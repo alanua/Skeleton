@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.boot_report.schema.json",
+  "type": "object",
+  "required": ["schema", "repo", "ref", "entrypoint", "loaded_sources", "mode", "active_project_status", "source_trust_map", "writes"],
+  "properties": {
+    "schema": {"const": "skeleton.boot_report.v1"},
+    "repo": {"type": "string"},
+    "ref": {"type": "string"},
+    "entrypoint": {"type": "string"},
+    "loaded_sources": {"type": "array", "items": {"type": "string"}},
+    "mode": {"type": "string"},
+    "active_project_status": {"type": "string"},
+    "source_trust_map": {"type": "object"},
+    "writes": {"type": "string"}
+  }
+}
