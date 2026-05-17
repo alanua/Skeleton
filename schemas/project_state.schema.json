@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.project_state.schema.json",
+  "type": "object",
+  "required": ["schema", "project_id", "status", "state_role", "last_verified", "evidence_source", "summary", "next_actions"],
+  "properties": {
+    "schema": {"const": "skeleton.project_state.v1"},
+    "project_id": {"type": "string"},
+    "status": {"type": "string"},
+    "state_role": {"const": "handoff_not_canon_truth"},
+    "last_verified": {"type": "string"},
+    "evidence_source": {"type": "string"},
+    "summary": {"type": "array", "items": {"type": "string"}},
+    "next_actions": {"type": "array", "items": {"type": "string"}}
+  }
+}
