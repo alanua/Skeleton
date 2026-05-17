@@ -1,0 +1,45 @@
+schema: skeleton.commands.v1
+status: DRAFT_ACTIVE_CANDIDATE
+
+commands:
+  прокинься:
+    mode: boot
+    boot_level: L1
+    output: BootReport
+
+  СК:
+    mode: project
+    boot_level: L2
+    project: skeleton
+    output: ProjectContextReport
+
+  ДЖ:
+    mode: project
+    boot_level: L2
+    project: jeeves
+    output: ProjectContextReport
+
+  АУД:
+    mode: audit
+    boot_level: L4
+    output: AuditReport
+
+  КОД:
+    mode: code_task
+    boot_level: L2
+    output: RunnerTask
+
+  БЗ:
+    mode: canon_write
+    boot_level: L4
+    gates:
+      - read_target
+      - critique
+      - patch_plan
+      - explicit_approval
+      - write
+      - verify
+
+  '+':
+    mode: continue_approved_step
+    rule: apply_smallest_approved_next_step
