@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.project_manifest.schema.json",
+  "type": "object",
+  "required": ["schema", "project_id", "name", "status", "entrypoint", "read_order"],
+  "properties": {
+    "schema": {"const": "skeleton.project_manifest.v1"},
+    "project_id": {"type": "string"},
+    "name": {"type": "string"},
+    "status": {"type": "string"},
+    "entrypoint": {"type": "string"},
+    "read_order": {"type": "array", "items": {"type": "string"}}
+  }
+}
