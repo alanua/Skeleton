@@ -1,0 +1,52 @@
+schema: skeleton.source_registry.v1
+status: DRAFT_ACTIVE_CANDIDATE
+
+sources:
+  current_user_message:
+    trust: runtime_direct
+    priority: 1
+    means: explicit instruction in the current conversation after safety and scope checks
+
+  boot_manifest:
+    trust: canon_route
+    priority: 2
+    means: declared machine-readable Skeleton startup route
+
+  public_github_canon:
+    trust: public_safe_canon_after_review
+    priority: 3
+    means: reviewed public-safe durable knowledge
+
+  private_memory:
+    trust: private_working_memory
+    priority: 4
+    means: non-public context in private Drive or local runner storage
+
+  chatgpt_memory:
+    trust: weak_cache
+    priority: 5
+    means: compact working memory requiring verification for serious claims
+
+  archive_history_recovery:
+    trust: evidence_on_demand
+    priority: 6
+    means: historical evidence used only in audit or recovery mode
+
+roles:
+  chatgpt:
+    means: current host interface, reviewer, framer, memory organizer
+
+  skeleton:
+    means: model-neutral control layer for LLM-assisted work
+
+  runner:
+    means: execution bridge for bounded tasks
+
+  codex:
+    means: bounded coding executor
+
+  gemini:
+    means: auditor and second-brain role
+
+  jeeves:
+    means: separate future assistant product and runtime
