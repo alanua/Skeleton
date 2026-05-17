@@ -1,0 +1,11 @@
+schema: skeleton.project_manifest.v1
+project_id: jeeves
+name: Jeeves
+status: SEPARATE_PRODUCT_RUNTIME_PROJECT
+entrypoint: projects/jeeves/PROJECT_MANIFEST.yaml
+read_order:
+  - projects/jeeves/PROJECT_MANIFEST.yaml
+  - projects/jeeves/STATE.yaml
+source_repo: alanua/jeeves
+privacy_class: mixed_public_private
+means: separate future assistant product and runtime, not Skeleton Core
