@@ -1,0 +1,64 @@
+schema: skeleton.modes.v1
+status: DRAFT_ACTIVE_CANDIDATE
+
+modes:
+  boot:
+    boot_level: L1
+    means:
+      - load_boot_manifest
+      - read_declared_sources
+      - produce_boot_report
+      - set_active_project_status
+      - keep_writes_none
+
+  project:
+    boot_level: L2
+    means:
+      - load_global_boot
+      - load_project_manifest
+      - load_project_sources
+      - produce_project_context_report
+
+  audit:
+    boot_level: L4
+    means:
+      - load_global_boot
+      - load_audit_scope
+      - compare_sources_against_rules
+      - produce_audit_report
+      - produce_patch_plan_when_requested
+
+  recovery:
+    boot_level: L4
+    means:
+      - load_global_boot
+      - load_recovery_sources
+      - classify_evidence
+      - produce_recovery_report
+
+  code_task:
+    boot_level: L2
+    means:
+      - load_global_boot
+      - load_project_context
+      - create_runner_readable_task
+      - keep_executor_bounded
+
+  canon_write:
+    boot_level: L4
+    means:
+      - load_global_boot
+      - read_target
+      - classify_change
+      - produce_critique
+      - produce_patch_plan
+      - require_explicit_approval
+      - write
+      - verify
+
+  continue_approved_step:
+    boot_level: current
+    means:
+      - continue_current_approved_task
+      - apply_smallest_safe_step
+      - verify_result
