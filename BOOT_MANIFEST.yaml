@@ -1,0 +1,35 @@
+schema: skeleton.boot_manifest.v1
+status: DRAFT_ACTIVE_CANDIDATE
+
+repo: alanua/Skeleton
+ref: main
+entrypoint: BOOT_MANIFEST.yaml
+
+read_order:
+  - BOOT_MANIFEST.yaml
+  - COMMANDS.yaml
+  - MODES.yaml
+  - SOURCE_REGISTRY.yaml
+  - MEMORY_ROUTING.yaml
+  - PROJECT_INDEX.yaml
+  - STATUS_CODES.yaml
+
+boot_output:
+  type: BootReport
+  required_fields:
+    - repo
+    - ref
+    - entrypoint
+    - loaded_sources
+    - mode
+    - active_project_status
+    - source_trust_map
+    - writes
+
+failure_statuses:
+  repo_unavailable: BOOT_FAILED_REPO_UNAVAILABLE
+  ref_unavailable: BOOT_FAILED_REF_UNAVAILABLE
+  entrypoint_unavailable: BOOT_FAILED_ENTRYPOINT_UNAVAILABLE
+  source_unavailable: BOOT_FAILED_SOURCE_UNAVAILABLE
+  project_missing: ACTIVE_PROJECT_WAITING
+  project_ambiguous: ACTIVE_PROJECT_AMBIGUOUS
