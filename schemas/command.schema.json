@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.command.schema.json",
+  "type": "object",
+  "required": ["schema", "status", "commands"],
+  "properties": {
+    "schema": {"const": "skeleton.commands.v1"},
+    "status": {"type": "string"},
+    "commands": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["mode", "boot_level", "loads", "produces", "writes"],
+        "properties": {
+          "mode": {"type": "string"},
+          "boot_level": {"type": "string"},
+          "project": {"type": "string"},
+          "loads": {"type": "array", "items": {"type": "string"}},
+          "produces": {"type": "array", "items": {"type": "string"}},
+          "writes": {"type": "string"},
+          "gates": {"type": "array", "items": {"type": "string"}},
+          "rule": {"type": "string"}
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,48 @@
+schema: skeleton.memory_routing.v1
+status: DRAFT_ACTIVE_CANDIDATE
+
+routes:
+  public_safe_durable:
+    target: public_github_canon
+    means: reviewed durable non-sensitive canon
+
+  private_context:
+    target: private_memory
+    means: useful non-public context for private work
+
+  secrets_credentials:
+    target: local_encrypted_store_or_secret_manager
+    means: keys, credentials, tokens, identity documents, and production secrets
+
+  temporary_noise:
+    target: no_persist
+    means: temporary logs, transient outputs, and unreviewed noise
+
+  archive_evidence:
+    target: archive_history_recovery
+    means: historical material used in audit or recovery mode
+
+conflict_rule:
+  means:
+    - use_SOURCE_REGISTRY_source_override_chain
+    - report_conflict_before_writing
+    - keep_current_user_message_as_runtime_instruction_source
+    - keep_boot_manifest_as_route_truth_source
+    - keep_archive_evidence_out_of_default_boot
+
+stale_rule:
+  means:
+    - classify_outdated_route_text_as_ARCHIVE_REFERENCE_or_OUTDATED_REJECTED
+    - keep_status_snapshots_out_of_default_boot
+    - require_last_verified_for_state_files
+    - use_audit_mode_for_history_recovery_and_diary_material
+
+classification_required_for:
+  - public_safe_durable
+  - private_context
+  - archive_evidence
+
+write_gate_for:
+  - public_safe_durable
+  - private_context
+  - archive_evidence

@@ -1,0 +1,88 @@
+schema: skeleton.commands.v1
+status: DRAFT_ACTIVE_CANDIDATE
+
+commands:
+  прокинься:
+    mode: boot
+    boot_level: L1
+    loads:
+      - BOOT_MANIFEST.yaml
+    produces:
+      - BootReport
+    writes: none
+
+  СК:
+    mode: project
+    boot_level: L2
+    project: skeleton
+    loads:
+      - BOOT_MANIFEST.yaml
+      - PROJECT_INDEX.yaml
+      - projects/skeleton/PROJECT_MANIFEST.yaml
+    produces:
+      - ProjectContextReport
+    writes: none
+
+  ДЖ:
+    mode: project
+    boot_level: L2
+    project: jeeves
+    loads:
+      - BOOT_MANIFEST.yaml
+      - PROJECT_INDEX.yaml
+      - projects/jeeves/PROJECT_MANIFEST.yaml
+    produces:
+      - ProjectContextReport
+    writes: none
+
+  АУД:
+    mode: audit
+    boot_level: L4
+    loads:
+      - BOOT_MANIFEST.yaml
+      - audit_scope
+    produces:
+      - AuditReport
+      - PatchPlan_when_requested
+    writes: report_only_by_default
+
+  КОД:
+    mode: code_task
+    boot_level: L2
+    loads:
+      - BOOT_MANIFEST.yaml
+      - PROJECT_INDEX.yaml
+      - selected_project_manifest
+    produces:
+      - RunnerTask
+    writes: task_artifact_only_after_scope_check
+
+  БЗ:
+    mode: canon_write
+    boot_level: L4
+    loads:
+      - BOOT_MANIFEST.yaml
+      - target_file
+      - active_rules
+    produces:
+      - Critique
+      - PatchPlan
+      - VerificationReport
+    writes: after_explicit_approval_only
+    gates:
+      - read_target
+      - critique
+      - patch_plan
+      - explicit_approval
+      - write
+      - verify
+
+  '+':
+    mode: continue_approved_step
+    boot_level: current
+    loads:
+      - current_approved_context
+    produces:
+      - StepResult
+    writes: current_scope_only
+    rule: apply_smallest_approved_next_step

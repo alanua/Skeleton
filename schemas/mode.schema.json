@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.mode.schema.json",
+  "type": "object",
+  "required": ["schema", "status", "modes"],
+  "properties": {
+    "schema": {"const": "skeleton.modes.v1"},
+    "status": {"type": "string"},
+    "modes": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["boot_level", "means"],
+        "properties": {
+          "boot_level": {"type": "string"},
+          "means": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    }
+  }
+}

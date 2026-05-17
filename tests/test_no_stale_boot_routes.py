@@ -1,0 +1,54 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def load_yaml(path: str) -> dict:
+    return yaml.safe_load((ROOT / path).read_text(encoding="utf-8"))
+
+
+def test_default_boot_route_is_manifest_only() -> None:
+    manifest = load_yaml("BOOT_MANIFEST.yaml")
+    read_order = manifest["read_order"]
+
+    assert read_order == [
+        "BOOT_MANIFEST.yaml",
+        "COMMANDS.yaml",
+        "MODES.yaml",
+        "SOURCE_REGISTRY.yaml",
+        "MEMORY_ROUTING.yaml",
+        "PROJECT_INDEX.yaml",
+        "STATUS_CODES.yaml",
+    ]
+
+
+def test_markdown_files_do_not_define_alternate_active_boot_route() -> None:
+    stale_patterns = [
+        "required boot sequence",
+        "active startup route",
+        "default boot chain",
+        "START_HERE_FOR_CHATGPT.md -> MEMORY_POLICY.md",
+        "assistant_diary.md",
+        "CHATGPT_BRANCH_CONTINUITY_BOOT.md",
+    ]
+
+    allowed_reference_paths = {
+        "docs/MIGRATION_FROM_JEEVES_REPO.md",
+    }
+
+    offenders: list[str] = []
+    for path in ROOT.rglob("*.md"):
+        rel = path.relative_to(ROOT).as_posix()
+        if rel in allowed_reference_paths:
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        lowered = text.lower()
+        if any(pattern.lower() in lowered for pattern in stale_patterns):
+            offenders.append(rel)
+
+    assert offenders == []

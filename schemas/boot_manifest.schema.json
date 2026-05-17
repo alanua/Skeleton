@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.boot_manifest.schema.json",
+  "type": "object",
+  "required": ["schema", "status", "repo", "ref", "entrypoint", "read_order", "boot_output", "failure_statuses"],
+  "properties": {
+    "schema": {"const": "skeleton.boot_manifest.v1"},
+    "status": {"type": "string"},
+    "repo": {"type": "string"},
+    "ref": {"type": "string"},
+    "entrypoint": {"type": "string"},
+    "read_order": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string"}
+    },
+    "boot_output": {
+      "type": "object",
+      "required": ["type", "required_fields"],
+      "properties": {
+        "type": {"const": "BootReport"},
+        "required_fields": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      }
+    },
+    "failure_statuses": {"type": "object"}
+  }
+}
