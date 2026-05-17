@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.patch_plan.schema.json",
+  "type": "object",
+  "required": ["schema", "target_files", "change_type", "reason", "current_rule_read", "critique", "minimal_patch", "verification", "approval_required"],
+  "properties": {
+    "schema": {"const": "skeleton.patch_plan.v1"},
+    "target_files": {"type": "array", "items": {"type": "string"}},
+    "change_type": {"type": "string"},
+    "reason": {"type": "string"},
+    "current_rule_read": {"type": "boolean"},
+    "critique": {"type": "string"},
+    "minimal_patch": {"type": "string"},
+    "risks": {"type": "array", "items": {"type": "string"}},
+    "verification": {"type": "array", "items": {"type": "string"}},
+    "approval_required": {"type": "boolean"}
+  }
+}
