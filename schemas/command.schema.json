@@ -10,12 +10,14 @@
       "type": "object",
       "additionalProperties": {
         "type": "object",
-        "required": ["mode", "boot_level"],
+        "required": ["mode", "boot_level", "loads", "produces", "writes"],
         "properties": {
           "mode": {"type": "string"},
           "boot_level": {"type": "string"},
           "project": {"type": "string"},
-          "output": {"type": "string"},
+          "loads": {"type": "array", "items": {"type": "string"}},
+          "produces": {"type": "array", "items": {"type": "string"}},
+          "writes": {"type": "string"},
           "gates": {"type": "array", "items": {"type": "string"}},
           "rule": {"type": "string"}
         }
