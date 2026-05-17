@@ -22,6 +22,21 @@ routes:
     target: archive_history_recovery
     means: historical material used in audit or recovery mode
 
+conflict_rule:
+  means:
+    - use_SOURCE_REGISTRY_source_override_chain
+    - report_conflict_before_writing
+    - keep_current_user_message_as_runtime_instruction_source
+    - keep_boot_manifest_as_route_truth_source
+    - keep_archive_evidence_out_of_default_boot
+
+stale_rule:
+  means:
+    - classify_outdated_route_text_as_ARCHIVE_REFERENCE_or_OUTDATED_REJECTED
+    - keep_status_snapshots_out_of_default_boot
+    - require_last_verified_for_state_files
+    - use_audit_mode_for_history_recovery_and_diary_material
+
 classification_required_for:
   - public_safe_durable
   - private_context
