@@ -12,6 +12,22 @@ def load_yaml(path: str) -> dict:
     return yaml.safe_load((ROOT / path).read_text(encoding="utf-8"))
 
 
+def test_source_registry_uses_explicit_override_chain() -> None:
+    registry = load_yaml("SOURCE_REGISTRY.yaml")
+
+    assert registry["source_override_chain"] == [
+        "current_user_message",
+        "boot_manifest",
+        "public_github_canon",
+        "private_memory",
+        "chatgpt_memory",
+        "archive_history_recovery",
+    ]
+
+    for source in registry["sources"].values():
+        assert "priority" not in source
+
+
 def test_source_registry_trust_levels_exist() -> None:
     sources = load_yaml("SOURCE_REGISTRY.yaml")["sources"]
 
@@ -28,6 +44,14 @@ def test_source_registry_trust_levels_exist() -> None:
         assert sources[source]["trust"] == trust
 
 
+def test_source_registry_has_conflict_rule() -> None:
+    registry = load_yaml("SOURCE_REGISTRY.yaml")
+
+    assert "conflict_rule" in registry
+    assert "compare_conflicting_sources_by_override_chain" in registry["conflict_rule"]["means"]
+    assert "use_boot_manifest_for_route_truth" in registry["conflict_rule"]["means"]
+
+
 def test_memory_routes_exist() -> None:
     routes = load_yaml("MEMORY_ROUTING.yaml")["routes"]
 
@@ -39,6 +63,15 @@ def test_memory_routes_exist() -> None:
         "archive_evidence",
     ]:
         assert route in routes
+
+
+def test_memory_routing_has_conflict_and_stale_rules() -> None:
+    routing = load_yaml("MEMORY_ROUTING.yaml")
+
+    assert "conflict_rule" in routing
+    assert "stale_rule" in routing
+    assert "use_SOURCE_REGISTRY_source_override_chain" in routing["conflict_rule"]["means"]
+    assert "require_last_verified_for_state_files" in routing["stale_rule"]["means"]
 
 
 def test_secrets_route_uses_secret_manager_target() -> None:
