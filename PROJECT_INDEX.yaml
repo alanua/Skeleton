@@ -1,0 +1,38 @@
+schema: skeleton.project_index.v1
+status: DRAFT_ACTIVE_CANDIDATE
+
+projects:
+  skeleton:
+    repo: alanua/Skeleton
+    entrypoint: projects/skeleton/PROJECT_MANIFEST.yaml
+    means: Skeleton Core project
+
+  jeeves:
+    repo: alanua/jeeves
+    entrypoint: projects/jeeves/PROJECT_MANIFEST.yaml
+    means: separate future assistant product and runtime
+
+  lavalamp:
+    repo: alanua/jeeves
+    entrypoint: projects/lavalamp/PROJECT_MANIFEST.yaml
+    means: WLED transparent cylinder lava lamp project
+
+  bauclock:
+    repo: alanua/jeeves
+    entrypoint: projects/bauclock/PROJECT_MANIFEST.yaml
+    means: construction time tracking project
+
+  homelab:
+    repo: alanua/jeeves
+    entrypoint: projects/homelab/PROJECT_MANIFEST.yaml
+    means: home server and automation project
+
+  gewerbe:
+    repo: alanua/jeeves
+    entrypoint: projects/gewerbe/PROJECT_MANIFEST.yaml
+    means: German self-employment administration project
+
+  van:
+    repo: alanua/jeeves
+    entrypoint: projects/van/PROJECT_MANIFEST.yaml
+    means: van conversion project
