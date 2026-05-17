@@ -27,6 +27,22 @@ def test_command_modes_exist() -> None:
         assert spec["mode"] in modes, command
 
 
+def test_commands_have_typed_loads_produces_and_writes() -> None:
+    commands = load_yaml("COMMANDS.yaml")["commands"]
+
+    for command, spec in commands.items():
+        assert spec["loads"], command
+        assert spec["produces"], command
+        assert isinstance(spec["writes"], str), command
+
+
+def test_boot_command_produces_boot_report_and_writes_none() -> None:
+    commands = load_yaml("COMMANDS.yaml")["commands"]
+
+    assert commands["прокинься"]["produces"] == ["BootReport"]
+    assert commands["прокинься"]["writes"] == "none"
+
+
 def test_write_command_has_required_gates() -> None:
     commands = load_yaml("COMMANDS.yaml")["commands"]
     gates = set(commands["БЗ"]["gates"])
