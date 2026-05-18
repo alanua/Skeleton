@@ -25,10 +25,7 @@ class GateEngine:
 
     def check_patch_plan(self, plan: Optional[dict]) -> GateDecision:
         if plan is None:
-            return GateDecision(
-                result=GateResult.BLOCKED_NO_PLAN,
-                reasons=("PatchPlan is required before a durable write.",),
-            )
+            return GateDecision(result=GateResult.BLOCKED_NO_PLAN, reasons=("PatchPlan is required before a durable write.",))
 
         errors = tuple(self._validator.validate(plan))
         if errors:
