@@ -1,0 +1,14 @@
+schema: skeleton.project_state.v1
+project_id: van
+status: DRAFT_HANDOFF
+state_role: handoff_not_canon_truth
+last_verified: '2026-05-17'
+evidence_source: migration source repo alanua/jeeves and project memory, not revalidated in this PR
+summary:
+  - Van Conversion covers layout, equipment placement, and practical design planning.
+  - Public-safe design rules can live in Skeleton project routing.
+  - Photos, personal logistics, and private planning details require private routes when needed.
+next_actions:
+  - Keep real private references out of public repo unless explicitly approved.
+  - Add reviewed project route after migration audit.
+  - Use project manifests to separate design planning from unrelated Skeleton/Jeeves work.
