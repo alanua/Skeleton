@@ -1,0 +1,14 @@
+schema: skeleton.project_state.v1
+project_id: lavalamp
+status: DRAFT_HANDOFF
+state_role: handoff_not_canon_truth
+last_verified: '2026-05-17'
+evidence_source: migration source repo alanua/jeeves, project memory, not revalidated in this PR
+summary:
+  - Lava Lamp / WLED Cylinder is a separate project.
+  - It overlaps technically with WLED and ESP32 but remains separate from general home automation.
+  - Real firmware/code/device context stays in project-specific private or source routes when needed.
+next_actions:
+  - Add exact source route after reviewing migrated project docs.
+  - Keep effect math and cylinder coordinate work as project-specific context.
+  - Avoid mixing with Jeeves runtime decisions.
