@@ -1,0 +1,11 @@
+schema: skeleton.project_manifest.v1
+project_id: homelab
+name: Homelab / Home Automation
+status: ACTIVE_INFRASTRUCTURE_PROJECT
+entrypoint: projects/homelab/PROJECT_MANIFEST.yaml
+read_order:
+  - projects/homelab/PROJECT_MANIFEST.yaml
+  - projects/homelab/STATE.yaml
+source_repo: alanua/jeeves
+privacy_class: mixed_public_private
+means: home server, Home Assistant, Proxmox, ESPHome, ESP32, MQTT, Node-RED, and related infrastructure project

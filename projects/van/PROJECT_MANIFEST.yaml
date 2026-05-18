@@ -1,0 +1,11 @@
+schema: skeleton.project_manifest.v1
+project_id: van
+name: Van Conversion
+status: ACTIVE_DESIGN_PROJECT
+entrypoint: projects/van/PROJECT_MANIFEST.yaml
+read_order:
+  - projects/van/PROJECT_MANIFEST.yaml
+  - projects/van/STATE.yaml
+source_repo: alanua/jeeves
+privacy_class: mixed_public_private
+means: van conversion and mobile equipment layout project

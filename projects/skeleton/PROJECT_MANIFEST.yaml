@@ -1,0 +1,11 @@
+schema: skeleton.project_manifest.v1
+project_id: skeleton
+name: Skeleton Core
+status: ACTIVE_CORE_PROJECT
+entrypoint: projects/skeleton/PROJECT_MANIFEST.yaml
+read_order:
+  - projects/skeleton/PROJECT_MANIFEST.yaml
+  - projects/skeleton/STATE.yaml
+source_repo: alanua/Skeleton
+privacy_class: public_safe
+means: model-neutral control layer for LLM-assisted work

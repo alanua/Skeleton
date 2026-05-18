@@ -1,0 +1,14 @@
+schema: skeleton.project_state.v1
+project_id: homelab
+status: DRAFT_HANDOFF
+state_role: handoff_not_canon_truth
+last_verified: '2026-05-17'
+evidence_source: migration source repo alanua/jeeves and project memory, not revalidated in this PR
+summary:
+  - Homelab covers Home Assistant, Proxmox, ESPHome, ESP32, MQTT, Node-RED, dashboards, and related infrastructure.
+  - Device inventory and private network details require private route handling.
+  - Skeleton provides mode routing, task framing, and safety gates.
+next_actions:
+  - Add private inventory routing rules when needed.
+  - Keep secrets, LAN details, and device credentials out of public repo.
+  - Add project-specific source routes after review.

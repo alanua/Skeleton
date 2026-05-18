@@ -1,0 +1,11 @@
+schema: skeleton.project_manifest.v1
+project_id: lavalamp
+name: Lava Lamp / WLED Cylinder
+status: ACTIVE_SIDE_PROJECT
+entrypoint: projects/lavalamp/PROJECT_MANIFEST.yaml
+read_order:
+  - projects/lavalamp/PROJECT_MANIFEST.yaml
+  - projects/lavalamp/STATE.yaml
+source_repo: alanua/jeeves
+privacy_class: mixed_public_private
+means: WLED transparent cylinder lava lamp project, separate from general home automation

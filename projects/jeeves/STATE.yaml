@@ -1,0 +1,14 @@
+schema: skeleton.project_state.v1
+project_id: jeeves
+status: DRAFT_HANDOFF
+state_role: handoff_not_canon_truth
+last_verified: '2026-05-17'
+evidence_source: migration source repo alanua/jeeves, not revalidated in this PR
+summary:
+  - Jeeves is separate from Skeleton Core.
+  - alanua/jeeves remains the runtime/product and historical migration source.
+  - Skeleton may provide control-layer patterns for Jeeves later.
+next_actions:
+  - Keep Jeeves runtime decisions in alanua/jeeves.
+  - Extract only reviewed Skeleton-core rules into alanua/Skeleton.
+  - Add adapter bridge after Skeleton v2 stabilizes.
