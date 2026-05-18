@@ -37,3 +37,10 @@ Markdown explains behavior.
 Tooling verifies behavior.
 Tests preserve behavior.
 ```
+
+## Project files
+
+```text
+PROJECT_MANIFEST.yaml = canonical project identity.
+STATE.yaml = handoff state (state_role: handoff_not_canon_truth).
+```
