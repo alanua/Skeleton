@@ -1,0 +1,14 @@
+schema: skeleton.project_state.v1
+project_id: gewerbe
+status: DRAFT_HANDOFF
+state_role: handoff_not_canon_truth
+last_verified: '2026-05-17'
+evidence_source: migration source repo alanua/jeeves and private memory, not revalidated in this PR
+summary:
+  - Gewerbe Administration contains tax, invoices, insurance, banking, and official correspondence context.
+  - This project is private-sensitive and should not publish personal, tax, financial, or official-document details by default.
+  - Skeleton may store public-safe workflow rules here, while details route to private memory.
+next_actions:
+  - Keep official documents and personal financial details out of public repo.
+  - Add private source routes only when needed.
+  - Use high-accuracy audit mode for legal, tax, and finance claims.
