@@ -1,0 +1,71 @@
+version: "1.0.0"
+capabilities:
+  boot_manifest:
+    status: available
+    module: BOOT_MANIFEST.yaml
+    tested: true
+    added: "2026-05-18"
+    description: Single Skeleton boot entrypoint.
+
+  command_modes:
+    status: available
+    module: COMMANDS.yaml
+    tested: true
+    added: "2026-05-18"
+    description: Declared command-to-mode routing.
+
+  memory_routing:
+    status: available
+    module: MEMORY_ROUTING.yaml
+    tested: true
+    added: "2026-05-18"
+    description: Memory trust and override routing.
+
+  project_manifests:
+    status: available
+    module: PROJECT_INDEX.yaml
+    tested: true
+    added: "2026-05-18"
+    description: Project index and project-level manifest routing.
+
+  adapter_contracts:
+    status: available
+    module: adapters/
+    tested: true
+    added: "2026-05-18"
+    description: Adapter contracts for model/runtime roles.
+
+  write_gate:
+    status: available
+    module: core/gate_engine.py
+    entry: GateEngine.check_patch_plan
+    requires:
+      - schemas/patch_plan.schema.json
+      - core/patch_validator.py
+    tested: true
+    added: "2026-05-18"
+    description: Enforces PatchPlan validation, read confirmation, operator approval, and verification gate.
+
+  boot_loader:
+    status: planned
+    module: core/boot_loader.py
+    tested: false
+    description: Reads BOOT_MANIFEST, validates sources, and produces BootReport.
+
+  project_loader:
+    status: planned
+    module: core/project_loader.py
+    tested: false
+    description: Activates project context after operator command.
+
+  runner_bridge:
+    status: planned
+    module: core/runner_bridge.py
+    tested: false
+    description: Connects write-gate to a bounded runner.
+
+  memory_manager:
+    status: planned
+    module: core/memory_manager.py
+    tested: false
+    description: Manages session memory layers.
