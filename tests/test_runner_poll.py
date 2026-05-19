@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import urllib.parse
 from pathlib import Path
 from unittest import mock
 
@@ -82,6 +84,61 @@ def test_set_issue_label_calls_gh_cli() -> None:
     )
 
 
+def test_send_telegram_notification_skips_when_env_missing() -> None:
+    with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
+        runner.urllib.request, "urlopen"
+    ) as urlopen:
+        runner.send_telegram_notification("done")
+
+    urlopen.assert_not_called()
+
+
+def test_send_telegram_notification_posts_with_env() -> None:
+    response = mock.MagicMock()
+    response.__enter__.return_value = response
+    with mock.patch.dict(
+        os.environ,
+        {
+            "SKELETON_TG_BOT": "telegram-bot-placeholder",
+            "SKELETON_TG_CHAT": "telegram-chat-placeholder",
+        },
+        clear=True,
+    ), mock.patch.object(
+        runner.urllib.request, "urlopen", return_value=response
+    ) as urlopen:
+        runner.send_telegram_notification("Repository: alanua/Skeleton\nStatus: DONE")
+
+    request = urlopen.call_args.args[0]
+    assert request.full_url == (
+        f"{runner.TELEGRAM_API_BASE}/bottelegram-bot-placeholder/sendMessage"
+    )
+    assert urlopen.call_args.kwargs == {"timeout": runner.TELEGRAM_TIMEOUT_SECONDS}
+    payload = urllib.parse.parse_qs(request.data.decode("utf-8"))
+    assert payload == {
+        "chat_id": ["telegram-chat-placeholder"],
+        "text": ["Repository: alanua/Skeleton\nStatus: DONE"],
+        "disable_web_page_preview": ["true"],
+    }
+
+
+def test_notify_task_finished_swallows_telegram_send_failure() -> None:
+    with mock.patch.object(
+        runner, "send_telegram_notification", side_effect=RuntimeError("send failed")
+    ):
+        runner.notify_task_finished(8, "DONE", "DONE report")
+
+
+def test_done_telegram_message_includes_pr_url_when_available() -> None:
+    report = "DONE: ok\n\nDraft PR: https://github.example/pull/1"
+
+    assert runner.build_telegram_message(9, "DONE", report) == (
+        f"Repository: {runner.REPO}\n"
+        "Issue: #9\n"
+        "Status: DONE\n"
+        "PR: https://github.example/pull/1"
+    )
+
+
 def test_run_codex_task_calls_codex_exec() -> None:
     with mock.patch.object(runner, "run_command", return_value=(0, "ok")) as run_command:
         code, output = runner.run_codex_task("Task body", "/repo")
@@ -106,13 +163,14 @@ def test_process_issue_blocks_when_no_task_block() -> None:
 
     with mock.patch.object(runner, "post_issue_comment") as comment, mock.patch.object(
         runner, "set_issue_label"
-    ) as label:
+    ) as label, mock.patch.object(runner, "notify_task_finished") as notify:
         runner.process_issue(issue, workdir="/repo")
 
     comment.assert_called_once()
     assert comment.call_args.args[0] == 3
     assert "BLOCKED" in comment.call_args.args[1]
     label.assert_called_once_with(3, runner.LABEL_READY, runner.LABEL_BLOCKED)
+    notify.assert_called_once_with(3, "BLOCKED")
 
 
 def test_process_issue_posts_blocked_on_codex_failure() -> None:
@@ -148,18 +206,57 @@ def test_process_issue_posts_done_on_success() -> None:
     ), mock.patch.object(
         runner, "run_codex_task", return_value=(0, "codex ok")
     ), mock.patch.object(
+        runner,
+        "finalize_success",
+        return_value="DONE report\n\nDraft PR: https://github.example/pull/5",
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ) as comment, mock.patch.object(
+        runner, "set_issue_label"
+    ) as label, mock.patch.object(runner, "notify_task_finished") as notify:
+        runner.process_issue(issue, workdir="/repo")
+
+    report = "DONE report\n\nDraft PR: https://github.example/pull/5"
+    comment.assert_called_once_with(5, report)
+    assert label.call_args_list == [
+        mock.call(5, runner.LABEL_READY, runner.LABEL_RUNNING),
+        mock.call(5, runner.LABEL_RUNNING, runner.LABEL_DONE),
+    ]
+    notify.assert_called_once_with(5, "DONE", report)
+
+
+def test_process_issue_keeps_done_transition_when_telegram_send_fails() -> None:
+    fence = "`" * 3
+    issue = {"number": 15, "title": "Notify fail", "body": f"{fence}task\nDo it\n{fence}"}
+
+    with mock.patch.dict(
+        os.environ,
+        {
+            "SKELETON_TG_BOT": "telegram-bot-placeholder",
+            "SKELETON_TG_CHAT": "telegram-chat-placeholder",
+        },
+        clear=True,
+    ), mock.patch.object(
+        runner, "ensure_clean_worktree", return_value=(True, "")
+    ), mock.patch.object(
+        runner, "prepare_issue_branch", return_value=(0, "", "runner/issue-15")
+    ), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, "codex ok")
+    ), mock.patch.object(
         runner, "finalize_success", return_value="DONE report"
     ), mock.patch.object(
         runner, "post_issue_comment"
     ) as comment, mock.patch.object(
         runner, "set_issue_label"
-    ) as label:
+    ) as label, mock.patch.object(
+        runner.urllib.request, "urlopen", side_effect=RuntimeError("send failed")
+    ):
         runner.process_issue(issue, workdir="/repo")
 
-    comment.assert_called_once_with(5, "DONE report")
+    comment.assert_called_once_with(15, "DONE report")
     assert label.call_args_list == [
-        mock.call(5, runner.LABEL_READY, runner.LABEL_RUNNING),
-        mock.call(5, runner.LABEL_RUNNING, runner.LABEL_DONE),
+        mock.call(15, runner.LABEL_READY, runner.LABEL_RUNNING),
+        mock.call(15, runner.LABEL_RUNNING, runner.LABEL_DONE),
     ]
 
 
@@ -252,7 +349,23 @@ def test_service_uses_agent_user() -> None:
     )
 
     assert "User=agent" in service
+    assert "EnvironmentFile=-/etc/skeleton-runner.env" in service
     assert "ExecStart=/usr/bin/python3 scripts/runner_poll_github_tasks.py" in service
+
+
+def test_readme_documents_local_env_file_and_credential_rules() -> None:
+    readme = (ROOT / "scripts" / "README_RUNNER_SETUP.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "/etc/skeleton-runner.env" in readme
+    assert "SKELETON_TG_BOT=replace-with-telegram-bot-token" in readme
+    assert "SKELETON_TG_CHAT=replace-with-telegram-chat-id" in readme
+    assert "chmod 600 /etc/skeleton-runner.env" in readme
+    assert "must not be committed" in readme
+    assert "task issues" in readme
+    assert "sudo cp scripts/skeleton-runner-poll.service /etc/systemd/system/" in readme
+    assert "sudo systemctl daemon-reload" in readme
 
 
 def test_timer_runs_every_60_seconds() -> None:
@@ -266,6 +379,7 @@ def test_timer_runs_every_60_seconds() -> None:
 def test_no_hardcoded_token_patterns() -> None:
     paths = [
         ROOT / "scripts" / "runner_poll_github_tasks.py",
+        ROOT / "scripts" / "skeleton-runner-poll.service",
         ROOT / "scripts" / "README_RUNNER_SETUP.md",
         ROOT / "tests" / "test_runner_poll.py",
     ]
