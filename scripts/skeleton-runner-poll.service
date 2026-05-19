@@ -1,0 +1,11 @@
+[Unit]
+Description=Skeleton GitHub Task Queue Poller
+After=network.target
+
+[Service]
+Type=oneshot
+User=agent
+WorkingDirectory=/home/agent/agent-dev/repos/Skeleton
+ExecStart=/usr/bin/python3 scripts/runner_poll_github_tasks.py
+StandardOutput=journal
+StandardError=journal

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Skeleton GitHub Task Queue Poller every 60 seconds
+Requires=skeleton-runner-poll.service
+
+[Timer]
+OnBootSec=30
+OnUnitActiveSec=60
+
+[Install]
+WantedBy=timers.target
