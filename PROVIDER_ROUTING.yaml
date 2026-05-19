@@ -1,0 +1,43 @@
+version: "1.0.0"
+
+routing_tiers:
+
+  local:
+    provider: ollama
+    model: qwen2.5-coder:7b
+    cost: zero
+    use_for: [classification, formatting, private_data, simple_tasks]
+
+  free_cloud:
+    provider: openrouter
+    model: "qwen/qwen3-coder-480b:free"
+    fallback: "deepseek/deepseek-v3:free"
+    cost: zero_with_limits
+    daily_limit_requests: 200
+    use_for: [coding_tasks, openhands_tasks, skeleton_operations]
+
+  paid_cloud:
+    provider: openrouter
+    model: "deepseek/deepseek-v3"
+    cost_per_million_tokens: 0.27
+    budget_alert_usd: 2.0
+    hard_stop_usd: 0.50
+    use_for: [complex_architecture, production_critical]
+
+  gemini_audit:
+    provider: google_ai_studio
+    model: "gemini-2.5-flash"
+    cost: operator_managed
+    use_for: [audit, canon_review, large_context]
+
+budget_guard:
+  note: >
+    Update current_balance_usd manually after top-up.
+    This is informational state only, not live balance.
+  alert_threshold_usd: 2.0
+  hard_stop_usd: 0.50
+
+fallback_chain:
+  default: [local, free_cloud, paid_cloud]
+  audit_mode: [gemini_audit, free_cloud]
+  critical_mode: [paid_cloud, free_cloud]

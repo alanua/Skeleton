@@ -47,10 +47,17 @@ capabilities:
     description: Enforces PatchPlan validation, read confirmation, operator approval, and verification gate.
 
   boot_loader:
-    status: planned
+    status: available
     module: core/boot_loader.py
-    tested: false
+    tested: true
     description: Reads BOOT_MANIFEST, validates sources, and produces BootReport.
+
+  provider_routing:
+    status: available
+    module: PROVIDER_ROUTING.yaml
+    tested: true
+    added: "2026-05-19"
+    description: Machine-readable provider routing policy defining local, free_cloud, paid_cloud, and gemini_audit tiers with cost controls.
 
   project_loader:
     status: planned
