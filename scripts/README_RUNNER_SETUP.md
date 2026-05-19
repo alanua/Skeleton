@@ -2,6 +2,10 @@
 
 The GitHub task queue lets the Hetzner Runner poll open GitHub issues labeled `runner:ready`, extract a bounded Codex task from the issue body, run it in the Skeleton checkout, and report the result back to GitHub. When the task produces file changes, the runner validates them, commits them on `runner/issue-<number>`, pushes the branch, and opens a draft PR.
 
+## Operating Status and Checklist
+
+The current queue operating status, validated issue flow, operator lockout rule, Telegram notification status, smoke test procedure, and post-merge runtime sync checklist are documented in [docs/RUNNER_QUEUE_STATUS.md](../docs/RUNNER_QUEUE_STATUS.md). Treat that file as the operational status and runtime checklist for the Runner queue.
+
 ## Labels
 
 Create these labels in the `alanua/Skeleton` repository:
