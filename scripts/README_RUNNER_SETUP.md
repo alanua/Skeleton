@@ -81,3 +81,9 @@ sudo systemctl daemon-reload
 ## Operation
 
 The default script mode performs one poll pass and exits. The systemd timer starts that one-shot service every 60 seconds. The optional `--loop` flag is for manual debugging only.
+
+## Operational Status
+
+See [docs/RUNNER_QUEUE_STATUS.md](../docs/RUNNER_QUEUE_STATUS.md) for the current
+Runner queue operating status, validated workflow, runtime checklist, smoke test
+procedure, and recovery notes.
