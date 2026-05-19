@@ -60,6 +60,9 @@ or `systemctl restart` while a task is running.
 
 - If an issue is stuck at `runner:running`, check `systemctl status` and
   `journalctl` for the Runner service.
+- If a stale notification points to a closed issue or pull request, recreate the
+  task as a new open issue with `runner:ready`; the poller silently ignores
+  closed items and pull requests.
 - If an issue is blocked due to no commits, check whether the repo was touched
   while the Runner was active.
 - If local `main` diverges after a squash merge, create a backup branch and reset

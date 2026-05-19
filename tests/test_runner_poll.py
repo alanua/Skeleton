@@ -24,11 +24,26 @@ def test_extract_task_block_not_found() -> None:
 
 def test_get_ready_issues_calls_gh_cli() -> None:
     with mock.patch.object(
-        runner, "run_command", return_value=(0, '[{"number": 1, "title": "T", "body": "B"}]')
+        runner,
+        "run_command",
+        return_value=(
+            0,
+            '[{"number": 1, "title": "T", "body": "B", "state": "OPEN", '
+            '"closed": false, "url": "https://github.com/alanua/Skeleton/issues/1"}]',
+        ),
     ) as run_command:
         issues = runner.get_ready_issues()
 
-    assert issues == [{"number": 1, "title": "T", "body": "B"}]
+    assert issues == [
+        {
+            "number": 1,
+            "title": "T",
+            "body": "B",
+            "state": "OPEN",
+            "closed": False,
+            "url": "https://github.com/alanua/Skeleton/issues/1",
+        }
+    ]
     run_command.assert_called_once_with(
         [
             "gh",
@@ -40,10 +55,48 @@ def test_get_ready_issues_calls_gh_cli() -> None:
             runner.LABEL_READY,
             "--state",
             "open",
+            "--search",
+            "is:issue",
             "--json",
-            "number,title,body",
+            "number,title,body,state,url,closed",
         ]
     )
+
+
+def test_get_ready_issues_filters_stale_and_pull_request_items() -> None:
+    output = """
+    [
+      {
+        "number": 1,
+        "title": "Issue",
+        "body": "B",
+        "state": "OPEN",
+        "closed": false,
+        "url": "https://github.com/alanua/Skeleton/issues/1"
+      },
+      {
+        "number": 2,
+        "title": "Closed",
+        "body": "B",
+        "state": "CLOSED",
+        "closed": true,
+        "url": "https://github.com/alanua/Skeleton/issues/2"
+      },
+      {
+        "number": 3,
+        "title": "PR",
+        "body": "B",
+        "state": "OPEN",
+        "closed": false,
+        "url": "https://github.com/alanua/Skeleton/pull/3"
+      }
+    ]
+    """
+
+    with mock.patch.object(runner, "run_command", return_value=(0, output)):
+        issues = runner.get_ready_issues()
+
+    assert [issue["number"] for issue in issues] == [1]
 
 
 def test_post_issue_comment_calls_gh_cli() -> None:
@@ -171,6 +224,53 @@ def test_process_issue_blocks_when_no_task_block() -> None:
     assert "BLOCKED" in comment.call_args.args[1]
     label.assert_called_once_with(3, runner.LABEL_READY, runner.LABEL_BLOCKED)
     notify.assert_called_once_with(3, "BLOCKED")
+
+
+def test_process_issue_silently_skips_pull_request_items() -> None:
+    issue = {
+        "number": 33,
+        "title": "PR",
+        "body": "plain text",
+        "state": "OPEN",
+        "closed": False,
+        "url": "https://github.com/alanua/Skeleton/pull/33",
+        "pull_request": {"url": "https://api.github.com/repos/alanua/Skeleton/pulls/33"},
+    }
+
+    with mock.patch.object(runner, "post_issue_comment") as comment, mock.patch.object(
+        runner, "set_issue_label"
+    ) as label, mock.patch.object(runner, "notify_task_finished") as notify, mock.patch.object(
+        runner, "ensure_clean_worktree"
+    ) as clean:
+        runner.process_issue(issue, workdir="/repo")
+
+    comment.assert_not_called()
+    label.assert_not_called()
+    notify.assert_not_called()
+    clean.assert_not_called()
+
+
+def test_process_issue_silently_skips_closed_items() -> None:
+    issue = {
+        "number": 34,
+        "title": "Closed",
+        "body": "plain text",
+        "state": "CLOSED",
+        "closed": True,
+        "url": "https://github.com/alanua/Skeleton/issues/34",
+    }
+
+    with mock.patch.object(runner, "post_issue_comment") as comment, mock.patch.object(
+        runner, "set_issue_label"
+    ) as label, mock.patch.object(runner, "notify_task_finished") as notify, mock.patch.object(
+        runner, "ensure_clean_worktree"
+    ) as clean:
+        runner.process_issue(issue, workdir="/repo")
+
+    comment.assert_not_called()
+    label.assert_not_called()
+    notify.assert_not_called()
+    clean.assert_not_called()
 
 
 def test_process_issue_posts_blocked_on_codex_failure() -> None:

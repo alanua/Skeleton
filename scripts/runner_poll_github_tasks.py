@@ -72,8 +72,10 @@ def get_ready_issues() -> list[dict[str, Any]]:
             LABEL_READY,
             "--state",
             "open",
+            "--search",
+            "is:issue",
             "--json",
-            "number,title,body",
+            "number,title,body,state,url,closed",
         ]
     )
     if code != 0:
@@ -81,7 +83,23 @@ def get_ready_issues() -> list[dict[str, Any]]:
     parsed = json.loads(output or "[]")
     if not isinstance(parsed, list):
         raise RuntimeError("gh issue list returned non-list JSON")
-    return parsed
+    return [issue for issue in parsed if is_open_task_issue(issue)]
+
+
+def is_pull_request_item(item: dict[str, Any]) -> bool:
+    if item.get("pull_request") is not None:
+        return True
+    url = str(item.get("url") or item.get("html_url") or "")
+    return "/pull/" in url or "/pulls/" in url
+
+
+def is_open_task_issue(item: dict[str, Any]) -> bool:
+    if is_pull_request_item(item):
+        return False
+    if item.get("closed") is True:
+        return False
+    state = item.get("state")
+    return state is None or str(state).lower() == "open"
 
 
 def extract_task_block(body: str) -> str | None:
@@ -357,6 +375,9 @@ def block_issue(issue_number: int, message: str, remove_label: str = LABEL_READY
 
 def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
     issue_number = int(issue["number"])
+    if not is_open_task_issue(issue):
+        return
+
     resolved_workdir = str(Path(workdir) if workdir is not None else DEFAULT_WORKDIR)
     claimed = False
     try:
