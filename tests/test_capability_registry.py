@@ -38,6 +38,13 @@ def test_registry_has_boot_loader_available() -> None:
     assert boot_loader["tested"] is True
 
 
+def test_registry_has_project_loader_available() -> None:
+    project_loader = load_registry()["capabilities"]["project_loader"]
+    assert project_loader["status"] == "available"
+    assert project_loader["module"] == "core/project_loader.py"
+    assert project_loader["tested"] is True
+
+
 def test_registry_has_all_adapter_contracts_available() -> None:
     adapter_contracts = load_registry()["capabilities"]["adapter_contracts"]
     assert adapter_contracts["status"] == "available"
@@ -46,7 +53,7 @@ def test_registry_has_all_adapter_contracts_available() -> None:
 
 def test_registry_has_planned_future_capabilities() -> None:
     capabilities = load_registry()["capabilities"]
-    for capability_id in ("project_loader", "runner_bridge", "memory_manager"):
+    for capability_id in ("runner_bridge", "memory_manager"):
         assert capabilities[capability_id]["status"] == "planned"
 
 
@@ -106,12 +113,14 @@ def test_capability_checker_available_list_non_empty() -> None:
 
 def test_capability_checker_planned_list_non_empty() -> None:
     planned = CapabilityChecker(REGISTRY_PATH).planned()
-    assert "project_loader" in planned
+    assert "runner_bridge" in planned
+    assert "memory_manager" in planned
 
 
 def test_capability_checker_is_available() -> None:
     checker = CapabilityChecker(REGISTRY_PATH)
     assert checker.is_available("write_gate") is True
+    assert checker.is_available("project_loader") is True
 
 
 def test_capability_checker_unknown_is_not_available() -> None:

@@ -60,9 +60,9 @@ capabilities:
     description: Machine-readable provider routing policy defining local, free_cloud, paid_cloud, and gemini_audit tiers with cost controls.
 
   project_loader:
-    status: planned
+    status: available
     module: core/project_loader.py
-    tested: false
+    tested: true
     description: Activates project context after operator command.
 
   runner_bridge:
