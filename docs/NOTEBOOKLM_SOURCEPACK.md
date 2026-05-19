@@ -8,6 +8,24 @@ Do not hand-edit this file; update the source manifests or docs and regenerate i
 NotebookLM is a mirror for reading and synthesis only. GitHub is canon for source files, issues, pull requests, labels, runner state, and merge history.
 This sourcepack makes no live Google calls, no NotebookLM API calls, and includes no secrets.
 
+## Canonical Quick Answers
+
+### Runner Queue Workflow
+
+A Runner task starts as a GitHub issue labeled `runner:ready`; the systemd timer picks it up; the Runner moves it to `runner:running`; Codex runs in the checkout with the `workspace-write` sandbox; the Runner posts a `DONE` or `BLOCKED` report; the final label becomes `runner:done` or `runner:blocked`; Telegram sends the completion notification.
+
+### Operator Lockout While Running
+
+While an issue is `runner:running`, the operator must not run: `git checkout`, `git pull`, `git reset`, `pytest`, `rm` cleanup, or `systemctl restart`.
+
+### Skeleton/Jeeves Boundary
+
+Skeleton is the controlled construction and control layer. Jeeves is a separate future assistant product and runtime. Skeleton builds and governs work but is not Jeeves; Jeeves is not a Skeleton runtime adapter.
+
+### NotebookLM Authority
+
+NotebookLM is advisory. GitHub remains canon for source files, issues, pull requests, labels, runner state, and merge history.
+
 ## Source Inputs
 
 - `BOOT_MANIFEST.yaml`

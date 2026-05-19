@@ -19,6 +19,7 @@ def test_sourcepack_has_required_sections() -> None:
 
     for section in [
         "## Canon Note",
+        "## Canonical Quick Answers",
         "## Source Inputs",
         "## Boot Entrypoint",
         "## Available Capabilities",
@@ -35,6 +36,34 @@ def test_sourcepack_records_notebooklm_as_mirror_and_github_as_canon() -> None:
 
     assert "NotebookLM is a mirror" in sourcepack
     assert "GitHub is canon" in sourcepack
+
+
+def test_sourcepack_has_canonical_quick_answers() -> None:
+    sourcepack = SOURCEPACK_PATH.read_text(encoding="utf-8")
+
+    assert "### Runner Queue Workflow" in sourcepack
+    assert (
+        "A Runner task starts as a GitHub issue labeled `runner:ready`; the systemd timer picks it up; "
+        "the Runner moves it to `runner:running`; Codex runs in the checkout with the `workspace-write` "
+        "sandbox; the Runner posts a `DONE` or `BLOCKED` report; the final label becomes `runner:done` "
+        "or `runner:blocked`; Telegram sends the completion notification."
+    ) in sourcepack
+    assert "### Operator Lockout While Running" in sourcepack
+    assert (
+        "While an issue is `runner:running`, the operator must not run: `git checkout`, `git pull`, "
+        "`git reset`, `pytest`, `rm` cleanup, or `systemctl restart`."
+    ) in sourcepack
+    assert "### Skeleton/Jeeves Boundary" in sourcepack
+    assert (
+        "Skeleton is the controlled construction and control layer. Jeeves is a separate future assistant "
+        "product and runtime. Skeleton builds and governs work but is not Jeeves; Jeeves is not a Skeleton "
+        "runtime adapter."
+    ) in sourcepack
+    assert "### NotebookLM Authority" in sourcepack
+    assert (
+        "NotebookLM is advisory. GitHub remains canon for source files, issues, pull requests, labels, "
+        "runner state, and merge history."
+    ) in sourcepack
 
 
 def test_sourcepack_includes_all_project_state_files() -> None:
