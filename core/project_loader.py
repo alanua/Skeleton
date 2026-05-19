@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Union
+from typing import Optional, Union
 
 import yaml
 
@@ -67,7 +67,7 @@ class ProjectLoader:
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else {}
 
-    def _find_project(self, index: dict, project_id: str) -> dict | None:
+    def _find_project(self, index: dict, project_id: str) -> Optional[dict]:
         projects = index.get("projects", {})
 
         if isinstance(projects, dict):
