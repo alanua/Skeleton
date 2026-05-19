@@ -65,6 +65,13 @@ capabilities:
     tested: true
     description: Activates project context after operator command.
 
+  github_task_queue:
+    status: available
+    module: scripts/runner_poll_github_tasks.py
+    tested: true
+    added: "2026-05-19"
+    description: Polls GitHub issues labeled runner:ready, executes bounded Codex tasks on Hetzner Runner, creates draft PRs, and reports results back to GitHub.
+
   runner_bridge:
     status: planned
     module: core/runner_bridge.py
