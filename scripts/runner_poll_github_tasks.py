@@ -8,6 +8,8 @@ import shutil
 import subprocess
 import tempfile
 import time
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +28,8 @@ RUNTIME_ARTIFACTS = (
     "scripts/__pycache__",
     ".codex",
 )
+TELEGRAM_API_BASE = "https://api.telegram.org"
+TELEGRAM_TIMEOUT_SECONDS = 10
 
 
 def truncate_comment(body: str) -> str:
@@ -141,6 +145,60 @@ def set_issue_label(issue_number: int, remove: str, add: str) -> None:
     )
     if code != 0:
         raise RuntimeError(f"gh issue edit failed:\n{output}")
+
+
+def extract_pr_url(report: str) -> str | None:
+    match = re.search(r"^Draft PR:\s*(?P<url>\S+)\s*$", report, re.MULTILINE)
+    if not match:
+        return None
+    return match.group("url")
+
+
+def build_telegram_message(
+    issue_number: int, status: str, report: str | None = None
+) -> str:
+    lines = [
+        f"Repository: {REPO}",
+        f"Issue: #{issue_number}",
+        f"Status: {status}",
+    ]
+    if report:
+        pr_url = extract_pr_url(report)
+        if pr_url:
+            lines.append(f"PR: {pr_url}")
+    return "\n".join(lines)
+
+
+def send_telegram_notification(message: str) -> None:
+    bot_token = os.environ.get("SKELETON_TG_BOT")
+    chat_id = os.environ.get("SKELETON_TG_CHAT")
+    if not bot_token or not chat_id:
+        return
+
+    payload = urllib.parse.urlencode(
+        {
+            "chat_id": chat_id,
+            "text": message,
+            "disable_web_page_preview": "true",
+        }
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        f"{TELEGRAM_API_BASE}/bot{bot_token}/sendMessage",
+        data=payload,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=TELEGRAM_TIMEOUT_SECONDS):
+        pass
+
+
+def notify_task_finished(
+    issue_number: int, status: str, report: str | None = None
+) -> None:
+    try:
+        send_telegram_notification(build_telegram_message(issue_number, status, report))
+    except Exception:
+        return
 
 
 def ensure_clean_worktree(workdir: str) -> tuple[bool, str]:
@@ -294,6 +352,7 @@ def finalize_success(issue: dict[str, Any], workdir: str, codex_output: str) -> 
 def block_issue(issue_number: int, message: str, remove_label: str = LABEL_READY) -> None:
     post_issue_comment(issue_number, f"BLOCKED: {message}")
     set_issue_label(issue_number, remove_label, LABEL_BLOCKED)
+    notify_task_finished(issue_number, "BLOCKED")
 
 
 def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
@@ -347,6 +406,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
         cleanup_runtime_artifacts(resolved_workdir)
         post_issue_comment(issue_number, report)
         set_issue_label(issue_number, LABEL_RUNNING, LABEL_DONE)
+        notify_task_finished(issue_number, "DONE", report)
     except Exception as exc:
         cleanup_runtime_artifacts(resolved_workdir)
         try:

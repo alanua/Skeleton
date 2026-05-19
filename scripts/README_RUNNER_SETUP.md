@@ -25,6 +25,32 @@ Run the required validation and report the result.
 
 Do not put secrets, API keys, environment files, production credentials, or private tokens in task issues.
 
+## Environment File
+
+The poller loads optional local configuration from `/etc/skeleton-runner.env`. This file belongs on the Hetzner Runner host only and must not be committed, copied into GitHub issues, or pasted into comments.
+
+Create the file with placeholders, then replace the values on the host:
+
+```bash
+sudo install -m 600 -o root -g root /dev/null /etc/skeleton-runner.env
+sudo editor /etc/skeleton-runner.env
+```
+
+Example structure:
+
+```sh
+SKELETON_TG_BOT=replace-with-telegram-bot-token
+SKELETON_TG_CHAT=replace-with-telegram-chat-id
+```
+
+Keep the permissions restricted:
+
+```bash
+sudo chmod 600 /etc/skeleton-runner.env
+```
+
+If either Telegram variable is absent, the runner skips Telegram notifications.
+
 ## Hetzner systemd Setup
 
 Install the service and timer on the Hetzner Runner host from the Skeleton repo checkout:
@@ -41,9 +67,16 @@ journalctl -u skeleton-runner-poll.service -f
 
 The service runs as user `agent` with `WorkingDirectory=/home/agent/agent-dev/repos/Skeleton`.
 
+After merging updates to the service file, copy the updated unit and reload systemd:
+
+```bash
+sudo cp scripts/skeleton-runner-poll.service /etc/systemd/system/
+sudo systemctl daemon-reload
+```
+
 ## Security
 
-`gh auth` must already be configured on Hetzner for the `agent` user. The GitHub token must never be stored in this repo. API keys must never be put in task issues, comments, commits, docs, logs, or source files.
+`gh auth` must already be configured on Hetzner for the `agent` user. The GitHub token and Telegram credentials must never be stored in this repo. API keys must never be put in task issues, comments, commits, docs, logs, or source files.
 
 ## Operation
 
