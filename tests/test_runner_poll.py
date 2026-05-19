@@ -175,11 +175,45 @@ def test_poll_once_processes_ready_issues() -> None:
 def test_cleanup_runtime_artifacts_removes_known_generated_directories(tmp_path: Path) -> None:
     for relative_path in runner.RUNTIME_ARTIFACTS:
         artifact = tmp_path / relative_path
+        if relative_path == ".codex":
+            artifact.write_text("generated", encoding="utf-8")
+            continue
         artifact.mkdir(parents=True)
         (artifact / "generated.txt").write_text("generated", encoding="utf-8")
 
     runner.cleanup_runtime_artifacts(tmp_path)
 
+    for relative_path in runner.RUNTIME_ARTIFACTS:
+        assert not (tmp_path / relative_path).exists()
+
+
+def test_finalize_success_no_file_changes_cleans_runtime_artifacts_and_reports(
+    tmp_path: Path,
+) -> None:
+    for relative_path in runner.RUNTIME_ARTIFACTS:
+        artifact = tmp_path / relative_path
+        if relative_path == ".codex":
+            artifact.write_text("generated", encoding="utf-8")
+            continue
+        artifact.mkdir(parents=True)
+        (artifact / "generated.txt").write_text("generated", encoding="utf-8")
+
+    def run_command(args: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        if args in (
+            ["git", "diff", "--name-only"],
+            ["git", "diff", "--cached", "--name-only"],
+            ["git", "ls-files", "--others", "--exclude-standard"],
+        ):
+            return 0, ""
+        raise AssertionError(f"unexpected command: {args}")
+
+    issue = {"number": 24, "title": "No changes"}
+    with mock.patch.object(runner, "run_command", side_effect=run_command):
+        report = runner.finalize_success(issue, str(tmp_path), "codex ok")
+
+    assert "DONE: Codex completed successfully with no file changes." in report
+    assert "Runtime artifacts cleaned after Codex execution." in report
+    assert "codex ok" in report
     for relative_path in runner.RUNTIME_ARTIFACTS:
         assert not (tmp_path / relative_path).exists()
 

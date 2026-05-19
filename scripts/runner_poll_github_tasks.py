@@ -190,6 +190,7 @@ def finalize_success(issue: dict[str, Any], workdir: str, codex_output: str) -> 
         cleanup_runtime_artifacts(workdir)
         return (
             "DONE: Codex completed successfully with no file changes.\n\n"
+            "Runtime artifacts cleaned after Codex execution.\n\n"
             f"Codex output:\n```\n{codex_output.strip()}\n```"
         )
 
