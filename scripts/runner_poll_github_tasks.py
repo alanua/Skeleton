@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -18,6 +19,12 @@ LABEL_BLOCKED = "runner:blocked"
 POLL_INTERVAL = 60
 DEFAULT_WORKDIR = Path(__file__).resolve().parents[1]
 MAX_COMMENT_LENGTH = 60000
+RUNTIME_ARTIFACTS = (
+    "core/__pycache__",
+    "tests/__pycache__",
+    "scripts/__pycache__",
+    ".codex",
+)
 
 
 def truncate_comment(body: str) -> str:
@@ -25,6 +32,16 @@ def truncate_comment(body: str) -> str:
         return body
     suffix = "\n\n[Runner output truncated.]"
     return body[: MAX_COMMENT_LENGTH - len(suffix)] + suffix
+
+
+def cleanup_runtime_artifacts(workdir: str | Path) -> None:
+    root = Path(workdir)
+    for relative_path in RUNTIME_ARTIFACTS:
+        artifact = root / relative_path
+        if artifact.is_dir():
+            shutil.rmtree(artifact, ignore_errors=True)
+        elif artifact.exists():
+            artifact.unlink()
 
 
 def run_command(args: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
@@ -126,6 +143,7 @@ def set_issue_label(issue_number: int, remove: str, add: str) -> None:
 
 
 def ensure_clean_worktree(workdir: str) -> tuple[bool, str]:
+    cleanup_runtime_artifacts(workdir)
     code, output = run_command(["git", "status", "--short"], cwd=workdir)
     if code != 0:
         return False, output
@@ -151,6 +169,7 @@ def prepare_issue_branch(issue_number: int, workdir: str) -> tuple[int, str, str
 
 
 def changed_files(workdir: str) -> list[str]:
+    cleanup_runtime_artifacts(workdir)
     files: set[str] = set()
     for command in (
         ["git", "diff", "--name-only"],
@@ -168,15 +187,27 @@ def finalize_success(issue: dict[str, Any], workdir: str, codex_output: str) -> 
     issue_number = int(issue["number"])
     files = changed_files(workdir)
     if not files:
+        cleanup_runtime_artifacts(workdir)
         return (
             "DONE: Codex completed successfully with no file changes.\n\n"
             f"Codex output:\n```\n{codex_output.strip()}\n```"
         )
 
     checks: list[tuple[str, str]] = []
+
     for command in (
         ["git", "diff", "--check"],
         ["python3", "-m", "pytest", "-q"],
+    ):
+        code, output = run_command(command, cwd=workdir)
+        checks.append((" ".join(command), output))
+        if code != 0:
+            raise RuntimeError(f"{' '.join(command)} failed:\n{output}")
+
+    cleanup_runtime_artifacts(workdir)
+    files = changed_files(workdir)
+
+    for command in (
         ["git", "add", *files],
         ["git", "diff", "--cached", "--check"],
         ["git", "commit", "-m", f"runner: issue #{issue_number} task"],
@@ -193,6 +224,8 @@ def finalize_success(issue: dict[str, Any], workdir: str, codex_output: str) -> 
         checks.append((" ".join(command), output))
         if code != 0:
             raise RuntimeError(f"{' '.join(command)} failed:\n{output}")
+
+    cleanup_runtime_artifacts(workdir)
 
     code, commit_sha = run_command(["git", "rev-parse", "HEAD"], cwd=workdir)
     if code != 0:
@@ -289,15 +322,19 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             block_issue(issue_number, f"Branch preparation failed:\n```\n{branch_output}\n```")
             return
 
+        cleanup_runtime_artifacts(resolved_workdir)
         codex_code, codex_output = run_codex_task(task_content, resolved_workdir)
+        cleanup_runtime_artifacts(resolved_workdir)
         if codex_code != 0:
             block_issue(issue_number, f"Codex task failed:\n```\n{codex_output}\n```")
             return
 
         report = finalize_success(issue, resolved_workdir, codex_output)
+        cleanup_runtime_artifacts(resolved_workdir)
         post_issue_comment(issue_number, report)
         set_issue_label(issue_number, LABEL_READY, LABEL_DONE)
     except Exception as exc:
+        cleanup_runtime_artifacts(resolved_workdir)
         try:
             block_issue(issue_number, f"Runner error:\n```\n{exc}\n```")
         except Exception:
