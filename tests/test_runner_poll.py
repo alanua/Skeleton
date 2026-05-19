@@ -133,7 +133,10 @@ def test_process_issue_posts_blocked_on_codex_failure() -> None:
     comment.assert_called_once()
     assert "BLOCKED" in comment.call_args.args[1]
     assert "codex failed" in comment.call_args.args[1]
-    label.assert_called_once_with(4, runner.LABEL_READY, runner.LABEL_BLOCKED)
+    assert label.call_args_list == [
+        mock.call(4, runner.LABEL_READY, runner.LABEL_RUNNING),
+        mock.call(4, runner.LABEL_RUNNING, runner.LABEL_BLOCKED),
+    ]
 
 
 def test_process_issue_posts_done_on_success() -> None:
@@ -154,7 +157,32 @@ def test_process_issue_posts_done_on_success() -> None:
         runner.process_issue(issue, workdir="/repo")
 
     comment.assert_called_once_with(5, "DONE report")
-    label.assert_called_once_with(5, runner.LABEL_READY, runner.LABEL_DONE)
+    assert label.call_args_list == [
+        mock.call(5, runner.LABEL_READY, runner.LABEL_RUNNING),
+        mock.call(5, runner.LABEL_RUNNING, runner.LABEL_DONE),
+    ]
+
+
+def test_process_issue_posts_blocked_on_branch_failure_after_claiming() -> None:
+    fence = "`" * 3
+    issue = {"number": 6, "title": "Branch fail", "body": f"{fence}task\nDo it\n{fence}"}
+
+    with mock.patch.object(runner, "ensure_clean_worktree", return_value=(True, "")), mock.patch.object(
+        runner, "prepare_issue_branch", return_value=(1, "branch failed", "runner/issue-6")
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ) as comment, mock.patch.object(
+        runner, "set_issue_label"
+    ) as label:
+        runner.process_issue(issue, workdir="/repo")
+
+    comment.assert_called_once()
+    assert "BLOCKED" in comment.call_args.args[1]
+    assert "branch failed" in comment.call_args.args[1]
+    assert label.call_args_list == [
+        mock.call(6, runner.LABEL_READY, runner.LABEL_RUNNING),
+        mock.call(6, runner.LABEL_RUNNING, runner.LABEL_BLOCKED),
+    ]
 
 
 def test_poll_once_processes_ready_issues() -> None:

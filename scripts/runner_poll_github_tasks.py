@@ -14,6 +14,7 @@ from typing import Any
 
 REPO = os.environ.get("SKELETON_REPO", "alanua/Skeleton")
 LABEL_READY = "runner:ready"
+LABEL_RUNNING = "runner:running"
 LABEL_DONE = "runner:done"
 LABEL_BLOCKED = "runner:blocked"
 POLL_INTERVAL = 60
@@ -290,14 +291,15 @@ def finalize_success(issue: dict[str, Any], workdir: str, codex_output: str) -> 
     )
 
 
-def block_issue(issue_number: int, message: str) -> None:
+def block_issue(issue_number: int, message: str, remove_label: str = LABEL_READY) -> None:
     post_issue_comment(issue_number, f"BLOCKED: {message}")
-    set_issue_label(issue_number, LABEL_READY, LABEL_BLOCKED)
+    set_issue_label(issue_number, remove_label, LABEL_BLOCKED)
 
 
 def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
     issue_number = int(issue["number"])
     resolved_workdir = str(Path(workdir) if workdir is not None else DEFAULT_WORKDIR)
+    claimed = False
     try:
         task_content = extract_task_block(issue.get("body") or "")
         if task_content is None:
@@ -316,28 +318,44 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             )
             return
 
+        set_issue_label(issue_number, LABEL_READY, LABEL_RUNNING)
+        claimed = True
+
         branch_code, branch_output, _branch = prepare_issue_branch(
             issue_number, resolved_workdir
         )
         if branch_code != 0:
-            block_issue(issue_number, f"Branch preparation failed:\n```\n{branch_output}\n```")
+            block_issue(
+                issue_number,
+                f"Branch preparation failed:\n```\n{branch_output}\n```",
+                remove_label=LABEL_RUNNING,
+            )
             return
 
         cleanup_runtime_artifacts(resolved_workdir)
         codex_code, codex_output = run_codex_task(task_content, resolved_workdir)
         cleanup_runtime_artifacts(resolved_workdir)
         if codex_code != 0:
-            block_issue(issue_number, f"Codex task failed:\n```\n{codex_output}\n```")
+            block_issue(
+                issue_number,
+                f"Codex task failed:\n```\n{codex_output}\n```",
+                remove_label=LABEL_RUNNING,
+            )
             return
 
         report = finalize_success(issue, resolved_workdir, codex_output)
         cleanup_runtime_artifacts(resolved_workdir)
         post_issue_comment(issue_number, report)
-        set_issue_label(issue_number, LABEL_READY, LABEL_DONE)
+        set_issue_label(issue_number, LABEL_RUNNING, LABEL_DONE)
     except Exception as exc:
         cleanup_runtime_artifacts(resolved_workdir)
         try:
-            block_issue(issue_number, f"Runner error:\n```\n{exc}\n```")
+            remove_label = LABEL_RUNNING if claimed else LABEL_READY
+            block_issue(
+                issue_number,
+                f"Runner error:\n```\n{exc}\n```",
+                remove_label=remove_label,
+            )
         except Exception:
             return
 
