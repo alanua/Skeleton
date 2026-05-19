@@ -172,6 +172,18 @@ def test_poll_once_processes_ready_issues() -> None:
     assert process_issue.call_count == 2
 
 
+def test_cleanup_runtime_artifacts_removes_known_generated_directories(tmp_path: Path) -> None:
+    for relative_path in runner.RUNTIME_ARTIFACTS:
+        artifact = tmp_path / relative_path
+        artifact.mkdir(parents=True)
+        (artifact / "generated.txt").write_text("generated", encoding="utf-8")
+
+    runner.cleanup_runtime_artifacts(tmp_path)
+
+    for relative_path in runner.RUNTIME_ARTIFACTS:
+        assert not (tmp_path / relative_path).exists()
+
+
 def test_service_uses_agent_user() -> None:
     service = (ROOT / "scripts" / "skeleton-runner-poll.service").read_text(
         encoding="utf-8"
