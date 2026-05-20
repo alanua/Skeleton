@@ -24,9 +24,9 @@ Jeeves = separate future assistant/product/runtime.
 ## Current status
 
 ```text
-Status: DRAFT_PARALLEL_BOOTSTRAP
-Active route: not switched yet
-Current entrypoint candidate: BOOT_MANIFEST.yaml
+Status: ACTIVE_CONTROLLED_BOOTSTRAP
+Active route: BOOT_MANIFEST.yaml
+Current entrypoint: BOOT_MANIFEST.yaml
 ```
 
 ## Core rule

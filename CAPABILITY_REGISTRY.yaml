@@ -159,7 +159,7 @@ capabilities:
     description: "Optional dependency groups for the limited Aufmass parser scope: DXF via ezdxf, PDF via pdfplumber and pypdf, and image/scan helpers via pillow, opencv-python-headless, and scikit-image."
 
   runner_bridge:
-    status: planned
+    status: stage1_dry_run
     module: core/runner_bridge.py
     entry: dry_run_runner_bridge
     stage: stage_1_dry_run
@@ -167,11 +167,11 @@ capabilities:
     requires:
       - schemas/runner_bridge.schema.json
       - docs/RUNNER_BRIDGE.md
-    tested: false
-    description: Connects write-gate to a bounded runner.
+    tested: true
+    description: Dry-run contract only. Validates and renders RunnerBridgeRequest. No GitHub calls, no network, no shell/subprocess. Stage 2 live requires separate operator-approved PR.
 
   memory_manager:
-    status: planned
+    status: stage1_dry_run
     module: core/memory_manager.py
     entry: route_memory_record
     stage: stage_1_dry_run

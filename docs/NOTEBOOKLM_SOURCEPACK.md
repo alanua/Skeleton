@@ -85,8 +85,6 @@ Boot output required fields:
 
 ## Planned Capabilities
 
-- `runner_bridge`: Connects write-gate to a bounded runner. Module: `core/runner_bridge.py`. Status: not tested.
-- `memory_manager`: Deterministic dry-run memory routing for weak cache, project state, canon candidates, confirmed canon, private-sensitive records, and rejected archive records. Module: `core/memory_manager.py`. Status: tested.
 - `memory_manager_live_storage`: Future operator-approved live storage bridge for memory routing decisions; not implemented in stage 1. Module: `core/memory_manager_live_storage.py`. Status: not tested.
 
 ## Project States
