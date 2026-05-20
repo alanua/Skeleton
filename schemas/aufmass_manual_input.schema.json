@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.aufmass_manual_input.schema.json",
+  "type": "object",
+  "required": [
+    "project_id",
+    "calibration",
+    "rooms"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "project_id": {"type": "string"},
+    "source_page": {"type": "string"},
+    "source_ref": {"type": "string"},
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "review_status": {"type": "string"},
+    "calibration": {
+      "type": "object",
+      "required": [
+        "point_a",
+        "point_b",
+        "real_length_m"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "point_a": {"$ref": "#/$defs/manual_point"},
+        "point_b": {"$ref": "#/$defs/manual_point"},
+        "real_length_m": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "source_page": {"type": "string"},
+        "source_ref": {"type": "string"},
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "review_status": {"type": "string"}
+      }
+    },
+    "rooms": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "room_id",
+          "height_m",
+          "polygon"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "room_id": {"type": "string"},
+          "name": {"type": "string"},
+          "height_m": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "polygon": {
+            "type": "array",
+            "minItems": 3,
+            "items": {"$ref": "#/$defs/manual_point"}
+          },
+          "openings": {
+            "type": "array",
+            "default": [],
+            "items": {
+              "type": "object",
+              "required": [
+                "width",
+                "height"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "opening_id": {"type": "string"},
+                "name": {"type": "string"},
+                "width": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "height": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "count": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "default": 1
+                },
+                "dimension_unit": {
+                  "type": "string",
+                  "enum": ["drawing", "m"],
+                  "default": "drawing"
+                },
+                "source_page": {"type": "string"},
+                "source_ref": {"type": "string"},
+                "confidence": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "review_status": {"type": "string"}
+              }
+            }
+          },
+          "source_page": {"type": "string"},
+          "source_ref": {"type": "string"},
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "review_status": {"type": "string"}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "manual_point": {
+      "type": "object",
+      "required": [
+        "x",
+        "y"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "x": {"type": "number"},
+        "y": {"type": "number"}
+      }
+    }
+  }
+}
