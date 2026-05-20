@@ -8,6 +8,7 @@ summary:
   - Construction Takeoff / Aufmass from drawings is a public-safe method candidate when kept separate from real project data.
   - Stage 1 calculation engine now exists for deterministic public-safe quantities from explicit room geometry, heights, and openings.
   - Stage 1 manual calibration adapter now converts operator-marked drawing coordinates into metric room geometry for the calculation engine.
+  - Stage 1 DXF adapter now extracts public-safe DXF metadata and simple geometry with optional-safe lazy ezdxf loading.
   - Stage 1 export table/report module now converts Aufmass results into deterministic rows, CSV text, and JSON-compatible dicts without writing files.
   - Current parser dependency prep is limited to operator-converted DXF, PDF, and scan/image sources through approved private routes.
   - The workflow calibrates scale from known dimensions before deriving measurements.
@@ -16,7 +17,7 @@ summary:
   - Source confidence is preserved per layer and per extracted measurement.
   - When multiple approved formats exist, DXF, PDF, scans, and images should be compared instead of trusting one source blindly.
   - Controlled table/report export exists for reviewing synthetic or sanitized engine results.
-  - No parser implementation, OCR, IFC, DWG converter install, runtime automation, or sample plan is included at this stage.
+  - No OCR, IFC, DWG converter install, runtime automation, private drawing, or sample plan is included at this stage.
 privacy_security_rules:
   - Do not commit real customer data.
   - Do not commit real drawings.
@@ -24,7 +25,6 @@ privacy_security_rules:
   - Do not commit invoices, contracts, or photos unless explicitly approved and routed privately.
   - Source files remain private, local, or in an approved Drive route unless the operator explicitly approves a public-safe sample.
 next_actions:
-  - Add DXF adapter stage 1 using ezdxf.
   - Run a private pilot with real DXF outside the public repo.
   - Add PDF adapter later.
   - Add image/scan helper later.

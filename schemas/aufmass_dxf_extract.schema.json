@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.aufmass_dxf_extract.schema.json",
+  "type": "object",
+  "required": [
+    "path",
+    "units",
+    "insunits",
+    "layer_counts",
+    "entity_counts",
+    "lines",
+    "polylines",
+    "texts",
+    "mtexts",
+    "dimensions"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "path": {"type": "string"},
+    "units": {"type": ["string", "null"]},
+    "insunits": {"type": ["integer", "null"]},
+    "layer_counts": {
+      "type": "object",
+      "additionalProperties": {"type": "integer", "minimum": 0}
+    },
+    "entity_counts": {
+      "type": "object",
+      "additionalProperties": {"type": "integer", "minimum": 0}
+    },
+    "lines": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/line"}
+    },
+    "polylines": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/polyline"}
+    },
+    "texts": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/text"}
+    },
+    "mtexts": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/text"}
+    },
+    "dimensions": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/dimension"}
+    }
+  },
+  "$defs": {
+    "point": {
+      "type": "object",
+      "required": [
+        "x",
+        "y",
+        "z"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "x": {"type": "number"},
+        "y": {"type": "number"},
+        "z": {"type": "number"}
+      }
+    },
+    "line": {
+      "type": "object",
+      "required": [
+        "layer",
+        "start",
+        "end"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "layer": {"type": "string"},
+        "start": {"$ref": "#/$defs/point"},
+        "end": {"$ref": "#/$defs/point"}
+      }
+    },
+    "polyline": {
+      "type": "object",
+      "required": [
+        "layer",
+        "entity_type",
+        "points",
+        "closed",
+        "area"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "layer": {"type": "string"},
+        "entity_type": {
+          "type": "string",
+          "enum": ["LWPOLYLINE", "POLYLINE"]
+        },
+        "points": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/point"}
+        },
+        "closed": {"type": "boolean"},
+        "area": {"type": ["number", "null"], "minimum": 0}
+      }
+    },
+    "text": {
+      "type": "object",
+      "required": [
+        "layer",
+        "text",
+        "insert",
+        "height",
+        "rotation"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "layer": {"type": "string"},
+        "text": {"type": "string"},
+        "insert": {"$ref": "#/$defs/point"},
+        "height": {"type": ["number", "null"]},
+        "rotation": {"type": ["number", "null"]}
+      }
+    },
+    "dimension": {
+      "type": "object",
+      "required": [
+        "layer",
+        "dimtype",
+        "text",
+        "measurement",
+        "defpoint",
+        "defpoint2",
+        "defpoint3"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "layer": {"type": "string"},
+        "dimtype": {"type": ["integer", "null"]},
+        "text": {"type": ["string", "null"]},
+        "measurement": {"type": ["number", "null"]},
+        "defpoint": {"anyOf": [{"$ref": "#/$defs/point"}, {"type": "null"}]},
+        "defpoint2": {"anyOf": [{"$ref": "#/$defs/point"}, {"type": "null"}]},
+        "defpoint3": {"anyOf": [{"$ref": "#/$defs/point"}, {"type": "null"}]}
+      }
+    }
+  }
+}
