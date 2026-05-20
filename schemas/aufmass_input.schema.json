@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.aufmass_input.schema.json",
+  "type": "object",
+  "required": [
+    "project_id",
+    "unit",
+    "rooms"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "project_id": {"type": "string"},
+    "unit": {
+      "type": "string",
+      "enum": ["m"]
+    },
+    "rooms": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "room_id",
+          "height",
+          "polygon"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "room_id": {"type": "string"},
+          "name": {"type": "string"},
+          "height": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "polygon": {
+            "type": "array",
+            "minItems": 3,
+            "items": {
+              "type": "object",
+              "required": [
+                "x",
+                "y"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "x": {"type": "number"},
+                "y": {"type": "number"}
+              }
+            }
+          },
+          "openings": {
+            "type": "array",
+            "default": [],
+            "items": {
+              "type": "object",
+              "required": [
+                "width",
+                "height",
+                "count"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "width": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "height": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "count": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "source": {"type": "string"},
+                "confidence": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                }
+              }
+            }
+          },
+          "source": {"type": "string"},
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          }
+        }
+      }
+    },
+    "source": {"type": "string"},
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    }
+  }
+}
