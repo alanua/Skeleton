@@ -149,6 +149,36 @@ Next actions:
 - Prepare stage 1 documentation-only bridge in alanua/jeeves only after explicit operator approval.
 - Keep any future bridge automation in a separate reviewed PR.
 
+### aufmass
+
+- Means: Construction Takeoff / Aufmass from drawings
+- Repo: `alanua/Skeleton`
+- Entrypoint: `projects/aufmass/PROJECT_MANIFEST.yaml`
+- State file: `projects/aufmass/STATE.yaml`
+- Status: `DRAFT_HANDOFF`
+- State role: `handoff_not_canon_truth`
+- Last verified: `2026-05-20`
+- Evidence source: Skeleton project candidate approval; documentation-only route, no construction source files committed
+
+Summary:
+
+- Construction Takeoff / Aufmass from drawings is a public-safe method candidate when kept separate from real project data.
+- Intake may cover IFC, DWG, DXF, PDF, scan, or image sources when available through approved private routes.
+- The workflow calibrates scale from known dimensions before deriving measurements.
+- The workflow identifies room contours and separates source layers where possible.
+- Calculation targets include floor area, ceiling area, perimeter, gross wall area, net wall area, openings, and volume.
+- Source confidence is preserved per layer and per extracted measurement.
+- When multiple formats exist, IFC, DWG/DXF, PDF, scans, and images should be compared instead of trusting one source blindly.
+- Later stages may export a controlled table or report after private pilot validation.
+- No parser, OCR, CAD extraction, runtime automation, or sample plan is included at this stage.
+
+Next actions:
+
+- Prepare a private pilot for one floor or object outside the public repo.
+- Define output table columns.
+- Define confidence and status vocabulary.
+- Add parser or extractor code only in a later separate PR.
+
 ### lavalamp
 
 - Means: WLED transparent cylinder lava lamp project
