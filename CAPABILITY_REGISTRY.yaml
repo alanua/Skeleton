@@ -75,6 +75,10 @@ capabilities:
   runner_bridge:
     status: planned
     module: core/runner_bridge.py
+    entry: dry_run_runner_bridge
+    requires:
+      - schemas/runner_bridge.schema.json
+      - docs/RUNNER_BRIDGE.md
     tested: false
     description: Connects write-gate to a bounded runner.
 
