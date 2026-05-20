@@ -92,6 +92,20 @@ capabilities:
     added: "2026-05-20"
     description: Calculates public-safe Aufmass quantities from explicit room geometry and openings.
 
+  aufmass_manual_adapter:
+    status: available
+    module: core/aufmass_manual_adapter.py
+    entry: calculate_manual_plan_aufmass
+    stage: stage_1_manual_calibration_adapter
+    live_runtime_execution: false
+    requires:
+      - schemas/aufmass_manual_input.schema.json
+      - docs/AUFMASS_MANUAL_ADAPTER.md
+      - core/aufmass_engine.py
+    tested: true
+    added: "2026-05-20"
+    description: Converts manually calibrated drawing coordinates into metric Aufmass engine input.
+
   runner_bridge:
     status: planned
     module: core/runner_bridge.py

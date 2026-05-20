@@ -77,6 +77,7 @@ Boot output required fields:
 - `github_task_queue`: Polls GitHub issues labeled runner:ready, executes bounded Codex tasks on Hetzner Runner, creates draft PRs, and reports results back to GitHub. Module: `scripts/runner_poll_github_tasks.py`. Status: tested.
 - `notebooklm_sourcepack`: Generates docs/NOTEBOOKLM_SOURCEPACK.md from repo state for NotebookLM mirror. Module: `scripts/build_notebooklm_sourcepack.py`. Status: tested.
 - `aufmass_engine`: Calculates public-safe Aufmass quantities from explicit room geometry and openings. Module: `core/aufmass_engine.py`. Status: tested.
+- `aufmass_manual_adapter`: Converts manually calibrated drawing coordinates into metric Aufmass engine input. Module: `core/aufmass_manual_adapter.py`. Status: tested.
 
 ## Planned Capabilities
 
@@ -165,6 +166,7 @@ Summary:
 
 - Construction Takeoff / Aufmass from drawings is a public-safe method candidate when kept separate from real project data.
 - Stage 1 calculation engine now exists for deterministic public-safe quantities from explicit room geometry, heights, and openings.
+- Stage 1 manual calibration adapter now converts operator-marked drawing coordinates into metric room geometry for the calculation engine.
 - Intake may cover IFC, DWG, DXF, PDF, scan, or image sources when available through approved private routes.
 - The workflow calibrates scale from known dimensions before deriving measurements.
 - The workflow identifies room contours and separates source layers where possible.
@@ -176,11 +178,11 @@ Summary:
 
 Next actions:
 
-- Prepare a private pilot input table outside the public repo.
-- Add a manual PDF/scan calibration adapter in a later separate PR.
-- Add a DXF adapter in a later separate PR.
-- Add an IFC adapter later after private pilot validation.
+- Run a private pilot with a real PDF/scan outside the public repo.
 - Define export table/report format.
+- Add a DXF adapter later.
+- Add an IFC adapter later.
+- Add an optional UI or spreadsheet input helper later.
 
 ### lavalamp
 
