@@ -1,0 +1,14 @@
+schema: skeleton.project_manifest.v1
+project_id: aufmass
+name: Construction Takeoff / Aufmass
+status: DRAFT_HANDOFF
+entrypoint: projects/aufmass/PROJECT_MANIFEST.yaml
+state_file: projects/aufmass/STATE.yaml
+read_order:
+  - projects/aufmass/PROJECT_MANIFEST.yaml
+  - projects/aufmass/STATE.yaml
+source_repo: alanua/Skeleton
+privacy_class: mixed_public_private
+meaning: Construction Takeoff / Aufmass from drawings
+means: Construction Takeoff / Aufmass from drawings
+route_note: Public-safe methods may live in Skeleton; real drawings and quantities stay private.

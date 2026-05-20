@@ -12,6 +12,11 @@ projects:
     entrypoint: projects/jeeves/PROJECT_MANIFEST.yaml
     means: separate future assistant product and runtime
 
+  aufmass:
+    repo: alanua/Skeleton
+    entrypoint: projects/aufmass/PROJECT_MANIFEST.yaml
+    means: Construction Takeoff / Aufmass from drawings
+
   lavalamp:
     repo: alanua/jeeves
     entrypoint: projects/lavalamp/PROJECT_MANIFEST.yaml
