@@ -72,6 +72,13 @@ capabilities:
     added: "2026-05-19"
     description: Polls GitHub issues labeled runner:ready, executes bounded Codex tasks on Hetzner Runner, creates draft PRs, and reports results back to GitHub.
 
+  notebooklm_sourcepack:
+    status: available
+    module: scripts/build_notebooklm_sourcepack.py
+    tested: true
+    added: "2026-05-20"
+    description: Generates docs/NOTEBOOKLM_SOURCEPACK.md from repo state for NotebookLM mirror.
+
   runner_bridge:
     status: planned
     module: core/runner_bridge.py

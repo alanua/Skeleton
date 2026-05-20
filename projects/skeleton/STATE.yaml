@@ -2,13 +2,26 @@ schema: skeleton.project_state.v1
 project_id: skeleton
 status: DRAFT_HANDOFF
 state_role: handoff_not_canon_truth
-last_verified: '2026-05-17'
-evidence_source: alanua/Skeleton PR #1 merged bootstrap
+last_verified: '2026-05-20'
+evidence_source: alanua/Skeleton main after PR #50 and replacement for superseded issue #52
 summary:
   - Skeleton v2 lives in alanua/Skeleton.
-  - BOOT_MANIFEST.yaml is the current v2 entrypoint candidate.
-  - Manifest, command, mode, source, memory, project, status, schemas, and tests exist.
+  - BOOT_MANIFEST, COMMANDS, MODES, MEMORY_ROUTING, SOURCE_REGISTRY, PROJECT_INDEX, and STATUS_CODES exist.
+  - Project manifests plus STATE handoff files exist.
+  - Adapter contracts for ChatGPT, Claude, Gemini, Codex, and Runner exist.
+  - Write-gate GateEngine plus PatchValidator exist.
+  - CAPABILITY_REGISTRY exists.
+  - SYSTEM_PROMPT files for ChatGPT and Gemini exist.
+  - boot_loader is v1-compatible and tested.
+  - project_loader plus session_state exists and is tested.
+  - github_task_queue Runner/Codex/Telegram route is live and tested.
+  - Telegram stale notification guard is merged and smoke-tested.
+  - notebooklm_sourcepack generator is merged and tested.
+  - PROVIDER_ROUTING 4-tier policy is merged and tested.
+  - runner_bridge stage 1 dry-run is merged, tested, and non-live, with strict validation command allowlist and no dry-run-to-live promotion without a separate stage 2 PR.
 next_actions:
-  - Add adapter contracts for ChatGPT, Claude, Gemini, Runner, and Codex.
-  - Add validators and bundle readers.
-  - Prepare bridge from historical ChatGPT Exoskeleton route after review.
+  - Add runner_bridge stage 2 live GitHub issue creation only as a separate operator-approved PR.
+  - Bridge jeeves from alanua/jeeves to alanua/Skeleton.
+  - Add memory_manager.
+  - Add aufmass project manifest.
+  - Optionally refresh NotebookLM source after this PR is merged.

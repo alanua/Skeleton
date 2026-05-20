@@ -1,5 +1,5 @@
 schema: skeleton.boot_manifest.v1
-status: DRAFT_ACTIVE_CANDIDATE
+status: CONFIRMED_BOOT_ROUTE
 
 repo: alanua/Skeleton
 ref: main
