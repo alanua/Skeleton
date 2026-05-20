@@ -106,6 +106,19 @@ capabilities:
     added: "2026-05-20"
     description: Converts manually calibrated drawing coordinates into metric Aufmass engine input.
 
+  aufmass_dxf_adapter:
+    status: available
+    module: core/aufmass_dxf_adapter.py
+    entry: extract_dxf
+    stage: stage_1_dxf_extract_adapter
+    live_runtime_execution: false
+    requires:
+      - schemas/aufmass_dxf_extract.schema.json
+      - docs/AUFMASS_DXF_ADAPTER.md
+    tested: true
+    added: "2026-05-20"
+    description: Optionally extracts public-safe DXF geometry and annotation metadata through lazy-loaded ezdxf.
+
   aufmass_exporter:
     status: available
     module: core/aufmass_exporter.py
