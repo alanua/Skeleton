@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.runner_bridge.schema.json",
+  "type": "object",
+  "required": [
+    "repo",
+    "base_ref",
+    "task_title",
+    "task_body",
+    "allowed_files",
+    "protected_files",
+    "validation_commands",
+    "approval_marker"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "repo": {"type": "string"},
+    "base_ref": {"type": "string"},
+    "task_title": {"type": "string"},
+    "task_body": {"type": "string"},
+    "allowed_files": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "protected_files": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "validation_commands": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "python3 -m pytest -q",
+          "python -m pytest -q",
+          "pytest -q",
+          "git diff --check",
+          "git status --short"
+        ]
+      }
+    },
+    "approval_marker": {
+      "type": ["string", "null"]
+    }
+  }
+}
