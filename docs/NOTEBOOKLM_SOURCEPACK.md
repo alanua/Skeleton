@@ -76,6 +76,7 @@ Boot output required fields:
 - `project_loader`: Activates project context after operator command. Module: `core/project_loader.py`. Status: tested.
 - `github_task_queue`: Polls GitHub issues labeled runner:ready, executes bounded Codex tasks on Hetzner Runner, creates draft PRs, and reports results back to GitHub. Module: `scripts/runner_poll_github_tasks.py`. Status: tested.
 - `notebooklm_sourcepack`: Generates docs/NOTEBOOKLM_SOURCEPACK.md from repo state for NotebookLM mirror. Module: `scripts/build_notebooklm_sourcepack.py`. Status: tested.
+- `aufmass_engine`: Calculates public-safe Aufmass quantities from explicit room geometry and openings. Module: `core/aufmass_engine.py`. Status: tested.
 
 ## Planned Capabilities
 
@@ -163,6 +164,7 @@ Next actions:
 Summary:
 
 - Construction Takeoff / Aufmass from drawings is a public-safe method candidate when kept separate from real project data.
+- Stage 1 calculation engine now exists for deterministic public-safe quantities from explicit room geometry, heights, and openings.
 - Intake may cover IFC, DWG, DXF, PDF, scan, or image sources when available through approved private routes.
 - The workflow calibrates scale from known dimensions before deriving measurements.
 - The workflow identifies room contours and separates source layers where possible.
@@ -174,10 +176,11 @@ Summary:
 
 Next actions:
 
-- Prepare a private pilot for one floor or object outside the public repo.
-- Define output table columns.
-- Define confidence and status vocabulary.
-- Add parser or extractor code only in a later separate PR.
+- Prepare a private pilot input table outside the public repo.
+- Add a manual PDF/scan calibration adapter in a later separate PR.
+- Add a DXF adapter in a later separate PR.
+- Add an IFC adapter later after private pilot validation.
+- Define export table/report format.
 
 ### lavalamp
 

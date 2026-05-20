@@ -79,6 +79,19 @@ capabilities:
     added: "2026-05-20"
     description: Generates docs/NOTEBOOKLM_SOURCEPACK.md from repo state for NotebookLM mirror.
 
+  aufmass_engine:
+    status: available
+    module: core/aufmass_engine.py
+    entry: calculate_aufmass
+    stage: stage_1_calculation_engine
+    live_runtime_execution: false
+    requires:
+      - schemas/aufmass_input.schema.json
+      - docs/AUFMASS_ENGINE.md
+    tested: true
+    added: "2026-05-20"
+    description: Calculates public-safe Aufmass quantities from explicit room geometry and openings.
+
   runner_bridge:
     status: planned
     module: core/runner_bridge.py
