@@ -11,6 +11,26 @@ dependencies = [
 dev = [
   "pytest>=8.0.0",
 ]
+aufmass-dxf = [
+  "ezdxf",
+]
+aufmass-pdf = [
+  "pdfplumber",
+  "pypdf",
+]
+aufmass-image = [
+  "pillow",
+  "opencv-python-headless",
+  "scikit-image",
+]
+aufmass-parsers = [
+  "ezdxf",
+  "pdfplumber",
+  "pypdf",
+  "pillow",
+  "opencv-python-headless",
+  "scikit-image",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

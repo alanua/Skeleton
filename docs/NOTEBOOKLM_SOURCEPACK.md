@@ -79,6 +79,7 @@ Boot output required fields:
 - `aufmass_engine`: Calculates public-safe Aufmass quantities from explicit room geometry and openings. Module: `core/aufmass_engine.py`. Status: tested.
 - `aufmass_manual_adapter`: Converts manually calibrated drawing coordinates into metric Aufmass engine input. Module: `core/aufmass_manual_adapter.py`. Status: tested.
 - `aufmass_exporter`: Exports Aufmass results to deterministic rows, CSV text, and JSON-compatible dicts. Module: `core/aufmass_exporter.py`. Status: tested.
+- `aufmass_parser_dependencies_limited`: Optional dependency groups for the limited Aufmass parser scope: DXF via ezdxf, PDF via pdfplumber and pypdf, and image/scan helpers via pillow, opencv-python-headless, and scikit-image. Module: `pyproject.toml`. Status: not tested.
 
 ## Planned Capabilities
 
@@ -169,21 +170,22 @@ Summary:
 - Stage 1 calculation engine now exists for deterministic public-safe quantities from explicit room geometry, heights, and openings.
 - Stage 1 manual calibration adapter now converts operator-marked drawing coordinates into metric room geometry for the calculation engine.
 - Stage 1 export table/report module now converts Aufmass results into deterministic rows, CSV text, and JSON-compatible dicts without writing files.
-- Intake may cover IFC, DWG, DXF, PDF, scan, or image sources when available through approved private routes.
+- Current parser dependency prep is limited to operator-converted DXF, PDF, and scan/image sources through approved private routes.
 - The workflow calibrates scale from known dimensions before deriving measurements.
 - The workflow identifies room contours and separates source layers where possible.
 - Calculation targets include floor area, ceiling area, perimeter, gross wall area, net wall area, openings, and volume.
 - Source confidence is preserved per layer and per extracted measurement.
-- When multiple formats exist, IFC, DWG/DXF, PDF, scans, and images should be compared instead of trusting one source blindly.
+- When multiple approved formats exist, DXF, PDF, scans, and images should be compared instead of trusting one source blindly.
 - Controlled table/report export exists for reviewing synthetic or sanitized engine results.
-- No parser, OCR, CAD extraction, runtime automation, or sample plan is included at this stage.
+- No parser implementation, OCR, IFC, DWG converter install, runtime automation, or sample plan is included at this stage.
 
 Next actions:
 
-- Run a private pilot with a real PDF/scan outside the public repo.
+- Add DXF adapter stage 1 using ezdxf.
+- Run a private pilot with real DXF outside the public repo.
+- Add PDF adapter later.
+- Add image/scan helper later.
 - Add a spreadsheet input helper or UI helper.
-- Add a DXF adapter later.
-- Add an IFC adapter later.
 
 ### lavalamp
 
