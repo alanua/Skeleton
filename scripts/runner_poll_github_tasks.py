@@ -19,6 +19,10 @@ LABEL_READY = "runner:ready"
 LABEL_RUNNING = "runner:running"
 LABEL_DONE = "runner:done"
 LABEL_BLOCKED = "runner:blocked"
+FINAL_LABELS_BY_STATUS = {
+    "DONE": LABEL_DONE,
+    "BLOCKED": LABEL_BLOCKED,
+}
 POLL_INTERVAL = 60
 DEFAULT_WORKDIR = Path(__file__).resolve().parents[1]
 MAX_COMMENT_LENGTH = 60000
@@ -100,6 +104,18 @@ def is_open_task_issue(item: dict[str, Any]) -> bool:
         return False
     state = item.get("state")
     return state is None or str(state).lower() == "open"
+
+
+def label_names(labels: Any) -> set[str]:
+    names: set[str] = set()
+    if not isinstance(labels, list):
+        return names
+    for label in labels:
+        if isinstance(label, str):
+            names.add(label)
+        elif isinstance(label, dict) and isinstance(label.get("name"), str):
+            names.add(label["name"])
+    return names
 
 
 def extract_task_block(body: str) -> str | None:
@@ -210,10 +226,46 @@ def send_telegram_notification(message: str) -> None:
         pass
 
 
+def get_notification_issue(issue_number: int) -> dict[str, Any]:
+    code, output = run_command(
+        [
+            "gh",
+            "issue",
+            "view",
+            str(issue_number),
+            "--repo",
+            REPO,
+            "--json",
+            "number,body,state,url,closed,labels",
+        ]
+    )
+    if code != 0:
+        raise RuntimeError(f"gh issue view failed:\n{output}")
+    parsed = json.loads(output or "{}")
+    if not isinstance(parsed, dict):
+        raise RuntimeError("gh issue view returned non-object JSON")
+    return parsed
+
+
+def should_notify_task_finished(issue_number: int, status: str) -> bool:
+    expected_label = FINAL_LABELS_BY_STATUS.get(status)
+    if expected_label is None:
+        return False
+
+    issue = get_notification_issue(issue_number)
+    if not is_open_task_issue(issue):
+        return False
+    if extract_task_block(issue.get("body") or "") is None:
+        return False
+    return expected_label in label_names(issue.get("labels"))
+
+
 def notify_task_finished(
     issue_number: int, status: str, report: str | None = None
 ) -> None:
     try:
+        if not should_notify_task_finished(issue_number, status):
+            return
         send_telegram_notification(build_telegram_message(issue_number, status, report))
     except Exception:
         return

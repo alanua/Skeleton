@@ -176,9 +176,136 @@ def test_send_telegram_notification_posts_with_env() -> None:
 
 def test_notify_task_finished_swallows_telegram_send_failure() -> None:
     with mock.patch.object(
+        runner, "should_notify_task_finished", return_value=True
+    ), mock.patch.object(
         runner, "send_telegram_notification", side_effect=RuntimeError("send failed")
     ):
         runner.notify_task_finished(8, "DONE", "DONE report")
+
+
+def test_notify_task_finished_closed_pull_request_does_not_notify() -> None:
+    fence = "`" * 3
+    issue = {
+        "number": 4,
+        "body": f"{fence}task\nDo it\n{fence}",
+        "state": "CLOSED",
+        "closed": True,
+        "url": "https://github.com/alanua/Skeleton/pull/4",
+        "labels": [{"name": runner.LABEL_BLOCKED}],
+    }
+
+    with mock.patch.object(runner, "get_notification_issue", return_value=issue), mock.patch.object(
+        runner, "send_telegram_notification"
+    ) as send:
+        runner.notify_task_finished(4, "BLOCKED")
+
+    send.assert_not_called()
+
+
+def test_notify_task_finished_closed_issue_does_not_notify() -> None:
+    fence = "`" * 3
+    issue = {
+        "number": 6,
+        "body": f"{fence}task\nDo it\n{fence}",
+        "state": "CLOSED",
+        "closed": True,
+        "url": "https://github.com/alanua/Skeleton/issues/6",
+        "labels": [{"name": runner.LABEL_BLOCKED}],
+    }
+
+    with mock.patch.object(runner, "get_notification_issue", return_value=issue), mock.patch.object(
+        runner, "send_telegram_notification"
+    ) as send:
+        runner.notify_task_finished(6, "BLOCKED")
+
+    send.assert_not_called()
+
+
+def test_notify_task_finished_pull_request_metadata_does_not_notify() -> None:
+    fence = "`" * 3
+    issue = {
+        "number": 11,
+        "body": f"{fence}task\nDo it\n{fence}",
+        "state": "OPEN",
+        "closed": False,
+        "url": "https://github.com/alanua/Skeleton/issues/11",
+        "pull_request": {"url": "https://api.github.com/repos/alanua/Skeleton/pulls/11"},
+        "labels": [{"name": runner.LABEL_DONE}],
+    }
+
+    with mock.patch.object(runner, "get_notification_issue", return_value=issue), mock.patch.object(
+        runner, "send_telegram_notification"
+    ) as send:
+        runner.notify_task_finished(11, "DONE", "DONE report")
+
+    send.assert_not_called()
+
+
+def test_notify_task_finished_without_task_body_does_not_notify() -> None:
+    issue = {
+        "number": 12,
+        "body": "No task fence here.",
+        "state": "OPEN",
+        "closed": False,
+        "url": "https://github.com/alanua/Skeleton/issues/12",
+        "labels": [{"name": runner.LABEL_DONE}],
+    }
+
+    with mock.patch.object(runner, "get_notification_issue", return_value=issue), mock.patch.object(
+        runner, "send_telegram_notification"
+    ) as send:
+        runner.notify_task_finished(12, "DONE", "DONE report")
+
+    send.assert_not_called()
+
+
+def test_notify_task_finished_without_current_final_label_does_not_notify() -> None:
+    fence = "`" * 3
+    issue = {
+        "number": 13,
+        "body": f"{fence}task\nDo it\n{fence}",
+        "state": "OPEN",
+        "closed": False,
+        "url": "https://github.com/alanua/Skeleton/issues/13",
+        "labels": [{"name": runner.LABEL_RUNNING}],
+    }
+
+    with mock.patch.object(runner, "get_notification_issue", return_value=issue), mock.patch.object(
+        runner, "send_telegram_notification"
+    ) as send:
+        runner.notify_task_finished(13, "DONE", "DONE report")
+
+    send.assert_not_called()
+
+
+def test_notify_task_finished_normal_runner_task_notifies() -> None:
+    fence = "`" * 3
+    issue = {
+        "number": 14,
+        "body": f"{fence}task\nDo it\n{fence}",
+        "state": "OPEN",
+        "closed": False,
+        "url": "https://github.com/alanua/Skeleton/issues/14",
+        "labels": [{"name": runner.LABEL_DONE}],
+    }
+
+    with mock.patch.object(runner, "get_notification_issue", return_value=issue), mock.patch.object(
+        runner, "send_telegram_notification"
+    ) as send:
+        runner.notify_task_finished(14, "DONE", "DONE report")
+
+    send.assert_called_once_with(
+        f"Repository: {runner.REPO}\nIssue: #14\nStatus: DONE"
+    )
+
+
+def test_notify_task_finished_guard_failure_suppresses_notification_safely() -> None:
+    with mock.patch.object(
+        runner, "get_notification_issue", side_effect=RuntimeError("gh failed")
+    ), mock.patch.object(runner, "send_telegram_notification") as send:
+        runner.notify_task_finished(16, "DONE", "DONE report")
+
+    send.assert_not_called()
 
 
 def test_done_telegram_message_includes_pr_url_when_available() -> None:
