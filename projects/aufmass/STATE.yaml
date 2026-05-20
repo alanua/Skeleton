@@ -16,6 +16,7 @@ summary:
   - Source confidence is preserved per layer and per extracted measurement.
   - When multiple formats exist, IFC, DWG/DXF, PDF, scans, and images should be compared instead of trusting one source blindly.
   - Controlled table/report export exists for reviewing synthetic or sanitized engine results.
+  - Optional parser dependency groups are declared for future DXF, PDF, IFC, image, and OCR adapters.
   - No parser, OCR, CAD extraction, runtime automation, or sample plan is included at this stage.
 privacy_security_rules:
   - Do not commit real customer data.
@@ -24,7 +25,8 @@ privacy_security_rules:
   - Do not commit invoices, contracts, or photos unless explicitly approved and routed privately.
   - Source files remain private, local, or in an approved Drive route unless the operator explicitly approves a public-safe sample.
 next_actions:
-  - Run a private pilot with a real PDF/scan outside the public repo.
-  - Add a spreadsheet input helper or UI helper.
-  - Add a DXF adapter later.
-  - Add an IFC adapter later.
+  - Add DXF adapter stage 1 using ezdxf against synthetic or sanitized DXF fixtures.
+  - Run a private pilot with real DXF or DWG converted to DXF outside the public repo.
+  - Add PDF adapter later using pdfplumber and pypdf.
+  - Add IFC adapter later using ifcopenshell.
+  - Add image and OCR adapters later using pillow, opencv-python-headless, scikit-image, and pytesseract.

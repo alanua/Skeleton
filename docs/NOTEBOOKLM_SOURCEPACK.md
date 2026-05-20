@@ -79,6 +79,7 @@ Boot output required fields:
 - `aufmass_engine`: Calculates public-safe Aufmass quantities from explicit room geometry and openings. Module: `core/aufmass_engine.py`. Status: tested.
 - `aufmass_manual_adapter`: Converts manually calibrated drawing coordinates into metric Aufmass engine input. Module: `core/aufmass_manual_adapter.py`. Status: tested.
 - `aufmass_exporter`: Exports Aufmass results to deterministic rows, CSV text, and JSON-compatible dicts. Module: `core/aufmass_exporter.py`. Status: tested.
+- `aufmass_parser_dependencies`: Optional dependency groups for future Aufmass DXF, PDF, IFC, image, and OCR parser adapters; no parser implementation or runtime automation. Module: `pyproject.toml`. Status: tested.
 
 ## Planned Capabilities
 
@@ -176,14 +177,16 @@ Summary:
 - Source confidence is preserved per layer and per extracted measurement.
 - When multiple formats exist, IFC, DWG/DXF, PDF, scans, and images should be compared instead of trusting one source blindly.
 - Controlled table/report export exists for reviewing synthetic or sanitized engine results.
+- Optional parser dependency groups are declared for future DXF, PDF, IFC, image, and OCR adapters.
 - No parser, OCR, CAD extraction, runtime automation, or sample plan is included at this stage.
 
 Next actions:
 
-- Run a private pilot with a real PDF/scan outside the public repo.
-- Add a spreadsheet input helper or UI helper.
-- Add a DXF adapter later.
-- Add an IFC adapter later.
+- Add DXF adapter stage 1 using ezdxf against synthetic or sanitized DXF fixtures.
+- Run a private pilot with real DXF or DWG converted to DXF outside the public repo.
+- Add PDF adapter later using pdfplumber and pypdf.
+- Add IFC adapter later using ifcopenshell.
+- Add image and OCR adapters later using pillow, opencv-python-headless, scikit-image, and pytesseract.
 
 ### lavalamp
 

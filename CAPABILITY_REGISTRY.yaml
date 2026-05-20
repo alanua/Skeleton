@@ -120,6 +120,17 @@ capabilities:
     added: "2026-05-20"
     description: Exports Aufmass results to deterministic rows, CSV text, and JSON-compatible dicts.
 
+  aufmass_parser_dependencies:
+    status: available
+    module: pyproject.toml
+    stage: parser_dependency_prep
+    live_runtime_execution: false
+    requires:
+      - docs/AUFMASS_PARSERS.md
+    tested: true
+    added: "2026-05-20"
+    description: Optional dependency groups for future Aufmass DXF, PDF, IFC, image, and OCR parser adapters; no parser implementation or runtime automation.
+
   runner_bridge:
     status: planned
     module: core/runner_bridge.py
