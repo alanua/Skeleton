@@ -6,6 +6,8 @@ entrypoint: projects/jeeves/PROJECT_MANIFEST.yaml
 read_order:
   - projects/jeeves/PROJECT_MANIFEST.yaml
   - projects/jeeves/STATE.yaml
+  - docs/JEEVES_BRIDGE.md
 source_repo: alanua/jeeves
 privacy_class: mixed_public_private
 means: separate future assistant product and runtime, not Skeleton Core
+bridge_document: docs/JEEVES_BRIDGE.md

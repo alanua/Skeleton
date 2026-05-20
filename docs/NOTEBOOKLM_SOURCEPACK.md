@@ -128,20 +128,25 @@ Next actions:
 - State file: `projects/jeeves/STATE.yaml`
 - Status: `DRAFT_HANDOFF`
 - State role: `handoff_not_canon_truth`
-- Last verified: `2026-05-17`
-- Evidence source: migration source repo alanua/jeeves, not revalidated in this PR
+- Last verified: `2026-05-20`
+- Evidence source: Skeleton bridge documentation only; alanua/jeeves not modified by this task
 
 Summary:
 
 - Jeeves is separate from Skeleton Core.
-- alanua/jeeves remains the runtime/product and historical migration source.
-- Skeleton may provide control-layer patterns for Jeeves later.
+- Skeleton is the control and construction layer for task governance and handoff rules.
+- alanua/jeeves remains canonical for Jeeves runtime, product code, and runtime decisions.
+- Skeleton may govern tasks for Jeeves, but runtime and product decisions stay in alanua/jeeves.
+- Bridge handoff is ready under existing DRAFT_HANDOFF status; no separate bridge-ready status exists in current project state vocabulary.
+- This task makes no code migration, no deployment, no secrets access, no live runtime access, and no changes to alanua/jeeves.
+- NotebookLM is advisory only and is not a canon source for Jeeves runtime or Skeleton bridge rules.
 
 Next actions:
 
-- Keep Jeeves runtime decisions in alanua/jeeves.
-- Extract only reviewed Skeleton-core rules into alanua/Skeleton.
-- Add adapter bridge after Skeleton v2 stabilizes.
+- Review alanua/jeeves source only after explicit operator approval.
+- Add exact Jeeves runtime source route after review.
+- Prepare stage 1 documentation-only bridge in alanua/jeeves only after explicit operator approval.
+- Keep any future bridge automation in a separate reviewed PR.
 
 ### lavalamp
 
