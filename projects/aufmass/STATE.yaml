@@ -6,6 +6,7 @@ last_verified: '2026-05-20'
 evidence_source: Skeleton project candidate approval; documentation-only route, no construction source files committed
 summary:
   - Construction Takeoff / Aufmass from drawings is a public-safe method candidate when kept separate from real project data.
+  - Stage 1 calculation engine now exists for deterministic public-safe quantities from explicit room geometry, heights, and openings.
   - Intake may cover IFC, DWG, DXF, PDF, scan, or image sources when available through approved private routes.
   - The workflow calibrates scale from known dimensions before deriving measurements.
   - The workflow identifies room contours and separates source layers where possible.
@@ -21,7 +22,8 @@ privacy_security_rules:
   - Do not commit invoices, contracts, or photos unless explicitly approved and routed privately.
   - Source files remain private, local, or in an approved Drive route unless the operator explicitly approves a public-safe sample.
 next_actions:
-  - Prepare a private pilot for one floor or object outside the public repo.
-  - Define output table columns.
-  - Define confidence and status vocabulary.
-  - Add parser or extractor code only in a later separate PR.
+  - Prepare a private pilot input table outside the public repo.
+  - Add a manual PDF/scan calibration adapter in a later separate PR.
+  - Add a DXF adapter in a later separate PR.
+  - Add an IFC adapter later after private pilot validation.
+  - Define export table/report format.
