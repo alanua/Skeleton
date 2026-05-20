@@ -40,7 +40,7 @@ NotebookLM is advisory. GitHub remains canon for source files, issues, pull requ
 - Repository: `alanua/Skeleton`
 - Ref: `main`
 - Entrypoint: `BOOT_MANIFEST.yaml`
-- Status: `DRAFT_ACTIVE_CANDIDATE`
+- Status: `CONFIRMED_BOOT_ROUTE`
 
 Boot read order:
 
@@ -75,6 +75,7 @@ Boot output required fields:
 - `provider_routing`: Machine-readable provider routing policy defining local, free_cloud, paid_cloud, and gemini_audit tiers with cost controls. Module: `PROVIDER_ROUTING.yaml`. Status: tested.
 - `project_loader`: Activates project context after operator command. Module: `core/project_loader.py`. Status: tested.
 - `github_task_queue`: Polls GitHub issues labeled runner:ready, executes bounded Codex tasks on Hetzner Runner, creates draft PRs, and reports results back to GitHub. Module: `scripts/runner_poll_github_tasks.py`. Status: tested.
+- `notebooklm_sourcepack`: Generates docs/NOTEBOOKLM_SOURCEPACK.md from repo state for NotebookLM mirror. Module: `scripts/build_notebooklm_sourcepack.py`. Status: tested.
 
 ## Planned Capabilities
 
@@ -91,20 +92,33 @@ Boot output required fields:
 - State file: `projects/skeleton/STATE.yaml`
 - Status: `DRAFT_HANDOFF`
 - State role: `handoff_not_canon_truth`
-- Last verified: `2026-05-17`
-- Evidence source: alanua/Skeleton PR
+- Last verified: `2026-05-20`
+- Evidence source: alanua/Skeleton main after PR
 
 Summary:
 
 - Skeleton v2 lives in alanua/Skeleton.
-- BOOT_MANIFEST.yaml is the current v2 entrypoint candidate.
-- Manifest, command, mode, source, memory, project, status, schemas, and tests exist.
+- BOOT_MANIFEST, COMMANDS, MODES, MEMORY_ROUTING, SOURCE_REGISTRY, PROJECT_INDEX, and STATUS_CODES exist.
+- Project manifests plus STATE handoff files exist.
+- Adapter contracts for ChatGPT, Claude, Gemini, Codex, and Runner exist.
+- Write-gate GateEngine plus PatchValidator exist.
+- CAPABILITY_REGISTRY exists.
+- SYSTEM_PROMPT files for ChatGPT and Gemini exist.
+- boot_loader is v1-compatible and tested.
+- project_loader plus session_state exists and is tested.
+- github_task_queue Runner/Codex/Telegram route is live and tested.
+- Telegram stale notification guard is merged and smoke-tested.
+- notebooklm_sourcepack generator is merged and tested.
+- PROVIDER_ROUTING 4-tier policy is merged and tested.
+- runner_bridge stage 1 dry-run is merged, tested, and non-live, with strict validation command allowlist and no dry-run-to-live promotion without a separate stage 2 PR.
 
 Next actions:
 
-- Add adapter contracts for ChatGPT, Claude, Gemini, Runner, and Codex.
-- Add validators and bundle readers.
-- Prepare bridge from historical ChatGPT Exoskeleton route after review.
+- Add runner_bridge stage 2 live GitHub issue creation only as a separate operator-approved PR.
+- Bridge jeeves from alanua/jeeves to alanua/Skeleton.
+- Add memory_manager.
+- Add aufmass project manifest.
+- Optionally refresh NotebookLM source after this PR is merged.
 
 ### jeeves
 
