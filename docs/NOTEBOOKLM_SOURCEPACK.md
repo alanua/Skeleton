@@ -79,6 +79,7 @@ Boot output required fields:
 - `aufmass_engine`: Calculates public-safe Aufmass quantities from explicit room geometry and openings. Module: `core/aufmass_engine.py`. Status: tested.
 - `aufmass_manual_adapter`: Converts manually calibrated drawing coordinates into metric Aufmass engine input. Module: `core/aufmass_manual_adapter.py`. Status: tested.
 - `aufmass_dxf_adapter`: Optionally extracts public-safe DXF geometry and annotation metadata through lazy-loaded ezdxf. Module: `core/aufmass_dxf_adapter.py`. Status: tested.
+- `aufmass_room_matcher`: Produces deterministic room-contour match candidates from DXF extraction output without reading drawing files. Module: `core/aufmass_room_matcher.py`. Status: tested.
 - `aufmass_exporter`: Exports Aufmass results to deterministic rows, CSV text, and JSON-compatible dicts. Module: `core/aufmass_exporter.py`. Status: tested.
 - `aufmass_parser_dependencies_limited`: Optional dependency groups for the limited Aufmass parser scope: DXF via ezdxf, PDF via pdfplumber and pypdf, and image/scan helpers via pillow, opencv-python-headless, and scikit-image. Module: `pyproject.toml`. Status: not tested.
 
@@ -171,6 +172,7 @@ Summary:
 - Stage 1 calculation engine now exists for deterministic public-safe quantities from explicit room geometry, heights, and openings.
 - Stage 1 manual calibration adapter now converts operator-marked drawing coordinates into metric room geometry for the calculation engine.
 - Stage 1 DXF adapter now extracts public-safe DXF metadata and simple geometry with optional-safe lazy ezdxf loading.
+- Stage 1 DXF room matcher now produces neutral closed-polyline and nearby-label match candidates for operator review.
 - Stage 1 export table/report module now converts Aufmass results into deterministic rows, CSV text, and JSON-compatible dicts without writing files.
 - Current parser dependency prep is limited to operator-converted DXF, PDF, and scan/image sources through approved private routes.
 - The workflow calibrates scale from known dimensions before deriving measurements.
@@ -184,9 +186,9 @@ Summary:
 Next actions:
 
 - Run a private pilot with real DXF outside the public repo.
+- Use reviewed DXF room match candidates for the DXF to engine handoff.
 - Add PDF adapter later.
 - Add image/scan helper later.
-- Add a spreadsheet input helper or UI helper.
 
 ### lavalamp
 

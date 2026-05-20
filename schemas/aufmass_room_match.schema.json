@@ -1,0 +1,177 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.aufmass_room_match.schema.json",
+  "type": "object",
+  "required": [
+    "units",
+    "insunits",
+    "contours",
+    "labels",
+    "matches",
+    "summary"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "units": {"type": ["string", "null"]},
+    "insunits": {"type": ["integer", "null"]},
+    "contours": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/contour"}
+    },
+    "labels": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/label"}
+    },
+    "matches": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/match"}
+    },
+    "summary": {
+      "type": "object",
+      "required": [
+        "contour_count",
+        "label_count",
+        "match_count",
+        "status_counts",
+        "stage"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "contour_count": {"type": "integer", "minimum": 0},
+        "label_count": {"type": "integer", "minimum": 0},
+        "match_count": {"type": "integer", "minimum": 0},
+        "status_counts": {
+          "type": "object",
+          "additionalProperties": {"type": "integer", "minimum": 0}
+        },
+        "stage": {"type": "string", "const": "room_match_candidates"}
+      }
+    }
+  },
+  "$defs": {
+    "point": {
+      "type": "object",
+      "required": [
+        "x",
+        "y",
+        "z"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "x": {"type": "number"},
+        "y": {"type": "number"},
+        "z": {"type": "number"}
+      }
+    },
+    "bbox": {
+      "type": "object",
+      "required": [
+        "min_x",
+        "min_y",
+        "max_x",
+        "max_y"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "min_x": {"type": "number"},
+        "min_y": {"type": "number"},
+        "max_x": {"type": "number"},
+        "max_y": {"type": "number"}
+      }
+    },
+    "contour": {
+      "type": "object",
+      "required": [
+        "contour_id",
+        "layer",
+        "entity_type",
+        "source_index",
+        "points",
+        "centroid",
+        "bbox",
+        "area"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "contour_id": {"type": "string"},
+        "layer": {"type": "string"},
+        "entity_type": {"type": "string"},
+        "source_index": {"type": "integer", "minimum": 0},
+        "points": {
+          "type": "array",
+          "minItems": 3,
+          "items": {"$ref": "#/$defs/point"}
+        },
+        "centroid": {"$ref": "#/$defs/point"},
+        "bbox": {"$ref": "#/$defs/bbox"},
+        "area": {"type": "number", "minimum": 0}
+      }
+    },
+    "label": {
+      "type": "object",
+      "required": [
+        "label_id",
+        "source_type",
+        "source_index",
+        "layer",
+        "text",
+        "insert",
+        "height",
+        "rotation",
+        "parsed_area"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "label_id": {"type": "string"},
+        "source_type": {"type": "string", "enum": ["TEXT", "MTEXT"]},
+        "source_index": {"type": "integer", "minimum": 0},
+        "layer": {"type": "string"},
+        "text": {"type": "string"},
+        "insert": {"$ref": "#/$defs/point"},
+        "height": {"type": ["number", "null"]},
+        "rotation": {"type": ["number", "null"]},
+        "parsed_area": {"type": ["number", "null"], "minimum": 0}
+      }
+    },
+    "match": {
+      "type": "object",
+      "required": [
+        "match_id",
+        "contour_id",
+        "room_label_id",
+        "area_label_id",
+        "room_label_text",
+        "area_label_text",
+        "calculated_area",
+        "parsed_area",
+        "area_delta",
+        "status",
+        "confidence",
+        "review_notes",
+        "nearby_label_ids"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "match_id": {"type": "string"},
+        "contour_id": {"type": "string"},
+        "room_label_id": {"type": ["string", "null"]},
+        "area_label_id": {"type": ["string", "null"]},
+        "room_label_text": {"type": ["string", "null"]},
+        "area_label_text": {"type": ["string", "null"]},
+        "calculated_area": {"type": "number", "minimum": 0},
+        "parsed_area": {"type": ["number", "null"], "minimum": 0},
+        "area_delta": {"type": ["number", "null"]},
+        "status": {"type": "string", "enum": ["candidate", "needs_review", "area_mismatch"]},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "review_notes": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "nearby_label_ids": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      }
+    }
+  }
+}
