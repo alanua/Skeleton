@@ -51,10 +51,22 @@ def test_registry_has_all_adapter_contracts_available() -> None:
     assert adapter_contracts["module"] == "adapters/"
 
 
+def test_registry_has_stage1_dry_run_capabilities() -> None:
+    capabilities = load_registry()["capabilities"]
+    runner_bridge = capabilities["runner_bridge"]
+    assert runner_bridge["status"] == "stage1_dry_run"
+    assert runner_bridge["tested"] is True
+    assert runner_bridge["live_runtime_execution"] is False
+
+    memory_manager = capabilities["memory_manager"]
+    assert memory_manager["status"] == "stage1_dry_run"
+    assert memory_manager["tested"] is True
+    assert memory_manager["live_runtime_execution"] is False
+
+
 def test_registry_has_planned_future_capabilities() -> None:
     capabilities = load_registry()["capabilities"]
-    for capability_id in ("runner_bridge", "memory_manager"):
-        assert capabilities[capability_id]["status"] == "planned"
+    assert capabilities["memory_manager_live_storage"]["status"] == "planned"
 
 
 def test_no_available_capability_without_module_field() -> None:
@@ -113,8 +125,9 @@ def test_capability_checker_available_list_non_empty() -> None:
 
 def test_capability_checker_planned_list_non_empty() -> None:
     planned = CapabilityChecker(REGISTRY_PATH).planned()
-    assert "runner_bridge" in planned
-    assert "memory_manager" in planned
+    assert "memory_manager_live_storage" in planned
+    assert "runner_bridge" not in planned
+    assert "memory_manager" not in planned
 
 
 def test_capability_checker_is_available() -> None:
