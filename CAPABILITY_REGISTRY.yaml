@@ -94,5 +94,19 @@ capabilities:
   memory_manager:
     status: planned
     module: core/memory_manager.py
+    entry: route_memory_record
+    stage: stage_1_dry_run
+    live_runtime_execution: false
+    requires:
+      - schemas/memory_record.schema.json
+      - docs/MEMORY_MANAGER.md
+    tested: true
+    added: "2026-05-20"
+    description: Deterministic dry-run memory routing for weak cache, project state, canon candidates, confirmed canon, private-sensitive records, and rejected archive records.
+
+  memory_manager_live_storage:
+    status: planned
+    module: core/memory_manager_live_storage.py
     tested: false
-    description: Manages session memory layers.
+    live_runtime_execution: false
+    description: Future operator-approved live storage bridge for memory routing decisions; not implemented in stage 1.

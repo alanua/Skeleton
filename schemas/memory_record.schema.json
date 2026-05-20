@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.memory_record.schema.json",
+  "type": "object",
+  "required": [
+    "id",
+    "project_id",
+    "memory_type",
+    "source",
+    "trust_level",
+    "content",
+    "status",
+    "created_at"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": {"type": "string"},
+    "project_id": {"type": "string"},
+    "memory_type": {
+      "type": "string",
+      "enum": [
+        "weak_chat_memory",
+        "project_state",
+        "canon_candidate",
+        "confirmed_canon",
+        "private_sensitive",
+        "rejected_outdated"
+      ]
+    },
+    "source": {"type": "string"},
+    "trust_level": {"type": "string"},
+    "content": {"type": "string"},
+    "status": {"type": "string"},
+    "created_at": {"type": "string"},
+    "public_safe": {"type": "boolean", "default": false},
+    "critique_present": {"type": "boolean", "default": false},
+    "operator_approved": {"type": "boolean", "default": false},
+    "changes_canon_or_instruction": {"type": "boolean", "default": false}
+  }
+}
