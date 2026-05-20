@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.aufmass_export.schema.json",
+  "title": "Aufmass Export",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["project_id", "unit", "columns", "rooms", "summary"],
+  "properties": {
+    "project_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "unit": {
+      "const": "m"
+    },
+    "columns": {
+      "const": [
+        "row_type",
+        "project_id",
+        "unit",
+        "room_id",
+        "room_name",
+        "floor_area",
+        "ceiling_area",
+        "perimeter",
+        "gross_wall_area",
+        "openings_area",
+        "net_wall_area",
+        "volume"
+      ]
+    },
+    "rooms": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/room_row"
+      }
+    },
+    "summary": {
+      "$ref": "#/$defs/summary"
+    }
+  },
+  "$defs": {
+    "number": {
+      "type": "number"
+    },
+    "room_row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "row_type",
+        "project_id",
+        "unit",
+        "room_id",
+        "room_name",
+        "floor_area",
+        "ceiling_area",
+        "perimeter",
+        "gross_wall_area",
+        "openings_area",
+        "net_wall_area",
+        "volume"
+      ],
+      "properties": {
+        "row_type": {
+          "const": "room"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "unit": {
+          "type": "string"
+        },
+        "room_id": {
+          "type": "string"
+        },
+        "room_name": {
+          "type": "string"
+        },
+        "floor_area": {
+          "$ref": "#/$defs/number"
+        },
+        "ceiling_area": {
+          "$ref": "#/$defs/number"
+        },
+        "perimeter": {
+          "$ref": "#/$defs/number"
+        },
+        "gross_wall_area": {
+          "$ref": "#/$defs/number"
+        },
+        "openings_area": {
+          "$ref": "#/$defs/number"
+        },
+        "net_wall_area": {
+          "$ref": "#/$defs/number"
+        },
+        "volume": {
+          "$ref": "#/$defs/number"
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "row_type",
+        "project_id",
+        "unit",
+        "room_count",
+        "room_id",
+        "room_name",
+        "floor_area",
+        "ceiling_area",
+        "perimeter",
+        "gross_wall_area",
+        "openings_area",
+        "net_wall_area",
+        "volume"
+      ],
+      "properties": {
+        "row_type": {
+          "const": "summary"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "unit": {
+          "type": "string"
+        },
+        "room_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "room_id": {
+          "const": ""
+        },
+        "room_name": {
+          "const": "Summary"
+        },
+        "floor_area": {
+          "$ref": "#/$defs/number"
+        },
+        "ceiling_area": {
+          "$ref": "#/$defs/number"
+        },
+        "perimeter": {
+          "$ref": "#/$defs/number"
+        },
+        "gross_wall_area": {
+          "$ref": "#/$defs/number"
+        },
+        "openings_area": {
+          "$ref": "#/$defs/number"
+        },
+        "net_wall_area": {
+          "$ref": "#/$defs/number"
+        },
+        "volume": {
+          "$ref": "#/$defs/number"
+        }
+      }
+    }
+  }
+}
