@@ -119,6 +119,20 @@ capabilities:
     added: "2026-05-20"
     description: Optionally extracts public-safe DXF geometry and annotation metadata through lazy-loaded ezdxf.
 
+  aufmass_room_matcher:
+    status: available
+    module: core/aufmass_room_matcher.py
+    entry: match_dxf_rooms
+    stage: stage_1_dxf_room_match_candidates
+    live_runtime_execution: false
+    requires:
+      - schemas/aufmass_room_match.schema.json
+      - docs/AUFMASS_ROOM_MATCHER.md
+      - core/aufmass_dxf_adapter.py
+    tested: true
+    added: "2026-05-20"
+    description: Produces deterministic room-contour match candidates from DXF extraction output without reading drawing files.
+
   aufmass_exporter:
     status: available
     module: core/aufmass_exporter.py
