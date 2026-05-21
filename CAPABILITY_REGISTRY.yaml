@@ -133,6 +133,20 @@ capabilities:
     added: "2026-05-20"
     description: Produces deterministic room-contour match candidates from DXF extraction output without reading drawing files.
 
+  aufmass_room_review_table:
+    status: available
+    module: core/aufmass_room_review.py
+    entry: room_matches_to_review_table
+    stage: stage_1_dxf_room_review_table
+    live_runtime_execution: false
+    requires:
+      - schemas/aufmass_room_review.schema.json
+      - docs/AUFMASS_ROOM_REVIEW_TABLE.md
+      - core/aufmass_room_matcher.py
+    tested: true
+    added: "2026-05-21"
+    description: Converts DXF room match candidates into deterministic public-safe review rows without producing official quantities.
+
   aufmass_exporter:
     status: available
     module: core/aufmass_exporter.py
