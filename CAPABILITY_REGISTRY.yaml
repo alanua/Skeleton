@@ -211,6 +211,21 @@ capabilities:
     added: "2026-05-21"
     description: Builds deterministic completed-PR Telegram review cards and validates bounded dry-run operator callbacks before any approved action-gate handoff.
 
+  telegram_operator_event_bridge:
+    status: stage1_dry_run
+    module: core/telegram_operator_event_bridge.py
+    entry: bridge_callback_to_operator_event
+    stage: stage_1_dry_run
+    live_runtime_execution: false
+    requires:
+      - schemas/telegram_operator_event_bridge.schema.json
+      - docs/TELEGRAM_OPERATOR_EVENT_BRIDGE.md
+      - core/telegram_approval_buttons.py
+      - core/operator_event.py
+    tested: true
+    added: "2026-05-21"
+    description: Converts validated Telegram callbacks and current PR state into deterministic public-safe dry-run operator event records and GitHub issue comment text.
+
   operator_event_record:
     status: stage1_dry_run
     module: core/operator_event.py
