@@ -110,6 +110,24 @@ def test_inline_keyboard_has_pr_review_buttons_when_binding_is_reliable() -> Non
     )
 
 
+def test_callback_data_carries_action_pr_number_and_head_marker() -> None:
+    card = runner.build_done_pr_ready_card_payload(DONE_REPORT)
+    assert card is not None
+
+    reply_markup = runner.card_payload_to_inline_keyboard(card)
+    callback_values = [
+        row[0]["callback_data"]
+        for row in reply_markup["inline_keyboard"]
+        if "callback_data" in row[0]
+    ]
+
+    assert callback_values
+    assert all(value.startswith("tpr1:") for value in callback_values)
+    assert any(value.startswith("tpr1:approve:p123:aaaaaaaa:") for value in callback_values)
+    assert any(value.startswith("tpr1:reject:p123:aaaaaaaa:") for value in callback_values)
+    assert all(":p123:aaaaaaaa:" in value for value in callback_values)
+
+
 def test_approve_reject_buttons_require_reliable_sha_and_changed_files() -> None:
     report = f"DONE: ok\n\nDraft PR: {PR_URL}"
 
