@@ -2,7 +2,7 @@ schema: skeleton.project_state.v1
 project_id: aufmass
 status: DRAFT_HANDOFF
 state_role: handoff_not_canon_truth
-last_verified: '2026-05-20'
+last_verified: '2026-05-21'
 evidence_source: Skeleton project candidate approval; documentation-only route, no construction source files committed
 summary:
   - Construction Takeoff / Aufmass from drawings is a public-safe method candidate when kept separate from real project data.
@@ -10,6 +10,7 @@ summary:
   - Stage 1 manual calibration adapter now converts operator-marked drawing coordinates into metric room geometry for the calculation engine.
   - Stage 1 DXF adapter now extracts public-safe DXF metadata and simple geometry with optional-safe lazy ezdxf loading.
   - Stage 1 DXF room matcher now produces neutral closed-polyline and nearby-label match candidates for operator review.
+  - Stage 1 DXF room review table now converts match candidates into deterministic public-safe spreadsheet rows without producing official or billable quantities.
   - Stage 1 export table/report module now converts Aufmass results into deterministic rows, CSV text, and JSON-compatible dicts without writing files.
   - Current parser dependency prep is limited to operator-converted DXF, PDF, and scan/image sources through approved private routes.
   - The workflow calibrates scale from known dimensions before deriving measurements.
@@ -27,6 +28,6 @@ privacy_security_rules:
   - Source files remain private, local, or in an approved Drive route unless the operator explicitly approves a public-safe sample.
 next_actions:
   - Run a private pilot with real DXF outside the public repo.
-  - Use reviewed DXF room match candidates for the DXF to engine handoff.
+  - Use the DXF room review table before any reviewed DXF to engine handoff.
   - Add PDF adapter later.
   - Add image/scan helper later.

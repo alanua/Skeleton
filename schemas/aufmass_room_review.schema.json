@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.aufmass_room_review.schema.json",
+  "title": "Aufmass Room Review Table",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["source_units", "columns", "rows", "summary"],
+  "properties": {
+    "source_units": {"type": ["string", "null"]},
+    "columns": {
+      "const": [
+        "room_id",
+        "room_name",
+        "source_ref",
+        "source_layer",
+        "contour_id",
+        "contour_status",
+        "label_text",
+        "label_status",
+        "area_from_label_m2",
+        "area_calculated_m2",
+        "area_delta_m2",
+        "area_delta_percent",
+        "height_m",
+        "height_source",
+        "openings_status",
+        "review_status",
+        "operator_note",
+        "export_ready"
+      ]
+    },
+    "rows": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/row"}
+    },
+    "summary": {"$ref": "#/$defs/summary"}
+  },
+  "$defs": {
+    "optional_number": {"type": ["number", "null"]},
+    "row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "room_id",
+        "room_name",
+        "source_ref",
+        "source_layer",
+        "contour_id",
+        "contour_status",
+        "label_text",
+        "label_status",
+        "area_from_label_m2",
+        "area_calculated_m2",
+        "area_delta_m2",
+        "area_delta_percent",
+        "height_m",
+        "height_source",
+        "openings_status",
+        "review_status",
+        "operator_note",
+        "export_ready"
+      ],
+      "properties": {
+        "room_id": {"type": "string"},
+        "room_name": {"type": "string"},
+        "source_ref": {"type": "string"},
+        "source_layer": {"type": "string"},
+        "contour_id": {"type": "string"},
+        "contour_status": {"const": "candidate"},
+        "label_text": {"type": "string"},
+        "label_status": {"type": "string", "enum": ["linked", "missing"]},
+        "area_from_label_m2": {"$ref": "#/$defs/optional_number"},
+        "area_calculated_m2": {"type": "number", "minimum": 0},
+        "area_delta_m2": {"$ref": "#/$defs/optional_number"},
+        "area_delta_percent": {"$ref": "#/$defs/optional_number"},
+        "height_m": {"$ref": "#/$defs/optional_number"},
+        "height_source": {"type": "string"},
+        "openings_status": {"const": "not_reviewed"},
+        "review_status": {
+          "type": "string",
+          "enum": ["candidate", "needs_review", "area_mismatch"]
+        },
+        "operator_note": {"type": "string"},
+        "export_ready": {"const": false}
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["row_count", "review_status_counts", "stage", "official_quantities"],
+      "properties": {
+        "row_count": {"type": "integer", "minimum": 0},
+        "review_status_counts": {
+          "type": "object",
+          "additionalProperties": {"type": "integer", "minimum": 0}
+        },
+        "stage": {"const": "room_review_table"},
+        "official_quantities": {"const": false}
+      }
+    }
+  }
+}
