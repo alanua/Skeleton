@@ -280,17 +280,60 @@ def card_payload_to_inline_keyboard(card_payload: dict[str, Any]) -> dict[str, A
     return {"inline_keyboard": inline_keyboard}
 
 
+def _operator_pr_ready_card_text(
+    pr_number: int,
+    *,
+    approve_reject_available: bool,
+) -> str:
+    lines = [
+        "Skeleton task completed.",
+        "A review PR is ready.",
+        f"Repository: {REPO}",
+        f"PR: #{pr_number}",
+        "Recommended action: review it in ChatGPT or open the PR before approving.",
+        "This button does not deploy anything.",
+    ]
+    if not approve_reject_available:
+        lines.append("Approve and Reject are unavailable until PR details are verified.")
+    return "\n".join(lines)
+
+
+def _operator_ready_card_payload(card_payload: dict[str, Any]) -> dict[str, Any]:
+    pr_number = card_payload.get("pr_number")
+    if not isinstance(pr_number, int):
+        return card_payload
+
+    buttons: list[dict[str, Any]] = []
+    for button in card_payload.get("buttons", []):
+        if not isinstance(button, dict):
+            continue
+        rendered_button = dict(button)
+        callback_payload = button.get("callback_payload")
+        if button.get("action") == "details" and isinstance(callback_payload, dict):
+            rendered_button["callback_payload"] = {
+                **callback_payload,
+                "changed_files": list(card_payload.get("changed_files", [])),
+                "test_summary": card_payload.get("test_summary"),
+                "risk_summary": card_payload.get("risk_summary"),
+            }
+        buttons.append(rendered_button)
+
+    return {
+        **card_payload,
+        "text": _operator_pr_ready_card_text(
+            pr_number,
+            approve_reject_available=True,
+        ),
+        "buttons": buttons,
+    }
+
+
 def _build_details_only_card_payload(pr_url: str, pr_number: int) -> dict[str, Any]:
     callback_base = {"repo": REPO, "pr_number": pr_number, "pr_url": pr_url}
     return {
-        "text": "\n".join(
-            (
-                "PR ready for operator review",
-                f"Repository: {REPO}",
-                f"PR: #{pr_number}",
-                "Approve/reject buttons unavailable: the Runner report lacks a reliable "
-                "reviewed SHA or changed-file list.",
-            )
+        "text": _operator_pr_ready_card_text(
+            pr_number,
+            approve_reject_available=False,
         ),
         "buttons": [
             {
@@ -324,14 +367,16 @@ def build_done_pr_ready_card_payload(report: str) -> dict[str, Any] | None:
     try:
         # Runner reports the commit pushed immediately before its draft PR URL;
         # that commit is the reviewed head for this DONE notification.
-        return build_pr_ready_card_payload(
-            repo=REPO,
-            pr_number=pr_number,
-            head_sha=head_sha,
-            changed_files=changed_files,
-            test_summary=TELEGRAM_CARD_TEST_SUMMARY,
-            risk_summary=TELEGRAM_CARD_RISK_SUMMARY,
-            pr_url=pr_url,
+        return _operator_ready_card_payload(
+            build_pr_ready_card_payload(
+                repo=REPO,
+                pr_number=pr_number,
+                head_sha=head_sha,
+                changed_files=changed_files,
+                test_summary=TELEGRAM_CARD_TEST_SUMMARY,
+                risk_summary=TELEGRAM_CARD_RISK_SUMMARY,
+                pr_url=pr_url,
+            )
         )
     except ValueError:
         return _build_details_only_card_payload(pr_url, pr_number)

@@ -8,6 +8,13 @@ summary, risk summary, and pull request URL. Runner `DONE` notifications can
 now emit that card as a Telegram message with inline buttons when a draft pull
 request URL is present.
 
+The main Telegram card is the operator decision summary. It says in simple
+language that the Skeleton task completed, a review PR is ready, and the
+recommended action is to review it before approving. It may show the
+repository and PR number, but it does not put the reviewed head SHA,
+changed-file list, test output, risk summary, or long technical metadata in
+the main message.
+
 The intended operator UX is:
 
 1. Runner finishes a pull request and posts a Telegram card.
@@ -21,14 +28,16 @@ reliable PR binding data: a reviewed SHA and the changed-file list. For the
 current Runner report format, the `Commit:` SHA is the commit pushed
 immediately before the draft PR is created, so the notification treats it as
 the reviewed PR head SHA. If that SHA or changed-file list is unavailable, the
-Telegram text says why and the inline keyboard contains `details` and
-`open_pr` only.
+Telegram text says approval is unavailable and the inline keyboard contains
+`details` and `open_pr` only.
 
-`details` and `open_pr` are button payloads only in this stage. The live
-Telegram sender uses Telegram `sendMessage` `reply_markup` with
-`inline_keyboard`; `open_pr` is emitted as a Telegram URL button. Callback
-data is deterministic, bounded, and derived only from public-safe card
-metadata.
+Technical review data belongs behind `details` or in the pull request opened
+by `open_pr`. The `details` payload retains the repository, pull request
+number, reviewed head SHA, changed-file list, test summary, and risk summary
+when the Runner has reliable PR binding data. The live Telegram sender uses
+Telegram `sendMessage` `reply_markup` with `inline_keyboard`; `open_pr` is
+emitted as a Telegram URL button. Callback data is deterministic, bounded, and
+derived only from public-safe card metadata.
 
 Stage 1 callback validation blocks malformed payloads and callbacks whose head
 SHA does not match the current SHA supplied by the caller. Only a validated
@@ -45,5 +54,7 @@ The payload records public PR review metadata only and does not carry source
 contents, credentials, or private runner state.
 
 A future live stage may perform a repository action only after re-checking pull
-request state, head SHA, changed files, and tests. That future stage must keep
-the stale-head and action-gate checks in front of repository side effects.
+request state, head SHA, changed files, and tests. Approve and reject still
+require later confirmation before any live merge in that future stage. That
+future stage must keep the stale-head and action-gate checks in front of
+repository side effects.

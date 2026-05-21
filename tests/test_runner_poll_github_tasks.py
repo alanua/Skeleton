@@ -110,6 +110,39 @@ def test_inline_keyboard_has_pr_review_buttons_when_binding_is_reliable() -> Non
     )
 
 
+def test_pr_ready_card_text_is_operator_summary_without_full_sha_or_files() -> None:
+    card = runner.build_done_pr_ready_card_payload(DONE_REPORT)
+    assert card is not None
+
+    text = str(card["text"])
+    assert text.startswith("Skeleton task completed.\nA review PR is ready.")
+    assert "Recommended action: review it in ChatGPT or open the PR before approving." in text
+    assert "This button does not deploy anything." in text
+    assert HEAD_SHA not in text
+    assert "scripts/runner_poll_github_tasks.py" not in text
+    assert "Changed files" not in text
+    assert runner.TELEGRAM_CARD_TEST_SUMMARY not in text
+    assert runner.TELEGRAM_CARD_RISK_SUMMARY not in text
+
+
+def test_details_callback_retains_pr_review_technical_data() -> None:
+    card = runner.build_done_pr_ready_card_payload(DONE_REPORT)
+    assert card is not None
+
+    details = next(button for button in card["buttons"] if button["action"] == "details")
+    callback_payload = details["callback_payload"]
+
+    assert callback_payload["repo"] == runner.REPO
+    assert callback_payload["pr_number"] == 123
+    assert callback_payload["head_sha"] == HEAD_SHA
+    assert callback_payload["changed_files"] == [
+        "docs/TELEGRAM_APPROVAL_BUTTONS.md",
+        "scripts/runner_poll_github_tasks.py",
+    ]
+    assert callback_payload["test_summary"] == runner.TELEGRAM_CARD_TEST_SUMMARY
+    assert callback_payload["risk_summary"] == runner.TELEGRAM_CARD_RISK_SUMMARY
+
+
 def test_callback_data_carries_action_pr_number_and_head_marker() -> None:
     card = runner.build_done_pr_ready_card_payload(DONE_REPORT)
     assert card is not None
@@ -137,7 +170,7 @@ def test_approve_reject_buttons_require_reliable_sha_and_changed_files() -> None
     buttons = [row[0] for row in reply_markup["inline_keyboard"]]
 
     assert [button["text"] for button in buttons] == ["Details", "Open PR"]
-    assert "Approve/reject buttons unavailable" in str(card["text"])
+    assert "Approve and Reject are unavailable" in str(card["text"])
 
 
 def test_send_telegram_notification_posts_reply_markup_for_card() -> None:
