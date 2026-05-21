@@ -147,6 +147,44 @@ def test_details_callback_renders_audit_comment() -> None:
     assert "Action: telegram_details" in poller.render_audit_comment(parsed)
 
 
+def test_details_callback_accepts_nosha_head_marker() -> None:
+    details = "tpr1:details:p120:nosha:abcdef012345"
+    parsed = poller.parse_callback_data(details)
+
+    assert parsed.head_marker == "nosha"
+    assert "Action: telegram_details" in poller.render_audit_comment(parsed)
+
+
+def test_approve_callback_with_nosha_head_marker_is_blocked() -> None:
+    approve = "tpr1:approve:p120:nosha:abcdef012345"
+    with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "github-secret"}, clear=True), mock.patch.object(
+        poller.urllib.request,
+        "urlopen",
+        return_value=response(github_pr_state()),
+    ) as urlopen:
+        result = poller.handle_callback_query(query(approve))
+
+    assert result["status"] == "blocked"
+    assert result["comment_posted"] is False
+    assert "SHA head marker" in str(result["reason"])
+    assert urlopen.call_count == 1
+
+
+def test_reject_callback_with_nosha_head_marker_is_blocked() -> None:
+    reject = "tpr1:reject:p120:nosha:abcdef012345"
+    with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "github-secret"}, clear=True), mock.patch.object(
+        poller.urllib.request,
+        "urlopen",
+        return_value=response(github_pr_state()),
+    ) as urlopen:
+        result = poller.handle_callback_query(query(reject))
+
+    assert result["status"] == "blocked"
+    assert result["comment_posted"] is False
+    assert "SHA head marker" in str(result["reason"])
+    assert urlopen.call_count == 1
+
+
 def test_telegram_answer_callback_query_is_called_when_bot_token_exists() -> None:
     with mock.patch.dict(os.environ, {"SKELETON_TG_BOT": "telegram-secret"}, clear=True), mock.patch.object(
         poller.urllib.request,
