@@ -1,17 +1,25 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from core.telegram_approval_buttons import build_pr_ready_card_payload
 
 
 REPO = os.environ.get("SKELETON_REPO", "alanua/Skeleton")
@@ -34,6 +42,9 @@ RUNTIME_ARTIFACTS = (
 )
 TELEGRAM_API_BASE = "https://api.telegram.org"
 TELEGRAM_TIMEOUT_SECONDS = 10
+TELEGRAM_CALLBACK_DATA_LIMIT = 64
+TELEGRAM_CARD_TEST_SUMMARY = "Runner pytest completed before draft PR creation."
+TELEGRAM_CARD_RISK_SUMMARY = "Review the changed-file list before approval."
 
 
 def truncate_comment(body: str) -> str:
@@ -188,6 +199,37 @@ def extract_pr_url(report: str) -> str | None:
     return match.group("url")
 
 
+def extract_pr_number(pr_url: str) -> int | None:
+    match = re.search(r"/pulls?/(?P<number>[1-9]\d*)(?:/|$)", pr_url)
+    if not match:
+        return None
+    return int(match.group("number"))
+
+
+def extract_runner_report_pr_binding(
+    report: str,
+) -> tuple[str | None, tuple[str, ...]]:
+    commit = re.search(
+        r"^Commit:\s*(?P<sha>[0-9a-fA-F]{40})\s*$", report, re.MULTILINE
+    )
+    files = re.search(
+        r"^Changed files:\s*\n(?P<files>(?:- [^\n]+\n?)+)",
+        report,
+        re.MULTILINE,
+    )
+    if not commit or not files:
+        return None, ()
+
+    changed_files = tuple(
+        line.removeprefix("- ").strip()
+        for line in files.group("files").splitlines()
+        if line.startswith("- ") and line.removeprefix("- ").strip()
+    )
+    if not changed_files:
+        return None, ()
+    return commit.group("sha"), changed_files
+
+
 def build_telegram_message(
     issue_number: int, status: str, report: str | None = None
 ) -> str:
@@ -203,19 +245,114 @@ def build_telegram_message(
     return "\n".join(lines)
 
 
-def send_telegram_notification(message: str) -> None:
+def _telegram_callback_data(button: dict[str, Any]) -> str:
+    callback_payload = button.get("callback_payload")
+    encoded = json.dumps(
+        callback_payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    action = re.sub(r"[^a-z_]", "", str(button.get("action") or ""))[:12]
+    digest = hashlib.sha256(encoded).hexdigest()[:40]
+    callback_data = f"tpr1:{action}:{digest}"
+    if len(callback_data.encode("utf-8")) > TELEGRAM_CALLBACK_DATA_LIMIT:
+        raise ValueError("Telegram callback_data exceeded its bound.")
+    return callback_data
+
+
+def card_payload_to_inline_keyboard(card_payload: dict[str, Any]) -> dict[str, Any]:
+    inline_keyboard = []
+    for button in card_payload.get("buttons", []):
+        if not isinstance(button, dict) or not isinstance(button.get("label"), str):
+            continue
+
+        telegram_button = {"text": button["label"]}
+        if isinstance(button.get("url"), str):
+            telegram_button["url"] = button["url"]
+        else:
+            telegram_button["callback_data"] = _telegram_callback_data(button)
+        inline_keyboard.append([telegram_button])
+    return {"inline_keyboard": inline_keyboard}
+
+
+def _build_details_only_card_payload(pr_url: str, pr_number: int) -> dict[str, Any]:
+    callback_base = {"repo": REPO, "pr_number": pr_number, "pr_url": pr_url}
+    return {
+        "text": "\n".join(
+            (
+                "PR ready for operator review",
+                f"Repository: {REPO}",
+                f"PR: #{pr_number}",
+                "Approve/reject buttons unavailable: the Runner report lacks a reliable "
+                "reviewed SHA or changed-file list.",
+            )
+        ),
+        "buttons": [
+            {
+                "action": "details",
+                "label": "Details",
+                "callback_payload": {**callback_base, "action": "details"},
+            },
+            {
+                "action": "open_pr",
+                "label": "Open PR",
+                "callback_payload": {**callback_base, "action": "open_pr"},
+                "url": pr_url,
+            },
+        ],
+    }
+
+
+def build_done_pr_ready_card_payload(report: str) -> dict[str, Any] | None:
+    pr_url = extract_pr_url(report)
+    if not pr_url:
+        return None
+
+    pr_number = extract_pr_number(pr_url)
+    if pr_number is None:
+        return None
+
+    head_sha, changed_files = extract_runner_report_pr_binding(report)
+    if head_sha is None or not changed_files:
+        return _build_details_only_card_payload(pr_url, pr_number)
+
+    try:
+        # Runner reports the commit pushed immediately before its draft PR URL;
+        # that commit is the reviewed head for this DONE notification.
+        return build_pr_ready_card_payload(
+            repo=REPO,
+            pr_number=pr_number,
+            head_sha=head_sha,
+            changed_files=changed_files,
+            test_summary=TELEGRAM_CARD_TEST_SUMMARY,
+            risk_summary=TELEGRAM_CARD_RISK_SUMMARY,
+            pr_url=pr_url,
+        )
+    except ValueError:
+        return _build_details_only_card_payload(pr_url, pr_number)
+
+
+def send_telegram_notification(
+    message: str, reply_markup: dict[str, Any] | None = None
+) -> None:
     bot_token = os.environ.get("SKELETON_TG_BOT")
     chat_id = os.environ.get("SKELETON_TG_CHAT")
     if not bot_token or not chat_id:
         return
 
-    payload = urllib.parse.urlencode(
-        {
-            "chat_id": chat_id,
-            "text": message,
-            "disable_web_page_preview": "true",
-        }
-    ).encode("utf-8")
+    request_fields = {
+        "chat_id": chat_id,
+        "text": message,
+        "disable_web_page_preview": "true",
+    }
+    if reply_markup is not None:
+        request_fields["reply_markup"] = json.dumps(
+            reply_markup,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    payload = urllib.parse.urlencode(request_fields).encode("utf-8")
     request = urllib.request.Request(
         f"{TELEGRAM_API_BASE}/bot{bot_token}/sendMessage",
         data=payload,
@@ -266,7 +403,18 @@ def notify_task_finished(
     try:
         if not should_notify_task_finished(issue_number, status):
             return
-        send_telegram_notification(build_telegram_message(issue_number, status, report))
+        card_payload = (
+            build_done_pr_ready_card_payload(report)
+            if status == "DONE" and report
+            else None
+        )
+        if card_payload is None:
+            send_telegram_notification(build_telegram_message(issue_number, status, report))
+            return
+        send_telegram_notification(
+            str(card_payload["text"]),
+            card_payload_to_inline_keyboard(card_payload),
+        )
     except Exception:
         return
 
