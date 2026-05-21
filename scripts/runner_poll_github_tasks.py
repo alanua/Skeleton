@@ -45,6 +45,12 @@ TELEGRAM_TIMEOUT_SECONDS = 10
 TELEGRAM_CALLBACK_DATA_LIMIT = 64
 TELEGRAM_CARD_TEST_SUMMARY = "Runner pytest completed before draft PR creation."
 TELEGRAM_CARD_RISK_SUMMARY = "Review the changed-file list before approval."
+TELEGRAM_PR_READY_BUTTON_LABELS = {
+    "approve": "Схвалити",
+    "reject": "Відхилити",
+    "details": "Деталі",
+    "open_pr": "Відкрити PR",
+}
 
 
 def truncate_comment(body: str) -> str:
@@ -280,27 +286,55 @@ def card_payload_to_inline_keyboard(card_payload: dict[str, Any]) -> dict[str, A
     return {"inline_keyboard": inline_keyboard}
 
 
+def _build_pr_ready_operator_text(pr_number: int) -> str:
+    return "\n".join(
+        (
+            "Завдання виконано.",
+            "Підготовлено зміни для перевірки.",
+            f"Репозиторій: {REPO}",
+            f"PR: #{pr_number}",
+            "Рекомендація: спочатку переглянути в ChatGPT або відкрити PR.",
+            "Ця кнопка нічого не деплоїть і не запускає на сервері.",
+        )
+    )
+
+
+def _localize_pr_ready_card_payload(
+    card_payload: dict[str, Any], pr_number: int
+) -> dict[str, Any]:
+    buttons = []
+    for button in card_payload.get("buttons", []):
+        if not isinstance(button, dict):
+            continue
+        action = str(button.get("action") or "")
+        buttons.append(
+            {
+                **button,
+                "label": TELEGRAM_PR_READY_BUTTON_LABELS.get(
+                    action, str(button.get("label") or "")
+                ),
+            }
+        )
+    return {
+        **card_payload,
+        "text": _build_pr_ready_operator_text(pr_number),
+        "buttons": buttons,
+    }
+
+
 def _build_details_only_card_payload(pr_url: str, pr_number: int) -> dict[str, Any]:
     callback_base = {"repo": REPO, "pr_number": pr_number, "pr_url": pr_url}
     return {
-        "text": "\n".join(
-            (
-                "PR ready for operator review",
-                f"Repository: {REPO}",
-                f"PR: #{pr_number}",
-                "Approve/reject buttons unavailable: the Runner report lacks a reliable "
-                "reviewed SHA or changed-file list.",
-            )
-        ),
+        "text": _build_pr_ready_operator_text(pr_number),
         "buttons": [
             {
                 "action": "details",
-                "label": "Details",
+                "label": TELEGRAM_PR_READY_BUTTON_LABELS["details"],
                 "callback_payload": {**callback_base, "action": "details"},
             },
             {
                 "action": "open_pr",
-                "label": "Open PR",
+                "label": TELEGRAM_PR_READY_BUTTON_LABELS["open_pr"],
                 "callback_payload": {**callback_base, "action": "open_pr"},
                 "url": pr_url,
             },
@@ -324,14 +358,17 @@ def build_done_pr_ready_card_payload(report: str) -> dict[str, Any] | None:
     try:
         # Runner reports the commit pushed immediately before its draft PR URL;
         # that commit is the reviewed head for this DONE notification.
-        return build_pr_ready_card_payload(
-            repo=REPO,
-            pr_number=pr_number,
-            head_sha=head_sha,
-            changed_files=changed_files,
-            test_summary=TELEGRAM_CARD_TEST_SUMMARY,
-            risk_summary=TELEGRAM_CARD_RISK_SUMMARY,
-            pr_url=pr_url,
+        return _localize_pr_ready_card_payload(
+            build_pr_ready_card_payload(
+                repo=REPO,
+                pr_number=pr_number,
+                head_sha=head_sha,
+                changed_files=changed_files,
+                test_summary=TELEGRAM_CARD_TEST_SUMMARY,
+                risk_summary=TELEGRAM_CARD_RISK_SUMMARY,
+                pr_url=pr_url,
+            ),
+            pr_number,
         )
     except ValueError:
         return _build_details_only_card_payload(pr_url, pr_number)

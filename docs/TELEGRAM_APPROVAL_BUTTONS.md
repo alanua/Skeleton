@@ -14,6 +14,10 @@ The intended operator UX is:
 2. Oleksii chooses `approve`, `reject`, `details`, or `open_pr`.
 3. A future live stage handles Telegram callbacks.
 
+Operator-facing Telegram text is Ukrainian and uses simple human wording. The
+main card is a short decision summary; technical review data belongs in
+`details` or the opened pull request, not in that card.
+
 The card includes button entries for all four choices. `approve` and `reject`
 callbacks are bound to the reviewed repository, pull request number, and head
 SHA. Runner only sends `approve` and `reject` when its `DONE` report has
@@ -21,8 +25,7 @@ reliable PR binding data: a reviewed SHA and the changed-file list. For the
 current Runner report format, the `Commit:` SHA is the commit pushed
 immediately before the draft PR is created, so the notification treats it as
 the reviewed PR head SHA. If that SHA or changed-file list is unavailable, the
-Telegram text says why and the inline keyboard contains `details` and
-`open_pr` only.
+inline keyboard contains `details` and `open_pr` only.
 
 `details` and `open_pr` are button payloads only in this stage. The live
 Telegram sender uses Telegram `sendMessage` `reply_markup` with
