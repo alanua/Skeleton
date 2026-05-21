@@ -407,18 +407,28 @@ def notify_task_finished(
     try:
         if not should_notify_task_finished(issue_number, status):
             return
-        card_payload = (
-            build_done_pr_ready_card_payload(report)
-            if status == "DONE" and report
-            else None
-        )
-        if card_payload is None:
-            send_telegram_notification(build_telegram_message(issue_number, status, report))
+        plain_message = build_telegram_message(issue_number, status, report)
+        if status != "DONE" or not report:
+            send_telegram_notification(plain_message)
             return
-        send_telegram_notification(
-            str(card_payload["text"]),
-            card_payload_to_inline_keyboard(card_payload),
-        )
+
+        try:
+            card_payload = build_done_pr_ready_card_payload(report)
+        except Exception:
+            send_telegram_notification(plain_message)
+            return
+
+        if card_payload is None:
+            send_telegram_notification(plain_message)
+            return
+
+        try:
+            send_telegram_notification(
+                str(card_payload["text"]),
+                card_payload_to_inline_keyboard(card_payload),
+            )
+        except Exception:
+            send_telegram_notification(plain_message)
     except Exception:
         return
 

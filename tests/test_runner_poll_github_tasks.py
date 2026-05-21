@@ -36,6 +36,10 @@ def _request_payload(urlopen: mock.MagicMock) -> dict[str, list[str]]:
     return urllib.parse.parse_qs(request.data.decode("utf-8"))
 
 
+def _plain_done_message(issue_number: int = 129) -> str:
+    return runner.build_telegram_message(issue_number, "DONE", DONE_REPORT)
+
+
 def test_simple_done_notification_without_pr_url_keeps_plain_message() -> None:
     response = _telegram_response()
     with mock.patch.dict(
@@ -177,10 +181,69 @@ def test_send_telegram_notification_without_env_makes_no_network_call() -> None:
     urlopen.assert_not_called()
 
 
+def test_done_pr_card_success_sends_reply_markup() -> None:
+    card = {"text": "PR ready card", "buttons": []}
+    reply_markup = {"inline_keyboard": []}
+
+    with mock.patch.object(
+        runner, "should_notify_task_finished", return_value=True
+    ), mock.patch.object(
+        runner, "build_done_pr_ready_card_payload", return_value=card
+    ), mock.patch.object(
+        runner, "card_payload_to_inline_keyboard", return_value=reply_markup
+    ), mock.patch.object(runner, "send_telegram_notification") as send:
+        runner.notify_task_finished(129, "DONE", DONE_REPORT)
+
+    send.assert_called_once_with("PR ready card", reply_markup)
+
+
+def test_done_pr_card_build_failure_falls_back_to_plain_done() -> None:
+    with mock.patch.object(
+        runner, "should_notify_task_finished", return_value=True
+    ), mock.patch.object(
+        runner,
+        "build_done_pr_ready_card_payload",
+        side_effect=RuntimeError("telegram-bot-token-must-not-leak"),
+    ), mock.patch.object(runner, "send_telegram_notification") as send:
+        runner.notify_task_finished(129, "DONE", DONE_REPORT)
+
+    send.assert_called_once_with(_plain_done_message())
+    assert "telegram-bot-token-must-not-leak" not in send.call_args.args[0]
+
+
+def test_done_pr_reply_markup_send_failure_falls_back_to_plain_done() -> None:
+    card = {"text": "PR ready card", "buttons": []}
+    reply_markup = {"inline_keyboard": []}
+
+    with mock.patch.object(
+        runner, "should_notify_task_finished", return_value=True
+    ), mock.patch.object(
+        runner, "build_done_pr_ready_card_payload", return_value=card
+    ), mock.patch.object(
+        runner, "card_payload_to_inline_keyboard", return_value=reply_markup
+    ), mock.patch.object(
+        runner,
+        "send_telegram_notification",
+        side_effect=(RuntimeError("reply_markup send failed"), None),
+    ) as send:
+        runner.notify_task_finished(129, "DONE", DONE_REPORT)
+
+    assert send.call_args_list == [
+        mock.call("PR ready card", reply_markup),
+        mock.call(_plain_done_message()),
+    ]
+
+
 def test_pr_card_build_does_not_execute_merge_or_reject_side_effects() -> None:
-    with mock.patch.object(runner, "run_command") as run_command:
-        card = runner.build_done_pr_ready_card_payload(DONE_REPORT)
-        reply_markup = runner.card_payload_to_inline_keyboard(card or {})
+    card = {"text": "PR ready card", "buttons": []}
+    with mock.patch.object(
+        runner, "should_notify_task_finished", return_value=True
+    ), mock.patch.object(
+        runner, "build_done_pr_ready_card_payload", return_value=card
+    ), mock.patch.object(runner, "run_command") as run_command, mock.patch.object(
+        runner, "send_telegram_notification"
+    ) as send:
+        runner.notify_task_finished(129, "DONE", DONE_REPORT)
 
     run_command.assert_not_called()
-    assert reply_markup["inline_keyboard"]
+    send.assert_called_once()
