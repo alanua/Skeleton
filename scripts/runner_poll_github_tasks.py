@@ -247,15 +247,19 @@ def build_telegram_message(
 
 def _telegram_callback_data(button: dict[str, Any]) -> str:
     callback_payload = button.get("callback_payload")
+    payload = callback_payload if isinstance(callback_payload, dict) else {}
     encoded = json.dumps(
-        callback_payload,
+        payload,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=True,
     ).encode("utf-8")
     action = re.sub(r"[^a-z_]", "", str(button.get("action") or ""))[:12]
-    digest = hashlib.sha256(encoded).hexdigest()[:40]
-    callback_data = f"tpr1:{action}:{digest}"
+    pr_number = payload.get("pr_number") if isinstance(payload.get("pr_number"), int) else 0
+    head_sha = str(payload.get("head_sha") or "").lower()
+    head_marker = head_sha[:8] if re.fullmatch(r"[0-9a-f]{40}", head_sha) else "nosha"
+    digest = hashlib.sha256(encoded).hexdigest()[:12]
+    callback_data = f"tpr1:{action}:p{pr_number}:{head_marker}:{digest}"
     if len(callback_data.encode("utf-8")) > TELEGRAM_CALLBACK_DATA_LIMIT:
         raise ValueError("Telegram callback_data exceeded its bound.")
     return callback_data
