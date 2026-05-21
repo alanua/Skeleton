@@ -88,6 +88,20 @@ def test_non_public_record_content_is_redacted() -> None:
     assert private_record.content not in json.dumps(memory_ledger_entry_to_dict(entry))
 
 
+def test_private_sensitive_record_is_redacted_even_when_public_safe_true() -> None:
+    private_record = record(
+        memory_type="private_sensitive",
+        public_safe=True,
+        content="must not appear in ledger preview",
+    )
+    entry = build_memory_ledger_entry(private_record, route_memory_record(private_record))
+    stored = memory_ledger_entry_to_dict(entry)
+
+    assert redact_private_content(private_record) == PRIVATE_CONTENT_PREVIEW
+    assert stored["content_preview"] == PRIVATE_CONTENT_PREVIEW
+    assert private_record.content not in json.dumps(stored)
+
+
 def test_jsonl_append_writes_only_explicit_tmp_path(tmp_path: Path) -> None:
     ledger_path = tmp_path / "memory-ledger.jsonl"
 

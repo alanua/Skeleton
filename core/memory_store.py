@@ -132,7 +132,7 @@ def redact_private_content(record: MemoryRecord) -> str:
     """Return a bounded public preview, or a redaction marker for non-public content."""
     if not isinstance(record, MemoryRecord):
         raise TypeError("record must be a MemoryRecord from core.memory_manager.")
-    if not record.public_safe:
+    if record.memory_type == "private_sensitive" or not record.public_safe:
         return PRIVATE_CONTENT_PREVIEW
     return _bounded_preview(record.content)
 
