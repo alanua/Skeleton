@@ -27,7 +27,8 @@ privacy_security_rules:
   - Do not commit invoices, contracts, or photos unless explicitly approved and routed privately.
   - Source files remain private, local, or in an approved Drive route unless the operator explicitly approves a public-safe sample.
 next_actions:
-  - Run a private pilot with real DXF outside the public repo.
+  - Use the stage 1 private pilot protocol before running real private Aufmass inputs outside the public repo.
+  - Prepare the private pilot review route without copying private source files or pilot outputs into Skeleton.
   - Use the DXF room review table before any reviewed DXF to engine handoff.
   - Add PDF adapter later.
   - Add image/scan helper later.
