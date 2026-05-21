@@ -186,7 +186,8 @@ Summary:
 Next actions:
 
 - Use the stage 1 private pilot protocol before running real private Aufmass inputs outside the public repo.
-- Prepare the private pilot review route without copying private source files or pilot outputs into Skeleton.
+- Use the stage 1 private pilot review route manifest only for opaque public-safe private pilot artifact references.
+- Prepare later private pilot lessons without copying private source files or pilot outputs into Skeleton.
 - Use the DXF room review table before any reviewed DXF to engine handoff.
 - Add PDF adapter later.
 - Add image/scan helper later.
