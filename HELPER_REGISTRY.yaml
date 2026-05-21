@@ -1,0 +1,109 @@
+version: "1.0.0"
+helpers:
+  chatgpt:
+    role: planner_reviewer_operator_companion
+    trust: operator_interface
+    can:
+      - propose_plan
+      - review_diff
+      - create_github_issues
+      - read_github
+      - propose_patch_plan
+    cannot:
+      - merge
+      - deploy
+      - secrets
+      - runtime_changes
+      - autonomous_scope_expansion
+
+  runner:
+    role: execution_bridge
+    trust: bounded_executor
+    can:
+      - execute_bounded_task
+      - create_draft_pr
+      - report_result_to_github
+      - send_telegram_notification
+    cannot:
+      - merge
+      - deploy
+      - secrets
+      - autonomous_scope_expansion
+      - exceed_allowed_files
+
+  codex:
+    role: implementation_agent
+    trust: bounded_executor
+    can:
+      - write_code_in_branch
+      - run_tests
+      - create_pr
+    cannot:
+      - merge
+      - deploy
+      - secrets
+      - exceed_allowed_files_in_task
+      - autonomous_scope_expansion
+
+  gemini:
+    role: audit_reviewer
+    trust: read_only_advisor
+    can:
+      - read_provided_context
+      - produce_audit_report
+      - large_context_review
+    cannot:
+      - write
+      - merge
+      - deploy
+      - become_canon_without_operator_approval
+
+  telegram_bot:
+    role: operator_console
+    trust: operator_interface
+    can:
+      - show_pr_ready_cards
+      - receive_approve_reject_callback
+      - send_notifications
+    cannot:
+      - autonomous_merge
+      - secrets
+      - runtime_changes
+
+  notebooklm:
+    role: advisory_mirror
+    trust: read_only_synthesis
+    can:
+      - answer_from_provided_sources
+      - synthesize_context
+    cannot:
+      - write_canon
+      - deploy
+      - merge
+      - auto_sync_github
+
+  claude:
+    role: architecture_critic
+    trust: external_reviewer
+    can:
+      - audit_architecture
+      - critique_design
+      - propose_backlog_items
+      - detect_drift
+    cannot:
+      - directly_execute
+      - merge
+      - deploy
+      - become_canon_without_operator_approval
+
+  operator:
+    role: final_gate
+    trust: highest
+    can:
+      - approve_merge
+      - approve_deploy
+      - approve_secrets_changes
+      - approve_runtime_changes
+      - approve_canon_changes
+      - reject_any_action
+    note: Approval must be explicit and never assumed from context.

@@ -79,6 +79,13 @@ capabilities:
     added: "2026-05-20"
     description: Generates docs/NOTEBOOKLM_SOURCEPACK.md from repo state for NotebookLM mirror.
 
+  helper_registry:
+    status: available
+    module: HELPER_REGISTRY.yaml
+    tested: true
+    added: "2026-05-21"
+    description: Machine-readable registry of helper roles, trust levels, and capability boundaries. Separate from CAPABILITY_REGISTRY which tracks code modules.
+
   aufmass_engine:
     status: available
     module: core/aufmass_engine.py
