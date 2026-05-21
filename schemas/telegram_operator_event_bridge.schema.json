@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.telegram_operator_event_bridge.schema.json",
+  "type": "object",
+  "required": ["schema", "status", "event", "issue_comment_text", "reasons"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "skeleton.telegram_operator_event_bridge.result.v1"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["blocked", "dry_run", "validated"]
+    },
+    "event": {
+      "$ref": "operator_event.schema.json"
+    },
+    "issue_comment_text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048
+    },
+    "reasons": {
+      "type": "array",
+      "maxItems": 8,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 240
+      }
+    }
+  }
+}
