@@ -184,6 +184,19 @@ capabilities:
     tested: true
     description: Dry-run contract only. Validates and renders RunnerBridgeRequest. No GitHub calls, no network, no shell/subprocess. Stage 2 live requires separate operator-approved PR.
 
+  action_gate:
+    status: stage1_dry_run
+    module: core/action_gate.py
+    entry: validate_action_request
+    stage: stage_1_dry_run
+    live_runtime_execution: false
+    requires:
+      - schemas/action_gate.schema.json
+      - docs/ACTION_GATE.md
+    tested: true
+    added: "2026-05-21"
+    description: Dry-run validation gate for a user-approved Skeleton pull-request action bound to action type, repo, PR number, expected head SHA, and expected files.
+
   memory_manager:
     status: stage1_dry_run
     module: core/memory_manager.py
