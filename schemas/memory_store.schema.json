@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.memory_store.schema.json",
+  "title": "Memory Store Stage 1 Local Audit Data",
+  "oneOf": [
+    {"$ref": "#/$defs/ledger_entry"},
+    {"$ref": "#/$defs/session_state_snapshot"}
+  ],
+  "$defs": {
+    "ledger_entry": {
+      "type": "object",
+      "required": [
+        "schema",
+        "record_id",
+        "project_id",
+        "memory_type",
+        "source",
+        "trust_level",
+        "record_status",
+        "created_at",
+        "public_safe",
+        "content_preview",
+        "route_status",
+        "target_route",
+        "requires_operator_approval",
+        "audit_summary",
+        "blocked_reason"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "skeleton.memory_store.ledger_entry.v1"},
+        "record_id": {"type": "string"},
+        "project_id": {"type": "string"},
+        "memory_type": {"type": "string"},
+        "source": {"type": "string"},
+        "trust_level": {"type": "string"},
+        "record_status": {"type": "string"},
+        "created_at": {"type": "string"},
+        "public_safe": {"type": "boolean"},
+        "content_preview": {"type": "string", "maxLength": 160},
+        "route_status": {"type": "string"},
+        "target_route": {"type": "string"},
+        "requires_operator_approval": {"type": "boolean"},
+        "audit_summary": {"type": "string"},
+        "blocked_reason": {"type": ["string", "null"]}
+      }
+    },
+    "session_state_snapshot": {
+      "type": "object",
+      "required": [
+        "schema",
+        "public_safe",
+        "session_id",
+        "project_id",
+        "state"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "schema": {"const": "skeleton.memory_store.session_state_snapshot.v1"},
+        "public_safe": {"const": true},
+        "session_id": {"type": "string"},
+        "project_id": {"type": "string"},
+        "state": {"type": "object"}
+      }
+    }
+  }
+}

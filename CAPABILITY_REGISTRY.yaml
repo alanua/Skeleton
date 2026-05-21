@@ -197,6 +197,20 @@ capabilities:
     added: "2026-05-20"
     description: Deterministic dry-run memory routing for weak cache, project state, canon candidates, confirmed canon, private-sensitive records, and rejected archive records.
 
+  memory_store:
+    status: available
+    module: core/memory_store.py
+    entry: append_memory_ledger_entry
+    stage: stage_1_local_audit_ledger
+    live_runtime_execution: false
+    requires:
+      - schemas/memory_store.schema.json
+      - docs/MEMORY_STORE.md
+      - core/memory_manager.py
+    tested: true
+    added: "2026-05-21"
+    description: Writes an explicit-path deterministic local memory routing audit ledger and public-safe session/project state snapshots without canon promotion.
+
   memory_manager_live_storage:
     status: planned
     module: core/memory_manager_live_storage.py
