@@ -1,0 +1,194 @@
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import subprocess
+from unittest import mock
+
+import pytest
+
+from scripts import telegram_callback_poller as poller
+
+
+CALLBACK_DATA = "tpr1:approve:p120:deadbeef:0123456789ab"
+HEAD_SHA = "deadbeef0123456789abcdef0123456789abcdef"
+
+
+def query(callback_data: str = CALLBACK_DATA) -> dict[str, str]:
+    return {"id": "callback-query-1", "data": callback_data}
+
+
+def response(payload: object | None = None) -> mock.MagicMock:
+    body = b"" if payload is None else json.dumps(payload).encode("utf-8")
+    handle = mock.MagicMock()
+    handle.__enter__.return_value = handle
+    handle.read.return_value = body
+    return handle
+
+
+def request_body(request: mock.MagicMock) -> dict[str, object]:
+    return json.loads(request.data.decode("utf-8"))
+
+
+def github_pr_state(*, number: int = 120, head_sha: str = HEAD_SHA) -> dict[str, object]:
+    return {"number": number, "head": {"sha": head_sha}}
+
+
+def test_parses_valid_callback_data() -> None:
+    parsed = poller.parse_callback_data(CALLBACK_DATA)
+
+    assert parsed == poller.ParsedCallback(
+        action="approve",
+        pr_number=120,
+        head_marker="deadbeef",
+        digest="0123456789ab",
+    )
+
+
+@pytest.mark.parametrize(
+    "callback_data",
+    (
+        "wrong:approve:p120:deadbeef:0123456789ab",
+        "tpr1:merge:p120:deadbeef:0123456789ab",
+        "tpr1:approve:p0:deadbeef:0123456789ab",
+        "tpr1:approve:pnope:deadbeef:0123456789ab",
+        "tpr1:approve:p120:notsha00:0123456789ab",
+        "tpr1:approve:p120:deadbeef:notdigest000",
+    ),
+)
+def test_rejects_malformed_callback_parts(callback_data: str) -> None:
+    with pytest.raises(ValueError):
+        poller.parse_callback_data(callback_data)
+
+
+def test_dry_run_does_not_call_urllib() -> None:
+    with mock.patch.dict(
+        os.environ,
+        {"GITHUB_TOKEN": "github-secret", "SKELETON_TG_BOT": "telegram-secret"},
+        clear=True,
+    ), mock.patch.object(poller.urllib.request, "urlopen") as urlopen:
+        result = poller.handle_callback_query(query(), dry_run=True)
+
+    urlopen.assert_not_called()
+    assert result["status"] == "dry_run"
+    assert result["comment_posted"] is False
+
+
+def test_missing_github_token_returns_skipped_no_post_result() -> None:
+    with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
+        poller.urllib.request, "urlopen"
+    ) as urlopen:
+        result = poller.handle_callback_query(query())
+
+    urlopen.assert_not_called()
+    assert result["status"] == "skipped"
+    assert result["github"] == "skipped_missing_token"
+    assert result["comment_posted"] is False
+
+
+def test_approve_callback_posts_audit_comment_when_pr_head_marker_matches() -> None:
+    with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "github-secret"}, clear=True), mock.patch.object(
+        poller.urllib.request,
+        "urlopen",
+        side_effect=(response(github_pr_state()), response({"id": 88})),
+    ) as urlopen:
+        result = poller.handle_callback_query(query())
+
+    assert result["status"] == "comment_posted"
+    assert result["comment_posted"] is True
+    assert urlopen.call_count == 2
+    fetch_request, post_request = [call.args[0] for call in urlopen.call_args_list]
+    assert fetch_request.full_url.endswith("/repos/alanua/Skeleton/pulls/120")
+    assert fetch_request.get_method() == "GET"
+    assert post_request.full_url.endswith("/repos/alanua/Skeleton/issues/120/comments")
+    assert post_request.get_method() == "POST"
+    assert request_body(post_request) == {"body": result["comment"]}
+    assert str(result["comment"]).startswith("Operator event record")
+
+
+def test_approve_callback_is_blocked_when_pr_head_marker_mismatches() -> None:
+    with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "github-secret"}, clear=True), mock.patch.object(
+        poller.urllib.request,
+        "urlopen",
+        return_value=response(github_pr_state(head_sha="cafebabe" + "0" * 32)),
+    ) as urlopen:
+        result = poller.handle_callback_query(query())
+
+    assert result["status"] == "blocked"
+    assert result["comment_posted"] is False
+    assert "head marker" in str(result["reason"])
+    assert urlopen.call_count == 1
+
+
+def test_reject_callback_posts_audit_comment_but_does_not_close_pr() -> None:
+    reject = "tpr1:reject:p120:deadbeef:abcdef012345"
+    with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "github-secret"}, clear=True), mock.patch.object(
+        poller.urllib.request,
+        "urlopen",
+        side_effect=(response(github_pr_state()), response({"id": 89})),
+    ) as urlopen:
+        result = poller.handle_callback_query(query(reject))
+
+    urls = [call.args[0].full_url for call in urlopen.call_args_list]
+    assert result["status"] == "comment_posted"
+    assert "Action: telegram_reject" in str(result["comment"])
+    assert urls == [
+        "https://api.github.com/repos/alanua/Skeleton/pulls/120",
+        "https://api.github.com/repos/alanua/Skeleton/issues/120/comments",
+    ]
+
+
+def test_details_callback_renders_audit_comment() -> None:
+    details = "tpr1:details:p120:deadbeef:abcdef012345"
+    parsed = poller.parse_callback_data(details)
+
+    assert poller.render_audit_comment(parsed).startswith("Operator event record")
+    assert "Action: telegram_details" in poller.render_audit_comment(parsed)
+
+
+def test_telegram_answer_callback_query_is_called_when_bot_token_exists() -> None:
+    with mock.patch.dict(os.environ, {"SKELETON_TG_BOT": "telegram-secret"}, clear=True), mock.patch.object(
+        poller.urllib.request,
+        "urlopen",
+        return_value=response(),
+    ) as urlopen:
+        result = poller.handle_callback_query(query())
+
+    request = urlopen.call_args.args[0]
+    assert result["status"] == "skipped"
+    assert result["telegram_answer"] == "answered"
+    assert request.full_url.endswith("/bottelegram-secret/answerCallbackQuery")
+    assert b"callback_query_id=callback-query-1" == request.data
+
+
+def test_no_token_appears_in_returned_result_or_comment() -> None:
+    github_token = "github-token-never-return"
+    telegram_token = "telegram-token-never-return"
+    with mock.patch.dict(
+        os.environ,
+        {"GITHUB_TOKEN": github_token, "SKELETON_TG_BOT": telegram_token},
+        clear=True,
+    ), mock.patch.object(
+        poller.urllib.request,
+        "urlopen",
+        side_effect=(response(github_pr_state()), response({"id": 90}), response()),
+    ):
+        result = poller.handle_callback_query(query())
+
+    rendered = json.dumps(result, sort_keys=True)
+    assert github_token not in rendered
+    assert telegram_token not in rendered
+
+
+def test_no_subprocess_usage() -> None:
+    script = Path(poller.__file__).read_text(encoding="utf-8")
+    with mock.patch.object(subprocess, "run") as run, mock.patch.object(
+        poller.urllib.request, "urlopen"
+    ) as urlopen:
+        result = poller.handle_callback_query(query(), dry_run=True)
+
+    assert "subprocess" not in script
+    assert result["status"] == "dry_run"
+    run.assert_not_called()
+    urlopen.assert_not_called()
