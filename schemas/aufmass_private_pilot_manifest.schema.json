@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.aufmass_private_pilot_manifest.schema.json",
+  "title": "Aufmass Private Pilot Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "project_id",
+    "route_stage",
+    "private_refs",
+    "public_safety",
+    "notes"
+  ],
+  "properties": {
+    "schema": {"const": "skeleton.aufmass_private_pilot_manifest.v1"},
+    "project_id": {"const": "aufmass"},
+    "route_stage": {"$ref": "#/$defs/route_stage"},
+    "private_refs": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/private_ref"}
+    },
+    "public_safety": {"$ref": "#/$defs/public_safety"},
+    "notes": {
+      "type": "array",
+      "items": {"type": "string", "maxLength": 240}
+    }
+  },
+  "$defs": {
+    "route_stage": {
+      "type": "string",
+      "enum": [
+        "input_sources",
+        "extracted_candidates",
+        "room_review_table",
+        "operator_corrections",
+        "private_exports",
+        "public_safe_lessons"
+      ]
+    },
+    "source_type": {
+      "type": "string",
+      "enum": [
+        "dxf",
+        "pdf",
+        "image_scan",
+        "manual_room_list",
+        "operator_note",
+        "mixed"
+      ]
+    },
+    "artifact_kind": {
+      "type": "string",
+      "enum": [
+        "input_source",
+        "extracted_candidate",
+        "room_review_table",
+        "operator_correction",
+        "private_export",
+        "public_safe_lesson"
+      ]
+    },
+    "public_safety_status": {
+      "type": "string",
+      "enum": [
+        "private_only",
+        "anonymized",
+        "synthetic",
+        "blocked_for_public"
+      ]
+    },
+    "private_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "private_ref",
+        "source_type",
+        "review_stage",
+        "artifact_kind",
+        "public_safety_status"
+      ],
+      "properties": {
+        "private_ref": {
+          "type": "string",
+          "pattern": "^private-ref-[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+        },
+        "source_type": {"$ref": "#/$defs/source_type"},
+        "review_stage": {"$ref": "#/$defs/route_stage"},
+        "artifact_kind": {"$ref": "#/$defs/artifact_kind"},
+        "public_safety_status": {"$ref": "#/$defs/public_safety_status"}
+      }
+    },
+    "public_safety": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": {"$ref": "#/$defs/public_safety_status"}
+      }
+    }
+  }
+}
