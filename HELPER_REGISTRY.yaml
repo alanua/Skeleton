@@ -24,8 +24,10 @@ helpers:
       - create_draft_pr
       - report_result_to_github
       - send_telegram_notification
+      - execute_operator_approved_merge
     cannot:
-      - merge
+      - autonomous_merge
+      - merge_without_operator_approval
       - deploy
       - secrets
       - autonomous_scope_expansion
