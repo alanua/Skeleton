@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.aufmass_opening_height_review.schema.json",
+  "title": "Aufmass Opening Height Review Table",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["source_units", "columns", "rows", "summary"],
+  "properties": {
+    "source_units": {"type": ["string", "null"]},
+    "columns": {
+      "const": [
+        "opening_id",
+        "opening_name",
+        "opening_kind",
+        "room_id",
+        "room_name",
+        "wall_id",
+        "wall_ref",
+        "section_id",
+        "section_source_ref",
+        "opening_width_m",
+        "opening_height_m",
+        "height_source",
+        "section_alignment_status",
+        "review_status",
+        "operator_note",
+        "export_ready"
+      ]
+    },
+    "rows": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/row"}
+    },
+    "summary": {"$ref": "#/$defs/summary"}
+  },
+  "$defs": {
+    "optional_non_negative_number": {"type": ["number", "null"], "minimum": 0},
+    "row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "opening_id",
+        "opening_name",
+        "opening_kind",
+        "room_id",
+        "room_name",
+        "wall_id",
+        "wall_ref",
+        "section_id",
+        "section_source_ref",
+        "opening_width_m",
+        "opening_height_m",
+        "height_source",
+        "section_alignment_status",
+        "review_status",
+        "operator_note",
+        "export_ready"
+      ],
+      "properties": {
+        "opening_id": {"type": "string"},
+        "opening_name": {"type": "string"},
+        "opening_kind": {"type": "string"},
+        "room_id": {"type": "string"},
+        "room_name": {"type": "string"},
+        "wall_id": {"type": "string"},
+        "wall_ref": {"type": "string"},
+        "section_id": {"type": "string"},
+        "section_source_ref": {"type": "string"},
+        "opening_width_m": {"$ref": "#/$defs/optional_non_negative_number"},
+        "opening_height_m": {"$ref": "#/$defs/optional_non_negative_number"},
+        "height_source": {"type": "string"},
+        "section_alignment_status": {
+          "type": "string",
+          "enum": ["candidate", "needs_review", "aligned", "conflict"]
+        },
+        "review_status": {
+          "type": "string",
+          "enum": ["candidate", "needs_review", "height_missing", "section_conflict"]
+        },
+        "operator_note": {"type": "string"},
+        "export_ready": {"const": false}
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["row_count", "review_status_counts", "stage", "official_quantities"],
+      "properties": {
+        "row_count": {"type": "integer", "minimum": 0},
+        "review_status_counts": {
+          "type": "object",
+          "additionalProperties": {"type": "integer", "minimum": 0}
+        },
+        "stage": {"const": "opening_height_review_table"},
+        "official_quantities": {"const": false}
+      }
+    }
+  }
+}
