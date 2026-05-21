@@ -76,6 +76,7 @@ Boot output required fields:
 - `project_loader`: Activates project context after operator command. Module: `core/project_loader.py`. Status: tested.
 - `github_task_queue`: Polls GitHub issues labeled runner:ready, executes bounded Codex tasks on Hetzner Runner, creates draft PRs, and reports results back to GitHub. Module: `scripts/runner_poll_github_tasks.py`. Status: tested.
 - `notebooklm_sourcepack`: Generates docs/NOTEBOOKLM_SOURCEPACK.md from repo state for NotebookLM mirror. Module: `scripts/build_notebooklm_sourcepack.py`. Status: tested.
+- `development_department_stage1`: Documents the human-controlled Skeleton development department workflow, Runner issue lifecycle, and bounded-task control boundary. Module: `docs/DEVELOPMENT_DEPARTMENT.md`. Status: not tested.
 - `aufmass_engine`: Calculates public-safe Aufmass quantities from explicit room geometry and openings. Module: `core/aufmass_engine.py`. Status: tested.
 - `aufmass_manual_adapter`: Converts manually calibrated drawing coordinates into metric Aufmass engine input. Module: `core/aufmass_manual_adapter.py`. Status: tested.
 - `aufmass_dxf_adapter`: Optionally extracts public-safe DXF geometry and annotation metadata through lazy-loaded ezdxf. Module: `core/aufmass_dxf_adapter.py`. Status: tested.
