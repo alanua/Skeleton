@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.aufmass_section_alignment.schema.json",
+  "title": "Aufmass Section Alignment Review Table",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["source_units", "columns", "rows", "summary"],
+  "properties": {
+    "source_units": {"type": ["string", "null"]},
+    "columns": {
+      "const": [
+        "section_id",
+        "section_name",
+        "section_source_ref",
+        "section_source_layer",
+        "room_id",
+        "room_name",
+        "wall_id",
+        "wall_ref",
+        "alignment_basis",
+        "alignment_status",
+        "operator_note",
+        "export_ready"
+      ]
+    },
+    "rows": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/row"}
+    },
+    "summary": {"$ref": "#/$defs/summary"}
+  },
+  "$defs": {
+    "row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "section_id",
+        "section_name",
+        "section_source_ref",
+        "section_source_layer",
+        "room_id",
+        "room_name",
+        "wall_id",
+        "wall_ref",
+        "alignment_basis",
+        "alignment_status",
+        "operator_note",
+        "export_ready"
+      ],
+      "properties": {
+        "section_id": {"type": "string"},
+        "section_name": {"type": "string"},
+        "section_source_ref": {"type": "string"},
+        "section_source_layer": {"type": "string"},
+        "room_id": {"type": "string"},
+        "room_name": {"type": "string"},
+        "wall_id": {"type": "string"},
+        "wall_ref": {"type": "string"},
+        "alignment_basis": {
+          "type": "string",
+          "enum": ["label", "wall_ref", "operator_mark", "unknown"]
+        },
+        "alignment_status": {
+          "type": "string",
+          "enum": ["candidate", "needs_review", "aligned", "conflict"]
+        },
+        "operator_note": {"type": "string"},
+        "export_ready": {"const": false}
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["row_count", "alignment_status_counts", "stage", "official_quantities"],
+      "properties": {
+        "row_count": {"type": "integer", "minimum": 0},
+        "alignment_status_counts": {
+          "type": "object",
+          "additionalProperties": {"type": "integer", "minimum": 0}
+        },
+        "stage": {"const": "section_alignment_review_table"},
+        "official_quantities": {"const": false}
+      }
+    }
+  }
+}

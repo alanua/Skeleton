@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.aufmass_wall_area_review.schema.json",
+  "title": "Aufmass Wall Area Review Table",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["source_units", "columns", "rows", "summary"],
+  "properties": {
+    "source_units": {"type": ["string", "null"]},
+    "columns": {
+      "const": [
+        "room_id",
+        "room_name",
+        "wall_id",
+        "wall_ref",
+        "section_id",
+        "wall_length_m",
+        "wall_height_m",
+        "height_source",
+        "opening_ids",
+        "gross_wall_area_m2",
+        "opening_area_m2",
+        "net_wall_area_m2",
+        "review_status",
+        "operator_note",
+        "export_ready"
+      ]
+    },
+    "rows": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/row"}
+    },
+    "summary": {"$ref": "#/$defs/summary"}
+  },
+  "$defs": {
+    "optional_non_negative_number": {"type": ["number", "null"], "minimum": 0},
+    "row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "room_id",
+        "room_name",
+        "wall_id",
+        "wall_ref",
+        "section_id",
+        "wall_length_m",
+        "wall_height_m",
+        "height_source",
+        "opening_ids",
+        "gross_wall_area_m2",
+        "opening_area_m2",
+        "net_wall_area_m2",
+        "review_status",
+        "operator_note",
+        "export_ready"
+      ],
+      "properties": {
+        "room_id": {"type": "string"},
+        "room_name": {"type": "string"},
+        "wall_id": {"type": "string"},
+        "wall_ref": {"type": "string"},
+        "section_id": {"type": "string"},
+        "wall_length_m": {"$ref": "#/$defs/optional_non_negative_number"},
+        "wall_height_m": {"$ref": "#/$defs/optional_non_negative_number"},
+        "height_source": {"type": "string"},
+        "opening_ids": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "gross_wall_area_m2": {"$ref": "#/$defs/optional_non_negative_number"},
+        "opening_area_m2": {"$ref": "#/$defs/optional_non_negative_number"},
+        "net_wall_area_m2": {"$ref": "#/$defs/optional_non_negative_number"},
+        "review_status": {
+          "type": "string",
+          "enum": [
+            "candidate",
+            "needs_review",
+            "height_missing",
+            "opening_review_pending",
+            "area_conflict"
+          ]
+        },
+        "operator_note": {"type": "string"},
+        "export_ready": {"const": false}
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["row_count", "review_status_counts", "stage", "official_quantities"],
+      "properties": {
+        "row_count": {"type": "integer", "minimum": 0},
+        "review_status_counts": {
+          "type": "object",
+          "additionalProperties": {"type": "integer", "minimum": 0}
+        },
+        "stage": {"const": "wall_area_review_table"},
+        "official_quantities": {"const": false}
+      }
+    }
+  }
+}

@@ -11,6 +11,7 @@ summary:
   - Stage 1 DXF adapter now extracts public-safe DXF metadata and simple geometry with optional-safe lazy ezdxf loading.
   - Stage 1 DXF room matcher now produces neutral closed-polyline and nearby-label match candidates for operator review.
   - Stage 1 DXF room review table now converts match candidates into deterministic public-safe spreadsheet rows without producing official or billable quantities.
+  - Stage 1 section opening-height review route now defines public-safe section alignment, opening-height, and wall-area review table schemas without producing official or billable quantities.
   - Stage 1 export table/report module now converts Aufmass results into deterministic rows, CSV text, and JSON-compatible dicts without writing files.
   - Current parser dependency prep is limited to operator-converted DXF, PDF, and scan/image sources through approved private routes.
   - The workflow calibrates scale from known dimensions before deriving measurements.
@@ -31,5 +32,6 @@ next_actions:
   - Use the stage 1 private pilot review route manifest only for opaque public-safe private pilot artifact references.
   - Prepare later private pilot lessons without copying private source files or pilot outputs into Skeleton.
   - Use the DXF room review table before any reviewed DXF to engine handoff.
+  - Use section alignment and opening-height review tables before any section-backed wall-area handoff.
   - Add PDF adapter later.
   - Add image/scan helper later.
