@@ -79,6 +79,17 @@ capabilities:
     added: "2026-05-20"
     description: Generates docs/NOTEBOOKLM_SOURCEPACK.md from repo state for NotebookLM mirror.
 
+  development_department_stage1:
+    status: available
+    module: docs/DEVELOPMENT_DEPARTMENT.md
+    stage: stage_1_documentation_control_contract
+    live_runtime_execution: false
+    requires:
+      - docs/RUNNER_ISSUE_LIFECYCLE.md
+    tested: false
+    added: "2026-05-21"
+    description: Documents the human-controlled Skeleton development department workflow, Runner issue lifecycle, and bounded-task control boundary.
+
   aufmass_engine:
     status: available
     module: core/aufmass_engine.py
