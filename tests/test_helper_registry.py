@@ -59,6 +59,21 @@ def test_operator_can_approve_merge() -> None:
     assert "approve_merge" in operator["can"]
 
 
+def test_runner_can_execute_operator_approved_merge() -> None:
+    runner = load_registry()["helpers"]["runner"]
+    assert "execute_operator_approved_merge" in runner["can"]
+
+
+def test_runner_cannot_merge_without_operator_approval() -> None:
+    runner = load_registry()["helpers"]["runner"]
+    assert "merge_without_operator_approval" in runner["cannot"]
+
+
+def test_runner_cannot_autonomous_merge() -> None:
+    runner = load_registry()["helpers"]["runner"]
+    assert "autonomous_merge" in runner["cannot"]
+
+
 def test_codex_cannot_merge() -> None:
     codex = load_registry()["helpers"]["codex"]
     assert "merge" in codex["cannot"]
