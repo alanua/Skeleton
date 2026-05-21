@@ -4,18 +4,31 @@
 layer for completed pull request review cards. It builds a deterministic,
 bounded Telegram card payload from public pull request review metadata:
 repository, pull request number, reviewed head SHA, changed file paths, test
-summary, risk summary, and pull request URL.
+summary, risk summary, and pull request URL. Runner `DONE` notifications can
+now emit that card as a Telegram message with inline buttons when a draft pull
+request URL is present.
 
 The intended operator UX is:
 
 1. Runner finishes a pull request and posts a Telegram card.
 2. Oleksii chooses `approve`, `reject`, `details`, or `open_pr`.
-3. Stage 1 validates the callback payload only.
+3. A future live stage handles Telegram callbacks.
 
 The card includes button entries for all four choices. `approve` and `reject`
 callbacks are bound to the reviewed repository, pull request number, and head
-SHA. `details` and `open_pr` are dry-run console events only; `open_pr` also
-carries the pull request URL for the future UI button route.
+SHA. Runner only sends `approve` and `reject` when its `DONE` report has
+reliable PR binding data: a reviewed SHA and the changed-file list. For the
+current Runner report format, the `Commit:` SHA is the commit pushed
+immediately before the draft PR is created, so the notification treats it as
+the reviewed PR head SHA. If that SHA or changed-file list is unavailable, the
+Telegram text says why and the inline keyboard contains `details` and
+`open_pr` only.
+
+`details` and `open_pr` are button payloads only in this stage. The live
+Telegram sender uses Telegram `sendMessage` `reply_markup` with
+`inline_keyboard`; `open_pr` is emitted as a Telegram URL button. Callback
+data is deterministic, bounded, and derived only from public-safe card
+metadata.
 
 Stage 1 callback validation blocks malformed payloads and callbacks whose head
 SHA does not match the current SHA supplied by the caller. Only a validated
@@ -24,11 +37,12 @@ dry-run `merge_pull_request` validation request. Rejecting a pull request,
 requesting details, or opening its URL does not ask `action_gate` for a live
 repository action.
 
-This stage does not send Telegram messages, read or write repositories, merge,
-deploy, access secrets, execute subprocesses, or perform any network call.
-Summaries, changed-file lists, and URLs are bounded before they enter the card
-payload. The payload records public PR review metadata only and does not carry
-source contents, credentials, or private runner state.
+Stage 1 Runner integration sends button payloads only. It does not handle
+callbacks and does not perform a live merge or reject action. Outside the
+existing Runner issue comment flow it does not write GitHub state. Summaries,
+changed-file lists, and URLs are bounded before they enter the card payload.
+The payload records public PR review metadata only and does not carry source
+contents, credentials, or private runner state.
 
 A future live stage may perform a repository action only after re-checking pull
 request state, head SHA, changed files, and tests. That future stage must keep

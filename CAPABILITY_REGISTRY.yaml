@@ -216,7 +216,7 @@ capabilities:
       - core/action_gate.py
     tested: true
     added: "2026-05-21"
-    description: Builds deterministic completed-PR Telegram review cards and validates bounded dry-run operator callbacks before any approved action-gate handoff.
+    description: Builds deterministic completed-PR Telegram review cards and validates bounded dry-run operator callbacks before any approved action-gate handoff; Runner notification integration is stage 1 card emission only, with no callback handling or live action.
 
   telegram_operator_event_bridge:
     status: stage1_dry_run
