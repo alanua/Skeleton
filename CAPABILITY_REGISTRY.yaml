@@ -211,6 +211,19 @@ capabilities:
     added: "2026-05-21"
     description: Builds deterministic completed-PR Telegram review cards and validates bounded dry-run operator callbacks before any approved action-gate handoff.
 
+  operator_event_record:
+    status: stage1_dry_run
+    module: core/operator_event.py
+    entry: render_public_issue_comment
+    stage: stage_1_dry_run
+    live_runtime_execution: false
+    requires:
+      - schemas/operator_event.schema.json
+      - docs/OPERATOR_EVENT_RECORD.md
+    tested: true
+    added: "2026-05-21"
+    description: Defines a bounded public-safe dry-run operator event record and deterministic issue comment text without live audit-trail writes.
+
   memory_manager:
     status: stage1_dry_run
     module: core/memory_manager.py

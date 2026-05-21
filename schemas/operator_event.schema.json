@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.operator_event.schema.json",
+  "type": "object",
+  "required": [
+    "schema",
+    "repo",
+    "issue_number",
+    "pr_number",
+    "head_sha",
+    "event_type",
+    "action_name",
+    "result",
+    "source",
+    "actor_reference",
+    "timestamp",
+    "summary"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "skeleton.operator_event.v1"
+    },
+    "repo": {
+      "type": "string",
+      "enum": ["alanua/Skeleton"]
+    },
+    "issue_number": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "pr_number": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "head_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "event_type": {
+      "type": "string",
+      "enum": ["operator_console_interaction"]
+    },
+    "action_name": {
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+    },
+    "result": {
+      "type": "string",
+      "enum": ["blocked", "dry_run", "validated"]
+    },
+    "source": {
+      "type": "string",
+      "enum": ["operator_console", "telegram_callback"]
+    },
+    "actor_reference": {
+      "type": "string",
+      "maxLength": 96,
+      "pattern": "^[a-z][a-z0-9_-]{0,31}:[A-Za-z0-9@._/-]{1,63}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 240
+    }
+  }
+}
