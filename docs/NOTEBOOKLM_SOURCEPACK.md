@@ -83,6 +83,7 @@ Boot output required fields:
 - `aufmass_room_review_table`: Converts DXF room match candidates into deterministic public-safe review rows without producing official quantities. Module: `core/aufmass_room_review.py`. Status: tested.
 - `aufmass_exporter`: Exports Aufmass results to deterministic rows, CSV text, and JSON-compatible dicts. Module: `core/aufmass_exporter.py`. Status: tested.
 - `aufmass_parser_dependencies_limited`: Optional dependency groups for the limited Aufmass parser scope: DXF via ezdxf, PDF via pdfplumber and pypdf, and image/scan helpers via pillow, opencv-python-headless, and scikit-image. Module: `pyproject.toml`. Status: not tested.
+- `memory_store`: Writes an explicit-path deterministic local memory routing audit ledger and public-safe session/project state snapshots without canon promotion. Module: `core/memory_store.py`. Status: tested.
 
 ## Planned Capabilities
 
