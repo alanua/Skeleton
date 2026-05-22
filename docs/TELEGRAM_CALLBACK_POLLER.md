@@ -30,7 +30,9 @@ secret before it verifies the callback-written approval record, performs the PR
 checks, and makes the merge decision. The routine operator approval ends at the
 Telegram `approve` button; it does not require a separate GitHub comment or
 manual Runner merge retry. `reject` and `details` remain audit-comment-only
-callbacks.
+callbacks. A signed `details` callback also answers the Telegram button with a
+bounded summary from the already-read GitHub PR state: title, lifecycle state,
+changed-file count, diff counts, and the button head marker.
 
 When `SKELETON_TG_CALLBACK_HMAC_SECRET` is absent, live `approve`, `reject`,
 and `details` callbacks are blocked before a GitHub read or comment write. When

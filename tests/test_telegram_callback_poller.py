@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 from unittest import mock
 import urllib.error
+import urllib.parse
 
 import pytest
 
@@ -55,7 +56,16 @@ def request_body(request: mock.MagicMock) -> dict[str, object]:
 
 
 def github_pr_state(*, number: int = 120, head_sha: str = HEAD_SHA) -> dict[str, object]:
-    return {"number": number, "head": {"sha": head_sha}}
+    return {
+        "number": number,
+        "head": {"sha": head_sha},
+        "title": "Bounded PR details",
+        "state": "open",
+        "draft": False,
+        "changed_files": 3,
+        "additions": 21,
+        "deletions": 8,
+    }
 
 
 def test_parses_valid_callback_data() -> None:
@@ -495,6 +505,65 @@ def test_details_callback_posts_audit_comment_only() -> None:
         "https://api.github.com/repos/alanua/Skeleton/pulls/120",
         "https://api.github.com/repos/alanua/Skeleton/issues/120/comments",
     ]
+
+
+def test_details_callback_answers_with_bounded_pr_summary_without_merge_request() -> None:
+    details = signed_callback_data("details")
+    with mock.patch.dict(
+        os.environ,
+        {
+            "GITHUB_TOKEN": "github-secret",
+            "SKELETON_TG_BOT": "telegram-secret",
+            poller.CALLBACK_HMAC_ENV: CALLBACK_HMAC_SECRET,
+        },
+        clear=True,
+    ), mock.patch.object(
+        poller.urllib.request,
+        "urlopen",
+        side_effect=(
+            response(github_pr_state()),
+            response({"id": 90}),
+            response(),
+        ),
+    ) as urlopen:
+        result = poller.handle_callback_query(query(details))
+
+    requests = [call.args[0] for call in urlopen.call_args_list]
+    answer = urllib.parse.parse_qs(requests[-1].data.decode("utf-8"))
+    assert result["runner_merge_request"] == "not_requested"
+    assert [request.full_url for request in requests] == [
+        "https://api.github.com/repos/alanua/Skeleton/pulls/120",
+        "https://api.github.com/repos/alanua/Skeleton/issues/120/comments",
+        "https://api.telegram.org/bottelegram-secret/answerCallbackQuery",
+    ]
+    assert answer == {
+        "callback_query_id": ["callback-query-1"],
+        "show_alert": ["true"],
+        "text": [
+            "PR #120: Bounded PR details\n"
+            "State: open, ready. Files: 3. Diff: +21/-8.\n"
+            "Head marker: deadbeef"
+        ],
+    }
+
+
+def test_details_answer_text_is_bounded_and_normalized() -> None:
+    details = poller.parse_callback_data(signed_callback_data("details"))
+    summary = poller._render_details_answer_text(
+        details,
+        github_pr_state()
+        | {
+            "title": "  Title\n" + ("long " * 80),
+            "changed_files": True,
+            "additions": "many",
+            "deletions": -1,
+        },
+    )
+
+    assert len(summary) <= poller.TELEGRAM_CALLBACK_ANSWER_TEXT_LIMIT
+    assert "\nTitle" not in summary
+    assert "Files: ?. Diff: +?/-?." in summary
+    assert summary.splitlines()[0].endswith("...")
 
 
 def test_details_callback_accepts_nosha_head_marker() -> None:

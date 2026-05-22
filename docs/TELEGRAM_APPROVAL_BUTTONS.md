@@ -28,7 +28,9 @@ immediately before the draft PR is created, so the notification treats it as
 the reviewed PR head SHA. If that SHA or changed-file list is unavailable, the
 inline keyboard contains `details` and `open_pr` only.
 
-`details` and `open_pr` are button payloads only in this stage. The live
+`details` and `open_pr` are button payloads only in the card. The live callback
+poller uses a signed `details` button to show a bounded PR summary in Telegram
+after it records the audit comment; `details` does not request a merge. The live
 Telegram sender uses Telegram `sendMessage` `reply_markup` with
 `inline_keyboard`; `open_pr` is emitted as a Telegram URL button. Callback
 data is deterministic, bounded, and derived only from public-safe card
