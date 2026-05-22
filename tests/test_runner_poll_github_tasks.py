@@ -292,3 +292,155 @@ def test_pr_card_build_does_not_execute_merge_or_reject_side_effects() -> None:
 
     run_command.assert_not_called()
     send.assert_called_once()
+
+
+def _maintenance_issue(task_id: str | None, task_body: str = "") -> dict[str, object]:
+    lines = ["Mode: RUNTIME_MAINTENANCE_TASK"]
+    if task_id is not None:
+        lines.append(f"Maintenance Task ID: {task_id}")
+    if task_body:
+        lines.extend(("", "```task", task_body, "```"))
+    return {"number": 145, "title": "Runner maintenance", "body": "\n".join(lines)}
+
+
+def test_maintenance_task_bypasses_codex() -> None:
+    report = (
+        "DONE: Runner host maintenance task completed.\n"
+        "maintenance_task_id=sync_telegram_callback_poller_runtime\n"
+        "success_criteria=met"
+    )
+    with mock.patch.object(
+        runner, "ensure_clean_worktree", return_value=(True, "")
+    ), mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "dispatch_runtime_maintenance_task", return_value=report
+    ) as dispatch, mock.patch.object(
+        runner, "prepare_issue_branch"
+    ) as prepare_branch, mock.patch.object(
+        runner, "run_codex_task"
+    ) as run_codex:
+        runner.process_issue(
+            _maintenance_issue(
+                runner.SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME, "Task: use Codex"
+            )
+        )
+
+    dispatch.assert_called_once()
+    prepare_branch.assert_not_called()
+    run_codex.assert_not_called()
+    assert set_label.call_args_list == [
+        mock.call(145, runner.LABEL_READY, runner.LABEL_RUNNING),
+        mock.call(145, runner.LABEL_RUNNING, runner.LABEL_DONE),
+    ]
+
+
+def test_unknown_maintenance_task_is_blocked() -> None:
+    with mock.patch.object(runner, "block_issue") as block, mock.patch.object(
+        runner, "run_codex_task"
+    ) as run_codex:
+        runner.process_issue(_maintenance_issue("restart_everything"))
+
+    block.assert_called_once_with(
+        145,
+        "Runtime maintenance task id `restart_everything` is not allowlisted.",
+    )
+    run_codex.assert_not_called()
+
+
+def test_blocked_maintenance_output_is_not_labeled_runner_done() -> None:
+    report = (
+        "DONE: mislabeled maintenance report\n"
+        "BLOCKED: step failed\n"
+        "success_criteria=met"
+    )
+    with mock.patch.object(
+        runner, "dispatch_runtime_maintenance_task", return_value=report
+    ), mock.patch.object(runner, "post_issue_comment"), mock.patch.object(
+        runner, "notify_task_finished"
+    ) as notify, mock.patch.object(runner, "set_issue_label") as set_label:
+        runner.process_runtime_maintenance_issue(
+            145, runner.SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME, str(runner.ROOT)
+        )
+
+    set_label.assert_called_once_with(145, runner.LABEL_RUNNING, runner.LABEL_BLOCKED)
+    notify.assert_called_once_with(145, "BLOCKED", report)
+
+
+def test_not_met_maintenance_output_is_not_labeled_runner_done() -> None:
+    report = (
+        "DONE: maintenance step returned\n"
+        "maintenance_task_id=sync_telegram_callback_poller_runtime\n"
+        "success_criteria=not_met"
+    )
+    with mock.patch.object(
+        runner, "dispatch_runtime_maintenance_task", return_value=report
+    ), mock.patch.object(runner, "post_issue_comment"), mock.patch.object(
+        runner, "notify_task_finished"
+    ) as notify, mock.patch.object(runner, "set_issue_label") as set_label:
+        runner.process_runtime_maintenance_issue(
+            145, runner.SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME, str(runner.ROOT)
+        )
+
+    set_label.assert_called_once_with(145, runner.LABEL_RUNNING, runner.LABEL_BLOCKED)
+    notify.assert_called_once_with(145, "BLOCKED", report)
+
+
+def test_sync_task_uses_only_allowed_service_names() -> None:
+    with mock.patch.object(runner, "run_command", return_value=(0, "")) as run:
+        report = runner.sync_telegram_callback_poller_runtime(str(runner.ROOT))
+
+    assert report.startswith("DONE:")
+    systemctl_commands = [
+        call.args[0]
+        for call in run.call_args_list
+        if call.args[0][:2] == ["sudo", "systemctl"]
+    ]
+    used_units = {
+        value
+        for command in systemctl_commands
+        for value in command
+        if value.endswith((".service", ".timer"))
+    }
+    assert used_units == {
+        runner.TELEGRAM_CALLBACK_POLLER_SERVICE,
+        runner.TELEGRAM_CALLBACK_POLLER_TIMER,
+    }
+
+
+def test_maintenance_issue_body_does_not_execute_arbitrary_command() -> None:
+    issue = _maintenance_issue(
+        runner.SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
+        "sudo reboot\nsudo apt upgrade\nsystemctl restart unrelated.service",
+    )
+    with mock.patch.object(
+        runner, "ensure_clean_worktree", return_value=(True, "")
+    ), mock.patch.object(runner, "set_issue_label"), mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "run_command", return_value=(0, "")
+    ) as run, mock.patch.object(
+        runner, "run_codex_task"
+    ) as run_codex:
+        runner.process_issue(issue, workdir=str(runner.ROOT))
+
+    commands = [" ".join(call.args[0]) for call in run.call_args_list]
+    assert all("reboot" not in command for command in commands)
+    assert all("apt" not in command for command in commands)
+    assert all("unrelated.service" not in command for command in commands)
+    run_codex.assert_not_called()
+
+
+def test_maintenance_report_does_not_include_command_output_token_values() -> None:
+    token = "github-token-must-not-leak"
+    with mock.patch.object(runner, "run_command", return_value=(1, token)):
+        report = runner.sync_telegram_callback_poller_runtime(str(runner.ROOT))
+
+    assert report.startswith("BLOCKED:")
+    assert token not in report
