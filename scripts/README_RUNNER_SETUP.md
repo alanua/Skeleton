@@ -23,6 +23,21 @@ Run the required validation and report the result.
 ```
 ````
 
+Runner lane stage 1 accepts optional issue-body metadata before the task fence:
+
+````markdown
+Runner Lane: lane-1
+
+```task
+Add the requested bounded change here.
+```
+````
+
+The allowed lane names are `default`, `lane-1`, and `lane-2`. Omitting
+`Runner Lane:` selects `default`. The lane name is parsed and validated now so
+future Runner stages can route tasks, but this stage still polls and runs every
+ready task one at a time.
+
 Do not put secrets, API keys, environment files, production credentials, or private tokens in task issues.
 
 ## Environment File

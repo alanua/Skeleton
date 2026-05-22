@@ -245,6 +245,53 @@ def test_poll_once_processes_issues_single_lane() -> None:
     ]
 
 
+def test_runner_task_defaults_to_default_lane() -> None:
+    task, reason = runner.extract_runner_task("```task\nDo it\n```")
+
+    assert reason is None
+    assert task == runner.RunnerTask(
+        content="Do it",
+        lane=runner.DEFAULT_RUNNER_LANE,
+    )
+
+
+def test_runner_task_accepts_allowlisted_lane_name() -> None:
+    task, reason = runner.extract_runner_task("Runner Lane: lane-1\n\n```task\nDo it\n```")
+
+    assert reason is None
+    assert task == runner.RunnerTask(
+        content="Do it",
+        lane=runner.RunnerLane("lane-1"),
+    )
+
+
+def test_runner_task_ignores_lane_text_inside_task_fence() -> None:
+    task, reason = runner.extract_runner_task("```task\nLane: deploy\nKeep it as prose.\n```")
+
+    assert reason is None
+    assert task == runner.RunnerTask(
+        content="Lane: deploy\nKeep it as prose.",
+        lane=runner.DEFAULT_RUNNER_LANE,
+    )
+
+
+def test_process_issue_blocks_non_allowlisted_runner_lane_before_claim() -> None:
+    issue = {
+        "number": 141,
+        "title": "Lane metadata",
+        "body": "Runner Lane: deploy\n\n```task\nDo it\n```",
+    }
+
+    with mock.patch.object(runner, "block_issue") as block, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(runner, "run_codex_task") as run_codex:
+        runner.process_issue(issue)
+
+    assert "Runner lane `deploy` is not allowlisted" in block.call_args.args[1]
+    set_label.assert_not_called()
+    run_codex.assert_not_called()
+
+
 def test_extracts_bounded_telegram_approved_merge_request() -> None:
     mode, request, reason = runner.extract_telegram_approved_pr_merge_request(
         _merge_issue_body()
