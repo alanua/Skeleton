@@ -527,12 +527,9 @@ def test_done_pr_report_builds_card_payload_from_runner_binding() -> None:
 
     assert localized_card is not None
     assert localized_card["text"] == (
-        "Завдання виконано.\n"
-        "Підготовлено зміни для перевірки.\n"
-        f"Репозиторій: {runner.REPO}\n"
         "PR: #123\n"
-        "Рекомендація: спочатку переглянути в ChatGPT або відкрити PR.\n"
-        "Ця кнопка нічого не деплоїть і не запускає на сервері."
+        "Надішліть номер PR у ChatGPT.\n"
+        "Натисніть «Схвалити» лише після того, як ChatGPT скаже схвалити."
     )
     assert localized_card["buttons"][0]["label"] == "Деталі"
 
@@ -555,14 +552,17 @@ def test_done_pr_card_hides_technical_details_from_operator_text() -> None:
     assert card is not None
 
     text = str(card["text"])
-    assert "Завдання виконано." in text
-    assert "Підготовлено зміни для перевірки." in text
-    assert "Рекомендація:" in text
+    assert text == (
+        "PR: #123\n"
+        "Надішліть номер PR у ChatGPT.\n"
+        "Натисніть «Схвалити» лише після того, як ChatGPT скаже схвалити."
+    )
     assert HEAD_SHA not in text
     assert "scripts/runner_poll_github_tasks.py" not in text
     assert "docs/TELEGRAM_APPROVAL_BUTTONS.md" not in text
     assert "Skeleton task completed" not in text
     assert "Recommended action" not in text
+    assert "Ця кнопка нічого не деплоїть" not in text
 
 
 def test_done_pr_card_keeps_technical_details_in_payload() -> None:
@@ -632,7 +632,7 @@ def test_approve_reject_buttons_require_reliable_sha_and_changed_files() -> None
     buttons = [row[0] for row in reply_markup["inline_keyboard"]]
 
     assert [button["text"] for button in buttons] == ["Деталі", "Відкрити PR"]
-    assert "Завдання виконано." in str(card["text"])
+    assert str(card["text"]).startswith("PR: #123\n")
 
 
 def test_send_telegram_notification_posts_reply_markup_for_card() -> None:

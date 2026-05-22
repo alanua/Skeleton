@@ -666,12 +666,9 @@ def card_payload_to_inline_keyboard(card_payload: dict[str, Any]) -> dict[str, A
 def _build_pr_ready_operator_text(pr_number: int) -> str:
     return "\n".join(
         (
-            "Завдання виконано.",
-            "Підготовлено зміни для перевірки.",
-            f"Репозиторій: {REPO}",
             f"PR: #{pr_number}",
-            "Рекомендація: спочатку переглянути в ChatGPT або відкрити PR.",
-            "Ця кнопка нічого не деплоїть і не запускає на сервері.",
+            "Надішліть номер PR у ChatGPT.",
+            "Натисніть «Схвалити» лише після того, як ChatGPT скаже схвалити.",
         )
     )
 
