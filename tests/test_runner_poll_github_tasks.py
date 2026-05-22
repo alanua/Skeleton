@@ -24,6 +24,32 @@ Pytest output:
 
 Commit: {HEAD_SHA}
 Draft PR: {PR_URL}"""
+ACTION_HEAD_SHA = "b" * 40
+
+
+def _chatgpt_review_comment(head_sha: str = ACTION_HEAD_SHA) -> dict[str, str]:
+    return {
+        "body": (
+            f"{runner.CHATGPT_REVIEW_DECISION}\n"
+            "Pull request: #123\n"
+            f"Head SHA: {head_sha}"
+        )
+    }
+
+
+def _github_action_issue() -> dict[str, object]:
+    return {
+        "number": 159,
+        "title": "Merge approved PR",
+        "body": (
+            "Mode: GITHUB_ACTION_REQUEST\n"
+            "Action: merge_pr_squash\n"
+            f"Repository: {runner.REPO}\n"
+            "Pull request: #123\n"
+            f"Expected head SHA: {ACTION_HEAD_SHA}\n"
+            "Approved via: Telegram"
+        ),
+    }
 
 
 def _telegram_response() -> mock.MagicMock:
@@ -184,6 +210,91 @@ def test_poll_once_processes_issues_single_lane() -> None:
         mock.call(issues[0], workdir="/coordinator"),
         mock.call(issues[1], workdir="/coordinator"),
     ]
+
+
+def test_runner_blocks_merge_action_when_chatgpt_review_marker_is_missing() -> None:
+    pr_state = {
+        "number": 123,
+        "state": "OPEN",
+        "isDraft": False,
+        "headRefOid": ACTION_HEAD_SHA,
+    }
+    with mock.patch.object(
+        runner, "_get_merge_pr_state", return_value=pr_state
+    ), mock.patch.object(
+        runner, "_get_pr_comments", return_value=[]
+    ), mock.patch.object(
+        runner, "block_issue"
+    ) as block, mock.patch.object(
+        runner, "merge_pr_squash"
+    ) as merge:
+        runner.process_github_action_request_issue(
+            159,
+            runner.MERGE_PR_SQUASH_ACTION,
+            123,
+            ACTION_HEAD_SHA,
+        )
+
+    block.assert_called_once()
+    assert "ChatGPT" in block.call_args.args[1]
+    merge.assert_not_called()
+
+
+def test_runner_blocks_merge_action_when_review_head_is_not_current() -> None:
+    pr_state = {
+        "number": 123,
+        "state": "OPEN",
+        "isDraft": False,
+        "headRefOid": ACTION_HEAD_SHA,
+    }
+    with mock.patch.object(
+        runner, "_get_merge_pr_state", return_value=pr_state
+    ), mock.patch.object(
+        runner, "_get_pr_comments", return_value=[_chatgpt_review_comment("c" * 40)]
+    ), mock.patch.object(
+        runner, "block_issue"
+    ) as block, mock.patch.object(
+        runner, "merge_pr_squash"
+    ) as merge:
+        runner.process_github_action_request_issue(
+            159,
+            runner.MERGE_PR_SQUASH_ACTION,
+            123,
+            ACTION_HEAD_SHA,
+        )
+
+    block.assert_called_once()
+    assert "current PR head" in block.call_args.args[1]
+    merge.assert_not_called()
+
+
+def test_runner_merge_action_rechecks_review_before_allowlisted_squash_merge() -> None:
+    pr_state = {
+        "number": 123,
+        "state": "OPEN",
+        "isDraft": False,
+        "headRefOid": ACTION_HEAD_SHA,
+    }
+    with mock.patch.object(runner, "set_issue_label") as set_label, mock.patch.object(
+        runner, "_get_merge_pr_state", return_value=pr_state
+    ), mock.patch.object(
+        runner, "_get_pr_comments", return_value=[_chatgpt_review_comment()]
+    ), mock.patch.object(
+        runner, "merge_pr_squash"
+    ) as merge, mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "run_codex_task"
+    ) as run_codex:
+        runner.process_issue(_github_action_issue())
+
+    assert set_label.call_args_list[0] == mock.call(
+        159, runner.LABEL_READY, runner.LABEL_RUNNING
+    )
+    merge.assert_called_once_with(123)
+    run_codex.assert_not_called()
 
 
 def test_simple_done_notification_without_pr_url_keeps_plain_message() -> None:

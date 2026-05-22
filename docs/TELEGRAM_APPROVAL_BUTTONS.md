@@ -11,8 +11,11 @@ request URL is present.
 The intended operator UX is:
 
 1. Runner finishes a pull request and posts a Telegram card.
-2. Oleksii chooses `approve`, `reject`, `details`, or `open_pr`.
-3. A future live stage handles Telegram callbacks.
+2. ChatGPT reviews the pull request and records `ChatGPT review decision:
+   CONTENT APPROVED` for the current PR head in the PR conversation.
+3. Oleksii chooses `approve`, `reject`, `details`, or `open_pr`.
+4. The live callback poller verifies the review marker before queueing an
+   approved merge action for Runner.
 
 Operator-facing Telegram text is Ukrainian and uses simple human wording. The
 main card is a short decision summary; technical review data belongs in
@@ -38,20 +41,25 @@ If Runner cannot build the `DONE` card, or Telegram rejects the card send with
 fallback text keeps the existing repository, issue, status, and PR link fields;
 it does not include the card failure or any bot token.
 
-Stage 1 callback validation blocks malformed payloads and callbacks whose head
-SHA does not match the current SHA supplied by the caller. Only a validated
-`approve` callback is passed to `core/action_gate.py`, where it becomes a
-dry-run `merge_pull_request` validation request. Rejecting a pull request,
-requesting details, or opening its URL does not ask `action_gate` for a live
+The live callback poller blocks malformed payloads and callbacks whose head
+marker does not match current GitHub pull request state. Before a Telegram
+`approve` can create a `GITHUB_ACTION_REQUEST`, the PR conversation must also
+contain the explicit public-safe review decision marker for the same PR and
+current head SHA or head marker. Rejecting a pull request, requesting details,
+or opening its URL stays audit-only and does not ask Runner for a live
 repository action.
 
-Stage 1 Runner integration sends button payloads only. It does not handle
-callbacks and does not perform a live merge or reject action. Outside the
-existing Runner issue comment flow it does not write GitHub state. Summaries,
-changed-file lists, and URLs are bounded before they enter the card payload.
-The payload records public PR review metadata only and does not carry source
-contents, credentials, or private runner state.
+Runner consumes the queued approved action separately. It re-checks PR state,
+the current head, and the ChatGPT review marker before it performs its
+allowlisted `merge_pr_squash` GitHub action. Telegram callbacks do not merge
+directly. Summaries, changed-file lists, URLs, and queued action fields remain
+bounded public-safe metadata; they do not carry source contents, credentials,
+or private runner state.
 
-A future live stage may perform a repository action only after re-checking pull
-request state, head SHA, changed files, and tests. That future stage must keep
-the stale-head and action-gate checks in front of repository side effects.
+Simple merge workflow:
+
+1. ChatGPT reviews the PR and records `CONTENT APPROVED`.
+2. The operator presses Telegram approve.
+3. Runner verifies review and PR state.
+4. Runner performs only the allowlisted GitHub action.
+5. ChatGPT verifies the result.
