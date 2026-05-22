@@ -15,13 +15,15 @@ Moving normal task execution out of the coordinator checkout reduces dirty
 checkout conflicts between issue work and queue coordination before parallel
 execution exists.
 
-Runner lane stage 1 reserves lane names for future routing. Normal task issues
-may set `Runner Lane: <name>` before the fenced task block; omitting it uses
-`default`. The allowlisted names are `default`, `lane-1`, and `lane-2`. The
-poller validates and stores the parsed lane with the task model, but stage 1
-does not route, prioritize, lock, or parallelize work by lane.
-Lane metadata smoke tests should confirm `Runner Lane: lane-1` appears in the
-Runner `DONE` report while execution remains single-runner.
+Runner lane stage 3 makes reserved lane names visible in GitHub before future
+routing. Normal task issues may set `Runner Lane: <name>` before the fenced
+task block; omitting it uses `default`. The allowlisted names are `default`,
+`lane-1`, and `lane-2`. When lane metadata is present, the poller applies the
+matching `runner:lane:*` GitHub label and repeats the parsed lane in the final
+Runner report. Lane labels are status markers only: this stage does not route,
+prioritize, lock, or parallelize work by lane.
+Lane metadata smoke tests should confirm `runner:lane:lane-1` and
+`Runner Lane: lane-1` appear while execution remains single-runner.
 
 An existing issue worktree is reused only when it is clean and already on the
 expected `runner/issue-N` branch. Otherwise the issue is blocked with cleanup

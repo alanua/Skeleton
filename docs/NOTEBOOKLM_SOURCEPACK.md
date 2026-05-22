@@ -342,6 +342,14 @@ smoke test.
 - `runner:running`
 - `runner:done`
 - `runner:blocked`
+- `runner:lane:default`
+- `runner:lane:lane-1`
+- `runner:lane:lane-2`
+
+The `runner:lane:*` labels are allowlisted visibility markers. Runner applies
+one when an issue body contains `Runner Lane:` metadata and repeats that lane
+in its final `DONE` or `BLOCKED` issue report. The lifecycle labels still drive
+pickup and completion; lane labels do not route or parallelize Runner work.
 
 ## Operator rule
 
@@ -409,8 +417,12 @@ Create these labels in the `alanua/Skeleton` repository:
 
 ```bash
 gh label create runner:ready --repo alanua/Skeleton --description "Ready for Hetzner Runner pickup"
+gh label create runner:running --repo alanua/Skeleton --description "Claimed by Hetzner Runner"
 gh label create runner:done --repo alanua/Skeleton --description "Completed by Hetzner Runner"
 gh label create runner:blocked --repo alanua/Skeleton --description "Blocked by Hetzner Runner"
+gh label create runner:lane:default --repo alanua/Skeleton --description "Visible default Runner lane marker"
+gh label create runner:lane:lane-1 --repo alanua/Skeleton --description "Visible Runner lane-1 marker"
+gh label create runner:lane:lane-2 --repo alanua/Skeleton --description "Visible Runner lane-2 marker"
 ```
 
 ## Task Issues
@@ -435,10 +447,12 @@ Add the requested bounded change here.
 ````
 
 The allowed lane names are `default`, `lane-1`, and `lane-2`. Omitting
-`Runner Lane:` selects `default`. When the metadata is present, Runner `DONE`
-and `BLOCKED` issue reports include the selected lane so lane-tagged tasks are
-visible before routing exists. This stage still polls and runs every ready task
-one at a time.
+`Runner Lane:` selects `default`. When the metadata is present, Runner applies
+the matching `runner:lane:*` GitHub label and includes the selected lane in its
+`DONE` or `BLOCKED` issue report. Lane labels are visibility markers for GitHub
+queue status; they do not select a different worker, route tasks, or add
+parallel execution. This stage still polls and runs every ready task one at a
+time.
 
 Do not put secrets, API keys, environment files, production credentials, or private tokens in task issues.
 

@@ -23,6 +23,14 @@ smoke test.
 - `runner:running`
 - `runner:done`
 - `runner:blocked`
+- `runner:lane:default`
+- `runner:lane:lane-1`
+- `runner:lane:lane-2`
+
+The `runner:lane:*` labels are allowlisted visibility markers. Runner applies
+one when an issue body contains `Runner Lane:` metadata and repeats that lane
+in its final `DONE` or `BLOCKED` issue report. The lifecycle labels still drive
+pickup and completion; lane labels do not route or parallelize Runner work.
 
 ## Operator rule
 
