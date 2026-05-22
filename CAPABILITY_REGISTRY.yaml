@@ -83,7 +83,15 @@ capabilities:
     module: scripts/runner_poll_github_tasks.py
     tested: true
     added: "2026-05-19"
-    description: Polls GitHub issues labeled runner:ready, executes bounded Codex tasks or explicit allowlisted host maintenance tasks on Hetzner Runner, creates draft PRs for code tasks, and reports results back to GitHub.
+    description: Polls GitHub issues labeled runner:ready, executes bounded Codex tasks in per-issue worktrees or explicit allowlisted host maintenance tasks on Hetzner Runner, creates draft PRs for code tasks, and reports results back to GitHub.
+
+  runner_worktree_execution:
+    status: stage1_single_lane
+    module: scripts/runner_poll_github_tasks.py
+    tested: true
+    live_runtime_execution: true
+    added: "2026-05-22"
+    description: Executes bounded normal Runner issues in per-issue git worktrees while keeping queue processing single-lane and preserving separate allowlisted host maintenance dispatch.
 
   notebooklm_sourcepack:
     status: available
