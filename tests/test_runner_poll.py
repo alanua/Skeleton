@@ -144,21 +144,114 @@ def test_apply_runner_lane_label_calls_gh_cli_for_explicit_lane_metadata() -> No
         has_lane_metadata=True,
     )
 
-    with mock.patch.object(runner, "run_command", return_value=(0, "")) as run_command:
+    with mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=(
+            (0, '[{"name": "runner:lane:lane-2"}]'),
+            (0, ""),
+        ),
+    ) as run_command:
         runner.apply_runner_lane_label(7, task)
 
-    run_command.assert_called_once_with(
-        [
-            "gh",
-            "issue",
-            "edit",
-            "7",
-            "--repo",
-            runner.REPO,
-            "--add-label",
-            runner.RUNNER_LANE_LABELS["lane-2"],
-        ]
+    run_command.assert_has_calls(
+        (
+            mock.call(
+                [
+                    "gh",
+                    "label",
+                    "list",
+                    "--repo",
+                    runner.REPO,
+                    "--search",
+                    runner.RUNNER_LANE_LABELS["lane-2"],
+                    "--json",
+                    "name",
+                ]
+            ),
+            mock.call(
+                [
+                    "gh",
+                    "issue",
+                    "edit",
+                    "7",
+                    "--repo",
+                    runner.REPO,
+                    "--add-label",
+                    runner.RUNNER_LANE_LABELS["lane-2"],
+                ]
+            ),
+        )
     )
+
+
+def test_apply_runner_lane_label_creates_missing_allowlisted_label() -> None:
+    task = runner.RunnerTask(
+        content="Do it",
+        lane=runner.RunnerLane("lane-1"),
+        has_lane_metadata=True,
+    )
+
+    with mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=((0, "[]"), (0, ""), (0, "")),
+    ) as run_command:
+        runner.apply_runner_lane_label(7, task)
+
+    run_command.assert_has_calls(
+        (
+            mock.call(
+                [
+                    "gh",
+                    "label",
+                    "list",
+                    "--repo",
+                    runner.REPO,
+                    "--search",
+                    runner.RUNNER_LANE_LABELS["lane-1"],
+                    "--json",
+                    "name",
+                ]
+            ),
+            mock.call(
+                [
+                    "gh",
+                    "label",
+                    "create",
+                    runner.RUNNER_LANE_LABELS["lane-1"],
+                    "--repo",
+                    runner.REPO,
+                    "--description",
+                    runner.RUNNER_LANE_LABEL_DESCRIPTIONS["lane-1"],
+                ]
+            ),
+            mock.call(
+                [
+                    "gh",
+                    "issue",
+                    "edit",
+                    "7",
+                    "--repo",
+                    runner.REPO,
+                    "--add-label",
+                    runner.RUNNER_LANE_LABELS["lane-1"],
+                ]
+            ),
+        )
+    )
+
+
+def test_ensure_runner_lane_label_refuses_non_allowlisted_lane() -> None:
+    with mock.patch.object(runner, "run_command") as run_command:
+        try:
+            runner.ensure_runner_lane_label(runner.RunnerLane("deploy"))
+        except ValueError as exc:
+            assert "non-allowlisted" in str(exc)
+        else:
+            raise AssertionError("expected a non-allowlisted lane to fail")
+
+    run_command.assert_not_called()
 
 
 def test_apply_runner_lane_label_skips_implicit_default_lane() -> None:

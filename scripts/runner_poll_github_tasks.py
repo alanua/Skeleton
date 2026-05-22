@@ -34,6 +34,11 @@ RUNNER_LANE_LABELS = {
     "lane-1": "runner:lane:lane-1",
     "lane-2": "runner:lane:lane-2",
 }
+RUNNER_LANE_LABEL_DESCRIPTIONS = {
+    "default": "Visible default Runner lane marker",
+    "lane-1": "Visible Runner lane-1 marker",
+    "lane-2": "Visible Runner lane-2 marker",
+}
 FINAL_LABELS_BY_STATUS = {
     "DONE": LABEL_DONE,
     "BLOCKED": LABEL_BLOCKED,
@@ -496,7 +501,7 @@ def apply_runner_lane_label(issue_number: int, task: RunnerTask | None) -> None:
     if task is None or not task.has_lane_metadata:
         return
 
-    label = RUNNER_LANE_LABELS[task.lane.name]
+    label = ensure_runner_lane_label(task.lane)
     code, output = run_command(
         [
             "gh",
@@ -511,6 +516,55 @@ def apply_runner_lane_label(issue_number: int, task: RunnerTask | None) -> None:
     )
     if code != 0:
         raise RuntimeError(f"gh issue lane label edit failed:\n{output}")
+
+
+def ensure_runner_lane_label(lane: RunnerLane) -> str:
+    label = RUNNER_LANE_LABELS.get(lane.name)
+    if label is None:
+        raise ValueError(f"Refusing to create non-allowlisted Runner lane `{lane.name}`.")
+
+    code, output = run_command(
+        [
+            "gh",
+            "label",
+            "list",
+            "--repo",
+            REPO,
+            "--search",
+            label,
+            "--json",
+            "name",
+        ]
+    )
+    if code != 0:
+        raise RuntimeError(f"gh runner lane label list failed:\n{output}")
+
+    try:
+        existing_labels = json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"gh runner lane label list returned invalid JSON:\n{output}") from exc
+
+    if any(
+        isinstance(existing_label, dict) and existing_label.get("name") == label
+        for existing_label in existing_labels
+    ):
+        return label
+
+    code, output = run_command(
+        [
+            "gh",
+            "label",
+            "create",
+            label,
+            "--repo",
+            REPO,
+            "--description",
+            RUNNER_LANE_LABEL_DESCRIPTIONS[lane.name],
+        ]
+    )
+    if code != 0:
+        raise RuntimeError(f"gh runner lane label create failed:\n{output}")
+    return label
 
 
 def extract_pr_url(report: str) -> str | None:
