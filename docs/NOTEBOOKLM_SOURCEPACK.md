@@ -379,6 +379,9 @@ or `systemctl restart` while a task is running.
 - 2026-05-22: Worktree prompt fix merged; Telegram approve -> Runner merge pilot ready.
 - Pilot-ready: Telegram approve can request the bounded Runner merge path.
 - Signed pilot: callback HMAC config is active for Telegram approve.
+- Telegram PR card approve writes the signed head-bound approval record Runner
+  verifies before its bounded squash merge path; routine approval does not need
+  an operator GitHub comment or merge retry.
 
 ## Smoke test procedure
 

@@ -406,12 +406,14 @@ def test_approve_callback_posts_audit_comment_when_pr_head_marker_matches() -> N
             "Merge Action: squash\n"
             "Approval Source: signed_telegram_callback\n"
             f"Callback Digest: {CALLBACK_DATA.rsplit(':', 1)[-1]}\n\n"
-            "Runner must verify the PR, review marker, and head before squash merge."
+            "Runner must verify the PR, signed approval record, and head before squash merge."
         ),
         "labels": ["runner:ready"],
         "title": "Runner merge approved PR #120",
     }
     assert str(result["comment"]).startswith("Operator event record")
+    assert "Verified approval record: signed_telegram_callback" in str(result["comment"])
+    assert f"Verified head SHA: {HEAD_SHA}" in str(result["comment"])
 
 
 def test_approve_callback_is_blocked_when_pr_head_marker_mismatches() -> None:

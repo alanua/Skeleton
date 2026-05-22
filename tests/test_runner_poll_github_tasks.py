@@ -66,9 +66,10 @@ def _merge_comments() -> list[dict[str, str]]:
                 f"Head marker: {HEAD_SHA[:8]}\n"
                 f"Callback digest: {CALLBACK_DIGEST}\n"
                 "Result: recorded\n"
+                "Verified approval record: signed_telegram_callback\n"
+                f"Verified head SHA: {HEAD_SHA}\n"
             )
-        },
-        {"body": f"{runner.CHATGPT_CONTENT_APPROVED_MARKER}\nPR: #123\nHead SHA: {HEAD_SHA}"},
+        }
     ]
 
 
@@ -88,6 +89,12 @@ def _merge_pr_state(**updates: object) -> dict[str, object]:
 def _telegram_response() -> mock.MagicMock:
     response = mock.MagicMock()
     response.__enter__.return_value = response
+    return response
+
+
+def _json_response(payload: object) -> mock.MagicMock:
+    response = _telegram_response()
+    response.read.return_value = json.dumps(payload).encode("utf-8")
     return response
 
 
@@ -307,12 +314,30 @@ def test_extracts_bounded_telegram_approved_merge_request() -> None:
     )
 
 
-def test_callback_merge_request_smoke_blocks_without_chatgpt_content_marker() -> None:
-    body = callback_poller._render_runner_merge_request_body(
-        pr_number=123,
-        head_sha=HEAD_SHA,
-        callback_digest=CALLBACK_DIGEST,
-    )
+def test_callback_merge_request_smoke_uses_signed_callback_approval_record() -> None:
+    callback_data = f"tpr1:approve:p123:{HEAD_SHA[:8]}:{CALLBACK_DIGEST}"
+    with mock.patch.dict(
+        os.environ,
+        {
+            "GITHUB_TOKEN": "github-secret",
+            runner.TELEGRAM_CALLBACK_HMAC_ENV: CALLBACK_HMAC_SECRET,
+        },
+        clear=True,
+    ), mock.patch.object(
+        callback_poller.urllib.request,
+        "urlopen",
+        side_effect=(
+            _json_response({"number": 123, "head": {"sha": HEAD_SHA}}),
+            _json_response({"id": 88}),
+            _json_response({"number": 910}),
+        ),
+    ) as urlopen:
+        callback_result = callback_poller.handle_callback_query(
+            {"id": "callback-query-1", "data": callback_data}
+        )
+
+    merge_issue_request = urlopen.call_args_list[-1].args[0]
+    body = json.loads(merge_issue_request.data.decode("utf-8"))["body"]
 
     mode, request, reason = runner.extract_telegram_approved_pr_merge_request(body)
 
@@ -329,12 +354,15 @@ def test_callback_merge_request_smoke_blocks_without_chatgpt_content_marker() ->
     ), mock.patch.object(
         runner,
         "get_pr_merge_state",
-        return_value=_merge_pr_state(comments=_merge_comments()[:1]),
-    ), mock.patch.object(runner, "run_command") as run:
+        return_value=_merge_pr_state(
+            comments=[{"body": str(callback_result["comment"])}]
+        ),
+    ), mock.patch.object(runner, "run_command", return_value=(0, "merged")) as run:
         report = runner.execute_telegram_approved_pr_merge(request)
 
-    assert report == "BLOCKED: ChatGPT CONTENT APPROVED marker is missing for this PR head."
-    run.assert_not_called()
+    assert callback_result["runner_merge_request"] == "requested"
+    assert report.startswith("DONE:")
+    run.assert_called_once()
 
 
 @pytest.mark.parametrize(
@@ -426,8 +454,20 @@ def test_blocks_telegram_approved_merge_when_callback_digest_is_not_signed() -> 
         ({"isDraft": True}, "still draft"),
         ({"mergeable": "CONFLICTING"}, "not mergeable"),
         ({"headRefOid": "b" * 40}, "head does not match"),
-        ({"comments": _merge_comments()[1:]}, "Signed Telegram approve audit"),
-        ({"comments": _merge_comments()[:1]}, "CONTENT APPROVED"),
+        ({"comments": []}, "Signed Telegram approve audit"),
+        (
+            {
+                "comments": [
+                    {
+                        "body": _merge_comments()[0]["body"].replace(
+                            f"Verified head SHA: {HEAD_SHA}",
+                            f"Verified head SHA: {'b' * 40}",
+                        )
+                    }
+                ]
+            },
+            "Signed Telegram approve audit",
+        ),
     ),
 )
 def test_blocks_telegram_approved_merge_when_verification_fails(
