@@ -29,6 +29,8 @@ the configured worktree root.
 Runtime maintenance tasks are separate allowlisted host-runner actions. They
 continue to bypass Codex and do not use Codex issue worktrees.
 
+Lane metadata smoke test after sync is active.
+
 Future stages can add file locks, lane routing, and the Antigravity helper route
 after this execution boundary is stable.
 
