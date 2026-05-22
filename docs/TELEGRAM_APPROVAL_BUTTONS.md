@@ -84,6 +84,7 @@ creates the bounded Runner merge request; the operator does not add a separate
 GitHub review marker or retry the merge issue.
 
 Smoke test note: a docs-only PR can verify the Telegram card approval flow.
+Smoke test note: verify the updated PR card text in the live Telegram notification.
 
 Summaries, changed-file lists, and URLs are bounded before they enter the card
 payload. The payload records public PR review metadata only and does not carry
