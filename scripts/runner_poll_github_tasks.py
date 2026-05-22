@@ -53,6 +53,9 @@ TELEGRAM_PR_READY_BUTTON_LABELS = {
     "open_pr": "Відкрити PR",
 }
 RUNTIME_MAINTENANCE_MODE = "RUNTIME_MAINTENANCE_TASK"
+GITHUB_ACTION_REQUEST_MODE = "GITHUB_ACTION_REQUEST"
+MERGE_PR_SQUASH_ACTION = "merge_pr_squash"
+CHATGPT_REVIEW_DECISION = "ChatGPT review decision: CONTENT APPROVED"
 SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME = "sync_telegram_callback_poller_runtime"
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset((SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,))
 TELEGRAM_CALLBACK_POLLER_SERVICE = "skeleton-telegram-callback-poll.service"
@@ -277,9 +280,43 @@ def extract_runtime_maintenance_task_id(body: str) -> tuple[bool, str | None]:
     return True, task_id.group("task_id") if task_id else None
 
 
+def extract_github_action_request(
+    body: str,
+) -> tuple[bool, str | None, int | None, str | None]:
+    mode_found = re.search(
+        rf"^\s*Mode:\s*{GITHUB_ACTION_REQUEST_MODE}\s*$",
+        body or "",
+        re.MULTILINE,
+    )
+    if mode_found is None:
+        return False, None, None, None
+
+    action = re.search(r"^\s*Action:\s*(?P<action>[a-z0-9_]+)\s*$", body, re.MULTILINE)
+    repo = re.search(r"^\s*Repository:\s*(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\s*$", body, re.MULTILINE)
+    pr_number = re.search(
+        r"^\s*Pull request:\s*#(?P<number>[1-9]\d*)\s*$",
+        body,
+        re.MULTILINE,
+    )
+    expected_head_sha = re.search(
+        r"^\s*Expected head SHA:\s*(?P<sha>[0-9a-fA-F]{40})\s*$",
+        body,
+        re.MULTILINE,
+    )
+    if repo is None or repo.group("repo") != REPO:
+        return True, action.group("action") if action else None, None, None
+    return (
+        True,
+        action.group("action") if action else None,
+        int(pr_number.group("number")) if pr_number else None,
+        expected_head_sha.group("sha").lower() if expected_head_sha else None,
+    )
+
+
 def has_runner_task_body(body: str) -> bool:
     maintenance_mode, _task_id = extract_runtime_maintenance_task_id(body)
-    return extract_task_block(body) is not None or maintenance_mode
+    action_mode, _action, _pr_number, _head_sha = extract_github_action_request(body)
+    return extract_task_block(body) is not None or maintenance_mode or action_mode
 
 
 def run_codex_task(task_content: str, workdir: str) -> tuple[int, str]:
@@ -746,6 +783,149 @@ def block_issue(issue_number: int, message: str, remove_label: str = LABEL_READY
     notify_task_finished(issue_number, "BLOCKED")
 
 
+def _gh_json(command: list[str], error_label: str) -> Any:
+    code, output = run_command(command)
+    if code != 0:
+        raise RuntimeError(f"{error_label} failed:\n{output}")
+    return json.loads(output or "{}")
+
+
+def _get_merge_pr_state(pr_number: int) -> dict[str, Any]:
+    payload = _gh_json(
+        [
+            "gh",
+            "pr",
+            "view",
+            str(pr_number),
+            "--repo",
+            REPO,
+            "--json",
+            "number,headRefOid,state,isDraft",
+        ],
+        "gh pr view",
+    )
+    if not isinstance(payload, dict):
+        raise RuntimeError("gh pr view returned non-object JSON")
+    return payload
+
+
+def _get_pr_comments(pr_number: int) -> list[dict[str, Any]]:
+    payload = _gh_json(
+        [
+            "gh",
+            "api",
+            f"repos/{REPO}/issues/{pr_number}/comments",
+            "--paginate",
+        ],
+        "gh api PR comments",
+    )
+    if not isinstance(payload, list):
+        raise RuntimeError("gh api PR comments returned non-list JSON")
+    return [comment for comment in payload if isinstance(comment, dict)]
+
+
+def _has_matching_chatgpt_review(
+    comments: list[dict[str, Any]],
+    pr_number: int,
+    head_sha: str,
+) -> bool:
+    expected_sha = head_sha.lower()
+    if re.fullmatch(r"[0-9a-f]{40}", expected_sha) is None:
+        return False
+
+    for comment in comments:
+        body = comment.get("body")
+        if not isinstance(body, str) or CHATGPT_REVIEW_DECISION not in body:
+            continue
+        if re.search(
+            rf"^Pull request:\s*#{pr_number}\s*$",
+            body,
+            re.MULTILINE,
+        ) is None:
+            continue
+        sha_match = re.search(
+            r"^Head SHA:\s*(?P<sha>[0-9a-fA-F]{40})\s*$",
+            body,
+            re.MULTILINE,
+        )
+        if sha_match is not None and sha_match.group("sha").lower() == expected_sha:
+            return True
+        marker_match = re.search(
+            r"^Head marker:\s*(?P<marker>[0-9a-fA-F]{8})\s*$",
+            body,
+            re.MULTILINE,
+        )
+        if marker_match is not None and expected_sha.startswith(
+            marker_match.group("marker").lower()
+        ):
+            return True
+    return False
+
+
+def _github_action_request_block_reason(
+    action: str | None,
+    pr_number: int | None,
+    expected_head_sha: str | None,
+) -> str | None:
+    if action != MERGE_PR_SQUASH_ACTION:
+        return "GitHub action request action is missing or not allowlisted."
+    if pr_number is None or expected_head_sha is None:
+        return "GitHub action request PR binding is incomplete."
+
+    pr_state = _get_merge_pr_state(pr_number)
+    if pr_state.get("number") != pr_number:
+        return "GitHub action request PR number does not match current PR state."
+    if pr_state.get("state") != "OPEN" or pr_state.get("isDraft") is True:
+        return "GitHub action request PR is not an open non-draft PR."
+    current_head_sha = pr_state.get("headRefOid")
+    if not isinstance(current_head_sha, str) or current_head_sha.lower() != expected_head_sha:
+        return "GitHub action request head SHA does not match current PR head."
+    if not _has_matching_chatgpt_review(
+        _get_pr_comments(pr_number),
+        pr_number,
+        current_head_sha,
+    ):
+        return "ChatGPT CONTENT APPROVED review marker is missing for current PR head."
+    return None
+
+
+def merge_pr_squash(pr_number: int) -> None:
+    code, output = run_command(
+        ["gh", "pr", "merge", str(pr_number), "--repo", REPO, "--squash"]
+    )
+    if code != 0:
+        raise RuntimeError(f"gh pr merge failed:\n{output}")
+
+
+def process_github_action_request_issue(
+    issue_number: int,
+    action: str | None,
+    pr_number: int | None,
+    expected_head_sha: str | None,
+) -> None:
+    block_reason = _github_action_request_block_reason(
+        action,
+        pr_number,
+        expected_head_sha,
+    )
+    if block_reason is not None:
+        block_issue(issue_number, block_reason, remove_label=LABEL_RUNNING)
+        return
+
+    assert pr_number is not None
+    merge_pr_squash(pr_number)
+    report = "\n".join(
+        (
+            "DONE: Runner GitHub action request completed.",
+            f"action={MERGE_PR_SQUASH_ACTION}",
+            f"pull_request=#{pr_number}",
+        )
+    )
+    post_issue_comment(issue_number, report)
+    set_issue_label(issue_number, LABEL_RUNNING, LABEL_DONE)
+    notify_task_finished(issue_number, "DONE", report)
+
+
 def _maintenance_report(
     status: str, task_id: str, status_lines: list[str], success_criteria: str
 ) -> str:
@@ -978,6 +1158,9 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
         maintenance_mode, maintenance_task_id = extract_runtime_maintenance_task_id(
             issue_body
         )
+        action_mode, action, action_pr_number, action_head_sha = (
+            extract_github_action_request(issue_body)
+        )
         if maintenance_mode and maintenance_task_id is None:
             block_issue(
                 issue_number,
@@ -992,7 +1175,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             return
 
         task_content = extract_task_block(issue_body)
-        if task_content is None:
+        if task_content is None and not action_mode:
             if maintenance_mode:
                 task_content = ""
             else:
@@ -1014,6 +1197,15 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
 
         set_issue_label(issue_number, LABEL_READY, LABEL_RUNNING)
         claimed = True
+
+        if action_mode:
+            process_github_action_request_issue(
+                issue_number,
+                action,
+                action_pr_number,
+                action_head_sha,
+            )
+            return
 
         if maintenance_mode and maintenance_task_id is not None:
             process_runtime_maintenance_issue(

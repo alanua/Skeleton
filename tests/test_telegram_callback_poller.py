@@ -36,6 +36,16 @@ def github_pr_state(*, number: int = 120, head_sha: str = HEAD_SHA) -> dict[str,
     return {"number": number, "head": {"sha": head_sha}}
 
 
+def review_comment(*, pr_number: int = 120, head_sha: str = HEAD_SHA) -> dict[str, str]:
+    return {
+        "body": (
+            f"{poller.CHATGPT_REVIEW_DECISION}\n"
+            f"Pull request: #{pr_number}\n"
+            f"Head SHA: {head_sha}"
+        )
+    }
+
+
 def test_parses_valid_callback_data() -> None:
     parsed = poller.parse_callback_data(CALLBACK_DATA)
 
@@ -246,24 +256,73 @@ def test_poll_once_duplicate_callback_skips_duplicate_audit_comment(
     assert poller.TELEGRAM_API_BASE not in json.dumps(result, sort_keys=True)
 
 
-def test_approve_callback_posts_audit_comment_when_pr_head_marker_matches() -> None:
+def test_approve_callback_with_chatgpt_review_creates_action_request() -> None:
     with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "github-secret"}, clear=True), mock.patch.object(
         poller.urllib.request,
         "urlopen",
-        side_effect=(response(github_pr_state()), response({"id": 88})),
+        side_effect=(
+            response(github_pr_state()),
+            response([review_comment()]),
+            response({"number": 501, "html_url": "https://github.com/alanua/Skeleton/issues/501"}),
+            response({"id": 88}),
+        ),
     ) as urlopen:
         result = poller.handle_callback_query(query())
 
-    assert result["status"] == "comment_posted"
+    assert result["status"] == "action_request_created"
     assert result["comment_posted"] is True
-    assert urlopen.call_count == 2
-    fetch_request, post_request = [call.args[0] for call in urlopen.call_args_list]
+    assert urlopen.call_count == 4
+    fetch_request, comments_request, action_request, post_request = [
+        call.args[0] for call in urlopen.call_args_list
+    ]
     assert fetch_request.full_url.endswith("/repos/alanua/Skeleton/pulls/120")
     assert fetch_request.get_method() == "GET"
+    assert comments_request.full_url.endswith("/repos/alanua/Skeleton/issues/120/comments")
+    assert comments_request.get_method() == "GET"
+    assert action_request.full_url.endswith("/repos/alanua/Skeleton/issues")
+    assert action_request.get_method() == "POST"
+    assert request_body(action_request)["labels"] == ["runner:ready"]
+    assert "Mode: GITHUB_ACTION_REQUEST" in str(request_body(action_request)["body"])
+    assert "Action: merge_pr_squash" in str(request_body(action_request)["body"])
     assert post_request.full_url.endswith("/repos/alanua/Skeleton/issues/120/comments")
     assert post_request.get_method() == "POST"
     assert request_body(post_request) == {"body": result["comment"]}
     assert str(result["comment"]).startswith("Operator event record")
+
+
+def test_approve_callback_without_chatgpt_review_does_not_create_action_request() -> None:
+    with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "github-secret"}, clear=True), mock.patch.object(
+        poller.urllib.request,
+        "urlopen",
+        side_effect=(response(github_pr_state()), response([])),
+    ) as urlopen:
+        result = poller.handle_callback_query(query())
+
+    assert result["status"] == "blocked"
+    assert "ChatGPT" in str(result["reason"])
+    urls = [call.args[0].full_url for call in urlopen.call_args_list]
+    assert urls == [
+        "https://api.github.com/repos/alanua/Skeleton/pulls/120",
+        "https://api.github.com/repos/alanua/Skeleton/issues/120/comments",
+    ]
+
+
+def test_approve_callback_with_stale_review_head_is_blocked() -> None:
+    with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "github-secret"}, clear=True), mock.patch.object(
+        poller.urllib.request,
+        "urlopen",
+        side_effect=(
+            response(github_pr_state()),
+            response([review_comment(head_sha="c" * 40)]),
+        ),
+    ) as urlopen:
+        result = poller.handle_callback_query(query())
+
+    assert result["status"] == "blocked"
+    assert result["github"] == "chatgpt_review_checked"
+    assert all(
+        call.args[0].get_method() == "GET" for call in urlopen.call_args_list
+    )
 
 
 def test_approve_callback_is_blocked_when_pr_head_marker_mismatches() -> None:
@@ -304,6 +363,24 @@ def test_details_callback_renders_audit_comment() -> None:
 
     assert poller.render_audit_comment(parsed).startswith("Operator event record")
     assert "Action: telegram_details" in poller.render_audit_comment(parsed)
+
+
+def test_details_callback_posts_audit_comment_only() -> None:
+    details = "tpr1:details:p120:deadbeef:abcdef012345"
+    with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "github-secret"}, clear=True), mock.patch.object(
+        poller.urllib.request,
+        "urlopen",
+        side_effect=(response(github_pr_state()), response({"id": 91})),
+    ) as urlopen:
+        result = poller.handle_callback_query(query(details))
+
+    urls = [call.args[0].full_url for call in urlopen.call_args_list]
+    assert result["status"] == "comment_posted"
+    assert "Action: telegram_details" in str(result["comment"])
+    assert urls == [
+        "https://api.github.com/repos/alanua/Skeleton/pulls/120",
+        "https://api.github.com/repos/alanua/Skeleton/issues/120/comments",
+    ]
 
 
 def test_details_callback_accepts_nosha_head_marker() -> None:
@@ -369,7 +446,13 @@ def test_no_token_appears_in_returned_result_or_comment() -> None:
     ), mock.patch.object(
         poller.urllib.request,
         "urlopen",
-        side_effect=(response(github_pr_state()), response({"id": 90}), response()),
+        side_effect=(
+            response(github_pr_state()),
+            response([review_comment()]),
+            response({"number": 502}),
+            response({"id": 90}),
+            response(),
+        ),
     ):
         result = poller.handle_callback_query(query())
 
@@ -391,7 +474,7 @@ def test_no_subprocess_usage() -> None:
     urlopen.assert_not_called()
 
 
-def test_stage_1_source_has_no_pr_action_endpoints() -> None:
+def test_callback_source_has_no_direct_pr_mutation_endpoints() -> None:
     script = Path(poller.__file__).read_text(encoding="utf-8")
 
     assert "/merge" not in script

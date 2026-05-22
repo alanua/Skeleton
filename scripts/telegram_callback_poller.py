@@ -19,6 +19,10 @@ HTTP_TIMEOUT_SECONDS = 15
 TELEGRAM_CALLBACK_DATA_LIMIT = 64
 TELEGRAM_UPDATE_LIMIT = 25
 CALLBACK_ID_HISTORY_LIMIT = 500
+RUNNER_READY_LABEL = "runner:ready"
+GITHUB_ACTION_REQUEST_MODE = "GITHUB_ACTION_REQUEST"
+MERGE_ACTION = "merge_pr_squash"
+CHATGPT_REVIEW_DECISION = "ChatGPT review decision: CONTENT APPROVED"
 DEFAULT_CALLBACK_STATE_PATH = Path(
     "/home/agent/agent-dev/state/telegram_callback_poller.json"
 )
@@ -142,6 +146,34 @@ def handle_callback_query(
             posted=False,
             comment=render_audit_comment(parsed, result="blocked"),
         )
+        return _answer_callback_query(result, callback_id, dry_run=False)
+
+    if parsed.action == "approve":
+        review_block_reason = _review_block_reason(
+            parsed,
+            pr_state,
+            _fetch_pr_comments(parsed.pr_number, github_token),
+        )
+        if review_block_reason is not None:
+            result = _result(
+                status="blocked",
+                reason=review_block_reason,
+                github="chatgpt_review_checked",
+                posted=False,
+                comment=render_audit_comment(parsed, result="blocked"),
+            )
+            return _answer_callback_query(result, callback_id, dry_run=False)
+
+        action_request = _create_merge_action_request(parsed, pr_state, github_token)
+        _post_pr_comment(parsed.pr_number, comment, github_token)
+        result = _result(
+            status="action_request_created",
+            reason="reviewed Telegram approve queued a Runner merge action request.",
+            github="action_request_created",
+            posted=True,
+            comment=comment,
+        )
+        result["action_request"] = action_request
         return _answer_callback_query(result, callback_id, dry_run=False)
 
     _post_pr_comment(parsed.pr_number, comment, github_token)
@@ -354,6 +386,117 @@ def _fetch_pr_state(pr_number: int, github_token: str) -> Mapping[str, object]:
     if not isinstance(payload, Mapping):
         raise RuntimeError("GitHub PR response was not an object.")
     return payload
+
+
+def _fetch_pr_comments(pr_number: int, github_token: str) -> list[object]:
+    payload = _github_json_request(
+        f"/repos/{REPO}/issues/{pr_number}/comments",
+        github_token,
+        method="GET",
+    )
+    return payload if isinstance(payload, list) else []
+
+
+def _review_block_reason(
+    parsed: ParsedCallback,
+    pr_state: Mapping[str, object],
+    comments: list[object],
+) -> str | None:
+    head = pr_state.get("head")
+    head_sha = head.get("sha") if isinstance(head, Mapping) else None
+    if not isinstance(head_sha, str) or not _has_matching_review_marker(
+        comments,
+        parsed.pr_number,
+        head_sha,
+        parsed.head_marker,
+    ):
+        return (
+            "Telegram approve requires a ChatGPT CONTENT APPROVED review marker "
+            "for this PR and current head."
+        )
+    return None
+
+
+def _has_matching_review_marker(
+    comments: list[object],
+    pr_number: int,
+    head_sha: str,
+    head_marker: str | None = None,
+) -> bool:
+    expected_sha = head_sha.lower()
+    expected_marker = (head_marker or expected_sha[:8]).lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_sha):
+        return False
+
+    for comment in comments:
+        body = comment.get("body") if isinstance(comment, Mapping) else None
+        if not isinstance(body, str) or CHATGPT_REVIEW_DECISION not in body:
+            continue
+        if re.search(
+            rf"^Pull request:\s*#{pr_number}\s*$",
+            body,
+            re.MULTILINE,
+        ) is None:
+            continue
+        sha_match = re.search(
+            r"^Head SHA:\s*(?P<sha>[0-9a-fA-F]{40})\s*$",
+            body,
+            re.MULTILINE,
+        )
+        if sha_match is not None and sha_match.group("sha").lower() == expected_sha:
+            return True
+        marker_match = re.search(
+            r"^Head marker:\s*(?P<marker>[0-9a-fA-F]{8})\s*$",
+            body,
+            re.MULTILINE,
+        )
+        if (
+            marker_match is not None
+            and marker_match.group("marker").lower() == expected_marker
+            and expected_sha.startswith(expected_marker)
+        ):
+            return True
+    return False
+
+
+def _create_merge_action_request(
+    parsed: ParsedCallback,
+    pr_state: Mapping[str, object],
+    github_token: str,
+) -> Mapping[str, object]:
+    head = pr_state.get("head")
+    head_sha = head.get("sha") if isinstance(head, Mapping) else None
+    if not isinstance(head_sha, str):
+        raise RuntimeError("GitHub PR head SHA was unavailable for action request.")
+    payload = _github_json_request(
+        f"/repos/{REPO}/issues",
+        github_token,
+        method="POST",
+        payload={
+            "title": f"Runner GitHub action: squash merge PR #{parsed.pr_number}",
+            "body": _render_merge_action_request(parsed.pr_number, head_sha),
+            "labels": [RUNNER_READY_LABEL],
+        },
+    )
+    if not isinstance(payload, Mapping):
+        raise RuntimeError("GitHub action request issue response was not an object.")
+    return {
+        "number": payload.get("number"),
+        "url": payload.get("html_url") or payload.get("url"),
+    }
+
+
+def _render_merge_action_request(pr_number: int, head_sha: str) -> str:
+    return "\n".join(
+        (
+            f"Mode: {GITHUB_ACTION_REQUEST_MODE}",
+            f"Action: {MERGE_ACTION}",
+            f"Repository: {REPO}",
+            f"Pull request: #{pr_number}",
+            f"Expected head SHA: {head_sha}",
+            "Approved via: Telegram",
+        )
+    )
 
 
 def _post_pr_comment(pr_number: int, comment: str, github_token: str) -> None:
