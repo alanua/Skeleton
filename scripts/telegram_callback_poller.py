@@ -19,6 +19,10 @@ GITHUB_API_BASE = "https://api.github.com"
 TELEGRAM_API_BASE = "https://api.telegram.org"
 HTTP_TIMEOUT_SECONDS = 15
 TELEGRAM_CALLBACK_DATA_LIMIT = 64
+TELEGRAM_CALLBACK_ANSWER_TEXT_LIMIT = 180
+TELEGRAM_DETAILS_TITLE_LIMIT = 64
+TELEGRAM_DETAILS_STATE_LIMIT = 10
+TELEGRAM_DETAILS_COUNT_LIMIT = 7
 TELEGRAM_UPDATE_LIMIT = 25
 CALLBACK_ID_HISTORY_LIMIT = 500
 CALLBACK_DATA_HISTORY_LIMIT = 500
@@ -181,9 +185,14 @@ def handle_callback_query(
     )
     _post_pr_comment(parsed.pr_number, comment, github_token)
     runner_merge_request = "not_requested"
+    callback_answer_text = None
+    callback_answer_alert = False
     if parsed.action == "approve":
         _create_runner_merge_request(parsed, pr_state, github_token)
         runner_merge_request = "requested"
+    elif parsed.action == "details":
+        callback_answer_text = _render_details_answer_text(parsed, pr_state)
+        callback_answer_alert = True
     result = _result(
         status="comment_posted",
         reason="audit comment posted.",
@@ -192,7 +201,13 @@ def handle_callback_query(
         comment=comment,
     )
     result["runner_merge_request"] = runner_merge_request
-    return _answer_callback_query(result, callback_id, dry_run=False)
+    return _answer_callback_query(
+        result,
+        callback_id,
+        dry_run=False,
+        text=callback_answer_text,
+        show_alert=callback_answer_alert,
+    )
 
 
 def poll_once(*, state_path: Path | None = None) -> dict[str, object]:
@@ -551,6 +566,61 @@ def _pr_head_sha(pr_state: Mapping[str, object]) -> str:
     return head_sha.lower()
 
 
+def _render_details_answer_text(
+    parsed: ParsedCallback,
+    pr_state: Mapping[str, object],
+) -> str:
+    title = _bounded_details_value(
+        pr_state.get("title"),
+        fallback="Title unavailable",
+        limit=TELEGRAM_DETAILS_TITLE_LIMIT,
+    )
+    state = _bounded_details_value(
+        pr_state.get("state"),
+        fallback="unknown",
+        limit=TELEGRAM_DETAILS_STATE_LIMIT,
+    )
+    draft = "draft" if pr_state.get("draft") is True else "ready"
+    changed_files = _bounded_count(pr_state.get("changed_files"))
+    additions = _bounded_count(pr_state.get("additions"))
+    deletions = _bounded_count(pr_state.get("deletions"))
+    return _bounded_callback_answer_text(
+        "\n".join(
+            (
+                f"PR #{parsed.pr_number}: {title}",
+                f"State: {state}, {draft}. Files: {changed_files}. Diff: +{additions}/-{deletions}.",
+                f"Head marker: {parsed.head_marker}",
+            )
+        )
+    )
+
+
+def _bounded_details_value(value: object, *, fallback: str, limit: int) -> str:
+    if not isinstance(value, str):
+        return fallback
+    normalized = " ".join(value.split())
+    if not normalized:
+        return fallback
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: limit - 3] + "..."
+
+
+def _bounded_count(value: object) -> str:
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        rendered = str(value)
+        if len(rendered) <= TELEGRAM_DETAILS_COUNT_LIMIT:
+            return rendered
+        return "9" * (TELEGRAM_DETAILS_COUNT_LIMIT - 1) + "+"
+    return "?"
+
+
+def _bounded_callback_answer_text(text: str) -> str:
+    if len(text) <= TELEGRAM_CALLBACK_ANSWER_TEXT_LIMIT:
+        return text
+    return text[: TELEGRAM_CALLBACK_ANSWER_TEXT_LIMIT - 3] + "..."
+
+
 def _github_json_request(
     path: str,
     github_token: str,
@@ -584,6 +654,8 @@ def _answer_callback_query(
     callback_id: str | None,
     *,
     dry_run: bool,
+    text: str | None = None,
+    show_alert: bool = False,
 ) -> dict[str, object]:
     if dry_run:
         result["telegram_answer"] = "not_called_dry_run"
@@ -594,7 +666,12 @@ def _answer_callback_query(
         result["telegram_answer"] = "skipped"
         return result
 
-    payload = urllib.parse.urlencode({"callback_query_id": callback_id}).encode("utf-8")
+    answer_payload = {"callback_query_id": callback_id}
+    if text is not None:
+        answer_payload["text"] = _bounded_callback_answer_text(text)
+    if show_alert:
+        answer_payload["show_alert"] = "true"
+    payload = urllib.parse.urlencode(answer_payload).encode("utf-8")
     request = urllib.request.Request(
         f"{TELEGRAM_API_BASE}/bot{bot_token}/answerCallbackQuery",
         data=payload,
