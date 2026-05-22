@@ -262,6 +262,7 @@ def test_runner_task_accepts_allowlisted_lane_name() -> None:
     assert task == runner.RunnerTask(
         content="Do it",
         lane=runner.RunnerLane("lane-1"),
+        has_lane_metadata=True,
     )
 
 

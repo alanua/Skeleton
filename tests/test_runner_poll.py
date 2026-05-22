@@ -461,6 +461,49 @@ def test_process_issue_posts_done_on_success() -> None:
     notify.assert_called_once_with(5, "DONE", report)
 
 
+def test_process_issue_reports_runner_lane_metadata_on_success() -> None:
+    issue = {
+        "number": 25,
+        "title": "Lane report",
+        "body": "Runner Lane: lane-2\n\n```task\nDo it\n```",
+    }
+
+    with mock.patch.object(
+        runner, "prepare_issue_branch", return_value=(0, "", "runner/issue-25")
+    ), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, "codex ok")
+    ), mock.patch.object(
+        runner, "finalize_success", return_value="DONE report"
+    ), mock.patch.object(
+        runner, "cleanup_issue_worktree", return_value=(0, "")
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ) as comment, mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(runner, "notify_task_finished"):
+        runner.process_issue(issue, workdir="/repo")
+
+    comment.assert_called_once_with(25, "DONE report\nRunner Lane: lane-2")
+
+
+def test_block_issue_reports_runner_lane_metadata() -> None:
+    task = runner.RunnerTask(
+        content="Do it",
+        lane=runner.RunnerLane("lane-1"),
+        has_lane_metadata=True,
+    )
+
+    with mock.patch.object(runner, "post_issue_comment") as comment, mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(runner, "notify_task_finished"):
+        runner.block_issue(26, "Codex task failed.", runner_task=task)
+
+    comment.assert_called_once_with(
+        26,
+        "BLOCKED: Codex task failed.\nRunner Lane: lane-1",
+    )
+
+
 def test_process_issue_keeps_done_transition_when_telegram_send_fails() -> None:
     fence = "`" * 3
     issue = {"number": 15, "title": "Notify fail", "body": f"{fence}task\nDo it\n{fence}"}
