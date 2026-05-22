@@ -78,6 +78,27 @@ _CALLBACK_DIGEST_RE = re.compile(r"^[0-9a-f]{12}$")
 
 
 @dataclass(frozen=True)
+class RunnerLane:
+    name: str
+
+
+DEFAULT_RUNNER_LANE = RunnerLane("default")
+ALLOWED_RUNNER_LANES = frozenset(
+    (
+        DEFAULT_RUNNER_LANE.name,
+        "lane-1",
+        "lane-2",
+    )
+)
+
+
+@dataclass(frozen=True)
+class RunnerTask:
+    content: str
+    lane: RunnerLane = DEFAULT_RUNNER_LANE
+
+
+@dataclass(frozen=True)
 class TelegramApprovedPrMergeRequest:
     pr_number: int
     approved_head_sha: str
@@ -292,6 +313,27 @@ def extract_task_block(body: str) -> str | None:
     if not match:
         return None
     return match.group("task").strip()
+
+
+def extract_runner_lane(body: str) -> tuple[RunnerLane | None, str | None]:
+    metadata = (body or "").split("```task", 1)[0]
+    lane_name = _body_field(metadata, "Runner Lane") or _body_field(metadata, "Lane")
+    if lane_name is None:
+        return DEFAULT_RUNNER_LANE, None
+    if lane_name not in ALLOWED_RUNNER_LANES:
+        allowed = ", ".join(f"`{name}`" for name in sorted(ALLOWED_RUNNER_LANES))
+        return None, f"Runner lane `{lane_name}` is not allowlisted. Use {allowed}."
+    return RunnerLane(lane_name), None
+
+
+def extract_runner_task(body: str) -> tuple[RunnerTask | None, str | None]:
+    content = extract_task_block(body)
+    if content is None:
+        return None, None
+    lane, lane_reason = extract_runner_lane(body)
+    if lane is None:
+        return None, lane_reason
+    return RunnerTask(content=content, lane=lane), None
 
 
 def extract_runtime_maintenance_task_id(body: str) -> tuple[bool, str | None]:
@@ -1353,8 +1395,11 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             )
             return
 
-        task_content = extract_task_block(issue_body)
-        if task_content is None:
+        runner_task, task_reason = extract_runner_task(issue_body)
+        if runner_task is None:
+            if task_reason is not None:
+                block_issue(issue_number, task_reason)
+                return
             if maintenance_mode or merge_mode:
                 task_content = ""
             else:
@@ -1363,6 +1408,8 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                     "No fenced task block found. Add a fence that starts with ```task.",
                 )
                 return
+        else:
+            task_content = runner_task.content
 
         if maintenance_mode:
             clean, status_output = ensure_clean_worktree(coordinator_workdir)
