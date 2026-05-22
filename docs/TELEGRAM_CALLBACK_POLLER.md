@@ -17,15 +17,20 @@ it fetch pull request state from `alanua/Skeleton`, verify the PR number and
 head marker before recording an `approve` or `reject` callback, and post one
 public-safe GitHub PR conversation comment that starts with `Operator event
 record`. The comment is a GitHub-readable OperatorEvent audit comment for the
-button click. It does not contain tokens or private Telegram state.
+button click. For `approve`, the comment also carries the bounded verified
+approval record and full GitHub head SHA that Runner requires before merge. It
+does not contain tokens or private Telegram state.
 
 After that audit comment is posted, only a signed `approve` callback creates a
 bounded GitHub issue labeled `runner:ready`. That issue uses the fixed
 `TELEGRAM_APPROVED_PR_MERGE` mode and carries only the repository, approved PR
 number, full approved head SHA fetched from GitHub, the fixed `squash` action,
 and the callback digest. Runner rechecks that digest with the callback HMAC
-secret before it performs the PR checks and merge decision. `reject` and
-`details` remain audit-comment-only callbacks.
+secret before it verifies the callback-written approval record, performs the PR
+checks, and makes the merge decision. The routine operator approval ends at the
+Telegram `approve` button; it does not require a separate GitHub comment or
+manual Runner merge retry. `reject` and `details` remain audit-comment-only
+callbacks.
 
 When `SKELETON_TG_CALLBACK_HMAC_SECRET` is absent, live `approve`, `reject`,
 and `details` callbacks are blocked before a GitHub read or comment write. When

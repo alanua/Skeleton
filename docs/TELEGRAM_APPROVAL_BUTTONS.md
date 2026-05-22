@@ -54,14 +54,19 @@ repository action.
 
 Runner accepts that merge request only through allowlisted issue mode
 `TELEGRAM_APPROVED_PR_MERGE`. Before its only merge action it rechecks the
-Telegram approve HMAC digest, verifies the matching signed Telegram approve
-audit record, verifies PR state and approved head SHA, and requires a PR
-conversation comment with the ChatGPT review marker for the same PR and head:
+Telegram approve HMAC digest, verifies PR state and approved head SHA, and
+requires the matching signed Telegram approve audit record. The callback poller
+writes that bounded approval record after it verifies the signed callback
+against GitHub PR state:
 
 ```text
-CONTENT APPROVED
-PR: #123
-Head SHA: <40-character head SHA>
+Operator event record (Telegram callback stage 1)
+Pull request: #123
+Action: telegram_approve
+Callback digest: <signed digest>
+Result: recorded
+Verified approval record: signed_telegram_callback
+Verified head SHA: <40-character head SHA>
 ```
 
 The PR must be open, not draft, mergeable, and still at the button head. Runner
@@ -70,6 +75,11 @@ as the merge head match. The merge mode does not execute Codex, arbitrary
 issue-body commands, deploys, server work, systemd work, or secret handling.
 Runner continues to leave `reject`, `details`, and `open_pr` without a live PR
 action.
+
+The routine operator path is one Telegram action: press `approve` on the PR
+card. The signed callback poller writes the GitHub-readable approval record and
+creates the bounded Runner merge request; the operator does not add a separate
+GitHub review marker or retry the merge issue.
 
 Summaries, changed-file lists, and URLs are bounded before they enter the card
 payload. The payload records public PR review metadata only and does not carry

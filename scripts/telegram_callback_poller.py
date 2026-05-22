@@ -68,23 +68,36 @@ def render_audit_comment(
     *,
     repo: str = REPO,
     result: str = "recorded",
+    verified_head_sha: str | None = None,
 ) -> str:
     """Render bounded public-safe audit text for one parsed button click."""
     if result not in {"recorded", "blocked"}:
         raise ValueError("audit comment result is not supported.")
+    if verified_head_sha is not None and not re.fullmatch(
+        r"[0-9a-fA-F]{40}", verified_head_sha
+    ):
+        raise ValueError("verified head SHA is malformed.")
 
-    return "\n".join(
-        (
-            "Operator event record (Telegram callback stage 1)",
-            f"Repository: {repo}",
-            f"Pull request: #{parsed.pr_number}",
-            f"Action: telegram_{parsed.action}",
-            f"Head marker: {parsed.head_marker}",
-            f"Callback digest: {parsed.digest}",
-            f"Result: {result}",
-            "Summary: Stage 1 recorded the inline button click only; no repository action was executed.",
+    lines = [
+        "Operator event record (Telegram callback stage 1)",
+        f"Repository: {repo}",
+        f"Pull request: #{parsed.pr_number}",
+        f"Action: telegram_{parsed.action}",
+        f"Head marker: {parsed.head_marker}",
+        f"Callback digest: {parsed.digest}",
+        f"Result: {result}",
+    ]
+    if parsed.action == "approve" and result == "recorded" and verified_head_sha:
+        lines.extend(
+            (
+                "Verified approval record: signed_telegram_callback",
+                f"Verified head SHA: {verified_head_sha.lower()}",
+            )
         )
+    lines.append(
+        "Summary: Stage 1 recorded the inline button click only; no repository action was executed."
     )
+    return "\n".join(lines)
 
 
 def handle_callback_query(
@@ -162,6 +175,10 @@ def handle_callback_query(
         )
         return _answer_callback_query(result, callback_id, dry_run=False)
 
+    comment = render_audit_comment(
+        parsed,
+        verified_head_sha=_pr_head_sha(pr_state) if parsed.action == "approve" else None,
+    )
     _post_pr_comment(parsed.pr_number, comment, github_token)
     runner_merge_request = "not_requested"
     if parsed.action == "approve":
@@ -487,10 +504,7 @@ def _create_runner_merge_request(
     pr_state: Mapping[str, object],
     github_token: str,
 ) -> None:
-    head = pr_state.get("head")
-    head_sha = head.get("sha") if isinstance(head, Mapping) else None
-    if not isinstance(head_sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", head_sha):
-        raise RuntimeError("GitHub PR state did not include a bounded head SHA.")
+    head_sha = _pr_head_sha(pr_state)
 
     _github_json_request(
         f"/repos/{REPO}/issues",
@@ -524,9 +538,17 @@ def _render_runner_merge_request_body(
             "Approval Source: signed_telegram_callback",
             f"Callback Digest: {callback_digest}",
             "",
-            "Runner must verify the PR, review marker, and head before squash merge.",
+            "Runner must verify the PR, signed approval record, and head before squash merge.",
         )
     )
+
+
+def _pr_head_sha(pr_state: Mapping[str, object]) -> str:
+    head = pr_state.get("head")
+    head_sha = head.get("sha") if isinstance(head, Mapping) else None
+    if not isinstance(head_sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", head_sha):
+        raise RuntimeError("GitHub PR state did not include a bounded head SHA.")
+    return head_sha.lower()
 
 
 def _github_json_request(

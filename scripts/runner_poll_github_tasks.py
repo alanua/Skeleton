@@ -73,7 +73,6 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
 )
 TELEGRAM_APPROVED_PR_MERGE_MODE = "TELEGRAM_APPROVED_PR_MERGE"
 TELEGRAM_APPROVED_PR_MERGE_ACTION = "squash"
-CHATGPT_CONTENT_APPROVED_MARKER = "CONTENT APPROVED"
 TELEGRAM_CALLBACK_POLLER_SERVICE = "skeleton-telegram-callback-poll.service"
 TELEGRAM_CALLBACK_POLLER_TIMER = "skeleton-telegram-callback-poll.timer"
 TELEGRAM_CALLBACK_LOCAL_CONFIG = "/etc/skeleton-runner.env"
@@ -1304,36 +1303,6 @@ def get_pr_merge_state(pr_number: int) -> dict[str, Any]:
     return parsed
 
 
-def chatgpt_content_approved_for_head(
-    pr_state: dict[str, Any],
-    pr_number: int,
-    head_sha: str,
-) -> bool:
-    comments = pr_state.get("comments")
-    if not isinstance(comments, list):
-        return False
-
-    pr_line = re.compile(rf"^\s*PR:\s*#?{pr_number}\s*$", re.MULTILINE)
-    head_line = re.compile(
-        rf"^\s*Head SHA:\s*{re.escape(head_sha)}\s*$",
-        re.MULTILINE | re.IGNORECASE,
-    )
-    marker_line = re.compile(
-        rf"^\s*{re.escape(CHATGPT_CONTENT_APPROVED_MARKER)}\s*$",
-        re.MULTILINE,
-    )
-    for comment in comments:
-        body = comment.get("body") if isinstance(comment, dict) else None
-        if (
-            isinstance(body, str)
-            and marker_line.search(body) is not None
-            and pr_line.search(body) is not None
-            and head_line.search(body) is not None
-        ):
-            return True
-    return False
-
-
 def telegram_approve_audit_matches_request(
     pr_state: dict[str, Any],
     request: TelegramApprovedPrMergeRequest,
@@ -1349,6 +1318,8 @@ def telegram_approve_audit_matches_request(
         f"Head marker: {request.approved_head_sha[:8]}",
         f"Callback digest: {request.callback_digest}",
         "Result: recorded",
+        "Verified approval record: signed_telegram_callback",
+        f"Verified head SHA: {request.approved_head_sha}",
     )
     for comment in comments:
         body = comment.get("body") if isinstance(comment, dict) else None
@@ -1392,10 +1363,6 @@ def _pr_merge_block_reason(
         return "Approved PR head does not match the Telegram button head."
     if not telegram_approve_audit_matches_request(pr_state, request):
         return "Signed Telegram approve audit does not match this merge request."
-    if not chatgpt_content_approved_for_head(
-        pr_state, request.pr_number, request.approved_head_sha
-    ):
-        return "ChatGPT CONTENT APPROVED marker is missing for this PR head."
     if request.action != TELEGRAM_APPROVED_PR_MERGE_ACTION:
         return "Approved PR merge action is not allowlisted."
     return None
