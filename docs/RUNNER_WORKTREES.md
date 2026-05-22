@@ -20,6 +20,8 @@ may set `Runner Lane: <name>` before the fenced task block; omitting it uses
 `default`. The allowlisted names are `default`, `lane-1`, and `lane-2`. The
 poller validates and stores the parsed lane with the task model, but stage 1
 does not route, prioritize, lock, or parallelize work by lane.
+Lane metadata smoke tests should confirm `Runner Lane: lane-1` appears in the
+Runner `DONE` report while execution remains single-runner.
 
 An existing issue worktree is reused only when it is clean and already on the
 expected `runner/issue-N` branch. Otherwise the issue is blocked with cleanup
