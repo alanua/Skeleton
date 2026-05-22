@@ -65,6 +65,19 @@ capabilities:
     tested: true
     description: Activates project context after operator command.
 
+  project_tree:
+    status: available
+    module: core/project_tree.py
+    entry: load_project_tree
+    stage: stage_1_metadata
+    live_runtime_execution: false
+    requires:
+      - PROJECT_TREE.yaml
+      - docs/PROJECT_TREE.md
+    tested: true
+    added: "2026-05-22"
+    description: Pure ProjectTree routing and future Runner worktree planning metadata with no scheduler or live parallel execution.
+
   github_task_queue:
     status: available
     module: scripts/runner_poll_github_tasks.py
