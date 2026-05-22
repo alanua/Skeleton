@@ -365,6 +365,16 @@ def has_runner_task_body(body: str) -> bool:
     return extract_task_block(body) is not None or maintenance_mode or merge_mode
 
 
+def build_codex_task_prompt(task_content: str, workdir: str) -> str:
+    return (
+        "Runner assigned this task to the issue worktree at:\n"
+        f"{workdir}\n\n"
+        "Edit files only inside that issue worktree. Do not create or use a separate "
+        "clone, checkout, or worktree for task output.\n\n"
+        f"{task_content}"
+    )
+
+
 def run_codex_task(task_content: str, workdir: str) -> tuple[int, str]:
     with tempfile.NamedTemporaryFile(
         mode="w", encoding="utf-8", prefix="runnerjob-", delete=True
@@ -379,7 +389,7 @@ def run_codex_task(task_content: str, workdir: str) -> tuple[int, str]:
                 "workspace-write",
                 "--cd",
                 workdir,
-                task_content,
+                build_codex_task_prompt(task_content, workdir),
             ],
             cwd=workdir,
         )

@@ -332,10 +332,19 @@ def test_run_codex_task_calls_codex_exec() -> None:
             "workspace-write",
             "--cd",
             "/repo",
-            "Task body",
+            runner.build_codex_task_prompt("Task body", "/repo"),
         ],
         cwd="/repo",
     )
+
+
+def test_codex_task_prompt_keeps_output_in_runner_issue_worktree() -> None:
+    prompt = runner.build_codex_task_prompt("Task body", "/runner/issue-187")
+
+    assert "/runner/issue-187" in prompt
+    assert "Edit files only inside that issue worktree." in prompt
+    assert "Do not create or use a separate clone, checkout, or worktree" in prompt
+    assert prompt.endswith("Task body")
 
 
 def test_process_issue_blocks_when_no_task_block() -> None:
