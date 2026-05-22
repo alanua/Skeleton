@@ -83,7 +83,7 @@ capabilities:
     module: scripts/runner_poll_github_tasks.py
     tested: true
     added: "2026-05-19"
-    description: Polls GitHub issues labeled runner:ready, executes bounded Codex tasks in per-issue worktrees or explicit allowlisted host maintenance tasks on Hetzner Runner, creates draft PRs for code tasks, and reports results back to GitHub.
+    description: Polls GitHub issues labeled runner:ready, executes bounded Codex tasks in per-issue worktrees, explicit allowlisted host maintenance tasks, or bounded Telegram-approved PR squash merges on Hetzner Runner, creates draft PRs for code tasks, and reports results back to GitHub.
 
   runner_worktree_execution:
     status: stage1_single_lane
@@ -237,7 +237,7 @@ capabilities:
       - core/action_gate.py
     tested: true
     added: "2026-05-21"
-    description: Builds deterministic completed-PR Telegram review cards and validates bounded dry-run operator callbacks before any approved action-gate handoff; Runner notification integration is stage 1 card emission only, with no callback handling or live action.
+    description: Builds deterministic completed-PR Telegram review cards and validates bounded dry-run operator callbacks before any approved action-gate handoff; live callback and Runner merge handling remain separate bounded runtime stages.
 
   telegram_operator_event_bridge:
     status: stage1_dry_run
@@ -255,16 +255,16 @@ capabilities:
     description: Converts validated Telegram callbacks and current PR state into deterministic public-safe dry-run operator event records and GitHub issue comment text.
 
   telegram_callback_poller:
-    status: stage1_comment_only
+    status: stage1_runner_merge_request
     module: scripts/telegram_callback_poller.py
     entry: poll_once
-    stage: stage_1_comment_only
+    stage: stage_1_runner_merge_request
     live_runtime_execution: true
     requires:
       - docs/TELEGRAM_CALLBACK_POLLER.md
     tested: true
     added: "2026-05-21"
-    description: Reads one bounded Telegram callback update batch with a local offset file, requires an HMAC-signed PR #120 inline button callback before live GitHub reads or audit-comment writes, suppresses replayed signed callback data locally, answers callback queries when Telegram credentials exist, and posts only a public-safe GitHub PR audit comment when live GitHub credentials exist.
+    description: Reads one bounded Telegram callback update batch with a local offset file, requires an HMAC-signed PR inline button callback before live GitHub reads or audit-comment writes, suppresses replayed signed callback data locally, answers callback queries when Telegram credentials exist, posts a public-safe GitHub PR audit comment, and only for approve creates a bounded runner:ready PR squash-merge request issue.
 
   operator_event_record:
     status: stage1_dry_run

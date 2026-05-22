@@ -12,7 +12,8 @@ The intended operator UX is:
 
 1. Runner finishes a pull request and posts a Telegram card.
 2. Oleksii chooses `approve`, `reject`, `details`, or `open_pr`.
-3. A future live stage handles Telegram callbacks.
+3. The live callback poller records the signed callback.
+4. Only `approve` may request a bounded Runner squash merge.
 
 Operator-facing Telegram text is Ukrainian and uses simple human wording. The
 main card is a short decision summary; technical review data belongs in
@@ -44,17 +45,34 @@ it does not include the card failure or any bot token.
 Stage 1 callback validation blocks malformed payloads and callbacks whose head
 SHA does not match the current SHA supplied by the caller. Only a validated
 `approve` callback is passed to `core/action_gate.py`, where it becomes a
-dry-run `merge_pull_request` validation request. Rejecting a pull request,
-requesting details, or opening its URL does not ask `action_gate` for a live
+dry-run `merge_pull_request` validation request. The live callback poller also
+accepts only signed bounded callback data from the Telegram sender. It
+suppresses local callback-data replay and creates a fixed Runner merge request
+issue only after the signed `approve` audit comment has been posted. Rejecting a
+pull request, requesting details, or opening its URL does not request a live
 repository action.
 
-Stage 1 Runner integration sends button payloads only. It does not handle
-callbacks and does not perform a live merge or reject action. Outside the
-existing Runner issue comment flow it does not write GitHub state. Summaries,
-changed-file lists, and URLs are bounded before they enter the card payload.
-The payload records public PR review metadata only and does not carry source
-contents, credentials, or private runner state.
+Runner accepts that merge request only through allowlisted issue mode
+`TELEGRAM_APPROVED_PR_MERGE`. Before its only merge action it rechecks the
+Telegram approve HMAC digest, verifies the matching signed Telegram approve
+audit record, verifies PR state and approved head SHA, and requires a PR
+conversation comment with the ChatGPT review marker for the same PR and head:
 
-A future live stage may perform a repository action only after re-checking pull
-request state, head SHA, changed files, and tests. That future stage must keep
-the stale-head and action-gate checks in front of repository side effects.
+```text
+CONTENT APPROVED
+PR: #123
+Head SHA: <40-character head SHA>
+```
+
+The PR must be open, not draft, mergeable, and still at the button head. Runner
+then invokes only a squash merge for that approved PR with the approved head SHA
+as the merge head match. The merge mode does not execute Codex, arbitrary
+issue-body commands, deploys, server work, systemd work, or secret handling.
+Runner continues to leave `reject`, `details`, and `open_pr` without a live PR
+action.
+
+Summaries, changed-file lists, and URLs are bounded before they enter the card
+payload. The payload records public PR review metadata only and does not carry
+source contents, credentials, or private runner state. Future stages must keep
+the stale-head, signed-callback, and review-marker checks in front of any
+broader repository side effects.
