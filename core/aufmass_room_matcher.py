@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import math
 import re
 from typing import Any, Optional
@@ -75,7 +75,7 @@ def match_dxf_rooms(dxf_result: Any) -> RoomMatchResult:
     insunits = _optional_int(_get(dxf_result, "insunits"))
     labels = _label_candidates(dxf_result)
     contours = _contour_candidates(dxf_result)
-    matches = [_match_contour(contour, labels) for contour in contours]
+    matches = _mark_duplicate_room_labels([_match_contour(contour, labels) for contour in contours])
     status_counts: dict[str, int] = {}
     for match in matches:
         status_counts[match.status] = status_counts.get(match.status, 0) + 1
@@ -172,8 +172,9 @@ def _match_contour(contour: RoomContourCandidate, labels: list[RoomLabelCandidat
         ((label, _distance_to_polygon(label.insert, contour.points)) for label in labels),
         key=lambda item: (item[1], item[0].label_id),
     )
-    area_ranked = [item for item in ranked if item[0].parsed_area is not None]
-    room_ranked = [item for item in ranked if item[0].parsed_area is None]
+    linked_ranked = [item for item in ranked if item[1] == 0.0]
+    area_ranked = [item for item in linked_ranked if item[0].parsed_area is not None]
+    room_ranked = [item for item in linked_ranked if item[0].parsed_area is None]
 
     area_label = area_ranked[0][0] if area_ranked else None
     room_label = room_ranked[0][0] if room_ranked else None
@@ -190,6 +191,10 @@ def _match_contour(contour: RoomContourCandidate, labels: list[RoomLabelCandidat
         status = "needs_review"
         confidence = 0.45
         review_notes.append("No non-area room label was linked to this closed polyline.")
+    elif len(room_ranked) > 1:
+        status = "needs_review"
+        confidence = 0.45
+        review_notes.append("Multiple non-area room labels are inside this closed polyline.")
     if parsed_area is None:
         if status == "candidate":
             confidence = 0.65
@@ -214,6 +219,40 @@ def _match_contour(contour: RoomContourCandidate, labels: list[RoomLabelCandidat
         review_notes=review_notes,
         nearby_label_ids=[label.label_id for label, _distance in ranked[:5]],
     )
+
+
+def _mark_duplicate_room_labels(matches: list[RoomMatchCandidate]) -> list[RoomMatchCandidate]:
+    matches_by_room_label: dict[str, list[int]] = {}
+    for index, match in enumerate(matches):
+        if match.room_label_text is None:
+            continue
+        normalized = " ".join(match.room_label_text.split()).casefold()
+        matches_by_room_label.setdefault(normalized, []).append(index)
+
+    duplicates = {
+        index
+        for match_indexes in matches_by_room_label.values()
+        if len(match_indexes) > 1
+        for index in match_indexes
+    }
+    if not duplicates:
+        return matches
+
+    marked = list(matches)
+    for index in duplicates:
+        match = marked[index]
+        status = "needs_review" if match.status == "candidate" else match.status
+        confidence = min(match.confidence, 0.45)
+        marked[index] = replace(
+            match,
+            status=status,
+            confidence=confidence,
+            review_notes=[
+                *match.review_notes,
+                "Duplicate linked room label text appears on multiple closed polylines.",
+            ],
+        )
+    return marked
 
 
 def _area_mismatch(calculated: float, parsed: float) -> bool:

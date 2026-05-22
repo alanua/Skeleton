@@ -65,6 +65,40 @@ def test_missing_labels_need_review() -> None:
     assert match.area_label_id is None
 
 
+def test_ambiguous_room_labels_need_review() -> None:
+    fixture = _dict_fixture()
+    fixture["texts"].insert(1, {"layer": "ROOM_NAMES", "text": "Office 1.01", "insert": {"x": 2, "y": 2, "z": 0}})  # type: ignore[attr-defined]
+
+    match = match_dxf_rooms(fixture).matches[0]
+
+    assert match.status == "needs_review"
+    assert match.room_label_text == "Office 101"
+    assert "Multiple non-area room labels are inside this closed polyline." in match.review_notes
+
+
+def test_duplicate_room_numbers_need_review() -> None:
+    fixture = _dict_fixture()
+    fixture["texts"][1]["text"] = "Office 101"  # type: ignore[index]
+
+    result = match_dxf_rooms(fixture)
+
+    assert [match.status for match in result.matches] == ["needs_review", "needs_review"]
+    assert all("Duplicate linked room label text appears on multiple closed polylines." in match.review_notes for match in result.matches)
+
+
+def test_unmatched_polygon_does_not_borrow_labels_from_other_room() -> None:
+    fixture = _dict_fixture()
+    fixture["texts"] = fixture["texts"][:1]  # type: ignore[index]
+    fixture["mtexts"] = fixture["mtexts"][:1]  # type: ignore[index]
+
+    match = match_dxf_rooms(fixture).matches[1]
+
+    assert match.status == "needs_review"
+    assert match.room_label_id is None
+    assert match.area_label_id is None
+    assert set(match.nearby_label_ids) == {"label-1", "label-2"}
+
+
 def test_accepts_dxf_adapter_dataclasses_without_requiring_ezdxf() -> None:
     result = match_dxf_rooms(
         DxfExtractResult(
