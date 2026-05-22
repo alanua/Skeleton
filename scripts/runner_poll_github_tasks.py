@@ -29,6 +29,11 @@ LABEL_READY = "runner:ready"
 LABEL_RUNNING = "runner:running"
 LABEL_DONE = "runner:done"
 LABEL_BLOCKED = "runner:blocked"
+RUNNER_LANE_LABELS = {
+    "default": "runner:lane:default",
+    "lane-1": "runner:lane:lane-1",
+    "lane-2": "runner:lane:lane-2",
+}
 FINAL_LABELS_BY_STATUS = {
     "DONE": LABEL_DONE,
     "BLOCKED": LABEL_BLOCKED,
@@ -83,13 +88,7 @@ class RunnerLane:
 
 
 DEFAULT_RUNNER_LANE = RunnerLane("default")
-ALLOWED_RUNNER_LANES = frozenset(
-    (
-        DEFAULT_RUNNER_LANE.name,
-        "lane-1",
-        "lane-2",
-    )
-)
+ALLOWED_RUNNER_LANES = frozenset(RUNNER_LANE_LABELS)
 
 
 @dataclass(frozen=True)
@@ -491,6 +490,27 @@ def set_issue_label(issue_number: int, remove: str, add: str) -> None:
     )
     if code != 0:
         raise RuntimeError(f"gh issue edit failed:\n{output}")
+
+
+def apply_runner_lane_label(issue_number: int, task: RunnerTask | None) -> None:
+    if task is None or not task.has_lane_metadata:
+        return
+
+    label = RUNNER_LANE_LABELS[task.lane.name]
+    code, output = run_command(
+        [
+            "gh",
+            "issue",
+            "edit",
+            str(issue_number),
+            "--repo",
+            REPO,
+            "--add-label",
+            label,
+        ]
+    )
+    if code != 0:
+        raise RuntimeError(f"gh issue lane label edit failed:\n{output}")
 
 
 def extract_pr_url(report: str) -> str | None:
@@ -1435,6 +1455,8 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                 return
         else:
             task_content = runner_task.content
+
+        apply_runner_lane_label(issue_number, runner_task)
 
         if maintenance_mode:
             clean, status_output = ensure_clean_worktree(coordinator_workdir)
