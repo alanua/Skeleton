@@ -73,7 +73,18 @@ def test_done_pr_report_builds_card_payload_from_runner_binding() -> None:
     with mock.patch.object(
         runner, "build_pr_ready_card_payload", return_value=card
     ) as build_card:
-        assert runner.build_done_pr_ready_card_payload(DONE_REPORT) == card
+        localized_card = runner.build_done_pr_ready_card_payload(DONE_REPORT)
+
+    assert localized_card is not None
+    assert localized_card["text"] == (
+        "Завдання виконано.\n"
+        "Підготовлено зміни для перевірки.\n"
+        f"Репозиторій: {runner.REPO}\n"
+        "PR: #123\n"
+        "Рекомендація: спочатку переглянути в ChatGPT або відкрити PR.\n"
+        "Ця кнопка нічого не деплоїть і не запускає на сервері."
+    )
+    assert localized_card["buttons"][0]["label"] == "Деталі"
 
     build_card.assert_called_once_with(
         repo=runner.REPO,
@@ -89,6 +100,34 @@ def test_done_pr_report_builds_card_payload_from_runner_binding() -> None:
     )
 
 
+def test_done_pr_card_hides_technical_details_from_operator_text() -> None:
+    card = runner.build_done_pr_ready_card_payload(DONE_REPORT)
+    assert card is not None
+
+    text = str(card["text"])
+    assert "Завдання виконано." in text
+    assert "Підготовлено зміни для перевірки." in text
+    assert "Рекомендація:" in text
+    assert HEAD_SHA not in text
+    assert "scripts/runner_poll_github_tasks.py" not in text
+    assert "docs/TELEGRAM_APPROVAL_BUTTONS.md" not in text
+    assert "Skeleton task completed" not in text
+    assert "Recommended action" not in text
+
+
+def test_done_pr_card_keeps_technical_details_in_payload() -> None:
+    card = runner.build_done_pr_ready_card_payload(DONE_REPORT)
+    assert card is not None
+
+    assert card["head_sha"] == HEAD_SHA
+    assert card["changed_files"] == [
+        "docs/TELEGRAM_APPROVAL_BUTTONS.md",
+        "scripts/runner_poll_github_tasks.py",
+    ]
+    assert card["test_summary"] == runner.TELEGRAM_CARD_TEST_SUMMARY
+    assert card["risk_summary"] == runner.TELEGRAM_CARD_RISK_SUMMARY
+
+
 def test_inline_keyboard_has_pr_review_buttons_when_binding_is_reliable() -> None:
     card = runner.build_done_pr_ready_card_payload(DONE_REPORT)
     assert card is not None
@@ -96,10 +135,16 @@ def test_inline_keyboard_has_pr_review_buttons_when_binding_is_reliable() -> Non
     reply_markup = runner.card_payload_to_inline_keyboard(card)
     buttons = [row[0] for row in reply_markup["inline_keyboard"]]
     assert [button["text"] for button in buttons] == [
-        "Approve",
-        "Reject",
-        "Details",
-        "Open PR",
+        "Схвалити",
+        "Відхилити",
+        "Деталі",
+        "Відкрити PR",
+    ]
+    assert [button["action"] for button in card["buttons"]] == [
+        "approve",
+        "reject",
+        "details",
+        "open_pr",
     ]
     assert buttons[-1]["url"] == PR_URL
     assert all(
@@ -136,8 +181,8 @@ def test_approve_reject_buttons_require_reliable_sha_and_changed_files() -> None
     reply_markup = runner.card_payload_to_inline_keyboard(card)
     buttons = [row[0] for row in reply_markup["inline_keyboard"]]
 
-    assert [button["text"] for button in buttons] == ["Details", "Open PR"]
-    assert "Approve/reject buttons unavailable" in str(card["text"])
+    assert [button["text"] for button in buttons] == ["Деталі", "Відкрити PR"]
+    assert "Завдання виконано." in str(card["text"])
 
 
 def test_send_telegram_notification_posts_reply_markup_for_card() -> None:
