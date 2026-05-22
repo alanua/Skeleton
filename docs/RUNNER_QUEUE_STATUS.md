@@ -51,6 +51,7 @@ or `systemctl restart` while a task is running.
 - Smoke test issue #31 confirmed the `DONE` notification.
 - 2026-05-22: Worktree prompt fix merged; Telegram approve -> Runner merge pilot ready.
 - Pilot-ready: Telegram approve can request the bounded Runner merge path.
+- Fresh approve pilot: docs-only Runner PR requested.
 
 ## Smoke test procedure
 
