@@ -36,8 +36,17 @@ Missing or unknown maintenance task ids are reported as `BLOCKED`.
 Every privileged host command uses non-interactive `sudo -n`; the Runner must
 block instead of waiting for operator input.
 
+`ensure_telegram_callback_local_config` may only:
+
+1. Create `/etc/skeleton-runner.env` if it is missing without reading config
+   from issue text.
+2. Set root ownership and `0600` permissions on that local environment file.
+3. Add a generated `SKELETON_TG_CALLBACK_HMAC_SECRET` when that setting is
+   missing or blank, or leave an existing nonblank setting unchanged.
+4. Verify the callback HMAC setting exists before reporting `DONE`.
+
 The allowlist does not permit rebooting the host, package upgrades, arbitrary
-commands from issue text, or unrelated services.
+commands or config values from issue text, or unrelated services.
 
 ## Reporting
 

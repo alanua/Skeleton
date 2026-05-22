@@ -801,6 +801,63 @@ def test_copied_callback_units_are_owned_by_root_and_read_only() -> None:
     assert ["sudo", "-n", "chmod", "0644", timer_unit] in commands
 
 
+def test_local_callback_config_task_maintains_only_callback_hmac_setting() -> None:
+    with mock.patch.object(runner, "run_command", return_value=(0, "")) as run:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.ENSURE_TELEGRAM_CALLBACK_LOCAL_CONFIG, str(runner.ROOT)
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert "step=verify_callback_hmac_secret status=done" in report
+    assert ["sudo", "-n", "touch", runner.TELEGRAM_CALLBACK_LOCAL_CONFIG] in commands
+    assert [
+        "sudo",
+        "-n",
+        "chown",
+        "root:root",
+        runner.TELEGRAM_CALLBACK_LOCAL_CONFIG,
+    ] in commands
+    assert [
+        "sudo",
+        "-n",
+        "chmod",
+        "0600",
+        runner.TELEGRAM_CALLBACK_LOCAL_CONFIG,
+    ] in commands
+    python_commands = [
+        command for command in commands if command[2:4] == ["python3", "-c"]
+    ]
+    assert len(python_commands) == 2
+    assert all(
+        command[-2:]
+        == [
+            runner.TELEGRAM_CALLBACK_LOCAL_CONFIG,
+            runner.TELEGRAM_CALLBACK_HMAC_ENV,
+        ]
+        for command in python_commands
+    )
+
+
+def test_local_callback_config_task_reports_blocked_on_verification_failure() -> None:
+    def fail_config_verification(
+        command: list[str], cwd: str | None = None
+    ) -> tuple[int, str]:
+        if command[-2:] == [
+            runner.TELEGRAM_CALLBACK_LOCAL_CONFIG,
+            runner.TELEGRAM_CALLBACK_HMAC_ENV,
+        ] and runner._VERIFY_CALLBACK_HMAC_SCRIPT in command:
+            return 1, "local config value must not be reported"
+        return 0, ""
+
+    with mock.patch.object(runner, "run_command", side_effect=fail_config_verification):
+        report = runner.ensure_telegram_callback_local_config()
+
+    assert report.startswith("BLOCKED:")
+    assert "step=verify_callback_hmac_secret status=failed exit_code=1" in report
+    assert "local config value" not in report
+
+
 def test_sync_task_uses_only_allowed_service_names() -> None:
     with mock.patch.object(
         runner, "run_command", side_effect=_successful_maintenance_command
