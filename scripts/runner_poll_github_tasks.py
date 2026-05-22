@@ -33,6 +33,7 @@ FINAL_LABELS_BY_STATUS = {
 }
 POLL_INTERVAL = 60
 DEFAULT_WORKDIR = Path(__file__).resolve().parents[1]
+DEFAULT_WORKTREE_ROOT = Path("/home/agent/agent-dev/worktrees/skeleton")
 MAX_COMMENT_LENGTH = 60000
 RUNTIME_ARTIFACTS = (
     "core/__pycache__",
@@ -89,6 +90,113 @@ def run_command(args: list[str], cwd: str | Path | None = None) -> tuple[int, st
         text=True,
     )
     return result.returncode, result.stdout + result.stderr
+
+
+def worktree_root() -> Path:
+    configured_root = os.environ.get("SKELETON_WORKTREE_ROOT")
+    if configured_root:
+        return Path(configured_root).expanduser()
+    return DEFAULT_WORKTREE_ROOT
+
+
+def issue_worktree_path(issue_number: int) -> Path:
+    return worktree_root() / f"issue-{issue_number}"
+
+
+def ensure_safe_worktree_path(path: str | Path) -> Path:
+    root = worktree_root().resolve()
+    candidate = Path(path).expanduser().resolve()
+    if candidate == root:
+        raise ValueError(f"Refusing to use worktree root as issue worktree: {candidate}")
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(
+            f"Refusing worktree path outside configured root {root}: {candidate}"
+        ) from exc
+    return candidate
+
+
+def issue_branch(issue_number: int) -> str:
+    return f"runner/issue-{issue_number}"
+
+
+def format_command_output(command: list[str], output: str) -> str:
+    return f"$ {' '.join(command)}\n{output}"
+
+
+def prepare_issue_worktree(
+    issue_number: int, coordinator_workdir: str | Path
+) -> tuple[int, str, Path]:
+    path = ensure_safe_worktree_path(issue_worktree_path(issue_number))
+    branch = issue_branch(issue_number)
+    outputs: list[str] = []
+
+    if path.exists():
+        checks = (
+            (["git", "status", "--short"], "dirty"),
+            (["git", "branch", "--show-current"], "branch"),
+        )
+        for command, check_name in checks:
+            code, output = run_command(command, cwd=path)
+            outputs.append(format_command_output(command, output))
+            if code != 0:
+                return (
+                    code,
+                    "Existing issue worktree needs cleanup before reuse.\n\n"
+                    + "\n".join(outputs),
+                    path,
+                )
+            if check_name == "dirty" and output.strip():
+                return (
+                    1,
+                    "Existing issue worktree is dirty; cleanup is required before reuse.\n\n"
+                    + "\n".join(outputs),
+                    path,
+                )
+            if check_name == "branch" and output.strip() != branch:
+                return (
+                    1,
+                    "Existing issue worktree is on the wrong branch; cleanup is "
+                    f"required before reuse. Expected {branch!r}.\n\n"
+                    + "\n".join(outputs),
+                    path,
+                )
+        return 0, "\n".join(outputs), path
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return 1, f"Unable to create worktree root {path.parent}:\n{exc}", path
+
+    for command in (
+        ["git", "fetch", "origin"],
+        ["git", "worktree", "add", "-B", branch, str(path), "origin/main"],
+    ):
+        code, output = run_command(command, cwd=coordinator_workdir)
+        outputs.append(format_command_output(command, output))
+        if code != 0:
+            return code, "\n".join(outputs), path
+    return 0, "\n".join(outputs), path
+
+
+def prepare_issue_branch(
+    issue_number: int, coordinator_workdir: str | Path
+) -> tuple[int, str, Path]:
+    return prepare_issue_worktree(issue_number, coordinator_workdir)
+
+
+def cleanup_issue_worktree(
+    issue_number: int, coordinator_workdir: str | Path
+) -> tuple[int, str]:
+    try:
+        path = ensure_safe_worktree_path(issue_worktree_path(issue_number))
+    except ValueError as exc:
+        return 1, str(exc)
+    if not path.exists():
+        return 0, ""
+    cleanup_runtime_artifacts(path)
+    return run_command(["git", "worktree", "remove", str(path)], cwd=coordinator_workdir)
 
 
 def get_ready_issues() -> list[dict[str, Any]]:
@@ -510,24 +618,6 @@ def ensure_clean_worktree(workdir: str) -> tuple[bool, str]:
     return output.strip() == "", output
 
 
-def prepare_issue_branch(issue_number: int, workdir: str) -> tuple[int, str, str]:
-    branch = f"runner/issue-{issue_number}"
-    commands = [
-        ["git", "fetch", "origin"],
-        ["git", "checkout", "main"],
-        ["git", "pull", "origin", "main"],
-        ["git", "branch", "-D", branch],
-        ["git", "checkout", "-b", branch, "origin/main"],
-    ]
-    combined_output = []
-    for command in commands:
-        code, output = run_command(command, cwd=workdir)
-        combined_output.append(f"$ {' '.join(command)}\n{output}")
-        if code != 0 and command[:3] != ["git", "branch", "-D"]:
-            return code, "\n".join(combined_output), branch
-    return 0, "\n".join(combined_output), branch
-
-
 def changed_files(workdir: str) -> list[str]:
     cleanup_runtime_artifacts(workdir)
     files: set[str] = set()
@@ -578,7 +668,7 @@ def finalize_success(issue: dict[str, Any], workdir: str, codex_output: str) -> 
             "--force-with-lease",
             "-u",
             "origin",
-            f"runner/issue-{issue_number}",
+            issue_branch(issue_number),
         ],
     ):
         code, output = run_command(command, cwd=workdir)
@@ -604,7 +694,7 @@ def finalize_success(issue: dict[str, Any], workdir: str, codex_output: str) -> 
         "--base",
         "main",
         "--head",
-        f"runner/issue-{issue_number}",
+        issue_branch(issue_number),
         "--title",
         pr_title,
         "--body",
@@ -620,7 +710,7 @@ def finalize_success(issue: dict[str, Any], workdir: str, codex_output: str) -> 
                 "gh",
                 "pr",
                 "view",
-                f"runner/issue-{issue_number}",
+                issue_branch(issue_number),
                 "--repo",
                 REPO,
                 "--json",
@@ -880,7 +970,8 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
     if not is_open_task_issue(issue):
         return
 
-    resolved_workdir = str(Path(workdir) if workdir is not None else DEFAULT_WORKDIR)
+    coordinator_workdir = str(Path(workdir) if workdir is not None else DEFAULT_WORKDIR)
+    issue_workdir: str | None = None
     claimed = False
     try:
         issue_body = issue.get("body") or ""
@@ -911,38 +1002,40 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                 )
                 return
 
-        clean, status_output = ensure_clean_worktree(resolved_workdir)
-        if not clean:
-            block_issue(
-                issue_number,
-                "Runner worktree is not clean before starting.\n\n"
-                f"git status --short:\n```\n{status_output.strip()}\n```",
-            )
-            return
+        if maintenance_mode:
+            clean, status_output = ensure_clean_worktree(coordinator_workdir)
+            if not clean:
+                block_issue(
+                    issue_number,
+                    "Runner worktree is not clean before starting.\n\n"
+                    f"git status --short:\n```\n{status_output.strip()}\n```",
+                )
+                return
 
         set_issue_label(issue_number, LABEL_READY, LABEL_RUNNING)
         claimed = True
 
         if maintenance_mode and maintenance_task_id is not None:
             process_runtime_maintenance_issue(
-                issue_number, maintenance_task_id, resolved_workdir
+                issue_number, maintenance_task_id, coordinator_workdir
             )
             return
 
-        branch_code, branch_output, _branch = prepare_issue_branch(
-            issue_number, resolved_workdir
+        worktree_code, worktree_output, worktree_path = prepare_issue_branch(
+            issue_number, coordinator_workdir
         )
-        if branch_code != 0:
+        if worktree_code != 0:
             block_issue(
                 issue_number,
-                f"Branch preparation failed:\n```\n{branch_output}\n```",
+                f"Issue worktree preparation failed:\n```\n{worktree_output}\n```",
                 remove_label=LABEL_RUNNING,
             )
             return
+        issue_workdir = str(worktree_path)
 
-        cleanup_runtime_artifacts(resolved_workdir)
-        codex_code, codex_output = run_codex_task(task_content, resolved_workdir)
-        cleanup_runtime_artifacts(resolved_workdir)
+        cleanup_runtime_artifacts(issue_workdir)
+        codex_code, codex_output = run_codex_task(task_content, issue_workdir)
+        cleanup_runtime_artifacts(issue_workdir)
         if codex_code != 0:
             block_issue(
                 issue_number,
@@ -951,13 +1044,18 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             )
             return
 
-        report = finalize_success(issue, resolved_workdir, codex_output)
-        cleanup_runtime_artifacts(resolved_workdir)
+        report = finalize_success(issue, issue_workdir, codex_output)
+        cleanup_runtime_artifacts(issue_workdir)
         post_issue_comment(issue_number, report)
         set_issue_label(issue_number, LABEL_RUNNING, LABEL_DONE)
         notify_task_finished(issue_number, "DONE", report)
+        try:
+            cleanup_issue_worktree(issue_number, coordinator_workdir)
+        except Exception:
+            pass
     except Exception as exc:
-        cleanup_runtime_artifacts(resolved_workdir)
+        if issue_workdir is not None:
+            cleanup_runtime_artifacts(issue_workdir)
         try:
             remove_label = LABEL_RUNNING if claimed else LABEL_READY
             block_issue(
