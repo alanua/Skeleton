@@ -1,0 +1,26 @@
+version: "1.0.0"
+default_project: skeleton
+projects:
+  skeleton:
+    repo: alanua/Skeleton
+    public: true
+    future_parallel_worktrees: true
+    runtime_approval_required: false
+    worktree_name_prefix: skeleton
+    description: Public Skeleton control and construction repository.
+
+  aufmass_private:
+    repo: private/aufmass
+    public: false
+    future_parallel_worktrees: false
+    runtime_approval_required: true
+    worktree_name_prefix: aufmass-private
+    description: Private Aufmass route kept outside public Skeleton artifacts.
+
+  home_automation:
+    repo: private/home-automation
+    public: false
+    future_parallel_worktrees: false
+    runtime_approval_required: true
+    worktree_name_prefix: home-automation
+    description: Private home automation route requiring runtime approval.

@@ -74,6 +74,7 @@ Boot output required fields:
 - `boot_loader`: Reads BOOT_MANIFEST, validates sources, and produces BootReport. Module: `core/boot_loader.py`. Status: tested.
 - `provider_routing`: Machine-readable provider routing policy defining local, free_cloud, paid_cloud, and gemini_audit tiers with cost controls. Module: `PROVIDER_ROUTING.yaml`. Status: tested.
 - `project_loader`: Activates project context after operator command. Module: `core/project_loader.py`. Status: tested.
+- `project_tree`: Pure ProjectTree routing and future Runner worktree planning metadata with no scheduler or live parallel execution. Module: `core/project_tree.py`. Status: tested.
 - `github_task_queue`: Polls GitHub issues labeled runner:ready, executes bounded Codex tasks on Hetzner Runner, creates draft PRs, and reports results back to GitHub. Module: `scripts/runner_poll_github_tasks.py`. Status: tested.
 - `notebooklm_sourcepack`: Generates docs/NOTEBOOKLM_SOURCEPACK.md from repo state for NotebookLM mirror. Module: `scripts/build_notebooklm_sourcepack.py`. Status: tested.
 - `helper_registry`: Machine-readable registry of helper roles, trust levels, and capability boundaries. Separate from CAPABILITY_REGISTRY which tracks code modules. Module: `HELPER_REGISTRY.yaml`. Status: tested.
