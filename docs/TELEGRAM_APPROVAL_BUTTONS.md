@@ -31,7 +31,10 @@ inline keyboard contains `details` and `open_pr` only.
 Telegram sender uses Telegram `sendMessage` `reply_markup` with
 `inline_keyboard`; `open_pr` is emitted as a Telegram URL button. Callback
 data is deterministic, bounded, and derived only from public-safe card
-metadata.
+metadata. When `SKELETON_TG_CALLBACK_HMAC_SECRET` is configured for the sender,
+the bounded callback digest is a truncated HMAC over the callback fields; the
+live callback poller accepts only that signed form and suppresses repeat signed
+callback data locally.
 
 If Runner cannot build the `DONE` card, or Telegram rejects the card send with
 `reply_markup`, Runner retries the public-safe plain `DONE` notification. The
