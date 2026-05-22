@@ -539,6 +539,31 @@ def test_cleanup_runtime_artifacts_removes_known_generated_directories(tmp_path:
         assert not (tmp_path / relative_path).exists()
 
 
+def test_cleanup_runtime_artifacts_ignores_busy_worker_marker(tmp_path: Path) -> None:
+    marker = tmp_path / ".codex"
+    marker.write_text("", encoding="utf-8")
+
+    with mock.patch.object(Path, "unlink", side_effect=OSError("busy")):
+        runner.cleanup_runtime_artifacts(tmp_path)
+
+    assert marker.exists()
+
+
+def test_changed_files_excludes_worker_runtime_artifacts() -> None:
+    outputs = (
+        (0, "docs/RUNNER_QUEUE_STATUS.md\n.codex\n"),
+        (0, "core/__pycache__/runner.cpython-312.pyc\n"),
+        (0, "docs/NOTEBOOKLM_SOURCEPACK.md\nscripts/__pycache__/poll.pyc\n"),
+    )
+
+    with mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(runner, "run_command", side_effect=outputs):
+        files = runner.changed_files("/repo")
+
+    assert files == ["docs/NOTEBOOKLM_SOURCEPACK.md", "docs/RUNNER_QUEUE_STATUS.md"]
+
+
 def test_finalize_success_no_file_changes_cleans_runtime_artifacts_and_reports(
     tmp_path: Path,
 ) -> None:

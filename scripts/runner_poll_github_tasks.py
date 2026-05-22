@@ -95,7 +95,19 @@ def cleanup_runtime_artifacts(workdir: str | Path) -> None:
         if artifact.is_dir():
             shutil.rmtree(artifact, ignore_errors=True)
         elif artifact.exists():
-            artifact.unlink()
+            try:
+                artifact.unlink()
+            except OSError:
+                # A local worker can keep its marker busy until the parent exits.
+                continue
+
+
+def is_runtime_artifact(path: str) -> bool:
+    normalized = Path(path).as_posix()
+    return any(
+        normalized == artifact or normalized.startswith(f"{artifact}/")
+        for artifact in RUNTIME_ARTIFACTS
+    )
 
 
 def run_command(args: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
@@ -721,7 +733,11 @@ def changed_files(workdir: str) -> list[str]:
         code, output = run_command(command, cwd=workdir)
         if code != 0:
             raise RuntimeError(f"{' '.join(command)} failed:\n{output}")
-        files.update(line.strip() for line in output.splitlines() if line.strip())
+        files.update(
+            file_name
+            for line in output.splitlines()
+            if (file_name := line.strip()) and not is_runtime_artifact(file_name)
+        )
     return sorted(files)
 
 

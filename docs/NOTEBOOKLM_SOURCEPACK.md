@@ -369,6 +369,7 @@ or `systemctl restart` while a task is running.
 - Do not put credentials in the repo, issues, or comments.
 - Smoke test issue #31 confirmed the `DONE` notification.
 - 2026-05-22: Telegram-approved merge path pilot pending.
+- 2026-05-22: Local worker output path prepared a review PR smoke task.
 
 ## Smoke test procedure
 
