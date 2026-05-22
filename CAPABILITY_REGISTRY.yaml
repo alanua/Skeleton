@@ -249,14 +249,14 @@ capabilities:
   telegram_callback_poller:
     status: stage1_comment_only
     module: scripts/telegram_callback_poller.py
-    entry: handle_callback_query
+    entry: poll_once
     stage: stage_1_comment_only
     live_runtime_execution: true
     requires:
       - docs/TELEGRAM_CALLBACK_POLLER.md
     tested: true
     added: "2026-05-21"
-    description: Validates bounded PR Telegram callback data from PR #120 inline buttons and posts only a public-safe GitHub PR audit comment when live GitHub credentials exist.
+    description: Reads one bounded Telegram callback update batch with a local offset file, validates PR #120 inline button callbacks, answers callback queries when Telegram credentials exist, and posts only a public-safe GitHub PR audit comment when live GitHub credentials exist.
 
   operator_event_record:
     status: stage1_dry_run
