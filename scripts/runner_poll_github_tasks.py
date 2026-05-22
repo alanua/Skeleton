@@ -57,12 +57,16 @@ TELEGRAM_PR_READY_BUTTON_LABELS = {
 }
 RUNTIME_MAINTENANCE_MODE = "RUNTIME_MAINTENANCE_TASK"
 SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME = "sync_telegram_callback_poller_runtime"
-RUNTIME_MAINTENANCE_TASK_IDS = frozenset((SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,))
+ENSURE_TELEGRAM_CALLBACK_LOCAL_CONFIG = "ensure_telegram_callback_local_config"
+RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
+    (SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME, ENSURE_TELEGRAM_CALLBACK_LOCAL_CONFIG)
+)
 TELEGRAM_APPROVED_PR_MERGE_MODE = "TELEGRAM_APPROVED_PR_MERGE"
 TELEGRAM_APPROVED_PR_MERGE_ACTION = "squash"
 CHATGPT_CONTENT_APPROVED_MARKER = "CONTENT APPROVED"
 TELEGRAM_CALLBACK_POLLER_SERVICE = "skeleton-telegram-callback-poll.service"
 TELEGRAM_CALLBACK_POLLER_TIMER = "skeleton-telegram-callback-poll.timer"
+TELEGRAM_CALLBACK_LOCAL_CONFIG = "/etc/skeleton-runner.env"
 TELEGRAM_CALLBACK_POLLER_RUNTIME_FILES = (
     "scripts/telegram_callback_poller.py",
     f"scripts/{TELEGRAM_CALLBACK_POLLER_SERVICE}",
@@ -1027,8 +1031,91 @@ def sync_telegram_callback_poller_runtime(workdir: str) -> str:
     return _maintenance_report("DONE", task_id, status_lines, "met")
 
 
+_ENSURE_CALLBACK_HMAC_SCRIPT = """\
+from pathlib import Path
+import secrets
+import sys
+
+path = Path(sys.argv[1])
+name = sys.argv[2]
+lines = path.read_text(encoding="utf-8").splitlines()
+prefix = f"{name}="
+replacement = f"{prefix}{secrets.token_urlsafe(48)}"
+for index, line in enumerate(lines):
+    if line.startswith(prefix):
+        if line[len(prefix):].strip():
+            break
+        lines[index] = replacement
+        path.write_text("\\n".join(lines) + "\\n", encoding="utf-8")
+        break
+else:
+    if lines:
+        lines.append(replacement)
+    else:
+        lines = [replacement]
+    path.write_text("\\n".join(lines) + "\\n", encoding="utf-8")
+"""
+
+_VERIFY_CALLBACK_HMAC_SCRIPT = """\
+from pathlib import Path
+import sys
+
+prefix = f"{sys.argv[2]}="
+lines = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+raise SystemExit(
+    0 if any(line.startswith(prefix) and line[len(prefix):].strip() for line in lines) else 1
+)
+"""
+
+
+def ensure_telegram_callback_local_config() -> str:
+    task_id = ENSURE_TELEGRAM_CALLBACK_LOCAL_CONFIG
+    status_lines: list[str] = []
+    steps = (
+        (
+            "create_callback_local_config",
+            _non_interactive_sudo("touch", TELEGRAM_CALLBACK_LOCAL_CONFIG),
+        ),
+        (
+            "own_callback_local_config",
+            _non_interactive_sudo(
+                "chown", "root:root", TELEGRAM_CALLBACK_LOCAL_CONFIG
+            ),
+        ),
+        (
+            "mode_callback_local_config",
+            _non_interactive_sudo("chmod", "0600", TELEGRAM_CALLBACK_LOCAL_CONFIG),
+        ),
+        (
+            "ensure_callback_hmac_secret",
+            _non_interactive_sudo(
+                "python3",
+                "-c",
+                _ENSURE_CALLBACK_HMAC_SCRIPT,
+                TELEGRAM_CALLBACK_LOCAL_CONFIG,
+                TELEGRAM_CALLBACK_HMAC_ENV,
+            ),
+        ),
+        (
+            "verify_callback_hmac_secret",
+            _non_interactive_sudo(
+                "python3",
+                "-c",
+                _VERIFY_CALLBACK_HMAC_SCRIPT,
+                TELEGRAM_CALLBACK_LOCAL_CONFIG,
+                TELEGRAM_CALLBACK_HMAC_ENV,
+            ),
+        ),
+    )
+    for step, command in steps:
+        report = _run_maintenance_command(task_id, step, command, status_lines)
+        if report is not None:
+            return report
+    return _maintenance_report("DONE", task_id, status_lines, "met")
+
+
 def dispatch_runtime_maintenance_task(task_id: str, workdir: str) -> str:
-    if task_id != SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME:
+    if task_id not in RUNTIME_MAINTENANCE_TASK_IDS:
         return _maintenance_report(
             "BLOCKED",
             task_id,
@@ -1036,7 +1123,9 @@ def dispatch_runtime_maintenance_task(task_id: str, workdir: str) -> str:
             "not_met",
         )
     try:
-        return sync_telegram_callback_poller_runtime(workdir)
+        if task_id == SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME:
+            return sync_telegram_callback_poller_runtime(workdir)
+        return ensure_telegram_callback_local_config()
     except Exception:
         return _maintenance_report(
             "BLOCKED",
