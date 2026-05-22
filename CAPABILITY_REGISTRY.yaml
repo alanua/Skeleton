@@ -264,7 +264,7 @@ capabilities:
       - docs/TELEGRAM_CALLBACK_POLLER.md
     tested: true
     added: "2026-05-21"
-    description: Reads one bounded Telegram callback update batch with a local offset file, validates PR #120 inline button callbacks, answers callback queries when Telegram credentials exist, and posts only a public-safe GitHub PR audit comment when live GitHub credentials exist.
+    description: Reads one bounded Telegram callback update batch with a local offset file, requires an HMAC-signed PR #120 inline button callback before live GitHub reads or audit-comment writes, answers callback queries when Telegram credentials exist, and posts only a public-safe GitHub PR audit comment when live GitHub credentials exist.
 
   operator_event_record:
     status: stage1_dry_run

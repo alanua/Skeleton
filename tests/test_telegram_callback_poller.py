@@ -12,8 +12,26 @@ import pytest
 from scripts import telegram_callback_poller as poller
 
 
-CALLBACK_DATA = "tpr1:approve:p120:deadbeef:0123456789ab"
+CALLBACK_HMAC_SECRET = "callback-hmac-test-secret"
 HEAD_SHA = "deadbeef0123456789abcdef0123456789abcdef"
+
+
+def signed_callback_data(
+    action: str = "approve",
+    *,
+    pr_number: int = 120,
+    head_marker: str = "deadbeef",
+) -> str:
+    digest = poller._callback_hmac_digest(
+        action=action,
+        pr_number=pr_number,
+        head_marker=head_marker,
+        hmac_secret=CALLBACK_HMAC_SECRET,
+    )
+    return f"tpr1:{action}:p{pr_number}:{head_marker}:{digest}"
+
+
+CALLBACK_DATA = signed_callback_data()
 
 
 def query(callback_data: str = CALLBACK_DATA) -> dict[str, str]:
@@ -43,7 +61,7 @@ def test_parses_valid_callback_data() -> None:
         action="approve",
         pr_number=120,
         head_marker="deadbeef",
-        digest="0123456789ab",
+        digest=CALLBACK_DATA.rsplit(":", 1)[-1],
     )
 
 
@@ -90,7 +108,9 @@ def test_dry_run_does_not_call_urllib() -> None:
 
 
 def test_missing_github_token_returns_skipped_no_post_result() -> None:
-    with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
+    with mock.patch.dict(
+        os.environ, {poller.CALLBACK_HMAC_ENV: CALLBACK_HMAC_SECRET}, clear=True
+    ), mock.patch.object(
         poller.urllib.request, "urlopen"
     ) as urlopen:
         result = poller.handle_callback_query(query())
@@ -99,6 +119,33 @@ def test_missing_github_token_returns_skipped_no_post_result() -> None:
     assert result["status"] == "skipped"
     assert result["github"] == "skipped_missing_token"
     assert result["comment_posted"] is False
+
+
+def test_missing_callback_hmac_secret_blocks_live_callback_without_github_write() -> None:
+    with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "github-secret"}, clear=True), mock.patch.object(
+        poller.urllib.request, "urlopen"
+    ) as urlopen:
+        result = poller.handle_callback_query(query())
+
+    assert result["status"] == "blocked"
+    assert result["github"] == "not_called"
+    assert poller.CALLBACK_HMAC_ENV in str(result["reason"])
+    urlopen.assert_not_called()
+
+
+def test_invalid_callback_hmac_blocks_live_callback_without_github_write() -> None:
+    forged = "tpr1:approve:p120:deadbeef:0123456789ab"
+    with mock.patch.dict(
+        os.environ,
+        {"GITHUB_TOKEN": "github-secret", poller.CALLBACK_HMAC_ENV: CALLBACK_HMAC_SECRET},
+        clear=True,
+    ), mock.patch.object(poller.urllib.request, "urlopen") as urlopen:
+        result = poller.handle_callback_query(query(forged))
+
+    assert result["status"] == "blocked"
+    assert result["github"] == "not_called"
+    assert "HMAC" in str(result["reason"])
+    urlopen.assert_not_called()
 
 
 def test_poll_once_skips_without_telegram_token(tmp_path: Path) -> None:
@@ -234,7 +281,11 @@ def test_poll_once_duplicate_callback_skips_duplicate_audit_comment(
     telegram_token = "telegram-secret-do-not-return"
     with mock.patch.dict(
         os.environ,
-        {"GITHUB_TOKEN": "github-secret", "SKELETON_TG_BOT": telegram_token},
+        {
+            "GITHUB_TOKEN": "github-secret",
+            "SKELETON_TG_BOT": telegram_token,
+            poller.CALLBACK_HMAC_ENV: CALLBACK_HMAC_SECRET,
+        },
         clear=True,
     ), mock.patch.object(
         poller.urllib.request,
@@ -260,7 +311,11 @@ def test_poll_once_duplicate_callback_skips_duplicate_audit_comment(
 
 
 def test_approve_callback_posts_audit_comment_when_pr_head_marker_matches() -> None:
-    with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "github-secret"}, clear=True), mock.patch.object(
+    with mock.patch.dict(
+        os.environ,
+        {"GITHUB_TOKEN": "github-secret", poller.CALLBACK_HMAC_ENV: CALLBACK_HMAC_SECRET},
+        clear=True,
+    ), mock.patch.object(
         poller.urllib.request,
         "urlopen",
         side_effect=(response(github_pr_state()), response({"id": 88})),
@@ -280,7 +335,11 @@ def test_approve_callback_posts_audit_comment_when_pr_head_marker_matches() -> N
 
 
 def test_approve_callback_is_blocked_when_pr_head_marker_mismatches() -> None:
-    with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "github-secret"}, clear=True), mock.patch.object(
+    with mock.patch.dict(
+        os.environ,
+        {"GITHUB_TOKEN": "github-secret", poller.CALLBACK_HMAC_ENV: CALLBACK_HMAC_SECRET},
+        clear=True,
+    ), mock.patch.object(
         poller.urllib.request,
         "urlopen",
         return_value=response(github_pr_state(head_sha="cafebabe" + "0" * 32)),
@@ -294,8 +353,12 @@ def test_approve_callback_is_blocked_when_pr_head_marker_mismatches() -> None:
 
 
 def test_reject_callback_posts_audit_comment_but_does_not_close_pr() -> None:
-    reject = "tpr1:reject:p120:deadbeef:abcdef012345"
-    with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "github-secret"}, clear=True), mock.patch.object(
+    reject = signed_callback_data("reject")
+    with mock.patch.dict(
+        os.environ,
+        {"GITHUB_TOKEN": "github-secret", poller.CALLBACK_HMAC_ENV: CALLBACK_HMAC_SECRET},
+        clear=True,
+    ), mock.patch.object(
         poller.urllib.request,
         "urlopen",
         side_effect=(response(github_pr_state()), response({"id": 89})),
@@ -312,7 +375,7 @@ def test_reject_callback_posts_audit_comment_but_does_not_close_pr() -> None:
 
 
 def test_details_callback_renders_audit_comment() -> None:
-    details = "tpr1:details:p120:deadbeef:abcdef012345"
+    details = signed_callback_data("details")
     parsed = poller.parse_callback_data(details)
 
     assert poller.render_audit_comment(parsed).startswith("Operator event record")
@@ -320,8 +383,12 @@ def test_details_callback_renders_audit_comment() -> None:
 
 
 def test_details_callback_posts_audit_comment_only() -> None:
-    details = "tpr1:details:p120:deadbeef:abcdef012345"
-    with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "github-secret"}, clear=True), mock.patch.object(
+    details = signed_callback_data("details")
+    with mock.patch.dict(
+        os.environ,
+        {"GITHUB_TOKEN": "github-secret", poller.CALLBACK_HMAC_ENV: CALLBACK_HMAC_SECRET},
+        clear=True,
+    ), mock.patch.object(
         poller.urllib.request,
         "urlopen",
         side_effect=(response(github_pr_state()), response({"id": 90})),
@@ -338,7 +405,7 @@ def test_details_callback_posts_audit_comment_only() -> None:
 
 
 def test_details_callback_accepts_nosha_head_marker() -> None:
-    details = "tpr1:details:p120:nosha:abcdef012345"
+    details = signed_callback_data("details", head_marker="nosha")
     parsed = poller.parse_callback_data(details)
 
     assert parsed.head_marker == "nosha"
@@ -346,8 +413,12 @@ def test_details_callback_accepts_nosha_head_marker() -> None:
 
 
 def test_approve_callback_with_nosha_head_marker_is_blocked() -> None:
-    approve = "tpr1:approve:p120:nosha:abcdef012345"
-    with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "github-secret"}, clear=True), mock.patch.object(
+    approve = signed_callback_data(head_marker="nosha")
+    with mock.patch.dict(
+        os.environ,
+        {"GITHUB_TOKEN": "github-secret", poller.CALLBACK_HMAC_ENV: CALLBACK_HMAC_SECRET},
+        clear=True,
+    ), mock.patch.object(
         poller.urllib.request,
         "urlopen",
         return_value=response(github_pr_state()),
@@ -361,8 +432,12 @@ def test_approve_callback_with_nosha_head_marker_is_blocked() -> None:
 
 
 def test_reject_callback_with_nosha_head_marker_is_blocked() -> None:
-    reject = "tpr1:reject:p120:nosha:abcdef012345"
-    with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "github-secret"}, clear=True), mock.patch.object(
+    reject = signed_callback_data("reject", head_marker="nosha")
+    with mock.patch.dict(
+        os.environ,
+        {"GITHUB_TOKEN": "github-secret", poller.CALLBACK_HMAC_ENV: CALLBACK_HMAC_SECRET},
+        clear=True,
+    ), mock.patch.object(
         poller.urllib.request,
         "urlopen",
         return_value=response(github_pr_state()),
@@ -376,7 +451,11 @@ def test_reject_callback_with_nosha_head_marker_is_blocked() -> None:
 
 
 def test_telegram_answer_callback_query_is_called_when_bot_token_exists() -> None:
-    with mock.patch.dict(os.environ, {"SKELETON_TG_BOT": "telegram-secret"}, clear=True), mock.patch.object(
+    with mock.patch.dict(
+        os.environ,
+        {"SKELETON_TG_BOT": "telegram-secret", poller.CALLBACK_HMAC_ENV: CALLBACK_HMAC_SECRET},
+        clear=True,
+    ), mock.patch.object(
         poller.urllib.request,
         "urlopen",
         return_value=response(),
@@ -395,7 +474,11 @@ def test_no_token_appears_in_returned_result_or_comment() -> None:
     telegram_token = "telegram-token-never-return"
     with mock.patch.dict(
         os.environ,
-        {"GITHUB_TOKEN": github_token, "SKELETON_TG_BOT": telegram_token},
+        {
+            "GITHUB_TOKEN": github_token,
+            "SKELETON_TG_BOT": telegram_token,
+            poller.CALLBACK_HMAC_ENV: CALLBACK_HMAC_SECRET,
+        },
         clear=True,
     ), mock.patch.object(
         poller.urllib.request,

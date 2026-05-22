@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -19,6 +21,7 @@ HTTP_TIMEOUT_SECONDS = 15
 TELEGRAM_CALLBACK_DATA_LIMIT = 64
 TELEGRAM_UPDATE_LIMIT = 25
 CALLBACK_ID_HISTORY_LIMIT = 500
+CALLBACK_HMAC_ENV = "SKELETON_TG_CALLBACK_HMAC_SECRET"
 DEFAULT_CALLBACK_STATE_PATH = Path(
     "/home/agent/agent-dev/state/telegram_callback_poller.json"
 )
@@ -110,6 +113,17 @@ def handle_callback_query(
             comment=render_audit_comment(parsed, repo=REPO, result="blocked"),
         )
         return _answer_callback_query(result, callback_id, dry_run=dry_run)
+
+    signature_block_reason = _callback_signature_block_reason(parsed)
+    if signature_block_reason is not None and not dry_run:
+        result = _result(
+            status="blocked",
+            reason=signature_block_reason,
+            github="not_called",
+            posted=False,
+            comment=render_audit_comment(parsed, result="blocked"),
+        )
+        return _answer_callback_query(result, callback_id, dry_run=False)
 
     if dry_run:
         result = _result(
@@ -326,6 +340,39 @@ def _get_updates(bot_token: str, offset: int | None) -> list[object]:
 
     result = payload.get("result") if isinstance(payload, Mapping) else None
     return result if isinstance(result, list) else []
+
+
+def _callback_signature_block_reason(parsed: ParsedCallback) -> str | None:
+    hmac_secret = os.environ.get(CALLBACK_HMAC_ENV)
+    if not hmac_secret:
+        return (
+            f"{CALLBACK_HMAC_ENV} is missing; live Telegram callbacks are blocked."
+        )
+
+    expected_digest = _callback_hmac_digest(
+        action=parsed.action,
+        pr_number=parsed.pr_number,
+        head_marker=parsed.head_marker,
+        hmac_secret=hmac_secret,
+    )
+    if not hmac.compare_digest(parsed.digest, expected_digest):
+        return "callback HMAC signature is invalid or stale."
+    return None
+
+
+def _callback_hmac_digest(
+    *,
+    action: str,
+    pr_number: int,
+    head_marker: str,
+    hmac_secret: str,
+) -> str:
+    message = f"tpr1:{action}:p{pr_number}:{head_marker}".encode("ascii")
+    return hmac.new(
+        hmac_secret.encode("utf-8"),
+        message,
+        hashlib.sha256,
+    ).hexdigest()[:12]
 
 
 def _head_binding_block_reason(parsed: ParsedCallback, pr_state: Mapping[str, object]) -> str | None:

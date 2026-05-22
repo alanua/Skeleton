@@ -42,6 +42,7 @@ Example structure:
 SKELETON_TG_BOT=replace-with-telegram-bot-token
 SKELETON_TG_CHAT=replace-with-telegram-chat-id
 SKELETON_TG_CALLBACK_STATE=/home/agent/agent-dev/state/telegram_callback_poller.json
+SKELETON_TG_CALLBACK_HMAC_SECRET=replace-with-callback-hmac-secret
 ```
 
 Keep the permissions restricted:
@@ -54,7 +55,9 @@ If either Telegram variable is absent, the runner skips Telegram notifications.
 The callback poller also reads `GITHUB_TOKEN` from the local runtime environment
 when it is allowed to post a public-safe PR audit comment. Without
 `SKELETON_TG_BOT` it skips its Telegram poll pass; without `GITHUB_TOKEN` it can
-answer callbacks but skips the PR audit comment.
+answer callbacks but skips the PR audit comment. Without
+`SKELETON_TG_CALLBACK_HMAC_SECRET`, inline callback audit comments are blocked
+before a live GitHub read or write.
 
 ## Hetzner systemd Setup
 
