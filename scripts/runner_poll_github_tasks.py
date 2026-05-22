@@ -91,15 +91,38 @@ class RunnerLane:
     name: str
 
 
+@dataclass(frozen=True)
+class TargetRepository:
+    repo: str
+    worktree_root: Path
+    coordinator_workdir: Path | None = None
+    base_branch: str = "main"
+    branch_prefix: str = "runner"
+
+
 DEFAULT_RUNNER_LANE = RunnerLane("default")
 ALLOWED_RUNNER_LANES = frozenset(RUNNER_LANE_LABELS)
+DEFAULT_TARGET_REPOSITORY = TargetRepository(
+    repo=REPO,
+    worktree_root=DEFAULT_WORKTREE_ROOT,
+)
+ALLOWED_TARGET_REPOSITORIES = {
+    REPO: DEFAULT_TARGET_REPOSITORY,
+    "alanua/jeeves": TargetRepository(
+        repo="alanua/jeeves",
+        worktree_root=Path("/home/agent/agent-dev/worktrees/jeeves"),
+        coordinator_workdir=Path("/home/agent/agent-dev/jeeves"),
+    ),
+}
 
 
 @dataclass(frozen=True)
 class RunnerTask:
     content: str
     lane: RunnerLane = DEFAULT_RUNNER_LANE
+    target_repository: TargetRepository = DEFAULT_TARGET_REPOSITORY
     has_lane_metadata: bool = False
+    has_target_repository_metadata: bool = False
 
 
 @dataclass(frozen=True)
@@ -138,19 +161,46 @@ def run_command(args: list[str], cwd: str | Path | None = None) -> tuple[int, st
     return result.returncode, result.stdout + result.stderr
 
 
-def worktree_root() -> Path:
-    configured_root = os.environ.get("SKELETON_WORKTREE_ROOT")
+def _repo_env_token(repo: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]+", "_", repo).strip("_").upper()
+
+
+def worktree_root(target_repository: TargetRepository | None = None) -> Path:
+    target = target_repository or DEFAULT_TARGET_REPOSITORY
+    legacy_root = os.environ.get("SKELETON_WORKTREE_ROOT")
+    if target.repo == REPO and legacy_root:
+        return Path(legacy_root).expanduser()
+    configured_root = os.environ.get(
+        f"SKELETON_WORKTREE_ROOT_{_repo_env_token(target.repo)}"
+    )
     if configured_root:
         return Path(configured_root).expanduser()
-    return DEFAULT_WORKTREE_ROOT
+    return target.worktree_root
 
 
-def issue_worktree_path(issue_number: int) -> Path:
-    return worktree_root() / f"issue-{issue_number}"
+def coordinator_workdir_for_target(
+    target_repository: TargetRepository, default_workdir: str | Path
+) -> Path:
+    configured_workdir = os.environ.get(
+        f"SKELETON_COORDINATOR_WORKDIR_{_repo_env_token(target_repository.repo)}"
+    )
+    if configured_workdir:
+        return Path(configured_workdir).expanduser()
+    if target_repository.coordinator_workdir is not None:
+        return target_repository.coordinator_workdir
+    return Path(default_workdir)
 
 
-def ensure_safe_worktree_path(path: str | Path) -> Path:
-    root = worktree_root().resolve()
+def issue_worktree_path(
+    issue_number: int, target_repository: TargetRepository | None = None
+) -> Path:
+    return worktree_root(target_repository) / f"issue-{issue_number}"
+
+
+def ensure_safe_worktree_path(
+    path: str | Path, target_repository: TargetRepository | None = None
+) -> Path:
+    root = worktree_root(target_repository).resolve()
     candidate = Path(path).expanduser().resolve()
     if candidate == root:
         raise ValueError(f"Refusing to use worktree root as issue worktree: {candidate}")
@@ -163,8 +213,11 @@ def ensure_safe_worktree_path(path: str | Path) -> Path:
     return candidate
 
 
-def issue_branch(issue_number: int) -> str:
-    return f"runner/issue-{issue_number}"
+def issue_branch(
+    issue_number: int, target_repository: TargetRepository | None = None
+) -> str:
+    target = target_repository or DEFAULT_TARGET_REPOSITORY
+    return f"{target.branch_prefix}/issue-{issue_number}"
 
 
 def format_command_output(command: list[str], output: str) -> str:
@@ -172,10 +225,15 @@ def format_command_output(command: list[str], output: str) -> str:
 
 
 def prepare_issue_worktree(
-    issue_number: int, coordinator_workdir: str | Path
+    issue_number: int,
+    coordinator_workdir: str | Path,
+    target_repository: TargetRepository | None = None,
 ) -> tuple[int, str, Path]:
-    path = ensure_safe_worktree_path(issue_worktree_path(issue_number))
-    branch = issue_branch(issue_number)
+    target = target_repository or DEFAULT_TARGET_REPOSITORY
+    path = ensure_safe_worktree_path(issue_worktree_path(issue_number, target), target)
+    branch = issue_branch(issue_number, target)
+    base_ref = f"origin/{target.base_branch}"
+    target_coordinator_workdir = coordinator_workdir_for_target(target, coordinator_workdir)
     outputs: list[str] = []
 
     if path.exists():
@@ -217,9 +275,9 @@ def prepare_issue_worktree(
 
     for command in (
         ["git", "fetch", "origin"],
-        ["git", "worktree", "add", "-B", branch, str(path), "origin/main"],
+        ["git", "worktree", "add", "-B", branch, str(path), base_ref],
     ):
-        code, output = run_command(command, cwd=coordinator_workdir)
+        code, output = run_command(command, cwd=target_coordinator_workdir)
         outputs.append(format_command_output(command, output))
         if code != 0:
             return code, "\n".join(outputs), path
@@ -227,27 +285,33 @@ def prepare_issue_worktree(
 
 
 def prepare_issue_branch(
-    issue_number: int, coordinator_workdir: str | Path
+    issue_number: int,
+    coordinator_workdir: str | Path,
+    target_repository: TargetRepository | None = None,
 ) -> tuple[int, str, Path]:
-    return prepare_issue_worktree(issue_number, coordinator_workdir)
+    return prepare_issue_worktree(issue_number, coordinator_workdir, target_repository)
 
 
 def cleanup_issue_worktree(
-    issue_number: int, coordinator_workdir: str | Path
+    issue_number: int,
+    coordinator_workdir: str | Path,
+    target_repository: TargetRepository | None = None,
 ) -> tuple[int, str]:
+    target = target_repository or DEFAULT_TARGET_REPOSITORY
     try:
-        path = ensure_safe_worktree_path(issue_worktree_path(issue_number))
+        path = ensure_safe_worktree_path(issue_worktree_path(issue_number, target), target)
     except ValueError as exc:
         return 1, str(exc)
     if not path.exists():
         return 0, ""
     cleanup_runtime_artifacts(path)
+    target_coordinator_workdir = coordinator_workdir_for_target(target, coordinator_workdir)
     outputs: list[str] = []
     for command in (
         ["git", "worktree", "remove", "--force", str(path)],
         ["git", "worktree", "prune"],
     ):
-        code, output = run_command(command, cwd=coordinator_workdir)
+        code, output = run_command(command, cwd=target_coordinator_workdir)
         outputs.append(format_command_output(command, output))
         if code != 0:
             return code, "\n".join(outputs)
@@ -337,6 +401,25 @@ def extract_runner_lane(body: str) -> tuple[RunnerLane | None, str | None]:
     return RunnerLane(lane_name), None
 
 
+def extract_target_repository(
+    body: str,
+) -> tuple[TargetRepository | None, str | None]:
+    metadata = (body or "").split("```task", 1)[0]
+    repo_name = _body_field(metadata, "Target Repository") or _body_field(
+        metadata, "Target Repo"
+    )
+    if repo_name is None:
+        return DEFAULT_TARGET_REPOSITORY, None
+    target = ALLOWED_TARGET_REPOSITORIES.get(repo_name)
+    if target is None:
+        allowed = ", ".join(f"`{name}`" for name in sorted(ALLOWED_TARGET_REPOSITORIES))
+        return (
+            None,
+            f"Target repository `{repo_name}` is not allowlisted. Use {allowed}.",
+        )
+    return target, None
+
+
 def extract_runner_task(body: str) -> tuple[RunnerTask | None, str | None]:
     content = extract_task_block(body)
     if content is None:
@@ -345,12 +428,20 @@ def extract_runner_task(body: str) -> tuple[RunnerTask | None, str | None]:
     lane, lane_reason = extract_runner_lane(body)
     if lane is None:
         return None, lane_reason
+    target_repository, target_reason = extract_target_repository(body)
+    if target_repository is None:
+        return None, target_reason
     return RunnerTask(
         content=content,
         lane=lane,
+        target_repository=target_repository,
         has_lane_metadata=(
             _body_field(metadata, "Runner Lane") is not None
             or _body_field(metadata, "Lane") is not None
+        ),
+        has_target_repository_metadata=(
+            _body_field(metadata, "Target Repository") is not None
+            or _body_field(metadata, "Target Repo") is not None
         ),
     ), None
 
@@ -580,6 +671,15 @@ def extract_pr_number(pr_url: str) -> int | None:
     return int(match.group("number"))
 
 
+def extract_report_repository(report: str) -> str:
+    match = re.search(
+        r"^Target Repository:\s*(?P<repo>\S+)\s*$",
+        report,
+        re.MULTILINE,
+    )
+    return match.group("repo") if match else REPO
+
+
 def extract_runner_report_pr_binding(
     report: str,
 ) -> tuple[str | None, tuple[str, ...]]:
@@ -729,12 +829,16 @@ def build_done_pr_ready_card_payload(report: str) -> dict[str, Any] | None:
     if head_sha is None or not changed_files:
         return _build_details_only_card_payload(pr_url, pr_number)
 
+    repo = extract_report_repository(report)
+    if repo != REPO:
+        return _build_details_only_card_payload(pr_url, pr_number)
+
     try:
         # Runner reports the commit pushed immediately before its draft PR URL;
         # that commit is the reviewed head for this DONE notification.
         return _localize_pr_ready_card_payload(
             build_pr_ready_card_payload(
-                repo=REPO,
+                repo=repo,
                 pr_number=pr_number,
                 head_sha=head_sha,
                 changed_files=changed_files,
@@ -867,8 +971,14 @@ def changed_files(workdir: str) -> list[str]:
     return sorted(files)
 
 
-def finalize_success(issue: dict[str, Any], workdir: str, codex_output: str) -> str:
+def finalize_success(
+    issue: dict[str, Any],
+    workdir: str,
+    codex_output: str,
+    target_repository: TargetRepository | None = None,
+) -> str:
     issue_number = int(issue["number"])
+    target = target_repository or DEFAULT_TARGET_REPOSITORY
     files = changed_files(workdir)
     if not files:
         cleanup_runtime_artifacts(workdir)
@@ -902,7 +1012,7 @@ def finalize_success(issue: dict[str, Any], workdir: str, codex_output: str) -> 
             "--force-with-lease",
             "-u",
             "origin",
-            issue_branch(issue_number),
+            issue_branch(issue_number, target),
         ],
     ):
         code, output = run_command(command, cwd=workdir)
@@ -924,11 +1034,11 @@ def finalize_success(issue: dict[str, Any], workdir: str, codex_output: str) -> 
         "pr",
         "create",
         "--repo",
-        REPO,
+        target.repo,
         "--base",
-        "main",
+        target.base_branch,
         "--head",
-        issue_branch(issue_number),
+        issue_branch(issue_number, target),
         "--title",
         pr_title,
         "--body",
@@ -944,9 +1054,9 @@ def finalize_success(issue: dict[str, Any], workdir: str, codex_output: str) -> 
                 "gh",
                 "pr",
                 "view",
-                issue_branch(issue_number),
+                issue_branch(issue_number, target),
                 "--repo",
-                REPO,
+                target.repo,
                 "--json",
                 "url",
                 "--jq",
@@ -965,6 +1075,7 @@ def finalize_success(issue: dict[str, Any], workdir: str, codex_output: str) -> 
     )
     return (
         "DONE: Codex completed successfully and produced file changes.\n\n"
+        f"Target Repository: {target.repo}\n\n"
         "Changed files:\n"
         + "\n".join(f"- {file_name}" for file_name in files)
         + "\n\n"
@@ -1499,7 +1610,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             return
 
         worktree_code, worktree_output, worktree_path = prepare_issue_branch(
-            issue_number, coordinator_workdir
+            issue_number, coordinator_workdir, runner_task.target_repository
         )
         if worktree_code != 0:
             block_issue(
@@ -1527,12 +1638,17 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             return
 
         report = report_runner_lane(
-            finalize_success(issue, issue_workdir, codex_output),
+            finalize_success(
+                issue,
+                issue_workdir,
+                codex_output,
+                runner_task.target_repository,
+            ),
             runner_task,
         )
         cleanup_runtime_artifacts(issue_workdir)
         cleanup_code, cleanup_output = cleanup_issue_worktree(
-            issue_number, coordinator_workdir
+            issue_number, coordinator_workdir, runner_task.target_repository
         )
         if cleanup_code != 0:
             raise RuntimeError(

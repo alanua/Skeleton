@@ -37,7 +37,9 @@ def test_successful_issue_cleans_issue_workspace_before_marking_done(
     ) as label, mock.patch.object(runner, "notify_task_finished"):
         runner.process_issue(_issue(161), workdir="/coordinator")
 
-    cleanup_worktree.assert_called_once_with(161, "/coordinator")
+    cleanup_worktree.assert_called_once_with(
+        161, "/coordinator", runner.DEFAULT_TARGET_REPOSITORY
+    )
     comment.assert_called_once_with(161, "DONE report")
     assert label.call_args_list == [
         mock.call(161, runner.LABEL_READY, runner.LABEL_RUNNING),

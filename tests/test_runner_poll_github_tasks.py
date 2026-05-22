@@ -173,6 +173,139 @@ def test_prepare_issue_worktree_adds_runner_issue_branch(tmp_path: Path) -> None
     ]
 
 
+def test_target_repository_metadata_plans_allowlisted_repo_worktree(
+    tmp_path: Path,
+) -> None:
+    worktree_root = tmp_path / "jeeves-worktrees"
+    coordinator = tmp_path / "jeeves"
+    coordinator.mkdir()
+    issue = {
+        "number": 139,
+        "title": "Target repo",
+        "body": "Target Repository: alanua/jeeves\n\n```task\nDo it\n```",
+    }
+
+    with mock.patch.dict(
+        os.environ,
+        {
+            "SKELETON_WORKTREE_ROOT_ALANUA_JEEVES": str(worktree_root),
+            "SKELETON_COORDINATOR_WORKDIR_ALANUA_JEEVES": str(coordinator),
+        },
+        clear=True,
+    ), mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "run_command", side_effect=((0, "fetched"), (0, "added"))
+    ) as run_command:
+        task, reason = runner.extract_runner_task(str(issue["body"]))
+        assert task is not None
+        assert reason is None
+        code, output, path = runner.prepare_issue_worktree(
+            139, "/skeleton-coordinator", task.target_repository
+        )
+
+    assert code == 0
+    assert "git worktree add" in output
+    assert path == (worktree_root / "issue-139").resolve()
+    assert task.target_repository.repo == "alanua/jeeves"
+    assert task.has_target_repository_metadata is True
+    assert run_command.call_args_list == [
+        mock.call(["git", "fetch", "origin"], cwd=coordinator),
+        mock.call(
+            [
+                "git",
+                "worktree",
+                "add",
+                "-B",
+                "runner/issue-139",
+                str(path),
+                "origin/main",
+            ],
+            cwd=coordinator,
+        ),
+    ]
+
+
+def test_non_allowlisted_target_repository_blocks_before_claim() -> None:
+    issue = {
+        "number": 140,
+        "title": "Unknown target",
+        "body": "Target Repository: untrusted/repo\n\n```task\nDo it\n```",
+    }
+
+    with mock.patch.object(runner, "block_issue") as block, mock.patch.object(
+        runner, "set_issue_label"
+    ) as label, mock.patch.object(runner, "run_codex_task") as run_codex:
+        runner.process_issue(issue, workdir="/coordinator")
+
+    block.assert_called_once()
+    assert "Target repository `untrusted/repo` is not allowlisted" in block.call_args.args[1]
+    label.assert_not_called()
+    run_codex.assert_not_called()
+
+
+def test_finalize_success_creates_draft_pr_for_target_repository(
+    tmp_path: Path,
+) -> None:
+    target = runner.ALLOWED_TARGET_REPOSITORIES["alanua/jeeves"]
+    commands: list[list[str]] = []
+
+    def run_command(args: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        del cwd
+        commands.append(args)
+        if args in (
+            ["git", "diff", "--name-only"],
+            ["git", "diff", "--cached", "--name-only"],
+            ["git", "ls-files", "--others", "--exclude-standard"],
+        ):
+            return 0, "scripts/runner_poll_github_tasks.py\n"
+        if args == ["python3", "-m", "pytest", "-q"]:
+            return 0, "1 passed\n"
+        if args == ["git", "rev-parse", "HEAD"]:
+            return 0, HEAD_SHA
+        if args[:3] == ["gh", "pr", "create"]:
+            return 0, "https://github.com/alanua/jeeves/pull/10\n"
+        return 0, ""
+
+    issue = {"number": 141, "title": "Target draft PR"}
+    with mock.patch.object(runner, "run_command", side_effect=run_command):
+        report = runner.finalize_success(issue, str(tmp_path), "codex ok", target)
+
+    assert "Target Repository: alanua/jeeves" in report
+    assert "Draft PR: https://github.com/alanua/jeeves/pull/10" in report
+    assert [
+        "gh",
+        "pr",
+        "create",
+        "--repo",
+        "alanua/jeeves",
+        "--base",
+        "main",
+        "--head",
+        "runner/issue-141",
+        "--title",
+        "Runner task #141: Target draft PR",
+        "--body",
+        "Automated Runner task from issue #141.",
+        "--draft",
+    ] in commands
+
+
+def test_target_repository_done_card_is_details_only_until_merge_allowlisted() -> None:
+    report = DONE_REPORT.replace(
+        "Changed files:",
+        "Target Repository: alanua/jeeves\n\nChanged files:",
+    ).replace(
+        PR_URL,
+        "https://github.com/alanua/jeeves/pull/123",
+    )
+
+    card = runner.build_done_pr_ready_card_payload(report)
+
+    assert card is not None
+    assert [button["action"] for button in card["buttons"]] == ["details", "open_pr"]
+
+
 def test_stale_dirty_worktree_blocks_instead_of_deleting(tmp_path: Path) -> None:
     worktree_path = tmp_path / "worktrees" / "issue-139"
     worktree_path.mkdir(parents=True)
@@ -233,9 +366,13 @@ def test_process_issue_runs_codex_in_prepared_issue_worktree(tmp_path: Path) -> 
     ):
         runner.process_issue(issue, workdir=str(coordinator))
 
-    prepare.assert_called_once_with(139, str(coordinator))
+    prepare.assert_called_once_with(
+        139, str(coordinator), runner.DEFAULT_TARGET_REPOSITORY
+    )
     run_codex.assert_called_once_with("Do it", str(issue_path))
-    finalize.assert_called_once_with(issue, str(issue_path), "codex output")
+    finalize.assert_called_once_with(
+        issue, str(issue_path), "codex output", runner.DEFAULT_TARGET_REPOSITORY
+    )
 
 
 def test_poll_once_processes_issues_single_lane() -> None:

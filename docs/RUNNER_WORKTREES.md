@@ -25,6 +25,24 @@ prioritize, lock, or parallelize work by lane.
 Lane metadata smoke tests should confirm `runner:lane:lane-1` and
 `Runner Lane: lane-1` appear while execution remains single-runner.
 
+Target worktree stage 2 lets normal task issues set
+`Target Repository: <owner/name>` before the fenced task block. Omitting it uses
+`alanua/Skeleton`. The allowlisted target repositories are `alanua/Skeleton` and
+`alanua/jeeves`; any other value is blocked before labels are claimed or Codex is
+run.
+
+The target repository metadata controls worktree path planning, coordinator
+checkout selection, base branch, branch name, push target, and draft PR
+creation. `alanua/Skeleton` keeps the legacy `SKELETON_WORKTREE_ROOT` override.
+Other allowlisted repositories may set
+`SKELETON_WORKTREE_ROOT_<OWNER>_<NAME>` and
+`SKELETON_COORDINATOR_WORKDIR_<OWNER>_<NAME>`, for example
+`SKELETON_WORKTREE_ROOT_ALANUA_JEEVES` and
+`SKELETON_COORDINATOR_WORKDIR_ALANUA_JEEVES`.
+
+Runner-created PRs remain draft PRs. Merge automation stays gated on an explicit
+Telegram-approved merge request and still refuses draft PRs.
+
 An existing issue worktree is reused only when it is clean and already on the
 expected `runner/issue-N` branch. Otherwise the issue is blocked with cleanup
 guidance. Cleanup after success is best effort and is limited to paths under
