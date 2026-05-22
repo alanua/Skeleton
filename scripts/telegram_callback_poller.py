@@ -17,7 +17,7 @@ TELEGRAM_CALLBACK_DATA_LIMIT = 64
 
 _CALLBACK_RE = re.compile(
     r"^tpr1:(?P<action>approve|reject|details):p(?P<pr_number>[1-9][0-9]{0,9}):"
-    r"(?P<head_marker>[0-9a-f]{8}):(?P<digest>[0-9a-f]{12})$"
+    r"(?P<head_marker>[0-9a-f]{8}|nosha):(?P<digest>[0-9a-f]{12})$"
 )
 
 
@@ -176,6 +176,9 @@ def _bounded_callback_id(callback_id: object) -> str | None:
 def _head_binding_block_reason(parsed: ParsedCallback, pr_state: Mapping[str, object]) -> str | None:
     if parsed.action not in {"approve", "reject"}:
         return None
+
+    if parsed.head_marker == "nosha":
+        return "approve/reject callback requires a SHA head marker."
 
     if pr_state.get("number") != parsed.pr_number:
         return "approve/reject callback PR number does not match GitHub PR state."

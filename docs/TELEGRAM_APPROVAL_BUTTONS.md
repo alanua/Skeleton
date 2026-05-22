@@ -33,6 +33,11 @@ Telegram sender uses Telegram `sendMessage` `reply_markup` with
 data is deterministic, bounded, and derived only from public-safe card
 metadata.
 
+If Runner cannot build the `DONE` card, or Telegram rejects the card send with
+`reply_markup`, Runner retries the public-safe plain `DONE` notification. The
+fallback text keeps the existing repository, issue, status, and PR link fields;
+it does not include the card failure or any bot token.
+
 Stage 1 callback validation blocks malformed payloads and callbacks whose head
 SHA does not match the current SHA supplied by the caller. Only a validated
 `approve` callback is passed to `core/action_gate.py`, where it becomes a
