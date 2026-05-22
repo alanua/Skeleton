@@ -9,6 +9,7 @@ from unittest import mock
 import pytest
 
 from scripts import runner_poll_github_tasks as runner
+from scripts import telegram_callback_poller as callback_poller
 
 
 HEAD_SHA = "a" * 40
@@ -256,6 +257,36 @@ def test_extracts_bounded_telegram_approved_merge_request() -> None:
         approved_head_sha=HEAD_SHA,
         callback_digest=CALLBACK_DIGEST,
     )
+
+
+def test_callback_merge_request_smoke_blocks_without_chatgpt_content_marker() -> None:
+    body = callback_poller._render_runner_merge_request_body(
+        pr_number=123,
+        head_sha=HEAD_SHA,
+        callback_digest=CALLBACK_DIGEST,
+    )
+
+    mode, request, reason = runner.extract_telegram_approved_pr_merge_request(body)
+
+    assert mode is True
+    assert reason is None
+    assert request == runner.TelegramApprovedPrMergeRequest(
+        pr_number=123,
+        approved_head_sha=HEAD_SHA,
+        callback_digest=CALLBACK_DIGEST,
+    )
+
+    with mock.patch.dict(
+        os.environ, {runner.TELEGRAM_CALLBACK_HMAC_ENV: CALLBACK_HMAC_SECRET}, clear=True
+    ), mock.patch.object(
+        runner,
+        "get_pr_merge_state",
+        return_value=_merge_pr_state(comments=_merge_comments()[:1]),
+    ), mock.patch.object(runner, "run_command") as run:
+        report = runner.execute_telegram_approved_pr_merge(request)
+
+    assert report == "BLOCKED: ChatGPT CONTENT APPROVED marker is missing for this PR head."
+    run.assert_not_called()
 
 
 @pytest.mark.parametrize(
