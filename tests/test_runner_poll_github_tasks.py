@@ -348,6 +348,19 @@ def test_maintenance_task_bypasses_codex() -> None:
     ]
 
 
+def test_missing_maintenance_task_id_is_blocked() -> None:
+    with mock.patch.object(runner, "block_issue") as block, mock.patch.object(
+        runner, "run_codex_task"
+    ) as run_codex:
+        runner.process_issue(_maintenance_issue(None))
+
+    block.assert_called_once_with(
+        145,
+        "Runtime maintenance task id is missing. Use `Maintenance Task ID:`.",
+    )
+    run_codex.assert_not_called()
+
+
 def test_unknown_maintenance_task_is_blocked() -> None:
     with mock.patch.object(runner, "block_issue") as block, mock.patch.object(
         runner, "run_codex_task"
