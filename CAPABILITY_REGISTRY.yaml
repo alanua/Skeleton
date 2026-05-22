@@ -85,6 +85,14 @@ capabilities:
     added: "2026-05-19"
     description: Polls GitHub issues labeled runner:ready, executes bounded Codex tasks on Hetzner Runner, creates draft PRs, and reports results back to GitHub.
 
+  runner_worktree_execution:
+    status: stage1_single_lane
+    module: scripts/runner_poll_github_tasks.py
+    tested: true
+    live_runtime_execution: true
+    added: "2026-05-22"
+    description: Executes bounded Runner issues in per-issue git worktrees while keeping queue processing single-lane.
+
   notebooklm_sourcepack:
     status: available
     module: scripts/build_notebooklm_sourcepack.py

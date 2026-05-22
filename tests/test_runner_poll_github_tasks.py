@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import urllib.parse
+from pathlib import Path
 from unittest import mock
 
 from scripts import runner_poll_github_tasks as runner
@@ -38,6 +39,133 @@ def _request_payload(urlopen: mock.MagicMock) -> dict[str, list[str]]:
 
 def _plain_done_message(issue_number: int = 129) -> str:
     return runner.build_telegram_message(issue_number, "DONE", DONE_REPORT)
+
+
+def test_worktree_path_uses_env_root_when_set(tmp_path: Path) -> None:
+    configured_root = tmp_path / "runner-worktrees"
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(configured_root)}, clear=True
+    ):
+        assert runner.issue_worktree_path(138) == configured_root / "issue-138"
+
+
+def test_worktree_path_falls_back_to_default_root() -> None:
+    with mock.patch.dict(os.environ, {}, clear=True):
+        assert runner.worktree_root() == runner.DEFAULT_WORKTREE_ROOT
+        assert runner.issue_worktree_path(138) == runner.DEFAULT_WORKTREE_ROOT / "issue-138"
+
+
+def test_worktree_path_includes_issue_number(tmp_path: Path) -> None:
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(tmp_path)}, clear=True
+    ):
+        assert runner.issue_worktree_path(912).name == "issue-912"
+
+
+def test_unsafe_worktree_paths_are_rejected(tmp_path: Path) -> None:
+    root = tmp_path / "runner-worktrees"
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(root)}, clear=True
+    ):
+        for unsafe_path in (root, tmp_path / "issue-138"):
+            try:
+                runner.ensure_safe_worktree_path(unsafe_path)
+            except ValueError:
+                continue
+            raise AssertionError(f"unsafe worktree path was accepted: {unsafe_path}")
+
+
+def test_prepare_issue_worktree_adds_runner_issue_branch(tmp_path: Path) -> None:
+    worktree_root = tmp_path / "worktrees"
+    coordinator = tmp_path / "coordinator"
+    coordinator.mkdir()
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(worktree_root)}, clear=True
+    ), mock.patch.object(
+        runner, "run_command", side_effect=((0, "fetch"), (0, "added"))
+    ) as run_command:
+        code, output, path = runner.prepare_issue_worktree(138, coordinator)
+
+    assert code == 0
+    assert "git worktree add" in output
+    assert path == (worktree_root / "issue-138").resolve()
+    assert run_command.call_args_list == [
+        mock.call(["git", "fetch", "origin"], cwd=coordinator),
+        mock.call(
+            [
+                "git",
+                "worktree",
+                "add",
+                "-B",
+                "runner/issue-138",
+                str(path),
+                "origin/main",
+            ],
+            cwd=coordinator,
+        ),
+    ]
+
+
+def test_stale_dirty_worktree_blocks_instead_of_deleting(tmp_path: Path) -> None:
+    worktree_path = tmp_path / "worktrees" / "issue-138"
+    worktree_path.mkdir(parents=True)
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(tmp_path / "worktrees")}, clear=True
+    ), mock.patch.object(
+        runner, "run_command", return_value=(0, " M scripts/runner_poll_github_tasks.py")
+    ) as run_command:
+        code, output, path = runner.prepare_issue_worktree(138, tmp_path / "coordinator")
+
+    assert code != 0
+    assert path == worktree_path.resolve()
+    assert "dirty" in output
+    assert "cleanup" in output
+    run_command.assert_called_once_with(["git", "status", "--short"], cwd=path)
+
+
+def test_process_issue_runs_codex_in_prepared_issue_worktree(tmp_path: Path) -> None:
+    coordinator = tmp_path / "coordinator"
+    issue_path = tmp_path / "worktrees" / "issue-138"
+    issue = {"number": 138, "title": "Worktree stage", "body": "```task\nDo it\n```"}
+
+    with mock.patch.object(runner, "set_issue_label"), mock.patch.object(
+        runner, "prepare_issue_worktree", return_value=(0, "ready", issue_path)
+    ) as prepare, mock.patch.object(
+        runner, "ensure_clean_worktree", side_effect=AssertionError("shared checkout used")
+    ), mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, "codex output")
+    ) as run_codex, mock.patch.object(
+        runner, "finalize_success", return_value="DONE report"
+    ) as finalize, mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "cleanup_issue_worktree"
+    ):
+        runner.process_issue(issue, workdir=str(coordinator))
+
+    prepare.assert_called_once_with(138, str(coordinator))
+    run_codex.assert_called_once_with("Do it", str(issue_path))
+    finalize.assert_called_once_with(issue, str(issue_path), "codex output")
+
+
+def test_poll_once_processes_issues_single_lane() -> None:
+    issues = [{"number": 138}, {"number": 139}]
+    with mock.patch.object(
+        runner, "get_ready_issues", return_value=issues
+    ), mock.patch.object(runner, "process_issue") as process_issue:
+        count = runner.poll_once(workdir="/coordinator")
+
+    assert count == 2
+    assert process_issue.call_args_list == [
+        mock.call(issues[0], workdir="/coordinator"),
+        mock.call(issues[1], workdir="/coordinator"),
+    ]
 
 
 def test_simple_done_notification_without_pr_url_keeps_plain_message() -> None:
