@@ -17,15 +17,21 @@ button click. It does not contain tokens or private Telegram state.
 
 When `GITHUB_TOKEN` is missing, the handler returns a skipped no-post result.
 When `SKELETON_TG_BOT` exists and the callback query has a bounded callback ID,
-the handler calls Telegram `answerCallbackQuery`. `dry_run=True` makes a hard
-no-HTTP path for validation and tests.
+the handler calls Telegram `answerCallbackQuery`. Telegram callback answers are
+best-effort: Telegram can reject an old callback after the GitHub audit comment
+has been posted, so an answer failure is recorded as an error result without
+crashing the poll pass. The GitHub audit record remains the durable operator
+event. `dry_run=True` makes a hard no-HTTP path for validation and tests.
 
 The one-shot poll pass reads and writes its Telegram offset state as JSON. Set
 `SKELETON_TG_CALLBACK_STATE` to choose the local state file. Without that
 variable it uses
 `/home/agent/agent-dev/state/telegram_callback_poller.json`. The poller advances
 the stored offset to the next update after the highest bounded batch update it
-processed, including non-callback updates returned by Telegram.
+processed, including non-callback updates returned by Telegram. The same local
+state file keeps a bounded callback ID history so a callback seen again does not
+post a duplicate GitHub audit comment; the duplicate still receives a
+best-effort Telegram callback answer.
 
 `scripts/skeleton-telegram-callback-poll.service` runs one poll pass with the
 optional `/etc/skeleton-runner.env` environment file. The matching timer starts
