@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 from unittest import mock
+import urllib.error
 
 import pytest
 
@@ -124,9 +125,65 @@ def test_poll_once_reads_updates_processes_callback_and_advances_offset(tmp_path
         "updates_seen": 1,
         "callbacks_seen": 1,
         "callbacks_handled": 1,
+        "callbacks_duplicate": 0,
         "offset": 42,
     }
-    assert json.loads(state_path.read_text(encoding="utf-8")) == {"offset": 42}
+    assert json.loads(state_path.read_text(encoding="utf-8")) == {
+        "handled_callback_ids": ["callback-query-1"],
+        "offset": 42,
+    }
+
+
+@pytest.mark.parametrize(
+    ("answer_error", "answer_error_name"),
+    (
+        (
+            urllib.error.HTTPError(
+                "https://api.telegram.org/bottelegram-secret/answerCallbackQuery",
+                400,
+                "Bad Request",
+                None,
+                None,
+            ),
+            "http_error",
+        ),
+        (urllib.error.URLError("stale callback transport failure"), "url_error"),
+    ),
+)
+def test_poll_once_advances_offset_when_telegram_answer_fails(
+    tmp_path: Path,
+    answer_error: Exception,
+    answer_error_name: str,
+) -> None:
+    state_path = tmp_path / "callback-state.json"
+    update_payload = {"result": [{"update_id": 41, "callback_query": query()}]}
+    with mock.patch.dict(
+        os.environ, {"SKELETON_TG_BOT": "telegram-secret"}, clear=True
+    ), mock.patch.object(
+        poller.urllib.request,
+        "urlopen",
+        side_effect=(response(update_payload), answer_error),
+    ):
+        result = poller.poll_once(state_path=state_path)
+
+    assert result["status"] == "polled"
+    assert result["offset"] == 42
+    assert json.loads(state_path.read_text(encoding="utf-8"))["offset"] == 42
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_TG_BOT": "telegram-secret"}, clear=True
+    ), mock.patch.object(
+        poller.urllib.request,
+        "urlopen",
+        side_effect=answer_error,
+    ):
+        answer_result = poller.handle_callback_query(query())
+
+    assert answer_result["telegram_answer"] == "error"
+    assert answer_result["telegram_answer_error"] == answer_error_name
+    rendered = json.dumps(answer_result, sort_keys=True)
+    assert "telegram-secret" not in rendered
+    assert poller.TELEGRAM_API_BASE not in rendered
 
 
 def test_poll_once_uses_configured_offset_state_path(tmp_path: Path) -> None:
@@ -150,6 +207,43 @@ def test_poll_once_uses_configured_offset_state_path(tmp_path: Path) -> None:
     request = urlopen.call_args.args[0]
     assert "offset=12" in request.full_url
     assert result["offset"] == 12
+
+
+def test_poll_once_duplicate_callback_skips_duplicate_audit_comment(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "callback-state.json"
+    state_path.write_text(
+        '{"handled_callback_ids":["callback-query-1"],"offset":41}\n',
+        encoding="utf-8",
+    )
+    update_payload = {"result": [{"update_id": 41, "callback_query": query()}]}
+    telegram_token = "telegram-secret-do-not-return"
+    with mock.patch.dict(
+        os.environ,
+        {"GITHUB_TOKEN": "github-secret", "SKELETON_TG_BOT": telegram_token},
+        clear=True,
+    ), mock.patch.object(
+        poller.urllib.request,
+        "urlopen",
+        side_effect=(response(update_payload), response()),
+    ) as urlopen:
+        result = poller.poll_once(state_path=state_path)
+
+    requests = [call.args[0] for call in urlopen.call_args_list]
+    assert result == {
+        "status": "polled",
+        "updates_seen": 1,
+        "callbacks_seen": 1,
+        "callbacks_handled": 1,
+        "callbacks_duplicate": 1,
+        "offset": 42,
+    }
+    assert len(requests) == 2
+    assert all("api.github.com" not in request.full_url for request in requests)
+    assert requests[-1].full_url.endswith("/bottelegram-secret-do-not-return/answerCallbackQuery")
+    assert telegram_token not in json.dumps(result, sort_keys=True)
+    assert poller.TELEGRAM_API_BASE not in json.dumps(result, sort_keys=True)
 
 
 def test_approve_callback_posts_audit_comment_when_pr_head_marker_matches() -> None:
@@ -301,6 +395,9 @@ def test_stage_1_source_has_no_pr_action_endpoints() -> None:
     script = Path(poller.__file__).read_text(encoding="utf-8")
 
     assert "/merge" not in script
+    assert '"/reject"' not in script
+    assert "'/reject'" not in script
+    assert "/close" not in script
     assert "/labels" not in script
     assert '"state":"closed"' not in script
     assert '"state": "closed"' not in script

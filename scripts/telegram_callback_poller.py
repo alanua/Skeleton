@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 from typing import Any, Mapping
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -17,6 +18,7 @@ TELEGRAM_API_BASE = "https://api.telegram.org"
 HTTP_TIMEOUT_SECONDS = 15
 TELEGRAM_CALLBACK_DATA_LIMIT = 64
 TELEGRAM_UPDATE_LIMIT = 25
+CALLBACK_ID_HISTORY_LIMIT = 500
 DEFAULT_CALLBACK_STATE_PATH = Path(
     "/home/agent/agent-dev/state/telegram_callback_poller.json"
 )
@@ -166,11 +168,15 @@ def poll_once(*, state_path: Path | None = None) -> dict[str, object]:
             "offset": _read_offset(path),
         }
 
-    offset = _read_offset(path)
+    state = _read_state(path)
+    offset = state["offset"]
+    handled_callback_ids = list(state["handled_callback_ids"])
+    handled_callback_id_set = set(handled_callback_ids)
     updates = _get_updates(bot_token, offset)
     next_offset = offset
     callbacks_seen = 0
     callbacks_handled = 0
+    callbacks_duplicate = 0
 
     for update in updates:
         if not isinstance(update, Mapping):
@@ -186,17 +192,28 @@ def poll_once(*, state_path: Path | None = None) -> dict[str, object]:
             continue
 
         callbacks_seen += 1
-        handle_callback_query(callback_query)
+        callback_id = _bounded_callback_id(callback_query.get("id"))
+        if callback_id is not None and callback_id in handled_callback_id_set:
+            _handle_duplicate_callback_query(callback_query)
+            callbacks_duplicate += 1
+        else:
+            handle_callback_query(callback_query)
+            if callback_id is not None:
+                handled_callback_ids = _remember_callback_id(
+                    handled_callback_ids, callback_id
+                )
+                handled_callback_id_set = set(handled_callback_ids)
         callbacks_handled += 1
 
-    if next_offset != offset and next_offset is not None:
-        _write_offset(path, next_offset)
+    if next_offset != offset or handled_callback_ids != state["handled_callback_ids"]:
+        _write_state(path, next_offset, handled_callback_ids)
 
     return {
         "status": "polled",
         "updates_seen": len(updates),
         "callbacks_seen": callbacks_seen,
         "callbacks_handled": callbacks_handled,
+        "callbacks_duplicate": callbacks_duplicate,
         "offset": next_offset,
     }
 
@@ -233,23 +250,61 @@ def _callback_state_path() -> Path:
 
 
 def _read_offset(path: Path) -> int | None:
+    return _read_state(path)["offset"]
+
+
+def _read_state(path: Path) -> dict[str, object]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return None
+        return {"offset": None, "handled_callback_ids": []}
 
     offset = payload.get("offset") if isinstance(payload, Mapping) else None
-    return offset if isinstance(offset, int) and offset >= 0 else None
+    handled_callback_ids = (
+        payload.get("handled_callback_ids") if isinstance(payload, Mapping) else None
+    )
+    return {
+        "offset": offset if isinstance(offset, int) and offset >= 0 else None,
+        "handled_callback_ids": _bounded_callback_id_history(handled_callback_ids),
+    }
 
 
 def _write_offset(path: Path, offset: int) -> None:
+    _write_state(path, offset, _read_state(path)["handled_callback_ids"])
+
+
+def _write_state(
+    path: Path, offset: int | None, handled_callback_ids: object
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp")
+    payload: dict[str, object] = {
+        "handled_callback_ids": _bounded_callback_id_history(handled_callback_ids)
+    }
+    if offset is not None:
+        payload["offset"] = offset
     temporary.write_text(
-        json.dumps({"offset": offset}, sort_keys=True, separators=(",", ":")) + "\n",
+        json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
         encoding="utf-8",
     )
     os.replace(temporary, path)
+
+
+def _bounded_callback_id_history(callback_ids: object) -> list[str]:
+    if not isinstance(callback_ids, list):
+        return []
+
+    history: list[str] = []
+    for callback_id in callback_ids:
+        bounded = _bounded_callback_id(callback_id)
+        if bounded is None or bounded in history:
+            continue
+        history.append(bounded)
+    return history[-CALLBACK_ID_HISTORY_LIMIT:]
+
+
+def _remember_callback_id(callback_ids: list[str], callback_id: str) -> list[str]:
+    return _bounded_callback_id_history([*callback_ids, callback_id])
 
 
 def _get_updates(bot_token: str, offset: int | None) -> list[object]:
@@ -360,10 +415,36 @@ def _answer_callback_query(
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS):
-        pass
+    try:
+        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS):
+            pass
+    except urllib.error.HTTPError:
+        result["telegram_answer"] = "error"
+        result["telegram_answer_error"] = "http_error"
+        return result
+    except urllib.error.URLError:
+        result["telegram_answer"] = "error"
+        result["telegram_answer_error"] = "url_error"
+        return result
     result["telegram_answer"] = "answered"
     return result
+
+
+def _handle_duplicate_callback_query(
+    callback_query: Mapping[str, object],
+) -> dict[str, object]:
+    result = _result(
+        status="duplicate",
+        reason="callback already processed locally; no audit comment was posted.",
+        github="skipped_duplicate",
+        posted=False,
+        comment=None,
+    )
+    return _answer_callback_query(
+        result,
+        _bounded_callback_id(callback_query.get("id")),
+        dry_run=False,
+    )
 
 
 def main() -> int:
