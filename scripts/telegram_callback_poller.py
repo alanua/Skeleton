@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -19,6 +21,8 @@ HTTP_TIMEOUT_SECONDS = 15
 TELEGRAM_CALLBACK_DATA_LIMIT = 64
 TELEGRAM_UPDATE_LIMIT = 25
 CALLBACK_ID_HISTORY_LIMIT = 500
+CALLBACK_DATA_HISTORY_LIMIT = 500
+CALLBACK_HMAC_ENV = "SKELETON_TG_CALLBACK_HMAC_SECRET"
 DEFAULT_CALLBACK_STATE_PATH = Path(
     "/home/agent/agent-dev/state/telegram_callback_poller.json"
 )
@@ -111,6 +115,17 @@ def handle_callback_query(
         )
         return _answer_callback_query(result, callback_id, dry_run=dry_run)
 
+    signature_block_reason = _callback_signature_block_reason(parsed)
+    if signature_block_reason is not None and not dry_run:
+        result = _result(
+            status="blocked",
+            reason=signature_block_reason,
+            github="not_called",
+            posted=False,
+            comment=render_audit_comment(parsed, result="blocked"),
+        )
+        return _answer_callback_query(result, callback_id, dry_run=False)
+
     if dry_run:
         result = _result(
             status="dry_run",
@@ -172,6 +187,8 @@ def poll_once(*, state_path: Path | None = None) -> dict[str, object]:
     offset = state["offset"]
     handled_callback_ids = list(state["handled_callback_ids"])
     handled_callback_id_set = set(handled_callback_ids)
+    handled_callback_data = list(state["handled_callback_data"])
+    handled_callback_data_set = set(handled_callback_data)
     updates = _get_updates(bot_token, offset)
     next_offset = offset
     callbacks_seen = 0
@@ -193,7 +210,12 @@ def poll_once(*, state_path: Path | None = None) -> dict[str, object]:
 
         callbacks_seen += 1
         callback_id = _bounded_callback_id(callback_query.get("id"))
-        if callback_id is not None and callback_id in handled_callback_id_set:
+        callback_data = _bounded_callback_data(callback_query.get("data"))
+        if (
+            callback_id is not None and callback_id in handled_callback_id_set
+        ) or (
+            callback_data is not None and callback_data in handled_callback_data_set
+        ):
             _handle_duplicate_callback_query(callback_query)
             callbacks_duplicate += 1
         else:
@@ -203,10 +225,19 @@ def poll_once(*, state_path: Path | None = None) -> dict[str, object]:
                     handled_callback_ids, callback_id
                 )
                 handled_callback_id_set = set(handled_callback_ids)
+            if callback_data is not None:
+                handled_callback_data = _remember_callback_data(
+                    handled_callback_data, callback_data
+                )
+                handled_callback_data_set = set(handled_callback_data)
         callbacks_handled += 1
 
-    if next_offset != offset or handled_callback_ids != state["handled_callback_ids"]:
-        _write_state(path, next_offset, handled_callback_ids)
+    if (
+        next_offset != offset
+        or handled_callback_ids != state["handled_callback_ids"]
+        or handled_callback_data != state["handled_callback_data"]
+    ):
+        _write_state(path, next_offset, handled_callback_ids, handled_callback_data)
 
     return {
         "status": "polled",
@@ -244,6 +275,14 @@ def _bounded_callback_id(callback_id: object) -> str | None:
     return callback_id
 
 
+def _bounded_callback_data(callback_data: object) -> str | None:
+    if not isinstance(callback_data, str) or not callback_data:
+        return None
+    if len(callback_data.encode("utf-8")) > TELEGRAM_CALLBACK_DATA_LIMIT:
+        return None
+    return callback_data
+
+
 def _callback_state_path() -> Path:
     configured = os.environ.get("SKELETON_TG_CALLBACK_STATE")
     return Path(configured) if configured else DEFAULT_CALLBACK_STATE_PATH
@@ -257,29 +296,47 @@ def _read_state(path: Path) -> dict[str, object]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return {"offset": None, "handled_callback_ids": []}
+        return {
+            "offset": None,
+            "handled_callback_ids": [],
+            "handled_callback_data": [],
+        }
 
     offset = payload.get("offset") if isinstance(payload, Mapping) else None
     handled_callback_ids = (
         payload.get("handled_callback_ids") if isinstance(payload, Mapping) else None
     )
+    handled_callback_data = (
+        payload.get("handled_callback_data") if isinstance(payload, Mapping) else None
+    )
     return {
         "offset": offset if isinstance(offset, int) and offset >= 0 else None,
         "handled_callback_ids": _bounded_callback_id_history(handled_callback_ids),
+        "handled_callback_data": _bounded_callback_data_history(handled_callback_data),
     }
 
 
 def _write_offset(path: Path, offset: int) -> None:
-    _write_state(path, offset, _read_state(path)["handled_callback_ids"])
+    state = _read_state(path)
+    _write_state(
+        path,
+        offset,
+        state["handled_callback_ids"],
+        state["handled_callback_data"],
+    )
 
 
 def _write_state(
-    path: Path, offset: int | None, handled_callback_ids: object
+    path: Path,
+    offset: int | None,
+    handled_callback_ids: object,
+    handled_callback_data: object,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp")
     payload: dict[str, object] = {
-        "handled_callback_ids": _bounded_callback_id_history(handled_callback_ids)
+        "handled_callback_data": _bounded_callback_data_history(handled_callback_data),
+        "handled_callback_ids": _bounded_callback_id_history(handled_callback_ids),
     }
     if offset is not None:
         payload["offset"] = offset
@@ -307,6 +364,25 @@ def _remember_callback_id(callback_ids: list[str], callback_id: str) -> list[str
     return _bounded_callback_id_history([*callback_ids, callback_id])
 
 
+def _bounded_callback_data_history(callback_data_values: object) -> list[str]:
+    if not isinstance(callback_data_values, list):
+        return []
+
+    history: list[str] = []
+    for callback_data in callback_data_values:
+        bounded = _bounded_callback_data(callback_data)
+        if bounded is None or bounded in history:
+            continue
+        history.append(bounded)
+    return history[-CALLBACK_DATA_HISTORY_LIMIT:]
+
+
+def _remember_callback_data(
+    callback_data_values: list[str], callback_data: str
+) -> list[str]:
+    return _bounded_callback_data_history([*callback_data_values, callback_data])
+
+
 def _get_updates(bot_token: str, offset: int | None) -> list[object]:
     query: dict[str, object] = {
         "allowed_updates": json.dumps(["callback_query"], separators=(",", ":")),
@@ -326,6 +402,39 @@ def _get_updates(bot_token: str, offset: int | None) -> list[object]:
 
     result = payload.get("result") if isinstance(payload, Mapping) else None
     return result if isinstance(result, list) else []
+
+
+def _callback_signature_block_reason(parsed: ParsedCallback) -> str | None:
+    hmac_secret = os.environ.get(CALLBACK_HMAC_ENV)
+    if not hmac_secret:
+        return (
+            f"{CALLBACK_HMAC_ENV} is missing; live Telegram callbacks are blocked."
+        )
+
+    expected_digest = _callback_hmac_digest(
+        action=parsed.action,
+        pr_number=parsed.pr_number,
+        head_marker=parsed.head_marker,
+        hmac_secret=hmac_secret,
+    )
+    if not hmac.compare_digest(parsed.digest, expected_digest):
+        return "callback HMAC signature is invalid or stale."
+    return None
+
+
+def _callback_hmac_digest(
+    *,
+    action: str,
+    pr_number: int,
+    head_marker: str,
+    hmac_secret: str,
+) -> str:
+    message = f"tpr1:{action}:p{pr_number}:{head_marker}".encode("ascii")
+    return hmac.new(
+        hmac_secret.encode("utf-8"),
+        message,
+        hashlib.sha256,
+    ).hexdigest()[:12]
 
 
 def _head_binding_block_reason(parsed: ParsedCallback, pr_state: Mapping[str, object]) -> str | None:

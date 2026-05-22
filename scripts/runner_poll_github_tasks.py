@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -44,6 +45,7 @@ RUNTIME_ARTIFACTS = (
 TELEGRAM_API_BASE = "https://api.telegram.org"
 TELEGRAM_TIMEOUT_SECONDS = 10
 TELEGRAM_CALLBACK_DATA_LIMIT = 64
+TELEGRAM_CALLBACK_HMAC_ENV = "SKELETON_TG_CALLBACK_HMAC_SECRET"
 TELEGRAM_CARD_TEST_SUMMARY = "Runner pytest completed before draft PR creation."
 TELEGRAM_CARD_RISK_SUMMARY = "Review the changed-file list before approval."
 TELEGRAM_PR_READY_BUTTON_LABELS = {
@@ -417,7 +419,16 @@ def _telegram_callback_data(button: dict[str, Any]) -> str:
     pr_number = payload.get("pr_number") if isinstance(payload.get("pr_number"), int) else 0
     head_sha = str(payload.get("head_sha") or "").lower()
     head_marker = head_sha[:8] if re.fullmatch(r"[0-9a-f]{40}", head_sha) else "nosha"
-    digest = hashlib.sha256(encoded).hexdigest()[:12]
+    hmac_secret = os.environ.get(TELEGRAM_CALLBACK_HMAC_ENV)
+    digest = (
+        hmac.new(
+            hmac_secret.encode("utf-8"),
+            f"tpr1:{action}:p{pr_number}:{head_marker}".encode("ascii"),
+            hashlib.sha256,
+        ).hexdigest()[:12]
+        if hmac_secret
+        else hashlib.sha256(encoded).hexdigest()[:12]
+    )
     callback_data = f"tpr1:{action}:p{pr_number}:{head_marker}:{digest}"
     if len(callback_data.encode("utf-8")) > TELEGRAM_CALLBACK_DATA_LIMIT:
         raise ValueError("Telegram callback_data exceeded its bound.")

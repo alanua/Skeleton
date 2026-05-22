@@ -6,22 +6,29 @@ explicit `--once` mode read one bounded Telegram `getUpdates` batch and exit.
 It accepts bounded
 `callback_data` values shaped as
 `tpr1:<action>:p<pr_number>:<sha8>:<digest12>` for `approve`, `reject`, and
-`details`.
+`details`. The digest is a truncated HMAC-SHA256 signature over the bounded
+callback fields. Unsigned legacy digests and forged digests do not authorize a
+live callback.
 
 This stage records button clicks only. When `GITHUB_TOKEN` exists, the handler
-fetches pull request state from `alanua/Skeleton`, verifies the PR number and
-head marker before recording an `approve` or `reject` callback, and posts one
-public-safe GitHub PR conversation comment that starts with `Operator event
-record`. The comment is a GitHub-readable OperatorEvent audit comment for the
-button click. It does not contain tokens or private Telegram state.
+first requires `SKELETON_TG_CALLBACK_HMAC_SECRET` and verifies the HMAC digest.
+Only then does it fetch pull request state from `alanua/Skeleton`, verify the
+PR number and head marker before recording an `approve` or `reject` callback,
+and post one public-safe GitHub PR conversation comment that starts with
+`Operator event record`. The comment is a GitHub-readable OperatorEvent audit
+comment for the button click. It does not contain tokens or private Telegram
+state.
 
-When `GITHUB_TOKEN` is missing, the handler returns a skipped no-post result.
-When `SKELETON_TG_BOT` exists and the callback query has a bounded callback ID,
-the handler calls Telegram `answerCallbackQuery`. Telegram callback answers are
-best-effort: Telegram can reject an old callback after the GitHub audit comment
-has been posted, so an answer failure is recorded as an error result without
-crashing the poll pass. The GitHub audit record remains the durable operator
-event. `dry_run=True` makes a hard no-HTTP path for validation and tests.
+When `SKELETON_TG_CALLBACK_HMAC_SECRET` is absent, live `approve`, `reject`,
+and `details` callbacks are blocked before a GitHub read or comment write. When
+`GITHUB_TOKEN` is missing after signature verification, the handler returns a
+skipped no-post result. When `SKELETON_TG_BOT` exists and the callback query has
+a bounded callback ID, the handler calls Telegram `answerCallbackQuery`.
+Telegram callback answers are best-effort: Telegram can reject an old callback
+after the GitHub audit comment has been posted, so an answer failure is recorded
+as an error result without crashing the poll pass. The GitHub audit record
+remains the durable operator event. `dry_run=True` makes a hard no-HTTP path for
+validation and tests.
 
 The one-shot poll pass reads and writes its Telegram offset state as JSON. Set
 `SKELETON_TG_CALLBACK_STATE` to choose the local state file. Without that
@@ -29,9 +36,10 @@ variable it uses
 `/home/agent/agent-dev/state/telegram_callback_poller.json`. The poller advances
 the stored offset to the next update after the highest bounded batch update it
 processed, including non-callback updates returned by Telegram. The same local
-state file keeps a bounded callback ID history so a callback seen again does not
-post a duplicate GitHub audit comment; the duplicate still receives a
-best-effort Telegram callback answer.
+state file keeps bounded callback ID and callback data histories. A repeat
+signed callback value does not post another GitHub audit comment even when
+Telegram assigns a new callback ID; the duplicate still receives a best-effort
+Telegram callback answer.
 
 `scripts/skeleton-telegram-callback-poll.service` runs one poll pass with the
 optional `/etc/skeleton-runner.env` environment file. The matching timer starts
@@ -39,6 +47,5 @@ the one-shot service frequently with timer jitter. Unit files do not carry
 credentials.
 
 Stage 1 does not merge, reject, close a PR, mutate labels, deploy, or perform
-any repository action other than posting the audit comment. Live merge or
-reject behavior is future work after an HMAC or one-time-token binding is
-designed and reviewed.
+any repository action other than posting the signed-callback audit comment.
+Live merge or reject behavior remains future work.
