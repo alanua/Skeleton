@@ -63,6 +63,19 @@ def test_rejects_malformed_callback_parts(callback_data: str) -> None:
         poller.parse_callback_data(callback_data)
 
 
+def test_malformed_callback_is_blocked_without_github_write() -> None:
+    with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "github-secret"}, clear=True), mock.patch.object(
+        poller.urllib.request,
+        "urlopen",
+    ) as urlopen:
+        result = poller.handle_callback_query(query("tpr1:merge:p120:deadbeef:0123456789ab"))
+
+    assert result["status"] == "blocked"
+    assert result["comment_posted"] is False
+    assert result["github"] == "not_called"
+    urlopen.assert_not_called()
+
+
 def test_dry_run_does_not_call_urllib() -> None:
     with mock.patch.dict(
         os.environ,
@@ -304,6 +317,24 @@ def test_details_callback_renders_audit_comment() -> None:
 
     assert poller.render_audit_comment(parsed).startswith("Operator event record")
     assert "Action: telegram_details" in poller.render_audit_comment(parsed)
+
+
+def test_details_callback_posts_audit_comment_only() -> None:
+    details = "tpr1:details:p120:deadbeef:abcdef012345"
+    with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "github-secret"}, clear=True), mock.patch.object(
+        poller.urllib.request,
+        "urlopen",
+        side_effect=(response(github_pr_state()), response({"id": 90})),
+    ) as urlopen:
+        result = poller.handle_callback_query(query(details))
+
+    urls = [call.args[0].full_url for call in urlopen.call_args_list]
+    assert result["status"] == "comment_posted"
+    assert "Action: telegram_details" in str(result["comment"])
+    assert urls == [
+        "https://api.github.com/repos/alanua/Skeleton/pulls/120",
+        "https://api.github.com/repos/alanua/Skeleton/issues/120/comments",
+    ]
 
 
 def test_details_callback_accepts_nosha_head_marker() -> None:
