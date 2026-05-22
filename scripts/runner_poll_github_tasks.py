@@ -96,6 +96,7 @@ ALLOWED_RUNNER_LANES = frozenset(
 class RunnerTask:
     content: str
     lane: RunnerLane = DEFAULT_RUNNER_LANE
+    has_lane_metadata: bool = False
 
 
 @dataclass(frozen=True)
@@ -254,6 +255,13 @@ def issue_workspace_review_note(path: str | Path) -> str:
     return f"\n\nIssue workspace kept for review:\n`{path}`"
 
 
+def report_runner_lane(report: str, task: RunnerTask | None) -> str:
+    if task is None or not task.has_lane_metadata:
+        return report
+    heading, *details = report.splitlines()
+    return "\n".join((heading, f"Runner Lane: {task.lane.name}", *details))
+
+
 def get_ready_issues() -> list[dict[str, Any]]:
     code, output = run_command(
         [
@@ -330,10 +338,18 @@ def extract_runner_task(body: str) -> tuple[RunnerTask | None, str | None]:
     content = extract_task_block(body)
     if content is None:
         return None, None
+    metadata = (body or "").split("```task", 1)[0]
     lane, lane_reason = extract_runner_lane(body)
     if lane is None:
         return None, lane_reason
-    return RunnerTask(content=content, lane=lane), None
+    return RunnerTask(
+        content=content,
+        lane=lane,
+        has_lane_metadata=(
+            _body_field(metadata, "Runner Lane") is not None
+            or _body_field(metadata, "Lane") is not None
+        ),
+    ), None
 
 
 def extract_runtime_maintenance_task_id(body: str) -> tuple[bool, str | None]:
@@ -888,8 +904,16 @@ def finalize_success(issue: dict[str, Any], workdir: str, codex_output: str) -> 
     )
 
 
-def block_issue(issue_number: int, message: str, remove_label: str = LABEL_READY) -> None:
-    post_issue_comment(issue_number, f"BLOCKED: {message}")
+def block_issue(
+    issue_number: int,
+    message: str,
+    remove_label: str = LABEL_READY,
+    runner_task: RunnerTask | None = None,
+) -> None:
+    post_issue_comment(
+        issue_number,
+        report_runner_lane(f"BLOCKED: {message}", runner_task),
+    )
     set_issue_label(issue_number, remove_label, LABEL_BLOCKED)
     notify_task_finished(issue_number, "BLOCKED")
 
@@ -1368,6 +1392,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
     coordinator_workdir = str(Path(workdir) if workdir is not None else DEFAULT_WORKDIR)
     issue_workdir: str | None = None
     claimed = False
+    runner_task: RunnerTask | None = None
     try:
         issue_body = issue.get("body") or ""
         maintenance_mode, maintenance_task_id = extract_runtime_maintenance_task_id(
@@ -1443,6 +1468,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                 f"```\n{worktree_output}\n```"
                 + issue_workspace_review_note(worktree_path),
                 remove_label=LABEL_RUNNING,
+                runner_task=runner_task,
             )
             return
         issue_workdir = str(worktree_path)
@@ -1456,10 +1482,14 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                 f"Codex task failed:\n```\n{codex_output}\n```"
                 + issue_workspace_review_note(issue_workdir),
                 remove_label=LABEL_RUNNING,
+                runner_task=runner_task,
             )
             return
 
-        report = finalize_success(issue, issue_workdir, codex_output)
+        report = report_runner_lane(
+            finalize_success(issue, issue_workdir, codex_output),
+            runner_task,
+        )
         cleanup_runtime_artifacts(issue_workdir)
         cleanup_code, cleanup_output = cleanup_issue_worktree(
             issue_number, coordinator_workdir
@@ -1486,6 +1516,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                     else ""
                 ),
                 remove_label=remove_label,
+                runner_task=runner_task,
             )
         except Exception:
             return
