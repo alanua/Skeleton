@@ -25,6 +25,14 @@ prioritize, lock, or parallelize work by lane.
 Lane metadata smoke tests should confirm `runner:lane:lane-1` and
 `Runner Lane: lane-1` appear while execution remains single-runner.
 
+Target repository routing stage 1 keeps the issue queue in `alanua/Skeleton`.
+Normal task issues may set `Target Repository: <owner/repo>` before the fenced
+task block. The allowlisted targets are `alanua/Skeleton`, `alanua/bauclock`,
+and `alanua/Lavalamp`; omitting the field plans `alanua/Skeleton`. This stage
+parses and validates the target and plans deterministic per-repository issue
+worktree paths only. It does not execute Codex, git worktree commands, pushes,
+or PR creation in another repository yet.
+
 An existing issue worktree is reused only when it is clean and already on the
 expected `runner/issue-N` branch. Otherwise the issue is blocked with cleanup
 guidance. Cleanup after success is best effort and is limited to paths under

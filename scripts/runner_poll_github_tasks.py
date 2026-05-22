@@ -24,11 +24,18 @@ if str(ROOT) not in sys.path:
 from core.telegram_approval_buttons import build_pr_ready_card_payload
 
 
-REPO = os.environ.get("SKELETON_REPO", "alanua/Skeleton")
+QUEUE_REPOSITORY = "alanua/Skeleton"
+REPO = QUEUE_REPOSITORY
 LABEL_READY = "runner:ready"
 LABEL_RUNNING = "runner:running"
 LABEL_DONE = "runner:done"
 LABEL_BLOCKED = "runner:blocked"
+TARGET_REPOSITORY_WORKTREE_DIRS = {
+    QUEUE_REPOSITORY: "skeleton",
+    "alanua/bauclock": "bauclock",
+    "alanua/Lavalamp": "lavalamp",
+}
+ALLOWED_TARGET_REPOSITORIES = frozenset(TARGET_REPOSITORY_WORKTREE_DIRS)
 RUNNER_LANE_LABELS = {
     "default": "runner:lane:default",
     "lane-1": "runner:lane:lane-1",
@@ -100,6 +107,8 @@ class RunnerTask:
     content: str
     lane: RunnerLane = DEFAULT_RUNNER_LANE
     has_lane_metadata: bool = False
+    target_repository: str = QUEUE_REPOSITORY
+    has_target_repository_metadata: bool = False
 
 
 @dataclass(frozen=True)
@@ -149,8 +158,28 @@ def issue_worktree_path(issue_number: int) -> Path:
     return worktree_root() / f"issue-{issue_number}"
 
 
-def ensure_safe_worktree_path(path: str | Path) -> Path:
-    root = worktree_root().resolve()
+def target_repository_worktree_root(target_repository: str) -> Path:
+    directory_name = TARGET_REPOSITORY_WORKTREE_DIRS.get(target_repository)
+    if directory_name is None:
+        allowed = ", ".join(f"`{repo}`" for repo in sorted(ALLOWED_TARGET_REPOSITORIES))
+        raise ValueError(
+            f"Target repository `{target_repository}` is not allowlisted. Use {allowed}."
+        )
+    if target_repository == QUEUE_REPOSITORY:
+        return worktree_root()
+    return worktree_root().parent / directory_name
+
+
+def target_repository_issue_worktree_path(
+    target_repository: str, issue_number: int
+) -> Path:
+    return target_repository_worktree_root(target_repository) / f"issue-{issue_number}"
+
+
+def ensure_safe_target_repository_worktree_path(
+    target_repository: str, path: str | Path
+) -> Path:
+    root = target_repository_worktree_root(target_repository).resolve()
     candidate = Path(path).expanduser().resolve()
     if candidate == root:
         raise ValueError(f"Refusing to use worktree root as issue worktree: {candidate}")
@@ -161,6 +190,10 @@ def ensure_safe_worktree_path(path: str | Path) -> Path:
             f"Refusing worktree path outside configured root {root}: {candidate}"
         ) from exc
     return candidate
+
+
+def ensure_safe_worktree_path(path: str | Path) -> Path:
+    return ensure_safe_target_repository_worktree_path(QUEUE_REPOSITORY, path)
 
 
 def issue_branch(issue_number: int) -> str:
@@ -337,6 +370,20 @@ def extract_runner_lane(body: str) -> tuple[RunnerLane | None, str | None]:
     return RunnerLane(lane_name), None
 
 
+def extract_target_repository(body: str) -> tuple[str | None, str | None]:
+    metadata = (body or "").split("```task", 1)[0]
+    target_repository = _body_field(metadata, "Target Repository")
+    if target_repository is None:
+        return QUEUE_REPOSITORY, None
+    if target_repository not in ALLOWED_TARGET_REPOSITORIES:
+        allowed = ", ".join(f"`{repo}`" for repo in sorted(ALLOWED_TARGET_REPOSITORIES))
+        return (
+            None,
+            f"Target repository `{target_repository}` is not allowlisted. Use {allowed}.",
+        )
+    return target_repository, None
+
+
 def extract_runner_task(body: str) -> tuple[RunnerTask | None, str | None]:
     content = extract_task_block(body)
     if content is None:
@@ -345,12 +392,19 @@ def extract_runner_task(body: str) -> tuple[RunnerTask | None, str | None]:
     lane, lane_reason = extract_runner_lane(body)
     if lane is None:
         return None, lane_reason
+    target_repository, repository_reason = extract_target_repository(body)
+    if target_repository is None:
+        return None, repository_reason
     return RunnerTask(
         content=content,
         lane=lane,
         has_lane_metadata=(
             _body_field(metadata, "Runner Lane") is not None
             or _body_field(metadata, "Lane") is not None
+        ),
+        target_repository=target_repository,
+        has_target_repository_metadata=(
+            _body_field(metadata, "Target Repository") is not None
         ),
     ), None
 
@@ -1473,6 +1527,17 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                 return
         else:
             task_content = runner_task.content
+
+        if (
+            runner_task is not None
+            and runner_task.target_repository != QUEUE_REPOSITORY
+        ):
+            block_issue(
+                issue_number,
+                "Target repository routing is planning-only in this stage. "
+                f"Runner cannot execute `{runner_task.target_repository}` yet.",
+            )
+            return
 
         apply_runner_lane_label(issue_number, runner_task)
 
