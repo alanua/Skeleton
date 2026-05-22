@@ -202,6 +202,116 @@ def test_multiple_room_result_exports_in_engine_order() -> None:
     assert csv_lines[3].startswith("summary,public-export-test,m,,Summary,")
 
 
+def test_report_rows_keep_fixed_column_order_for_room_and_summary_rows() -> None:
+    rows = aufmass_result_to_rows(
+        aufmass_result(
+            rectangle_room(room_id="room-b", name="Second"),
+            rectangle_room(room_id="room-a", name="First"),
+        )
+    )
+
+    assert [list(row) for row in rows] == [EXPORT_COLUMNS, EXPORT_COLUMNS, EXPORT_COLUMNS]
+    assert [row["room_id"] for row in rows] == ["room-b", "room-a", ""]
+
+
+def test_manual_export_accepts_missing_review_fields() -> None:
+    input_data = ManualAufmassInput(
+        project_id="public-manual-missing-review-export-test",
+        calibration=ScaleCalibration(
+            point_a=ManualPoint(0, 0),
+            point_b=ManualPoint(100, 0),
+            real_length_m=5.0,
+        ),
+        rooms=[
+            ManualRoomInput(
+                room_id="manual-room-no-review",
+                height_m=2.5,
+                polygon=[
+                    ManualPoint(0, 0),
+                    ManualPoint(80, 0),
+                    ManualPoint(80, 60),
+                    ManualPoint(0, 60),
+                ],
+                openings=[ManualOpeningInput(width=18, height=40)],
+            )
+        ],
+    )
+
+    rows = aufmass_result_to_rows(calculate_manual_plan_aufmass(input_data))
+
+    assert [list(row) for row in rows] == [EXPORT_COLUMNS, EXPORT_COLUMNS]
+    assert rows[0]["room_id"] == "manual-room-no-review"
+    assert rows[0]["room_name"] == ""
+    assert rows[0]["openings_area"] == pytest.approx(1.8)
+    assert rows[1]["row_type"] == "summary"
+
+
+def test_manual_export_is_deterministic_with_mixed_confidence_and_review_statuses() -> None:
+    input_data = ManualAufmassInput(
+        project_id="public-manual-mixed-review-export-test",
+        calibration=ScaleCalibration(
+            point_a=ManualPoint(0, 0),
+            point_b=ManualPoint(100, 0),
+            real_length_m=5.0,
+            confidence=0.99,
+            review_status="reviewed",
+        ),
+        rooms=[
+            ManualRoomInput(
+                room_id="room-needs-review",
+                name="Needs Review",
+                height_m=2.5,
+                polygon=[
+                    ManualPoint(0, 0),
+                    ManualPoint(80, 0),
+                    ManualPoint(80, 60),
+                    ManualPoint(0, 60),
+                ],
+                confidence=0.42,
+                review_status="needs_review",
+                openings=[
+                    ManualOpeningInput(
+                        width=18,
+                        height=40,
+                        confidence=0.35,
+                        review_status="candidate",
+                    )
+                ],
+            ),
+            ManualRoomInput(
+                room_id="room-reviewed",
+                name="Reviewed",
+                height_m=3.0,
+                polygon=[
+                    ManualPoint(100, 0),
+                    ManualPoint(140, 0),
+                    ManualPoint(140, 40),
+                    ManualPoint(100, 40),
+                ],
+                confidence=0.95,
+                review_status="reviewed",
+                openings=[],
+            ),
+        ],
+        confidence=0.7,
+        review_status="candidate",
+    )
+
+    result = calculate_manual_plan_aufmass(input_data)
+    first_rows = aufmass_result_to_rows(result)
+
+    assert first_rows == aufmass_result_to_rows(result)
+    assert [row["room_id"] for row in first_rows] == [
+        "room-needs-review",
+        "room-reviewed",
+        "",
+    ]
+    assert aufmass_result_to_json_dict(result)["rooms"] == [
+        {column: first_rows[0][column] for column in EXPORT_COLUMNS},
+        {column: first_rows[1][column] for column in EXPORT_COLUMNS},
+    ]
+
+
 def test_manual_adapter_engine_exporter_integration_returns_expected_csv_and_json_values() -> None:
     result = calculate_manual_plan_aufmass(manual_input())
 
