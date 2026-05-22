@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Skeleton Telegram Callback Poller frequently
+Requires=skeleton-telegram-callback-poll.service
+
+[Timer]
+OnBootSec=45
+OnUnitActiveSec=30
+AccuracySec=5
+RandomizedDelaySec=5
+
+[Install]
+WantedBy=timers.target

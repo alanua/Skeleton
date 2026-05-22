@@ -1,0 +1,12 @@
+[Unit]
+Description=Skeleton Telegram Callback Poller
+After=network.target
+
+[Service]
+Type=oneshot
+User=agent
+WorkingDirectory=/home/agent/agent-dev/repos/Skeleton
+EnvironmentFile=-/etc/skeleton-runner.env
+ExecStart=/usr/bin/python3 scripts/telegram_callback_poller.py --once
+StandardOutput=journal
+StandardError=journal

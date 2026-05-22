@@ -87,6 +87,71 @@ def test_missing_github_token_returns_skipped_no_post_result() -> None:
     assert result["comment_posted"] is False
 
 
+def test_poll_once_skips_without_telegram_token(tmp_path: Path) -> None:
+    state_path = tmp_path / "callback-state.json"
+    with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
+        poller.urllib.request, "urlopen"
+    ) as urlopen:
+        result = poller.poll_once(state_path=state_path)
+
+    urlopen.assert_not_called()
+    assert result == {
+        "status": "skipped_missing_telegram_token",
+        "updates_seen": 0,
+        "callbacks_seen": 0,
+        "callbacks_handled": 0,
+        "offset": None,
+    }
+
+
+def test_poll_once_reads_updates_processes_callback_and_advances_offset(tmp_path: Path) -> None:
+    state_path = tmp_path / "callback-state.json"
+    update_payload = {"result": [{"update_id": 41, "callback_query": query()}]}
+    with mock.patch.dict(os.environ, {"SKELETON_TG_BOT": "telegram-secret"}, clear=True), mock.patch.object(
+        poller.urllib.request,
+        "urlopen",
+        side_effect=(response(update_payload), response()),
+    ) as urlopen:
+        result = poller.poll_once(state_path=state_path)
+
+    get_updates_request, answer_request = [call.args[0] for call in urlopen.call_args_list]
+    assert get_updates_request.get_method() == "GET"
+    assert "/getUpdates?" in get_updates_request.full_url
+    assert "allowed_updates=" in get_updates_request.full_url
+    assert answer_request.full_url.endswith("/bottelegram-secret/answerCallbackQuery")
+    assert result == {
+        "status": "polled",
+        "updates_seen": 1,
+        "callbacks_seen": 1,
+        "callbacks_handled": 1,
+        "offset": 42,
+    }
+    assert json.loads(state_path.read_text(encoding="utf-8")) == {"offset": 42}
+
+
+def test_poll_once_uses_configured_offset_state_path(tmp_path: Path) -> None:
+    state_path = tmp_path / "configured" / "callback-state.json"
+    state_path.parent.mkdir()
+    state_path.write_text('{"offset":12}\n', encoding="utf-8")
+    with mock.patch.dict(
+        os.environ,
+        {
+            "SKELETON_TG_BOT": "telegram-secret",
+            "SKELETON_TG_CALLBACK_STATE": str(state_path),
+        },
+        clear=True,
+    ), mock.patch.object(
+        poller.urllib.request,
+        "urlopen",
+        return_value=response({"result": []}),
+    ) as urlopen:
+        result = poller.poll_once()
+
+    request = urlopen.call_args.args[0]
+    assert "offset=12" in request.full_url
+    assert result["offset"] == 12
+
+
 def test_approve_callback_posts_audit_comment_when_pr_head_marker_matches() -> None:
     with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "github-secret"}, clear=True), mock.patch.object(
         poller.urllib.request,
@@ -230,3 +295,23 @@ def test_no_subprocess_usage() -> None:
     assert result["status"] == "dry_run"
     run.assert_not_called()
     urlopen.assert_not_called()
+
+
+def test_stage_1_source_has_no_pr_action_endpoints() -> None:
+    script = Path(poller.__file__).read_text(encoding="utf-8")
+
+    assert "/merge" not in script
+    assert "/labels" not in script
+    assert '"state":"closed"' not in script
+    assert '"state": "closed"' not in script
+
+
+def test_callback_poll_service_uses_environment_file_without_credentials() -> None:
+    service = Path("scripts/skeleton-telegram-callback-poll.service").read_text(
+        encoding="utf-8"
+    )
+
+    environment_lines = [line for line in service.splitlines() if line.startswith("Environment")]
+    assert environment_lines == ["EnvironmentFile=-/etc/skeleton-runner.env"]
+    assert "GITHUB_TOKEN=" not in service
+    assert "SKELETON_TG_BOT=" not in service

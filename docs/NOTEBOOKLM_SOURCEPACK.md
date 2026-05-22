@@ -439,6 +439,7 @@ Example structure:
 ```sh
 SKELETON_TG_BOT=replace-with-telegram-bot-token
 SKELETON_TG_CHAT=replace-with-telegram-chat-id
+SKELETON_TG_CALLBACK_STATE=/home/agent/agent-dev/state/telegram_callback_poller.json
 ```
 
 Keep the permissions restricted:
@@ -448,6 +449,10 @@ sudo chmod 600 /etc/skeleton-runner.env
 ```
 
 If either Telegram variable is absent, the runner skips Telegram notifications.
+The callback poller also reads `GITHUB_TOKEN` from the local runtime environment
+when it is allowed to post a public-safe PR audit comment. Without
+`SKELETON_TG_BOT` it skips its Telegram poll pass; without `GITHUB_TOKEN` it can
+answer callbacks but skips the PR audit comment.
 
 ## Hetzner systemd Setup
 
@@ -472,13 +477,36 @@ sudo cp scripts/skeleton-runner-poll.service /etc/systemd/system/
 sudo systemctl daemon-reload
 ```
 
+## Telegram Callback Poller systemd Setup
+
+Install the callback poller service and timer on the Hetzner Runner host from
+the same checkout:
+
+```bash
+sudo cp scripts/skeleton-telegram-callback-poll.service /etc/systemd/system/
+sudo cp scripts/skeleton-telegram-callback-poll.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable skeleton-telegram-callback-poll.timer
+sudo systemctl start skeleton-telegram-callback-poll.timer
+systemctl status skeleton-telegram-callback-poll.timer
+journalctl -u skeleton-telegram-callback-poll.service -f
+```
+
+The callback poller service runs one bounded `getUpdates` pass and persists the
+next Telegram offset to `SKELETON_TG_CALLBACK_STATE`, or to its local default
+under `/home/agent/agent-dev/state` when that variable is absent.
+
 ## Security
 
 `gh auth` must already be configured on Hetzner for the `agent` user. The GitHub token and Telegram credentials must never be stored in this repo. API keys must never be put in task issues, comments, commits, docs, logs, or source files.
 
 ## Operation
 
-The default script mode performs one poll pass and exits. The systemd timer starts that one-shot service every 60 seconds. The optional `--loop` flag is for manual debugging only.
+The default Runner script mode performs one GitHub task poll pass and exits. The
+Runner systemd timer starts that one-shot service every 60 seconds. The optional
+Runner `--loop` flag is for manual debugging only. The Telegram callback poller
+is also one-shot: `python3 scripts/telegram_callback_poller.py` and the explicit
+`--once` mode both read one bounded Telegram update batch and exit.
 
 ## Operational Status
 

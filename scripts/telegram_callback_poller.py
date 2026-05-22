@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import argparse
 from dataclasses import dataclass
 import json
 import os
+from pathlib import Path
 import re
 from typing import Any, Mapping
 import urllib.parse
@@ -14,6 +16,10 @@ GITHUB_API_BASE = "https://api.github.com"
 TELEGRAM_API_BASE = "https://api.telegram.org"
 HTTP_TIMEOUT_SECONDS = 15
 TELEGRAM_CALLBACK_DATA_LIMIT = 64
+TELEGRAM_UPDATE_LIMIT = 25
+DEFAULT_CALLBACK_STATE_PATH = Path(
+    "/home/agent/agent-dev/state/telegram_callback_poller.json"
+)
 
 _CALLBACK_RE = re.compile(
     r"^tpr1:(?P<action>approve|reject|details):p(?P<pr_number>[1-9][0-9]{0,9}):"
@@ -147,6 +153,54 @@ def handle_callback_query(
     return _answer_callback_query(result, callback_id, dry_run=False)
 
 
+def poll_once(*, state_path: Path | None = None) -> dict[str, object]:
+    """Read one bounded Telegram update batch and handle callback queries only."""
+    path = state_path or _callback_state_path()
+    bot_token = os.environ.get("SKELETON_TG_BOT")
+    if not bot_token:
+        return {
+            "status": "skipped_missing_telegram_token",
+            "updates_seen": 0,
+            "callbacks_seen": 0,
+            "callbacks_handled": 0,
+            "offset": _read_offset(path),
+        }
+
+    offset = _read_offset(path)
+    updates = _get_updates(bot_token, offset)
+    next_offset = offset
+    callbacks_seen = 0
+    callbacks_handled = 0
+
+    for update in updates:
+        if not isinstance(update, Mapping):
+            continue
+
+        update_id = update.get("update_id")
+        if isinstance(update_id, int) and update_id >= 0:
+            candidate_offset = update_id + 1
+            next_offset = candidate_offset if next_offset is None else max(next_offset, candidate_offset)
+
+        callback_query = update.get("callback_query")
+        if not isinstance(callback_query, Mapping):
+            continue
+
+        callbacks_seen += 1
+        handle_callback_query(callback_query)
+        callbacks_handled += 1
+
+    if next_offset != offset and next_offset is not None:
+        _write_offset(path, next_offset)
+
+    return {
+        "status": "polled",
+        "updates_seen": len(updates),
+        "callbacks_seen": callbacks_seen,
+        "callbacks_handled": callbacks_handled,
+        "offset": next_offset,
+    }
+
+
 def _result(
     *,
     status: str,
@@ -171,6 +225,52 @@ def _bounded_callback_id(callback_id: object) -> str | None:
     if len(callback_id.encode("utf-8")) > TELEGRAM_CALLBACK_DATA_LIMIT:
         return None
     return callback_id
+
+
+def _callback_state_path() -> Path:
+    configured = os.environ.get("SKELETON_TG_CALLBACK_STATE")
+    return Path(configured) if configured else DEFAULT_CALLBACK_STATE_PATH
+
+
+def _read_offset(path: Path) -> int | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+
+    offset = payload.get("offset") if isinstance(payload, Mapping) else None
+    return offset if isinstance(offset, int) and offset >= 0 else None
+
+
+def _write_offset(path: Path, offset: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(
+        json.dumps({"offset": offset}, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
+
+
+def _get_updates(bot_token: str, offset: int | None) -> list[object]:
+    query: dict[str, object] = {
+        "allowed_updates": json.dumps(["callback_query"], separators=(",", ":")),
+        "limit": TELEGRAM_UPDATE_LIMIT,
+        "timeout": 0,
+    }
+    if offset is not None:
+        query["offset"] = offset
+
+    request = urllib.request.Request(
+        f"{TELEGRAM_API_BASE}/bot{bot_token}/getUpdates?{urllib.parse.urlencode(query)}",
+        headers={"Accept": "application/json"},
+        method="GET",
+    )
+    with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+
+    result = payload.get("result") if isinstance(payload, Mapping) else None
+    return result if isinstance(result, list) else []
 
 
 def _head_binding_block_reason(parsed: ParsedCallback, pr_state: Mapping[str, object]) -> str | None:
@@ -264,3 +364,24 @@ def _answer_callback_query(
         pass
     result["telegram_answer"] = "answered"
     return result
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Read one bounded Telegram callback update batch and record audit comments."
+    )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Run one poll pass and exit. This is the default runtime mode.",
+    )
+    args = parser.parse_args()
+    del args
+
+    summary = poll_once()
+    print(json.dumps(summary, sort_keys=True, separators=(",", ":")))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
