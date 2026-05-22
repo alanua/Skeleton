@@ -22,7 +22,7 @@ task block; omitting it uses `default`. The allowlisted names are `default`,
 matching `runner:lane:*` GitHub label and repeats the parsed lane in the final
 Runner report. Lane labels are status markers only: this stage does not route,
 prioritize, lock, or parallelize work by lane.
-Lane metadata smoke tests should confirm `runner:lane:lane-1` and
+The post-fix live lane-label smoke test confirmed `runner:lane:lane-1` and
 `Runner Lane: lane-1` appear while execution remains single-runner.
 
 An existing issue worktree is reused only when it is clean and already on the
