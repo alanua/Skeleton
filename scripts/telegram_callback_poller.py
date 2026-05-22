@@ -19,6 +19,11 @@ HTTP_TIMEOUT_SECONDS = 15
 TELEGRAM_CALLBACK_DATA_LIMIT = 64
 TELEGRAM_UPDATE_LIMIT = 25
 CALLBACK_ID_HISTORY_LIMIT = 500
+RUNNER_READY_LABEL = "runner:ready"
+ACTION_REQUEST_MODE = "GITHUB_ACTION_REQUEST"
+MERGE_ACTION_ID = "merge_pr_squash"
+CHANGED_FILE_SUMMARY_LIMIT = 12
+CHANGED_FILE_PATH_LIMIT = 180
 DEFAULT_CALLBACK_STATE_PATH = Path(
     "/home/agent/agent-dev/state/telegram_callback_poller.json"
 )
@@ -78,6 +83,36 @@ def render_audit_comment(
             "Summary: Stage 1 recorded the inline button click only; no repository action was executed.",
         )
     )
+
+
+def render_action_request_body(
+    parsed: ParsedCallback,
+    pr_state: Mapping[str, object],
+    *,
+    changed_files: tuple[str, ...] = (),
+    repo: str = REPO,
+) -> str:
+    """Render one public-safe, bounded Runner GitHub action request."""
+    head = pr_state.get("head")
+    head_sha = head.get("sha") if isinstance(head, Mapping) else None
+    if not isinstance(head_sha, str) or re.fullmatch(r"[0-9a-fA-F]{40}", head_sha) is None:
+        raise ValueError("PR state does not include a reliable head SHA.")
+
+    lines = [
+        f"Mode: {ACTION_REQUEST_MODE}",
+        f"Repository: {repo}",
+        f"Pull Request: #{parsed.pr_number}",
+        f"Action ID: {MERGE_ACTION_ID}",
+        f"Expected Head SHA: {head_sha.lower()}",
+        f"Operator Event Digest: {parsed.digest}",
+        "Operator Gate: telegram_approve",
+        "Changed File Summary:",
+    ]
+    if changed_files:
+        lines.extend(f"- {file_name}" for file_name in changed_files)
+    else:
+        lines.append("- unavailable")
+    return "\n".join(lines)
 
 
 def handle_callback_query(
@@ -144,14 +179,34 @@ def handle_callback_query(
         )
         return _answer_callback_query(result, callback_id, dry_run=False)
 
-    _post_pr_comment(parsed.pr_number, comment, github_token)
-    result = _result(
-        status="comment_posted",
-        reason="audit comment posted.",
-        github="comment_posted",
-        posted=True,
-        comment=comment,
-    )
+    if parsed.action == "approve":
+        changed_files = _fetch_pr_changed_file_summary(parsed.pr_number, github_token)
+        request_body = render_action_request_body(
+            parsed, pr_state, changed_files=changed_files
+        )
+        request = _create_runner_action_request(
+            parsed.pr_number, request_body, github_token
+        )
+        request_number = request.get("number") if isinstance(request, Mapping) else None
+        result = _result(
+            status="action_request_created",
+            reason="approved Telegram callback queued for Runner.",
+            github="action_request_created",
+            posted=False,
+            comment=None,
+        )
+        result["action_request"] = request_body
+        if isinstance(request_number, int):
+            result["action_request_issue"] = request_number
+    else:
+        _post_pr_comment(parsed.pr_number, comment, github_token)
+        result = _result(
+            status="comment_posted",
+            reason="audit comment posted.",
+            github="comment_posted",
+            posted=True,
+            comment=comment,
+        )
     return _answer_callback_query(result, callback_id, dry_run=False)
 
 
@@ -363,6 +418,56 @@ def _post_pr_comment(pr_number: int, comment: str, github_token: str) -> None:
         method="POST",
         payload={"body": comment},
     )
+
+
+def _create_runner_action_request(
+    pr_number: int, body: str, github_token: str
+) -> Mapping[str, object]:
+    payload = _github_json_request(
+        f"/repos/{REPO}/issues",
+        github_token,
+        method="POST",
+        payload={
+            "title": f"Approved GitHub action for PR #{pr_number}",
+            "body": body,
+            "labels": [RUNNER_READY_LABEL],
+        },
+    )
+    if not isinstance(payload, Mapping):
+        raise RuntimeError("GitHub action-request issue response was not an object.")
+    return payload
+
+
+def _fetch_pr_changed_file_summary(
+    pr_number: int, github_token: str
+) -> tuple[str, ...]:
+    try:
+        payload = _github_json_request(
+            f"/repos/{REPO}/pulls/{pr_number}/files?per_page={CHANGED_FILE_SUMMARY_LIMIT}",
+            github_token,
+            method="GET",
+        )
+    except (RuntimeError, urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError):
+        return ()
+    if not isinstance(payload, list):
+        return ()
+
+    files: list[str] = []
+    for item in payload[:CHANGED_FILE_SUMMARY_LIMIT]:
+        filename = item.get("filename") if isinstance(item, Mapping) else None
+        safe_filename = _public_safe_file_name(filename)
+        if safe_filename is not None:
+            files.append(safe_filename)
+    return tuple(files)
+
+
+def _public_safe_file_name(filename: object) -> str | None:
+    if not isinstance(filename, str):
+        return None
+    file_name = filename.strip().replace("\r", " ").replace("\n", " ")
+    if not file_name:
+        return None
+    return file_name[:CHANGED_FILE_PATH_LIMIT]
 
 
 def _github_json_request(

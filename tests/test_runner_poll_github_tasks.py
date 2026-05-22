@@ -6,6 +6,8 @@ import urllib.parse
 from pathlib import Path
 from unittest import mock
 
+import pytest
+
 from scripts import runner_poll_github_tasks as runner
 
 
@@ -39,6 +41,60 @@ def _request_payload(urlopen: mock.MagicMock) -> dict[str, list[str]]:
 
 def _plain_done_message(issue_number: int = 129) -> str:
     return runner.build_telegram_message(issue_number, "DONE", DONE_REPORT)
+
+
+def _action_request_body(
+    *,
+    action_id: str = "merge_pr_squash",
+    expected_head: str = HEAD_SHA,
+    extra: str = "",
+) -> str:
+    suffix = f"\n{extra}" if extra else ""
+    return (
+        "Mode: GITHUB_ACTION_REQUEST\n"
+        f"Repository: {runner.REPO}\n"
+        "Pull Request: #123\n"
+        f"Action ID: {action_id}\n"
+        f"Expected Head SHA: {expected_head}\n"
+        "Operator Event Digest: abcdef012345\n"
+        "Operator Gate: telegram_approve\n"
+        "Changed File Summary:\n"
+        "- scripts/runner_poll_github_tasks.py"
+        f"{suffix}"
+    )
+
+
+def _action_request(
+    *,
+    action_id: str = "merge_pr_squash",
+    expected_head: str = HEAD_SHA,
+    task_issue_number: int | None = None,
+) -> runner.GitHubActionRequest:
+    return runner.GitHubActionRequest(
+        repo=runner.REPO,
+        pr_number=123,
+        action_id=action_id,
+        expected_head=expected_head,
+        operator_event_digest="abcdef012345",
+        operator_gate="telegram_approve",
+        task_issue_number=task_issue_number,
+    )
+
+
+def _pr_state(
+    *,
+    state: str = "OPEN",
+    is_draft: bool = False,
+    mergeable: str = "MERGEABLE",
+    head: str = HEAD_SHA,
+) -> dict[str, object]:
+    return {
+        "number": 123,
+        "state": state,
+        "isDraft": is_draft,
+        "mergeable": mergeable,
+        "headRefOid": head,
+    }
 
 
 def test_worktree_path_uses_env_root_when_set(tmp_path: Path) -> None:
@@ -184,6 +240,151 @@ def test_poll_once_processes_issues_single_lane() -> None:
         mock.call(issues[0], workdir="/coordinator"),
         mock.call(issues[1], workdir="/coordinator"),
     ]
+
+
+def test_action_request_parser_keeps_expected_binding_fields() -> None:
+    request = runner.parse_github_action_request(_action_request_body())
+
+    assert request == _action_request()
+
+
+def test_runner_executes_merge_pr_squash_only_after_verified_pr_state() -> None:
+    with mock.patch.object(
+        runner, "_view_pr_for_action", return_value=_pr_state()
+    ), mock.patch.object(runner, "_run_github_mutation", return_value=True) as mutate:
+        status, summary = runner.execute_github_action_request(_action_request())
+
+    assert (status, summary) == ("DONE", "squash merge completed.")
+    assert mutate.call_args.args[0][:4] == ["gh", "pr", "merge", "123"]
+    assert "--squash" in mutate.call_args.args[0]
+
+
+def test_runner_blocks_merge_when_pr_is_draft() -> None:
+    with mock.patch.object(
+        runner, "_view_pr_for_action", return_value=_pr_state(is_draft=True)
+    ), mock.patch.object(runner, "_run_github_mutation") as mutate:
+        status, summary = runner.execute_github_action_request(_action_request())
+
+    assert (status, summary) == ("BLOCKED", "pull request is draft.")
+    mutate.assert_not_called()
+
+
+def test_runner_blocks_merge_when_head_changed() -> None:
+    with mock.patch.object(
+        runner, "_view_pr_for_action", return_value=_pr_state(head="b" * 40)
+    ), mock.patch.object(runner, "_run_github_mutation") as mutate:
+        status, summary = runner.execute_github_action_request(_action_request())
+
+    assert (status, summary) == ("BLOCKED", "pull request head changed.")
+    mutate.assert_not_called()
+
+
+def test_runner_blocks_merge_with_missing_head_marker() -> None:
+    with pytest.raises(ValueError):
+        runner.parse_github_action_request(
+            _action_request_body().replace(f"Expected Head SHA: {HEAD_SHA}\n", "")
+        )
+
+
+def test_runner_blocks_unknown_action_id() -> None:
+    with mock.patch.object(runner, "_view_pr_for_action") as view:
+        status, summary = runner.execute_github_action_request(
+            _action_request(action_id="run_anything")
+        )
+
+    assert (status, summary) == ("BLOCKED", "action id is not allowlisted.")
+    view.assert_not_called()
+
+
+@pytest.mark.parametrize("word", ("deploy", "runtime", "server", "systemd", "secrets"))
+def test_runner_blocks_forbidden_action_request_text(word: str) -> None:
+    with pytest.raises(ValueError, match="blocked action boundary"):
+        runner.parse_github_action_request(_action_request_body(extra=f"Note: {word}"))
+
+
+def test_runner_close_pr_as_superseded_does_not_merge() -> None:
+    with mock.patch.object(
+        runner, "_view_pr_for_action", return_value=_pr_state()
+    ), mock.patch.object(runner, "_run_github_mutation", return_value=True) as mutate:
+        status, summary = runner.execute_github_action_request(
+            _action_request(action_id="close_pr_as_superseded", expected_head="nosha")
+        )
+
+    command = mutate.call_args.args[0]
+    assert (status, summary) == ("DONE", "superseded pull request closed.")
+    assert command[:4] == ["gh", "pr", "close", "123"]
+    assert "merge" not in command
+
+
+def test_runner_close_issue_completed_only_closes_done_task_issue() -> None:
+    done_issue = {
+        "number": 55,
+        "state": "OPEN",
+        "closed": False,
+        "labels": [{"name": runner.LABEL_DONE}],
+        "body": "```task\nfinish it\n```",
+    }
+    with mock.patch.object(
+        runner, "_view_pr_for_action", return_value=_pr_state(state="MERGED")
+    ), mock.patch.object(
+        runner, "_view_issue_for_action", return_value=done_issue
+    ), mock.patch.object(runner, "_run_github_mutation", return_value=True) as mutate:
+        status, summary = runner.execute_github_action_request(
+            _action_request(
+                action_id="close_issue_completed",
+                expected_head="nosha",
+                task_issue_number=55,
+            )
+        )
+
+    assert (status, summary) == ("DONE", "completed task issue closed.")
+    assert mutate.call_args.args[0][:4] == ["gh", "issue", "close", "55"]
+
+    without_done = {**done_issue, "labels": []}
+    with mock.patch.object(
+        runner, "_view_pr_for_action", return_value=_pr_state(state="MERGED")
+    ), mock.patch.object(
+        runner, "_view_issue_for_action", return_value=without_done
+    ), mock.patch.object(runner, "_run_github_mutation") as mutate:
+        status, summary = runner.execute_github_action_request(
+            _action_request(
+                action_id="close_issue_completed",
+                expected_head="nosha",
+                task_issue_number=55,
+            )
+        )
+
+    assert (status, summary) == ("BLOCKED", "task issue is not marked runner done.")
+    mutate.assert_not_called()
+
+
+def test_action_request_issue_body_is_not_run_as_codex_or_shell() -> None:
+    issue = {
+        "number": 244,
+        "body": _action_request_body(extra="```task\nrm -rf /\n```"),
+    }
+    with mock.patch.object(runner, "set_issue_label"), mock.patch.object(
+        runner, "process_github_action_request_issue"
+    ) as process_action, mock.patch.object(runner, "run_codex_task") as run_codex, mock.patch.object(
+        runner, "prepare_issue_branch"
+    ) as prepare:
+        runner.process_issue(issue)
+
+    process_action.assert_called_once()
+    run_codex.assert_not_called()
+    prepare.assert_not_called()
+
+
+def test_runner_action_report_does_not_include_github_command_output_token() -> None:
+    token = "github-token-must-not-leak"
+    with mock.patch.object(
+        runner, "_view_pr_for_action", return_value=_pr_state()
+    ), mock.patch.object(runner, "run_command", return_value=(1, token)):
+        status, summary = runner.execute_github_action_request(_action_request())
+        report = runner.github_action_report(status, _action_request(), summary)
+
+    assert report.startswith("BLOCKED:")
+    assert token not in report
 
 
 def test_simple_done_notification_without_pr_url_keeps_plain_message() -> None:

@@ -83,7 +83,7 @@ capabilities:
     module: scripts/runner_poll_github_tasks.py
     tested: true
     added: "2026-05-19"
-    description: Polls GitHub issues labeled runner:ready, executes bounded Codex tasks in per-issue worktrees or explicit allowlisted host maintenance tasks on Hetzner Runner, creates draft PRs for code tasks, and reports results back to GitHub.
+    description: Polls GitHub issues labeled runner:ready, executes bounded Codex tasks in per-issue worktrees, explicit allowlisted host maintenance tasks, or Telegram-approved allowlisted GitHub action requests after verification, creates draft PRs for code tasks, and reports results back to GitHub.
 
   runner_worktree_execution:
     status: stage1_single_lane
@@ -255,16 +255,16 @@ capabilities:
     description: Converts validated Telegram callbacks and current PR state into deterministic public-safe dry-run operator event records and GitHub issue comment text.
 
   telegram_callback_poller:
-    status: stage1_comment_only
+    status: stage2_action_request_queue
     module: scripts/telegram_callback_poller.py
     entry: poll_once
-    stage: stage_1_comment_only
+    stage: stage_2_action_request_queue
     live_runtime_execution: true
     requires:
       - docs/TELEGRAM_CALLBACK_POLLER.md
     tested: true
     added: "2026-05-21"
-    description: Reads one bounded Telegram callback update batch with a local offset file, validates PR #120 inline button callbacks, answers callback queries when Telegram credentials exist, and posts only a public-safe GitHub PR audit comment when live GitHub credentials exist.
+    description: Reads one bounded Telegram callback update batch with a local offset file, validates PR inline button callbacks, answers callback queries when Telegram credentials exist, keeps reject and details callbacks audit-only, and turns reliable Telegram approve callbacks into public-safe Runner merge action-request issues instead of direct PR mutations.
 
   operator_event_record:
     status: stage1_dry_run

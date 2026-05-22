@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import hashlib
 import json
 import os
@@ -62,6 +63,28 @@ TELEGRAM_CALLBACK_POLLER_RUNTIME_FILES = (
     f"scripts/{TELEGRAM_CALLBACK_POLLER_SERVICE}",
     f"scripts/{TELEGRAM_CALLBACK_POLLER_TIMER}",
 )
+GITHUB_ACTION_REQUEST_MODE = "GITHUB_ACTION_REQUEST"
+GITHUB_ACTION_REPO = "alanua/Skeleton"
+GITHUB_ACTION_IDS = frozenset(
+    ("merge_pr_squash", "close_pr_as_superseded", "close_issue_completed")
+)
+FORBIDDEN_GITHUB_ACTION_TEXT = re.compile(
+    r"\b(deploy|runtime|server|systemd|secret|secrets)\b",
+    re.IGNORECASE,
+)
+EXPECTED_HEAD_MARKER = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{8}|nosha)")
+OPERATOR_EVENT_DIGEST = re.compile(r"[0-9a-f]{12}")
+
+
+@dataclass(frozen=True)
+class GitHubActionRequest:
+    repo: str
+    pr_number: int
+    action_id: str
+    expected_head: str
+    operator_event_digest: str
+    operator_gate: str
+    task_issue_number: int | None = None
 
 
 def truncate_comment(body: str) -> str:
@@ -280,6 +303,72 @@ def extract_runtime_maintenance_task_id(body: str) -> tuple[bool, str | None]:
 def has_runner_task_body(body: str) -> bool:
     maintenance_mode, _task_id = extract_runtime_maintenance_task_id(body)
     return extract_task_block(body) is not None or maintenance_mode
+
+
+def body_declares_github_action_request(body: str) -> bool:
+    return re.search(
+        rf"^\s*Mode:\s*{GITHUB_ACTION_REQUEST_MODE}\s*$",
+        body or "",
+        re.MULTILINE,
+    ) is not None
+
+
+def parse_github_action_request(body: str) -> GitHubActionRequest | None:
+    if not body_declares_github_action_request(body):
+        return None
+    if FORBIDDEN_GITHUB_ACTION_TEXT.search(body or "") is not None:
+        raise ValueError("Action request text includes a blocked action boundary.")
+
+    repo = _action_request_field(body, "Repository")
+    pr_number = _action_request_number_field(body, "Pull Request")
+    action_id = _action_request_field(body, "Action ID")
+    expected_head = _action_request_field(body, "Expected Head SHA")
+    if expected_head is None:
+        expected_head = _action_request_field(body, "Expected Head Marker")
+    digest = _action_request_field(body, "Operator Event Digest")
+    operator_gate = _action_request_field(body, "Operator Gate")
+    task_issue_number = _action_request_number_field(body, "Task Issue", required=False)
+
+    if repo is None or pr_number is None or action_id is None:
+        raise ValueError("Action request is missing repository, PR number, or action id.")
+    if expected_head is None or EXPECTED_HEAD_MARKER.fullmatch(expected_head) is None:
+        raise ValueError("Action request has no safe expected head marker.")
+    if digest is None or OPERATOR_EVENT_DIGEST.fullmatch(digest) is None:
+        raise ValueError("Action request has no safe operator event digest.")
+    if operator_gate != "telegram_approve":
+        raise ValueError("Action request is missing Telegram operator approval.")
+    return GitHubActionRequest(
+        repo=repo,
+        pr_number=pr_number,
+        action_id=action_id,
+        expected_head=expected_head.lower(),
+        operator_event_digest=digest,
+        operator_gate=operator_gate,
+        task_issue_number=task_issue_number,
+    )
+
+
+def _action_request_field(body: str, field: str) -> str | None:
+    match = re.search(
+        rf"^\s*{re.escape(field)}:\s*(?P<value>[^\r\n]+?)\s*$",
+        body or "",
+        re.MULTILINE,
+    )
+    return match.group("value") if match is not None else None
+
+
+def _action_request_number_field(
+    body: str, field: str, *, required: bool = True
+) -> int | None:
+    value = _action_request_field(body, field)
+    if value is None and not required:
+        return None
+    match = re.fullmatch(r"#(?P<number>[1-9]\d*)", value or "")
+    if match is None:
+        if required:
+            raise ValueError(f"Action request has no safe {field.lower()}.")
+        raise ValueError(f"Action request has no safe optional {field.lower()}.")
+    return int(match.group("number"))
 
 
 def run_codex_task(task_content: str, workdir: str) -> tuple[int, str]:
@@ -746,6 +835,186 @@ def block_issue(issue_number: int, message: str, remove_label: str = LABEL_READY
     notify_task_finished(issue_number, "BLOCKED")
 
 
+def _gh_json(command: list[str]) -> dict[str, Any] | None:
+    code, output = run_command(command)
+    if code != 0:
+        return None
+    try:
+        payload = json.loads(output or "{}")
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _view_pr_for_action(pr_number: int) -> dict[str, Any] | None:
+    return _gh_json(
+        [
+            "gh",
+            "pr",
+            "view",
+            str(pr_number),
+            "--repo",
+            GITHUB_ACTION_REPO,
+            "--json",
+            "number,state,isDraft,mergeable,headRefOid",
+        ]
+    )
+
+
+def _view_issue_for_action(issue_number: int) -> dict[str, Any] | None:
+    return _gh_json(
+        [
+            "gh",
+            "issue",
+            "view",
+            str(issue_number),
+            "--repo",
+            GITHUB_ACTION_REPO,
+            "--json",
+            "number,body,state,closed,labels",
+        ]
+    )
+
+
+def _head_matches(expected_head: str, actual_head: object) -> bool:
+    if not isinstance(actual_head, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", actual_head):
+        return False
+    if re.fullmatch(r"[0-9a-f]{40}", expected_head):
+        return actual_head.lower() == expected_head
+    if re.fullmatch(r"[0-9a-f]{8}", expected_head):
+        return actual_head.lower().startswith(expected_head)
+    return False
+
+
+def _run_github_mutation(command: list[str]) -> bool:
+    code, _output = run_command(command)
+    return code == 0
+
+
+def execute_github_action_request(request: GitHubActionRequest) -> tuple[str, str]:
+    if request.repo != GITHUB_ACTION_REPO:
+        return "BLOCKED", "repository is not allowlisted."
+    if request.action_id not in GITHUB_ACTION_IDS:
+        return "BLOCKED", "action id is not allowlisted."
+    if request.action_id == "merge_pr_squash":
+        return _merge_pr_squash(request)
+    if request.action_id == "close_pr_as_superseded":
+        return _close_pr_as_superseded(request)
+    return _close_issue_completed(request)
+
+
+def _merge_pr_squash(request: GitHubActionRequest) -> tuple[str, str]:
+    pr = _view_pr_for_action(request.pr_number)
+    if pr is None or pr.get("number") != request.pr_number:
+        return "BLOCKED", "pull request state could not be verified."
+    if str(pr.get("state") or "").upper() != "OPEN":
+        return "BLOCKED", "pull request is not open."
+    if pr.get("isDraft") is True:
+        return "BLOCKED", "pull request is draft."
+    if str(pr.get("mergeable") or "").upper() != "MERGEABLE":
+        return "BLOCKED", "pull request is not mergeable."
+    if not _head_matches(request.expected_head, pr.get("headRefOid")):
+        return "BLOCKED", "pull request head changed."
+    if not _run_github_mutation(
+        [
+            "gh",
+            "pr",
+            "merge",
+            str(request.pr_number),
+            "--repo",
+            GITHUB_ACTION_REPO,
+            "--squash",
+        ]
+    ):
+        return "BLOCKED", "GitHub merge did not complete."
+    return "DONE", "squash merge completed."
+
+
+def _close_pr_as_superseded(request: GitHubActionRequest) -> tuple[str, str]:
+    pr = _view_pr_for_action(request.pr_number)
+    if pr is None or pr.get("number") != request.pr_number:
+        return "BLOCKED", "pull request state could not be verified."
+    if str(pr.get("state") or "").upper() != "OPEN":
+        return "BLOCKED", "pull request is not open."
+    if not _run_github_mutation(
+        [
+            "gh",
+            "pr",
+            "close",
+            str(request.pr_number),
+            "--repo",
+            GITHUB_ACTION_REPO,
+            "--comment",
+            "Closed by approved Runner action: superseded.",
+        ]
+    ):
+        return "BLOCKED", "GitHub pull request close did not complete."
+    return "DONE", "superseded pull request closed."
+
+
+def _close_issue_completed(request: GitHubActionRequest) -> tuple[str, str]:
+    if request.task_issue_number is None:
+        return "BLOCKED", "completed task issue is missing."
+    pr = _view_pr_for_action(request.pr_number)
+    if pr is None or pr.get("number") != request.pr_number:
+        return "BLOCKED", "linked pull request state could not be verified."
+    if str(pr.get("state") or "").upper() != "MERGED":
+        return "BLOCKED", "linked pull request is not merged."
+    task_issue = _view_issue_for_action(request.task_issue_number)
+    if task_issue is None or task_issue.get("number") != request.task_issue_number:
+        return "BLOCKED", "completed task issue could not be verified."
+    if not is_open_task_issue(task_issue):
+        return "BLOCKED", "completed task issue is not open."
+    if LABEL_DONE not in label_names(task_issue.get("labels")):
+        return "BLOCKED", "task issue is not marked runner done."
+    if not has_runner_task_body(str(task_issue.get("body") or "")):
+        return "BLOCKED", "target issue is not a Runner task."
+    if not _run_github_mutation(
+        [
+            "gh",
+            "issue",
+            "close",
+            str(request.task_issue_number),
+            "--repo",
+            GITHUB_ACTION_REPO,
+            "--comment",
+            f"Closed by approved Runner action after PR #{request.pr_number} merged.",
+        ]
+    ):
+        return "BLOCKED", "GitHub task issue close did not complete."
+    return "DONE", "completed task issue closed."
+
+
+def github_action_report(
+    status: str, request: GitHubActionRequest, summary: str
+) -> str:
+    return "\n".join(
+        (
+            f"{status}: approved GitHub action {'completed' if status == 'DONE' else 'blocked'}.",
+            f"action_id={request.action_id}",
+            f"pr=#{request.pr_number}",
+            f"summary={summary}",
+        )
+    )
+
+
+def process_github_action_request_issue(
+    issue_number: int, request: GitHubActionRequest
+) -> None:
+    try:
+        status, summary = execute_github_action_request(request)
+    except Exception:
+        status, summary = "BLOCKED", "GitHub action verification raised."
+    report = github_action_report(status, request, summary)
+    post_issue_comment(issue_number, report)
+    if status == "DONE":
+        set_issue_label(issue_number, LABEL_RUNNING, LABEL_DONE)
+        notify_task_finished(issue_number, "DONE", report)
+        return
+    set_issue_label(issue_number, LABEL_RUNNING, LABEL_BLOCKED)
+    notify_task_finished(issue_number, "BLOCKED", report)
+
+
 def _maintenance_report(
     status: str, task_id: str, status_lines: list[str], success_criteria: str
 ) -> str:
@@ -975,6 +1244,17 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
     claimed = False
     try:
         issue_body = issue.get("body") or ""
+        try:
+            github_action_request = parse_github_action_request(issue_body)
+        except ValueError as exc:
+            block_issue(issue_number, str(exc))
+            return
+        if github_action_request is not None:
+            set_issue_label(issue_number, LABEL_READY, LABEL_RUNNING)
+            claimed = True
+            process_github_action_request_issue(issue_number, github_action_request)
+            return
+
         maintenance_mode, maintenance_task_id = extract_runtime_maintenance_task_id(
             issue_body
         )
