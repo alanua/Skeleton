@@ -51,6 +51,16 @@ TELEGRAM_PR_READY_BUTTON_LABELS = {
     "details": "Деталі",
     "open_pr": "Відкрити PR",
 }
+RUNTIME_MAINTENANCE_MODE = "RUNTIME_MAINTENANCE_TASK"
+SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME = "sync_telegram_callback_poller_runtime"
+RUNTIME_MAINTENANCE_TASK_IDS = frozenset((SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,))
+TELEGRAM_CALLBACK_POLLER_SERVICE = "skeleton-telegram-callback-poll.service"
+TELEGRAM_CALLBACK_POLLER_TIMER = "skeleton-telegram-callback-poll.timer"
+TELEGRAM_CALLBACK_POLLER_RUNTIME_FILES = (
+    "scripts/telegram_callback_poller.py",
+    f"scripts/{TELEGRAM_CALLBACK_POLLER_SERVICE}",
+    f"scripts/{TELEGRAM_CALLBACK_POLLER_TIMER}",
+)
 
 
 def truncate_comment(body: str) -> str:
@@ -140,6 +150,28 @@ def extract_task_block(body: str) -> str | None:
     if not match:
         return None
     return match.group("task").strip()
+
+
+def extract_runtime_maintenance_task_id(body: str) -> tuple[bool, str | None]:
+    mode_found = re.search(
+        rf"^\s*Mode:\s*{RUNTIME_MAINTENANCE_MODE}\s*$",
+        body or "",
+        re.MULTILINE,
+    )
+    if mode_found is None:
+        return False, None
+
+    task_id = re.search(
+        r"^\s*Maintenance Task ID:\s*(?P<task_id>[a-z0-9_]+)\s*$",
+        body or "",
+        re.MULTILINE,
+    )
+    return True, task_id.group("task_id") if task_id else None
+
+
+def has_runner_task_body(body: str) -> bool:
+    maintenance_mode, _task_id = extract_runtime_maintenance_task_id(body)
+    return extract_task_block(body) is not None or maintenance_mode
 
 
 def run_codex_task(task_content: str, workdir: str) -> tuple[int, str]:
@@ -433,7 +465,7 @@ def should_notify_task_finished(issue_number: int, status: str) -> bool:
     issue = get_notification_issue(issue_number)
     if not is_open_task_issue(issue):
         return False
-    if extract_task_block(issue.get("body") or "") is None:
+    if not has_runner_task_body(issue.get("body") or ""):
         return False
     return expected_label in label_names(issue.get("labels"))
 
@@ -624,6 +656,225 @@ def block_issue(issue_number: int, message: str, remove_label: str = LABEL_READY
     notify_task_finished(issue_number, "BLOCKED")
 
 
+def _maintenance_report(
+    status: str, task_id: str, status_lines: list[str], success_criteria: str
+) -> str:
+    heading = (
+        "DONE: Runner host maintenance task completed."
+        if status == "DONE"
+        else "BLOCKED: Runner host maintenance task did not complete."
+    )
+    return "\n".join(
+        (
+            heading,
+            f"maintenance_task_id={task_id}",
+            *status_lines,
+            f"success_criteria={success_criteria}",
+        )
+    )
+
+
+def _non_interactive_sudo(*args: str) -> list[str]:
+    return ["sudo", "-n", *args]
+
+
+def _run_maintenance_command(
+    task_id: str,
+    step: str,
+    command: list[str],
+    status_lines: list[str],
+    cwd: str | Path | None = None,
+) -> str | None:
+    code, _output = run_command(command, cwd=cwd)
+    if code == 0:
+        status_lines.append(f"step={step} status=done")
+        return None
+    return _maintenance_report(
+        "BLOCKED",
+        task_id,
+        [*status_lines, f"step={step} status=failed exit_code={code}"],
+        "not_met",
+    )
+
+
+def _verify_maintenance_command_output(
+    task_id: str,
+    step: str,
+    command: list[str],
+    expected_output: str,
+    status_lines: list[str],
+) -> str | None:
+    code, output = run_command(command)
+    if code == 0 and output.strip() == expected_output:
+        status_lines.append(f"step={step} status=done")
+        return None
+    return _maintenance_report(
+        "BLOCKED",
+        task_id,
+        [*status_lines, f"step={step} status=failed"],
+        "not_met",
+    )
+
+
+def sync_telegram_callback_poller_runtime(workdir: str) -> str:
+    task_id = SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME
+    status_lines: list[str] = []
+    steps = (
+        (
+            "stop_callback_timer",
+            _non_interactive_sudo("systemctl", "stop", TELEGRAM_CALLBACK_POLLER_TIMER),
+            None,
+        ),
+        (
+            "stop_callback_service",
+            _non_interactive_sudo(
+                "systemctl", "stop", TELEGRAM_CALLBACK_POLLER_SERVICE
+            ),
+            None,
+        ),
+        ("fetch_origin_main", ["git", "fetch", "origin", "main"], workdir),
+        ("checkout_main", ["git", "checkout", "main"], workdir),
+        ("pull_origin_main", ["git", "pull", "--ff-only", "origin", "main"], workdir),
+    )
+    for step, command, cwd in steps:
+        report = _run_maintenance_command(task_id, step, command, status_lines, cwd)
+        if report is not None:
+            return report
+
+    repository = Path(workdir)
+    missing_files = [
+        relative_path
+        for relative_path in TELEGRAM_CALLBACK_POLLER_RUNTIME_FILES
+        if not (repository / relative_path).is_file()
+    ]
+    if missing_files:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                *status_lines,
+                "step=verify_callback_runtime_files status=failed",
+                *[f"missing_file={file_name}" for file_name in missing_files],
+            ],
+            "not_met",
+        )
+    status_lines.append("step=verify_callback_runtime_files status=done")
+
+    source_service = repository / "scripts" / TELEGRAM_CALLBACK_POLLER_SERVICE
+    source_timer = repository / "scripts" / TELEGRAM_CALLBACK_POLLER_TIMER
+    installed_service = f"/etc/systemd/system/{TELEGRAM_CALLBACK_POLLER_SERVICE}"
+    installed_timer = f"/etc/systemd/system/{TELEGRAM_CALLBACK_POLLER_TIMER}"
+    copy_and_start_steps = (
+        (
+            "copy_callback_service_unit",
+            _non_interactive_sudo("cp", str(source_service), installed_service),
+        ),
+        (
+            "copy_callback_timer_unit",
+            _non_interactive_sudo("cp", str(source_timer), installed_timer),
+        ),
+        (
+            "own_callback_service_unit",
+            _non_interactive_sudo("chown", "root:root", installed_service),
+        ),
+        (
+            "own_callback_timer_unit",
+            _non_interactive_sudo("chown", "root:root", installed_timer),
+        ),
+        (
+            "mode_callback_service_unit",
+            _non_interactive_sudo("chmod", "0644", installed_service),
+        ),
+        (
+            "mode_callback_timer_unit",
+            _non_interactive_sudo("chmod", "0644", installed_timer),
+        ),
+        ("systemd_daemon_reload", _non_interactive_sudo("systemctl", "daemon-reload")),
+        (
+            "enable_callback_timer",
+            _non_interactive_sudo("systemctl", "enable", TELEGRAM_CALLBACK_POLLER_TIMER),
+        ),
+        (
+            "start_callback_timer",
+            _non_interactive_sudo("systemctl", "start", TELEGRAM_CALLBACK_POLLER_TIMER),
+        ),
+        (
+            "run_callback_service_once",
+            _non_interactive_sudo(
+                "systemctl", "start", TELEGRAM_CALLBACK_POLLER_SERVICE
+            ),
+        ),
+        (
+            "verify_callback_timer_active",
+            _non_interactive_sudo(
+                "systemctl", "is-active", "--quiet", TELEGRAM_CALLBACK_POLLER_TIMER
+            ),
+        ),
+    )
+    for step, command in copy_and_start_steps:
+        report = _run_maintenance_command(task_id, step, command, status_lines)
+        if report is not None:
+            return report
+
+    report = _verify_maintenance_command_output(
+        task_id,
+        "verify_callback_service_result",
+        _non_interactive_sudo(
+            "systemctl",
+            "show",
+            "--property=Result",
+            "--value",
+            TELEGRAM_CALLBACK_POLLER_SERVICE,
+        ),
+        "success",
+        status_lines,
+    )
+    if report is not None:
+        return report
+
+    return _maintenance_report("DONE", task_id, status_lines, "met")
+
+
+def dispatch_runtime_maintenance_task(task_id: str, workdir: str) -> str:
+    if task_id != SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            ["reason=maintenance_task_id_not_allowlisted"],
+            "not_met",
+        )
+    try:
+        return sync_telegram_callback_poller_runtime(workdir)
+    except Exception:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            ["reason=maintenance_step_raised"],
+            "not_met",
+        )
+
+
+def maintenance_report_is_done(report: str) -> bool:
+    return (
+        report.startswith("DONE:")
+        and re.search(r"\bBLOCKED\b", report) is None
+        and re.search(r"^success_criteria=not_met\s*$", report, re.MULTILINE) is None
+    )
+
+
+def process_runtime_maintenance_issue(
+    issue_number: int, task_id: str, workdir: str
+) -> None:
+    report = dispatch_runtime_maintenance_task(task_id, workdir)
+    post_issue_comment(issue_number, report)
+    if maintenance_report_is_done(report):
+        set_issue_label(issue_number, LABEL_RUNNING, LABEL_DONE)
+        notify_task_finished(issue_number, "DONE", report)
+        return
+    set_issue_label(issue_number, LABEL_RUNNING, LABEL_BLOCKED)
+    notify_task_finished(issue_number, "BLOCKED", report)
+
+
 def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
     issue_number = int(issue["number"])
     if not is_open_task_issue(issue):
@@ -632,13 +883,33 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
     resolved_workdir = str(Path(workdir) if workdir is not None else DEFAULT_WORKDIR)
     claimed = False
     try:
-        task_content = extract_task_block(issue.get("body") or "")
-        if task_content is None:
+        issue_body = issue.get("body") or ""
+        maintenance_mode, maintenance_task_id = extract_runtime_maintenance_task_id(
+            issue_body
+        )
+        if maintenance_mode and maintenance_task_id is None:
             block_issue(
                 issue_number,
-                "No fenced task block found. Add a fence that starts with ```task.",
+                "Runtime maintenance task id is missing. Use `Maintenance Task ID:`.",
             )
             return
+        if maintenance_mode and maintenance_task_id not in RUNTIME_MAINTENANCE_TASK_IDS:
+            block_issue(
+                issue_number,
+                f"Runtime maintenance task id `{maintenance_task_id}` is not allowlisted.",
+            )
+            return
+
+        task_content = extract_task_block(issue_body)
+        if task_content is None:
+            if maintenance_mode:
+                task_content = ""
+            else:
+                block_issue(
+                    issue_number,
+                    "No fenced task block found. Add a fence that starts with ```task.",
+                )
+                return
 
         clean, status_output = ensure_clean_worktree(resolved_workdir)
         if not clean:
@@ -651,6 +922,12 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
 
         set_issue_label(issue_number, LABEL_READY, LABEL_RUNNING)
         claimed = True
+
+        if maintenance_mode and maintenance_task_id is not None:
+            process_runtime_maintenance_issue(
+                issue_number, maintenance_task_id, resolved_workdir
+            )
+            return
 
         branch_code, branch_output, _branch = prepare_issue_branch(
             issue_number, resolved_workdir
