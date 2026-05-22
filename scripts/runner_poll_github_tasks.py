@@ -196,7 +196,20 @@ def cleanup_issue_worktree(
     if not path.exists():
         return 0, ""
     cleanup_runtime_artifacts(path)
-    return run_command(["git", "worktree", "remove", str(path)], cwd=coordinator_workdir)
+    outputs: list[str] = []
+    for command in (
+        ["git", "worktree", "remove", "--force", str(path)],
+        ["git", "worktree", "prune"],
+    ):
+        code, output = run_command(command, cwd=coordinator_workdir)
+        outputs.append(format_command_output(command, output))
+        if code != 0:
+            return code, "\n".join(outputs)
+    return 0, "\n".join(outputs)
+
+
+def issue_workspace_review_note(path: str | Path) -> str:
+    return f"\n\nIssue workspace kept for review:\n`{path}`"
 
 
 def get_ready_issues() -> list[dict[str, Any]]:
@@ -1027,7 +1040,9 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
         if worktree_code != 0:
             block_issue(
                 issue_number,
-                f"Issue worktree preparation failed:\n```\n{worktree_output}\n```",
+                "Issue worktree preparation failed:\n"
+                f"```\n{worktree_output}\n```"
+                + issue_workspace_review_note(worktree_path),
                 remove_label=LABEL_RUNNING,
             )
             return
@@ -1039,20 +1054,25 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
         if codex_code != 0:
             block_issue(
                 issue_number,
-                f"Codex task failed:\n```\n{codex_output}\n```",
+                f"Codex task failed:\n```\n{codex_output}\n```"
+                + issue_workspace_review_note(issue_workdir),
                 remove_label=LABEL_RUNNING,
             )
             return
 
         report = finalize_success(issue, issue_workdir, codex_output)
         cleanup_runtime_artifacts(issue_workdir)
+        cleanup_code, cleanup_output = cleanup_issue_worktree(
+            issue_number, coordinator_workdir
+        )
+        if cleanup_code != 0:
+            raise RuntimeError(
+                "Issue workspace cleanup failed:\n"
+                f"{cleanup_output.strip() or f'exit code {cleanup_code}'}"
+            )
         post_issue_comment(issue_number, report)
         set_issue_label(issue_number, LABEL_RUNNING, LABEL_DONE)
         notify_task_finished(issue_number, "DONE", report)
-        try:
-            cleanup_issue_worktree(issue_number, coordinator_workdir)
-        except Exception:
-            pass
     except Exception as exc:
         if issue_workdir is not None:
             cleanup_runtime_artifacts(issue_workdir)
@@ -1060,7 +1080,12 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             remove_label = LABEL_RUNNING if claimed else LABEL_READY
             block_issue(
                 issue_number,
-                f"Runner error:\n```\n{exc}\n```",
+                f"Runner error:\n```\n{exc}\n```"
+                + (
+                    issue_workspace_review_note(issue_workdir)
+                    if issue_workdir is not None
+                    else ""
+                ),
                 remove_label=remove_label,
             )
         except Exception:
