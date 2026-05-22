@@ -6,6 +6,8 @@ import urllib.parse
 from pathlib import Path
 from unittest import mock
 
+import pytest
+
 from scripts import runner_poll_github_tasks as runner
 
 
@@ -24,6 +26,62 @@ Pytest output:
 
 Commit: {HEAD_SHA}
 Draft PR: {PR_URL}"""
+CALLBACK_HMAC_SECRET = "runner-callback-hmac-test-secret"
+CALLBACK_DIGEST = runner.hmac.new(
+    CALLBACK_HMAC_SECRET.encode("utf-8"),
+    f"tpr1:approve:p123:{HEAD_SHA[:8]}".encode("ascii"),
+    runner.hashlib.sha256,
+).hexdigest()[:12]
+
+
+def _merge_issue_body(
+    *,
+    pr_number: int = 123,
+    head_sha: str = HEAD_SHA,
+    action: str = "squash",
+    approval_source: str = "signed_telegram_callback",
+) -> str:
+    return "\n".join(
+        (
+            f"Mode: {runner.TELEGRAM_APPROVED_PR_MERGE_MODE}",
+            f"Repository: {runner.REPO}",
+            f"Pull Request: {pr_number}",
+            f"Approved Head SHA: {head_sha}",
+            f"Merge Action: {action}",
+            f"Approval Source: {approval_source}",
+            f"Callback Digest: {CALLBACK_DIGEST}",
+        )
+    )
+
+
+def _merge_comments() -> list[dict[str, str]]:
+    return [
+        {
+            "body": (
+                "Operator event record (Telegram callback stage 1)\n"
+                f"Repository: {runner.REPO}\n"
+                "Pull request: #123\n"
+                "Action: telegram_approve\n"
+                f"Head marker: {HEAD_SHA[:8]}\n"
+                f"Callback digest: {CALLBACK_DIGEST}\n"
+                "Result: recorded\n"
+            )
+        },
+        {"body": f"{runner.CHATGPT_CONTENT_APPROVED_MARKER}\nPR: #123\nHead SHA: {HEAD_SHA}"},
+    ]
+
+
+def _merge_pr_state(**updates: object) -> dict[str, object]:
+    state: dict[str, object] = {
+        "number": 123,
+        "state": "OPEN",
+        "isDraft": False,
+        "mergeable": "MERGEABLE",
+        "headRefOid": HEAD_SHA,
+        "comments": _merge_comments(),
+    }
+    state.update(updates)
+    return state
 
 
 def _telegram_response() -> mock.MagicMock:
@@ -184,6 +242,129 @@ def test_poll_once_processes_issues_single_lane() -> None:
         mock.call(issues[0], workdir="/coordinator"),
         mock.call(issues[1], workdir="/coordinator"),
     ]
+
+
+def test_extracts_bounded_telegram_approved_merge_request() -> None:
+    mode, request, reason = runner.extract_telegram_approved_pr_merge_request(
+        _merge_issue_body()
+    )
+
+    assert mode is True
+    assert reason is None
+    assert request == runner.TelegramApprovedPrMergeRequest(
+        pr_number=123,
+        approved_head_sha=HEAD_SHA,
+        callback_digest=CALLBACK_DIGEST,
+    )
+
+
+@pytest.mark.parametrize(
+    ("body", "reason"),
+    (
+        (_merge_issue_body(action="merge"), "action must be squash"),
+        (
+            _merge_issue_body(approval_source="issue_body"),
+            "source is not allowlisted",
+        ),
+        (_merge_issue_body(head_sha="not-a-sha"), "head SHA is malformed"),
+    ),
+)
+def test_blocks_malformed_telegram_approved_merge_issue(
+    body: str, reason: str
+) -> None:
+    with mock.patch.object(runner, "block_issue") as block, mock.patch.object(
+        runner, "run_codex_task"
+    ) as run_codex:
+        runner.process_issue({"number": 141, "title": "Merge", "body": body})
+
+    assert reason in block.call_args.args[1]
+    run_codex.assert_not_called()
+
+
+def test_telegram_approved_merge_issue_bypasses_codex_and_posts_merge_report() -> None:
+    issue = {"number": 141, "title": "Merge", "body": _merge_issue_body()}
+    with mock.patch.object(runner, "set_issue_label") as set_label, mock.patch.object(
+        runner, "process_telegram_approved_pr_merge_issue"
+    ) as process_merge, mock.patch.object(runner, "run_codex_task") as run_codex:
+        runner.process_issue(issue)
+
+    assert set_label.call_args_list == [
+        mock.call(141, runner.LABEL_READY, runner.LABEL_RUNNING)
+    ]
+    process_merge.assert_called_once_with(
+        141,
+        runner.TelegramApprovedPrMergeRequest(
+            pr_number=123,
+            approved_head_sha=HEAD_SHA,
+            callback_digest=CALLBACK_DIGEST,
+        ),
+    )
+    run_codex.assert_not_called()
+
+
+def test_executes_only_head_matched_squash_merge_for_approved_pr() -> None:
+    request = runner.TelegramApprovedPrMergeRequest(123, HEAD_SHA, CALLBACK_DIGEST)
+    with mock.patch.dict(
+        os.environ, {runner.TELEGRAM_CALLBACK_HMAC_ENV: CALLBACK_HMAC_SECRET}, clear=True
+    ), mock.patch.object(
+        runner, "get_pr_merge_state", return_value=_merge_pr_state()
+    ), mock.patch.object(runner, "run_command", return_value=(0, "merged")) as run:
+        report = runner.execute_telegram_approved_pr_merge(request)
+
+    assert report.startswith("DONE:")
+    run.assert_called_once_with(
+        [
+            "gh",
+            "pr",
+            "merge",
+            "123",
+            "--repo",
+            runner.REPO,
+            "--squash",
+            "--match-head-commit",
+            HEAD_SHA,
+        ]
+    )
+
+
+def test_blocks_telegram_approved_merge_when_callback_digest_is_not_signed() -> None:
+    request = runner.TelegramApprovedPrMergeRequest(123, HEAD_SHA, "0123456789ab")
+    with mock.patch.dict(
+        os.environ, {runner.TELEGRAM_CALLBACK_HMAC_ENV: CALLBACK_HMAC_SECRET}, clear=True
+    ), mock.patch.object(
+        runner, "get_pr_merge_state", return_value=_merge_pr_state()
+    ), mock.patch.object(runner, "run_command") as run:
+        report = runner.execute_telegram_approved_pr_merge(request)
+
+    assert report == "BLOCKED: Telegram approve callback HMAC signature is invalid."
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("updates", "reason"),
+    (
+        ({"state": "CLOSED"}, "not open"),
+        ({"isDraft": True}, "still draft"),
+        ({"mergeable": "CONFLICTING"}, "not mergeable"),
+        ({"headRefOid": "b" * 40}, "head does not match"),
+        ({"comments": _merge_comments()[1:]}, "Signed Telegram approve audit"),
+        ({"comments": _merge_comments()[:1]}, "CONTENT APPROVED"),
+    ),
+)
+def test_blocks_telegram_approved_merge_when_verification_fails(
+    updates: dict[str, object], reason: str
+) -> None:
+    request = runner.TelegramApprovedPrMergeRequest(123, HEAD_SHA, CALLBACK_DIGEST)
+    with mock.patch.dict(
+        os.environ, {runner.TELEGRAM_CALLBACK_HMAC_ENV: CALLBACK_HMAC_SECRET}, clear=True
+    ), mock.patch.object(
+        runner, "get_pr_merge_state", return_value=_merge_pr_state(**updates)
+    ), mock.patch.object(runner, "run_command") as run:
+        report = runner.execute_telegram_approved_pr_merge(request)
+
+    assert report.startswith("BLOCKED:")
+    assert reason in report
+    run.assert_not_called()
 
 
 def test_simple_done_notification_without_pr_url_keeps_plain_message() -> None:

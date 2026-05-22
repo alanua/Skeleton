@@ -23,6 +23,9 @@ TELEGRAM_UPDATE_LIMIT = 25
 CALLBACK_ID_HISTORY_LIMIT = 500
 CALLBACK_DATA_HISTORY_LIMIT = 500
 CALLBACK_HMAC_ENV = "SKELETON_TG_CALLBACK_HMAC_SECRET"
+RUNNER_READY_LABEL = "runner:ready"
+RUNNER_MERGE_MODE = "TELEGRAM_APPROVED_PR_MERGE"
+RUNNER_MERGE_ACTION = "squash"
 DEFAULT_CALLBACK_STATE_PATH = Path(
     "/home/agent/agent-dev/state/telegram_callback_poller.json"
 )
@@ -90,7 +93,7 @@ def handle_callback_query(
     repo: str = REPO,
     dry_run: bool = False,
 ) -> dict[str, object]:
-    """Handle one Telegram callback query as a comment-only stage 1 audit event."""
+    """Handle one bounded Telegram callback query."""
     callback_id = _bounded_callback_id(callback_query.get("id"))
     try:
         parsed = parse_callback_data(callback_query.get("data"))
@@ -160,6 +163,10 @@ def handle_callback_query(
         return _answer_callback_query(result, callback_id, dry_run=False)
 
     _post_pr_comment(parsed.pr_number, comment, github_token)
+    runner_merge_request = "not_requested"
+    if parsed.action == "approve":
+        _create_runner_merge_request(parsed, pr_state, github_token)
+        runner_merge_request = "requested"
     result = _result(
         status="comment_posted",
         reason="audit comment posted.",
@@ -167,6 +174,7 @@ def handle_callback_query(
         posted=True,
         comment=comment,
     )
+    result["runner_merge_request"] = runner_merge_request
     return _answer_callback_query(result, callback_id, dry_run=False)
 
 
@@ -471,6 +479,53 @@ def _post_pr_comment(pr_number: int, comment: str, github_token: str) -> None:
         github_token,
         method="POST",
         payload={"body": comment},
+    )
+
+
+def _create_runner_merge_request(
+    parsed: ParsedCallback,
+    pr_state: Mapping[str, object],
+    github_token: str,
+) -> None:
+    head = pr_state.get("head")
+    head_sha = head.get("sha") if isinstance(head, Mapping) else None
+    if not isinstance(head_sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", head_sha):
+        raise RuntimeError("GitHub PR state did not include a bounded head SHA.")
+
+    _github_json_request(
+        f"/repos/{REPO}/issues",
+        github_token,
+        method="POST",
+        payload={
+            "title": f"Runner merge approved PR #{parsed.pr_number}",
+            "labels": [RUNNER_READY_LABEL],
+            "body": _render_runner_merge_request_body(
+                pr_number=parsed.pr_number,
+                head_sha=head_sha.lower(),
+                callback_digest=parsed.digest,
+            ),
+        },
+    )
+
+
+def _render_runner_merge_request_body(
+    *,
+    pr_number: int,
+    head_sha: str,
+    callback_digest: str,
+) -> str:
+    return "\n".join(
+        (
+            f"Mode: {RUNNER_MERGE_MODE}",
+            f"Repository: {REPO}",
+            f"Pull Request: {pr_number}",
+            f"Approved Head SHA: {head_sha}",
+            f"Merge Action: {RUNNER_MERGE_ACTION}",
+            "Approval Source: signed_telegram_callback",
+            f"Callback Digest: {callback_digest}",
+            "",
+            "Runner must verify the PR, review marker, and head before squash merge.",
+        )
     )
 
 

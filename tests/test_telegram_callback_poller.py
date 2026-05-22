@@ -376,19 +376,41 @@ def test_approve_callback_posts_audit_comment_when_pr_head_marker_matches() -> N
     ), mock.patch.object(
         poller.urllib.request,
         "urlopen",
-        side_effect=(response(github_pr_state()), response({"id": 88})),
+        side_effect=(
+            response(github_pr_state()),
+            response({"id": 88}),
+            response({"number": 910}),
+        ),
     ) as urlopen:
         result = poller.handle_callback_query(query())
 
     assert result["status"] == "comment_posted"
     assert result["comment_posted"] is True
-    assert urlopen.call_count == 2
-    fetch_request, post_request = [call.args[0] for call in urlopen.call_args_list]
+    assert result["runner_merge_request"] == "requested"
+    assert urlopen.call_count == 3
+    fetch_request, post_request, request_issue = [
+        call.args[0] for call in urlopen.call_args_list
+    ]
     assert fetch_request.full_url.endswith("/repos/alanua/Skeleton/pulls/120")
     assert fetch_request.get_method() == "GET"
     assert post_request.full_url.endswith("/repos/alanua/Skeleton/issues/120/comments")
     assert post_request.get_method() == "POST"
     assert request_body(post_request) == {"body": result["comment"]}
+    assert request_issue.full_url.endswith("/repos/alanua/Skeleton/issues")
+    assert request_body(request_issue) == {
+        "body": (
+            "Mode: TELEGRAM_APPROVED_PR_MERGE\n"
+            "Repository: alanua/Skeleton\n"
+            "Pull Request: 120\n"
+            f"Approved Head SHA: {HEAD_SHA}\n"
+            "Merge Action: squash\n"
+            "Approval Source: signed_telegram_callback\n"
+            f"Callback Digest: {CALLBACK_DATA.rsplit(':', 1)[-1]}\n\n"
+            "Runner must verify the PR, review marker, and head before squash merge."
+        ),
+        "labels": ["runner:ready"],
+        "title": "Runner merge approved PR #120",
+    }
     assert str(result["comment"]).startswith("Operator event record")
 
 
@@ -432,6 +454,7 @@ def test_reject_callback_posts_audit_comment_but_does_not_close_pr() -> None:
     urls = [call.args[0].full_url for call in urlopen.call_args_list]
     assert result["status"] == "comment_posted"
     assert "Action: telegram_reject" in str(result["comment"])
+    assert result["runner_merge_request"] == "not_requested"
     assert urls == [
         "https://api.github.com/repos/alanua/Skeleton/pulls/120",
         "https://api.github.com/repos/alanua/Skeleton/issues/120/comments",
@@ -465,6 +488,7 @@ def test_details_callback_posts_audit_comment_only() -> None:
     urls = [call.args[0].full_url for call in urlopen.call_args_list]
     assert result["status"] == "comment_posted"
     assert "Action: telegram_details" in str(result["comment"])
+    assert result["runner_merge_request"] == "not_requested"
     assert urls == [
         "https://api.github.com/repos/alanua/Skeleton/pulls/120",
         "https://api.github.com/repos/alanua/Skeleton/issues/120/comments",
@@ -559,7 +583,12 @@ def test_no_token_appears_in_returned_result_or_comment() -> None:
     ), mock.patch.object(
         poller.urllib.request,
         "urlopen",
-        side_effect=(response(github_pr_state()), response({"id": 90}), response()),
+        side_effect=(
+            response(github_pr_state()),
+            response({"id": 90}),
+            response({"number": 911}),
+            response(),
+        ),
     ):
         result = poller.handle_callback_query(query())
 

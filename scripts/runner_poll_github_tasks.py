@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import hashlib
 import hmac
 import json
@@ -57,6 +58,9 @@ TELEGRAM_PR_READY_BUTTON_LABELS = {
 RUNTIME_MAINTENANCE_MODE = "RUNTIME_MAINTENANCE_TASK"
 SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME = "sync_telegram_callback_poller_runtime"
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset((SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,))
+TELEGRAM_APPROVED_PR_MERGE_MODE = "TELEGRAM_APPROVED_PR_MERGE"
+TELEGRAM_APPROVED_PR_MERGE_ACTION = "squash"
+CHATGPT_CONTENT_APPROVED_MARKER = "CONTENT APPROVED"
 TELEGRAM_CALLBACK_POLLER_SERVICE = "skeleton-telegram-callback-poll.service"
 TELEGRAM_CALLBACK_POLLER_TIMER = "skeleton-telegram-callback-poll.timer"
 TELEGRAM_CALLBACK_POLLER_RUNTIME_FILES = (
@@ -64,6 +68,17 @@ TELEGRAM_CALLBACK_POLLER_RUNTIME_FILES = (
     f"scripts/{TELEGRAM_CALLBACK_POLLER_SERVICE}",
     f"scripts/{TELEGRAM_CALLBACK_POLLER_TIMER}",
 )
+
+_HEAD_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+_CALLBACK_DIGEST_RE = re.compile(r"^[0-9a-f]{12}$")
+
+
+@dataclass(frozen=True)
+class TelegramApprovedPrMergeRequest:
+    pr_number: int
+    approved_head_sha: str
+    callback_digest: str
+    action: str = TELEGRAM_APPROVED_PR_MERGE_ACTION
 
 
 def truncate_comment(body: str) -> str:
@@ -292,9 +307,62 @@ def extract_runtime_maintenance_task_id(body: str) -> tuple[bool, str | None]:
     return True, task_id.group("task_id") if task_id else None
 
 
+def extract_telegram_approved_pr_merge_request(
+    body: str,
+) -> tuple[bool, TelegramApprovedPrMergeRequest | None, str | None]:
+    mode_found = re.search(
+        rf"^\s*Mode:\s*{TELEGRAM_APPROVED_PR_MERGE_MODE}\s*$",
+        body or "",
+        re.MULTILINE,
+    )
+    if mode_found is None:
+        return False, None, None
+
+    repo = _body_field(body, "Repository")
+    pr_number = _body_field(body, "Pull Request")
+    head_sha = _body_field(body, "Approved Head SHA")
+    action = _body_field(body, "Merge Action")
+    approval_source = _body_field(body, "Approval Source")
+    callback_digest = _body_field(body, "Callback Digest")
+    if repo != REPO:
+        return True, None, f"Telegram approved merge repository must be `{REPO}`."
+    if not isinstance(pr_number, str) or not re.fullmatch(r"[1-9]\d*", pr_number):
+        return True, None, "Telegram approved merge pull request is malformed."
+    if not isinstance(head_sha, str) or _HEAD_SHA_RE.fullmatch(head_sha) is None:
+        return True, None, "Telegram approved merge head SHA is malformed."
+    if action != TELEGRAM_APPROVED_PR_MERGE_ACTION:
+        return True, None, "Telegram approved merge action must be squash."
+    if approval_source != "signed_telegram_callback":
+        return True, None, "Telegram approved merge source is not allowlisted."
+    if (
+        not isinstance(callback_digest, str)
+        or _CALLBACK_DIGEST_RE.fullmatch(callback_digest) is None
+    ):
+        return True, None, "Telegram approved merge callback digest is malformed."
+    return (
+        True,
+        TelegramApprovedPrMergeRequest(
+            pr_number=int(pr_number),
+            approved_head_sha=head_sha.lower(),
+            callback_digest=callback_digest,
+        ),
+        None,
+    )
+
+
+def _body_field(body: str, field: str) -> str | None:
+    match = re.search(
+        rf"^\s*{re.escape(field)}:\s*(?P<value>\S(?:.*\S)?)\s*$",
+        body or "",
+        re.MULTILINE,
+    )
+    return match.group("value") if match else None
+
+
 def has_runner_task_body(body: str) -> bool:
     maintenance_mode, _task_id = extract_runtime_maintenance_task_id(body)
-    return extract_task_block(body) is not None or maintenance_mode
+    merge_mode, _request, _reason = extract_telegram_approved_pr_merge_request(body)
+    return extract_task_block(body) is not None or maintenance_mode or merge_mode
 
 
 def run_codex_task(task_content: str, workdir: str) -> tuple[int, str]:
@@ -976,6 +1044,168 @@ def maintenance_report_is_done(report: str) -> bool:
     )
 
 
+def get_pr_merge_state(pr_number: int) -> dict[str, Any]:
+    code, output = run_command(
+        [
+            "gh",
+            "pr",
+            "view",
+            str(pr_number),
+            "--repo",
+            REPO,
+            "--json",
+            "number,state,isDraft,mergeable,headRefOid,comments",
+        ]
+    )
+    if code != 0:
+        raise RuntimeError(f"gh pr view failed:\n{output}")
+    parsed = json.loads(output or "{}")
+    if not isinstance(parsed, dict):
+        raise RuntimeError("gh pr view returned non-object JSON")
+    return parsed
+
+
+def chatgpt_content_approved_for_head(
+    pr_state: dict[str, Any],
+    pr_number: int,
+    head_sha: str,
+) -> bool:
+    comments = pr_state.get("comments")
+    if not isinstance(comments, list):
+        return False
+
+    pr_line = re.compile(rf"^\s*PR:\s*#?{pr_number}\s*$", re.MULTILINE)
+    head_line = re.compile(
+        rf"^\s*Head SHA:\s*{re.escape(head_sha)}\s*$",
+        re.MULTILINE | re.IGNORECASE,
+    )
+    marker_line = re.compile(
+        rf"^\s*{re.escape(CHATGPT_CONTENT_APPROVED_MARKER)}\s*$",
+        re.MULTILINE,
+    )
+    for comment in comments:
+        body = comment.get("body") if isinstance(comment, dict) else None
+        if (
+            isinstance(body, str)
+            and marker_line.search(body) is not None
+            and pr_line.search(body) is not None
+            and head_line.search(body) is not None
+        ):
+            return True
+    return False
+
+
+def telegram_approve_audit_matches_request(
+    pr_state: dict[str, Any],
+    request: TelegramApprovedPrMergeRequest,
+) -> bool:
+    comments = pr_state.get("comments")
+    if not isinstance(comments, list):
+        return False
+
+    expected_lines = (
+        "Operator event record (Telegram callback stage 1)",
+        f"Pull request: #{request.pr_number}",
+        "Action: telegram_approve",
+        f"Head marker: {request.approved_head_sha[:8]}",
+        f"Callback digest: {request.callback_digest}",
+        "Result: recorded",
+    )
+    for comment in comments:
+        body = comment.get("body") if isinstance(comment, dict) else None
+        if isinstance(body, str) and all(line in body.splitlines() for line in expected_lines):
+            return True
+    return False
+
+
+def telegram_approve_digest_is_signed(
+    request: TelegramApprovedPrMergeRequest,
+) -> bool:
+    hmac_secret = os.environ.get(TELEGRAM_CALLBACK_HMAC_ENV)
+    if not hmac_secret:
+        return False
+    digest = hmac.new(
+        hmac_secret.encode("utf-8"),
+        (
+            f"tpr1:approve:p{request.pr_number}:"
+            f"{request.approved_head_sha[:8]}"
+        ).encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()[:12]
+    return hmac.compare_digest(request.callback_digest, digest)
+
+
+def _pr_merge_block_reason(
+    request: TelegramApprovedPrMergeRequest,
+    pr_state: dict[str, Any],
+) -> str | None:
+    if not telegram_approve_digest_is_signed(request):
+        return "Telegram approve callback HMAC signature is invalid."
+    if pr_state.get("number") != request.pr_number:
+        return "GitHub PR number does not match the approved merge request."
+    if str(pr_state.get("state") or "").upper() != "OPEN":
+        return "Approved PR is not open."
+    if pr_state.get("isDraft") is not False:
+        return "Approved PR is still draft."
+    if str(pr_state.get("mergeable") or "").upper() != "MERGEABLE":
+        return "Approved PR is not mergeable."
+    if str(pr_state.get("headRefOid") or "").lower() != request.approved_head_sha:
+        return "Approved PR head does not match the Telegram button head."
+    if not telegram_approve_audit_matches_request(pr_state, request):
+        return "Signed Telegram approve audit does not match this merge request."
+    if not chatgpt_content_approved_for_head(
+        pr_state, request.pr_number, request.approved_head_sha
+    ):
+        return "ChatGPT CONTENT APPROVED marker is missing for this PR head."
+    if request.action != TELEGRAM_APPROVED_PR_MERGE_ACTION:
+        return "Approved PR merge action is not allowlisted."
+    return None
+
+
+def execute_telegram_approved_pr_merge(
+    request: TelegramApprovedPrMergeRequest,
+) -> str:
+    pr_state = get_pr_merge_state(request.pr_number)
+    block_reason = _pr_merge_block_reason(request, pr_state)
+    if block_reason is not None:
+        return f"BLOCKED: {block_reason}"
+
+    command = [
+        "gh",
+        "pr",
+        "merge",
+        str(request.pr_number),
+        "--repo",
+        REPO,
+        "--squash",
+        "--match-head-commit",
+        request.approved_head_sha,
+    ]
+    code, _output = run_command(command)
+    if code != 0:
+        return "BLOCKED: GitHub squash merge failed."
+    return (
+        f"DONE: Squash merged approved PR #{request.pr_number}.\n"
+        f"approved_head_sha={request.approved_head_sha}\n"
+        f"merge_action={request.action}"
+    )
+
+
+def process_telegram_approved_pr_merge_issue(
+    issue_number: int,
+    request: TelegramApprovedPrMergeRequest,
+) -> None:
+    report = execute_telegram_approved_pr_merge(request)
+    post_issue_comment(issue_number, report)
+    status = "DONE" if report.startswith("DONE:") else "BLOCKED"
+    set_issue_label(
+        issue_number,
+        LABEL_RUNNING,
+        LABEL_DONE if status == "DONE" else LABEL_BLOCKED,
+    )
+    notify_task_finished(issue_number, status, report)
+
+
 def process_runtime_maintenance_issue(
     issue_number: int, task_id: str, workdir: str
 ) -> None:
@@ -1002,6 +1232,9 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
         maintenance_mode, maintenance_task_id = extract_runtime_maintenance_task_id(
             issue_body
         )
+        merge_mode, merge_request, merge_reason = (
+            extract_telegram_approved_pr_merge_request(issue_body)
+        )
         if maintenance_mode and maintenance_task_id is None:
             block_issue(
                 issue_number,
@@ -1014,10 +1247,16 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                 f"Runtime maintenance task id `{maintenance_task_id}` is not allowlisted.",
             )
             return
+        if merge_mode and merge_request is None:
+            block_issue(
+                issue_number,
+                merge_reason or "Telegram approved merge request is malformed.",
+            )
+            return
 
         task_content = extract_task_block(issue_body)
         if task_content is None:
-            if maintenance_mode:
+            if maintenance_mode or merge_mode:
                 task_content = ""
             else:
                 block_issue(
@@ -1043,6 +1282,9 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             process_runtime_maintenance_issue(
                 issue_number, maintenance_task_id, coordinator_workdir
             )
+            return
+        if merge_mode and merge_request is not None:
+            process_telegram_approved_pr_merge_issue(issue_number, merge_request)
             return
 
         worktree_code, worktree_output, worktree_path = prepare_issue_branch(
