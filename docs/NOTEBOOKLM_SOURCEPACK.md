@@ -460,6 +460,7 @@ time.
 Target repository metadata can also be added before the task fence:
 
 ````markdown
+Target Project: bauclock
 Target Repository: alanua/bauclock
 
 ```task
@@ -468,10 +469,9 @@ Add the requested bounded change here.
 ````
 
 The current queue repository stays `alanua/Skeleton`. Target routing stage 1
-accepts only `alanua/Skeleton`, `alanua/bauclock`, and `alanua/Lavalamp`, and
-uses that metadata for worktree path planning only. Cross-repository Codex
-execution, commits, pushes, and draft PR creation are not enabled in this
-stage.
+loads `PROJECT_REGISTRY.yaml` and uses that metadata for worktree path planning
+only. Cross-repository Codex execution, commits, pushes, and draft PR creation
+are not enabled in this stage.
 
 Do not put secrets, API keys, environment files, production credentials, or private tokens in task issues.
 

@@ -1,0 +1,30 @@
+schema: skeleton.project_registry.v1
+default_project: skeleton
+projects:
+  skeleton:
+    project_id: skeleton
+    repository: alanua/Skeleton
+    checkout_path: /home/agent/agent-dev/skeleton
+    worktree_root: /home/agent/agent-dev/worktrees/skeleton
+    base_branch: main
+    runner_modes:
+      - codex_issue_worktree
+    enabled: true
+  bauclock:
+    project_id: bauclock
+    repository: alanua/bauclock
+    checkout_path: /home/agent/agent-dev/bauclock
+    worktree_root: /home/agent/agent-dev/worktrees/bauclock
+    base_branch: main
+    runner_modes:
+      - planning_only
+    enabled: true
+  lavalamp:
+    project_id: lavalamp
+    repository: alanua/Lavalamp
+    checkout_path: /home/agent/agent-dev/lavalamp
+    worktree_root: /home/agent/agent-dev/worktrees/lavalamp
+    base_branch: main
+    runner_modes:
+      - planning_only
+    enabled: true

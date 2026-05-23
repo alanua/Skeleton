@@ -21,6 +21,14 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from core.project_registry import (
+    ProjectRegistryEntry,
+    ensure_safe_issue_worktree_path,
+    load_project_registry,
+    registry_entry_for_repository,
+    resolve_registry_target,
+    validate_registry_entry_ready,
+)
 from core.telegram_approval_buttons import build_pr_ready_card_payload
 
 
@@ -30,12 +38,12 @@ LABEL_READY = "runner:ready"
 LABEL_RUNNING = "runner:running"
 LABEL_DONE = "runner:done"
 LABEL_BLOCKED = "runner:blocked"
-TARGET_REPOSITORY_WORKTREE_DIRS = {
-    QUEUE_REPOSITORY: "skeleton",
-    "alanua/bauclock": "bauclock",
-    "alanua/Lavalamp": "lavalamp",
-}
-ALLOWED_TARGET_REPOSITORIES = frozenset(TARGET_REPOSITORY_WORKTREE_DIRS)
+PROJECT_REGISTRY_PATH = ROOT / "PROJECT_REGISTRY.yaml"
+ALLOWED_TARGET_REPOSITORIES = frozenset(
+    entry["repository"]
+    for entry in load_project_registry(PROJECT_REGISTRY_PATH)["projects"].values()
+    if entry["enabled"]
+)
 RUNNER_LANE_LABELS = {
     "default": "runner:lane:default",
     "lane-1": "runner:lane:lane-1",
@@ -124,6 +132,8 @@ class RunnerTask:
     content: str
     lane: RunnerLane = DEFAULT_RUNNER_LANE
     has_lane_metadata: bool = False
+    target_project: str = "skeleton"
+    has_target_project_metadata: bool = False
     target_repository: str = QUEUE_REPOSITORY
     has_target_repository_metadata: bool = False
 
@@ -164,6 +174,37 @@ def run_command(args: list[str], cwd: str | Path | None = None) -> tuple[int, st
     return result.returncode, result.stdout + result.stderr
 
 
+def project_registry_path() -> Path:
+    configured_path = os.environ.get("SKELETON_PROJECT_REGISTRY")
+    if configured_path:
+        return Path(configured_path).expanduser()
+    return PROJECT_REGISTRY_PATH
+
+
+def load_runner_project_registry() -> dict[str, Any]:
+    return load_project_registry(project_registry_path())
+
+
+def project_registry_entry_for_repository(repository: str) -> ProjectRegistryEntry:
+    try:
+        return registry_entry_for_repository(load_runner_project_registry(), repository)
+    except KeyError as exc:
+        allowed = ", ".join(
+            f"`{repo}`" for repo in sorted(allowed_target_repositories())
+        )
+        raise ValueError(
+            f"Target repository `{repository}` is not allowlisted. Use {allowed}."
+        ) from exc
+
+
+def allowed_target_repositories() -> frozenset[str]:
+    return frozenset(
+        entry["repository"]
+        for entry in load_runner_project_registry()["projects"].values()
+        if entry["enabled"]
+    )
+
+
 def worktree_root() -> Path:
     configured_root = os.environ.get("SKELETON_WORKTREE_ROOT")
     if configured_root:
@@ -176,15 +217,12 @@ def issue_worktree_path(issue_number: int) -> Path:
 
 
 def target_repository_worktree_root(target_repository: str) -> Path:
-    directory_name = TARGET_REPOSITORY_WORKTREE_DIRS.get(target_repository)
-    if directory_name is None:
-        allowed = ", ".join(f"`{repo}`" for repo in sorted(ALLOWED_TARGET_REPOSITORIES))
-        raise ValueError(
-            f"Target repository `{target_repository}` is not allowlisted. Use {allowed}."
-        )
-    if target_repository == QUEUE_REPOSITORY:
+    entry = project_registry_entry_for_repository(target_repository)
+    if entry.repository == QUEUE_REPOSITORY:
         return worktree_root()
-    return worktree_root().parent / directory_name
+    if os.environ.get("SKELETON_WORKTREE_ROOT"):
+        return worktree_root().parent / entry.project_id
+    return entry.worktree_root
 
 
 def target_repository_issue_worktree_path(
@@ -196,17 +234,18 @@ def target_repository_issue_worktree_path(
 def ensure_safe_target_repository_worktree_path(
     target_repository: str, path: str | Path
 ) -> Path:
-    root = target_repository_worktree_root(target_repository).resolve()
-    candidate = Path(path).expanduser().resolve()
-    if candidate == root:
-        raise ValueError(f"Refusing to use worktree root as issue worktree: {candidate}")
-    try:
-        candidate.relative_to(root)
-    except ValueError as exc:
-        raise ValueError(
-            f"Refusing worktree path outside configured root {root}: {candidate}"
-        ) from exc
-    return candidate
+    entry = project_registry_entry_for_repository(target_repository)
+    if entry.repository == QUEUE_REPOSITORY or os.environ.get("SKELETON_WORKTREE_ROOT"):
+        entry = ProjectRegistryEntry(
+            project_id=entry.project_id,
+            repository=entry.repository,
+            checkout_path=entry.checkout_path,
+            worktree_root=target_repository_worktree_root(target_repository),
+            base_branch=entry.base_branch,
+            runner_modes=entry.runner_modes,
+            enabled=entry.enabled,
+        )
+    return ensure_safe_issue_worktree_path(entry, path)
 
 
 def ensure_safe_worktree_path(path: str | Path) -> Path:
@@ -459,14 +498,53 @@ def extract_target_repository(body: str) -> tuple[str | None, str | None]:
     metadata = (body or "").split("```task", 1)[0]
     target_repository = _body_field(metadata, "Target Repository")
     if target_repository is None:
-        return QUEUE_REPOSITORY, None
-    if target_repository not in ALLOWED_TARGET_REPOSITORIES:
-        allowed = ", ".join(f"`{repo}`" for repo in sorted(ALLOWED_TARGET_REPOSITORIES))
+        return None, None
+    if target_repository not in allowed_target_repositories():
+        allowed = ", ".join(
+            f"`{repo}`" for repo in sorted(allowed_target_repositories())
+        )
         return (
             None,
             f"Target repository `{target_repository}` is not allowlisted. Use {allowed}.",
         )
     return target_repository, None
+
+
+def extract_target_project(body: str) -> tuple[str | None, str | None]:
+    metadata = (body or "").split("```task", 1)[0]
+    target_project = _body_field(metadata, "Target Project")
+    if target_project is None:
+        return None, None
+    try:
+        resolve_registry_target(
+            load_runner_project_registry(),
+            target_project=target_project,
+        )
+    except (KeyError, ValueError) as exc:
+        return None, str(exc)
+    return target_project, None
+
+
+def resolve_runner_target(
+    target_project: str | None,
+    target_repository: str | None,
+) -> ProjectRegistryEntry:
+    return resolve_registry_target(
+        load_runner_project_registry(),
+        target_project=target_project,
+        target_repository=target_repository,
+    )
+
+
+def registry_remote_reader(checkout_path: Path) -> str:
+    code, output = run_command(["git", "remote", "get-url", "origin"], cwd=checkout_path)
+    if code != 0:
+        raise ValueError(f"unable to read checkout remote for {checkout_path}.")
+    return output
+
+
+def validate_runner_target_ready(entry: ProjectRegistryEntry) -> None:
+    validate_registry_entry_ready(entry, remote_reader=registry_remote_reader)
 
 
 def extract_runner_task(body: str) -> tuple[RunnerTask | None, str | None]:
@@ -477,9 +555,16 @@ def extract_runner_task(body: str) -> tuple[RunnerTask | None, str | None]:
     lane, lane_reason = extract_runner_lane(body)
     if lane is None:
         return None, lane_reason
+    target_project, project_reason = extract_target_project(body)
+    if project_reason is not None:
+        return None, project_reason
     target_repository, repository_reason = extract_target_repository(body)
-    if target_repository is None:
+    if repository_reason is not None:
         return None, repository_reason
+    try:
+        target_entry = resolve_runner_target(target_project, target_repository)
+    except (KeyError, ValueError) as exc:
+        return None, str(exc)
     return RunnerTask(
         content=content,
         lane=lane,
@@ -487,7 +572,11 @@ def extract_runner_task(body: str) -> tuple[RunnerTask | None, str | None]:
             _body_field(metadata, "Runner Lane") is not None
             or _body_field(metadata, "Lane") is not None
         ),
-        target_repository=target_repository,
+        target_project=target_entry.project_id,
+        has_target_project_metadata=(
+            _body_field(metadata, "Target Project") is not None
+        ),
+        target_repository=target_entry.repository,
         has_target_repository_metadata=(
             _body_field(metadata, "Target Repository") is not None
         ),
@@ -1612,6 +1701,24 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                 return
         else:
             task_content = runner_task.content
+
+        if (
+            runner_task is not None
+            and (
+                runner_task.has_target_project_metadata
+                or runner_task.has_target_repository_metadata
+            )
+        ):
+            try:
+                validate_runner_target_ready(
+                    resolve_runner_target(
+                        runner_task.target_project,
+                        runner_task.target_repository,
+                    )
+                )
+            except ValueError as exc:
+                block_issue(issue_number, str(exc), runner_task=runner_task)
+                return
 
         if (
             runner_task is not None

@@ -107,6 +107,42 @@ def _plain_done_message(issue_number: int = 129) -> str:
     return runner.build_telegram_message(issue_number, "DONE", DONE_REPORT)
 
 
+def _write_project_registry(
+    path: Path,
+    *,
+    projects: dict[str, dict[str, object]],
+    default_project: str = "skeleton",
+) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "schema": "skeleton.project_registry.v1",
+                "default_project": default_project,
+                "projects": projects,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _registry_entry(
+    tmp_path: Path,
+    project_id: str,
+    repository: str,
+    *,
+    enabled: bool = True,
+) -> dict[str, object]:
+    return {
+        "project_id": project_id,
+        "repository": repository,
+        "checkout_path": str(tmp_path / "checkouts" / project_id),
+        "worktree_root": str(tmp_path / "worktrees" / project_id),
+        "base_branch": "main",
+        "runner_modes": ["codex_issue_worktree" if project_id == "skeleton" else "planning_only"],
+        "enabled": enabled,
+    }
+
+
 def test_blocked_output_classifier_detects_runner_blockers() -> None:
     cases = {
         "BLOCKED": "BLOCKED",
@@ -381,6 +417,7 @@ def test_runner_task_accepts_allowlisted_target_repository() -> None:
     assert reason is None
     assert task == runner.RunnerTask(
         content="Do it",
+        target_project="bauclock",
         target_repository="alanua/bauclock",
         has_target_repository_metadata=True,
     )
@@ -435,6 +472,125 @@ def test_process_issue_blocks_non_allowlisted_target_repository_before_claim() -
     run_codex.assert_not_called()
 
 
+def test_process_issue_blocks_disabled_target_project_before_claim(tmp_path: Path) -> None:
+    registry_path = tmp_path / "PROJECT_REGISTRY.yaml"
+    checkout = tmp_path / "checkouts" / "disabled"
+    checkout.mkdir(parents=True)
+    _write_project_registry(
+        registry_path,
+        default_project="skeleton",
+        projects={
+            "skeleton": _registry_entry(tmp_path, "skeleton", "alanua/Skeleton"),
+            "disabled": _registry_entry(
+                tmp_path, "disabled", "alanua/disabled", enabled=False
+            ),
+        },
+    )
+    issue = {
+        "number": 144,
+        "title": "Disabled target",
+        "body": "Target Project: disabled\n\n```task\nDo it\n```",
+    }
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_PROJECT_REGISTRY": str(registry_path)}, clear=True
+    ), mock.patch.object(runner, "block_issue") as block, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(runner, "run_codex_task") as run_codex:
+        runner.process_issue(issue)
+
+    assert "disabled" in block.call_args.args[1]
+    set_label.assert_not_called()
+    run_codex.assert_not_called()
+
+
+def test_process_issue_blocks_missing_checkout_before_codex(tmp_path: Path) -> None:
+    registry_path = tmp_path / "PROJECT_REGISTRY.yaml"
+    _write_project_registry(
+        registry_path,
+        default_project="skeleton",
+        projects={
+            "skeleton": _registry_entry(tmp_path, "skeleton", "alanua/Skeleton"),
+            "future": _registry_entry(tmp_path, "future", "alanua/future"),
+        },
+    )
+    issue = {
+        "number": 145,
+        "title": "Missing checkout",
+        "body": "Target Project: future\n\n```task\nDo it\n```",
+    }
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_PROJECT_REGISTRY": str(registry_path)}, clear=True
+    ), mock.patch.object(runner, "block_issue") as block, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(runner, "run_codex_task") as run_codex:
+        runner.process_issue(issue)
+
+    assert "checkout_path does not exist" in block.call_args.args[1]
+    set_label.assert_not_called()
+    run_codex.assert_not_called()
+
+
+def test_process_issue_blocks_wrong_remote_before_codex(tmp_path: Path) -> None:
+    registry_path = tmp_path / "PROJECT_REGISTRY.yaml"
+    checkout = tmp_path / "checkouts" / "future"
+    checkout.mkdir(parents=True)
+    _write_project_registry(
+        registry_path,
+        default_project="skeleton",
+        projects={
+            "skeleton": _registry_entry(tmp_path, "skeleton", "alanua/Skeleton"),
+            "future": _registry_entry(tmp_path, "future", "alanua/future"),
+        },
+    )
+    issue = {
+        "number": 146,
+        "title": "Wrong remote",
+        "body": "Target Project: future\n\n```task\nDo it\n```",
+    }
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_PROJECT_REGISTRY": str(registry_path)}, clear=True
+    ), mock.patch.object(
+        runner, "registry_remote_reader", return_value="alanua/wrong"
+    ), mock.patch.object(runner, "block_issue") as block, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(runner, "run_codex_task") as run_codex:
+        runner.process_issue(issue)
+
+    assert "checkout remote does not match" in block.call_args.args[1]
+    set_label.assert_not_called()
+    run_codex.assert_not_called()
+
+
+def test_runner_task_accepts_future_target_from_registry(tmp_path: Path) -> None:
+    registry_path = tmp_path / "PROJECT_REGISTRY.yaml"
+    _write_project_registry(
+        registry_path,
+        default_project="skeleton",
+        projects={
+            "skeleton": _registry_entry(tmp_path, "skeleton", "alanua/Skeleton"),
+            "future": _registry_entry(tmp_path, "future", "alanua/future"),
+        },
+    )
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_PROJECT_REGISTRY": str(registry_path)}, clear=True
+    ):
+        task, reason = runner.extract_runner_task(
+            "Target Repository: alanua/future\n\n```task\nDo it\n```"
+        )
+
+    assert reason is None
+    assert task == runner.RunnerTask(
+        content="Do it",
+        target_project="future",
+        target_repository="alanua/future",
+        has_target_repository_metadata=True,
+    )
+
+
 def test_process_issue_does_not_execute_allowlisted_cross_repo_target_yet() -> None:
     issue = {
         "number": 143,
@@ -445,6 +601,8 @@ def test_process_issue_does_not_execute_allowlisted_cross_repo_target_yet() -> N
     with mock.patch.object(runner, "block_issue") as block, mock.patch.object(
         runner, "set_issue_label"
     ) as set_label, mock.patch.object(
+        runner, "validate_runner_target_ready"
+    ), mock.patch.object(
         runner, "prepare_issue_branch"
     ) as prepare_branch, mock.patch.object(runner, "run_codex_task") as run_codex:
         runner.process_issue(issue)

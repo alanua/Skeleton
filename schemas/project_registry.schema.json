@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.project_registry.schema.json",
+  "type": "object",
+  "required": ["schema", "default_project", "projects"],
+  "properties": {
+    "schema": {"const": "skeleton.project_registry.v1"},
+    "default_project": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+    "projects": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "project_id",
+          "repository",
+          "checkout_path",
+          "worktree_root",
+          "base_branch",
+          "runner_modes",
+          "enabled"
+        ],
+        "properties": {
+          "project_id": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+          "repository": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
+          "checkout_path": {"type": "string", "minLength": 1},
+          "worktree_root": {"type": "string", "minLength": 1},
+          "base_branch": {"type": "string", "minLength": 1},
+          "runner_modes": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "minItems": 1,
+            "uniqueItems": true
+          },
+          "enabled": {"type": "boolean"}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}
