@@ -189,6 +189,45 @@ def test_worktree_path_includes_issue_number(tmp_path: Path) -> None:
         assert runner.issue_worktree_path(912).name == "issue-912"
 
 
+def test_target_repository_worktree_paths_are_deterministic(tmp_path: Path) -> None:
+    skeleton_root = tmp_path / "skeleton"
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(skeleton_root)}, clear=True
+    ):
+        bauclock_path = runner.target_repository_issue_worktree_path(
+            "alanua/bauclock", 912
+        )
+
+        assert runner.target_repository_worktree_root("alanua/Skeleton") == skeleton_root
+        assert runner.target_repository_worktree_root("alanua/bauclock") == (
+            tmp_path / "bauclock"
+        )
+        assert runner.target_repository_worktree_root("alanua/Lavalamp") == (
+            tmp_path / "lavalamp"
+        )
+        assert bauclock_path == tmp_path / "bauclock" / "issue-912"
+        assert bauclock_path == runner.target_repository_issue_worktree_path(
+            "alanua/bauclock", 912
+        )
+
+
+def test_unknown_target_repository_worktree_root_is_rejected() -> None:
+    with pytest.raises(ValueError, match="not allowlisted"):
+        runner.target_repository_worktree_root("alanua/unknown")
+
+
+def test_target_repository_worktree_path_rejects_other_repository_root(
+    tmp_path: Path,
+) -> None:
+    skeleton_root = tmp_path / "skeleton"
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(skeleton_root)}, clear=True
+    ), pytest.raises(ValueError, match="outside configured root"):
+        runner.ensure_safe_target_repository_worktree_path(
+            "alanua/bauclock", skeleton_root / "issue-912"
+        )
+
+
 def test_unsafe_worktree_paths_are_rejected(tmp_path: Path) -> None:
     root = tmp_path / "runner-worktrees"
     with mock.patch.dict(
@@ -334,6 +373,22 @@ def test_runner_task_accepts_allowlisted_lane_name() -> None:
     )
 
 
+def test_runner_task_accepts_allowlisted_target_repository() -> None:
+    task, reason = runner.extract_runner_task(
+        "Target Repository: alanua/bauclock\n\n```task\nDo it\n```"
+    )
+
+    assert reason is None
+    assert task == runner.RunnerTask(
+        content="Do it",
+        target_repository="alanua/bauclock",
+        has_target_repository_metadata=True,
+    )
+    assert runner.ALLOWED_TARGET_REPOSITORIES == frozenset(
+        ("alanua/Skeleton", "alanua/bauclock", "alanua/Lavalamp")
+    )
+
+
 def test_runner_task_ignores_lane_text_inside_task_fence() -> None:
     task, reason = runner.extract_runner_task("```task\nLane: deploy\nKeep it as prose.\n```")
 
@@ -358,6 +413,45 @@ def test_process_issue_blocks_non_allowlisted_runner_lane_before_claim() -> None
 
     assert "Runner lane `deploy` is not allowlisted" in block.call_args.args[1]
     set_label.assert_not_called()
+    run_codex.assert_not_called()
+
+
+def test_process_issue_blocks_non_allowlisted_target_repository_before_claim() -> None:
+    issue = {
+        "number": 142,
+        "title": "Target repository metadata",
+        "body": "Target Repository: alanua/unknown\n\n```task\nDo it\n```",
+    }
+
+    with mock.patch.object(runner, "block_issue") as block, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(runner, "run_codex_task") as run_codex:
+        runner.process_issue(issue)
+
+    assert "Target repository `alanua/unknown` is not allowlisted" in (
+        block.call_args.args[1]
+    )
+    set_label.assert_not_called()
+    run_codex.assert_not_called()
+
+
+def test_process_issue_does_not_execute_allowlisted_cross_repo_target_yet() -> None:
+    issue = {
+        "number": 143,
+        "title": "Target repository stage 1",
+        "body": "Target Repository: alanua/Lavalamp\n\n```task\nDo it\n```",
+    }
+
+    with mock.patch.object(runner, "block_issue") as block, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(
+        runner, "prepare_issue_branch"
+    ) as prepare_branch, mock.patch.object(runner, "run_codex_task") as run_codex:
+        runner.process_issue(issue)
+
+    assert "planning-only" in block.call_args.args[1]
+    set_label.assert_not_called()
+    prepare_branch.assert_not_called()
     run_codex.assert_not_called()
 
 
