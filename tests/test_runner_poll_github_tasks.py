@@ -304,12 +304,38 @@ def test_runner_task_accepts_allowlisted_lane_name() -> None:
     )
 
 
+def test_runner_task_parses_requires_metadata_before_task_fence() -> None:
+    task, reason = runner.extract_runner_task(
+        "Requires: github_task_queue, write_gate\n\n```task\nDo it\n```"
+    )
+
+    assert reason is None
+    assert task == runner.RunnerTask(
+        content="Do it",
+        lane=runner.DEFAULT_RUNNER_LANE,
+        required_capabilities=("github_task_queue", "write_gate"),
+        has_requires_metadata=True,
+    )
+
+
 def test_runner_task_ignores_lane_text_inside_task_fence() -> None:
     task, reason = runner.extract_runner_task("```task\nLane: deploy\nKeep it as prose.\n```")
 
     assert reason is None
     assert task == runner.RunnerTask(
         content="Lane: deploy\nKeep it as prose.",
+        lane=runner.DEFAULT_RUNNER_LANE,
+    )
+
+
+def test_runner_task_ignores_requires_text_inside_task_fence() -> None:
+    task, reason = runner.extract_runner_task(
+        "```task\nRequires: planned_capability\nKeep it as prose.\n```"
+    )
+
+    assert reason is None
+    assert task == runner.RunnerTask(
+        content="Requires: planned_capability\nKeep it as prose.",
         lane=runner.DEFAULT_RUNNER_LANE,
     )
 
@@ -329,6 +355,61 @@ def test_process_issue_blocks_non_allowlisted_runner_lane_before_claim() -> None
     assert "Runner lane `deploy` is not allowlisted" in block.call_args.args[1]
     set_label.assert_not_called()
     run_codex.assert_not_called()
+
+
+def test_process_issue_blocks_unavailable_required_target_repository_execution_before_codex() -> None:
+    issue = {
+        "number": 142,
+        "title": "Target repository prerequisite",
+        "body": "Requires: runner_worktree_execution\n\n```task\nDo it\n```",
+    }
+
+    with mock.patch.object(runner, "block_issue") as block, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(
+        runner, "prepare_issue_worktree"
+    ) as prepare_worktree, mock.patch.object(
+        runner, "run_codex_task"
+    ) as run_codex:
+        runner.process_issue(issue)
+
+    assert "Required Runner capability `runner_worktree_execution` is not available" in (
+        block.call_args.args[1]
+    )
+    set_label.assert_not_called()
+    prepare_worktree.assert_not_called()
+    run_codex.assert_not_called()
+
+
+def test_process_issue_allows_available_required_capability_to_reach_codex(
+    tmp_path: Path,
+) -> None:
+    coordinator = tmp_path / "coordinator"
+    issue_path = tmp_path / "worktrees" / "issue-143"
+    issue = {
+        "number": 143,
+        "title": "Available prerequisite",
+        "body": "Requires: github_task_queue\n\n```task\nDo it\n```",
+    }
+
+    with mock.patch.object(runner, "set_issue_label"), mock.patch.object(
+        runner, "prepare_issue_worktree", return_value=(0, "ready", issue_path)
+    ), mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, "codex output")
+    ) as run_codex, mock.patch.object(
+        runner, "finalize_success", return_value="DONE report"
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "cleanup_issue_worktree"
+    ):
+        runner.process_issue(issue, workdir=str(coordinator))
+
+    run_codex.assert_called_once_with("Do it", str(issue_path))
 
 
 def test_extracts_bounded_telegram_approved_merge_request() -> None:

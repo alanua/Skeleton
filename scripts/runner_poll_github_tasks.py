@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from core.capability_checker import CapabilityChecker
 from core.telegram_approval_buttons import build_pr_ready_card_payload
 
 
@@ -117,6 +118,8 @@ class RunnerTask:
     content: str
     lane: RunnerLane = DEFAULT_RUNNER_LANE
     has_lane_metadata: bool = False
+    required_capabilities: tuple[str, ...] = ()
+    has_requires_metadata: bool = False
 
 
 @dataclass(frozen=True)
@@ -405,6 +408,34 @@ def extract_runner_lane(body: str) -> tuple[RunnerLane | None, str | None]:
     return RunnerLane(lane_name), None
 
 
+def extract_required_capabilities(body: str) -> tuple[tuple[str, ...], str | None]:
+    metadata = (body or "").split("```task", 1)[0]
+    capability_ids: list[str] = []
+    for value in _body_fields(metadata, "Requires"):
+        capability_ids.extend(
+            item.strip() for item in re.split(r"[,\s]+", value) if item.strip()
+        )
+
+    for capability_id in capability_ids:
+        if re.fullmatch(r"[a-z0-9_]+", capability_id) is None:
+            return (), f"Requires field has malformed capability id `{capability_id}`."
+    return tuple(dict.fromkeys(capability_ids)), None
+
+
+def required_capability_block_reason(task: RunnerTask) -> str | None:
+    if not task.required_capabilities:
+        return None
+
+    checker = CapabilityChecker(ROOT / "CAPABILITY_REGISTRY.yaml")
+    for capability_id in task.required_capabilities:
+        if not checker.is_available(capability_id):
+            return (
+                f"Required Runner capability `{capability_id}` is not available. "
+                "The queue blocked this task before Codex execution."
+            )
+    return None
+
+
 def extract_runner_task(body: str) -> tuple[RunnerTask | None, str | None]:
     content = extract_task_block(body)
     if content is None:
@@ -413,6 +444,9 @@ def extract_runner_task(body: str) -> tuple[RunnerTask | None, str | None]:
     lane, lane_reason = extract_runner_lane(body)
     if lane is None:
         return None, lane_reason
+    required_capabilities, requires_reason = extract_required_capabilities(body)
+    if requires_reason is not None:
+        return None, requires_reason
     return RunnerTask(
         content=content,
         lane=lane,
@@ -420,6 +454,8 @@ def extract_runner_task(body: str) -> tuple[RunnerTask | None, str | None]:
             _body_field(metadata, "Runner Lane") is not None
             or _body_field(metadata, "Lane") is not None
         ),
+        required_capabilities=required_capabilities,
+        has_requires_metadata=bool(required_capabilities),
     ), None
 
 
@@ -490,6 +526,17 @@ def _body_field(body: str, field: str) -> str | None:
         re.MULTILINE,
     )
     return match.group("value") if match else None
+
+
+def _body_fields(body: str, field: str) -> list[str]:
+    return [
+        match.group("value")
+        for match in re.finditer(
+            rf"^\s*{re.escape(field)}:\s*(?P<value>\S(?:.*\S)?)\s*$",
+            body or "",
+            re.MULTILINE,
+        )
+    ]
 
 
 def has_runner_task_body(body: str) -> bool:
@@ -1541,6 +1588,12 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                 return
         else:
             task_content = runner_task.content
+
+        if runner_task is not None:
+            prerequisite_reason = required_capability_block_reason(runner_task)
+            if prerequisite_reason is not None:
+                block_issue(issue_number, prerequisite_reason, runner_task=runner_task)
+                return
 
         apply_runner_lane_label(issue_number, runner_task)
 
