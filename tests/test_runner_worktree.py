@@ -21,7 +21,7 @@ def test_successful_issue_cleans_issue_workspace_before_marking_done(
     issue_path = tmp_path / "worktrees" / "issue-161"
 
     with mock.patch.object(
-        runner, "prepare_issue_worktree", return_value=(0, "ready", issue_path)
+        runner, "prepare_issue_branch", return_value=(0, "ready", issue_path)
     ), mock.patch.object(
         runner, "run_codex_task", return_value=(0, "codex ok")
     ), mock.patch.object(
@@ -80,7 +80,7 @@ def test_failed_issue_keeps_workspace_path_for_review(tmp_path: Path) -> None:
     issue_path = tmp_path / "worktrees" / "issue-162"
 
     with mock.patch.object(
-        runner, "prepare_issue_worktree", return_value=(0, "ready", issue_path)
+        runner, "prepare_issue_branch", return_value=(0, "ready", issue_path)
     ), mock.patch.object(
         runner, "run_codex_task", return_value=(1, "codex failed")
     ), mock.patch.object(
@@ -104,7 +104,7 @@ def test_cleanup_failure_blocks_with_retained_workspace_path(tmp_path: Path) -> 
     issue_path = tmp_path / "worktrees" / "issue-163"
 
     with mock.patch.object(
-        runner, "prepare_issue_worktree", return_value=(0, "ready", issue_path)
+        runner, "prepare_issue_branch", return_value=(0, "ready", issue_path)
     ), mock.patch.object(
         runner, "run_codex_task", return_value=(0, "codex ok")
     ), mock.patch.object(

@@ -221,10 +221,13 @@ def format_command_output(command: list[str], output: str) -> str:
     return f"$ {' '.join(command)}\n{output}"
 
 
-def prepare_issue_worktree(
-    issue_number: int, coordinator_workdir: str | Path
+def _prepare_issue_worktree_at_path(
+    issue_number: int,
+    checkout_workdir: str | Path,
+    path: str | Path,
+    target_repository: str,
 ) -> tuple[int, str, Path]:
-    path = ensure_safe_worktree_path(issue_worktree_path(issue_number))
+    path = ensure_safe_target_repository_worktree_path(target_repository, path)
     branch = issue_branch(issue_number)
     outputs: list[str] = []
 
@@ -269,17 +272,48 @@ def prepare_issue_worktree(
         ["git", "fetch", "origin"],
         ["git", "worktree", "add", "-B", branch, str(path), "origin/main"],
     ):
-        code, output = run_command(command, cwd=coordinator_workdir)
+        code, output = run_command(command, cwd=checkout_workdir)
         outputs.append(format_command_output(command, output))
         if code != 0:
             return code, "\n".join(outputs), path
     return 0, "\n".join(outputs), path
 
 
-def prepare_issue_branch(
+def prepare_issue_worktree(
     issue_number: int, coordinator_workdir: str | Path
 ) -> tuple[int, str, Path]:
-    return prepare_issue_worktree(issue_number, coordinator_workdir)
+    return _prepare_issue_worktree_at_path(
+        issue_number,
+        coordinator_workdir,
+        issue_worktree_path(issue_number),
+        QUEUE_REPOSITORY,
+    )
+
+
+def prepare_issue_branch(
+    issue_number: int,
+    coordinator_workdir: str | Path,
+    target_repository: str = QUEUE_REPOSITORY,
+) -> tuple[int, str, Path]:
+    if target_repository == QUEUE_REPOSITORY:
+        path = Path(coordinator_workdir).expanduser().resolve()
+        branch = issue_branch(issue_number)
+        outputs: list[str] = []
+        for command in (
+            ["git", "fetch", "origin"],
+            ["git", "checkout", "-B", branch, "origin/main"],
+        ):
+            code, output = run_command(command, cwd=path)
+            outputs.append(format_command_output(command, output))
+            if code != 0:
+                return code, "\n".join(outputs), path
+        return 0, "\n".join(outputs), path
+    return _prepare_issue_worktree_at_path(
+        issue_number,
+        target_repository_worktree_root(target_repository),
+        target_repository_issue_worktree_path(target_repository, issue_number),
+        target_repository,
+    )
 
 
 def cleanup_issue_worktree(

@@ -273,6 +273,64 @@ def test_prepare_issue_worktree_adds_runner_issue_branch(tmp_path: Path) -> None
     ]
 
 
+def test_prepare_issue_branch_uses_coordinator_checkout_for_default_skeleton(
+    tmp_path: Path,
+) -> None:
+    coordinator = tmp_path / "coordinator"
+    coordinator.mkdir()
+
+    with mock.patch.object(
+        runner, "run_command", side_effect=((0, "fetched"), (0, "checked out"))
+    ) as run_command:
+        code, output, path = runner.prepare_issue_branch(139, coordinator)
+
+    assert code == 0
+    assert "git checkout -B runner/issue-139 origin/main" in output
+    assert path == coordinator.resolve()
+    assert run_command.call_args_list == [
+        mock.call(["git", "fetch", "origin"], cwd=coordinator.resolve()),
+        mock.call(
+            ["git", "checkout", "-B", "runner/issue-139", "origin/main"],
+            cwd=coordinator.resolve(),
+        ),
+    ]
+
+
+def test_prepare_issue_branch_keeps_target_repository_issue_worktree_layout(
+    tmp_path: Path,
+) -> None:
+    skeleton_root = tmp_path / "skeleton"
+    target_checkout = tmp_path / "bauclock"
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(skeleton_root)}, clear=True
+    ), mock.patch.object(
+        runner, "run_command", side_effect=((0, "fetched"), (0, "added"))
+    ) as run_command:
+        code, output, path = runner.prepare_issue_branch(
+            139, tmp_path / "coordinator", target_repository="alanua/bauclock"
+        )
+
+    assert code == 0
+    assert "git worktree add" in output
+    assert path == (target_checkout / "issue-139").resolve()
+    assert run_command.call_args_list == [
+        mock.call(["git", "fetch", "origin"], cwd=target_checkout),
+        mock.call(
+            [
+                "git",
+                "worktree",
+                "add",
+                "-B",
+                "runner/issue-139",
+                str(path),
+                "origin/main",
+            ],
+            cwd=target_checkout,
+        ),
+    ]
+
+
 def test_stale_dirty_worktree_blocks_instead_of_deleting(tmp_path: Path) -> None:
     worktree_path = tmp_path / "worktrees" / "issue-139"
     worktree_path.mkdir(parents=True)
@@ -311,11 +369,11 @@ def test_cleanup_issue_worktree_refuses_path_outside_configured_root(
 
 def test_process_issue_runs_codex_in_prepared_issue_worktree(tmp_path: Path) -> None:
     coordinator = tmp_path / "coordinator"
-    issue_path = tmp_path / "worktrees" / "issue-139"
+    issue_path = coordinator.resolve()
     issue = {"number": 139, "title": "Worktree stage", "body": "```task\nDo it\n```"}
 
     with mock.patch.object(runner, "set_issue_label"), mock.patch.object(
-        runner, "prepare_issue_worktree", return_value=(0, "ready", issue_path)
+        runner, "prepare_issue_branch", return_value=(0, "ready", issue_path)
     ) as prepare, mock.patch.object(
         runner, "ensure_clean_worktree", side_effect=AssertionError("coordinator checked")
     ), mock.patch.object(
