@@ -342,7 +342,9 @@ def test_process_issue_runs_codex_in_prepared_issue_worktree(tmp_path: Path) -> 
         runner.process_issue(issue, workdir=str(coordinator))
 
     prepare.assert_called_once_with(139, str(coordinator))
-    run_codex.assert_called_once_with("Do it", str(issue_path))
+    run_codex.assert_called_once_with(
+        "Do it", str(issue_path), runner.RunnerTask(content="Do it")
+    )
     finalize.assert_called_once_with(issue, str(issue_path), "codex output")
 
 
@@ -410,6 +412,22 @@ def test_runner_task_accepts_allowlisted_target_project() -> None:
         has_target_project_metadata=True,
         target_repository="alanua/bauclock",
     )
+
+
+def test_codex_task_prompt_includes_selected_project_context() -> None:
+    prompt = runner.build_codex_task_prompt(
+        "Return selected project.",
+        "/tmp/worktree",
+        runner.RunnerTask(
+            content="Return selected project.",
+            target_project="bauclock",
+            has_target_project_metadata=True,
+            target_repository="alanua/bauclock",
+        ),
+    )
+
+    assert "Selected Project: bauclock" in prompt
+    assert "Selected Repository: alanua/bauclock" in prompt
 
 
 def test_runner_task_accepts_matching_target_project_and_repository() -> None:
@@ -595,7 +613,16 @@ def test_process_issue_runs_target_project_skeleton_normally(tmp_path: Path) -> 
         runner.process_issue(issue, workdir=str(coordinator))
 
     prepare.assert_called_once_with(148, str(coordinator))
-    run_codex.assert_called_once_with("Do it", str(issue_path))
+    run_codex.assert_called_once_with(
+        "Do it",
+        str(issue_path),
+        runner.RunnerTask(
+            content="Do it",
+            target_project="skeleton",
+            has_target_project_metadata=True,
+            target_repository="alanua/Skeleton",
+        ),
+    )
     assert comment.call_args.args[1] == "DONE report\nTarget Project: skeleton"
 
 
