@@ -690,17 +690,28 @@ def has_runner_task_body(body: str) -> bool:
     return extract_task_block(body) is not None or maintenance_mode or merge_mode
 
 
-def build_codex_task_prompt(task_content: str, workdir: str) -> str:
+def build_codex_task_prompt(
+    task_content: str, workdir: str, task: RunnerTask | None = None
+) -> str:
+    selected_project_context = ""
+    if task is not None:
+        selected_project_context = (
+            f"Selected Project: {task.target_project}\n"
+            f"Selected Repository: {task.target_repository}\n\n"
+        )
     return (
         "Runner assigned this task to the issue worktree at:\n"
         f"{workdir}\n\n"
         "Edit files only inside that issue worktree. Do not create or use a separate "
         "clone, checkout, or worktree for task output.\n\n"
+        f"{selected_project_context}"
         f"{task_content}"
     )
 
 
-def run_codex_task(task_content: str, workdir: str) -> tuple[int, str]:
+def run_codex_task(
+    task_content: str, workdir: str, task: RunnerTask | None = None
+) -> tuple[int, str]:
     with tempfile.NamedTemporaryFile(
         mode="w", encoding="utf-8", prefix="runnerjob-", delete=True
     ) as task_file:
@@ -714,7 +725,7 @@ def run_codex_task(task_content: str, workdir: str) -> tuple[int, str]:
                 "workspace-write",
                 "--cd",
                 workdir,
-                build_codex_task_prompt(task_content, workdir),
+                build_codex_task_prompt(task_content, workdir, task),
             ],
             cwd=workdir,
         )
@@ -1786,7 +1797,9 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
         issue_workdir = str(worktree_path)
 
         cleanup_runtime_artifacts(issue_workdir)
-        codex_code, codex_output = run_codex_task(task_content, issue_workdir)
+        codex_code, codex_output = run_codex_task(
+            task_content, issue_workdir, runner_task
+        )
         cleanup_runtime_artifacts(issue_workdir)
         if codex_code != 0:
             block_issue(
