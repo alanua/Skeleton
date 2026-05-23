@@ -389,11 +389,43 @@ def test_runner_task_accepts_allowlisted_target_repository() -> None:
     assert reason is None
     assert task == runner.RunnerTask(
         content="Do it",
+        target_project="bauclock",
         target_repository="alanua/bauclock",
         has_target_repository_metadata=True,
     )
     assert runner.ALLOWED_TARGET_REPOSITORIES == frozenset(
         ("alanua/Skeleton", "alanua/bauclock", "alanua/Lavalamp")
+    )
+
+
+def test_runner_task_accepts_allowlisted_target_project() -> None:
+    task, reason = runner.extract_runner_task(
+        "Target Project: bauclock\n\n```task\nDo it\n```"
+    )
+
+    assert reason is None
+    assert task == runner.RunnerTask(
+        content="Do it",
+        target_project="bauclock",
+        has_target_project_metadata=True,
+        target_repository="alanua/bauclock",
+    )
+
+
+def test_runner_task_accepts_matching_target_project_and_repository() -> None:
+    task, reason = runner.extract_runner_task(
+        "Target Project: lavalamp\n"
+        "Target Repository: alanua/Lavalamp\n\n"
+        "```task\nDo it\n```"
+    )
+
+    assert reason is None
+    assert task == runner.RunnerTask(
+        content="Do it",
+        target_project="lavalamp",
+        has_target_project_metadata=True,
+        target_repository="alanua/Lavalamp",
+        has_target_repository_metadata=True,
     )
 
 
@@ -441,6 +473,130 @@ def test_process_issue_blocks_non_allowlisted_target_repository_before_claim() -
     )
     set_label.assert_not_called()
     run_codex.assert_not_called()
+
+
+def test_process_issue_blocks_unknown_target_project_before_claim() -> None:
+    issue = {
+        "number": 144,
+        "title": "Target project metadata",
+        "body": "Target Project: unknown\n\n```task\nDo it\n```",
+    }
+
+    with mock.patch.object(runner, "block_issue") as block, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(runner, "run_codex_task") as run_codex:
+        runner.process_issue(issue)
+
+    assert "Target project `unknown` is not allowlisted" in block.call_args.args[1]
+    set_label.assert_not_called()
+    run_codex.assert_not_called()
+
+
+def test_process_issue_blocks_mismatched_target_project_and_repository_before_claim() -> None:
+    issue = {
+        "number": 145,
+        "title": "Target project mismatch",
+        "body": (
+            "Target Project: bauclock\n"
+            "Target Repository: alanua/Lavalamp\n\n"
+            "```task\nDo it\n```"
+        ),
+    }
+
+    with mock.patch.object(runner, "block_issue") as block, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(runner, "run_codex_task") as run_codex:
+        runner.process_issue(issue)
+
+    assert "resolve to different PROJECT_TREE entries" in block.call_args.args[1]
+    set_label.assert_not_called()
+    run_codex.assert_not_called()
+
+
+def test_process_issue_blocks_target_project_bauclock_planning_only_before_codex() -> None:
+    issue = {
+        "number": 146,
+        "title": "Target project bauclock",
+        "body": "Target Project: bauclock\n\n```task\nDo it\n```",
+    }
+
+    with mock.patch.object(runner, "block_issue") as block, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(
+        runner, "prepare_issue_branch"
+    ) as prepare_branch, mock.patch.object(runner, "run_codex_task") as run_codex:
+        runner.process_issue(issue)
+
+    assert "planning-only" in block.call_args.args[1]
+    assert block.call_args.kwargs["runner_task"] == runner.RunnerTask(
+        content="Do it",
+        target_project="bauclock",
+        has_target_project_metadata=True,
+        target_repository="alanua/bauclock",
+    )
+    set_label.assert_not_called()
+    prepare_branch.assert_not_called()
+    run_codex.assert_not_called()
+
+
+def test_process_issue_blocks_target_project_lavalamp_planning_only_before_codex() -> None:
+    issue = {
+        "number": 147,
+        "title": "Target project lavalamp",
+        "body": "Target Project: lavalamp\n\n```task\nDo it\n```",
+    }
+
+    with mock.patch.object(runner, "block_issue") as block, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(
+        runner, "prepare_issue_branch"
+    ) as prepare_branch, mock.patch.object(runner, "run_codex_task") as run_codex:
+        runner.process_issue(issue)
+
+    assert "planning-only" in block.call_args.args[1]
+    assert block.call_args.kwargs["runner_task"] == runner.RunnerTask(
+        content="Do it",
+        target_project="lavalamp",
+        has_target_project_metadata=True,
+        target_repository="alanua/Lavalamp",
+    )
+    set_label.assert_not_called()
+    prepare_branch.assert_not_called()
+    run_codex.assert_not_called()
+
+
+def test_process_issue_runs_target_project_skeleton_normally(tmp_path: Path) -> None:
+    coordinator = tmp_path / "repo"
+    issue_path = tmp_path / "worktree"
+    coordinator.mkdir()
+    issue = {
+        "number": 148,
+        "title": "Target project skeleton",
+        "body": "Target Project: skeleton\n\n```task\nDo it\n```",
+    }
+
+    with mock.patch.object(
+        runner, "prepare_issue_branch", return_value=(0, "", issue_path)
+    ) as prepare, mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, "codex output")
+    ) as run_codex, mock.patch.object(
+        runner, "finalize_success", return_value="DONE report"
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ) as comment, mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "cleanup_issue_worktree", return_value=(0, "")
+    ):
+        runner.process_issue(issue, workdir=str(coordinator))
+
+    prepare.assert_called_once_with(148, str(coordinator))
+    run_codex.assert_called_once_with("Do it", str(issue_path))
+    assert comment.call_args.args[1] == "DONE report\nTarget Project: skeleton"
 
 
 def test_process_issue_does_not_execute_allowlisted_cross_repo_target_yet() -> None:

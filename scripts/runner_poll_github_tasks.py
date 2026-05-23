@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.project_tree import get_project_by_repo, load_project_tree
+from core.project_tree import get_project, get_project_by_repo, load_project_tree
 from core.telegram_approval_buttons import build_pr_ready_card_payload
 
 
@@ -131,11 +131,25 @@ def allowed_target_repositories() -> frozenset[str]:
 ALLOWED_TARGET_REPOSITORIES = allowed_target_repositories()
 
 
+def allowed_target_projects() -> frozenset[str]:
+    project_tree = load_runner_project_tree()
+    return frozenset(
+        project_id
+        for project_id, project in project_tree["projects"].items()
+        if project["public"] is True
+    )
+
+
+ALLOWED_TARGET_PROJECTS = allowed_target_projects()
+
+
 @dataclass(frozen=True)
 class RunnerTask:
     content: str
     lane: RunnerLane = DEFAULT_RUNNER_LANE
     has_lane_metadata: bool = False
+    target_project: str = "skeleton"
+    has_target_project_metadata: bool = False
     target_repository: str = QUEUE_REPOSITORY
     has_target_repository_metadata: bool = False
 
@@ -333,10 +347,22 @@ def issue_workspace_review_note(path: str | Path) -> str:
 
 
 def report_runner_lane(report: str, task: RunnerTask | None) -> str:
-    if task is None or not task.has_lane_metadata:
+    if (
+        task is None
+        or not task.has_lane_metadata
+        and not task.has_target_project_metadata
+        and not task.has_target_repository_metadata
+    ):
         return report
     heading, *details = report.splitlines()
-    return "\n".join((heading, f"Runner Lane: {task.lane.name}", *details))
+    metadata: list[str] = []
+    if task.has_lane_metadata:
+        metadata.append(f"Runner Lane: {task.lane.name}")
+    if task.has_target_project_metadata:
+        metadata.append(f"Target Project: {task.target_project}")
+    if task.has_target_repository_metadata:
+        metadata.append(f"Target Repository: {task.target_repository}")
+    return "\n".join((heading, *metadata, *details))
 
 
 def final_codex_answer(output: str) -> str:
@@ -479,18 +505,83 @@ def extract_runner_lane(body: str) -> tuple[RunnerLane | None, str | None]:
     return RunnerLane(lane_name), None
 
 
-def extract_target_repository(body: str) -> tuple[str | None, str | None]:
+def _project_id_for_repo(project_tree: dict[str, Any], repo: str) -> str:
+    for project_id, project in project_tree["projects"].items():
+        if project["repo"] == repo:
+            return project_id
+    raise KeyError(f"unknown repo {repo!r}.")
+
+
+def resolve_target_project_metadata(
+    body: str,
+) -> tuple[str | None, str | None, str | None]:
     metadata = (body or "").split("```task", 1)[0]
+    target_project = _body_field(metadata, "Target Project")
     target_repository = _body_field(metadata, "Target Repository")
-    if target_repository is None:
-        return QUEUE_REPOSITORY, None
-    if target_repository not in ALLOWED_TARGET_REPOSITORIES:
-        allowed = ", ".join(f"`{repo}`" for repo in sorted(ALLOWED_TARGET_REPOSITORIES))
-        return (
-            None,
-            f"Target repository `{target_repository}` is not allowlisted. Use {allowed}.",
-        )
-    return target_repository, None
+    project_tree = load_runner_project_tree()
+
+    if target_project is None and target_repository is None:
+        return "skeleton", QUEUE_REPOSITORY, None
+
+    project_from_project: dict[str, Any] | None = None
+    project_from_repository: dict[str, Any] | None = None
+    project_id_from_repository: str | None = None
+
+    if target_project is not None:
+        try:
+            project_from_project = get_project(project_tree, target_project)
+        except (KeyError, ValueError) as exc:
+            allowed = ", ".join(
+                f"`{project}`" for project in sorted(ALLOWED_TARGET_PROJECTS)
+            )
+            return (
+                None,
+                None,
+                f"Target project `{target_project}` is not allowlisted. Use {allowed}.",
+            )
+        if project_from_project["public"] is not True:
+            return None, None, f"Target project `{target_project}` is not public."
+
+    if target_repository is not None:
+        try:
+            project_from_repository = get_project_by_repo(project_tree, target_repository)
+            project_id_from_repository = _project_id_for_repo(
+                project_tree, target_repository
+            )
+        except KeyError:
+            allowed = ", ".join(
+                f"`{repo}`" for repo in sorted(ALLOWED_TARGET_REPOSITORIES)
+            )
+            return (
+                None,
+                None,
+                f"Target repository `{target_repository}` is not allowlisted. Use {allowed}.",
+            )
+        if project_from_repository["public"] is not True:
+            return None, None, f"Target repository `{target_repository}` is not public."
+
+    if target_project is not None and target_repository is not None:
+        if project_from_project != project_from_repository:
+            return (
+                None,
+                None,
+                "Target Project and Target Repository resolve to different "
+                "PROJECT_TREE entries.",
+            )
+        return target_project, target_repository, None
+
+    if target_project is not None and project_from_project is not None:
+        return target_project, project_from_project["repo"], None
+
+    if project_id_from_repository is not None and target_repository is not None:
+        return project_id_from_repository, target_repository, None
+
+    return None, None, "Target project metadata could not be resolved."
+
+
+def extract_target_repository(body: str) -> tuple[str | None, str | None]:
+    _target_project, target_repository, reason = resolve_target_project_metadata(body)
+    return target_repository, reason
 
 
 def extract_runner_task(body: str) -> tuple[RunnerTask | None, str | None]:
@@ -501,15 +592,21 @@ def extract_runner_task(body: str) -> tuple[RunnerTask | None, str | None]:
     lane, lane_reason = extract_runner_lane(body)
     if lane is None:
         return None, lane_reason
-    target_repository, repository_reason = extract_target_repository(body)
-    if target_repository is None:
-        return None, repository_reason
+    target_project, target_repository, target_reason = resolve_target_project_metadata(
+        body
+    )
+    if target_project is None or target_repository is None:
+        return None, target_reason
     return RunnerTask(
         content=content,
         lane=lane,
         has_lane_metadata=(
             _body_field(metadata, "Runner Lane") is not None
             or _body_field(metadata, "Lane") is not None
+        ),
+        target_project=target_project,
+        has_target_project_metadata=(
+            _body_field(metadata, "Target Project") is not None
         ),
         target_repository=target_repository,
         has_target_repository_metadata=(
@@ -1645,6 +1742,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                 issue_number,
                 "Target repository routing is planning-only in this stage. "
                 f"Runner cannot execute `{runner_task.target_repository}` yet.",
+                runner_task=runner_task,
             )
             return
 
