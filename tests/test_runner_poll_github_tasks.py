@@ -202,8 +202,14 @@ def test_target_repository_worktree_paths_are_deterministic(tmp_path: Path) -> N
         assert runner.target_repository_worktree_root("alanua/bauclock") == (
             tmp_path / "bauclock"
         )
+        assert runner.target_repository_main_checkout_path("alanua/bauclock") == (
+            tmp_path / "bauclock" / "main"
+        )
         assert runner.target_repository_worktree_root("alanua/Lavalamp") == (
             tmp_path / "lavalamp"
+        )
+        assert runner.target_repository_main_checkout_path("alanua/Lavalamp") == (
+            tmp_path / "lavalamp" / "main"
         )
         assert bauclock_path == tmp_path / "bauclock" / "issue-912"
         assert bauclock_path == runner.target_repository_issue_worktree_path(
@@ -214,6 +220,52 @@ def test_target_repository_worktree_paths_are_deterministic(tmp_path: Path) -> N
 def test_unknown_target_repository_worktree_root_is_rejected() -> None:
     with pytest.raises(ValueError, match="not allowlisted"):
         runner.target_repository_worktree_root("alanua/unknown")
+
+
+@pytest.mark.parametrize(
+    "remote_url",
+    (
+        "https://github.com/alanua/bauclock.git",
+        "https://github.com/alanua/bauclock",
+        "git@github.com:alanua/bauclock.git",
+        "ssh://git@github.com/alanua/bauclock.git",
+    ),
+)
+def test_parse_github_remote_repository_accepts_strict_github_urls(
+    remote_url: str,
+) -> None:
+    assert runner.parse_github_remote_repository(remote_url) == "alanua/bauclock"
+
+
+@pytest.mark.parametrize(
+    "remote_url",
+    (
+        "https://gitlab.com/alanua/bauclock.git",
+        "https://github.com/alanua/bauclock.git/extra",
+        "https://github.com/alanua/bauclock?x=1",
+        "git@github.com:alanua/bauclock.git/extra",
+        "not-a-remote",
+    ),
+)
+def test_parse_github_remote_repository_rejects_wrong_or_malformed_urls(
+    remote_url: str,
+) -> None:
+    with pytest.raises(ValueError):
+        runner.parse_github_remote_repository(remote_url)
+
+
+def test_verify_target_repository_origin_rejects_wrong_owner_or_repo() -> None:
+    with mock.patch.object(
+        runner,
+        "run_command",
+        return_value=(0, "https://github.com/other/bauclock.git\n"),
+    ):
+        code, output = runner.verify_target_repository_origin(
+            "alanua/bauclock", "/tmp/bauclock/main"
+        )
+
+    assert code != 0
+    assert "does not match selected repository" in output
 
 
 def test_target_repository_worktree_path_rejects_other_repository_root(
@@ -273,6 +325,53 @@ def test_prepare_issue_worktree_adds_runner_issue_branch(tmp_path: Path) -> None
     ]
 
 
+@pytest.mark.parametrize(
+    ("target_repository", "directory_name"),
+    (("alanua/bauclock", "bauclock"), ("alanua/Lavalamp", "lavalamp")),
+)
+def test_prepare_target_repository_worktree_uses_target_main_checkout(
+    tmp_path: Path, target_repository: str, directory_name: str
+) -> None:
+    skeleton_root = tmp_path / "skeleton"
+    target_main = tmp_path / directory_name / "main"
+    target_main.mkdir(parents=True)
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(skeleton_root)}, clear=True
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=(
+            (0, f"https://github.com/{target_repository}.git\n"),
+            (0, "fetched"),
+            (0, "added"),
+        ),
+    ) as run_command:
+        code, output, path = runner.prepare_target_repository_issue_worktree(
+            target_repository, 315, target_main
+        )
+
+    assert code == 0
+    assert "git worktree add" in output
+    assert path == (tmp_path / directory_name / "issue-315").resolve()
+    assert run_command.call_args_list == [
+        mock.call(["git", "remote", "get-url", "origin"], cwd=target_main),
+        mock.call(["git", "fetch", "origin"], cwd=target_main),
+        mock.call(
+            [
+                "git",
+                "worktree",
+                "add",
+                "-B",
+                "runner/issue-315",
+                str(path),
+                "origin/main",
+            ],
+            cwd=target_main,
+        ),
+    ]
+
+
 def test_stale_dirty_worktree_blocks_instead_of_deleting(tmp_path: Path) -> None:
     worktree_path = tmp_path / "worktrees" / "issue-139"
     worktree_path.mkdir(parents=True)
@@ -315,7 +414,9 @@ def test_process_issue_runs_codex_in_prepared_issue_worktree(tmp_path: Path) -> 
     issue = {"number": 139, "title": "Worktree stage", "body": "```task\nDo it\n```"}
 
     with mock.patch.object(runner, "set_issue_label"), mock.patch.object(
-        runner, "prepare_issue_worktree", return_value=(0, "ready", issue_path)
+        runner,
+        "prepare_issue_branch",
+        return_value=(0, "ready", issue_path),
     ) as prepare, mock.patch.object(
         runner, "ensure_clean_worktree", side_effect=AssertionError("coordinator checked")
     ), mock.patch.object(
@@ -435,23 +536,30 @@ def test_process_issue_blocks_non_allowlisted_target_repository_before_claim() -
     run_codex.assert_not_called()
 
 
-def test_process_issue_does_not_execute_allowlisted_cross_repo_target_yet() -> None:
+def test_process_issue_blocks_unsafe_target_remote_before_codex(tmp_path: Path) -> None:
     issue = {
         "number": 143,
-        "title": "Target repository stage 1",
-        "body": "Target Repository: alanua/Lavalamp\n\n```task\nDo it\n```",
+        "title": "Target repository stage 2",
+        "body": "Target Repository: alanua/bauclock\n\n```task\nDo it\n```",
     }
+    skeleton_root = tmp_path / "skeleton"
 
-    with mock.patch.object(runner, "block_issue") as block, mock.patch.object(
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(skeleton_root)}, clear=True
+    ), mock.patch.object(runner, "block_issue") as block, mock.patch.object(
         runner, "set_issue_label"
     ) as set_label, mock.patch.object(
-        runner, "prepare_issue_branch"
-    ) as prepare_branch, mock.patch.object(runner, "run_codex_task") as run_codex:
+        runner,
+        "run_command",
+        return_value=(0, "https://github.com/alanua/Skeleton.git\n"),
+    ), mock.patch.object(runner, "run_codex_task") as run_codex:
         runner.process_issue(issue)
 
-    assert "planning-only" in block.call_args.args[1]
-    set_label.assert_not_called()
-    prepare_branch.assert_not_called()
+    assert "Target origin remote does not match selected repository" in (
+        block.call_args.args[1]
+    )
+    assert block.call_args.kwargs["remove_label"] == runner.LABEL_RUNNING
+    set_label.assert_called_once_with(143, runner.LABEL_READY, runner.LABEL_RUNNING)
     run_codex.assert_not_called()
 
 
@@ -788,6 +896,58 @@ def test_approve_reject_buttons_require_reliable_sha_and_changed_files() -> None
 
     assert [button["text"] for button in buttons] == ["Деталі", "Відкрити PR"]
     assert str(card["text"]).startswith("PR: #123\n")
+
+
+def test_target_pr_card_has_url_only_buttons_without_callbacks() -> None:
+    report = DONE_REPORT.replace(
+        "https://github.com/alanua/Skeleton/pull/123",
+        "https://github.com/alanua/bauclock/pull/456",
+    )
+
+    card = runner.build_done_pr_ready_card_payload(report, "alanua/bauclock")
+    assert card is not None
+
+    assert [button["action"] for button in card["buttons"]] == ["details", "open_pr"]
+    assert all(
+        button["url"] == "https://github.com/alanua/bauclock/pull/456"
+        for button in card["buttons"]
+    )
+    assert all("callback_payload" not in button for button in card["buttons"])
+
+    reply_markup = runner.card_payload_to_inline_keyboard(card)
+    buttons = [row[0] for row in reply_markup["inline_keyboard"]]
+    assert [button["text"] for button in buttons] == ["Деталі", "Відкрити PR"]
+    assert all("url" in button for button in buttons)
+    assert all("callback_data" not in button for button in buttons)
+
+
+def test_finalize_success_creates_draft_pr_in_selected_target_repository() -> None:
+    issue = {"number": 456, "title": "Target repo"}
+    commands: list[list[str]] = []
+
+    def fake_run_command(command: list[str], cwd: str | None = None) -> tuple[int, str]:
+        del cwd
+        commands.append(command)
+        if command[:3] == ["git", "rev-parse", "HEAD"]:
+            return 0, f"{HEAD_SHA}\n"
+        if command[:3] == ["gh", "pr", "create"]:
+            return 0, "https://github.com/alanua/bauclock/pull/456\n"
+        if command == ["python3", "-m", "pytest", "-q"]:
+            return 0, "101 passed\n"
+        return 0, ""
+
+    with mock.patch.object(runner, "changed_files", return_value=["app.py"]), mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(runner, "run_command", side_effect=fake_run_command):
+        report = runner.finalize_success(
+            issue, "/tmp/bauclock/issue-456", "codex output", "alanua/bauclock"
+        )
+
+    pr_create = next(
+        command for command in commands if command[:3] == ["gh", "pr", "create"]
+    )
+    assert pr_create[pr_create.index("--repo") + 1] == "alanua/bauclock"
+    assert "Draft PR: https://github.com/alanua/bauclock/pull/456" in report
 
 
 def test_send_telegram_notification_posts_reply_markup_for_card() -> None:
