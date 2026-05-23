@@ -36,6 +36,7 @@ TARGET_REPOSITORY_WORKTREE_DIRS = {
     "alanua/Lavalamp": "lavalamp",
 }
 ALLOWED_TARGET_REPOSITORIES = frozenset(TARGET_REPOSITORY_WORKTREE_DIRS)
+ALLOWED_PROVIDER_HOSTS = frozenset(("github.com",))
 RUNNER_LANE_LABELS = {
     "default": "runner:lane:default",
     "lane-1": "runner:lane:lane-1",
@@ -164,6 +165,89 @@ def run_command(args: list[str], cwd: str | Path | None = None) -> tuple[int, st
     return result.returncode, result.stdout + result.stderr
 
 
+def normalized_repository_name(repository: str) -> str | None:
+    parts = repository.strip().split("/")
+    if len(parts) != 2 or not all(parts):
+        return None
+    owner, repo = parts
+    if any(part in {".", ".."} or any(char.isspace() for char in part) for part in parts):
+        return None
+    return f"{owner.lower()}/{repo.lower()}"
+
+
+def canonical_allowed_target_repository(repository: str) -> str | None:
+    normalized = normalized_repository_name(repository)
+    if normalized is None:
+        return None
+    for allowed in ALLOWED_TARGET_REPOSITORIES:
+        if normalized_repository_name(allowed) == normalized:
+            return allowed
+    return None
+
+
+def _repository_from_path(path: str) -> str | None:
+    parts = path.split("/")
+    if len(parts) != 3 or parts[0] != "" or not parts[1] or not parts[2]:
+        return None
+    owner, repo = parts[1:]
+    if repo.endswith(".git"):
+        repo = repo[:-4]
+    return normalized_repository_name(f"{owner}/{repo}")
+
+
+def remote_repository_name(remote_url: str) -> str | None:
+    remote = remote_url.strip()
+    if not remote or any(char.isspace() for char in remote):
+        return None
+
+    scp_like = re.fullmatch(r"git@([^:]+):([^/]+)/([^/]+)", remote)
+    if scp_like:
+        host, owner, repo = scp_like.groups()
+        if host.lower() not in ALLOWED_PROVIDER_HOSTS:
+            return None
+        if repo.endswith(".git"):
+            repo = repo[:-4]
+        return normalized_repository_name(f"{owner}/{repo}")
+
+    parsed = urllib.parse.urlparse(remote)
+    if parsed.scheme not in {"https", "ssh", "git"}:
+        return None
+    if not parsed.hostname or parsed.hostname.lower() not in ALLOWED_PROVIDER_HOSTS:
+        return None
+    if parsed.params or parsed.query or parsed.fragment:
+        return None
+    return _repository_from_path(parsed.path)
+
+
+def target_repository_remote_matches(target_repository: str, remote_url: str) -> bool:
+    expected = canonical_allowed_target_repository(target_repository)
+    if expected is None:
+        return False
+    return remote_repository_name(remote_url) == normalized_repository_name(expected)
+
+
+def verify_target_repository_origin(
+    target_repository: str, checkout_path: str | Path
+) -> tuple[bool, str]:
+    canonical = canonical_allowed_target_repository(target_repository)
+    if canonical is None:
+        allowed = ", ".join(f"`{repo}`" for repo in sorted(ALLOWED_TARGET_REPOSITORIES))
+        return False, f"Target repository `{target_repository}` is not allowlisted. Use {allowed}."
+
+    code, output = run_command(["git", "remote", "get-url", "origin"], cwd=checkout_path)
+    if code != 0:
+        return False, f"Unable to read target checkout origin:\n{output}"
+
+    remote_url = output.strip()
+    if not target_repository_remote_matches(canonical, remote_url):
+        return (
+            False,
+            "Target checkout origin does not match the requested allowlisted repository. "
+            f"Expected `{canonical}` on github.com.",
+        )
+    return True, ""
+
+
 def worktree_root() -> Path:
     configured_root = os.environ.get("SKELETON_WORKTREE_ROOT")
     if configured_root:
@@ -176,13 +260,16 @@ def issue_worktree_path(issue_number: int) -> Path:
 
 
 def target_repository_worktree_root(target_repository: str) -> Path:
-    directory_name = TARGET_REPOSITORY_WORKTREE_DIRS.get(target_repository)
+    canonical = canonical_allowed_target_repository(target_repository)
+    directory_name = (
+        TARGET_REPOSITORY_WORKTREE_DIRS.get(canonical) if canonical is not None else None
+    )
     if directory_name is None:
         allowed = ", ".join(f"`{repo}`" for repo in sorted(ALLOWED_TARGET_REPOSITORIES))
         raise ValueError(
             f"Target repository `{target_repository}` is not allowlisted. Use {allowed}."
         )
-    if target_repository == QUEUE_REPOSITORY:
+    if canonical == QUEUE_REPOSITORY:
         return worktree_root()
     return worktree_root().parent / directory_name
 
@@ -460,13 +547,14 @@ def extract_target_repository(body: str) -> tuple[str | None, str | None]:
     target_repository = _body_field(metadata, "Target Repository")
     if target_repository is None:
         return QUEUE_REPOSITORY, None
-    if target_repository not in ALLOWED_TARGET_REPOSITORIES:
+    canonical = canonical_allowed_target_repository(target_repository)
+    if canonical is None:
         allowed = ", ".join(f"`{repo}`" for repo in sorted(ALLOWED_TARGET_REPOSITORIES))
         return (
             None,
             f"Target repository `{target_repository}` is not allowlisted. Use {allowed}.",
         )
-    return target_repository, None
+    return canonical, None
 
 
 def extract_runner_task(body: str) -> tuple[RunnerTask | None, str | None]:
@@ -719,6 +807,18 @@ def extract_pr_number(pr_url: str) -> int | None:
     return int(match.group("number"))
 
 
+def extract_pr_url_repository(pr_url: str) -> str | None:
+    parsed = urllib.parse.urlparse(pr_url.strip())
+    if parsed.scheme != "https":
+        return None
+    if not parsed.hostname or parsed.hostname.lower() not in ALLOWED_PROVIDER_HOSTS:
+        return None
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) < 4 or parts[2] != "pull":
+        return None
+    return normalized_repository_name(f"{parts[0]}/{parts[1]}")
+
+
 def extract_runner_report_pr_binding(
     report: str,
 ) -> tuple[str | None, tuple[str, ...]]:
@@ -863,6 +963,10 @@ def build_done_pr_ready_card_payload(report: str) -> dict[str, Any] | None:
     pr_number = extract_pr_number(pr_url)
     if pr_number is None:
         return None
+
+    pr_repository = extract_pr_url_repository(pr_url)
+    if pr_repository != normalized_repository_name(REPO):
+        return _build_details_only_card_payload(pr_url, pr_number)
 
     head_sha, changed_files = extract_runner_report_pr_binding(report)
     if head_sha is None or not changed_files:

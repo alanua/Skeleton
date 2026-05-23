@@ -209,11 +209,57 @@ def test_target_repository_worktree_paths_are_deterministic(tmp_path: Path) -> N
         assert bauclock_path == runner.target_repository_issue_worktree_path(
             "alanua/bauclock", 912
         )
+        assert runner.target_repository_worktree_root("ALANUA/skeleton") == skeleton_root
 
 
 def test_unknown_target_repository_worktree_root_is_rejected() -> None:
     with pytest.raises(ValueError, match="not allowlisted"):
         runner.target_repository_worktree_root("alanua/unknown")
+
+
+def test_target_repository_origin_matches_exact_normalized_owner_repo() -> None:
+    assert runner.target_repository_remote_matches(
+        "alanua/Skeleton", "https://github.com/alanua/Skeleton.git"
+    )
+    assert runner.target_repository_remote_matches(
+        "alanua/skeleton", "git@github.com:ALANUA/Skeleton.git"
+    )
+    assert runner.target_repository_remote_matches(
+        "alanua/bauclock", "ssh://git@github.com/alanua/bauclock.git"
+    )
+
+
+@pytest.mark.parametrize(
+    "remote_url",
+    (
+        "https://github.example/alanua/Skeleton.git",
+        "https://github.com.evil/alanua/Skeleton.git",
+        "https://github.com/other/Skeleton.git",
+        "https://github.com/alanua/Skeleton/extra",
+        "https://github.com/alanua/Skeleton.git/",
+        "git@github.com:extra/alanua/Skeleton.git",
+        "/home/agent/Skeleton",
+    ),
+)
+def test_target_repository_origin_rejects_unknown_malformed_or_extra_path_remotes(
+    remote_url: str,
+) -> None:
+    assert not runner.target_repository_remote_matches("alanua/Skeleton", remote_url)
+
+
+def test_verify_target_repository_origin_reads_origin_and_rejects_suffix_match() -> None:
+    with mock.patch.object(
+        runner,
+        "run_command",
+        return_value=(0, "https://github.com/other/alanua-Skeleton.git\n"),
+    ) as run_command:
+        ok, reason = runner.verify_target_repository_origin("alanua/Skeleton", "/target")
+
+    assert not ok
+    assert "does not match" in reason
+    run_command.assert_called_once_with(
+        ["git", "remote", "get-url", "origin"], cwd="/target"
+    )
 
 
 def test_target_repository_worktree_path_rejects_other_repository_root(
@@ -375,7 +421,7 @@ def test_runner_task_accepts_allowlisted_lane_name() -> None:
 
 def test_runner_task_accepts_allowlisted_target_repository() -> None:
     task, reason = runner.extract_runner_task(
-        "Target Repository: alanua/bauclock\n\n```task\nDo it\n```"
+        "Target Repository: ALANUA/bauclock\n\n```task\nDo it\n```"
     )
 
     assert reason is None
@@ -788,6 +834,19 @@ def test_approve_reject_buttons_require_reliable_sha_and_changed_files() -> None
 
     assert [button["text"] for button in buttons] == ["Деталі", "Відкрити PR"]
     assert str(card["text"]).startswith("PR: #123\n")
+
+
+def test_non_skeleton_target_pr_card_has_no_approve_or_reject_buttons() -> None:
+    report = DONE_REPORT.replace(
+        PR_URL, "https://github.com/alanua/bauclock/pull/123"
+    )
+
+    card = runner.build_done_pr_ready_card_payload(report)
+    assert card is not None
+    reply_markup = runner.card_payload_to_inline_keyboard(card)
+    buttons = [row[0] for row in reply_markup["inline_keyboard"]]
+
+    assert [button["text"] for button in buttons] == ["Деталі", "Відкрити PR"]
 
 
 def test_send_telegram_notification_posts_reply_markup_for_card() -> None:
