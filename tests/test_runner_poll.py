@@ -585,6 +585,82 @@ def test_process_issue_posts_done_on_success() -> None:
     notify.assert_called_once_with(5, "DONE", report)
 
 
+def test_blocked_codex_output_is_not_labeled_runner_done() -> None:
+    fence = "`" * 3
+    issue = {
+        "number": 51,
+        "title": "Blocked output",
+        "body": f"{fence}task\nDo it\n{fence}",
+    }
+    codex_output = "Blocked: PlatformIO not available, so no firmware can be built."
+
+    with mock.patch.object(
+        runner, "ensure_clean_worktree", return_value=(True, "")
+    ), mock.patch.object(
+        runner, "prepare_issue_branch", return_value=(0, "", "runner/issue-51")
+    ), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, codex_output)
+    ), mock.patch.object(
+        runner, "finalize_success"
+    ) as finalize, mock.patch.object(
+        runner, "post_issue_comment"
+    ) as comment, mock.patch.object(
+        runner, "set_issue_label"
+    ) as label, mock.patch.object(runner, "notify_task_finished") as notify:
+        runner.process_issue(issue, workdir="/repo")
+
+    finalize.assert_not_called()
+    report = comment.call_args.args[1]
+    assert report.startswith("BLOCKED: Codex output reported a blocked deliverable.")
+    assert "Codex completed successfully" not in report
+    assert codex_output in report
+    assert label.call_args_list == [
+        mock.call(51, runner.LABEL_READY, runner.LABEL_RUNNING),
+        mock.call(51, runner.LABEL_RUNNING, runner.LABEL_BLOCKED),
+    ]
+    notify.assert_called_once_with(51, "BLOCKED", report)
+
+
+def test_file_change_report_without_draft_pr_is_not_labeled_runner_done() -> None:
+    fence = "`" * 3
+    issue = {
+        "number": 52,
+        "title": "Missing PR",
+        "body": f"{fence}task\nDo it\n{fence}",
+    }
+    finalize_report = (
+        "DONE: Codex completed successfully and produced file changes.\n\n"
+        "Changed files:\n"
+        "- scripts/runner_poll_github_tasks.py"
+    )
+
+    with mock.patch.object(
+        runner, "ensure_clean_worktree", return_value=(True, "")
+    ), mock.patch.object(
+        runner, "prepare_issue_branch", return_value=(0, "", "runner/issue-52")
+    ), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, "codex ok")
+    ), mock.patch.object(
+        runner, "finalize_success", return_value=finalize_report
+    ), mock.patch.object(
+        runner, "cleanup_issue_worktree", return_value=(0, "")
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ) as comment, mock.patch.object(
+        runner, "set_issue_label"
+    ) as label, mock.patch.object(runner, "notify_task_finished") as notify:
+        runner.process_issue(issue, workdir="/repo")
+
+    report = comment.call_args.args[1]
+    assert report.startswith("BLOCKED: Runner did not mark this task complete.")
+    assert "draft PR URL was missing" in report
+    assert label.call_args_list == [
+        mock.call(52, runner.LABEL_READY, runner.LABEL_RUNNING),
+        mock.call(52, runner.LABEL_RUNNING, runner.LABEL_BLOCKED),
+    ]
+    notify.assert_called_once_with(52, "BLOCKED", report)
+
+
 def test_process_issue_reports_runner_lane_metadata_on_success() -> None:
     issue = {
         "number": 25,

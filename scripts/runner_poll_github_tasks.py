@@ -84,6 +84,23 @@ TELEGRAM_CALLBACK_POLLER_RUNTIME_FILES = (
 
 _HEAD_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 _CALLBACK_DIGEST_RE = re.compile(r"^[0-9a-f]{12}$")
+_BLOCKED_OUTPUT_MARKERS = (
+    "BLOCKED",
+    "Blocked:",
+    "missing capability",
+    "wrong worktree",
+    "not target repo",
+    "writer unavailable",
+    "cancelled",
+    "no build files",
+    "PlatformIO not available",
+    "no firmware",
+    "assigned worktree is not target",
+)
+_BLOCKED_OUTPUT_MARKER_RES = tuple(
+    re.compile(rf"(?<!\w){re.escape(marker)}(?!\w)", re.IGNORECASE)
+    for marker in _BLOCKED_OUTPUT_MARKERS
+)
 
 
 @dataclass(frozen=True)
@@ -263,6 +280,57 @@ def report_runner_lane(report: str, task: RunnerTask | None) -> str:
         return report
     heading, *details = report.splitlines()
     return "\n".join((heading, f"Runner Lane: {task.lane.name}", *details))
+
+
+def blocked_output_marker(output: str) -> str | None:
+    for marker, marker_re in zip(_BLOCKED_OUTPUT_MARKERS, _BLOCKED_OUTPUT_MARKER_RES):
+        if marker_re.search(output or ""):
+            return marker
+    return None
+
+
+def runner_report_status(report: str) -> str:
+    if blocked_output_marker(report):
+        return "BLOCKED"
+    if re.match(r"^DONE\b:?", report or "") is None:
+        return "BLOCKED"
+    if (
+        "Codex completed successfully and produced file changes." in report
+        and not extract_pr_url(report)
+    ):
+        return "BLOCKED"
+    return "DONE"
+
+
+def blocked_final_report(report: str) -> str:
+    marker = blocked_output_marker(report)
+    if marker is not None:
+        reason = f"blocked marker `{marker}` was present"
+    elif (
+        "Codex completed successfully and produced file changes." in report
+        and not extract_pr_url(report)
+    ):
+        reason = "draft PR URL was missing from a file-change report"
+    else:
+        reason = "runner report did not meet completion criteria"
+    return (
+        "BLOCKED: Runner did not mark this task complete.\n\n"
+        f"Reason: {reason}.\n\n"
+        f"Runner report:\n```\n{report.strip()}\n```"
+    )
+
+
+def blocked_codex_output_report(
+    codex_output: str,
+    marker: str,
+    issue_workdir: str,
+) -> str:
+    return (
+        "BLOCKED: Codex output reported a blocked deliverable.\n\n"
+        f"Blocked marker: {marker}\n\n"
+        f"Codex output:\n```\n{codex_output.strip()}\n```"
+        + issue_workspace_review_note(issue_workdir)
+    )
 
 
 def get_ready_issues() -> list[dict[str, Any]]:
@@ -1525,6 +1593,16 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                 runner_task=runner_task,
             )
             return
+        marker = blocked_output_marker(codex_output)
+        if marker is not None:
+            report = report_runner_lane(
+                blocked_codex_output_report(codex_output, marker, issue_workdir),
+                runner_task,
+            )
+            post_issue_comment(issue_number, report)
+            set_issue_label(issue_number, LABEL_RUNNING, LABEL_BLOCKED)
+            notify_task_finished(issue_number, "BLOCKED", report)
+            return
 
         report = report_runner_lane(
             finalize_success(issue, issue_workdir, codex_output),
@@ -1539,9 +1617,16 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                 "Issue workspace cleanup failed:\n"
                 f"{cleanup_output.strip() or f'exit code {cleanup_code}'}"
             )
+        status = runner_report_status(report)
+        if status == "BLOCKED":
+            report = blocked_final_report(report)
         post_issue_comment(issue_number, report)
-        set_issue_label(issue_number, LABEL_RUNNING, LABEL_DONE)
-        notify_task_finished(issue_number, "DONE", report)
+        set_issue_label(
+            issue_number,
+            LABEL_RUNNING,
+            LABEL_DONE if status == "DONE" else LABEL_BLOCKED,
+        )
+        notify_task_finished(issue_number, status, report)
     except Exception as exc:
         if issue_workdir is not None:
             cleanup_runtime_artifacts(issue_workdir)

@@ -107,6 +107,37 @@ def _plain_done_message(issue_number: int = 129) -> str:
     return runner.build_telegram_message(issue_number, "DONE", DONE_REPORT)
 
 
+def test_blocked_output_classifier_detects_runner_blockers() -> None:
+    cases = {
+        "BLOCKED": "BLOCKED",
+        "Blocked: waiting for access": "BLOCKED",
+        "missing capability: docker": "missing capability",
+        "wrong worktree selected": "wrong worktree",
+        "not target repo": "not target repo",
+        "writer unavailable": "writer unavailable",
+        "cancelled by operator": "cancelled",
+        "no build files were present": "no build files",
+        "PlatformIO not available": "PlatformIO not available",
+        "no firmware target exists": "no firmware",
+        "assigned worktree is not target": "assigned worktree is not target",
+    }
+
+    for output, expected_marker in cases.items():
+        assert runner.blocked_output_marker(output) == expected_marker
+
+
+def test_runner_report_status_blocks_file_change_done_without_draft_pr() -> None:
+    report = DONE_REPORT.replace(f"\nDraft PR: {PR_URL}", "")
+
+    assert runner.runner_report_status(report) == "BLOCKED"
+
+
+def test_runner_report_status_allows_no_change_done_without_draft_pr() -> None:
+    report = "DONE: Codex completed successfully with no file changes."
+
+    assert runner.runner_report_status(report) == "DONE"
+
+
 def test_worktree_path_uses_env_root_when_set(tmp_path: Path) -> None:
     configured_root = tmp_path / "runner-worktrees"
     with mock.patch.dict(
