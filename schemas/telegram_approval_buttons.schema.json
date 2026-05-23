@@ -17,7 +17,7 @@
         },
         "repo": {
           "type": "string",
-          "enum": ["alanua/Skeleton"]
+          "enum": ["alanua/Skeleton", "alanua/bauclock", "alanua/Lavalamp"]
         },
         "pr_number": {
           "type": "integer",
@@ -80,7 +80,7 @@
     },
     "repo": {
       "type": "string",
-      "enum": ["alanua/Skeleton"]
+      "enum": ["alanua/Skeleton", "alanua/bauclock", "alanua/Lavalamp"]
     },
     "pr_number": {
       "type": "integer",

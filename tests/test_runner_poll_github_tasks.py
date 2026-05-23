@@ -249,7 +249,14 @@ def test_prepare_issue_worktree_adds_runner_issue_branch(tmp_path: Path) -> None
     with mock.patch.dict(
         os.environ, {"SKELETON_WORKTREE_ROOT": str(worktree_root)}, clear=True
     ), mock.patch.object(
-        runner, "run_command", side_effect=((0, "fetched"), (0, "added"))
+        runner,
+        "run_command",
+        side_effect=(
+            (0, "https://github.com/alanua/Skeleton.git\n"),
+            (0, "fetched"),
+            (0, "added"),
+            (0, "https://github.com/alanua/Skeleton.git\n"),
+        ),
     ) as run_command:
         code, output, path = runner.prepare_issue_worktree(139, coordinator)
 
@@ -257,6 +264,7 @@ def test_prepare_issue_worktree_adds_runner_issue_branch(tmp_path: Path) -> None
     assert "git worktree add" in output
     assert path == (worktree_root / "issue-139").resolve()
     assert run_command.call_args_list == [
+        mock.call(["git", "remote", "get-url", "origin"], cwd=coordinator),
         mock.call(["git", "fetch", "origin"], cwd=coordinator),
         mock.call(
             [
@@ -270,25 +278,61 @@ def test_prepare_issue_worktree_adds_runner_issue_branch(tmp_path: Path) -> None
             ],
             cwd=coordinator,
         ),
+        mock.call(["git", "remote", "get-url", "origin"], cwd=path),
     ]
 
 
 def test_stale_dirty_worktree_blocks_instead_of_deleting(tmp_path: Path) -> None:
     worktree_path = tmp_path / "worktrees" / "issue-139"
     worktree_path.mkdir(parents=True)
+    coordinator = tmp_path / "coordinator"
+    coordinator.mkdir()
 
     with mock.patch.dict(
         os.environ, {"SKELETON_WORKTREE_ROOT": str(tmp_path / "worktrees")}, clear=True
     ), mock.patch.object(
-        runner, "run_command", return_value=(0, " M scripts/runner_poll_github_tasks.py")
+        runner,
+        "run_command",
+        side_effect=(
+            (0, "https://github.com/alanua/Skeleton.git\n"),
+            (0, " M scripts/runner_poll_github_tasks.py"),
+        ),
     ) as run_command:
-        code, output, path = runner.prepare_issue_worktree(139, tmp_path / "coordinator")
+        code, output, path = runner.prepare_issue_worktree(139, coordinator)
 
     assert code != 0
     assert path == worktree_path.resolve()
     assert "dirty" in output
     assert "cleanup" in output
-    run_command.assert_called_once_with(["git", "status", "--short"], cwd=path)
+    assert run_command.call_args_list == [
+        mock.call(["git", "remote", "get-url", "origin"], cwd=coordinator),
+        mock.call(["git", "status", "--short"], cwd=path),
+    ]
+
+
+def test_prepare_issue_worktree_blocks_wrong_remote_before_codex(
+    tmp_path: Path,
+) -> None:
+    worktree_root = tmp_path / "worktrees"
+    coordinator = tmp_path / "coordinator"
+    coordinator.mkdir()
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(worktree_root)}, clear=True
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        return_value=(0, "https://github.com/alanua/Other.git\n"),
+    ) as run_command:
+        code, output, path = runner.prepare_issue_worktree(139, coordinator)
+
+    assert code != 0
+    assert path == (worktree_root / "issue-139").resolve()
+    assert "does not match target repository" in output
+    assert "Expected: alanua/Skeleton" in output
+    run_command.assert_called_once_with(
+        ["git", "remote", "get-url", "origin"], cwd=coordinator
+    )
 
 
 def test_cleanup_issue_worktree_refuses_path_outside_configured_root(
@@ -435,10 +479,10 @@ def test_process_issue_blocks_non_allowlisted_target_repository_before_claim() -
     run_codex.assert_not_called()
 
 
-def test_process_issue_does_not_execute_allowlisted_cross_repo_target_yet() -> None:
+def test_process_issue_blocks_missing_target_checkout_before_claim() -> None:
     issue = {
         "number": 143,
-        "title": "Target repository stage 1",
+        "title": "Target repository checkout",
         "body": "Target Repository: alanua/Lavalamp\n\n```task\nDo it\n```",
     }
 
@@ -449,10 +493,94 @@ def test_process_issue_does_not_execute_allowlisted_cross_repo_target_yet() -> N
     ) as prepare_branch, mock.patch.object(runner, "run_codex_task") as run_codex:
         runner.process_issue(issue)
 
-    assert "planning-only" in block.call_args.args[1]
+    assert "Target repository checkout is missing" in block.call_args.args[1]
+    assert "/home/agent/agent-dev/worktrees/lavalamp/main" in block.call_args.args[1]
     set_label.assert_not_called()
     prepare_branch.assert_not_called()
     run_codex.assert_not_called()
+
+
+def test_process_issue_runs_codex_in_allowlisted_target_worktree(tmp_path: Path) -> None:
+    skeleton_root = tmp_path / "skeleton"
+    target_checkout = tmp_path / "lavalamp" / "main"
+    target_checkout.mkdir(parents=True)
+    issue_path = tmp_path / "lavalamp" / "issue-143"
+    issue = {
+        "number": 143,
+        "title": "Target repository execution",
+        "body": "Target Repository: alanua/Lavalamp\n\n```task\nDo it\n```",
+    }
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(skeleton_root)}, clear=True
+    ), mock.patch.object(runner, "set_issue_label"), mock.patch.object(
+        runner, "prepare_issue_worktree", return_value=(0, "ready", issue_path)
+    ) as prepare, mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, "codex output")
+    ) as run_codex, mock.patch.object(
+        runner, "finalize_success", return_value="DONE report"
+    ) as finalize, mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "cleanup_issue_worktree", return_value=(0, "")
+    ) as cleanup:
+        runner.process_issue(issue, workdir=str(tmp_path / "queue"))
+
+    prepare.assert_called_once_with(143, target_checkout, "alanua/Lavalamp")
+    run_codex.assert_called_once_with("Do it", str(issue_path))
+    finalize.assert_called_once_with(
+        issue, str(issue_path), "codex output", "alanua/Lavalamp"
+    )
+    cleanup.assert_called_once_with(143, target_checkout, "alanua/Lavalamp")
+
+
+def test_finalize_success_creates_draft_pr_in_target_repository(
+    tmp_path: Path,
+) -> None:
+    issue = {"number": 143, "title": "Target draft PR"}
+    commands: list[list[str]] = []
+
+    def fake_run_command(command: list[str], cwd: str | None = None) -> tuple[int, str]:
+        del cwd
+        commands.append(command)
+        if command[:3] == ["git", "rev-parse", "HEAD"]:
+            return 0, HEAD_SHA
+        if command[:3] == ["gh", "pr", "create"]:
+            return 0, "https://github.com/alanua/bauclock/pull/77\n"
+        return 0, ""
+
+    with mock.patch.object(
+        runner, "changed_files", return_value=["src/main.cpp"]
+    ), mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "run_command", side_effect=fake_run_command
+    ):
+        report = runner.finalize_success(
+            issue, str(tmp_path), "codex output", "alanua/bauclock"
+        )
+
+    assert "Draft PR: https://github.com/alanua/bauclock/pull/77" in report
+    assert [
+        "gh",
+        "pr",
+        "create",
+        "--repo",
+        "alanua/bauclock",
+        "--base",
+        "main",
+        "--head",
+        "runner/issue-143",
+        "--title",
+        "Runner task #143: Target draft PR",
+        "--body",
+        "Automated Runner task from issue #143.",
+        "--draft",
+    ] in commands
 
 
 def test_extracts_bounded_telegram_approved_merge_request() -> None:
@@ -700,6 +828,21 @@ def test_done_pr_report_builds_card_payload_from_runner_binding() -> None:
         risk_summary=runner.TELEGRAM_CARD_RISK_SUMMARY,
         pr_url=PR_URL,
     )
+
+
+def test_done_pr_report_builds_card_payload_for_target_repository() -> None:
+    report = DONE_REPORT.replace(
+        "https://github.com/alanua/Skeleton/pull/123",
+        "https://github.com/alanua/Lavalamp/pull/123",
+    )
+
+    with mock.patch.object(
+        runner, "build_pr_ready_card_payload", return_value={"text": "PR card", "buttons": []}
+    ) as build_card:
+        runner.build_done_pr_ready_card_payload(report)
+
+    assert build_card.call_args.kwargs["repo"] == "alanua/Lavalamp"
+    assert build_card.call_args.kwargs["pr_url"] == "https://github.com/alanua/Lavalamp/pull/123"
 
 
 def test_done_pr_card_hides_technical_details_from_operator_text() -> None:

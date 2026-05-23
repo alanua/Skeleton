@@ -6,7 +6,7 @@ from typing import Optional
 
 
 ALLOWED_ACTION_TYPES = frozenset({"merge_pull_request"})
-ALLOWED_REPOS = frozenset({"alanua/Skeleton"})
+ALLOWED_REPOS = frozenset({"alanua/Skeleton", "alanua/bauclock", "alanua/Lavalamp"})
 
 _HEAD_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 

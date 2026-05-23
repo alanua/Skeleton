@@ -1,6 +1,6 @@
 # Runner Worktrees
 
-Runner worktree execution stage 1 maps one normal bounded GitHub issue to one
+Runner worktree execution maps one normal bounded GitHub issue to one
 git worktree, one `runner/issue-N` branch, and one draft PR.
 
 The main Skeleton checkout is the coordinator. It polls GitHub issues and
@@ -28,10 +28,22 @@ Lane metadata smoke tests should confirm `runner:lane:lane-1` and
 Target repository routing stage 1 keeps the issue queue in `alanua/Skeleton`.
 Normal task issues may set `Target Repository: <owner/repo>` before the fenced
 task block. The allowlisted targets are `alanua/Skeleton`, `alanua/bauclock`,
-and `alanua/Lavalamp`; omitting the field plans `alanua/Skeleton`. This stage
-parses and validates the target and plans deterministic per-repository issue
-worktree paths only. It does not execute Codex, git worktree commands, pushes,
-or PR creation in another repository yet.
+and `alanua/Lavalamp`; omitting the field uses `alanua/Skeleton`.
+
+Target repository routing stage 2 runs Codex in deterministic per-target
+worktree roots only:
+
+- `alanua/Skeleton`: `$SKELETON_WORKTREE_ROOT/issue-N`
+- `alanua/bauclock`: `$SKELETON_WORKTREE_ROOT/../bauclock/issue-N`
+- `alanua/Lavalamp`: `$SKELETON_WORKTREE_ROOT/../lavalamp/issue-N`
+
+For non-Skeleton targets, Runner expects a main checkout at
+`$SKELETON_WORKTREE_ROOT/../<target>/main`. If that checkout path is missing,
+the issue is blocked with the exact missing path. Before Codex runs, Runner
+verifies `origin` resolves to the selected target repository. File changes are
+committed, pushed, and opened as a draft PR in the selected target repository.
+Issue polling, queue labels, comments, and Telegram merge request issues remain
+in `alanua/Skeleton`.
 
 An existing issue worktree is reused only when it is clean and already on the
 expected `runner/issue-N` branch. Otherwise the issue is blocked with cleanup

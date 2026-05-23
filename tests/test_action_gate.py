@@ -34,6 +34,11 @@ def test_allows_approved_request_bound_to_expected_pr_state() -> None:
     assert decision.reasons == ()
 
 
+def test_allows_current_target_repository_allowlist() -> None:
+    for repo in ("alanua/Skeleton", "alanua/bauclock", "alanua/Lavalamp"):
+        assert validate_action_request(valid_request(repo=repo)).status == "allowed"
+
+
 def test_blocks_unapproved_request() -> None:
     decision = validate_action_request(valid_request(user_approved=False))
 
@@ -86,5 +91,9 @@ def test_schema_documents_stage_1_request_shape() -> None:
         "user_approved",
     ]
     assert schema["properties"]["action_type"]["enum"] == ["merge_pull_request"]
-    assert schema["properties"]["repo"]["enum"] == ["alanua/Skeleton"]
+    assert schema["properties"]["repo"]["enum"] == [
+        "alanua/Skeleton",
+        "alanua/bauclock",
+        "alanua/Lavalamp",
+    ]
     assert schema["properties"]["user_approved"]["const"] is True
