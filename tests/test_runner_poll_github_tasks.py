@@ -126,6 +126,36 @@ def test_blocked_output_classifier_detects_runner_blockers() -> None:
         assert runner.blocked_output_marker(output) == expected_marker
 
 
+
+def test_blocked_output_classifier_ignores_echoed_transcript_markers() -> None:
+    output = """Changed files:
+- scripts/runner_poll_github_tasks.py
+- tests/test_runner_poll_github_tasks.py
+
+Test count: 416 passed, 3 skipped
+Reading additional input from stdin...
+OpenAI Codex v0.125.0
+--------
+user
+Goal text mentions BLOCKED and runner:blocked in echoed instructions.
+exec
+LABEL_BLOCKED = "runner:blocked"
+"""
+
+    assert runner.final_codex_answer(output).startswith("Changed files:")
+    assert runner.blocked_output_marker(output) is None
+
+
+def test_blocked_output_classifier_keeps_real_final_marker_detection() -> None:
+    output = """BLOCKED: missing capability
+
+Reading additional input from stdin...
+OpenAI Codex v0.125.0
+"""
+
+    assert runner.blocked_output_marker(output) == "BLOCKED"
+
+
 def test_runner_report_status_blocks_file_change_done_without_draft_pr() -> None:
     report = DONE_REPORT.replace(f"\nDraft PR: {PR_URL}", "")
 

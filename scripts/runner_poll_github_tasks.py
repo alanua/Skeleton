@@ -282,9 +282,26 @@ def report_runner_lane(report: str, task: RunnerTask | None) -> str:
     return "\n".join((heading, f"Runner Lane: {task.lane.name}", *details))
 
 
+def final_codex_answer(output: str) -> str:
+    """Return the final Codex answer without echoed prompt/transcript text."""
+    text = output or ""
+    boundaries = (
+        "\nReading additional input from stdin...",
+        "\nOpenAI Codex v",
+        "\n--------\nworkdir:",
+    )
+    cut = len(text)
+    for boundary in boundaries:
+        index = text.find(boundary)
+        if index != -1:
+            cut = min(cut, index)
+    return text[:cut].strip()
+
+
 def blocked_output_marker(output: str) -> str | None:
+    final_answer = final_codex_answer(output)
     for marker, marker_re in zip(_BLOCKED_OUTPUT_MARKERS, _BLOCKED_OUTPUT_MARKER_RES):
-        if marker_re.search(output or ""):
+        if marker_re.search(final_answer):
             return marker
     return None
 
