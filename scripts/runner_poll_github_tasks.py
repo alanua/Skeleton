@@ -84,6 +84,19 @@ TELEGRAM_CALLBACK_POLLER_RUNTIME_FILES = (
 
 _HEAD_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 _CALLBACK_DIGEST_RE = re.compile(r"^[0-9a-f]{12}$")
+BLOCKED_OUTPUT_MARKERS = (
+    r"\bBLOCKED\b",
+    r"\bBlocked:",
+    r"\bmissing capability\b",
+    r"\bwrong worktree\b",
+    r"\bnot target repo\b",
+    r"\bwriter unavailable\b",
+    r"\bcancell?ed\b",
+    r"\bno build files\b",
+    r"\bPlatformIO not available\b",
+    r"\bno firmware\b",
+    r"\bassigned worktree is not target\b",
+)
 
 
 @dataclass(frozen=True)
@@ -571,6 +584,40 @@ def extract_pr_url(report: str) -> str | None:
     if not match:
         return None
     return match.group("url")
+
+
+def find_blocked_output_marker(output: str) -> str | None:
+    for marker in BLOCKED_OUTPUT_MARKERS:
+        match = re.search(marker, output, re.IGNORECASE)
+        if match:
+            return match.group(0)
+    return None
+
+
+def report_requires_draft_pr_url(report: str) -> bool:
+    return bool(
+        re.search(r"\bproduced file changes\b", report, re.IGNORECASE)
+        or re.search(r"^Changed files:\s*$", report, re.MULTILINE)
+        or re.search(r"^Commit:\s*[0-9a-fA-F]{40}\s*$", report, re.MULTILINE)
+    )
+
+
+def successful_report_is_done(report: str) -> bool:
+    if not report.startswith("DONE"):
+        return False
+    if find_blocked_output_marker(report):
+        return False
+    if report_requires_draft_pr_url(report) and extract_pr_url(report) is None:
+        return False
+    return True
+
+
+def build_blocked_codex_output_report(codex_output: str, marker: str) -> str:
+    return (
+        "BLOCKED: Codex output indicates the deliverable was blocked.\n\n"
+        f"Matched marker: {marker}\n\n"
+        f"Codex output:\n```\n{codex_output.strip()}\n```"
+    )
 
 
 def extract_pr_number(pr_url: str) -> int | None:
@@ -1526,6 +1573,25 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             )
             return
 
+        blocked_marker = find_blocked_output_marker(codex_output)
+        if blocked_marker is not None:
+            report = report_runner_lane(
+                build_blocked_codex_output_report(codex_output, blocked_marker),
+                runner_task,
+            )
+            cleanup_code, cleanup_output = cleanup_issue_worktree(
+                issue_number, coordinator_workdir
+            )
+            if cleanup_code != 0:
+                raise RuntimeError(
+                    "Issue workspace cleanup failed:\n"
+                    f"{cleanup_output.strip() or f'exit code {cleanup_code}'}"
+                )
+            post_issue_comment(issue_number, report)
+            set_issue_label(issue_number, LABEL_RUNNING, LABEL_BLOCKED)
+            notify_task_finished(issue_number, "BLOCKED", report)
+            return
+
         report = report_runner_lane(
             finalize_success(issue, issue_workdir, codex_output),
             runner_task,
@@ -1540,8 +1606,13 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                 f"{cleanup_output.strip() or f'exit code {cleanup_code}'}"
             )
         post_issue_comment(issue_number, report)
-        set_issue_label(issue_number, LABEL_RUNNING, LABEL_DONE)
-        notify_task_finished(issue_number, "DONE", report)
+        status = "DONE" if successful_report_is_done(report) else "BLOCKED"
+        set_issue_label(
+            issue_number,
+            LABEL_RUNNING,
+            LABEL_DONE if status == "DONE" else LABEL_BLOCKED,
+        )
+        notify_task_finished(issue_number, status, report)
     except Exception as exc:
         if issue_workdir is not None:
             cleanup_runtime_artifacts(issue_workdir)

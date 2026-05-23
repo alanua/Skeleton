@@ -107,6 +107,104 @@ def _plain_done_message(issue_number: int = 129) -> str:
     return runner.build_telegram_message(issue_number, "DONE", DONE_REPORT)
 
 
+@pytest.mark.parametrize(
+    "codex_output",
+    [
+        "BLOCKED",
+        "Blocked: missing device access",
+        "missing capability: serial writer",
+        "wrong worktree for this task",
+        "not target repo",
+        "writer unavailable",
+        "cancelled by operator",
+        "canceled by operator",
+        "no build files found",
+        "PlatformIO not available",
+        "no firmware was produced",
+        "assigned worktree is not target",
+    ],
+)
+def test_blocked_output_classifier_detects_known_markers(codex_output: str) -> None:
+    assert runner.find_blocked_output_marker(codex_output) is not None
+
+
+def test_blocked_codex_output_is_not_labeled_runner_done(tmp_path: Path) -> None:
+    coordinator = tmp_path / "coordinator"
+    issue_path = tmp_path / "worktrees" / "issue-139"
+    issue = {"number": 139, "title": "Blocked", "body": "```task\nDo it\n```"}
+    codex_output = "Blocked: PlatformIO not available on this runner."
+
+    with mock.patch.object(runner, "set_issue_label") as set_label, mock.patch.object(
+        runner, "prepare_issue_branch", return_value=(0, "ready", issue_path)
+    ), mock.patch.object(runner, "cleanup_runtime_artifacts"), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, codex_output)
+    ), mock.patch.object(
+        runner, "finalize_success"
+    ) as finalize, mock.patch.object(
+        runner, "post_issue_comment"
+    ) as comment, mock.patch.object(
+        runner, "notify_task_finished"
+    ) as notify, mock.patch.object(
+        runner, "cleanup_issue_worktree", return_value=(0, "")
+    ):
+        runner.process_issue(issue, workdir=str(coordinator))
+
+    finalize.assert_not_called()
+    report = comment.call_args.args[1]
+    assert report.startswith("BLOCKED:")
+    assert "Codex completed successfully" not in report
+    assert set_label.call_args_list == [
+        mock.call(139, runner.LABEL_READY, runner.LABEL_RUNNING),
+        mock.call(139, runner.LABEL_RUNNING, runner.LABEL_BLOCKED),
+    ]
+    notify.assert_called_once_with(139, "BLOCKED", report)
+
+
+def test_pr_style_done_report_without_draft_pr_is_blocked(tmp_path: Path) -> None:
+    coordinator = tmp_path / "coordinator"
+    issue_path = tmp_path / "worktrees" / "issue-140"
+    issue = {"number": 140, "title": "No PR", "body": "```task\nDo it\n```"}
+    report = (
+        "DONE: Codex completed successfully and produced file changes.\n\n"
+        "Changed files:\n"
+        "- scripts/runner_poll_github_tasks.py\n\n"
+        f"Commit: {HEAD_SHA}"
+    )
+
+    with mock.patch.object(runner, "set_issue_label") as set_label, mock.patch.object(
+        runner, "prepare_issue_branch", return_value=(0, "ready", issue_path)
+    ), mock.patch.object(runner, "cleanup_runtime_artifacts"), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, "codex ok")
+    ), mock.patch.object(
+        runner, "finalize_success", return_value=report
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ) as comment, mock.patch.object(
+        runner, "notify_task_finished"
+    ) as notify, mock.patch.object(
+        runner, "cleanup_issue_worktree", return_value=(0, "")
+    ):
+        runner.process_issue(issue, workdir=str(coordinator))
+
+    comment.assert_called_once_with(140, report)
+    assert set_label.call_args_list == [
+        mock.call(140, runner.LABEL_READY, runner.LABEL_RUNNING),
+        mock.call(140, runner.LABEL_RUNNING, runner.LABEL_BLOCKED),
+    ]
+    notify.assert_called_once_with(140, "BLOCKED", report)
+
+
+def test_blocked_telegram_message_does_not_say_completed() -> None:
+    text = runner.build_telegram_message(
+        141,
+        "BLOCKED",
+        "BLOCKED: Codex output indicates the deliverable was blocked.",
+    )
+
+    assert "Status: BLOCKED" in text
+    assert "completed" not in text.lower()
+
+
 def test_worktree_path_uses_env_root_when_set(tmp_path: Path) -> None:
     configured_root = tmp_path / "runner-worktrees"
     with mock.patch.dict(
