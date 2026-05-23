@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from pathlib import Path
 from typing import Any, Mapping, Union
@@ -11,8 +12,12 @@ import yaml
 PROJECT_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 WORKTREE_PREFIX_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 WORKTREE_SLUG_PATTERN = re.compile(r"[^a-z0-9]+")
+APPROVED_WORKSPACE_ROOT_ENV = "RUNNER_APPROVED_WORKSPACE_ROOT"
+DEFAULT_APPROVED_WORKSPACE_ROOT = Path("/home/agent/agent-dev")
 REQUIRED_PROJECT_FIELDS = (
     "repo",
+    "checkout_path",
+    "worktree_root",
     "public",
     "future_parallel_worktrees",
     "runtime_approval_required",
@@ -59,6 +64,31 @@ def get_project(project_tree: Mapping[str, Any], project_id: str) -> dict[str, A
     return project
 
 
+def get_project_by_repo(project_tree: Mapping[str, Any], repo: str) -> dict[str, Any]:
+    validated_tree = validate_project_tree(project_tree)
+    if not isinstance(repo, str) or repo.strip() == "":
+        raise ValueError("repo must be a non-empty string.")
+
+    for project in validated_tree["projects"].values():
+        if project["repo"] == repo:
+            return project
+    raise KeyError(f"unknown repo {repo!r}.")
+
+
+def allowed_project_repositories(project_tree: Mapping[str, Any]) -> frozenset[str]:
+    validated_tree = validate_project_tree(project_tree)
+    return frozenset(project["repo"] for project in validated_tree["projects"].values())
+
+
+def issue_worktree_path(project: Mapping[str, Any], issue_number: int) -> Path:
+    validated_project = _validate_project_mapping(project)
+    root = Path(validated_project["worktree_root"])
+    candidate = root / f"issue-{issue_number}"
+    if candidate.resolve() == root.resolve():
+        raise ValueError("issue worktree must not equal worktree_root.")
+    return candidate
+
+
 def plan_worktree_name(project_id: str, task_ref: str) -> str:
     _validate_project_id(project_id)
     if not isinstance(task_ref, str) or task_ref.strip() == "":
@@ -88,6 +118,8 @@ def _validate_project(project_id: str, project: object) -> None:
     if not isinstance(project["repo"], str) or project["repo"].strip() == "":
         raise ValueError(f"project {project_id!r} repo must be a non-empty string.")
 
+    _validate_registry_paths(project_id, project)
+
     for field in ("public", "future_parallel_worktrees", "runtime_approval_required"):
         if not isinstance(project[field], bool):
             raise ValueError(f"project {project_id!r} {field} must be a boolean.")
@@ -95,3 +127,52 @@ def _validate_project(project_id: str, project: object) -> None:
     prefix = project["worktree_name_prefix"]
     if not isinstance(prefix, str) or not WORKTREE_PREFIX_PATTERN.fullmatch(prefix):
         raise ValueError(f"project {project_id!r} worktree_name_prefix is invalid.")
+
+
+def _approved_workspace_root() -> Path:
+    configured_root = os.environ.get(APPROVED_WORKSPACE_ROOT_ENV)
+    root = Path(configured_root).expanduser() if configured_root else DEFAULT_APPROVED_WORKSPACE_ROOT
+    return root.resolve()
+
+
+def _validate_project_mapping(project: Mapping[str, Any]) -> Mapping[str, Any]:
+    missing = [
+        field
+        for field in ("repo", "checkout_path", "worktree_root")
+        if field not in project
+    ]
+    if missing:
+        raise ValueError(f"project is missing fields: {', '.join(missing)}.")
+    return project
+
+
+def _validate_registry_paths(project_id: str, project: Mapping[str, Any]) -> None:
+    checkout_path = _validate_workspace_path(project_id, "checkout_path", project)
+    worktree_root = _validate_workspace_path(project_id, "worktree_root", project)
+
+    if checkout_path == worktree_root:
+        raise ValueError(
+            f"project {project_id!r} checkout_path must not equal worktree_root."
+        )
+
+
+def _validate_workspace_path(
+    project_id: str, field: str, project: Mapping[str, Any]
+) -> Path:
+    raw_path = project[field]
+    if not isinstance(raw_path, str) or raw_path.strip() == "":
+        raise ValueError(f"project {project_id!r} {field} must be a non-empty string.")
+
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        raise ValueError(f"project {project_id!r} {field} must be absolute.")
+
+    approved_root = _approved_workspace_root()
+    resolved_path = path.resolve()
+    try:
+        resolved_path.relative_to(approved_root)
+    except ValueError as exc:
+        raise ValueError(
+            f"project {project_id!r} {field} must stay under {approved_root}."
+        ) from exc
+    return resolved_path

@@ -3,14 +3,38 @@ default_project: skeleton
 projects:
   skeleton:
     repo: alanua/Skeleton
+    checkout_path: /home/agent/agent-dev/repos/Skeleton
+    worktree_root: /home/agent/agent-dev/worktrees/skeleton
     public: true
     future_parallel_worktrees: true
     runtime_approval_required: false
     worktree_name_prefix: skeleton
     description: Public Skeleton control and construction repository.
 
+  bauclock:
+    repo: alanua/bauclock
+    checkout_path: /home/agent/agent-dev/worktrees/bauclock/main
+    worktree_root: /home/agent/agent-dev/worktrees/bauclock
+    public: true
+    future_parallel_worktrees: true
+    runtime_approval_required: true
+    worktree_name_prefix: bauclock
+    description: Public BauClock project registered for future Runner routing.
+
+  lavalamp:
+    repo: alanua/Lavalamp
+    checkout_path: /home/agent/agent-dev/worktrees/lavalamp/main
+    worktree_root: /home/agent/agent-dev/worktrees/lavalamp
+    public: true
+    future_parallel_worktrees: true
+    runtime_approval_required: true
+    worktree_name_prefix: lavalamp
+    description: Public Lavalamp project registered for future Runner routing.
+
   aufmass_private:
     repo: private/aufmass
+    checkout_path: /home/agent/agent-dev/worktrees/aufmass-private/main
+    worktree_root: /home/agent/agent-dev/worktrees/aufmass-private
     public: false
     future_parallel_worktrees: false
     runtime_approval_required: true
@@ -19,6 +43,8 @@ projects:
 
   home_automation:
     repo: private/home-automation
+    checkout_path: /home/agent/agent-dev/worktrees/home-automation/main
+    worktree_root: /home/agent/agent-dev/worktrees/home-automation
     public: false
     future_parallel_worktrees: false
     runtime_approval_required: true
