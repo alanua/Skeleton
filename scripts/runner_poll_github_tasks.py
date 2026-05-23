@@ -175,6 +175,13 @@ def issue_worktree_path(issue_number: int) -> Path:
     return worktree_root() / f"issue-{issue_number}"
 
 
+def target_repository_main_worktree_path(target_repository: str) -> Path:
+    root = target_repository_worktree_root(target_repository)
+    if target_repository == QUEUE_REPOSITORY:
+        return root
+    return root / "main"
+
+
 def target_repository_worktree_root(target_repository: str) -> Path:
     directory_name = TARGET_REPOSITORY_WORKTREE_DIRS.get(target_repository)
     if directory_name is None:
@@ -190,6 +197,8 @@ def target_repository_worktree_root(target_repository: str) -> Path:
 def target_repository_issue_worktree_path(
     target_repository: str, issue_number: int
 ) -> Path:
+    if target_repository == QUEUE_REPOSITORY:
+        return issue_worktree_path(issue_number)
     return target_repository_worktree_root(target_repository) / f"issue-{issue_number}"
 
 
@@ -217,16 +226,118 @@ def issue_branch(issue_number: int) -> str:
     return f"runner/issue-{issue_number}"
 
 
+def parse_github_remote_repository(remote_url: str) -> str:
+    """Return owner/repo for strict github.com remotes with no extra path."""
+    if not isinstance(remote_url, str) or not remote_url.strip():
+        raise ValueError("origin remote is empty.")
+
+    remote = remote_url.strip()
+    if remote.startswith("git@"):
+        match = re.fullmatch(
+            r"git@(?P<host>[^:]+):(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)(?:\.git)?",
+            remote,
+        )
+        if match is None:
+            raise ValueError("origin remote is malformed.")
+        if match.group("host").lower() != "github.com":
+            raise ValueError("origin remote provider host is not allowlisted.")
+        return f"{match.group('owner')}/{match.group('repo')}"
+
+    parsed = urllib.parse.urlparse(remote)
+    if parsed.scheme not in {"https", "ssh"}:
+        raise ValueError("origin remote provider is not allowlisted.")
+    if parsed.hostname is None or parsed.hostname.lower() != "github.com":
+        raise ValueError("origin remote provider host is not allowlisted.")
+    if parsed.params or parsed.query or parsed.fragment or parsed.username not in {None, "git"}:
+        raise ValueError("origin remote is malformed.")
+
+    path = parsed.path.lstrip("/")
+    parts = path.split("/")
+    if len(parts) != 2 or any(part in {"", ".", ".."} for part in parts):
+        raise ValueError("origin remote must be exactly owner/repo.")
+    owner, repo = parts
+    if repo.endswith(".git"):
+        repo = repo[:-4]
+    elif "." in repo and repo.rsplit(".", 1)[-1] == "git":
+        raise ValueError("origin remote is malformed.")
+    if not owner or not repo or "/" in repo:
+        raise ValueError("origin remote is malformed.")
+    return f"{owner}/{repo}"
+
+
+def verify_target_checkout(target_repository: str) -> tuple[int, str, Path]:
+    try:
+        checkout_path = target_repository_main_worktree_path(target_repository).resolve()
+    except ValueError as exc:
+        return 1, str(exc), Path(".")
+
+    if not checkout_path.exists():
+        return 1, f"Target checkout does not exist: {checkout_path}", checkout_path
+    if not checkout_path.is_dir():
+        return 1, f"Target checkout is not a directory: {checkout_path}", checkout_path
+
+    outputs: list[str] = []
+    rev_parse_output = ""
+    remote_output = ""
+    for index, command in enumerate(
+        (
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            ["git", "remote", "get-url", "origin"],
+        )
+    ):
+        code, output = run_command(command, cwd=checkout_path)
+        outputs.append(format_command_output(command, output))
+        if code != 0:
+            return code, "Target checkout is not a usable git repository.\n\n" + "\n".join(outputs), checkout_path
+        if index == 0:
+            rev_parse_output = output
+        else:
+            remote_output = output
+
+    if rev_parse_output.strip() != "true":
+        return 1, "Target checkout is not inside a git worktree.\n\n" + "\n".join(outputs), checkout_path
+
+    remote_url = remote_output.strip()
+    try:
+        remote_repository = parse_github_remote_repository(remote_url)
+    except ValueError as exc:
+        return 1, f"Target checkout origin is not safe: {exc}\n\n" + "\n".join(outputs), checkout_path
+    if remote_repository != target_repository:
+        return (
+            1,
+            "Target checkout origin does not match selected allowlisted repo. "
+            f"Expected `{target_repository}`, got `{remote_repository}`.\n\n"
+            + "\n".join(outputs),
+            checkout_path,
+        )
+    return 0, "\n".join(outputs), checkout_path
+
+
 def format_command_output(command: list[str], output: str) -> str:
     return f"$ {' '.join(command)}\n{output}"
 
 
 def prepare_issue_worktree(
-    issue_number: int, coordinator_workdir: str | Path
+    issue_number: int,
+    coordinator_workdir: str | Path,
+    target_repository: str = QUEUE_REPOSITORY,
 ) -> tuple[int, str, Path]:
-    path = ensure_safe_worktree_path(issue_worktree_path(issue_number))
+    path = ensure_safe_target_repository_worktree_path(
+        target_repository,
+        target_repository_issue_worktree_path(target_repository, issue_number),
+    )
     branch = issue_branch(issue_number)
     outputs: list[str] = []
+    base_workdir = (
+        Path(coordinator_workdir)
+        if target_repository == QUEUE_REPOSITORY
+        else target_repository_main_worktree_path(target_repository)
+    )
+
+    verify_code, verify_output, _checkout_path = verify_target_checkout(target_repository)
+    outputs.append(verify_output)
+    if verify_code != 0:
+        return verify_code, "\n".join(output for output in outputs if output), path
 
     if path.exists():
         checks = (
@@ -269,7 +380,7 @@ def prepare_issue_worktree(
         ["git", "fetch", "origin"],
         ["git", "worktree", "add", "-B", branch, str(path), "origin/main"],
     ):
-        code, output = run_command(command, cwd=coordinator_workdir)
+        code, output = run_command(command, cwd=base_workdir)
         outputs.append(format_command_output(command, output))
         if code != 0:
             return code, "\n".join(outputs), path
@@ -277,27 +388,41 @@ def prepare_issue_worktree(
 
 
 def prepare_issue_branch(
-    issue_number: int, coordinator_workdir: str | Path
+    issue_number: int,
+    coordinator_workdir: str | Path,
+    target_repository: str = QUEUE_REPOSITORY,
 ) -> tuple[int, str, Path]:
-    return prepare_issue_worktree(issue_number, coordinator_workdir)
+    if target_repository == QUEUE_REPOSITORY:
+        return prepare_issue_worktree(issue_number, coordinator_workdir)
+    return prepare_issue_worktree(issue_number, coordinator_workdir, target_repository)
 
 
 def cleanup_issue_worktree(
-    issue_number: int, coordinator_workdir: str | Path
+    issue_number: int,
+    coordinator_workdir: str | Path,
+    target_repository: str = QUEUE_REPOSITORY,
 ) -> tuple[int, str]:
     try:
-        path = ensure_safe_worktree_path(issue_worktree_path(issue_number))
+        path = ensure_safe_target_repository_worktree_path(
+            target_repository,
+            target_repository_issue_worktree_path(target_repository, issue_number),
+        )
     except ValueError as exc:
         return 1, str(exc)
     if not path.exists():
         return 0, ""
+    base_workdir = (
+        Path(coordinator_workdir)
+        if target_repository == QUEUE_REPOSITORY
+        else target_repository_main_worktree_path(target_repository)
+    )
     cleanup_runtime_artifacts(path)
     outputs: list[str] = []
     for command in (
         ["git", "worktree", "remove", "--force", str(path)],
         ["git", "worktree", "prune"],
     ):
-        code, output = run_command(command, cwd=coordinator_workdir)
+        code, output = run_command(command, cwd=base_workdir)
         outputs.append(format_command_output(command, output))
         if code != 0:
             return code, "\n".join(outputs)
@@ -712,6 +837,34 @@ def extract_pr_url(report: str) -> str | None:
     return match.group("url")
 
 
+def extract_pr_repository(pr_url: str) -> str | None:
+    try:
+        parsed = urllib.parse.urlparse(pr_url)
+    except ValueError:
+        return None
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname is None
+        or parsed.hostname.lower() != "github.com"
+        or parsed.username
+        or parsed.password
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    parts = parsed.path.strip("/").split("/")
+    if len(parts) != 4 or parts[2] not in {"pull", "pulls"}:
+        return None
+    owner, repo, _pull, number = parts
+    if not re.fullmatch(r"[1-9]\d*", number):
+        return None
+    repository = f"{owner}/{repo}"
+    if repository not in ALLOWED_TARGET_REPOSITORIES:
+        return None
+    return repository
+
+
 def extract_pr_number(pr_url: str) -> int | None:
     match = re.search(r"/pulls?/(?P<number>[1-9]\d*)(?:/|$)", pr_url)
     if not match:
@@ -836,19 +989,17 @@ def _localize_pr_ready_card_payload(
 
 
 def _build_details_only_card_payload(pr_url: str, pr_number: int) -> dict[str, Any]:
-    callback_base = {"repo": REPO, "pr_number": pr_number, "pr_url": pr_url}
     return {
         "text": _build_pr_ready_operator_text(pr_number),
         "buttons": [
             {
                 "action": "details",
                 "label": TELEGRAM_PR_READY_BUTTON_LABELS["details"],
-                "callback_payload": {**callback_base, "action": "details"},
+                "url": pr_url,
             },
             {
                 "action": "open_pr",
                 "label": TELEGRAM_PR_READY_BUTTON_LABELS["open_pr"],
-                "callback_payload": {**callback_base, "action": "open_pr"},
                 "url": pr_url,
             },
         ],
@@ -863,6 +1014,11 @@ def build_done_pr_ready_card_payload(report: str) -> dict[str, Any] | None:
     pr_number = extract_pr_number(pr_url)
     if pr_number is None:
         return None
+    pr_repository = extract_pr_repository(pr_url)
+    if pr_repository is None:
+        return None
+    if pr_repository != QUEUE_REPOSITORY:
+        return _build_details_only_card_payload(pr_url, pr_number)
 
     head_sha, changed_files = extract_runner_report_pr_binding(report)
     if head_sha is None or not changed_files:
@@ -1007,6 +1163,20 @@ def changed_files(workdir: str) -> list[str]:
 
 
 def finalize_success(issue: dict[str, Any], workdir: str, codex_output: str) -> str:
+    return finalize_target_success(
+        issue,
+        workdir,
+        codex_output,
+        QUEUE_REPOSITORY,
+    )
+
+
+def finalize_target_success(
+    issue: dict[str, Any],
+    workdir: str,
+    codex_output: str,
+    target_repository: str = QUEUE_REPOSITORY,
+) -> str:
     issue_number = int(issue["number"])
     files = changed_files(workdir)
     if not files:
@@ -1063,7 +1233,7 @@ def finalize_success(issue: dict[str, Any], workdir: str, codex_output: str) -> 
         "pr",
         "create",
         "--repo",
-        REPO,
+        target_repository,
         "--base",
         "main",
         "--head",
@@ -1085,7 +1255,7 @@ def finalize_success(issue: dict[str, Any], workdir: str, codex_output: str) -> 
                 "view",
                 issue_branch(issue_number),
                 "--repo",
-                REPO,
+                target_repository,
                 "--json",
                 "url",
                 "--jq",
@@ -1613,17 +1783,6 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
         else:
             task_content = runner_task.content
 
-        if (
-            runner_task is not None
-            and runner_task.target_repository != QUEUE_REPOSITORY
-        ):
-            block_issue(
-                issue_number,
-                "Target repository routing is planning-only in this stage. "
-                f"Runner cannot execute `{runner_task.target_repository}` yet.",
-            )
-            return
-
         apply_runner_lane_label(issue_number, runner_task)
 
         if maintenance_mode:
@@ -1648,9 +1807,17 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             process_telegram_approved_pr_merge_issue(issue_number, merge_request)
             return
 
-        worktree_code, worktree_output, worktree_path = prepare_issue_branch(
-            issue_number, coordinator_workdir
+        target_repository = (
+            runner_task.target_repository if runner_task is not None else QUEUE_REPOSITORY
         )
+        if target_repository == QUEUE_REPOSITORY:
+            worktree_code, worktree_output, worktree_path = prepare_issue_branch(
+                issue_number, coordinator_workdir
+            )
+        else:
+            worktree_code, worktree_output, worktree_path = prepare_issue_branch(
+                issue_number, coordinator_workdir, target_repository
+            )
         if worktree_code != 0:
             block_issue(
                 issue_number,
@@ -1686,14 +1853,28 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             notify_task_finished(issue_number, "BLOCKED", report)
             return
 
-        report = report_runner_lane(
-            finalize_success(issue, issue_workdir, codex_output),
-            runner_task,
+        final_report = (
+            finalize_success(issue, issue_workdir, codex_output)
+            if target_repository == QUEUE_REPOSITORY
+            else finalize_target_success(
+                issue,
+                issue_workdir,
+                codex_output,
+                target_repository,
+            )
         )
+        report = report_runner_lane(final_report, runner_task)
         cleanup_runtime_artifacts(issue_workdir)
-        cleanup_code, cleanup_output = cleanup_issue_worktree(
-            issue_number, coordinator_workdir
-        )
+        if target_repository == QUEUE_REPOSITORY:
+            cleanup_code, cleanup_output = cleanup_issue_worktree(
+                issue_number, coordinator_workdir
+            )
+        else:
+            cleanup_code, cleanup_output = cleanup_issue_worktree(
+                issue_number,
+                coordinator_workdir,
+                target_repository,
+            )
         if cleanup_code != 0:
             raise RuntimeError(
                 "Issue workspace cleanup failed:\n"
