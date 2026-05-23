@@ -200,12 +200,20 @@ def test_target_repository_worktree_paths_are_deterministic(tmp_path: Path) -> N
 
         assert runner.target_repository_worktree_root("alanua/Skeleton") == skeleton_root
         assert runner.target_repository_worktree_root("alanua/bauclock") == (
-            tmp_path / "bauclock"
+            Path("/home/agent/agent-dev/worktrees/bauclock")
         )
         assert runner.target_repository_worktree_root("alanua/Lavalamp") == (
-            tmp_path / "lavalamp"
+            Path("/home/agent/agent-dev/worktrees/lavalamp")
         )
-        assert bauclock_path == tmp_path / "bauclock" / "issue-912"
+        assert runner.target_repository_checkout_path("alanua/bauclock") == (
+            Path("/home/agent/agent-dev/worktrees/bauclock/main")
+        )
+        assert runner.target_repository_checkout_path("alanua/Lavalamp") == (
+            Path("/home/agent/agent-dev/worktrees/lavalamp/main")
+        )
+        assert bauclock_path == (
+            Path("/home/agent/agent-dev/worktrees/bauclock") / "issue-912"
+        )
         assert bauclock_path == runner.target_repository_issue_worktree_path(
             "alanua/bauclock", 912
         )
@@ -224,7 +232,7 @@ def test_target_repository_worktree_path_rejects_other_repository_root(
         os.environ, {"SKELETON_WORKTREE_ROOT": str(skeleton_root)}, clear=True
     ), pytest.raises(ValueError, match="outside configured root"):
         runner.ensure_safe_target_repository_worktree_path(
-            "alanua/bauclock", skeleton_root / "issue-912"
+            "alanua/bauclock", Path("/home/agent/agent-dev/worktrees/skeleton/issue-912")
         )
 
 

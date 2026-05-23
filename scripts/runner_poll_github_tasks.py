@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from core.project_tree import get_project_by_repo, load_project_tree
 from core.telegram_approval_buttons import build_pr_ready_card_payload
 
 
@@ -30,12 +31,6 @@ LABEL_READY = "runner:ready"
 LABEL_RUNNING = "runner:running"
 LABEL_DONE = "runner:done"
 LABEL_BLOCKED = "runner:blocked"
-TARGET_REPOSITORY_WORKTREE_DIRS = {
-    QUEUE_REPOSITORY: "skeleton",
-    "alanua/bauclock": "bauclock",
-    "alanua/Lavalamp": "lavalamp",
-}
-ALLOWED_TARGET_REPOSITORIES = frozenset(TARGET_REPOSITORY_WORKTREE_DIRS)
 RUNNER_LANE_LABELS = {
     "default": "runner:lane:default",
     "lane-1": "runner:lane:lane-1",
@@ -53,6 +48,7 @@ FINAL_LABELS_BY_STATUS = {
 POLL_INTERVAL = 60
 DEFAULT_WORKDIR = Path(__file__).resolve().parents[1]
 DEFAULT_WORKTREE_ROOT = Path("/home/agent/agent-dev/worktrees/skeleton")
+PROJECT_TREE_PATH = ROOT / "PROJECT_TREE.yaml"
 MAX_COMMENT_LENGTH = 60000
 RUNTIME_ARTIFACTS = (
     "core/__pycache__",
@@ -119,6 +115,22 @@ DEFAULT_RUNNER_LANE = RunnerLane("default")
 ALLOWED_RUNNER_LANES = frozenset(RUNNER_LANE_LABELS)
 
 
+def load_runner_project_tree() -> dict[str, Any]:
+    return load_project_tree(PROJECT_TREE_PATH)
+
+
+def allowed_target_repositories() -> frozenset[str]:
+    project_tree = load_runner_project_tree()
+    return frozenset(
+        project["repo"]
+        for project in project_tree["projects"].values()
+        if project["public"] is True
+    )
+
+
+ALLOWED_TARGET_REPOSITORIES = allowed_target_repositories()
+
+
 @dataclass(frozen=True)
 class RunnerTask:
     content: str
@@ -176,15 +188,27 @@ def issue_worktree_path(issue_number: int) -> Path:
 
 
 def target_repository_worktree_root(target_repository: str) -> Path:
-    directory_name = TARGET_REPOSITORY_WORKTREE_DIRS.get(target_repository)
-    if directory_name is None:
+    try:
+        project = get_project_by_repo(load_runner_project_tree(), target_repository)
+    except KeyError as exc:
         allowed = ", ".join(f"`{repo}`" for repo in sorted(ALLOWED_TARGET_REPOSITORIES))
         raise ValueError(
             f"Target repository `{target_repository}` is not allowlisted. Use {allowed}."
-        )
+        ) from exc
     if target_repository == QUEUE_REPOSITORY:
         return worktree_root()
-    return worktree_root().parent / directory_name
+    return Path(project["worktree_root"])
+
+
+def target_repository_checkout_path(target_repository: str) -> Path:
+    try:
+        project = get_project_by_repo(load_runner_project_tree(), target_repository)
+    except KeyError as exc:
+        allowed = ", ".join(f"`{repo}`" for repo in sorted(ALLOWED_TARGET_REPOSITORIES))
+        raise ValueError(
+            f"Target repository `{target_repository}` is not allowlisted. Use {allowed}."
+        ) from exc
+    return Path(project["checkout_path"])
 
 
 def target_repository_issue_worktree_path(

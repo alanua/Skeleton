@@ -1,9 +1,11 @@
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
 import core.project_tree as project_tree
 from core.project_tree import (
+    get_project_by_repo,
     get_project,
     load_project_tree,
     plan_worktree_name,
@@ -24,7 +26,96 @@ def test_required_projects_are_present() -> None:
 
     assert tree["version"] == "1.0.0"
     assert tree["default_project"] == "skeleton"
-    assert {"skeleton", "aufmass_private", "home_automation"} <= set(tree["projects"])
+    assert {
+        "skeleton",
+        "bauclock",
+        "lavalamp",
+        "aufmass_private",
+        "home_automation",
+    } <= set(tree["projects"])
+
+
+def test_registry_has_real_runner_paths() -> None:
+    tree = loaded_tree()
+
+    assert get_project(tree, "skeleton")["checkout_path"] == (
+        "/home/agent/agent-dev/repos/Skeleton"
+    )
+    assert get_project(tree, "skeleton")["worktree_root"] == (
+        "/home/agent/agent-dev/worktrees/skeleton"
+    )
+    assert get_project(tree, "bauclock")["checkout_path"] == (
+        "/home/agent/agent-dev/worktrees/bauclock/main"
+    )
+    assert get_project(tree, "bauclock")["worktree_root"] == (
+        "/home/agent/agent-dev/worktrees/bauclock"
+    )
+    assert get_project(tree, "lavalamp")["checkout_path"] == (
+        "/home/agent/agent-dev/worktrees/lavalamp/main"
+    )
+    assert get_project(tree, "lavalamp")["worktree_root"] == (
+        "/home/agent/agent-dev/worktrees/lavalamp"
+    )
+
+
+def test_current_projects_resolve_through_registry() -> None:
+    tree = loaded_tree()
+
+    assert get_project_by_repo(tree, "alanua/Skeleton")["worktree_name_prefix"] == "skeleton"
+    assert get_project_by_repo(tree, "alanua/bauclock")["worktree_name_prefix"] == "bauclock"
+    assert get_project_by_repo(tree, "alanua/Lavalamp")["worktree_name_prefix"] == "lavalamp"
+
+
+def test_future_registry_entry_resolves_without_code_changes() -> None:
+    tree = loaded_tree()
+    tree["projects"]["future_app"] = {
+        "repo": "alanua/future-app",
+        "checkout_path": "/home/agent/agent-dev/worktrees/future-app/main",
+        "worktree_root": "/home/agent/agent-dev/worktrees/future-app",
+        "public": True,
+        "future_parallel_worktrees": True,
+        "runtime_approval_required": True,
+        "worktree_name_prefix": "future-app",
+    }
+
+    assert get_project_by_repo(tree, "alanua/future-app")["worktree_root"] == (
+        "/home/agent/agent-dev/worktrees/future-app"
+    )
+
+
+def test_registry_paths_outside_approved_workspace_are_rejected() -> None:
+    tree = loaded_tree()
+    tree["projects"]["skeleton"]["checkout_path"] = "/tmp/Skeleton"
+
+    with pytest.raises(ValueError, match="checkout_path must stay under"):
+        validate_project_tree(tree)
+
+
+def test_registry_workspace_root_override_is_supported_for_tests(tmp_path: Path) -> None:
+    tree = loaded_tree()
+    root = tmp_path / "agent-dev"
+    for project_id, project in tree["projects"].items():
+        project["checkout_path"] = str(root / "checkouts" / project_id / "main")
+        project["worktree_root"] = str(root / "worktrees" / project_id)
+
+    with mock.patch.dict(
+        "os.environ",
+        {project_tree.APPROVED_WORKSPACE_ROOT_ENV: str(root)},
+        clear=True,
+    ):
+        assert validate_project_tree(tree)["projects"]["skeleton"]["checkout_path"] == (
+            str(root / "checkouts" / "skeleton" / "main")
+        )
+
+
+def test_checkout_path_must_not_equal_worktree_root() -> None:
+    tree = loaded_tree()
+    tree["projects"]["skeleton"]["checkout_path"] = tree["projects"]["skeleton"][
+        "worktree_root"
+    ]
+
+    with pytest.raises(ValueError, match="checkout_path must not equal worktree_root"):
+        validate_project_tree(tree)
 
 
 def test_skeleton_project_allows_future_parallel_work() -> None:
