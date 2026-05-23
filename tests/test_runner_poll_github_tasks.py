@@ -37,6 +37,7 @@ CALLBACK_DIGEST = runner.hmac.new(
 
 def _merge_issue_body(
     *,
+    repo: str = runner.REPO,
     pr_number: int = 123,
     head_sha: str = HEAD_SHA,
     action: str = "squash",
@@ -45,7 +46,7 @@ def _merge_issue_body(
     return "\n".join(
         (
             f"Mode: {runner.TELEGRAM_APPROVED_PR_MERGE_MODE}",
-            f"Repository: {runner.REPO}",
+            f"Repository: {repo}",
             f"Pull Request: {pr_number}",
             f"Approved Head SHA: {head_sha}",
             f"Merge Action: {action}",
@@ -435,24 +436,82 @@ def test_process_issue_blocks_non_allowlisted_target_repository_before_claim() -
     run_codex.assert_not_called()
 
 
-def test_process_issue_does_not_execute_allowlisted_cross_repo_target_yet() -> None:
+def test_process_issue_runs_codex_in_allowlisted_target_repository_worktree(
+    tmp_path: Path,
+) -> None:
+    coordinator = tmp_path / "coordinator"
+    issue_path = tmp_path / "lavalamp" / "issue-143"
     issue = {
         "number": 143,
-        "title": "Target repository stage 1",
+        "title": "Target repository stage 2",
         "body": "Target Repository: alanua/Lavalamp\n\n```task\nDo it\n```",
     }
 
-    with mock.patch.object(runner, "block_issue") as block, mock.patch.object(
+    with mock.patch.object(
         runner, "set_issue_label"
-    ) as set_label, mock.patch.object(
-        runner, "prepare_issue_branch"
-    ) as prepare_branch, mock.patch.object(runner, "run_codex_task") as run_codex:
-        runner.process_issue(issue)
+    ), mock.patch.object(
+        runner,
+        "prepare_target_repository_issue_branch",
+        return_value=(0, "ready", issue_path),
+    ) as prepare, mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, "codex output")
+    ) as run_codex, mock.patch.object(
+        runner, "finalize_success", return_value="DONE report"
+    ) as finalize, mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "cleanup_target_repository_issue_worktree", return_value=(0, "")
+    ):
+        runner.process_issue(issue, workdir=str(coordinator))
 
-    assert "planning-only" in block.call_args.args[1]
-    set_label.assert_not_called()
-    prepare_branch.assert_not_called()
+    prepare.assert_called_once_with("alanua/Lavalamp", 143, str(coordinator))
+    run_codex.assert_called_once_with("Do it", str(issue_path))
+    finalize.assert_called_once_with(
+        issue, str(issue_path), "codex output", "alanua/Lavalamp"
+    )
+
+
+def test_target_checkout_missing_blocks_before_codex(tmp_path: Path) -> None:
+    skeleton_root = tmp_path / "skeleton"
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(skeleton_root)}, clear=True
+    ), mock.patch.object(runner, "run_codex_task") as run_codex:
+        code, output, path = runner.prepare_target_repository_issue_branch(
+            "alanua/bauclock", 143, tmp_path / "coordinator"
+        )
+
+    assert code != 0
+    assert "checkout is missing" in output
+    assert path == tmp_path / "bauclock"
     run_codex.assert_not_called()
+
+
+def test_target_checkout_wrong_remote_blocks(tmp_path: Path) -> None:
+    skeleton_root = tmp_path / "skeleton"
+    target_root = tmp_path / "bauclock"
+    target_root.mkdir()
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(skeleton_root)}, clear=True
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=((0, str(target_root)), (0, "https://github.com/alanua/Skeleton.git")),
+    ) as run_command:
+        code, output, path = runner.prepare_target_repository_issue_branch(
+            "alanua/bauclock", 143, tmp_path / "coordinator"
+        )
+
+    assert code != 0
+    assert "origin remote does not match" in output
+    assert path == target_root.resolve()
+    assert run_command.call_args_list == [
+        mock.call(["git", "rev-parse", "--show-toplevel"], cwd=target_root.resolve()),
+        mock.call(["git", "remote", "get-url", "origin"], cwd=target_root.resolve()),
+    ]
 
 
 def test_extracts_bounded_telegram_approved_merge_request() -> None:
@@ -543,6 +602,28 @@ def test_blocks_malformed_telegram_approved_merge_issue(
     run_codex.assert_not_called()
 
 
+def test_wrong_repo_telegram_approved_merge_issue_is_blocked() -> None:
+    body = _merge_issue_body(repo="alanua/bauclock")
+
+    with mock.patch.object(runner, "block_issue") as block, mock.patch.object(
+        runner, "run_codex_task"
+    ) as run_codex:
+        runner.process_issue({"number": 141, "title": "Merge", "body": body})
+
+    assert "repository must be" in block.call_args.args[1]
+    run_codex.assert_not_called()
+
+
+def test_same_pr_number_in_target_repo_cannot_approve_skeleton_merge() -> None:
+    body = _merge_issue_body(repo="alanua/Lavalamp", pr_number=123)
+
+    mode, request, reason = runner.extract_telegram_approved_pr_merge_request(body)
+
+    assert mode is True
+    assert request is None
+    assert reason == f"Telegram approved merge repository must be `{runner.REPO}`."
+
+
 def test_telegram_approved_merge_issue_bypasses_codex_and_posts_merge_report() -> None:
     issue = {"number": 141, "title": "Merge", "body": _merge_issue_body()}
     with mock.patch.object(runner, "set_issue_label") as set_label, mock.patch.object(
@@ -587,6 +668,52 @@ def test_executes_only_head_matched_squash_merge_for_approved_pr() -> None:
             HEAD_SHA,
         ]
     )
+
+
+def test_target_draft_pr_creation_uses_selected_target_repo(tmp_path: Path) -> None:
+    issue = {"number": 143, "title": "Target change"}
+    command_results = [
+        (0, ""),
+        (0, "143 passed\n"),
+        (0, ""),
+        (0, ""),
+        (0, "committed\n"),
+        (0, "pushed\n"),
+        (0, HEAD_SHA + "\n"),
+        (0, "https://github.com/alanua/bauclock/pull/123\n"),
+    ]
+    with mock.patch.object(
+        runner, "changed_files", return_value=["app/main.py"]
+    ), mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "run_command", side_effect=command_results
+    ) as run:
+        report = runner.finalize_success(
+            issue,
+            str(tmp_path),
+            "codex output",
+            "alanua/bauclock",
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert "Draft PR: https://github.com/alanua/bauclock/pull/123" in report
+    assert [
+        "gh",
+        "pr",
+        "create",
+        "--repo",
+        "alanua/bauclock",
+        "--base",
+        "main",
+        "--head",
+        "runner/issue-143",
+        "--title",
+        "Runner task #143: Target change",
+        "--body",
+        "Automated Runner task from issue #143.",
+        "--draft",
+    ] in commands
 
 
 def test_blocks_telegram_approved_merge_when_callback_digest_is_not_signed() -> None:
@@ -758,6 +885,27 @@ def test_inline_keyboard_has_pr_review_buttons_when_binding_is_reliable() -> Non
         for button in buttons
         if "callback_data" in button
     )
+
+
+@pytest.mark.parametrize(
+    "target_pr_url",
+    (
+        "https://github.com/alanua/bauclock/pull/123",
+        "https://github.com/alanua/Lavalamp/pull/123",
+    ),
+)
+def test_target_repo_pr_card_omits_approve_and_reject(target_pr_url: str) -> None:
+    report = DONE_REPORT.replace(PR_URL, target_pr_url)
+
+    card = runner.build_done_pr_ready_card_payload(report)
+    assert card is not None
+    reply_markup = runner.card_payload_to_inline_keyboard(card)
+    buttons = [row[0] for row in reply_markup["inline_keyboard"]]
+
+    assert [button["action"] for button in card["buttons"]] == ["details", "open_pr"]
+    assert [button["text"] for button in buttons] == ["Деталі", "Відкрити PR"]
+    assert [button["url"] for button in buttons] == [target_pr_url, target_pr_url]
+    assert all("callback_data" not in button for button in buttons)
 
 
 def test_callback_data_carries_action_pr_number_and_head_marker() -> None:
