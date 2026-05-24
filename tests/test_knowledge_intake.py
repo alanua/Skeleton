@@ -155,6 +155,47 @@ def test_review_queue_preserves_agent_department_and_safety_rejections() -> None
         assert phrase in text
 
 
+def test_review_queue_preserves_work_plan_control_entries() -> None:
+    text = queue_text()
+
+    for phrase in [
+        "operator_work_plan_2026-05-24",
+        "bauclock stage 1 local-only",
+        "audit_packet stage 1 after bauclock",
+        "aufmass a1+a2",
+        "temporary control/backlog reference",
+        "reconcile against live issues and prs",
+    ]:
+        assert phrase in text
+
+
+def test_review_queue_preserves_aufmass_and_sai_pipeline_entries() -> None:
+    text = queue_text()
+
+    for phrase in [
+        "system first verifies whether calculation is possible",
+        "evidence, confidence, and review queue",
+        "not an agent calculating the whole building at once",
+        "cheap executor to stronger verification to human",
+        "machine output plus human report",
+        "floors or apartments rather than the whole object at once",
+    ]:
+        assert phrase in text
+
+
+def test_review_queue_preserves_sai_rejected_items() -> None:
+    text = queue_text()
+
+    for phrase in [
+        "sai-derived rejected items",
+        "uncontrolled revit/autocad automation",
+        "agent controls everything",
+        "normative answers without verification",
+        "limit bypass or multi-account workarounds",
+    ]:
+        assert phrase in text
+
+
 def test_knowledge_intake_doc_mentions_required_controls() -> None:
     doc = (ROOT / "docs/KNOWLEDGE_INTAKE.md").read_text(encoding="utf-8").lower()
 
