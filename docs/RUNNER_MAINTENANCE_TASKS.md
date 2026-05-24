@@ -70,6 +70,34 @@ matches the registered repository. Missing target metadata, unknown projects,
 unsafe paths, missing checkouts, missing `.git`, failed origin reads, and remote
 mismatches are reported as `BLOCKED`.
 
+`ensure_project_checkout` prepares only a missing registered project checkout and
+must include target project metadata:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: ensure_project_checkout
+Target Project: skeleton
+```
+
+It may only:
+
+1. Resolve `Target Project` through `PROJECT_TREE.yaml`.
+2. Use only the registered repository and registered `checkout_path`.
+3. Verify the registered `checkout_path` has no `..` components and resolves
+   under `/home/agent/agent-dev/`.
+4. If the checkout already exists, run the same `.git` and origin checks as
+   `check_project_checkout` without preparing anything.
+5. If the checkout is missing, run only
+   `git clone https://github.com/{registered_repo}.git {registered_checkout_path}`.
+6. After preparation, verify the checkout exists, `.git` exists, and origin
+   matches the repository registered in `PROJECT_TREE.yaml`.
+
+It reports `DONE` only when the checkout exists, `.git` exists, and origin
+matches the registered repository. It reports `BLOCKED` for missing target
+metadata, unknown projects, unsafe paths, path traversal, existing checkouts
+without `.git`, wrong remotes, clone failures, failed origin reads, and remote
+mismatches after preparation.
+
 The allowlist does not permit rebooting the host, package upgrades, arbitrary
 commands or config values from issue text, or unrelated services.
 
