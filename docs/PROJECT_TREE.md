@@ -17,5 +17,8 @@ names. Project ids are bounded identifiers so path traversal values do not enter
 future worktree routing.
 
 ProjectTree does not schedule Runner work, start parallel jobs, create
-worktrees, run git, call subprocesses, or write to the filesystem. Stage 1 is
-control metadata and tests only.
+worktrees, run git, call subprocesses, or write to the filesystem. Runner uses
+the metadata to decide which projects may execute from issue worktrees:
+Skeleton runs through the normal Skeleton issue-worktree PR flow, BauClock runs
+through the local target-project issue-worktree Stage 1 route without creating
+target-repo output, and Lavalamp remains planning-only.

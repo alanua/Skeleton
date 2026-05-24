@@ -112,7 +112,7 @@ def test_all_projects_require_explicit_approval_for_mode_changes() -> None:
         assert project["requires_explicit_approval_for_mode_change"] is True
 
 
-def test_skeleton_is_the_only_codex_issue_worktree_project() -> None:
+def test_skeleton_and_bauclock_are_codex_issue_worktree_projects() -> None:
     tree = loaded_tree()
 
     codex_issue_worktree_projects = {
@@ -121,15 +121,24 @@ def test_skeleton_is_the_only_codex_issue_worktree_project() -> None:
         if project["execution_modes"]["codex_issue_worktree"] is True
     }
 
-    assert codex_issue_worktree_projects == {"skeleton"}
+    assert codex_issue_worktree_projects == {"skeleton", "bauclock"}
 
 
-def test_non_skeleton_projects_are_planning_only() -> None:
+def test_bauclock_stage_1_is_local_worktree_enabled() -> None:
+    bauclock = get_project(loaded_tree(), "bauclock")
+
+    assert bauclock["execution_modes"] == {
+        "planning_only": False,
+        "codex_issue_worktree": True,
+        "live_cross_repo": False,
+    }
+
+
+def test_lavalamp_and_private_projects_are_planning_only() -> None:
     tree = loaded_tree()
 
-    for project_id, project in tree["projects"].items():
-        if project_id != "skeleton":
-            assert project["execution_modes"]["planning_only"] is True
+    for project_id in ("lavalamp", "aufmass_private", "home_automation"):
+        assert tree["projects"][project_id]["execution_modes"]["planning_only"] is True
 
 
 def test_no_project_allows_live_cross_repo_execution() -> None:
