@@ -278,3 +278,15 @@ entries:
     recommended_action: Keep rejected unless a future operator-approved safety design explicitly supersedes a specific item.
     status: REJECTED
     canon_status: rejected_not_canon
+
+  - id: RQ-2026-05-24-024
+    source_batch: operator_work_plan_2026-05-24
+    date: '2026-05-24'
+    classification: REVIEW/TEMPORARY_CONTROL
+    target_project: skeleton
+    summary: "Temporary control/backlog reference from operator_work_plan_2026-05-24 preserves stage-order notes: bauclock stage 1 local-only, audit_packet stage 1 after bauclock, and aufmass a1+a2."
+    existing_match: Uploaded correction document only; reconcile against live issues and prs before treating any item as active work.
+    risk: Work-plan control text could be mistaken for canon, roadmap commitment, or Runner authorization if copied outside review intake.
+    recommended_action: Keep as REVIEW / TEMPORARY_CONTROL only, do not canonize the work plan, and reconcile against live issues and prs before any follow-up task.
+    status: REVIEW
+    canon_status: not_canon_until_promoted

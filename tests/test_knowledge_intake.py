@@ -233,6 +233,24 @@ def test_review_queue_preserves_agent_department_concept() -> None:
         assert phrase in text
 
 
+def test_review_queue_preserves_work_plan_control_entries() -> None:
+    entry = require_entry("operator_work_plan_2026-05-24", "temporary control/backlog reference")
+    text = entry_text(entry)
+
+    assert entry["classification"] == "REVIEW/TEMPORARY_CONTROL"
+    assert entry["status"] == "REVIEW"
+    assert entry["canon_status"] == "not_canon_until_promoted"
+    for phrase in [
+        "operator_work_plan_2026-05-24",
+        "bauclock stage 1 local-only",
+        "audit_packet stage 1 after bauclock",
+        "aufmass a1+a2",
+        "temporary control/backlog reference",
+        "reconcile against live issues and prs",
+    ]:
+        assert phrase in text
+
+
 def test_review_queue_preserves_jeeves_product_vision_and_long_term_controls() -> None:
     product = require_entry("jeeves personal assistant vision")
     home = require_entry("home automation, tv, media, and music control")
