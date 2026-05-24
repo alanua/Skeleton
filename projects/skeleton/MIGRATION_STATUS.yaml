@@ -1,0 +1,103 @@
+schema: skeleton.migration_status.v1
+project_id: skeleton
+status_entries:
+  - id: skeleton_v2_control_layer
+    category: migrated
+    summary: Skeleton v2 is framed as a human-controlled, model-neutral control layer for LLM-assisted work.
+    source_of_truth:
+      - BOOT_MANIFEST.yaml
+      - projects/skeleton/PROJECT_MANIFEST.yaml
+      - SOURCE_REGISTRY.yaml
+    state: active_public_safe
+    risk: low
+    next_action: Keep framing aligned with reviewed public-safe Skeleton source files.
+
+  - id: active_boot_route
+    category: migrated
+    summary: BOOT_MANIFEST.yaml is the active Skeleton startup entrypoint and read-order source.
+    source_of_truth:
+      - BOOT_MANIFEST.yaml
+      - tests/test_boot_manifest.py
+    state: active_public_safe
+    risk: low
+    next_action: Verify future boot route changes through existing boot tests and operator approval.
+
+  - id: project_handoff_route
+    category: migrated
+    summary: Project manifests and state files record public-safe project routing and handoff status.
+    source_of_truth:
+      - PROJECT_INDEX.yaml
+      - projects/skeleton/PROJECT_MANIFEST.yaml
+      - projects/skeleton/STATE.yaml
+    state: active_public_safe
+    risk: low
+    next_action: Keep state files as handoff records, not full canon truth.
+
+  - id: command_mode_gate_registries
+    category: migrated
+    summary: Command, mode, memory routing, source registry, capability registry, gate engine, and PatchPlan validator files are current Skeleton control sources.
+    source_of_truth:
+      - COMMANDS.yaml
+      - MODES.yaml
+      - MEMORY_ROUTING.yaml
+      - SOURCE_REGISTRY.yaml
+      - CAPABILITY_REGISTRY.yaml
+      - core/gate_engine.py
+      - core/patch_validator.py
+      - schemas/patch_plan.schema.json
+    state: active_public_safe
+    risk: medium
+    next_action: Require critique, PatchPlan, explicit operator approval, write, and verification for canon or instruction changes.
+
+  - id: historical_jeeves_material
+    category: pending_review
+    summary: Historical Jeeves and ChatGPT Exoskeleton material remains evidence until classified against Skeleton v2 boundaries.
+    source_of_truth:
+      - docs/MIGRATION_FROM_JEEVES_REPO.md
+      - SOURCE_REGISTRY.yaml
+    state: evidence_pending_review
+    risk: medium
+    next_action: Classify reviewed items as canon, archive reference, rejected, or private route before migration.
+
+  - id: future_jeeves_runtime
+    category: pending_review
+    summary: Jeeves remains a separate future assistant/runtime, not a Skeleton adapter.
+    source_of_truth:
+      - projects/jeeves/PROJECT_MANIFEST.yaml
+      - projects/jeeves/STATE.yaml
+      - SOURCE_REGISTRY.yaml
+    state: separate_future_runtime
+    risk: medium
+    next_action: Keep any Jeeves runtime planning in a separate approved route.
+
+  - id: chat_memory_as_canon
+    category: rejected
+    summary: Chat memory is not canon and cannot override durable Skeleton source files or explicit operator instructions.
+    source_of_truth:
+      - SOURCE_REGISTRY.yaml
+      - MEMORY_ROUTING.yaml
+      - docs/SKELETON_V2_MIGRATION.md
+    state: rejected
+    risk: high
+    next_action: Verify chat-derived claims against durable source files before use.
+
+  - id: jeeves_as_skeleton_adapter
+    category: rejected
+    summary: Treating Jeeves as a Skeleton adapter is rejected because Jeeves is a separate future assistant/runtime.
+    source_of_truth:
+      - projects/jeeves/PROJECT_MANIFEST.yaml
+      - projects/jeeves/STATE.yaml
+      - docs/SKELETON_V2_MIGRATION.md
+    state: rejected
+    risk: high
+    next_action: Preserve the Skeleton/Jeeves boundary in future bridge work.
+
+  - id: private_client_secrets_material
+    category: private_only
+    summary: Private, client, credential, deployment, and secrets material is not public-repo material.
+    source_of_truth:
+      - SOURCE_REGISTRY.yaml
+      - docs/SKELETON_V2_MIGRATION.md
+    state: private_route_only
+    risk: high
+    next_action: Keep private-only material in approved private storage or secret management routes.
