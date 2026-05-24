@@ -1450,6 +1450,40 @@ def _ensure_checkout_issue_body(project_id: str = "checkout_test") -> str:
     )
 
 
+def _validate_pr_issue_body(
+    *,
+    pr_number: int | str | None = 123,
+    expected_head_sha: str | None = HEAD_SHA,
+    profile: str | None = "full_pytest",
+    task_body: str = "",
+) -> str:
+    lines = [
+        "Mode: RUNTIME_MAINTENANCE_TASK",
+        f"Maintenance Task ID: {runner.VALIDATE_PR_BRANCH}",
+    ]
+    if pr_number is not None:
+        lines.append(f"Pull Request: {pr_number}")
+    if expected_head_sha is not None:
+        lines.append(f"Expected Head SHA: {expected_head_sha}")
+    if profile is not None:
+        lines.append(f"Validation Profile: {profile}")
+    if task_body:
+        lines.extend(("", "```task", task_body, "```"))
+    return "\n".join(lines)
+
+
+def _pr_validation_state(**updates: object) -> dict[str, object]:
+    state: dict[str, object] = {
+        "number": 123,
+        "state": "OPEN",
+        "baseRefName": "main",
+        "headRefName": "runner-test-branch",
+        "headRefOid": HEAD_SHA,
+    }
+    state.update(updates)
+    return state
+
+
 def _safe_checkout_path(name: str) -> Path:
     return runner.RUNNER_PROJECT_CHECKOUT_BASE / "worktrees" / name
 
@@ -1905,6 +1939,294 @@ def test_ensure_project_checkout_task_never_runs_forbidden_commands_or_codex() -
     assert all(" push" not in command for command in command_words)
     assert all("gh pr" not in command for command in command_words)
     run_codex.assert_not_called()
+
+
+def test_validate_pr_branch_missing_pr_number_blocks() -> None:
+    report = runner.validate_pr_branch(_validate_pr_issue_body(pr_number=None))
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=missing_or_invalid_pull_request" in report
+
+
+def test_validate_pr_branch_invalid_pr_number_blocks() -> None:
+    report = runner.validate_pr_branch(_validate_pr_issue_body(pr_number="abc"))
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=missing_or_invalid_pull_request" in report
+
+
+def test_validate_pr_branch_unsupported_profile_blocks() -> None:
+    report = runner.validate_pr_branch(_validate_pr_issue_body(profile="shell"))
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=unsupported_validation_profile" in report
+
+
+def test_validate_pr_branch_expected_head_sha_mismatch_blocks() -> None:
+    with mock.patch.object(
+        runner, "_get_pr_branch_validation_state", return_value=_pr_validation_state()
+    ):
+        report = runner.validate_pr_branch(
+            _validate_pr_issue_body(expected_head_sha="b" * 40)
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=expected_head_sha_mismatch" in report
+
+
+def test_validate_pr_branch_rejects_closed_or_non_main_prs() -> None:
+    with mock.patch.object(
+        runner,
+        "_get_pr_branch_validation_state",
+        return_value=_pr_validation_state(state="CLOSED"),
+    ):
+        closed_report = runner.validate_pr_branch(_validate_pr_issue_body())
+    with mock.patch.object(
+        runner,
+        "_get_pr_branch_validation_state",
+        return_value=_pr_validation_state(baseRefName="develop"),
+    ):
+        base_report = runner.validate_pr_branch(_validate_pr_issue_body())
+
+    assert closed_report.startswith("BLOCKED:")
+    assert "reason=pr_not_open" in closed_report
+    assert base_report.startswith("BLOCKED:")
+    assert "reason=pr_base_not_main" in base_report
+
+
+def test_validate_pr_branch_unsafe_validation_path_blocks(tmp_path: Path) -> None:
+    with mock.patch.object(
+        runner, "_get_pr_branch_validation_state", return_value=_pr_validation_state()
+    ), mock.patch.object(
+        runner, "_validation_worktree_path", return_value=Path("/tmp/unsafe-pr-validation")
+    ), mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(tmp_path)}, clear=True
+    ), mock.patch.object(
+        runner, "run_command"
+    ) as run:
+        report = runner.validate_pr_branch(_validate_pr_issue_body())
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=validation_worktree_path_unsafe" in report
+    run.assert_not_called()
+
+
+def test_validate_pr_branch_uses_exact_pr_head_selection(tmp_path: Path) -> None:
+    validation_path = tmp_path / "validate-pr-branch" / "pr-123"
+    exists = {validation_path: False}
+
+    def run_validation_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        if command == [
+            "gh",
+            "pr",
+            "view",
+            "123",
+            "--repo",
+            runner.REPO,
+            "--json",
+            "number,state,baseRefName,headRefName,headRefOid",
+        ]:
+            return 0, json.dumps(_pr_validation_state())
+        if command[:3] == ["git", "fetch", "origin"]:
+            return 0, ""
+        if command[:2] == ["git", "rev-parse"] and cwd == runner.ROOT:
+            return 0, f"{HEAD_SHA}\n"
+        if command[:3] == ["git", "worktree", "add"]:
+            exists[validation_path] = True
+            return 0, ""
+        if command == ["git", "rev-parse", "HEAD"] and cwd == validation_path:
+            return 0, f"{HEAD_SHA}\n"
+        if command == ["python3", "-m", "pytest", "-q"] and cwd == validation_path:
+            return 0, "99 passed\n"
+        return 2, "unexpected command"
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(tmp_path)}, clear=True
+    ), mock.patch.object(Path, "exists", autospec=True) as path_exists, mock.patch.object(
+        Path, "mkdir", autospec=True
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run_validation_command
+    ) as run:
+        path_exists.side_effect = lambda path: exists.get(path, False)
+        report = runner.validate_pr_branch(_validate_pr_issue_body())
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert f"head_sha={HEAD_SHA}" in report
+    assert [
+        "git",
+        "fetch",
+        "origin",
+        "+refs/pull/123/head:refs/remotes/origin/pr-validation/123",
+    ] in commands
+    assert [
+        "git",
+        "worktree",
+        "add",
+        "--detach",
+        str(validation_path),
+        HEAD_SHA,
+    ] in commands
+    assert ["python3", "-m", "pytest", "-q"] in commands
+
+
+def test_validate_pr_branch_knowledge_intake_profile_runs_allowlisted_tests(
+    tmp_path: Path,
+) -> None:
+    validation_path = tmp_path / "validate-pr-branch" / "pr-123"
+
+    def run_validation_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        if command[:3] == ["gh", "pr", "view"]:
+            return 0, json.dumps(_pr_validation_state())
+        if command[:3] == ["git", "fetch", "origin"]:
+            return 0, ""
+        if command[:2] == ["git", "rev-parse"] and cwd == runner.ROOT:
+            return 0, f"{HEAD_SHA}\n"
+        if command[:3] == ["git", "worktree", "add"]:
+            return 0, ""
+        if command == ["git", "rev-parse", "HEAD"] and cwd == validation_path:
+            return 0, f"{HEAD_SHA}\n"
+        if command in (
+            ["python3", "-m", "pytest", "-q", "tests/test_knowledge_intake.py"],
+            ["python3", "-m", "pytest", "-q"],
+        ) and cwd == validation_path:
+            return 0, ""
+        return 2, "unexpected command"
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(tmp_path)}, clear=True
+    ), mock.patch.object(Path, "exists", autospec=True, return_value=False), mock.patch.object(
+        Path, "mkdir", autospec=True
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run_validation_command
+    ) as run:
+        report = runner.validate_pr_branch(
+            _validate_pr_issue_body(profile="knowledge_intake")
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert commands[-2:] == [
+        ["python3", "-m", "pytest", "-q", "tests/test_knowledge_intake.py"],
+        ["python3", "-m", "pytest", "-q"],
+    ]
+
+
+def test_validate_pr_branch_issue_body_does_not_execute_arbitrary_commands(
+    tmp_path: Path,
+) -> None:
+    issue = _maintenance_issue(
+        runner.VALIDATE_PR_BRANCH,
+        "sudo env\n"
+        "git push\n"
+        "gh pr merge 123\n"
+        "codex exec unsafe\n"
+        "python3 -c 'print(1)'",
+        metadata="\n".join(
+            (
+                "Pull Request: 123",
+                f"Expected Head SHA: {HEAD_SHA}",
+                "Validation Profile: full_pytest",
+            )
+        ),
+    )
+    validation_path = tmp_path / "validate-pr-branch" / "pr-123"
+
+    def run_validation_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        if command[:3] == ["gh", "pr", "view"]:
+            return 0, json.dumps(_pr_validation_state())
+        if command[:3] == ["git", "fetch", "origin"]:
+            return 0, ""
+        if command[:2] == ["git", "rev-parse"] and cwd == runner.ROOT:
+            return 0, f"{HEAD_SHA}\n"
+        if command[:3] == ["git", "worktree", "add"]:
+            return 0, ""
+        if command == ["git", "rev-parse", "HEAD"] and cwd == validation_path:
+            return 0, f"{HEAD_SHA}\n"
+        if command == ["python3", "-m", "pytest", "-q"] and cwd == validation_path:
+            return 0, ""
+        return 2, "unexpected command"
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(tmp_path)}, clear=True
+    ), mock.patch.object(Path, "exists", autospec=True, return_value=False), mock.patch.object(
+        Path, "mkdir", autospec=True
+    ), mock.patch.object(
+        runner, "ensure_clean_worktree", return_value=(True, "")
+    ), mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run_validation_command
+    ) as run, mock.patch.object(
+        runner, "run_codex_task"
+    ) as run_codex:
+        runner.process_issue(issue, workdir=str(runner.ROOT))
+
+    command_words = [" ".join(call.args[0]) for call in run.call_args_list]
+    assert all("sudo" not in command for command in command_words)
+    assert all("env" not in command for command in command_words)
+    assert all("push" not in command for command in command_words)
+    assert all("merge" not in command for command in command_words)
+    assert all("codex" not in command for command in command_words)
+    assert all("-c" not in command for command in command_words)
+    run_codex.assert_not_called()
+
+
+def test_validate_pr_branch_removes_existing_validation_worktree_only(
+    tmp_path: Path,
+) -> None:
+    validation_path = tmp_path / "validate-pr-branch" / "pr-123"
+
+    def run_validation_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        if command[:3] == ["gh", "pr", "view"]:
+            return 0, json.dumps(_pr_validation_state())
+        if command[:4] == ["git", "worktree", "remove", "--force"]:
+            return 0, ""
+        if command[:3] == ["git", "fetch", "origin"]:
+            return 0, ""
+        if command[:2] == ["git", "rev-parse"] and cwd == runner.ROOT:
+            return 0, f"{HEAD_SHA}\n"
+        if command[:3] == ["git", "worktree", "add"]:
+            return 0, ""
+        if command == ["git", "rev-parse", "HEAD"] and cwd == validation_path:
+            return 0, f"{HEAD_SHA}\n"
+        if command == ["python3", "-m", "pytest", "-q"] and cwd == validation_path:
+            return 0, ""
+        return 2, "unexpected command"
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(tmp_path)}, clear=True
+    ), mock.patch.object(Path, "exists", autospec=True, return_value=True), mock.patch.object(
+        Path, "mkdir", autospec=True
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run_validation_command
+    ) as run:
+        report = runner.validate_pr_branch(_validate_pr_issue_body())
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert [
+        "git",
+        "worktree",
+        "remove",
+        "--force",
+        str(validation_path),
+    ] in commands
+    assert all(command[:2] != ["git", "commit"] for command in commands)
+    assert all(command[:2] != ["git", "push"] for command in commands)
+    assert all(command[:3] != ["gh", "pr", "merge"] for command in commands)
 
 
 def test_sync_task_uses_only_allowed_service_names() -> None:
