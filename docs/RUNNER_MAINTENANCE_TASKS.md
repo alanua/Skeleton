@@ -135,7 +135,10 @@ It reports `DONE` only when PR metadata, safe workspace preparation, exact head
 verification, and every profile command succeeds. Missing or invalid PR numbers,
 unsupported profiles, closed PRs, non-`main` base branches, expected head SHA
 mismatches, unsafe validation paths, fetch or checkout failures, head mismatches,
-and test failures are reported as `BLOCKED`.
+and test failures are reported as `BLOCKED`. Failed validation profile commands
+include the allowlisted command and a bounded, sanitized output block between
+`failed_output_start` and `failed_output_end`; long output is truncated with an
+explicit marker.
 
 The allowlist does not permit rebooting the host, package upgrades, arbitrary
 commands or config values from issue text, or unrelated services.

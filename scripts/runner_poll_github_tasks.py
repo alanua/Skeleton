@@ -7,6 +7,7 @@ import hmac
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -92,6 +93,10 @@ PR_BRANCH_VALIDATION_PROFILES = {
         ("python3", "-m", "pytest", "-q"),
     ),
 }
+VALIDATION_FAILED_OUTPUT_LIMIT = 4000
+VALIDATION_FAILED_OUTPUT_TRUNCATED_MARKER = (
+    "[Runner validation output truncated to 4000 characters.]"
+)
 TELEGRAM_APPROVED_PR_MERGE_MODE = "TELEGRAM_APPROVED_PR_MERGE"
 TELEGRAM_APPROVED_PR_MERGE_ACTION = "squash"
 TELEGRAM_CALLBACK_POLLER_SERVICE = "skeleton-telegram-callback-poll.service"
@@ -121,6 +126,12 @@ _BLOCKED_OUTPUT_MARKERS = (
 _BLOCKED_OUTPUT_MARKER_RES = tuple(
     re.compile(rf"(?<!\w){re.escape(marker)}(?!\w)", re.IGNORECASE)
     for marker in _BLOCKED_OUTPUT_MARKERS
+)
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_ENV_ASSIGNMENT_LINE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{1,80}=.*$")
+_SENSITIVE_OUTPUT_VALUE_RE = re.compile(
+    r"(?i)\b([A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASS|KEY|CREDENTIAL|AUTH)"
+    r"[A-Z0-9_]*)\s*=\s*([^\s]+)"
 )
 
 
@@ -1854,6 +1865,48 @@ def _pr_branch_validation_block_reason(
     return None
 
 
+def _sanitize_validation_command_output(output: str) -> str:
+    sanitized = _ANSI_ESCAPE_RE.sub("", output or "")
+    sanitized = sanitized.replace("\r\n", "\n").replace("\r", "\n")
+    sanitized = "".join(
+        character
+        if character == "\n" or character == "\t" or 32 <= ord(character) < 127
+        else "?"
+        for character in sanitized
+    )
+    safe_lines: list[str] = []
+    for line in sanitized.split("\n"):
+        if _ENV_ASSIGNMENT_LINE_RE.fullmatch(line):
+            safe_lines.append("[redacted environment variable]")
+            continue
+        safe_lines.append(
+            _SENSITIVE_OUTPUT_VALUE_RE.sub(r"\1=[redacted]", line).rstrip()
+        )
+    return "\n".join(safe_lines).strip()
+
+
+def _bounded_validation_command_output(output: str) -> str:
+    sanitized = _sanitize_validation_command_output(output)
+    if not sanitized:
+        return "(no output)"
+    if len(sanitized) <= VALIDATION_FAILED_OUTPUT_LIMIT:
+        return sanitized
+    marker = f"\n{VALIDATION_FAILED_OUTPUT_TRUNCATED_MARKER}"
+    return sanitized[: VALIDATION_FAILED_OUTPUT_LIMIT - len(marker)].rstrip() + marker
+
+
+def _validation_command_failure_lines(
+    index: int, command: tuple[str, ...], exit_code: int, output: str
+) -> list[str]:
+    return [
+        f"step=validation_profile_command_{index} status=failed exit_code={exit_code}",
+        f"failed_command={shlex.join(command)}",
+        "failed_output_start",
+        _bounded_validation_command_output(output),
+        "failed_output_end",
+    ]
+
+
 def validate_pr_branch(body: str) -> str:
     task_id = VALIDATE_PR_BRANCH
     request, reason = _pr_branch_validation_metadata(body)
@@ -1979,14 +2032,16 @@ def validate_pr_branch(body: str) -> str:
     status_lines.append("step=verify_validation_head status=done")
 
     for index, command in enumerate(PR_BRANCH_VALIDATION_PROFILES[request.profile], 1):
-        code, _output = run_command(list(command), cwd=validation_path)
+        code, output = run_command(list(command), cwd=validation_path)
         if code != 0:
             return _maintenance_report(
                 "BLOCKED",
                 task_id,
                 [
                     *status_lines,
-                    f"step=validation_profile_command_{index} status=failed exit_code={code}",
+                    *_validation_command_failure_lines(
+                        index, command, code, output
+                    ),
                 ],
                 "not_met",
             )
