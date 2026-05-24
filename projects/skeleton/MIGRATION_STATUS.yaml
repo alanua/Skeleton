@@ -18,7 +18,6 @@ status_entries:
     source_of_truth:
       - BOOT_MANIFEST.yaml
       - tests/test_boot_manifest.py
-      - tests/test_boot_loader.py
     state: active_public_safe
     risk: low
     next_action: Verify future boot route changes through existing boot tests and operator approval.
@@ -36,15 +35,16 @@ status_entries:
 
   - id: command_mode_gate_registries
     category: migrated
-    summary: Command, mode, write gate, action gate, source registry, helper registry, and capability registry files are current Skeleton control sources.
+    summary: Command, mode, memory routing, source registry, capability registry, gate engine, and PatchPlan validator files are current Skeleton control sources.
     source_of_truth:
       - COMMANDS.yaml
       - MODES.yaml
-      - WRITE_GATE.yaml
-      - ACTION_GATE.yaml
+      - MEMORY_ROUTING.yaml
       - SOURCE_REGISTRY.yaml
-      - HELPER_REGISTRY.yaml
       - CAPABILITY_REGISTRY.yaml
+      - core/gate_engine.py
+      - core/patch_validator.py
+      - schemas/patch_plan.schema.json
     state: active_public_safe
     risk: medium
     next_action: Require critique, PatchPlan, explicit operator approval, write, and verification for canon or instruction changes.
@@ -54,7 +54,6 @@ status_entries:
     summary: Historical Jeeves and ChatGPT Exoskeleton material remains evidence until classified against Skeleton v2 boundaries.
     source_of_truth:
       - docs/MIGRATION_FROM_JEEVES_REPO.md
-      - docs/JEEVES_BRIDGE.md
       - SOURCE_REGISTRY.yaml
     state: evidence_pending_review
     risk: medium
@@ -64,7 +63,8 @@ status_entries:
     category: pending_review
     summary: Jeeves remains a separate future assistant/runtime, not a Skeleton adapter.
     source_of_truth:
-      - docs/JEEVES_BRIDGE.md
+      - projects/jeeves/PROJECT_MANIFEST.yaml
+      - projects/jeeves/STATE.yaml
       - SOURCE_REGISTRY.yaml
     state: separate_future_runtime
     risk: medium
@@ -85,7 +85,8 @@ status_entries:
     category: rejected
     summary: Treating Jeeves as a Skeleton adapter is rejected because Jeeves is a separate future assistant/runtime.
     source_of_truth:
-      - docs/JEEVES_BRIDGE.md
+      - projects/jeeves/PROJECT_MANIFEST.yaml
+      - projects/jeeves/STATE.yaml
       - docs/SKELETON_V2_MIGRATION.md
     state: rejected
     risk: high
