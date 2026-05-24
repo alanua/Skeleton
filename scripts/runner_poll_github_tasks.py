@@ -72,11 +72,13 @@ RUNTIME_MAINTENANCE_MODE = "RUNTIME_MAINTENANCE_TASK"
 SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME = "sync_telegram_callback_poller_runtime"
 ENSURE_TELEGRAM_CALLBACK_LOCAL_CONFIG = "ensure_telegram_callback_local_config"
 CHECK_PROJECT_CHECKOUT = "check_project_checkout"
+ENSURE_PROJECT_CHECKOUT = "ensure_project_checkout"
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
         SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
         ENSURE_TELEGRAM_CALLBACK_LOCAL_CONFIG,
         CHECK_PROJECT_CHECKOUT,
+        ENSURE_PROJECT_CHECKOUT,
     )
 )
 RUNNER_PROJECT_CHECKOUT_BASE = Path("/home/agent/agent-dev")
@@ -166,6 +168,15 @@ class TelegramApprovedPrMergeRequest:
     approved_head_sha: str
     callback_digest: str
     action: str = TELEGRAM_APPROVED_PR_MERGE_ACTION
+
+
+@dataclass(frozen=True)
+class RegisteredProjectCheckout:
+    target_project: str
+    repo: str
+    checkout_path_text: str
+    checkout_path: Path
+    status_lines: list[str]
 
 
 def truncate_comment(body: str) -> str:
@@ -1586,12 +1597,12 @@ def _remote_url_matches_project_repo(remote_url: str, repo: str) -> bool:
     return remote_url.removesuffix(".git") in candidates
 
 
-def check_project_checkout(body: str) -> str:
-    task_id = CHECK_PROJECT_CHECKOUT
-    status_lines: list[str] = []
+def _registered_project_checkout(
+    task_id: str, body: str
+) -> tuple[RegisteredProjectCheckout | None, str | None]:
     target_project = _target_project_metadata_field(body)
     if target_project is None:
-        return _maintenance_report(
+        return None, _maintenance_report(
             "BLOCKED",
             task_id,
             ["reason=missing_target_project"],
@@ -1601,7 +1612,7 @@ def check_project_checkout(body: str) -> str:
     projects = load_runner_project_tree().get("projects")
     project = projects.get(target_project) if isinstance(projects, dict) else None
     if not isinstance(project, dict):
-        return _maintenance_report(
+        return None, _maintenance_report(
             "BLOCKED",
             task_id,
             [
@@ -1613,6 +1624,7 @@ def check_project_checkout(body: str) -> str:
 
     checkout_path_text = str(project["checkout_path"])
     checkout_path = Path(checkout_path_text)
+    status_lines: list[str] = []
     status_lines.extend(
         (
             f"target_project={target_project}",
@@ -1621,19 +1633,33 @@ def check_project_checkout(body: str) -> str:
         )
     )
     if any(part == ".." for part in checkout_path.parts):
-        return _maintenance_report(
+        return None, _maintenance_report(
             "BLOCKED",
             task_id,
             [*status_lines, "reason=checkout_path_traversal"],
             "not_met",
         )
     if not _project_checkout_path_is_under_runner_base(checkout_path):
-        return _maintenance_report(
+        return None, _maintenance_report(
             "BLOCKED",
             task_id,
             [*status_lines, "reason=checkout_path_unsafe"],
             "not_met",
         )
+    return RegisteredProjectCheckout(
+        target_project=target_project,
+        repo=str(project["repo"]),
+        checkout_path_text=checkout_path_text,
+        checkout_path=checkout_path,
+        status_lines=status_lines,
+    ), None
+
+
+def _verify_registered_project_checkout(
+    task_id: str, registered_checkout: RegisteredProjectCheckout
+) -> str:
+    checkout_path = registered_checkout.checkout_path
+    status_lines = registered_checkout.status_lines
     if not checkout_path.exists():
         return _maintenance_report(
             "BLOCKED",
@@ -1658,7 +1684,7 @@ def check_project_checkout(body: str) -> str:
             [*status_lines, "step=read_origin_remote status=failed"],
             "not_met",
         )
-    if not _remote_url_matches_project_repo(output, str(project["repo"])):
+    if not _remote_url_matches_project_repo(output, registered_checkout.repo):
         return _maintenance_report(
             "BLOCKED",
             task_id,
@@ -1678,6 +1704,55 @@ def check_project_checkout(body: str) -> str:
     )
 
 
+def check_project_checkout(body: str) -> str:
+    task_id = CHECK_PROJECT_CHECKOUT
+    registered_checkout, report = _registered_project_checkout(task_id, body)
+    if report is not None:
+        return report
+    assert registered_checkout is not None
+    return _verify_registered_project_checkout(task_id, registered_checkout)
+
+
+def ensure_project_checkout(body: str) -> str:
+    task_id = ENSURE_PROJECT_CHECKOUT
+    registered_checkout, report = _registered_project_checkout(task_id, body)
+    if report is not None:
+        return report
+    assert registered_checkout is not None
+
+    checkout_path = registered_checkout.checkout_path
+    status_lines = registered_checkout.status_lines
+    if checkout_path.exists():
+        return _verify_registered_project_checkout(task_id, registered_checkout)
+
+    try:
+        checkout_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                *status_lines,
+                "step=prepare_checkout_parent status=failed",
+                "reason=checkout_parent_prepare_failed",
+            ],
+            "not_met",
+        )
+    status_lines.append("step=prepare_checkout_parent status=done")
+
+    clone_url = f"https://github.com/{registered_checkout.repo.removesuffix('.git')}.git"
+    code, _output = run_command(["git", "clone", clone_url, str(checkout_path)])
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, f"step=prepare_checkout status=failed exit_code={code}"],
+            "not_met",
+        )
+    status_lines.append("step=prepare_checkout status=done")
+    return _verify_registered_project_checkout(task_id, registered_checkout)
+
+
 def dispatch_runtime_maintenance_task(
     task_id: str, workdir: str, body: str = ""
 ) -> str:
@@ -1693,6 +1768,8 @@ def dispatch_runtime_maintenance_task(
             return sync_telegram_callback_poller_runtime(workdir)
         if task_id == ENSURE_TELEGRAM_CALLBACK_LOCAL_CONFIG:
             return ensure_telegram_callback_local_config()
+        if task_id == ENSURE_PROJECT_CHECKOUT:
+            return ensure_project_checkout(body)
         return check_project_checkout(body)
     except Exception:
         return _maintenance_report(
