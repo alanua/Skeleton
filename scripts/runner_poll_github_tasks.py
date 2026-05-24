@@ -75,6 +75,7 @@ ENSURE_TELEGRAM_CALLBACK_LOCAL_CONFIG = "ensure_telegram_callback_local_config"
 CHECK_PROJECT_CHECKOUT = "check_project_checkout"
 ENSURE_PROJECT_CHECKOUT = "ensure_project_checkout"
 VALIDATE_PR_BRANCH = "validate_pr_branch"
+VALIDATE_CURRENT_MAIN = "validate_current_main"
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
         SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
@@ -82,6 +83,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         CHECK_PROJECT_CHECKOUT,
         ENSURE_PROJECT_CHECKOUT,
         VALIDATE_PR_BRANCH,
+        VALIDATE_CURRENT_MAIN,
     )
 )
 RUNNER_PROJECT_CHECKOUT_BASE = Path("/home/agent/agent-dev")
@@ -93,6 +95,19 @@ PR_BRANCH_VALIDATION_PROFILES = {
         ("python3", "-m", "pytest", "-q"),
     ),
 }
+CURRENT_MAIN_VALIDATION_PROFILES = {
+    "full_pytest": ("python3", "-m", "pytest", "-q"),
+    "runner_pytest": (
+        "python3",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/test_runner_poll_github_tasks.py",
+    ),
+}
+CURRENT_MAIN_REFS = frozenset(
+    ("main", "refs/heads/main", "origin/main", "refs/remotes/origin/main")
+)
 VALIDATION_FAILED_OUTPUT_LIMIT = 4000
 VALIDATION_FAILED_OUTPUT_TRUNCATED_MARKER = (
     "[Runner validation output truncated to 4000 characters.]"
@@ -205,6 +220,13 @@ class RegisteredProjectCheckout:
 class PrBranchValidationRequest:
     pr_number: int
     expected_head_sha: str | None
+    profile: str
+
+
+@dataclass(frozen=True)
+class CurrentMainValidationRequest:
+    repository: str
+    ref: str
     profile: str
 
 
@@ -1891,6 +1913,31 @@ def _pr_branch_validation_metadata(
     )
 
 
+def _current_main_validation_metadata(
+    body: str,
+) -> tuple[CurrentMainValidationRequest | None, str | None]:
+    metadata = (body or "").split("```task", 1)[0]
+    repository = (
+        _body_field(metadata, "Repository")
+        or _body_field(metadata, "Target Repository")
+        or REPO
+    )
+    ref = (
+        _body_field(metadata, "Branch/Ref")
+        or _body_field(metadata, "Ref")
+        or _body_field(metadata, "Branch")
+        or "main"
+    )
+    profile = _body_field(metadata, "Validation Profile") or "full_pytest"
+    if repository != REPO:
+        return None, "unsupported_repository"
+    if ref not in CURRENT_MAIN_REFS:
+        return None, "unsafe_or_non_main_ref"
+    if profile not in CURRENT_MAIN_VALIDATION_PROFILES:
+        return None, "unsupported_validation_profile"
+    return CurrentMainValidationRequest(repository=repository, ref=ref, profile=profile), None
+
+
 def _get_pr_branch_validation_state(pr_number: int) -> dict[str, Any]:
     code, output = run_command(
         [
@@ -2130,6 +2177,174 @@ def validate_pr_branch(body: str) -> str:
     return _maintenance_report("DONE", task_id, status_lines, "met")
 
 
+def _current_main_checkout_path(
+    task_id: str, status_lines: list[str]
+) -> tuple[Path | None, str | None]:
+    try:
+        checkout_path = target_repository_checkout_path(REPO)
+    except Exception:
+        return None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=registered_checkout_unavailable"],
+            "not_met",
+        )
+    status_lines.append(f"checkout_path={checkout_path}")
+    if any(part == ".." for part in checkout_path.parts):
+        return None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=checkout_path_traversal"],
+            "not_met",
+        )
+    if not _project_checkout_path_is_under_runner_base(checkout_path):
+        return None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=checkout_path_unsafe"],
+            "not_met",
+        )
+    if not checkout_path.exists():
+        return None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=checkout_path_missing"],
+            "not_met",
+        )
+    if not (checkout_path / ".git").exists():
+        return None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=checkout_git_missing"],
+            "not_met",
+        )
+
+    code, output = run_command(
+        ["git", "-C", str(checkout_path), "remote", "get-url", "origin"]
+    )
+    if code != 0:
+        return None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "step=read_origin_remote status=failed"],
+            "not_met",
+        )
+    status_lines.append("step=read_origin_remote status=done")
+    if not _remote_url_matches_project_repo(output, REPO):
+        return None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "step=verify_origin_remote status=failed"],
+            "not_met",
+        )
+    status_lines.append("step=verify_origin_remote status=done")
+    return checkout_path, None
+
+
+def _run_current_main_step(
+    task_id: str,
+    step: str,
+    command: list[str],
+    checkout_path: Path,
+    status_lines: list[str],
+) -> str | None:
+    code, _output = run_command(command, cwd=checkout_path)
+    if code == 0:
+        status_lines.append(f"step={step} status=done")
+        return None
+    return _maintenance_report(
+        "BLOCKED",
+        task_id,
+        [*status_lines, f"step={step} status=failed exit_code={code}"],
+        "not_met",
+    )
+
+
+def _current_main_commit_sha(checkout_path: Path, ref: str) -> tuple[str | None, bool]:
+    code, output = run_command(["git", "rev-parse", f"{ref}^{{commit}}"], cwd=checkout_path)
+    sha = output.strip().lower()
+    return sha if code == 0 and _HEAD_SHA_RE.fullmatch(sha) is not None else None, code == 0
+
+
+def validate_current_main(body: str) -> str:
+    task_id = VALIDATE_CURRENT_MAIN
+    request, reason = _current_main_validation_metadata(body)
+    if reason is not None:
+        return _maintenance_report("BLOCKED", task_id, [f"reason={reason}"], "not_met")
+    assert request is not None
+
+    command = CURRENT_MAIN_VALIDATION_PROFILES[request.profile]
+    status_lines = [
+        f"repository={request.repository}",
+        f"branch_ref={request.ref}",
+        f"validation_profile={request.profile}",
+        f"command={shlex.join(command)}",
+    ]
+    checkout_path, report = _current_main_checkout_path(task_id, status_lines)
+    if report is not None:
+        return report
+    assert checkout_path is not None
+
+    for step, git_command in (
+        ("fetch_origin_main", ["git", "fetch", "origin", "main"]),
+        ("checkout_main", ["git", "checkout", "main"]),
+        ("reset_hard_origin_main", ["git", "reset", "--hard", "origin/main"]),
+    ):
+        report = _run_current_main_step(
+            task_id, step, git_command, checkout_path, status_lines
+        )
+        if report is not None:
+            return report
+
+    local_main_sha, local_main_read = _current_main_commit_sha(checkout_path, "main")
+    origin_main_sha, origin_main_read = _current_main_commit_sha(
+        checkout_path, "origin/main"
+    )
+    head_sha, head_read = _current_main_commit_sha(checkout_path, "HEAD")
+    if not (local_main_read and origin_main_read and head_read):
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "step=read_current_main_sha status=failed"],
+            "not_met",
+        )
+    if (
+        local_main_sha is None
+        or origin_main_sha is None
+        or head_sha is None
+        or local_main_sha != origin_main_sha
+        or head_sha != origin_main_sha
+    ):
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "step=verify_current_main status=failed"],
+            "not_met",
+        )
+    status_lines.extend(
+        (
+            "step=read_current_main_sha status=done",
+            "step=verify_current_main status=done",
+            f"validated_sha={head_sha}",
+        )
+    )
+
+    code, output = run_command(list(command), cwd=checkout_path)
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                *status_lines,
+                "result=failed",
+                *_validation_command_failure_lines(1, command, code, output),
+            ],
+            "not_met",
+        )
+    status_lines.extend(("step=validation_profile_command_1 status=done", "result=passed"))
+    return _maintenance_report("DONE", task_id, status_lines, "met")
+
+
 def dispatch_runtime_maintenance_task(
     task_id: str, workdir: str, body: str = ""
 ) -> str:
@@ -2149,6 +2364,8 @@ def dispatch_runtime_maintenance_task(
             return ensure_project_checkout(body)
         if task_id == VALIDATE_PR_BRANCH:
             return validate_pr_branch(body)
+        if task_id == VALIDATE_CURRENT_MAIN:
+            return validate_current_main(body)
         return check_project_checkout(body)
     except Exception:
         return _maintenance_report(

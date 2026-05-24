@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import urllib.parse
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
@@ -1560,6 +1561,27 @@ def _validate_pr_issue_body(
     return "\n".join(lines)
 
 
+def _validate_current_main_issue_body(
+    *,
+    repository: str = runner.REPO,
+    ref: str | None = "main",
+    profile: str | None = "full_pytest",
+    task_body: str = "",
+) -> str:
+    lines = [
+        "Mode: RUNTIME_MAINTENANCE_TASK",
+        f"Maintenance Task ID: {runner.VALIDATE_CURRENT_MAIN}",
+        f"Repository: {repository}",
+    ]
+    if ref is not None:
+        lines.append(f"Branch/Ref: {ref}")
+    if profile is not None:
+        lines.append(f"Validation Profile: {profile}")
+    if task_body:
+        lines.extend(("", "```task", task_body, "```"))
+    return "\n".join(lines)
+
+
 def _pr_validation_state(**updates: object) -> dict[str, object]:
     state: dict[str, object] = {
         "number": 123,
@@ -2415,6 +2437,234 @@ def test_validate_pr_branch_removes_existing_validation_worktree_only(
     assert all(command[:2] != ["git", "commit"] for command in commands)
     assert all(command[:2] != ["git", "push"] for command in commands)
     assert all(command[:3] != ["gh", "pr", "merge"] for command in commands)
+
+
+def _mock_current_main_checkout(checkout_path: Path) -> mock._patch:
+    return mock.patch.object(
+        runner, "target_repository_checkout_path", return_value=checkout_path
+    )
+
+
+@contextmanager
+def _mock_existing_git_checkout(checkout_path: Path):
+    with mock.patch.object(Path, "exists", autospec=True) as path_exists:
+        path_exists.side_effect = lambda path: path in {
+            checkout_path,
+            checkout_path / ".git",
+        }
+        yield path_exists
+
+
+def test_validate_current_main_default_profile_uses_full_pytest(
+    tmp_path: Path,
+) -> None:
+    checkout_path = runner.RUNNER_PROJECT_CHECKOUT_BASE / "worktrees" / "skeleton-main"
+
+    def run_validation_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        if command == ["git", "-C", str(checkout_path), "remote", "get-url", "origin"]:
+            return 0, "https://github.com/alanua/Skeleton.git\n"
+        if command in (
+            ["git", "fetch", "origin", "main"],
+            ["git", "checkout", "main"],
+            ["git", "reset", "--hard", "origin/main"],
+        ) and cwd == checkout_path:
+            return 0, ""
+        if command[:2] == ["git", "rev-parse"] and cwd == checkout_path:
+            return 0, f"{HEAD_SHA}\n"
+        if command == ["python3", "-m", "pytest", "-q"] and cwd == checkout_path:
+            return 0, "514 passed, 3 skipped\n"
+        return 2, "unexpected command"
+
+    with _mock_current_main_checkout(checkout_path), _mock_existing_git_checkout(
+        checkout_path
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run_validation_command
+    ) as run:
+        report = runner.validate_current_main(
+            _validate_current_main_issue_body(profile=None)
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert f"repository={runner.REPO}" in report
+    assert "branch_ref=main" in report
+    assert f"validated_sha={HEAD_SHA}" in report
+    assert "command=python3 -m pytest -q" in report
+    assert "result=passed" in report
+    assert "success_criteria=met" in report
+    assert ["python3", "-m", "pytest", "-q"] in commands
+
+
+def test_validate_current_main_runner_profile_uses_runner_test_command(
+    tmp_path: Path,
+) -> None:
+    checkout_path = runner.RUNNER_PROJECT_CHECKOUT_BASE / "worktrees" / "skeleton-main"
+    runner_command = [
+        "python3",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/test_runner_poll_github_tasks.py",
+    ]
+
+    def run_validation_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        if command == ["git", "-C", str(checkout_path), "remote", "get-url", "origin"]:
+            return 0, "git@github.com:alanua/Skeleton.git\n"
+        if command[:2] == ["git", "rev-parse"] and cwd == checkout_path:
+            return 0, f"{HEAD_SHA}\n"
+        if command[0] == "git" and cwd == checkout_path:
+            return 0, ""
+        if command == runner_command and cwd == checkout_path:
+            return 0, "121 passed\n"
+        return 2, "unexpected command"
+
+    with _mock_current_main_checkout(checkout_path), _mock_existing_git_checkout(
+        checkout_path
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run_validation_command
+    ) as run:
+        report = runner.validate_current_main(
+            _validate_current_main_issue_body(profile="runner_pytest")
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert f"command={runner.shlex.join(runner_command)}" in report
+    assert runner_command in commands
+
+
+def test_validate_current_main_unsupported_profile_blocks() -> None:
+    with mock.patch.object(runner, "run_command") as run:
+        report = runner.validate_current_main(
+            _validate_current_main_issue_body(profile="shell")
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=unsupported_validation_profile" in report
+    run.assert_not_called()
+
+
+def test_validate_current_main_unsafe_non_main_ref_blocks() -> None:
+    with mock.patch.object(runner, "run_command") as run:
+        report = runner.validate_current_main(
+            _validate_current_main_issue_body(ref="feature/not-main")
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=unsafe_or_non_main_ref" in report
+    run.assert_not_called()
+
+
+def test_validate_current_main_rejects_other_repository() -> None:
+    report = runner.validate_current_main(
+        _validate_current_main_issue_body(repository="alanua/Other")
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=unsupported_repository" in report
+
+
+def test_validate_current_main_command_failure_reports_output_and_not_met(
+    tmp_path: Path,
+) -> None:
+    checkout_path = runner.RUNNER_PROJECT_CHECKOUT_BASE / "worktrees" / "skeleton-main"
+    pytest_output = "tests/test_runner_poll_github_tasks.py::test_x FAILED\n1 failed"
+
+    def run_validation_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        if command == ["git", "-C", str(checkout_path), "remote", "get-url", "origin"]:
+            return 0, "https://github.com/alanua/Skeleton\n"
+        if command[:2] == ["git", "rev-parse"] and cwd == checkout_path:
+            return 0, f"{HEAD_SHA}\n"
+        if command[0] == "git" and cwd == checkout_path:
+            return 0, ""
+        if command == ["python3", "-m", "pytest", "-q"] and cwd == checkout_path:
+            return 1, pytest_output
+        return 2, "unexpected command"
+
+    with _mock_current_main_checkout(checkout_path), _mock_existing_git_checkout(
+        checkout_path
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run_validation_command
+    ):
+        report = runner.validate_current_main(_validate_current_main_issue_body())
+
+    assert report.startswith("BLOCKED:")
+    assert "result=failed" in report
+    assert "step=validation_profile_command_1 status=failed exit_code=1" in report
+    assert "failed_command=python3 -m pytest -q" in report
+    assert "test_x FAILED" in report
+    assert "success_criteria=not_met" in report
+
+
+def test_validate_current_main_issue_body_does_not_execute_arbitrary_commands(
+    tmp_path: Path,
+) -> None:
+    issue = _maintenance_issue(
+        runner.VALIDATE_CURRENT_MAIN,
+        "sudo env\n"
+        "git push\n"
+        "gh pr merge 123\n"
+        "python3 -c 'print(1)'",
+        metadata="\n".join(
+            (
+                f"Repository: {runner.REPO}",
+                "Branch/Ref: main",
+                "Validation Profile: runner_pytest",
+            )
+        ),
+    )
+    checkout_path = runner.RUNNER_PROJECT_CHECKOUT_BASE / "worktrees" / "skeleton-main"
+    runner_command = [
+        "python3",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/test_runner_poll_github_tasks.py",
+    ]
+
+    def run_validation_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        if command == ["git", "-C", str(checkout_path), "remote", "get-url", "origin"]:
+            return 0, "https://github.com/alanua/Skeleton.git\n"
+        if command[:2] == ["git", "rev-parse"] and cwd == checkout_path:
+            return 0, f"{HEAD_SHA}\n"
+        if command[0] == "git" and cwd == checkout_path:
+            return 0, ""
+        if command == runner_command and cwd == checkout_path:
+            return 0, ""
+        return 2, "unexpected command"
+
+    with _mock_current_main_checkout(checkout_path), _mock_existing_git_checkout(
+        checkout_path
+    ), mock.patch.object(
+        runner, "ensure_clean_worktree", return_value=(True, "")
+    ), mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run_validation_command
+    ) as run, mock.patch.object(
+        runner, "run_codex_task"
+    ) as run_codex:
+        runner.process_issue(issue, workdir=str(runner.ROOT))
+
+    command_words = [" ".join(call.args[0]) for call in run.call_args_list]
+    assert all("sudo" not in command for command in command_words)
+    assert all("env" not in command for command in command_words)
+    assert all("push" not in command for command in command_words)
+    assert all("merge" not in command for command in command_words)
+    assert all("-c" not in command for command in command_words)
+    run_codex.assert_not_called()
 
 
 def test_sync_task_uses_only_allowed_service_names() -> None:
