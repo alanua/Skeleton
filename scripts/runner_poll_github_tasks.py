@@ -308,6 +308,23 @@ def prepare_issue_worktree(
     issue_number: int, coordinator_workdir: str | Path
 ) -> tuple[int, str, Path]:
     path = ensure_safe_worktree_path(issue_worktree_path(issue_number))
+    return prepare_git_issue_worktree(issue_number, coordinator_workdir, path)
+
+
+def prepare_target_repository_issue_worktree(
+    target_repository: str, issue_number: int
+) -> tuple[int, str, Path]:
+    path = ensure_safe_target_repository_worktree_path(
+        target_repository,
+        target_repository_issue_worktree_path(target_repository, issue_number),
+    )
+    checkout_path = target_repository_checkout_path(target_repository)
+    return prepare_git_issue_worktree(issue_number, checkout_path, path)
+
+
+def prepare_git_issue_worktree(
+    issue_number: int, coordinator_workdir: str | Path, path: Path
+) -> tuple[int, str, Path]:
     branch = issue_branch(issue_number)
     outputs: list[str] = []
 
@@ -365,13 +382,7 @@ def prepare_issue_branch(
     return prepare_issue_worktree(issue_number, coordinator_workdir)
 
 
-def cleanup_issue_worktree(
-    issue_number: int, coordinator_workdir: str | Path
-) -> tuple[int, str]:
-    try:
-        path = ensure_safe_worktree_path(issue_worktree_path(issue_number))
-    except ValueError as exc:
-        return 1, str(exc)
+def cleanup_git_issue_worktree(path: Path, coordinator_workdir: str | Path) -> tuple[int, str]:
     if not path.exists():
         return 0, ""
     cleanup_runtime_artifacts(path)
@@ -385,6 +396,29 @@ def cleanup_issue_worktree(
         if code != 0:
             return code, "\n".join(outputs)
     return 0, "\n".join(outputs)
+
+
+def cleanup_issue_worktree(
+    issue_number: int, coordinator_workdir: str | Path
+) -> tuple[int, str]:
+    try:
+        path = ensure_safe_worktree_path(issue_worktree_path(issue_number))
+    except ValueError as exc:
+        return 1, str(exc)
+    return cleanup_git_issue_worktree(path, coordinator_workdir)
+
+
+def cleanup_target_repository_issue_worktree(
+    target_repository: str, issue_number: int
+) -> tuple[int, str]:
+    try:
+        path = ensure_safe_target_repository_worktree_path(
+            target_repository,
+            target_repository_issue_worktree_path(target_repository, issue_number),
+        )
+    except ValueError as exc:
+        return 1, str(exc)
+    return cleanup_git_issue_worktree(path, target_repository_checkout_path(target_repository))
 
 
 def issue_workspace_review_note(path: str | Path) -> str:
@@ -684,10 +718,7 @@ def project_execution_block_reason(task: RunnerTask) -> str | None:
             "requires a separate PR."
         )
     if execution_modes.get("codex_issue_worktree") is True:
-        return (
-            "Target repository codex issue worktree execution is not implemented "
-            f"for `{task.target_repository}` in this task."
-        )
+        return None
     return (
         f"Target project `{task.target_project}` does not enable an executable "
         "runner mode."
@@ -1321,6 +1352,29 @@ def finalize_success(issue: dict[str, Any], workdir: str, codex_output: str) -> 
         f"Pytest output:\n```\n{pytest_output.strip()}\n```\n\n"
         f"Commit: {commit_sha}\n"
         f"Draft PR: {pr_url}"
+    )
+
+
+def finalize_local_worktree_success(
+    workdir: str, codex_output: str, runner_task: RunnerTask
+) -> str:
+    files = changed_files(workdir)
+    cleanup_runtime_artifacts(workdir)
+    file_summary = (
+        "Local worktree changed files:\n"
+        + "\n".join(f"- {file_name}" for file_name in files)
+        if files
+        else "Local worktree changed files: none"
+    )
+    return (
+        "DONE: Codex completed successfully in the local target-project "
+        "worktree.\n\n"
+        f"Selected Project: {runner_task.target_project}\n"
+        f"Selected Repository: {runner_task.target_repository}\n"
+        f"Issue worktree: `{workdir}`\n"
+        "Target-repo output: not created.\n\n"
+        f"{file_summary}\n\n"
+        f"Codex output:\n```\n{codex_output.strip()}\n```"
     )
 
 
@@ -2319,9 +2373,21 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             process_telegram_approved_pr_merge_issue(issue_number, merge_request)
             return
 
-        worktree_code, worktree_output, worktree_path = prepare_issue_branch(
-            issue_number, coordinator_workdir
+        target_repository = (
+            runner_task.target_repository if runner_task is not None else QUEUE_REPOSITORY
         )
+        local_target_worktree = target_repository != QUEUE_REPOSITORY
+        if local_target_worktree:
+            worktree_code, worktree_output, worktree_path = (
+                prepare_target_repository_issue_worktree(
+                    target_repository,
+                    issue_number,
+                )
+            )
+        else:
+            worktree_code, worktree_output, worktree_path = prepare_issue_branch(
+                issue_number, coordinator_workdir
+            )
         if worktree_code != 0:
             block_issue(
                 issue_number,
@@ -2359,14 +2425,23 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             notify_task_finished(issue_number, "BLOCKED", report)
             return
 
-        report = report_runner_lane(
-            finalize_success(issue, issue_workdir, codex_output),
-            runner_task,
-        )
+        if local_target_worktree and runner_task is not None:
+            finalized_report = finalize_local_worktree_success(
+                issue_workdir, codex_output, runner_task
+            )
+        else:
+            finalized_report = finalize_success(issue, issue_workdir, codex_output)
+        report = report_runner_lane(finalized_report, runner_task)
         cleanup_runtime_artifacts(issue_workdir)
-        cleanup_code, cleanup_output = cleanup_issue_worktree(
-            issue_number, coordinator_workdir
-        )
+        if local_target_worktree:
+            cleanup_code, cleanup_output = cleanup_target_repository_issue_worktree(
+                target_repository,
+                issue_number,
+            )
+        else:
+            cleanup_code, cleanup_output = cleanup_issue_worktree(
+                issue_number, coordinator_workdir
+            )
         if cleanup_code != 0:
             raise RuntimeError(
                 "Issue workspace cleanup failed:\n"
