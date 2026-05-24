@@ -71,9 +71,15 @@ TELEGRAM_PR_READY_BUTTON_LABELS = {
 RUNTIME_MAINTENANCE_MODE = "RUNTIME_MAINTENANCE_TASK"
 SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME = "sync_telegram_callback_poller_runtime"
 ENSURE_TELEGRAM_CALLBACK_LOCAL_CONFIG = "ensure_telegram_callback_local_config"
+CHECK_PROJECT_CHECKOUT = "check_project_checkout"
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
-    (SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME, ENSURE_TELEGRAM_CALLBACK_LOCAL_CONFIG)
+    (
+        SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
+        ENSURE_TELEGRAM_CALLBACK_LOCAL_CONFIG,
+        CHECK_PROJECT_CHECKOUT,
+    )
 )
+RUNNER_PROJECT_CHECKOUT_BASE = Path("/home/agent/agent-dev")
 TELEGRAM_APPROVED_PR_MERGE_MODE = "TELEGRAM_APPROVED_PR_MERGE"
 TELEGRAM_APPROVED_PR_MERGE_ACTION = "squash"
 TELEGRAM_CALLBACK_POLLER_SERVICE = "skeleton-telegram-callback-poll.service"
@@ -1555,7 +1561,126 @@ def ensure_telegram_callback_local_config() -> str:
     return _maintenance_report("DONE", task_id, status_lines, "met")
 
 
-def dispatch_runtime_maintenance_task(task_id: str, workdir: str) -> str:
+def _target_project_metadata_field(body: str) -> str | None:
+    metadata = (body or "").split("```task", 1)[0]
+    return _body_field(metadata, "Target Project")
+
+
+def _project_checkout_path_is_under_runner_base(checkout_path: Path) -> bool:
+    try:
+        checkout_path.resolve(strict=False).relative_to(RUNNER_PROJECT_CHECKOUT_BASE)
+    except ValueError:
+        return False
+    return True
+
+
+def _remote_url_matches_project_repo(remote_url: str, repo: str) -> bool:
+    remote_url = remote_url.strip()
+    expected = repo.strip().removesuffix(".git")
+    candidates = {
+        expected,
+        f"https://github.com/{expected}",
+        f"git@github.com:{expected}",
+        f"ssh://git@github.com/{expected}",
+    }
+    return remote_url.removesuffix(".git") in candidates
+
+
+def check_project_checkout(body: str) -> str:
+    task_id = CHECK_PROJECT_CHECKOUT
+    status_lines: list[str] = []
+    target_project = _target_project_metadata_field(body)
+    if target_project is None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            ["reason=missing_target_project"],
+            "not_met",
+        )
+
+    projects = load_runner_project_tree().get("projects")
+    project = projects.get(target_project) if isinstance(projects, dict) else None
+    if not isinstance(project, dict):
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                f"target_project={target_project}",
+                "reason=target_project_unknown",
+            ],
+            "not_met",
+        )
+
+    checkout_path_text = str(project["checkout_path"])
+    checkout_path = Path(checkout_path_text)
+    status_lines.extend(
+        (
+            f"target_project={target_project}",
+            f"target_repository={project['repo']}",
+            f"checkout_path={checkout_path_text}",
+        )
+    )
+    if any(part == ".." for part in checkout_path.parts):
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=checkout_path_traversal"],
+            "not_met",
+        )
+    if not _project_checkout_path_is_under_runner_base(checkout_path):
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=checkout_path_unsafe"],
+            "not_met",
+        )
+    if not checkout_path.exists():
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=checkout_path_missing"],
+            "not_met",
+        )
+    if not (checkout_path / ".git").exists():
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=checkout_git_missing"],
+            "not_met",
+        )
+
+    command = ["git", "-C", str(checkout_path), "remote", "get-url", "origin"]
+    code, output = run_command(command)
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "step=read_origin_remote status=failed"],
+            "not_met",
+        )
+    if not _remote_url_matches_project_repo(output, str(project["repo"])):
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "step=verify_origin_remote status=failed"],
+            "not_met",
+        )
+
+    return _maintenance_report(
+        "DONE",
+        task_id,
+        [
+            *status_lines,
+            "step=read_origin_remote status=done",
+            "step=verify_origin_remote status=done",
+        ],
+        "met",
+    )
+
+
+def dispatch_runtime_maintenance_task(
+    task_id: str, workdir: str, body: str = ""
+) -> str:
     if task_id not in RUNTIME_MAINTENANCE_TASK_IDS:
         return _maintenance_report(
             "BLOCKED",
@@ -1566,7 +1691,9 @@ def dispatch_runtime_maintenance_task(task_id: str, workdir: str) -> str:
     try:
         if task_id == SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME:
             return sync_telegram_callback_poller_runtime(workdir)
-        return ensure_telegram_callback_local_config()
+        if task_id == ENSURE_TELEGRAM_CALLBACK_LOCAL_CONFIG:
+            return ensure_telegram_callback_local_config()
+        return check_project_checkout(body)
     except Exception:
         return _maintenance_report(
             "BLOCKED",
@@ -1715,9 +1842,9 @@ def process_telegram_approved_pr_merge_issue(
 
 
 def process_runtime_maintenance_issue(
-    issue_number: int, task_id: str, workdir: str
+    issue_number: int, task_id: str, workdir: str, body: str = ""
 ) -> None:
-    report = dispatch_runtime_maintenance_task(task_id, workdir)
+    report = dispatch_runtime_maintenance_task(task_id, workdir, body)
     post_issue_comment(issue_number, report)
     if maintenance_report_is_done(report):
         set_issue_label(issue_number, LABEL_RUNNING, LABEL_DONE)
@@ -1763,21 +1890,24 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             )
             return
 
-        runner_task, task_reason = extract_runner_task(issue_body)
-        if runner_task is None:
-            if task_reason is not None:
-                block_issue(issue_number, task_reason)
-                return
-            if maintenance_mode or merge_mode:
-                task_content = ""
-            else:
-                block_issue(
-                    issue_number,
-                    "No fenced task block found. Add a fence that starts with ```task.",
-                )
-                return
+        if maintenance_mode:
+            task_content = ""
         else:
-            task_content = runner_task.content
+            runner_task, task_reason = extract_runner_task(issue_body)
+            if runner_task is None:
+                if task_reason is not None:
+                    block_issue(issue_number, task_reason)
+                    return
+                if merge_mode:
+                    task_content = ""
+                else:
+                    block_issue(
+                        issue_number,
+                        "No fenced task block found. Add a fence that starts with ```task.",
+                    )
+                    return
+            else:
+                task_content = runner_task.content
 
         if runner_task is not None:
             execution_block_reason = project_execution_block_reason(runner_task)
@@ -1806,7 +1936,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
 
         if maintenance_mode and maintenance_task_id is not None:
             process_runtime_maintenance_issue(
-                issue_number, maintenance_task_id, coordinator_workdir
+                issue_number, maintenance_task_id, coordinator_workdir, issue_body
             )
             return
         if merge_mode and merge_request is not None:

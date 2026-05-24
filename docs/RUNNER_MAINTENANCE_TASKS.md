@@ -45,6 +45,31 @@ block instead of waiting for operator input.
    missing or blank, or leave an existing nonblank setting unchanged.
 4. Verify the callback HMAC setting exists before reporting `DONE`.
 
+`check_project_checkout` is read-only and must include target project metadata:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: check_project_checkout
+Target Project: skeleton
+```
+
+It may only:
+
+1. Resolve `Target Project` through `PROJECT_TREE.yaml`.
+2. Verify the registered `checkout_path` has no `..` components and resolves
+   under `/home/agent/agent-dev/`.
+3. Check whether the checkout path exists.
+4. Check whether `checkout_path/.git` exists.
+5. If the checkout exists, run only
+   `git -C {checkout_path} remote get-url origin`.
+6. Compare that origin URL with the repository registered in
+   `PROJECT_TREE.yaml`.
+
+It reports `DONE` only when the checkout exists, `.git` exists, and origin
+matches the registered repository. Missing target metadata, unknown projects,
+unsafe paths, missing checkouts, missing `.git`, failed origin reads, and remote
+mismatches are reported as `BLOCKED`.
+
 The allowlist does not permit rebooting the host, package upgrades, arbitrary
 commands or config values from issue text, or unrelated services.
 

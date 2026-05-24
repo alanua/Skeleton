@@ -1207,10 +1207,14 @@ def test_pr_card_build_does_not_execute_merge_or_reject_side_effects() -> None:
     send.assert_called_once()
 
 
-def _maintenance_issue(task_id: str | None, task_body: str = "") -> dict[str, object]:
+def _maintenance_issue(
+    task_id: str | None, task_body: str = "", metadata: str = ""
+) -> dict[str, object]:
     lines = ["Mode: RUNTIME_MAINTENANCE_TASK"]
     if task_id is not None:
         lines.append(f"Maintenance Task ID: {task_id}")
+    if metadata:
+        lines.extend(metadata.splitlines())
     if task_body:
         lines.extend(("", "```task", task_body, "```"))
     return {"number": 145, "title": "Runner maintenance", "body": "\n".join(lines)}
@@ -1411,6 +1415,161 @@ def test_local_callback_config_task_reports_blocked_on_verification_failure() ->
     assert report.startswith("BLOCKED:")
     assert "step=verify_callback_hmac_secret status=failed exit_code=1" in report
     assert "local config value" not in report
+
+
+def _project_tree_for_checkout(project_id: str, checkout_path: Path) -> dict[str, object]:
+    project_tree = _project_tree_with(
+        project_id,
+        repo="alanua/CheckoutTest",
+        runner_enabled=True,
+        planning_only=False,
+        codex_issue_worktree=True,
+        live_cross_repo=False,
+    )
+    project_tree["projects"][project_id]["checkout_path"] = str(checkout_path)
+    return project_tree
+
+
+def _checkout_issue_body(project_id: str = "checkout_test") -> str:
+    return "\n".join(
+        (
+            "Mode: RUNTIME_MAINTENANCE_TASK",
+            f"Maintenance Task ID: {runner.CHECK_PROJECT_CHECKOUT}",
+            f"Target Project: {project_id}",
+        )
+    )
+
+
+def test_check_project_checkout_missing_target_project_blocks() -> None:
+    report = runner.check_project_checkout(
+        "Mode: RUNTIME_MAINTENANCE_TASK\n"
+        f"Maintenance Task ID: {runner.CHECK_PROJECT_CHECKOUT}"
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=missing_target_project" in report
+
+
+def test_check_project_checkout_unknown_target_project_blocks() -> None:
+    report = runner.check_project_checkout(_checkout_issue_body("unknown"))
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=target_project_unknown" in report
+
+
+def test_check_project_checkout_unsafe_path_blocks() -> None:
+    project_tree = _project_tree_for_checkout(
+        "checkout_test", Path("/tmp/checkout-test")
+    )
+    with mock.patch.object(runner, "load_runner_project_tree", return_value=project_tree):
+        report = runner.check_project_checkout(_checkout_issue_body())
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=checkout_path_unsafe" in report
+
+
+def test_check_project_checkout_path_traversal_blocks() -> None:
+    project_tree = _project_tree_for_checkout(
+        "checkout_test", Path("/home/agent/agent-dev/../checkout-test")
+    )
+    with mock.patch.object(runner, "load_runner_project_tree", return_value=project_tree):
+        report = runner.check_project_checkout(_checkout_issue_body())
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=checkout_path_traversal" in report
+
+
+def test_check_project_checkout_missing_checkout_path_blocks() -> None:
+    checkout_path = Path.cwd() / "missing-checkout-for-maintenance-test"
+    project_tree = _project_tree_for_checkout("checkout_test", checkout_path)
+    with mock.patch.object(runner, "load_runner_project_tree", return_value=project_tree):
+        report = runner.check_project_checkout(_checkout_issue_body())
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=checkout_path_missing" in report
+
+
+def test_check_project_checkout_missing_git_blocks_under_runner_base() -> None:
+    checkout_path = Path.cwd() / "checkout-without-git"
+    project_tree = _project_tree_for_checkout("checkout_test", checkout_path)
+    exists = {checkout_path: True, checkout_path / ".git": False}
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(Path, "exists", autospec=True) as path_exists:
+        path_exists.side_effect = lambda path: exists.get(path, False)
+        report = runner.check_project_checkout(_checkout_issue_body())
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=checkout_git_missing" in report
+
+
+def test_check_project_checkout_wrong_remote_blocks() -> None:
+    checkout_path = Path.cwd()
+    project_tree = _project_tree_for_checkout("checkout_test", checkout_path)
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(
+        runner, "run_command", return_value=(0, "https://github.com/alanua/Wrong.git\n")
+    ):
+        report = runner.check_project_checkout(_checkout_issue_body())
+
+    assert report.startswith("BLOCKED:")
+    assert "step=verify_origin_remote status=failed" in report
+
+
+def test_check_project_checkout_matching_remote_reports_done() -> None:
+    checkout_path = Path.cwd()
+    project_tree = _project_tree_for_checkout("checkout_test", checkout_path)
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        return_value=(0, "git@github.com:alanua/CheckoutTest.git\n"),
+    ) as run:
+        report = runner.check_project_checkout(_checkout_issue_body())
+
+    assert report.startswith("DONE:")
+    assert "success_criteria=met" in report
+    run.assert_called_once_with(
+        ["git", "-C", str(checkout_path), "remote", "get-url", "origin"]
+    )
+
+
+def test_check_project_checkout_task_never_runs_mutating_git_or_gh_pr() -> None:
+    issue = _maintenance_issue(
+        runner.CHECK_PROJECT_CHECKOUT,
+        "git clone bad\n"
+        "git pull\n"
+        "git fetch\n"
+        "git push\n"
+        "gh pr create\n"
+        "sudo chmod 777 /tmp/nope",
+        metadata="Target Project: checkout_test",
+    )
+    checkout_path = Path.cwd()
+    project_tree = _project_tree_for_checkout("checkout_test", checkout_path)
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(
+        runner, "ensure_clean_worktree", return_value=(True, "")
+    ), mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        return_value=(0, "https://github.com/alanua/CheckoutTest.git\n"),
+    ) as run:
+        runner.process_issue(issue, workdir=str(runner.ROOT))
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert commands == [
+        ["git", "-C", str(checkout_path), "remote", "get-url", "origin"]
+    ]
 
 
 def test_sync_task_uses_only_allowed_service_names() -> None:
