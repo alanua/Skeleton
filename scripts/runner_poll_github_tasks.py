@@ -615,6 +615,40 @@ def extract_runner_task(body: str) -> tuple[RunnerTask | None, str | None]:
     ), None
 
 
+def project_execution_block_reason(task: RunnerTask) -> str | None:
+    project = get_project(load_runner_project_tree(), task.target_project)
+    execution_modes = project.get("execution_modes") or {}
+
+    if project.get("runner_enabled") is not True:
+        return f"Runner is disabled for target project `{task.target_project}`."
+    if execution_modes.get("planning_only") is True:
+        return (
+            f"Target project `{task.target_project}` is planning-only. "
+            "Runner will not execute Codex for this project."
+        )
+    if task.target_repository == QUEUE_REPOSITORY:
+        if execution_modes.get("codex_issue_worktree") is True:
+            return None
+        return (
+            f"Target project `{task.target_project}` does not enable "
+            "codex issue worktree execution."
+        )
+    if execution_modes.get("live_cross_repo") is True:
+        return (
+            "Live cross-repo execution is blocked in this runner stage and "
+            "requires a separate PR."
+        )
+    if execution_modes.get("codex_issue_worktree") is True:
+        return (
+            "Target repository codex issue worktree execution is not implemented "
+            f"for `{task.target_repository}` in this task."
+        )
+    return (
+        f"Target project `{task.target_project}` does not enable an executable "
+        "runner mode."
+    )
+
+
 def extract_runtime_maintenance_task_id(body: str) -> tuple[bool, str | None]:
     mode_found = re.search(
         rf"^\s*Mode:\s*{RUNTIME_MAINTENANCE_MODE}\s*$",
@@ -1745,17 +1779,15 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
         else:
             task_content = runner_task.content
 
-        if (
-            runner_task is not None
-            and runner_task.target_repository != QUEUE_REPOSITORY
-        ):
-            block_issue(
-                issue_number,
-                "Target repository routing is planning-only in this stage. "
-                f"Runner cannot execute `{runner_task.target_repository}` yet.",
-                runner_task=runner_task,
-            )
-            return
+        if runner_task is not None:
+            execution_block_reason = project_execution_block_reason(runner_task)
+            if execution_block_reason is not None:
+                block_issue(
+                    issue_number,
+                    execution_block_reason,
+                    runner_task=runner_task,
+                )
+                return
 
         apply_runner_lane_label(issue_number, runner_task)
 

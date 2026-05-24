@@ -107,6 +107,36 @@ def _plain_done_message(issue_number: int = 129) -> str:
     return runner.build_telegram_message(issue_number, "DONE", DONE_REPORT)
 
 
+def _project_tree_with(
+    project_id: str,
+    *,
+    repo: str,
+    runner_enabled: bool,
+    planning_only: bool,
+    codex_issue_worktree: bool,
+    live_cross_repo: bool,
+) -> dict[str, object]:
+    project_tree = json.loads(json.dumps(runner.load_runner_project_tree()))
+    project_tree["projects"][project_id] = {
+        "repo": repo,
+        "checkout_path": f"/home/agent/agent-dev/worktrees/{project_id}/main",
+        "worktree_root": f"/home/agent/agent-dev/worktrees/{project_id}",
+        "public": True,
+        "runner_enabled": runner_enabled,
+        "execution_modes": {
+            "planning_only": planning_only,
+            "codex_issue_worktree": codex_issue_worktree,
+            "live_cross_repo": live_cross_repo,
+        },
+        "requires_explicit_approval_for_mode_change": True,
+        "future_parallel_worktrees": False,
+        "runtime_approval_required": True,
+        "worktree_name_prefix": project_id.replace("_", "-"),
+        "description": "Test project.",
+    }
+    return project_tree
+
+
 def test_blocked_output_classifier_detects_runner_blockers() -> None:
     cases = {
         "BLOCKED": "BLOCKED",
@@ -641,6 +671,97 @@ def test_process_issue_does_not_execute_allowlisted_cross_repo_target_yet() -> N
         runner.process_issue(issue)
 
     assert "planning-only" in block.call_args.args[1]
+    set_label.assert_not_called()
+    prepare_branch.assert_not_called()
+    run_codex.assert_not_called()
+
+
+def test_process_issue_blocks_runner_disabled_project_before_codex() -> None:
+    issue = {
+        "number": 149,
+        "title": "Disabled target project",
+        "body": "Target Project: disabled_public\n\n```task\nDo it\n```",
+    }
+    project_tree = _project_tree_with(
+        "disabled_public",
+        repo="alanua/Disabled",
+        runner_enabled=False,
+        planning_only=False,
+        codex_issue_worktree=True,
+        live_cross_repo=False,
+    )
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(runner, "block_issue") as block, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(
+        runner, "prepare_issue_branch"
+    ) as prepare_branch, mock.patch.object(runner, "run_codex_task") as run_codex:
+        runner.process_issue(issue)
+
+    assert "Runner is disabled" in block.call_args.args[1]
+    set_label.assert_not_called()
+    prepare_branch.assert_not_called()
+    run_codex.assert_not_called()
+
+
+def test_process_issue_blocks_non_skeleton_codex_worktree_mode_before_codex() -> None:
+    issue = {
+        "number": 150,
+        "title": "Non-skeleton codex worktree",
+        "body": "Target Project: codex_other\n\n```task\nDo it\n```",
+    }
+    project_tree = _project_tree_with(
+        "codex_other",
+        repo="alanua/CodexOther",
+        runner_enabled=True,
+        planning_only=False,
+        codex_issue_worktree=True,
+        live_cross_repo=False,
+    )
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(runner, "block_issue") as block, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(
+        runner, "prepare_issue_branch"
+    ) as prepare_branch, mock.patch.object(runner, "run_codex_task") as run_codex:
+        runner.process_issue(issue)
+
+    assert "not implemented" in block.call_args.args[1]
+    assert "alanua/CodexOther" in block.call_args.args[1]
+    set_label.assert_not_called()
+    prepare_branch.assert_not_called()
+    run_codex.assert_not_called()
+
+
+def test_process_issue_blocks_live_cross_repo_mode_before_codex() -> None:
+    issue = {
+        "number": 151,
+        "title": "Live cross repo",
+        "body": "Target Project: live_other\n\n```task\nDo it\n```",
+    }
+    project_tree = _project_tree_with(
+        "live_other",
+        repo="alanua/LiveOther",
+        runner_enabled=True,
+        planning_only=False,
+        codex_issue_worktree=False,
+        live_cross_repo=True,
+    )
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(runner, "block_issue") as block, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(
+        runner, "prepare_issue_branch"
+    ) as prepare_branch, mock.patch.object(runner, "run_codex_task") as run_codex:
+        runner.process_issue(issue)
+
+    assert "requires a separate PR" in block.call_args.args[1]
     set_label.assert_not_called()
     prepare_branch.assert_not_called()
     run_codex.assert_not_called()
