@@ -16,6 +16,13 @@ metadata, reading one project entry, and planning deterministic future worktree
 names. Project ids are bounded identifiers so path traversal values do not enter
 future worktree routing.
 
-ProjectTree does not schedule Runner work, start parallel jobs, create
-worktrees, run git, call subprocesses, or write to the filesystem. Stage 1 is
-control metadata and tests only.
+ProjectTree does not schedule Runner work, start parallel jobs, run git, call
+subprocesses, or write to the filesystem. Stage 1 is control metadata and tests
+only.
+
+Stage 1 enables local Codex issue worktree execution for `skeleton` and
+`bauclock`. BauClock remains a local-worktree-only route:
+`planning_only=false`, `codex_issue_worktree=true`, and
+`live_cross_repo=false`. Because live cross-repo execution is disabled, Runner
+must not push BauClock branches, create BauClock pull requests, deploy, or use
+secrets for BauClock tasks.

@@ -293,10 +293,13 @@ def format_command_output(command: list[str], output: str) -> str:
     return f"$ {' '.join(command)}\n{output}"
 
 
-def prepare_issue_worktree(
-    issue_number: int, coordinator_workdir: str | Path
+def prepare_target_repository_issue_worktree(
+    issue_number: int, target_repository: str, coordinator_workdir: str | Path
 ) -> tuple[int, str, Path]:
-    path = ensure_safe_worktree_path(issue_worktree_path(issue_number))
+    path = ensure_safe_target_repository_worktree_path(
+        target_repository,
+        target_repository_issue_worktree_path(target_repository, issue_number),
+    )
     branch = issue_branch(issue_number)
     outputs: list[str] = []
 
@@ -348,10 +351,26 @@ def prepare_issue_worktree(
     return 0, "\n".join(outputs), path
 
 
-def prepare_issue_branch(
+def prepare_issue_worktree(
     issue_number: int, coordinator_workdir: str | Path
 ) -> tuple[int, str, Path]:
-    return prepare_issue_worktree(issue_number, coordinator_workdir)
+    return prepare_target_repository_issue_worktree(
+        issue_number, QUEUE_REPOSITORY, coordinator_workdir
+    )
+
+
+def prepare_issue_branch(
+    issue_number: int,
+    coordinator_workdir: str | Path,
+    target_repository: str = QUEUE_REPOSITORY,
+) -> tuple[int, str, Path]:
+    if target_repository == QUEUE_REPOSITORY:
+        return prepare_issue_worktree(issue_number, coordinator_workdir)
+    return prepare_target_repository_issue_worktree(
+        issue_number,
+        target_repository,
+        target_repository_checkout_path(target_repository),
+    )
 
 
 def cleanup_issue_worktree(
@@ -673,10 +692,7 @@ def project_execution_block_reason(task: RunnerTask) -> str | None:
             "requires a separate PR."
         )
     if execution_modes.get("codex_issue_worktree") is True:
-        return (
-            "Target repository codex issue worktree execution is not implemented "
-            f"for `{task.target_repository}` in this task."
-        )
+        return None
     return (
         f"Target project `{task.target_project}` does not enable an executable "
         "runner mode."
@@ -1206,7 +1222,12 @@ def changed_files(workdir: str) -> list[str]:
     return sorted(files)
 
 
-def finalize_success(issue: dict[str, Any], workdir: str, codex_output: str) -> str:
+def finalize_success(
+    issue: dict[str, Any],
+    workdir: str,
+    codex_output: str,
+    task: RunnerTask | None = None,
+) -> str:
     issue_number = int(issue["number"])
     files = changed_files(workdir)
     if not files:
@@ -1230,6 +1251,21 @@ def finalize_success(issue: dict[str, Any], workdir: str, codex_output: str) -> 
 
     cleanup_runtime_artifacts(workdir)
     files = changed_files(workdir)
+    pytest_output = next(
+        output for command, output in checks if command == "python3 -m pytest -q"
+    )
+
+    if task is not None and task.target_repository != QUEUE_REPOSITORY:
+        return (
+            "DONE: Codex completed successfully in local target worktree and "
+            "produced file changes.\n\n"
+            "Changed files:\n"
+            + "\n".join(f"- {file_name}" for file_name in files)
+            + "\n\n"
+            f"Pytest output:\n```\n{pytest_output.strip()}\n```\n\n"
+            f"Local worktree: {workdir}\n"
+            "Target repository push/PR skipped because live_cross_repo=false."
+        )
 
     for command in (
         ["git", "add", *files],
@@ -1299,9 +1335,6 @@ def finalize_success(issue: dict[str, Any], workdir: str, codex_output: str) -> 
             )
         pr_url = view_output.strip()
 
-    pytest_output = next(
-        output for command, output in checks if command == "python3 -m pytest -q"
-    )
     return (
         "DONE: Codex completed successfully and produced file changes.\n\n"
         "Changed files:\n"
@@ -2264,8 +2297,13 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             process_telegram_approved_pr_merge_issue(issue_number, merge_request)
             return
 
+        target_repository = (
+            runner_task.target_repository
+            if runner_task is not None
+            else QUEUE_REPOSITORY
+        )
         worktree_code, worktree_output, worktree_path = prepare_issue_branch(
-            issue_number, coordinator_workdir
+            issue_number, coordinator_workdir, target_repository
         )
         if worktree_code != 0:
             block_issue(
@@ -2305,18 +2343,19 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             return
 
         report = report_runner_lane(
-            finalize_success(issue, issue_workdir, codex_output),
+            finalize_success(issue, issue_workdir, codex_output, runner_task),
             runner_task,
         )
         cleanup_runtime_artifacts(issue_workdir)
-        cleanup_code, cleanup_output = cleanup_issue_worktree(
-            issue_number, coordinator_workdir
-        )
-        if cleanup_code != 0:
-            raise RuntimeError(
-                "Issue workspace cleanup failed:\n"
-                f"{cleanup_output.strip() or f'exit code {cleanup_code}'}"
+        if target_repository == QUEUE_REPOSITORY:
+            cleanup_code, cleanup_output = cleanup_issue_worktree(
+                issue_number, coordinator_workdir
             )
+            if cleanup_code != 0:
+                raise RuntimeError(
+                    "Issue workspace cleanup failed:\n"
+                    f"{cleanup_output.strip() or f'exit code {cleanup_code}'}"
+                )
         status = runner_report_status(report)
         if status == "BLOCKED":
             report = blocked_final_report(report)

@@ -198,6 +198,18 @@ def test_runner_report_status_allows_no_change_done_without_draft_pr() -> None:
     assert runner.runner_report_status(report) == "DONE"
 
 
+def test_runner_report_status_allows_local_target_worktree_done_without_pr() -> None:
+    report = (
+        "DONE: Codex completed successfully in local target worktree and "
+        "produced file changes.\n\n"
+        "Changed files:\n- app.py\n\n"
+        "Local worktree: /home/agent/agent-dev/worktrees/bauclock/issue-146\n"
+        "Target repository push/PR skipped because live_cross_repo=false."
+    )
+
+    assert runner.runner_report_status(report) == "DONE"
+
+
 def test_worktree_path_uses_env_root_when_set(tmp_path: Path) -> None:
     configured_root = tmp_path / "runner-worktrees"
     with mock.patch.dict(
@@ -375,7 +387,9 @@ def test_process_issue_runs_codex_in_prepared_issue_worktree(tmp_path: Path) -> 
     run_codex.assert_called_once_with(
         "Do it", str(issue_path), runner.RunnerTask(content="Do it")
     )
-    finalize.assert_called_once_with(issue, str(issue_path), "codex output")
+    finalize.assert_called_once_with(
+        issue, str(issue_path), "codex output", runner.RunnerTask(content="Do it")
+    )
 
 
 def test_poll_once_processes_issues_single_lane() -> None:
@@ -561,30 +575,51 @@ def test_process_issue_blocks_mismatched_target_project_and_repository_before_cl
     run_codex.assert_not_called()
 
 
-def test_process_issue_blocks_target_project_bauclock_planning_only_before_codex() -> None:
+def test_process_issue_runs_target_project_bauclock_in_local_worktree(
+    tmp_path: Path,
+) -> None:
+    coordinator = tmp_path / "repo"
+    issue_path = tmp_path / "bauclock" / "issue-146"
+    coordinator.mkdir()
     issue = {
         "number": 146,
         "title": "Target project bauclock",
         "body": "Target Project: bauclock\n\n```task\nDo it\n```",
     }
 
-    with mock.patch.object(runner, "block_issue") as block, mock.patch.object(
-        runner, "set_issue_label"
-    ) as set_label, mock.patch.object(
-        runner, "prepare_issue_branch"
-    ) as prepare_branch, mock.patch.object(runner, "run_codex_task") as run_codex:
-        runner.process_issue(issue)
-
-    assert "planning-only" in block.call_args.args[1]
-    assert block.call_args.kwargs["runner_task"] == runner.RunnerTask(
+    expected_task = runner.RunnerTask(
         content="Do it",
         target_project="bauclock",
         has_target_project_metadata=True,
         target_repository="alanua/bauclock",
     )
-    set_label.assert_not_called()
-    prepare_branch.assert_not_called()
-    run_codex.assert_not_called()
+
+    with mock.patch.object(
+        runner, "prepare_issue_branch", return_value=(0, "", issue_path)
+    ) as prepare, mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, "codex output")
+    ) as run_codex, mock.patch.object(
+        runner, "finalize_success", return_value="DONE report"
+    ) as finalize, mock.patch.object(
+        runner, "post_issue_comment"
+    ) as comment, mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "cleanup_issue_worktree"
+    ) as cleanup:
+        runner.process_issue(issue, workdir=str(coordinator))
+
+    prepare.assert_called_once_with(146, str(coordinator), "alanua/bauclock")
+    run_codex.assert_called_once_with("Do it", str(issue_path), expected_task)
+    finalize.assert_called_once_with(
+        issue, str(issue_path), "codex output", expected_task
+    )
+    cleanup.assert_not_called()
+    assert comment.call_args.args[1] == "DONE report\nTarget Project: bauclock"
 
 
 def test_process_issue_blocks_target_project_lavalamp_planning_only_before_codex() -> None:
@@ -642,7 +677,7 @@ def test_process_issue_runs_target_project_skeleton_normally(tmp_path: Path) -> 
     ):
         runner.process_issue(issue, workdir=str(coordinator))
 
-    prepare.assert_called_once_with(148, str(coordinator))
+    prepare.assert_called_once_with(148, str(coordinator), "alanua/Skeleton")
     run_codex.assert_called_once_with(
         "Do it",
         str(issue_path),
@@ -654,6 +689,33 @@ def test_process_issue_runs_target_project_skeleton_normally(tmp_path: Path) -> 
         ),
     )
     assert comment.call_args.args[1] == "DONE report\nTarget Project: skeleton"
+
+
+def test_finalize_success_skips_target_repo_push_and_pr_when_live_cross_repo_false(
+    tmp_path: Path,
+) -> None:
+    issue = {"number": 146, "title": "Target project bauclock"}
+    task = runner.RunnerTask(
+        content="Do it",
+        target_project="bauclock",
+        target_repository="alanua/bauclock",
+    )
+
+    with mock.patch.object(
+        runner, "changed_files", side_effect=(["app.py"], ["app.py"])
+    ), mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "run_command", return_value=(0, "ok")
+    ) as run_command:
+        report = runner.finalize_success(issue, str(tmp_path), "codex output", task)
+
+    assert "Target repository push/PR skipped because live_cross_repo=false." in report
+    commands = [call.args[0] for call in run_command.call_args_list]
+    assert commands == [
+        ["git", "diff", "--check"],
+        ["python3", "-m", "pytest", "-q"],
+    ]
 
 
 def test_process_issue_does_not_execute_allowlisted_cross_repo_target_yet() -> None:
@@ -706,12 +768,13 @@ def test_process_issue_blocks_runner_disabled_project_before_codex() -> None:
     run_codex.assert_not_called()
 
 
-def test_process_issue_blocks_non_skeleton_codex_worktree_mode_before_codex() -> None:
+def test_process_issue_allows_project_tree_codex_worktree_mode(tmp_path: Path) -> None:
     issue = {
         "number": 150,
         "title": "Non-skeleton codex worktree",
         "body": "Target Project: codex_other\n\n```task\nDo it\n```",
     }
+    issue_path = tmp_path / "codex-other" / "issue-150"
     project_tree = _project_tree_with(
         "codex_other",
         repo="alanua/CodexOther",
@@ -721,20 +784,40 @@ def test_process_issue_blocks_non_skeleton_codex_worktree_mode_before_codex() ->
         live_cross_repo=False,
     )
 
+    expected_task = runner.RunnerTask(
+        content="Do it",
+        target_project="codex_other",
+        has_target_project_metadata=True,
+        target_repository="alanua/CodexOther",
+    )
+
     with mock.patch.object(
         runner, "load_runner_project_tree", return_value=project_tree
-    ), mock.patch.object(runner, "block_issue") as block, mock.patch.object(
+    ), mock.patch.object(
+        runner, "prepare_issue_branch", return_value=(0, "", issue_path)
+    ) as prepare, mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, "codex output")
+    ) as run_codex, mock.patch.object(
+        runner, "finalize_success", return_value="DONE report"
+    ) as finalize, mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
         runner, "set_issue_label"
-    ) as set_label, mock.patch.object(
-        runner, "prepare_issue_branch"
-    ) as prepare_branch, mock.patch.object(runner, "run_codex_task") as run_codex:
-        runner.process_issue(issue)
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "cleanup_issue_worktree"
+    ) as cleanup:
+        runner.process_issue(issue, workdir=str(tmp_path))
 
-    assert "not implemented" in block.call_args.args[1]
-    assert "alanua/CodexOther" in block.call_args.args[1]
-    set_label.assert_not_called()
-    prepare_branch.assert_not_called()
-    run_codex.assert_not_called()
+    prepare.assert_called_once_with(150, str(tmp_path), "alanua/CodexOther")
+    run_codex.assert_called_once_with("Do it", str(issue_path), expected_task)
+    finalize.assert_called_once_with(
+        issue, str(issue_path), "codex output", expected_task
+    )
+    cleanup.assert_not_called()
 
 
 def test_process_issue_blocks_live_cross_repo_mode_before_codex() -> None:
