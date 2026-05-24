@@ -73,15 +73,25 @@ SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME = "sync_telegram_callback_poller_runtime"
 ENSURE_TELEGRAM_CALLBACK_LOCAL_CONFIG = "ensure_telegram_callback_local_config"
 CHECK_PROJECT_CHECKOUT = "check_project_checkout"
 ENSURE_PROJECT_CHECKOUT = "ensure_project_checkout"
+VALIDATE_PR_BRANCH = "validate_pr_branch"
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
         SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
         ENSURE_TELEGRAM_CALLBACK_LOCAL_CONFIG,
         CHECK_PROJECT_CHECKOUT,
         ENSURE_PROJECT_CHECKOUT,
+        VALIDATE_PR_BRANCH,
     )
 )
 RUNNER_PROJECT_CHECKOUT_BASE = Path("/home/agent/agent-dev")
+PR_BRANCH_VALIDATION_WORKTREE_DIR = "validate-pr-branch"
+PR_BRANCH_VALIDATION_PROFILES = {
+    "full_pytest": (("python3", "-m", "pytest", "-q"),),
+    "knowledge_intake": (
+        ("python3", "-m", "pytest", "-q", "tests/test_knowledge_intake.py"),
+        ("python3", "-m", "pytest", "-q"),
+    ),
+}
 TELEGRAM_APPROVED_PR_MERGE_MODE = "TELEGRAM_APPROVED_PR_MERGE"
 TELEGRAM_APPROVED_PR_MERGE_ACTION = "squash"
 TELEGRAM_CALLBACK_POLLER_SERVICE = "skeleton-telegram-callback-poll.service"
@@ -177,6 +187,13 @@ class RegisteredProjectCheckout:
     checkout_path_text: str
     checkout_path: Path
     status_lines: list[str]
+
+
+@dataclass(frozen=True)
+class PrBranchValidationRequest:
+    pr_number: int
+    expected_head_sha: str | None
+    profile: str
 
 
 def truncate_comment(body: str) -> str:
@@ -1753,6 +1770,231 @@ def ensure_project_checkout(body: str) -> str:
     return _verify_registered_project_checkout(task_id, registered_checkout)
 
 
+def _pr_branch_validation_metadata(
+    body: str,
+) -> tuple[PrBranchValidationRequest | None, str | None]:
+    metadata = (body or "").split("```task", 1)[0]
+    pr_number = _body_field(metadata, "Pull Request")
+    expected_head_sha = _body_field(metadata, "Expected Head SHA")
+    profile = _body_field(metadata, "Validation Profile") or "full_pytest"
+    if not isinstance(pr_number, str) or not re.fullmatch(r"[1-9]\d*", pr_number):
+        return None, "missing_or_invalid_pull_request"
+    if (
+        expected_head_sha is not None
+        and _HEAD_SHA_RE.fullmatch(expected_head_sha) is None
+    ):
+        return None, "invalid_expected_head_sha"
+    if profile not in PR_BRANCH_VALIDATION_PROFILES:
+        return None, "unsupported_validation_profile"
+    return (
+        PrBranchValidationRequest(
+            pr_number=int(pr_number),
+            expected_head_sha=(
+                expected_head_sha.lower()
+                if isinstance(expected_head_sha, str)
+                else None
+            ),
+            profile=profile,
+        ),
+        None,
+    )
+
+
+def _get_pr_branch_validation_state(pr_number: int) -> dict[str, Any]:
+    code, output = run_command(
+        [
+            "gh",
+            "pr",
+            "view",
+            str(pr_number),
+            "--repo",
+            REPO,
+            "--json",
+            "number,state,baseRefName,headRefName,headRefOid",
+        ]
+    )
+    if code != 0:
+        raise RuntimeError("gh pr view failed")
+    parsed = json.loads(output or "{}")
+    if not isinstance(parsed, dict):
+        raise RuntimeError("gh pr view returned non-object JSON")
+    return parsed
+
+
+def _validation_worktree_path(pr_number: int) -> Path:
+    return worktree_root() / PR_BRANCH_VALIDATION_WORKTREE_DIR / f"pr-{pr_number}"
+
+
+def _ensure_safe_validation_worktree_path(path: str | Path) -> Path:
+    root = worktree_root().resolve(strict=False)
+    candidate = Path(path).expanduser().resolve(strict=False)
+    if candidate == root:
+        raise ValueError("validation worktree cannot be the worktree root")
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("validation worktree is outside runner worktree root") from exc
+    return candidate
+
+
+def _pr_branch_validation_block_reason(
+    request: PrBranchValidationRequest, pr_state: dict[str, Any]
+) -> str | None:
+    if pr_state.get("number") != request.pr_number:
+        return "pr_number_mismatch"
+    if str(pr_state.get("state") or "").upper() != "OPEN":
+        return "pr_not_open"
+    if pr_state.get("baseRefName") != "main":
+        return "pr_base_not_main"
+    head_sha = str(pr_state.get("headRefOid") or "").lower()
+    if _HEAD_SHA_RE.fullmatch(head_sha) is None:
+        return "pr_head_sha_invalid"
+    if request.expected_head_sha is not None and head_sha != request.expected_head_sha:
+        return "expected_head_sha_mismatch"
+    return None
+
+
+def validate_pr_branch(body: str) -> str:
+    task_id = VALIDATE_PR_BRANCH
+    request, reason = _pr_branch_validation_metadata(body)
+    if reason is not None:
+        return _maintenance_report("BLOCKED", task_id, [f"reason={reason}"], "not_met")
+    assert request is not None
+
+    status_lines = [
+        f"repository={REPO}",
+        f"pull_request={request.pr_number}",
+        f"validation_profile={request.profile}",
+    ]
+    try:
+        pr_state = _get_pr_branch_validation_state(request.pr_number)
+    except Exception:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "step=read_pr_metadata status=failed"],
+            "not_met",
+        )
+    status_lines.append("step=read_pr_metadata status=done")
+
+    block_reason = _pr_branch_validation_block_reason(request, pr_state)
+    if block_reason is not None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, f"reason={block_reason}"],
+            "not_met",
+        )
+
+    head_sha = str(pr_state["headRefOid"]).lower()
+    status_lines.append(f"head_sha={head_sha}")
+    try:
+        validation_path = _ensure_safe_validation_worktree_path(
+            _validation_worktree_path(request.pr_number)
+        )
+    except ValueError:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=validation_worktree_path_unsafe"],
+            "not_met",
+        )
+
+    try:
+        validation_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "step=prepare_validation_parent status=failed"],
+            "not_met",
+        )
+    status_lines.append("step=prepare_validation_parent status=done")
+
+    if validation_path.exists():
+        code, _output = run_command(
+            ["git", "worktree", "remove", "--force", str(validation_path)], cwd=ROOT
+        )
+        if code != 0:
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [
+                    *status_lines,
+                    (
+                        "step=remove_validation_worktree status=failed "
+                        f"exit_code={code}"
+                    ),
+                ],
+                "not_met",
+            )
+        status_lines.append("step=remove_validation_worktree status=done")
+
+    pr_ref = f"refs/remotes/origin/pr-validation/{request.pr_number}"
+    fetch_refspec = f"+refs/pull/{request.pr_number}/head:{pr_ref}"
+    code, _output = run_command(["git", "fetch", "origin", fetch_refspec], cwd=ROOT)
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, f"step=fetch_pr_head status=failed exit_code={code}"],
+            "not_met",
+        )
+    status_lines.append("step=fetch_pr_head status=done")
+
+    code, output = run_command(["git", "rev-parse", f"{pr_ref}^{{commit}}"], cwd=ROOT)
+    if code != 0 or output.strip().lower() != head_sha:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "step=verify_fetched_head status=failed"],
+            "not_met",
+        )
+    status_lines.append("step=verify_fetched_head status=done")
+
+    code, _output = run_command(
+        ["git", "worktree", "add", "--detach", str(validation_path), head_sha],
+        cwd=ROOT,
+    )
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                *status_lines,
+                f"step=checkout_validation_head status=failed exit_code={code}",
+            ],
+            "not_met",
+        )
+    status_lines.append("step=checkout_validation_head status=done")
+
+    code, output = run_command(["git", "rev-parse", "HEAD"], cwd=validation_path)
+    if code != 0 or output.strip().lower() != head_sha:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "step=verify_validation_head status=failed"],
+            "not_met",
+        )
+    status_lines.append("step=verify_validation_head status=done")
+
+    for index, command in enumerate(PR_BRANCH_VALIDATION_PROFILES[request.profile], 1):
+        code, _output = run_command(list(command), cwd=validation_path)
+        if code != 0:
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [
+                    *status_lines,
+                    f"step=validation_profile_command_{index} status=failed exit_code={code}",
+                ],
+                "not_met",
+            )
+        status_lines.append(f"step=validation_profile_command_{index} status=done")
+
+    return _maintenance_report("DONE", task_id, status_lines, "met")
+
+
 def dispatch_runtime_maintenance_task(
     task_id: str, workdir: str, body: str = ""
 ) -> str:
@@ -1770,6 +2012,8 @@ def dispatch_runtime_maintenance_task(
             return ensure_telegram_callback_local_config()
         if task_id == ENSURE_PROJECT_CHECKOUT:
             return ensure_project_checkout(body)
+        if task_id == VALIDATE_PR_BRANCH:
+            return validate_pr_branch(body)
         return check_project_checkout(body)
     except Exception:
         return _maintenance_report(
