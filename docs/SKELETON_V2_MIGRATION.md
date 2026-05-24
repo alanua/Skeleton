@@ -34,10 +34,12 @@ Current public-safe source-of-truth files include:
 - Project state files such as `projects/skeleton/STATE.yaml`, treated as
   handoff state and not full canon truth.
 - Command and mode files: `COMMANDS.yaml` and `MODES.yaml`.
-- Gate files and schemas, including `ACTION_GATE.yaml`, `WRITE_GATE.yaml`, and
-  PatchPlan validation files.
-- Capability and source registries: `CAPABILITY_REGISTRY.yaml`,
-  `HELPER_REGISTRY.yaml`, and `SOURCE_REGISTRY.yaml`.
+- Memory, source, and capability registries: `MEMORY_ROUTING.yaml`,
+  `SOURCE_REGISTRY.yaml`, and `CAPABILITY_REGISTRY.yaml`.
+- Gate and validation implementation files: `core/gate_engine.py`,
+  `core/patch_validator.py`, and `schemas/patch_plan.schema.json`.
+- Adapter contract files under `adapters/`, including the Codex, Runner, and
+  Gemini contracts.
 
 Canon or instruction changes require critique, a PatchPlan, explicit operator
 approval, the approved write, and verification. A chat assertion alone cannot
@@ -52,10 +54,9 @@ The Skeleton project route has been migrated into
 `projects/skeleton/PROJECT_MANIFEST.yaml` and
 `projects/skeleton/STATE.yaml`.
 
-Command, mode, memory routing, source registry, capability registry, helper
-registry, project index, write gate, action gate, adapter contract, boot loader,
-and project loader materials have been migrated as public-safe Skeleton control
-layer material.
+Command, mode, memory routing, source registry, capability registry, project
+index, adapter contracts, gate engine, PatchPlan validation, and project-loader
+materials have been migrated as public-safe Skeleton control layer material.
 
 ## Pending Review
 
