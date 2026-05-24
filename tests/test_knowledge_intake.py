@@ -166,7 +166,9 @@ def test_review_queue_preserves_work_plan_control_entries() -> None:
         "only",
         "audit_packet",
         "after",
-        "aufmass a1+a2",
+        "aufmass",
+        "a1",
+        "a2",
         "temporary control/backlog reference",
         "reconcile against live issues and prs",
     ]:
