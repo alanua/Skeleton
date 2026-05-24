@@ -86,6 +86,53 @@ def _merge_pr_state(**updates: object) -> dict[str, object]:
     return state
 
 
+def _inspect_pr_issue_body(
+    *,
+    pr_number: int | str | None = 123,
+    expected_head_sha: str | None = HEAD_SHA,
+    repository: str = runner.REPO,
+) -> str:
+    lines = [
+        f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+        f"Maintenance Task ID: {runner.INSPECT_PR_MERGEABILITY}",
+        f"Repository: {repository}",
+    ]
+    if pr_number is not None:
+        lines.append(f"Pull Request: {pr_number}")
+    if expected_head_sha is not None:
+        lines.append(f"Expected Head SHA: {expected_head_sha}")
+    return "\n".join(lines)
+
+
+def _inspect_pr_state(**updates: object) -> dict[str, object]:
+    pr: dict[str, object] = {
+        "number": 123,
+        "state": "open",
+        "draft": False,
+        "mergeable": True,
+        "mergeable_state": "clean",
+        "base": {
+            "ref": "main",
+            "sha": "b" * 40,
+            "repo": {"full_name": runner.REPO},
+        },
+        "head": {"ref": "runner/issue-123", "sha": HEAD_SHA},
+    }
+    pr.update(updates.pop("pr", {}))
+    state: dict[str, object] = {
+        "pr": pr,
+        "files": [{"filename": "scripts/runner_poll_github_tasks.py"}],
+        "compare": {"status": "ahead", "ahead_by": 1, "behind_by": 0},
+        "combined_status": {
+            "state": "success",
+            "statuses": [{"context": "pytest", "state": "success"}],
+        },
+        "check_runs": [],
+    }
+    state.update(updates)
+    return state
+
+
 def _telegram_response() -> mock.MagicMock:
     response = mock.MagicMock()
     response.__enter__.return_value = response
@@ -2367,6 +2414,203 @@ def test_validate_pr_branch_issue_body_does_not_execute_arbitrary_commands(
     assert all("merge" not in command for command in command_words)
     assert all("codex" not in command for command in command_words)
     assert all("-c" not in command for command in command_words)
+    run_codex.assert_not_called()
+
+
+def test_inspect_pr_mergeability_missing_pr_number_blocks() -> None:
+    report = runner.inspect_pr_mergeability(_inspect_pr_issue_body(pr_number=None))
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=missing_or_invalid_pull_request" in report
+
+
+def test_inspect_pr_mergeability_unsupported_repository_blocks() -> None:
+    report = runner.inspect_pr_mergeability(
+        _inspect_pr_issue_body(repository="alanua/Other")
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=unsupported_repository" in report
+
+
+def test_inspect_pr_mergeability_expected_head_sha_mismatch_blocks() -> None:
+    with mock.patch.object(
+        runner, "_get_pr_mergeability_state", return_value=_inspect_pr_state()
+    ):
+        report = runner.inspect_pr_mergeability(
+            _inspect_pr_issue_body(expected_head_sha="b" * 40)
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "head_sha=" + HEAD_SHA in report
+    assert "reason=expected_head_sha_mismatch" in report
+    assert "next_action=refresh_inspection_request" in report
+
+
+def test_inspect_pr_mergeability_closed_pr_reports_obsolete() -> None:
+    with mock.patch.object(
+        runner,
+        "_get_pr_mergeability_state",
+        return_value=_inspect_pr_state(pr={"state": "closed"}),
+    ):
+        report = runner.inspect_pr_mergeability(_inspect_pr_issue_body())
+
+    assert report.startswith("BLOCKED:")
+    assert "pr_state=closed" in report
+    assert "reason=pr_not_open" in report
+    assert "next_action=obsolete_close_or_reopen_request" in report
+
+
+def test_inspect_pr_mergeability_draft_pr_reports_draft_next_action() -> None:
+    with mock.patch.object(
+        runner,
+        "_get_pr_mergeability_state",
+        return_value=_inspect_pr_state(pr={"draft": True}),
+    ):
+        report = runner.inspect_pr_mergeability(_inspect_pr_issue_body())
+
+    assert report.startswith("BLOCKED:")
+    assert "draft=true" in report
+    assert "reason=pr_is_draft" in report
+    assert "next_action=mark_pr_ready_for_review" in report
+
+
+def test_inspect_pr_mergeability_validation_missing_reports_next_action() -> None:
+    with mock.patch.object(
+        runner,
+        "_get_pr_mergeability_state",
+        return_value=_inspect_pr_state(
+            combined_status={"state": "pending", "statuses": []},
+            check_runs=[],
+        ),
+    ):
+        report = runner.inspect_pr_mergeability(_inspect_pr_issue_body())
+
+    assert report.startswith("BLOCKED:")
+    assert "validation_state=missing" in report
+    assert "reason=validation_missing" in report
+    assert "next_action=run_required_validation" in report
+
+
+def test_inspect_pr_mergeability_open_mergeable_pr_reports_ready_next_action() -> None:
+    with mock.patch.object(
+        runner, "_get_pr_mergeability_state", return_value=_inspect_pr_state()
+    ):
+        report = runner.inspect_pr_mergeability(_inspect_pr_issue_body())
+
+    assert report.startswith("DONE:")
+    assert f"repository={runner.REPO}" in report
+    assert "pr_state=open" in report
+    assert "draft=false" in report
+    assert "base_branch=main" in report
+    assert f"head_sha={HEAD_SHA}" in report
+    assert "mergeable=true" in report
+    assert "changed_files=scripts/runner_poll_github_tasks.py" in report
+    assert "ahead_by=1" in report
+    assert "behind_by=0" in report
+    assert "next_action=mark_ready_or_merge" in report
+
+
+def test_inspect_pr_mergeability_diverged_pr_reports_refresh_next_action() -> None:
+    with mock.patch.object(
+        runner,
+        "_get_pr_mergeability_state",
+        return_value=_inspect_pr_state(
+            compare={"status": "diverged", "ahead_by": 2, "behind_by": 1}
+        ),
+    ):
+        report = runner.inspect_pr_mergeability(_inspect_pr_issue_body())
+
+    assert report.startswith("BLOCKED:")
+    assert "compare_status=diverged" in report
+    assert "reason=branch_behind_or_diverged" in report
+    assert "next_action=refresh_pr_branch" in report
+
+
+def test_inspect_pr_mergeability_non_mergeable_pr_reports_conflict_next_action() -> None:
+    with mock.patch.object(
+        runner,
+        "_get_pr_mergeability_state",
+        return_value=_inspect_pr_state(
+            pr={"mergeable": False, "mergeable_state": "dirty"}
+        ),
+    ):
+        report = runner.inspect_pr_mergeability(_inspect_pr_issue_body())
+
+    assert report.startswith("BLOCKED:")
+    assert "mergeable=false" in report
+    assert "reason=pr_has_merge_conflicts" in report
+    assert "next_action=resolve_merge_conflicts" in report
+
+
+def test_inspect_pr_mergeability_uses_github_api_only() -> None:
+    payloads = {
+        f"https://api.github.com/repos/{runner.REPO}/pulls/123": _inspect_pr_state()[
+            "pr"
+        ],
+        (
+            f"https://api.github.com/repos/{runner.REPO}/pulls/123/files"
+            "?per_page=100&page=1"
+        ): _inspect_pr_state()["files"],
+        (
+            f"https://api.github.com/repos/{runner.REPO}/compare/"
+            f"{'b' * 40}...{HEAD_SHA}"
+        ): _inspect_pr_state()["compare"],
+        f"https://api.github.com/repos/{runner.REPO}/commits/{HEAD_SHA}/status": _inspect_pr_state()[
+            "combined_status"
+        ],
+        (
+            f"https://api.github.com/repos/{runner.REPO}/commits/{HEAD_SHA}/check-runs"
+            "?per_page=100&page=1"
+        ): {"check_runs": []},
+    }
+
+    def urlopen(request: object, timeout: int = 0) -> mock.MagicMock:
+        del timeout
+        assert isinstance(request, runner.urllib.request.Request)
+        return _json_response(payloads[request.full_url])
+
+    with mock.patch.object(runner.urllib.request, "urlopen", side_effect=urlopen), mock.patch.object(
+        runner, "run_command"
+    ) as run:
+        report = runner.inspect_pr_mergeability(_inspect_pr_issue_body())
+
+    assert report.startswith("DONE:")
+    run.assert_not_called()
+
+
+def test_inspect_pr_mergeability_issue_body_does_not_execute_arbitrary_commands() -> None:
+    issue = _maintenance_issue(
+        runner.INSPECT_PR_MERGEABILITY,
+        "sudo env\n"
+        "git push\n"
+        "gh pr merge 123\n"
+        "codex exec unsafe\n"
+        "python3 -c 'print(1)'",
+        metadata="\n".join(
+            (
+                f"Repository: {runner.REPO}",
+                "Pull Request: 123",
+                f"Expected Head SHA: {HEAD_SHA}",
+            )
+        ),
+    )
+    with mock.patch.object(
+        runner, "ensure_clean_worktree", return_value=(True, "")
+    ), mock.patch.object(runner, "set_issue_label"), mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "_get_pr_mergeability_state", return_value=_inspect_pr_state()
+    ), mock.patch.object(
+        runner, "run_command"
+    ) as run, mock.patch.object(
+        runner, "run_codex_task"
+    ) as run_codex:
+        runner.process_issue(issue, workdir=str(runner.ROOT))
+
+    run.assert_not_called()
     run_codex.assert_not_called()
 
 

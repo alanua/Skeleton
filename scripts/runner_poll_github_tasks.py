@@ -75,6 +75,7 @@ ENSURE_TELEGRAM_CALLBACK_LOCAL_CONFIG = "ensure_telegram_callback_local_config"
 CHECK_PROJECT_CHECKOUT = "check_project_checkout"
 ENSURE_PROJECT_CHECKOUT = "ensure_project_checkout"
 VALIDATE_PR_BRANCH = "validate_pr_branch"
+INSPECT_PR_MERGEABILITY = "inspect_pr_mergeability"
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
         SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
@@ -82,6 +83,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         CHECK_PROJECT_CHECKOUT,
         ENSURE_PROJECT_CHECKOUT,
         VALIDATE_PR_BRANCH,
+        INSPECT_PR_MERGEABILITY,
     )
 )
 RUNNER_PROJECT_CHECKOUT_BASE = Path("/home/agent/agent-dev")
@@ -206,6 +208,12 @@ class PrBranchValidationRequest:
     pr_number: int
     expected_head_sha: str | None
     profile: str
+
+
+@dataclass(frozen=True)
+class PrMergeabilityInspectionRequest:
+    pr_number: int
+    expected_head_sha: str | None
 
 
 def truncate_comment(body: str) -> str:
@@ -2130,6 +2138,256 @@ def validate_pr_branch(body: str) -> str:
     return _maintenance_report("DONE", task_id, status_lines, "met")
 
 
+def _pr_mergeability_inspection_metadata(
+    body: str,
+) -> tuple[PrMergeabilityInspectionRequest | None, str | None]:
+    metadata = (body or "").split("```task", 1)[0]
+    repository = _body_field(metadata, "Repository")
+    pr_number = _body_field(metadata, "Pull Request")
+    expected_head_sha = _body_field(metadata, "Expected Head SHA")
+    if repository is not None and repository != REPO:
+        return None, "unsupported_repository"
+    if not isinstance(pr_number, str) or not re.fullmatch(r"[1-9]\d*", pr_number):
+        return None, "missing_or_invalid_pull_request"
+    if (
+        expected_head_sha is not None
+        and _HEAD_SHA_RE.fullmatch(expected_head_sha) is None
+    ):
+        return None, "invalid_expected_head_sha"
+    return (
+        PrMergeabilityInspectionRequest(
+            pr_number=int(pr_number),
+            expected_head_sha=(
+                expected_head_sha.lower()
+                if isinstance(expected_head_sha, str)
+                else None
+            ),
+        ),
+        None,
+    )
+
+
+def _github_api_json(path: str, query: dict[str, str] | None = None) -> object:
+    url = f"https://api.github.com{path}"
+    if query:
+        url = f"{url}?{urllib.parse.urlencode(query)}"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "skeleton-runner-maintenance",
+    }
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return json.loads(response.read().decode("utf-8") or "null")
+
+
+def _github_api_list(path: str, key: str | None = None) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    page = 1
+    while True:
+        payload = _github_api_json(
+            path, {"per_page": "100", "page": str(page)}
+        )
+        page_items = payload.get(key) if key and isinstance(payload, dict) else payload
+        if not isinstance(page_items, list):
+            raise RuntimeError("GitHub API list response was malformed")
+        items.extend(item for item in page_items if isinstance(item, dict))
+        if len(page_items) < 100:
+            return items
+        page += 1
+
+
+def _get_pr_mergeability_state(pr_number: int) -> dict[str, Any]:
+    pr_path = f"/repos/{REPO}/pulls/{pr_number}"
+    pr = _github_api_json(pr_path)
+    if not isinstance(pr, dict):
+        raise RuntimeError("GitHub PR response was malformed")
+
+    files = _github_api_list(f"{pr_path}/files")
+    head_sha = str((pr.get("head") or {}).get("sha") or "")
+    base_sha = str((pr.get("base") or {}).get("sha") or "")
+
+    compare: dict[str, Any] = {}
+    if _HEAD_SHA_RE.fullmatch(base_sha) and _HEAD_SHA_RE.fullmatch(head_sha):
+        compare_payload = _github_api_json(
+            f"/repos/{REPO}/compare/{base_sha}...{head_sha}"
+        )
+        if isinstance(compare_payload, dict):
+            compare = compare_payload
+
+    combined_status: dict[str, Any] = {}
+    check_runs: list[dict[str, Any]] = []
+    if _HEAD_SHA_RE.fullmatch(head_sha):
+        status_payload = _github_api_json(f"/repos/{REPO}/commits/{head_sha}/status")
+        if isinstance(status_payload, dict):
+            combined_status = status_payload
+        check_runs = _github_api_list(
+            f"/repos/{REPO}/commits/{head_sha}/check-runs", key="check_runs"
+        )
+
+    return {
+        "pr": pr,
+        "files": files,
+        "compare": compare,
+        "combined_status": combined_status,
+        "check_runs": check_runs,
+    }
+
+
+def _github_bool_value(value: object) -> str:
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if value is None:
+        return "null"
+    return str(value)
+
+
+def _validation_summary(
+    combined_status: dict[str, Any], check_runs: list[dict[str, Any]]
+) -> tuple[str, str]:
+    statuses = combined_status.get("statuses")
+    status_items = statuses if isinstance(statuses, list) else []
+    status_state = str(combined_status.get("state") or "").lower()
+    if not status_items and not check_runs:
+        return "missing", "validation_missing"
+
+    check_states = {
+        str(check.get("status") or "").lower() for check in check_runs
+    }
+    check_conclusions = {
+        str(check.get("conclusion") or "").lower()
+        for check in check_runs
+        if check.get("conclusion") is not None
+    }
+    checks_success = not check_runs or (
+        check_states <= {"completed"}
+        and check_conclusions <= {"success", "neutral", "skipped"}
+    )
+    statuses_success = not status_items or status_state == "success"
+    if statuses_success and checks_success:
+        return "success", "none"
+    return "not_success", "validation_not_success"
+
+
+def _pr_mergeability_next_action(
+    pr: dict[str, Any],
+    compare: dict[str, Any],
+    validation_state: str,
+    request: PrMergeabilityInspectionRequest,
+) -> tuple[str, str, str]:
+    state = str(pr.get("state") or "").upper()
+    head_sha = str((pr.get("head") or {}).get("sha") or "").lower()
+    mergeable = pr.get("mergeable")
+    mergeable_state = str(pr.get("mergeable_state") or "").lower()
+    behind_by = compare.get("behind_by")
+    compare_status = str(compare.get("status") or "").lower()
+
+    if state != "OPEN":
+        return "BLOCKED", "pr_not_open", "obsolete_close_or_reopen_request"
+    if request.expected_head_sha is not None and head_sha != request.expected_head_sha:
+        return "BLOCKED", "expected_head_sha_mismatch", "refresh_inspection_request"
+    if pr.get("draft") is True:
+        return "BLOCKED", "pr_is_draft", "mark_pr_ready_for_review"
+    if (
+        isinstance(behind_by, int)
+        and behind_by > 0
+        or compare_status in {"behind", "diverged"}
+        or mergeable_state == "behind"
+    ):
+        return "BLOCKED", "branch_behind_or_diverged", "refresh_pr_branch"
+    if mergeable is False or mergeable_state in {"dirty", "blocked"}:
+        return "BLOCKED", "pr_has_merge_conflicts", "resolve_merge_conflicts"
+    if validation_state == "missing":
+        return "BLOCKED", "validation_missing", "run_required_validation"
+    if validation_state != "success":
+        return "BLOCKED", "validation_not_success", "wait_for_or_fix_validation"
+    if mergeable is True:
+        return "DONE", "none", "mark_ready_or_merge"
+    return "BLOCKED", "mergeability_unknown", "refresh_mergeability_inspection"
+
+
+def inspect_pr_mergeability(body: str) -> str:
+    task_id = INSPECT_PR_MERGEABILITY
+    request, reason = _pr_mergeability_inspection_metadata(body)
+    if reason is not None:
+        return _maintenance_report("BLOCKED", task_id, [f"reason={reason}"], "not_met")
+    assert request is not None
+
+    status_lines = [f"repository={REPO}", f"pull_request={request.pr_number}"]
+    try:
+        state = _get_pr_mergeability_state(request.pr_number)
+    except Exception:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "step=read_pr_metadata status=failed"],
+            "not_met",
+        )
+
+    pr = state["pr"]
+    files = state["files"]
+    compare = state["compare"]
+    combined_status = state["combined_status"]
+    check_runs = state["check_runs"]
+
+    base = pr.get("base") if isinstance(pr.get("base"), dict) else {}
+    head = pr.get("head") if isinstance(pr.get("head"), dict) else {}
+    base_repo = base.get("repo") if isinstance(base.get("repo"), dict) else {}
+    if base_repo.get("full_name") != REPO:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=unsupported_repository"],
+            "not_met",
+        )
+
+    validation_state, validation_reason = _validation_summary(
+        combined_status, check_runs
+    )
+    report_status, reason, next_action = _pr_mergeability_next_action(
+        pr, compare, validation_state, request
+    )
+    changed_files = [
+        str(file.get("filename"))
+        for file in files
+        if isinstance(file.get("filename"), str)
+    ]
+    mergeable = _github_bool_value(pr.get("mergeable"))
+    mergeable_state = str(pr.get("mergeable_state") or "unknown")
+    status_lines.extend(
+        (
+            "step=read_pr_metadata status=done",
+            f"pr_state={str(pr.get('state') or '').lower()}",
+            f"draft={_github_bool_value(pr.get('draft'))}",
+            f"base_branch={base.get('ref')}",
+            f"base_sha={base.get('sha')}",
+            f"head_branch={head.get('ref')}",
+            f"head_sha={head.get('sha')}",
+            f"mergeable={mergeable}",
+            f"mergeable_state={mergeable_state}",
+            f"changed_file_count={len(changed_files)}",
+            f"changed_files={','.join(changed_files) if changed_files else '(none)'}",
+            f"compare_status={compare.get('status', 'unknown')}",
+            f"ahead_by={compare.get('ahead_by', 'unknown')}",
+            f"behind_by={compare.get('behind_by', 'unknown')}",
+            f"validation_state={validation_state}",
+            f"reason={reason if reason != 'none' else validation_reason}",
+            f"next_action={next_action}",
+        )
+    )
+    return _maintenance_report(
+        report_status,
+        task_id,
+        status_lines,
+        "met" if report_status == "DONE" else "not_met",
+    )
+
+
 def dispatch_runtime_maintenance_task(
     task_id: str, workdir: str, body: str = ""
 ) -> str:
@@ -2149,6 +2407,8 @@ def dispatch_runtime_maintenance_task(
             return ensure_project_checkout(body)
         if task_id == VALIDATE_PR_BRANCH:
             return validate_pr_branch(body)
+        if task_id == INSPECT_PR_MERGEABILITY:
+            return inspect_pr_mergeability(body)
         return check_project_checkout(body)
     except Exception:
         return _maintenance_report(
