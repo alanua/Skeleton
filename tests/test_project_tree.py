@@ -15,6 +15,11 @@ from core.project_tree import (
 
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT_TREE_PATH = ROOT / "PROJECT_TREE.yaml"
+REQUIRED_EXECUTION_MODES = {
+    "planning_only",
+    "codex_issue_worktree",
+    "live_cross_repo",
+}
 
 
 def loaded_tree() -> dict:
@@ -81,6 +86,57 @@ def test_future_registry_entry_resolves_without_code_changes() -> None:
     assert get_project_by_repo(tree, "alanua/future-app")["worktree_root"] == (
         "/home/agent/agent-dev/worktrees/future-app"
     )
+
+
+def test_all_projects_have_explicit_runner_enabled_flag() -> None:
+    tree = loaded_tree()
+
+    for project in tree["projects"].values():
+        assert isinstance(project["runner_enabled"], bool)
+
+
+def test_all_projects_have_required_execution_mode_flags() -> None:
+    tree = loaded_tree()
+
+    for project in tree["projects"].values():
+        execution_modes = project["execution_modes"]
+
+        assert set(execution_modes) == REQUIRED_EXECUTION_MODES
+        assert all(isinstance(value, bool) for value in execution_modes.values())
+
+
+def test_all_projects_require_explicit_approval_for_mode_changes() -> None:
+    tree = loaded_tree()
+
+    for project in tree["projects"].values():
+        assert project["requires_explicit_approval_for_mode_change"] is True
+
+
+def test_skeleton_is_the_only_codex_issue_worktree_project() -> None:
+    tree = loaded_tree()
+
+    codex_issue_worktree_projects = {
+        project_id
+        for project_id, project in tree["projects"].items()
+        if project["execution_modes"]["codex_issue_worktree"] is True
+    }
+
+    assert codex_issue_worktree_projects == {"skeleton"}
+
+
+def test_non_skeleton_projects_are_planning_only() -> None:
+    tree = loaded_tree()
+
+    for project_id, project in tree["projects"].items():
+        if project_id != "skeleton":
+            assert project["execution_modes"]["planning_only"] is True
+
+
+def test_no_project_allows_live_cross_repo_execution() -> None:
+    tree = loaded_tree()
+
+    for project in tree["projects"].values():
+        assert project["execution_modes"]["live_cross_repo"] is False
 
 
 def test_registry_paths_outside_approved_workspace_are_rejected() -> None:
