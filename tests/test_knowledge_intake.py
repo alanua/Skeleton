@@ -35,6 +35,12 @@ def queue_text() -> str:
     ).lower()
 
 
+def entry_by_id(entry_id: str) -> dict:
+    matches = [entry for entry in review_queue_entries() if entry["id"] == entry_id]
+    assert len(matches) == 1
+    return matches[0]
+
+
 def test_review_queue_parses_and_has_schema() -> None:
     queue = load_yaml("projects/skeleton/REVIEW_QUEUE.yaml")
 
@@ -155,24 +161,21 @@ def test_review_queue_preserves_agent_department_and_safety_rejections() -> None
         assert phrase in text
 
 
-def test_review_queue_preserves_work_plan_control_entries() -> None:
-    text = queue_text()
+def test_review_queue_preserves_work_plan_control_entry() -> None:
+    entry = entry_by_id("RQ-2026-05-24-024")
+
+    assert entry["source_batch"] == "operator_work_plan_2026-05-24"
+    assert entry["date"] == "2026-05-24"
+    assert entry["classification"] == "REVIEW/TEMPORARY_CONTROL/BACKLOG"
+    assert entry["target_project"] == "skeleton/bauclock/audit_packet/aufmass"
+    assert entry["status"] == "REVIEW"
+    assert entry["canon_status"] == "not_canon_until_promoted"
 
     for phrase in [
-        "operator_work_plan_2026-05-24",
-        "bauclock",
-        "stage 1",
-        "local",
-        "only",
-        "audit_packet",
-        "after",
-        "aufmass",
-        "a1",
-        "a2",
         "temporary control/backlog reference",
         "reconcile against live issues and prs",
     ]:
-        assert phrase in text
+        assert phrase in entry["recommended_action"].lower()
 
 
 def test_review_queue_preserves_aufmass_and_sai_pipeline_entries() -> None:
