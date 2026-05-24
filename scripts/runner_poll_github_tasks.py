@@ -127,6 +127,7 @@ _BLOCKED_OUTPUT_MARKER_RES = tuple(
     re.compile(rf"(?<!\w){re.escape(marker)}(?!\w)", re.IGNORECASE)
     for marker in _BLOCKED_OUTPUT_MARKERS
 )
+_FINAL_STATUS_LINE_RE = re.compile(r"^\s*(DONE|BLOCKED)\b:?", re.IGNORECASE)
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _ENV_ASSIGNMENT_LINE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{1,80}=.*$")
 _SENSITIVE_OUTPUT_VALUE_RE = re.compile(
@@ -446,12 +447,25 @@ def report_runner_lane(report: str, task: RunnerTask | None) -> str:
 
 def final_codex_answer(output: str) -> str:
     """Return the final Codex answer without echoed prompt/transcript text."""
-    text = output or ""
+    text = _ANSI_ESCAPE_RE.sub("", output or "")
     boundaries = (
         "\nReading additional input from stdin...",
         "\nOpenAI Codex v",
         "\n--------\nworkdir:",
     )
+    lines = text.splitlines(keepends=True)
+    in_fence = False
+    final_status_index: int | None = None
+    offset = 0
+    for line in lines:
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+        elif not in_fence and _FINAL_STATUS_LINE_RE.match(line):
+            final_status_index = offset
+        offset += len(line)
+    if final_status_index is not None:
+        text = text[final_status_index:]
+
     cut = len(text)
     for boundary in boundaries:
         index = text.find(boundary)
@@ -460,8 +474,20 @@ def final_codex_answer(output: str) -> str:
     return text[:cut].strip()
 
 
+def _without_fenced_blocks(text: str) -> str:
+    kept: list[str] = []
+    in_fence = False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        if not in_fence:
+            kept.append(line)
+    return "\n".join(kept)
+
+
 def blocked_output_marker(output: str) -> str | None:
-    final_answer = final_codex_answer(output)
+    final_answer = _without_fenced_blocks(final_codex_answer(output))
     for marker, marker_re in zip(_BLOCKED_OUTPUT_MARKERS, _BLOCKED_OUTPUT_MARKER_RES):
         if marker_re.search(final_answer):
             return marker

@@ -156,7 +156,6 @@ def test_blocked_output_classifier_detects_runner_blockers() -> None:
         assert runner.blocked_output_marker(output) == expected_marker
 
 
-
 def test_blocked_output_classifier_ignores_echoed_transcript_markers() -> None:
     output = """Changed files:
 - scripts/runner_poll_github_tasks.py
@@ -173,6 +172,53 @@ LABEL_BLOCKED = "runner:blocked"
 """
 
     assert runner.final_codex_answer(output).startswith("Changed files:")
+    assert runner.blocked_output_marker(output) is None
+
+
+def test_blocked_output_classifier_uses_final_done_deliverable_over_echoed_prompt() -> None:
+    output = """Reading additional input from stdin...
+OpenAI Codex v0.125.0
+--------
+user
+Task instructions:
+- A real final deliverable beginning with BLOCKED must still be classified as blocked.
+- Do not weaken safety for true blocked reports.
+--------
+assistant
+DONE: Codex completed successfully and produced file changes.
+
+Changed files:
+- scripts/runner_poll_github_tasks.py
+- tests/test_runner_poll_github_tasks.py
+- docs/RUNNER_MAINTENANCE_TASKS.md
+
+Pytest output:
+```
+python3 -m pytest -q tests/test_runner_poll_github_tasks.py
+115 passed
+
+python3 -m pytest -q
+503 passed, 3 skipped
+```
+
+No packages were installed during tests and no generic package-install capability was added.
+"""
+
+    assert runner.final_codex_answer(output).startswith("DONE:")
+    assert runner.blocked_output_marker(output) is None
+
+
+def test_blocked_output_classifier_ignores_echoed_prompt_inside_codex_output_block() -> None:
+    output = """DONE: Codex completed successfully with no file changes.
+
+Codex output:
+```
+Task instructions:
+- A real final deliverable beginning with BLOCKED must still be classified as blocked.
+- BLOCKED: example text from the original prompt.
+```
+"""
+
     assert runner.blocked_output_marker(output) is None
 
 
