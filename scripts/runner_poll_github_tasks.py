@@ -1725,6 +1725,21 @@ def ensure_project_checkout(body: str) -> str:
     if checkout_path.exists():
         return _verify_registered_project_checkout(task_id, registered_checkout)
 
+    try:
+        checkout_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                *status_lines,
+                "step=prepare_checkout_parent status=failed",
+                "reason=checkout_parent_prepare_failed",
+            ],
+            "not_met",
+        )
+    status_lines.append("step=prepare_checkout_parent status=done")
+
     clone_url = f"https://github.com/{registered_checkout.repo.removesuffix('.git')}.git"
     code, _output = run_command(["git", "clone", clone_url, str(checkout_path)])
     if code != 0:
