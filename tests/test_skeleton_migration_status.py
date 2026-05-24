@@ -25,6 +25,15 @@ def load_doc() -> str:
     return MIGRATION_DOC.read_text(encoding="utf-8")
 
 
+def source_references() -> set[str]:
+    status = load_status()
+    return {
+        source
+        for entry in status["status_entries"]
+        for source in entry["source_of_truth"]
+    }
+
+
 def test_migration_status_yaml_parses_and_has_required_top_level_fields() -> None:
     status = load_status()
 
@@ -66,6 +75,12 @@ def test_migration_status_entries_have_required_fields_and_categories() -> None:
         assert entry["next_action"]
 
 
+def test_migration_status_source_references_exist() -> None:
+    missing = [source for source in sorted(source_references()) if not (ROOT / source).exists()]
+
+    assert not missing
+
+
 def test_migration_doc_mentions_required_framing() -> None:
     doc = load_doc()
     doc_lower = doc.lower()
@@ -77,16 +92,9 @@ def test_migration_doc_mentions_required_framing() -> None:
 
 
 def test_migration_status_pack_does_not_require_pr_367_files() -> None:
-    status = load_status()
     doc = load_doc()
 
-    referenced_sources = {
-        source
-        for entry in status["status_entries"]
-        for source in entry["source_of_truth"]
-    }
-
-    assert referenced_sources.isdisjoint(PR_367_FILES)
+    assert source_references().isdisjoint(PR_367_FILES)
 
     for path in PR_367_FILES:
         assert path not in doc
