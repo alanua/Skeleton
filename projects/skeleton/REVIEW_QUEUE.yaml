@@ -1,0 +1,160 @@
+schema: skeleton.review_queue.v1
+project_id: skeleton
+queue_role: public_safe_knowledge_intake_not_canon
+created: '2026-05-24'
+entries:
+  - id: RQ-2026-05-24-001
+    source_batch: recovered_prior_ideas
+    date: '2026-05-24'
+    classification: REVIEW/BACKLOG
+    target_project: EMERAP
+    summary: EMERAP / Mine & Craft Avatar Hub inspiration may inform later product or interaction ideas.
+    existing_match: No adopted Skeleton architecture; treat only as recovered inspiration.
+    risk: Could be mistaken for approved architecture if promoted without design review.
+    recommended_action: Keep as backlog inspiration until EMERAP-specific review exists.
+    status: BACKLOG
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-24-002
+    source_batch: recovered_prior_ideas
+    date: '2026-05-24'
+    classification: BACKLOG
+    target_project: skeleton/jeeves
+    summary: Local-first PWA dashboard for future Skeleton or Jeeves operator UI.
+    existing_match: Related to operator UI direction but not implemented.
+    risk: Premature UI commitment could bypass route, auth, and safety decisions.
+    recommended_action: Revisit when dashboard scope and controlled interfaces are defined.
+    status: BACKLOG
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-24-003
+    source_batch: recovered_prior_ideas
+    date: '2026-05-24'
+    classification: REVIEW/BACKLOG
+    target_project: skeleton/jeeves
+    summary: Telegram Mini App plus regular browser dashboard as an operator UI option.
+    existing_match: Related to Telegram operator event and approval-button work.
+    risk: Telegram-specific UI could overfit one channel and confuse interface boundaries.
+    recommended_action: Review as one possible operator UI surface alongside browser dashboard needs.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-24-004
+    source_batch: recovered_prior_ideas
+    date: '2026-05-24'
+    classification: REVIEW
+    target_project: jeeves
+    summary: Telegram should be one communication channel, not the only Jeeves interface.
+    existing_match: Matches existing Telegram bridge direction as a channel rather than full runtime.
+    risk: Over-reliance on Telegram could constrain future local, browser, or voice interfaces.
+    recommended_action: Preserve as review guidance for Jeeves interface planning.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-24-005
+    source_batch: recovered_prior_ideas
+    date: '2026-05-24'
+    classification: BACKLOG
+    target_project: skeleton/jeeves
+    summary: Sandboxed modules using iframe or webview-style isolation with a strict message protocol.
+    existing_match: Conceptually related to controlled adapter and bridge boundaries.
+    risk: Security-sensitive design; isolation, permissions, origin policy, and message validation require review.
+    recommended_action: Keep in backlog pending explicit security review and threat model.
+    status: BACKLOG
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-24-006
+    source_batch: recovered_prior_ideas
+    date: '2026-05-24'
+    classification: REVIEW
+    target_project: skeleton
+    summary: Local companion / controlled Runner bridge pattern for carefully mediated local execution.
+    existing_match: Related to existing Runner bridge concept and dry-run-only stage 1 boundary.
+    risk: Local execution can cross safety boundaries if approval and command allowlists are weakened.
+    recommended_action: Review only as an extension of the existing Runner bridge with explicit approval gates.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-24-007
+    source_batch: recovered_prior_ideas
+    date: '2026-05-24'
+    classification: BACKLOG
+    target_project: skeleton/jeeves
+    summary: Delta/event-log sync for durable state movement between local and remote surfaces.
+    existing_match: Related to memory and state handoff concepts, but no canonical sync architecture exists.
+    risk: Sync semantics can corrupt state or leak private data if conflict and privacy rules are weak.
+    recommended_action: Keep as backlog until state ownership and privacy boundaries are specified.
+    status: BACKLOG
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-24-008
+    source_batch: recovered_prior_ideas
+    date: '2026-05-24'
+    classification: REVIEW
+    target_project: skeleton
+    summary: Optional GitHub/serverless sync for selected public-safe state or queue material.
+    existing_match: Related to GitHub issue queue and public GitHub canon routes.
+    risk: High safety review required because sync can publish private context or automate side effects.
+    recommended_action: Review only with strict public-safe filters, approval gates, and audit trail.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-24-009
+    source_batch: recovered_prior_ideas
+    date: '2026-05-24'
+    classification: BACKLOG
+    target_project: skeleton/jeeves
+    summary: LoRa/radio-mesh low-bandwidth and offline sync inspiration.
+    existing_match: No Skeleton core match; adjacent inspiration for resilient communication.
+    risk: Could distract from core Skeleton scope if treated as near-term architecture.
+    recommended_action: Keep as backlog inspiration; do not treat as Skeleton core.
+    status: BACKLOG
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-24-010
+    source_batch: recovered_prior_ideas
+    date: '2026-05-24'
+    classification: REJECTED
+    target_project: skeleton/jeeves
+    summary: "Rejected near-term unsafe patterns: browser PAT/localStorage, CORS wildcard companion, automatic git push without approval, and blockchain/token layer as a near-term Skeleton feature."
+    existing_match: Conflicts with current approval-gated Runner bridge and secret-handling expectations.
+    risk: Token exposure, broad local attack surface, unapproved remote mutation, or unjustified complexity.
+    recommended_action: Keep rejected for near-term Skeleton work unless a future approved security design supersedes it.
+    status: REJECTED
+    canon_status: rejected_not_canon
+
+  - id: RQ-2026-05-24-011
+    source_batch: recovered_prior_ideas
+    date: '2026-05-24'
+    classification: BACKLOG
+    target_project: jeeves
+    summary: Home automation, TV, media, and music control as a long-term Jeeves runtime goal.
+    existing_match: Related to Jeeves long-term runtime ambitions, not Skeleton core implementation.
+    risk: Device control needs explicit permission, safety, audit, and private-environment handling.
+    recommended_action: Keep in Jeeves backlog; Skeleton may only plan or review controlled interfaces.
+    status: BACKLOG
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-24-012
+    source_batch: recovered_prior_ideas
+    date: '2026-05-24'
+    classification: REVIEW
+    target_project: skeleton
+    summary: Automated auditor consultation gate using Gemini/Claude auditor roles, provider routing, and sourcepack context.
+    existing_match: Conceptually linked to issue #350, provider routing, Gemini/Claude auditor roles, and sourcepack work.
+    risk: Auditor output can be over-trusted unless treated as advisory evidence behind operator approval.
+    recommended_action: Continue review as an accepted direction, with PatchPlan and explicit approval before canon changes.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-24-013
+    source_batch: recovered_prior_ideas
+    date: '2026-05-24'
+    classification: CANON_CANDIDATE
+    target_project: skeleton
+    summary: Knowledge intake mechanism for public-safe durable review of recovered ideas and future source intake.
+    existing_match: Builds on BZ flow, memory routing, source registry, and public-safe canon review practice.
+    risk: Intake could be confused with canon unless queue entries remain non-canon by default.
+    recommended_action: Promote only through BZ critique, PatchPlan, explicit operator approval, write, and verification.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
