@@ -2114,6 +2114,106 @@ def test_validate_pr_branch_knowledge_intake_profile_runs_allowlisted_tests(
         ["python3", "-m", "pytest", "-q", "tests/test_knowledge_intake.py"],
         ["python3", "-m", "pytest", "-q"],
     ]
+    assert "failed_output_start" not in report
+
+
+def test_validate_pr_branch_failed_knowledge_intake_command_reports_output(
+    tmp_path: Path,
+) -> None:
+    validation_path = tmp_path / "validate-pr-branch" / "pr-123"
+    pytest_output = "\n".join(
+        (
+            "tests/test_knowledge_intake.py::test_rejects_unknown_entry FAILED",
+            "E       AssertionError: expected unknown entry to be rejected",
+            "SKELETON_TG_CALLBACK_HMAC_SECRET=should-not-leak",
+            "1 failed, 4 passed",
+        )
+    )
+
+    def run_validation_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        if command[:3] == ["gh", "pr", "view"]:
+            return 0, json.dumps(_pr_validation_state())
+        if command[:3] == ["git", "fetch", "origin"]:
+            return 0, ""
+        if command[:2] == ["git", "rev-parse"] and cwd == runner.ROOT:
+            return 0, f"{HEAD_SHA}\n"
+        if command[:3] == ["git", "worktree", "add"]:
+            return 0, ""
+        if command == ["git", "rev-parse", "HEAD"] and cwd == validation_path:
+            return 0, f"{HEAD_SHA}\n"
+        if (
+            command
+            == ["python3", "-m", "pytest", "-q", "tests/test_knowledge_intake.py"]
+            and cwd == validation_path
+        ):
+            return 1, pytest_output
+        return 2, "unexpected command"
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(tmp_path)}, clear=True
+    ), mock.patch.object(Path, "exists", autospec=True, return_value=False), mock.patch.object(
+        Path, "mkdir", autospec=True
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run_validation_command
+    ):
+        report = runner.validate_pr_branch(
+            _validate_pr_issue_body(profile="knowledge_intake")
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "step=validation_profile_command_1 status=failed exit_code=1" in report
+    assert (
+        "failed_command=python3 -m pytest -q tests/test_knowledge_intake.py"
+        in report
+    )
+    assert "failed_output_start" in report
+    assert "AssertionError: expected unknown entry to be rejected" in report
+    assert "SKELETON_TG_CALLBACK_HMAC_SECRET=should-not-leak" not in report
+    assert "[redacted environment variable]" in report
+    assert "failed_output_end" in report
+
+
+def test_validate_pr_branch_failed_command_output_is_truncated(
+    tmp_path: Path,
+) -> None:
+    validation_path = tmp_path / "validate-pr-branch" / "pr-123"
+    long_output = "pytest failure line\n" + ("x" * 5000)
+
+    def run_validation_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        if command[:3] == ["gh", "pr", "view"]:
+            return 0, json.dumps(_pr_validation_state())
+        if command[:3] == ["git", "fetch", "origin"]:
+            return 0, ""
+        if command[:2] == ["git", "rev-parse"] and cwd == runner.ROOT:
+            return 0, f"{HEAD_SHA}\n"
+        if command[:3] == ["git", "worktree", "add"]:
+            return 0, ""
+        if command == ["git", "rev-parse", "HEAD"] and cwd == validation_path:
+            return 0, f"{HEAD_SHA}\n"
+        if command == ["python3", "-m", "pytest", "-q"] and cwd == validation_path:
+            return 1, long_output
+        return 2, "unexpected command"
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(tmp_path)}, clear=True
+    ), mock.patch.object(Path, "exists", autospec=True, return_value=False), mock.patch.object(
+        Path, "mkdir", autospec=True
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run_validation_command
+    ):
+        report = runner.validate_pr_branch(_validate_pr_issue_body())
+
+    output_block = report.split("failed_output_start\n", 1)[1].split(
+        "\nfailed_output_end", 1
+    )[0]
+    assert report.startswith("BLOCKED:")
+    assert "pytest failure line" in output_block
+    assert runner.VALIDATION_FAILED_OUTPUT_TRUNCATED_MARKER in output_block
+    assert len(output_block) <= runner.VALIDATION_FAILED_OUTPUT_LIMIT
 
 
 def test_validate_pr_branch_issue_body_does_not_execute_arbitrary_commands(
