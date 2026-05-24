@@ -23,6 +23,11 @@ Each incoming item should be classified before any durable write:
 public-safe item that looks suitable for canon promotion but still requires the
 normal BZ approval flow.
 
+`TEMPORARY_CONTROL` may be paired with `REVIEW` for uploaded correction or
+work-plan control notes that need to be preserved for reconciliation. These
+entries remain temporary review material, not canon, not roadmap, and not active
+Runner work.
+
 ## Storage Rules
 
 Public-safe durable items go to `projects/skeleton/REVIEW_QUEUE.yaml` first.
