@@ -56,9 +56,30 @@ modes:
       - write
       - verify
 
+  persist_request:
+    boot_level: L4
+    means:
+      - load_global_boot
+      - classify_persistence_request
+      - select_memory_route
+      - produce_critique_or_patch_plan
+      - require_write_gate
+      - write_to_durable_target_after_approval
+      - verify_persistence
+
   continue_approved_step:
     boot_level: current
     means:
       - continue_current_approved_task
       - apply_smallest_safe_step
       - verify_result
+
+  batch_continue_approved_route:
+    boot_level: current
+    means:
+      - continue_current_approved_route
+      - verify_same_type_scope_risk_gate
+      - process_batch_items
+      - split_out_different_or_risky_items
+      - preserve_required_approval_gates
+      - verify_each_result

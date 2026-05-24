@@ -77,6 +77,28 @@ commands:
       - write
       - verify
 
+  зафіксуй:
+    mode: persist_request
+    boot_level: L4
+    loads:
+      - BOOT_MANIFEST.yaml
+      - MEMORY_ROUTING.yaml
+      - SOURCE_REGISTRY.yaml
+      - requested_instruction_change
+    produces:
+      - PersistenceClassification
+      - RouteDecision
+      - CritiqueOrPatchPlan
+      - VerificationReport
+    writes: routed_durable_storage_after_write_gate
+    means:
+      - explicit_durable_persistence_request
+      - classify_CANON_REVIEW_BACKLOG_REJECTED_PRIVATE_TEMPORARY
+      - route_public_safe_durable_through_BZ_GitHub_write_gate
+      - route_private_context_privately
+      - secrets_never_to_chat_GitHub_plain_Drive
+      - write_only_after_route_scope_safety_check_and_required_approval
+
   '+':
     mode: continue_approved_step
     boot_level: current
@@ -86,3 +108,21 @@ commands:
       - StepResult
     writes: current_scope_only
     rule: apply_smallest_approved_next_step
+
+  пакетно:
+    mode: batch_continue_approved_route
+    boot_level: current
+    loads:
+      - current_approved_context
+      - approved_batch_items
+    produces:
+      - BatchStepResults
+      - SplitOutItems
+      - VerificationReport
+    writes: current_scope_only_after_required_gates
+    rule: same_type_routine_tasks_only_same_approved_route_scope_risk_gate
+    means:
+      - allowed_only_for_same_type_routine_tasks
+      - require_same_approved_route_scope_risk_level_and_gate
+      - no_batch_merge_deploy_secrets_runtime_canon_instruction_promotion_unless_explicitly_approved
+      - split_and_stop_if_any_item_differs
