@@ -188,7 +188,7 @@ entries:
     date: '2026-05-24'
     classification: CANON_CANDIDATE
     target_project: jeeves
-    summary: Controlled self-improvement lifecycle: observe, detect, propose, validate, approve, apply, monitor, rollback.
+    summary: "Controlled self-improvement lifecycle: observe, detect, propose, validate, approve, apply, monitor, rollback."
     existing_match: Consistent with Skeleton approval gates, PatchPlan flow, Runner/Codex separation, and no direct self-modification.
     risk: If shortened or automated without approval, the lifecycle could become uncontrolled self-modification.
     recommended_action: Preserve as reviewed safety pattern; promote only with explicit wording that operator approval remains mandatory.
@@ -212,7 +212,7 @@ entries:
     date: '2026-05-24'
     classification: REVIEW/CANON_CANDIDATE
     target_project: skeleton/jeeves
-    summary: Multi-agent role split: ChatGPT as architect/reviewer/control plane, Runner as bounded executor, Codex as implementation agent, Gemini and Claude as auditors/critics, Oleksii as final gate.
+    summary: "Multi-agent role split: ChatGPT as architect/reviewer/control plane, Runner as bounded executor, Codex as implementation agent, Gemini and Claude as auditors/critics, Oleksii as final gate."
     existing_match: Compare with HELPER_REGISTRY and adapter contracts for ChatGPT, Runner, Codex, Gemini, and Claude.
     risk: Roles can blur if auditors become authorities or executors bypass approval gates.
     recommended_action: Keep as review guidance and promote only after reconciling exact wording with HELPER_REGISTRY.
@@ -260,7 +260,7 @@ entries:
     date: '2026-05-24'
     classification: REVIEW/BACKLOG
     target_project: skeleton/jeeves
-    summary: Agent development department concept: intake, planning, implementation, tests, review, reporting, and approval gates with Oleksii mostly approving or rejecting at defined gates.
+    summary: "Agent development department concept: intake, planning, implementation, tests, review, reporting, and approval gates with Oleksii mostly approving or rejecting at defined gates."
     existing_match: Related to current GitHub issue queue, Runner, Codex, PR review, and approval workflow.
     risk: Minimizing operator involvement must not remove approval gates for merge, deploy, secrets, runtime, canon, or cross-repo writes.
     recommended_action: Keep as backlog/design direction and split into bounded Runner capability stages later.
@@ -272,9 +272,57 @@ entries:
     date: '2026-05-24'
     classification: REJECTED
     target_project: jeeves
-    summary: Rejected or safety-blocked near-term Jeeves patterns: uncontrolled autonomy, secrets in chat/GitHub/plain Drive, browser-stored PATs, automatic git push without approval, and unsafe direct control of locks, heaters, 230V, security systems, purchases, or cameras.
+    summary: "Rejected or safety-blocked near-term Jeeves patterns: uncontrolled autonomy, secrets in chat/GitHub/plain Drive, browser-stored PATs, automatic git push without approval, and unsafe direct control of locks, heaters, 230V, security systems, purchases, or cameras."
     existing_match: Matches current secret-handling, approval-gate, and dangerous-action safety boundaries.
     risk: These patterns can expose credentials, mutate systems without approval, or create physical/security risk.
     recommended_action: Keep rejected unless a future operator-approved safety design explicitly supersedes a specific item.
+    status: REJECTED
+    canon_status: rejected_not_canon
+
+  - id: RQ-2026-05-24-024
+    source_batch: operator_work_plan_2026-05-24
+    date: '2026-05-24'
+    classification: REVIEW/TEMPORARY_CONTROL/BACKLOG
+    target_project: skeleton/bauclock/audit_packet/aufmass
+    summary: Current work queue notes #349 merge/runtime/smoke, BauClock Stage 1 local-only, audit_packet Stage 1 after BauClock, and Aufmass A1+A2 source-pack and intake-validator work.
+    existing_match: Related to current GitHub issue queue, BauClock gated execution, provider/auditor routing, and public-safe Aufmass pipeline work.
+    risk: Could be mistaken for durable canon or active execution order if promoted without review of current repo state.
+    recommended_action: Keep as temporary control/backlog reference; reconcile against live issues and PRs before creating execution tasks.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-24-025
+    source_batch: operator_work_plan_2026-05-24
+    date: '2026-05-24'
+    classification: REVIEW/BACKLOG
+    target_project: aufmass
+    summary: "Aufmass principle: the system first verifies whether calculation is possible, then calculates with evidence, confidence, and review queue; it is not an agent calculating the whole building at once."
+    existing_match: Related to existing Aufmass staged adapters, private pilot boundary, evidence/confidence concepts, and review workflow.
+    risk: If treated as fully solved, it could encourage unreliable full-building automation or publication of private construction data.
+    recommended_action: Preserve as pipeline principle for later Aufmass design; keep real drawings and quantities private.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-24-026
+    source_batch: sai_transcript_intake_2026-05-24
+    date: '2026-05-24'
+    classification: REVIEW/BACKLOG
+    target_project: skeleton/aufmass/jeeves
+    summary: "Sai-derived pipeline principles retained for review: cheap executor to stronger verification to human; machine output plus human report; calculate by floors or apartments rather than the whole object at once."
+    existing_match: Related to auditor consultation, evidence-first Aufmass flow, staged execution, and human approval gates.
+    risk: Useful pipeline ideas can be overgeneralized into uncontrolled automation if not bounded by Skeleton gates.
+    recommended_action: Keep only as pipeline inspiration until mapped to specific Skeleton/Aufmass capability tasks.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-24-027
+    source_batch: sai_transcript_intake_2026-05-24
+    date: '2026-05-24'
+    classification: REJECTED
+    target_project: skeleton/aufmass/jeeves
+    summary: "Sai-derived rejected items: adopting Sai architecture as canon, uncontrolled Revit/AutoCAD automation, agent controls everything, normative answers without verification, and limit bypass or multi-account workarounds as a normal workflow."
+    existing_match: Conflicts with Skeleton human-controlled gates, safe tool boundaries, and verification-first Aufmass approach.
+    risk: These patterns could create unsafe automation, unreliable technical/legal outputs, or policy and account-risk behavior.
+    recommended_action: Keep rejected unless a future explicit security and compliance review approves a narrow exception.
     status: REJECTED
     canon_status: rejected_not_canon
