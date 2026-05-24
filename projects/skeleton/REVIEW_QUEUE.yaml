@@ -158,3 +158,123 @@ entries:
     recommended_action: Promote only through BZ critique, PatchPlan, explicit operator approval, write, and verification.
     status: REVIEW
     canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-24-014
+    source_batch: recovered_jeeves_project_ideas
+    date: '2026-05-24'
+    classification: CANON_CANDIDATE
+    target_project: jeeves
+    summary: Jeeves is a separate future assistant product and runtime, not a Skeleton adapter.
+    existing_match: Matches SOURCE_REGISTRY role separation and project-index separation between Skeleton and Jeeves.
+    risk: Confusing Jeeves with Skeleton could collapse the safety boundary and activate runtime assumptions too early.
+    recommended_action: Preserve the Skeleton/Jeeves boundary in future canon promotion and implementation tasks.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-24-015
+    source_batch: recovered_jeeves_project_ideas
+    date: '2026-05-24'
+    classification: REVIEW/BACKLOG
+    target_project: jeeves
+    summary: Jeeves personal assistant vision combines personal assistant behavior, durable memory, tool use, and safety-first governance.
+    existing_match: Related to current Skeleton role, memory routing, and helper registry concepts, but not active Jeeves runtime implementation.
+    risk: Broad assistant scope can become uncontrolled if it is promoted before permissions, memory, and safety gates are designed.
+    recommended_action: Keep as Jeeves product vision backlog and split into reviewed capability designs later.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-24-016
+    source_batch: recovered_jeeves_project_ideas
+    date: '2026-05-24'
+    classification: CANON_CANDIDATE
+    target_project: jeeves
+    summary: Controlled self-improvement lifecycle: observe, detect, propose, validate, approve, apply, monitor, rollback.
+    existing_match: Consistent with Skeleton approval gates, PatchPlan flow, Runner/Codex separation, and no direct self-modification.
+    risk: If shortened or automated without approval, the lifecycle could become uncontrolled self-modification.
+    recommended_action: Preserve as reviewed safety pattern; promote only with explicit wording that operator approval remains mandatory.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-24-017
+    source_batch: recovered_jeeves_project_ideas
+    date: '2026-05-24'
+    classification: CANON_CANDIDATE
+    target_project: skeleton/jeeves
+    summary: No autonomous self-modification; merge, deploy, secrets, runtime, execution-mode, and canon changes require explicit operator approval.
+    existing_match: Matches COMMANDS BZ write gate, Runner approval gates, and source/memory routing rules.
+    risk: Weakening this rule would allow model-driven changes to become active without human control.
+    recommended_action: Treat as a safety entry for future canon promotion and keep it enforced in tasks and reviews.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-24-018
+    source_batch: recovered_jeeves_project_ideas
+    date: '2026-05-24'
+    classification: REVIEW/CANON_CANDIDATE
+    target_project: skeleton/jeeves
+    summary: Multi-agent role split: ChatGPT as architect/reviewer/control plane, Runner as bounded executor, Codex as implementation agent, Gemini and Claude as auditors/critics, Oleksii as final gate.
+    existing_match: Compare with HELPER_REGISTRY and adapter contracts for ChatGPT, Runner, Codex, Gemini, and Claude.
+    risk: Roles can blur if auditors become authorities or executors bypass approval gates.
+    recommended_action: Keep as review guidance and promote only after reconciling exact wording with HELPER_REGISTRY.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-24-019
+    source_batch: recovered_jeeves_project_ideas
+    date: '2026-05-24'
+    classification: REVIEW/CANON_CANDIDATE
+    target_project: skeleton/jeeves
+    summary: Memory architecture routes knowledge through public GitHub canon, private memory, archive/evidence, temporary/noise handling, and a secret manager for credentials.
+    existing_match: Compare with MEMORY_ROUTING and SOURCE_REGISTRY; this is an architecture restatement, not a new storage backend.
+    risk: Storing private context or secrets in public GitHub would violate the route boundary.
+    recommended_action: Keep as review entry and promote only if wording exactly matches current routing files.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-24-020
+    source_batch: recovered_jeeves_project_ideas
+    date: '2026-05-24'
+    classification: REVIEW
+    target_project: skeleton/jeeves
+    summary: LLM routing ideas include local-first routing, free and paid cloud fallback, Gemini audit tier, fallback routing, and cost, latency, and quality telemetry.
+    existing_match: Compare with PROVIDER_ROUTING and future telemetry/journaling design.
+    risk: Routing can leak data or increase cost if privacy and fallback rules are not explicit.
+    recommended_action: Keep as review item and reconcile with provider routing before implementation.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-24-021
+    source_batch: recovered_jeeves_project_ideas
+    date: '2026-05-24'
+    classification: BACKLOG/REVIEW
+    target_project: jeeves
+    summary: Telemetry and journaling for future Jeeves should record prompt used, agent selected, model chosen, cost, latency, success flag, user correction, and fallback_used.
+    existing_match: Related to provider routing, audit reports, and future quality/cost monitoring; not yet active runtime canon.
+    risk: Telemetry can become private data and needs retention, redaction, and storage routing before implementation.
+    recommended_action: Keep in Jeeves backlog and design privacy-safe event schema before runtime use.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-24-022
+    source_batch: recovered_jeeves_project_ideas
+    date: '2026-05-24'
+    classification: REVIEW/BACKLOG
+    target_project: skeleton/jeeves
+    summary: Agent development department concept: intake, planning, implementation, tests, review, reporting, and approval gates with Oleksii mostly approving or rejecting at defined gates.
+    existing_match: Related to current GitHub issue queue, Runner, Codex, PR review, and approval workflow.
+    risk: Minimizing operator involvement must not remove approval gates for merge, deploy, secrets, runtime, canon, or cross-repo writes.
+    recommended_action: Keep as backlog/design direction and split into bounded Runner capability stages later.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-24-023
+    source_batch: recovered_jeeves_project_ideas
+    date: '2026-05-24'
+    classification: REJECTED
+    target_project: jeeves
+    summary: Rejected or safety-blocked near-term Jeeves patterns: uncontrolled autonomy, secrets in chat/GitHub/plain Drive, browser-stored PATs, automatic git push without approval, and unsafe direct control of locks, heaters, 230V, security systems, purchases, or cameras.
+    existing_match: Matches current secret-handling, approval-gate, and dangerous-action safety boundaries.
+    risk: These patterns can expose credentials, mutate systems without approval, or create physical/security risk.
+    recommended_action: Keep rejected unless a future operator-approved safety design explicitly supersedes a specific item.
+    status: REJECTED
+    canon_status: rejected_not_canon
