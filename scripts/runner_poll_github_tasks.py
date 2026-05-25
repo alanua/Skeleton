@@ -130,6 +130,9 @@ _BLOCKED_OUTPUT_MARKER_RES = tuple(
     for marker in _BLOCKED_OUTPUT_MARKERS
 )
 _FINAL_STATUS_LINE_RE = re.compile(r"^\s*(DONE|BLOCKED)\b:?", re.IGNORECASE)
+_CODEX_TRANSCRIPT_TAIL_RE = re.compile(
+    r"(?m)^(?:Reading additional input from stdin\.\.\.|OpenAI Codex v)"
+)
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _ENV_ASSIGNMENT_LINE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{1,80}=.*$")
 _SENSITIVE_OUTPUT_VALUE_RE = re.compile(
@@ -456,11 +459,6 @@ def report_runner_lane(report: str, task: RunnerTask | None) -> str:
 def final_codex_answer(output: str) -> str:
     """Return the final Codex answer without echoed prompt/transcript text."""
     text = _ANSI_ESCAPE_RE.sub("", output or "")
-    boundaries = (
-        "\nReading additional input from stdin...",
-        "\nOpenAI Codex v",
-        "\n--------\nworkdir:",
-    )
     lines = text.splitlines(keepends=True)
     in_fence = False
     final_status_index: int | None = None
@@ -474,11 +472,11 @@ def final_codex_answer(output: str) -> str:
     if final_status_index is not None:
         text = text[final_status_index:]
 
-    cut = len(text)
-    for boundary in boundaries:
-        index = text.find(boundary)
-        if index != -1:
-            cut = min(cut, index)
+    transcript_tail = _CODEX_TRANSCRIPT_TAIL_RE.search(text)
+    cut = transcript_tail.start() if transcript_tail else len(text)
+    workdir_boundary = text.find("\n--------\nworkdir:")
+    if workdir_boundary != -1:
+        cut = min(cut, workdir_boundary)
     return text[:cut].strip()
 
 
