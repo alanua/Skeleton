@@ -75,6 +75,7 @@ ENSURE_TELEGRAM_CALLBACK_LOCAL_CONFIG = "ensure_telegram_callback_local_config"
 CHECK_PROJECT_CHECKOUT = "check_project_checkout"
 ENSURE_PROJECT_CHECKOUT = "ensure_project_checkout"
 VALIDATE_PR_BRANCH = "validate_pr_branch"
+PREFLIGHT_PR_REFRESH = "preflight_pr_refresh"
 INSPECT_PR_MERGEABILITY = "inspect_pr_mergeability"
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
@@ -83,6 +84,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         CHECK_PROJECT_CHECKOUT,
         ENSURE_PROJECT_CHECKOUT,
         VALIDATE_PR_BRANCH,
+        PREFLIGHT_PR_REFRESH,
         INSPECT_PR_MERGEABILITY,
     )
 )
@@ -211,6 +213,12 @@ class PrBranchValidationRequest:
     pr_number: int
     expected_head_sha: str | None
     profile: str
+
+
+@dataclass(frozen=True)
+class PreflightPrRefreshRequest:
+    pr_number: int
+    expected_head_sha: str | None
 
 
 @dataclass(frozen=True)
@@ -1931,6 +1939,243 @@ def _get_pr_branch_validation_state(pr_number: int) -> dict[str, Any]:
     return parsed
 
 
+def _preflight_pr_refresh_metadata(
+    body: str,
+) -> tuple[PreflightPrRefreshRequest | None, str | None]:
+    metadata = (body or "").split("```task", 1)[0]
+    pr_number = _body_field(metadata, "Pull Request")
+    expected_head_sha = _body_field(metadata, "Expected Head SHA")
+    if not isinstance(pr_number, str) or not re.fullmatch(r"[1-9]\d*", pr_number):
+        return None, "missing_or_invalid_pull_request"
+    if (
+        expected_head_sha is not None
+        and _HEAD_SHA_RE.fullmatch(expected_head_sha) is None
+    ):
+        return None, "invalid_expected_head_sha"
+    return (
+        PreflightPrRefreshRequest(
+            pr_number=int(pr_number),
+            expected_head_sha=(
+                expected_head_sha.lower()
+                if isinstance(expected_head_sha, str)
+                else None
+            ),
+        ),
+        None,
+    )
+
+
+def _get_preflight_pr_refresh_state(pr_number: int) -> dict[str, Any]:
+    code, output = run_command(
+        [
+            "gh",
+            "pr",
+            "view",
+            str(pr_number),
+            "--repo",
+            REPO,
+            "--json",
+            (
+                "number,state,baseRefName,headRefName,headRefOid,"
+                "headRepository,headRepositoryOwner,files"
+            ),
+        ]
+    )
+    if code != 0:
+        raise RuntimeError("gh pr view failed")
+    parsed = json.loads(output or "{}")
+    if not isinstance(parsed, dict):
+        raise RuntimeError("gh pr view returned non-object JSON")
+    return parsed
+
+
+def _get_preflight_compare_state(head_sha: str) -> dict[str, Any]:
+    code, output = run_command(
+        ["gh", "api", f"repos/{REPO}/compare/main...{head_sha}"]
+    )
+    if code != 0:
+        raise RuntimeError("gh compare failed")
+    parsed = json.loads(output or "{}")
+    if not isinstance(parsed, dict):
+        raise RuntimeError("gh compare returned non-object JSON")
+    return parsed
+
+
+def _main_contains_path(path: str) -> bool:
+    code, _output = run_command(
+        [
+            "gh",
+            "api",
+            "--method",
+            "GET",
+            f"repos/{REPO}/contents/{urllib.parse.quote(path, safe='/')}",
+            "-f",
+            "ref=main",
+        ]
+    )
+    return code == 0
+
+
+def _pr_file_paths(pr_state: dict[str, Any]) -> list[str]:
+    files = pr_state.get("files")
+    if not isinstance(files, list):
+        return []
+    paths: list[str] = []
+    for file_info in files:
+        if isinstance(file_info, dict) and isinstance(file_info.get("path"), str):
+            paths.append(file_info["path"])
+    return paths
+
+
+def _repository_name_with_owner(repository: object) -> str | None:
+    if isinstance(repository, dict):
+        name = repository.get("nameWithOwner")
+        if isinstance(name, str):
+            return name
+        owner = repository.get("owner")
+        repo_name = repository.get("name")
+        if isinstance(owner, dict):
+            owner = owner.get("login")
+        if isinstance(owner, str) and isinstance(repo_name, str):
+            return f"{owner}/{repo_name}"
+    return None
+
+
+def _head_repository_name_with_owner(pr_state: dict[str, Any]) -> str | None:
+    repo = _repository_name_with_owner(pr_state.get("headRepository"))
+    if repo is not None:
+        return repo
+    owner = pr_state.get("headRepositoryOwner")
+    if isinstance(owner, dict):
+        owner = owner.get("login")
+    if isinstance(owner, str):
+        head_ref = pr_state.get("headRefName")
+        if isinstance(head_ref, str) and head_ref:
+            return f"{owner}/{REPO.rsplit('/', 1)[1]}"
+    return None
+
+
+def _preflight_refresh_next_action(
+    *,
+    pr_state: dict[str, Any],
+    compare_state: dict[str, Any] | None,
+    changed_files: list[str],
+    files_on_main: list[str],
+) -> str:
+    if str(pr_state.get("state") or "").upper() != "OPEN":
+        if compare_state is not None and int(compare_state.get("ahead_by") or 0) == 0:
+            return "mark obsolete"
+        return "manual review required"
+    if pr_state.get("baseRefName") != "main":
+        return "manual review required"
+    if (
+        not pr_state.get("headRefName")
+        or _head_repository_name_with_owner(pr_state) != REPO
+    ):
+        return "manual review required"
+    if compare_state is None:
+        return "manual review required"
+
+    ahead_by = int(compare_state.get("ahead_by") or 0)
+    behind_by = int(compare_state.get("behind_by") or 0)
+    compare_status = str(compare_state.get("status") or "")
+    if ahead_by == 0 or compare_status == "identical":
+        return "mark obsolete"
+    if files_on_main:
+        return "manual review required"
+    if changed_files and behind_by > 0:
+        return "create fresh PR"
+    return "validate and merge"
+
+
+def preflight_pr_refresh(body: str) -> str:
+    task_id = PREFLIGHT_PR_REFRESH
+    request, reason = _preflight_pr_refresh_metadata(body)
+    if reason is not None:
+        return _maintenance_report("BLOCKED", task_id, [f"reason={reason}"], "not_met")
+    assert request is not None
+
+    status_lines = [
+        f"repository={REPO}",
+        f"pull_request={request.pr_number}",
+    ]
+    try:
+        pr_state = _get_preflight_pr_refresh_state(request.pr_number)
+    except Exception:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "step=read_pr_metadata status=failed"],
+            "not_met",
+        )
+    status_lines.append("step=read_pr_metadata status=done")
+
+    if pr_state.get("number") != request.pr_number:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=pr_number_mismatch"],
+            "not_met",
+        )
+
+    head_sha = str(pr_state.get("headRefOid") or "").lower()
+    if _HEAD_SHA_RE.fullmatch(head_sha) is None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=pr_head_sha_invalid"],
+            "not_met",
+        )
+    if request.expected_head_sha is not None and head_sha != request.expected_head_sha:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=expected_head_sha_mismatch"],
+            "not_met",
+        )
+    status_lines.append(f"head_sha={head_sha}")
+
+    changed_files = _pr_file_paths(pr_state)
+    status_lines.append(f"changed_files_count={len(changed_files)}")
+    status_lines.extend(f"changed_file={path}" for path in changed_files)
+
+    compare_state: dict[str, Any] | None = None
+    try:
+        compare_state = _get_preflight_compare_state(head_sha)
+    except Exception:
+        status_lines.append("step=compare_main_to_head status=failed")
+    else:
+        status_lines.extend(
+            (
+                "step=compare_main_to_head status=done",
+                f"compare_status={compare_state.get('status')}",
+                f"compare_ahead_by={int(compare_state.get('ahead_by') or 0)}",
+                f"compare_behind_by={int(compare_state.get('behind_by') or 0)}",
+            )
+        )
+
+    files_on_main = [path for path in changed_files if _main_contains_path(path)]
+    status_lines.append(f"files_on_main_count={len(files_on_main)}")
+    status_lines.extend(f"file_on_main={path}" for path in files_on_main)
+
+    next_action = _preflight_refresh_next_action(
+        pr_state=pr_state,
+        compare_state=compare_state,
+        changed_files=changed_files,
+        files_on_main=files_on_main,
+    )
+    status_lines.extend(
+        (
+            f"pr_state={str(pr_state.get('state') or '').upper()}",
+            f"base_ref={pr_state.get('baseRefName')}",
+            f"head_ref={pr_state.get('headRefName') or ''}",
+            f"head_repository={_head_repository_name_with_owner(pr_state) or ''}",
+            f"next_action={next_action}",
+        )
+    )
+    return _maintenance_report("DONE", task_id, status_lines, "met")
+
+
 def _validation_worktree_path(pr_number: int) -> Path:
     return worktree_root() / PR_BRANCH_VALIDATION_WORKTREE_DIR / f"pr-{pr_number}"
 
@@ -2418,6 +2663,8 @@ def dispatch_runtime_maintenance_task(
             return ensure_project_checkout(body)
         if task_id == VALIDATE_PR_BRANCH:
             return validate_pr_branch(body)
+        if task_id == PREFLIGHT_PR_REFRESH:
+            return preflight_pr_refresh(body)
         if task_id == INSPECT_PR_MERGEABILITY:
             return inspect_pr_mergeability(body)
         return check_project_checkout(body)

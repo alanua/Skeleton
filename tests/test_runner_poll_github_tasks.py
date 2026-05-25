@@ -1664,6 +1664,25 @@ def _validate_pr_issue_body(
     return "\n".join(lines)
 
 
+def _preflight_pr_issue_body(
+    *,
+    pr_number: int | str | None = 123,
+    expected_head_sha: str | None = HEAD_SHA,
+    task_body: str = "",
+) -> str:
+    lines = [
+        "Mode: RUNTIME_MAINTENANCE_TASK",
+        f"Maintenance Task ID: {runner.PREFLIGHT_PR_REFRESH}",
+    ]
+    if pr_number is not None:
+        lines.append(f"Pull Request: {pr_number}")
+    if expected_head_sha is not None:
+        lines.append(f"Expected Head SHA: {expected_head_sha}")
+    if task_body:
+        lines.extend(("", "```task", task_body, "```"))
+    return "\n".join(lines)
+
+
 def _pr_validation_state(**updates: object) -> dict[str, object]:
     state: dict[str, object] = {
         "number": 123,
@@ -1671,6 +1690,35 @@ def _pr_validation_state(**updates: object) -> dict[str, object]:
         "baseRefName": "main",
         "headRefName": "runner-test-branch",
         "headRefOid": HEAD_SHA,
+    }
+    state.update(updates)
+    return state
+
+
+def _preflight_pr_state(**updates: object) -> dict[str, object]:
+    state: dict[str, object] = {
+        "number": 123,
+        "state": "OPEN",
+        "baseRefName": "main",
+        "headRefName": "runner-test-branch",
+        "headRefOid": HEAD_SHA,
+        "headRepository": {
+            "name": "Skeleton",
+            "nameWithOwner": runner.REPO,
+            "owner": {"login": "alanua"},
+        },
+        "headRepositoryOwner": {"login": "alanua"},
+        "files": [{"path": "new_runner_file.py"}],
+    }
+    state.update(updates)
+    return state
+
+
+def _preflight_compare_state(**updates: object) -> dict[str, object]:
+    state: dict[str, object] = {
+        "status": "ahead",
+        "ahead_by": 1,
+        "behind_by": 0,
     }
     state.update(updates)
     return state
@@ -2138,6 +2186,173 @@ def test_validate_pr_branch_missing_pr_number_blocks() -> None:
 
     assert report.startswith("BLOCKED:")
     assert "reason=missing_or_invalid_pull_request" in report
+
+
+def test_preflight_pr_refresh_missing_pr_number_blocks() -> None:
+    report = runner.preflight_pr_refresh(_preflight_pr_issue_body(pr_number=None))
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=missing_or_invalid_pull_request" in report
+
+
+def test_preflight_pr_refresh_closed_pr_reports_manual_review() -> None:
+    with mock.patch.object(
+        runner,
+        "_get_preflight_pr_refresh_state",
+        return_value=_preflight_pr_state(state="CLOSED"),
+    ), mock.patch.object(
+        runner,
+        "_get_preflight_compare_state",
+        return_value=_preflight_compare_state(ahead_by=1, behind_by=0),
+    ), mock.patch.object(
+        runner, "_main_contains_path", return_value=False
+    ):
+        report = runner.preflight_pr_refresh(_preflight_pr_issue_body())
+
+    assert report.startswith("DONE:")
+    assert "pr_state=CLOSED" in report
+    assert "next_action=manual review required" in report
+
+
+def test_preflight_pr_refresh_head_sha_mismatch_blocks() -> None:
+    with mock.patch.object(
+        runner, "_get_preflight_pr_refresh_state", return_value=_preflight_pr_state()
+    ), mock.patch.object(runner, "_get_preflight_compare_state") as compare:
+        report = runner.preflight_pr_refresh(
+            _preflight_pr_issue_body(expected_head_sha="b" * 40)
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=expected_head_sha_mismatch" in report
+    compare.assert_not_called()
+
+
+def test_preflight_pr_refresh_identical_to_main_reports_obsolete() -> None:
+    with mock.patch.object(
+        runner, "_get_preflight_pr_refresh_state", return_value=_preflight_pr_state()
+    ), mock.patch.object(
+        runner,
+        "_get_preflight_compare_state",
+        return_value=_preflight_compare_state(
+            status="identical", ahead_by=0, behind_by=0
+        ),
+    ), mock.patch.object(
+        runner, "_main_contains_path", return_value=True
+    ):
+        report = runner.preflight_pr_refresh(_preflight_pr_issue_body())
+
+    assert report.startswith("DONE:")
+    assert "compare_status=identical" in report
+    assert "next_action=mark obsolete" in report
+
+
+def test_preflight_pr_refresh_behind_only_new_files_recommends_fresh_pr() -> None:
+    with mock.patch.object(
+        runner, "_get_preflight_pr_refresh_state", return_value=_preflight_pr_state()
+    ), mock.patch.object(
+        runner,
+        "_get_preflight_compare_state",
+        return_value=_preflight_compare_state(
+            status="diverged", ahead_by=1, behind_by=3
+        ),
+    ), mock.patch.object(
+        runner, "_main_contains_path", return_value=False
+    ):
+        report = runner.preflight_pr_refresh(_preflight_pr_issue_body())
+
+    assert report.startswith("DONE:")
+    assert "compare_status=diverged" in report
+    assert "files_on_main_count=0" in report
+    assert "next_action=create fresh PR" in report
+
+
+def test_preflight_pr_refresh_overlapping_main_files_requires_manual_review() -> None:
+    with mock.patch.object(
+        runner, "_get_preflight_pr_refresh_state", return_value=_preflight_pr_state()
+    ), mock.patch.object(
+        runner,
+        "_get_preflight_compare_state",
+        return_value=_preflight_compare_state(
+            status="diverged", ahead_by=1, behind_by=2
+        ),
+    ), mock.patch.object(
+        runner, "_main_contains_path", return_value=True
+    ):
+        report = runner.preflight_pr_refresh(_preflight_pr_issue_body())
+
+    assert report.startswith("DONE:")
+    assert "files_on_main_count=1" in report
+    assert "next_action=manual review required" in report
+
+
+def test_preflight_pr_refresh_open_current_pr_recommends_validate_and_merge() -> None:
+    with mock.patch.object(
+        runner, "_get_preflight_pr_refresh_state", return_value=_preflight_pr_state()
+    ), mock.patch.object(
+        runner,
+        "_get_preflight_compare_state",
+        return_value=_preflight_compare_state(status="ahead", ahead_by=1, behind_by=0),
+    ), mock.patch.object(
+        runner, "_main_contains_path", return_value=False
+    ):
+        report = runner.preflight_pr_refresh(_preflight_pr_issue_body())
+
+    assert report.startswith("DONE:")
+    assert "next_action=validate and merge" in report
+
+
+def test_preflight_pr_refresh_task_makes_no_mutating_calls() -> None:
+    issue = _maintenance_issue(
+        runner.PREFLIGHT_PR_REFRESH,
+        "git update-ref refs/heads/main HEAD\n"
+        "git merge unsafe\n"
+        "git push --force\n"
+        "gh pr merge 123\n"
+        "python3 -c 'open(\"/tmp/nope\", \"w\").write(\"x\")'",
+        metadata="\n".join(
+            (
+                "Pull Request: 123",
+                f"Expected Head SHA: {HEAD_SHA}",
+            )
+        ),
+    )
+
+    def run_preflight_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        del cwd
+        if command[:3] == ["gh", "pr", "view"]:
+            return 0, json.dumps(_preflight_pr_state())
+        if command[:2] == ["gh", "api"] and "compare" in command[2]:
+            return 0, json.dumps(_preflight_compare_state(status="ahead"))
+        if command[:4] == ["gh", "api", "--method", "GET"]:
+            return 1, "not found"
+        return 2, "unexpected command"
+
+    with mock.patch.object(
+        runner, "ensure_clean_worktree", return_value=(True, "")
+    ), mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run_preflight_command
+    ) as run, mock.patch.object(
+        runner, "run_codex_task"
+    ) as run_codex:
+        runner.process_issue(issue, workdir=str(runner.ROOT))
+
+    commands = [call.args[0] for call in run.call_args_list]
+    command_words = [" ".join(command) for command in commands]
+    assert all("update-ref" not in command for command in command_words)
+    assert all(" merge" not in command for command in command_words)
+    assert all(" push" not in command for command in command_words)
+    assert all("checkout" not in command for command in command_words)
+    assert all("-c" not in command for command in command_words)
+    assert all("open(" not in command for command in command_words)
+    run_codex.assert_not_called()
 
 
 def test_validate_pr_branch_invalid_pr_number_blocks() -> None:
