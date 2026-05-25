@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.aufmass_source_pack.schema.json",
+  "title": "Aufmass Source Pack Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "pack_id",
+    "project_id",
+    "sources"
+  ],
+  "properties": {
+    "schema": {"const": "skeleton.aufmass_source_pack.v1"},
+    "pack_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+    "project_id": {"type": "string", "minLength": 1},
+    "sources": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/source"}
+    }
+  },
+  "$defs": {
+    "source_type": {
+      "type": "string",
+      "enum": [
+        "dxf",
+        "pdf",
+        "image_scan",
+        "ifc",
+        "manual_room_list",
+        "operator_note",
+        "mixed"
+      ]
+    },
+    "artifact_route": {
+      "type": "string",
+      "enum": [
+        "public_synthetic",
+        "private_drive",
+        "private_local_runner",
+        "private_operator_handoff"
+      ]
+    },
+    "privacy_status": {
+      "type": "string",
+      "enum": [
+        "synthetic",
+        "public_safe",
+        "private_pilot",
+        "blocked_for_public"
+      ]
+    },
+    "review_status": {
+      "type": "string",
+      "enum": [
+        "draft",
+        "needs_review",
+        "reviewed",
+        "rejected",
+        "approved_for_private_intake"
+      ]
+    },
+    "scale_basis": {
+      "type": "string",
+      "enum": [
+        "known_dimension",
+        "drawing_scale",
+        "declared_model_units",
+        "not_applicable",
+        "unknown"
+      ]
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "title",
+        "source_revision",
+        "prepared_by"
+      ],
+      "properties": {
+        "title": {"type": "string", "minLength": 1, "maxLength": 120},
+        "source_revision": {"type": "string", "minLength": 1, "maxLength": 80},
+        "prepared_by": {"type": "string", "minLength": 1, "maxLength": 80}
+      }
+    },
+    "scale_hint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["basis"],
+      "properties": {
+        "basis": {"$ref": "#/$defs/scale_basis"},
+        "detail": {"type": "string", "minLength": 1, "maxLength": 160}
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "source_type",
+        "artifact_ref",
+        "artifact_route",
+        "metadata",
+        "scale_hint",
+        "privacy_status",
+        "review_status"
+      ],
+      "properties": {
+        "source_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+        "source_type": {"$ref": "#/$defs/source_type"},
+        "artifact_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+        "artifact_route": {"$ref": "#/$defs/artifact_route"},
+        "metadata": {"$ref": "#/$defs/metadata"},
+        "scale_hint": {"$ref": "#/$defs/scale_hint"},
+        "privacy_status": {"$ref": "#/$defs/privacy_status"},
+        "review_status": {"$ref": "#/$defs/review_status"},
+        "notes": {
+          "type": "array",
+          "items": {"type": "string", "maxLength": 240}
+        }
+      }
+    }
+  }
+}
