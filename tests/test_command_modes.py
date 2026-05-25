@@ -15,7 +15,7 @@ def load_yaml(path: str) -> dict:
 def test_required_commands_exist() -> None:
     commands = load_yaml("COMMANDS.yaml")["commands"]
 
-    for command in ["прокинься", "СК", "ДЖ", "АУД", "КОД", "БЗ", "зафіксуй", "фіксуй", "+"]:
+    for command in ["прокинься", "СК", "СК-свіжість", "ДЖ", "АУД", "КОД", "БЗ", "зафіксуй", "фіксуй", "+"]:
         assert command in commands
 
 
@@ -103,6 +103,11 @@ def test_behavior_playbook_consolidates_safe_helper_issue_first_and_repeated_wor
         "safe_next_step": "process_as_batch_split_and_stop_on_different_or_risky_item",
         "report": "short_human_readable_processed_split_blocked_validation_summary",
     }
+    assert playbook["skeleton_freshness_check"] == {
+        "trigger": "before_skeleton_project_work_or_after_recent_main_merge",
+        "safe_next_step": "compare_github_main_runner_checkout_sourcepack_and_open_work",
+        "report": "short_human_readable_fresh_stale_blocked_summary",
+    }
 
 
 def test_batch_command_reports_repeated_work_without_weakening_gates() -> None:
@@ -114,3 +119,23 @@ def test_batch_command_reports_repeated_work_without_weakening_gates() -> None:
     assert "split_and_stop_if_any_item_differs" in means
     assert "report_processed_split_blocked_validation_summary" in means
     assert "no_batch_merge_deploy_secrets_runtime_canon_instruction_promotion_unless_explicitly_approved" in means
+
+
+def test_skeleton_freshness_command_is_report_only_and_checks_canon_sources() -> None:
+    commands = load_yaml("COMMANDS.yaml")["commands"]
+    spec = commands["СК-свіжість"]
+    means = set(spec["means"])
+
+    assert spec["mode"] == "audit"
+    assert spec["project"] == "skeleton"
+    assert spec["writes"] == "none"
+    assert spec["produces"] == ["SkeletonFreshnessReport"]
+    assert "GitHub_main_status" in spec["loads"]
+    assert "Runner_checkout_status" in spec["loads"]
+    assert "open_PRs_and_issues" in spec["loads"]
+    assert "GitHub_main_is_source_of_truth" in means
+    assert "check_live_runner_checkout_sync_after_recent_merges" in means
+    assert "check_notebooklm_sourcepack_freshness_when_relevant" in means
+    assert "flag_open_prs_or_issues_stale_relative_to_main" in means
+    assert "old_chats_and_old_branches_are_not_canon" in means
+    assert "keep_report_short_human_readable" in means

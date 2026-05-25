@@ -140,6 +140,43 @@ include the allowlisted command and a bounded, sanitized output block between
 `failed_output_start` and `failed_output_end`; long output is truncated with an
 explicit marker.
 
+`check_skeleton_freshness` is a short status-only check before Skeleton project
+work starts or after recent merges. It requires no target metadata:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: check_skeleton_freshness
+```
+
+It may only:
+
+1. Use the registered Skeleton checkout from `PROJECT_TREE.yaml`.
+2. Verify the checkout path is safe using the same path rules as
+   `check_project_checkout`.
+3. Run only bounded Git and GitHub status queries:
+   `git -C {checkout_path} remote get-url origin`,
+   `git -C {checkout_path} fetch --prune origin main`,
+   `git -C {checkout_path} rev-parse HEAD`,
+   `git -C {checkout_path} rev-parse origin/main`,
+   `git -C {checkout_path} ls-remote origin refs/heads/main`,
+   `git -C {checkout_path} merge-base --is-ancestor`,
+   `gh pr list --repo alanua/Skeleton --state open`, and
+   `gh issue list --repo alanua/Skeleton --state open`.
+4. Report whether GitHub `main` is the source of truth.
+5. Report whether the live Runner checkout is equal to, ahead of, behind, or
+   diverged from the current GitHub `main` SHA.
+6. Report whether `docs/NOTEBOOKLM_SOURCEPACK.md` may need refresh when
+   sourcepack or NotebookLM context is relevant.
+7. Flag open PRs or issues that may need rebase, retest, or scope review against
+   current `main`.
+8. Remind that old chats and old branches are not canon.
+
+It reports `DONE` when the freshness report was produced. It reports `BLOCKED`
+for unsafe paths, missing checkouts, missing `.git`, failed origin reads, failed
+GitHub `main` SHA reads, GitHub query failures, or any unclassified sync state.
+The report must be short, human-readable, and must not include raw command
+output.
+
 The allowlist does not permit rebooting the host, package upgrades, arbitrary
 commands or config values from issue text, or unrelated services.
 

@@ -52,3 +52,20 @@ def test_markdown_files_do_not_define_alternate_active_boot_route() -> None:
             offenders.append(rel)
 
     assert offenders == []
+
+
+def test_skeleton_freshness_docs_keep_github_main_as_canon() -> None:
+    operating_standard = (ROOT / "projects/skeleton/PROJECT_OPERATING_STANDARD.md").read_text(encoding="utf-8")
+    runner_tasks = (ROOT / "docs/RUNNER_MAINTENANCE_TASKS.md").read_text(encoding="utf-8")
+
+    assert "## 5. Skeleton freshness check" in operating_standard
+    assert "GitHub `main` is the source of truth" in operating_standard
+    assert "live Runner checkout" in operating_standard
+    assert "`docs/NOTEBOOKLM_SOURCEPACK.md` freshness" in operating_standard
+    assert "open PRs or issues" in operating_standard
+    assert "old chats, old branches, and old local notes are not canon" in operating_standard
+
+    assert "`check_skeleton_freshness`" in runner_tasks
+    assert "GitHub `main` is the source of truth" in runner_tasks
+    assert "current GitHub `main` SHA" in runner_tasks
+    assert "old chats and old branches are not canon" in runner_tasks
