@@ -308,6 +308,20 @@ def test_runner_report_status_blocks_file_change_done_without_draft_pr() -> None
     assert runner.runner_report_status(report) == "BLOCKED"
 
 
+def test_runner_report_status_blocks_file_change_done_with_placeholder_pr_url() -> None:
+    report = DONE_REPORT.replace(PR_URL, "{PR_URL}")
+
+    assert runner.extract_pr_url(report) is None
+    assert runner.runner_report_status(report) == "BLOCKED"
+
+
+def test_blocked_final_report_replaces_placeholder_pr_url() -> None:
+    report = runner.blocked_final_report(DONE_REPORT.replace(PR_URL, "{PR_URL}"))
+
+    assert "{PR_URL}" not in report
+    assert "Draft PR: none" in report
+
+
 def test_runner_report_status_allows_no_change_done_without_draft_pr() -> None:
     report = "DONE: Codex completed successfully with no file changes."
 
@@ -333,6 +347,17 @@ def test_worktree_path_includes_issue_number(tmp_path: Path) -> None:
         os.environ, {"SKELETON_WORKTREE_ROOT": str(tmp_path)}, clear=True
     ):
         assert runner.issue_worktree_path(912).name == "issue-912"
+
+
+def test_post_issue_comment_replaces_placeholder_pr_url() -> None:
+    with mock.patch.object(runner, "run_command", return_value=(0, "")) as run:
+        runner.post_issue_comment(9, "DONE\nDraft PR: {PR_URL}\nPR: {PR_URL}")
+
+    command = run.call_args.args[0]
+    body = command[command.index("--body") + 1]
+    assert "{PR_URL}" not in body
+    assert "Draft PR: none" in body
+    assert "PR: none" in body
 
 
 def test_target_repository_worktree_paths_are_deterministic(tmp_path: Path) -> None:
@@ -1132,6 +1157,15 @@ def test_simple_done_notification_without_pr_url_keeps_plain_message() -> None:
         "text": [f"Repository: {runner.REPO}\nIssue: #9\nStatus: DONE"],
         "disable_web_page_preview": ["true"],
     }
+
+
+def test_telegram_message_omits_placeholder_pr_url() -> None:
+    message = runner.build_telegram_message(
+        9, "BLOCKED", DONE_REPORT.replace(PR_URL, "{PR_URL}")
+    )
+
+    assert "{PR_URL}" not in message
+    assert "PR:" not in message
 
 
 def test_done_pr_report_builds_card_payload_from_runner_binding() -> None:

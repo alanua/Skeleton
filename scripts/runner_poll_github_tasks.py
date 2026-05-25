@@ -514,6 +514,7 @@ def runner_report_status(report: str) -> str:
 
 
 def blocked_final_report(report: str) -> str:
+    report = sanitize_public_report(report)
     marker = blocked_output_marker(report)
     if marker is not None:
         reason = f"blocked marker `{marker}` was present"
@@ -874,6 +875,7 @@ def run_codex_task(
 
 
 def post_issue_comment(issue_number: int, body: str) -> None:
+    body = sanitize_public_report(body)
     code, output = run_command(
         [
             "gh",
@@ -983,7 +985,18 @@ def extract_pr_url(report: str) -> str | None:
     match = re.search(r"^Draft PR:\s*(?P<url>\S+)\s*$", report, re.MULTILINE)
     if not match:
         return None
-    return match.group("url")
+    pr_url = match.group("url")
+    if pr_url == "{PR_URL}":
+        return None
+    return pr_url
+
+
+def sanitize_public_report(report: str) -> str:
+    return re.sub(
+        r"(?m)^(?P<label>(?:Draft )?PR):\s*\{PR_URL\}\s*$",
+        r"\g<label>: none",
+        report,
+    )
 
 
 def extract_pr_number(pr_url: str) -> int | None:
