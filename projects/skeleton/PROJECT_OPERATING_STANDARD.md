@@ -262,7 +262,19 @@ For every task:
 10. summarize result;
 11. give the exact next step.
 
-## 14. BauClock-specific boundaries
+## 14. Behavior playbook
+
+Use these small rules to reduce routine workflow friction without changing safety gates:
+
+| Pattern | Trigger | Safe next step | Report |
+| --- | --- | --- | --- |
+| Routine safe helper step | The helper step is already approved, in the same scope, read-only or current-scope-only, and not risky. | Run the smallest safe helper step without asking for another `+`. | Short human-readable status, result, and next safe step. |
+| Blocked long task creation | A long task cannot be created safely because details are missing, scope is too large, or ambiguity would make execution unsafe. | Create a short public-safe issue for the first unblocker only. | Issue reference, blocker, and next safe step. |
+| Repeated work pattern | Same-type routine items share the same approved route, scope, risk level, and gate. | Process as a batch; split and stop on any different or risky item. | Processed, split, blocked, and validation summary. |
+
+These rules do not allow merge, deploy, runtime, secrets, destructive operations, canon instruction promotion, or cross-scope writes without the existing explicit approvals.
+
+## 15. BauClock-specific boundaries
 
 BauClock has additional boundaries:
 
@@ -273,7 +285,7 @@ BauClock has additional boundaries:
 - test role and access-control changes separately;
 - validate Telegram bot and runtime changes through tests and manual review.
 
-## 15. Lavalamp / WLED-specific boundaries
+## 16. Lavalamp / WLED-specific boundaries
 
 Lavalamp has additional boundaries:
 
@@ -284,7 +296,7 @@ Lavalamp has additional boundaries:
 - run PlatformIO or WLED builds only through Runner or a prepared environment;
 - flash firmware only after explicit operator command.
 
-## 16. Non-code projects
+## 17. Non-code projects
 
 Skeleton can also manage non-code projects such as documents, drawings, Aufmaß, planning, or administrative workflows.
 
@@ -295,7 +307,7 @@ For non-code projects:
 - durable file changes still require PatchPlan;
 - no private documents are published to public repos unless explicitly approved.
 
-## 17. Main principle
+## 18. Main principle
 
 The human sets direction.
 

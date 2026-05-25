@@ -1,6 +1,20 @@
 schema: skeleton.memory_routing.v1
 status: DRAFT_ACTIVE_CANDIDATE
 
+behavior_playbook:
+  routine_safe_helper_steps:
+    trigger: approved_helper_step_is_same_scope_read_only_or_current_scope_only_and_not_risky
+    safe_next_step: run_smallest_safe_helper_step_without_extra_plus
+    report: short_human_readable_status_result_next_safe_step
+  blocked_long_task_creation:
+    trigger: long_task_creation_blocked_by_missing_detail_size_or_unsafe_ambiguity
+    safe_next_step: create_short_public_safe_issue_for_first_unblocker
+    report: short_human_readable_issue_reference_blocker_next_safe_step
+  repeated_work_pattern:
+    trigger: same_type_routine_items_share_approved_route_scope_risk_level_and_gate
+    safe_next_step: process_as_batch_split_and_stop_on_different_or_risky_item
+    report: short_human_readable_processed_split_blocked_validation_summary
+
 routes:
   public_safe_durable:
     target: public_github_canon

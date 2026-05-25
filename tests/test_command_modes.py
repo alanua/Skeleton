@@ -82,3 +82,35 @@ def test_fixuy_commands_record_without_extra_plus_but_keep_risky_actions_gated()
             "report_to_Oleksii_human_readable_clear_person_to_person_technical_details_only_when_needed_or_requested"
             in means
         )
+
+
+def test_behavior_playbook_consolidates_safe_helper_issue_first_and_repeated_work() -> None:
+    commands = load_yaml("COMMANDS.yaml")
+    playbook = commands["behavior_playbook"]
+
+    assert playbook["routine_safe_helper_steps"] == {
+        "trigger": "approved_helper_step_is_same_scope_read_only_or_current_scope_only_and_not_risky",
+        "safe_next_step": "run_smallest_safe_helper_step_without_extra_plus",
+        "report": "short_human_readable_status_result_next_safe_step",
+    }
+    assert playbook["blocked_long_task_creation"] == {
+        "trigger": "long_task_creation_blocked_by_missing_detail_size_or_unsafe_ambiguity",
+        "safe_next_step": "create_short_public_safe_issue_for_first_unblocker",
+        "report": "short_human_readable_issue_reference_blocker_next_safe_step",
+    }
+    assert playbook["repeated_work_pattern"] == {
+        "trigger": "same_type_routine_items_share_approved_route_scope_risk_level_and_gate",
+        "safe_next_step": "process_as_batch_split_and_stop_on_different_or_risky_item",
+        "report": "short_human_readable_processed_split_blocked_validation_summary",
+    }
+
+
+def test_batch_command_reports_repeated_work_without_weakening_gates() -> None:
+    commands = load_yaml("COMMANDS.yaml")["commands"]
+    means = set(commands["пакетно"]["means"])
+
+    assert commands["пакетно"]["rule"] == "same_type_routine_tasks_only_same_approved_route_scope_risk_gate"
+    assert "require_same_approved_route_scope_risk_level_and_gate" in means
+    assert "split_and_stop_if_any_item_differs" in means
+    assert "report_processed_split_blocked_validation_summary" in means
+    assert "no_batch_merge_deploy_secrets_runtime_canon_instruction_promotion_unless_explicitly_approved" in means
