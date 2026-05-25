@@ -93,11 +93,37 @@ commands:
     writes: routed_durable_storage_after_write_gate
     means:
       - explicit_durable_persistence_request
+      - fixuy_is_enough_approval_to_record_stated_rule_after_classification
       - classify_CANON_REVIEW_BACKLOG_REJECTED_PRIVATE_TEMPORARY
-      - route_public_safe_durable_through_BZ_GitHub_write_gate
+      - route_public_safe_durable_to_GitHub_canon_review_without_extra_plus
       - route_private_context_privately
       - secrets_never_to_chat_GitHub_plain_Drive
-      - write_only_after_route_scope_safety_check_and_required_approval
+      - risky_actions_merge_deploy_runtime_secrets_destructive_require_separate_explicit_approval
+      - report_to_Oleksii_human_readable_clear_person_to_person_technical_details_only_when_needed_or_requested
+
+  фіксуй:
+    mode: persist_request
+    boot_level: L4
+    loads:
+      - BOOT_MANIFEST.yaml
+      - MEMORY_ROUTING.yaml
+      - SOURCE_REGISTRY.yaml
+      - requested_instruction_change
+    produces:
+      - PersistenceClassification
+      - RouteDecision
+      - CritiqueOrPatchPlan
+      - VerificationReport
+    writes: routed_durable_storage_after_write_gate
+    means:
+      - explicit_durable_persistence_request
+      - fixuy_is_enough_approval_to_record_stated_rule_after_classification
+      - classify_CANON_REVIEW_BACKLOG_REJECTED_PRIVATE_TEMPORARY
+      - route_public_safe_durable_to_GitHub_canon_review_without_extra_plus
+      - route_private_context_privately
+      - secrets_never_to_chat_GitHub_plain_Drive
+      - risky_actions_merge_deploy_runtime_secrets_destructive_require_separate_explicit_approval
+      - report_to_Oleksii_human_readable_clear_person_to_person_technical_details_only_when_needed_or_requested
 
   '+':
     mode: continue_approved_step

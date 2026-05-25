@@ -80,6 +80,32 @@ def test_secrets_route_uses_secret_manager_target() -> None:
     assert routes["secrets_credentials"]["target"] == "local_encrypted_store_or_secret_manager"
 
 
+def test_fixuy_memory_routes_are_explicit_and_secrets_refuse_plain_storage() -> None:
+    routing = load_yaml("MEMORY_ROUTING.yaml")
+    routes = routing["routes"]
+
+    assert routes["public_safe_durable"]["fixuy_rule"] == (
+        "record_after_classification_via_GitHub_canon_review_without_extra_plus"
+    )
+    assert routes["private_context"]["fixuy_rule"] == "record_after_classification_in_private_memory"
+    assert routes["secrets_credentials"]["fixuy_rule"] == (
+        "refuse_chat_GitHub_plain_storage_require_secret_manager_or_local_encrypted_route"
+    )
+    assert "secrets_credentials" in routing["classification_required_for"]
+
+
+def test_risky_actions_still_require_separate_approval() -> None:
+    routing = load_yaml("MEMORY_ROUTING.yaml")
+
+    assert routing["risky_action_rule"]["still_requires_separate_explicit_approval"] == [
+        "merge",
+        "deploy",
+        "runtime",
+        "secrets",
+        "destructive_operations",
+    ]
+
+
 def test_role_boundaries_exist() -> None:
     roles = load_yaml("SOURCE_REGISTRY.yaml")["roles"]
 
