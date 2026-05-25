@@ -15,6 +15,7 @@ import tempfile
 import time
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +23,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from core.audit_ledger import AuditLedger, validate_public_safe_payload
 from core.project_tree import get_project, get_project_by_repo, load_project_tree
+from core.skeleton_memory import SkeletonMemory
 from core.telegram_approval_buttons import build_pr_ready_card_payload
 
 
@@ -141,6 +144,18 @@ _SENSITIVE_OUTPUT_VALUE_RE = re.compile(
     r"(?i)\b([A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASS|KEY|CREDENTIAL|AUTH)"
     r"[A-Z0-9_]*)\s*=\s*([^\s]+)"
 )
+RUNNER_MEMORY_DB_ENV = "SKELETON_RUNNER_MEMORY_DB"
+RUNNER_MEMORY_LEDGER_ENV = "SKELETON_RUNNER_MEMORY_LEDGER"
+RUNNER_MEMORY_DIR_ENV = "SKELETON_RUNNER_MEMORY_DIR"
+RUNNER_MEMORY_WARNING = "Memory warning: Runner memory write failed."
+_PUBLIC_GITHUB_PR_URL_RE = re.compile(
+    r"^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[1-9]\d*/?$"
+)
+_SAFE_CHANGED_FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@+-]*$")
+_PYTEST_SUMMARY_LINE_RE = re.compile(
+    r"(?i)\b(?:\d+\s+(?:passed|failed|skipped|xfailed|xpassed|error|errors|warnings?)"
+    r"|no tests ran|failed|passed)\b"
+)
 
 
 @dataclass(frozen=True)
@@ -206,6 +221,12 @@ class RegisteredProjectCheckout:
     checkout_path_text: str
     checkout_path: Path
     status_lines: list[str]
+
+
+@dataclass(frozen=True)
+class RunnerMemoryConfig:
+    db_path: Path
+    ledger_path: Path
 
 
 @dataclass(frozen=True)
@@ -1007,6 +1028,198 @@ def sanitize_public_report(report: str) -> str:
     )
 
 
+def runner_memory_config_from_env() -> RunnerMemoryConfig | None:
+    db_path = os.environ.get(RUNNER_MEMORY_DB_ENV)
+    ledger_path = os.environ.get(RUNNER_MEMORY_LEDGER_ENV)
+    if db_path and ledger_path:
+        return RunnerMemoryConfig(Path(db_path).expanduser(), Path(ledger_path).expanduser())
+
+    memory_dir = os.environ.get(RUNNER_MEMORY_DIR_ENV)
+    if not memory_dir:
+        return None
+
+    base = Path(memory_dir).expanduser()
+    month = datetime.now(timezone.utc).strftime("%Y_%m")
+    return RunnerMemoryConfig(base / "skeleton.db", base / f"events_{month}.jsonl")
+
+
+def _public_github_pr_url(report: str) -> str | None:
+    pr_url = extract_pr_url(report)
+    if pr_url and _PUBLIC_GITHUB_PR_URL_RE.fullmatch(pr_url):
+        return pr_url
+    return None
+
+
+def _safe_changed_file(file_name: str) -> str | None:
+    normalized = file_name.strip()
+    if not normalized:
+        return None
+    lowered = normalized.lower()
+    if (
+        normalized.startswith(("/", "~"))
+        or "\\" in normalized
+        or ".." in Path(normalized).parts
+        or lowered.endswith(".env")
+        or lowered == ".env"
+        or "://" in normalized
+        or _SAFE_CHANGED_FILE_RE.fullmatch(normalized) is None
+    ):
+        return None
+    try:
+        validate_public_safe_payload({"changed_file": normalized})
+    except ValueError:
+        return None
+    return normalized
+
+
+def extract_runner_memory_changed_files(report: str) -> list[str]:
+    patterns = (
+        r"^Changed files:\s*\n(?P<files>(?:- [^\n]+\n?)+)",
+        r"^Local worktree changed files:\s*\n(?P<files>(?:- [^\n]+\n?)+)",
+    )
+    files: list[str] = []
+    for pattern in patterns:
+        match = re.search(pattern, report or "", re.MULTILINE)
+        if match is None:
+            continue
+        for line in match.group("files").splitlines():
+            if not line.startswith("- "):
+                continue
+            safe_file = _safe_changed_file(line.removeprefix("- "))
+            if safe_file is not None and safe_file not in files:
+                files.append(safe_file)
+    return files
+
+
+def extract_runner_memory_test_summary(report: str) -> str | None:
+    match = re.search(
+        r"^Pytest output:\s*\n```(?P<summary>.*?)```",
+        report or "",
+        re.MULTILINE | re.DOTALL,
+    )
+    if match is None:
+        return None
+
+    summary_lines = []
+    for line in match.group("summary").splitlines():
+        stripped = line.strip()
+        if stripped and _PYTEST_SUMMARY_LINE_RE.search(stripped):
+            summary_lines.append(stripped)
+        if len(summary_lines) >= 3:
+            break
+    if not summary_lines:
+        return None
+
+    summary = "\n".join(summary_lines)
+    try:
+        validate_public_safe_payload({"test_summary": summary})
+    except ValueError:
+        return "redacted unsafe test summary"
+    return summary
+
+
+def _runner_memory_payload(
+    *,
+    event_type: str,
+    issue_number: int,
+    project_id: str,
+    runner_status: str,
+    executor: str | None,
+    status: str | None = None,
+    report: str | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "event_type": event_type,
+        "issue_number": issue_number,
+        "project_id": project_id,
+        "runner_status": runner_status,
+    }
+    if executor in {"codex", "openhands", "maintenance"}:
+        payload["executor"] = executor
+    if status is not None:
+        payload["status"] = status
+    if report is not None:
+        changed = extract_runner_memory_changed_files(report)
+        if changed:
+            payload["changed_files"] = changed
+        test_summary = extract_runner_memory_test_summary(report)
+        if test_summary is not None:
+            payload["test_summary"] = test_summary
+        pr_url = _public_github_pr_url(report)
+        if pr_url is not None:
+            payload["pr_url"] = pr_url
+    validate_public_safe_payload(payload)
+    return payload
+
+
+def _write_runner_memory_payload(
+    payload: dict[str, Any],
+    *,
+    executor_result: bool,
+) -> str | None:
+    config = runner_memory_config_from_env()
+    if config is None:
+        return None
+    try:
+        memory = SkeletonMemory(config.db_path)
+        memory.init_schema()
+        if executor_result:
+            memory.log_executor_run(payload)
+        else:
+            memory.log_operator_event(payload)
+        AuditLedger(config.ledger_path).append(payload)
+    except Exception:
+        return RUNNER_MEMORY_WARNING
+    return None
+
+
+def record_runner_task_picked_up(
+    issue_number: int,
+    project_id: str,
+    executor: str | None,
+) -> str | None:
+    try:
+        payload = _runner_memory_payload(
+            event_type="runner_task_picked_up",
+            issue_number=issue_number,
+            project_id=project_id,
+            runner_status="RUNNING",
+            executor=executor,
+        )
+    except Exception:
+        return RUNNER_MEMORY_WARNING
+    return _write_runner_memory_payload(payload, executor_result=False)
+
+
+def record_runner_executor_result(
+    issue_number: int,
+    project_id: str,
+    status: str,
+    runner_status: str,
+    executor: str | None,
+    report: str | None,
+) -> str | None:
+    try:
+        payload = _runner_memory_payload(
+            event_type="runner_task_executor_result",
+            issue_number=issue_number,
+            project_id=project_id,
+            status=status,
+            runner_status=runner_status,
+            executor=executor,
+            report=report,
+        )
+    except Exception:
+        return RUNNER_MEMORY_WARNING
+    return _write_runner_memory_payload(payload, executor_result=True)
+
+
+def append_memory_warning(report: str, warning: str | None) -> str:
+    if not warning:
+        return report
+    return f"{report.rstrip()}\n\n{warning}"
+
+
 def extract_pr_number(pr_url: str) -> int | None:
     match = re.search(r"/pulls?/(?P<number>[1-9]\d*)(?:/|$)", pr_url)
     if not match:
@@ -1436,11 +1649,18 @@ def block_issue(
     message: str,
     remove_label: str = LABEL_READY,
     runner_task: RunnerTask | None = None,
+    result_status: str = "BLOCKED",
 ) -> None:
-    post_issue_comment(
+    report = report_runner_lane(f"BLOCKED: {message}", runner_task)
+    warning = record_runner_executor_result(
         issue_number,
-        report_runner_lane(f"BLOCKED: {message}", runner_task),
+        runner_task.target_project if runner_task is not None else "skeleton",
+        result_status,
+        "BLOCKED",
+        "codex" if runner_task is not None else None,
+        report,
     )
+    post_issue_comment(issue_number, append_memory_warning(report, warning))
     set_issue_label(issue_number, remove_label, LABEL_BLOCKED)
     notify_task_finished(issue_number, "BLOCKED")
 
@@ -2803,10 +3023,20 @@ def execute_telegram_approved_pr_merge(
 def process_telegram_approved_pr_merge_issue(
     issue_number: int,
     request: TelegramApprovedPrMergeRequest,
+    memory_warning: str | None = None,
 ) -> None:
     report = execute_telegram_approved_pr_merge(request)
-    post_issue_comment(issue_number, report)
     status = "DONE" if report.startswith("DONE:") else "BLOCKED"
+    warning = record_runner_executor_result(
+        issue_number,
+        "skeleton",
+        status,
+        status,
+        "maintenance",
+        report,
+    )
+    report = append_memory_warning(report, warning or memory_warning)
+    post_issue_comment(issue_number, report)
     set_issue_label(
         issue_number,
         LABEL_RUNNING,
@@ -2816,14 +3046,37 @@ def process_telegram_approved_pr_merge_issue(
 
 
 def process_runtime_maintenance_issue(
-    issue_number: int, task_id: str, workdir: str, body: str = ""
+    issue_number: int,
+    task_id: str,
+    workdir: str,
+    body: str = "",
+    memory_warning: str | None = None,
 ) -> None:
     report = dispatch_runtime_maintenance_task(task_id, workdir, body)
-    post_issue_comment(issue_number, report)
     if maintenance_report_is_done(report):
+        warning = record_runner_executor_result(
+            issue_number,
+            "skeleton",
+            "DONE",
+            "DONE",
+            "maintenance",
+            report,
+        )
+        report = append_memory_warning(report, warning or memory_warning)
+        post_issue_comment(issue_number, report)
         set_issue_label(issue_number, LABEL_RUNNING, LABEL_DONE)
         notify_task_finished(issue_number, "DONE", report)
         return
+    warning = record_runner_executor_result(
+        issue_number,
+        "skeleton",
+        "BLOCKED",
+        "BLOCKED",
+        "maintenance",
+        report,
+    )
+    report = append_memory_warning(report, warning or memory_warning)
+    post_issue_comment(issue_number, report)
     set_issue_label(issue_number, LABEL_RUNNING, LABEL_BLOCKED)
     notify_task_finished(issue_number, "BLOCKED", report)
 
@@ -2907,14 +3160,34 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
 
         set_issue_label(issue_number, LABEL_READY, LABEL_RUNNING)
         claimed = True
+        executor_name = "maintenance" if maintenance_mode or merge_mode else "codex"
+        pickup_memory_warning = record_runner_task_picked_up(
+            issue_number,
+            runner_task.target_project if runner_task is not None else "skeleton",
+            executor_name,
+        )
 
         if maintenance_mode and maintenance_task_id is not None:
-            process_runtime_maintenance_issue(
-                issue_number, maintenance_task_id, coordinator_workdir, issue_body
-            )
+            if pickup_memory_warning:
+                process_runtime_maintenance_issue(
+                    issue_number,
+                    maintenance_task_id,
+                    coordinator_workdir,
+                    issue_body,
+                    pickup_memory_warning,
+                )
+            else:
+                process_runtime_maintenance_issue(
+                    issue_number, maintenance_task_id, coordinator_workdir, issue_body
+                )
             return
         if merge_mode and merge_request is not None:
-            process_telegram_approved_pr_merge_issue(issue_number, merge_request)
+            if pickup_memory_warning:
+                process_telegram_approved_pr_merge_issue(
+                    issue_number, merge_request, pickup_memory_warning
+                )
+            else:
+                process_telegram_approved_pr_merge_issue(issue_number, merge_request)
             return
 
         target_repository = (
@@ -2964,6 +3237,15 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                 blocked_codex_output_report(codex_output, marker, issue_workdir),
                 runner_task,
             )
+            warning = record_runner_executor_result(
+                issue_number,
+                runner_task.target_project if runner_task is not None else "skeleton",
+                "BLOCKED",
+                "BLOCKED",
+                "codex",
+                report,
+            )
+            report = append_memory_warning(report, warning or pickup_memory_warning)
             post_issue_comment(issue_number, report)
             set_issue_label(issue_number, LABEL_RUNNING, LABEL_BLOCKED)
             notify_task_finished(issue_number, "BLOCKED", report)
@@ -2994,6 +3276,15 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
         status = runner_report_status(report)
         if status == "BLOCKED":
             report = blocked_final_report(report)
+        warning = record_runner_executor_result(
+            issue_number,
+            runner_task.target_project if runner_task is not None else "skeleton",
+            status,
+            status,
+            "codex",
+            report,
+        )
+        report = append_memory_warning(report, warning or pickup_memory_warning)
         post_issue_comment(issue_number, report)
         set_issue_label(
             issue_number,
@@ -3016,6 +3307,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                 ),
                 remove_label=remove_label,
                 runner_task=runner_task,
+                result_status="ERROR",
             )
         except Exception:
             return
