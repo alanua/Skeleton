@@ -77,6 +77,7 @@ ENSURE_PROJECT_CHECKOUT = "ensure_project_checkout"
 VALIDATE_PR_BRANCH = "validate_pr_branch"
 PREFLIGHT_PR_REFRESH = "preflight_pr_refresh"
 INSPECT_PR_MERGEABILITY = "inspect_pr_mergeability"
+PUBLISH_ISSUE_WORKTREE_PR = "publish_issue_worktree_pr"
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
         SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
@@ -86,6 +87,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         VALIDATE_PR_BRANCH,
         PREFLIGHT_PR_REFRESH,
         INSPECT_PR_MERGEABILITY,
+        PUBLISH_ISSUE_WORKTREE_PR,
     )
 )
 RUNNER_PROJECT_CHECKOUT_BASE = Path("/home/agent/agent-dev")
@@ -97,6 +99,7 @@ PR_BRANCH_VALIDATION_PROFILES = {
         ("python3", "-m", "pytest", "-q"),
     ),
 }
+ISSUE_WORKTREE_PUBLISH_VALIDATION_PROFILE = "full_pytest"
 VALIDATION_FAILED_OUTPUT_LIMIT = 4000
 VALIDATION_FAILED_OUTPUT_TRUNCATED_MARKER = (
     "[Runner validation output truncated to 4000 characters.]"
@@ -225,6 +228,13 @@ class PreflightPrRefreshRequest:
 class PrMergeabilityInspectionRequest:
     pr_number: int
     expected_head_sha: str | None
+
+
+@dataclass(frozen=True)
+class IssueWorktreePublishRequest:
+    source_issue: int
+    expected_branch: str
+    allowed_files: tuple[str, ...]
 
 
 def truncate_comment(body: str) -> str:
@@ -2176,6 +2186,331 @@ def preflight_pr_refresh(body: str) -> str:
     return _maintenance_report("DONE", task_id, status_lines, "met")
 
 
+def _body_list_field(body: str, field: str) -> list[str]:
+    lines = (body or "").splitlines()
+    values: list[str] = []
+    collecting = False
+    field_re = re.compile(rf"^\s*{re.escape(field)}:\s*(?P<value>.*)\s*$", re.I)
+    next_field_re = re.compile(r"^\s*[A-Za-z][A-Za-z0-9 ]{1,80}:\s*")
+    for line in lines:
+        if not collecting:
+            match = field_re.match(line)
+            if match is None:
+                continue
+            collecting = True
+            inline = match.group("value").strip()
+            if inline:
+                values.append(inline)
+            continue
+        stripped = line.strip()
+        if not stripped:
+            break
+        if next_field_re.match(line) and not stripped.startswith(("-", "*")):
+            break
+        if stripped.startswith(("-", "*")):
+            stripped = stripped[1:].strip()
+        values.append(stripped)
+    return values
+
+
+def _valid_relative_file_path(path: str) -> bool:
+    candidate = Path(path)
+    return (
+        path == path.strip()
+        and path != ""
+        and not candidate.is_absolute()
+        and all(part not in {"", ".", ".."} for part in candidate.parts)
+    )
+
+
+def _publish_issue_worktree_metadata(
+    body: str,
+) -> tuple[IssueWorktreePublishRequest | None, str | None]:
+    metadata = (body or "").split("```task", 1)[0]
+    repository = _body_field(metadata, "Repository")
+    source_issue = _body_field(metadata, "Source Issue") or _body_field(
+        metadata, "Source Issue Number"
+    )
+    expected_branch = _body_field(metadata, "Expected Branch")
+    allowed_files = _body_list_field(metadata, "Allowed Files") or _body_list_field(
+        metadata, "Allowed files"
+    )
+    if repository != REPO:
+        return None, "unsupported_repository"
+    if not isinstance(source_issue, str) or not re.fullmatch(r"[1-9]\d*", source_issue):
+        return None, "missing_or_invalid_source_issue"
+    if not isinstance(expected_branch, str) or not expected_branch.strip():
+        return None, "missing_expected_branch"
+    issue_number = int(source_issue)
+    if expected_branch != issue_branch(issue_number):
+        return None, "expected_branch_mismatch"
+    if not allowed_files:
+        return None, "missing_allowed_files"
+    normalized = tuple(sorted(dict.fromkeys(allowed_files)))
+    if len(normalized) != len(allowed_files):
+        return None, "duplicate_allowed_file"
+    if any(not _valid_relative_file_path(path) for path in normalized):
+        return None, "invalid_allowed_file"
+    return (
+        IssueWorktreePublishRequest(
+            source_issue=issue_number,
+            expected_branch=expected_branch,
+            allowed_files=normalized,
+        ),
+        None,
+    )
+
+
+def _changed_tracked_files(workdir: Path) -> list[str]:
+    code, output = run_command(["git", "diff", "--name-only", "HEAD", "--"], cwd=workdir)
+    if code != 0:
+        raise RuntimeError("git diff failed")
+    return sorted(line.strip() for line in output.splitlines() if line.strip())
+
+
+def _untracked_files(workdir: Path) -> list[str]:
+    code, output = run_command(
+        ["git", "ls-files", "--others", "--exclude-standard"], cwd=workdir
+    )
+    if code != 0:
+        raise RuntimeError("git ls-files failed")
+    return sorted(line.strip() for line in output.splitlines() if line.strip())
+
+
+def _is_ignored_publish_untracked_file(path: str) -> bool:
+    return path == ".codex" or path.startswith(".codex/")
+
+
+def _create_or_view_draft_pr(
+    request: IssueWorktreePublishRequest, workdir: Path
+) -> str:
+    pr_title = f"Runner task #{request.source_issue}: delivery fixes"
+    pr_body = (
+        f"Delivery-only draft PR for prepared issue worktree #{request.source_issue}."
+    )
+    create_command = [
+        "gh",
+        "pr",
+        "create",
+        "--repo",
+        REPO,
+        "--base",
+        "main",
+        "--head",
+        request.expected_branch,
+        "--title",
+        pr_title,
+        "--body",
+        pr_body,
+        "--draft",
+    ]
+    code, output = run_command(create_command, cwd=workdir)
+    if code == 0 and output.strip():
+        return output.strip()
+
+    view_code, view_output = run_command(
+        [
+            "gh",
+            "pr",
+            "view",
+            request.expected_branch,
+            "--repo",
+            REPO,
+            "--json",
+            "url",
+            "--jq",
+            ".url",
+        ],
+        cwd=workdir,
+    )
+    if view_code != 0 or not view_output.strip():
+        raise RuntimeError("gh pr create failed")
+    return view_output.strip()
+
+
+def publish_issue_worktree_pr(body: str) -> str:
+    task_id = PUBLISH_ISSUE_WORKTREE_PR
+    request, reason = _publish_issue_worktree_metadata(body)
+    if reason is not None:
+        return _maintenance_report("BLOCKED", task_id, [f"reason={reason}"], "not_met")
+    assert request is not None
+
+    status_lines = [
+        f"repository={REPO}",
+        f"source_issue={request.source_issue}",
+        f"expected_branch={request.expected_branch}",
+        f"validation_profile={ISSUE_WORKTREE_PUBLISH_VALIDATION_PROFILE}",
+    ]
+
+    try:
+        worktree_path = ensure_safe_worktree_path(issue_worktree_path(request.source_issue))
+    except ValueError:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=issue_worktree_path_unsafe"],
+            "not_met",
+        )
+    status_lines.append(f"worktree_path={worktree_path}")
+
+    if not worktree_path.exists():
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=issue_worktree_missing"],
+            "not_met",
+        )
+
+    code, output = run_command(["git", "branch", "--show-current"], cwd=worktree_path)
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "step=read_current_branch status=failed"],
+            "not_met",
+        )
+    current_branch = output.strip()
+    status_lines.append(f"current_branch={current_branch}")
+    if current_branch != request.expected_branch:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=current_branch_mismatch"],
+            "not_met",
+        )
+    status_lines.append("step=verify_current_branch status=done")
+
+    try:
+        tracked_files = _changed_tracked_files(worktree_path)
+        untracked_files = _untracked_files(worktree_path)
+    except Exception:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "step=read_worktree_changes status=failed"],
+            "not_met",
+        )
+
+    allowed_files = list(request.allowed_files)
+    unexpected_untracked = [
+        path for path in untracked_files if not _is_ignored_publish_untracked_file(path)
+    ]
+    status_lines.extend(
+        (
+            f"allowed_file_count={len(allowed_files)}",
+            f"changed_tracked_file_count={len(tracked_files)}",
+            f"untracked_file_count={len(untracked_files)}",
+        )
+    )
+    status_lines.extend(f"allowed_file={path}" for path in allowed_files)
+    status_lines.extend(f"changed_tracked_file={path}" for path in tracked_files)
+    status_lines.extend(f"untracked_file={path}" for path in untracked_files)
+    if unexpected_untracked:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=unexpected_untracked_files"],
+            "not_met",
+        )
+    if tracked_files != allowed_files:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=changed_tracked_files_mismatch"],
+            "not_met",
+        )
+    status_lines.append("step=verify_changed_files status=done")
+
+    commands_before_validation = (
+        ["git", "diff", "--check"],
+        ["git", "add", *allowed_files],
+        ["git", "diff", "--cached", "--check"],
+        ["git", "commit", "-m", f"runner: issue #{request.source_issue} task"],
+    )
+    for index, command in enumerate(commands_before_validation, 1):
+        code, output = run_command(command, cwd=worktree_path)
+        if code != 0:
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [
+                    *status_lines,
+                    f"step=publish_prepare_command_{index} status=failed exit_code={code}",
+                    *_validation_command_failure_lines(index, tuple(command), code, output),
+                ],
+                "not_met",
+            )
+        status_lines.append(f"step=publish_prepare_command_{index} status=done")
+
+    code, output = run_command(["git", "rev-parse", "HEAD"], cwd=worktree_path)
+    if code != 0 or _HEAD_SHA_RE.fullmatch(output.strip()) is None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "step=read_validated_head_sha status=failed"],
+            "not_met",
+        )
+    head_sha = output.strip().lower()
+    status_lines.append(f"validated_head_sha={head_sha}")
+
+    for index, command in enumerate(
+        PR_BRANCH_VALIDATION_PROFILES[ISSUE_WORKTREE_PUBLISH_VALIDATION_PROFILE], 1
+    ):
+        code, output = run_command(list(command), cwd=worktree_path)
+        if code != 0:
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [
+                    *status_lines,
+                    *_validation_command_failure_lines(index, command, code, output),
+                ],
+                "not_met",
+            )
+        status_lines.append(f"step=validation_profile_command_{index} status=done")
+
+    code, output = run_command(
+        [
+            "git",
+            "push",
+            "--force-with-lease",
+            "-u",
+            "origin",
+            request.expected_branch,
+        ],
+        cwd=worktree_path,
+    )
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                *status_lines,
+                f"step=push_issue_branch status=failed exit_code={code}",
+                *_validation_command_failure_lines(1, ("git", "push"), code, output),
+            ],
+            "not_met",
+        )
+    status_lines.append("step=push_issue_branch status=done")
+
+    try:
+        pr_url = _create_or_view_draft_pr(request, worktree_path)
+    except Exception:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "step=create_draft_pr status=failed"],
+            "not_met",
+        )
+    status_lines.extend(
+        (
+            "step=create_draft_pr status=done",
+            f"pr_url={pr_url}",
+        )
+    )
+    return _maintenance_report("DONE", task_id, status_lines, "met")
+
+
 def _validation_worktree_path(pr_number: int) -> Path:
     return worktree_root() / PR_BRANCH_VALIDATION_WORKTREE_DIR / f"pr-{pr_number}"
 
@@ -2667,6 +3002,8 @@ def dispatch_runtime_maintenance_task(
             return preflight_pr_refresh(body)
         if task_id == INSPECT_PR_MERGEABILITY:
             return inspect_pr_mergeability(body)
+        if task_id == PUBLISH_ISSUE_WORKTREE_PR:
+            return publish_issue_worktree_pr(body)
         return check_project_checkout(body)
     except Exception:
         return _maintenance_report(
