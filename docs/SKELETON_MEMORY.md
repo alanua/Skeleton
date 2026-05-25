@@ -77,3 +77,20 @@ task report. A memory write failure must not turn a `DONE` task into `BLOCKED`.
 OpenHands and Codex do not directly own or write Skeleton memory in this stage.
 They may produce task output for Runner, but Runner is the controlled caller
 that extracts public-safe outcome fields and writes the sanitized memory event.
+
+## Controlled Backfill
+
+Runner has an allowlisted maintenance task,
+`backfill_skeleton_memory_recent`, for a small recent Skeleton operational
+state backfill. It is not automatic and must be run only from an explicit
+operator-approved maintenance issue with live memory configuration present.
+
+Backfill records must be explicit, bounded, and public-safe. They must not read
+chat logs, private docs, Drive or Docs URLs, private filesystem paths, `.env`
+contents, raw logs, secret values, or environment values. The handler may write
+only fixed public operational facts into `memory_events`, `project_state`, and
+the audit ledger. It does not promote anything to canon.
+
+The current SkeletonMemory API has no public decision-record writer. This
+backfill therefore skips `decision_records`; adding a safe decision-record API
+is a follow-up before future backfills should use that table.
