@@ -222,6 +222,29 @@ LABEL_BLOCKED = "runner:blocked"
     assert runner.blocked_output_marker(output) is None
 
 
+def test_blocked_output_classifier_ignores_issue_438_transcript_tail() -> None:
+    output = """Implemented the issue #421 two-file runner classifier patch.
+
+Changed files:
+- scripts/runner_poll_github_tasks.py
+- tests/test_runner_poll_github_tasks.py
+
+Test results:
+- 126 passed
+Reading additional input from stdin...
+OpenAI Codex v0.125.0
+--------
+user
+Task text mentions BLOCKED and runner:blocked in the echoed transcript.
+"""
+
+    final_answer = runner.final_codex_answer(output)
+
+    assert final_answer.startswith("Implemented the issue #421")
+    assert "Reading additional input from stdin" not in final_answer
+    assert runner.blocked_output_marker(output) is None
+
+
 def test_blocked_output_classifier_uses_final_done_deliverable_over_echoed_prompt() -> None:
     output = """Reading additional input from stdin...
 OpenAI Codex v0.125.0
