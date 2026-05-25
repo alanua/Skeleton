@@ -75,6 +75,7 @@ Before doing project work, activate the correct project context.
 
 Common project commands:
 - СК: Skeleton
+- СК-свіжість: Skeleton freshness check
 - ДЖ: Jeeves
 - БК: BauClock
 - ЛАВА: Lavalamp
@@ -88,7 +89,26 @@ After activation:
 
 Do not continue from memory if the project state may be stale.
 
-## 5. Durable write rule
+## 5. Skeleton freshness check
+
+Before Skeleton project work starts, or after recent merges may have changed the
+rules, run the small freshness check:
+
+    СК-свіжість
+
+The report must stay short and human-readable. It checks:
+- GitHub `main` is the source of truth for Skeleton rules;
+- the live Runner checkout is at, ahead of, or behind `origin/main` after recent
+  merges;
+- `docs/NOTEBOOKLM_SOURCEPACK.md` freshness when NotebookLM or sourcepack
+  answers are part of the context;
+- open PRs or issues that may be stale relative to current `main`;
+- old chats, old branches, and old local notes are not canon.
+
+If the check finds stale context, use GitHub `main` and the current project files
+before planning work.
+
+## 6. Durable write rule
 
 Any durable write requires a PatchPlan first.
 
@@ -118,7 +138,7 @@ Execution starts only after explicit operator approval:
 
 Do not execute before approval.
 
-## 6. Execution model
+## 7. Execution model
 
 Use Hetzner Runner for file and code changes.
 
@@ -132,7 +152,7 @@ ChatGPT plans, critiques, checks diffs, and controls scope.
 
 ChatGPT is not the execution layer.
 
-## 7. Runner workflow
+## 8. Runner workflow
 
 For code or file changes, Runner should:
 
@@ -147,7 +167,7 @@ For code or file changes, Runner should:
 9. open a draft PR;
 10. write validation logs to GitHub issue or PR comment.
 
-## 8. Codex control checklist
+## 9. Codex control checklist
 
 After every Codex result, verify:
 
@@ -166,7 +186,7 @@ After every Codex result, verify:
 
 If Codex expands scope, stop and request a minimal correction.
 
-## 9. Canon and instruction changes
+## 10. Canon and instruction changes
 
 Canon or instruction changes require extra care.
 
@@ -184,7 +204,7 @@ For canon or instruction changes:
 
 Do not silently update instructions.
 
-## 10. Safety boundaries
+## 11. Safety boundaries
 
 Work in minimal scope.
 
@@ -200,7 +220,7 @@ Secrets, API keys, .env, production DB, server runtime, and live service restart
 
 Keys must not be pasted into ChatGPT, NotebookLM, GitHub, sourcepacks, logs, or source files.
 
-## 11. NotebookLM
+## 12. NotebookLM
 
 NotebookLM is a Control Room for reading project state.
 
@@ -223,7 +243,7 @@ The sourcepack should clearly separate:
 
 Do not rely on NotebookLM as live GitHub sync.
 
-## 12. Standard response after project activation
+## 13. Standard response after project activation
 
 After activating a project, respond briefly:
 
@@ -246,7 +266,7 @@ After activating a project, respond briefly:
 
 Do not give long explanations unless the operator asks.
 
-## 13. Standard task workflow
+## 14. Standard task workflow
 
 For every task:
 
@@ -262,7 +282,7 @@ For every task:
 10. summarize result;
 11. give the exact next step.
 
-## 14. Behavior playbook
+## 15. Behavior playbook
 
 Use these small rules to reduce routine workflow friction without changing safety gates:
 
@@ -274,7 +294,7 @@ Use these small rules to reduce routine workflow friction without changing safet
 
 These rules do not allow merge, deploy, runtime, secrets, destructive operations, canon instruction promotion, or cross-scope writes without the existing explicit approvals.
 
-## 15. BauClock-specific boundaries
+## 16. BauClock-specific boundaries
 
 BauClock has additional boundaries:
 
@@ -285,7 +305,7 @@ BauClock has additional boundaries:
 - test role and access-control changes separately;
 - validate Telegram bot and runtime changes through tests and manual review.
 
-## 16. Lavalamp / WLED-specific boundaries
+## 17. Lavalamp / WLED-specific boundaries
 
 Lavalamp has additional boundaries:
 
@@ -296,7 +316,7 @@ Lavalamp has additional boundaries:
 - run PlatformIO or WLED builds only through Runner or a prepared environment;
 - flash firmware only after explicit operator command.
 
-## 17. Non-code projects
+## 18. Non-code projects
 
 Skeleton can also manage non-code projects such as documents, drawings, Aufmaß, planning, or administrative workflows.
 
@@ -307,7 +327,7 @@ For non-code projects:
 - durable file changes still require PatchPlan;
 - no private documents are published to public repos unless explicitly approved.
 
-## 18. Main principle
+## 19. Main principle
 
 The human sets direction.
 

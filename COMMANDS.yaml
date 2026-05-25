@@ -14,6 +14,10 @@ behavior_playbook:
     trigger: same_type_routine_items_share_approved_route_scope_risk_level_and_gate
     safe_next_step: process_as_batch_split_and_stop_on_different_or_risky_item
     report: short_human_readable_processed_split_blocked_validation_summary
+  skeleton_freshness_check:
+    trigger: before_skeleton_project_work_or_after_recent_main_merge
+    safe_next_step: compare_github_main_runner_checkout_sourcepack_and_open_work
+    report: short_human_readable_fresh_stale_blocked_summary
 
 commands:
   прокинься:
@@ -36,6 +40,31 @@ commands:
     produces:
       - ProjectContextReport
     writes: none
+
+  СК-свіжість:
+    mode: audit
+    boot_level: L4
+    project: skeleton
+    loads:
+      - BOOT_MANIFEST.yaml
+      - PROJECT_INDEX.yaml
+      - projects/skeleton/PROJECT_MANIFEST.yaml
+      - projects/skeleton/PROJECT_OPERATING_STANDARD.md
+      - docs/RUNNER_MAINTENANCE_TASKS.md
+      - docs/NOTEBOOKLM_SOURCEPACK.md
+      - GitHub_main_status
+      - Runner_checkout_status
+      - open_PRs_and_issues
+    produces:
+      - SkeletonFreshnessReport
+    writes: none
+    means:
+      - GitHub_main_is_source_of_truth
+      - check_live_runner_checkout_sync_after_recent_merges
+      - check_notebooklm_sourcepack_freshness_when_relevant
+      - flag_open_prs_or_issues_stale_relative_to_main
+      - old_chats_and_old_branches_are_not_canon
+      - keep_report_short_human_readable
 
   ДЖ:
     mode: project
