@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.memory_event.schema.json",
+  "title": "Skeleton Operational Memory Event",
+  "type": "object",
+  "required": ["schema", "id", "created_at", "event_type"],
+  "additionalProperties": true,
+  "properties": {
+    "schema": {"const": "skeleton.memory_event.v1"},
+    "id": {"type": "string"},
+    "created_at": {"type": "string"},
+    "event_type": {"type": "string"},
+    "project_id": {"type": "string"},
+    "actor": {"type": "string"},
+    "operator": {"type": "string"},
+    "public_safe": {"type": "boolean"},
+    "summary": {"type": "string"},
+    "private_reference_stub": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stub_id", "reference_type"],
+      "properties": {
+        "stub_id": {"type": "string"},
+        "reference_type": {"type": "string"},
+        "label": {"type": "string"}
+      }
+    }
+  }
+}
