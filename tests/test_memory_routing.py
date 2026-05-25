@@ -112,3 +112,26 @@ def test_role_boundaries_exist() -> None:
     for role in ["chatgpt", "skeleton", "runner", "codex", "gemini", "jeeves"]:
         assert role in roles
         assert "means" in roles[role]
+
+
+def test_behavior_playbook_memory_routing_has_clear_trigger_step_and_report() -> None:
+    playbook = load_yaml("MEMORY_ROUTING.yaml")["behavior_playbook"]
+
+    assert set(playbook) == {
+        "routine_safe_helper_steps",
+        "blocked_long_task_creation",
+        "repeated_work_pattern",
+    }
+
+    for rule in playbook.values():
+        assert set(rule) == {"trigger", "safe_next_step", "report"}
+
+    assert playbook["routine_safe_helper_steps"]["safe_next_step"] == (
+        "run_smallest_safe_helper_step_without_extra_plus"
+    )
+    assert playbook["blocked_long_task_creation"]["safe_next_step"] == (
+        "create_short_public_safe_issue_for_first_unblocker"
+    )
+    assert playbook["repeated_work_pattern"]["safe_next_step"] == (
+        "process_as_batch_split_and_stop_on_different_or_risky_item"
+    )
