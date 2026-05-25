@@ -61,6 +61,8 @@ TELEGRAM_API_BASE = "https://api.telegram.org"
 TELEGRAM_TIMEOUT_SECONDS = 10
 TELEGRAM_CALLBACK_DATA_LIMIT = 64
 TELEGRAM_CALLBACK_HMAC_ENV = "SKELETON_TG_CALLBACK_HMAC_SECRET"
+TELEGRAM_BOT_TOKEN_PLACEHOLDERS = frozenset({"replace-with-telegram-bot-token"})
+TELEGRAM_CHAT_ID_PLACEHOLDERS = frozenset({"replace-with-telegram-chat-id"})
 TELEGRAM_CARD_TEST_SUMMARY = "Runner pytest completed before draft PR creation."
 TELEGRAM_CARD_RISK_SUMMARY = "Review the changed-file list before approval."
 TELEGRAM_PR_READY_BUTTON_LABELS = {
@@ -1161,11 +1163,28 @@ def build_done_pr_ready_card_payload(report: str) -> dict[str, Any] | None:
         return _build_details_only_card_payload(pr_url, pr_number)
 
 
+def _configured_telegram_env_value(
+    name: str, placeholders: frozenset[str]
+) -> str | None:
+    value = os.environ.get(name)
+    if value is None:
+        return None
+
+    value = value.strip()
+    if not value or value in placeholders:
+        return None
+    return value
+
+
 def send_telegram_notification(
     message: str, reply_markup: dict[str, Any] | None = None
 ) -> None:
-    bot_token = os.environ.get("SKELETON_TG_BOT")
-    chat_id = os.environ.get("SKELETON_TG_CHAT")
+    bot_token = _configured_telegram_env_value(
+        "SKELETON_TG_BOT", TELEGRAM_BOT_TOKEN_PLACEHOLDERS
+    )
+    chat_id = _configured_telegram_env_value(
+        "SKELETON_TG_CHAT", TELEGRAM_CHAT_ID_PLACEHOLDERS
+    )
     if not bot_token or not chat_id:
         return
 

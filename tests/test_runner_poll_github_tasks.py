@@ -1297,6 +1297,31 @@ def test_send_telegram_notification_without_env_makes_no_network_call() -> None:
     urlopen.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("bot_token", "chat_id"),
+    [
+        ("replace-with-telegram-bot-token", "telegram-chat-placeholder"),
+        ("telegram-bot-placeholder", "replace-with-telegram-chat-id"),
+        (" replace-with-telegram-bot-token ", " telegram-chat-placeholder "),
+        (" telegram-bot-placeholder ", " replace-with-telegram-chat-id "),
+    ],
+)
+def test_send_telegram_notification_skips_documented_placeholders(
+    bot_token: str, chat_id: str
+) -> None:
+    with mock.patch.dict(
+        os.environ,
+        {
+            "SKELETON_TG_BOT": bot_token,
+            "SKELETON_TG_CHAT": chat_id,
+        },
+        clear=True,
+    ), mock.patch.object(runner.urllib.request, "urlopen") as urlopen:
+        runner.send_telegram_notification("done")
+
+    urlopen.assert_not_called()
+
+
 def test_done_pr_card_success_sends_reply_markup() -> None:
     card = {"text": "PR ready card", "buttons": []}
     reply_markup = {"inline_keyboard": []}
