@@ -80,6 +80,7 @@ ENSURE_PROJECT_CHECKOUT = "ensure_project_checkout"
 VALIDATE_PR_BRANCH = "validate_pr_branch"
 PREFLIGHT_PR_REFRESH = "preflight_pr_refresh"
 INSPECT_PR_MERGEABILITY = "inspect_pr_mergeability"
+BACKFILL_SKELETON_MEMORY_RECENT = "backfill_skeleton_memory_recent"
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
         SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
@@ -89,6 +90,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         VALIDATE_PR_BRANCH,
         PREFLIGHT_PR_REFRESH,
         INSPECT_PR_MERGEABILITY,
+        BACKFILL_SKELETON_MEMORY_RECENT,
     )
 )
 RUNNER_PROJECT_CHECKOUT_BASE = Path("/home/agent/agent-dev")
@@ -1032,7 +1034,9 @@ def runner_memory_config_from_env() -> RunnerMemoryConfig | None:
     db_path = os.environ.get(RUNNER_MEMORY_DB_ENV)
     ledger_path = os.environ.get(RUNNER_MEMORY_LEDGER_ENV)
     if db_path and ledger_path:
-        return RunnerMemoryConfig(Path(db_path).expanduser(), Path(ledger_path).expanduser())
+        return _pytest_safe_runner_memory_config(
+            RunnerMemoryConfig(Path(db_path).expanduser(), Path(ledger_path).expanduser())
+        )
 
     memory_dir = os.environ.get(RUNNER_MEMORY_DIR_ENV)
     if not memory_dir:
@@ -1040,7 +1044,24 @@ def runner_memory_config_from_env() -> RunnerMemoryConfig | None:
 
     base = Path(memory_dir).expanduser()
     month = datetime.now(timezone.utc).strftime("%Y_%m")
-    return RunnerMemoryConfig(base / "skeleton.db", base / f"events_{month}.jsonl")
+    return _pytest_safe_runner_memory_config(
+        RunnerMemoryConfig(base / "skeleton.db", base / f"events_{month}.jsonl")
+    )
+
+
+def _pytest_safe_runner_memory_config(
+    config: RunnerMemoryConfig,
+) -> RunnerMemoryConfig | None:
+    if "PYTEST_CURRENT_TEST" not in os.environ:
+        return config
+
+    tmp_root = Path(tempfile.gettempdir()).resolve(strict=False)
+    for path in (config.db_path, config.ledger_path):
+        try:
+            path.expanduser().resolve(strict=False).relative_to(tmp_root)
+        except ValueError:
+            return None
+    return config
 
 
 def _public_github_pr_url(report: str) -> str | None:
@@ -1171,6 +1192,188 @@ def _write_runner_memory_payload(
     except Exception:
         return RUNNER_MEMORY_WARNING
     return None
+
+
+SKELETON_MEMORY_RECENT_BACKFILL_EVENTS: tuple[dict[str, Any], ...] = (
+    {
+        "id": "backfill-skeleton-memory-recent-pr-461",
+        "event_type": "skeleton_memory_milestone",
+        "project_id": "skeleton",
+        "actor": "runner_maintenance",
+        "source": "operator_approved_backfill",
+        "summary": "PR #461 merged memory stage 1.",
+        "pull_request": 461,
+        "milestone": "memory_stage_1_merged",
+    },
+    {
+        "id": "backfill-skeleton-memory-recent-pr-465",
+        "event_type": "skeleton_memory_milestone",
+        "project_id": "skeleton",
+        "actor": "runner_maintenance",
+        "source": "operator_approved_backfill",
+        "summary": "PR #465 merged memory stage 2.",
+        "pull_request": 465,
+        "milestone": "memory_stage_2_merged",
+    },
+    {
+        "id": "backfill-skeleton-memory-recent-runtime-checkout",
+        "event_type": "skeleton_memory_milestone",
+        "project_id": "skeleton",
+        "actor": "runner_maintenance",
+        "source": "operator_approved_backfill",
+        "summary": "Runtime checkout synced to 269a0e79d2e5b9df83db96b7d1fa837bad0a5baa.",
+        "commit": "269a0e79d2e5b9df83db96b7d1fa837bad0a5baa",
+        "milestone": "runtime_checkout_synced",
+    },
+    {
+        "id": "backfill-skeleton-memory-recent-issue-468-smoke",
+        "event_type": "skeleton_memory_milestone",
+        "project_id": "skeleton",
+        "actor": "runner_maintenance",
+        "source": "operator_approved_backfill",
+        "summary": "Issue #468 confirmed live memory smoke wrote records.",
+        "issue_number": 468,
+        "milestone": "live_memory_smoke_confirmed",
+    },
+    {
+        "id": "backfill-skeleton-memory-recent-openhands-executor-candidate",
+        "event_type": "skeleton_memory_milestone",
+        "project_id": "skeleton",
+        "actor": "runner_maintenance",
+        "source": "operator_approved_backfill",
+        "summary": "OpenHands exists on Hetzner as executor candidate, but does not own memory.",
+        "executor": "openhands",
+        "milestone": "executor_candidate_not_memory_owner",
+    },
+    {
+        "id": "backfill-skeleton-memory-recent-pr-458-hold",
+        "event_type": "skeleton_memory_milestone",
+        "project_id": "skeleton",
+        "actor": "runner_maintenance",
+        "source": "operator_approved_backfill",
+        "summary": "PR #458 remains hold / do not merge until safety-fix.",
+        "pull_request": 458,
+        "milestone": "pr_hold_until_safety_fix",
+    },
+    {
+        "id": "backfill-skeleton-memory-recent-memory-boundary",
+        "event_type": "skeleton_memory_milestone",
+        "project_id": "skeleton",
+        "actor": "runner_maintenance",
+        "source": "operator_approved_backfill",
+        "summary": (
+            "Skeleton memory is operational state, not Jeeves memory, not private "
+            "document storage, not canon write path."
+        ),
+        "milestone": "memory_boundary_recorded",
+    },
+)
+
+SKELETON_MEMORY_RECENT_BACKFILL_PROJECT_STATE: dict[str, Any] = {
+    "id": "backfill-skeleton-memory-recent-project-state",
+    "project_id": "skeleton",
+    "source": "operator_approved_backfill",
+    "memory_status": "live_memory_operational",
+    "stage_1_pr": 461,
+    "stage_2_pr": 465,
+    "runtime_checkout_commit": "269a0e79d2e5b9df83db96b7d1fa837bad0a5baa",
+    "live_smoke_issue": 468,
+    "executor_candidate": "openhands",
+    "executor_candidate_owns_memory": False,
+    "held_pr": 458,
+    "held_pr_reason": "hold_do_not_merge_until_safety_fix",
+    "boundaries": [
+        "operational_state",
+        "not_jeeves_memory",
+        "not_private_document_storage",
+        "not_canon_write_path",
+    ],
+    "backfill_policy": "explicit_bounded_public_safe_operator_approved",
+    "automatic_canon_promotion": False,
+    "decision_records_status": "skipped_no_public_skeleton_memory_writer",
+}
+
+
+def _memory_event_exists(memory: SkeletonMemory, event_id: str) -> bool:
+    row = memory.connection.execute(
+        "SELECT 1 FROM memory_events WHERE id = ?",
+        (event_id,),
+    ).fetchone()
+    return row is not None
+
+
+def _append_backfill_ledger_event(
+    ledger: AuditLedger, payload: dict[str, Any], event_type: str
+) -> None:
+    ledger.append(
+        {
+            **payload,
+            "id": f"{payload['id']}-ledger",
+            "event_type": event_type,
+        }
+    )
+
+
+def backfill_skeleton_memory_recent() -> str:
+    task_id = BACKFILL_SKELETON_MEMORY_RECENT
+    config = runner_memory_config_from_env()
+    if config is None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            ["reason=runner_memory_config_missing"],
+            "not_met",
+        )
+
+    memory_events_written = 0
+    memory_events_existing = 0
+    ledger_events_written = 0
+    project_state_written = 0
+    project_state_existing = 0
+    decision_records_written = 0
+    decision_records_skipped = 1
+
+    memory = SkeletonMemory(config.db_path)
+    memory.init_schema()
+    ledger = AuditLedger(config.ledger_path)
+
+    for event in SKELETON_MEMORY_RECENT_BACKFILL_EVENTS:
+        validate_public_safe_payload(event)
+        event_id = str(event["id"])
+        if _memory_event_exists(memory, event_id):
+            memory_events_existing += 1
+            continue
+        memory.log_operator_event(dict(event))
+        _append_backfill_ledger_event(ledger, dict(event), "skeleton_memory_backfill_event")
+        memory_events_written += 1
+        ledger_events_written += 1
+
+    state = dict(SKELETON_MEMORY_RECENT_BACKFILL_PROJECT_STATE)
+    validate_public_safe_payload(state)
+    if memory.get_project_state("skeleton") == state:
+        project_state_existing = 1
+    else:
+        memory.update_project_state("skeleton", state)
+        _append_backfill_ledger_event(
+            ledger, state, "skeleton_memory_backfill_project_state"
+        )
+        project_state_written = 1
+        ledger_events_written += 1
+
+    return _maintenance_report(
+        "DONE",
+        task_id,
+        [
+            f"memory_events_written={memory_events_written}",
+            f"memory_events_existing={memory_events_existing}",
+            f"project_state_written={project_state_written}",
+            f"project_state_existing={project_state_existing}",
+            f"ledger_events_written={ledger_events_written}",
+            f"decision_records_written={decision_records_written}",
+            f"decision_records_skipped={decision_records_skipped}",
+        ],
+        "met",
+    )
 
 
 def record_runner_task_picked_up(
@@ -2887,6 +3090,8 @@ def dispatch_runtime_maintenance_task(
             return preflight_pr_refresh(body)
         if task_id == INSPECT_PR_MERGEABILITY:
             return inspect_pr_mergeability(body)
+        if task_id == BACKFILL_SKELETON_MEMORY_RECENT:
+            return backfill_skeleton_memory_recent()
         return check_project_checkout(body)
     except Exception:
         return _maintenance_report(
