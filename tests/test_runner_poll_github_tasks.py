@@ -1683,6 +1683,35 @@ def _preflight_pr_issue_body(
     return "\n".join(lines)
 
 
+def _publish_issue_worktree_pr_body(
+    *,
+    repository: str = runner.REPO,
+    source_issue: int | str | None = 123,
+    expected_branch: str | None = "runner/issue-123",
+    allowed_files: list[str] | None = None,
+    task_body: str = "",
+) -> str:
+    if allowed_files is None:
+        allowed_files = [
+            "scripts/runner_poll_github_tasks.py",
+            "tests/test_runner_poll_github_tasks.py",
+        ]
+    lines = [
+        "Mode: RUNTIME_MAINTENANCE_TASK",
+        f"Maintenance Task ID: {runner.PUBLISH_ISSUE_WORKTREE_PR}",
+        f"Repository: {repository}",
+    ]
+    if source_issue is not None:
+        lines.append(f"Source Issue: {source_issue}")
+    if expected_branch is not None:
+        lines.append(f"Expected Branch: {expected_branch}")
+    lines.append("Allowed Files:")
+    lines.extend(f"- {path}" for path in allowed_files)
+    if task_body:
+        lines.extend(("", "```task", task_body, "```"))
+    return "\n".join(lines)
+
+
 def _pr_validation_state(**updates: object) -> dict[str, object]:
     state: dict[str, object] = {
         "number": 123,
@@ -2352,6 +2381,309 @@ def test_preflight_pr_refresh_task_makes_no_mutating_calls() -> None:
     assert all("checkout" not in command for command in command_words)
     assert all("-c" not in command for command in command_words)
     assert all("open(" not in command for command in command_words)
+    run_codex.assert_not_called()
+
+
+def test_publish_issue_worktree_pr_rejects_unsupported_repository() -> None:
+    report = runner.publish_issue_worktree_pr(
+        _publish_issue_worktree_pr_body(repository="alanua/Other")
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=unsupported_repository" in report
+
+
+def test_publish_issue_worktree_pr_requires_source_issue() -> None:
+    report = runner.publish_issue_worktree_pr(
+        _publish_issue_worktree_pr_body(source_issue=None)
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=missing_or_invalid_source_issue" in report
+
+
+def test_publish_issue_worktree_pr_requires_expected_branch() -> None:
+    report = runner.publish_issue_worktree_pr(
+        _publish_issue_worktree_pr_body(expected_branch=None)
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=missing_expected_branch" in report
+
+
+def test_publish_issue_worktree_pr_requires_allowed_files() -> None:
+    report = runner.publish_issue_worktree_pr(
+        _publish_issue_worktree_pr_body(allowed_files=[])
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=missing_allowed_files" in report
+
+
+def test_publish_issue_worktree_pr_rejects_unsafe_worktree_path(tmp_path: Path) -> None:
+    with mock.patch.object(
+        runner, "issue_worktree_path", return_value=Path("/tmp/outside-skeleton")
+    ), mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(tmp_path)}, clear=True
+    ), mock.patch.object(
+        runner, "run_command"
+    ) as run:
+        report = runner.publish_issue_worktree_pr(_publish_issue_worktree_pr_body())
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=issue_worktree_path_unsafe" in report
+    run.assert_not_called()
+
+
+def test_publish_issue_worktree_pr_rejects_branch_mismatch(tmp_path: Path) -> None:
+    worktree_path = tmp_path / "issue-123"
+    worktree_path.mkdir()
+
+    def run_publish_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        assert cwd == worktree_path
+        if command == ["git", "branch", "--show-current"]:
+            return 0, "runner/other\n"
+        return 2, "unexpected command"
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(tmp_path)}, clear=True
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run_publish_command
+    ) as run:
+        report = runner.publish_issue_worktree_pr(_publish_issue_worktree_pr_body())
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=current_branch_mismatch" in report
+    assert [call.args[0] for call in run.call_args_list] == [
+        ["git", "branch", "--show-current"]
+    ]
+
+
+def test_publish_issue_worktree_pr_rejects_changed_file_mismatch(
+    tmp_path: Path,
+) -> None:
+    worktree_path = tmp_path / "issue-123"
+    worktree_path.mkdir()
+
+    def run_publish_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        assert cwd == worktree_path
+        if command == ["git", "branch", "--show-current"]:
+            return 0, "runner/issue-123\n"
+        if command == ["git", "diff", "--name-only", "HEAD", "--"]:
+            return 0, "scripts/runner_poll_github_tasks.py\nREADME.md\n"
+        if command == ["git", "ls-files", "--others", "--exclude-standard"]:
+            return 0, ".codex/session.json\n"
+        return 2, "unexpected command"
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(tmp_path)}, clear=True
+    ), mock.patch.object(runner, "run_command", side_effect=run_publish_command):
+        report = runner.publish_issue_worktree_pr(_publish_issue_worktree_pr_body())
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=changed_tracked_files_mismatch" in report
+    assert "untracked_file=.codex/session.json" in report
+
+
+def test_publish_issue_worktree_pr_rejects_untracked_except_codex(
+    tmp_path: Path,
+) -> None:
+    worktree_path = tmp_path / "issue-123"
+    worktree_path.mkdir()
+
+    def run_publish_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        assert cwd == worktree_path
+        if command == ["git", "branch", "--show-current"]:
+            return 0, "runner/issue-123\n"
+        if command == ["git", "diff", "--name-only", "HEAD", "--"]:
+            return 0, (
+                "scripts/runner_poll_github_tasks.py\n"
+                "tests/test_runner_poll_github_tasks.py\n"
+            )
+        if command == ["git", "ls-files", "--others", "--exclude-standard"]:
+            return 0, ".codex/session.json\ntmp.txt\n"
+        return 2, "unexpected command"
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(tmp_path)}, clear=True
+    ), mock.patch.object(runner, "run_command", side_effect=run_publish_command):
+        report = runner.publish_issue_worktree_pr(_publish_issue_worktree_pr_body())
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=unexpected_untracked_files" in report
+
+
+def test_publish_issue_worktree_pr_commits_validates_pushes_and_creates_draft_pr(
+    tmp_path: Path,
+) -> None:
+    worktree_path = tmp_path / "issue-123"
+    worktree_path.mkdir()
+
+    def run_publish_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        assert cwd == worktree_path
+        if command == ["git", "branch", "--show-current"]:
+            return 0, "runner/issue-123\n"
+        if command == ["git", "diff", "--name-only", "HEAD", "--"]:
+            return 0, (
+                "scripts/runner_poll_github_tasks.py\n"
+                "tests/test_runner_poll_github_tasks.py\n"
+            )
+        if command == ["git", "ls-files", "--others", "--exclude-standard"]:
+            return 0, ".codex/session.json\n"
+        if command in (
+            ["git", "diff", "--check"],
+            [
+                "git",
+                "add",
+                "scripts/runner_poll_github_tasks.py",
+                "tests/test_runner_poll_github_tasks.py",
+            ],
+            ["git", "diff", "--cached", "--check"],
+            ["git", "commit", "-m", "runner: issue #123 task"],
+            ["python3", "-m", "pytest", "-q"],
+            [
+                "git",
+                "push",
+                "--force-with-lease",
+                "-u",
+                "origin",
+                "runner/issue-123",
+            ],
+        ):
+            return 0, ""
+        if command == ["git", "rev-parse", "HEAD"]:
+            return 0, f"{HEAD_SHA}\n"
+        if command[:3] == ["gh", "pr", "create"]:
+            return 0, f"{PR_URL}\n"
+        return 2, "unexpected command"
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(tmp_path)}, clear=True
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run_publish_command
+    ) as run:
+        report = runner.publish_issue_worktree_pr(_publish_issue_worktree_pr_body())
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert f"validated_head_sha={HEAD_SHA}" in report
+    assert f"pr_url={PR_URL}" in report
+    assert ["python3", "-m", "pytest", "-q"] in commands
+    assert [
+        "gh",
+        "pr",
+        "create",
+        "--repo",
+        runner.REPO,
+        "--base",
+        "main",
+        "--head",
+        "runner/issue-123",
+        "--title",
+        "Runner task #123: delivery fixes",
+        "--body",
+        "Delivery-only draft PR for prepared issue worktree #123.",
+        "--draft",
+    ] in commands
+
+
+def test_publish_issue_worktree_pr_issue_body_does_not_execute_arbitrary_commands(
+    tmp_path: Path,
+) -> None:
+    issue = _maintenance_issue(
+        runner.PUBLISH_ISSUE_WORKTREE_PR,
+        "sudo env\n"
+        "git merge unsafe\n"
+        "gh pr merge 123\n"
+        "codex exec unsafe\n"
+        "python3 -c 'print(1)'",
+        metadata="\n".join(
+            (
+                f"Repository: {runner.REPO}",
+                "Source Issue: 123",
+                "Expected Branch: runner/issue-123",
+                "Allowed Files:",
+                "- scripts/runner_poll_github_tasks.py",
+                "- tests/test_runner_poll_github_tasks.py",
+            )
+        ),
+    )
+    worktree_path = tmp_path / "issue-123"
+    worktree_path.mkdir()
+
+    def run_publish_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        assert cwd == worktree_path
+        if command == ["git", "branch", "--show-current"]:
+            return 0, "runner/issue-123\n"
+        if command == ["git", "diff", "--name-only", "HEAD", "--"]:
+            return 0, (
+                "scripts/runner_poll_github_tasks.py\n"
+                "tests/test_runner_poll_github_tasks.py\n"
+            )
+        if command == ["git", "ls-files", "--others", "--exclude-standard"]:
+            return 0, ".codex/session.json\n"
+        if command in (
+            ["git", "diff", "--check"],
+            [
+                "git",
+                "add",
+                "scripts/runner_poll_github_tasks.py",
+                "tests/test_runner_poll_github_tasks.py",
+            ],
+            ["git", "diff", "--cached", "--check"],
+            ["git", "commit", "-m", "runner: issue #123 task"],
+            ["python3", "-m", "pytest", "-q"],
+            [
+                "git",
+                "push",
+                "--force-with-lease",
+                "-u",
+                "origin",
+                "runner/issue-123",
+            ],
+        ):
+            return 0, ""
+        if command == ["git", "rev-parse", "HEAD"]:
+            return 0, f"{HEAD_SHA}\n"
+        if command[:3] == ["gh", "pr", "create"]:
+            return 0, f"{PR_URL}\n"
+        return 2, "unexpected command"
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(tmp_path)}, clear=True
+    ), mock.patch.object(
+        runner, "ensure_clean_worktree", return_value=(True, "")
+    ), mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run_publish_command
+    ) as run, mock.patch.object(
+        runner, "run_codex_task"
+    ) as run_codex:
+        runner.process_issue(issue, workdir=str(runner.ROOT))
+
+    command_words = [" ".join(call.args[0]) for call in run.call_args_list]
+    assert all("sudo" not in command for command in command_words)
+    assert all("env" not in command for command in command_words)
+    assert all(" merge " not in f" {command} " for command in command_words)
+    assert all("codex" not in command for command in command_words)
+    commands = [call.args[0] for call in run.call_args_list]
+    assert all(command[:3] != ["python3", "-c", "print(1)"] for command in commands)
+    assert ["gh", "pr", "merge", "123"] not in commands
     run_codex.assert_not_called()
 
 
