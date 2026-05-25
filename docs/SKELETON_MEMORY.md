@@ -31,3 +31,49 @@ is responsible for deciding when to call the memory layer.
 Private reference stubs are allowed only as opaque references. They can record
 that a controlled private artifact exists, but not its Drive URL, file id, raw
 filesystem path, `.env` content, secret value, or private document body.
+
+## Stage 2 Runner Integration
+
+Runner can now write sanitized task lifecycle events into Skeleton memory after
+it claims and completes a task. This integration is disabled by default. Runner
+does not create or use a live memory path unless one of these explicit runtime
+configurations is present:
+
+- `SKELETON_RUNNER_MEMORY_DB` and `SKELETON_RUNNER_MEMORY_LEDGER`
+- `SKELETON_RUNNER_MEMORY_DIR`
+
+When `SKELETON_RUNNER_MEMORY_DIR` is used, Runner derives `skeleton.db` and a
+monthly `events_YYYY_MM.jsonl` ledger path inside that directory. Suggested
+Hetzner runtime paths are:
+
+- `/home/agent/skeleton-memory/skeleton.db`
+- `/home/agent/skeleton-memory/events_YYYY_MM.jsonl`
+
+Tests must use only `tmp_path` paths and must not create these runtime files.
+
+Runner records only bounded operational facts:
+
+- task picked up
+- executor result status: `DONE`, `BLOCKED`, or `ERROR`
+- public GitHub pull request URL, if present
+- sanitized relative changed-file list
+- pytest summary lines only
+- executor name when known: `codex`, `openhands`, or `maintenance`
+- issue number
+- project id
+- runner status
+
+Runner never writes raw Codex or OpenHands transcripts, full test logs, `.env`
+values, secret-looking fields or values, Drive or Docs URLs, private filesystem
+paths, private document content, or private data locators. The integration uses
+the same public-safe validation as `core/audit_ledger.py` and
+`core/skeleton_memory.py`; unsafe report content is omitted or reduced to a
+redacted summary before append.
+
+Memory writes are best-effort. If SQLite or JSONL append fails, Runner keeps the
+task status it already computed and adds a public-safe memory warning to the
+task report. A memory write failure must not turn a `DONE` task into `BLOCKED`.
+
+OpenHands and Codex do not directly own or write Skeleton memory in this stage.
+They may produce task output for Runner, but Runner is the controlled caller
+that extracts public-safe outcome fields and writes the sanitized memory event.
