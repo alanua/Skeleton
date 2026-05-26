@@ -82,6 +82,7 @@ VALIDATE_PR_BRANCH = "validate_pr_branch"
 PREFLIGHT_PR_REFRESH = "preflight_pr_refresh"
 INSPECT_PR_MERGEABILITY = "inspect_pr_mergeability"
 BACKFILL_SKELETON_MEMORY_RECENT = "backfill_skeleton_memory_recent"
+INSPECT_ISSUE_WORKTREE_FOR_PUBLISH = "inspect_issue_worktree_for_publish"
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
         SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
@@ -93,6 +94,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         PREFLIGHT_PR_REFRESH,
         INSPECT_PR_MERGEABILITY,
         BACKFILL_SKELETON_MEMORY_RECENT,
+        INSPECT_ISSUE_WORKTREE_FOR_PUBLISH,
     )
 )
 RUNNER_PROJECT_CHECKOUT_BASE = Path("/home/agent/agent-dev")
@@ -250,6 +252,13 @@ class PreflightPrRefreshRequest:
 class PrMergeabilityInspectionRequest:
     pr_number: int
     expected_head_sha: str | None
+
+
+@dataclass(frozen=True)
+class IssueWorktreePublishInspectionRequest:
+    source_issue: int
+    expected_branch: str
+    allowed_files: frozenset[str]
 
 
 def truncate_comment(body: str) -> str:
@@ -3360,6 +3369,231 @@ def inspect_pr_mergeability(body: str) -> str:
     )
 
 
+def _safe_issue_publish_file_path(path: str) -> bool:
+    relative_path = Path(path)
+    return (
+        path == path.strip()
+        and path != ""
+        and not relative_path.is_absolute()
+        and ".." not in relative_path.parts
+        and _SAFE_CHANGED_FILE_RE.fullmatch(path) is not None
+    )
+
+
+def _issue_publish_allowed_files(metadata: str) -> tuple[frozenset[str], str | None]:
+    lines = (metadata or "").splitlines()
+    for index, line in enumerate(lines):
+        if re.fullmatch(r"\s*Allowed Files:\s*", line):
+            allowed_files: list[str] = []
+            for item in lines[index + 1 :]:
+                if re.fullmatch(r"\s*[A-Za-z][A-Za-z ]+:\s*.*", item):
+                    break
+                match = re.fullmatch(r"\s*-\s+(?P<path>\S(?:.*\S)?)\s*", item)
+                if match is None:
+                    if item.strip():
+                        return frozenset(), "invalid_allowed_files"
+                    continue
+                allowed_path = match.group("path")
+                if not _safe_issue_publish_file_path(allowed_path):
+                    return frozenset(), "invalid_allowed_files"
+                allowed_files.append(allowed_path)
+            if not allowed_files:
+                return frozenset(), "missing_allowed_files"
+            if len(set(allowed_files)) != len(allowed_files):
+                return frozenset(), "invalid_allowed_files"
+            return frozenset(allowed_files), None
+    return frozenset(), "missing_allowed_files"
+
+
+def _issue_worktree_publish_inspection_metadata(
+    body: str,
+) -> tuple[IssueWorktreePublishInspectionRequest | None, str | None]:
+    metadata = (body or "").split("```task", 1)[0]
+    repository = _body_field(metadata, "Repository")
+    source_issue = _body_field(metadata, "Source Issue")
+    expected_branch = _body_field(metadata, "Expected Branch")
+    allowed_files, allowed_files_reason = _issue_publish_allowed_files(metadata)
+
+    if repository is not None and repository != REPO:
+        return None, "unsupported_repository"
+    if not isinstance(source_issue, str) or re.fullmatch(r"[1-9]\d*", source_issue) is None:
+        return None, "missing_or_invalid_source_issue"
+    source_issue_number = int(source_issue)
+    required_branch = f"runner/issue-{source_issue_number}"
+    if expected_branch != required_branch:
+        return None, "missing_or_invalid_expected_branch"
+    if allowed_files_reason is not None:
+        return None, allowed_files_reason
+
+    return (
+        IssueWorktreePublishInspectionRequest(
+            source_issue=source_issue_number,
+            expected_branch=expected_branch,
+            allowed_files=allowed_files,
+        ),
+        None,
+    )
+
+
+def _issue_publish_worktree_path(issue_number: int) -> Path:
+    return worktree_root() / f"issue-{issue_number}"
+
+
+def _ensure_safe_issue_publish_worktree_path(path: str | Path) -> Path:
+    root = worktree_root().resolve(strict=False)
+    candidate = Path(path).expanduser().resolve(strict=False)
+    if candidate == root:
+        raise ValueError("issue worktree cannot be the worktree root")
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("issue worktree is outside runner worktree root") from exc
+    return candidate
+
+
+def _git_status_path_lines(output: str) -> list[str]:
+    return [line.strip() for line in (output or "").splitlines() if line.strip()]
+
+
+def _is_ignored_issue_publish_untracked_path(path: str) -> bool:
+    return path == ".codex" or path.startswith(".codex/")
+
+
+def inspect_issue_worktree_for_publish(body: str) -> str:
+    task_id = INSPECT_ISSUE_WORKTREE_FOR_PUBLISH
+    request, reason = _issue_worktree_publish_inspection_metadata(body)
+    if reason is not None:
+        return _maintenance_report("BLOCKED", task_id, [f"reason={reason}"], "not_met")
+    assert request is not None
+
+    status_lines = [
+        f"repository={REPO}",
+        f"source_issue={request.source_issue}",
+        f"expected_branch={request.expected_branch}",
+        f"allowed_files_count={len(request.allowed_files)}",
+    ]
+    try:
+        worktree_path = _ensure_safe_issue_publish_worktree_path(
+            _issue_publish_worktree_path(request.source_issue)
+        )
+    except ValueError:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=issue_worktree_path_unsafe"],
+            "not_met",
+        )
+
+    status_lines.append(f"issue_worktree={worktree_path}")
+    if not worktree_path.exists():
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=issue_worktree_missing"],
+            "not_met",
+        )
+    if not (worktree_path / ".git").exists():
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=issue_worktree_git_missing"],
+            "not_met",
+        )
+
+    code, output = run_command(["git", "branch", "--show-current"], cwd=worktree_path)
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "step=read_current_branch status=failed"],
+            "not_met",
+        )
+    current_branch_lines = _git_status_path_lines(output)
+    current_branch = current_branch_lines[0] if current_branch_lines else ""
+    status_lines.extend(
+        ("step=read_current_branch status=done", f"current_branch={current_branch}")
+    )
+    if current_branch != request.expected_branch:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=branch_mismatch"],
+            "not_met",
+        )
+
+    code, output = run_command(["git", "diff", "--name-only", "HEAD", "--"], cwd=worktree_path)
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "step=read_changed_tracked_files status=failed"],
+            "not_met",
+        )
+    changed_tracked_files = _git_status_path_lines(output)
+    if not all(_safe_issue_publish_file_path(path) for path in changed_tracked_files):
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                *status_lines,
+                "step=read_changed_tracked_files status=done",
+                "reason=changed_tracked_file_path_unsafe",
+            ],
+            "not_met",
+        )
+    status_lines.extend(
+        (
+            "step=read_changed_tracked_files status=done",
+            f"changed_tracked_files_count={len(changed_tracked_files)}",
+            f"changed_tracked_files={','.join(changed_tracked_files) if changed_tracked_files else '(none)'}",
+        )
+    )
+
+    code, output = run_command(
+        ["git", "ls-files", "--others", "--exclude-standard"], cwd=worktree_path
+    )
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "step=read_untracked_files status=failed"],
+            "not_met",
+        )
+    untracked_files = _git_status_path_lines(output)
+    unexpected_untracked_files = [
+        path
+        for path in untracked_files
+        if not _is_ignored_issue_publish_untracked_path(path)
+    ]
+    status_lines.extend(
+        (
+            "step=read_untracked_files status=done",
+            f"unexpected_untracked_files_count={len(unexpected_untracked_files)}",
+        )
+    )
+    if unexpected_untracked_files:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=unexpected_untracked_files"],
+            "not_met",
+        )
+
+    changed_files_allowed = set(changed_tracked_files) <= set(request.allowed_files)
+    status_lines.append(
+        f"tracked_files_match_allowlist={str(changed_files_allowed).lower()}"
+    )
+    if not changed_files_allowed:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=changed_tracked_files_outside_allowlist"],
+            "not_met",
+        )
+
+    return _maintenance_report("DONE", task_id, status_lines, "met")
+
+
 def dispatch_runtime_maintenance_task(
     task_id: str, workdir: str, body: str = ""
 ) -> str:
@@ -3387,6 +3621,8 @@ def dispatch_runtime_maintenance_task(
             return inspect_pr_mergeability(body)
         if task_id == BACKFILL_SKELETON_MEMORY_RECENT:
             return backfill_skeleton_memory_recent()
+        if task_id == INSPECT_ISSUE_WORKTREE_FOR_PUBLISH:
+            return inspect_issue_worktree_for_publish(body)
         return check_project_checkout(body)
     except Exception:
         return _maintenance_report(
