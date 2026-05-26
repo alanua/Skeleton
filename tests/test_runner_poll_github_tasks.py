@@ -245,6 +245,30 @@ Task text mentions BLOCKED and runner:blocked in the echoed transcript.
     assert runner.blocked_output_marker(output) is None
 
 
+def test_final_codex_answer_prefers_useful_prefix_before_echoed_transcript_tail() -> None:
+    marker = runner._BLOCKED_OUTPUT_MARKERS[0]
+    useful_prefix = """DONE: parser tail safe retry ready
+
+Changed files:
+- scripts/runner_poll_github_tasks.py
+- tests/test_runner_poll_github_tasks.py
+
+Test result:
+- targeted regression passed"""
+    output = f"""{useful_prefix}
+Reading additional input from stdin...
+OpenAI Codex v0.125.0
+--------
+user
+Task text includes {marker} in echoed instructions.
+exec
+echo {marker}
+"""
+
+    assert runner.final_codex_answer(output) == useful_prefix
+    assert runner.blocked_output_marker(output) is None
+
+
 def test_blocked_output_classifier_uses_final_done_deliverable_over_echoed_prompt() -> None:
     output = """Reading additional input from stdin...
 OpenAI Codex v0.125.0
