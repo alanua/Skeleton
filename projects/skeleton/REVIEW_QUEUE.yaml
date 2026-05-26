@@ -722,3 +722,111 @@ entries:
     recommended_action: Keep as private infrastructure backlog with separate public/private remotes and safety checks.
     status: BACKLOG
     canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-061
+    source_batch: openclow_orchestration_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: REVIEW/CANON_CANDIDATE
+    target_project: skeleton
+    summary: A main orchestrator should keep the operator conversation and delegate bounded work to specialized agents or subagents, receiving only summaries or artifacts back.
+    existing_match: Matches Skeleton dev-department role split, Runner/Codex bounded execution, and approval-gated report flow.
+    risk: If the main orchestrator also keeps broad server tools, it can mutate its own environment and blur control boundaries.
+    recommended_action: Keep as orchestration design candidate; reconcile with HELPER_REGISTRY and Runner bridge before any implementation.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-062
+    source_batch: openclow_orchestration_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: CANON_CANDIDATE
+    target_project: skeleton
+    summary: Per-agent least privilege should be explicit: orchestrator has messaging/delegation tools, setup agent has constrained setup authority, report agent writes only scoped report artifacts.
+    existing_match: Strongly matches Skeleton allowed-path, forbidden-change, write-gate, local-tool, and commit-preparation patterns.
+    risk: Broad full-access agents can change server state, secrets, runtime, or config without the operator noticing.
+    recommended_action: Promote only as a least-privilege principle; do not adopt full-trust server agents without separate safety design.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-063
+    source_batch: openclow_orchestration_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: BACKLOG
+    target_project: skeleton
+    summary: Temporary subagents can isolate long or noisy tasks so the main context does not bloat; subagents return compact summaries, changed files, links, or validation reports.
+    existing_match: Related to queue-run reports, local validations, commit_preparation, and existing task-summary patterns.
+    risk: Summaries can hide errors unless raw logs and artifacts remain auditable.
+    recommended_action: Keep as Runner/reporting backlog with raw-log and artifact retention requirements.
+    status: BACKLOG
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-064
+    source_batch: openclow_orchestration_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: REVIEW/BACKLOG
+    target_project: skeleton
+    summary: Model aliases can decouple roles from provider churn: cheap models for reports/simple work, stronger models for setup/architecture/review, with explicit cost-quality tracking.
+    existing_match: Related to PROVIDER_ROUTING, model profile ideas, local-first hybrid stack, and telemetry entries.
+    risk: Alias drift can silently change behavior, cost, or safety properties if not logged and reviewed.
+    recommended_action: Keep as provider-routing backlog; require visible alias-to-model resolution in reports.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-065
+    source_batch: openclow_orchestration_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: BACKLOG
+    target_project: skeleton
+    summary: A report-developer worker can generate static HTML reports from approved data and place them in a scoped artifact directory with a returned link.
+    existing_match: Related to audit_packet, Telegram reports, queue reports, and dashboard/report backlog.
+    risk: Reports can expose private server data or credentials if source data is not filtered.
+    recommended_action: Keep as synthetic/public-safe reporting backlog; private/live data requires private route and redaction gate.
+    status: BACKLOG
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-066
+    source_batch: openclow_orchestration_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: REVIEW
+    target_project: skeleton
+    summary: The useful dev-department chain is task graph first: operator/main orchestrator, setup worker, implementation worker, report worker, auditor, and final operator gate.
+    existing_match: Matches existing development-department concept but needs exact mapping to Skeleton Runner instead of OpenClow UI config.
+    risk: Nested agents can become brittle and hard to debug if state, permissions, and logs are not explicit.
+    recommended_action: Keep as design input for Skeleton Dev Department Console and bounded worker registry.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-067
+    source_batch: openclow_orchestration_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: REJECTED
+    target_project: skeleton
+    summary: Unrestricted setup agents with full server authority and no confirmation are rejected for Skeleton live Runner paths.
+    existing_match: Conflicts with no autonomous self-modification, approval gates, sensitive-access handling, and no manual server mutation rules.
+    risk: Can mutate runtime, install packages, alter configs, expose sensitive data, or break services without review.
+    recommended_action: Allow only in disposable lab sandboxes; production or Runner environments need explicit allowlists, logs, and operator approval.
+    status: REJECTED
+    canon_status: rejected_not_canon
+
+  - id: RQ-2026-05-26-068
+    source_batch: openclow_orchestration_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: BACKLOG
+    target_project: skeleton
+    summary: Multiple operator surfaces such as Telegram, web dashboard, and TUI can share the same controller route, but UI channels must not decide permissions.
+    existing_match: Related to Telegram/browser dashboard ideas and command route separation.
+    risk: Channel-specific behavior can bypass central command policy or confuse active route state.
+    recommended_action: Keep as UI/control-plane design principle for future console work.
+    status: BACKLOG
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-069
+    source_batch: openclow_orchestration_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: REVIEW
+    target_project: skeleton
+    summary: Agent-orchestration systems with unstable versions or changing config schemas need adapter tests and smoke tests before Skeleton depends on them.
+    existing_match: Matches current queue-runner smoke tests, validation reports, and controlled adapter-contract pattern.
+    risk: Hidden UI/config changes can break subagent spawning, model routing, permissions, or reporting.
+    recommended_action: Treat OpenClow-style orchestration as inspiration; any adopted adapter needs version pinning, synthetic tests, and rollback.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
