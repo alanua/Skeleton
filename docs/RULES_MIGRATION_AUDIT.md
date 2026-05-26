@@ -46,9 +46,25 @@ Purpose: collect behavior rules from old Skeleton, current Skeleton, branches, i
 | Status snapshots must not override current source truth; require last_verified for state files. Source: MEMORY_ROUTING.yaml. | CANON_BEHAVIOR | P1 | MEMORY_ROUTING.yaml | present |
 | Repeated routine work should be processed as a pattern, batched only when route/scope/risk/gate match. Source: MEMORY_ROUTING.yaml. | WORKFLOW_RULE | P2 | MEMORY_ROUTING.yaml | present |
 
+## Batch 2: boot, source, project, and adapter evidence
+
+| Evidence | Class | Rank | Target | Status |
+| --- | --- | --- | --- | --- |
+| `BOOT_MANIFEST.yaml` is the confirmed boot route and declares the startup read order. | CANON_BEHAVIOR | P0 | BOOT_MANIFEST.yaml | present |
+| Boot must produce a BootReport with repo, ref, entrypoint, loaded_sources, mode, active_project_status, source_trust_map, and writes. | WORKFLOW_RULE | P1 | BOOT_MANIFEST.yaml / boot_loader docs | present |
+| Source trust order starts with current user message for runtime instructions, then boot manifest, then public GitHub canon, private memory, weak ChatGPT memory, archive evidence. | CANON_BEHAVIOR | P0 | SOURCE_REGISTRY.yaml | present |
+| ChatGPT memory is weak cache and requires verification for serious claims. | CANON_BEHAVIOR | P0 | SOURCE_REGISTRY.yaml / MEMORY_ROUTING.yaml | present |
+| Archive history is evidence on demand, not active route. | CANON_BEHAVIOR | P1 | SOURCE_REGISTRY.yaml | present |
+| ChatGPT role is planner/operator interface, reviewer, framer, memory organizer. | WORKFLOW_RULE | P1 | SOURCE_REGISTRY.yaml / adapters/chatgpt | present |
+| Skeleton is model-neutral control layer for LLM-assisted work. | CANON_BEHAVIOR | P0 | SOURCE_REGISTRY.yaml / BOOT_MANIFEST.yaml | present |
+| Runner is execution bridge for bounded tasks; Codex is bounded coding executor; Gemini is auditor/second-brain role. | WORKFLOW_RULE | P1 | SOURCE_REGISTRY.yaml / adapters | present |
+| Jeeves is separate future assistant product and runtime. | CANON_BEHAVIOR | P0 | SOURCE_REGISTRY.yaml / projects/jeeves | present |
+| Projects are routed through PROJECT_INDEX.yaml to per-project PROJECT_MANIFEST.yaml entrypoints. | WORKFLOW_RULE | P1 | PROJECT_INDEX.yaml / project_loader | present |
+| ChatGPT adapter must load Skeleton through BOOT_MANIFEST.yaml and must not merge, deploy, access secrets, or write durable canon without explicit operator approval. | SAFETY_GATE | P0 | adapters/chatgpt/START_HERE.md | present |
+| ChatGPT may frame work and draft reviewable changes, but authority comes from operator plus declared Skeleton manifests and contracts. | CANON_BEHAVIOR | P0 | adapters/chatgpt/START_HERE.md | present |
+
 ## Initial observed rules from recent work
 
-- Skeleton is the control layer; Jeeves is a separate future assistant/product/runtime.
 - Skeleton is P0, Aufmass is P1, BauClock and Lavalamp are later.
 - Each project needs its own strategy file.
 - After repeated blockers, stop similar tasks and repair the route first.
