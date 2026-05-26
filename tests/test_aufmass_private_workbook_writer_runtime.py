@@ -69,6 +69,54 @@ def test_write_table_with_verify_retry_retries_until_readback_matches() -> None:
     assert result.column_count == 2
 
 
+def test_write_table_with_verify_retry_accepts_expected_table_in_readback() -> None:
+    written: list[list[object]] = []
+
+    def write_table(values: list[list[object]]) -> None:
+        nonlocal written
+        written = values
+
+    def read_table() -> list[list[object]]:
+        return [
+            ["unrelated", "context", ""],
+            ["prefix", *written[0]],
+            ["prefix", *written[1]],
+        ]
+
+    result = write_table_with_verify_retry(
+        write_table,
+        read_table,
+        [["room_id", "status"], ["R-001", "reviewed"]],
+    )
+
+    assert result.attempts == 1
+    assert result.row_count == 2
+    assert result.column_count == 2
+
+
+def test_write_table_with_verify_retry_retries_when_expected_table_absent() -> None:
+    attempts = 0
+    written: list[list[object]] = []
+
+    def write_table(values: list[list[object]]) -> None:
+        nonlocal attempts, written
+        attempts += 1
+        written = values
+
+    def read_table() -> list[list[object]]:
+        if attempts == 1:
+            return [["room_id", "status"], ["R-999", "stale"]]
+        return written
+
+    result = write_table_with_verify_retry(
+        write_table,
+        read_table,
+        [["room_id", "status"], ["R-001", "reviewed"]],
+    )
+
+    assert result.attempts == 2
+
+
 def test_write_table_with_verify_retry_retries_after_write_error() -> None:
     attempts = 0
     written: list[list[object]] = []
