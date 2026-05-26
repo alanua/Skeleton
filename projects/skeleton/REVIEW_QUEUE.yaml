@@ -117,7 +117,7 @@ entries:
     classification: REJECTED
     target_project: skeleton+jeeves
     summary: "Rejected near-term unsafe patterns: browser PAT/localStorage, CORS wildcard companion, automatic git push without approval, and blockchain/token layer as a near-term Skeleton feature."
-    existing_match: Conflicts with current approval-gated Runner bridge and secret-handling expectations.
+    existing_match: Conflicts with current approval-gated Runner bridge and sensitive-access handling expectations.
     risk: Token exposure, broad local attack surface, unapproved remote mutation, or unjustified complexity.
     recommended_action: Keep rejected for near-term Skeleton work unless a future approved security design supersedes it.
     status: REJECTED
@@ -166,7 +166,7 @@ entries:
     target_project: jeeves
     summary: Jeeves is a separate future assistant product and runtime, not a Skeleton adapter.
     existing_match: Matches SOURCE_REGISTRY role separation and project-index separation between Skeleton and Jeeves.
-    risk: Confusing Jeeves with Skeleton could collapse the safety boundary and activate runtime assumptions too early.
+    risk: Confusing Jeeves with Skeleton could collapse the Skeleton/Jeeves boundary and activate runtime assumptions too early.
     recommended_action: Preserve the Skeleton/Jeeves boundary in future canon promotion and implementation tasks.
     status: REVIEW
     canon_status: not_canon_until_promoted
@@ -188,7 +188,7 @@ entries:
     date: '2026-05-24'
     classification: CANON_CANDIDATE
     target_project: jeeves
-    summary: "Controlled self-improvement lifecycle: observe, detect, propose, validate, approve, apply, monitor, rollback."
+    summary: "Controlled self-improvement lifecycle: observe, detect, propose, validate, approve, apply, monitor, rollback. Operator approval remains mandatory."
     existing_match: Consistent with Skeleton approval gates, PatchPlan flow, Runner/Codex separation, and no direct self-modification.
     risk: If shortened or automated without approval, the lifecycle could become uncontrolled self-modification.
     recommended_action: Preserve as reviewed safety pattern; promote only with explicit wording that operator approval remains mandatory.
@@ -200,7 +200,7 @@ entries:
     date: '2026-05-24'
     classification: CANON_CANDIDATE
     target_project: skeleton+jeeves
-    summary: No autonomous self-modification; merge, deploy, secrets, runtime, execution-mode, and canon changes require explicit operator approval.
+    summary: No autonomous self-modification; merge, deploy, sensitive-access, runtime, execution-mode, and canon changes require explicit operator approval.
     existing_match: Matches COMMANDS BZ write gate, Runner approval gates, and source/memory routing rules.
     risk: Weakening this rule would allow model-driven changes to become active without human control.
     recommended_action: Treat as a safety entry for future canon promotion and keep it enforced in tasks and reviews.
@@ -226,7 +226,7 @@ entries:
     target_project: skeleton+jeeves
     summary: Memory architecture routes knowledge through public GitHub canon, private memory, archive/evidence, temporary/noise handling, and a secret manager for credentials.
     existing_match: Compare with MEMORY_ROUTING and SOURCE_REGISTRY; this is an architecture restatement, not a new storage backend.
-    risk: Storing private context or secrets in public GitHub would violate the route boundary.
+    risk: Storing private context or sensitive material in public GitHub would violate the route boundary; public GitHub would violate private routing.
     recommended_action: Keep as review entry and promote only if wording exactly matches current routing files.
     status: REVIEW
     canon_status: not_canon_until_promoted
@@ -239,7 +239,7 @@ entries:
     summary: LLM routing ideas include local-first routing, free and paid cloud fallback, Gemini audit tier, fallback routing, and cost, latency, and quality telemetry.
     existing_match: Compare with PROVIDER_ROUTING and future telemetry/journaling design.
     risk: Routing can leak data or increase cost if privacy and fallback rules are not explicit.
-    recommended_action: Keep as review item and reconcile with provider routing before implementation.
+    recommended_action: Keep as review item and reconcile with provider_routing before implementation.
     status: REVIEW
     canon_status: not_canon_until_promoted
 
@@ -262,7 +262,7 @@ entries:
     target_project: skeleton+jeeves
     summary: "Agent development department concept: intake, planning, implementation, tests, review, reporting, and approval gates with Oleksii mostly approving or rejecting at defined gates."
     existing_match: Related to current GitHub issue queue, Runner, Codex, PR review, and approval workflow.
-    risk: Minimizing operator involvement must not remove approval gates for merge, deploy, secrets, runtime, canon, or cross-repo writes.
+    risk: Minimizing operator involvement must not remove approval gates for merge, deploy, sensitive-access, runtime, canon, or cross-repo writes.
     recommended_action: Keep as backlog/design direction and split into bounded Runner capability stages later.
     status: REVIEW
     canon_status: not_canon_until_promoted
@@ -272,8 +272,8 @@ entries:
     date: '2026-05-24'
     classification: REJECTED
     target_project: jeeves
-    summary: "Rejected or safety-blocked near-term Jeeves patterns: uncontrolled autonomy, secrets in chat/GitHub/plain Drive, browser-stored PATs, automatic git push without approval, and unsafe direct control of locks, heaters, 230V, security systems, purchases, or cameras."
-    existing_match: Matches current secret-handling, approval-gate, and dangerous-action safety boundaries.
+    summary: "Rejected or safety-blocked near-term Jeeves patterns: uncontrolled autonomy, sensitive access in chat/GitHub/plain Drive, browser-stored PATs, automatic git push without approval, and unsafe direct control of locks, heaters, 230V, security systems, purchases, or cameras."
+    existing_match: Matches current sensitive-access handling, approval-gate, and dangerous-action safety boundaries.
     risk: These patterns can expose credentials, mutate systems without approval, or create physical/security risk.
     recommended_action: Keep rejected unless a future operator-approved safety design explicitly supersedes a specific item.
     status: REJECTED
@@ -289,4 +289,436 @@ entries:
     risk: Work-plan control text could be mistaken for canon, roadmap commitment, or Runner authorization if copied outside review intake.
     recommended_action: Keep as REVIEW / TEMPORARY_CONTROL only, do not canonize the work plan, and reconcile against live issues and prs before any follow-up task.
     status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-025
+    source_batch: transcript_source_intake_2026_05_26
+    date: '2026-05-26'
+    classification: CANON_CANDIDATE
+    target_project: skeleton
+    summary: Transcript, video text, article, news, sourcepack, external analysis, or assistant-output analysis must default to BZ knowledge_intake, not KOD or Runner execution.
+    existing_match: Reinforces docs/KNOWLEDGE_INTAKE.md and central REVIEW_QUEUE storage.
+    risk: Misrouting intake into execution creates unwanted issues, PRs, or code work.
+    recommended_action: Promote through BZ canon update after review; keep test-enforced.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-026
+    source_batch: transcript_source_intake_2026_05_26
+    date: '2026-05-26'
+    classification: CANON_CANDIDATE
+    target_project: aufmass
+    summary: Aufmass should use hybrid extraction plus deterministic calculation: AI extracts candidates, code calculates quantities, and reports confidence and assumptions.
+    existing_match: Matches existing aufmass engine, adapters, room matcher, review table, and exporter direction.
+    risk: Direct model-calculated official quantities can be wrong without evidence and verification.
+    recommended_action: Preserve as Aufmass architecture principle and reconcile with Aufmass docs before promotion.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-027
+    source_batch: paperclip_hermes_agent_org_os_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: REVIEW
+    target_project: skeleton+jeeves
+    summary: Paperclip-style mission layer can give bounded agent teams a declared project objective.
+    existing_match: Related to PROJECT_INDEX, project manifests, and future mission context.
+    risk: Goal framing can become autonomous roadmap control if not bounded by operator decisions.
+    recommended_action: Keep as mission-context idea for future dashboard or project manifest review.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-028
+    source_batch: paperclip_hermes_agent_org_os_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: BACKLOG
+    target_project: skeleton
+    summary: Org-chart style role UI can show bounded workers such as planner, worker, critic, reviewer, QA, archivist, and operator gate.
+    existing_match: Matches dev department console inspiration and helper role boundaries.
+    risk: Worker roles can be mistaken for autonomous authority if not shown as bounded and approval-gated.
+    recommended_action: Keep as future Skeleton Dev Console UI concept with explicit role constraints.
+    status: BACKLOG
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-029
+    source_batch: paperclip_hermes_agent_org_os_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: CANON_CANDIDATE
+    target_project: skeleton
+    summary: Ticket or issue queue should remain the central delegation mechanism for auditable work.
+    existing_match: Matches existing GitHub issue queue and Runner route.
+    risk: Bypassing the issue queue through chat-only execution reduces traceability.
+    recommended_action: Promote only after reconciling exact wording with COMMANDS and Runner docs.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-030
+    source_batch: ollama_custom_modelfile_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: REVIEW
+    target_project: skeleton+jeeves
+    summary: Local model profiles can be declared with model name, system prompt, runtime parameters, context size, intended task class, and risk level.
+    existing_match: Related to provider routing and adapter contracts; no model profile registry exists yet.
+    risk: Arbitrary profiles can change behavior or bypass safety if not reviewed.
+    recommended_action: Consider future approved MODEL_PROFILES registry with policy gate.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-031
+    source_batch: ollama_custom_modelfile_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: CANON_CANDIDATE
+    target_project: skeleton+jeeves
+    summary: Prompt/profile changes strongly shape model behavior and must stay behind review and approval when durable or tool-bearing.
+    existing_match: Matches approval-gated canon/instruction changes and helper/adapter boundaries.
+    risk: Unsafe profiles can create unsafe tool use even when the model is local.
+    recommended_action: Promote only with wording aligned to source registry, helper registry, and provider routing.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-032
+    source_batch: local_first_hybrid_agent_stack_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: CANON_CANDIDATE
+    target_project: skeleton+jeeves
+    summary: Local is not free; hardware cost, electricity, maintenance, latency, model quality, setup complexity, and operator time are real costs.
+    existing_match: Reinforces provider routing, cost controls, and operator-visible telemetry ideas.
+    risk: Calling local execution free hides operational cost and can cause poor architecture decisions.
+    recommended_action: Keep as cost/latency/privacy framing for future provider and local-model policy.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-033
+    source_batch: local_first_hybrid_agent_stack_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: CANON_CANDIDATE
+    target_project: skeleton+jeeves
+    summary: Best practical architecture is local-first hybrid agent stack: simple or private tasks stay local, complex non-private tasks route to stronger cloud models when needed.
+    existing_match: Matches provider_routing direction and local/cloud hybrid backlog.
+    risk: Poor privacy classification can leak sensitive data to cloud, while overusing local models can slow important work.
+    recommended_action: Promote only with explicit privacy classification, task risk levels, and fallback rules.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-034
+    source_batch: local_first_hybrid_agent_stack_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: REVIEW
+    target_project: skeleton
+    summary: Agent runtime location and LLM runtime location are separate decisions; agent may run locally while model runs locally, on a local server, or in cloud.
+    existing_match: Related to adapter contracts, runner bridge, provider routing, and future local endpoint adapters.
+    risk: Mixing agent location with model location obscures privacy and reliability boundaries.
+    recommended_action: Add to future architecture notes for runtime topology and provider routing.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-035
+    source_batch: local_first_hybrid_agent_stack_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: CANON_CANDIDATE
+    target_project: skeleton+jeeves
+    summary: Token speed alone is insufficient; agent latency across tool calls, browsing, subagents, and validation loops is the real workflow metric.
+    existing_match: Reinforces telemetry and journaling backlog for cost, latency, and success metrics.
+    risk: Optimizing only tokens per second can miss actual task runtime and user waiting cost.
+    recommended_action: Use both tokens per second and end-to-end agent latency in future telemetry.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-036
+    source_batch: local_first_hybrid_agent_stack_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: CANON_CANDIDATE
+    target_project: skeleton+jeeves
+    summary: Privacy is the main reason to run local models; sensitive data, API keys, customer data, financial data, and regulated data should not be sent to cloud by default.
+    existing_match: Matches MEMORY_ROUTING privacy routes, sensitive-access handling rules, and provider routing privacy concerns.
+    risk: Cloud fallback can leak private data if not classified before routing.
+    recommended_action: Promote only with explicit privacy gate before cloud fallback.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-037
+    source_batch: openrouter_multi_model_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: REVIEW
+    target_project: skeleton
+    summary: Multi-model trinity workflow can split work into planner, worker, critic roles and route them through an OpenRouter-style model gateway.
+    existing_match: Related to provider_routing, helper registry roles, and auditor/critic concepts.
+    risk: Without strict role boundaries, critic output can be mistaken for authority and provider routing can leak private data or increase cost.
+    recommended_action: Keep as provider-routing design candidate; require machine-readable routing policy and privacy gates before implementation.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-038
+    source_batch: ai_business_builder_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: REVIEW/BACKLOG
+    target_project: skeleton+jeeves
+    summary: AI can fill missing hacker, hustler, or hipster roles, but the human must keep ownership of problem selection, validation, and responsibility.
+    existing_match: Related to Skeleton dev-department idea and bounded helper roles.
+    risk: Treating AI as a full replacement for accountability can lead to weak product, unsafe automation, or poor decisions.
+    recommended_action: Store as product-thinking backlog; do not treat as execution authorization.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-039
+    source_batch: ai_business_builder_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: REVIEW/BACKLOG
+    target_project: skeleton+bauclock+aufmass
+    summary: Start automation/product discovery from a recurring personal or operational pain, then measure total ROI across user time and team time.
+    existing_match: Useful for BauClock, Aufmass, and Skeleton workflow discovery.
+    risk: Anecdotal pain can be over-generalized without validation and evidence.
+    recommended_action: Keep as intake heuristic for future product/task triage.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-040
+    source_batch: ai_business_builder_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: BACKLOG
+    target_project: skeleton+jeeves
+    summary: Build for one, sell to thousands: solve your own concrete problem first, then test whether the same problem exists in a niche community.
+    existing_match: Related to idea intake and product validation practice; not an active implementation rule.
+    risk: Can become overconfident if validation is limited to friendly audiences or paid-course sales framing.
+    recommended_action: Keep as product-validation heuristic, not canon truth.
+    status: BACKLOG
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-041
+    source_batch: ai_business_builder_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: BACKLOG
+    target_project: skeleton+jeeves
+    summary: Small niche economics become more viable when AI lowers build cost: even 100 motivated users can justify a focused micro-product.
+    existing_match: Related to mini-product and dev-department ideas.
+    risk: Pricing and retention assumptions need validation; small niches can still fail.
+    recommended_action: Keep as business-model backlog idea with validation requirement.
+    status: BACKLOG
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-042
+    source_batch: ai_business_builder_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: REVIEW
+    target_project: skeleton+jeeves
+    summary: Fast iteration is a strategic advantage: user feedback can become a tested feature quickly when scope is bounded and validation is explicit.
+    existing_match: Related to Runner/Codex bounded task loop and approval-gated changes.
+    risk: Fast iteration without tests or approval can ship unsafe or low-quality changes.
+    recommended_action: Keep as product/process idea; map to test-first bounded tasks before code work.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-043
+    source_batch: ai_business_builder_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: BACKLOG
+    target_project: jeeves
+    summary: Voice-to-actions second brain pattern can route one natural-language input into calendar events, tasks, notes, CRM entries, and email drafts.
+    existing_match: Related to future Jeeves personal runtime and home/assistant context, not current Skeleton execution.
+    risk: Personal data, calendars, contacts, and messages are private and require approved private storage and action gates.
+    recommended_action: Keep as Jeeves backlog only; require private design and confirmation gates before implementation.
+    status: BACKLOG
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-044
+    source_batch: ai_business_builder_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: REVIEW
+    target_project: skeleton+jeeves
+    summary: Product value is not implementation cost; users pay for saved time, a ready system, confidence, and reduced cognitive load.
+    existing_match: Related to BauClock/Aufmass product framing and future Jeeves UI ideas.
+    risk: Sales framing can distort engineering priorities if not grounded in real usefulness and safety.
+    recommended_action: Keep as product-strategy review item.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-045
+    source_batch: vibe_coding_quality_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: CANON_CANDIDATE
+    target_project: skeleton
+    summary: Good AI-assisted coding keeps the human in control: context, constraints, architecture, tests, and review are specified before accepting generated code.
+    existing_match: Strongly matches Skeleton role split: ChatGPT plans/reviews, Runner/Codex executes bounded tasks, Oleksii approves.
+    risk: Without this boundary, AI coding becomes unmaintainable opaque output.
+    recommended_action: Promote as Skeleton coding principle after reconciling with COMMANDS and Runner docs.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-046
+    source_batch: vibe_coding_quality_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: REJECTED
+    target_project: skeleton
+    summary: Bad vibe coding is rejected: vague prompts, AI choosing architecture alone, no tests, no review, no ownership, and no understanding of deployment or data flow.
+    existing_match: Conflicts with Skeleton bounded task, PatchPlan, and verification practice.
+    risk: Produces code that appears polished but can break under scale, security review, deployment, or maintenance.
+    recommended_action: Keep rejected; use AI as helper, not owner.
+    status: REJECTED
+    canon_status: rejected_not_canon
+
+  - id: RQ-2026-05-26-047
+    source_batch: vibe_coding_quality_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: CANON_CANDIDATE
+    target_project: skeleton
+    summary: AI code must be checked especially around security, authorization, permissions, payments, architecture, performance, dependencies, deployment, environment variables, paths, caching, and logging.
+    existing_match: Matches current PR review and Runner validation gates.
+    risk: These zones can create silent production failures or expose sensitive data.
+    recommended_action: Add to future code-review checklist or Runner validation backlog.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-048
+    source_batch: vibe_coding_quality_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: REVIEW
+    target_project: skeleton
+    summary: Negative prompts and constraints matter in AI coding: specify what not to touch, such as old APIs, brittle dependencies, migration boundaries, and legacy behavior.
+    existing_match: Related to bounded task files, allowed paths, forbidden changes, and scope-control wording.
+    risk: Missing negative constraints lets generated code break legacy behavior or widen scope.
+    recommended_action: Keep as task-prompt quality guideline for future Runner task templates.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-049
+    source_batch: vibe_coding_quality_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: BACKLOG
+    target_project: skeleton
+    summary: AI coding is useful for prototypes, UI components, parsers, bots, refactoring, and code explanation, but production code still needs architecture and verification.
+    existing_match: Related to Runner bounded tasks and code review practice.
+    risk: Prototype speed can be mistaken for production readiness.
+    recommended_action: Keep as coding workflow guidance and possible docs addition.
+    status: BACKLOG
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-050
+    source_batch: obsidian_markdown_second_brain_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: CANON_CANDIDATE
+    target_project: skeleton
+    summary: Markdown files in a repo are a strong AI-readable knowledge substrate because they are local-first, portable, git-trackable, and model-neutral.
+    existing_match: Matches Skeleton public GitHub canon, sourcepacks, and docs-first workflow.
+    risk: Markdown can become unstructured noise without schemas, links, and tests.
+    recommended_action: Promote as knowledge substrate principle only with structure and validation.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-051
+    source_batch: obsidian_markdown_second_brain_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: REVIEW/BACKLOG
+    target_project: skeleton+jeeves
+    summary: Obsidian-style graph and wikilinks can expose linked context to AI so it reads related notes by semantic relationship, not only by date or filename.
+    existing_match: Related to source registry, NotebookLM sourcepack, and future knowledge graph ideas.
+    risk: Link graphs can drift or overconnect unless maintained and linted.
+    recommended_action: Keep as knowledge graph/backlink idea for future memory manager design.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-052
+    source_batch: obsidian_markdown_second_brain_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: CANON_CANDIDATE
+    target_project: skeleton
+    summary: Project documentation for AI should include ADRs, architecture context, conventions, C4/Mermaid diagrams, module rules, and error-handling patterns so agents follow project rules.
+    existing_match: Strong match with Skeleton docs, adapter contracts, and sourcepack design.
+    risk: Outdated ADRs or diagrams can mislead agents.
+    recommended_action: Add to future docs/sourcepack quality checklist.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-053
+    source_batch: obsidian_markdown_second_brain_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: BACKLOG
+    target_project: skeleton
+    summary: Daily task-tracker digest pipeline can pull tracker changes, compute a diff from previous state, send a Telegram digest, and store markdown history for weekly reports and retrospectives.
+    existing_match: Related to Telegram reports, Runner issue queue, and audit/reporting backlog.
+    risk: Needs private/public routing because project tasks can include sensitive operational data.
+    recommended_action: Keep as private-capable reporting backlog; public repo should use synthetic examples only.
+    status: BACKLOG
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-054
+    source_batch: obsidian_markdown_second_brain_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: BACKLOG
+    target_project: jeeves
+    summary: Meeting transcript pipeline can classify meetings, structure notes by template, extract action items, and create project tasks or comments.
+    existing_match: Related to future Jeeves assistant and private memory workflow.
+    risk: Meeting transcripts are private by default and need consent, retention, and storage routing.
+    recommended_action: Keep as Jeeves/private-memory backlog, not public implementation.
+    status: BACKLOG
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-055
+    source_batch: obsidian_markdown_second_brain_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: REVIEW/BACKLOG
+    target_project: skeleton+jeeves
+    summary: Local wiki ingestion can split knowledge into sources, entities, questions, and processing logs, preserving evidence and enabling repeatable query answers.
+    existing_match: Related to memory routing, archive/evidence, review queue, and future memory manager.
+    risk: Extraction errors can become false canon if not tied to sources and review gates.
+    recommended_action: Keep as future memory-manager design candidate with evidence citations and non-canon defaults.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-056
+    source_batch: obsidian_markdown_second_brain_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: BACKLOG
+    target_project: skeleton+jeeves
+    summary: Hybrid lexical plus vector search with a reranker can improve local knowledge retrieval compared with keyword or embedding search alone.
+    existing_match: Related to future memory manager and local search tools, not current Skeleton core.
+    risk: Retrieval quality needs benchmark data and privacy-safe indexing.
+    recommended_action: Keep as search architecture backlog; test on synthetic/public data first.
+    status: BACKLOG
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-057
+    source_batch: obsidian_markdown_second_brain_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: BACKLOG
+    target_project: skeleton
+    summary: Knowledge-base linting can scan entries for duplicates, contradictions, stale claims, and source conflicts on a schedule.
+    existing_match: Related to review queue tests and future memory manager linting.
+    risk: Automated lint must not rewrite canon without approval.
+    recommended_action: Keep as report-only lint backlog with explicit human review.
+    status: BACKLOG
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-058
+    source_batch: obsidian_markdown_second_brain_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: BACKLOG
+    target_project: jeeves
+    summary: Universal inbox router can classify incoming text or voice notes, route them to notes, tasks, wiki, or project tracker, and ask for clarification when confidence is low.
+    existing_match: Related to future Jeeves intake and Telegram channel ideas.
+    risk: Auto-routing private notes can misfile data or create unintended tasks without confirmation.
+    recommended_action: Keep as future Jeeves/private workflow with confidence thresholds and confirmation gates.
+    status: BACKLOG
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-059
+    source_batch: obsidian_markdown_second_brain_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: REVIEW
+    target_project: skeleton+jeeves
+    summary: Correction history can help an intake router adapt by remembering recent human corrections, then later converting stable corrections into explicit skills or prompts.
+    existing_match: Related to BZ correction, runtime adaptation, and no-autonomous-self-modification boundaries.
+    risk: Automatic adaptation can become hidden behavior change if not reviewed and promoted.
+    recommended_action: Keep as reviewed design idea: correction logs are evidence, durable behavior changes require approval.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-060
+    source_batch: obsidian_markdown_second_brain_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: BACKLOG
+    target_project: homelab+jeeves
+    summary: Git-synced markdown vault across local machine, VPS, and mobile can provide a distributed second brain with offline-friendly access.
+    existing_match: Related to homelab, private memory, and local-first ideas.
+    risk: Sync conflicts and accidental public push can leak private data if routes are not separated.
+    recommended_action: Keep as private infrastructure backlog with separate public/private remotes and safety checks.
+    status: BACKLOG
     canon_status: not_canon_until_promoted
