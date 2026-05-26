@@ -59,9 +59,14 @@ def test_write_command_has_required_gates() -> None:
 
 def test_continue_command_is_bounded() -> None:
     commands = load_yaml("COMMANDS.yaml")["commands"]
+    means = set(commands["+"]["means"])
 
     assert commands["+"]["mode"] == "continue_approved_step"
     assert commands["+"]["rule"] == "apply_smallest_approved_next_step"
+    assert "continue_already_proposed_safe_next_step" in means
+    assert "do_not_replan_unless_new_evidence_changes_route" in means
+    assert "stay_inside_current_scope_risk_and_gate" in means
+    assert "report_classification_route_done_next_practical_step" in means
 
 
 def test_fixuy_commands_record_without_extra_plus_but_keep_risky_actions_gated() -> None:
@@ -73,15 +78,16 @@ def test_fixuy_commands_record_without_extra_plus_but_keep_risky_actions_gated()
 
         assert spec["mode"] == "persist_request"
         assert spec["writes"] == "routed_durable_storage_after_write_gate"
+        assert "fixuy_is_memory_routing_event" in means
+        assert "classify_then_route_then_change_next_action" in means
+        assert "fixation_without_changed_next_action_does_not_count" in means
+        assert "use_memory_manager_and_memory_store_stage1_model_when_available" in means
         assert "fixuy_is_enough_approval_to_record_stated_rule_after_classification" in means
         assert "route_public_safe_durable_to_GitHub_canon_review_without_extra_plus" in means
         assert "route_private_context_privately" in means
         assert "secrets_never_to_chat_GitHub_plain_Drive" in means
         assert "risky_actions_merge_deploy_runtime_secrets_destructive_require_separate_explicit_approval" in means
-        assert (
-            "report_to_Oleksii_human_readable_clear_person_to_person_technical_details_only_when_needed_or_requested"
-            in means
-        )
+        assert "report_classification_route_done_next_practical_step" in means
 
 
 def test_behavior_playbook_consolidates_safe_helper_issue_first_and_repeated_work() -> None:
@@ -107,6 +113,16 @@ def test_behavior_playbook_consolidates_safe_helper_issue_first_and_repeated_wor
         "trigger": "before_skeleton_project_work_or_after_recent_main_merge",
         "safe_next_step": "compare_github_main_runner_checkout_sourcepack_and_open_work",
         "report": "short_human_readable_fresh_stale_blocked_summary",
+    }
+    assert playbook["adaptive_practical_learning"] == {
+        "trigger": "repeated_blocker_or_repeated_failed_route_or_fixuy_with_adapt_instruction",
+        "safe_next_step": "classify_route_change_next_action_and_repair_real_blocker_before_repeating",
+        "report": "classification_route_done_next_practical_step",
+    }
+    assert playbook["issue_or_pr_number_review"] == {
+        "trigger": "operator_provides_issue_or_pr_number",
+        "safe_next_step": "read_scope_tests_data_runtime_risk_then_approve_reject_or_state_blocker_and_one_next_step",
+        "report": "short_review_decision_with_reason",
     }
 
 
