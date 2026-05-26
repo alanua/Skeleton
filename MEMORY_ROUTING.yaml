@@ -47,6 +47,7 @@ fixuy_runtime_rule:
   means:
     - fixuy_is_memory_routing_event
     - classify_then_route_then_change_next_action
+    - durable_fixuy_must_use_routed_long_term_target_not_chat_only
     - fixation_without_changed_next_action_does_not_count
     - use_memory_manager_and_memory_store_stage1_model_when_available
     - report_classification_route_done_next_practical_step
