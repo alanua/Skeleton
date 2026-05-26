@@ -63,6 +63,22 @@ Purpose: collect behavior rules from old Skeleton, current Skeleton, branches, i
 | ChatGPT adapter must load Skeleton through BOOT_MANIFEST.yaml and must not merge, deploy, access secrets, or write durable canon without explicit operator approval. | SAFETY_GATE | P0 | adapters/chatgpt/START_HERE.md | present |
 | ChatGPT may frame work and draft reviewable changes, but authority comes from operator plus declared Skeleton manifests and contracts. | CANON_BEHAVIOR | P0 | adapters/chatgpt/START_HERE.md | present |
 
+## Batch 3: Runner maintenance and tool-format evidence
+
+| Evidence | Class | Rank | Target | Status |
+| --- | --- | --- | --- | --- |
+| Runtime maintenance tasks are host Runner actions, not Codex tasks. | SAFETY_GATE | P0 | docs/RUNNER_MAINTENANCE_TASKS.md | present |
+| Codex stays inside its workspace sandbox and must not be asked to reach systemd or host runtime paths. | SAFETY_GATE | P0 | docs/RUNNER_MAINTENANCE_TASKS.md / adapter contracts | present |
+| Runtime maintenance issue format requires `Mode: RUNTIME_MAINTENANCE_TASK` and `Maintenance Task ID:`. | TOOL_FORMAT_RULE | P1 | docs/RUNNER_MAINTENANCE_TASKS.md / COMMANDS.yaml | present |
+| Issue text is not a shell script; host Runner dispatches only task ids in its code allowlist. | SAFETY_GATE | P0 | docs/RUNNER_MAINTENANCE_TASKS.md | present |
+| Missing or unknown maintenance task ids are reported as `BLOCKED`. | TOOL_FORMAT_RULE | P1 | docs/RUNNER_MAINTENANCE_TASKS.md | present |
+| Privileged host commands must use non-interactive `sudo -n`; Runner blocks instead of waiting for input. | SAFETY_GATE | P0 | docs/RUNNER_MAINTENANCE_TASKS.md | present |
+| `check_project_checkout` and `ensure_project_checkout` must include `Target Project:` and resolve paths through PROJECT_TREE. | TOOL_FORMAT_RULE | P1 | docs/RUNNER_MAINTENANCE_TASKS.md / PROJECT_TREE docs | present |
+| `validate_pr_branch` requires `Pull Request:` and only allows validation profiles `full_pytest` and `knowledge_intake`. | TOOL_FORMAT_RULE | P1 | docs/RUNNER_MAINTENANCE_TASKS.md | present |
+| `check_skeleton_freshness` is documented as an allowlisted maintenance id, but runtime reported it not allowlisted in #518. | ADAPTIVE_LESSON | P2 | docs/ADAPTIVE_PRACTICAL_LEARNING.md / Runner repair task | conflict observed |
+| Maintenance reports must state `DONE` or `BLOCKED` accurately; failed runtime verification is `BLOCKED`. | WORKFLOW_RULE | P1 | docs/RUNNER_MAINTENANCE_TASKS.md | present |
+| Reports must not print token values or raw command output. | SAFETY_GATE | P0 | docs/RUNNER_MAINTENANCE_TASKS.md | present |
+
 ## Initial observed rules from recent work
 
 - Skeleton is P0, Aufmass is P1, BauClock and Lavalamp are later.
