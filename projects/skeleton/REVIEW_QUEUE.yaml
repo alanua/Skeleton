@@ -830,3 +830,147 @@ entries:
     recommended_action: Treat OpenClow-style orchestration as inspiration; any adopted adapter needs version pinning, synthetic tests, and rollback.
     status: REVIEW
     canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-070
+    source_batch: agent_systems_intro_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: REVIEW/CANON_CANDIDATE
+    target_project: skeleton+jeeves
+    summary: Agent systems move from prompt-response chat toward goal-directed delegated work: the user gives an outcome and the agent plans, executes steps, and returns a report.
+    existing_match: Matches Skeleton dev-department direction, issue queue, Runner reports, and future Jeeves runtime concept.
+    risk: Goal-directed work becomes unsafe if execution, publishing, and external side effects are not gated.
+    recommended_action: Keep as agent-system framing; promote only with explicit bounded execution and reporting rules.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-071
+    source_batch: agent_systems_intro_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: CANON_CANDIDATE
+    target_project: skeleton+jeeves
+    summary: Good agent tasks are recurring, necessary, measurable, and unpleasant or time-consuming for the human, not vague one-off requests.
+    existing_match: Matches BauClock, Aufmass, Runner reporting, and product-discovery pain-first heuristics.
+    risk: Vague tasks like 'make everything' create uncontrolled scope and unverifiable results.
+    recommended_action: Promote as task-selection heuristic after wording is reconciled with COMMANDS and task templates.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-072
+    source_batch: agent_systems_intro_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: BACKLOG
+    target_project: skeleton+bauclock+jeeves
+    summary: Daily operational intelligence agents can collect metrics, compare with prior periods, summarize anomalies, and send a Telegram or dashboard report.
+    existing_match: Related to audit_packet, BauClock reporting, Telegram reports, and daily digest backlog.
+    risk: Business metrics and client data may be private; public examples must use synthetic data and redaction.
+    recommended_action: Keep as reporting backlog; design with privacy routing and read-only data access first.
+    status: BACKLOG
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-073
+    source_batch: agent_systems_intro_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: BACKLOG
+    target_project: skeleton+jeeves
+    summary: Competitor-monitoring agents can track public pricing, ads, and content changes, then suggest responses rather than act automatically.
+    existing_match: Related to market/news intake and future product-ops automation ideas.
+    risk: Scraping, ToS constraints, hallucinated recommendations, and auto-publishing can create business or legal problems.
+    recommended_action: Keep as review-only intelligence backlog; require sources, citations, and human approval before any response action.
+    status: BACKLOG
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-074
+    source_batch: agent_systems_intro_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: BACKLOG
+    target_project: jeeves
+    summary: Personal assistant agents can monitor email, classify spam, draft concise replies, and escalate important messages to the human.
+    existing_match: Related to future Jeeves personal assistant, universal inbox router, and private memory workflow.
+    risk: Email content is private; autonomous sending or deletion can cause harm without confirmation and audit.
+    recommended_action: Keep as Jeeves private-workflow backlog; first version should draft/escalate only, not send or delete automatically.
+    status: BACKLOG
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-075
+    source_batch: agent_systems_intro_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: REVIEW
+    target_project: skeleton+jeeves
+    summary: Agent capability can become part of a human work profile: value comes from what the user can accomplish with their agents, models, and automations.
+    existing_match: Related to Skeleton dev department, user-as-operator gate, and future Jeeves assistant skillset.
+    risk: This can turn into sales rhetoric unless grounded in measurable workflows and safe execution.
+    recommended_action: Keep as product/strategy review item, not a technical requirement.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-076
+    source_batch: agent_systems_intro_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: REVIEW
+    target_project: skeleton+jeeves
+    summary: Agent forms can be grouped as partial chat-tool agents, packaged agents such as Hermes/OpenClow-style systems, and custom business-specific agents.
+    existing_match: Related to helper registry, adapter contracts, and future worker registry design.
+    risk: Packaged agents may hide permissions, skills, or external calls; custom agents can encode unsafe business logic if unreviewed.
+    recommended_action: Use this taxonomy for review language; require capability registry and permission declarations before adoption.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-077
+    source_batch: agent_systems_intro_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: CANON_CANDIDATE
+    target_project: skeleton+homelab+jeeves
+    summary: Agent hosting is a separate architecture decision: laptop/local device for experiments, home server for private 24/7 local runtime, VPS for reliable always-on hosted runtime.
+    existing_match: Matches existing homelab, Fujitsu/Proxmox, Runner, and local-first hybrid stack notes.
+    risk: Hosting private agents on VPS can expose secrets or personal data; home servers depend on power, network, backups, and maintenance.
+    recommended_action: Preserve as runtime-topology principle with privacy and reliability tradeoffs documented.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-078
+    source_batch: agent_systems_intro_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: CANON_CANDIDATE
+    target_project: skeleton+jeeves
+    summary: Model selection for agents must balance task quality, context length, modality, tool-use ability, latency, and cost rather than always choosing the strongest frontier model.
+    existing_match: Matches provider routing, model profile, local-first hybrid, and telemetry/cost entries.
+    risk: Poor model choice can either waste money or silently reduce task quality and safety.
+    recommended_action: Promote into provider-routing design with task classes, budgets, fallback rules, and measured outcomes.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-079
+    source_batch: agent_systems_intro_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: REVIEW/BACKLOG
+    target_project: skeleton
+    summary: OpenRouter-style aggregator routing can provide free-model mode, auto-selection, provider filters, fallback pools, and model lists for agent roles.
+    existing_match: Related to PROVIDER_ROUTING and model aliases already recorded from prior transcripts.
+    risk: Auto-routing can leak private data, change behavior, or hide costs if selected model and provider are not logged.
+    recommended_action: Keep as provider-routing backlog; any implementation must log resolved provider/model and enforce privacy gates.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-080
+    source_batch: agent_systems_intro_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: BACKLOG
+    target_project: skeleton
+    summary: A model tier-list or registry can track model task class, price, context, modality, provider, and suitability for text, code, agent, image, video, or audio tasks.
+    existing_match: Related to MODEL_PROFILES idea, provider routing, and visible alias-to-model resolution requirement.
+    risk: Model rankings become stale quickly and can mislead routing without update cadence and benchmarks.
+    recommended_action: Keep as provider-routing tool backlog; use machine-readable model registry plus smoke benchmarks, not static opinions.
+    status: BACKLOG
+    canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-05-26-081
+    source_batch: agent_systems_intro_transcript_2026_05_26
+    date: '2026-05-26'
+    classification: REJECTED
+    target_project: skeleton+jeeves
+    summary: Fully autonomous posting, emailing, deleting, pricing, or external-response actions are rejected as default agent behavior.
+    existing_match: Matches approval gates, dangerous-action handling, email/private workflow concerns, and no uncontrolled automation rule.
+    risk: Can publish wrong content, damage relationships, alter business decisions, delete evidence, or leak private data.
+    recommended_action: Agents may draft, recommend, report, or queue actions; external side effects require explicit approval and audit trail.
+    status: REJECTED
+    canon_status: rejected_not_canon
