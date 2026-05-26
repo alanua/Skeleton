@@ -14,6 +14,10 @@ behavior_playbook:
     trigger: same_type_routine_items_share_approved_route_scope_risk_level_and_gate
     safe_next_step: process_as_batch_split_and_stop_on_different_or_risky_item
     report: short_human_readable_processed_split_blocked_validation_summary
+  adaptive_practical_learning:
+    trigger: repeated_blocker_or_repeated_failed_route_or_fixuy_with_adapt_instruction
+    safe_next_step: stop_repeating_failed_route_classify_ACTIVE_BLOCKER_repair_real_route_then_resume
+    report: classification_route_done_next_practical_step
 
 routes:
   public_safe_durable:
@@ -38,6 +42,14 @@ routes:
   archive_evidence:
     target: archive_history_recovery
     means: historical material used in audit or recovery mode
+
+fixuy_runtime_rule:
+  means:
+    - fixuy_is_memory_routing_event
+    - classify_then_route_then_change_next_action
+    - fixation_without_changed_next_action_does_not_count
+    - use_memory_manager_and_memory_store_stage1_model_when_available
+    - report_classification_route_done_next_practical_step
 
 conflict_rule:
   means:
