@@ -94,6 +94,16 @@ def test_fixuy_memory_routes_are_explicit_and_secrets_refuse_plain_storage() -> 
     assert "secrets_credentials" in routing["classification_required_for"]
 
 
+def test_fixuy_runtime_rule_is_not_chat_only() -> None:
+    means = set(load_yaml("MEMORY_ROUTING.yaml")["fixuy_runtime_rule"]["means"])
+
+    assert "fixuy_is_memory_routing_event" in means
+    assert "classify_then_route_then_change_next_action" in means
+    assert "fixation_without_changed_next_action_does_not_count" in means
+    assert "use_memory_manager_and_memory_store_stage1_model_when_available" in means
+    assert "report_classification_route_done_next_practical_step" in means
+
+
 def test_risky_actions_still_require_separate_approval() -> None:
     routing = load_yaml("MEMORY_ROUTING.yaml")
 
@@ -121,6 +131,7 @@ def test_behavior_playbook_memory_routing_has_clear_trigger_step_and_report() ->
         "routine_safe_helper_steps",
         "blocked_long_task_creation",
         "repeated_work_pattern",
+        "adaptive_practical_learning",
     }
 
     for rule in playbook.values():
@@ -135,3 +146,8 @@ def test_behavior_playbook_memory_routing_has_clear_trigger_step_and_report() ->
     assert playbook["repeated_work_pattern"]["safe_next_step"] == (
         "process_as_batch_split_and_stop_on_different_or_risky_item"
     )
+    assert playbook["adaptive_practical_learning"] == {
+        "trigger": "repeated_blocker_or_repeated_failed_route_or_fixuy_with_adapt_instruction",
+        "safe_next_step": "stop_repeating_failed_route_classify_ACTIVE_BLOCKER_repair_real_route_then_resume",
+        "report": "classification_route_done_next_practical_step",
+    }
