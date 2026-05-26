@@ -308,7 +308,7 @@ entries:
     date: '2026-05-26'
     classification: CANON_CANDIDATE
     target_project: aufmass
-    summary: Aufmass should use hybrid extraction plus deterministic calculation: AI extracts candidates, code calculates quantities, and reports confidence and assumptions.
+    summary: "Aufmass should use hybrid extraction plus deterministic calculation: AI extracts candidates, code calculates quantities, and reports confidence and assumptions."
     existing_match: Matches existing aufmass engine, adapters, room matcher, review table, and exporter direction.
     risk: Direct model-calculated official quantities can be wrong without evidence and verification.
     recommended_action: Preserve as Aufmass architecture principle and reconcile with Aufmass docs before promotion.
@@ -392,7 +392,7 @@ entries:
     date: '2026-05-26'
     classification: CANON_CANDIDATE
     target_project: skeleton+jeeves
-    summary: Best practical architecture is local-first hybrid agent stack: simple or private tasks stay local, complex non-private tasks route to stronger cloud models when needed.
+    summary: "Best practical architecture is local-first hybrid agent stack: simple or private tasks stay local, complex non-private tasks route to stronger cloud models when needed."
     existing_match: Matches provider_routing direction and local/cloud hybrid backlog.
     risk: Poor privacy classification can leak sensitive data to cloud, while overusing local models can slow important work.
     recommended_action: Promote only with explicit privacy classification, task risk levels, and fallback rules.
@@ -476,7 +476,7 @@ entries:
     date: '2026-05-26'
     classification: BACKLOG
     target_project: skeleton+jeeves
-    summary: Build for one, sell to thousands: solve your own concrete problem first, then test whether the same problem exists in a niche community.
+    summary: "Build for one, sell to thousands: solve your own concrete problem first, then test whether the same problem exists in a niche community."
     existing_match: Related to idea intake and product validation practice; not an active implementation rule.
     risk: Can become overconfident if validation is limited to friendly audiences or paid-course sales framing.
     recommended_action: Keep as product-validation heuristic, not canon truth.
@@ -488,7 +488,7 @@ entries:
     date: '2026-05-26'
     classification: BACKLOG
     target_project: skeleton+jeeves
-    summary: Small niche economics become more viable when AI lowers build cost: even 100 motivated users can justify a focused micro-product.
+    summary: "Small niche economics become more viable when AI lowers build cost: even 100 motivated users can justify a focused micro-product."
     existing_match: Related to mini-product and dev-department ideas.
     risk: Pricing and retention assumptions need validation; small niches can still fail.
     recommended_action: Keep as business-model backlog idea with validation requirement.
@@ -500,7 +500,7 @@ entries:
     date: '2026-05-26'
     classification: REVIEW
     target_project: skeleton+jeeves
-    summary: Fast iteration is a strategic advantage: user feedback can become a tested feature quickly when scope is bounded and validation is explicit.
+    summary: "Fast iteration is a strategic advantage: user feedback can become a tested feature quickly when scope is bounded and validation is explicit."
     existing_match: Related to Runner/Codex bounded task loop and approval-gated changes.
     risk: Fast iteration without tests or approval can ship unsafe or low-quality changes.
     recommended_action: Keep as product/process idea; map to test-first bounded tasks before code work.
@@ -536,8 +536,8 @@ entries:
     date: '2026-05-26'
     classification: CANON_CANDIDATE
     target_project: skeleton
-    summary: Good AI-assisted coding keeps the human in control: context, constraints, architecture, tests, and review are specified before accepting generated code.
-    existing_match: Strongly matches Skeleton role split: ChatGPT plans/reviews, Runner/Codex executes bounded tasks, Oleksii approves.
+    summary: "Good AI-assisted coding keeps the human in control: context, constraints, architecture, tests, and review are specified before accepting generated code."
+    existing_match: "Strongly matches Skeleton role split: ChatGPT plans/reviews, Runner/Codex executes bounded tasks, Oleksii approves."
     risk: Without this boundary, AI coding becomes unmaintainable opaque output.
     recommended_action: Promote as Skeleton coding principle after reconciling with COMMANDS and Runner docs.
     status: REVIEW
@@ -548,7 +548,7 @@ entries:
     date: '2026-05-26'
     classification: REJECTED
     target_project: skeleton
-    summary: Bad vibe coding is rejected: vague prompts, AI choosing architecture alone, no tests, no review, no ownership, and no understanding of deployment or data flow.
+    summary: "Bad vibe coding is rejected: vague prompts, AI choosing architecture alone, no tests, no review, no ownership, and no understanding of deployment or data flow."
     existing_match: Conflicts with Skeleton bounded task, PatchPlan, and verification practice.
     risk: Produces code that appears polished but can break under scale, security review, deployment, or maintenance.
     recommended_action: Keep rejected; use AI as helper, not owner.
@@ -572,7 +572,7 @@ entries:
     date: '2026-05-26'
     classification: REVIEW
     target_project: skeleton
-    summary: Negative prompts and constraints matter in AI coding: specify what not to touch, such as old APIs, brittle dependencies, migration boundaries, and legacy behavior.
+    summary: "Negative prompts and constraints matter in AI coding: specify what not to touch, such as old APIs, brittle dependencies, migration boundaries, and legacy behavior."
     existing_match: Related to bounded task files, allowed paths, forbidden changes, and scope-control wording.
     risk: Missing negative constraints lets generated code break legacy behavior or widen scope.
     recommended_action: Keep as task-prompt quality guideline for future Runner task templates.
@@ -707,7 +707,7 @@ entries:
     summary: Correction history can help an intake router adapt by remembering recent human corrections, then later converting stable corrections into explicit skills or prompts.
     existing_match: Related to BZ correction, runtime adaptation, and no-autonomous-self-modification boundaries.
     risk: Automatic adaptation can become hidden behavior change if not reviewed and promoted.
-    recommended_action: Keep as reviewed design idea: correction logs are evidence, durable behavior changes require approval.
+    recommended_action: "Keep as reviewed design idea: correction logs are evidence, durable behavior changes require approval."
     status: REVIEW
     canon_status: not_canon_until_promoted
 
@@ -740,7 +740,7 @@ entries:
     date: '2026-05-26'
     classification: CANON_CANDIDATE
     target_project: skeleton
-    summary: Per-agent least privilege should be explicit: orchestrator has messaging/delegation tools, setup agent has constrained setup authority, report agent writes only scoped report artifacts.
+    summary: "Per-agent least privilege should be explicit: orchestrator has messaging/delegation tools, setup agent has constrained setup authority, report agent writes only scoped report artifacts."
     existing_match: Strongly matches Skeleton allowed-path, forbidden-change, write-gate, local-tool, and commit-preparation patterns.
     risk: Broad full-access agents can change server state, secrets, runtime, or config without the operator noticing.
     recommended_action: Promote only as a least-privilege principle; do not adopt full-trust server agents without separate safety design.
@@ -764,7 +764,7 @@ entries:
     date: '2026-05-26'
     classification: REVIEW/BACKLOG
     target_project: skeleton
-    summary: Model aliases can decouple roles from provider churn: cheap models for reports/simple work, stronger models for setup/architecture/review, with explicit cost-quality tracking.
+    summary: "Model aliases can decouple roles from provider churn: cheap models for reports/simple work, stronger models for setup/architecture/review, with explicit cost-quality tracking."
     existing_match: Related to PROVIDER_ROUTING, model profile ideas, local-first hybrid stack, and telemetry entries.
     risk: Alias drift can silently change behavior, cost, or safety properties if not logged and reviewed.
     recommended_action: Keep as provider-routing backlog; require visible alias-to-model resolution in reports.
@@ -788,7 +788,7 @@ entries:
     date: '2026-05-26'
     classification: REVIEW
     target_project: skeleton
-    summary: The useful dev-department chain is task graph first: operator/main orchestrator, setup worker, implementation worker, report worker, auditor, and final operator gate.
+    summary: "The useful dev-department chain is task graph first: operator/main orchestrator, setup worker, implementation worker, report worker, auditor, and final operator gate."
     existing_match: Matches existing development-department concept but needs exact mapping to Skeleton Runner instead of OpenClow UI config.
     risk: Nested agents can become brittle and hard to debug if state, permissions, and logs are not explicit.
     recommended_action: Keep as design input for Skeleton Dev Department Console and bounded worker registry.
@@ -836,7 +836,7 @@ entries:
     date: '2026-05-26'
     classification: REVIEW/CANON_CANDIDATE
     target_project: skeleton+jeeves
-    summary: Agent systems move from prompt-response chat toward goal-directed delegated work: the user gives an outcome and the agent plans, executes steps, and returns a report.
+    summary: "Agent systems move from prompt-response chat toward goal-directed delegated work: the user gives an outcome and the agent plans, executes steps, and returns a report."
     existing_match: Matches Skeleton dev-department direction, issue queue, Runner reports, and future Jeeves runtime concept.
     risk: Goal-directed work becomes unsafe if execution, publishing, and external side effects are not gated.
     recommended_action: Keep as agent-system framing; promote only with explicit bounded execution and reporting rules.
@@ -896,7 +896,7 @@ entries:
     date: '2026-05-26'
     classification: REVIEW
     target_project: skeleton+jeeves
-    summary: Agent capability can become part of a human work profile: value comes from what the user can accomplish with their agents, models, and automations.
+    summary: "Agent capability can become part of a human work profile: value comes from what the user can accomplish with their agents, models, and automations."
     existing_match: Related to Skeleton dev department, user-as-operator gate, and future Jeeves assistant skillset.
     risk: This can turn into sales rhetoric unless grounded in measurable workflows and safe execution.
     recommended_action: Keep as product/strategy review item, not a technical requirement.
@@ -920,7 +920,7 @@ entries:
     date: '2026-05-26'
     classification: CANON_CANDIDATE
     target_project: skeleton+homelab+jeeves
-    summary: Agent hosting is a separate architecture decision: laptop/local device for experiments, home server for private 24/7 local runtime, VPS for reliable always-on hosted runtime.
+    summary: "Agent hosting is a separate architecture decision: laptop/local device for experiments, home server for private 24/7 local runtime, VPS for reliable always-on hosted runtime."
     existing_match: Matches existing homelab, Fujitsu/Proxmox, Runner, and local-first hybrid stack notes.
     risk: Hosting private agents on VPS can expose secrets or personal data; home servers depend on power, network, backups, and maintenance.
     recommended_action: Preserve as runtime-topology principle with privacy and reliability tradeoffs documented.
