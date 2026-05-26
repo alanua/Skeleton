@@ -175,7 +175,9 @@ It reports `DONE` when the freshness report was produced. It reports `BLOCKED`
 for unsafe paths, missing checkouts, missing `.git`, failed origin reads, failed
 GitHub `main` SHA reads, GitHub query failures, or any unclassified sync state.
 The report must be short, human-readable, and must not include raw command
-output.
+output. It may include only safe synthesized status lines such as current
+`main` SHA, checkout sync state, open PR/issue counts, and bounded reminder
+notes.
 
 The allowlist does not permit rebooting the host, package upgrades, arbitrary
 commands or config values from issue text, or unrelated services.
