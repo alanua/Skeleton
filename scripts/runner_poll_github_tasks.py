@@ -490,6 +490,19 @@ def report_runner_lane(report: str, task: RunnerTask | None) -> str:
 def final_codex_answer(output: str) -> str:
     """Return the final Codex answer without echoed prompt/transcript text."""
     text = _ANSI_ESCAPE_RE.sub("", output or "")
+
+    transcript_tail = _CODEX_TRANSCRIPT_TAIL_RE.search(text)
+    workdir_boundary = text.find("\n--------\nworkdir:")
+    prefix_cuts: list[int] = []
+    if transcript_tail is not None:
+        prefix_cuts.append(transcript_tail.start())
+    if workdir_boundary != -1:
+        prefix_cuts.append(workdir_boundary)
+    if prefix_cuts:
+        prefix = text[: min(prefix_cuts)].strip()
+        if prefix:
+            return prefix
+
     lines = text.splitlines(keepends=True)
     in_fence = False
     final_status_index: int | None = None
