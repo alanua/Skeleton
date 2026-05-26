@@ -278,6 +278,27 @@ No packages were installed during tests and no generic package-install capabilit
     assert runner.blocked_output_marker(output) is None
 
 
+
+def test_final_codex_answer_prefers_useful_prefix_before_transcript_tail() -> None:
+    marker = runner._BLOCKED_OUTPUT_MARKERS[0]
+    output = (
+        "DONE: useful work completed\n\n"
+        "Changed files:\n"
+        "- scripts/runner_poll_github_tasks.py\n\n"
+        "Reading additional input from stdin...\n"
+        "OpenAI Codex v0.125.0\n"
+        "--------\n"
+        "user\n"
+        f"Echoed task text includes {marker} but it is not the final answer.\n"
+    )
+
+    final_answer = runner.final_codex_answer(output)
+
+    assert final_answer.startswith("DONE: useful work completed")
+    assert "Reading additional input from stdin" not in final_answer
+    assert runner.blocked_output_marker(output) is None
+
+
 def test_blocked_output_classifier_ignores_echoed_prompt_inside_codex_output_block() -> None:
     output = """DONE: Codex completed successfully with no file changes.
 
