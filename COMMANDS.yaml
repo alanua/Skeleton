@@ -18,6 +18,14 @@ behavior_playbook:
     trigger: before_skeleton_project_work_or_after_recent_main_merge
     safe_next_step: compare_github_main_runner_checkout_sourcepack_and_open_work
     report: short_human_readable_fresh_stale_blocked_summary
+  adaptive_practical_learning:
+    trigger: repeated_blocker_or_repeated_failed_route_or_fixuy_with_adapt_instruction
+    safe_next_step: classify_route_change_next_action_and_repair_real_blocker_before_repeating
+    report: classification_route_done_next_practical_step
+  issue_or_pr_number_review:
+    trigger: operator_provides_issue_or_pr_number
+    safe_next_step: read_scope_tests_data_runtime_risk_then_approve_reject_or_state_blocker_and_one_next_step
+    report: short_review_decision_with_reason
 
 commands:
   прокинься:
@@ -136,13 +144,17 @@ commands:
     writes: routed_durable_storage_after_write_gate
     means:
       - explicit_durable_persistence_request
+      - fixuy_is_memory_routing_event
+      - classify_then_route_then_change_next_action
+      - fixation_without_changed_next_action_does_not_count
+      - use_memory_manager_and_memory_store_stage1_model_when_available
       - fixuy_is_enough_approval_to_record_stated_rule_after_classification
       - classify_CANON_REVIEW_BACKLOG_REJECTED_PRIVATE_TEMPORARY
       - route_public_safe_durable_to_GitHub_canon_review_without_extra_plus
       - route_private_context_privately
       - secrets_never_to_chat_GitHub_plain_Drive
       - risky_actions_merge_deploy_runtime_secrets_destructive_require_separate_explicit_approval
-      - report_to_Oleksii_human_readable_clear_person_to_person_technical_details_only_when_needed_or_requested
+      - report_classification_route_done_next_practical_step
 
   фіксуй:
     mode: persist_request
@@ -160,13 +172,17 @@ commands:
     writes: routed_durable_storage_after_write_gate
     means:
       - explicit_durable_persistence_request
+      - fixuy_is_memory_routing_event
+      - classify_then_route_then_change_next_action
+      - fixation_without_changed_next_action_does_not_count
+      - use_memory_manager_and_memory_store_stage1_model_when_available
       - fixuy_is_enough_approval_to_record_stated_rule_after_classification
       - classify_CANON_REVIEW_BACKLOG_REJECTED_PRIVATE_TEMPORARY
       - route_public_safe_durable_to_GitHub_canon_review_without_extra_plus
       - route_private_context_privately
       - secrets_never_to_chat_GitHub_plain_Drive
       - risky_actions_merge_deploy_runtime_secrets_destructive_require_separate_explicit_approval
-      - report_to_Oleksii_human_readable_clear_person_to_person_technical_details_only_when_needed_or_requested
+      - report_classification_route_done_next_practical_step
 
   '+':
     mode: continue_approved_step
@@ -177,6 +193,11 @@ commands:
       - StepResult
     writes: current_scope_only
     rule: apply_smallest_approved_next_step
+    means:
+      - continue_already_proposed_safe_next_step
+      - do_not_replan_unless_new_evidence_changes_route
+      - stay_inside_current_scope_risk_and_gate
+      - report_classification_route_done_next_practical_step
 
   пакетно:
     mode: batch_continue_approved_route
