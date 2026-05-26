@@ -30,7 +30,7 @@ Purpose: collect behavior rules from old Skeleton, current Skeleton, branches, i
 - P3 project strategy routing
 - P4 reporting style and convenience
 
-## Batch 1: current main evidence
+## Batch 1: current command and memory evidence
 
 | Evidence | Class | Rank | Target | Status |
 | --- | --- | --- | --- | --- |
@@ -79,13 +79,40 @@ Purpose: collect behavior rules from old Skeleton, current Skeleton, branches, i
 | Maintenance reports must state `DONE` or `BLOCKED` accurately; failed runtime verification is `BLOCKED`. | WORKFLOW_RULE | P1 | docs/RUNNER_MAINTENANCE_TASKS.md | present |
 | Reports must not print token values or raw command output. | SAFETY_GATE | P0 | docs/RUNNER_MAINTENANCE_TASKS.md | present |
 
-## Initial observed rules from recent work
+## Batch 4: all-project evidence
 
-- Skeleton is P0, Aufmass is P1, BauClock and Lavalamp are later.
-- Each project needs its own strategy file.
-- After repeated blockers, stop similar tasks and repair the route first.
-- Runtime maintenance tasks need exact allowed format and real allowlisted ids.
+| Project | Evidence | Class | Rank | Target | Status |
+| --- | --- | --- | --- | --- | --- |
+| skeleton | Skeleton is the active core project and control layer; public-safe repo is alanua/Skeleton. | PROJECT_STRATEGY | P1 | projects/skeleton/STRATEGY.md | present in manifest, needs strategy file |
+| aufmass | Public-safe methods may live in Skeleton; real drawings and real quantities stay private. | PROJECT_STRATEGY | P1 | projects/aufmass/STRATEGY.md | present in manifest/state, needs strategy file |
+| jeeves | Jeeves is separate from Skeleton; alanua/jeeves remains canonical for runtime/product code; Skeleton may govern tasks but not become Jeeves runtime. | CANON_BEHAVIOR | P0 | projects/jeeves/STRATEGY.md / docs/JEEVES_BRIDGE.md | present in state, needs strategy file |
+| homelab | Homelab includes HA, Proxmox, ESPHome, ESP32, MQTT, Node-RED; device inventory, LAN details, and credentials require private route handling. | PROJECT_STRATEGY | P2 | projects/homelab/STRATEGY.md | present in state, needs strategy file |
+| gewerbe | Gewerbe is private-sensitive; personal/tax/finance/official-document details must not be public by default; legal/tax/finance claims need high-accuracy audit mode. | SAFETY_GATE | P0 | projects/gewerbe/STRATEGY.md | present in state, needs strategy file |
+| van | Van conversion may keep public-safe design rules in Skeleton but photos, logistics, and private planning details require private routes. | PROJECT_STRATEGY | P3 | projects/van/STRATEGY.md | present in state, needs strategy file |
+| bauclock | BauClock has legal, privacy, audit, role-isolation, dashboard-token, and export boundary requirements. | PROJECT_STRATEGY | P3 | projects/bauclock/STRATEGY.md | present in manifest/state, needs strategy file |
+| lavalamp | Lavalamp is separate from general home automation and separate from Jeeves runtime decisions. | PROJECT_STRATEGY | P4 | projects/lavalamp/STRATEGY.md | present in manifest/state, needs strategy file |
+| all projects | Current manifests mostly read PROJECT_MANIFEST and STATE only; they do not yet point to STRATEGY.md. | ADAPTIVE_LESSON | P2 | project manifests / project loader docs | gap observed |
+| all projects | Each project needs its own STRATEGY.md; cross-project ordering belongs in docs/WORKING_STRATEGY.md. | PROJECT_STRATEGY | P1 | per-project STRATEGY.md / docs/WORKING_STRATEGY.md | proposed |
+| all projects | Before creating a task, Skeleton should load the selected project strategy; if projects compete, load WORKING_STRATEGY. | WORKFLOW_RULE | P1 | COMMANDS.yaml / project manifests / project_loader docs | proposed |
+
+## Batch 5: branch scan evidence
+
+| Branch group | Evidence | Class | Rank | Target | Status |
+| --- | --- | --- | --- | --- | --- |
+| chatgpt/adaptive-practical-learning | Branch is one commit ahead and adds docs/ADAPTIVE_PRACTICAL_LEARNING.md. It records practical adaptation after repeated blockers. | ADAPTIVE_LESSON | P2 | docs/ADAPTIVE_PRACTICAL_LEARNING.md / MEMORY_ROUTING.yaml | candidate branch |
+| chatgpt/rules-migration-audit | Branch is ahead and contains this audit file. Purpose is evidence collection, classification, ranking, and later targeted canon updates. | WORKFLOW_RULE | P1 | docs/RULES_MIGRATION_AUDIT.md | active audit branch |
+| chatgpt/pr3-state-manifest-doc | Branch is diverged and far behind main; only README.md differs. Treat as historical review, not active canon route. | OUTDATED_OR_REJECTED | P4 | archive review only | stale branch |
+| feat/system-prompts-chatgpt-gemini | Branch is behind main with no commits ahead. Treat as already merged, superseded, or historical unless specific evidence is requested. | OUTDATED_OR_REJECTED | P4 | archive review only | stale branch |
+| runner/issue-* | Many runner branches remain from completed or blocked issue work. Branch existence alone is not canon; merged PRs and main files are stronger evidence. | WORKFLOW_RULE | P1 | cleanup policy / branch hygiene | needs cleanup policy |
+| runner/issue-* | Search found runner branches through issue-509. They should be reviewed by issue/PR status, not blindly imported as rules. | ADAPTIVE_LESSON | P2 | docs/WORKING_STRATEGY.md / cleanup tasks | evidence rule |
 
 ## Active blocker
 
 Runner PR publishing from issue worktrees is blocking strategy work. Do not create more strategy content tasks until this route is repaired or a safe manual connector route is used.
+
+## Next audit steps
+
+1. Review merged PRs and closed issues for additional behavior rules.
+2. Compare stale branches only when they contain files not represented on main.
+3. Promote accepted rules into target files in small PRs.
+4. Keep private project details out of public GitHub.
