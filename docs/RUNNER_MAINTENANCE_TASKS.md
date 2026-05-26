@@ -179,6 +179,46 @@ output. It may include only safe synthesized status lines such as current
 `main` SHA, checkout sync state, open PR/issue counts, and bounded reminder
 notes.
 
+`inspect_issue_worktree_for_publish` is a Stage 1 delivery-only publisher
+inspection. It is validation/dry-run only and must include explicit metadata:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: inspect_issue_worktree_for_publish
+Repository: alanua/Skeleton
+Source Issue: 123
+Expected Branch: runner/issue-123
+Allowed Files:
+- docs/RUNNER_MAINTENANCE_TASKS.md
+- scripts/runner_poll_github_tasks.py
+- tests/test_runner_poll_github_tasks.py
+```
+
+It may only:
+
+1. Validate that `Repository`, when present, is `alanua/Skeleton`.
+2. Validate `Source Issue` as a positive issue number.
+3. Validate `Expected Branch` as exactly `runner/issue-{Source Issue}`.
+4. Validate an explicit `Allowed Files` list of safe relative paths.
+5. Resolve the issue worktree as `issue-{Source Issue}` under the configured
+   Skeleton worktree root.
+6. Verify the worktree exists, has Git metadata, and is on the expected branch.
+7. Run only read-only Git status commands in that issue worktree:
+   `git branch --show-current`, `git diff --name-only HEAD --`, and
+   `git ls-files --others --exclude-standard`.
+8. Ignore `.codex/` only as untracked runtime noise.
+9. Report changed tracked files, unexpected untracked file count, and whether
+   tracked files match the allowlist.
+
+It reports `DONE` only when the inspection completes and all publish
+preconditions are met. Unsupported repositories, invalid or missing metadata,
+unsafe paths, missing worktrees, branch mismatches, command/read failures,
+unexpected untracked files outside `.codex/`, and changed tracked files outside
+the allowlist are reported as `BLOCKED`. This task must not push branches,
+create pull requests, commit changes, merge, deploy, read secrets, or mutate
+runtime services. Reports must not include raw command output, secrets, tokens,
+environment values, or arbitrary task text.
+
 The allowlist does not permit rebooting the host, package upgrades, arbitrary
 commands or config values from issue text, or unrelated services.
 
