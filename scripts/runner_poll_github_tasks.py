@@ -1543,18 +1543,224 @@ def extract_runner_report_pr_binding(
     return commit.group("sha"), changed_files
 
 
-def build_telegram_message(
-    issue_number: int, status: str, report: str | None = None
-) -> str:
-    lines = [
-        f"Repository: {REPO}",
-        f"Issue: #{issue_number}",
-        f"Status: {status}",
-    ]
+def _telegram_card_value(value: object, *, fallback: str | None = None) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return fallback
+    text = re.sub(r"[\r\n\t]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return fallback
+    if _ENV_ASSIGNMENT_LINE_RE.fullmatch(text) is not None:
+        return fallback
+    try:
+        validate_public_safe_payload({"telegram_card_value": text})
+    except ValueError:
+        return fallback
+    return text[:180]
+
+
+def _report_field(report: str | None, field: str) -> str | None:
+    if not report:
+        return None
+    match = re.search(
+        rf"^\s*{re.escape(field)}=(?P<value>\S(?:.*\S)?)\s*$",
+        report,
+        re.MULTILINE,
+    )
+    return _telegram_card_value(match.group("value")) if match else None
+
+
+def _report_failed_step(report: str | None) -> str | None:
+    if not report:
+        return None
+    failed_steps = re.findall(
+        r"\bstep=(?P<step>[a-z0-9_]+)\s+status=failed\b",
+        report,
+    )
+    return _telegram_card_value(failed_steps[-1]) if failed_steps else None
+
+
+def _report_reason(report: str | None) -> str | None:
+    return _report_field(report, "reason")
+
+
+def _route_type_from_issue_body(body: str | None) -> str:
+    body_text = body or ""
+    maintenance_mode, task_id = extract_runtime_maintenance_task_id(body_text)
+    if maintenance_mode:
+        if task_id in {INSPECT_ISSUE_WORKTREE_FOR_PUBLISH, PUBLISH_ISSUE_WORKTREE_PR}:
+            return "runtime maintenance / publish worktree"
+        if task_id and "sync" in task_id:
+            return "runtime maintenance / sync"
+        return "runtime maintenance"
+    merge_mode, _request, _reason = extract_telegram_approved_pr_merge_request(body_text)
+    if merge_mode:
+        return "manual fallback / merge approval"
+    if re.search(r"\brepair\b", body_text, re.IGNORECASE):
+        return "repair / runner task"
+    return "runner task"
+
+
+def _source_issue_from_body(body: str | None, issue_number: int) -> int:
+    source_issue = _body_field(body or "", "Source Issue")
+    if isinstance(source_issue, str) and re.fullmatch(r"[1-9]\d*", source_issue):
+        return int(source_issue)
+    return issue_number
+
+
+def _pr_number_from_report_or_body(report: str | None, body: str | None) -> int | None:
     if report:
         pr_url = extract_pr_url(report)
         if pr_url:
+            pr_number = extract_pr_number(pr_url)
+            if pr_number is not None:
+                return pr_number
+    pr_number = _body_field(body or "", "Pull Request")
+    if isinstance(pr_number, str) and re.fullmatch(r"[1-9]\d*", pr_number):
+        return int(pr_number)
+    return None
+
+
+def _head_sha_from_report_or_body(report: str | None, body: str | None) -> str | None:
+    head_sha, _changed_files = extract_runner_report_pr_binding(report or "")
+    if head_sha is not None:
+        return head_sha.lower()
+    for report_field, body_field in (
+        ("approved_head_sha", "Approved Head SHA"),
+        ("expected_head_sha", "Expected Head SHA"),
+        ("head_sha", "Head SHA"),
+    ):
+        value = _report_field(report, report_field)
+        if value is None and body_field:
+            value = _body_field(body or "", body_field)
+        if isinstance(value, str) and _HEAD_SHA_RE.fullmatch(value):
+            return value.lower()
+    return None
+
+
+def _head_branch_from_report_or_body(report: str | None, body: str | None) -> str | None:
+    for field in ("head_ref", "current_branch", "expected_branch"):
+        value = _report_field(report, field)
+        if value:
+            return value
+    expected_branch = _body_field(body or "", "Expected Branch")
+    if expected_branch:
+        return _telegram_card_value(expected_branch)
+    return None
+
+
+def _base_branch_from_report_or_body(report: str | None, body: str | None) -> str:
+    return (
+        _report_field(report, "base_ref")
+        or _body_field(body or "", "Base Branch")
+        or "main"
+    )
+
+
+def _blocked_next_action(report: str | None) -> str:
+    action = _report_field(report, "next_action")
+    if action:
+        return action.replace("_", " ")
+    step = _report_failed_step(report)
+    if step:
+        return f"inspect {step} output and retry after fixing it"
+    return "open the issue comment and fix the blocked step"
+
+
+def build_telegram_message(
+    issue_number: int,
+    status: str,
+    report: str | None = None,
+    *,
+    target_repository: str = REPO,
+    issue_body: str | None = None,
+) -> str:
+    if issue_body is None and status != "BLOCKED":
+        lines = [
+            f"Repository: {target_repository}",
+            f"Issue: #{issue_number}",
+            f"Status: {status}",
+        ]
+        if report:
+            pr_url = extract_pr_url(report)
+            if pr_url:
+                lines.append(f"PR: {pr_url}")
+        return "\n".join(lines)
+
+    pr_url = extract_pr_url(report or "") if report else None
+    pr_number = _pr_number_from_report_or_body(report, issue_body)
+    source_issue = _source_issue_from_body(issue_body, issue_number)
+    base_branch = _base_branch_from_report_or_body(report, issue_body)
+    head_branch = _head_branch_from_report_or_body(report, issue_body)
+    head_sha = _head_sha_from_report_or_body(report, issue_body)
+    route_type = _route_type_from_issue_body(issue_body)
+
+    lines = [
+        f"Repository: {target_repository}",
+        f"Route: {route_type}",
+        f"Issue: #{source_issue}" + (f" -> PR: #{pr_number}" if pr_number else ""),
+        f"Base: {base_branch}",
+    ]
+    if head_branch:
+        lines.append(f"Head: {head_branch}")
+    if head_sha and (status == "BLOCKED" or pr_number is not None):
+        lines.append(f"Head SHA: {head_sha}")
+    lines.append(f"Status: {status}")
+    if status == "BLOCKED":
+        failed_step = _report_failed_step(report)
+        reason = _report_reason(report)
+        if failed_step:
+            lines.append(f"Failed step: {failed_step}")
+        if reason:
+            lines.append(f"Reason: {reason}")
+        lines.append(f"Next: {_blocked_next_action(report)}")
+    else:
+        if pr_url:
             lines.append(f"PR: {pr_url}")
+        lines.append("Next: review the linked PR or issue comment.")
+    return "\n".join(lines)
+
+
+def _build_approval_card_text(
+    *,
+    pr_number: int,
+    target_repository: str,
+    source_issue: int | None = None,
+    base_branch: str = "main",
+    head_branch: str | None = None,
+    head_sha: str | None = None,
+    route_type: str = "runner task",
+    include_approval_instruction: bool = True,
+) -> str:
+    lines = [
+        f"Repository: {target_repository}",
+        f"Route: {route_type}",
+        (
+            f"Issue: #{source_issue} -> PR: #{pr_number}"
+            if source_issue is not None
+            else f"PR: #{pr_number}"
+        ),
+        f"Base: {base_branch}",
+    ]
+    if head_branch:
+        lines.append(f"Head: {head_branch}")
+    if head_sha:
+        lines.append(f"Head SHA: {head_sha}")
+    approval_target = (
+        f"PR #{pr_number} {base_branch} <- {head_branch or 'unknown'}"
+        f"{f' @ {head_sha}' if head_sha else ''}"
+    )
+    lines.extend(
+        (
+            "Status: APPROVE_WAITING",
+            f"Approval target: {approval_target}",
+        )
+    )
+    if include_approval_instruction:
+        lines.append("Next: ask ChatGPT to review this exact PR and SHA before approving.")
+    else:
+        lines.append("Next: open PR details and confirm this exact branch.")
     return "\n".join(lines)
 
 
@@ -1624,23 +1830,34 @@ def _build_pr_ready_operator_text(
     target_repository: str = REPO,
     *,
     include_approval_instruction: bool = True,
+    source_issue: int | None = None,
+    base_branch: str = "main",
+    head_branch: str | None = None,
+    head_sha: str | None = None,
+    route_type: str = "runner task",
 ) -> str:
-    lines = [
-        f"PR: #{pr_number}",
-        f"target_repo: {target_repository}",
-        "Надішліть номер PR у ChatGPT.",
-    ]
-    if include_approval_instruction:
-        lines.append(
-            "Натисніть «Схвалити» лише після того, як ChatGPT скаже схвалити."
-        )
-    else:
-        lines.append("Кнопка «Деталі» покаже короткий стан PR.")
-    return "\n".join(lines)
+    return _build_approval_card_text(
+        pr_number=pr_number,
+        target_repository=target_repository,
+        source_issue=source_issue,
+        base_branch=base_branch,
+        head_branch=head_branch,
+        head_sha=head_sha,
+        route_type=route_type,
+        include_approval_instruction=include_approval_instruction,
+    )
 
 
 def _localize_pr_ready_card_payload(
-    card_payload: dict[str, Any], pr_number: int, target_repository: str = REPO
+    card_payload: dict[str, Any],
+    pr_number: int,
+    target_repository: str = REPO,
+    *,
+    source_issue: int | None = None,
+    base_branch: str = "main",
+    head_branch: str | None = None,
+    head_sha: str | None = None,
+    route_type: str = "runner task",
 ) -> dict[str, Any]:
     buttons = []
     for button in card_payload.get("buttons", []):
@@ -1661,13 +1878,26 @@ def _localize_pr_ready_card_payload(
             pr_number,
             target_repository,
             include_approval_instruction=True,
+            source_issue=source_issue,
+            base_branch=base_branch,
+            head_branch=head_branch,
+            head_sha=head_sha,
+            route_type=route_type,
         ),
         "buttons": buttons,
     }
 
 
 def _build_details_only_card_payload(
-    pr_url: str, pr_number: int, target_repository: str = REPO
+    pr_url: str,
+    pr_number: int,
+    target_repository: str = REPO,
+    *,
+    source_issue: int | None = None,
+    base_branch: str = "main",
+    head_branch: str | None = None,
+    head_sha: str | None = None,
+    route_type: str = "runner task",
 ) -> dict[str, Any]:
     callback_base = {"repo": target_repository, "pr_number": pr_number, "pr_url": pr_url}
     return {
@@ -1675,6 +1905,11 @@ def _build_details_only_card_payload(
             pr_number,
             target_repository,
             include_approval_instruction=False,
+            source_issue=source_issue,
+            base_branch=base_branch,
+            head_branch=head_branch,
+            head_sha=head_sha,
+            route_type=route_type,
         ),
         "buttons": [
             {
@@ -1693,7 +1928,13 @@ def _build_details_only_card_payload(
 
 
 def build_done_pr_ready_card_payload(
-    report: str, target_repository: str = REPO
+    report: str,
+    target_repository: str = REPO,
+    *,
+    source_issue: int | None = None,
+    base_branch: str = "main",
+    head_branch: str | None = None,
+    route_type: str = "runner task",
 ) -> dict[str, Any] | None:
     pr_url = extract_pr_url(report)
     if not pr_url:
@@ -1704,11 +1945,30 @@ def build_done_pr_ready_card_payload(
         return None
 
     head_sha, changed_files = extract_runner_report_pr_binding(report)
+    if head_branch is None and source_issue is not None:
+        head_branch = f"runner/issue-{source_issue}"
     if head_sha is None or not changed_files:
-        return _build_details_only_card_payload(pr_url, pr_number, target_repository)
+        return _build_details_only_card_payload(
+            pr_url,
+            pr_number,
+            target_repository,
+            source_issue=source_issue,
+            base_branch=base_branch,
+            head_branch=head_branch,
+            route_type=route_type,
+        )
 
     if target_repository != REPO:
-        return _build_details_only_card_payload(pr_url, pr_number, target_repository)
+        return _build_details_only_card_payload(
+            pr_url,
+            pr_number,
+            target_repository,
+            source_issue=source_issue,
+            base_branch=base_branch,
+            head_branch=head_branch,
+            head_sha=head_sha,
+            route_type=route_type,
+        )
 
     try:
         # Runner reports the commit pushed immediately before its draft PR URL;
@@ -1725,9 +1985,23 @@ def build_done_pr_ready_card_payload(
             ),
             pr_number,
             target_repository,
+            source_issue=source_issue,
+            base_branch=base_branch,
+            head_branch=head_branch,
+            head_sha=head_sha,
+            route_type=route_type,
         )
     except ValueError:
-        return _build_details_only_card_payload(pr_url, pr_number, target_repository)
+        return _build_details_only_card_payload(
+            pr_url,
+            pr_number,
+            target_repository,
+            source_issue=source_issue,
+            base_branch=base_branch,
+            head_branch=head_branch,
+            head_sha=head_sha,
+            route_type=route_type,
+        )
 
 
 def send_telegram_notification(
@@ -1818,7 +2092,27 @@ def notify_task_finished(
         if not should_notify_task_finished(issue_number, status):
             return
         issue = _NOTIFICATION_ISSUE_CACHE.pop((issue_number, status), None)
-        plain_message = build_telegram_message(issue_number, status, report)
+        issue_body = str(issue.get("body") or "") if issue is not None else None
+        target_repository = (
+            notification_target_repository(issue) if issue is not None else REPO
+        )
+        route_type = _route_type_from_issue_body(issue_body)
+        plain_issue_body = (
+            issue_body
+            if (
+                status == "BLOCKED"
+                or extract_pr_url(report or "")
+                or route_type != "runner task"
+            )
+            else None
+        )
+        plain_message = build_telegram_message(
+            issue_number,
+            status,
+            report,
+            target_repository=target_repository,
+            issue_body=plain_issue_body,
+        )
         if status != "DONE" or not report:
             send_telegram_notification(plain_message)
             return
@@ -1826,7 +2120,15 @@ def notify_task_finished(
         try:
             card_payload = build_done_pr_ready_card_payload(
                 report,
-                notification_target_repository(issue) if issue is not None else REPO,
+                target_repository,
+                source_issue=(
+                    _source_issue_from_body(issue_body, issue_number)
+                    if issue_body is not None
+                    else issue_number
+                ),
+                base_branch=_base_branch_from_report_or_body(report, issue_body),
+                head_branch=_head_branch_from_report_or_body(report, issue_body),
+                route_type=route_type,
             )
         except Exception:
             send_telegram_notification(plain_message)

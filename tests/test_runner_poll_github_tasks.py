@@ -1314,10 +1314,14 @@ def test_done_pr_report_builds_card_payload_from_runner_binding() -> None:
 
     assert localized_card is not None
     assert localized_card["text"] == (
+        "Repository: alanua/Skeleton\n"
+        "Route: runner task\n"
         "PR: #123\n"
-        "target_repo: alanua/Skeleton\n"
-        "Надішліть номер PR у ChatGPT.\n"
-        "Натисніть «Схвалити» лише після того, як ChatGPT скаже схвалити."
+        "Base: main\n"
+        f"Head SHA: {HEAD_SHA}\n"
+        "Status: APPROVE_WAITING\n"
+        f"Approval target: PR #123 main <- unknown @ {HEAD_SHA}\n"
+        "Next: ask ChatGPT to review this exact PR and SHA before approving."
     )
     assert localized_card["buttons"][0]["label"] == "Деталі"
 
@@ -1335,18 +1339,21 @@ def test_done_pr_report_builds_card_payload_from_runner_binding() -> None:
     )
 
 
-def test_done_pr_card_hides_technical_details_from_operator_text() -> None:
+def test_done_pr_card_shows_approval_target_context_in_operator_text() -> None:
     card = runner.build_done_pr_ready_card_payload(DONE_REPORT)
     assert card is not None
 
     text = str(card["text"])
     assert text == (
+        "Repository: alanua/Skeleton\n"
+        "Route: runner task\n"
         "PR: #123\n"
-        "target_repo: alanua/Skeleton\n"
-        "Надішліть номер PR у ChatGPT.\n"
-        "Натисніть «Схвалити» лише після того, як ChatGPT скаже схвалити."
+        "Base: main\n"
+        f"Head SHA: {HEAD_SHA}\n"
+        "Status: APPROVE_WAITING\n"
+        f"Approval target: PR #123 main <- unknown @ {HEAD_SHA}\n"
+        "Next: ask ChatGPT to review this exact PR and SHA before approving."
     )
-    assert HEAD_SHA not in text
     assert "scripts/runner_poll_github_tasks.py" not in text
     assert "docs/TELEGRAM_APPROVAL_BUTTONS.md" not in text
     assert "Skeleton task completed" not in text
@@ -1355,12 +1362,34 @@ def test_done_pr_card_hides_technical_details_from_operator_text() -> None:
     assert "Ця кнопка нічого не деплоїть" not in text
 
 
+def test_pr_approval_card_includes_source_branch_route_and_exact_sha() -> None:
+    card = runner.build_done_pr_ready_card_payload(
+        DONE_REPORT,
+        source_issue=608,
+        base_branch="main",
+        head_branch="runner/issue-608",
+        route_type="repair / publish worktree",
+    )
+    assert card is not None
+
+    text = str(card["text"])
+    assert "Repository: alanua/Skeleton" in text
+    assert "Route: repair / publish worktree" in text
+    assert "Issue: #608 -> PR: #123" in text
+    assert "Base: main" in text
+    assert "Head: runner/issue-608" in text
+    assert f"Head SHA: {HEAD_SHA}" in text
+    assert "Status: APPROVE_WAITING" in text
+    assert f"Approval target: PR #123 main <- runner/issue-608 @ {HEAD_SHA}" in text
+    assert "Next: ask ChatGPT to review this exact PR and SHA before approving." in text
+
+
 def test_done_pr_card_shows_default_target_repo() -> None:
     card = runner.build_done_pr_ready_card_payload(DONE_REPORT)
     assert card is not None
 
     text = str(card["text"])
-    assert "target_repo: alanua/Skeleton" in text
+    assert "Repository: alanua/Skeleton" in text
 
 
 def test_done_pr_card_shows_target_repo_without_misleading_repository_line() -> None:
@@ -1371,7 +1400,7 @@ def test_done_pr_card_shows_target_repo_without_misleading_repository_line() -> 
     assert card is not None
 
     text = str(card["text"])
-    assert "target_repo: alanua/bauclock" in text
+    assert "Repository: alanua/bauclock" in text
     assert "Repository: alanua/Skeleton" not in text
     assert "Рекомендація: спочатку переглянути в ChatGPT або відкрити PR." not in text
     assert "Ця кнопка нічого не деплоїть і не запускає на сервері." not in text
@@ -1458,7 +1487,8 @@ def test_approve_reject_buttons_require_reliable_sha_and_changed_files() -> None
     buttons = [row[0] for row in reply_markup["inline_keyboard"]]
 
     assert [button["text"] for button in buttons] == ["Деталі", "Відкрити PR"]
-    assert str(card["text"]).startswith("PR: #123\n")
+    assert str(card["text"]).startswith("Repository: alanua/Skeleton\n")
+    assert "PR: #123" in str(card["text"])
 
 
 def test_send_telegram_notification_posts_reply_markup_for_card() -> None:
@@ -1531,12 +1561,55 @@ def test_done_pr_card_uses_target_repository_from_issue_body() -> None:
     assert send.call_count == 1
     text = send.call_args.args[0]
     reply_markup = send.call_args.args[1]
-    assert "target_repo: alanua/bauclock" in text
+    assert "Repository: alanua/bauclock" in text
+    assert "Issue: #129 -> PR: #123" in text
+    assert "Head: runner/issue-129" in text
     assert "Repository: alanua/Skeleton" not in text
     assert [row[0]["text"] for row in reply_markup["inline_keyboard"]] == [
         "Деталі",
         "Відкрити PR",
     ]
+
+
+def test_blocked_publisher_maintenance_card_includes_branch_step_reason_and_next_action() -> None:
+    issue_body = _maintenance_issue(
+        runner.PUBLISH_ISSUE_WORKTREE_PR,
+        metadata="\n".join(
+            (
+                f"Repository: {runner.REPO}",
+                "Source Issue: 608",
+                "Expected Branch: runner/issue-608",
+                "Allowed Files:",
+                "- scripts/runner_poll_github_tasks.py",
+            )
+        ),
+    )["body"]
+    report = (
+        "BLOCKED: Runner host maintenance task did not complete.\n"
+        f"maintenance_task_id={runner.PUBLISH_ISSUE_WORKTREE_PR}\n"
+        "repository=alanua/Skeleton\n"
+        "source_issue=608\n"
+        "expected_branch=runner/issue-608\n"
+        "step=push_expected_branch status=failed\n"
+        "reason=push_failed\n"
+        "success_criteria=not_met"
+    )
+
+    text = runner.build_telegram_message(
+        145,
+        "BLOCKED",
+        report,
+        issue_body=str(issue_body),
+    )
+
+    assert "Repository: alanua/Skeleton" in text
+    assert "Route: runtime maintenance / publish worktree" in text
+    assert "Issue: #608" in text
+    assert "Head: runner/issue-608" in text
+    assert "Status: BLOCKED" in text
+    assert "Failed step: push_expected_branch" in text
+    assert "Reason: push_failed" in text
+    assert "Next: inspect push_expected_branch output and retry after fixing it" in text
 
 
 def test_done_pr_card_build_failure_falls_back_to_plain_done() -> None:
