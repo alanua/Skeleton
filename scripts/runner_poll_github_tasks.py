@@ -1493,6 +1493,14 @@ def build_telegram_message(
     return "\n".join(lines)
 
 
+TELEGRAM_CALLBACK_REPO_KEYS = {
+    "alanua/Skeleton": "s",
+    "alanua/bauclock": "b",
+    "alanua/Lavalamp": "l",
+}
+_NOTIFICATION_ISSUE_CACHE: dict[tuple[int, str], dict[str, Any]] = {}
+
+
 def _telegram_callback_data(button: dict[str, Any]) -> str:
     callback_payload = button.get("callback_payload")
     payload = callback_payload if isinstance(callback_payload, dict) else {}
@@ -1504,19 +1512,28 @@ def _telegram_callback_data(button: dict[str, Any]) -> str:
     ).encode("utf-8")
     action = re.sub(r"[^a-z_]", "", str(button.get("action") or ""))[:12]
     pr_number = payload.get("pr_number") if isinstance(payload.get("pr_number"), int) else 0
+    repo = str(payload.get("repo") or REPO)
     head_sha = str(payload.get("head_sha") or "").lower()
     head_marker = head_sha[:8] if re.fullmatch(r"[0-9a-f]{40}", head_sha) else "nosha"
     hmac_secret = os.environ.get(TELEGRAM_CALLBACK_HMAC_ENV)
+    repo_key = TELEGRAM_CALLBACK_REPO_KEYS.get(repo)
+    if repo != REPO and repo_key is None:
+        raise ValueError("Telegram callback repo is not allowlisted.")
+    callback_prefix = (
+        f"tpr2:{action}:{repo_key}:p{pr_number}:{head_marker}"
+        if repo != REPO
+        else f"tpr1:{action}:p{pr_number}:{head_marker}"
+    )
     digest = (
         hmac.new(
             hmac_secret.encode("utf-8"),
-            f"tpr1:{action}:p{pr_number}:{head_marker}".encode("ascii"),
+            callback_prefix.encode("ascii"),
             hashlib.sha256,
         ).hexdigest()[:12]
         if hmac_secret
         else hashlib.sha256(encoded).hexdigest()[:12]
     )
-    callback_data = f"tpr1:{action}:p{pr_number}:{head_marker}:{digest}"
+    callback_data = f"{callback_prefix}:{digest}"
     if len(callback_data.encode("utf-8")) > TELEGRAM_CALLBACK_DATA_LIMIT:
         raise ValueError("Telegram callback_data exceeded its bound.")
     return callback_data
@@ -1537,18 +1554,28 @@ def card_payload_to_inline_keyboard(card_payload: dict[str, Any]) -> dict[str, A
     return {"inline_keyboard": inline_keyboard}
 
 
-def _build_pr_ready_operator_text(pr_number: int) -> str:
-    return "\n".join(
-        (
-            f"PR: #{pr_number}",
-            "Надішліть номер PR у ChatGPT.",
-            "Натисніть «Схвалити» лише після того, як ChatGPT скаже схвалити.",
+def _build_pr_ready_operator_text(
+    pr_number: int,
+    target_repository: str = REPO,
+    *,
+    include_approval_instruction: bool = True,
+) -> str:
+    lines = [
+        f"PR: #{pr_number}",
+        f"target_repo: {target_repository}",
+        "Надішліть номер PR у ChatGPT.",
+    ]
+    if include_approval_instruction:
+        lines.append(
+            "Натисніть «Схвалити» лише після того, як ChatGPT скаже схвалити."
         )
-    )
+    else:
+        lines.append("Кнопка «Деталі» покаже короткий стан PR.")
+    return "\n".join(lines)
 
 
 def _localize_pr_ready_card_payload(
-    card_payload: dict[str, Any], pr_number: int
+    card_payload: dict[str, Any], pr_number: int, target_repository: str = REPO
 ) -> dict[str, Any]:
     buttons = []
     for button in card_payload.get("buttons", []):
@@ -1565,15 +1592,25 @@ def _localize_pr_ready_card_payload(
         )
     return {
         **card_payload,
-        "text": _build_pr_ready_operator_text(pr_number),
+        "text": _build_pr_ready_operator_text(
+            pr_number,
+            target_repository,
+            include_approval_instruction=True,
+        ),
         "buttons": buttons,
     }
 
 
-def _build_details_only_card_payload(pr_url: str, pr_number: int) -> dict[str, Any]:
-    callback_base = {"repo": REPO, "pr_number": pr_number, "pr_url": pr_url}
+def _build_details_only_card_payload(
+    pr_url: str, pr_number: int, target_repository: str = REPO
+) -> dict[str, Any]:
+    callback_base = {"repo": target_repository, "pr_number": pr_number, "pr_url": pr_url}
     return {
-        "text": _build_pr_ready_operator_text(pr_number),
+        "text": _build_pr_ready_operator_text(
+            pr_number,
+            target_repository,
+            include_approval_instruction=False,
+        ),
         "buttons": [
             {
                 "action": "details",
@@ -1590,7 +1627,9 @@ def _build_details_only_card_payload(pr_url: str, pr_number: int) -> dict[str, A
     }
 
 
-def build_done_pr_ready_card_payload(report: str) -> dict[str, Any] | None:
+def build_done_pr_ready_card_payload(
+    report: str, target_repository: str = REPO
+) -> dict[str, Any] | None:
     pr_url = extract_pr_url(report)
     if not pr_url:
         return None
@@ -1601,7 +1640,10 @@ def build_done_pr_ready_card_payload(report: str) -> dict[str, Any] | None:
 
     head_sha, changed_files = extract_runner_report_pr_binding(report)
     if head_sha is None or not changed_files:
-        return _build_details_only_card_payload(pr_url, pr_number)
+        return _build_details_only_card_payload(pr_url, pr_number, target_repository)
+
+    if target_repository != REPO:
+        return _build_details_only_card_payload(pr_url, pr_number, target_repository)
 
     try:
         # Runner reports the commit pushed immediately before its draft PR URL;
@@ -1617,9 +1659,10 @@ def build_done_pr_ready_card_payload(report: str) -> dict[str, Any] | None:
                 pr_url=pr_url,
             ),
             pr_number,
+            target_repository,
         )
     except ValueError:
-        return _build_details_only_card_payload(pr_url, pr_number)
+        return _build_details_only_card_payload(pr_url, pr_number, target_repository)
 
 
 def send_telegram_notification(
@@ -1673,17 +1716,34 @@ def get_notification_issue(issue_number: int) -> dict[str, Any]:
     return parsed
 
 
-def should_notify_task_finished(issue_number: int, status: str) -> bool:
+def notification_task_issue(issue_number: int, status: str) -> dict[str, Any] | None:
     expected_label = FINAL_LABELS_BY_STATUS.get(status)
     if expected_label is None:
-        return False
+        return None
 
     issue = get_notification_issue(issue_number)
     if not is_open_task_issue(issue):
-        return False
+        return None
     if not has_runner_task_body(issue.get("body") or ""):
-        return False
-    return expected_label in label_names(issue.get("labels"))
+        return None
+    if expected_label not in label_names(issue.get("labels")):
+        return None
+    _NOTIFICATION_ISSUE_CACHE[(issue_number, status)] = issue
+    return issue
+
+
+def should_notify_task_finished(issue_number: int, status: str) -> bool:
+    return notification_task_issue(issue_number, status) is not None
+
+
+def notification_target_repository(issue: dict[str, Any]) -> str:
+    try:
+        target_repository, reason = extract_target_repository(str(issue.get("body") or ""))
+        if reason is None and target_repository in ALLOWED_TARGET_REPOSITORIES:
+            return target_repository
+    except Exception:
+        pass
+    return QUEUE_REPOSITORY
 
 
 def notify_task_finished(
@@ -1692,13 +1752,17 @@ def notify_task_finished(
     try:
         if not should_notify_task_finished(issue_number, status):
             return
+        issue = _NOTIFICATION_ISSUE_CACHE.pop((issue_number, status), None)
         plain_message = build_telegram_message(issue_number, status, report)
         if status != "DONE" or not report:
             send_telegram_notification(plain_message)
             return
 
         try:
-            card_payload = build_done_pr_ready_card_payload(report)
+            card_payload = build_done_pr_ready_card_payload(
+                report,
+                notification_target_repository(issue) if issue is not None else REPO,
+            )
         except Exception:
             send_telegram_notification(plain_message)
             return

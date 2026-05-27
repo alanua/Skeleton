@@ -1208,6 +1208,7 @@ def test_done_pr_report_builds_card_payload_from_runner_binding() -> None:
     assert localized_card is not None
     assert localized_card["text"] == (
         "PR: #123\n"
+        "target_repo: alanua/Skeleton\n"
         "Надішліть номер PR у ChatGPT.\n"
         "Натисніть «Схвалити» лише після того, як ChatGPT скаже схвалити."
     )
@@ -1234,6 +1235,7 @@ def test_done_pr_card_hides_technical_details_from_operator_text() -> None:
     text = str(card["text"])
     assert text == (
         "PR: #123\n"
+        "target_repo: alanua/Skeleton\n"
         "Надішліть номер PR у ChatGPT.\n"
         "Натисніть «Схвалити» лише після того, як ChatGPT скаже схвалити."
     )
@@ -1242,7 +1244,44 @@ def test_done_pr_card_hides_technical_details_from_operator_text() -> None:
     assert "docs/TELEGRAM_APPROVAL_BUTTONS.md" not in text
     assert "Skeleton task completed" not in text
     assert "Recommended action" not in text
+    assert "Рекомендація: спочатку переглянути в ChatGPT або відкрити PR." not in text
     assert "Ця кнопка нічого не деплоїть" not in text
+
+
+def test_done_pr_card_shows_default_target_repo() -> None:
+    card = runner.build_done_pr_ready_card_payload(DONE_REPORT)
+    assert card is not None
+
+    text = str(card["text"])
+    assert "target_repo: alanua/Skeleton" in text
+
+
+def test_done_pr_card_shows_target_repo_without_misleading_repository_line() -> None:
+    card = runner.build_done_pr_ready_card_payload(
+        DONE_REPORT,
+        target_repository="alanua/bauclock",
+    )
+    assert card is not None
+
+    text = str(card["text"])
+    assert "target_repo: alanua/bauclock" in text
+    assert "Repository: alanua/Skeleton" not in text
+    assert "Рекомендація: спочатку переглянути в ChatGPT або відкрити PR." not in text
+    assert "Ця кнопка нічого не деплоїть і не запускає на сервері." not in text
+
+
+def test_target_repo_pr_card_uses_details_only_buttons() -> None:
+    card = runner.build_done_pr_ready_card_payload(
+        DONE_REPORT,
+        target_repository="alanua/Lavalamp",
+    )
+    assert card is not None
+    reply_markup = runner.card_payload_to_inline_keyboard(card)
+
+    buttons = [row[0] for row in reply_markup["inline_keyboard"]]
+    assert [button["text"] for button in buttons] == ["Деталі", "Відкрити PR"]
+    assert buttons[0]["callback_data"].startswith("tpr2:details:l:p123:nosha:")
+    assert len(buttons[0]["callback_data"].encode("utf-8")) <= runner.TELEGRAM_CALLBACK_DATA_LIMIT
 
 
 def test_done_pr_card_keeps_technical_details_in_payload() -> None:
@@ -1366,6 +1405,31 @@ def test_done_pr_card_success_sends_reply_markup() -> None:
         runner.notify_task_finished(129, "DONE", DONE_REPORT)
 
     send.assert_called_once_with("PR ready card", reply_markup)
+
+
+def test_done_pr_card_uses_target_repository_from_issue_body() -> None:
+    issue = {
+        "number": 129,
+        "body": "Target Repository: alanua/bauclock\n\n```task\nDo it\n```",
+        "state": "open",
+        "closed": False,
+        "labels": [{"name": runner.LABEL_DONE}],
+    }
+
+    with mock.patch.object(
+        runner, "get_notification_issue", return_value=issue
+    ), mock.patch.object(runner, "send_telegram_notification") as send:
+        runner.notify_task_finished(129, "DONE", DONE_REPORT)
+
+    assert send.call_count == 1
+    text = send.call_args.args[0]
+    reply_markup = send.call_args.args[1]
+    assert "target_repo: alanua/bauclock" in text
+    assert "Repository: alanua/Skeleton" not in text
+    assert [row[0]["text"] for row in reply_markup["inline_keyboard"]] == [
+        "Деталі",
+        "Відкрити PR",
+    ]
 
 
 def test_done_pr_card_build_failure_falls_back_to_plain_done() -> None:

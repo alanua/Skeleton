@@ -15,6 +15,12 @@ import urllib.request
 
 
 REPO = "alanua/Skeleton"
+CALLBACK_REPO_KEYS = {
+    "s": "alanua/Skeleton",
+    "b": "alanua/bauclock",
+    "l": "alanua/Lavalamp",
+}
+CALLBACK_REPO_KEY_BY_REPO = {repo: key for key, repo in CALLBACK_REPO_KEYS.items()}
 GITHUB_API_BASE = "https://api.github.com"
 TELEGRAM_API_BASE = "https://api.telegram.org"
 HTTP_TIMEOUT_SECONDS = 15
@@ -38,6 +44,11 @@ _CALLBACK_RE = re.compile(
     r"^tpr1:(?P<action>approve|reject|details):p(?P<pr_number>[1-9][0-9]{0,9}):"
     r"(?P<head_marker>[0-9a-f]{8}|nosha):(?P<digest>[0-9a-f]{12})$"
 )
+_CALLBACK_V2_RE = re.compile(
+    r"^tpr2:(?P<action>approve|reject|details):(?P<repo_key>[sbl]):"
+    r"p(?P<pr_number>[1-9][0-9]{0,9}):"
+    r"(?P<head_marker>[0-9a-f]{8}|nosha):(?P<digest>[0-9a-f]{12})$"
+)
 
 
 @dataclass(frozen=True)
@@ -46,6 +57,9 @@ class ParsedCallback:
     pr_number: int
     head_marker: str
     digest: str
+    repo: str = REPO
+    version: int = 1
+    repo_key: str = "s"
 
 
 def parse_callback_data(callback_data: object) -> ParsedCallback:
@@ -56,14 +70,26 @@ def parse_callback_data(callback_data: object) -> ParsedCallback:
         raise ValueError("callback_data must be a bounded Telegram callback value.")
 
     match = _CALLBACK_RE.fullmatch(callback_data)
+    version = 1
     if match is None:
-        raise ValueError("callback_data does not match the tpr1 callback format.")
+        match = _CALLBACK_V2_RE.fullmatch(callback_data)
+        version = 2
+    if match is None:
+        raise ValueError("callback_data does not match the tpr1/tpr2 callback format.")
+
+    repo_key = match.groupdict().get("repo_key") or "s"
+    repo = CALLBACK_REPO_KEYS.get(repo_key)
+    if repo is None:
+        raise ValueError("callback repository is not allowlisted.")
 
     return ParsedCallback(
         action=match.group("action"),
         pr_number=int(match.group("pr_number")),
         head_marker=match.group("head_marker"),
         digest=match.group("digest"),
+        repo=repo,
+        version=version,
+        repo_key=repo_key,
     )
 
 
@@ -124,7 +150,8 @@ def handle_callback_query(
         )
         return _answer_callback_query(result, callback_id, dry_run=dry_run)
 
-    comment = render_audit_comment(parsed, repo=repo)
+    effective_repo = parsed.repo
+    comment = render_audit_comment(parsed, repo=effective_repo)
     if repo != REPO:
         result = _result(
             status="blocked",
@@ -135,6 +162,26 @@ def handle_callback_query(
         )
         return _answer_callback_query(result, callback_id, dry_run=dry_run)
 
+    if effective_repo not in CALLBACK_REPO_KEY_BY_REPO:
+        result = _result(
+            status="blocked",
+            reason="callback repository is not allowlisted.",
+            github="not_called",
+            posted=False,
+            comment=render_audit_comment(parsed, repo=effective_repo, result="blocked"),
+        )
+        return _answer_callback_query(result, callback_id, dry_run=dry_run)
+
+    if parsed.action in {"approve", "reject"} and effective_repo != REPO:
+        result = _result(
+            status="blocked",
+            reason=f"approve/reject callbacks are only enabled for {REPO}.",
+            github="not_called",
+            posted=False,
+            comment=render_audit_comment(parsed, repo=effective_repo, result="blocked"),
+        )
+        return _answer_callback_query(result, callback_id, dry_run=dry_run)
+
     signature_block_reason = _callback_signature_block_reason(parsed)
     if signature_block_reason is not None and not dry_run:
         result = _result(
@@ -142,7 +189,7 @@ def handle_callback_query(
             reason=signature_block_reason,
             github="not_called",
             posted=False,
-            comment=render_audit_comment(parsed, result="blocked"),
+            comment=render_audit_comment(parsed, repo=effective_repo, result="blocked"),
         )
         return _answer_callback_query(result, callback_id, dry_run=False)
 
@@ -167,7 +214,7 @@ def handle_callback_query(
         )
         return _answer_callback_query(result, callback_id, dry_run=False)
 
-    pr_state = _fetch_pr_state(parsed.pr_number, github_token)
+    pr_state = _fetch_pr_state(effective_repo, parsed.pr_number, github_token)
     block_reason = _head_binding_block_reason(parsed, pr_state)
     if block_reason is not None:
         result = _result(
@@ -175,15 +222,16 @@ def handle_callback_query(
             reason=block_reason,
             github="pr_state_checked",
             posted=False,
-            comment=render_audit_comment(parsed, result="blocked"),
+            comment=render_audit_comment(parsed, repo=effective_repo, result="blocked"),
         )
         return _answer_callback_query(result, callback_id, dry_run=False)
 
     comment = render_audit_comment(
         parsed,
+        repo=effective_repo,
         verified_head_sha=_pr_head_sha(pr_state) if parsed.action == "approve" else None,
     )
-    _post_pr_comment(parsed.pr_number, comment, github_token)
+    _post_pr_comment(effective_repo, parsed.pr_number, comment, github_token)
     runner_merge_request = "not_requested"
     callback_answer_text = None
     callback_answer_alert = False
@@ -456,6 +504,8 @@ def _callback_signature_block_reason(parsed: ParsedCallback) -> str | None:
         pr_number=parsed.pr_number,
         head_marker=parsed.head_marker,
         hmac_secret=hmac_secret,
+        version=parsed.version,
+        repo_key=parsed.repo_key,
     )
     if not hmac.compare_digest(parsed.digest, expected_digest):
         return "callback HMAC signature is invalid or stale."
@@ -468,8 +518,14 @@ def _callback_hmac_digest(
     pr_number: int,
     head_marker: str,
     hmac_secret: str,
+    version: int = 1,
+    repo_key: str = "s",
 ) -> str:
-    message = f"tpr1:{action}:p{pr_number}:{head_marker}".encode("ascii")
+    if version == 2:
+        message_text = f"tpr2:{action}:{repo_key}:p{pr_number}:{head_marker}"
+    else:
+        message_text = f"tpr1:{action}:p{pr_number}:{head_marker}"
+    message = message_text.encode("ascii")
     return hmac.new(
         hmac_secret.encode("utf-8"),
         message,
@@ -494,9 +550,9 @@ def _head_binding_block_reason(parsed: ParsedCallback, pr_state: Mapping[str, ob
     return None
 
 
-def _fetch_pr_state(pr_number: int, github_token: str) -> Mapping[str, object]:
+def _fetch_pr_state(repo: str, pr_number: int, github_token: str) -> Mapping[str, object]:
     payload = _github_json_request(
-        f"/repos/{REPO}/pulls/{pr_number}",
+        f"/repos/{repo}/pulls/{pr_number}",
         github_token,
         method="GET",
     )
@@ -505,9 +561,9 @@ def _fetch_pr_state(pr_number: int, github_token: str) -> Mapping[str, object]:
     return payload
 
 
-def _post_pr_comment(pr_number: int, comment: str, github_token: str) -> None:
+def _post_pr_comment(repo: str, pr_number: int, comment: str, github_token: str) -> None:
     _github_json_request(
-        f"/repos/{REPO}/issues/{pr_number}/comments",
+        f"/repos/{repo}/issues/{pr_number}/comments",
         github_token,
         method="POST",
         payload={"body": comment},

@@ -22,13 +22,19 @@ def signed_callback_data(
     *,
     pr_number: int = 120,
     head_marker: str = "deadbeef",
+    repo_key: str = "s",
+    version: int = 1,
 ) -> str:
     digest = poller._callback_hmac_digest(
         action=action,
         pr_number=pr_number,
         head_marker=head_marker,
         hmac_secret=CALLBACK_HMAC_SECRET,
+        repo_key=repo_key,
+        version=version,
     )
+    if version == 2:
+        return f"tpr2:{action}:{repo_key}:p{pr_number}:{head_marker}:{digest}"
     return f"tpr1:{action}:p{pr_number}:{head_marker}:{digest}"
 
 
@@ -76,7 +82,25 @@ def test_parses_valid_callback_data() -> None:
         pr_number=120,
         head_marker="deadbeef",
         digest=CALLBACK_DATA.rsplit(":", 1)[-1],
+        repo="alanua/Skeleton",
+        version=1,
+        repo_key="s",
     )
+
+
+def test_parses_valid_v2_target_repo_callback_data() -> None:
+    callback_data = signed_callback_data(
+        "details",
+        head_marker="nosha",
+        repo_key="b",
+        version=2,
+    )
+    parsed = poller.parse_callback_data(callback_data)
+
+    assert parsed.action == "details"
+    assert parsed.repo == "alanua/bauclock"
+    assert parsed.version == 2
+    assert parsed.repo_key == "b"
 
 
 @pytest.mark.parametrize(
@@ -88,6 +112,7 @@ def test_parses_valid_callback_data() -> None:
         "tpr1:approve:pnope:deadbeef:0123456789ab",
         "tpr1:approve:p120:notsha00:0123456789ab",
         "tpr1:approve:p120:deadbeef:notdigest000",
+        "tpr2:details:x:p120:nosha:0123456789ab",
     ),
 )
 def test_rejects_malformed_callback_parts(callback_data: str) -> None:
@@ -545,6 +570,79 @@ def test_details_callback_answers_with_bounded_pr_summary_without_merge_request(
             "Head marker: deadbeef"
         ],
     }
+
+
+def test_v2_details_callback_fetches_and_comments_on_allowlisted_target_repo() -> None:
+    details = signed_callback_data(
+        "details",
+        head_marker="nosha",
+        repo_key="b",
+        version=2,
+    )
+    assert len(details.encode("utf-8")) <= poller.TELEGRAM_CALLBACK_DATA_LIMIT
+    with mock.patch.dict(
+        os.environ,
+        {
+            "GITHUB_TOKEN": "github-secret",
+            "SKELETON_TG_BOT": "telegram-secret",
+            poller.CALLBACK_HMAC_ENV: CALLBACK_HMAC_SECRET,
+        },
+        clear=True,
+    ), mock.patch.object(
+        poller.urllib.request,
+        "urlopen",
+        side_effect=(
+            response(github_pr_state()),
+            response({"id": 90}),
+            response(),
+        ),
+    ) as urlopen:
+        result = poller.handle_callback_query(query(details))
+
+    requests = [call.args[0] for call in urlopen.call_args_list]
+    assert result["status"] == "comment_posted"
+    assert result["runner_merge_request"] == "not_requested"
+    assert "Repository: alanua/bauclock" in str(result["comment"])
+    assert [request.full_url for request in requests] == [
+        "https://api.github.com/repos/alanua/bauclock/pulls/120",
+        "https://api.github.com/repos/alanua/bauclock/issues/120/comments",
+        "https://api.telegram.org/bottelegram-secret/answerCallbackQuery",
+    ]
+
+
+def test_v2_non_allowlisted_repo_key_is_blocked_before_github() -> None:
+    forged = "tpr2:details:x:p120:nosha:0123456789ab"
+    with mock.patch.dict(
+        os.environ,
+        {
+            "GITHUB_TOKEN": "github-secret",
+            poller.CALLBACK_HMAC_ENV: CALLBACK_HMAC_SECRET,
+        },
+        clear=True,
+    ), mock.patch.object(poller.urllib.request, "urlopen") as urlopen:
+        result = poller.handle_callback_query(query(forged))
+
+    assert result["status"] == "blocked"
+    assert result["github"] == "not_called"
+    urlopen.assert_not_called()
+
+
+def test_v2_approve_for_target_repo_is_blocked_before_github() -> None:
+    approve = signed_callback_data("approve", repo_key="b", version=2)
+    with mock.patch.dict(
+        os.environ,
+        {
+            "GITHUB_TOKEN": "github-secret",
+            poller.CALLBACK_HMAC_ENV: CALLBACK_HMAC_SECRET,
+        },
+        clear=True,
+    ), mock.patch.object(poller.urllib.request, "urlopen") as urlopen:
+        result = poller.handle_callback_query(query(approve))
+
+    assert result["status"] == "blocked"
+    assert "approve/reject" in str(result["reason"])
+    assert result["github"] == "not_called"
+    urlopen.assert_not_called()
 
 
 def test_details_answer_text_is_bounded_and_normalized() -> None:
