@@ -222,6 +222,77 @@ environment values, or arbitrary task text.
 The allowlist does not permit rebooting the host, package upgrades, arbitrary
 commands or config values from issue text, or unrelated services.
 
+`publish_issue_worktree_pr` is the Stage 2 publisher for an already-inspected
+Skeleton issue worktree. It is deliberately narrow: it may only publish the
+current `HEAD` of the exact expected issue branch and create a draft PR against
+`main`.
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: publish_issue_worktree_pr
+Repository: alanua/Skeleton
+Source Issue: 477
+Expected Branch: runner/issue-477
+PR Title: Runner task #477
+Allowed Files:
+- firmware/lavalamp/routes.cpp
+- tests/test_lavalamp_routes.py
+```
+
+Required metadata:
+
+1. `Repository` must be exactly `alanua/Skeleton`.
+2. `Source Issue` must be a positive issue number.
+3. `Expected Branch` must be exactly `runner/issue-{Source Issue}`.
+4. `Allowed Files` must be an explicit list of safe relative paths using the
+   same rules as `inspect_issue_worktree_for_publish`.
+5. `PR Title` is optional safe single-line text. When omitted, the title is
+   generated as `Runner task #{Source Issue}`.
+
+The task may only:
+
+1. Resolve the source worktree as `issue-{Source Issue}` under the configured
+   Skeleton worktree root, for example
+   `/home/agent/agent-dev/worktrees/skeleton/issue-477`.
+2. Verify that the worktree exists, has Git metadata, and is on the exact
+   expected branch.
+3. Verify that changed tracked files are non-empty and all listed in
+   `Allowed Files`.
+4. Ignore `.codex/` only as untracked runtime noise, and block on any other
+   untracked file.
+5. Verify that `origin` points to the expected Skeleton GitHub repository
+   before any push.
+6. Query for an existing open PR from the exact branch to `main`; if one exists,
+   report `DONE` with that PR URL and do not create a duplicate.
+7. Push only `HEAD:refs/heads/{Expected Branch}` to `origin`.
+8. Create a draft PR against `main` for the exact expected branch after the push
+   succeeds.
+
+It reports `BLOCKED` for missing worktrees, missing Git metadata, branch
+mismatches, unsafe paths, allowlist mismatches, unexpected untracked files,
+origin remote mismatches, push failures, PR creation failures, GitHub API
+failures, or unavailable GitHub credentials. It must not execute Codex, edit
+files, merge, deploy, perform OTA work, restart services, print secrets, use
+commands or paths from issue body text, push arbitrary refs, or force-push.
+
+To publish issue #477 after confirming the Stage 1 inspection is still valid,
+open a runtime maintenance issue with:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: publish_issue_worktree_pr
+Repository: alanua/Skeleton
+Source Issue: 477
+Expected Branch: runner/issue-477
+PR Title: Runner task #477
+Allowed Files:
+- firmware/lavalamp/routes.cpp
+- tests/test_lavalamp_routes.py
+```
+
+Replace the example `Allowed Files` entries with the exact safe relative file
+paths reported by the successful Stage 1 inspection for issue #477.
+
 ## Reporting
 
 Each maintenance report must state `DONE` or `BLOCKED` accurately with safe
