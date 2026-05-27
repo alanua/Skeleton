@@ -585,6 +585,51 @@ def test_process_issue_posts_done_on_success() -> None:
     notify.assert_called_once_with(5, "DONE", report)
 
 
+def test_process_issue_does_not_block_done_codex_report_with_echoed_prompt_marker() -> None:
+    fence = "`" * 3
+    failure_marker = "BLO" + "CKED"
+    issue = {
+        "number": 52,
+        "title": "Success with echoed prompt",
+        "body": f"{fence}task\nDo it\n{fence}",
+    }
+    codex_output = (
+        "DONE: Codex completed successfully with no file changes.\n\n"
+        "Tests passed.\n\n"
+        "Reading additional input from stdin...\n"
+        "OpenAI Codex v0.125.0\n"
+        "--------\n"
+        "user\n"
+        f"Return {failure_marker} if the work cannot be completed.\n"
+    )
+
+    with mock.patch.object(
+        runner, "ensure_clean_worktree", return_value=(True, "")
+    ), mock.patch.object(
+        runner, "prepare_issue_branch", return_value=(0, "", "runner/issue-52")
+    ), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, codex_output)
+    ), mock.patch.object(
+        runner,
+        "finalize_success",
+        return_value="DONE: Codex completed successfully with no file changes.",
+    ) as finalize, mock.patch.object(
+        runner, "post_issue_comment"
+    ) as comment, mock.patch.object(
+        runner, "set_issue_label"
+    ) as label, mock.patch.object(runner, "notify_task_finished") as notify:
+        runner.process_issue(issue, workdir="/repo")
+
+    finalize.assert_called_once_with(issue, "runner/issue-52", codex_output)
+    report = "DONE: Codex completed successfully with no file changes."
+    comment.assert_called_once_with(52, report)
+    assert label.call_args_list == [
+        mock.call(52, runner.LABEL_READY, runner.LABEL_RUNNING),
+        mock.call(52, runner.LABEL_RUNNING, runner.LABEL_DONE),
+    ]
+    notify.assert_called_once_with(52, "DONE", report)
+
+
 def test_blocked_codex_output_is_not_labeled_runner_done() -> None:
     fence = "`" * 3
     issue = {

@@ -213,6 +213,13 @@ class RunnerTask:
 
 
 @dataclass(frozen=True)
+class CodexTaskResult:
+    status: str
+    marker: str | None = None
+    final_answer: str = ""
+
+
+@dataclass(frozen=True)
 class TelegramApprovedPrMergeRequest:
     pr_number: int
     approved_head_sha: str
@@ -547,12 +554,48 @@ def _without_fenced_blocks(text: str) -> str:
     return "\n".join(kept)
 
 
+def _first_final_status_marker(text: str) -> str | None:
+    in_fence = False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        match = _FINAL_STATUS_LINE_RE.match(line)
+        if match is not None:
+            return match.group(1).upper()
+    return None
+
+
 def blocked_output_marker(output: str) -> str | None:
     final_answer = _without_fenced_blocks(final_codex_answer(output))
+    explicit_status = _first_final_status_marker(final_answer)
+    if explicit_status == "DONE":
+        return None
+    if explicit_status == "BLOCKED":
+        return "BLOCKED"
     for marker, marker_re in zip(_BLOCKED_OUTPUT_MARKERS, _BLOCKED_OUTPUT_MARKER_RES):
         if marker_re.search(final_answer):
             return marker
     return None
+
+
+def classify_codex_task_result(output: str, exit_code: int) -> CodexTaskResult:
+    final_answer = _without_fenced_blocks(final_codex_answer(output))
+    if exit_code != 0:
+        return CodexTaskResult("BLOCKED", f"exit_code={exit_code}", final_answer)
+
+    explicit_status = _first_final_status_marker(final_answer)
+    if explicit_status == "DONE":
+        return CodexTaskResult("DONE", None, final_answer)
+    if explicit_status == "BLOCKED":
+        return CodexTaskResult("BLOCKED", "BLOCKED", final_answer)
+
+    marker = blocked_output_marker(output)
+    if marker is not None:
+        return CodexTaskResult("BLOCKED", marker, final_answer)
+    return CodexTaskResult("DONE", None, final_answer)
 
 
 def runner_report_status(report: str) -> str:
@@ -4046,6 +4089,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             task_content, issue_workdir, runner_task
         )
         cleanup_runtime_artifacts(issue_workdir)
+        codex_result = classify_codex_task_result(codex_output, codex_code)
         if codex_code != 0:
             block_issue(
                 issue_number,
@@ -4055,8 +4099,8 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                 runner_task=runner_task,
             )
             return
-        marker = blocked_output_marker(codex_output)
-        if marker is not None:
+        if codex_result.status == "BLOCKED":
+            marker = codex_result.marker or "BLOCKED"
             report = report_runner_lane(
                 blocked_codex_output_report(codex_output, marker, issue_workdir),
                 runner_task,

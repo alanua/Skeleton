@@ -323,6 +323,56 @@ OpenAI Codex v0.125.0
     assert runner.blocked_output_marker(output) == "BLOCKED"
 
 
+def test_codex_task_result_prefers_leading_done_over_echoed_failure_marker() -> None:
+    failure_marker = "BLO" + "CKED"
+    output = (
+        "DONE: Codex completed successfully and produced file changes.\n\n"
+        "Changed files:\n"
+        "- scripts/runner_poll_github_tasks.py\n"
+        "- tests/test_runner_poll_github_tasks.py\n\n"
+        "Pytest output:\n"
+        "```\n"
+        "python3 -m pytest -q\n"
+        "503 passed, 3 skipped\n"
+        "```\n\n"
+        "Reading additional input from stdin...\n"
+        "OpenAI Codex v0.125.0\n"
+        "--------\n"
+        "user\n"
+        f"Return {failure_marker} only when the task cannot be completed.\n"
+    )
+
+    result = runner.classify_codex_task_result(output, 0)
+
+    assert result.status == "DONE"
+    assert result.marker is None
+    assert runner.blocked_output_marker(output) is None
+
+
+def test_codex_task_result_keeps_leading_failure_status() -> None:
+    failure_marker = "BLO" + "CKED"
+    output = (
+        f"{failure_marker}: missing integration point\n\n"
+        "Reading additional input from stdin...\n"
+        "OpenAI Codex v0.125.0\n"
+        "--------\n"
+        "user\n"
+        "The task prompt also listed DONE as an allowed result.\n"
+    )
+
+    result = runner.classify_codex_task_result(output, 0)
+
+    assert result.status == "BLOCKED"
+    assert result.marker == "BLOCKED"
+
+
+def test_codex_task_result_preserves_nonzero_exit_failure() -> None:
+    result = runner.classify_codex_task_result("DONE: partial report", 1)
+
+    assert result.status == "BLOCKED"
+    assert result.marker == "exit_code=1"
+
+
 def test_runner_report_status_blocks_file_change_done_without_draft_pr() -> None:
     report = DONE_REPORT.replace(f"\nDraft PR: {PR_URL}", "")
 
