@@ -1,0 +1,48 @@
+schema: skeleton.build_plan_registry.v1
+status: PUBLIC_SAFE_PLANNING
+source_of_truth:
+  repo: alanua/Skeleton
+  ref: main
+  boot_entrypoint: BOOT_MANIFEST.yaml
+  state_yaml_role: handoff_not_canon_truth
+documents:
+  build_plan: docs/SKELETON_BUILD_PLAN.md
+  development_department_roadmap: docs/DEVELOPMENT_DEPARTMENT_ROADMAP.md
+boundaries:
+  skeleton_role: human_controlled_construction_and_control_layer
+  jeeves_role: separate_future_assistant_product_and_runtime
+  operator_rules_stage: registry_only_not_runtime_gate
+  phone_first: constraint_not_whole_plan
+  antigravity: controlled_dev_cockpit_or_worker_candidate_not_source_of_truth
+forbidden_in_this_plan:
+  - autonomous_merge
+  - deploy
+  - secrets_or_env_handling
+  - runtime_changes
+  - telegram_callback_changes
+  - publisher_implementation
+  - dashboard_implementation
+  - service_restart
+phases:
+  - id: 0
+    name: source_of_truth_and_boot_route_stabilization
+  - id: 1
+    name: rules_and_operating_standard_visibility
+  - id: 2
+    name: reliable_task_queue_and_delivery_route
+  - id: 3
+    name: pr_backlog_cleanup_and_review_discipline
+  - id: 4
+    name: managed_development_department_roles_and_worker_selection
+  - id: 5
+    name: antigravity_openhands_gemini_claude_adapters_discovery
+  - id: 6
+    name: dashboard_console_and_state_reporting
+  - id: 7
+    name: future_jeeves_bridge
+next_milestones:
+  - audit_open_stale_prs
+  - rebuild_clean_publisher_delivery_route_from_current_main
+  - document_manual_fallback_route_with_exact_head_sha_validation
+  - add_development_department_status_report_dashboard_later
+  - only_then_expand_worker_automation
