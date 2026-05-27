@@ -1,0 +1,125 @@
+schema: skeleton.development_chain.v1
+status: STAGE_0_DOCUMENTED_REGISTRY_ONLY
+
+purpose: >-
+  Phone-first development chain registry for Skeleton. This file documents
+  worker selection, reporting shape, and approval gates. It is not a runtime
+  gate and does not enable autonomous behavior.
+
+canon:
+  task_queue: GitHub Issues
+  review_and_merge_surface: GitHub PRs
+  phone_console: Telegram
+  registry_doc: docs/PHONE_FIRST_DEVELOPMENT_CHAIN.md
+
+stage_0_boundaries:
+  runtime_enforcement: false
+  telegram_callback_changes: false
+  antigravity_automation: false
+  deploy_changes: false
+  secrets_handling: false
+  merge_automation: false
+
+roles:
+  oleksii:
+    role: product_owner_operator_approval_gate
+    approves:
+      - merge
+      - deploy
+      - secrets_access
+      - runtime_access
+      - production_database_access
+      - roadmap_changes
+      - scope_escalation
+    rejects:
+      - any_unclear_or_unsafe_action
+
+  chatgpt:
+    role: planner_reviewer_architect
+    does:
+      - plan_issue_ready_tasks
+      - review_worker_results
+      - check_scope_and_gates
+      - recommend_one_next_action
+    does_not:
+      - merge
+      - deploy
+      - access_secrets
+      - change_roadmap_autonomously
+
+  runner:
+    role: queue_executor_controlled_task_runner
+    does:
+      - execute_github_issue_queue_items
+      - run_controlled_worker_tasks
+      - create_or_update_pr_surface
+      - report_status_to_github_and_telegram
+    does_not:
+      - merge_without_approval
+      - deploy_without_approval
+      - access_secrets_without_approval
+      - edit_main_directly
+      - invent_scope
+
+workers:
+  codex:
+    select_for:
+      - bounded_allowed_file_code_tasks
+      - clear_acceptance_criteria
+      - local_validation_commands
+  openhands:
+    select_for:
+      - debugging
+      - investigation
+      - multi_file_analysis
+  antigravity:
+    select_for:
+      - dev_cockpit
+      - repo_navigation
+      - patch_preparation
+      - local_test_support
+    allowed_only_through: controlled_task_contract
+    implemented_in_stage_0: false
+
+reviewers:
+  gemini:
+    useful_for:
+      - high_risk_review
+      - security_review
+      - privacy_review
+      - large_context_audit
+  claude:
+    useful_for:
+      - architectural_critique
+      - external_reasoning_audit
+      - design_drift_review
+
+safe_gates:
+  no_merge_without_approval: true
+  no_deploy_without_approval: true
+  no_secrets_runtime_or_production_database_access_without_approval: true
+  no_autonomous_roadmap_changes: true
+  no_direct_main_edits: true
+  manual_pr_fallback_validate_exact_head_sha_before_merge: true
+
+phone_first_output:
+  order:
+    - plain_human_summary_first_paragraph
+    - result_status
+    - risk
+    - exactly_one_recommended_next_action
+    - details_link_or_expandable_logs
+  exactly_one_recommended_next_action: true
+  logs_inline_by_default: false
+
+worker_task_contract:
+  required_fields:
+    - issue
+    - repository
+    - base_branch
+    - allowed_files
+    - forbidden_actions
+    - acceptance_criteria
+    - validation_commands
+    - expected_output
+  escalation_behavior: stop_and_report_blocked_with_one_recommended_next_action
