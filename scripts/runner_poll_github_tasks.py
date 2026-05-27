@@ -3852,14 +3852,6 @@ def _issue_worktree_publish_validated_report(
     if not publish:
         return _maintenance_report("DONE", task_id, status_lines, "met")
 
-    if not changed_tracked_files:
-        return _maintenance_report(
-            "BLOCKED",
-            task_id,
-            [*status_lines, "reason=no_changed_tracked_files"],
-            "not_met",
-        )
-
     existing_pr_url, existing_pr_reason = _issue_worktree_publish_existing_pr_url(
         request.expected_branch, worktree_path
     )
@@ -3878,6 +3870,116 @@ def _issue_worktree_publish_validated_report(
             [*status_lines, f"existing_pr_url={existing_pr_url}"],
             "met",
         )
+
+    if changed_tracked_files:
+        code, output = run_command(["git", "rev-parse", "HEAD"], cwd=worktree_path)
+        if code != 0:
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [*status_lines, "step=read_pre_commit_head status=failed"],
+                "not_met",
+            )
+        pre_commit_head_lines = _git_status_path_lines(output)
+        pre_commit_head = pre_commit_head_lines[0] if pre_commit_head_lines else ""
+
+        code, _output = run_command(
+            ["git", "add", "--", *changed_tracked_files], cwd=worktree_path
+        )
+        if code != 0:
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [
+                    *status_lines,
+                    "step=stage_validated_files status=failed reason=staging_failed",
+                ],
+                "not_met",
+            )
+        status_lines.append("step=stage_validated_files status=done")
+
+        code, _output = run_command(
+            ["git", "diff", "--cached", "--check", "--", *changed_tracked_files],
+            cwd=worktree_path,
+        )
+        if code != 0:
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [
+                    *status_lines,
+                    "step=staged_diff_check status=failed reason=staged_diff_check_failed",
+                ],
+                "not_met",
+            )
+        status_lines.append("step=staged_diff_check status=done")
+
+        code, _output = run_command(
+            [
+                "git",
+                "commit",
+                "-m",
+                f"Publish issue #{request.source_issue} worktree",
+            ],
+            cwd=worktree_path,
+        )
+        if code != 0:
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [
+                    *status_lines,
+                    "step=commit_validated_files status=failed reason=commit_failed",
+                ],
+                "not_met",
+            )
+        status_lines.append("step=commit_validated_files status=done")
+
+        code, output = run_command(["git", "rev-parse", "HEAD"], cwd=worktree_path)
+        if code != 0:
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [*status_lines, "step=read_post_commit_head status=failed"],
+                "not_met",
+            )
+        post_commit_head_lines = _git_status_path_lines(output)
+        post_commit_head = post_commit_head_lines[0] if post_commit_head_lines else ""
+        if (
+            not pre_commit_head
+            or not post_commit_head
+            or post_commit_head == pre_commit_head
+        ):
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [
+                    *status_lines,
+                    "step=verify_commit_head_moved status=failed "
+                    "reason=branch_head_did_not_move",
+                ],
+                "not_met",
+            )
+        status_lines.append("step=verify_commit_head_moved status=done")
+    else:
+        code, _output = run_command(
+            ["git", "diff", "--quiet", "main...HEAD", "--"], cwd=worktree_path
+        )
+        if code == 0:
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [*status_lines, "reason=no_publishable_changes"],
+                "not_met",
+            )
+        if code != 1:
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [*status_lines, "step=read_branch_diff status=failed"],
+                "not_met",
+            )
+        status_lines.append("step=read_branch_diff status=done")
 
     push_ref = f"refs/heads/{request.expected_branch}:refs/heads/{request.expected_branch}"
     code, _output = run_command(["git", "push", "origin", push_ref], cwd=worktree_path)
