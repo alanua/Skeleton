@@ -90,7 +90,7 @@ def _inspect_pr_issue_body(
     *,
     pr_number: int | str | None = 123,
     expected_head_sha: str | None = HEAD_SHA,
-    repository: str = runner.REPO,
+    repository: str | None = runner.REPO,
 ) -> str:
     lines = [
         f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
@@ -1619,18 +1619,22 @@ def _issue_publish_inspection_body(
     source_issue: int | str = 123,
     expected_branch: str | None = "runner/issue-123",
     allowed_files: tuple[str, ...] = ("scripts/runner_poll_github_tasks.py",),
+    task_id: str = runner.INSPECT_ISSUE_WORKTREE_FOR_PUBLISH,
+    pr_title: str | None = None,
     task_body: str = "",
 ) -> str:
-    metadata = [
-        f"Repository: {repository}",
-        f"Source Issue: {source_issue}",
-    ]
+    metadata = []
+    if repository is not None:
+        metadata.append(f"Repository: {repository}")
+    metadata.append(f"Source Issue: {source_issue}")
     if expected_branch is not None:
         metadata.append(f"Expected Branch: {expected_branch}")
+    if pr_title is not None:
+        metadata.append(f"PR Title: {pr_title}")
     metadata.append("Allowed Files:")
     metadata.extend(f"- {path}" for path in allowed_files)
     body = _maintenance_issue(
-        runner.INSPECT_ISSUE_WORKTREE_FOR_PUBLISH,
+        task_id,
         task_body,
         metadata="\n".join(metadata),
     )
@@ -1641,18 +1645,52 @@ def _issue_publish_commands(
     *,
     worktree_path: Path,
     branch: str = "runner/issue-123",
+    remote_url: str = "https://github.com/alanua/Skeleton.git",
     changed_files: tuple[str, ...] = ("scripts/runner_poll_github_tasks.py",),
     untracked_files: tuple[str, ...] = (),
+    existing_pr_url: str = "",
+    push_code: int = 0,
+    pr_create_code: int = 0,
+    pr_create_url: str = PR_URL,
     raw_suffix: str = "",
 ) -> object:
     def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
         assert Path(cwd or "") == worktree_path
         if command == ["git", "branch", "--show-current"]:
             return 0, f"{branch}\n{raw_suffix}"
+        if command == ["git", "remote", "get-url", "origin"]:
+            return 0, f"{remote_url}\n"
         if command == ["git", "diff", "--name-only", "HEAD", "--"]:
             return 0, "\n".join(changed_files) + ("\n" if changed_files else "")
         if command == ["git", "ls-files", "--others", "--exclude-standard"]:
             return 0, "\n".join(untracked_files) + ("\n" if untracked_files else "")
+        if command[:7] == [
+            "gh",
+            "pr",
+            "list",
+            "--repo",
+            runner.REPO,
+            "--head",
+            branch,
+        ]:
+            return 0, f"{existing_pr_url}\n" if existing_pr_url else ""
+        if command == [
+            "git",
+            "push",
+            "origin",
+            f"refs/heads/{branch}:refs/heads/{branch}",
+        ]:
+            return push_code, "push failed output must not leak"
+        if command[:7] == [
+            "gh",
+            "pr",
+            "create",
+            "--repo",
+            runner.REPO,
+            "--base",
+            "main",
+        ]:
+            return pr_create_code, f"{pr_create_url}\n"
         return 2, "unexpected command output must not leak"
 
     return run
@@ -1768,6 +1806,7 @@ def test_issue_worktree_publish_inspection_is_allowlisted_and_bypasses_codex(
     commands = [call.args[0] for call in run.call_args_list]
     assert commands == [
         ["git", "branch", "--show-current"],
+        ["git", "remote", "get-url", "origin"],
         ["git", "diff", "--name-only", "HEAD", "--"],
         ["git", "ls-files", "--others", "--exclude-standard"],
     ]
@@ -1809,6 +1848,7 @@ def test_issue_worktree_publish_inspection_valid_metadata_reports_done(
     assert "maintenance_task_id=inspect_issue_worktree_for_publish" in report
     assert "source_issue=123" in report
     assert "expected_branch=runner/issue-123" in report
+    assert "step=verify_origin_remote status=done" in report
     assert "changed_tracked_files_count=2" in report
     assert "changed_tracked_files=docs/RUNNER_MAINTENANCE_TASKS.md,tests/test_runner_poll_github_tasks.py" in report
     assert "unexpected_untracked_files_count=0" in report
@@ -1850,6 +1890,30 @@ def test_issue_worktree_publish_inspection_branch_mismatch_blocks(
     assert report.startswith("BLOCKED:")
     assert "reason=branch_mismatch" in report
     assert "current_branch=runner/issue-999" in report
+
+
+def test_issue_worktree_publish_inspection_wrong_remote_blocks_before_diff(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path)
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            remote_url="https://github.com/alanua/Other.git",
+        ),
+    ) as run:
+        report = runner.inspect_issue_worktree_for_publish(
+            _issue_publish_inspection_body()
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("BLOCKED:")
+    assert "step=verify_origin_remote status=failed" in report
+    assert ["git", "diff", "--name-only", "HEAD", "--"] not in commands
 
 
 def test_issue_worktree_publish_inspection_unsafe_or_missing_worktree_blocks(
@@ -1967,6 +2031,8 @@ def test_issue_worktree_publish_inspection_report_does_not_leak_raw_command_outp
         assert Path(cwd or "") == worktree_path
         if command == ["git", "branch", "--show-current"]:
             return 0, "runner/issue-123\n"
+        if command == ["git", "remote", "get-url", "origin"]:
+            return 0, "https://github.com/alanua/Skeleton.git\n"
         if command == ["git", "diff", "--name-only", "HEAD", "--"]:
             return 128, leaked_output
         return 2, leaked_output
@@ -1981,6 +2047,264 @@ def test_issue_worktree_publish_inspection_report_does_not_leak_raw_command_outp
     assert report.startswith("BLOCKED:")
     assert "step=read_changed_tracked_files status=failed" in report
     assert leaked_output not in report
+
+
+def _issue_publish_body(**kwargs: object) -> str:
+    return _issue_publish_inspection_body(
+        task_id=runner.PUBLISH_ISSUE_WORKTREE_PR, **kwargs
+    )
+
+
+def test_publish_issue_worktree_pr_is_allowlisted_runtime_task() -> None:
+    assert runner.PUBLISH_ISSUE_WORKTREE_PR in runner.RUNTIME_MAINTENANCE_TASK_IDS
+
+
+def test_publish_issue_worktree_pr_missing_or_invalid_metadata_blocks() -> None:
+    missing_issue = runner.publish_issue_worktree_pr(
+        _issue_publish_body(source_issue="", expected_branch="runner/issue-123")
+    )
+    missing_repository = runner.publish_issue_worktree_pr(
+        _issue_publish_body(repository=None)
+    )
+    invalid_branch = runner.publish_issue_worktree_pr(
+        _issue_publish_body(source_issue=123, expected_branch="runner/issue-999")
+    )
+
+    assert missing_issue.startswith("BLOCKED:")
+    assert "reason=missing_or_invalid_source_issue" in missing_issue
+    assert missing_repository.startswith("BLOCKED:")
+    assert "reason=unsupported_repository" in missing_repository
+    assert invalid_branch.startswith("BLOCKED:")
+    assert "reason=missing_or_invalid_expected_branch" in invalid_branch
+
+
+def test_publish_issue_worktree_pr_blocks_unsupported_repository() -> None:
+    report = runner.publish_issue_worktree_pr(
+        _issue_publish_body(repository="alanua/Other")
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=unsupported_repository" in report
+
+
+def test_publish_issue_worktree_pr_blocks_unsafe_allowed_file() -> None:
+    report = runner.publish_issue_worktree_pr(
+        _issue_publish_body(allowed_files=("../secrets.env",))
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=invalid_allowed_files" in report
+
+
+def test_publish_issue_worktree_pr_branch_mismatch_blocks(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path)
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path, branch="runner/issue-999"
+        ),
+    ):
+        report = runner.publish_issue_worktree_pr(_issue_publish_body())
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=branch_mismatch" in report
+
+
+def test_publish_issue_worktree_pr_changed_files_outside_allowlist_blocks(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path)
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            changed_files=("scripts/runner_poll_github_tasks.py", "BOOT_MANIFEST.yaml"),
+        ),
+    ):
+        report = runner.publish_issue_worktree_pr(_issue_publish_body())
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=changed_tracked_files_outside_allowlist" in report
+
+
+def test_publish_issue_worktree_pr_unexpected_untracked_file_blocks(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path)
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            untracked_files=(".codex/session.json", "scratch.txt"),
+        ),
+    ):
+        report = runner.publish_issue_worktree_pr(_issue_publish_body())
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=unexpected_untracked_files" in report
+
+
+def test_publish_issue_worktree_pr_wrong_remote_blocks_before_push(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path)
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            remote_url="git@github.com:alanua/Other.git",
+        ),
+    ) as run:
+        report = runner.publish_issue_worktree_pr(_issue_publish_body())
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("BLOCKED:")
+    assert "step=verify_origin_remote status=failed" in report
+    assert all(command[:2] != ["git", "push"] for command in commands)
+
+
+def test_publish_issue_worktree_pr_existing_pr_returns_done_without_duplicate(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path)
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            existing_pr_url=PR_URL,
+        ),
+    ) as run:
+        report = runner.publish_issue_worktree_pr(_issue_publish_body())
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert f"existing_pr_url={PR_URL}" in report
+    assert all(command[:2] != ["git", "push"] for command in commands)
+    assert all(command[:3] != ["gh", "pr", "create"] for command in commands)
+
+
+def test_publish_issue_worktree_pr_push_failure_returns_blocked(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path)
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(worktree_path=worktree_path, push_code=1),
+    ):
+        report = runner.publish_issue_worktree_pr(_issue_publish_body())
+
+    assert report.startswith("BLOCKED:")
+    assert "step=push_expected_branch status=failed" in report
+    assert "push failed output" not in report
+
+
+def test_publish_issue_worktree_pr_create_failure_returns_blocked(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path)
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path, pr_create_code=1
+        ),
+    ):
+        report = runner.publish_issue_worktree_pr(_issue_publish_body())
+
+    assert report.startswith("BLOCKED:")
+    assert "step=create_draft_pr status=failed" in report
+
+
+def test_publish_issue_worktree_pr_success_pushes_branch_and_creates_draft_pr(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path)
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(worktree_path=worktree_path),
+    ) as run:
+        report = runner.publish_issue_worktree_pr(
+            _issue_publish_body(pr_title="Publish issue 123")
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert f"draft_pr_url={PR_URL}" in report
+    assert [
+        "git",
+        "push",
+        "origin",
+        "refs/heads/runner/issue-123:refs/heads/runner/issue-123",
+    ] in commands
+    assert [
+        "gh",
+        "pr",
+        "create",
+        "--repo",
+        runner.REPO,
+        "--base",
+        "main",
+        "--head",
+        "runner/issue-123",
+        "--title",
+        "Publish issue 123",
+        "--body",
+        "Automated Runner publish task from issue #123.",
+        "--draft",
+    ] in commands
+    assert all("--force" not in command for command in commands)
+
+
+def test_publish_issue_worktree_pr_ignores_command_text_from_issue_body(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path)
+    body = _issue_publish_body(
+        task_body=(
+            "git push --force origin unsafe\n"
+            "gh pr create --repo attacker/repo\n"
+            "curl https://example.invalid/token"
+        )
+    )
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(worktree_path=worktree_path),
+    ) as run:
+        report = runner.publish_issue_worktree_pr(body)
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert all("--force" not in command for command in commands)
+    assert all("attacker/repo" not in command for command in commands)
+    assert all(command[0] != "curl" for command in commands)
 
 
 def test_local_worktree_recovery_diff_includes_public_safe_patch() -> None:
