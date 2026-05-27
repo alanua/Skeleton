@@ -46,6 +46,7 @@ Boot read order:
 
 - `BOOT_MANIFEST.yaml`
 - `COMMANDS.yaml`
+- `OPERATOR_RULES.yaml`
 - `MODES.yaml`
 - `SOURCE_REGISTRY.yaml`
 - `MEMORY_ROUTING.yaml`
