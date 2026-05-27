@@ -1,19 +1,24 @@
-# Runner Worktrees
+# Runner Issue Workspaces
 
 Runner worktree execution stage 1 maps one normal bounded GitHub issue to one
-git worktree, one `runner/issue-N` branch, and one draft PR.
+standalone issue workspace, one `runner/issue-N` branch, and one draft PR.
 
 The main Skeleton checkout is the coordinator. It polls GitHub issues and
 changes Runner labels, but normal issue Codex execution, task validation,
-commits, pushes, and draft PR creation run in the per-issue worktree. The
-worktree root comes from `SKELETON_WORKTREE_ROOT` when set and otherwise
+commits, pushes, and draft PR creation run in the per-issue workspace. The
+workspace root comes from `SKELETON_WORKTREE_ROOT` when set and otherwise
 defaults to `/home/agent/agent-dev/worktrees/skeleton`.
+
+Issue workspaces are standalone local clones. They are not linked Git
+worktrees, because linked worktrees store writable per-worktree metadata under
+the coordinator checkout's `.git/worktrees` directory instead of inside the
+assigned issue workspace.
 
 Stage 1 is single-runner execution. The poller still processes ready issues one
 at a time; it does not add a parallel timer or concurrent issue execution.
 Moving normal task execution out of the coordinator checkout reduces dirty
-checkout conflicts between issue work and queue coordination before parallel
-execution exists.
+checkout conflicts and keeps Git metadata writes inside the assigned issue
+workspace before parallel execution exists.
 
 Runner lane stage 3 makes reserved lane names visible in GitHub before future
 routing. Normal task issues may set `Runner Lane: <name>` before the fenced
@@ -30,8 +35,8 @@ Normal task issues may set `Target Repository: <owner/repo>` before the fenced
 task block. The allowlisted targets are `alanua/Skeleton`, `alanua/bauclock`,
 and `alanua/Lavalamp`; omitting the field plans `alanua/Skeleton`. This stage
 parses and validates the target and plans deterministic per-repository issue
-worktree paths only. It does not execute Codex, git worktree commands, pushes,
-or PR creation in another repository yet.
+workspace paths only. It does not execute Codex, workspace creation commands,
+pushes, or PR creation in another repository yet.
 
 An existing issue worktree is reused only when it is clean and already on the
 expected `runner/issue-N` branch. Otherwise the issue is blocked with cleanup

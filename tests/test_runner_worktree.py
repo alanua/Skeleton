@@ -45,7 +45,7 @@ def test_successful_issue_cleans_issue_workspace_before_marking_done(
     ]
 
 
-def test_cleanup_issue_worktree_force_removes_workspace_and_prunes_metadata(
+def test_cleanup_issue_worktree_removes_standalone_workspace(
     tmp_path: Path,
 ) -> None:
     worktree_root = tmp_path / "worktrees"
@@ -59,21 +59,14 @@ def test_cleanup_issue_worktree_force_removes_workspace_and_prunes_metadata(
     ), mock.patch.object(
         runner, "cleanup_runtime_artifacts"
     ) as cleanup_artifacts, mock.patch.object(
-        runner, "run_command", side_effect=((0, "removed"), (0, "pruned"))
-    ) as run_command:
+        runner.shutil, "rmtree"
+    ) as rmtree:
         code, output = runner.cleanup_issue_worktree(161, coordinator)
 
     assert code == 0
-    assert "git worktree remove --force" in output
-    assert "git worktree prune" in output
+    assert "rm -rf" in output
     cleanup_artifacts.assert_called_once_with(issue_path.resolve())
-    assert run_command.call_args_list == [
-        mock.call(
-            ["git", "worktree", "remove", "--force", str(issue_path.resolve())],
-            cwd=coordinator,
-        ),
-        mock.call(["git", "worktree", "prune"], cwd=coordinator),
-    ]
+    rmtree.assert_called_once_with(issue_path.resolve())
 
 
 def test_failed_issue_keeps_workspace_path_for_review(tmp_path: Path) -> None:

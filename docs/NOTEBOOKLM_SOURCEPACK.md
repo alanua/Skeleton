@@ -415,7 +415,7 @@ The runner setup reference is mirrored below from `scripts/README_RUNNER_SETUP.m
 ```markdown
 # Skeleton GitHub Task Queue Runner
 
-The GitHub task queue lets the Hetzner Runner poll open GitHub issues labeled `runner:ready`, extract a bounded Codex task from the issue body, run it in the Skeleton checkout, and report the result back to GitHub. When the task produces file changes, the runner validates them, commits them on `runner/issue-<number>`, pushes the branch, and opens a draft PR.
+The GitHub task queue lets the Hetzner Runner poll open GitHub issues labeled `runner:ready`, extract a bounded Codex task from the issue body, run it in a disposable issue workspace, and report the result back to GitHub. When the task produces file changes, the runner validates them, commits them on `runner/issue-<number>`, pushes the branch, and opens a draft PR.
 
 ## Labels
 
@@ -475,6 +475,11 @@ accepts only `alanua/Skeleton`, `alanua/bauclock`, and `alanua/Lavalamp`, and
 uses that metadata for worktree path planning only. Cross-repository Codex
 execution, commits, pushes, and draft PR creation are not enabled in this
 stage.
+
+Issue workspaces are standalone local clones under the configured worktree root,
+not linked Git worktrees. This keeps each issue workspace's writable Git metadata
+inside the assigned workspace path instead of under the coordinator checkout's
+`.git/worktrees` directory.
 
 Do not put secrets, API keys, environment files, production credentials, or private tokens in task issues.
 
