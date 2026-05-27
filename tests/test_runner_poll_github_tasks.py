@@ -1812,6 +1812,47 @@ def test_issue_worktree_publish_inspection_report_does_not_leak_raw_command_outp
     assert leaked_output not in report
 
 
+def test_local_worktree_recovery_diff_includes_public_safe_patch() -> None:
+    patch = "diff --git a/docs/example.md b/docs/example.md\n+public note\n"
+    with mock.patch.object(runner, "run_command", return_value=(0, patch)) as run:
+        report = runner.local_worktree_recovery_diff("/tmp/worktree")
+
+    run.assert_called_once_with(
+        ["git", "diff", "--no-ext-diff", "--binary", "HEAD", "--"],
+        cwd="/tmp/worktree",
+    )
+    assert report == f"Local worktree git diff:\n```diff\n{patch.strip()}\n```"
+
+
+def test_local_worktree_recovery_diff_omits_unsafe_patch() -> None:
+    patch = "diff --git a/.env b/.env\n+GITHUB_TOKEN=github-token-must-not-leak\n"
+    with mock.patch.object(runner, "run_command", return_value=(0, patch)):
+        report = runner.local_worktree_recovery_diff("/tmp/worktree")
+
+    assert "omitted" in report
+    assert "github-token-must-not-leak" not in report
+
+
+def test_finalize_local_worktree_success_includes_recovery_diff() -> None:
+    task = runner.RunnerTask(
+        content="Do it",
+        target_project="demo",
+        target_repository="alanua/Demo",
+    )
+    with mock.patch.object(
+        runner, "changed_files", return_value=["docs/example.md"]
+    ), mock.patch.object(runner, "cleanup_runtime_artifacts"), mock.patch.object(
+        runner, "local_worktree_recovery_diff", return_value="Local worktree git diff: none"
+    ):
+        report = runner.finalize_local_worktree_success(
+            "/tmp/worktree", "codex output", task
+        )
+
+    assert "Selected Project: demo" in report
+    assert "Local worktree changed files:\n- docs/example.md" in report
+    assert "Local worktree git diff: none" in report
+
+
 def test_blocked_maintenance_output_is_not_labeled_runner_done() -> None:
     report = (
         "DONE: mislabeled maintenance report\n"

@@ -1859,6 +1859,7 @@ def finalize_local_worktree_success(
         if files
         else "Local worktree changed files: none"
     )
+    diff_summary = local_worktree_recovery_diff(workdir)
     return (
         "DONE: Codex completed successfully in the local target-project "
         "worktree.\n\n"
@@ -1867,8 +1868,31 @@ def finalize_local_worktree_success(
         f"Issue worktree: `{workdir}`\n"
         "Target-repo output: not created.\n\n"
         f"{file_summary}\n\n"
+        f"{diff_summary}\n\n"
         f"Codex output:\n```\n{codex_output.strip()}\n```"
     )
+
+
+def local_worktree_recovery_diff(workdir: str) -> str:
+    code, output = run_command(
+        ["git", "diff", "--no-ext-diff", "--binary", "HEAD", "--"], cwd=workdir
+    )
+    if code != 0:
+        return "Local worktree git diff: unavailable (git diff failed)."
+
+    diff = output.strip()
+    if not diff:
+        return "Local worktree git diff: none"
+
+    try:
+        validate_public_safe_payload({"recovery_patch": diff})
+    except ValueError:
+        return (
+            "Local worktree git diff: omitted because the patch is not bounded "
+            "public-safe issue-comment content."
+        )
+
+    return f"Local worktree git diff:\n```diff\n{diff}\n```"
 
 
 def block_issue(
