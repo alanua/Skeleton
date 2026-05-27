@@ -219,6 +219,50 @@ create pull requests, commit changes, merge, deploy, read secrets, or mutate
 runtime services. Reports must not include raw command output, secrets, tokens,
 environment values, or arbitrary task text.
 
+`publish_issue_worktree_pr` is a Stage 2 issue-worktree draft PR publisher. It
+is a host Runner runtime maintenance task, not a Codex responsibility, and must
+include explicit metadata:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: publish_issue_worktree_pr
+Repository: alanua/Skeleton
+Source Issue: 123
+Expected Branch: runner/issue-123
+PR Title: Optional safe title
+Allowed Files:
+- docs/RUNNER_MAINTENANCE_TASKS.md
+- scripts/runner_poll_github_tasks.py
+- tests/test_runner_poll_github_tasks.py
+```
+
+It may only:
+
+1. Validate that `Repository` is exactly `alanua/Skeleton`.
+2. Validate `Source Issue` as a positive issue number.
+3. Validate `Expected Branch` as exactly `runner/issue-{Source Issue}`.
+4. Validate an explicit `Allowed Files` list of safe relative paths using the
+   same rules as `inspect_issue_worktree_for_publish`.
+5. Resolve the issue workspace as `issue-{Source Issue}` under the configured
+   Skeleton worktree root.
+6. Verify the workspace exists, has Git metadata, is on the expected branch,
+   and has origin set to the expected Skeleton GitHub remote.
+7. Verify changed tracked files are non-empty and all inside `Allowed Files`.
+8. Verify untracked files are absent except for `.codex/` runtime noise.
+9. Query for an existing open PR for the expected branch and report `DONE` with
+   that PR URL instead of creating a duplicate.
+10. Push only `refs/heads/runner/issue-N:refs/heads/runner/issue-N` to origin.
+11. Create a draft PR against `main` for the exact expected branch.
+
+It reports `DONE` only when an existing PR is found or when the exact branch
+push and draft PR creation succeed. Unsupported repositories, missing or invalid
+metadata, unsafe paths, missing workspaces, missing Git metadata, branch
+mismatches, remote mismatches, missing changed files, changed files outside the
+allowlist, unexpected untracked files, GitHub access failures, push failures,
+and PR creation failures are reported as `BLOCKED`. This task must not commit,
+force-push, merge, deploy, read secrets, mutate runtime services, use
+issue-provided paths, or execute arbitrary issue text.
+
 The allowlist does not permit rebooting the host, package upgrades, arbitrary
 commands or config values from issue text, or unrelated services.
 
