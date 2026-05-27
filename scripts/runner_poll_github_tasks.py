@@ -219,6 +219,34 @@ class RunnerTask:
 
 
 @dataclass(frozen=True)
+class RunnerQueueTask:
+    issue: dict[str, Any]
+    issue_number: int
+    priority: int = 0
+    dependencies: frozenset[int] = frozenset()
+
+
+@dataclass(frozen=True)
+class BlockedRunnerQueueTask:
+    issue: dict[str, Any]
+    issue_number: int
+    priority: int
+    dependencies: frozenset[int]
+    blocked_dependencies: frozenset[int]
+    reason: str
+
+
+@dataclass(frozen=True)
+class RunnerQueuePlan:
+    ready: tuple[RunnerQueueTask, ...]
+    blocked: tuple[BlockedRunnerQueueTask, ...]
+
+    @property
+    def ready_issues(self) -> list[dict[str, Any]]:
+        return [task.issue for task in self.ready]
+
+
+@dataclass(frozen=True)
 class TelegramApprovedPrMergeRequest:
     pr_number: int
     approved_head_sha: str
@@ -675,6 +703,102 @@ def is_open_task_issue(item: dict[str, Any]) -> bool:
         return False
     state = item.get("state")
     return state is None or str(state).lower() == "open"
+
+
+def issue_number(item: dict[str, Any]) -> int:
+    number = item.get("number")
+    if isinstance(number, bool) or not isinstance(number, int):
+        raise ValueError("runner queue issue is missing an integer number")
+    return number
+
+
+def extract_runner_priority(body: str) -> int:
+    raw_priority = _body_field((body or "").split("```task", 1)[0], "Runner Priority")
+    if raw_priority is None:
+        return 0
+    try:
+        return int(raw_priority, 10)
+    except ValueError as exc:
+        raise ValueError(f"Runner priority `{raw_priority}` is not an integer.") from exc
+
+
+def extract_runner_dependencies(body: str) -> frozenset[int]:
+    metadata = (body or "").split("```task", 1)[0]
+    dependency_text = (
+        _body_field(metadata, "Runner Depends On")
+        or _body_field(metadata, "Depends On")
+        or _body_field(metadata, "Dependencies")
+    )
+    if dependency_text is None:
+        return frozenset()
+
+    dependencies: set[int] = set()
+    for token in re.split(r"[\s,]+", dependency_text):
+        token = token.strip()
+        if token == "":
+            continue
+        match = re.fullmatch(r"#?(?P<number>[1-9][0-9]*)", token)
+        if match is None:
+            raise ValueError(f"Runner dependency `{token}` is not an issue number.")
+        dependencies.add(int(match.group("number")))
+    return frozenset(dependencies)
+
+
+def build_runner_queue_task(issue: dict[str, Any]) -> RunnerQueueTask:
+    return RunnerQueueTask(
+        issue=issue,
+        issue_number=issue_number(issue),
+        priority=extract_runner_priority(str(issue.get("body") or "")),
+        dependencies=extract_runner_dependencies(str(issue.get("body") or "")),
+    )
+
+
+def plan_ready_issue_queue(
+    issues: list[dict[str, Any]], completed_issue_numbers: set[int] | None = None
+) -> RunnerQueuePlan:
+    completed = set(completed_issue_numbers or set())
+    tasks = [build_runner_queue_task(issue) for issue in issues]
+    remaining = {task.issue_number: task for task in tasks}
+    ready: list[RunnerQueueTask] = []
+    blocked: list[BlockedRunnerQueueTask] = []
+
+    while remaining:
+        available = [
+            task
+            for task in remaining.values()
+            if task.dependencies.issubset(completed)
+        ]
+        if not available:
+            break
+        selected = sorted(
+            available, key=lambda task: (-task.priority, task.issue_number)
+        )[0]
+        ready.append(selected)
+        completed.add(selected.issue_number)
+        del remaining[selected.issue_number]
+
+    for task in sorted(
+        remaining.values(), key=lambda item: (-item.priority, item.issue_number)
+    ):
+        blocked_dependencies = frozenset(
+            dependency for dependency in task.dependencies if dependency not in completed
+        )
+        blocked.append(
+            BlockedRunnerQueueTask(
+                issue=task.issue,
+                issue_number=task.issue_number,
+                priority=task.priority,
+                dependencies=task.dependencies,
+                blocked_dependencies=blocked_dependencies,
+                reason=(
+                    "blocked by dependency cycle"
+                    if blocked_dependencies.issubset(remaining)
+                    else "blocked by unfinished dependencies"
+                ),
+            )
+        )
+
+    return RunnerQueuePlan(ready=tuple(ready), blocked=tuple(blocked))
 
 
 def label_names(labels: Any) -> set[str]:
@@ -4178,9 +4302,10 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
 
 def poll_once(workdir: str | None = None) -> int:
     issues = get_ready_issues()
-    for issue in issues:
+    plan = plan_ready_issue_queue(issues)
+    for issue in plan.ready_issues:
         process_issue(issue, workdir=workdir)
-    return len(issues)
+    return len(plan.ready)
 
 
 def main() -> None:

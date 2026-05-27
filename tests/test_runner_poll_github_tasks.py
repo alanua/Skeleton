@@ -633,6 +633,96 @@ def test_poll_once_processes_issues_single_lane() -> None:
     ]
 
 
+def test_queue_plan_orders_ready_tasks_by_priority_then_issue_number() -> None:
+    issues = [
+        {"number": 22, "body": "Runner Priority: 2\n\n```task\nB\n```"},
+        {"number": 21, "body": "Runner Priority: 2\n\n```task\nA\n```"},
+        {"number": 20, "body": "Runner Priority: 5\n\n```task\nTop\n```"},
+    ]
+
+    plan = runner.plan_ready_issue_queue(issues)
+
+    assert [task.issue_number for task in plan.ready] == [20, 21, 22]
+    assert plan.blocked == ()
+
+
+def test_queue_plan_schedules_dependencies_before_higher_priority_dependents() -> None:
+    issues = [
+        {
+            "number": 30,
+            "body": "Runner Priority: 10\nRunner Depends On: #31\n\n```task\nDependent\n```",
+        },
+        {"number": 31, "body": "Runner Priority: 1\n\n```task\nDependency\n```"},
+    ]
+
+    plan = runner.plan_ready_issue_queue(issues)
+
+    assert [task.issue_number for task in plan.ready] == [31, 30]
+    assert plan.blocked == ()
+
+
+def test_queue_plan_blocks_unfinished_external_dependencies() -> None:
+    issues = [
+        {
+            "number": 40,
+            "body": "Runner Priority: 10\nRunner Depends On: #99\n\n```task\nWait\n```",
+        },
+        {"number": 41, "body": "Runner Priority: 1\n\n```task\nReady\n```"},
+    ]
+
+    plan = runner.plan_ready_issue_queue(issues)
+
+    assert [task.issue_number for task in plan.ready] == [41]
+    assert len(plan.blocked) == 1
+    assert plan.blocked[0].issue_number == 40
+    assert plan.blocked[0].blocked_dependencies == frozenset({99})
+    assert plan.blocked[0].reason == "blocked by unfinished dependencies"
+
+
+def test_queue_plan_accepts_completed_external_dependencies() -> None:
+    issues = [
+        {
+            "number": 40,
+            "body": "Runner Priority: 10\nRunner Depends On: #99\n\n```task\nContinue\n```",
+        },
+    ]
+
+    plan = runner.plan_ready_issue_queue(issues, completed_issue_numbers={99})
+
+    assert [task.issue_number for task in plan.ready] == [40]
+    assert plan.blocked == ()
+
+
+def test_queue_plan_blocks_dependency_cycles_deterministically() -> None:
+    issues = [
+        {"number": 51, "body": "Runner Depends On: #52\n\n```task\nA\n```"},
+        {"number": 52, "body": "Runner Priority: 5\nRunner Depends On: #51\n\n```task\nB\n```"},
+    ]
+
+    plan = runner.plan_ready_issue_queue(issues)
+
+    assert plan.ready == ()
+    assert [task.issue_number for task in plan.blocked] == [52, 51]
+    assert {task.reason for task in plan.blocked} == {"blocked by dependency cycle"}
+
+
+def test_poll_once_uses_queue_plan_and_skips_dependency_blocked_issues() -> None:
+    issues = [
+        {"number": 61, "body": "Runner Priority: 1\n\n```task\nFirst\n```"},
+        {
+            "number": 62,
+            "body": "Runner Priority: 10\nRunner Depends On: #99\n\n```task\nBlocked\n```",
+        },
+    ]
+    with mock.patch.object(
+        runner, "get_ready_issues", return_value=issues
+    ), mock.patch.object(runner, "process_issue") as process_issue:
+        count = runner.poll_once(workdir="/coordinator")
+
+    assert count == 1
+    process_issue.assert_called_once_with(issues[0], workdir="/coordinator")
+
+
 def test_runner_task_defaults_to_default_lane() -> None:
     task, reason = runner.extract_runner_task("```task\nDo it\n```")
 
