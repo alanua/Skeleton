@@ -1649,12 +1649,21 @@ def _issue_publish_commands(
     changed_files: tuple[str, ...] = ("scripts/runner_poll_github_tasks.py",),
     untracked_files: tuple[str, ...] = (),
     existing_pr_url: str = "",
+    branch_diff_code: int = 1,
+    diff_check_code: int = 0,
+    add_code: int = 0,
+    commit_code: int = 0,
+    pre_commit_head: str = "0000000000000000000000000000000000000000",
+    post_commit_head: str = "1111111111111111111111111111111111111111",
     push_code: int = 0,
     pr_create_code: int = 0,
     pr_create_url: str = PR_URL,
     raw_suffix: str = "",
 ) -> object:
+    rev_parse_count = 0
+
     def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        nonlocal rev_parse_count
         assert Path(cwd or "") == worktree_path
         if command == ["git", "branch", "--show-current"]:
             return 0, f"{branch}\n{raw_suffix}"
@@ -1674,6 +1683,24 @@ def _issue_publish_commands(
             branch,
         ]:
             return 0, f"{existing_pr_url}\n" if existing_pr_url else ""
+        if command == ["git", "diff", "--check", "--", *changed_files]:
+            return diff_check_code, "diff check output must not leak"
+        if command == ["git", "rev-parse", "HEAD"]:
+            rev_parse_count += 1
+            if rev_parse_count == 1:
+                return 0, f"{pre_commit_head}\n"
+            return 0, f"{post_commit_head}\n"
+        if command == ["git", "add", "--", *changed_files]:
+            return add_code, "add failed output must not leak"
+        if command == [
+            "git",
+            "commit",
+            "-m",
+            "Publish issue #123 worktree",
+        ]:
+            return commit_code, "commit failed output must not leak"
+        if command == ["git", "diff", "--quiet", "main...HEAD", "--"]:
+            return branch_diff_code, "branch diff output must not leak"
         if command == [
             "git",
             "push",
@@ -2198,6 +2225,146 @@ def test_publish_issue_worktree_pr_existing_pr_returns_done_without_duplicate(
     assert f"existing_pr_url={PR_URL}" in report
     assert all(command[:2] != ["git", "push"] for command in commands)
     assert all(command[:3] != ["gh", "pr", "create"] for command in commands)
+    assert all(command[:2] != ["git", "commit"] for command in commands)
+
+
+def test_publish_issue_worktree_pr_diff_check_failure_blocks_before_staging(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path)
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            diff_check_code=1,
+        ),
+    ) as run:
+        report = runner.publish_issue_worktree_pr(_issue_publish_body())
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("BLOCKED:")
+    assert "reason=diff_check_failed" in report
+    assert ["git", "add", "--", "scripts/runner_poll_github_tasks.py"] not in commands
+    assert all(command[:2] != ["git", "push"] for command in commands)
+
+
+def test_publish_issue_worktree_pr_staging_failure_blocks_before_commit(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path)
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(worktree_path=worktree_path, add_code=1),
+    ) as run:
+        report = runner.publish_issue_worktree_pr(_issue_publish_body())
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("BLOCKED:")
+    assert "reason=staging_failed" in report
+    assert all(command[:2] != ["git", "commit"] for command in commands)
+    assert all(command[:2] != ["git", "push"] for command in commands)
+
+
+def test_publish_issue_worktree_pr_commit_failure_blocks_before_push(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path)
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(worktree_path=worktree_path, commit_code=1),
+    ) as run:
+        report = runner.publish_issue_worktree_pr(_issue_publish_body())
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("BLOCKED:")
+    assert "reason=commit_failed" in report
+    assert all(command[:2] != ["git", "push"] for command in commands)
+
+
+def test_publish_issue_worktree_pr_blocks_if_commit_head_does_not_move(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path)
+    head = "1111111111111111111111111111111111111111"
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            pre_commit_head=head,
+            post_commit_head=head,
+        ),
+    ) as run:
+        report = runner.publish_issue_worktree_pr(_issue_publish_body())
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("BLOCKED:")
+    assert "reason=branch_head_did_not_move" in report
+    assert all(command[:2] != ["git", "push"] for command in commands)
+
+
+def test_publish_issue_worktree_pr_no_uncommitted_changes_with_branch_diff_publishes(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path)
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            changed_files=(),
+            branch_diff_code=1,
+        ),
+    ) as run:
+        report = runner.publish_issue_worktree_pr(_issue_publish_body())
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert "step=read_branch_diff status=done" in report
+    assert all(command[:2] != ["git", "commit"] for command in commands)
+    assert [
+        "git",
+        "push",
+        "origin",
+        "refs/heads/runner/issue-123:refs/heads/runner/issue-123",
+    ] in commands
+
+
+def test_publish_issue_worktree_pr_no_publishable_changes_blocks(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path)
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            changed_files=(),
+            branch_diff_code=0,
+        ),
+    ) as run:
+        report = runner.publish_issue_worktree_pr(_issue_publish_body())
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("BLOCKED:")
+    assert "reason=no_publishable_changes" in report
+    assert all(command[:2] != ["git", "commit"] for command in commands)
+    assert all(command[:2] != ["git", "push"] for command in commands)
 
 
 def test_publish_issue_worktree_pr_push_failure_returns_blocked(
@@ -2255,6 +2422,21 @@ def test_publish_issue_worktree_pr_success_pushes_branch_and_creates_draft_pr(
     commands = [call.args[0] for call in run.call_args_list]
     assert report.startswith("DONE:")
     assert f"draft_pr_url={PR_URL}" in report
+    assert [
+        "git",
+        "diff",
+        "--check",
+        "--",
+        "scripts/runner_poll_github_tasks.py",
+    ] in commands
+    assert ["git", "add", "--", "scripts/runner_poll_github_tasks.py"] in commands
+    assert [
+        "git",
+        "commit",
+        "-m",
+        "Publish issue #123 worktree",
+    ] in commands
+    assert "step=verify_commit_head_moved status=done" in report
     assert [
         "git",
         "push",
