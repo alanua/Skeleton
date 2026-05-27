@@ -425,14 +425,46 @@ def prepare_git_issue_worktree(
     except OSError as exc:
         return 1, f"Unable to create worktree root {path.parent}:\n{exc}", path
 
-    for command in (
-        ["git", "fetch", "origin"],
-        ["git", "worktree", "add", "-B", branch, str(path), "origin/main"],
-    ):
-        code, output = run_command(command, cwd=coordinator_workdir)
+    remote_code, remote_output = run_command(
+        ["git", "remote", "get-url", "origin"], cwd=coordinator_workdir
+    )
+    if remote_code != 0:
+        return 1, "Unable to read coordinator origin URL.", path
+    origin_url = remote_output.strip()
+    if not origin_url:
+        return 1, "Coordinator origin URL is empty.", path
+
+    commands = (
+        (["git", "fetch", "origin"], coordinator_workdir),
+        (
+            [
+                "git",
+                "clone",
+                "--local",
+                "--no-hardlinks",
+                "--no-checkout",
+                str(Path(coordinator_workdir).resolve()),
+                str(path),
+            ],
+            coordinator_workdir,
+        ),
+        (["git", "fetch", "origin"], path),
+        (["git", "checkout", "-B", branch, "origin/main"], path),
+    )
+    for command, cwd in commands:
+        code, output = run_command(command, cwd=cwd)
         outputs.append(format_command_output(command, output))
         if code != 0:
             return code, "\n".join(outputs), path
+        if command[1] == "clone":
+            config_code, config_output = run_command(
+                ["git", "remote", "set-url", "origin", origin_url], cwd=path
+            )
+            outputs.append(
+                "$ git remote set-url origin <coordinator-origin>\n" + config_output
+            )
+            if config_code != 0:
+                return config_code, "\n".join(outputs), path
     return 0, "\n".join(outputs), path
 
 
@@ -446,16 +478,11 @@ def cleanup_git_issue_worktree(path: Path, coordinator_workdir: str | Path) -> t
     if not path.exists():
         return 0, ""
     cleanup_runtime_artifacts(path)
-    outputs: list[str] = []
-    for command in (
-        ["git", "worktree", "remove", "--force", str(path)],
-        ["git", "worktree", "prune"],
-    ):
-        code, output = run_command(command, cwd=coordinator_workdir)
-        outputs.append(format_command_output(command, output))
-        if code != 0:
-            return code, "\n".join(outputs)
-    return 0, "\n".join(outputs)
+    try:
+        shutil.rmtree(path)
+    except OSError as exc:
+        return 1, f"Unable to remove issue workspace {path}:\n{exc}"
+    return 0, f"$ rm -rf {path}\nremoved"
 
 
 def cleanup_issue_worktree(

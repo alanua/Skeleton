@@ -520,7 +520,9 @@ def test_unsafe_worktree_paths_are_rejected(tmp_path: Path) -> None:
             raise AssertionError(f"unsafe worktree path was accepted: {unsafe_path}")
 
 
-def test_prepare_issue_worktree_adds_runner_issue_branch(tmp_path: Path) -> None:
+def test_prepare_issue_worktree_clones_workspace_with_writable_gitdir(
+    tmp_path: Path,
+) -> None:
     worktree_root = tmp_path / "worktrees"
     coordinator = tmp_path / "coordinator"
     coordinator.mkdir()
@@ -528,26 +530,52 @@ def test_prepare_issue_worktree_adds_runner_issue_branch(tmp_path: Path) -> None
     with mock.patch.dict(
         os.environ, {"SKELETON_WORKTREE_ROOT": str(worktree_root)}, clear=True
     ), mock.patch.object(
-        runner, "run_command", side_effect=((0, "fetched"), (0, "added"))
+        runner,
+        "run_command",
+        side_effect=(
+            (0, "https://github.com/alanua/Skeleton.git"),
+            (0, "fetched"),
+            (0, "cloned"),
+            (0, ""),
+            (0, "fetched clone"),
+            (0, "checked out"),
+        ),
     ) as run_command:
         code, output, path = runner.prepare_issue_worktree(139, coordinator)
 
     assert code == 0
-    assert "git worktree add" in output
+    assert "git clone --local --no-hardlinks --no-checkout" in output
+    assert "git remote set-url origin <coordinator-origin>" in output
+    assert "git checkout -B runner/issue-139 origin/main" in output
     assert path == (worktree_root / "issue-139").resolve()
     assert run_command.call_args_list == [
+        mock.call(["git", "remote", "get-url", "origin"], cwd=coordinator),
         mock.call(["git", "fetch", "origin"], cwd=coordinator),
         mock.call(
             [
                 "git",
-                "worktree",
-                "add",
-                "-B",
-                "runner/issue-139",
+                "clone",
+                "--local",
+                "--no-hardlinks",
+                "--no-checkout",
+                str(coordinator.resolve()),
                 str(path),
-                "origin/main",
             ],
             cwd=coordinator,
+        ),
+        mock.call(
+            [
+                "git",
+                "remote",
+                "set-url",
+                "origin",
+                "https://github.com/alanua/Skeleton.git",
+            ],
+            cwd=path,
+        ),
+        mock.call(["git", "fetch", "origin"], cwd=path),
+        mock.call(
+            ["git", "checkout", "-B", "runner/issue-139", "origin/main"], cwd=path
         ),
     ]
 
