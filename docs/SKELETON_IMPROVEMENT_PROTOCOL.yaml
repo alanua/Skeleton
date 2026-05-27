@@ -1,0 +1,114 @@
+schema: skeleton.improvement_protocol.v1
+status: PUBLIC_SAFE_PLANNING
+stage: 1
+enforcement_model:
+  runtime_enforcement: false
+  python_gate_module: none
+  autonomous_self_modification: false
+  notes:
+    - Skeleton may propose improvements but must not apply them autonomously.
+    - This registry is documentation support, not runtime enforcement.
+inputs:
+  build_plan: docs/SKELETON_BUILD_PLAN.md
+  development_department_roadmap: docs/DEVELOPMENT_DEPARTMENT_ROADMAP.md
+  build_plan_registry: docs/SKELETON_BUILD_PLAN.yaml
+  operator_rules_registry: OPERATOR_RULES.yaml
+operator_rules_relationship:
+  role: complements_operator_rules_registry
+  duplicates_operator_rules: false
+  operator_rules_runtime_gate_in_this_stage: false
+controlled_loop:
+  - observe
+  - detect
+  - classify
+  - propose
+  - critique
+  - approve
+  - execute
+  - validate
+  - merge
+  - sync
+  - monitor
+  - repair_or_rollback
+improvement_categories:
+  - documentation_plan_update
+  - operating_rule_update
+  - task_queue_repair
+  - publisher_delivery_repair
+  - worker_selection_update
+  - adapter_discovery
+  - runtime_sensitive_change
+  - secrets_sensitive_change
+  - dashboard_status_reporting
+  - project_handoff_state_update
+risk_levels:
+  green:
+    definition: docs_tests_only_no_behavior_change
+    required_gates:
+      - github_issue
+      - bounded_scope
+      - allowed_files
+      - validation_before_merge
+      - pr_review
+  yellow:
+    definition: workflow_tooling_changes_without_runtime_secrets_or_deploy
+    required_gates:
+      - github_issue
+      - bounded_scope
+      - allowed_files
+      - validation_before_merge
+      - pr_review
+      - critique_before_canon_rules_roadmap_boot_worker_or_approval_gate_change
+  red:
+    definition: runtime_deploy_secrets_production_db_service_restart_live_worker_or_merge_automation
+    required_gates:
+      - github_issue
+      - bounded_scope
+      - allowed_files
+      - validation_before_merge
+      - pr_review
+      - critique_before_canon_rules_roadmap_boot_worker_or_approval_gate_change
+      - explicit_separate_human_approval_for_risky_action
+required_boundaries:
+  - github_issue_before_durable_change
+  - bounded_scope_before_execution
+  - allowed_files_before_execution
+  - validation_evidence_before_merge
+  - critique_before_changing_canon_rules_roadmap_boot_route_worker_authority_or_approval_gates
+  - reviewed_pr_as_durable_change_boundary
+  - no_autonomous_self_modification
+forbidden_in_stage_1:
+  - runtime_enforcement
+  - python_gate_code
+  - telegram_callback_change
+  - dashboard_implementation
+  - publisher_implementation
+  - antigravity_automation
+  - openhands_automation
+  - gemini_live_integration
+  - claude_live_integration
+  - deploy
+  - secrets_handling
+  - service_restart
+  - production_db_access
+  - merge_automation
+phone_first_operator_involvement:
+  operator: Oleksii
+  main_interface: short_approve_reject_decisions
+  not_main_interface: raw_logs
+  include:
+    - proposed_change
+    - category
+    - risk_level
+    - required_decision
+    - allowed_files_or_affected_route
+    - validation_result
+    - next_safe_action
+jeeves_boundary:
+  skeleton_improvement: development_control_system_improvement
+  future_jeeves_autonomy: separate_product_and_runtime_work
+  skeleton_is_jeeves_runtime_adapter: false
+repair_path:
+  trigger: drift_breakage_failing_tests_stale_references_queue_breakage_unclear_authority_operator_confusion_or_delivery_breakage
+  action: stop_expansion_and_create_minimal_repair_or_rollback_task
+  required_scope: smallest_safe_scope
