@@ -19,6 +19,7 @@ def test_default_boot_route_is_manifest_only() -> None:
     assert read_order == [
         "BOOT_MANIFEST.yaml",
         "COMMANDS.yaml",
+        "OPERATOR_RULES.yaml",
         "MODES.yaml",
         "SOURCE_REGISTRY.yaml",
         "MEMORY_ROUTING.yaml",

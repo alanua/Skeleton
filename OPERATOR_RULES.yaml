@@ -1,0 +1,131 @@
+schema: skeleton.operator_rules.v1
+status: STATIC_REGISTRY_STAGE_1
+
+purpose: >-
+  Machine-readable index of approved operator-facing rules. This file references
+  existing Skeleton sources and is not a second canon store or runtime enforcement
+  layer.
+
+source_of_truth:
+  - COMMANDS.yaml
+  - MEMORY_ROUTING.yaml
+  - projects/skeleton/PROJECT_OPERATING_STANDARD.md
+  - CAPABILITY_REGISTRY.yaml
+  - core/action_gate.py
+
+enforcement_model:
+  stage: registry_only
+  runtime_enforcement: false
+  python_gate_module: none
+  notes:
+    - Rules are read by operators and adapters as a compact index.
+    - Future enforcement must be added only through a separate approved task.
+    - Block rules describe unsafe actions; they are not automatic runtime hooks in this stage.
+
+allowed_severities:
+  - block
+  - rewrite
+  - warn
+  - log
+
+rules:
+  - id: no_secrets_in_public_outputs
+    severity: block
+    scope:
+      - final_answer
+      - github_comment
+      - telegram_report
+      - runner_task
+    source_refs:
+      - MEMORY_ROUTING.yaml:secrets_private
+      - projects/skeleton/PROJECT_OPERATING_STANDARD.md
+      - scripts/README_RUNNER_SETUP.md
+    plain_language: Do not put secrets, tokens, passwords, environment file contents, or private credentials into public outputs.
+    check: public_output_contains_no_secrets_tokens_passwords_or_env_values
+
+  - id: approved_route_for_risky_actions
+    severity: block
+    scope:
+      - github_action
+      - runner_task
+      - runtime_maintenance
+      - telegram_approval
+    source_refs:
+      - COMMANDS.yaml:risky_action_boundaries
+      - MEMORY_ROUTING.yaml:risky_action_rule
+      - projects/skeleton/PROJECT_OPERATING_STANDARD.md
+      - core/action_gate.py
+    plain_language: Merge, deploy, runtime, destructive, and secret-related actions require the approved separate route before execution.
+    check: risky_action_has_matching_approved_route
+
+  - id: ukrainian_response_for_ukrainian_user
+    severity: rewrite
+    scope:
+      - final_answer
+      - status_response
+    source_refs:
+      - COMMANDS.yaml:behavior_playbook
+      - projects/skeleton/PROJECT_OPERATING_STANDARD.md
+    plain_language: When Oleksii writes Ukrainian, answer in Ukrainian for normal responses.
+    check: user_language_uk_requires_ukrainian_answer
+
+  - id: plain_human_summary_first
+    severity: rewrite
+    scope:
+      - final_answer
+      - status_response
+      - telegram_report
+    source_refs:
+      - COMMANDS.yaml:short_human_readable_status_result_next_safe_step
+      - projects/skeleton/PROJECT_OPERATING_STANDARD.md
+    plain_language: Project and status answers should begin with a simple human summary before hashes, logs, labels, or technical details.
+    check: first_paragraph_is_plain_human_summary
+
+  - id: plus_continues_safe_next_step
+    severity: warn
+    scope:
+      - command_interpretation
+      - github_action
+      - runner_task
+    source_refs:
+      - COMMANDS.yaml:+
+      - COMMANDS.yaml:routine_safe_helper_steps
+    plain_language: The plus command continues only the already proposed safe next step in the same scope.
+    check: plus_does_not_expand_scope_or_start_new_risky_action
+
+  - id: canon_instruction_changes_need_approval
+    severity: block
+    scope:
+      - canon_change
+      - instruction_change
+      - memory_route
+    source_refs:
+      - MEMORY_ROUTING.yaml:public_github_canon
+      - projects/skeleton/PROJECT_OPERATING_STANDARD.md
+    plain_language: Canon and instruction changes require critique, a clear route, and Oleksii approval before durable promotion.
+    check: canon_or_instruction_change_has_critique_patchplan_and_operator_approval
+
+  - id: skeleton_human_controlled_jeeves_future
+    severity: warn
+    scope:
+      - architecture
+      - runner_task
+      - final_answer
+    source_refs:
+      - projects/skeleton/PROJECT_OPERATING_STANDARD.md
+      - COMMANDS.yaml
+    plain_language: Skeleton is the human-controlled construction and control layer; Jeeves autonomy is future separate product work.
+    check: skeleton_work_does_not_claim_or_enable_autonomous_jeeves_runtime
+
+  - id: code_work_uses_github_runner_queue
+    severity: warn
+    scope:
+      - code_work
+      - runner_task
+      - github_action
+    source_refs:
+      - COMMANDS.yaml:issue_or_pr_number_review
+      - docs/RUNNER_QUEUE_STATUS.md
+      - projects/skeleton/PROJECT_OPERATING_STANDARD.md
+    plain_language: Normal code work goes through GitHub issue queue and Runner/Codex execution, with Oleksii approving merge/deploy/secrets/runtime gates.
+    check: code_work_is_routed_through_issue_queue_runner_and_review_gate
