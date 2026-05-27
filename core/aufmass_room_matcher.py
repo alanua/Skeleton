@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import math
 import re
 from typing import Any, Optional
@@ -75,7 +75,10 @@ def match_dxf_rooms(dxf_result: Any) -> RoomMatchResult:
     insunits = _optional_int(_get(dxf_result, "insunits"))
     labels = _label_candidates(dxf_result)
     contours = _contour_candidates(dxf_result)
-    matches = [_match_contour(contour, labels) for contour in contours]
+    labels_by_contour = _labels_by_contour(contours, labels)
+    matches = _flag_duplicate_room_labels(
+        [_match_contour(contour, labels_by_contour[contour.contour_id]) for contour in contours]
+    )
     status_counts: dict[str, int] = {}
     for match in matches:
         status_counts[match.status] = status_counts.get(match.status, 0) + 1
@@ -190,6 +193,10 @@ def _match_contour(contour: RoomContourCandidate, labels: list[RoomLabelCandidat
         status = "needs_review"
         confidence = 0.45
         review_notes.append("No non-area room label was linked to this closed polyline.")
+    elif _has_distance_tie(room_ranked):
+        status = _needs_review_status(status)
+        confidence = min(confidence, 0.45)
+        review_notes.append("Multiple room labels are equally close to this closed polyline.")
     if parsed_area is None:
         if status == "candidate":
             confidence = 0.65
@@ -214,6 +221,67 @@ def _match_contour(contour: RoomContourCandidate, labels: list[RoomLabelCandidat
         review_notes=review_notes,
         nearby_label_ids=[label.label_id for label, _distance in ranked[:5]],
     )
+
+
+def _labels_by_contour(
+    contours: list[RoomContourCandidate],
+    labels: list[RoomLabelCandidate],
+) -> dict[str, list[RoomLabelCandidate]]:
+    labels_by_contour = {contour.contour_id: [] for contour in contours}
+    for label in labels:
+        distances = [
+            (contour, _distance_to_polygon(label.insert, contour.points))
+            for contour in contours
+        ]
+        if not distances:
+            continue
+        closest_distance = min(distance for _contour, distance in distances)
+        for contour, distance in distances:
+            if math.isclose(distance, closest_distance, abs_tol=1e-9):
+                labels_by_contour[contour.contour_id].append(label)
+    return labels_by_contour
+
+
+def _flag_duplicate_room_labels(matches: list[RoomMatchCandidate]) -> list[RoomMatchCandidate]:
+    matches_by_room_label: dict[str, list[RoomMatchCandidate]] = {}
+    for match in matches:
+        if match.room_label_text is None:
+            continue
+        normalized = match.room_label_text.strip().casefold()
+        if normalized:
+            matches_by_room_label.setdefault(normalized, []).append(match)
+
+    duplicate_match_ids = {
+        match.match_id
+        for room_matches in matches_by_room_label.values()
+        if len(room_matches) > 1
+        for match in room_matches
+    }
+    return [
+        _add_duplicate_room_label_note(match) if match.match_id in duplicate_match_ids else match
+        for match in matches
+    ]
+
+
+def _add_duplicate_room_label_note(match: RoomMatchCandidate) -> RoomMatchCandidate:
+    return replace(
+        match,
+        status=_needs_review_status(match.status),
+        confidence=min(match.confidence, 0.45),
+        review_notes=[*match.review_notes, "Room label text is duplicated across closed polylines."],
+    )
+
+
+def _has_distance_tie(ranked: list[tuple[RoomLabelCandidate, float]]) -> bool:
+    if len(ranked) < 2:
+        return False
+    return math.isclose(ranked[0][1], ranked[1][1], abs_tol=1e-9)
+
+
+def _needs_review_status(status: str) -> str:
+    if status == "candidate":
+        return "needs_review"
+    return status
 
 
 def _area_mismatch(calculated: float, parsed: float) -> bool:

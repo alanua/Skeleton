@@ -76,6 +76,20 @@ def test_room_review_rows_preserve_mismatch_and_missing_label_review_context() -
     assert mismatch_row["export_ready"] is False
 
 
+def test_room_review_rows_keep_unmatched_polygons_out_of_export_handoff() -> None:
+    fixture = _fixture()
+    fixture["texts"] = fixture["texts"][:1]
+    fixture["mtexts"] = fixture["mtexts"][:1]
+
+    unmatched_row = room_review_table_to_rows(room_matches_to_review_table(match_dxf_rooms(fixture)))[1]
+
+    assert unmatched_row["review_status"] == "needs_review"
+    assert unmatched_row["label_status"] == "missing"
+    assert unmatched_row["room_name"] == ""
+    assert unmatched_row["area_from_label_m2"] is None
+    assert unmatched_row["export_ready"] is False
+
+
 def test_room_review_dict_is_json_compatible_and_declares_fixed_columns() -> None:
     table = room_matches_to_review_table(match_dxf_rooms(_fixture()))
 
