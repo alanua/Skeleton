@@ -621,6 +621,49 @@ def test_blocked_codex_output_is_not_labeled_runner_done() -> None:
     notify.assert_called_once_with(51, "BLOCKED", report)
 
 
+def test_process_issue_accepts_done_output_with_echoed_prompt_blocked_word() -> None:
+    fence = "`" * 3
+    blocked = "BLOCK" + "ED"
+    issue = {
+        "number": 53,
+        "title": "Done with echoed prompt",
+        "body": f"{fence}task\nDo it\n{fence}",
+    }
+    codex_output = (
+        "DONE: Codex completed successfully with no file changes.\n\n"
+        "Reading additional input from stdin...\n"
+        "OpenAI Codex v0.125.0\n"
+        "--------\n"
+        "user\n"
+        f"Return {blocked} if the task cannot be completed.\n"
+    )
+
+    with mock.patch.object(
+        runner, "ensure_clean_worktree", return_value=(True, "")
+    ), mock.patch.object(
+        runner, "prepare_issue_branch", return_value=(0, "", "runner/issue-53")
+    ), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, codex_output)
+    ), mock.patch.object(
+        runner, "finalize_success", return_value="DONE report"
+    ) as finalize, mock.patch.object(
+        runner, "cleanup_issue_worktree", return_value=(0, "")
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ) as comment, mock.patch.object(
+        runner, "set_issue_label"
+    ) as label, mock.patch.object(runner, "notify_task_finished") as notify:
+        runner.process_issue(issue, workdir="/repo")
+
+    finalize.assert_called_once_with(issue, "runner/issue-53", codex_output)
+    comment.assert_called_once_with(53, "DONE report")
+    assert label.call_args_list == [
+        mock.call(53, runner.LABEL_READY, runner.LABEL_RUNNING),
+        mock.call(53, runner.LABEL_RUNNING, runner.LABEL_DONE),
+    ]
+    notify.assert_called_once_with(53, "DONE", "DONE report")
+
+
 def test_file_change_report_without_draft_pr_is_not_labeled_runner_done() -> None:
     fence = "`" * 3
     issue = {

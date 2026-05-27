@@ -278,6 +278,85 @@ No packages were installed during tests and no generic package-install capabilit
     assert runner.blocked_output_marker(output) is None
 
 
+def test_codex_task_result_uses_done_final_report_over_echoed_prompt() -> None:
+    blocked = "BLOCK" + "ED"
+    output = f"""DONE: Codex completed successfully and produced file changes.
+
+Changed files:
+- scripts/runner_poll_github_tasks.py
+- tests/test_runner_poll_github_tasks.py
+
+Pytest output:
+```
+2 passed
+```
+
+Reading additional input from stdin...
+OpenAI Codex v0.125.0
+--------
+user
+Task instructions mention {blocked} as an allowed return status.
+"""
+
+    result = runner.classify_codex_task_result(output, 0)
+
+    assert result == runner.CodexTaskResult("DONE")
+
+
+def test_codex_task_result_trusts_leading_done_before_later_status_echo() -> None:
+    blocked = "BLOCK" + "ED"
+    output = f"""DONE: Codex completed successfully with no file changes.
+
+Copied acceptance criteria:
+{blocked}: use this only when the task cannot be completed.
+"""
+
+    result = runner.classify_codex_task_result(output, 0)
+
+    assert result == runner.CodexTaskResult("DONE")
+
+
+def test_codex_task_result_blocks_failure_final_report() -> None:
+    blocked = "BLOCK" + "ED"
+    output = f"""{blocked}: missing capability
+
+Reading additional input from stdin...
+OpenAI Codex v0.125.0
+--------
+user
+Echoed task text later says DONE is also possible.
+"""
+
+    result = runner.classify_codex_task_result(output, 0)
+
+    assert result == runner.CodexTaskResult("BLOCKED", "BLOCKED")
+
+
+def test_codex_task_result_ignores_prompt_echo_before_assistant_done() -> None:
+    blocked = "BLOCK" + "ED"
+    output = f"""Reading additional input from stdin...
+OpenAI Codex v0.125.0
+--------
+user
+Return {blocked} if the task cannot be completed.
+--------
+assistant
+DONE: Codex completed successfully with no file changes.
+"""
+
+    result = runner.classify_codex_task_result(output, 0)
+
+    assert result == runner.CodexTaskResult("DONE")
+
+
+def test_codex_task_result_preserves_nonzero_exit_failure() -> None:
+    output = "DONE: Codex completed successfully with no file changes."
+
+    result = runner.classify_codex_task_result(output, 2)
+
+    assert result == runner.CodexTaskResult("BLOCKED", "exit code 2")
+
+
 
 def test_final_codex_answer_prefers_useful_prefix_before_transcript_tail() -> None:
     marker = runner._BLOCKED_OUTPUT_MARKERS[0]

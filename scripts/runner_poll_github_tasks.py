@@ -169,6 +169,12 @@ class RunnerLane:
     name: str
 
 
+@dataclass(frozen=True)
+class CodexTaskResult:
+    status: str
+    marker: str | None = None
+
+
 DEFAULT_RUNNER_LANE = RunnerLane("default")
 ALLOWED_RUNNER_LANES = frozenset(RUNNER_LANE_LABELS)
 
@@ -547,12 +553,41 @@ def _without_fenced_blocks(text: str) -> str:
     return "\n".join(kept)
 
 
+def _first_final_status(output: str) -> str | None:
+    text = _ANSI_ESCAPE_RE.sub("", output or "").lstrip()
+    first_line = text.splitlines()[0] if text else ""
+    match = _FINAL_STATUS_LINE_RE.match(first_line)
+    if match is not None:
+        return match.group(1).upper()
+
+    final_answer = _without_fenced_blocks(final_codex_answer(output))
+    for line in final_answer.splitlines():
+        match = _FINAL_STATUS_LINE_RE.match(line)
+        if match is not None:
+            return match.group(1).upper()
+    return None
+
+
 def blocked_output_marker(output: str) -> str | None:
     final_answer = _without_fenced_blocks(final_codex_answer(output))
     for marker, marker_re in zip(_BLOCKED_OUTPUT_MARKERS, _BLOCKED_OUTPUT_MARKER_RES):
         if marker_re.search(final_answer):
             return marker
     return None
+
+
+def classify_codex_task_result(output: str, exit_code: int) -> CodexTaskResult:
+    if exit_code != 0:
+        return CodexTaskResult("BLOCKED", f"exit code {exit_code}")
+
+    status = _first_final_status(output)
+    if status is not None:
+        return CodexTaskResult(status, status if status == "BLOCKED" else None)
+
+    marker = blocked_output_marker(output)
+    if marker is not None:
+        return CodexTaskResult("BLOCKED", marker)
+    return CodexTaskResult("DONE")
 
 
 def runner_report_status(report: str) -> str:
@@ -4046,6 +4081,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             task_content, issue_workdir, runner_task
         )
         cleanup_runtime_artifacts(issue_workdir)
+        codex_result = classify_codex_task_result(codex_output, codex_code)
         if codex_code != 0:
             block_issue(
                 issue_number,
@@ -4055,10 +4091,13 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                 runner_task=runner_task,
             )
             return
-        marker = blocked_output_marker(codex_output)
-        if marker is not None:
+        if codex_result.status == "BLOCKED":
             report = report_runner_lane(
-                blocked_codex_output_report(codex_output, marker, issue_workdir),
+                blocked_codex_output_report(
+                    codex_output,
+                    codex_result.marker or "BLOCKED",
+                    issue_workdir,
+                ),
                 runner_task,
             )
             warning = record_runner_executor_result(
