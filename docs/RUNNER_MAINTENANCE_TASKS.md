@@ -247,21 +247,29 @@ It may only:
    Skeleton worktree root.
 6. Verify the workspace exists, has Git metadata, is on the expected branch,
    and has origin set to the expected Skeleton GitHub remote.
-7. Verify changed tracked files are non-empty and all inside `Allowed Files`.
+7. Verify changed tracked files from `git diff --name-only HEAD --` are all
+   inside `Allowed Files`.
 8. Verify untracked files are absent except for `.codex/` runtime noise.
 9. Query for an existing open PR for the expected branch and report `DONE` with
    that PR URL instead of creating a duplicate.
-10. Push only `refs/heads/runner/issue-N:refs/heads/runner/issue-N` to origin.
-11. Create a draft PR against `main` for the exact expected branch.
+10. If allowed uncommitted tracked changes exist, run `git diff --check`, stage
+    only those validated files, create one commit named
+    `Publish issue #N worktree`, and verify branch `HEAD` moved.
+11. If there are no uncommitted changes but the branch already differs from
+    `main`, push and create the PR without creating another commit.
+12. Push only `refs/heads/runner/issue-N:refs/heads/runner/issue-N` to origin.
+13. Create a draft PR against `main` for the exact expected branch.
 
 It reports `DONE` only when an existing PR is found or when the exact branch
-push and draft PR creation succeed. Unsupported repositories, missing or invalid
-metadata, unsafe paths, missing workspaces, missing Git metadata, branch
-mismatches, remote mismatches, missing changed files, changed files outside the
-allowlist, unexpected untracked files, GitHub access failures, push failures,
-and PR creation failures are reported as `BLOCKED`. This task must not commit,
-force-push, merge, deploy, read secrets, mutate runtime services, use
-issue-provided paths, or execute arbitrary issue text.
+push and draft PR creation succeed. Unsupported repositories, missing or
+invalid metadata, unsafe paths, missing workspaces, missing Git metadata, branch
+mismatches, remote mismatches, no publishable changes, changed files outside the
+allowlist, unexpected untracked files, diff-check failures, staging failures,
+commit failures, branch `HEAD` verification failures, GitHub access failures,
+push failures, and PR creation failures are reported as `BLOCKED`. This task
+must not force-push, merge, deploy, read secrets, mutate runtime services, use
+issue-provided paths, or execute arbitrary issue text. Its only allowed commit
+is the single validated issue-worktree publish commit described above.
 
 The allowlist does not permit rebooting the host, package upgrades, arbitrary
 commands or config values from issue text, or unrelated services.
