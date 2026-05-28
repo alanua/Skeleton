@@ -1619,23 +1619,29 @@ def card_payload_to_inline_keyboard(card_payload: dict[str, Any]) -> dict[str, A
     return {"inline_keyboard": inline_keyboard}
 
 
+def _telegram_project_name(target_repository: str) -> str:
+    project_name = target_repository.rsplit("/", 1)[-1].strip()
+    return project_name or target_repository
+
+
 def _build_pr_ready_operator_text(
     pr_number: int,
     target_repository: str = REPO,
     *,
     include_approval_instruction: bool = True,
 ) -> str:
+    del pr_number
+    status = "очікує схвалення" if include_approval_instruction else "готово до перегляду"
+    comment = (
+        "Перевір у ChatGPT перед схваленням."
+        if include_approval_instruction
+        else "Відкрий PR, якщо потрібні деталі."
+    )
     lines = [
-        f"PR: #{pr_number}",
-        f"target_repo: {target_repository}",
-        "Надішліть номер PR у ChatGPT.",
+        f"Проєкт: {_telegram_project_name(target_repository)}",
+        f"Статус: {status}",
+        f"Коментар: {comment}",
     ]
-    if include_approval_instruction:
-        lines.append(
-            "Натисніть «Схвалити» лише після того, як ChatGPT скаже схвалити."
-        )
-    else:
-        lines.append("Кнопка «Деталі» покаже короткий стан PR.")
     return "\n".join(lines)
 
 
