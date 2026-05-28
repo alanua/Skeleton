@@ -1314,10 +1314,9 @@ def test_done_pr_report_builds_card_payload_from_runner_binding() -> None:
 
     assert localized_card is not None
     assert localized_card["text"] == (
-        "PR: #123\n"
-        "target_repo: alanua/Skeleton\n"
-        "Надішліть номер PR у ChatGPT.\n"
-        "Натисніть «Схвалити» лише після того, як ChatGPT скаже схвалити."
+        "Проєкт: Skeleton\n"
+        "Статус: очікує схвалення\n"
+        "Коментар: Перевір у ChatGPT перед схваленням."
     )
     assert localized_card["buttons"][0]["label"] == "Деталі"
 
@@ -1341,12 +1340,17 @@ def test_done_pr_card_hides_technical_details_from_operator_text() -> None:
 
     text = str(card["text"])
     assert text == (
-        "PR: #123\n"
-        "target_repo: alanua/Skeleton\n"
-        "Надішліть номер PR у ChatGPT.\n"
-        "Натисніть «Схвалити» лише після того, як ChatGPT скаже схвалити."
+        "Проєкт: Skeleton\n"
+        "Статус: очікує схвалення\n"
+        "Коментар: Перевір у ChatGPT перед схваленням."
     )
     assert HEAD_SHA not in text
+    assert "PR:" not in text
+    assert "target_repo" not in text
+    assert "Base:" not in text
+    assert "Head:" not in text
+    assert "SHA" not in text
+    assert "Route:" not in text
     assert "scripts/runner_poll_github_tasks.py" not in text
     assert "docs/TELEGRAM_APPROVAL_BUTTONS.md" not in text
     assert "Skeleton task completed" not in text
@@ -1360,7 +1364,7 @@ def test_done_pr_card_shows_default_target_repo() -> None:
     assert card is not None
 
     text = str(card["text"])
-    assert "target_repo: alanua/Skeleton" in text
+    assert "Проєкт: Skeleton" in text
 
 
 def test_done_pr_card_shows_target_repo_without_misleading_repository_line() -> None:
@@ -1371,8 +1375,9 @@ def test_done_pr_card_shows_target_repo_without_misleading_repository_line() -> 
     assert card is not None
 
     text = str(card["text"])
-    assert "target_repo: alanua/bauclock" in text
+    assert "Проєкт: bauclock" in text
     assert "Repository: alanua/Skeleton" not in text
+    assert "target_repo" not in text
     assert "Рекомендація: спочатку переглянути в ChatGPT або відкрити PR." not in text
     assert "Ця кнопка нічого не деплоїть і не запускає на сервері." not in text
 
@@ -1458,7 +1463,11 @@ def test_approve_reject_buttons_require_reliable_sha_and_changed_files() -> None
     buttons = [row[0] for row in reply_markup["inline_keyboard"]]
 
     assert [button["text"] for button in buttons] == ["Деталі", "Відкрити PR"]
-    assert str(card["text"]).startswith("PR: #123\n")
+    assert str(card["text"]) == (
+        "Проєкт: Skeleton\n"
+        "Статус: готово до перегляду\n"
+        "Коментар: Відкрий PR, якщо потрібні деталі."
+    )
 
 
 def test_send_telegram_notification_posts_reply_markup_for_card() -> None:
@@ -1531,8 +1540,9 @@ def test_done_pr_card_uses_target_repository_from_issue_body() -> None:
     assert send.call_count == 1
     text = send.call_args.args[0]
     reply_markup = send.call_args.args[1]
-    assert "target_repo: alanua/bauclock" in text
+    assert "Проєкт: bauclock" in text
     assert "Repository: alanua/Skeleton" not in text
+    assert "target_repo" not in text
     assert [row[0]["text"] for row in reply_markup["inline_keyboard"]] == [
         "Деталі",
         "Відкрити PR",
