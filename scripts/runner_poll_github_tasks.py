@@ -92,6 +92,8 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     )
 )
 RUNNER_PROJECT_CHECKOUT_BASE = Path("/home/agent/agent-dev")
+RUNNER_REPO_SOURCE_BASE = RUNNER_PROJECT_CHECKOUT_BASE / "repos"
+RUNNER_WORKTREE_BASE = RUNNER_PROJECT_CHECKOUT_BASE / "worktrees"
 PR_BRANCH_VALIDATION_WORKTREE_DIR = "validate-pr-branch"
 PR_BRANCH_VALIDATION_PROFILES = {
     "full_pytest": (("python3", "-m", "pytest", "-q"),),
@@ -308,7 +310,10 @@ def target_repository_checkout_path(target_repository: str) -> Path:
         raise ValueError(
             f"Target repository `{target_repository}` is not allowlisted. Use {allowed}."
         ) from exc
-    return Path(project["checkout_path"])
+    if target_repository == QUEUE_REPOSITORY:
+        return Path(project["checkout_path"])
+    repo_name = target_repository.split("/", 1)[1]
+    return RUNNER_REPO_SOURCE_BASE / repo_name
 
 
 def target_repository_issue_worktree_path(
@@ -331,6 +336,69 @@ def ensure_safe_target_repository_worktree_path(
             f"Refusing worktree path outside configured root {root}: {candidate}"
         ) from exc
     return candidate
+
+
+def ensure_safe_target_repository_checkout_path(target_repository: str) -> Path:
+    checkout_path = target_repository_checkout_path(target_repository).expanduser()
+    if target_repository == QUEUE_REPOSITORY:
+        return checkout_path.resolve(strict=False)
+
+    repo_name = target_repository.split("/", 1)[1]
+    expected_root = (RUNNER_REPO_SOURCE_BASE / repo_name).resolve(strict=False)
+    candidate = checkout_path.resolve(strict=False)
+    if candidate != expected_root:
+        raise ValueError(
+            "Refusing target repository checkout path outside configured source "
+            f"{expected_root}: {candidate}"
+        )
+    return candidate
+
+
+def validate_target_repository_execution_paths(
+    target_repository: str,
+) -> tuple[int, str]:
+    try:
+        checkout_path = ensure_safe_target_repository_checkout_path(target_repository)
+        worktree_parent = target_repository_worktree_root(target_repository).resolve(
+            strict=False
+        )
+        issue_path = ensure_safe_target_repository_worktree_path(
+            target_repository,
+            worktree_parent / "issue-0",
+        )
+    except ValueError as exc:
+        return 1, str(exc)
+
+    if target_repository == QUEUE_REPOSITORY:
+        return 0, ""
+
+    status_lines = [
+        f"target_repository={target_repository}",
+        f"checkout_path={checkout_path}",
+        f"worktree_root={worktree_parent}",
+    ]
+    try:
+        worktree_parent.relative_to(RUNNER_WORKTREE_BASE.resolve(strict=False))
+    except ValueError:
+        return (
+            1,
+            "\n".join(
+                [
+                    *status_lines,
+                    "reason=worktree_root_unsafe",
+                    f"bounded_worktree={issue_path.parent / 'issue-N'}",
+                ]
+            ),
+        )
+    if not checkout_path.exists():
+        return 1, "\n".join([*status_lines, "reason=checkout_path_missing"])
+    if not os.access(checkout_path, os.W_OK):
+        return 1, "\n".join([*status_lines, "reason=checkout_path_unwritable"])
+    if not worktree_parent.exists():
+        return 1, "\n".join([*status_lines, "reason=worktree_root_missing"])
+    if not os.access(worktree_parent, os.W_OK):
+        return 1, "\n".join([*status_lines, "reason=worktree_root_unwritable"])
+    return 0, "\n".join([*status_lines, "status=paths_ready"])
 
 
 def ensure_safe_worktree_path(path: str | Path) -> Path:
@@ -359,7 +427,12 @@ def prepare_target_repository_issue_worktree(
         target_repository,
         target_repository_issue_worktree_path(target_repository, issue_number),
     )
-    checkout_path = target_repository_checkout_path(target_repository)
+    path_code, path_output = validate_target_repository_execution_paths(
+        target_repository
+    )
+    if path_code != 0:
+        return path_code, path_output, path
+    checkout_path = ensure_safe_target_repository_checkout_path(target_repository)
     return prepare_git_issue_worktree(issue_number, checkout_path, path)
 
 
@@ -653,12 +726,22 @@ def _project_id_for_repo(project_tree: dict[str, Any], repo: str) -> str:
     raise KeyError(f"unknown repo {repo!r}.")
 
 
+def _target_repository_metadata_field(metadata: str) -> tuple[str | None, str | None]:
+    for field in ("Target Repository", "Selected Repository", "Repo"):
+        value = _body_field(metadata, field)
+        if value is not None:
+            return value, field
+    return None, None
+
+
 def resolve_target_project_metadata(
     body: str,
 ) -> tuple[str | None, str | None, str | None]:
     metadata = (body or "").split("```task", 1)[0]
     target_project = _body_field(metadata, "Target Project")
-    target_repository = _body_field(metadata, "Target Repository")
+    target_repository, _target_repository_field = _target_repository_metadata_field(
+        metadata
+    )
     project_tree = load_runner_project_tree()
 
     if target_project is None and target_repository is None:
@@ -751,7 +834,7 @@ def extract_runner_task(body: str) -> tuple[RunnerTask | None, str | None]:
         ),
         target_repository=target_repository,
         has_target_repository_metadata=(
-            _body_field(metadata, "Target Repository") is not None
+            _target_repository_metadata_field(metadata)[0] is not None
         ),
     ), None
 
@@ -762,7 +845,10 @@ def project_execution_block_reason(task: RunnerTask) -> str | None:
 
     if project.get("runner_enabled") is not True:
         return f"Runner is disabled for target project `{task.target_project}`."
-    if execution_modes.get("planning_only") is True:
+    if (
+        execution_modes.get("planning_only") is True
+        and task.target_repository != "alanua/Lavalamp"
+    ):
         return (
             f"Target project `{task.target_project}` is planning-only. "
             "Runner will not execute Codex for this project."
@@ -779,6 +865,8 @@ def project_execution_block_reason(task: RunnerTask) -> str | None:
             "Live cross-repo execution is blocked in this runner stage and "
             "requires a separate PR."
         )
+    if task.target_repository == "alanua/Lavalamp":
+        return None
     if execution_modes.get("codex_issue_worktree") is True:
         return None
     return (

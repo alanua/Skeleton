@@ -35,6 +35,13 @@ CALLBACK_DIGEST = runner.hmac.new(
 ).hexdigest()[:12]
 
 
+@pytest.fixture(autouse=True)
+def _disable_runner_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(runner.RUNNER_MEMORY_DB_ENV, raising=False)
+    monkeypatch.delenv(runner.RUNNER_MEMORY_LEDGER_ENV, raising=False)
+    monkeypatch.delenv(runner.RUNNER_MEMORY_DIR_ENV, raising=False)
+
+
 def _merge_issue_body(
     *,
     pr_number: int = 123,
@@ -377,10 +384,10 @@ def test_target_repository_worktree_paths_are_deterministic(tmp_path: Path) -> N
             Path("/home/agent/agent-dev/worktrees/lavalamp")
         )
         assert runner.target_repository_checkout_path("alanua/bauclock") == (
-            Path("/home/agent/agent-dev/worktrees/bauclock/main")
+            Path("/home/agent/agent-dev/repos/bauclock")
         )
         assert runner.target_repository_checkout_path("alanua/Lavalamp") == (
-            Path("/home/agent/agent-dev/worktrees/lavalamp/main")
+            Path("/home/agent/agent-dev/repos/Lavalamp")
         )
         assert bauclock_path == (
             Path("/home/agent/agent-dev/worktrees/bauclock") / "issue-912"
@@ -571,6 +578,36 @@ def test_runner_task_accepts_allowlisted_target_repository() -> None:
     )
 
 
+def test_runner_task_accepts_selected_repository_alias() -> None:
+    task, reason = runner.extract_runner_task(
+        "Selected Repository: alanua/Lavalamp\n\n```task\nDo it\n```"
+    )
+
+    assert reason is None
+    assert task == runner.RunnerTask(
+        content="Do it",
+        target_project="lavalamp",
+        target_repository="alanua/Lavalamp",
+        has_target_repository_metadata=True,
+    )
+
+
+def test_runner_task_accepts_repo_alias_after_preferred_fields() -> None:
+    task, reason = runner.extract_runner_task(
+        "Repo: alanua/bauclock\n"
+        "Selected Repository: alanua/Lavalamp\n"
+        "Target Repository: alanua/Skeleton\n\n"
+        "```task\nDo it\n```"
+    )
+
+    assert reason is None
+    assert task == runner.RunnerTask(
+        content="Do it",
+        target_repository="alanua/Skeleton",
+        has_target_repository_metadata=True,
+    )
+
+
 def test_runner_task_accepts_allowlisted_target_project() -> None:
     task, reason = runner.extract_runner_task(
         "Target Project: bauclock\n\n```task\nDo it\n```"
@@ -752,30 +789,49 @@ def test_process_issue_runs_target_project_bauclock_in_local_worktree(
     assert comment.call_args.args[1] == "DONE local report\nTarget Project: bauclock"
 
 
-def test_process_issue_blocks_target_project_lavalamp_planning_only_before_codex() -> None:
+def test_process_issue_runs_target_project_lavalamp_in_local_worktree(
+    tmp_path: Path,
+) -> None:
+    issue_path = tmp_path / "lavalamp" / "issue-147"
     issue = {
         "number": 147,
         "title": "Target project lavalamp",
         "body": "Target Project: lavalamp\n\n```task\nDo it\n```",
     }
 
-    with mock.patch.object(runner, "block_issue") as block, mock.patch.object(
-        runner, "set_issue_label"
-    ) as set_label, mock.patch.object(
+    with mock.patch.object(
         runner, "prepare_issue_branch"
-    ) as prepare_branch, mock.patch.object(runner, "run_codex_task") as run_codex:
+    ) as prepare_branch, mock.patch.object(
+        runner,
+        "prepare_target_repository_issue_worktree",
+        return_value=(0, "ready", issue_path),
+    ) as prepare_target, mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, "codex output")
+    ) as run_codex, mock.patch.object(
+        runner, "finalize_local_worktree_success", return_value="DONE local report"
+    ) as finalize_local, mock.patch.object(
+        runner, "cleanup_target_repository_issue_worktree", return_value=(0, "")
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ):
         runner.process_issue(issue)
 
-    assert "planning-only" in block.call_args.args[1]
-    assert block.call_args.kwargs["runner_task"] == runner.RunnerTask(
+    expected_task = runner.RunnerTask(
         content="Do it",
         target_project="lavalamp",
         has_target_project_metadata=True,
         target_repository="alanua/Lavalamp",
     )
-    set_label.assert_not_called()
     prepare_branch.assert_not_called()
-    run_codex.assert_not_called()
+    prepare_target.assert_called_once_with("alanua/Lavalamp", 147)
+    run_codex.assert_called_once_with("Do it", str(issue_path), expected_task)
+    finalize_local.assert_called_once_with(str(issue_path), "codex output", expected_task)
 
 
 def test_process_issue_runs_target_project_skeleton_normally(tmp_path: Path) -> None:
@@ -821,23 +877,174 @@ def test_process_issue_runs_target_project_skeleton_normally(tmp_path: Path) -> 
     assert comment.call_args.args[1] == "DONE report\nTarget Project: skeleton"
 
 
-def test_process_issue_does_not_execute_allowlisted_cross_repo_target_yet() -> None:
+def test_process_issue_runs_skeleton_issue_target_repo_lavalamp_in_local_worktree(
+    tmp_path: Path,
+) -> None:
+    issue_path = tmp_path / "lavalamp" / "issue-143"
     issue = {
         "number": 143,
-        "title": "Target repository stage 1",
+        "title": "Target repository Lavalamp",
         "body": "Target Repository: alanua/Lavalamp\n\n```task\nDo it\n```",
+    }
+
+    with mock.patch.object(
+        runner, "prepare_issue_branch"
+    ) as prepare_branch, mock.patch.object(
+        runner,
+        "prepare_target_repository_issue_worktree",
+        return_value=(0, "ready", issue_path),
+    ) as prepare_target, mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, "codex output")
+    ) as run_codex, mock.patch.object(
+        runner, "finalize_local_worktree_success", return_value="DONE local report"
+    ) as finalize_local, mock.patch.object(
+        runner, "cleanup_target_repository_issue_worktree", return_value=(0, "")
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ):
+        runner.process_issue(issue)
+
+    expected_task = runner.RunnerTask(
+        content="Do it",
+        target_project="lavalamp",
+        target_repository="alanua/Lavalamp",
+        has_target_repository_metadata=True,
+    )
+    prepare_branch.assert_not_called()
+    prepare_target.assert_called_once_with("alanua/Lavalamp", 143)
+    run_codex.assert_called_once_with("Do it", str(issue_path), expected_task)
+    finalize_local.assert_called_once_with(str(issue_path), "codex output", expected_task)
+
+
+def test_process_issue_blocks_missing_lavalamp_repo_checkout_before_codex(
+    tmp_path: Path,
+) -> None:
+    checkout = tmp_path / "repos" / "Lavalamp"
+    worktree_root = tmp_path / "worktrees" / "lavalamp"
+    worktree_root.mkdir(parents=True)
+    issue = {
+        "number": 152,
+        "title": "Missing Lavalamp checkout",
+        "body": "Target Repository: alanua/Lavalamp\n\n```task\nDo it\n```",
+    }
+
+    with mock.patch.object(
+        runner, "RUNNER_REPO_SOURCE_BASE", tmp_path / "repos"
+    ), mock.patch.object(
+        runner, "RUNNER_WORKTREE_BASE", tmp_path / "worktrees"
+    ), mock.patch.object(
+        runner, "target_repository_checkout_path", return_value=checkout
+    ), mock.patch.object(
+        runner, "target_repository_worktree_root", return_value=worktree_root
+    ), mock.patch.object(
+        runner, "block_issue"
+    ) as block, mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "run_codex_task"
+    ) as run_codex:
+        runner.process_issue(issue)
+
+    assert "reason=checkout_path_missing" in block.call_args.args[1]
+    assert str(checkout) in block.call_args.args[1]
+    assert block.call_args.kwargs["remove_label"] == runner.LABEL_RUNNING
+    run_codex.assert_not_called()
+
+
+def test_process_issue_blocks_missing_lavalamp_worktree_root_before_codex(
+    tmp_path: Path,
+) -> None:
+    checkout = tmp_path / "repos" / "Lavalamp"
+    worktree_root = tmp_path / "worktrees" / "lavalamp"
+    checkout.mkdir(parents=True)
+    issue = {
+        "number": 153,
+        "title": "Missing Lavalamp worktree root",
+        "body": "Target Repository: alanua/Lavalamp\n\n```task\nDo it\n```",
+    }
+
+    with mock.patch.object(
+        runner, "RUNNER_REPO_SOURCE_BASE", tmp_path / "repos"
+    ), mock.patch.object(
+        runner, "RUNNER_WORKTREE_BASE", tmp_path / "worktrees"
+    ), mock.patch.object(
+        runner, "target_repository_checkout_path", return_value=checkout
+    ), mock.patch.object(
+        runner, "target_repository_worktree_root", return_value=worktree_root
+    ), mock.patch.object(
+        runner, "block_issue"
+    ) as block, mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "run_codex_task"
+    ) as run_codex:
+        runner.process_issue(issue)
+
+    assert "reason=worktree_root_missing" in block.call_args.args[1]
+    assert str(worktree_root) in block.call_args.args[1]
+    run_codex.assert_not_called()
+
+
+def test_process_issue_blocks_unwritable_lavalamp_worktree_root_before_codex(
+    tmp_path: Path,
+) -> None:
+    checkout = tmp_path / "repos" / "Lavalamp"
+    worktree_root = tmp_path / "worktrees" / "lavalamp"
+    checkout.mkdir(parents=True)
+    worktree_root.mkdir(parents=True)
+    issue = {
+        "number": 154,
+        "title": "Unwritable Lavalamp worktree root",
+        "body": "Target Repository: alanua/Lavalamp\n\n```task\nDo it\n```",
+    }
+
+    def access(path: Path, mode: int) -> bool:
+        return path != worktree_root
+
+    with mock.patch.object(
+        runner, "RUNNER_REPO_SOURCE_BASE", tmp_path / "repos"
+    ), mock.patch.object(
+        runner, "RUNNER_WORKTREE_BASE", tmp_path / "worktrees"
+    ), mock.patch.object(
+        runner, "target_repository_checkout_path", return_value=checkout
+    ), mock.patch.object(
+        runner, "target_repository_worktree_root", return_value=worktree_root
+    ), mock.patch.object(
+        runner.os, "access", side_effect=access
+    ), mock.patch.object(
+        runner, "block_issue"
+    ) as block, mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "run_codex_task"
+    ) as run_codex:
+        runner.process_issue(issue)
+
+    assert "reason=worktree_root_unwritable" in block.call_args.args[1]
+    assert str(worktree_root) in block.call_args.args[1]
+    run_codex.assert_not_called()
+
+
+def test_process_issue_rejects_unallowlisted_repo_alias_before_claim() -> None:
+    issue = {
+        "number": 155,
+        "title": "Repo alias injection",
+        "body": "Repo: /tmp/evil\n\n```task\nDo it\n```",
     }
 
     with mock.patch.object(runner, "block_issue") as block, mock.patch.object(
         runner, "set_issue_label"
-    ) as set_label, mock.patch.object(
-        runner, "prepare_issue_branch"
-    ) as prepare_branch, mock.patch.object(runner, "run_codex_task") as run_codex:
+    ) as set_label, mock.patch.object(runner, "run_codex_task") as run_codex:
         runner.process_issue(issue)
 
-    assert "planning-only" in block.call_args.args[1]
+    assert "Target repository `/tmp/evil` is not allowlisted" in block.call_args.args[1]
     set_label.assert_not_called()
-    prepare_branch.assert_not_called()
     run_codex.assert_not_called()
 
 

@@ -4,7 +4,16 @@ import os
 from pathlib import Path
 from unittest import mock
 
+import pytest
+
 from scripts import runner_poll_github_tasks as runner
+
+
+@pytest.fixture(autouse=True)
+def _disable_runner_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(runner.RUNNER_MEMORY_DB_ENV, raising=False)
+    monkeypatch.delenv(runner.RUNNER_MEMORY_LEDGER_ENV, raising=False)
+    monkeypatch.delenv(runner.RUNNER_MEMORY_DIR_ENV, raising=False)
 
 
 def _issue(number: int) -> dict[str, object]:
