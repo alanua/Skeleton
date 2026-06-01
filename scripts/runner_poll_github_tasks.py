@@ -100,6 +100,10 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     )
 )
 RUNNER_PROJECT_CHECKOUT_BASE = Path("/home/agent/agent-dev")
+RUNNER_ALLOWED_TARGET_PATH_BASES = (
+    RUNNER_PROJECT_CHECKOUT_BASE / "repos",
+    RUNNER_PROJECT_CHECKOUT_BASE / "worktrees",
+)
 PR_BRANCH_VALIDATION_WORKTREE_DIR = "validate-pr-branch"
 PR_BRANCH_VALIDATION_PROFILES = {
     "full_pytest": (("python3", "-m", "pytest", "-q"),),
@@ -207,6 +211,11 @@ def allowed_target_projects() -> frozenset[str]:
 
 
 ALLOWED_TARGET_PROJECTS = allowed_target_projects()
+TARGET_REPOSITORY_METADATA_FIELDS = (
+    "Target Repository",
+    "Selected Repository",
+    "Repo",
+)
 
 
 @dataclass(frozen=True)
@@ -310,27 +319,84 @@ def issue_worktree_path(issue_number: int) -> Path:
 
 
 def target_repository_worktree_root(target_repository: str) -> Path:
-    try:
-        project = get_project_by_repo(load_runner_project_tree(), target_repository)
-    except KeyError as exc:
-        allowed = ", ".join(f"`{repo}`" for repo in sorted(ALLOWED_TARGET_REPOSITORIES))
-        raise ValueError(
-            f"Target repository `{target_repository}` is not allowlisted. Use {allowed}."
-        ) from exc
+    project = _project_for_target_repository(target_repository)
     if target_repository == QUEUE_REPOSITORY:
         return worktree_root()
-    return Path(project["worktree_root"])
+    return _validated_registered_target_path(
+        target_repository, "worktree_root", project["worktree_root"]
+    )
 
 
 def target_repository_checkout_path(target_repository: str) -> Path:
-    try:
-        project = get_project_by_repo(load_runner_project_tree(), target_repository)
-    except KeyError as exc:
-        allowed = ", ".join(f"`{repo}`" for repo in sorted(ALLOWED_TARGET_REPOSITORIES))
+    project = _project_for_target_repository(target_repository)
+    return _validated_registered_target_path(
+        target_repository, "checkout_path", project["checkout_path"]
+    )
+
+
+def _project_for_target_repository(target_repository: str) -> dict[str, Any]:
+    project_tree = load_runner_project_tree()
+    projects = project_tree.get("projects")
+    if isinstance(projects, dict):
+        for project in projects.values():
+            if isinstance(project, dict) and project.get("repo") == target_repository:
+                if project.get("public") is not True:
+                    break
+                return project
+    allowed = ", ".join(f"`{repo}`" for repo in sorted(ALLOWED_TARGET_REPOSITORIES))
+    raise ValueError(
+        f"Target repository `{target_repository}` is not allowlisted. Use {allowed}."
+    )
+
+
+def _path_is_under_allowed_target_base(path: Path) -> bool:
+    resolved_path = path.resolve(strict=False)
+    for base in RUNNER_ALLOWED_TARGET_PATH_BASES:
+        try:
+            resolved_path.relative_to(base.resolve(strict=False))
+        except ValueError:
+            continue
+        return True
+    return False
+
+
+def _validated_registered_target_path(
+    target_repository: str, field: str, raw_path: object
+) -> Path:
+    path_text = str(raw_path)
+    path = Path(path_text).expanduser()
+    if not path.is_absolute():
         raise ValueError(
-            f"Target repository `{target_repository}` is not allowlisted. Use {allowed}."
-        ) from exc
-    return Path(project["checkout_path"])
+            f"Registered {field} for `{target_repository}` must be absolute: {path_text}"
+        )
+    if any(part == ".." for part in path.parts):
+        raise ValueError(
+            f"Registered {field} for `{target_repository}` contains traversal: {path_text}"
+        )
+    if not _path_is_under_allowed_target_base(path):
+        allowed = ", ".join(str(base) for base in RUNNER_ALLOWED_TARGET_PATH_BASES)
+        raise ValueError(
+            f"Registered {field} for `{target_repository}` is outside allowed Runner bases "
+            f"({allowed}): {path_text}"
+        )
+    return path
+
+
+def verify_target_repository_checkout(target_repository: str) -> str | None:
+    checkout_path = target_repository_checkout_path(target_repository)
+    status_lines = [
+        f"target_repository={target_repository}",
+        f"checkout_path={checkout_path}",
+    ]
+    if not checkout_path.exists():
+        return "Target repository checkout is unavailable:\n```\n" + "\n".join(
+            [*status_lines, "reason=checkout_path_missing"]
+        ) + "\n```"
+    if not (checkout_path / ".git").exists():
+        return "Target repository checkout is unavailable:\n```\n" + "\n".join(
+            [*status_lines, "reason=checkout_git_missing"]
+        ) + "\n```"
+    return None
 
 
 def target_repository_issue_worktree_path(
@@ -377,11 +443,17 @@ def prepare_issue_worktree(
 def prepare_target_repository_issue_worktree(
     target_repository: str, issue_number: int
 ) -> tuple[int, str, Path]:
-    path = ensure_safe_target_repository_worktree_path(
-        target_repository,
-        target_repository_issue_worktree_path(target_repository, issue_number),
-    )
-    checkout_path = target_repository_checkout_path(target_repository)
+    try:
+        path = ensure_safe_target_repository_worktree_path(
+            target_repository,
+            target_repository_issue_worktree_path(target_repository, issue_number),
+        )
+        checkout_path = target_repository_checkout_path(target_repository)
+    except ValueError as exc:
+        return 1, str(exc), Path(".")
+    checkout_block_reason = verify_target_repository_checkout(target_repository)
+    if checkout_block_reason is not None:
+        return 1, checkout_block_reason, path
     return prepare_git_issue_worktree(issue_number, checkout_path, path)
 
 
@@ -744,12 +816,22 @@ def _project_id_for_repo(project_tree: dict[str, Any], repo: str) -> str:
     raise KeyError(f"unknown repo {repo!r}.")
 
 
+def _target_repository_metadata_field(metadata: str) -> tuple[str | None, str | None]:
+    for field in TARGET_REPOSITORY_METADATA_FIELDS:
+        value = _body_field(metadata, field)
+        if value is not None:
+            return value, field
+    return None, None
+
+
 def resolve_target_project_metadata(
     body: str,
 ) -> tuple[str | None, str | None, str | None]:
     metadata = (body or "").split("```task", 1)[0]
     target_project = _body_field(metadata, "Target Project")
-    target_repository = _body_field(metadata, "Target Repository")
+    target_repository, _target_repository_field = _target_repository_metadata_field(
+        metadata
+    )
     project_tree = load_runner_project_tree()
 
     if target_project is None and target_repository is None:
@@ -842,7 +924,7 @@ def extract_runner_task(body: str) -> tuple[RunnerTask | None, str | None]:
         ),
         target_repository=target_repository,
         has_target_repository_metadata=(
-            _body_field(metadata, "Target Repository") is not None
+            _target_repository_metadata_field(metadata)[0] is not None
         ),
     ), None
 

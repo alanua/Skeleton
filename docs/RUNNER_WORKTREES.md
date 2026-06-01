@@ -30,13 +30,20 @@ prioritize, lock, or parallelize work by lane.
 Lane metadata smoke tests should confirm `runner:lane:lane-1` and
 `Runner Lane: lane-1` appear while execution remains single-runner.
 
-Target repository routing stage 1 keeps the issue queue in `alanua/Skeleton`.
-Normal task issues may set `Target Repository: <owner/repo>` before the fenced
-task block. The allowlisted targets are `alanua/Skeleton`, `alanua/bauclock`,
-and `alanua/Lavalamp`; omitting the field plans `alanua/Skeleton`. This stage
-parses and validates the target and plans deterministic per-repository issue
-workspace paths only. It does not execute Codex, workspace creation commands,
-pushes, or PR creation in another repository yet.
+Target repository routing keeps the issue queue in `alanua/Skeleton`. Normal
+task issues may set `Target Repository: <owner/repo>` before the fenced task
+block. The compatibility aliases `Selected Repository:` and `Repo:` are also
+accepted, in that priority order after `Target Repository:`. The allowlisted
+targets are the public projects registered in `PROJECT_TREE.yaml`; omitting the
+field selects `alanua/Skeleton`.
+
+Execution policy is also read from `PROJECT_TREE.yaml`. Skeleton tasks continue
+to use Skeleton issue worktrees. Non-Skeleton targets that enable
+`codex_issue_worktree` use their registered `worktree_root`, and Runner blocks
+before Codex when the registered checkout path is outside the approved Runner
+bases, missing, or not a Git checkout. `live_cross_repo` remains disabled for
+all projects, so pushes and draft PR creation outside this task remain a
+separate gate.
 
 An existing issue worktree is reused only when it is clean and already on the
 expected `runner/issue-N` branch. Otherwise the issue is blocked with cleanup
