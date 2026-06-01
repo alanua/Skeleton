@@ -129,3 +129,42 @@ rules:
       - projects/skeleton/PROJECT_OPERATING_STANDARD.md
     plain_language: Normal code work goes through GitHub issue queue and Runner/Codex execution, with Oleksii approving merge/deploy/secrets/runtime gates.
     check: code_work_is_routed_through_issue_queue_runner_and_review_gate
+
+  - id: no_probe_writes_to_real_systems
+    severity: block
+    scope:
+      - github_action
+      - connector_action
+      - file_write
+      - runner_task
+      - tool_discovery
+    source_refs:
+      - COMMANDS.yaml:зафіксуй
+      - projects/skeleton/PROJECT_OPERATING_STANDARD.md
+    plain_language: Use discovery and read tools to inspect capabilities; do not test tool schemas by writing, deleting, merging, creating files, creating issues, or mutating real systems.
+    check: tool_capability_checks_use_read_or_discovery_only
+
+  - id: batch_safe_work_stays_inside_existing_gate
+    severity: block
+    scope:
+      - command_interpretation
+      - runner_task
+      - github_action
+    source_refs:
+      - COMMANDS.yaml:пакетно
+      - COMMANDS.yaml:+
+    plain_language: Batch work is allowed only for same-type routine steps inside the existing approved route, scope, risk level, and gate.
+    check: batch_work_matches_existing_approved_route_scope_risk_and_gate
+
+  - id: blocked_write_tool_requires_stop
+    severity: block
+    scope:
+      - github_action
+      - connector_action
+      - file_write
+      - runner_task
+    source_refs:
+      - COMMANDS.yaml:adaptive_practical_learning
+      - MEMORY_ROUTING.yaml
+    plain_language: If a write or action tool is blocked or unclear, stop and report the blocker instead of trying write-workarounds.
+    check: blocked_write_or_action_tool_does_not_trigger_workaround_write
