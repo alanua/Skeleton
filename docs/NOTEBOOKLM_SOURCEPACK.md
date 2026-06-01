@@ -332,9 +332,11 @@ smoke test.
 
 1. Operator approves a bounded task.
 2. ChatGPT creates a GitHub issue with the `runner:ready` label.
-3. The systemd timer picks up the issue.
+3. The systemd timer picks up the issue and validates any target repository
+   metadata.
 4. The Runner changes the label from `runner:ready` to `runner:running`.
-5. Codex runs in the checkout using the `workspace-write` sandbox.
+5. Codex runs in the selected issue worktree using the `workspace-write`
+   sandbox.
 6. The Runner posts a `DONE` or `BLOCKED` report to the issue.
 7. The Runner changes the label to `runner:done` or `runner:blocked`.
 8. Telegram notification is sent after completion.
@@ -353,6 +355,17 @@ The `runner:lane:*` labels are allowlisted visibility markers. Runner applies
 one when an issue body contains `Runner Lane:` metadata and repeats that lane
 in its final `DONE` or `BLOCKED` issue report. The lifecycle labels still drive
 pickup and completion; lane labels do not route or parallelize Runner work.
+
+## Target repository routing
+
+Repository metadata priority is `Target Repository`, then
+`Selected Repository`, then `Repo`. The allowlisted target repositories are
+`alanua/Skeleton`, `alanua/bauclock`, and `alanua/Lavalamp`. Skeleton tasks use
+Skeleton issue worktrees. BauClock and Lavalamp tasks use their registered
+allowlisted issue worktree roots. The Runner blocks before Codex execution if
+the target repository is not allowlisted, a registered path is outside the
+Runner workspace base, an issue worktree path is unsafe, or the required target
+checkout is missing or is not a Git checkout.
 
 ## Operator rule
 

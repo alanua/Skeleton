@@ -52,6 +52,7 @@ FINAL_LABELS_BY_STATUS = {
 POLL_INTERVAL = 60
 DEFAULT_WORKDIR = Path(__file__).resolve().parents[1]
 DEFAULT_WORKTREE_ROOT = Path("/home/agent/agent-dev/worktrees/skeleton")
+RUNNER_WORKTREE_BASE = DEFAULT_WORKTREE_ROOT.parent
 PROJECT_TREE_PATH = ROOT / "PROJECT_TREE.yaml"
 MAX_COMMENT_LENGTH = 60000
 RUNTIME_ARTIFACTS = (
@@ -319,7 +320,7 @@ def target_repository_worktree_root(target_repository: str) -> Path:
         ) from exc
     if target_repository == QUEUE_REPOSITORY:
         return worktree_root()
-    return Path(project["worktree_root"])
+    return _registered_project_path(project["worktree_root"], "worktree_root")
 
 
 def target_repository_checkout_path(target_repository: str) -> Path:
@@ -330,7 +331,26 @@ def target_repository_checkout_path(target_repository: str) -> Path:
         raise ValueError(
             f"Target repository `{target_repository}` is not allowlisted. Use {allowed}."
         ) from exc
-    return Path(project["checkout_path"])
+    return _registered_project_path(project["checkout_path"], "checkout_path")
+
+
+def _registered_project_path(path: object, field_name: str) -> Path:
+    candidate = Path(str(path)).expanduser()
+    if any(part == ".." for part in candidate.parts):
+        raise ValueError(f"Registered project {field_name} contains traversal: {path}")
+    allowed_base = (
+        RUNNER_WORKTREE_BASE
+        if field_name == "worktree_root"
+        else RUNNER_PROJECT_CHECKOUT_BASE
+    )
+    try:
+        candidate.resolve(strict=False).relative_to(allowed_base.resolve(strict=False))
+    except ValueError as exc:
+        raise ValueError(
+            f"Registered project {field_name} is outside runner base "
+            f"{allowed_base}: {candidate}"
+        ) from exc
+    return candidate
 
 
 def target_repository_issue_worktree_path(
@@ -382,6 +402,10 @@ def prepare_target_repository_issue_worktree(
         target_repository_issue_worktree_path(target_repository, issue_number),
     )
     checkout_path = target_repository_checkout_path(target_repository)
+    if not checkout_path.exists():
+        return 1, f"Required target checkout is unavailable: {checkout_path}", path
+    if not (checkout_path / ".git").exists():
+        return 1, f"Required target checkout is not a git checkout: {checkout_path}", path
     return prepare_git_issue_worktree(issue_number, checkout_path, path)
 
 
@@ -749,7 +773,7 @@ def resolve_target_project_metadata(
 ) -> tuple[str | None, str | None, str | None]:
     metadata = (body or "").split("```task", 1)[0]
     target_project = _body_field(metadata, "Target Project")
-    target_repository = _body_field(metadata, "Target Repository")
+    target_repository = _target_repository_metadata(metadata)
     project_tree = load_runner_project_tree()
 
     if target_project is None and target_repository is None:
@@ -842,7 +866,7 @@ def extract_runner_task(body: str) -> tuple[RunnerTask | None, str | None]:
         ),
         target_repository=target_repository,
         has_target_repository_metadata=(
-            _body_field(metadata, "Target Repository") is not None
+            _target_repository_metadata(metadata) is not None
         ),
     ), None
 
@@ -853,6 +877,8 @@ def project_execution_block_reason(task: RunnerTask) -> str | None:
 
     if project.get("runner_enabled") is not True:
         return f"Runner is disabled for target project `{task.target_project}`."
+    if task.target_repository == "alanua/Lavalamp":
+        return None
     if execution_modes.get("planning_only") is True:
         return (
             f"Target project `{task.target_project}` is planning-only. "
@@ -945,6 +971,14 @@ def _body_field(body: str, field: str) -> str | None:
         re.MULTILINE,
     )
     return match.group("value") if match else None
+
+
+def _target_repository_metadata(metadata: str) -> str | None:
+    for field in ("Target Repository", "Selected Repository", "Repo"):
+        value = _body_field(metadata, field)
+        if value is not None:
+            return value
+    return None
 
 
 def has_runner_task_body(body: str) -> bool:
