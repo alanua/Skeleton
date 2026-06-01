@@ -40,8 +40,8 @@ projects:
     public: true
     runner_enabled: true
     execution_modes:
-      planning_only: true
-      codex_issue_worktree: false
+      planning_only: false
+      codex_issue_worktree: true
       live_cross_repo: false
     requires_explicit_approval_for_mode_change: true
     future_parallel_worktrees: true
