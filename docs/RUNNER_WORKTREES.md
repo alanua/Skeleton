@@ -30,13 +30,21 @@ prioritize, lock, or parallelize work by lane.
 Lane metadata smoke tests should confirm `runner:lane:lane-1` and
 `Runner Lane: lane-1` appear while execution remains single-runner.
 
-Target repository routing stage 1 keeps the issue queue in `alanua/Skeleton`.
-Normal task issues may set `Target Repository: <owner/repo>` before the fenced
-task block. The allowlisted targets are `alanua/Skeleton`, `alanua/bauclock`,
-and `alanua/Lavalamp`; omitting the field plans `alanua/Skeleton`. This stage
-parses and validates the target and plans deterministic per-repository issue
-workspace paths only. It does not execute Codex, workspace creation commands,
-pushes, or PR creation in another repository yet.
+Target repository routing keeps the issue queue in `alanua/Skeleton`. Normal
+task issues may set repository metadata before the fenced task block. The
+metadata priority is `Target Repository`, then `Selected Repository`, then
+`Repo`. The allowlisted targets are `alanua/Skeleton`, `alanua/bauclock`, and
+`alanua/Lavalamp`; omitting repository metadata routes to `alanua/Skeleton`.
+Skeleton tasks keep using Skeleton issue workspaces under the configured
+Skeleton worktree root. BauClock and Lavalamp tasks use their allowlisted
+registered issue workspace roots under `/home/agent/agent-dev/worktrees`.
+
+Target-repository execution is preflighted before Codex runs. The Runner rejects
+unallowlisted repositories, arbitrary registered paths outside the Runner
+workspace base, unsafe issue workspace paths, and target tasks whose registered
+checkout is missing or is not a Git checkout. Successful target-repository Codex
+runs leave the local target issue workspace available for the Runner publish
+boundary instead of asking Codex to commit, push, or create a PR.
 
 An existing issue worktree is reused only when it is clean and already on the
 expected `runner/issue-N` branch. Otherwise the issue is blocked with cleanup
