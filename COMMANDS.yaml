@@ -195,6 +195,7 @@ commands:
     rule: apply_smallest_approved_next_step
     means:
       - continue_already_proposed_safe_next_step
+      - plus_does_not_authorize_new_durable_write_or_route_bypass
       - do_not_replan_unless_new_evidence_changes_route
       - stay_inside_current_scope_risk_and_gate
       - report_classification_route_done_next_practical_step
@@ -214,6 +215,7 @@ commands:
     means:
       - allowed_only_for_same_type_routine_tasks
       - require_same_approved_route_scope_risk_level_and_gate
+      - batch_saves_time_only_inside_existing_approved_gate
       - no_batch_merge_deploy_secrets_runtime_canon_instruction_promotion_unless_explicitly_approved
       - split_and_stop_if_any_item_differs
       - report_processed_split_blocked_validation_summary
