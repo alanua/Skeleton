@@ -4603,3 +4603,61 @@ def test_maintenance_report_does_not_include_command_output_token_values() -> No
 
     assert report.startswith("BLOCKED:")
     assert token not in report
+
+def test_codex_exec_command_default_env_unset_keeps_existing_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(runner.CODEX_MODEL_ENV, raising=False)
+
+    command = runner.codex_exec_command("Task body", "/tmp/work", None)
+
+    assert command == [
+        "codex",
+        "exec",
+        "--sandbox",
+        "workspace-write",
+        "--cd",
+        "/tmp/work",
+        runner.build_codex_task_prompt("Task body", "/tmp/work", None),
+    ]
+
+
+def test_codex_exec_command_blank_env_keeps_existing_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(runner.CODEX_MODEL_ENV, "   ")
+
+    command = runner.codex_exec_command("Task body", "/tmp/work", None)
+
+    assert "--model" not in command
+    assert command == [
+        "codex",
+        "exec",
+        "--sandbox",
+        "workspace-write",
+        "--cd",
+        "/tmp/work",
+        runner.build_codex_task_prompt("Task body", "/tmp/work", None),
+    ]
+
+
+def test_codex_exec_command_env_override_inserts_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(runner.CODEX_MODEL_ENV, "gpt-5-codex")
+
+    command = runner.codex_exec_command("Task body", "/tmp/work", None)
+
+    assert command[:6] == [
+        "codex",
+        "exec",
+        "--sandbox",
+        "workspace-write",
+        "--model",
+        "gpt-5-codex",
+    ]
+    assert command[6:8] == ["--cd", "/tmp/work"]
+
+
+def test_codex_exec_command_rejects_invalid_model_before_run_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(runner.CODEX_MODEL_ENV, "../../bad")
+
+    with mock.patch.object(runner, "run_command") as run_command:
+        with pytest.raises(ValueError, match="unsupported characters"):
+            runner.run_codex_task("Task body", "/tmp/work", None)
+
+    run_command.assert_not_called()

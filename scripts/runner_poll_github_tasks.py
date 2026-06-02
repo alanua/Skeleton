@@ -64,6 +64,7 @@ TELEGRAM_API_BASE = "https://api.telegram.org"
 TELEGRAM_TIMEOUT_SECONDS = 10
 TELEGRAM_CALLBACK_DATA_LIMIT = 64
 TELEGRAM_CALLBACK_HMAC_ENV = "SKELETON_TG_CALLBACK_HMAC_SECRET"
+CODEX_MODEL_ENV = "SKELETON_CODEX_MODEL"
 TELEGRAM_CARD_TEST_SUMMARY = "Runner pytest completed before draft PR creation."
 TELEGRAM_CARD_RISK_SUMMARY = "Review the changed-file list before approval."
 TELEGRAM_PR_READY_BUTTON_LABELS = {
@@ -168,6 +169,7 @@ _PYTEST_SUMMARY_LINE_RE = re.compile(
     r"(?i)\b(?:\d+\s+(?:passed|failed|skipped|xfailed|xpassed|error|errors|warnings?)"
     r"|no tests ran|failed|passed)\b"
 )
+_SAFE_CODEX_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,80}$")
 
 
 @dataclass(frozen=True)
@@ -1054,6 +1056,40 @@ def build_codex_task_prompt(
     )
 
 
+def selected_codex_model() -> str | None:
+    model = os.environ.get(CODEX_MODEL_ENV)
+    if model is None:
+        return None
+    model = model.strip()
+    if not model:
+        return None
+    if _SAFE_CODEX_MODEL_RE.fullmatch(model) is None:
+        raise ValueError("Configured Codex model contains unsupported characters.")
+    return model
+
+
+def codex_exec_command(
+    task_content: str, workdir: str, task: RunnerTask | None = None
+) -> list[str]:
+    command = [
+        "codex",
+        "exec",
+        "--sandbox",
+        "workspace-write",
+    ]
+    model = selected_codex_model()
+    if model is not None:
+        command.extend(["--model", model])
+    command.extend(
+        [
+            "--cd",
+            workdir,
+            build_codex_task_prompt(task_content, workdir, task),
+        ]
+    )
+    return command
+
+
 def run_codex_task(
     task_content: str, workdir: str, task: RunnerTask | None = None
 ) -> tuple[int, str]:
@@ -1063,15 +1099,7 @@ def run_codex_task(
         task_file.write(task_content)
         task_file.flush()
         return run_command(
-            [
-                "codex",
-                "exec",
-                "--sandbox",
-                "workspace-write",
-                "--cd",
-                workdir,
-                build_codex_task_prompt(task_content, workdir, task),
-            ],
+            codex_exec_command(task_content, workdir, task),
             cwd=workdir,
         )
 
