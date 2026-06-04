@@ -81,6 +81,7 @@ CHECK_SKELETON_FRESHNESS = "check_skeleton_freshness"
 ENSURE_PROJECT_CHECKOUT = "ensure_project_checkout"
 VALIDATE_PR_BRANCH = "validate_pr_branch"
 PREFLIGHT_PR_REFRESH = "preflight_pr_refresh"
+HERMES_WORKER_PREFLIGHT = "hermes_worker_preflight"
 INSPECT_PR_MERGEABILITY = "inspect_pr_mergeability"
 BACKFILL_SKELETON_MEMORY_RECENT = "backfill_skeleton_memory_recent"
 INSPECT_ISSUE_WORKTREE_FOR_PUBLISH = "inspect_issue_worktree_for_publish"
@@ -94,6 +95,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         ENSURE_PROJECT_CHECKOUT,
         VALIDATE_PR_BRANCH,
         PREFLIGHT_PR_REFRESH,
+        HERMES_WORKER_PREFLIGHT,
         INSPECT_PR_MERGEABILITY,
         BACKFILL_SKELETON_MEMORY_RECENT,
         INSPECT_ISSUE_WORKTREE_FOR_PUBLISH,
@@ -2202,6 +2204,56 @@ def _maintenance_report(
     )
 
 
+_HOST_INVENTORY_VALUE_RE = re.compile(r"[^A-Za-z0-9._:+-]+")
+
+
+def _sanitized_host_inventory_value(value: object, *, fallback: str = "unknown") -> str:
+    text = str(value or "").strip()
+    if not text:
+        return fallback
+    sanitized = _HOST_INVENTORY_VALUE_RE.sub("_", text).strip("._:+-")
+    return (sanitized or fallback)[:80]
+
+
+def hermes_worker_preflight() -> str:
+    task_id = HERMES_WORKER_PREFLIGHT
+    try:
+        uname = os.uname()
+    except AttributeError:
+        system = sys.platform
+        kernel_release = "unknown"
+        machine = "unknown"
+        nodename = ""
+    else:
+        system = uname.sysname
+        kernel_release = uname.release
+        machine = uname.machine
+        nodename = uname.nodename
+
+    host_id = (
+        hashlib.sha256(nodename.encode("utf-8", errors="ignore")).hexdigest()[:12]
+        if nodename
+        else "unknown"
+    )
+    python_version = ".".join(str(part) for part in sys.version_info[:3])
+    tool_lines = [
+        f"tool_{tool}=present" if shutil.which(tool) else f"tool_{tool}=missing"
+        for tool in ("python3", "git", "gh", "codex")
+    ]
+    status_lines = [
+        "inventory_schema=hermes_worker_preflight_v1",
+        "report_mode=read_only",
+        f"host_id_sha256_12={host_id}",
+        f"system={_sanitized_host_inventory_value(system)}",
+        f"kernel_release={_sanitized_host_inventory_value(kernel_release)}",
+        f"machine={_sanitized_host_inventory_value(machine)}",
+        f"python_version={_sanitized_host_inventory_value(python_version)}",
+        f"runner_root_exists={str(ROOT.exists()).lower()}",
+        *tool_lines,
+    ]
+    return _maintenance_report("DONE", task_id, status_lines, "met")
+
+
 def _non_interactive_sudo(*args: str) -> list[str]:
     return ["sudo", "-n", *args]
 
@@ -4244,6 +4296,8 @@ def dispatch_runtime_maintenance_task(
             return validate_pr_branch(body)
         if task_id == PREFLIGHT_PR_REFRESH:
             return preflight_pr_refresh(body)
+        if task_id == HERMES_WORKER_PREFLIGHT:
+            return hermes_worker_preflight()
         if task_id == INSPECT_PR_MERGEABILITY:
             return inspect_pr_mergeability(body)
         if task_id == BACKFILL_SKELETON_MEMORY_RECENT:
