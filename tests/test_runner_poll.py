@@ -443,7 +443,9 @@ def test_done_telegram_message_includes_pr_url_when_available() -> None:
     )
 
 
-def test_run_codex_task_calls_codex_exec() -> None:
+def test_run_codex_task_calls_codex_exec(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(runner.CODEX_MODEL_ENV, "gpt-5.5")
+
     with mock.patch.object(runner, "run_command", return_value=(0, "ok")) as run_command:
         code, output = runner.run_codex_task("Task body", "/repo")
 
@@ -454,6 +456,8 @@ def test_run_codex_task_calls_codex_exec() -> None:
             "exec",
             "--sandbox",
             "workspace-write",
+            "--model",
+            "gpt-5.5",
             "--cd",
             "/repo",
             runner.build_codex_task_prompt("Task body", "/repo"),
