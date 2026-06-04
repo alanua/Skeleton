@@ -112,7 +112,7 @@ Validation Profile: full_pytest
 `Pull Request` is required. `Expected Head SHA` is optional but, when present,
 must match the PR head reported by GitHub. `Validation Profile` is optional and
 defaults to `full_pytest`; the only allowed values are `full_pytest` and
-`knowledge_intake`.
+`knowledge_intake`, and `time_ledger_stage1`.
 
 It may only:
 
@@ -129,7 +129,10 @@ It may only:
 7. Run only the selected allowlisted validation profile:
    `full_pytest` runs `python3 -m pytest -q`; `knowledge_intake` runs
    `python3 -m pytest -q tests/test_knowledge_intake.py` followed by
-   `python3 -m pytest -q`.
+   `python3 -m pytest -q`; `time_ledger_stage1` validates BauClock PR 52 Time
+   Ledger changes by running `python3 -m pytest -q tests/test_time_ledger.py`
+   followed by `python3 -m py_compile api/services/arbzg_policy.py
+   api/services/time_ledger.py tests/test_time_ledger.py`.
 
 It reports `DONE` only when PR metadata, safe workspace preparation, exact head
 verification, and every profile command succeeds. Missing or invalid PR numbers,

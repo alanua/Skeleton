@@ -4060,6 +4060,73 @@ def test_validate_pr_branch_knowledge_intake_profile_runs_allowlisted_tests(
     assert "failed_output_start" not in report
 
 
+def test_validate_pr_branch_time_ledger_stage1_profile_validates_bauclock_pr_52(
+    tmp_path: Path,
+) -> None:
+    validation_path = tmp_path / "validate-pr-branch" / "pr-52"
+    bauclock_head_sha = "b6fb3f2df6332c710b795e5ea1559fbd8ecd936e"
+
+    def run_validation_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        if command[:3] == ["gh", "pr", "view"]:
+            return 0, json.dumps(
+                _pr_validation_state(number=52, headRefOid=bauclock_head_sha)
+            )
+        if command[:3] == ["git", "fetch", "origin"]:
+            return 0, ""
+        if command[:2] == ["git", "rev-parse"] and cwd == runner.ROOT:
+            return 0, f"{bauclock_head_sha}\n"
+        if command[:3] == ["git", "worktree", "add"]:
+            return 0, ""
+        if command == ["git", "rev-parse", "HEAD"] and cwd == validation_path:
+            return 0, f"{bauclock_head_sha}\n"
+        if command in (
+            ["python3", "-m", "pytest", "-q", "tests/test_time_ledger.py"],
+            [
+                "python3",
+                "-m",
+                "py_compile",
+                "api/services/arbzg_policy.py",
+                "api/services/time_ledger.py",
+                "tests/test_time_ledger.py",
+            ],
+        ) and cwd == validation_path:
+            return 0, ""
+        return 2, "unexpected command"
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(tmp_path)}, clear=True
+    ), mock.patch.object(Path, "exists", autospec=True, return_value=False), mock.patch.object(
+        Path, "mkdir", autospec=True
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run_validation_command
+    ) as run:
+        report = runner.validate_pr_branch(
+            _validate_pr_issue_body(
+                pr_number=52,
+                expected_head_sha=bauclock_head_sha,
+                profile="time_ledger_stage1",
+            )
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert commands[-2:] == [
+        ["python3", "-m", "pytest", "-q", "tests/test_time_ledger.py"],
+        [
+            "python3",
+            "-m",
+            "py_compile",
+            "api/services/arbzg_policy.py",
+            "api/services/time_ledger.py",
+            "tests/test_time_ledger.py",
+        ],
+    ]
+    assert "tests/test_arbzg_policy.py" not in report
+    assert "api/services/telegram_handlers.py" not in report
+
+
 def test_validate_pr_branch_failed_knowledge_intake_command_reports_output(
     tmp_path: Path,
 ) -> None:

@@ -112,6 +112,17 @@ PR_BRANCH_VALIDATION_PROFILES = {
         ("python3", "-m", "pytest", "-q", "tests/test_knowledge_intake.py"),
         ("python3", "-m", "pytest", "-q"),
     ),
+    "time_ledger_stage1": (
+        ("python3", "-m", "pytest", "-q", "tests/test_time_ledger.py"),
+        (
+            "python3",
+            "-m",
+            "py_compile",
+            "api/services/arbzg_policy.py",
+            "api/services/time_ledger.py",
+            "tests/test_time_ledger.py",
+        ),
+    ),
 }
 VALIDATION_FAILED_OUTPUT_LIMIT = 4000
 VALIDATION_FAILED_OUTPUT_TRUNCATED_MARKER = (
