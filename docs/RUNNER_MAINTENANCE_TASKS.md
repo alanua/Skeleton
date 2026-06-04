@@ -98,30 +98,33 @@ metadata, unknown projects, unsafe paths, path traversal, existing checkouts
 without `.git`, wrong remotes, clone failures, failed origin reads, and remote
 mismatches after preparation.
 
-`validate_pr_branch` validates an open Skeleton PR branch and must include pull
-request metadata:
+`validate_pr_branch` validates an open pull request branch for an allowlisted
+public repository and must include pull request metadata:
 
 ```text
 Mode: RUNTIME_MAINTENANCE_TASK
 Maintenance Task ID: validate_pr_branch
+Repository: alanua/Skeleton
 Pull Request: 123
 Expected Head SHA: 0123456789abcdef0123456789abcdef01234567
 Validation Profile: full_pytest
 ```
 
-`Pull Request` is required. `Expected Head SHA` is optional but, when present,
-must match the PR head reported by GitHub. `Validation Profile` is optional and
-defaults to `full_pytest`; the only allowed values are `full_pytest` and
-`knowledge_intake`.
+`Repository` is optional and defaults to `alanua/Skeleton`; it may also be
+supplied as `Target Repository`, `Selected Repository`, or `Repo`. `Pull
+Request` is required. `Expected Head SHA` is optional but, when present, must
+match the PR head reported by GitHub. `Validation Profile` is optional and
+defaults to `full_pytest`; the only allowed values are `full_pytest`,
+`knowledge_intake`, and `time_ledger_stage1`.
 
 It may only:
 
-1. Query PR metadata with `gh pr view --repo alanua/Skeleton`.
+1. Query PR metadata with `gh pr view --repo <allowlisted repository>`.
 2. Continue only when the PR is open and targets base branch `main`.
 3. Use the PR head SHA from GitHub metadata, not branch names or commands from
    issue text.
 4. Prepare a dedicated validation worktree under the configured Runner
-   worktree root at `validate-pr-branch/pr-{number}`.
+   worktree root for that repository at `validate-pr-branch/pr-{number}`.
 5. Fetch only the GitHub PR head ref for the requested PR and verify it matches
    the exact PR head SHA.
 6. Check out the validation worktree detached at the exact PR head SHA and
@@ -129,16 +132,19 @@ It may only:
 7. Run only the selected allowlisted validation profile:
    `full_pytest` runs `python3 -m pytest -q`; `knowledge_intake` runs
    `python3 -m pytest -q tests/test_knowledge_intake.py` followed by
-   `python3 -m pytest -q`.
+   `python3 -m pytest -q`; `time_ledger_stage1` runs
+   `python3 -m pytest -q tests/test_time_corrections.py`.
 
 It reports `DONE` only when PR metadata, safe workspace preparation, exact head
 verification, and every profile command succeeds. Missing or invalid PR numbers,
-unsupported profiles, closed PRs, non-`main` base branches, expected head SHA
-mismatches, unsafe validation paths, fetch or checkout failures, head mismatches,
-and test failures are reported as `BLOCKED`. Failed validation profile commands
-include the allowlisted command and a bounded, sanitized output block between
-`failed_output_start` and `failed_output_end`; long output is truncated with an
-explicit marker.
+unsupported repositories or profiles, closed PRs, non-`main` base branches,
+expected head SHA mismatches, unsafe validation paths, fetch or checkout
+failures, head mismatches, and test failures are reported as `BLOCKED`. Reports
+include the exact repository, PR number, PR head branch, head SHA, allowlisted
+commands, pass/fail status, and any detected missing dependency module names.
+Failed validation profile commands include the allowlisted command and a
+bounded, sanitized output block between `failed_output_start` and
+`failed_output_end`; long output is truncated with an explicit marker.
 
 `check_skeleton_freshness` is a short status-only check before Skeleton project
 work starts or after recent merges. It requires no target metadata:
