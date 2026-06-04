@@ -20,7 +20,8 @@ enforcement_model:
   notes:
     - Rules are read by operators and adapters as a compact index.
     - Future enforcement must be added only through a separate approved task.
-    - Block rules describe unsafe actions; they are not automatic runtime hooks in this stage.
+    - Severity block is a policy-level classification for unsafe actions.
+    - Block rules are not automatic runtime hooks while runtime_enforcement is false.
 
 allowed_severities:
   - block
@@ -37,7 +38,7 @@ rules:
       - telegram_report
       - runner_task
     source_refs:
-      - MEMORY_ROUTING.yaml:secrets_private
+      - MEMORY_ROUTING.yaml:secrets_credentials
       - projects/skeleton/PROJECT_OPERATING_STANDARD.md
       - scripts/README_RUNNER_SETUP.md
     plain_language: Do not put secrets, tokens, passwords, environment file contents, or private credentials into public outputs.
@@ -51,7 +52,7 @@ rules:
       - runtime_maintenance
       - telegram_approval
     source_refs:
-      - COMMANDS.yaml:risky_action_boundaries
+      - COMMANDS.yaml:risky_actions_merge_deploy_runtime_secrets_destructive_require_separate_explicit_approval
       - MEMORY_ROUTING.yaml:risky_action_rule
       - projects/skeleton/PROJECT_OPERATING_STANDARD.md
       - core/action_gate.py
