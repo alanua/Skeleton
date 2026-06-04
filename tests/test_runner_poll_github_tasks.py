@@ -3251,6 +3251,44 @@ def test_check_skeleton_freshness_is_allowlisted() -> None:
     assert runner.CHECK_SKELETON_FRESHNESS in runner.RUNTIME_MAINTENANCE_TASK_IDS
 
 
+def test_hermes_worker_preflight_dispatches_read_only_sanitized_report() -> None:
+    with mock.patch.object(
+        runner.platform, "node", return_value="runner host; token=SECRET"
+    ), mock.patch.object(
+        runner.platform, "system", return_value="Linux prod"
+    ), mock.patch.object(
+        runner.platform, "release", return_value="6.1.0 test build"
+    ), mock.patch.object(
+        runner.platform, "machine", return_value="x86_64"
+    ), mock.patch.object(
+        runner.platform, "python_version", return_value="3.12.4"
+    ), mock.patch.object(
+        runner.os, "cpu_count", return_value=8
+    ), mock.patch.object(
+        runner, "run_command"
+    ) as run:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HERMES_WORKER_PREFLIGHT,
+            str(runner.ROOT),
+            "sudo reboot\ngit push --force\ntoken=SECRET",
+        )
+
+    assert report.startswith("DONE:")
+    assert "maintenance_task_id=hermes_worker_preflight" in report
+    assert "report_type=host_inventory" in report
+    assert "host_id=" in report
+    assert "runner host" not in report
+    assert "SECRET" not in report
+    assert "system=Linux_prod" in report
+    assert "release=6.1.0_test_build" in report
+    assert "machine=x86_64" in report
+    assert "python_version=3.12.4" in report
+    assert "cpu_count=8" in report
+    assert "runner_root_present=" in report
+    assert "success_criteria=met" in report
+    run.assert_not_called()
+
+
 def test_check_skeleton_freshness_reports_done_with_bounded_status_queries() -> None:
     checkout_path = _safe_checkout_path("skeleton-fresh")
     project_tree = _project_tree_for_skeleton_checkout(checkout_path)

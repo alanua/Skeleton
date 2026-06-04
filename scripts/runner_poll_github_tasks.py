@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+import platform
 import re
 import shlex
 import shutil
@@ -85,6 +86,7 @@ INSPECT_PR_MERGEABILITY = "inspect_pr_mergeability"
 BACKFILL_SKELETON_MEMORY_RECENT = "backfill_skeleton_memory_recent"
 INSPECT_ISSUE_WORKTREE_FOR_PUBLISH = "inspect_issue_worktree_for_publish"
 PUBLISH_ISSUE_WORKTREE_PR = "publish_issue_worktree_pr"
+HERMES_WORKER_PREFLIGHT = "hermes_worker_preflight"
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
         SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
@@ -98,6 +100,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         BACKFILL_SKELETON_MEMORY_RECENT,
         INSPECT_ISSUE_WORKTREE_FOR_PUBLISH,
         PUBLISH_ISSUE_WORKTREE_PR,
+        HERMES_WORKER_PREFLIGHT,
     )
 )
 RUNNER_PROJECT_CHECKOUT_BASE = Path("/home/agent/agent-dev")
@@ -2202,6 +2205,36 @@ def _maintenance_report(
     )
 
 
+def _sanitized_report_value(value: object, default: str = "unknown") -> str:
+    text = str(value).strip() if value is not None else ""
+    if not text:
+        return default
+    sanitized = re.sub(r"[^A-Za-z0-9._:/+-]+", "_", text).strip("_")
+    return (sanitized or default)[:80]
+
+
+def hermes_worker_preflight() -> str:
+    task_id = HERMES_WORKER_PREFLIGHT
+    host_name = platform.node()
+    host_id = (
+        hashlib.sha256(host_name.encode("utf-8")).hexdigest()[:12]
+        if host_name
+        else "unknown"
+    )
+    cpu_count = os.cpu_count()
+    status_lines = [
+        "report_type=host_inventory",
+        f"host_id={host_id}",
+        f"system={_sanitized_report_value(platform.system())}",
+        f"release={_sanitized_report_value(platform.release())}",
+        f"machine={_sanitized_report_value(platform.machine())}",
+        f"python_version={_sanitized_report_value(platform.python_version())}",
+        f"cpu_count={cpu_count if cpu_count is not None else 'unknown'}",
+        f"runner_root_present={str(ROOT.exists()).lower()}",
+    ]
+    return _maintenance_report("DONE", task_id, status_lines, "met")
+
+
 def _non_interactive_sudo(*args: str) -> list[str]:
     return ["sudo", "-n", *args]
 
@@ -4252,6 +4285,8 @@ def dispatch_runtime_maintenance_task(
             return inspect_issue_worktree_for_publish(body)
         if task_id == PUBLISH_ISSUE_WORKTREE_PR:
             return publish_issue_worktree_pr(body)
+        if task_id == HERMES_WORKER_PREFLIGHT:
+            return hermes_worker_preflight()
         return check_project_checkout(body)
     except Exception:
         return _maintenance_report(

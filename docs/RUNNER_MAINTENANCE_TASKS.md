@@ -187,6 +187,27 @@ output. It may include only safe synthesized status lines such as current
 `main` SHA, checkout sync state, open PR/issue counts, and bounded reminder
 notes.
 
+`hermes_worker_preflight` is a read-only, report-only host inventory preflight
+for the future Hermes worker. It requires no target metadata:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: hermes_worker_preflight
+```
+
+It may only:
+
+1. Read host inventory facts through Python standard-library APIs.
+2. Report a hashed host id, OS family, OS release, machine architecture, Python
+   version, CPU count, and whether the configured Runner root is present.
+3. Sanitize report values to short `key=value` status lines.
+
+It reports `DONE` when the inventory report was produced. It must not run shell
+commands, call `sudo`, query GitHub, read secrets, inspect environment values,
+mutate files, mutate services, or execute arbitrary issue text. Reports must not
+include raw hostnames, tokens, environment values, raw command output, or
+operator-provided task text.
+
 `inspect_issue_worktree_for_publish` is a Stage 1 delivery-only publisher
 inspection. It is validation/dry-run only and must include explicit metadata:
 
