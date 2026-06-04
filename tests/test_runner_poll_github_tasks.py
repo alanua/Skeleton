@@ -2936,6 +2936,7 @@ def _project_tree_for_skeleton_checkout(checkout_path: Path) -> dict[str, object
 
 def _validate_pr_issue_body(
     *,
+    repository: str | None = None,
     pr_number: int | str | None = 123,
     expected_head_sha: str | None = HEAD_SHA,
     profile: str | None = "full_pytest",
@@ -2945,6 +2946,8 @@ def _validate_pr_issue_body(
         "Mode: RUNTIME_MAINTENANCE_TASK",
         f"Maintenance Task ID: {runner.VALIDATE_PR_BRANCH}",
     ]
+    if repository is not None:
+        lines.append(f"Repository: {repository}")
     if pr_number is not None:
         lines.append(f"Pull Request: {pr_number}")
     if expected_head_sha is not None:
@@ -4060,6 +4063,103 @@ def test_validate_pr_branch_knowledge_intake_profile_runs_allowlisted_tests(
     assert "failed_output_start" not in report
 
 
+def test_validate_pr_branch_bauclock_time_ledger_profile_uses_target_checkout(
+    tmp_path: Path,
+) -> None:
+    del tmp_path
+    checkout_path = _safe_checkout_path("bauclock-validation-main")
+    worktree_root = _safe_checkout_path("bauclock-validation-worktrees")
+    validation_path = worktree_root / "validate-pr-branch" / "pr-52"
+    project_tree = json.loads(json.dumps(runner.load_runner_project_tree()))
+    project_tree["projects"]["bauclock"]["checkout_path"] = str(checkout_path)
+    project_tree["projects"]["bauclock"]["worktree_root"] = str(worktree_root)
+
+    def run_validation_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        if command == [
+            "gh",
+            "pr",
+            "view",
+            "52",
+            "--repo",
+            "alanua/bauclock",
+            "--json",
+            "number,state,baseRefName,headRefName,headRefOid",
+        ]:
+            return 0, json.dumps(
+                _pr_validation_state(number=52, headRefName="runner/issue-668")
+            )
+        if (
+            command
+            == [
+                "git",
+                "fetch",
+                "origin",
+                "+refs/pull/52/head:refs/remotes/origin/pr-validation/52",
+            ]
+            and cwd == checkout_path
+        ):
+            return 0, ""
+        if (
+            command
+            == ["git", "rev-parse", "refs/remotes/origin/pr-validation/52^{commit}"]
+            and cwd == checkout_path
+        ):
+            return 0, f"{HEAD_SHA}\n"
+        if (
+            command
+            == ["git", "worktree", "add", "--detach", str(validation_path), HEAD_SHA]
+            and cwd == checkout_path
+        ):
+            return 0, ""
+        if command == ["git", "rev-parse", "HEAD"] and cwd == validation_path:
+            return 0, f"{HEAD_SHA}\n"
+        if (
+            command
+            == ["python3", "-m", "pytest", "-q", "tests/test_time_corrections.py"]
+            and cwd == validation_path
+        ):
+            return 0, "12 passed\n"
+        return 2, "unexpected command"
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(
+        runner, "verify_target_repository_checkout", return_value=None
+    ), mock.patch.object(
+        Path, "exists", autospec=True, return_value=False
+    ), mock.patch.object(
+        Path, "mkdir", autospec=True
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run_validation_command
+    ) as run:
+        report = runner.validate_pr_branch(
+            _validate_pr_issue_body(
+                repository="alanua/bauclock",
+                pr_number=52,
+                profile="time_ledger_stage1",
+            )
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert "repository=alanua/bauclock" in report
+    assert "pull_request=52" in report
+    assert "head_ref=runner/issue-668" in report
+    assert f"head_sha={HEAD_SHA}" in report
+    assert [
+        "python3",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/test_time_corrections.py",
+    ] in commands
+    assert all(command[:2] != ["git", "checkout"] for command in commands)
+    assert all(command[:2] != ["git", "merge"] for command in commands)
+    assert all(command[:2] != ["git", "push"] for command in commands)
+
+
 def test_validate_pr_branch_failed_knowledge_intake_command_reports_output(
     tmp_path: Path,
 ) -> None:
@@ -4116,6 +4216,43 @@ def test_validate_pr_branch_failed_knowledge_intake_command_reports_output(
     assert "SKELETON_TG_CALLBACK_HMAC_SECRET=should-not-leak" not in report
     assert "[redacted environment variable]" in report
     assert "failed_output_end" in report
+
+
+def test_validate_pr_branch_reports_missing_dependency_module_names(
+    tmp_path: Path,
+) -> None:
+    validation_path = tmp_path / "validate-pr-branch" / "pr-123"
+
+    def run_validation_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        if command[:3] == ["gh", "pr", "view"]:
+            return 0, json.dumps(_pr_validation_state())
+        if command[:3] == ["git", "fetch", "origin"]:
+            return 0, ""
+        if command[:2] == ["git", "rev-parse"] and cwd == runner.ROOT:
+            return 0, f"{HEAD_SHA}\n"
+        if command[:3] == ["git", "worktree", "add"]:
+            return 0, ""
+        if command == ["git", "rev-parse", "HEAD"] and cwd == validation_path:
+            return 0, f"{HEAD_SHA}\n"
+        if command == ["python3", "-m", "pytest", "-q"] and cwd == validation_path:
+            return 1, "ModuleNotFoundError: No module named 'aiogram'\n"
+        return 2, "unexpected command"
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(tmp_path)}, clear=True
+    ), mock.patch.object(
+        Path, "exists", autospec=True, return_value=False
+    ), mock.patch.object(
+        Path, "mkdir", autospec=True
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run_validation_command
+    ):
+        report = runner.validate_pr_branch(_validate_pr_issue_body())
+
+    assert report.startswith("BLOCKED:")
+    assert "missing_dependency_module=aiogram" in report
 
 
 def test_validate_pr_branch_failed_command_output_is_truncated(

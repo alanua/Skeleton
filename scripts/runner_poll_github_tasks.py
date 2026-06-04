@@ -112,6 +112,9 @@ PR_BRANCH_VALIDATION_PROFILES = {
         ("python3", "-m", "pytest", "-q", "tests/test_knowledge_intake.py"),
         ("python3", "-m", "pytest", "-q"),
     ),
+    "time_ledger_stage1": (
+        ("python3", "-m", "pytest", "-q", "tests/test_time_corrections.py"),
+    ),
 }
 VALIDATION_FAILED_OUTPUT_LIMIT = 4000
 VALIDATION_FAILED_OUTPUT_TRUNCATED_MARKER = (
@@ -256,6 +259,7 @@ class RunnerMemoryConfig:
 
 @dataclass(frozen=True)
 class PrBranchValidationRequest:
+    repository: str
     pr_number: int
     expected_head_sha: str | None
     profile: str
@@ -2886,9 +2890,13 @@ def _pr_branch_validation_metadata(
     body: str,
 ) -> tuple[PrBranchValidationRequest | None, str | None]:
     metadata = (body or "").split("```task", 1)[0]
+    repository, _repository_field = _target_repository_metadata_field(metadata)
+    repository = repository or _body_field(metadata, "Repository") or REPO
     pr_number = _body_field(metadata, "Pull Request")
     expected_head_sha = _body_field(metadata, "Expected Head SHA")
     profile = _body_field(metadata, "Validation Profile") or "full_pytest"
+    if repository not in ALLOWED_TARGET_REPOSITORIES:
+        return None, "unsupported_repository"
     if not isinstance(pr_number, str) or not re.fullmatch(r"[1-9]\d*", pr_number):
         return None, "missing_or_invalid_pull_request"
     if (
@@ -2900,6 +2908,7 @@ def _pr_branch_validation_metadata(
         return None, "unsupported_validation_profile"
     return (
         PrBranchValidationRequest(
+            repository=repository,
             pr_number=int(pr_number),
             expected_head_sha=(
                 expected_head_sha.lower()
@@ -2912,7 +2921,7 @@ def _pr_branch_validation_metadata(
     )
 
 
-def _get_pr_branch_validation_state(pr_number: int) -> dict[str, Any]:
+def _get_pr_branch_validation_state(repository: str, pr_number: int) -> dict[str, Any]:
     code, output = run_command(
         [
             "gh",
@@ -2920,7 +2929,7 @@ def _get_pr_branch_validation_state(pr_number: int) -> dict[str, Any]:
             "view",
             str(pr_number),
             "--repo",
-            REPO,
+            repository,
             "--json",
             "number,state,baseRefName,headRefName,headRefOid",
         ]
@@ -3170,12 +3179,16 @@ def preflight_pr_refresh(body: str) -> str:
     return _maintenance_report("DONE", task_id, status_lines, "met")
 
 
-def _validation_worktree_path(pr_number: int) -> Path:
-    return worktree_root() / PR_BRANCH_VALIDATION_WORKTREE_DIR / f"pr-{pr_number}"
+def _validation_worktree_path(repository: str, pr_number: int) -> Path:
+    return (
+        target_repository_worktree_root(repository)
+        / PR_BRANCH_VALIDATION_WORKTREE_DIR
+        / f"pr-{pr_number}"
+    )
 
 
-def _ensure_safe_validation_worktree_path(path: str | Path) -> Path:
-    root = worktree_root().resolve(strict=False)
+def _ensure_safe_validation_worktree_path(repository: str, path: str | Path) -> Path:
+    root = target_repository_worktree_root(repository).resolve(strict=False)
     candidate = Path(path).expanduser().resolve(strict=False)
     if candidate == root:
         raise ValueError("validation worktree cannot be the worktree root")
@@ -3184,6 +3197,17 @@ def _ensure_safe_validation_worktree_path(path: str | Path) -> Path:
     except ValueError as exc:
         raise ValueError("validation worktree is outside runner worktree root") from exc
     return candidate
+
+
+def _pr_branch_validation_checkout_path(
+    repository: str,
+) -> tuple[Path | None, str | None]:
+    if repository == REPO:
+        return ROOT, None
+    checkout_block_reason = verify_target_repository_checkout(repository)
+    if checkout_block_reason is not None:
+        return None, "target_repository_checkout_unavailable"
+    return target_repository_checkout_path(repository), None
 
 
 def _pr_branch_validation_block_reason(
@@ -3236,13 +3260,35 @@ def _bounded_validation_command_output(output: str) -> str:
 def _validation_command_failure_lines(
     index: int, command: tuple[str, ...], exit_code: int, output: str
 ) -> list[str]:
-    return [
+    lines = [
         f"step=validation_profile_command_{index} status=failed exit_code={exit_code}",
         f"failed_command={shlex.join(command)}",
-        "failed_output_start",
-        _bounded_validation_command_output(output),
-        "failed_output_end",
     ]
+    lines.extend(_missing_dependency_module_lines(output))
+    lines.extend(
+        (
+            "failed_output_start",
+            _bounded_validation_command_output(output),
+            "failed_output_end",
+        )
+    )
+    return lines
+
+
+_MISSING_DEPENDENCY_MODULE_RES = (
+    re.compile(r"ModuleNotFoundError:\s+No module named ['\"](?P<module>[^'\"]+)['\"]"),
+    re.compile(r"ImportError:\s+No module named ['\"](?P<module>[^'\"]+)['\"]"),
+)
+
+
+def _missing_dependency_module_lines(output: str) -> list[str]:
+    modules: list[str] = []
+    for pattern in _MISSING_DEPENDENCY_MODULE_RES:
+        for match in pattern.finditer(output or ""):
+            module = match.group("module").strip()
+            if module and module not in modules:
+                modules.append(module)
+    return [f"missing_dependency_module={module}" for module in modules]
 
 
 def validate_pr_branch(body: str) -> str:
@@ -3253,12 +3299,26 @@ def validate_pr_branch(body: str) -> str:
     assert request is not None
 
     status_lines = [
-        f"repository={REPO}",
+        f"repository={request.repository}",
         f"pull_request={request.pr_number}",
         f"validation_profile={request.profile}",
     ]
+    checkout_path, checkout_block_reason = _pr_branch_validation_checkout_path(
+        request.repository
+    )
+    if checkout_path is None or checkout_block_reason is not None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, f"reason={checkout_block_reason or 'checkout_unavailable'}"],
+            "not_met",
+        )
+    status_lines.append(f"checkout_path={checkout_path}")
+
     try:
-        pr_state = _get_pr_branch_validation_state(request.pr_number)
+        pr_state = _get_pr_branch_validation_state(
+            request.repository, request.pr_number
+        )
     except Exception:
         return _maintenance_report(
             "BLOCKED",
@@ -3278,10 +3338,14 @@ def validate_pr_branch(body: str) -> str:
         )
 
     head_sha = str(pr_state["headRefOid"]).lower()
+    head_ref = str(pr_state.get("headRefName") or "")
+    if head_ref:
+        status_lines.append(f"head_ref={head_ref}")
     status_lines.append(f"head_sha={head_sha}")
     try:
         validation_path = _ensure_safe_validation_worktree_path(
-            _validation_worktree_path(request.pr_number)
+            request.repository,
+            _validation_worktree_path(request.repository, request.pr_number),
         )
     except ValueError:
         return _maintenance_report(
@@ -3304,7 +3368,8 @@ def validate_pr_branch(body: str) -> str:
 
     if validation_path.exists():
         code, _output = run_command(
-            ["git", "worktree", "remove", "--force", str(validation_path)], cwd=ROOT
+            ["git", "worktree", "remove", "--force", str(validation_path)],
+            cwd=checkout_path,
         )
         if code != 0:
             return _maintenance_report(
@@ -3323,7 +3388,9 @@ def validate_pr_branch(body: str) -> str:
 
     pr_ref = f"refs/remotes/origin/pr-validation/{request.pr_number}"
     fetch_refspec = f"+refs/pull/{request.pr_number}/head:{pr_ref}"
-    code, _output = run_command(["git", "fetch", "origin", fetch_refspec], cwd=ROOT)
+    code, _output = run_command(
+        ["git", "fetch", "origin", fetch_refspec], cwd=checkout_path
+    )
     if code != 0:
         return _maintenance_report(
             "BLOCKED",
@@ -3333,7 +3400,9 @@ def validate_pr_branch(body: str) -> str:
         )
     status_lines.append("step=fetch_pr_head status=done")
 
-    code, output = run_command(["git", "rev-parse", f"{pr_ref}^{{commit}}"], cwd=ROOT)
+    code, output = run_command(
+        ["git", "rev-parse", f"{pr_ref}^{{commit}}"], cwd=checkout_path
+    )
     if code != 0 or output.strip().lower() != head_sha:
         return _maintenance_report(
             "BLOCKED",
@@ -3345,7 +3414,7 @@ def validate_pr_branch(body: str) -> str:
 
     code, _output = run_command(
         ["git", "worktree", "add", "--detach", str(validation_path), head_sha],
-        cwd=ROOT,
+        cwd=checkout_path,
     )
     if code != 0:
         return _maintenance_report(
