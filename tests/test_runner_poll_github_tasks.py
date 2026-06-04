@@ -943,6 +943,8 @@ def test_process_issue_runs_target_project_bauclock_in_local_worktree(
     with mock.patch.object(
         runner, "prepare_issue_branch"
     ) as prepare_branch, mock.patch.object(
+        runner, "verify_target_repository_checkout", return_value=None
+    ), mock.patch.object(
         runner,
         "prepare_target_repository_issue_worktree",
         return_value=(0, "ready", issue_path),
@@ -991,6 +993,8 @@ def test_process_issue_runs_target_project_lavalamp_when_project_tree_enables_wo
     }
 
     with mock.patch.object(
+        runner, "verify_target_repository_checkout", return_value=None
+    ), mock.patch.object(
         runner,
         "prepare_target_repository_issue_worktree",
         return_value=(0, "ready", issue_path),
@@ -1069,14 +1073,18 @@ def test_process_issue_blocks_missing_target_checkout_before_codex() -> None:
         runner, "load_runner_project_tree", return_value=project_tree
     ), mock.patch.object(Path, "exists", autospec=True, return_value=False), mock.patch.object(
         runner, "set_issue_label"
-    ), mock.patch.object(
+    ) as set_label, mock.patch.object(
         runner, "block_issue"
     ) as block, mock.patch.object(
+        runner, "prepare_target_repository_issue_worktree"
+    ) as prepare_target, mock.patch.object(
         runner, "run_codex_task"
     ) as run_codex:
         runner.process_issue(issue)
 
     assert "reason=checkout_path_missing" in block.call_args.args[1]
+    set_label.assert_not_called()
+    prepare_target.assert_not_called()
     run_codex.assert_not_called()
 
 
@@ -1094,15 +1102,82 @@ def test_process_issue_blocks_non_git_target_checkout_before_codex() -> None:
         runner, "load_runner_project_tree", return_value=project_tree
     ), mock.patch.object(Path, "exists", autospec=True) as path_exists, mock.patch.object(
         runner, "set_issue_label"
-    ), mock.patch.object(
+    ) as set_label, mock.patch.object(
         runner, "block_issue"
     ) as block, mock.patch.object(
+        runner, "prepare_target_repository_issue_worktree"
+    ) as prepare_target, mock.patch.object(
         runner, "run_codex_task"
     ) as run_codex:
         path_exists.side_effect = lambda path: path == checkout_path
         runner.process_issue(issue)
 
     assert "reason=checkout_git_missing" in block.call_args.args[1]
+    set_label.assert_not_called()
+    prepare_target.assert_not_called()
+    run_codex.assert_not_called()
+
+
+def test_process_issue_blocks_unsafe_target_worktree_root_before_claim() -> None:
+    checkout_path = _safe_checkout_path("lavalamp-unsafe-root-main")
+    issue = {
+        "number": 153,
+        "title": "Unsafe target worktree root",
+        "body": "Target Repository: alanua/Lavalamp\n\n```task\nDo it\n```",
+    }
+    project_tree = _project_tree_with_lavalamp_checkout(
+        checkout_path,
+        runner.RUNNER_PROJECT_CHECKOUT_BASE / "other" / "lavalamp-root",
+    )
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(
+        runner, "block_issue"
+    ) as block, mock.patch.object(
+        runner, "prepare_target_repository_issue_worktree"
+    ) as prepare_target, mock.patch.object(
+        runner, "run_codex_task"
+    ) as run_codex:
+        runner.process_issue(issue)
+
+    assert "reason=registered_target_path_invalid" in block.call_args.args[1]
+    assert "worktree_root" in block.call_args.args[1]
+    set_label.assert_not_called()
+    prepare_target.assert_not_called()
+    run_codex.assert_not_called()
+
+
+def test_process_issue_blocks_unsafe_target_checkout_path_before_claim() -> None:
+    issue = {
+        "number": 154,
+        "title": "Unsafe target checkout path",
+        "body": "Target Repository: alanua/Lavalamp\n\n```task\nDo it\n```",
+    }
+    project_tree = _project_tree_with_lavalamp_checkout(
+        runner.RUNNER_PROJECT_CHECKOUT_BASE / "other" / "lavalamp-main",
+        _safe_checkout_path("lavalamp-safe-worktrees"),
+    )
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(
+        runner, "block_issue"
+    ) as block, mock.patch.object(
+        runner, "prepare_target_repository_issue_worktree"
+    ) as prepare_target, mock.patch.object(
+        runner, "run_codex_task"
+    ) as run_codex:
+        runner.process_issue(issue)
+
+    assert "reason=registered_target_path_invalid" in block.call_args.args[1]
+    assert "checkout_path" in block.call_args.args[1]
+    set_label.assert_not_called()
+    prepare_target.assert_not_called()
     run_codex.assert_not_called()
 
 
@@ -1162,6 +1237,8 @@ def test_process_issue_runs_target_repository_lavalamp_in_registered_worktree(
     with mock.patch.object(
         runner, "prepare_issue_branch"
     ) as prepare_branch, mock.patch.object(
+        runner, "verify_target_repository_checkout", return_value=None
+    ), mock.patch.object(
         runner,
         "prepare_target_repository_issue_worktree",
         return_value=(0, "ready", issue_path),
@@ -1240,6 +1317,8 @@ def test_process_issue_runs_non_skeleton_codex_worktree_mode_locally(
     ), mock.patch.object(
         runner, "prepare_issue_branch"
     ) as prepare_branch, mock.patch.object(
+        runner, "verify_target_repository_checkout", return_value=None
+    ), mock.patch.object(
         runner,
         "prepare_target_repository_issue_worktree",
         return_value=(0, "ready", issue_path),

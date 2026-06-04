@@ -397,9 +397,20 @@ def _validated_registered_target_path(
 
 
 def verify_target_repository_checkout(target_repository: str) -> str | None:
-    checkout_path = target_repository_checkout_path(target_repository)
+    try:
+        worktree_root_path = target_repository_worktree_root(target_repository)
+        checkout_path = target_repository_checkout_path(target_repository)
+    except ValueError as exc:
+        return (
+            "Target repository route is invalid:\n```\n"
+            f"target_repository={target_repository}\n"
+            f"reason=registered_target_path_invalid\n"
+            f"detail={exc}\n"
+            "```"
+        )
     status_lines = [
         f"target_repository={target_repository}",
+        f"worktree_root={worktree_root_path}",
         f"checkout_path={checkout_path}",
     ]
     if not checkout_path.exists():
@@ -4499,6 +4510,17 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                     runner_task=runner_task,
                 )
                 return
+            if runner_task.target_repository != QUEUE_REPOSITORY:
+                checkout_block_reason = verify_target_repository_checkout(
+                    runner_task.target_repository
+                )
+                if checkout_block_reason is not None:
+                    block_issue(
+                        issue_number,
+                        checkout_block_reason,
+                        runner_task=runner_task,
+                    )
+                    return
 
         apply_runner_lane_label(issue_number, runner_task)
 
