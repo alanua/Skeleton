@@ -4121,6 +4121,33 @@ def test_validate_pr_branch_bauclock_time_ledger_profile_uses_target_checkout(
             and cwd == validation_path
         ):
             return 0, "12 passed\n"
+        if (
+            command
+            == [
+                "python3",
+                "-m",
+                "pytest",
+                "-q",
+                "tests/test_time_correction_access_control.py",
+            ]
+            and cwd == validation_path
+        ):
+            return 0, "3 passed\n"
+        if (
+            command
+            == [
+                "python3",
+                "-m",
+                "pytest",
+                "-q",
+                (
+                    "tests/test_legal_hardening.py::"
+                    "test_manual_time_correction_requires_reason_and_is_visible_in_worker_home"
+                ),
+            ]
+            and cwd == validation_path
+        ):
+            return 0, "1 passed\n"
         return 2, "unexpected command"
 
     with mock.patch.object(
@@ -4148,13 +4175,26 @@ def test_validate_pr_branch_bauclock_time_ledger_profile_uses_target_checkout(
     assert "pull_request=52" in report
     assert "head_ref=runner/issue-668" in report
     assert f"head_sha={HEAD_SHA}" in report
-    assert [
-        "python3",
-        "-m",
-        "pytest",
-        "-q",
-        "tests/test_time_corrections.py",
-    ] in commands
+    assert commands[-3:] == [
+        ["python3", "-m", "pytest", "-q", "tests/test_time_corrections.py"],
+        [
+            "python3",
+            "-m",
+            "pytest",
+            "-q",
+            "tests/test_time_correction_access_control.py",
+        ],
+        [
+            "python3",
+            "-m",
+            "pytest",
+            "-q",
+            (
+                "tests/test_legal_hardening.py::"
+                "test_manual_time_correction_requires_reason_and_is_visible_in_worker_home"
+            ),
+        ],
+    ]
     assert all(command[:2] != ["git", "checkout"] for command in commands)
     assert all(command[:2] != ["git", "merge"] for command in commands)
     assert all(command[:2] != ["git", "push"] for command in commands)

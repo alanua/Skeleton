@@ -133,7 +133,9 @@ It may only:
    `full_pytest` runs `python3 -m pytest -q`; `knowledge_intake` runs
    `python3 -m pytest -q tests/test_knowledge_intake.py` followed by
    `python3 -m pytest -q`; `time_ledger_stage1` runs
-   `python3 -m pytest -q tests/test_time_corrections.py`.
+   `python3 -m pytest -q tests/test_time_corrections.py`,
+   `python3 -m pytest -q tests/test_time_correction_access_control.py`, and
+   `python3 -m pytest -q tests/test_legal_hardening.py::test_manual_time_correction_requires_reason_and_is_visible_in_worker_home`.
 
 It reports `DONE` only when PR metadata, safe workspace preparation, exact head
 verification, and every profile command succeeds. Missing or invalid PR numbers,

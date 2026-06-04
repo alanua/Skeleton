@@ -114,6 +114,20 @@ PR_BRANCH_VALIDATION_PROFILES = {
     ),
     "time_ledger_stage1": (
         ("python3", "-m", "pytest", "-q", "tests/test_time_corrections.py"),
+        (
+            "python3",
+            "-m",
+            "pytest",
+            "-q",
+            "tests/test_time_correction_access_control.py",
+        ),
+        (
+            "python3",
+            "-m",
+            "pytest",
+            "-q",
+            "tests/test_legal_hardening.py::test_manual_time_correction_requires_reason_and_is_visible_in_worker_home",
+        ),
     ),
 }
 VALIDATION_FAILED_OUTPUT_LIMIT = 4000
