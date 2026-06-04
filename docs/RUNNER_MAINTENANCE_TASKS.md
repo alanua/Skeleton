@@ -133,7 +133,9 @@ It may only:
    `full_pytest` runs `python3 -m pytest -q`; `knowledge_intake` runs
    `python3 -m pytest -q tests/test_knowledge_intake.py` followed by
    `python3 -m pytest -q`; `time_ledger_stage1` runs
-   `python3 -m pytest -q tests/test_time_corrections.py`.
+   `python3 -m pytest -q tests/test_time_ledger.py` followed by
+   `python3 -m py_compile api/services/time_ledger.py
+   api/services/arbzg_policy.py tests/test_time_ledger.py`.
 
 It reports `DONE` only when PR metadata, safe workspace preparation, exact head
 verification, and every profile command succeeds. Missing or invalid PR numbers,

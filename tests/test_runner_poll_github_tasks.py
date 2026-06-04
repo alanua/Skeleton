@@ -4117,10 +4117,23 @@ def test_validate_pr_branch_bauclock_time_ledger_profile_uses_target_checkout(
             return 0, f"{HEAD_SHA}\n"
         if (
             command
-            == ["python3", "-m", "pytest", "-q", "tests/test_time_corrections.py"]
+            == ["python3", "-m", "pytest", "-q", "tests/test_time_ledger.py"]
             and cwd == validation_path
         ):
             return 0, "12 passed\n"
+        if (
+            command
+            == [
+                "python3",
+                "-m",
+                "py_compile",
+                "api/services/time_ledger.py",
+                "api/services/arbzg_policy.py",
+                "tests/test_time_ledger.py",
+            ]
+            and cwd == validation_path
+        ):
+            return 0, ""
         return 2, "unexpected command"
 
     with mock.patch.object(
@@ -4153,7 +4166,15 @@ def test_validate_pr_branch_bauclock_time_ledger_profile_uses_target_checkout(
         "-m",
         "pytest",
         "-q",
-        "tests/test_time_corrections.py",
+        "tests/test_time_ledger.py",
+    ] in commands
+    assert [
+        "python3",
+        "-m",
+        "py_compile",
+        "api/services/time_ledger.py",
+        "api/services/arbzg_policy.py",
+        "tests/test_time_ledger.py",
     ] in commands
     assert all(command[:2] != ["git", "checkout"] for command in commands)
     assert all(command[:2] != ["git", "merge"] for command in commands)
