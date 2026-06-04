@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.parse
 from pathlib import Path
 from unittest import mock
@@ -3055,6 +3056,66 @@ def _preflight_pr_issue_body(
     if task_body:
         lines.extend(("", "```task", task_body, "```"))
     return "\n".join(lines)
+
+
+def test_hermes_worker_preflight_is_allowlisted() -> None:
+    assert runner.HERMES_WORKER_PREFLIGHT == "hermes_worker_preflight"
+    assert runner.HERMES_WORKER_PREFLIGHT in runner.RUNTIME_MAINTENANCE_TASK_IDS
+
+
+def test_hermes_worker_preflight_dispatch_reports_sanitized_inventory() -> None:
+    with mock.patch.object(runner.shutil, "which", return_value="/usr/bin/tool"):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HERMES_WORKER_PREFLIGHT,
+            str(runner.ROOT),
+            "sudo env\nTOKEN=must-not-leak\ngit push\ncodex exec unsafe",
+        )
+
+    assert report.startswith("DONE:")
+    assert "maintenance_task_id=hermes_worker_preflight" in report
+    assert "inventory_schema=hermes_worker_preflight_v1" in report
+    assert "report_mode=read_only" in report
+    assert re.search(r"^host_id_sha256_12=([0-9a-f]{12}|unknown)$", report, re.MULTILINE)
+    assert re.search(r"^system=[A-Za-z0-9._:+-]{1,80}$", report, re.MULTILINE)
+    assert re.search(r"^kernel_release=[A-Za-z0-9._:+-]{1,80}$", report, re.MULTILINE)
+    assert re.search(r"^machine=[A-Za-z0-9._:+-]{1,80}$", report, re.MULTILINE)
+    assert re.search(r"^python_version=\d+\.\d+\.\d+$", report, re.MULTILINE)
+    assert "runner_root_exists=true" in report
+    assert "tool_python3=present" in report
+    assert "tool_git=present" in report
+    assert "tool_gh=present" in report
+    assert "tool_codex=present" in report
+    assert "TOKEN" not in report
+    assert "must-not-leak" not in report
+    assert "sudo env" not in report
+    assert "git push" not in report
+    assert "codex exec" not in report
+
+
+def test_hermes_worker_preflight_issue_body_does_not_execute_commands() -> None:
+    issue = _maintenance_issue(
+        runner.HERMES_WORKER_PREFLIGHT,
+        "sudo reboot\n"
+        "git push --force\n"
+        "gh pr merge 123\n"
+        "python3 -c 'open(\"/tmp/nope\", \"w\").write(\"x\")'\n"
+        "codex exec unsafe",
+    )
+    with mock.patch.object(
+        runner, "ensure_clean_worktree", return_value=(True, "")
+    ), mock.patch.object(runner, "set_issue_label"), mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "run_command"
+    ) as run, mock.patch.object(
+        runner, "run_codex_task"
+    ) as run_codex:
+        runner.process_issue(issue, workdir=str(runner.ROOT))
+
+    run.assert_not_called()
+    run_codex.assert_not_called()
 
 
 def _pr_validation_state(**updates: object) -> dict[str, object]:
