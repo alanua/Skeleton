@@ -1956,6 +1956,7 @@ def _issue_publish_commands(
     remote_url: str = "https://github.com/alanua/Skeleton.git",
     changed_files: tuple[str, ...] = ("scripts/runner_poll_github_tasks.py",),
     untracked_files: tuple[str, ...] = (),
+    validated_publish_files: tuple[str, ...] | None = None,
     existing_pr_url: str = "",
     branch_diff_code: int = 1,
     diff_check_code: int = 0,
@@ -1969,6 +1970,9 @@ def _issue_publish_commands(
     raw_suffix: str = "",
 ) -> object:
     rev_parse_count = 0
+    expected_publish_files = (
+        changed_files if validated_publish_files is None else validated_publish_files
+    )
 
     def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
         nonlocal rev_parse_count
@@ -1991,14 +1995,14 @@ def _issue_publish_commands(
             branch,
         ]:
             return 0, f"{existing_pr_url}\n" if existing_pr_url else ""
-        if command == ["git", "diff", "--check", "--", *changed_files]:
+        if command == ["git", "diff", "--check", "--", *expected_publish_files]:
             return diff_check_code, "diff check output must not leak"
         if command == ["git", "rev-parse", "HEAD"]:
             rev_parse_count += 1
             if rev_parse_count == 1:
                 return 0, f"{pre_commit_head}\n"
             return 0, f"{post_commit_head}\n"
-        if command == ["git", "add", "--", *changed_files]:
+        if command == ["git", "add", "--", *expected_publish_files]:
             return add_code, "add failed output must not leak"
         if command == [
             "git",
@@ -2326,7 +2330,7 @@ def test_issue_worktree_publish_inspection_unexpected_untracked_except_codex_blo
     assert report.startswith("BLOCKED:")
     assert "unexpected_untracked_files_count=1" in report
     assert "reason=unexpected_untracked_files" in report
-    assert "scratch.txt" not in report
+    assert 'unexpected_untracked_files=["scratch.txt"]' in report
 
 
 def test_issue_worktree_publish_inspection_ignores_arbitrary_commands(
@@ -2483,11 +2487,55 @@ def test_publish_issue_worktree_pr_unexpected_untracked_file_blocks(
             worktree_path=worktree_path,
             untracked_files=(".codex/session.json", "scratch.txt"),
         ),
-    ):
+    ) as run:
         report = runner.publish_issue_worktree_pr(_issue_publish_body())
 
+    commands = [call.args[0] for call in run.call_args_list]
     assert report.startswith("BLOCKED:")
+    assert "unexpected_untracked_files_count=1" in report
+    assert 'unexpected_untracked_files=["scratch.txt"]' in report
     assert "reason=unexpected_untracked_files" in report
+    assert all(command[:2] != ["git", "add"] for command in commands)
+    assert all(command[:2] != ["git", "commit"] for command in commands)
+
+
+def test_publish_issue_worktree_pr_allowlisted_untracked_file_is_committed(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path)
+    validated_publish_files = (
+        "scripts/runner_poll_github_tasks.py",
+        "tests/test_runner_poll_github_tasks.py",
+    )
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            untracked_files=(
+                ".codex/session.json",
+                "tests/test_runner_poll_github_tasks.py",
+            ),
+            validated_publish_files=validated_publish_files,
+        ),
+    ) as run:
+        report = runner.publish_issue_worktree_pr(
+            _issue_publish_body(allowed_files=validated_publish_files)
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert "unexpected_untracked_files_count=0" in report
+    assert "allowed_untracked_files_count=1" in report
+    assert (
+        'allowed_untracked_files=["tests/test_runner_poll_github_tasks.py"]'
+        in report
+    )
+    assert "validated_publish_files_count=2" in report
+    assert ["git", "add", "--", *validated_publish_files] in commands
+    assert ["git", "diff", "--check", "--", *validated_publish_files] in commands
 
 
 def test_publish_issue_worktree_pr_wrong_remote_blocks_before_push(
