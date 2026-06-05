@@ -4078,11 +4078,23 @@ def _issue_worktree_publish_validated_report(
         path
         for path in untracked_files
         if not _is_ignored_issue_publish_untracked_path(path)
+        and path not in request.allowed_files
+    ]
+    allowed_untracked_files = [
+        path
+        for path in untracked_files
+        if not _is_ignored_issue_publish_untracked_path(path)
+        and path in request.allowed_files
     ]
     status_lines.extend(
         (
             "step=read_untracked_files status=done",
             f"unexpected_untracked_files_count={len(unexpected_untracked_files)}",
+            "unexpected_untracked_files="
+            f"{json.dumps(unexpected_untracked_files, sort_keys=True)}",
+            f"allowed_untracked_files_count={len(allowed_untracked_files)}",
+            "allowed_untracked_files="
+            f"{json.dumps(allowed_untracked_files, sort_keys=True)}",
         )
     )
     if unexpected_untracked_files:
@@ -4093,7 +4105,8 @@ def _issue_worktree_publish_validated_report(
             "not_met",
         )
 
-    changed_files_allowed = set(changed_tracked_files) <= set(request.allowed_files)
+    validated_publish_files = [*changed_tracked_files, *allowed_untracked_files]
+    changed_files_allowed = set(validated_publish_files) <= set(request.allowed_files)
     status_lines.append(
         f"tracked_files_match_allowlist={str(changed_files_allowed).lower()}"
     )
@@ -4104,6 +4117,13 @@ def _issue_worktree_publish_validated_report(
             [*status_lines, "reason=changed_tracked_files_outside_allowlist"],
             "not_met",
         )
+    status_lines.extend(
+        (
+            f"validated_publish_files_count={len(validated_publish_files)}",
+            "validated_publish_files="
+            f"{','.join(validated_publish_files) if validated_publish_files else '(none)'}",
+        )
+    )
 
     if not publish:
         return _maintenance_report("DONE", task_id, status_lines, "met")
@@ -4127,9 +4147,9 @@ def _issue_worktree_publish_validated_report(
             "met",
         )
 
-    if changed_tracked_files:
+    if validated_publish_files:
         code, _output = run_command(
-            ["git", "diff", "--check", "--", *changed_tracked_files],
+            ["git", "diff", "--check", "--", *validated_publish_files],
             cwd=worktree_path,
         )
         if code != 0:
@@ -4156,7 +4176,7 @@ def _issue_worktree_publish_validated_report(
         pre_commit_head = pre_commit_head_lines[0] if pre_commit_head_lines else ""
 
         code, _output = run_command(
-            ["git", "add", "--", *changed_tracked_files], cwd=worktree_path
+            ["git", "add", "--", *validated_publish_files], cwd=worktree_path
         )
         if code != 0:
             return _maintenance_report(
