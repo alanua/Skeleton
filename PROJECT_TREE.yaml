@@ -35,7 +35,7 @@ projects:
 
   lavalamp:
     repo: alanua/Lavalamp
-    checkout_path: /home/agent/agent-dev/worktrees/lavalamp/main
+    checkout_path: /home/agent/agent-dev/repos/Lavalamp
     worktree_root: /home/agent/agent-dev/worktrees/lavalamp
     public: true
     runner_enabled: true

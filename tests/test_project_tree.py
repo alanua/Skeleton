@@ -56,7 +56,7 @@ def test_registry_has_real_runner_paths() -> None:
         "/home/agent/agent-dev/worktrees/bauclock"
     )
     assert get_project(tree, "lavalamp")["checkout_path"] == (
-        "/home/agent/agent-dev/worktrees/lavalamp/main"
+        "/home/agent/agent-dev/repos/Lavalamp"
     )
     assert get_project(tree, "lavalamp")["worktree_root"] == (
         "/home/agent/agent-dev/worktrees/lavalamp"
@@ -137,6 +137,8 @@ def test_bauclock_stage_1_is_local_worktree_enabled() -> None:
 def test_lavalamp_is_local_worktree_enabled_with_runtime_approval() -> None:
     lavalamp = get_project(loaded_tree(), "lavalamp")
 
+    assert lavalamp["checkout_path"] == "/home/agent/agent-dev/repos/Lavalamp"
+    assert lavalamp["worktree_root"] == "/home/agent/agent-dev/worktrees/lavalamp"
     assert lavalamp["execution_modes"] == {
         "planning_only": False,
         "codex_issue_worktree": True,
