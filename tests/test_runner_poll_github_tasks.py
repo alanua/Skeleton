@@ -514,6 +514,18 @@ def test_unknown_target_repository_worktree_root_is_rejected() -> None:
         runner.target_repository_worktree_root("alanua/unknown")
 
 
+def test_aufmass_private_route_does_not_allow_default_repository_file_access() -> None:
+    task = runner.RunnerTask(
+        content="Do it",
+        target_project="aufmass_private",
+        target_repository="private/aufmass",
+    )
+
+    assert runner.project_execution_block_reason(task) is None
+    with pytest.raises(ValueError, match="not allowlisted"):
+        runner.target_repository_worktree_root("private/aufmass")
+
+
 def test_target_repository_worktree_path_rejects_other_repository_root(
     tmp_path: Path,
 ) -> None:
