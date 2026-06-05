@@ -54,10 +54,10 @@ projects:
     checkout_path: /home/agent/agent-dev/worktrees/aufmass-private/main
     worktree_root: /home/agent/agent-dev/worktrees/aufmass-private
     public: false
-    runner_enabled: false
+    runner_enabled: true
     execution_modes:
-      planning_only: true
-      codex_issue_worktree: false
+      planning_only: false
+      codex_issue_worktree: true
       live_cross_repo: false
     requires_explicit_approval_for_mode_change: true
     future_parallel_worktrees: false
