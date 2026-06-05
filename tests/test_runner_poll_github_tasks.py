@@ -499,7 +499,7 @@ def test_target_repository_worktree_paths_are_deterministic(tmp_path: Path) -> N
             Path("/home/agent/agent-dev/worktrees/bauclock/main")
         )
         assert runner.target_repository_checkout_path("alanua/Lavalamp") == (
-            Path("/home/agent/agent-dev/worktrees/lavalamp/main")
+            Path("/home/agent/agent-dev/repos/Lavalamp")
         )
         assert bauclock_path == (
             Path("/home/agent/agent-dev/worktrees/bauclock") / "issue-912"
