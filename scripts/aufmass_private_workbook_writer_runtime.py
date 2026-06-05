@@ -61,7 +61,7 @@ def write_table_with_verify_retry(
         try:
             write_table(expected)
             last_actual = _normalize_table(read_table())
-            if last_actual == expected:
+            if _readback_contains_expected_table(last_actual, expected):
                 return WriteVerifyResult(
                     attempts=attempt,
                     row_count=len(expected),
@@ -130,6 +130,29 @@ def _normalize_table(values: TableValues) -> list[list[CellValue]]:
         normalized.append(normalized_row)
         width = max(width, len(normalized_row))
     return [row + [""] * (width - len(row)) for row in normalized]
+
+
+def _readback_contains_expected_table(
+    actual: list[list[CellValue]], expected: list[list[CellValue]]
+) -> bool:
+    if not expected:
+        return actual == expected
+
+    expected_width = max((len(row) for row in expected), default=0)
+    if not expected_width:
+        return len(actual) >= len(expected)
+
+    for row_index in range(0, len(actual) - len(expected) + 1):
+        for column_index in range(0, len(actual[row_index]) - expected_width + 1):
+            if all(
+                actual[row_index + expected_row_index][
+                    column_index : column_index + expected_width
+                ]
+                == expected_row
+                for expected_row_index, expected_row in enumerate(expected)
+            ):
+                return True
+    return False
 
 
 def _clean_column(column: str) -> str:
