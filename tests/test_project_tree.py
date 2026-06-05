@@ -115,13 +115,14 @@ def test_all_projects_require_explicit_approval_for_mode_changes() -> None:
 def test_public_enabled_projects_are_codex_issue_worktree_projects() -> None:
     tree = loaded_tree()
 
-    codex_issue_worktree_projects = {
+    public_codex_issue_worktree_projects = {
         project_id
         for project_id, project in tree["projects"].items()
-        if project["execution_modes"]["codex_issue_worktree"] is True
+        if project["public"] is True
+        and project["execution_modes"]["codex_issue_worktree"] is True
     }
 
-    assert codex_issue_worktree_projects == {"skeleton", "bauclock", "lavalamp"}
+    assert public_codex_issue_worktree_projects == {"skeleton", "bauclock", "lavalamp"}
 
 
 def test_bauclock_stage_1_is_local_worktree_enabled() -> None:
@@ -145,10 +146,25 @@ def test_lavalamp_is_local_worktree_enabled_with_runtime_approval() -> None:
     assert lavalamp["runtime_approval_required"] is True
 
 
-def test_private_projects_remain_disabled_non_public_and_planning_only() -> None:
+def test_aufmass_private_is_enabled_only_for_gated_local_worktree_pilot() -> None:
+    aufmass_private = get_project(loaded_tree(), "aufmass_private")
+
+    assert aufmass_private["public"] is False
+    assert aufmass_private["runner_enabled"] is True
+    assert aufmass_private["execution_modes"] == {
+        "planning_only": False,
+        "codex_issue_worktree": True,
+        "live_cross_repo": False,
+    }
+    assert aufmass_private["requires_explicit_approval_for_mode_change"] is True
+    assert aufmass_private["future_parallel_worktrees"] is False
+    assert aufmass_private["runtime_approval_required"] is True
+
+
+def test_disabled_private_projects_remain_non_public_and_planning_only() -> None:
     tree = loaded_tree()
 
-    for project_id in ("aufmass_private", "home_automation"):
+    for project_id in ("home_automation",):
         project = tree["projects"][project_id]
 
         assert project["public"] is False
