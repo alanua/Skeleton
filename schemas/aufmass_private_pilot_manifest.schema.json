@@ -6,6 +6,7 @@
   "additionalProperties": false,
   "required": [
     "schema",
+    "pilot_id",
     "project_id",
     "route_stage",
     "private_refs",
@@ -14,16 +15,29 @@
   ],
   "properties": {
     "schema": {"const": "skeleton.aufmass_private_pilot_manifest.v1"},
+    "pilot_id": {
+      "type": "string",
+      "pattern": "^private-pilot-[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+    },
     "project_id": {"const": "aufmass"},
     "route_stage": {"$ref": "#/$defs/route_stage"},
     "private_refs": {
       "type": "array",
+      "minItems": 1,
       "items": {"$ref": "#/$defs/private_ref"}
     },
     "public_safety": {"$ref": "#/$defs/public_safety"},
     "notes": {
       "type": "array",
       "items": {"type": "string", "maxLength": 240}
+    },
+    "output_refs": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/routed_private_ref"}
+    },
+    "report_refs": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/routed_private_ref"}
     }
   },
   "$defs": {
@@ -69,6 +83,23 @@
         "blocked_for_public"
       ]
     },
+    "private_route": {
+      "type": "string",
+      "enum": [
+        "private_drive",
+        "private_local_runner",
+        "private_operator_handoff"
+      ]
+    },
+    "review_status": {
+      "type": "string",
+      "enum": [
+        "needs_review",
+        "reviewed",
+        "rejected",
+        "export_ready"
+      ]
+    },
     "private_ref": {
       "type": "object",
       "additionalProperties": false,
@@ -77,6 +108,8 @@
         "source_type",
         "review_stage",
         "artifact_kind",
+        "artifact_route",
+        "review_status",
         "public_safety_status"
       ],
       "properties": {
@@ -87,7 +120,21 @@
         "source_type": {"$ref": "#/$defs/source_type"},
         "review_stage": {"$ref": "#/$defs/route_stage"},
         "artifact_kind": {"$ref": "#/$defs/artifact_kind"},
+        "artifact_route": {"$ref": "#/$defs/private_route"},
+        "review_status": {"$ref": "#/$defs/review_status"},
         "public_safety_status": {"$ref": "#/$defs/public_safety_status"}
+      }
+    },
+    "routed_private_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "route"],
+      "properties": {
+        "ref": {
+          "type": "string",
+          "pattern": "^private-ref-[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+        },
+        "route": {"$ref": "#/$defs/private_route"}
       }
     },
     "public_safety": {
