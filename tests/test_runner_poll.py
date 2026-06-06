@@ -418,9 +418,7 @@ def test_notify_task_finished_normal_runner_task_notifies() -> None:
     ) as send:
         runner.notify_task_finished(14, "DONE", "DONE report")
 
-    send.assert_called_once_with(
-        f"Repository: {runner.REPO}\nIssue: #14\nStatus: DONE"
-    )
+    send.assert_called_once_with("Skeleton\nIssue: #14\nStatus: DONE")
 
 
 def test_notify_task_finished_guard_failure_suppresses_notification_safely() -> None:
@@ -436,7 +434,7 @@ def test_done_telegram_message_includes_pr_url_when_available() -> None:
     report = "DONE: ok\n\nDraft PR: https://github.example/pull/1"
 
     assert runner.build_telegram_message(9, "DONE", report) == (
-        f"Repository: {runner.REPO}\n"
+        "Skeleton\n"
         "Issue: #9\n"
         "Status: DONE\n"
         "PR: https://github.example/pull/1"
@@ -586,7 +584,12 @@ def test_process_issue_posts_done_on_success() -> None:
         mock.call(5, runner.LABEL_READY, runner.LABEL_RUNNING),
         mock.call(5, runner.LABEL_RUNNING, runner.LABEL_DONE),
     ]
-    notify.assert_called_once_with(5, "DONE", report)
+    notify.assert_called_once_with(
+        5,
+        "DONE",
+        report,
+        runner.RunnerTask(content="Do it"),
+    )
 
 
 def test_blocked_codex_output_is_not_labeled_runner_done() -> None:
@@ -622,7 +625,12 @@ def test_blocked_codex_output_is_not_labeled_runner_done() -> None:
         mock.call(51, runner.LABEL_READY, runner.LABEL_RUNNING),
         mock.call(51, runner.LABEL_RUNNING, runner.LABEL_BLOCKED),
     ]
-    notify.assert_called_once_with(51, "BLOCKED", report)
+    notify.assert_called_once_with(
+        51,
+        "BLOCKED",
+        report,
+        runner.RunnerTask(content="Do it"),
+    )
 
 
 def test_process_issue_accepts_done_output_with_echoed_prompt_blocked_word() -> None:
@@ -665,7 +673,12 @@ def test_process_issue_accepts_done_output_with_echoed_prompt_blocked_word() -> 
         mock.call(53, runner.LABEL_READY, runner.LABEL_RUNNING),
         mock.call(53, runner.LABEL_RUNNING, runner.LABEL_DONE),
     ]
-    notify.assert_called_once_with(53, "DONE", "DONE report")
+    notify.assert_called_once_with(
+        53,
+        "DONE",
+        "DONE report",
+        runner.RunnerTask(content="Do it"),
+    )
 
 
 def test_file_change_report_without_draft_pr_is_not_labeled_runner_done() -> None:
@@ -705,7 +718,12 @@ def test_file_change_report_without_draft_pr_is_not_labeled_runner_done() -> Non
         mock.call(52, runner.LABEL_READY, runner.LABEL_RUNNING),
         mock.call(52, runner.LABEL_RUNNING, runner.LABEL_BLOCKED),
     ]
-    notify.assert_called_once_with(52, "BLOCKED", report)
+    notify.assert_called_once_with(
+        52,
+        "BLOCKED",
+        report,
+        runner.RunnerTask(content="Do it"),
+    )
 
 
 def test_process_issue_reports_runner_lane_metadata_on_success() -> None:
