@@ -1678,11 +1678,21 @@ def extract_runner_report_pr_binding(
     return commit.group("sha"), changed_files
 
 
+def target_project_display_name(target_project: str | None = None) -> str:
+    project_id = (target_project or "skeleton").strip() or "skeleton"
+    if project_id == "skeleton":
+        return "Skeleton"
+    return " ".join(part.capitalize() for part in re.split(r"[_-]+", project_id) if part)
+
+
 def build_telegram_message(
-    issue_number: int, status: str, report: str | None = None
+    issue_number: int,
+    status: str,
+    report: str | None = None,
+    target_project: str | None = None,
 ) -> str:
     lines = [
-        f"Repository: {REPO}",
+        target_project_display_name(target_project),
         f"Issue: #{issue_number}",
         f"Status: {status}",
     ]
@@ -1952,14 +1962,60 @@ def notification_target_repository(issue: dict[str, Any]) -> str:
     return QUEUE_REPOSITORY
 
 
+def _notification_target_project_from_labels(issue: dict[str, Any]) -> str | None:
+    for label in sorted(label_names(issue.get("labels"))):
+        for prefix in ("target-project:", "target_project:", "target:", "project:"):
+            if not label.startswith(prefix):
+                continue
+            target_project = label.removeprefix(prefix).strip()
+            if target_project in ALLOWED_TARGET_PROJECTS:
+                return target_project
+    return None
+
+
+def notification_target_project(
+    issue: dict[str, Any] | None, runner_task: RunnerTask | None = None
+) -> str:
+    if runner_task is not None:
+        return runner_task.target_project
+    if issue is not None:
+        body = str(issue.get("body") or "")
+        metadata = body.split("```task", 1)[0]
+        has_explicit_target_metadata = (
+            _body_field(metadata, "Target Project") is not None
+            or _target_repository_metadata_field(metadata)[0] is not None
+        )
+        if has_explicit_target_metadata:
+            try:
+                target_project, _target_repository, reason = (
+                    resolve_target_project_metadata(body)
+                )
+                if reason is None and target_project in ALLOWED_TARGET_PROJECTS:
+                    return target_project
+            except Exception:
+                pass
+        target_project = _notification_target_project_from_labels(issue)
+        if target_project is not None:
+            return target_project
+    return "skeleton"
+
+
 def notify_task_finished(
-    issue_number: int, status: str, report: str | None = None
+    issue_number: int,
+    status: str,
+    report: str | None = None,
+    runner_task: RunnerTask | None = None,
 ) -> None:
     try:
         if not should_notify_task_finished(issue_number, status):
             return
         issue = _NOTIFICATION_ISSUE_CACHE.pop((issue_number, status), None)
-        plain_message = build_telegram_message(issue_number, status, report)
+        plain_message = build_telegram_message(
+            issue_number,
+            status,
+            report,
+            notification_target_project(issue, runner_task),
+        )
         if status != "DONE" or not report:
             send_telegram_notification(plain_message)
             return
@@ -2183,7 +2239,10 @@ def block_issue(
     )
     post_issue_comment(issue_number, append_memory_warning(report, warning))
     set_issue_label(issue_number, remove_label, LABEL_BLOCKED)
-    notify_task_finished(issue_number, "BLOCKED")
+    if runner_task is None:
+        notify_task_finished(issue_number, "BLOCKED")
+    else:
+        notify_task_finished(issue_number, "BLOCKED", runner_task=runner_task)
 
 
 def _maintenance_report(
@@ -4702,7 +4761,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             report = append_memory_warning(report, warning or pickup_memory_warning)
             post_issue_comment(issue_number, report)
             set_issue_label(issue_number, LABEL_RUNNING, LABEL_BLOCKED)
-            notify_task_finished(issue_number, "BLOCKED", report)
+            notify_task_finished(issue_number, "BLOCKED", report, runner_task)
             return
 
         if local_target_worktree and runner_task is not None:
@@ -4745,7 +4804,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             LABEL_RUNNING,
             LABEL_DONE if status == "DONE" else LABEL_BLOCKED,
         )
-        notify_task_finished(issue_number, status, report)
+        notify_task_finished(issue_number, status, report, runner_task)
     except Exception as exc:
         if issue_workdir is not None:
             cleanup_runtime_artifacts(issue_workdir)

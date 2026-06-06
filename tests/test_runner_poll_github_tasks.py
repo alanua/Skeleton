@@ -1580,9 +1580,39 @@ def test_simple_done_notification_without_pr_url_keeps_plain_message() -> None:
 
     assert _request_payload(urlopen) == {
         "chat_id": ["telegram-chat-placeholder"],
-        "text": [f"Repository: {runner.REPO}\nIssue: #9\nStatus: DONE"],
+        "text": ["Skeleton\nIssue: #9\nStatus: DONE"],
         "disable_web_page_preview": ["true"],
     }
+
+
+def test_telegram_message_uses_target_project_display_name() -> None:
+    message = runner.build_telegram_message(
+        9,
+        "DONE",
+        DONE_REPORT,
+        target_project="lavalamp",
+    )
+
+    assert message.startswith("Lavalamp\nIssue: #9\nStatus: DONE")
+    assert "Repository:" not in message
+    assert f"PR: {PR_URL}" in message
+
+
+def test_telegram_message_uses_target_label_display_name() -> None:
+    issue = {
+        "body": "```task\nDo it\n```",
+        "labels": [
+            {"name": runner.LABEL_DONE},
+            {"name": "target:lavalamp"},
+        ],
+    }
+
+    assert runner.notification_target_project(issue) == "lavalamp"
+    assert runner.build_telegram_message(
+        9,
+        "BLOCKED",
+        target_project=runner.notification_target_project(issue),
+    ) == "Lavalamp\nIssue: #9\nStatus: BLOCKED"
 
 
 def test_telegram_message_omits_placeholder_pr_url() -> None:
