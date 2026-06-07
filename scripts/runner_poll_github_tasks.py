@@ -134,6 +134,10 @@ VALIDATION_FAILED_OUTPUT_LIMIT = 4000
 VALIDATION_FAILED_OUTPUT_TRUNCATED_MARKER = (
     "[Runner validation output truncated to 4000 characters.]"
 )
+QUARANTINE_REMOVE_FAILED_OUTPUT_LIMIT = 1200
+QUARANTINE_REMOVE_FAILED_OUTPUT_TRUNCATED_MARKER = (
+    "[Runner quarantine remove output truncated to 1200 characters.]"
+)
 TELEGRAM_APPROVED_PR_MERGE_MODE = "TELEGRAM_APPROVED_PR_MERGE"
 TELEGRAM_APPROVED_PR_MERGE_ACTION = "squash"
 TELEGRAM_CALLBACK_POLLER_SERVICE = "skeleton-telegram-callback-poll.service"
@@ -3976,6 +3980,47 @@ def _ensure_safe_quarantine_issue_worktree_path(path: str | Path) -> Path:
     return candidate
 
 
+def _bounded_quarantine_remove_failed_output(output: str) -> str:
+    sanitized = _sanitize_validation_command_output(output)
+    if not sanitized:
+        return "(no stderr)"
+    if len(sanitized) <= QUARANTINE_REMOVE_FAILED_OUTPUT_LIMIT:
+        return sanitized
+    marker = f"\n{QUARANTINE_REMOVE_FAILED_OUTPUT_TRUNCATED_MARKER}"
+    return (
+        sanitized[: QUARANTINE_REMOVE_FAILED_OUTPUT_LIMIT - len(marker)].rstrip()
+        + marker
+    )
+
+
+def _git_worktree_list_porcelain_registers_path(output: str, path: Path) -> bool:
+    expected = str(path)
+    for line in (output or "").splitlines():
+        if line.startswith("worktree ") and line.removeprefix("worktree ") == expected:
+            return True
+    return False
+
+
+def _quarantine_remove_failed_report_lines(
+    worktree_id: str, worktree_path: Path, exit_code: int, output: str
+) -> list[str]:
+    lines = [
+        f"worktree={worktree_id} action=remove_failed exit_code={exit_code}",
+        "remove_stderr_start",
+        _bounded_quarantine_remove_failed_output(output),
+        "remove_stderr_end",
+    ]
+    list_code, list_output = run_command(["git", "worktree", "list", "--porcelain"])
+    if list_code == 0:
+        registered = _git_worktree_list_porcelain_registers_path(
+            list_output, worktree_path
+        )
+        lines.append(f"git_worktree_list_registers_path={str(registered).lower()}")
+    else:
+        lines.append(f"git_worktree_list_status=failed exit_code={list_code}")
+    return lines
+
+
 def quarantine_stale_clean_skeleton_worktrees(body: str) -> str:
     task_id = QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES
     request, reason = _stale_clean_skeleton_worktree_quarantine_metadata(body)
@@ -4050,14 +4095,16 @@ def quarantine_stale_clean_skeleton_worktrees(body: str) -> str:
             status_lines.append(f"worktree={worktree_id} action=skipped reason=dirty")
             continue
 
-        code, _output = run_command(["git", "worktree", "remove", str(worktree_path)])
+        code, output = run_command(["git", "worktree", "remove", str(worktree_path)])
         if code != 0:
             return _maintenance_report(
                 "BLOCKED",
                 task_id,
                 [
                     *status_lines,
-                    f"worktree={worktree_id} action=remove_failed exit_code={code}",
+                    *_quarantine_remove_failed_report_lines(
+                        worktree_id, worktree_path, code, output
+                    ),
                 ],
                 "not_met",
             )
