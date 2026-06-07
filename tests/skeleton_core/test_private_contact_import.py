@@ -20,8 +20,8 @@ from tools.skeleton_core.private_contact_import import (
 )
 
 
-SHEET_A = "1pdyZDL9vBRxW5Dsdx32-8IYzAzu3Xgx-BPoTdzBMByA"
-SHEET_B = "1NdXIPZ4QVDJ8_oUZjq4XRyplR8YySNg1mxE2iEiEReE"
+SHEET_A = "synthetic_sheet_id_A_0000000000"
+SHEET_B = "synthetic_sheet_id_B_0000000000"
 
 
 class FakeSheetsClient:
