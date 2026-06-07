@@ -4001,19 +4001,33 @@ def _git_worktree_list_porcelain_registers_path(output: str, path: Path) -> bool
     return False
 
 
+def _git_worktree_remove_output_says_not_working_tree(output: str) -> bool:
+    return "not a working tree" in (output or "").lower()
+
+
 def _quarantine_remove_failed_report_lines(
-    worktree_id: str, worktree_path: Path, exit_code: int, output: str
+    worktree_id: str,
+    worktree_path: Path,
+    exit_code: int,
+    output: str,
+    *,
+    action: str = "remove_failed",
+    list_code: int | None = None,
+    list_output: str | None = None,
 ) -> list[str]:
     lines = [
-        f"worktree={worktree_id} action=remove_failed exit_code={exit_code}",
+        f"worktree={worktree_id} action={action} exit_code={exit_code}",
         "remove_stderr_start",
         _bounded_quarantine_remove_failed_output(output),
         "remove_stderr_end",
     ]
-    list_code, list_output = run_command(["git", "worktree", "list", "--porcelain"])
+    if list_code is None:
+        list_code, list_output = run_command(
+            ["git", "worktree", "list", "--porcelain"]
+        )
     if list_code == 0:
         registered = _git_worktree_list_porcelain_registers_path(
-            list_output, worktree_path
+            list_output or "", worktree_path
         )
         lines.append(f"git_worktree_list_registers_path={str(registered).lower()}")
     else:
@@ -4097,13 +4111,43 @@ def quarantine_stale_clean_skeleton_worktrees(body: str) -> str:
 
         code, output = run_command(["git", "worktree", "remove", str(worktree_path)])
         if code != 0:
+            registered = None
+            list_code, list_output = run_command(
+                ["git", "worktree", "list", "--porcelain"]
+            )
+            if list_code == 0:
+                registered = _git_worktree_list_porcelain_registers_path(
+                    list_output, worktree_path
+                )
+            if (
+                registered is False
+                and _git_worktree_remove_output_says_not_working_tree(output)
+            ):
+                skipped_count += 1
+                status_lines.extend(
+                    _quarantine_remove_failed_report_lines(
+                        worktree_id,
+                        worktree_path,
+                        code,
+                        output,
+                        action="skipped_unregistered",
+                        list_code=list_code,
+                        list_output=list_output,
+                    )
+                )
+                continue
             return _maintenance_report(
                 "BLOCKED",
                 task_id,
                 [
                     *status_lines,
                     *_quarantine_remove_failed_report_lines(
-                        worktree_id, worktree_path, code, output
+                        worktree_id,
+                        worktree_path,
+                        code,
+                        output,
+                        list_code=list_code,
+                        list_output=list_output,
                     ),
                 ],
                 "not_met",

@@ -2528,6 +2528,49 @@ def test_quarantine_stale_clean_skeleton_worktrees_reports_remove_128_stderr(
     ]
 
 
+def test_quarantine_stale_clean_skeleton_worktrees_skips_unregistered_not_working_tree(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_quarantine_worktree(tmp_path, "issue-794")
+
+    def run_quarantine_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        if command == ["git", "remote", "get-url", "origin"]:
+            return 0, "https://github.com/alanua/Skeleton.git\n"
+        if command == ["git", "status", "--porcelain"]:
+            return 0, ""
+        if command == ["git", "worktree", "remove", str(worktree_path)]:
+            return 128, f"fatal: '{worktree_path}' is not a working tree\n"
+        if command == ["git", "worktree", "list", "--porcelain"]:
+            return 0, f"worktree {tmp_path / 'issue-120'}\nHEAD abc123\n"
+        return 2, "unexpected command output must not leak"
+
+    with mock.patch.object(runner, "DEFAULT_WORKTREE_ROOT", tmp_path), mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run_quarantine_command
+    ) as run:
+        report = runner.quarantine_stale_clean_skeleton_worktrees(
+            _quarantine_stale_worktrees_body(worktree_ids=("issue-794",))
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert "worktree=issue-794 action=skipped_unregistered exit_code=128" in report
+    assert f"fatal: '{worktree_path}' is not a working tree" in report
+    assert "git_worktree_list_registers_path=false" in report
+    assert "removed_worktrees_count=0" in report
+    assert "skipped_worktrees_count=1" in report
+    assert all(command[0] != "rm" for command in commands)
+    assert commands == [
+        ["git", "remote", "get-url", "origin"],
+        ["git", "status", "--porcelain"],
+        ["git", "worktree", "remove", str(worktree_path)],
+        ["git", "worktree", "list", "--porcelain"],
+    ]
+
+
 def test_quarantine_stale_clean_skeleton_worktrees_skips_protected_without_commands(
     tmp_path: Path,
 ) -> None:
