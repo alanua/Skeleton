@@ -1,0 +1,14 @@
+{
+  "schema": "skeleton.governance_gate_fixture.v1",
+  "name": "block runtime scope",
+  "input": {
+    "changed_roots": ["docs", "core"],
+    "requested_actions": ["document governance contract", "add runtime enforcement"],
+    "declared_forbidden_absent": ["deploy", "secrets", "merge", "publish"],
+    "uses_memory_as_canon": false
+  },
+  "expected_decision": {
+    "allowed": false,
+    "reasons": ["runtime and server changes are outside governance contract v1 scope"]
+  }
+}
