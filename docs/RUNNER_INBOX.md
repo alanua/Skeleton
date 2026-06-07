@@ -45,3 +45,33 @@ python -m tools.skeleton_core.runner_inbox path/to/packet.yaml --repo-root .
 
 The command prints a JSON report plus a compact human-readable report. Blocked
 packets return exit code 2 and leave the review queue unchanged.
+
+## Local Transport
+
+`tools/skeleton_core/runner_inbox_transport.py` adds a bounded local polling
+transport around the same processor. It does not add any packet capabilities:
+packets still cannot run shell commands, call network APIs, deploy, expose
+secrets or private data, publish externally, alter runtime configuration, or
+promote canon. The only accepted packet action remains
+`append_review_queue_entries`.
+
+The default transport root is `var/runner_inbox`:
+
+- `inbox/`: local incoming packet files (`.yaml`, `.yml`, or `.json`)
+- `done/`: packets that processed successfully
+- `failed/`: blocked or failed packets
+- `runner_inbox_report.json`: compact JSON report for the last poll
+
+Polling processes at most one packet. Files are selected deterministically by
+name from `inbox/`. A successful packet is moved to `done/`; a blocked packet or
+malformed packet is moved to `failed/`. An empty inbox returns `no-op` and still
+writes the compact JSON report.
+
+Run one poll locally:
+
+```bash
+python -m tools.skeleton_core.runner_inbox_transport --transport-root var/runner_inbox --repo-root .
+```
+
+The transport returns exit code 0 for `done` and `no-op`, and exit code 2 for
+`failed`.
