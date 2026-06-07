@@ -15,6 +15,33 @@ read_order:
   - PROJECT_INDEX.yaml
   - STATUS_CODES.yaml
 
+boot_visible_control_routes:
+  runner_inbox_v0:
+    label: Runner Inbox route
+    docs:
+      - docs/RUNNER_INBOX.md
+      - docs/ASSISTANT_CONTROL_ROUTE.md
+    target: projects/skeleton/REVIEW_QUEUE.yaml
+    packet_type: append_review_queue_entries
+    allowed_entry_states:
+      - REVIEW
+      - BACKLOG
+      - REJECTED
+    canon_promotion: explicit_operator_approval_required
+    forbids:
+      - private_data
+      - secrets
+      - deploy
+      - runtime_changes
+  runner_inbox_transport_polling_v0:
+    label: Runner Inbox route
+    docs:
+      - docs/RUNNER_INBOX.md
+      - docs/ASSISTANT_CONTROL_ROUTE.md
+    transport_root: var/runner_inbox
+    processes: at_most_one_packet_per_poll
+    capabilities: same_as_runner_inbox_v0
+
 boot_output:
   type: BootReport
   required_fields:
