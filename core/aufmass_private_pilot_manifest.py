@@ -172,7 +172,8 @@ def validate_private_pilot_manifest(data: Mapping[str, Any]) -> ValidationResult
         if status and status not in APPROVED_PUBLIC_SAFETY_STATUSES:
             _error(errors, "$.public_safety.status", "unsupported_public_safety_status", "public_safety status is not supported.")
 
-    _validate_notes(data.get("notes"), "$.notes", errors)
+    if "notes" in data:
+        _validate_notes(data.get("notes"), "$.notes", errors)
     _validate_routed_refs(data.get("output_refs", []), "$.output_refs", errors)
     _validate_routed_refs(data.get("report_refs", []), "$.report_refs", errors)
 

@@ -42,7 +42,6 @@ def manifest(**overrides: object) -> dict[str, object]:
             }
         ],
         "public_safety": {"status": "private_only"},
-        "notes": ["synthetic manifest metadata only"],
     }
     values.update(overrides)
     return deepcopy(values)
@@ -68,6 +67,33 @@ def test_manifest_dataclass_model_builds_after_validation() -> None:
     assert model.project_id == "aufmass"
     assert model.private_refs[0].private_ref == "private-ref-synthetic-1"
     assert model.public_safety.status == "private_only"
+    assert model.notes == []
+
+
+def test_present_notes_list_of_strings_passes() -> None:
+    result = validate_private_pilot_manifest(manifest(notes=["synthetic manifest metadata only"]))
+
+    assert result.ok is True
+    assert result.errors == []
+    assert result.warnings == []
+
+
+def test_present_non_list_notes_fails() -> None:
+    result = validate_private_pilot_manifest(manifest(notes="synthetic manifest metadata only"))
+
+    assert result.ok is False
+    assert [(issue.path, issue.code) for issue in result.errors] == [
+        ("$.notes", "invalid_notes"),
+    ]
+
+
+def test_present_notes_list_with_non_string_item_fails() -> None:
+    result = validate_private_pilot_manifest(manifest(notes=["synthetic manifest metadata only", 1]))
+
+    assert result.ok is False
+    assert [(issue.path, issue.code) for issue in result.errors] == [
+        ("$.notes[1]", "invalid_note"),
+    ]
 
 
 def test_pilot_id_and_project_id_are_required() -> None:
