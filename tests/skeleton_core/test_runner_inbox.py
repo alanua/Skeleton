@@ -138,3 +138,24 @@ def test_yaml_remains_valid_after_append(tmp_path: Path) -> None:
     assert report.status == "appended"
     parsed = queue(root)
     assert parsed["entries"][-1]["summary"] == "Public-safe text with colon: still valid YAML."
+
+
+def test_public_safe_private_route_wording_is_allowed(tmp_path: Path) -> None:
+    root = repo_copy(tmp_path)
+    packet_path = write_packet(
+        tmp_path,
+        entries=[
+            valid_entry(
+                id="RQ-2099-01-01-002",
+                summary="Private memory route is discussed as an architecture boundary, not private data.",
+                existing_match="Related to private memory routing terminology.",
+                risk="Could be misunderstood if treated as actual private content.",
+                recommended_action="Keep as REVIEW terminology only.",
+            )
+        ],
+    )
+
+    report = process_runner_inbox(packet_path, repo_root=root)
+
+    assert report.status == "appended"
+    assert queue(root)["entries"][-1]["id"] == "RQ-2099-01-01-002"

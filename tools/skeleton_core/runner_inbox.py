@@ -30,7 +30,6 @@ REQUIRED_ENTRY_FIELDS = frozenset(
 ALLOWED_STATUS = frozenset({"REVIEW", "BACKLOG", "REJECTED"})
 ALLOWED_CANON_STATUS = frozenset({"not_canon_until_promoted", "rejected_not_canon"})
 BLOCKED_TEXT = (
-    "private",
     "secret",
     "password",
     "passwd",
