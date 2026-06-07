@@ -1613,8 +1613,9 @@ def test_done_pr_report_builds_card_payload_from_runner_binding() -> None:
     assert localized_card is not None
     assert localized_card["text"] == (
         "Проєкт: Skeleton\n"
-        "Статус: очікує схвалення\n"
-        "Коментар: Перевір у ChatGPT перед схваленням."
+        "PR: #123\n"
+        "Status: очікує схвалення\n"
+        "Comment: Перевір у ChatGPT перед схваленням."
     )
     assert localized_card["buttons"][0]["label"] == "Деталі"
 
@@ -1639,11 +1640,13 @@ def test_done_pr_card_hides_technical_details_from_operator_text() -> None:
     text = str(card["text"])
     assert text == (
         "Проєкт: Skeleton\n"
-        "Статус: очікує схвалення\n"
-        "Коментар: Перевір у ChatGPT перед схваленням."
+        "PR: #123\n"
+        "Status: очікує схвалення\n"
+        "Comment: Перевір у ChatGPT перед схваленням."
     )
     assert HEAD_SHA not in text
-    assert "PR:" not in text
+    assert "Issue:" not in text
+    assert PR_URL not in text
     assert "target_repo" not in text
     assert "Base:" not in text
     assert "Head:" not in text
@@ -1663,6 +1666,22 @@ def test_done_pr_card_shows_default_target_repo() -> None:
 
     text = str(card["text"])
     assert "Проєкт: Skeleton" in text
+
+
+def test_done_pr_card_with_source_issue_renders_issue_and_pr_numbers() -> None:
+    card = runner.build_done_pr_ready_card_payload(
+        DONE_REPORT,
+        source_issue_number=129,
+    )
+    assert card is not None
+
+    assert str(card["text"]) == (
+        "Проєкт: Skeleton\n"
+        "Issue: #129\n"
+        "PR: #123\n"
+        "Status: очікує схвалення\n"
+        "Comment: Перевір у ChatGPT перед схваленням."
+    )
 
 
 def test_done_pr_card_shows_target_repo_without_misleading_repository_line() -> None:
@@ -1763,8 +1782,9 @@ def test_approve_reject_buttons_require_reliable_sha_and_changed_files() -> None
     assert [button["text"] for button in buttons] == ["Деталі", "Відкрити PR"]
     assert str(card["text"]) == (
         "Проєкт: Skeleton\n"
-        "Статус: готово до перегляду\n"
-        "Коментар: Відкрий PR, якщо потрібні деталі."
+        "PR: #123\n"
+        "Status: готово до перегляду\n"
+        "Comment: Відкрий PR, якщо потрібні деталі."
     )
 
 
@@ -1813,11 +1833,16 @@ def test_done_pr_card_success_sends_reply_markup() -> None:
         runner, "should_notify_task_finished", return_value=True
     ), mock.patch.object(
         runner, "build_done_pr_ready_card_payload", return_value=card
-    ), mock.patch.object(
+    ) as build_card, mock.patch.object(
         runner, "card_payload_to_inline_keyboard", return_value=reply_markup
     ), mock.patch.object(runner, "send_telegram_notification") as send:
         runner.notify_task_finished(129, "DONE", DONE_REPORT)
 
+    build_card.assert_called_once_with(
+        DONE_REPORT,
+        runner.REPO,
+        source_issue_number=129,
+    )
     send.assert_called_once_with("PR ready card", reply_markup)
 
 
@@ -1839,6 +1864,10 @@ def test_done_pr_card_uses_target_repository_from_issue_body() -> None:
     text = send.call_args.args[0]
     reply_markup = send.call_args.args[1]
     assert "Проєкт: bauclock" in text
+    assert "Issue: #129" in text
+    assert "PR: #123" in text
+    assert "Status:" in text
+    assert "Comment:" in text
     assert "Repository: alanua/Skeleton" not in text
     assert "target_repo" not in text
     assert [row[0]["text"] for row in reply_markup["inline_keyboard"]] == [
