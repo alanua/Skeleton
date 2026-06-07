@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.task_template.schema.json",
+  "type": "object",
+  "required": [
+    "schema",
+    "task_id",
+    "project_id",
+    "repo",
+    "worktree",
+    "goal",
+    "scope",
+    "allowed_change_roots",
+    "forbidden",
+    "stop_condition",
+    "evidence_packet",
+    "validation",
+    "approval_required"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": "skeleton.task_template.v1"
+    },
+    "task_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "project_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "repo": {
+      "type": "string",
+      "minLength": 1
+    },
+    "worktree": {
+      "type": "string",
+      "minLength": 1
+    },
+    "goal": {
+      "type": "string",
+      "minLength": 1
+    },
+    "scope": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "allowed_change_roots": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "enum": ["docs", "schemas", "fixtures"]
+      }
+    },
+    "forbidden": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "enum": ["runtime", "deploy", "secrets", "server", "merge", "publish"]
+      }
+    },
+    "stop_condition": {
+      "type": "string",
+      "minLength": 1
+    },
+    "evidence_packet": {
+      "type": "string",
+      "pattern": "^fixtures/governance/.+\\.json$"
+    },
+    "validation": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "approval_required": {
+      "type": "boolean"
+    }
+  }
+}

@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.evidence_packet.schema.json",
+  "type": "object",
+  "required": [
+    "schema",
+    "task_id",
+    "project_id",
+    "repo",
+    "operator_instruction",
+    "authority_sources_read",
+    "requested_scope",
+    "changed_files",
+    "memory_boundary",
+    "risk_summary",
+    "validation",
+    "prohibited_areas_not_touched",
+    "public_safe"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": "skeleton.evidence_packet.v1"
+    },
+    "task_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "project_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "repo": {
+      "type": "string",
+      "minLength": 1
+    },
+    "operator_instruction": {
+      "type": "string",
+      "minLength": 1
+    },
+    "authority_sources_read": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "requested_scope": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "changed_files": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^(docs|schemas|fixtures)/.+"
+      }
+    },
+    "memory_boundary": {
+      "type": "object",
+      "required": ["uses_memory_as_canon", "notes"],
+      "additionalProperties": false,
+      "properties": {
+        "uses_memory_as_canon": {
+          "type": "boolean",
+          "const": false
+        },
+        "notes": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "risk_summary": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "validation": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "prohibited_areas_not_touched": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "enum": ["runtime", "deploy", "secrets", "server", "merge", "publish"]
+      }
+    },
+    "public_safe": {
+      "type": "boolean",
+      "const": true
+    }
+  }
+}

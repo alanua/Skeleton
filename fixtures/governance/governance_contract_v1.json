@@ -1,0 +1,61 @@
+{
+  "schema": "skeleton.governance_contract.v1",
+  "version": 1,
+  "authority_ladder": [
+    {
+      "rank": 1,
+      "source": "latest direct operator instruction",
+      "canon_role": "current_instruction"
+    },
+    {
+      "rank": 2,
+      "source": "GitHub main and reviewed project files",
+      "canon_role": "canon"
+    },
+    {
+      "rank": 3,
+      "source": "PROJECT_MANIFEST.yaml",
+      "canon_role": "identity"
+    },
+    {
+      "rank": 4,
+      "source": "STATE.yaml",
+      "canon_role": "handoff_not_canon"
+    },
+    {
+      "rank": 5,
+      "source": "NotebookLM sourcepack",
+      "canon_role": "read_only_mirror"
+    },
+    {
+      "rank": 6,
+      "source": "model memory",
+      "canon_role": "weak_cache"
+    }
+  ],
+  "memory_boundary": {
+    "canon_status": "memory_is_not_canon",
+    "allowed": [
+      "public-safe task lifecycle facts",
+      "sanitized evidence summaries",
+      "opaque private reference stubs"
+    ],
+    "forbidden": [
+      "secrets",
+      ".env values",
+      "raw private documents",
+      "Drive or Docs URLs",
+      "private filesystem paths",
+      "raw executor transcripts"
+    ],
+    "promotion_rule": "Canon promotion requires explicit operator approval and reviewed repository files."
+  },
+  "role_manifest_ref": "schemas/skeleton_role_manifest.schema.json",
+  "evidence_packet_ref": "schemas/skeleton_evidence_packet.schema.json",
+  "task_template_ref": "schemas/skeleton_task_template.schema.json",
+  "gate_fixture_refs": [
+    "fixtures/governance/gate_allow_public_docs_only.json",
+    "fixtures/governance/gate_block_runtime_scope.json"
+  ],
+  "non_goals": ["runtime", "deploy", "secrets", "server", "merge", "publish"]
+}

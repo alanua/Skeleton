@@ -1,0 +1,14 @@
+{
+  "schema": "skeleton.governance_gate_fixture.v1",
+  "name": "allow public-safe docs, schemas, and fixtures only",
+  "input": {
+    "changed_roots": ["docs", "schemas", "fixtures"],
+    "requested_actions": ["document governance contract", "add schemas", "add fixtures"],
+    "declared_forbidden_absent": ["runtime", "deploy", "secrets", "server", "merge", "publish"],
+    "uses_memory_as_canon": false
+  },
+  "expected_decision": {
+    "allowed": true,
+    "reasons": ["scope is limited to docs, schemas, and fixtures"]
+  }
+}

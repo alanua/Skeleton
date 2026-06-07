@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.role_manifest.schema.json",
+  "type": "object",
+  "required": ["schema", "version", "roles"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": "skeleton.role_manifest.v1"
+    },
+    "version": {
+      "const": 1
+    },
+    "roles": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["role", "authority", "allowed_actions", "forbidden_actions"],
+        "additionalProperties": false,
+        "properties": {
+          "role": {
+            "type": "string",
+            "enum": ["operator", "planner", "executor", "runner", "auditor"]
+          },
+          "authority": {
+            "type": "string",
+            "minLength": 1
+          },
+          "allowed_actions": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1}
+          },
+          "forbidden_actions": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    }
+  }
+}

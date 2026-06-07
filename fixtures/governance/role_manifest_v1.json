@@ -1,0 +1,36 @@
+{
+  "schema": "skeleton.role_manifest.v1",
+  "version": 1,
+  "roles": [
+    {
+      "role": "operator",
+      "authority": "Sets current instructions and approves durable writes, merge, deploy, and canon promotion.",
+      "allowed_actions": ["approve durable writes", "approve canon promotion", "approve merge", "approve deploy"],
+      "forbidden_actions": ["bypass evidence packet"]
+    },
+    {
+      "role": "planner",
+      "authority": "Reads context, critiques scope, and prepares bounded task templates.",
+      "allowed_actions": ["read public-safe context", "prepare task template", "critique scope"],
+      "forbidden_actions": ["merge", "deploy", "publish"]
+    },
+    {
+      "role": "executor",
+      "authority": "Makes bounded file changes inside the assigned worktree.",
+      "allowed_actions": ["edit allowed files", "run validation", "report evidence"],
+      "forbidden_actions": ["change forbidden roots", "merge", "deploy", "publish"]
+    },
+    {
+      "role": "runner",
+      "authority": "Owns approved orchestration and validation around assigned worktrees.",
+      "allowed_actions": ["claim task", "run validation", "open draft PR when explicitly allowed"],
+      "forbidden_actions": ["deploy without approval", "merge without approval"]
+    },
+    {
+      "role": "auditor",
+      "authority": "Reviews evidence, diffs, and risk without owning execution.",
+      "allowed_actions": ["review diff", "review evidence", "identify risks"],
+      "forbidden_actions": ["execute changes", "merge", "deploy"]
+    }
+  ]
+}

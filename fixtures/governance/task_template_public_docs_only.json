@@ -1,0 +1,15 @@
+{
+  "schema": "skeleton.task_template.v1",
+  "task_id": "issue-815",
+  "project_id": "skeleton",
+  "repo": "alanua/Skeleton",
+  "worktree": "/home/agent/agent-dev/worktrees/skeleton/issue-815",
+  "goal": "Add Skeleton governance contract v1.",
+  "scope": ["docs", "schemas", "fixtures"],
+  "allowed_change_roots": ["docs", "schemas", "fixtures"],
+  "forbidden": ["runtime", "deploy", "secrets", "server", "merge", "publish"],
+  "stop_condition": "Report conflicts only.",
+  "evidence_packet": "fixtures/governance/evidence_packet_minimal.json",
+  "validation": ["json syntax validation", "git diff --check"],
+  "approval_required": false
+}

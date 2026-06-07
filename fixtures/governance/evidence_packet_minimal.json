@@ -1,0 +1,35 @@
+{
+  "schema": "skeleton.evidence_packet.v1",
+  "task_id": "issue-815",
+  "project_id": "skeleton",
+  "repo": "alanua/Skeleton",
+  "operator_instruction": "Add Skeleton governance contract v1 in docs, schemas, and fixtures only.",
+  "authority_sources_read": [
+    "projects/skeleton/PROJECT_OPERATING_STANDARD.md",
+    "docs/SKELETON_MEMORY.md",
+    "docs/MEMORY_STORE.md",
+    "docs/ACTION_GATE.md"
+  ],
+  "requested_scope": ["docs", "schemas", "fixtures"],
+  "changed_files": [
+    "docs/SKELETON_GOVERNANCE_CONTRACT_V1.md",
+    "schemas/skeleton_governance_contract.schema.json",
+    "schemas/skeleton_role_manifest.schema.json",
+    "schemas/skeleton_evidence_packet.schema.json",
+    "schemas/skeleton_task_template.schema.json",
+    "fixtures/governance/governance_contract_v1.json",
+    "fixtures/governance/role_manifest_v1.json",
+    "fixtures/governance/evidence_packet_minimal.json",
+    "fixtures/governance/task_template_public_docs_only.json",
+    "fixtures/governance/gate_allow_public_docs_only.json",
+    "fixtures/governance/gate_block_runtime_scope.json"
+  ],
+  "memory_boundary": {
+    "uses_memory_as_canon": false,
+    "notes": "Memory is treated as weak cache and operational state only."
+  },
+  "risk_summary": ["Static contract could drift from runtime behavior if future enforcement is added elsewhere."],
+  "validation": ["json syntax validation", "scope check limited to docs, schemas, fixtures"],
+  "prohibited_areas_not_touched": ["runtime", "deploy", "secrets", "server", "merge", "publish"],
+  "public_safe": true
+}

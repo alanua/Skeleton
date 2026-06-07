@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.governance_gate_fixture.schema.json",
+  "type": "object",
+  "required": ["schema", "name", "input", "expected_decision"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": "skeleton.governance_gate_fixture.v1"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "input": {
+      "type": "object",
+      "required": [
+        "changed_roots",
+        "requested_actions",
+        "declared_forbidden_absent",
+        "uses_memory_as_canon"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "changed_roots": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "requested_actions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "declared_forbidden_absent": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["runtime", "deploy", "secrets", "server", "merge", "publish"]
+          }
+        },
+        "uses_memory_as_canon": {
+          "type": "boolean",
+          "const": false
+        }
+      }
+    },
+    "expected_decision": {
+      "type": "object",
+      "required": ["allowed", "reasons"],
+      "additionalProperties": false,
+      "properties": {
+        "allowed": {
+          "type": "boolean"
+        },
+        "reasons": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  }
+}
