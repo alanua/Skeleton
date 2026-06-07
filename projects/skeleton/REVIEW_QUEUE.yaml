@@ -1045,3 +1045,75 @@ entries:
     recommended_action: Do not implement in Skeleton core; keep only audit-trail and review-filter lessons.
     status: REJECTED
     canon_status: rejected_not_canon
+
+  - id: RQ-2026-06-07-CONTROL-PLANE-001
+    source_batch: assistant_control_plane_failures_2026_06_07
+    date: '2026-06-07'
+    classification: REVIEW
+    target_project: skeleton
+    summary: Assistant incorrectly routed BZ knowledge intake into execution-style GitHub or Runner work.
+    existing_match: Matches corrected BZ route where transcript, article, sourcepack, or external analysis defaults to knowledge_intake
+      with write gate.
+    risk: Wrong route creates wasted Runner work, noisy issues, and accidental durable writes before critique.
+    recommended_action: Add guardrail that BZ inputs must produce classification, critique, duplicate check, and PatchPlan before
+      any write or Runner task.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+  - id: RQ-2026-06-07-CONTROL-PLANE-002
+    source_batch: assistant_control_plane_failures_2026_06_07
+    date: '2026-06-07'
+    classification: REVIEW
+    target_project: skeleton
+    summary: Assistant over-recorded ideas without enough critique and rejection.
+    existing_match: Matches user correction that interesting ideas must be filtered, not copied wholesale.
+    risk: Review queue becomes noise storage instead of a decision-support layer.
+    recommended_action: Require every intake batch to include KEEP, REJECT, risk, existing match, and recommended action.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+  - id: RQ-2026-06-07-CONTROL-PLANE-003
+    source_batch: assistant_control_plane_failures_2026_06_07
+    date: '2026-06-07'
+    classification: BACKLOG
+    target_project: skeleton
+    summary: Add fallback path for blocked GitHub write operations.
+    existing_match: Matches failure where GitHub comment and issue updates were blocked while the task itself was safe.
+    risk: Without fallback, safe BZ work stalls and requires Oleksii to manually bridge every small step.
+    recommended_action: Use Runner Inbox packet path for bounded append-only BZ writes when GitHub write from chat is unavailable.
+    status: BACKLOG
+    canon_status: not_canon_until_promoted
+  - id: RQ-2026-06-07-CONTROL-PLANE-004
+    source_batch: assistant_control_plane_failures_2026_06_07
+    date: '2026-06-07'
+    classification: REVIEW
+    target_project: skeleton
+    summary: Runner task was blocked because issue body initially lacked a fenced task block.
+    existing_match: 'Matches #794 initial block where Runner could not find a task fence.'
+    risk: Runner-ready labels without parseable task blocks create false progress and idle time.
+    recommended_action: Add preflight check that runner:ready issues contain a fenced task block in the issue body, not only
+      comments.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+  - id: RQ-2026-06-07-CONTROL-PLANE-005
+    source_batch: assistant_control_plane_failures_2026_06_07
+    date: '2026-06-07'
+    classification: REVIEW
+    target_project: skeleton
+    summary: Assistant overstated direct Runner capability instead of clearly distinguishing GitHub route from bounded inbox
+      route.
+    existing_match: Matches correction that Runner exists, but ChatGPT had no direct Hetzner shell channel in this chat.
+    risk: Misstated capability causes bad operational expectations and hides the real blocker.
+    recommended_action: 'Use exact capability labels: GitHub route, Runner Inbox route, terminal-pasted route, or blocked.'
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+  - id: RQ-2026-06-07-CONTROL-PLANE-006
+    source_batch: assistant_control_plane_failures_2026_06_07
+    date: '2026-06-07'
+    classification: BACKLOG
+    target_project: skeleton
+    summary: Add compact terminal mode for long Runner scripts and logs.
+    existing_match: Matches broken terminal output window during long script execution.
+    risk: Long inline terminal output makes debugging slower and can corrupt the working view.
+    recommended_action: Prefer scripts written to files, output redirected to log files, and tail-only reporting for routine
+      Runner operations.
+    status: BACKLOG
+    canon_status: not_canon_until_promoted
