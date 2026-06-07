@@ -974,3 +974,74 @@ entries:
     recommended_action: Agents may draft, recommend, report, or queue actions; external side effects require explicit approval and audit trail.
     status: REJECTED
     canon_status: rejected_not_canon
+
+  - id: RQ-2026-06-07-AGENT-BLOG-001
+    source_batch: fil_m_agent_blog_content_repo_2026_06_07
+    date: '2026-06-07'
+    classification: REVIEW
+    target_project: skeleton
+    summary: Use structured events instead of raw logs for agent and Runner observations.
+    existing_match: Matches Skeleton audit-friendly artifact direction and reduces noisy log retention.
+    risk: Over-structuring can create bureaucracy if every minor log becomes an event.
+    recommended_action: Keep as REVIEW pattern for future event schema; apply only to decision-relevant signals.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+  - id: RQ-2026-06-07-AGENT-BLOG-002
+    source_batch: fil_m_agent_blog_content_repo_2026_06_07
+    date: '2026-06-07'
+    classification: REVIEW
+    target_project: skeleton
+    summary: Add a filter-before-escalation step before creating issues, review memos, or TASK_PACKETs.
+    existing_match: Reinforces BZ correction to extract, critique, deduplicate, classify, then write.
+    risk: Too strict a filter may hide useful weak signals.
+    recommended_action: Keep as REVIEW pattern; escalate only when signal changes risk, decision, blocker state, acceptance
+      criteria, or reusable lesson.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+  - id: RQ-2026-06-07-AGENT-BLOG-003
+    source_batch: fil_m_agent_blog_content_repo_2026_06_07
+    date: '2026-06-07'
+    classification: BACKLOG
+    target_project: skeleton
+    summary: Treat lessons as first-class reusable artifacts.
+    existing_match: Matches recent failures around wrong route, over-recording, missing fenced task block, and GitHub write
+      fallback.
+    risk: Lesson artifacts can become vague notes unless linked to tests, guardrails, schemas, or checklists.
+    recommended_action: Add later as a lightweight lesson or guardrail event type connected to review queue and tests.
+    status: BACKLOG
+    canon_status: not_canon_until_promoted
+  - id: RQ-2026-06-07-AGENT-BLOG-004
+    source_batch: fil_m_agent_blog_content_repo_2026_06_07
+    date: '2026-06-07'
+    classification: REVIEW
+    target_project: skeleton
+    summary: Normalize the pipeline signal to review to packet to delivery.
+    existing_match: Matches Skeleton route where observation or transcript intake becomes critique, then review packet, then
+      GitHub or Runner only when approved.
+    risk: If automated too early, it can recreate the same uncontrolled intake problem.
+    recommended_action: Keep as REVIEW; use for BZ intake and Runner reports after bounded gates are proven.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+  - id: RQ-2026-06-07-AGENT-BLOG-005
+    source_batch: fil_m_agent_blog_content_repo_2026_06_07
+    date: '2026-06-07'
+    classification: REVIEW
+    target_project: skeleton
+    summary: Separate intake roles into observer, reviewer, planner, and packager modes.
+    existing_match: Matches need to prevent one assistant pass from collecting, approving, routing, and writing without critique.
+    risk: Role split can become theatrical if implemented as agent personas instead of functional modes.
+    recommended_action: Keep functional role split only; reject storytelling/persona layer for Skeleton core.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+  - id: RQ-2026-06-07-AGENT-BLOG-006
+    source_batch: fil_m_agent_blog_content_repo_2026_06_07
+    date: '2026-06-07'
+    classification: REJECTED
+    target_project: skeleton
+    summary: Reject agent personas, Git-only agent bus, full media publisher layer, autonomous publication, and private content
+      in public repo.
+    existing_match: Matches Skeleton/Jeeves boundary and public/private routing rules.
+    risk: These patterns create theatre, noise, publication risk, or privacy leakage if copied directly.
+    recommended_action: Do not implement in Skeleton core; keep only audit-trail and review-filter lessons.
+    status: REJECTED
+    canon_status: rejected_not_canon
