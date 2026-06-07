@@ -6,6 +6,9 @@ entrypoint: projects/lavalamp/PROJECT_MANIFEST.yaml
 read_order:
   - projects/lavalamp/PROJECT_MANIFEST.yaml
   - projects/lavalamp/STATE.yaml
-source_repo: alanua/jeeves
-privacy_class: mixed_public_private
+  - projects/lavalamp/README.md
+  - projects/lavalamp/src/README.md
+  - projects/lavalamp/firmware/README.md
+source_repo: alanua/Lavalamp
+privacy_class: public_safe_placeholders
 means: WLED transparent cylinder lava lamp project, separate from general home automation

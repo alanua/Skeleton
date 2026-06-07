@@ -203,24 +203,25 @@ Next actions:
 ### lavalamp
 
 - Means: WLED transparent cylinder lava lamp project
-- Repo: `alanua/jeeves`
+- Repo: `alanua/Lavalamp`
 - Entrypoint: `projects/lavalamp/PROJECT_MANIFEST.yaml`
 - State file: `projects/lavalamp/STATE.yaml`
-- Status: `DRAFT_HANDOFF`
+- Status: `BASELINE_PLACEHOLDER`
 - State role: `handoff_not_canon_truth`
-- Last verified: `2026-05-17`
-- Evidence source: migration source repo alanua/jeeves, project memory, not revalidated in this PR
+- Last verified: `2026-06-07`
+- Evidence source: Skeleton project metadata and public-safe Lavalamp baseline placeholders; migrated Jeeves memory remains weak handoff context only
 
 Summary:
 
 - Lava Lamp / WLED Cylinder is a separate project.
 - It overlaps technically with WLED and ESP32 but remains separate from general home automation.
-- Real firmware/code/device context stays in project-specific private or source routes when needed.
+- Public repo content is limited to docs, routing metadata, and source placeholders until real source is reviewed.
+- No binaries, build cache, OTA payloads, secrets, credentials, or device-specific configuration belong in this baseline.
 
 Next actions:
 
-- Add exact source route after reviewing migrated project docs.
-- Keep effect math and cylinder coordinate work as project-specific context.
+- Add real source only after reviewing the target repository history and the relevant WLED effect or usermod code.
+- Keep effect math and cylinder coordinate work as project-specific context with testable assumptions.
 - Avoid mixing with Jeeves runtime decisions.
 
 ### bauclock
