@@ -300,6 +300,48 @@ must not force-push, merge, deploy, read secrets, mutate runtime services, use
 issue-provided paths, or execute arbitrary issue text. Its only allowed commit
 is the single validated issue-worktree publish commit described above.
 
+`quarantine_stale_clean_skeleton_worktrees` removes only explicitly listed
+clean Skeleton issue worktrees and must include explicit worktree id metadata:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: quarantine_stale_clean_skeleton_worktrees
+Repository: alanua/Skeleton
+Issue Worktrees:
+- issue-123
+- issue-124
+Protected IDs:
+- issue-834
+```
+
+`Repository` is optional but, when present, must be exactly `alanua/Skeleton`.
+`Protected IDs` is optional. Worktree ids must be literal `issue-N` names, not
+paths.
+
+It may only:
+
+1. Resolve each listed id as `issue-N` under
+   `/home/agent/agent-dev/worktrees/skeleton`.
+2. Skip protected ids before running any Git commands for them.
+3. Skip missing paths, missing Git metadata, unsafe paths, dirty worktrees, and
+   worktrees whose origin remote is not `alanua/Skeleton`.
+4. For existing non-protected candidates, run only
+   `git remote get-url origin` and `git status --porcelain` inside the
+   candidate worktree before removal.
+5. Remove only candidates that exist, have Git metadata, match the Skeleton
+   remote, and have empty porcelain status, using
+   `git worktree remove {resolved_issue_worktree_path}`.
+
+It reports `DONE` when the listed candidates have been inspected and every
+eligible clean Skeleton issue worktree was removed. Missing, dirty, wrong
+remote, missing Git metadata, unsafe, and protected candidates are reported as
+skipped. Unsupported repositories, missing or invalid worktree id metadata,
+duplicate ids, invalid protected ids, unsafe configured roots, command failures
+while removing an eligible worktree, and unexpected handler errors are reported
+as `BLOCKED`. This task must not delete arbitrary paths, use shell commands,
+push, merge, deploy, read secrets, mutate runtime services, or execute arbitrary
+issue text.
+
 The allowlist does not permit rebooting the host, package upgrades, arbitrary
 commands or config values from issue text, or unrelated services.
 
