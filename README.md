@@ -44,3 +44,11 @@ Tests preserve behavior.
 PROJECT_MANIFEST.yaml = canonical project identity.
 STATE.yaml = handoff state (state_role: handoff_not_canon_truth).
 ```
+
+## Public-safe Aufmass docs
+
+```text
+docs/AUFMASS_PRIVATE_WORKSPACE_CONTRACT.md = minimal private workspace contract for bounded private pilots.
+docs/AUFMASS_PRIVATE_PILOT_PROTOCOL.md = public/private boundary for stage 1 private pilots.
+docs/AUFMASS_SOURCE_PACK.md = source pack manifest intake checkpoint.
+```
