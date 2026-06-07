@@ -86,6 +86,9 @@ INSPECT_PR_MERGEABILITY = "inspect_pr_mergeability"
 BACKFILL_SKELETON_MEMORY_RECENT = "backfill_skeleton_memory_recent"
 INSPECT_ISSUE_WORKTREE_FOR_PUBLISH = "inspect_issue_worktree_for_publish"
 PUBLISH_ISSUE_WORKTREE_PR = "publish_issue_worktree_pr"
+QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES = (
+    "quarantine_stale_clean_skeleton_worktrees"
+)
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
         SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
@@ -100,6 +103,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         BACKFILL_SKELETON_MEMORY_RECENT,
         INSPECT_ISSUE_WORKTREE_FOR_PUBLISH,
         PUBLISH_ISSUE_WORKTREE_PR,
+        QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES,
     )
 )
 RUNNER_PROJECT_CHECKOUT_BASE = Path("/home/agent/agent-dev")
@@ -293,6 +297,12 @@ class IssueWorktreePublishInspectionRequest:
     expected_branch: str
     allowed_files: frozenset[str]
     pr_title: str
+
+
+@dataclass(frozen=True)
+class StaleCleanSkeletonWorktreeQuarantineRequest:
+    worktree_ids: tuple[str, ...]
+    protected_ids: frozenset[str]
 
 
 def truncate_comment(body: str) -> str:
@@ -3888,6 +3898,181 @@ def _git_status_path_lines(output: str) -> list[str]:
     return [line.strip() for line in (output or "").splitlines() if line.strip()]
 
 
+_ISSUE_WORKTREE_ID_RE = re.compile(r"issue-[1-9]\d*")
+
+
+def _body_list_items(metadata: str, field_names: tuple[str, ...]) -> list[str] | None:
+    field_pattern = "|".join(re.escape(field_name) for field_name in field_names)
+    for index, line in enumerate((metadata or "").splitlines()):
+        if re.fullmatch(rf"\s*(?:{field_pattern}):\s*", line):
+            items: list[str] = []
+            for item in (metadata or "").splitlines()[index + 1 :]:
+                if re.fullmatch(r"\s*[A-Za-z][A-Za-z ]+:\s*.*", item):
+                    break
+                match = re.fullmatch(r"\s*-\s+(?P<value>\S(?:.*\S)?)\s*", item)
+                if match is None:
+                    if item.strip():
+                        return []
+                    continue
+                items.append(match.group("value"))
+            return items
+    return None
+
+
+def _stale_clean_skeleton_worktree_quarantine_metadata(
+    body: str,
+) -> tuple[StaleCleanSkeletonWorktreeQuarantineRequest | None, str | None]:
+    metadata = (body or "").split("```task", 1)[0]
+    repository = _body_field(metadata, "Repository")
+    if repository is not None and repository != REPO:
+        return None, "unsupported_repository"
+
+    listed_ids = _body_list_items(
+        metadata, ("Issue Worktrees", "Worktree IDs", "Worktrees")
+    )
+    if listed_ids is None or not listed_ids:
+        return None, "missing_worktree_ids"
+    if any(_ISSUE_WORKTREE_ID_RE.fullmatch(item) is None for item in listed_ids):
+        return None, "invalid_worktree_ids"
+    if len(set(listed_ids)) != len(listed_ids):
+        return None, "duplicate_worktree_ids"
+
+    protected_items = _body_list_items(
+        metadata, ("Protected IDs", "Protected Worktrees")
+    )
+    protected_ids = frozenset(protected_items or ())
+    if any(_ISSUE_WORKTREE_ID_RE.fullmatch(item) is None for item in protected_ids):
+        return None, "invalid_protected_ids"
+
+    return (
+        StaleCleanSkeletonWorktreeQuarantineRequest(
+            worktree_ids=tuple(listed_ids),
+            protected_ids=protected_ids,
+        ),
+        None,
+    )
+
+
+def _quarantine_issue_worktree_path(worktree_id: str) -> Path:
+    return worktree_root() / worktree_id
+
+
+def _ensure_safe_quarantine_issue_worktree_path(path: str | Path) -> Path:
+    root = worktree_root().resolve(strict=False)
+    candidate = Path(path).expanduser().resolve(strict=False)
+    if root != DEFAULT_WORKTREE_ROOT.resolve(strict=False):
+        raise ValueError("quarantine task is restricted to the Skeleton worktree root")
+    if candidate == root:
+        raise ValueError("issue worktree cannot be the worktree root")
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("issue worktree is outside runner worktree root") from exc
+    if (
+        candidate.name != Path(path).name
+        or _ISSUE_WORKTREE_ID_RE.fullmatch(candidate.name) is None
+    ):
+        raise ValueError("issue worktree path does not end with an issue id")
+    return candidate
+
+
+def quarantine_stale_clean_skeleton_worktrees(body: str) -> str:
+    task_id = QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES
+    request, reason = _stale_clean_skeleton_worktree_quarantine_metadata(body)
+    if reason is not None:
+        return _maintenance_report("BLOCKED", task_id, [f"reason={reason}"], "not_met")
+    assert request is not None
+
+    status_lines = [
+        f"repository={REPO}",
+        f"worktree_root={worktree_root()}",
+        f"listed_worktrees_count={len(request.worktree_ids)}",
+        f"protected_worktrees_count={len(request.protected_ids)}",
+    ]
+    removed_count = 0
+    skipped_count = 0
+    for worktree_id in request.worktree_ids:
+        status_lines.append(f"worktree_id={worktree_id}")
+        if worktree_id in request.protected_ids:
+            skipped_count += 1
+            status_lines.append(
+                f"worktree={worktree_id} action=skipped reason=protected"
+            )
+            continue
+
+        try:
+            worktree_path = _ensure_safe_quarantine_issue_worktree_path(
+                _quarantine_issue_worktree_path(worktree_id)
+            )
+        except ValueError:
+            skipped_count += 1
+            status_lines.append(
+                f"worktree={worktree_id} action=skipped reason=unsafe_path"
+            )
+            continue
+
+        if not worktree_path.exists():
+            skipped_count += 1
+            status_lines.append(f"worktree={worktree_id} action=skipped reason=missing")
+            continue
+        if not (worktree_path / ".git").exists():
+            skipped_count += 1
+            status_lines.append(
+                f"worktree={worktree_id} action=skipped reason=git_missing"
+            )
+            continue
+
+        code, output = run_command(
+            ["git", "remote", "get-url", "origin"], cwd=worktree_path
+        )
+        if code != 0:
+            skipped_count += 1
+            status_lines.append(
+                f"worktree={worktree_id} action=skipped reason=origin_read_failed"
+            )
+            continue
+        if not _remote_url_matches_project_repo(output, REPO):
+            skipped_count += 1
+            status_lines.append(
+                f"worktree={worktree_id} action=skipped reason=wrong_remote"
+            )
+            continue
+
+        code, output = run_command(["git", "status", "--porcelain"], cwd=worktree_path)
+        if code != 0:
+            skipped_count += 1
+            status_lines.append(
+                f"worktree={worktree_id} action=skipped reason=status_read_failed"
+            )
+            continue
+        if output.strip():
+            skipped_count += 1
+            status_lines.append(f"worktree={worktree_id} action=skipped reason=dirty")
+            continue
+
+        code, _output = run_command(["git", "worktree", "remove", str(worktree_path)])
+        if code != 0:
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [
+                    *status_lines,
+                    f"worktree={worktree_id} action=remove_failed exit_code={code}",
+                ],
+                "not_met",
+            )
+        removed_count += 1
+        status_lines.append(f"worktree={worktree_id} action=removed")
+
+    status_lines.extend(
+        (
+            f"removed_worktrees_count={removed_count}",
+            f"skipped_worktrees_count={skipped_count}",
+        )
+    )
+    return _maintenance_report("DONE", task_id, status_lines, "met")
+
+
 def _is_ignored_issue_publish_untracked_path(path: str) -> bool:
     return path == ".codex" or path.startswith(".codex/")
 
@@ -4326,6 +4511,8 @@ def dispatch_runtime_maintenance_task(
             return inspect_issue_worktree_for_publish(body)
         if task_id == PUBLISH_ISSUE_WORKTREE_PR:
             return publish_issue_worktree_pr(body)
+        if task_id == QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES:
+            return quarantine_stale_clean_skeleton_worktrees(body)
         return check_project_checkout(body)
     except Exception:
         return _maintenance_report(

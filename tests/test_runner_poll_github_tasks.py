@@ -2388,6 +2388,168 @@ def test_issue_worktree_publish_inspection_report_does_not_leak_raw_command_outp
     assert leaked_output not in report
 
 
+def _quarantine_stale_worktrees_body(
+    *,
+    worktree_ids: tuple[str, ...] = ("issue-120",),
+    protected_ids: tuple[str, ...] = (),
+    repository: str | None = runner.REPO,
+    task_body: str = "",
+) -> str:
+    metadata = []
+    if repository is not None:
+        metadata.append(f"Repository: {repository}")
+    metadata.append("Issue Worktrees:")
+    metadata.extend(f"- {worktree_id}" for worktree_id in worktree_ids)
+    if protected_ids:
+        metadata.append("Protected IDs:")
+        metadata.extend(f"- {worktree_id}" for worktree_id in protected_ids)
+    body = _maintenance_issue(
+        runner.QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES,
+        task_body,
+        metadata="\n".join(metadata),
+    )
+    return str(body["body"])
+
+
+def _prepare_quarantine_worktree(root: Path, worktree_id: str) -> Path:
+    worktree_path = root / worktree_id
+    worktree_path.mkdir(parents=True)
+    (worktree_path / ".git").write_text("gitdir: /tmp/git-dir\n", encoding="utf-8")
+    return worktree_path
+
+
+def test_quarantine_stale_clean_skeleton_worktrees_is_allowlisted() -> None:
+    assert (
+        runner.QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES
+        == "quarantine_stale_clean_skeleton_worktrees"
+    )
+    assert (
+        runner.QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES
+        in runner.RUNTIME_MAINTENANCE_TASK_IDS
+    )
+
+
+def test_quarantine_stale_clean_skeleton_worktrees_removes_only_clean_matching_worktrees(
+    tmp_path: Path,
+) -> None:
+    clean_path = _prepare_quarantine_worktree(tmp_path, "issue-120")
+    dirty_path = _prepare_quarantine_worktree(tmp_path, "issue-121")
+    wrong_remote_path = _prepare_quarantine_worktree(tmp_path, "issue-122")
+
+    def run_quarantine_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        if command == ["git", "remote", "get-url", "origin"]:
+            if Path(cwd or "") == wrong_remote_path:
+                return 0, "https://github.com/alanua/Other.git\n"
+            return 0, "https://github.com/alanua/Skeleton.git\n"
+        if command == ["git", "status", "--porcelain"]:
+            if Path(cwd or "") == dirty_path:
+                return 0, " M scripts/runner_poll_github_tasks.py\n"
+            return 0, ""
+        if command == ["git", "worktree", "remove", str(clean_path)]:
+            return 0, ""
+        return 2, "unexpected command output must not leak"
+
+    with mock.patch.object(runner, "DEFAULT_WORKTREE_ROOT", tmp_path), mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run_quarantine_command
+    ) as run:
+        report = runner.quarantine_stale_clean_skeleton_worktrees(
+            _quarantine_stale_worktrees_body(
+                worktree_ids=("issue-120", "issue-121", "issue-122", "issue-123"),
+            )
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert "removed_worktrees_count=1" in report
+    assert "skipped_worktrees_count=3" in report
+    assert "worktree=issue-120 action=removed" in report
+    assert "worktree=issue-121 action=skipped reason=dirty" in report
+    assert "worktree=issue-122 action=skipped reason=wrong_remote" in report
+    assert "worktree=issue-123 action=skipped reason=missing" in report
+    assert commands == [
+        ["git", "remote", "get-url", "origin"],
+        ["git", "status", "--porcelain"],
+        ["git", "worktree", "remove", str(clean_path)],
+        ["git", "remote", "get-url", "origin"],
+        ["git", "status", "--porcelain"],
+        ["git", "remote", "get-url", "origin"],
+    ]
+
+
+def test_quarantine_stale_clean_skeleton_worktrees_skips_protected_without_commands(
+    tmp_path: Path,
+) -> None:
+    _prepare_quarantine_worktree(tmp_path, "issue-834")
+    with mock.patch.object(runner, "DEFAULT_WORKTREE_ROOT", tmp_path), mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(runner, "run_command") as run:
+        report = runner.quarantine_stale_clean_skeleton_worktrees(
+            _quarantine_stale_worktrees_body(
+                worktree_ids=("issue-834",),
+                protected_ids=("issue-834",),
+            )
+        )
+
+    assert report.startswith("DONE:")
+    assert "worktree=issue-834 action=skipped reason=protected" in report
+    assert "removed_worktrees_count=0" in report
+    run.assert_not_called()
+
+
+def test_quarantine_stale_clean_skeleton_worktrees_blocks_invalid_metadata() -> None:
+    unsafe_path_report = runner.quarantine_stale_clean_skeleton_worktrees(
+        _quarantine_stale_worktrees_body(worktree_ids=("../issue-120",))
+    )
+    unsupported_repo_report = runner.quarantine_stale_clean_skeleton_worktrees(
+        _quarantine_stale_worktrees_body(repository="alanua/Other")
+    )
+
+    assert unsafe_path_report.startswith("BLOCKED:")
+    assert "reason=invalid_worktree_ids" in unsafe_path_report
+    assert unsupported_repo_report.startswith("BLOCKED:")
+    assert "reason=unsupported_repository" in unsupported_repo_report
+
+
+def test_quarantine_stale_clean_skeleton_worktrees_ignores_command_text(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_quarantine_worktree(tmp_path, "issue-120")
+
+    def run_quarantine_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        if command == ["git", "remote", "get-url", "origin"]:
+            return 0, "https://github.com/alanua/Skeleton.git\n"
+        if command == ["git", "status", "--porcelain"]:
+            return 0, ""
+        if command == ["git", "worktree", "remove", str(worktree_path)]:
+            return 0, ""
+        return 2, "unexpected command output must not leak"
+
+    with mock.patch.object(runner, "DEFAULT_WORKTREE_ROOT", tmp_path), mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run_quarantine_command
+    ) as run:
+        report = runner.quarantine_stale_clean_skeleton_worktrees(
+            _quarantine_stale_worktrees_body(
+                task_body="rm -rf /home/agent/agent-dev/worktrees/skeleton\n"
+                "git worktree remove /tmp/unsafe\n"
+                "TOKEN=must-not-leak",
+            )
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert "TOKEN" not in report
+    assert all(command[0] != "rm" for command in commands)
+    assert ["git", "worktree", "remove", "/tmp/unsafe"] not in commands
+
+
 def _issue_publish_body(**kwargs: object) -> str:
     return _issue_publish_inspection_body(
         task_id=runner.PUBLISH_ISSUE_WORKTREE_PR, **kwargs
