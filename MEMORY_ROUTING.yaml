@@ -25,6 +25,21 @@ routes:
     means: reviewed durable non-sensitive canon
     fixuy_rule: record_after_classification_via_GitHub_canon_review_without_extra_plus
 
+  public_safe_review_queue:
+    target: projects/skeleton/REVIEW_QUEUE.yaml
+    route: Runner Inbox route
+    means: public-safe BZ knowledge intake entries before canon promotion
+    allowed_statuses:
+      - REVIEW
+      - BACKLOG
+      - REJECTED
+    canon_rule: CANON_requires_explicit_operator_approval_and_separate_promotion
+    forbids:
+      - private_data
+      - secrets
+      - deploy
+      - runtime_changes
+
   private_context:
     target: private_memory
     means: useful non-public context for private work
@@ -69,14 +84,23 @@ stale_rule:
 
 classification_required_for:
   - public_safe_durable
+  - public_safe_review_queue
   - private_context
   - secrets_credentials
   - archive_evidence
 
 write_gate_for:
   - public_safe_durable
+  - public_safe_review_queue
   - private_context
   - archive_evidence
+
+runner_inbox_rule:
+  means:
+    - public_safe_REVIEW_BACKLOG_REJECTED_entries_go_to_projects_skeleton_REVIEW_QUEUE_yaml_via_Runner_Inbox
+    - CANON_requires_approval_and_must_not_be_promoted_automatically
+    - private_data_and_secrets_never_go_to_public_inbox
+    - deploy_and_runtime_changes_never_go_through_public_Runner_Inbox
 
 risky_action_rule:
   still_requires_separate_explicit_approval:

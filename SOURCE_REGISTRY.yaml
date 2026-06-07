@@ -16,7 +16,7 @@ sources:
 
   boot_manifest:
     trust: canon_route
-    means: declared machine-readable Skeleton startup route
+    means: declared machine-readable Skeleton startup route and active control source
 
   public_github_canon:
     trust: public_safe_canon_after_review
@@ -28,7 +28,7 @@ sources:
 
   chatgpt_memory:
     trust: weak_cache
-    means: compact working memory requiring verification for serious claims
+    means: compact working memory requiring verification against Skeleton repo boot/routing files for serious claims
 
   archive_history_recovery:
     trust: evidence_on_demand
@@ -40,6 +40,8 @@ conflict_rule:
     - report_conflict_when_sources_disagree
     - use_current_user_message_for_runtime_instruction_after_safety_scope_checks
     - use_boot_manifest_for_route_truth
+    - use_Skeleton_repo_boot_routing_files_as_active_control_source
+    - treat_ChatGPT_memory_as_weak_cache_not_route_truth
     - use_archive_history_recovery_as_evidence_not_active_route
 
 roles:

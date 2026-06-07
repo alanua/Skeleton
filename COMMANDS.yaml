@@ -100,6 +100,7 @@ commands:
   КОД:
     mode: code_task
     boot_level: L2
+    default_route: runner_issue_or_TASK_PACKET
     loads:
       - BOOT_MANIFEST.yaml
       - PROJECT_INDEX.yaml
@@ -111,6 +112,7 @@ commands:
   БЗ:
     mode: canon_write
     boot_level: L4
+    default_route: knowledge_intake
     loads:
       - BOOT_MANIFEST.yaml
       - target_file
@@ -127,6 +129,12 @@ commands:
       - explicit_approval
       - write
       - verify
+    means:
+      - transcript_article_sourcepack_external_analysis_defaults_to_knowledge_intake
+      - public_safe_durable_entries_are_REVIEW_BACKLOG_REJECTED_only
+      - approved_public_safe_review_queue_writes_may_use_Runner_Inbox_route
+      - no_automatic_CANON_promotion
+      - private_data_secrets_deploy_runtime_never_through_public_Runner_Inbox
 
   зафіксуй:
     mode: persist_request
@@ -195,6 +203,7 @@ commands:
     rule: apply_smallest_approved_next_step
     means:
       - continue_already_proposed_safe_next_step
+      - plus_continues_active_route_only
       - plus_does_not_authorize_new_durable_write_or_route_bypass
       - do_not_replan_unless_new_evidence_changes_route
       - stay_inside_current_scope_risk_and_gate
