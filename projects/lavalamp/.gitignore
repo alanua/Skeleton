@@ -1,0 +1,28 @@
+# Local development and build outputs stay out of the controlled baseline.
+.pio/
+.pioenvs/
+.piolibdeps/
+build/
+dist/
+out/
+tmp/
+
+# Firmware and binary artifacts are not source placeholders.
+*.bin
+*.elf
+*.hex
+*.map
+*.uf2
+*.zip
+*.tar
+*.tar.gz
+
+# OTA, device, and secret-bearing files are explicitly out of scope.
+*ota*
+.env
+.env.*
+secrets.*
+credentials.*
+private.*
+device-config.*
+wifi.*

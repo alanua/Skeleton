@@ -18,7 +18,7 @@ projects:
     means: Construction Takeoff / Aufmass from drawings
 
   lavalamp:
-    repo: alanua/jeeves
+    repo: alanua/Lavalamp
     entrypoint: projects/lavalamp/PROJECT_MANIFEST.yaml
     means: WLED transparent cylinder lava lamp project
 
