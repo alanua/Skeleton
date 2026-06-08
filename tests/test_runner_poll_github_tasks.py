@@ -836,6 +836,21 @@ def test_runner_task_ignores_lane_text_inside_task_fence() -> None:
     )
 
 
+def test_runner_task_reports_missing_closing_task_fence() -> None:
+    task, reason = runner.extract_runner_task("```task\nDo it\n")
+
+    assert task is None
+    assert reason is not None
+    assert "missing_closing_task_fence" in reason
+
+
+def test_task_fence_block_reason_detects_later_truncated_task_fence() -> None:
+    reason = runner.task_fence_block_reason("```task\nDo it\n```\n\n```task\nMore\n")
+
+    assert reason is not None
+    assert "missing_closing_task_fence" in reason
+
+
 def test_process_issue_blocks_non_allowlisted_runner_lane_before_claim() -> None:
     issue = {
         "number": 141,
@@ -849,6 +864,23 @@ def test_process_issue_blocks_non_allowlisted_runner_lane_before_claim() -> None
         runner.process_issue(issue)
 
     assert "Runner lane `deploy` is not allowlisted" in block.call_args.args[1]
+    set_label.assert_not_called()
+    run_codex.assert_not_called()
+
+
+def test_process_issue_blocks_missing_closing_task_fence_before_claim() -> None:
+    issue = {
+        "number": 151,
+        "title": "Truncated task",
+        "body": "```task\nDo it\n",
+    }
+
+    with mock.patch.object(runner, "block_issue") as block, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(runner, "run_codex_task") as run_codex:
+        runner.process_issue(issue)
+
+    assert "missing_closing_task_fence" in block.call_args.args[1]
     set_label.assert_not_called()
     run_codex.assert_not_called()
 
@@ -2076,6 +2108,25 @@ def test_maintenance_task_bypasses_codex() -> None:
         mock.call(145, runner.LABEL_READY, runner.LABEL_RUNNING),
         mock.call(145, runner.LABEL_RUNNING, runner.LABEL_DONE),
     ]
+
+
+def test_maintenance_task_blocks_missing_closing_task_fence_before_execution() -> None:
+    issue = _maintenance_issue(runner.SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME)
+    issue["body"] = str(issue["body"]) + "\n\n```task\nTask: use Codex\n"
+
+    with mock.patch.object(runner, "block_issue") as block, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(
+        runner, "dispatch_runtime_maintenance_task"
+    ) as dispatch, mock.patch.object(
+        runner, "run_codex_task"
+    ) as run_codex:
+        runner.process_issue(issue)
+
+    assert "missing_closing_task_fence" in block.call_args.args[1]
+    set_label.assert_not_called()
+    dispatch.assert_not_called()
+    run_codex.assert_not_called()
 
 
 def test_missing_maintenance_task_id_is_blocked() -> None:
