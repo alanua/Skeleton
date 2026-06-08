@@ -1,0 +1,265 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.hermes_queue_audit_packet.schema.json",
+  "type": "object",
+  "required": [
+    "schema",
+    "snapshot",
+    "active_items",
+    "blocked_items",
+    "done_open_items",
+    "duplicate_candidates",
+    "carrier_defects",
+    "state_drift",
+    "recommended_review_only_actions",
+    "operator_decisions_needed"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": "hermes.queue_audit_packet.v0"
+    },
+    "snapshot": {
+      "type": "object",
+      "required": [
+        "generated_at",
+        "queue_name",
+        "source_inputs",
+        "read_only_sources_only",
+        "no_mutations_performed",
+        "no_secrets_included",
+        "notes"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "generated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "queue_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_inputs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["source_type", "reference", "read_only"],
+            "additionalProperties": false,
+            "properties": {
+              "source_type": {
+                "type": "string",
+                "enum": [
+                  "queue_snapshot",
+                  "issue_metadata",
+                  "task_metadata",
+                  "runner_metadata",
+                  "repository_documentation",
+                  "operator_context",
+                  "other_public_safe_source"
+                ]
+              },
+              "reference": {
+                "type": "string",
+                "minLength": 1
+              },
+              "read_only": {
+                "type": "boolean",
+                "const": true
+              }
+            }
+          }
+        },
+        "read_only_sources_only": {
+          "type": "boolean",
+          "const": true
+        },
+        "no_mutations_performed": {
+          "type": "boolean",
+          "const": true
+        },
+        "no_secrets_included": {
+          "type": "boolean",
+          "const": true
+        },
+        "notes": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "active_items": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/queue_item"}
+    },
+    "blocked_items": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/blocked_item"}
+    },
+    "done_open_items": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/done_open_item"}
+    },
+    "duplicate_candidates": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/duplicate_candidate"}
+    },
+    "carrier_defects": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/carrier_defect"}
+    },
+    "state_drift": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/state_drift"}
+    },
+    "recommended_review_only_actions": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/recommended_review_only_action"}
+    },
+    "operator_decisions_needed": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/operator_decision"}
+    }
+  },
+  "$defs": {
+    "non_empty_string_array": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "queue_item": {
+      "type": "object",
+      "required": ["item_id", "title", "status", "source_refs", "notes"],
+      "additionalProperties": false,
+      "properties": {
+        "item_id": {"type": "string", "minLength": 1},
+        "title": {"type": "string", "minLength": 1},
+        "status": {"type": "string", "minLength": 1},
+        "source_refs": {"$ref": "#/$defs/non_empty_string_array"},
+        "notes": {"type": "string", "minLength": 1}
+      }
+    },
+    "blocked_item": {
+      "type": "object",
+      "required": [
+        "item_id",
+        "title",
+        "blockers",
+        "source_refs",
+        "review_reason"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "item_id": {"type": "string", "minLength": 1},
+        "title": {"type": "string", "minLength": 1},
+        "blockers": {"$ref": "#/$defs/non_empty_string_array"},
+        "source_refs": {"$ref": "#/$defs/non_empty_string_array"},
+        "review_reason": {"type": "string", "minLength": 1}
+      }
+    },
+    "done_open_item": {
+      "type": "object",
+      "required": [
+        "item_id",
+        "title",
+        "done_evidence",
+        "open_state",
+        "source_refs",
+        "review_reason"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "item_id": {"type": "string", "minLength": 1},
+        "title": {"type": "string", "minLength": 1},
+        "done_evidence": {"$ref": "#/$defs/non_empty_string_array"},
+        "open_state": {"type": "string", "minLength": 1},
+        "source_refs": {"$ref": "#/$defs/non_empty_string_array"},
+        "review_reason": {"type": "string", "minLength": 1}
+      }
+    },
+    "duplicate_candidate": {
+      "type": "object",
+      "required": [
+        "candidate_ids",
+        "evidence",
+        "recommended_review_only_disposition"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "candidate_ids": {
+          "type": "array",
+          "minItems": 2,
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "evidence": {"$ref": "#/$defs/non_empty_string_array"},
+        "recommended_review_only_disposition": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "carrier_defect": {
+      "type": "object",
+      "required": ["defect_type", "affected_refs", "evidence", "review_reason"],
+      "additionalProperties": false,
+      "properties": {
+        "defect_type": {
+          "type": "string",
+          "enum": [
+            "missing_status",
+            "conflicting_status",
+            "stale_metadata",
+            "malformed_metadata",
+            "missing_source_reference",
+            "other_public_safe_defect"
+          ]
+        },
+        "affected_refs": {"$ref": "#/$defs/non_empty_string_array"},
+        "evidence": {"$ref": "#/$defs/non_empty_string_array"},
+        "review_reason": {"type": "string", "minLength": 1}
+      }
+    },
+    "state_drift": {
+      "type": "object",
+      "required": [
+        "item_id",
+        "observed_state",
+        "expected_or_evidenced_state",
+        "evidence",
+        "review_reason"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "item_id": {"type": "string", "minLength": 1},
+        "observed_state": {"type": "string", "minLength": 1},
+        "expected_or_evidenced_state": {"type": "string", "minLength": 1},
+        "evidence": {"$ref": "#/$defs/non_empty_string_array"},
+        "review_reason": {"type": "string", "minLength": 1}
+      }
+    },
+    "recommended_review_only_action": {
+      "type": "object",
+      "required": ["action", "rationale", "mutation_allowed"],
+      "additionalProperties": false,
+      "properties": {
+        "action": {"type": "string", "minLength": 1},
+        "rationale": {"type": "string", "minLength": 1},
+        "mutation_allowed": {
+          "type": "boolean",
+          "const": false
+        }
+      }
+    },
+    "operator_decision": {
+      "type": "object",
+      "required": ["decision", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "decision": {"type": "string", "minLength": 1},
+        "reason": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}
