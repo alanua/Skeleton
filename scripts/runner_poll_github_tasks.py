@@ -191,6 +191,8 @@ _PYTEST_SUMMARY_LINE_RE = re.compile(
     r"|no tests ran|failed|passed)\b"
 )
 _SAFE_CODEX_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,80}$")
+_TASK_FENCE_OPEN_LINE_RE = re.compile(r"^[ \t]*```task[ \t]*$")
+_FENCE_CLOSE_LINE_RE = re.compile(r"^[ \t]*```[ \t]*$")
 
 
 @dataclass(frozen=True)
@@ -832,11 +834,40 @@ def label_names(labels: Any) -> set[str]:
     return names
 
 
+def task_fence_block_reason(body: str) -> str | None:
+    lines = (body or "").splitlines()
+    index = 0
+    while index < len(lines):
+        if _TASK_FENCE_OPEN_LINE_RE.match(lines[index]) is None:
+            index += 1
+            continue
+        closing_index: int | None = None
+        for candidate_index, candidate in enumerate(lines[index + 1 :], start=index + 1):
+            if _FENCE_CLOSE_LINE_RE.match(candidate):
+                closing_index = candidate_index
+                break
+        if closing_index is not None:
+            index = closing_index + 1
+            continue
+        return (
+            "missing_closing_task_fence: task fence starts with ```task but "
+            "does not include a closing ``` fence."
+        )
+    return None
+
+
 def extract_task_block(body: str) -> str | None:
-    match = re.search(r"```task\s*\n(?P<task>.*?)\n```", body or "", re.DOTALL)
-    if not match:
+    lines = (body or "").splitlines()
+    for index, line in enumerate(lines):
+        if _TASK_FENCE_OPEN_LINE_RE.match(line) is None:
+            continue
+        task_lines: list[str] = []
+        for candidate in lines[index + 1 :]:
+            if _FENCE_CLOSE_LINE_RE.match(candidate):
+                return "\n".join(task_lines).strip()
+            task_lines.append(candidate)
         return None
-    return match.group("task").strip()
+    return None
 
 
 def extract_runner_lane(body: str) -> tuple[RunnerLane | None, str | None]:
@@ -940,6 +971,9 @@ def extract_target_repository(body: str) -> tuple[str | None, str | None]:
 
 
 def extract_runner_task(body: str) -> tuple[RunnerTask | None, str | None]:
+    fence_reason = task_fence_block_reason(body)
+    if fence_reason is not None:
+        return None, fence_reason
     content = extract_task_block(body)
     if content is None:
         return None, None
@@ -4809,6 +4843,10 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
     runner_task: RunnerTask | None = None
     try:
         issue_body = issue.get("body") or ""
+        fence_reason = task_fence_block_reason(issue_body)
+        if fence_reason is not None:
+            block_issue(issue_number, fence_reason)
+            return
         maintenance_mode, maintenance_task_id = extract_runtime_maintenance_task_id(
             issue_body
         )
