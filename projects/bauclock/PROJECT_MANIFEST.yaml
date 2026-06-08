@@ -6,6 +6,6 @@ entrypoint: projects/bauclock/PROJECT_MANIFEST.yaml
 read_order:
   - projects/bauclock/PROJECT_MANIFEST.yaml
   - projects/bauclock/STATE.yaml
-source_repo: alanua/jeeves
+source_repo: alanua/bauclock
 privacy_class: mixed_public_private
 means: construction time tracking project with strict legal, privacy, and audit boundaries

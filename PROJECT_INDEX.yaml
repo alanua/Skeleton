@@ -23,7 +23,7 @@ projects:
     means: WLED transparent cylinder lava lamp project
 
   bauclock:
-    repo: alanua/jeeves
+    repo: alanua/bauclock
     entrypoint: projects/bauclock/PROJECT_MANIFEST.yaml
     means: construction time tracking project
 
