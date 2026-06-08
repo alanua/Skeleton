@@ -90,6 +90,9 @@ Boot output required fields:
 
 ## Planned Capabilities
 
+- `codex_runtime_preflight`: Planned Runner/Codex preflight to verify execution user, authentication, supported ChatGPT-account Codex model, and quota availability before starting Codex tasks. Module: `scripts/runner_poll_github_tasks.py`. Status: not tested.
+- `hermes_quota_aware_review`: Planned Hermes provider policy requiring bounded audit packets, usage-limit stop rules, compact snapshots, no full queue or repo scans by default, and no executor authority. Module: `PROVIDER_ROUTING.yaml`. Status: not tested.
+- `alternative_provider_backlog`: Planned backlog track for Gemini as read-only reviewer/auditor and Antigravity as lab-only worker candidate, with no direct merge, deploy, secrets, runtime, or queue execution authority. Module: `PROVIDER_ROUTING.yaml`. Status: not tested.
 - `memory_manager_live_storage`: Future operator-approved live storage bridge for memory routing decisions; not implemented in stage 1. Module: `core/memory_manager_live_storage.py`. Status: not tested.
 
 ## Project States
@@ -102,33 +105,32 @@ Boot output required fields:
 - State file: `projects/skeleton/STATE.yaml`
 - Status: `DRAFT_HANDOFF`
 - State role: `handoff_not_canon_truth`
-- Last verified: `2026-05-20`
-- Evidence source: alanua/Skeleton main after PR
+- Last verified: `2026-06-08`
+- Evidence source: Skeleton main after PR #863 plus private operator diagnostics on Runner/Codex/Hermes. Private quota details remain outside the public repository.
+
 
 Summary:
 
 - Skeleton v2 lives in alanua/Skeleton.
-- BOOT_MANIFEST, COMMANDS, MODES, MEMORY_ROUTING, SOURCE_REGISTRY, PROJECT_INDEX, and STATUS_CODES exist.
-- Project manifests plus STATE handoff files exist.
-- Adapter contracts for ChatGPT, Claude, Gemini, Codex, and Runner exist.
-- Write-gate GateEngine plus PatchValidator exist.
-- CAPABILITY_REGISTRY exists.
-- SYSTEM_PROMPT files for ChatGPT and Gemini exist.
-- boot_loader is v1-compatible and tested.
-- project_loader plus session_state exists and is tested.
-- github_task_queue Runner/Codex/Telegram route is live and tested.
-- Telegram stale notification guard is merged and smoke-tested.
-- notebooklm_sourcepack generator is merged and tested.
-- PROVIDER_ROUTING 4-tier policy is merged and tested.
-- runner_bridge stage 1 dry-run is merged, tested, and non-live, with strict validation command allowlist and no dry-run-to-live promotion without a separate stage 2 PR.
+- GitHub issue queue, Runner, and Telegram notification route are operational.
+- Safe task issue publishing exists through scripts/publish_task_issue.py after PR 862.
+- Truncated task fence detection blocks malformed Runner task bodies after PR 860.
+- Hermes queue-audit packet docs/schema landed after PR 858.
+- BauClock PR 52 status is recorded after PR 863.
+- Runner/Codex execution requires an explicit runtime preflight for execution user, authentication, supported model, and quota availability.
+- Codex must run from the Runner user context, not from root.
+- The current ChatGPT-account Codex setup requires a supported model configuration; unsupported Codex model defaults must fail closed before task execution.
+- Hermes must be quota-aware and bounded before further automation.
+- Gemini remains a future read-only reviewer/auditor candidate.
+- Antigravity remains a future lab-only worker candidate, not a production Runner executor.
 
 Next actions:
 
-- Add runner_bridge stage 2 live GitHub issue creation only as a separate operator-approved PR.
-- Bridge jeeves from alanua/jeeves to alanua/Skeleton.
-- Add memory_manager.
-- Add aufmass project manifest.
-- Optionally refresh NotebookLM source after this PR is merged.
+- Sync the live Runner checkout to main after approved Skeleton changes.
+- Add Codex runtime preflight before starting further Codex tasks.
+- Add Hermes quota-aware review rules before using Hermes for queue audits.
+- Keep Gemini reviewer and Antigravity lab work in backlog until Codex and publisher paths are stable.
+- Continue runner:blocked cleanup only with evidence and without Codex retries while provider availability is constrained.
 
 ### jeeves
 
