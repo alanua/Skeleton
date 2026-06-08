@@ -306,6 +306,30 @@ capabilities:
     added: "2026-05-21"
     description: Writes an explicit-path deterministic local memory routing audit ledger and public-safe session/project state snapshots without canon promotion.
 
+  codex_runtime_preflight:
+    status: planned
+    module: scripts/runner_poll_github_tasks.py
+    tested: false
+    live_runtime_execution: true
+    added: "2026-06-08"
+    description: Planned Runner/Codex preflight to verify execution user, authentication, supported ChatGPT-account Codex model, and quota availability before starting Codex tasks.
+
+  hermes_quota_aware_review:
+    status: planned
+    module: PROVIDER_ROUTING.yaml
+    tested: false
+    live_runtime_execution: false
+    added: "2026-06-08"
+    description: Planned Hermes provider policy requiring bounded audit packets, usage-limit stop rules, compact snapshots, no full queue or repo scans by default, and no executor authority.
+
+  alternative_provider_backlog:
+    status: planned
+    module: PROVIDER_ROUTING.yaml
+    tested: false
+    live_runtime_execution: false
+    added: "2026-06-08"
+    description: Planned backlog track for Gemini as read-only reviewer/auditor and Antigravity as lab-only worker candidate, with no direct merge, deploy, secrets, runtime, or queue execution authority.
+
   memory_manager_live_storage:
     status: planned
     module: core/memory_manager_live_storage.py
