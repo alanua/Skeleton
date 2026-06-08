@@ -227,24 +227,26 @@ Next actions:
 ### bauclock
 
 - Means: construction time tracking project
-- Repo: `alanua/jeeves`
+- Repo: `alanua/bauclock`
 - Entrypoint: `projects/bauclock/PROJECT_MANIFEST.yaml`
 - State file: `projects/bauclock/STATE.yaml`
 - Status: `DRAFT_HANDOFF`
 - State role: `handoff_not_canon_truth`
-- Last verified: `2026-05-17`
-- Evidence source: migration source repo alanua/jeeves and project memory, not revalidated in this PR
+- Last verified: `2026-06-07`
+- Evidence source: Skeleton issue 823 validation record and manual BauClock PR 52 merge report
 
 Summary:
 
 - BauClock is a Telegram bot and FastAPI backend for construction time tracking.
 - Project work requires strict role isolation, audit logging, privacy, retention, dashboard token, and export boundary controls.
 - Skeleton provides task framing and audit discipline, not production runtime authority.
+- BauClock PR 52 in alanua/bauclock was validated by Skeleton issue 823 and manually merged at commit 66c72948acc252ef8310d3c686ab73f840b64cd8.
+- No deploy was performed for BauClock PR 52, and the production DB was not touched.
 
 Next actions:
 
 - Keep BauClock implementation work in its project source route.
-- Add exact project repo route after review.
+- Keep BauClock routing on alanua/bauclock.
 - Keep legal/security constraints as project-specific narrowing rules.
 
 ### homelab
@@ -386,6 +388,13 @@ or `systemctl restart` while a task is running.
 - Telegram PR card approve writes the signed head-bound approval record Runner
   verifies before its bounded squash merge path; routine approval does not need
   an operator GitHub comment or merge retry.
+
+## Cross-repo merge status
+
+- 2026-06-07: BauClock PR 52 in `alanua/bauclock` was validated by Skeleton
+  issue 823 and manually merged at
+  `66c72948acc252ef8310d3c686ab73f840b64cd8`. No deploy was performed, and
+  the production DB was not touched.
 
 ## Smoke test procedure
 

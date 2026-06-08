@@ -64,6 +64,13 @@ or `systemctl restart` while a task is running.
   verifies before its bounded squash merge path; routine approval does not need
   an operator GitHub comment or merge retry.
 
+## Cross-repo merge status
+
+- 2026-06-07: BauClock PR 52 in `alanua/bauclock` was validated by Skeleton
+  issue 823 and manually merged at
+  `66c72948acc252ef8310d3c686ab73f840b64cd8`. No deploy was performed, and
+  the production DB was not touched.
+
 ## Smoke test procedure
 
 1. Create a no-op Runner issue.
