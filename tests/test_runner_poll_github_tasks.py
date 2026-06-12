@@ -3955,8 +3955,10 @@ def _write_aufmass_private_registry(workspace: Path) -> tuple[Path, Path, Path]:
 def test_aufmass_private_review_tasks_are_allowlisted() -> None:
     assert runner.RUN_AUFMASS_PRIVATE_DXF_REVIEW == "run_aufmass_private_dxf_review"
     assert runner.SUMMARIZE_AUFMASS_PRIVATE_REVIEW == "summarize_aufmass_private_review"
+    assert runner.BUILD_AUFMASS_PRIVATE_SHORTLIST == "build_aufmass_private_shortlist"
     assert runner.RUN_AUFMASS_PRIVATE_DXF_REVIEW in runner.RUNTIME_MAINTENANCE_TASK_IDS
     assert runner.SUMMARIZE_AUFMASS_PRIVATE_REVIEW in runner.RUNTIME_MAINTENANCE_TASK_IDS
+    assert runner.BUILD_AUFMASS_PRIVATE_SHORTLIST in runner.RUNTIME_MAINTENANCE_TASK_IDS
 
 
 @pytest.mark.parametrize(
@@ -4004,6 +4006,24 @@ def test_aufmass_private_review_rejects_unsupported_issue_metadata(
     assert "customer-plan.dxf" not in report
     assert "/private/customer" not in report
     run.assert_not_called()
+
+
+def test_build_aufmass_private_shortlist_rejects_issue_supplied_private_data() -> None:
+    body = _maintenance_issue(
+        runner.BUILD_AUFMASS_PRIVATE_SHORTLIST,
+        metadata=(
+            "Private Source Pack ID: pack_token\n"
+            "Drawing Name: confidential-plan.dxf\n"
+            "Room Label: Secret Room"
+        ),
+    )["body"]
+
+    report = runner.build_aufmass_private_shortlist(str(body))
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=unsupported_private_aufmass_issue_field" in report
+    assert "confidential-plan.dxf" not in report
+    assert "Secret Room" not in report
 
 
 def test_aufmass_private_registry_is_required_inside_private_workspace(
@@ -4230,6 +4250,76 @@ def test_summarize_aufmass_private_review_redacts_private_rows_and_quantities(
     assert "Office Secret" not in report
     assert "42.5" not in report
     assert "source_token_room_review_table.json" not in report
+
+
+def test_build_aufmass_private_shortlist_writes_private_artifacts_and_public_counts(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "private"
+    workspace.mkdir()
+    _manifest, _artifact_map, output_root = _write_aufmass_private_registry(workspace)
+    review_table = {
+        "rows": [
+            {
+                "source_ref": "source_token",
+                "room_label": "Conference 101",
+                "label": "Wall finish A",
+                "review_status": "needs_review",
+                "area_m2": 42.5,
+                "quantity": 3,
+            },
+            {
+                "source_ref": "source_token",
+                "review_status": "approved",
+                "quantity": 99,
+            },
+        ]
+    }
+    (output_root / "source_token_room_review_table.json").write_text(
+        json.dumps(review_table),
+        encoding="utf-8",
+    )
+    body = _maintenance_issue(
+        runner.BUILD_AUFMASS_PRIVATE_SHORTLIST,
+        "cat /private/customer/source_token_room_review_table.json",
+        metadata="Private Source Pack ID: pack_token\nRun ID: run_token",
+    )["body"]
+
+    with mock.patch.object(
+        runner,
+        "_aufmass_private_registered_paths",
+        return_value=(workspace / "checkout", workspace, None),
+    ):
+        report = runner.build_aufmass_private_shortlist(str(body))
+
+    assert report.startswith("DONE:")
+    assert "maintenance_task_id=build_aufmass_private_shortlist" in report
+    assert "source_pack_id=pack_token" in report
+    assert "run_id=run_token" in report
+    assert "input_table_count=1" in report
+    assert "input_row_count=2" in report
+    assert "shortlist_row_count=1" in report
+    assert "status_count_approved=1" in report
+    assert "status_count_needs_review=1" in report
+    assert "warning_count=0" in report
+    assert str(workspace) not in report
+    assert "Conference 101" not in report
+    assert "Wall finish A" not in report
+    assert "42.5" not in report
+    assert "99" not in report
+    assert "source_token_room_review_table.json" not in report
+
+    json_path, csv_path = runner._private_shortlist_artifact_paths(output_root)
+    shortlist = json.loads(json_path.read_text(encoding="utf-8"))
+    assert shortlist["schema"] == "skeleton.aufmass_private_shortlist.v1"
+    assert shortlist["input_row_count"] == 2
+    assert shortlist["shortlist_row_count"] == 1
+    assert shortlist["rows"][0]["filtering_reason"] == "usable_evidence"
+    assert shortlist["rows"][0]["row"]["room_label"] == "Conference 101"
+    assert shortlist["rows"][0]["row"]["quantity"] == 3
+    csv_text = csv_path.read_text(encoding="utf-8")
+    assert "Conference 101" in csv_text
+    assert "Wall finish A" in csv_text
 
 
 def _pr_validation_state(**updates: object) -> dict[str, object]:

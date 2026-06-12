@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 from dataclasses import dataclass
 import hashlib
 import hmac
@@ -86,6 +87,7 @@ HERMES_WORKER_PREFLIGHT = "hermes_worker_preflight"
 PREPARE_AUFMASS_PRIVATE_RUNTIME = "prepare_aufmass_private_runtime"
 RUN_AUFMASS_PRIVATE_DXF_REVIEW = "run_aufmass_private_dxf_review"
 SUMMARIZE_AUFMASS_PRIVATE_REVIEW = "summarize_aufmass_private_review"
+BUILD_AUFMASS_PRIVATE_SHORTLIST = "build_aufmass_private_shortlist"
 INSPECT_PR_MERGEABILITY = "inspect_pr_mergeability"
 BACKFILL_SKELETON_MEMORY_RECENT = "backfill_skeleton_memory_recent"
 INSPECT_ISSUE_WORKTREE_FOR_PUBLISH = "inspect_issue_worktree_for_publish"
@@ -107,6 +109,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         PREPARE_AUFMASS_PRIVATE_RUNTIME,
         RUN_AUFMASS_PRIVATE_DXF_REVIEW,
         SUMMARIZE_AUFMASS_PRIVATE_REVIEW,
+        BUILD_AUFMASS_PRIVATE_SHORTLIST,
         INSPECT_PR_MERGEABILITY,
         BACKFILL_SKELETON_MEMORY_RECENT,
         INSPECT_ISSUE_WORKTREE_FOR_PUBLISH,
@@ -2950,6 +2953,241 @@ def _summarize_review_table(path: Path) -> tuple[int, dict[str, int], int]:
     return len(rows), status_counts, len(source_tokens)
 
 
+def _private_shortlist_artifact_paths(output_root: Path) -> tuple[Path, Path]:
+    return (
+        output_root / "aufmass_private_shortlist.json",
+        output_root / "aufmass_private_shortlist.csv",
+    )
+
+
+def _private_row_has_text(row: dict[str, Any], keys: tuple[str, ...]) -> bool:
+    for key in keys:
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            return True
+    return False
+
+
+def _private_row_has_area(row: dict[str, Any]) -> bool:
+    for key in ("area_m2", "area", "surface_area", "detected_area_m2"):
+        value = row.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+            return True
+        if isinstance(value, str):
+            try:
+                if float(value.strip()) > 0:
+                    return True
+            except ValueError:
+                continue
+    return False
+
+
+def _private_shortlist_row(
+    table_index: int, row_index: int, row: dict[str, Any]
+) -> dict[str, Any]:
+    has_room = _private_row_has_text(row, ("room_label", "room_name", "room"))
+    has_label = _private_row_has_text(row, ("label", "item_label", "name"))
+    has_area = _private_row_has_area(row)
+    evidence_score = int(has_room) + int(has_label) + int(has_area)
+    reasons = []
+    if not has_room:
+        reasons.append("missing_room_evidence")
+    if not has_label:
+        reasons.append("missing_label_evidence")
+    if not has_area:
+        reasons.append("missing_area_evidence")
+    return {
+        "table_index": table_index,
+        "row_index": row_index,
+        "evidence": {
+            "has_room": has_room,
+            "has_label": has_label,
+            "has_area": has_area,
+            "score": evidence_score,
+        },
+        "filtering_reason": "usable_evidence" if evidence_score >= 2 else ",".join(reasons),
+        "row": row,
+    }
+
+
+def _read_private_review_rows(
+    table_paths: list[Path],
+) -> tuple[list[dict[str, Any]], dict[str, int], int]:
+    rows: list[dict[str, Any]] = []
+    status_counts: dict[str, int] = {}
+    warning_count = 0
+    for table_index, table_path in enumerate(table_paths):
+        data, reason = _read_json_file(table_path)
+        if reason is not None or data is None:
+            warning_count += 1
+            continue
+        table_rows = data.get("rows")
+        if not isinstance(table_rows, list):
+            warning_count += 1
+            continue
+        for row_index, row in enumerate(table_rows):
+            if not isinstance(row, dict):
+                warning_count += 1
+                continue
+            status = row.get("review_status")
+            if isinstance(status, str) and _valid_aufmass_private_token(status):
+                status_counts[status] = status_counts.get(status, 0) + 1
+            rows.append(_private_shortlist_row(table_index, row_index, row))
+    return rows, status_counts, warning_count
+
+
+def _select_private_shortlist_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    max_rows = 100
+    preferred = [
+        row
+        for row in rows
+        if isinstance(row.get("evidence"), dict) and row["evidence"].get("score", 0) >= 2
+    ]
+    if not preferred:
+        preferred = sorted(
+            rows,
+            key=lambda row: (
+                row.get("evidence", {}).get("score", 0)
+                if isinstance(row.get("evidence"), dict)
+                else 0,
+                -int(row.get("table_index", 0)),
+                -int(row.get("row_index", 0)),
+            ),
+            reverse=True,
+        )[:25]
+        for row in preferred:
+            row["filtering_reason"] = "fallback_no_rows_with_strong_evidence"
+    return preferred[:max_rows]
+
+
+def _write_private_shortlist_artifacts(
+    entry: AufmassPrivateRegistryEntry,
+    rows: list[dict[str, Any]],
+    input_table_count: int,
+    input_row_count: int,
+    status_counts: dict[str, int],
+    warning_count: int,
+) -> str | None:
+    json_path, csv_path = _private_shortlist_artifact_paths(entry.output_root)
+    for path in (json_path, csv_path):
+        resolved = path.resolve(strict=False)
+        if not _path_is_relative_to(resolved, entry.output_root):
+            return "shortlist_artifact_path_unsafe"
+        if resolved == ROOT or _path_is_relative_to(resolved, ROOT):
+            return "shortlist_artifact_inside_public_repo"
+    payload = {
+        "schema": "skeleton.aufmass_private_shortlist.v1",
+        "source_pack_id": entry.source_pack_id,
+        "run_id": entry.run_id,
+        "input_table_count": input_table_count,
+        "input_row_count": input_row_count,
+        "shortlist_row_count": len(rows),
+        "status_counts": status_counts,
+        "warning_count": warning_count,
+        "rows": rows,
+    }
+    try:
+        entry.output_root.mkdir(parents=True, exist_ok=True)
+        json_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        with csv_path.open("w", encoding="utf-8", newline="") as csv_file:
+            writer = csv.DictWriter(
+                csv_file,
+                fieldnames=(
+                    "table_index",
+                    "row_index",
+                    "evidence_score",
+                    "has_room",
+                    "has_label",
+                    "has_area",
+                    "filtering_reason",
+                    "row_json",
+                ),
+            )
+            writer.writeheader()
+            for row in rows:
+                evidence = row.get("evidence") if isinstance(row.get("evidence"), dict) else {}
+                writer.writerow(
+                    {
+                        "table_index": row.get("table_index"),
+                        "row_index": row.get("row_index"),
+                        "evidence_score": evidence.get("score", 0),
+                        "has_room": str(bool(evidence.get("has_room"))).lower(),
+                        "has_label": str(bool(evidence.get("has_label"))).lower(),
+                        "has_area": str(bool(evidence.get("has_area"))).lower(),
+                        "filtering_reason": row.get("filtering_reason", ""),
+                        "row_json": json.dumps(
+                            row.get("row", {}), ensure_ascii=False, sort_keys=True
+                        ),
+                    }
+                )
+    except OSError:
+        return "shortlist_artifact_write_failed"
+    return None
+
+
+def build_aufmass_private_shortlist(body: str) -> str:
+    task_id = BUILD_AUFMASS_PRIVATE_SHORTLIST
+    request, report = _aufmass_private_automation_request(task_id, body, include_mode=False)
+    if report is not None:
+        return report
+    assert request is not None
+
+    _checkout_path, workspace_root, reason = _aufmass_private_registered_paths()
+    if reason is not None or workspace_root is None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [f"source_pack_id={request.source_pack_id}", reason or "reason=private_project_unavailable"],
+            "not_met",
+        )
+    entry, report = _resolve_aufmass_private_registry_entry(task_id, request, workspace_root)
+    if report is not None:
+        return report
+    assert entry is not None
+
+    table_paths = _review_table_private_paths(entry.output_root)
+    rows, status_counts, warning_count = _read_private_review_rows(table_paths)
+    shortlist_rows = _select_private_shortlist_rows(rows)
+    reason = _write_private_shortlist_artifacts(
+        entry,
+        shortlist_rows,
+        len(table_paths),
+        len(rows),
+        status_counts,
+        warning_count,
+    )
+    if reason is not None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                f"source_pack_id={request.source_pack_id}",
+                f"run_id={entry.run_id}",
+                f"reason={reason}",
+            ],
+            "not_met",
+        )
+
+    status_count_lines = [
+        f"status_count_{status}={status_counts[status]}"
+        for status in sorted(status_counts)
+    ]
+    status_lines = [
+        "status=done",
+        f"source_pack_id={request.source_pack_id}",
+        f"run_id={entry.run_id}",
+        f"input_table_count={len(table_paths)}",
+        f"input_row_count={len(rows)}",
+        f"shortlist_row_count={len(shortlist_rows)}",
+        *status_count_lines,
+        f"warning_count={warning_count}",
+    ]
+    return _maintenance_report("DONE", task_id, status_lines, "met")
+
+
 def summarize_aufmass_private_review(body: str) -> str:
     task_id = SUMMARIZE_AUFMASS_PRIVATE_REVIEW
     request, report = _aufmass_private_automation_request(task_id, body, include_mode=False)
@@ -5418,6 +5656,8 @@ def dispatch_runtime_maintenance_task(
             return run_aufmass_private_dxf_review(body)
         if task_id == SUMMARIZE_AUFMASS_PRIVATE_REVIEW:
             return summarize_aufmass_private_review(body)
+        if task_id == BUILD_AUFMASS_PRIVATE_SHORTLIST:
+            return build_aufmass_private_shortlist(body)
         if task_id == INSPECT_PR_MERGEABILITY:
             return inspect_pr_mergeability(body)
         if task_id == BACKFILL_SKELETON_MEMORY_RECENT:

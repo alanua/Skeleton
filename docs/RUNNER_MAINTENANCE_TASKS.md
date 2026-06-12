@@ -314,6 +314,39 @@ registry schema, unknown source pack/run tokens, unsafe registry paths, and
 malformed review tables are handled with sanitized `BLOCKED` or warning count
 status lines only.
 
+`build_aufmass_private_shortlist` builds a smaller private operator review set
+from existing private review table artifacts:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: build_aufmass_private_shortlist
+Private Source Pack ID: opaque-token
+Run ID: optional-opaque-token
+```
+
+`Run ID` is optional; when omitted, the Runner uses the latest run registered
+for that source-pack token. It may only resolve input review tables and output
+shortlist artifacts through `automation_registry.private.json` inside the
+registered private Aufmass workspace. GitHub issue text may provide only the
+opaque source-pack token and optional run token. It must not provide paths,
+filenames, drawing names, room names, labels, layers, dimensions, areas,
+quantities, row data, shell fragments, raw JSON, CSV contents, or registry
+contents.
+
+The task reads already generated private `*_room_review_table.json` artifacts
+under the resolved run output root and writes private shortlist JSON and CSV
+artifacts under that same output root. The private artifacts preserve row detail
+needed for later manual review and include private filtering reasons. Rows with
+usable room, label, and area evidence are preferred. The task does not calculate
+final quantities.
+
+The public GitHub report may include only status, maintenance task id,
+source-pack token, run token, input table count, input row count, shortlist row
+count, review status counts, warning count, and success criteria. It must not
+print private paths, filenames, drawing names, room names, labels, layers,
+dimensions, areas, quantities, raw JSON, CSV contents, command output, secrets,
+or issue-body text.
+
 `automation_registry.private.json` is private Runner state. Its contents may
 contain private workspace-relative paths, but those values must never be
 committed to the public repository, pasted into GitHub issues/comments, or
