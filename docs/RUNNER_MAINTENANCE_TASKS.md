@@ -245,6 +245,80 @@ create pull requests, or read secrets. Reports must include only safe status
 booleans and step names, never private paths, drawing names, quantities, raw
 command output, tokens, or issue-body text.
 
+`run_aufmass_private_dxf_review` runs the controlled private Aufmass DXF review
+pilot using only a private registry from the registered private Aufmass
+workspace:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: run_aufmass_private_dxf_review
+Private Source Pack ID: opaque-token
+Pilot Mode: dry-run
+```
+
+`Pilot Mode` is optional and defaults to `dry-run`; the only allowed values are
+`dry-run` and `execute`. GitHub issue text may provide only `Private Source Pack
+ID` and optional mode metadata. It must not provide absolute paths, relative
+paths, filenames, drawing names, room labels, quantities, dimensions, areas,
+shell fragments, or registry contents.
+
+It may only:
+
+1. Resolve the private Aufmass route through `PROJECT_TREE.yaml` by its fixed
+   private project id.
+2. Read `automation_registry.private.json` from the registered private Aufmass
+   workspace root.
+3. Resolve the source-pack manifest, artifact map, output root, and optional run
+   mapping from that registry using the opaque source-pack token.
+4. Accept only registry paths that are relative to the private workspace,
+   traversal-free, URL-free, and outside the public Skeleton repository.
+5. Validate the resolved source-pack manifest with the existing source-pack
+   validator before running the pilot.
+6. For dry-run, run only
+   `python3 -m scripts.aufmass_private_pilot_run --source-pack-manifest
+   <resolved-private-manifest> --branch dxf-assisted`.
+7. For execute, run only the same module invocation with `--execute`,
+   `--private-workspace`, `--output-root`, and `--artifact-map`, all resolved
+   from the private workspace and registry.
+
+It reports `DONE` only when registry resolution, source-pack validation, the
+bounded module invocation, and public-safe summary verification succeed. Public
+GitHub output may include only status, maintenance task id, source pack token,
+mode, branch, selected source count, DXF source count, artifact count, run token,
+warning counts, and success criteria. It must not print private paths, registry
+values, filenames, drawing names, source labels, room names, layers, dimensions,
+areas, quantities, raw JSON, CSV contents, command output, secrets, or issue-body
+text.
+
+`summarize_aufmass_private_review` summarizes generated private review tables
+without printing private row contents:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: summarize_aufmass_private_review
+Private Source Pack ID: opaque-token
+Run ID: optional-opaque-token
+```
+
+`Run ID` is optional; when omitted, the Runner uses the latest run registered
+for that source-pack token. It may only resolve review artifacts through
+`automation_registry.private.json` inside the registered private workspace. It
+must summarize generated private review tables without printing paths, row
+contents, labels, layers, room names, areas, dimensions, quantities, filenames,
+raw JSON, or CSV contents.
+
+It reports only row counts, review status counts, source token counts, warning
+counts, status, source-pack token, run token, maintenance task id, and success
+criteria. Missing or unsafe private registration, missing registry, unsupported
+registry schema, unknown source pack/run tokens, unsafe registry paths, and
+malformed review tables are handled with sanitized `BLOCKED` or warning count
+status lines only.
+
+`automation_registry.private.json` is private Runner state. Its contents may
+contain private workspace-relative paths, but those values must never be
+committed to the public repository, pasted into GitHub issues/comments, or
+printed in Runner reports.
+
 `inspect_issue_worktree_for_publish` is a Stage 1 delivery-only publisher
 inspection. It is validation/dry-run only and must include explicit metadata:
 
