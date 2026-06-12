@@ -329,6 +329,8 @@ The current runner queue status is mirrored below from `docs/RUNNER_QUEUE_STATUS
 
 Status: GitHub issue queue is working.
 
+Parser repair smoke status: 2026-06-12 docs-only Runner task completed normally.
+
 This document records the current operating status and runtime checklist for the
 Skeleton GitHub task queue Runner after the successful Telegram notification
 smoke test.
