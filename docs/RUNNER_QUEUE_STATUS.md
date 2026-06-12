@@ -79,6 +79,14 @@ or `systemctl restart` while a task is running.
 
 ## Recovery notes
 
+- Codex delivery status is taken from the final report heading or explicit
+  `RESULT: DONE` / `RESULT: NEEDS_OPERATOR` contract line, not from ordinary
+  status words inside docs, task text, logs, test names, or quoted output.
+- To recover an already completed issue worktree, create an operator-approved
+  runtime maintenance issue using
+  `Maintenance Task ID: publish_existing_issue_worktree` with explicit
+  `Target Repository`, `Source Issue`, `Base Branch`, `Output Branch`,
+  `Draft PR: true`, and `Allowed Files` metadata.
 - If an issue is stuck at `runner:running`, check `systemctl status` and
   `journalctl` for the Runner service.
 - If a stale notification points to a closed issue or pull request, recreate the

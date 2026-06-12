@@ -300,6 +300,47 @@ must not force-push, merge, deploy, read secrets, mutate runtime services, use
 issue-provided paths, or execute arbitrary issue text. Its only allowed commit
 is the single validated issue-worktree publish commit described above.
 
+`publish_existing_issue_worktree` is the bounded recovery route for publishing
+work that already exists in a Runner issue worktree. Use it when normal issue
+mode would allocate a new worktree but the operator needs to recover a specific
+existing `issue-N` worktree under the known Runner worktree base.
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: publish_existing_issue_worktree
+Target Repository: alanua/Skeleton
+Source Issue: 822
+Base Branch: main
+Output Branch: runner/issue-822
+Draft PR: true
+Allowed Files:
+- path/explicitly/allowed.ext
+```
+
+It may only:
+
+1. Validate `Target Repository` as exactly `alanua/Skeleton`.
+2. Validate `Source Issue` as a positive issue number.
+3. Validate `Base Branch` as `main`.
+4. Validate `Output Branch` as exactly `runner/issue-{Source Issue}`.
+5. Validate `Draft PR: true`; this route never creates a ready-for-review PR.
+6. Validate an explicit `Allowed Files` list of safe relative paths.
+7. Resolve the source worktree as `issue-{Source Issue}` under the configured
+   Skeleton Runner worktree root and reject paths outside that root.
+8. Verify Git metadata, current branch, and origin remote before reading diffs.
+9. Verify changed tracked files are a subset of the explicit allowlist.
+10. Ignore only local `.codex/` untracked runtime artifacts; never stage them.
+11. Stage only validated publish files, push only the exact output branch, and
+    create only a draft PR against the base branch.
+12. Never merge, force-push, deploy, restart services, read secrets, execute
+    issue-provided commands, or use broad `git add`.
+
+It reports `DONE` only when an existing open PR is found or when the exact
+branch push and draft PR creation succeed. Operator-action failures are reported
+as `NEEDS_OPERATOR` with sanitized key/value status lines only; raw command
+output, private paths outside the Runner worktree contract, secrets, task text,
+and quoted transcripts must not be included.
+
 `quarantine_stale_clean_skeleton_worktrees` removes only explicitly listed
 clean Skeleton issue worktrees and must include explicit worktree id metadata:
 
