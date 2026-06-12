@@ -3068,10 +3068,11 @@ def _write_private_shortlist_artifacts(
     status_counts: dict[str, int],
     warning_count: int,
 ) -> str | None:
-    json_path, csv_path = _private_shortlist_artifact_paths(entry.output_root)
+    resolved_output_root = entry.output_root.resolve(strict=False)
+    json_path, csv_path = _private_shortlist_artifact_paths(resolved_output_root)
     for path in (json_path, csv_path):
         resolved = path.resolve(strict=False)
-        if not _path_is_relative_to(resolved, entry.output_root):
+        if not _path_is_relative_to(resolved, resolved_output_root):
             return "shortlist_artifact_path_unsafe"
         if resolved == ROOT or _path_is_relative_to(resolved, ROOT):
             return "shortlist_artifact_inside_public_repo"
