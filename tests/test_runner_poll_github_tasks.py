@@ -335,6 +335,55 @@ Copied acceptance criteria:
     assert result == runner.CodexTaskResult("DONE")
 
 
+def test_codex_task_result_accepts_result_done_with_stop_state_evidence() -> None:
+    output = """RESULT: DONE
+
+Changed files:
+- scripts/runner_poll_github_tasks.py
+- docs/RUNNER_QUEUE_STATUS.md
+
+Report notes:
+The maintenance docs mention runner-stopped, BLOCKED, and NEEDS_OPERATOR as
+evidence text for recovery handling. Those words are not the final result.
+"""
+
+    result = runner.classify_codex_task_result(output, 0)
+
+    assert result == runner.CodexTaskResult("DONE")
+
+
+def test_codex_task_result_uses_assistant_result_over_prompt_echo() -> None:
+    output = """Reading additional input from stdin...
+OpenAI Codex v0.125.0
+--------
+user
+Return RESULT: NEEDS_OPERATOR if the task cannot proceed.
+--------
+assistant
+RESULT: DONE
+
+Docs mention runner-stopped and BLOCKED as evidence text.
+"""
+
+    result = runner.classify_codex_task_result(output, 0)
+
+    assert result == runner.CodexTaskResult("DONE")
+
+
+def test_codex_task_result_blocks_structured_needs_operator_result() -> None:
+    output = """Changed files:
+- none
+
+The task cannot proceed because the source worktree is missing.
+
+RESULT: NEEDS_OPERATOR
+"""
+
+    result = runner.classify_codex_task_result(output, 0)
+
+    assert result == runner.CodexTaskResult("BLOCKED", "BLOCKED")
+
+
 def test_codex_task_result_blocks_failure_final_report() -> None:
     blocked = "BLOCK" + "ED"
     output = f"""{blocked}: missing capability
@@ -443,6 +492,19 @@ def test_blocked_final_report_replaces_placeholder_pr_url() -> None:
 
 def test_runner_report_status_allows_no_change_done_without_draft_pr() -> None:
     report = "DONE: Codex completed successfully with no file changes."
+
+    assert runner.runner_report_status(report) == "DONE"
+
+
+def test_runner_report_status_ignores_blocked_words_in_success_report_text() -> None:
+    report = """DONE: Codex completed successfully with no file changes.
+
+Docs updated:
+- docs/RUNNER_MAINTENANCE_TASKS.md
+
+The docs describe runner-stopped, BLOCKED, and NEEDS_OPERATOR states as
+maintenance evidence text. They are not the final delivery status.
+"""
 
     assert runner.runner_report_status(report) == "DONE"
 
@@ -1981,6 +2043,34 @@ def _issue_publish_inspection_body(
     return str(body["body"])
 
 
+def _publish_existing_issue_worktree_body(
+    *,
+    target_repository: str = runner.REPO,
+    source_issue: int | str = 123,
+    base_branch: str = "main",
+    output_branch: str = "runner/issue-123",
+    allowed_files: tuple[str, ...] = ("scripts/runner_poll_github_tasks.py",),
+    draft_pr: str = "true",
+    pr_title: str | None = None,
+) -> str:
+    metadata = [
+        f"Target Repository: {target_repository}",
+        f"Source Issue: {source_issue}",
+        f"Base Branch: {base_branch}",
+        f"Output Branch: {output_branch}",
+        f"Draft PR: {draft_pr}",
+    ]
+    if pr_title is not None:
+        metadata.append(f"PR Title: {pr_title}")
+    metadata.append("Allowed Files:")
+    metadata.extend(f"- {path}" for path in allowed_files)
+    body = _maintenance_issue(
+        runner.PUBLISH_EXISTING_ISSUE_WORKTREE,
+        metadata="\n".join(metadata),
+    )
+    return str(body["body"])
+
+
 def _issue_publish_commands(
     *,
     worktree_path: Path,
@@ -2204,6 +2294,45 @@ def test_issue_worktree_publish_inspection_is_allowlisted_and_bypasses_codex(
     assert set_label.call_args_list[-1] == mock.call(
         145, runner.LABEL_RUNNING, runner.LABEL_DONE
     )
+
+
+def test_publish_existing_issue_worktree_is_allowlisted_and_creates_draft_pr(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path)
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            untracked_files=(".codex/session.json",),
+        ),
+    ) as run:
+        report = runner.publish_existing_issue_worktree(
+            _publish_existing_issue_worktree_body()
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert runner.PUBLISH_EXISTING_ISSUE_WORKTREE in runner.RUNTIME_MAINTENANCE_TASK_IDS
+    assert report.startswith("DONE:")
+    assert "maintenance_task_id=publish_existing_issue_worktree" in report
+    assert "repository=alanua/Skeleton" in report
+    assert "base_branch=main" in report
+    assert "draft_pr=true" in report
+    assert ["git", "add", "--", "scripts/runner_poll_github_tasks.py"] in commands
+    assert not any(".codex/session.json" in command for command in commands)
+    assert commands[-1][-1] == "--draft"
+
+
+def test_publish_existing_issue_worktree_requires_draft_pr_true() -> None:
+    report = runner.publish_existing_issue_worktree(
+        _publish_existing_issue_worktree_body(draft_pr="false")
+    )
+
+    assert report.startswith("NEEDS_OPERATOR:")
+    assert "reason=draft_pr_required" in report
 
 
 def test_issue_worktree_publish_inspection_valid_metadata_reports_done(
