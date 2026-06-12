@@ -23,15 +23,25 @@ hard_stop_file_patterns:
   - BOOT_MANIFEST.yaml
   - COMMANDS.yaml
   - OPERATOR_RULES.yaml
+  - PROJECT_TREE.yaml
+  - CAPABILITY_REGISTRY.yaml
   - PROVIDER_ROUTING.yaml
+  - core/gate_engine.py
+  - core/action_gate.py
   - scripts/runner_poll_github_tasks.py
   - scripts/*.service
   - scripts/*.timer
+  - adapters/**
   - adapters/*/*CONTRACT.md
 
 ask_operator_triggers:
   - execution_mode_changed
   - dirty_pr
+  - architecture_direction_changed
+  - external_service_added
+  - cost_related_change
+  - cross_repo_execution_enabled
+  - live_runtime_capability_added
 
 level_red_triggers:
   - level_red
