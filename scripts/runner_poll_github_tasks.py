@@ -189,10 +189,15 @@ _BLOCKED_OUTPUT_MARKERS = (
     "assigned worktree is not target",
 )
 _BLOCKED_OUTPUT_MARKER_RES = tuple(
-    re.compile(rf"(?<!\w){re.escape(marker)}(?!\w)", re.IGNORECASE)
+    re.compile(r"^\s*BLOCKED\s*:", re.IGNORECASE | re.MULTILINE)
+    if marker == "BLOCKED"
+    else re.compile(rf"(?<!\w){re.escape(marker)}(?!\w)", re.IGNORECASE)
     for marker in _BLOCKED_OUTPUT_MARKERS
 )
 _FINAL_STATUS_LINE_RE = re.compile(r"^\s*(DONE|BLOCKED)\b:?", re.IGNORECASE)
+_FINAL_STATUS_DELIVERY_LINE_RE = re.compile(
+    r"^\s*(DONE|BLOCKED)\s*:", re.IGNORECASE
+)
 _FINAL_RESULT_LINE_RE = re.compile(
     r"^\s*RESULT:\s*(?P<result>DONE|BLOCKED|NEEDS_OPERATOR)\b", re.IGNORECASE
 )
@@ -728,7 +733,8 @@ def final_codex_answer(output: str) -> str:
         if line.lstrip().startswith("```"):
             in_fence = not in_fence
         elif not in_fence and (
-            _FINAL_STATUS_LINE_RE.match(line) or _FINAL_RESULT_LINE_RE.match(line)
+            _FINAL_STATUS_DELIVERY_LINE_RE.match(line)
+            or _FINAL_RESULT_LINE_RE.match(line)
         ):
             final_status_index = offset
         offset += len(line)
@@ -768,7 +774,7 @@ def _first_final_status(output: str) -> str | None:
 
     final_answer = _without_fenced_blocks(final_codex_answer(output))
     for line in final_answer.splitlines():
-        match = _FINAL_STATUS_LINE_RE.match(line)
+        match = _FINAL_STATUS_DELIVERY_LINE_RE.match(line)
         if match is not None:
             return match.group(1).upper()
     return None

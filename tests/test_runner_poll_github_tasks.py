@@ -205,7 +205,7 @@ def _project_tree_with_lavalamp_checkout(
 
 def test_blocked_output_classifier_detects_runner_blockers() -> None:
     cases = {
-        "BLOCKED": "BLOCKED",
+        "BLOCKED: cannot continue": "BLOCKED",
         "Blocked: waiting for access": "BLOCKED",
         "missing capability: docker": "missing capability",
         "wrong worktree selected": "wrong worktree",
@@ -349,6 +349,24 @@ evidence text for recovery handling. Those words are not the final result.
 
     result = runner.classify_codex_task_result(output, 0)
 
+    assert result == runner.CodexTaskResult("DONE")
+
+
+def test_codex_task_result_ignores_plain_decision_words_in_success_output() -> None:
+    output = """Worker completed the requested parser repair.
+
+Decision words referenced by the task:
+DONE
+BLOCKED
+NEEDS_OPERATOR
+
+Those words are plain text examples, not the worker result.
+"""
+
+    result = runner.classify_codex_task_result(output, 0)
+
+    assert runner.final_codex_answer(output).startswith("Worker completed")
+    assert runner.blocked_output_marker(output) is None
     assert result == runner.CodexTaskResult("DONE")
 
 
