@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from core.merge_policy_checker import (
     ASK_OPERATOR,
     AUTO_MERGE,
@@ -17,6 +19,26 @@ from core.merge_policy_checker import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+HARD_STOP_FILES = (
+    "scripts/runner_poll_github_tasks.py",
+    "PROJECT_TREE.yaml",
+    "CAPABILITY_REGISTRY.yaml",
+    "core/gate_engine.py",
+    "core/action_gate.py",
+    "adapters/chatgpt/SYSTEM_PROMPT.md",
+)
+
+
+ASK_OPERATOR_TRIGGERS = (
+    "execution_mode_changed",
+    "architecture_direction_changed",
+    "external_service_added",
+    "cost_related_change",
+    "cross_repo_execution_enabled",
+    "live_runtime_capability_added",
+)
 
 
 def clean_pr_data(**overrides: object) -> dict[str, object]:
@@ -57,17 +79,16 @@ def test_clean_routine_pr_auto_merges_when_all_evidence_true() -> None:
     assert result.ask_triggers_found == ()
 
 
-def test_hard_stop_file_asks_operator() -> None:
+@pytest.mark.parametrize("changed_file", HARD_STOP_FILES)
+def test_hard_stop_file_asks_operator(changed_file: str) -> None:
     result = MergePolicyChecker(DEFAULT_POLICY_PATH).check(
-        clean_pr_data(changed_files=("scripts/runner_poll_github_tasks.py",))
+        clean_pr_data(changed_files=(changed_file,))
     )
 
     assert result.decision == ASK_OPERATOR
-    assert result.hard_stop_files_found == ("scripts/runner_poll_github_tasks.py",)
+    assert result.hard_stop_files_found == (changed_file,)
     assert result.ask_triggers_found == ()
-    assert result.reasons == (
-        "hard-stop file changed: scripts/runner_poll_github_tasks.py",
-    )
+    assert result.reasons == (f"hard-stop file changed: {changed_file}",)
 
 
 def test_level_red_trigger_is_never_auto() -> None:
@@ -101,16 +122,15 @@ def test_unverifiable_evidence_blocks() -> None:
     assert result.reasons == ("unverifiable merge evidence: diff_check_passed",)
 
 
-def test_ask_trigger_asks_operator() -> None:
+@pytest.mark.parametrize("trigger", ASK_OPERATOR_TRIGGERS)
+def test_ask_trigger_asks_operator(trigger: str) -> None:
     result = MergePolicyChecker(DEFAULT_POLICY_PATH).check(
-        clean_pr_data(triggers=("execution_mode_changed",))
+        clean_pr_data(triggers=(trigger,))
     )
 
     assert result.decision == ASK_OPERATOR
-    assert result.ask_triggers_found == ("execution_mode_changed",)
-    assert result.reasons == (
-        "operator review trigger found: execution_mode_changed",
-    )
+    assert result.ask_triggers_found == (trigger,)
+    assert result.reasons == (f"operator review trigger found: {trigger}",)
 
 
 def test_dirty_pr_asks_operator() -> None:
@@ -135,6 +155,9 @@ def test_policy_loading() -> None:
         "no_ask_operator_triggers",
         "no_level_red_triggers",
     ]
+    assert set(HARD_STOP_FILES[:-1]).issubset(set(policy["hard_stop_file_patterns"]))
+    assert "adapters/**" in policy["hard_stop_file_patterns"]
+    assert set(ASK_OPERATOR_TRIGGERS).issubset(set(policy["ask_operator_triggers"]))
 
 
 def test_legacy_function_uses_aligned_result_fields() -> None:
