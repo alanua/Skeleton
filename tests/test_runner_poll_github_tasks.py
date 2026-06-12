@@ -3647,8 +3647,8 @@ def test_prepare_aufmass_private_runtime_reports_done_without_private_paths() ->
         if command[:2] == ["python3", "-c"] and cwd == runner.ROOT:
             return 0, "raw dependency output must not appear"
         if (
-            command[:2] == ["python3", str(runner.ROOT / "scripts" / "aufmass_private_pilot_run.py")]
-            and command[2:] == [
+            command[:3] == ["python3", "-m", "scripts.aufmass_private_pilot_run"]
+            and command[3:] == [
                 "--source-pack-manifest",
                 str(source_pack_manifest),
                 "--branch",
@@ -3704,12 +3704,88 @@ def test_prepare_aufmass_private_runtime_reports_done_without_private_paths() ->
     assert len(commands) == 3
     assert commands[-1] == [
         "python3",
-        str(runner.ROOT / "scripts" / "aufmass_private_pilot_run.py"),
+        "-m",
+        "scripts.aufmass_private_pilot_run",
         "--source-pack-manifest",
         str(source_pack_manifest),
         "--branch",
         "manual-only",
     ]
+
+
+def test_prepare_aufmass_private_runtime_dry_run_uses_module_invocation() -> None:
+    checkout_path = _safe_checkout_path("aufmass-private/main")
+    workspace_root = _safe_checkout_path("aufmass-private")
+    source_pack_manifest = workspace_root / runner.AUFMASS_PRIVATE_SOURCE_PACK_MANIFEST
+    project_tree = _project_tree_for_aufmass_private(checkout_path, workspace_root)
+    existing_paths = {
+        checkout_path,
+        checkout_path / ".git",
+        workspace_root,
+        source_pack_manifest,
+        runner.ROOT / "scripts" / "aufmass_private_pilot_run.py",
+    }
+
+    def run_private_runtime_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        if command[:2] == ["python3", "-c"] and cwd == runner.ROOT:
+            return 0, ""
+        if command == [
+            "python3",
+            "-m",
+            "scripts.aufmass_private_pilot_run",
+            "--source-pack-manifest",
+            str(source_pack_manifest),
+            "--branch",
+            "manual-only",
+        ] and cwd == runner.ROOT:
+            return 0, json.dumps(
+                {
+                    "schema": "skeleton.aufmass_private_pilot_public_summary.v1",
+                    "mode": "dry-run",
+                }
+            )
+        return 2, "unexpected command"
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(runner.shutil, "which", return_value="/usr/bin/python3"), mock.patch.object(
+        Path, "is_dir", autospec=True
+    ) as path_is_dir, mock.patch.object(
+        Path, "exists", autospec=True
+    ) as path_exists, mock.patch.object(
+        Path, "is_file", autospec=True
+    ) as path_is_file, mock.patch.object(
+        runner, "run_command", side_effect=run_private_runtime_command
+    ) as run:
+        path_is_dir.side_effect = lambda path: path in {checkout_path, workspace_root}
+        path_exists.side_effect = lambda path: path in existing_paths
+        path_is_file.side_effect = lambda path: path in existing_paths
+        report = runner.prepare_aufmass_private_runtime()
+
+    assert report.startswith("DONE:")
+    dry_run_commands = [
+        call.args[0]
+        for call in run.call_args_list
+        if call.args[0][:3] == ["python3", "-m", "scripts.aufmass_private_pilot_run"]
+    ]
+    assert dry_run_commands == [
+        [
+            "python3",
+            "-m",
+            "scripts.aufmass_private_pilot_run",
+            "--source-pack-manifest",
+            str(source_pack_manifest),
+            "--branch",
+            "manual-only",
+        ]
+    ]
+    assert all(
+        str(runner.ROOT / "scripts" / "aufmass_private_pilot_run.py") not in command
+        for call in run.call_args_list
+        for command in call.args[0]
+    )
 
 
 def test_prepare_aufmass_private_runtime_missing_inventory_blocks_without_commands() -> None:
@@ -3759,9 +3835,10 @@ def test_prepare_aufmass_private_runtime_issue_body_does_not_execute_commands() 
     ) -> tuple[int, str]:
         if command[:2] == ["python3", "-c"] and cwd == runner.ROOT:
             return 0, ""
-        if command[:2] == [
+        if command[:3] == [
             "python3",
-            str(runner.ROOT / "scripts" / "aufmass_private_pilot_run.py"),
+            "-m",
+            "scripts.aufmass_private_pilot_run",
         ]:
             return 0, json.dumps(
                 {
