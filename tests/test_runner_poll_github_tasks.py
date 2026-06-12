@@ -3883,6 +3883,337 @@ def test_prepare_aufmass_private_runtime_issue_body_does_not_execute_commands() 
     run_codex.assert_not_called()
 
 
+def _aufmass_private_source_pack(pack_id: str = "pack_token") -> dict[str, object]:
+    return {
+        "schema": "skeleton.aufmass_source_pack.v1",
+        "pack_id": pack_id,
+        "project_id": "aufmass",
+        "sources": [
+            {
+                "source_id": "source_token",
+                "source_type": "dxf",
+                "artifact_ref": "artifact_token",
+                "artifact_route": "private_local_runner",
+                "metadata": {
+                    "title": "title-token",
+                    "source_revision": "rev-token",
+                    "prepared_by": "operator-token",
+                },
+                "scale_hint": {"basis": "drawing_scale", "detail": "scale-token"},
+                "privacy_status": "private_pilot",
+                "review_status": "approved_for_private_intake",
+            }
+        ],
+    }
+
+
+def _write_aufmass_private_registry(workspace: Path) -> tuple[Path, Path, Path]:
+    pack_dir = workspace / "packs" / "packA"
+    output_root = workspace / "runs" / "runA"
+    manifest = pack_dir / runner.AUFMASS_PRIVATE_SOURCE_PACK_MANIFEST
+    artifact_map = pack_dir / "artifact_map.json"
+    manifest.parent.mkdir(parents=True)
+    output_root.mkdir(parents=True)
+    manifest.write_text(json.dumps(_aufmass_private_source_pack()), encoding="utf-8")
+    artifact_map.write_text(json.dumps({"artifact_token": "sources/source.dxf"}), encoding="utf-8")
+    registry = {
+        "schema": runner.AUFMASS_PRIVATE_AUTOMATION_REGISTRY_SCHEMA,
+        "source_packs": {
+            "pack_token": {
+                "source_pack_manifest": "packs/packA/source_pack_manifest.json",
+                "artifact_map": "packs/packA/artifact_map.json",
+                "latest_run_id": "run_token",
+                "runs": {"run_token": {"output_root": "runs/runA"}},
+            }
+        },
+    }
+    (workspace / runner.AUFMASS_PRIVATE_AUTOMATION_REGISTRY).write_text(
+        json.dumps(registry),
+        encoding="utf-8",
+    )
+    return manifest, artifact_map, output_root
+
+
+def test_aufmass_private_review_tasks_are_allowlisted() -> None:
+    assert runner.RUN_AUFMASS_PRIVATE_DXF_REVIEW == "run_aufmass_private_dxf_review"
+    assert runner.SUMMARIZE_AUFMASS_PRIVATE_REVIEW == "summarize_aufmass_private_review"
+    assert runner.RUN_AUFMASS_PRIVATE_DXF_REVIEW in runner.RUNTIME_MAINTENANCE_TASK_IDS
+    assert runner.SUMMARIZE_AUFMASS_PRIVATE_REVIEW in runner.RUNTIME_MAINTENANCE_TASK_IDS
+
+
+@pytest.mark.parametrize(
+    "field_value",
+    ("../source_pack_manifest.json", "/tmp/private.dxf", "drawing.dxf", "pack; reboot"),
+)
+def test_run_aufmass_private_dxf_review_rejects_issue_supplied_paths_and_shell(
+    field_value: str,
+) -> None:
+    body = _maintenance_issue(
+        runner.RUN_AUFMASS_PRIVATE_DXF_REVIEW,
+        "sudo reboot\npython3 scripts/aufmass_private_pilot_run.py",
+        metadata=f"Private Source Pack ID: {field_value}",
+    )["body"]
+
+    with mock.patch.object(runner, "run_command") as run:
+        report = runner.run_aufmass_private_dxf_review(str(body))
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=invalid_private_source_pack_id" in report
+    assert field_value not in report
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    (
+        "Private Source Pack ID: pack_token\nSource File: customer-plan.dxf",
+        "Private Source Pack ID: pack_token\n/private/customer/source_pack_manifest.json",
+    ),
+)
+def test_aufmass_private_review_rejects_unsupported_issue_metadata(
+    metadata: str,
+) -> None:
+    body = _maintenance_issue(
+        runner.RUN_AUFMASS_PRIVATE_DXF_REVIEW,
+        metadata=metadata,
+    )["body"]
+
+    with mock.patch.object(runner, "run_command") as run:
+        report = runner.run_aufmass_private_dxf_review(str(body))
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=unsupported_private_aufmass_issue_field" in report
+    assert "customer-plan.dxf" not in report
+    assert "/private/customer" not in report
+    run.assert_not_called()
+
+
+def test_aufmass_private_registry_is_required_inside_private_workspace(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "private"
+    workspace.mkdir()
+    request = runner.AufmassPrivateAutomationRequest("pack_token")
+
+    entry, report = runner._resolve_aufmass_private_registry_entry(
+        runner.RUN_AUFMASS_PRIVATE_DXF_REVIEW,
+        request,
+        workspace,
+    )
+
+    assert entry is None
+    assert report is not None
+    assert "reason=registry_missing" in report
+    assert str(workspace) not in report
+
+
+def test_aufmass_private_registry_paths_are_relative_and_constrained(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "private"
+    workspace.mkdir()
+    registry = {
+        "schema": runner.AUFMASS_PRIVATE_AUTOMATION_REGISTRY_SCHEMA,
+        "source_packs": {
+            "pack_token": {
+                "source_pack_manifest": "/private/source_pack_manifest.json",
+                "artifact_map": "maps/artifact_map.json",
+                "output_root": "../leak",
+            }
+        },
+    }
+    (workspace / runner.AUFMASS_PRIVATE_AUTOMATION_REGISTRY).write_text(
+        json.dumps(registry),
+        encoding="utf-8",
+    )
+    request = runner.AufmassPrivateAutomationRequest("pack_token")
+
+    entry, report = runner._resolve_aufmass_private_registry_entry(
+        runner.RUN_AUFMASS_PRIVATE_DXF_REVIEW,
+        request,
+        workspace,
+    )
+
+    assert entry is None
+    assert report is not None
+    assert "reason=source_pack_manifest_unsafe" in report
+    assert "/private/source_pack_manifest.json" not in report
+    assert "../leak" not in report
+
+
+def test_run_aufmass_private_dxf_review_dry_run_uses_bounded_module_invocation(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "private"
+    workspace.mkdir()
+    manifest, _artifact_map, _output_root = _write_aufmass_private_registry(workspace)
+    body = _maintenance_issue(
+        runner.RUN_AUFMASS_PRIVATE_DXF_REVIEW,
+        "python3 scripts/aufmass_private_pilot_run.py --local-debug\nrm -rf /",
+        metadata="Private Source Pack ID: pack_token",
+    )["body"]
+
+    def run_private_command(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        assert cwd == runner.ROOT
+        assert command == [
+            "python3",
+            "-m",
+            "scripts.aufmass_private_pilot_run",
+            "--source-pack-manifest",
+            str(manifest),
+            "--branch",
+            "dxf-assisted",
+        ]
+        return 0, json.dumps(
+            {
+                "schema": "skeleton.aufmass_private_pilot_public_summary.v1",
+                "mode": "dry-run",
+                "branch": "dxf-assisted",
+                "selected_source_count": 1,
+                "private_artifacts": ["room_review_table"],
+                "source_validation": {"warnings": []},
+            }
+        )
+
+    with mock.patch.object(
+        runner,
+        "_aufmass_private_registered_paths",
+        return_value=(workspace / "checkout", workspace, None),
+    ), mock.patch.object(runner, "run_command", side_effect=run_private_command) as run:
+        report = runner.run_aufmass_private_dxf_review(str(body))
+
+    assert report.startswith("DONE:")
+    assert "maintenance_task_id=run_aufmass_private_dxf_review" in report
+    assert "source_pack_id=pack_token" in report
+    assert "mode=dry-run" in report
+    assert "branch=dxf-assisted" in report
+    assert "selected_source_count=1" in report
+    assert "dxf_source_count=1" in report
+    assert "artifact_count=1" in report
+    assert "run_id=run_token" in report
+    assert str(workspace) not in report
+    assert "source.dxf" not in report
+    assert "rm -rf" not in report
+    assert run.call_count == 1
+
+
+def test_run_aufmass_private_dxf_review_execute_uses_bounded_command(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "private"
+    workspace.mkdir()
+    manifest, artifact_map, output_root = _write_aufmass_private_registry(workspace)
+    body = _maintenance_issue(
+        runner.RUN_AUFMASS_PRIVATE_DXF_REVIEW,
+        metadata="\n".join(
+            (
+                "Private Source Pack ID: pack_token",
+                "Pilot Mode: execute",
+                "Run ID: run_token",
+            )
+        ),
+    )["body"]
+
+    def run_private_command(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        assert cwd == runner.ROOT
+        assert command == [
+            "python3",
+            "-m",
+            "scripts.aufmass_private_pilot_run",
+            "--source-pack-manifest",
+            str(manifest),
+            "--branch",
+            "dxf-assisted",
+            "--execute",
+            "--private-workspace",
+            str(workspace),
+            "--output-root",
+            str(output_root),
+            "--artifact-map",
+            str(artifact_map),
+        ]
+        return 0, json.dumps(
+            {
+                "schema": "skeleton.aufmass_private_pilot_public_summary.v1",
+                "mode": "execute",
+                "branch": "dxf-assisted",
+                "selected_source_count": 1,
+                "dxf_source_count": 1,
+                "artifact_count": 4,
+                "source_validation": {"warnings": []},
+            }
+        )
+
+    with mock.patch.object(
+        runner,
+        "_aufmass_private_registered_paths",
+        return_value=(workspace / "checkout", workspace, None),
+    ), mock.patch.object(runner, "run_command", side_effect=run_private_command):
+        report = runner.run_aufmass_private_dxf_review(str(body))
+
+    assert report.startswith("DONE:")
+    assert "mode=execute" in report
+    assert "artifact_count=4" in report
+    assert str(workspace) not in report
+    assert "artifact_map.json" not in report
+
+
+def test_summarize_aufmass_private_review_redacts_private_rows_and_quantities(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "private"
+    workspace.mkdir()
+    _manifest, _artifact_map, output_root = _write_aufmass_private_registry(workspace)
+    review_table = {
+        "rows": [
+            {
+                "source_ref": "source_token",
+                "room_label": "Conference 101",
+                "review_status": "needs_review",
+                "area_m2": 42.5,
+                "width_m": 7,
+            },
+            {
+                "source_ref": "source_token",
+                "room_label": "Office Secret",
+                "review_status": "approved",
+                "quantity": 3,
+            },
+        ]
+    }
+    (output_root / "source_token_room_review_table.json").write_text(
+        json.dumps(review_table),
+        encoding="utf-8",
+    )
+    body = _maintenance_issue(
+        runner.SUMMARIZE_AUFMASS_PRIVATE_REVIEW,
+        "cat /private/customer/source_token_room_review_table.json",
+        metadata="Private Source Pack ID: pack_token",
+    )["body"]
+
+    with mock.patch.object(
+        runner,
+        "_aufmass_private_registered_paths",
+        return_value=(workspace / "checkout", workspace, None),
+    ):
+        report = runner.summarize_aufmass_private_review(str(body))
+
+    assert report.startswith("DONE:")
+    assert "maintenance_task_id=summarize_aufmass_private_review" in report
+    assert "source_pack_id=pack_token" in report
+    assert "run_id=run_token" in report
+    assert "review_table_count=1" in report
+    assert "row_count=2" in report
+    assert "source_token_count=1" in report
+    assert "status_count_approved=1" in report
+    assert "status_count_needs_review=1" in report
+    assert str(workspace) not in report
+    assert "Conference 101" not in report
+    assert "Office Secret" not in report
+    assert "42.5" not in report
+    assert "source_token_room_review_table.json" not in report
+
+
 def _pr_validation_state(**updates: object) -> dict[str, object]:
     state: dict[str, object] = {
         "number": 123,

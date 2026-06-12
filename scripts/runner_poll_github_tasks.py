@@ -24,6 +24,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.audit_ledger import AuditLedger, validate_public_safe_payload
+from core.aufmass_source_pack import validate_source_pack_manifest
 from core.project_tree import get_project, get_project_by_repo, load_project_tree
 from core.skeleton_memory import SkeletonMemory
 from core.telegram_approval_buttons import build_pr_ready_card_payload
@@ -83,6 +84,8 @@ VALIDATE_PR_BRANCH = "validate_pr_branch"
 PREFLIGHT_PR_REFRESH = "preflight_pr_refresh"
 HERMES_WORKER_PREFLIGHT = "hermes_worker_preflight"
 PREPARE_AUFMASS_PRIVATE_RUNTIME = "prepare_aufmass_private_runtime"
+RUN_AUFMASS_PRIVATE_DXF_REVIEW = "run_aufmass_private_dxf_review"
+SUMMARIZE_AUFMASS_PRIVATE_REVIEW = "summarize_aufmass_private_review"
 INSPECT_PR_MERGEABILITY = "inspect_pr_mergeability"
 BACKFILL_SKELETON_MEMORY_RECENT = "backfill_skeleton_memory_recent"
 INSPECT_ISSUE_WORKTREE_FOR_PUBLISH = "inspect_issue_worktree_for_publish"
@@ -102,6 +105,8 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         PREFLIGHT_PR_REFRESH,
         HERMES_WORKER_PREFLIGHT,
         PREPARE_AUFMASS_PRIVATE_RUNTIME,
+        RUN_AUFMASS_PRIVATE_DXF_REVIEW,
+        SUMMARIZE_AUFMASS_PRIVATE_REVIEW,
         INSPECT_PR_MERGEABILITY,
         BACKFILL_SKELETON_MEMORY_RECENT,
         INSPECT_ISSUE_WORKTREE_FOR_PUBLISH,
@@ -113,6 +118,10 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
 AUFMASS_PRIVATE_PROJECT_ID = "aufmass_private"
 AUFMASS_PRIVATE_REGISTERED_REPO = "private/aufmass"
 AUFMASS_PRIVATE_SOURCE_PACK_MANIFEST = "source_pack_manifest.json"
+AUFMASS_PRIVATE_AUTOMATION_REGISTRY = "automation_registry.private.json"
+AUFMASS_PRIVATE_AUTOMATION_REGISTRY_SCHEMA = (
+    "skeleton.aufmass_private_automation_registry.v1"
+)
 AUFMASS_PRIVATE_REQUIRED_MODULES = (
     "core.aufmass_engine",
     "core.aufmass_exporter",
@@ -211,6 +220,7 @@ _PYTEST_SUMMARY_LINE_RE = re.compile(
 _SAFE_CODEX_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,80}$")
 _TASK_FENCE_OPEN_LINE_RE = re.compile(r"^[ \t]*```task[ \t]*$")
 _FENCE_CLOSE_LINE_RE = re.compile(r"^[ \t]*```[ \t]*$")
+_AUFMASS_PRIVATE_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{2,80}$")
 
 
 @dataclass(frozen=True)
@@ -330,6 +340,22 @@ class IssueWorktreePublishInspectionRequest:
 class StaleCleanSkeletonWorktreeQuarantineRequest:
     worktree_ids: tuple[str, ...]
     protected_ids: frozenset[str]
+
+
+@dataclass(frozen=True)
+class AufmassPrivateAutomationRequest:
+    source_pack_id: str
+    mode: str = "dry-run"
+    run_id: str | None = None
+
+
+@dataclass(frozen=True)
+class AufmassPrivateRegistryEntry:
+    source_pack_id: str
+    manifest_path: Path
+    artifact_map_path: Path
+    output_root: Path
+    run_id: str
 
 
 def truncate_comment(body: str) -> str:
@@ -2502,6 +2528,469 @@ def prepare_aufmass_private_runtime() -> str:
             "pilot_summary_schema=skeleton.aufmass_private_pilot_public_summary.v1",
         )
     )
+    return _maintenance_report("DONE", task_id, status_lines, "met")
+
+
+def _aufmass_private_metadata(body: str) -> str:
+    return (body or "").split("```task", 1)[0]
+
+
+def _valid_aufmass_private_token(value: str | None) -> bool:
+    return (
+        isinstance(value, str)
+        and _AUFMASS_PRIVATE_TOKEN_RE.fullmatch(value) is not None
+    )
+
+
+def _validate_aufmass_private_issue_metadata(
+    task_id: str, body: str, *, include_mode: bool
+) -> str | None:
+    allowed_fields = {"Mode", "Maintenance Task ID", "Private Source Pack ID", "Run ID"}
+    if include_mode:
+        allowed_fields.add("Pilot Mode")
+    for line in _aufmass_private_metadata(body).splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        field, separator, _value = stripped.partition(":")
+        if not separator or field not in allowed_fields:
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                ["reason=unsupported_private_aufmass_issue_field"],
+                "not_met",
+            )
+    return None
+
+
+def _aufmass_private_automation_request(
+    task_id: str, body: str, *, include_mode: bool
+) -> tuple[AufmassPrivateAutomationRequest | None, str | None]:
+    metadata_report = _validate_aufmass_private_issue_metadata(
+        task_id, body, include_mode=include_mode
+    )
+    if metadata_report is not None:
+        return None, metadata_report
+
+    metadata = _aufmass_private_metadata(body)
+    source_pack_id = _body_field(metadata, "Private Source Pack ID")
+    if not _valid_aufmass_private_token(source_pack_id):
+        return None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            ["reason=invalid_private_source_pack_id"],
+            "not_met",
+        )
+
+    run_id = _body_field(metadata, "Run ID")
+    if run_id is not None and not _valid_aufmass_private_token(run_id):
+        return None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [f"source_pack_id={source_pack_id}", "reason=invalid_run_id"],
+            "not_met",
+        )
+
+    mode = "dry-run"
+    if include_mode:
+        mode = _body_field(metadata, "Pilot Mode") or "dry-run"
+        if mode not in {"dry-run", "execute"}:
+            return None, _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [f"source_pack_id={source_pack_id}", "reason=invalid_pilot_mode"],
+                "not_met",
+            )
+
+    return AufmassPrivateAutomationRequest(source_pack_id, mode, run_id), None
+
+
+def _read_json_file(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None, "json_read_failed"
+    if not isinstance(data, dict):
+        return None, "json_not_object"
+    return data, None
+
+
+def _resolve_private_registry_path(
+    workspace_root: Path,
+) -> tuple[Path | None, str | None]:
+    registry_path = workspace_root / AUFMASS_PRIVATE_AUTOMATION_REGISTRY
+    resolved_registry = registry_path.resolve(strict=False)
+    if not _path_is_relative_to(resolved_registry, workspace_root):
+        return None, "registry_outside_private_workspace"
+    if resolved_registry == ROOT or _path_is_relative_to(resolved_registry, ROOT):
+        return None, "registry_inside_public_repo"
+    if not resolved_registry.is_file():
+        return None, "registry_missing"
+    return resolved_registry, None
+
+
+def _private_registry_relative_path(
+    workspace_root: Path, raw_path: object, label: str
+) -> tuple[Path | None, str | None]:
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return None, f"{label}_missing"
+    if "://" in raw_path or "\\" in raw_path:
+        return None, f"{label}_unsafe"
+    candidate = Path(raw_path)
+    if candidate.is_absolute() or any(part == ".." for part in candidate.parts):
+        return None, f"{label}_unsafe"
+    resolved = (workspace_root / candidate).resolve(strict=False)
+    if not _path_is_relative_to(resolved, workspace_root):
+        return None, f"{label}_outside_private_workspace"
+    if resolved == ROOT or _path_is_relative_to(resolved, ROOT):
+        return None, f"{label}_inside_public_repo"
+    return resolved, None
+
+
+def _source_pack_registry_entry(data: dict[str, Any], source_pack_id: str) -> dict[str, Any] | None:
+    source_packs = data.get("source_packs")
+    if isinstance(source_packs, dict):
+        entry = source_packs.get(source_pack_id)
+        return entry if isinstance(entry, dict) else None
+    return None
+
+
+def _resolve_aufmass_private_registry_entry(
+    task_id: str,
+    request: AufmassPrivateAutomationRequest,
+    workspace_root: Path,
+) -> tuple[AufmassPrivateRegistryEntry | None, str | None]:
+    registry_path, reason = _resolve_private_registry_path(workspace_root)
+    status_prefix = [f"source_pack_id={request.source_pack_id}"]
+    if reason is not None or registry_path is None:
+        return None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_prefix, f"reason={reason or 'registry_unavailable'}"],
+            "not_met",
+        )
+
+    registry, reason = _read_json_file(registry_path)
+    if reason is not None or registry is None:
+        return None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_prefix, f"reason=registry_{reason or 'invalid'}"],
+            "not_met",
+        )
+    if registry.get("schema") != AUFMASS_PRIVATE_AUTOMATION_REGISTRY_SCHEMA:
+        return None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_prefix, "reason=registry_schema_invalid"],
+            "not_met",
+        )
+
+    entry = _source_pack_registry_entry(registry, request.source_pack_id)
+    if entry is None:
+        return None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_prefix, "reason=source_pack_not_registered"],
+            "not_met",
+        )
+
+    run_id = request.run_id
+    output_root_value: object = entry.get("output_root")
+    runs = entry.get("runs")
+    if run_id is None:
+        latest_run_id = entry.get("latest_run_id")
+        if isinstance(latest_run_id, str) and _valid_aufmass_private_token(latest_run_id):
+            run_id = latest_run_id
+    if run_id is not None and isinstance(runs, dict):
+        run_entry = runs.get(run_id)
+        if not isinstance(run_entry, dict):
+            return None, _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [*status_prefix, f"run_id={run_id}", "reason=run_not_registered"],
+                "not_met",
+            )
+        output_root_value = run_entry.get("output_root", output_root_value)
+    if run_id is None:
+        run_id = "registry_default"
+
+    manifest_path, reason = _private_registry_relative_path(
+        workspace_root, entry.get("source_pack_manifest"), "source_pack_manifest"
+    )
+    if reason is None and manifest_path is not None and manifest_path.name != AUFMASS_PRIVATE_SOURCE_PACK_MANIFEST:
+        reason = "source_pack_manifest_name_invalid"
+    artifact_map_path, artifact_reason = _private_registry_relative_path(
+        workspace_root, entry.get("artifact_map"), "artifact_map"
+    )
+    output_root, output_reason = _private_registry_relative_path(
+        workspace_root, output_root_value, "output_root"
+    )
+    reason = reason or artifact_reason or output_reason
+    if reason is not None or manifest_path is None or artifact_map_path is None or output_root is None:
+        return None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_prefix, f"run_id={run_id}", f"reason={reason or 'registry_path_invalid'}"],
+            "not_met",
+        )
+    return (
+        AufmassPrivateRegistryEntry(
+            source_pack_id=request.source_pack_id,
+            manifest_path=manifest_path,
+            artifact_map_path=artifact_map_path,
+            output_root=output_root,
+            run_id=run_id,
+        ),
+        None,
+    )
+
+
+def _load_and_validate_private_source_pack(
+    task_id: str, request: AufmassPrivateAutomationRequest, entry: AufmassPrivateRegistryEntry
+) -> tuple[dict[str, Any] | None, str | None]:
+    source_pack_data, reason = _read_json_file(entry.manifest_path)
+    if reason is not None or source_pack_data is None:
+        return None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                f"source_pack_id={request.source_pack_id}",
+                f"run_id={entry.run_id}",
+                f"reason=source_pack_{reason or 'invalid'}",
+            ],
+            "not_met",
+        )
+    validation = validate_source_pack_manifest(source_pack_data)
+    if not validation.ok:
+        return None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                f"source_pack_id={request.source_pack_id}",
+                f"run_id={entry.run_id}",
+                f"source_pack_warning_count={len(validation.warnings)}",
+                f"source_pack_error_count={len(validation.errors)}",
+                "reason=source_pack_validation_failed",
+            ],
+            "not_met",
+        )
+    return source_pack_data, None
+
+
+def _source_pack_count(source_pack_data: dict[str, Any], source_type: str | None = None) -> int:
+    sources = source_pack_data.get("sources")
+    if not isinstance(sources, list):
+        return 0
+    if source_type is None:
+        return len([source for source in sources if isinstance(source, dict)])
+    return len(
+        [
+            source
+            for source in sources
+            if isinstance(source, dict) and source.get("source_type") == source_type
+        ]
+    )
+
+
+def _warning_count(summary: dict[str, Any]) -> int:
+    source_validation = summary.get("source_validation")
+    if not isinstance(source_validation, dict):
+        return 0
+    warnings = source_validation.get("warnings")
+    return len(warnings) if isinstance(warnings, list) else 0
+
+
+def _summary_int(summary: dict[str, Any], key: str, default: int = 0) -> int:
+    value = summary.get(key)
+    return value if isinstance(value, int) and value >= 0 else default
+
+
+def _artifact_count(summary: dict[str, Any]) -> int:
+    value = summary.get("artifact_count")
+    if isinstance(value, int) and value >= 0:
+        return value
+    artifacts = summary.get("private_artifacts")
+    return len(artifacts) if isinstance(artifacts, list) else 0
+
+
+def run_aufmass_private_dxf_review(body: str) -> str:
+    task_id = RUN_AUFMASS_PRIVATE_DXF_REVIEW
+    request, report = _aufmass_private_automation_request(task_id, body, include_mode=True)
+    if report is not None:
+        return report
+    assert request is not None
+
+    checkout_path, workspace_root, reason = _aufmass_private_registered_paths()
+    if reason is not None or checkout_path is None or workspace_root is None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [f"source_pack_id={request.source_pack_id}", reason or "reason=private_project_unavailable"],
+            "not_met",
+        )
+
+    entry, report = _resolve_aufmass_private_registry_entry(task_id, request, workspace_root)
+    if report is not None:
+        return report
+    assert entry is not None
+
+    source_pack_data, report = _load_and_validate_private_source_pack(task_id, request, entry)
+    if report is not None:
+        return report
+    assert source_pack_data is not None
+    validation = validate_source_pack_manifest(source_pack_data)
+    dxf_source_count = _source_pack_count(source_pack_data, "dxf")
+    selected_source_count = dxf_source_count
+
+    command = [
+        "python3",
+        "-m",
+        "scripts.aufmass_private_pilot_run",
+        "--source-pack-manifest",
+        str(entry.manifest_path),
+        "--branch",
+        "dxf-assisted",
+    ]
+    if request.mode == "execute":
+        command.extend(
+            [
+                "--execute",
+                "--private-workspace",
+                str(workspace_root),
+                "--output-root",
+                str(entry.output_root),
+                "--artifact-map",
+                str(entry.artifact_map_path),
+            ]
+        )
+    code, output = run_command(command, cwd=ROOT)
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                f"source_pack_id={request.source_pack_id}",
+                f"mode={request.mode}",
+                "branch=dxf-assisted",
+                f"run_id={entry.run_id}",
+                f"warning_count={len(validation.warnings)}",
+                f"step=run_private_pilot status=failed exit_code={code}",
+            ],
+            "not_met",
+        )
+    try:
+        summary = json.loads(output or "{}")
+    except json.JSONDecodeError:
+        summary = {}
+    if (
+        not isinstance(summary, dict)
+        or summary.get("schema") != "skeleton.aufmass_private_pilot_public_summary.v1"
+        or summary.get("mode") != request.mode
+        or summary.get("branch") != "dxf-assisted"
+    ):
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                f"source_pack_id={request.source_pack_id}",
+                f"mode={request.mode}",
+                "branch=dxf-assisted",
+                f"run_id={entry.run_id}",
+                "step=verify_public_summary status=failed",
+            ],
+            "not_met",
+        )
+
+    status_lines = [
+        "status=done",
+        f"source_pack_id={request.source_pack_id}",
+        f"mode={request.mode}",
+        "branch=dxf-assisted",
+        f"selected_source_count={_summary_int(summary, 'selected_source_count', selected_source_count)}",
+        f"dxf_source_count={_summary_int(summary, 'dxf_source_count', dxf_source_count)}",
+        f"artifact_count={_artifact_count(summary)}",
+        f"run_id={entry.run_id}",
+        f"warning_count={_warning_count(summary)}",
+        f"source_pack_warning_count={len(validation.warnings)}",
+    ]
+    return _maintenance_report("DONE", task_id, status_lines, "met")
+
+
+def _review_table_private_paths(output_root: Path) -> list[Path]:
+    if not output_root.is_dir():
+        return []
+    return sorted(output_root.glob("*_room_review_table.json"))
+
+
+def _summarize_review_table(path: Path) -> tuple[int, dict[str, int], int]:
+    data, reason = _read_json_file(path)
+    if reason is not None or data is None:
+        return 0, {}, 1
+    rows = data.get("rows")
+    if not isinstance(rows, list):
+        return 0, {}, 1
+    status_counts: dict[str, int] = {}
+    source_tokens: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        status = row.get("review_status")
+        if isinstance(status, str) and _valid_aufmass_private_token(status):
+            status_counts[status] = status_counts.get(status, 0) + 1
+        source_ref = row.get("source_ref")
+        if isinstance(source_ref, str) and _valid_aufmass_private_token(source_ref):
+            source_tokens.add(source_ref)
+    return len(rows), status_counts, len(source_tokens)
+
+
+def summarize_aufmass_private_review(body: str) -> str:
+    task_id = SUMMARIZE_AUFMASS_PRIVATE_REVIEW
+    request, report = _aufmass_private_automation_request(task_id, body, include_mode=False)
+    if report is not None:
+        return report
+    assert request is not None
+
+    _checkout_path, workspace_root, reason = _aufmass_private_registered_paths()
+    if reason is not None or workspace_root is None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [f"source_pack_id={request.source_pack_id}", reason or "reason=private_project_unavailable"],
+            "not_met",
+        )
+    entry, report = _resolve_aufmass_private_registry_entry(task_id, request, workspace_root)
+    if report is not None:
+        return report
+    assert entry is not None
+
+    table_paths = _review_table_private_paths(entry.output_root)
+    row_count = 0
+    warning_count = 0
+    source_token_count = 0
+    status_counts: dict[str, int] = {}
+    for table_path in table_paths:
+        table_rows, table_status_counts, table_source_tokens = _summarize_review_table(table_path)
+        row_count += table_rows
+        warning_count += 1 if table_rows == 0 and not table_status_counts else 0
+        source_token_count += table_source_tokens
+        for status, count in table_status_counts.items():
+            status_counts[status] = status_counts.get(status, 0) + count
+
+    status_count_lines = [
+        f"status_count_{status}={status_counts[status]}"
+        for status in sorted(status_counts)
+    ]
+    status_lines = [
+        "status=done",
+        f"source_pack_id={request.source_pack_id}",
+        f"run_id={entry.run_id}",
+        f"review_table_count={len(table_paths)}",
+        f"row_count={row_count}",
+        f"source_token_count={source_token_count}",
+        f"warning_count={warning_count}",
+        *status_count_lines,
+    ]
     return _maintenance_report("DONE", task_id, status_lines, "met")
 
 
@@ -4919,6 +5408,10 @@ def dispatch_runtime_maintenance_task(
             return hermes_worker_preflight()
         if task_id == PREPARE_AUFMASS_PRIVATE_RUNTIME:
             return prepare_aufmass_private_runtime()
+        if task_id == RUN_AUFMASS_PRIVATE_DXF_REVIEW:
+            return run_aufmass_private_dxf_review(body)
+        if task_id == SUMMARIZE_AUFMASS_PRIVATE_REVIEW:
+            return summarize_aufmass_private_review(body)
         if task_id == INSPECT_PR_MERGEABILITY:
             return inspect_pr_mergeability(body)
         if task_id == BACKFILL_SKELETON_MEMORY_RECENT:
