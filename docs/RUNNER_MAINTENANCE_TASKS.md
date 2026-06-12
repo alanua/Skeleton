@@ -208,6 +208,43 @@ systemd, query GitHub, start Codex, or execute arbitrary issue text. Reports
 must be short and include only sanitized key/value status lines; they must not
 include raw command output, token values, raw host names, or issue-body text.
 
+`prepare_aufmass_private_runtime` verifies that the registered private Aufmass
+runtime is ready for a controlled private pilot dry run. It requires no target
+metadata:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: prepare_aufmass_private_runtime
+```
+
+It may only:
+
+1. Resolve the private Aufmass route through `PROJECT_TREE.yaml` by its fixed
+   project id.
+2. Verify that the route is registered as private and that its registered
+   checkout and private workspace paths are absolute, traversal-free, under
+   Runner-managed bases, and outside the public Skeleton checkout.
+3. Check only bounded local inventory facts: private checkout exists, Git
+   metadata exists, private workspace exists, the fixed private
+   `source_pack_manifest.json` exists, the public pilot script exists, and
+   `python3` is available.
+4. Verify required public Python modules for the Aufmass pilot planner and the
+   DXF parser dependency with fixed `python3 -c` import checks.
+5. Run only the public pilot script in dry-run mode with the fixed private
+   source-pack manifest and `manual-only` branch.
+6. Verify that the pilot script returns the public-safe dry-run summary schema.
+
+It reports `DONE` only when all registration, inventory, dependency, dry-run,
+and public summary checks succeed. Missing private registration, unsafe
+registered paths, missing private inventory, missing dependencies, dry-run
+failures, malformed summaries, and non-dry-run summaries are reported as
+`BLOCKED`. The task must not run arbitrary shell from issue text, install
+packages, deploy, restart services, query GitHub for private paths, publish
+private local paths, inspect drawings, calculate quantities, push branches,
+create pull requests, or read secrets. Reports must include only safe status
+booleans and step names, never private paths, drawing names, quantities, raw
+command output, tokens, or issue-body text.
+
 `inspect_issue_worktree_for_publish` is a Stage 1 delivery-only publisher
 inspection. It is validation/dry-run only and must include explicit metadata:
 

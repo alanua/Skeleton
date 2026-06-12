@@ -82,6 +82,7 @@ ENSURE_PROJECT_CHECKOUT = "ensure_project_checkout"
 VALIDATE_PR_BRANCH = "validate_pr_branch"
 PREFLIGHT_PR_REFRESH = "preflight_pr_refresh"
 HERMES_WORKER_PREFLIGHT = "hermes_worker_preflight"
+PREPARE_AUFMASS_PRIVATE_RUNTIME = "prepare_aufmass_private_runtime"
 INSPECT_PR_MERGEABILITY = "inspect_pr_mergeability"
 BACKFILL_SKELETON_MEMORY_RECENT = "backfill_skeleton_memory_recent"
 INSPECT_ISSUE_WORKTREE_FOR_PUBLISH = "inspect_issue_worktree_for_publish"
@@ -100,6 +101,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         VALIDATE_PR_BRANCH,
         PREFLIGHT_PR_REFRESH,
         HERMES_WORKER_PREFLIGHT,
+        PREPARE_AUFMASS_PRIVATE_RUNTIME,
         INSPECT_PR_MERGEABILITY,
         BACKFILL_SKELETON_MEMORY_RECENT,
         INSPECT_ISSUE_WORKTREE_FOR_PUBLISH,
@@ -108,6 +110,17 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES,
     )
 )
+AUFMASS_PRIVATE_PROJECT_ID = "aufmass_private"
+AUFMASS_PRIVATE_REGISTERED_REPO = "private/aufmass"
+AUFMASS_PRIVATE_SOURCE_PACK_MANIFEST = "source_pack_manifest.json"
+AUFMASS_PRIVATE_REQUIRED_MODULES = (
+    "core.aufmass_engine",
+    "core.aufmass_exporter",
+    "core.aufmass_manual_adapter",
+    "core.aufmass_source_pack",
+    "scripts.aufmass_private_pilot_run",
+)
+AUFMASS_PRIVATE_OPTIONAL_DXF_MODULE = "ezdxf"
 RUNNER_PROJECT_CHECKOUT_BASE = Path("/home/agent/agent-dev")
 RUNNER_ALLOWED_TARGET_PATH_BASES = (
     RUNNER_PROJECT_CHECKOUT_BASE / "repos",
@@ -398,6 +411,14 @@ def _path_is_under_allowed_target_base(path: Path) -> bool:
             continue
         return True
     return False
+
+
+def _path_is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(parent.resolve(strict=False))
+    except ValueError:
+        return False
+    return True
 
 
 def _validated_registered_target_path(
@@ -2327,6 +2348,159 @@ def hermes_worker_preflight() -> str:
         f"runner_root_exists={str(ROOT.exists()).lower()}",
         *tool_lines,
     ]
+    return _maintenance_report("DONE", task_id, status_lines, "met")
+
+
+def _aufmass_private_registered_paths() -> tuple[Path | None, Path | None, str | None]:
+    project = load_runner_project_tree().get("projects", {}).get(
+        AUFMASS_PRIVATE_PROJECT_ID
+    )
+    if not isinstance(project, dict):
+        return None, None, "reason=private_project_not_registered"
+    if project.get("repo") != AUFMASS_PRIVATE_REGISTERED_REPO:
+        return None, None, "reason=private_project_repo_mismatch"
+    if project.get("public") is not False:
+        return None, None, "reason=private_project_visibility_mismatch"
+
+    checkout_path = Path(str(project.get("checkout_path") or ""))
+    workspace_root = Path(str(project.get("worktree_root") or ""))
+    for name, path in (
+        ("checkout_path", checkout_path),
+        ("private_workspace", workspace_root),
+    ):
+        if not path.is_absolute():
+            return None, None, f"reason={name}_not_absolute"
+        if any(part == ".." for part in path.parts):
+            return None, None, f"reason={name}_traversal"
+        if not _path_is_under_allowed_target_base(path):
+            return None, None, f"reason={name}_unsafe"
+
+    if workspace_root == ROOT or _path_is_relative_to(workspace_root, ROOT):
+        return None, None, "reason=private_workspace_inside_public_repo"
+    if checkout_path == ROOT or _path_is_relative_to(checkout_path, ROOT):
+        return None, None, "reason=private_checkout_inside_public_repo"
+
+    return checkout_path, workspace_root, None
+
+
+def _python_import_check_script(modules: tuple[str, ...]) -> str:
+    return (
+        "import importlib.util, sys\n"
+        f"modules={modules!r}\n"
+        "missing=[module for module in modules if importlib.util.find_spec(module) is None]\n"
+        "sys.exit(1 if missing else 0)\n"
+    )
+
+
+def prepare_aufmass_private_runtime() -> str:
+    task_id = PREPARE_AUFMASS_PRIVATE_RUNTIME
+    status_lines = [
+        f"target_project={AUFMASS_PRIVATE_PROJECT_ID}",
+        "private_workspace=registered",
+        "report_private_paths=false",
+        "report_drawings=false",
+        "report_quantities=false",
+        "mutation_mode=none",
+    ]
+    checkout_path, workspace_root, reason = _aufmass_private_registered_paths()
+    if reason is not None or checkout_path is None or workspace_root is None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, reason or "reason=private_project_unavailable"],
+            "not_met",
+        )
+
+    pilot_script = ROOT / "scripts" / "aufmass_private_pilot_run.py"
+    source_pack_manifest = workspace_root / AUFMASS_PRIVATE_SOURCE_PACK_MANIFEST
+    bounded_checks = (
+        ("private_checkout", checkout_path.is_dir()),
+        ("private_checkout_git", (checkout_path / ".git").exists()),
+        ("private_workspace", workspace_root.is_dir()),
+        ("source_pack_manifest", source_pack_manifest.is_file()),
+        ("pilot_script", pilot_script.is_file()),
+        ("tool_python3", shutil.which("python3") is not None),
+    )
+    for step, ok in bounded_checks:
+        status_lines.append(f"step=verify_{step} status={'done' if ok else 'failed'}")
+        if not ok:
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [*status_lines, f"reason={step}_unavailable"],
+                "not_met",
+            )
+
+    dependency_checks = (
+        ("required_python_modules", AUFMASS_PRIVATE_REQUIRED_MODULES),
+        ("dxf_python_module", (AUFMASS_PRIVATE_OPTIONAL_DXF_MODULE,)),
+    )
+    for step, modules in dependency_checks:
+        code, _output = run_command(
+            ["python3", "-c", _python_import_check_script(modules)],
+            cwd=ROOT,
+        )
+        status_lines.append(
+            f"step=verify_{step} status={'done' if code == 0 else 'failed'}"
+        )
+        if code != 0:
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [*status_lines, f"reason={step}_missing"],
+                "not_met",
+            )
+
+    code, output = run_command(
+        [
+            "python3",
+            str(pilot_script),
+            "--source-pack-manifest",
+            str(source_pack_manifest),
+            "--branch",
+            "manual-only",
+        ],
+        cwd=ROOT,
+    )
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, f"step=dry_run_private_pilot status=failed exit_code={code}"],
+            "not_met",
+        )
+
+    try:
+        dry_run_summary = json.loads(output or "{}")
+    except json.JSONDecodeError:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "step=parse_dry_run_summary status=failed"],
+            "not_met",
+        )
+    if (
+        not isinstance(dry_run_summary, dict)
+        or dry_run_summary.get("mode") != "dry-run"
+        or dry_run_summary.get("schema")
+        != "skeleton.aufmass_private_pilot_public_summary.v1"
+    ):
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "step=verify_dry_run_summary status=failed"],
+            "not_met",
+        )
+
+    status_lines.extend(
+        (
+            "step=dry_run_private_pilot status=done",
+            "step=parse_dry_run_summary status=done",
+            "step=verify_dry_run_summary status=done",
+            "pilot_mode=dry-run",
+            "pilot_summary_schema=skeleton.aufmass_private_pilot_public_summary.v1",
+        )
+    )
     return _maintenance_report("DONE", task_id, status_lines, "met")
 
 
@@ -4742,6 +4916,8 @@ def dispatch_runtime_maintenance_task(
             return preflight_pr_refresh(body)
         if task_id == HERMES_WORKER_PREFLIGHT:
             return hermes_worker_preflight()
+        if task_id == PREPARE_AUFMASS_PRIVATE_RUNTIME:
+            return prepare_aufmass_private_runtime()
         if task_id == INSPECT_PR_MERGEABILITY:
             return inspect_pr_mergeability(body)
         if task_id == BACKFILL_SKELETON_MEMORY_RECENT:

@@ -3539,6 +3539,30 @@ def _preflight_pr_issue_body(
     return "\n".join(lines)
 
 
+def _project_tree_for_aufmass_private(
+    checkout_path: Path, workspace_root: Path
+) -> dict[str, object]:
+    project_tree = json.loads(json.dumps(runner.load_runner_project_tree()))
+    project_tree["projects"][runner.AUFMASS_PRIVATE_PROJECT_ID] = {
+        "repo": runner.AUFMASS_PRIVATE_REGISTERED_REPO,
+        "checkout_path": str(checkout_path),
+        "worktree_root": str(workspace_root),
+        "public": False,
+        "runner_enabled": True,
+        "execution_modes": {
+            "planning_only": False,
+            "codex_issue_worktree": True,
+            "live_cross_repo": False,
+        },
+        "requires_explicit_approval_for_mode_change": True,
+        "future_parallel_worktrees": False,
+        "runtime_approval_required": True,
+        "worktree_name_prefix": "aufmass-private",
+        "description": "Private Aufmass route kept outside public artifacts.",
+    }
+    return project_tree
+
+
 def test_hermes_worker_preflight_is_allowlisted() -> None:
     assert runner.HERMES_WORKER_PREFLIGHT == "hermes_worker_preflight"
     assert runner.HERMES_WORKER_PREFLIGHT in runner.RUNTIME_MAINTENANCE_TASK_IDS
@@ -3596,6 +3620,189 @@ def test_hermes_worker_preflight_issue_body_does_not_execute_commands() -> None:
         runner.process_issue(issue, workdir=str(runner.ROOT))
 
     run.assert_not_called()
+    run_codex.assert_not_called()
+
+
+def test_prepare_aufmass_private_runtime_is_allowlisted() -> None:
+    assert runner.PREPARE_AUFMASS_PRIVATE_RUNTIME == "prepare_aufmass_private_runtime"
+    assert runner.PREPARE_AUFMASS_PRIVATE_RUNTIME in runner.RUNTIME_MAINTENANCE_TASK_IDS
+
+
+def test_prepare_aufmass_private_runtime_reports_done_without_private_paths() -> None:
+    checkout_path = _safe_checkout_path("aufmass-private/main")
+    workspace_root = _safe_checkout_path("aufmass-private")
+    source_pack_manifest = workspace_root / runner.AUFMASS_PRIVATE_SOURCE_PACK_MANIFEST
+    project_tree = _project_tree_for_aufmass_private(checkout_path, workspace_root)
+    existing_paths = {
+        checkout_path,
+        checkout_path / ".git",
+        workspace_root,
+        source_pack_manifest,
+        runner.ROOT / "scripts" / "aufmass_private_pilot_run.py",
+    }
+
+    def run_private_runtime_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        if command[:2] == ["python3", "-c"] and cwd == runner.ROOT:
+            return 0, "raw dependency output must not appear"
+        if (
+            command[:2] == ["python3", str(runner.ROOT / "scripts" / "aufmass_private_pilot_run.py")]
+            and command[2:] == [
+                "--source-pack-manifest",
+                str(source_pack_manifest),
+                "--branch",
+                "manual-only",
+            ]
+            and cwd == runner.ROOT
+        ):
+            return 0, json.dumps(
+                {
+                    "schema": "skeleton.aufmass_private_pilot_public_summary.v1",
+                    "mode": "dry-run",
+                    "branch": "manual-only",
+                }
+            )
+        return 2, "unexpected command output must not appear"
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(runner.shutil, "which", return_value="/usr/bin/python3"), mock.patch.object(
+        Path, "is_dir", autospec=True
+    ) as path_is_dir, mock.patch.object(
+        Path, "exists", autospec=True
+    ) as path_exists, mock.patch.object(
+        Path, "is_file", autospec=True
+    ) as path_is_file, mock.patch.object(
+        runner, "run_command", side_effect=run_private_runtime_command
+    ) as run:
+        path_is_dir.side_effect = lambda path: path in {checkout_path, workspace_root}
+        path_exists.side_effect = lambda path: path in existing_paths
+        path_is_file.side_effect = lambda path: path in existing_paths
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.PREPARE_AUFMASS_PRIVATE_RUNTIME,
+            str(runner.ROOT),
+            "sudo reboot\ncat /private/path\ncalculate quantities",
+        )
+
+    assert report.startswith("DONE:")
+    assert "maintenance_task_id=prepare_aufmass_private_runtime" in report
+    assert "private_workspace=registered" in report
+    assert "report_private_paths=false" in report
+    assert "report_drawings=false" in report
+    assert "report_quantities=false" in report
+    assert "step=verify_required_python_modules status=done" in report
+    assert "step=verify_dxf_python_module status=done" in report
+    assert "step=dry_run_private_pilot status=done" in report
+    assert "pilot_mode=dry-run" in report
+    assert str(workspace_root) not in report
+    assert str(checkout_path) not in report
+    assert "raw dependency output" not in report
+    assert "sudo reboot" not in report
+    assert "calculate quantities" not in report
+    commands = [call.args[0] for call in run.call_args_list]
+    assert len(commands) == 3
+    assert commands[-1] == [
+        "python3",
+        str(runner.ROOT / "scripts" / "aufmass_private_pilot_run.py"),
+        "--source-pack-manifest",
+        str(source_pack_manifest),
+        "--branch",
+        "manual-only",
+    ]
+
+
+def test_prepare_aufmass_private_runtime_missing_inventory_blocks_without_commands() -> None:
+    checkout_path = _safe_checkout_path("aufmass-private/main")
+    workspace_root = _safe_checkout_path("aufmass-private")
+    project_tree = _project_tree_for_aufmass_private(checkout_path, workspace_root)
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(runner.shutil, "which", return_value="/usr/bin/python3"), mock.patch.object(
+        Path, "is_dir", autospec=True, return_value=False
+    ), mock.patch.object(
+        runner, "run_command"
+    ) as run:
+        report = runner.prepare_aufmass_private_runtime()
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=private_checkout_unavailable" in report
+    assert str(workspace_root) not in report
+    assert str(checkout_path) not in report
+    run.assert_not_called()
+
+
+def test_prepare_aufmass_private_runtime_issue_body_does_not_execute_commands() -> None:
+    issue = _maintenance_issue(
+        runner.PREPARE_AUFMASS_PRIVATE_RUNTIME,
+        "sudo reboot\n"
+        "git push --force\n"
+        "gh pr merge 123\n"
+        "python3 -c 'open(\"/tmp/nope\", \"w\").write(\"x\")'\n"
+        "codex exec unsafe",
+    )
+    checkout_path = _safe_checkout_path("aufmass-private/main")
+    workspace_root = _safe_checkout_path("aufmass-private")
+    source_pack_manifest = workspace_root / runner.AUFMASS_PRIVATE_SOURCE_PACK_MANIFEST
+    project_tree = _project_tree_for_aufmass_private(checkout_path, workspace_root)
+    existing_paths = {
+        checkout_path,
+        checkout_path / ".git",
+        workspace_root,
+        source_pack_manifest,
+        runner.ROOT / "scripts" / "aufmass_private_pilot_run.py",
+    }
+
+    def run_private_runtime_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        if command[:2] == ["python3", "-c"] and cwd == runner.ROOT:
+            return 0, ""
+        if command[:2] == [
+            "python3",
+            str(runner.ROOT / "scripts" / "aufmass_private_pilot_run.py"),
+        ]:
+            return 0, json.dumps(
+                {
+                    "schema": "skeleton.aufmass_private_pilot_public_summary.v1",
+                    "mode": "dry-run",
+                }
+            )
+        return 2, "unexpected command"
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(runner.shutil, "which", return_value="/usr/bin/python3"), mock.patch.object(
+        Path, "is_dir", autospec=True
+    ) as path_is_dir, mock.patch.object(
+        Path, "exists", autospec=True
+    ) as path_exists, mock.patch.object(
+        Path, "is_file", autospec=True
+    ) as path_is_file, mock.patch.object(
+        runner, "ensure_clean_worktree", return_value=(True, "")
+    ), mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run_private_runtime_command
+    ) as run, mock.patch.object(
+        runner, "run_codex_task"
+    ) as run_codex:
+        path_is_dir.side_effect = lambda path: path in {checkout_path, workspace_root}
+        path_exists.side_effect = lambda path: path in existing_paths
+        path_is_file.side_effect = lambda path: path in existing_paths
+        runner.process_issue(issue, workdir=str(runner.ROOT))
+
+    command_words = [" ".join(call.args[0]) for call in run.call_args_list]
+    assert all("reboot" not in command for command in command_words)
+    assert all("push" not in command for command in command_words)
+    assert all("pr merge" not in command for command in command_words)
+    assert all("open(" not in command for command in command_words)
+    assert all("codex exec" not in command for command in command_words)
     run_codex.assert_not_called()
 
 
