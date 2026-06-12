@@ -2454,7 +2454,8 @@ def prepare_aufmass_private_runtime() -> str:
     code, output = run_command(
         [
             "python3",
-            str(pilot_script),
+            "-m",
+            "scripts.aufmass_private_pilot_run",
             "--source-pack-manifest",
             str(source_pack_manifest),
             "--branch",
