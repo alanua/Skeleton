@@ -88,6 +88,7 @@ PREPARE_AUFMASS_PRIVATE_RUNTIME = "prepare_aufmass_private_runtime"
 RUN_AUFMASS_PRIVATE_DXF_REVIEW = "run_aufmass_private_dxf_review"
 SUMMARIZE_AUFMASS_PRIVATE_REVIEW = "summarize_aufmass_private_review"
 BUILD_AUFMASS_PRIVATE_SHORTLIST = "build_aufmass_private_shortlist"
+BUILD_AUFMASS_PRIVATE_AREA_SCHEDULE = "build_aufmass_private_area_schedule"
 INSPECT_PR_MERGEABILITY = "inspect_pr_mergeability"
 BACKFILL_SKELETON_MEMORY_RECENT = "backfill_skeleton_memory_recent"
 INSPECT_ISSUE_WORKTREE_FOR_PUBLISH = "inspect_issue_worktree_for_publish"
@@ -110,6 +111,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         RUN_AUFMASS_PRIVATE_DXF_REVIEW,
         SUMMARIZE_AUFMASS_PRIVATE_REVIEW,
         BUILD_AUFMASS_PRIVATE_SHORTLIST,
+        BUILD_AUFMASS_PRIVATE_AREA_SCHEDULE,
         INSPECT_PR_MERGEABILITY,
         BACKFILL_SKELETON_MEMORY_RECENT,
         INSPECT_ISSUE_WORKTREE_FOR_PUBLISH,
@@ -2960,12 +2962,82 @@ def _private_shortlist_artifact_paths(output_root: Path) -> tuple[Path, Path]:
     )
 
 
+def _private_area_schedule_artifact_paths(output_root: Path) -> tuple[Path, Path, Path]:
+    return (
+        output_root / "aufmass_private_area_schedule.json",
+        output_root / "aufmass_private_room_area_schedule.csv",
+        output_root / "aufmass_private_wall_area_schedule.csv",
+    )
+
+
 def _private_row_has_text(row: dict[str, Any], keys: tuple[str, ...]) -> bool:
     for key in keys:
         value = row.get(key)
         if isinstance(value, str) and value.strip():
             return True
     return False
+
+
+def _private_row_text(row: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+_PRIVATE_WEAK_STATUS_VALUES = {
+    "area_mismatch",
+    "candidate",
+    "contour",
+    "fallback",
+    "needs_review",
+    "weak",
+}
+_PRIVATE_STRONG_STATUS_VALUES = {"approved", "strong"}
+_PRIVATE_REVIEW_STATUS_KEYS = (
+    "row_type",
+    "type",
+    "category",
+    "review_status",
+    "filtering_reason",
+    "status",
+    "match_status",
+    "area_status",
+    "confidence",
+    "confidence_status",
+    "source_status",
+    "row_status",
+    "classification",
+    "source_kind",
+)
+_PRIVATE_ROOM_REF_KEYS = ("room_ref", "room_id", "room_label", "room_name", "room")
+_PRIVATE_WALL_REF_KEYS = ("wall_ref", "wall_id", "wall_label", "wall_name", "wall")
+_PRIVATE_GENERIC_AREA_KEYS = ("area_m2", "area", "surface_area", "detected_area_m2")
+
+
+def _private_status_values(row: dict[str, Any]) -> set[str]:
+    values: set[str] = set()
+    for key in _PRIVATE_REVIEW_STATUS_KEYS:
+        value = row.get(key)
+        if not isinstance(value, str):
+            continue
+        normalized = re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
+        if not normalized:
+            continue
+        values.add(normalized)
+        values.update(part for part in normalized.split("_") if part)
+    return values
+
+
+def _private_row_has_weak_status(row: dict[str, Any]) -> bool:
+    values = _private_status_values(row)
+    return bool(values & _PRIVATE_WEAK_STATUS_VALUES)
+
+
+def _private_row_has_strong_status(row: dict[str, Any]) -> bool:
+    values = _private_status_values(row)
+    return bool(values & _PRIVATE_STRONG_STATUS_VALUES)
 
 
 def _private_row_has_area(row: dict[str, Any]) -> bool:
@@ -2980,6 +3052,159 @@ def _private_row_has_area(row: dict[str, Any]) -> bool:
             except ValueError:
                 continue
     return False
+
+
+def _private_positive_float(row: dict[str, Any], keys: tuple[str, ...]) -> tuple[float | None, str | None]:
+    for key in keys:
+        value = row.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)) and value > 0:
+            return float(value), key
+        if isinstance(value, str):
+            try:
+                parsed = float(value.strip())
+            except ValueError:
+                continue
+            if parsed > 0:
+                return parsed, key
+    return None, None
+
+
+def _private_nonnegative_float(
+    row: dict[str, Any], keys: tuple[str, ...]
+) -> tuple[float | None, str | None]:
+    for key in keys:
+        value = row.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)) and value >= 0:
+            return float(value), key
+        if isinstance(value, str):
+            try:
+                parsed = float(value.strip())
+            except ValueError:
+                continue
+            if parsed >= 0:
+                return parsed, key
+    return None, None
+
+
+def _private_row_is_candidate_contour(row: dict[str, Any]) -> bool:
+    return _private_row_has_weak_status(row)
+
+
+def _private_evidence(
+    source: str | None, status: str, confidence: str = "sufficient"
+) -> dict[str, str]:
+    return {
+        "source": source or "missing",
+        "status": status,
+        "confidence": confidence,
+    }
+
+
+def _private_room_area_schedule_row(
+    table_index: int, row_index: int, row: dict[str, Any]
+) -> tuple[dict[str, Any] | None, str | None]:
+    if _private_row_is_candidate_contour(row):
+        return None, "weak_review_status_not_payable_quantity"
+    floor_area, floor_source = _private_positive_float(
+        row,
+        (
+            "floor_area_m2",
+            "room_floor_area_m2",
+            "floor_area",
+        ),
+    )
+    if floor_area is None and _private_row_has_strong_status(row):
+        floor_area, floor_source = _private_positive_float(row, _PRIVATE_GENERIC_AREA_KEYS)
+    if floor_area is None:
+        return None, "missing_floor_area_evidence"
+    ceiling_area, ceiling_source = _private_positive_float(
+        row, ("ceiling_area_m2", "room_ceiling_area_m2", "ceiling_area")
+    )
+    ceiling_status = "explicit"
+    ceiling_confidence = "sufficient"
+    if ceiling_area is None:
+        ceiling_area = floor_area
+        ceiling_source = floor_source
+        ceiling_status = "assumed_equal_to_floor_area"
+        ceiling_confidence = "assumed"
+    floor_status = "explicit"
+    if floor_source in _PRIVATE_GENERIC_AREA_KEYS:
+        floor_status = "explicit_generic_area_used_as_floor_area"
+    return {
+        "table_index": table_index,
+        "row_index": row_index,
+        "room_ref": _private_row_text(row, _PRIVATE_ROOM_REF_KEYS) or "",
+        "floor_area_m2": round(floor_area, 6),
+        "ceiling_area_m2": round(ceiling_area, 6),
+        "evidence": {
+            "floor_area_m2": _private_evidence(floor_source, floor_status),
+            "ceiling_area_m2": _private_evidence(
+                ceiling_source, ceiling_status, ceiling_confidence
+            ),
+        },
+    }, None
+
+
+def _private_wall_area_schedule_row(
+    table_index: int, row_index: int, row: dict[str, Any]
+) -> tuple[dict[str, Any] | None, str | None]:
+    if _private_row_is_candidate_contour(row):
+        return None, "weak_review_status_not_payable_quantity"
+    wall_length, length_source = _private_positive_float(
+        row, ("wall_length_m", "length_m", "wall_length", "length")
+    )
+    height, height_source = _private_positive_float(row, ("height_m", "wall_height_m", "height"))
+    opening_area, opening_source = _private_nonnegative_float(
+        row, ("opening_area_m2", "openings_area_m2", "opening_area")
+    )
+    if wall_length is None:
+        return None, "missing_wall_length_evidence"
+    if height is None:
+        return None, "missing_wall_height_evidence"
+    opening_status = "explicit"
+    opening_confidence = "sufficient"
+    if opening_area is None:
+        opening_area = 0.0
+        opening_source = "missing"
+        opening_status = "assumed_zero"
+        opening_confidence = "assumed"
+    elif opening_area == 0:
+        opening_status = "known_zero"
+    else:
+        opening_status = "known_value"
+    gross_wall_area = wall_length * height
+    net_wall_area = gross_wall_area - opening_area
+    if net_wall_area < 0:
+        return None, "opening_area_exceeds_gross_wall_area"
+    return {
+        "table_index": table_index,
+        "row_index": row_index,
+        "wall_ref": _private_row_text(row, _PRIVATE_WALL_REF_KEYS) or "",
+        "wall_length_m": round(wall_length, 6),
+        "height_m": round(height, 6),
+        "gross_wall_area_m2": round(gross_wall_area, 6),
+        "opening_area_m2": round(opening_area, 6),
+        "opening_area_status": opening_status,
+        "net_wall_area_m2": round(net_wall_area, 6),
+        "evidence": {
+            "wall_length_m": _private_evidence(length_source, "explicit"),
+            "height_m": _private_evidence(height_source, "explicit"),
+            "opening_area_m2": _private_evidence(
+                opening_source, opening_status, opening_confidence
+            ),
+            "gross_wall_area_m2": _private_evidence(
+                "wall_length_m,height_m", "calculated_from_explicit_length_and_height"
+            ),
+            "net_wall_area_m2": _private_evidence(
+                "gross_wall_area_m2,opening_area_m2",
+                "calculated_from_explicit_gross_and_opening_area",
+            ),
+        },
+    }, None
 
 
 def _private_shortlist_row(
@@ -3127,6 +3352,243 @@ def _write_private_shortlist_artifacts(
     except OSError:
         return "shortlist_artifact_write_failed"
     return None
+
+
+def _build_private_area_schedules(
+    table_paths: list[Path],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], int]:
+    room_rows: list[dict[str, Any]] = []
+    wall_rows: list[dict[str, Any]] = []
+    diagnostics: list[dict[str, Any]] = []
+    warning_count = 0
+    for table_index, table_path in enumerate(table_paths):
+        data, reason = _read_json_file(table_path)
+        if reason is not None or data is None:
+            warning_count += 1
+            diagnostics.append(
+                {"table_index": table_index, "row_index": None, "reason": "table_read_failed"}
+            )
+            continue
+        table_rows = data.get("rows")
+        if not isinstance(table_rows, list):
+            warning_count += 1
+            diagnostics.append(
+                {"table_index": table_index, "row_index": None, "reason": "table_rows_missing"}
+            )
+            continue
+        for row_index, row in enumerate(table_rows):
+            if not isinstance(row, dict):
+                warning_count += 1
+                diagnostics.append(
+                    {
+                        "table_index": table_index,
+                        "row_index": row_index,
+                        "reason": "row_not_object",
+                    }
+                )
+                continue
+            room_row, room_reason = _private_room_area_schedule_row(
+                table_index, row_index, row
+            )
+            wall_row, wall_reason = _private_wall_area_schedule_row(
+                table_index, row_index, row
+            )
+            if room_row is not None and wall_row is not None:
+                diagnostics.append(
+                    {
+                        "table_index": table_index,
+                        "row_index": row_index,
+                        "reason": "ambiguous_room_wall_quantity",
+                    }
+                )
+                continue
+            if room_row is not None:
+                room_rows.append(room_row)
+            if wall_row is not None:
+                wall_rows.append(wall_row)
+            if room_row is None and wall_row is None:
+                diagnostics.append(
+                    {
+                        "table_index": table_index,
+                        "row_index": row_index,
+                        "reason": ",".join(
+                            sorted(
+                                {
+                                    reason
+                                    for reason in (room_reason, wall_reason)
+                                    if reason is not None
+                                }
+                            )
+                        )
+                        or "insufficient_area_schedule_evidence",
+                    }
+                )
+    if not table_paths:
+        diagnostics.append(
+            {"table_index": None, "row_index": None, "reason": "review_table_missing"}
+        )
+    return room_rows, wall_rows, diagnostics, warning_count
+
+
+def _write_private_area_schedule_artifacts(
+    entry: AufmassPrivateRegistryEntry,
+    room_rows: list[dict[str, Any]],
+    wall_rows: list[dict[str, Any]],
+    diagnostics: list[dict[str, Any]],
+    warning_count: int,
+) -> str | None:
+    resolved_output_root = entry.output_root.resolve(strict=False)
+    json_path, room_csv_path, wall_csv_path = _private_area_schedule_artifact_paths(
+        resolved_output_root
+    )
+    for path in (json_path, room_csv_path, wall_csv_path):
+        resolved = path.resolve(strict=False)
+        if not _path_is_relative_to(resolved, resolved_output_root):
+            return "area_schedule_artifact_path_unsafe"
+        if resolved == ROOT or _path_is_relative_to(resolved, ROOT):
+            return "area_schedule_artifact_inside_public_repo"
+    payload = {
+        "schema": "skeleton.aufmass_private_area_schedule.v1",
+        "source_pack_id": entry.source_pack_id,
+        "run_id": entry.run_id,
+        "room_area_row_count": len(room_rows),
+        "wall_area_row_count": len(wall_rows),
+        "warning_count": warning_count,
+        "diagnostic_count": len(diagnostics),
+        "room_area_schedule": room_rows,
+        "wall_area_schedule": wall_rows,
+        "diagnostics": diagnostics,
+    }
+    try:
+        entry.output_root.mkdir(parents=True, exist_ok=True)
+        json_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        with room_csv_path.open("w", encoding="utf-8", newline="") as csv_file:
+            writer = csv.DictWriter(
+                csv_file,
+                fieldnames=(
+                    "table_index",
+                    "row_index",
+                    "room_ref",
+                    "floor_area_m2",
+                    "ceiling_area_m2",
+                    "floor_area_status",
+                    "ceiling_area_status",
+                    "ceiling_area_confidence",
+                ),
+            )
+            writer.writeheader()
+            for row in room_rows:
+                evidence = row.get("evidence") if isinstance(row.get("evidence"), dict) else {}
+                floor = evidence.get("floor_area_m2") if isinstance(evidence, dict) else {}
+                ceiling = evidence.get("ceiling_area_m2") if isinstance(evidence, dict) else {}
+                writer.writerow(
+                    {
+                        "table_index": row.get("table_index"),
+                        "row_index": row.get("row_index"),
+                        "room_ref": row.get("room_ref", ""),
+                        "floor_area_m2": row.get("floor_area_m2"),
+                        "ceiling_area_m2": row.get("ceiling_area_m2"),
+                        "floor_area_status": floor.get("status", "")
+                        if isinstance(floor, dict)
+                        else "",
+                        "ceiling_area_status": ceiling.get("status", "")
+                        if isinstance(ceiling, dict)
+                        else "",
+                        "ceiling_area_confidence": ceiling.get("confidence", "")
+                        if isinstance(ceiling, dict)
+                        else "",
+                    }
+                )
+        with wall_csv_path.open("w", encoding="utf-8", newline="") as csv_file:
+            writer = csv.DictWriter(
+                csv_file,
+                fieldnames=(
+                    "table_index",
+                    "row_index",
+                    "wall_ref",
+                    "wall_length_m",
+                    "height_m",
+                    "gross_wall_area_m2",
+                    "opening_area_m2",
+                    "opening_area_status",
+                    "net_wall_area_m2",
+                ),
+            )
+            writer.writeheader()
+            for row in wall_rows:
+                writer.writerow(
+                    {
+                        "table_index": row.get("table_index"),
+                        "row_index": row.get("row_index"),
+                        "wall_ref": row.get("wall_ref", ""),
+                        "wall_length_m": row.get("wall_length_m"),
+                        "height_m": row.get("height_m"),
+                        "gross_wall_area_m2": row.get("gross_wall_area_m2"),
+                        "opening_area_m2": row.get("opening_area_m2"),
+                        "opening_area_status": row.get("opening_area_status"),
+                        "net_wall_area_m2": row.get("net_wall_area_m2"),
+                    }
+                )
+    except OSError:
+        return "area_schedule_artifact_write_failed"
+    return None
+
+
+def build_aufmass_private_area_schedule(body: str) -> str:
+    task_id = BUILD_AUFMASS_PRIVATE_AREA_SCHEDULE
+    request, report = _aufmass_private_automation_request(task_id, body, include_mode=False)
+    if report is not None:
+        return report
+    assert request is not None
+
+    _checkout_path, workspace_root, reason = _aufmass_private_registered_paths()
+    if reason is not None or workspace_root is None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                f"source_pack_id={request.source_pack_id}",
+                reason or "reason=private_project_unavailable",
+            ],
+            "not_met",
+        )
+    entry, report = _resolve_aufmass_private_registry_entry(task_id, request, workspace_root)
+    if report is not None:
+        return report
+    assert entry is not None
+
+    table_paths = _review_table_private_paths(entry.output_root)
+    room_rows, wall_rows, diagnostics, warning_count = _build_private_area_schedules(
+        table_paths
+    )
+    reason = _write_private_area_schedule_artifacts(
+        entry, room_rows, wall_rows, diagnostics, warning_count
+    )
+    if reason is not None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                f"source_pack_id={request.source_pack_id}",
+                f"run_id={entry.run_id}",
+                f"reason={reason}",
+            ],
+            "not_met",
+        )
+
+    status_lines = [
+        "status=done",
+        f"source_pack_id={request.source_pack_id}",
+        f"run_id={entry.run_id}",
+        f"room_area_row_count={len(room_rows)}",
+        f"wall_area_row_count={len(wall_rows)}",
+        f"warning_count={warning_count}",
+        f"diagnostic_count={len(diagnostics)}",
+    ]
+    return _maintenance_report("DONE", task_id, status_lines, "met")
 
 
 def build_aufmass_private_shortlist(body: str) -> str:
@@ -5659,6 +6121,8 @@ def dispatch_runtime_maintenance_task(
             return summarize_aufmass_private_review(body)
         if task_id == BUILD_AUFMASS_PRIVATE_SHORTLIST:
             return build_aufmass_private_shortlist(body)
+        if task_id == BUILD_AUFMASS_PRIVATE_AREA_SCHEDULE:
+            return build_aufmass_private_area_schedule(body)
         if task_id == INSPECT_PR_MERGEABILITY:
             return inspect_pr_mergeability(body)
         if task_id == BACKFILL_SKELETON_MEMORY_RECENT:
