@@ -347,6 +347,44 @@ print private paths, filenames, drawing names, room names, labels, layers,
 dimensions, areas, quantities, raw JSON, CSV contents, command output, secrets,
 or issue-body text.
 
+`build_aufmass_private_area_schedule` builds the private payable area schedules
+needed for Aufmass output from existing private review table artifacts:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: build_aufmass_private_area_schedule
+Private Source Pack ID: opaque-token
+Run ID: optional-opaque-token
+```
+
+`Run ID` is optional; when omitted, the Runner uses the latest run registered
+for that source-pack token. It resolves private input and output only through
+`automation_registry.private.json` inside the registered private Aufmass
+workspace. GitHub issue text may provide only the opaque source-pack token and
+optional run token. It must not provide paths, filenames, drawing names, room
+names, labels, layers, dimensions, areas, quantities, raw rows, shell fragments,
+raw JSON, CSV contents, or registry contents.
+
+The task reads already generated private `*_room_review_table.json` artifacts
+under the resolved run output root and writes private JSON plus room and wall
+CSV schedule artifacts under that same output root. `room_area_schedule` rows
+must contain explicit `floor_area_m2` and `ceiling_area_m2` fields; a generic
+`area_m2` field is not a valid room quantity output. When the ceiling area is
+copied from floor-area evidence by assumption, the private evidence records that
+assumption in source, status, and confidence fields. `wall_area_schedule` rows
+are emitted only when length, height, and opening-area evidence are present, and
+then contain `wall_length_m`, `height_m`, `gross_wall_area_m2`,
+`opening_area_m2`, and `net_wall_area_m2`.
+
+The task does not emit candidate contours as payable quantities and does not
+invent missing wall, floor, or ceiling quantities. If evidence is insufficient,
+it writes empty private schedules with private diagnostic reasons. The public
+GitHub report may include only status, maintenance task id, source-pack token,
+run token, room area row count, wall area row count, warning count, diagnostic
+count, and success criteria. It must not print private paths, filenames, drawing
+names, room names, labels, layers, dimensions, areas, quantities, raw artifact
+content, command output, secrets, or issue-body text.
+
 `automation_registry.private.json` is private Runner state. Its contents may
 contain private workspace-relative paths, but those values must never be
 committed to the public repository, pasted into GitHub issues/comments, or
