@@ -347,6 +347,42 @@ print private paths, filenames, drawing names, room names, labels, layers,
 dimensions, areas, quantities, raw JSON, CSV contents, command output, secrets,
 or issue-body text.
 
+`build_aufmass_private_area_schedule` builds the private room-area and wall-area
+schedules that can be reviewed as the actual needed Aufmass output:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: build_aufmass_private_area_schedule
+Private Source Pack ID: opaque-token
+Run ID: optional-opaque-token
+```
+
+`Run ID` is optional; when omitted, the Runner uses the latest run registered
+for that source-pack token. It may only resolve private input and output through
+`automation_registry.private.json` inside the registered private Aufmass
+workspace. GitHub issue text may provide only the opaque source-pack token and
+optional run token. It must not provide paths, filenames, drawing names, room
+names, labels, layers, dimensions, areas, quantities, row data, shell fragments,
+raw JSON, CSV contents, or registry contents.
+
+The task reads already generated private review artifacts under the resolved
+run output root and writes private JSON and CSV artifacts for
+`room_area_schedule` and `wall_area_schedule` under that same output root.
+`room_area_schedule` includes only rows with sufficient room area evidence.
+`wall_area_schedule` includes only rows with sufficient wall length, wall
+height, and opening evidence; eligible wall rows produce gross and net wall
+area schedule rows. Candidate contours are never emitted as payable quantities,
+and missing room or wall quantities are never invented. If evidence is
+insufficient, the private artifacts still contain empty tables plus private
+diagnostic reasons.
+
+The public GitHub report may include only status, maintenance task id,
+source-pack token, run token, room area row count, wall area row count, warning
+count, diagnostic count, and success criteria. It must not print private paths,
+filenames, drawing names, room names, labels, layers, dimensions, areas,
+quantities, raw JSON, CSV contents, command output, secrets, or issue-body
+text.
+
 `automation_registry.private.json` is private Runner state. Its contents may
 contain private workspace-relative paths, but those values must never be
 committed to the public repository, pasted into GitHub issues/comments, or

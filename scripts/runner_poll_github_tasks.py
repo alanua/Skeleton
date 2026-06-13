@@ -88,6 +88,7 @@ PREPARE_AUFMASS_PRIVATE_RUNTIME = "prepare_aufmass_private_runtime"
 RUN_AUFMASS_PRIVATE_DXF_REVIEW = "run_aufmass_private_dxf_review"
 SUMMARIZE_AUFMASS_PRIVATE_REVIEW = "summarize_aufmass_private_review"
 BUILD_AUFMASS_PRIVATE_SHORTLIST = "build_aufmass_private_shortlist"
+BUILD_AUFMASS_PRIVATE_AREA_SCHEDULE = "build_aufmass_private_area_schedule"
 INSPECT_PR_MERGEABILITY = "inspect_pr_mergeability"
 BACKFILL_SKELETON_MEMORY_RECENT = "backfill_skeleton_memory_recent"
 INSPECT_ISSUE_WORKTREE_FOR_PUBLISH = "inspect_issue_worktree_for_publish"
@@ -110,6 +111,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         RUN_AUFMASS_PRIVATE_DXF_REVIEW,
         SUMMARIZE_AUFMASS_PRIVATE_REVIEW,
         BUILD_AUFMASS_PRIVATE_SHORTLIST,
+        BUILD_AUFMASS_PRIVATE_AREA_SCHEDULE,
         INSPECT_PR_MERGEABILITY,
         BACKFILL_SKELETON_MEMORY_RECENT,
         INSPECT_ISSUE_WORKTREE_FOR_PUBLISH,
@@ -3129,6 +3131,398 @@ def _write_private_shortlist_artifacts(
     return None
 
 
+def _area_schedule_private_paths(output_root: Path) -> tuple[Path, Path, Path, Path]:
+    return (
+        output_root / "aufmass_private_room_area_schedule.json",
+        output_root / "aufmass_private_room_area_schedule.csv",
+        output_root / "aufmass_private_wall_area_schedule.json",
+        output_root / "aufmass_private_wall_area_schedule.csv",
+    )
+
+
+def _private_numeric_value(row: dict[str, Any], keys: tuple[str, ...]) -> float | None:
+    for key in keys:
+        value = row.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)) and value >= 0:
+            return float(value)
+        if isinstance(value, str):
+            try:
+                parsed = float(value.strip())
+            except ValueError:
+                continue
+            if parsed >= 0:
+                return parsed
+    return None
+
+
+def _private_row_identifier(row: dict[str, Any], keys: tuple[str, ...], fallback: str) -> str:
+    for key in keys:
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return fallback
+
+
+def _private_area_schedule_report(
+    status: str,
+    task_id: str,
+    source_pack_id: str,
+    run_id: str,
+    room_area_row_count: int,
+    wall_area_row_count: int,
+    warning_count: int,
+    diagnostic_count: int,
+    success_criteria: str,
+) -> str:
+    return _maintenance_report(
+        status,
+        task_id,
+        [
+            "status=done" if status == "DONE" else "status=blocked",
+            f"source_pack_id={source_pack_id}",
+            f"run_id={run_id}",
+            f"room_area_row_count={room_area_row_count}",
+            f"wall_area_row_count={wall_area_row_count}",
+            f"warning_count={warning_count}",
+            f"diagnostic_count={diagnostic_count}",
+        ],
+        success_criteria,
+    )
+
+
+def _private_row_is_candidate(row: dict[str, Any]) -> bool:
+    for key in ("review_status", "status", "row_type", "source_kind", "kind"):
+        value = row.get(key)
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if "candidate" in lowered or "contour" in lowered:
+                return True
+    return False
+
+
+def _private_room_area_schedule_row(
+    table_index: int, row_index: int, row: dict[str, Any]
+) -> tuple[dict[str, Any] | None, str | None]:
+    if _private_row_is_candidate(row):
+        return None, "candidate_contour_not_payable"
+    area = _private_numeric_value(
+        row, ("area_m2", "floor_area_m2", "room_area_m2", "floor_area", "area")
+    )
+    if area is None or area <= 0:
+        return None, "missing_room_area_evidence"
+    return (
+        {
+            "table_index": table_index,
+            "row_index": row_index,
+            "room_ref": _private_row_identifier(
+                row, ("room_id", "room_ref", "room_label", "room_name", "room"), f"room_{table_index}_{row_index}"
+            ),
+            "quantity_type": "room_area",
+            "unit": "m2",
+            "area_m2": round(area, 6),
+            "evidence": {"has_area": True},
+        },
+        None,
+    )
+
+
+def _private_opening_area_from_list(value: object) -> tuple[float | None, bool]:
+    if not isinstance(value, list):
+        return None, False
+    total = 0.0
+    for opening in value:
+        if not isinstance(opening, dict):
+            return None, False
+        width = _private_numeric_value(opening, ("width", "width_m", "opening_width_m"))
+        height = _private_numeric_value(opening, ("height", "height_m", "opening_height_m"))
+        count = _private_numeric_value(opening, ("count", "quantity"))
+        if width is None or height is None:
+            return None, False
+        if count is None:
+            count = 1.0
+        total += width * height * count
+    return total, True
+
+
+def _private_wall_opening_area(row: dict[str, Any]) -> tuple[float | None, bool]:
+    opening_area = _private_numeric_value(
+        row, ("opening_area_m2", "openings_area_m2", "openings_area")
+    )
+    if opening_area is not None:
+        return opening_area, True
+    opening_area, has_opening_evidence = _private_opening_area_from_list(row.get("openings"))
+    if has_opening_evidence:
+        return opening_area, True
+    opening_ids = row.get("opening_ids")
+    if isinstance(opening_ids, list) and not opening_ids:
+        return 0.0, True
+    return None, False
+
+
+def _private_wall_area_schedule_rows(
+    table_index: int, row_index: int, row: dict[str, Any]
+) -> tuple[list[dict[str, Any]], str | None]:
+    if _private_row_is_candidate(row):
+        return [], "candidate_contour_not_payable"
+    length = _private_numeric_value(row, ("wall_length_m", "length_m", "length"))
+    height = _private_numeric_value(row, ("wall_height_m", "height_m", "height"))
+    opening_area, has_opening_evidence = _private_wall_opening_area(row)
+    if length is None or length <= 0:
+        return [], "missing_wall_length_evidence"
+    if height is None or height <= 0:
+        return [], "missing_wall_height_evidence"
+    if opening_area is None or not has_opening_evidence:
+        return [], "missing_wall_opening_evidence"
+    gross_area = length * height
+    if opening_area > gross_area:
+        return [], "wall_opening_area_exceeds_gross_area"
+    wall_ref = _private_row_identifier(
+        row, ("wall_id", "wall_ref", "label", "item_label", "name"), f"wall_{table_index}_{row_index}"
+    )
+    base = {
+        "table_index": table_index,
+        "row_index": row_index,
+        "wall_ref": wall_ref,
+        "unit": "m2",
+        "wall_length_m": round(length, 6),
+        "wall_height_m": round(height, 6),
+        "opening_area_m2": round(opening_area, 6),
+        "evidence": {"has_length": True, "has_height": True, "has_openings": True},
+    }
+    return (
+        [
+            {**base, "quantity_type": "gross_wall_area", "area_m2": round(gross_area, 6)},
+            {
+                **base,
+                "quantity_type": "net_wall_area",
+                "area_m2": round(gross_area - opening_area, 6),
+            },
+        ],
+        None,
+    )
+
+
+def _area_schedule_table_paths(output_root: Path) -> tuple[list[Path], list[Path]]:
+    if not output_root.is_dir():
+        return [], []
+    room_tables = sorted(output_root.glob("*_room_review_table.json"))
+    wall_tables = sorted(output_root.glob("*_wall_area_review_table.json"))
+    return room_tables, wall_tables
+
+
+def _private_rows_from_tables(
+    table_paths: list[Path],
+) -> tuple[list[tuple[int, int, dict[str, Any]]], int, list[dict[str, Any]]]:
+    rows: list[tuple[int, int, dict[str, Any]]] = []
+    diagnostics: list[dict[str, Any]] = []
+    warning_count = 0
+    for table_index, table_path in enumerate(table_paths):
+        data, reason = _read_json_file(table_path)
+        if reason is not None or data is None:
+            warning_count += 1
+            diagnostics.append({"table_index": table_index, "reason": "table_json_invalid"})
+            continue
+        table_rows = data.get("rows")
+        if not isinstance(table_rows, list):
+            warning_count += 1
+            diagnostics.append({"table_index": table_index, "reason": "table_rows_missing"})
+            continue
+        for row_index, row in enumerate(table_rows):
+            if not isinstance(row, dict):
+                warning_count += 1
+                diagnostics.append(
+                    {"table_index": table_index, "row_index": row_index, "reason": "row_invalid"}
+                )
+                continue
+            rows.append((table_index, row_index, row))
+    return rows, warning_count, diagnostics
+
+
+def _build_private_area_schedules(
+    output_root: Path,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int, list[dict[str, Any]]]:
+    room_tables, wall_tables = _area_schedule_table_paths(output_root)
+    room_input_rows, room_warnings, diagnostics = _private_rows_from_tables(room_tables)
+    wall_input_rows, wall_warnings, wall_diagnostics = _private_rows_from_tables(wall_tables)
+    diagnostics.extend(wall_diagnostics)
+    room_schedule: list[dict[str, Any]] = []
+    wall_schedule: list[dict[str, Any]] = []
+    for table_index, row_index, row in room_input_rows:
+        schedule_row, reason = _private_room_area_schedule_row(table_index, row_index, row)
+        if schedule_row is None:
+            diagnostics.append(
+                {"schedule": "room_area_schedule", "table_index": table_index, "row_index": row_index, "reason": reason}
+            )
+        else:
+            room_schedule.append(schedule_row)
+    for table_index, row_index, row in wall_input_rows:
+        schedule_rows, reason = _private_wall_area_schedule_rows(table_index, row_index, row)
+        if not schedule_rows:
+            diagnostics.append(
+                {"schedule": "wall_area_schedule", "table_index": table_index, "row_index": row_index, "reason": reason}
+            )
+        else:
+            wall_schedule.extend(schedule_rows)
+    return room_schedule, wall_schedule, room_warnings + wall_warnings, diagnostics
+
+
+def _write_private_schedule_csv(path: Path, fieldnames: tuple[str, ...], rows: list[dict[str, Any]]) -> None:
+    with path.open("w", encoding="utf-8", newline="") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({field: row.get(field, "") for field in fieldnames})
+
+
+def _write_private_area_schedule_artifacts(
+    entry: AufmassPrivateRegistryEntry,
+    room_schedule: list[dict[str, Any]],
+    wall_schedule: list[dict[str, Any]],
+    warning_count: int,
+    diagnostics: list[dict[str, Any]],
+) -> str | None:
+    resolved_output_root = entry.output_root.resolve(strict=False)
+    paths = _area_schedule_private_paths(resolved_output_root)
+    for path in paths:
+        resolved = path.resolve(strict=False)
+        if not _path_is_relative_to(resolved, resolved_output_root):
+            return "area_schedule_artifact_path_unsafe"
+        if resolved == ROOT or _path_is_relative_to(resolved, ROOT):
+            return "area_schedule_artifact_inside_public_repo"
+    room_json, room_csv, wall_json, wall_csv = paths
+    room_payload = {
+        "schema": "skeleton.aufmass_private_room_area_schedule.v1",
+        "source_pack_id": entry.source_pack_id,
+        "run_id": entry.run_id,
+        "room_area_row_count": len(room_schedule),
+        "warning_count": warning_count,
+        "diagnostic_count": len(diagnostics),
+        "diagnostics": diagnostics,
+        "rows": room_schedule,
+    }
+    wall_payload = {
+        "schema": "skeleton.aufmass_private_wall_area_schedule.v1",
+        "source_pack_id": entry.source_pack_id,
+        "run_id": entry.run_id,
+        "wall_area_row_count": len(wall_schedule),
+        "warning_count": warning_count,
+        "diagnostic_count": len(diagnostics),
+        "diagnostics": diagnostics,
+        "rows": wall_schedule,
+    }
+    try:
+        entry.output_root.mkdir(parents=True, exist_ok=True)
+        room_json.write_text(
+            json.dumps(room_payload, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        wall_json.write_text(
+            json.dumps(wall_payload, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        _write_private_schedule_csv(
+            room_csv,
+            ("table_index", "row_index", "room_ref", "quantity_type", "unit", "area_m2"),
+            room_schedule,
+        )
+        _write_private_schedule_csv(
+            wall_csv,
+            (
+                "table_index",
+                "row_index",
+                "wall_ref",
+                "quantity_type",
+                "unit",
+                "wall_length_m",
+                "wall_height_m",
+                "opening_area_m2",
+                "area_m2",
+            ),
+            wall_schedule,
+        )
+    except OSError:
+        return "area_schedule_artifact_write_failed"
+    return None
+
+
+def build_aufmass_private_area_schedule(body: str) -> str:
+    task_id = BUILD_AUFMASS_PRIVATE_AREA_SCHEDULE
+    request, report = _aufmass_private_automation_request(task_id, body, include_mode=False)
+    if report is not None:
+        metadata = _aufmass_private_metadata(body)
+        source_pack_id = _body_field(metadata, "Private Source Pack ID")
+        if not _valid_aufmass_private_token(source_pack_id):
+            source_pack_id = "unresolved"
+        run_id = _body_field(metadata, "Run ID")
+        if not _valid_aufmass_private_token(run_id):
+            run_id = "unresolved"
+        return _private_area_schedule_report(
+            "BLOCKED", task_id, source_pack_id, run_id, 0, 0, 0, 1, "not_met"
+        )
+    assert request is not None
+
+    _checkout_path, workspace_root, reason = _aufmass_private_registered_paths()
+    if reason is not None or workspace_root is None:
+        return _private_area_schedule_report(
+            "BLOCKED",
+            task_id,
+            request.source_pack_id,
+            request.run_id or "unresolved",
+            0,
+            0,
+            0,
+            1,
+            "not_met",
+        )
+    entry, report = _resolve_aufmass_private_registry_entry(task_id, request, workspace_root)
+    if report is not None:
+        return _private_area_schedule_report(
+            "BLOCKED",
+            task_id,
+            request.source_pack_id,
+            request.run_id or "unresolved",
+            0,
+            0,
+            0,
+            1,
+            "not_met",
+        )
+    assert entry is not None
+
+    room_schedule, wall_schedule, warning_count, diagnostics = _build_private_area_schedules(
+        entry.output_root
+    )
+    reason = _write_private_area_schedule_artifacts(
+        entry, room_schedule, wall_schedule, warning_count, diagnostics
+    )
+    if reason is not None:
+        return _private_area_schedule_report(
+            "BLOCKED",
+            task_id,
+            request.source_pack_id,
+            entry.run_id,
+            0,
+            0,
+            warning_count,
+            len(diagnostics) + 1,
+            "not_met",
+        )
+
+    return _private_area_schedule_report(
+        "DONE",
+        task_id,
+        request.source_pack_id,
+        entry.run_id,
+        len(room_schedule),
+        len(wall_schedule),
+        warning_count,
+        len(diagnostics),
+        "met",
+    )
+
+
 def build_aufmass_private_shortlist(body: str) -> str:
     task_id = BUILD_AUFMASS_PRIVATE_SHORTLIST
     request, report = _aufmass_private_automation_request(task_id, body, include_mode=False)
@@ -5659,6 +6053,8 @@ def dispatch_runtime_maintenance_task(
             return summarize_aufmass_private_review(body)
         if task_id == BUILD_AUFMASS_PRIVATE_SHORTLIST:
             return build_aufmass_private_shortlist(body)
+        if task_id == BUILD_AUFMASS_PRIVATE_AREA_SCHEDULE:
+            return build_aufmass_private_area_schedule(body)
         if task_id == INSPECT_PR_MERGEABILITY:
             return inspect_pr_mergeability(body)
         if task_id == BACKFILL_SKELETON_MEMORY_RECENT:
