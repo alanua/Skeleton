@@ -3956,9 +3956,17 @@ def test_aufmass_private_review_tasks_are_allowlisted() -> None:
     assert runner.RUN_AUFMASS_PRIVATE_DXF_REVIEW == "run_aufmass_private_dxf_review"
     assert runner.SUMMARIZE_AUFMASS_PRIVATE_REVIEW == "summarize_aufmass_private_review"
     assert runner.BUILD_AUFMASS_PRIVATE_SHORTLIST == "build_aufmass_private_shortlist"
+    assert (
+        runner.BUILD_AUFMASS_PRIVATE_AREA_SCHEDULE
+        == "build_aufmass_private_area_schedule"
+    )
     assert runner.RUN_AUFMASS_PRIVATE_DXF_REVIEW in runner.RUNTIME_MAINTENANCE_TASK_IDS
     assert runner.SUMMARIZE_AUFMASS_PRIVATE_REVIEW in runner.RUNTIME_MAINTENANCE_TASK_IDS
     assert runner.BUILD_AUFMASS_PRIVATE_SHORTLIST in runner.RUNTIME_MAINTENANCE_TASK_IDS
+    assert (
+        runner.BUILD_AUFMASS_PRIVATE_AREA_SCHEDULE
+        in runner.RUNTIME_MAINTENANCE_TASK_IDS
+    )
 
 
 @pytest.mark.parametrize(
@@ -4024,6 +4032,24 @@ def test_build_aufmass_private_shortlist_rejects_issue_supplied_private_data() -
     assert "reason=unsupported_private_aufmass_issue_field" in report
     assert "confidential-plan.dxf" not in report
     assert "Secret Room" not in report
+
+
+def test_build_aufmass_private_area_schedule_rejects_issue_supplied_private_data() -> None:
+    body = _maintenance_issue(
+        runner.BUILD_AUFMASS_PRIVATE_AREA_SCHEDULE,
+        metadata=(
+            "Private Source Pack ID: pack_token\n"
+            "Layer: private-layer\n"
+            "Area: 42.5"
+        ),
+    )["body"]
+
+    report = runner.build_aufmass_private_area_schedule(str(body))
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=unsupported_private_aufmass_issue_field" in report
+    assert "private-layer" not in report
+    assert "42.5" not in report
 
 
 def test_aufmass_private_registry_is_required_inside_private_workspace(
@@ -4320,6 +4346,156 @@ def test_build_aufmass_private_shortlist_writes_private_artifacts_and_public_cou
     csv_text = csv_path.read_text(encoding="utf-8")
     assert "Conference 101" in csv_text
     assert "Wall finish A" in csv_text
+
+
+def test_build_aufmass_private_area_schedule_writes_explicit_room_and_wall_fields(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "private"
+    workspace.mkdir()
+    _manifest, _artifact_map, output_root = _write_aufmass_private_registry(workspace)
+    review_table = {
+        "rows": [
+            {
+                "source_ref": "source_token",
+                "room_label": "Executive Office",
+                "review_status": "approved",
+                "area_m2": 42.5,
+            },
+            {
+                "source_ref": "source_token",
+                "label": "North Wall",
+                "review_status": "approved",
+                "wall_length_m": 6.0,
+                "height_m": 2.8,
+                "opening_area_m2": 1.6,
+            },
+        ]
+    }
+    (output_root / "source_token_room_review_table.json").write_text(
+        json.dumps(review_table),
+        encoding="utf-8",
+    )
+    body = _maintenance_issue(
+        runner.BUILD_AUFMASS_PRIVATE_AREA_SCHEDULE,
+        "cat /private/customer/source_token_room_review_table.json",
+        metadata="Private Source Pack ID: pack_token\nRun ID: run_token",
+    )["body"]
+
+    with mock.patch.object(
+        runner,
+        "_aufmass_private_registered_paths",
+        return_value=(workspace / "checkout", workspace, None),
+    ):
+        report = runner.build_aufmass_private_area_schedule(str(body))
+
+    assert report.startswith("DONE:")
+    assert "maintenance_task_id=build_aufmass_private_area_schedule" in report
+    assert "source_pack_id=pack_token" in report
+    assert "run_id=run_token" in report
+    assert "room_area_row_count=1" in report
+    assert "wall_area_row_count=1" in report
+    assert "warning_count=0" in report
+    assert "diagnostic_count=0" in report
+    assert str(workspace) not in report
+    assert "Executive Office" not in report
+    assert "North Wall" not in report
+    assert "42.5" not in report
+    assert "6.0" not in report
+    assert "2.8" not in report
+    assert "1.6" not in report
+    assert "source_token_room_review_table.json" not in report
+
+    json_path, room_csv_path, wall_csv_path = runner._private_area_schedule_artifact_paths(
+        output_root
+    )
+    schedule = json.loads(json_path.read_text(encoding="utf-8"))
+    assert schedule["schema"] == "skeleton.aufmass_private_area_schedule.v1"
+    assert schedule["room_area_row_count"] == 1
+    assert schedule["wall_area_row_count"] == 1
+    room = schedule["room_area_schedule"][0]
+    assert "area_m2" not in room
+    assert room["floor_area_m2"] == 42.5
+    assert room["ceiling_area_m2"] == 42.5
+    assert room["evidence"]["floor_area_m2"]["source"] == "area_m2"
+    assert (
+        room["evidence"]["ceiling_area_m2"]["status"]
+        == "assumed_equal_to_floor_area"
+    )
+    assert room["evidence"]["ceiling_area_m2"]["confidence"] == "assumed"
+    wall = schedule["wall_area_schedule"][0]
+    assert wall["wall_length_m"] == 6.0
+    assert wall["height_m"] == 2.8
+    assert wall["gross_wall_area_m2"] == 16.8
+    assert wall["opening_area_m2"] == 1.6
+    assert wall["net_wall_area_m2"] == 15.2
+    assert "floor_area_m2" in room_csv_path.read_text(encoding="utf-8")
+    assert "net_wall_area_m2" in wall_csv_path.read_text(encoding="utf-8")
+
+
+def test_build_aufmass_private_area_schedule_missing_evidence_emits_empty_private_tables(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "private"
+    workspace.mkdir()
+    _manifest, _artifact_map, output_root = _write_aufmass_private_registry(workspace)
+    review_table = {
+        "rows": [
+            {"room_label": "Unmeasured Room", "review_status": "approved"},
+            {
+                "label": "Incomplete Wall",
+                "wall_length_m": 4.0,
+                "height_m": 3.0,
+                "review_status": "approved",
+            },
+            {
+                "row_type": "candidate_contour",
+                "area_m2": 100.0,
+                "wall_length_m": 10.0,
+                "height_m": 3.0,
+                "opening_area_m2": 0.0,
+            },
+        ]
+    }
+    (output_root / "source_token_room_review_table.json").write_text(
+        json.dumps(review_table),
+        encoding="utf-8",
+    )
+    body = _maintenance_issue(
+        runner.BUILD_AUFMASS_PRIVATE_AREA_SCHEDULE,
+        metadata="Private Source Pack ID: pack_token",
+    )["body"]
+
+    with mock.patch.object(
+        runner,
+        "_aufmass_private_registered_paths",
+        return_value=(workspace / "checkout", workspace, None),
+    ):
+        report = runner.build_aufmass_private_area_schedule(str(body))
+
+    assert report.startswith("DONE:")
+    assert "room_area_row_count=0" in report
+    assert "wall_area_row_count=0" in report
+    assert "diagnostic_count=3" in report
+    assert "Unmeasured Room" not in report
+    assert "Incomplete Wall" not in report
+    assert "100.0" not in report
+
+    json_path, _room_csv_path, _wall_csv_path = runner._private_area_schedule_artifact_paths(
+        output_root
+    )
+    schedule = json.loads(json_path.read_text(encoding="utf-8"))
+    assert schedule["room_area_schedule"] == []
+    assert schedule["wall_area_schedule"] == []
+    assert schedule["diagnostic_count"] == 3
+    reasons = {diagnostic["reason"] for diagnostic in schedule["diagnostics"]}
+    assert any("missing_floor_area_evidence" in reason for reason in reasons)
+    assert any("missing_opening_area_evidence" in reason for reason in reasons)
+    assert reasons == {
+        "candidate_contour_not_payable_quantity",
+        "missing_floor_area_evidence,missing_wall_length_evidence",
+        "missing_floor_area_evidence,missing_opening_area_evidence",
+    }
 
 
 def _pr_validation_state(**updates: object) -> dict[str, object]:
