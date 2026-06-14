@@ -1,0 +1,59 @@
+version: "1.0.0"
+policy_id: skeleton.delegated_merge_policy.review_only
+scope: delegated_merge_review
+
+verdicts:
+  AUTO_MERGE_ALLOWED:
+    means: "All delegated review conditions allow auto-merge consideration."
+  REVIEW_REQUIRED:
+    means: "The PR requires review before any merge decision is made."
+  OPERATOR_APPROVAL_REQUIRED:
+    means: "The PR requires explicit operator approval before any merge decision is made."
+  NEVER_AUTO:
+    means: "The PR must not be auto-merged, even if it may be valid after review."
+
+auto_merge_allowed_requires:
+  - clean_pr
+  - evidence_all_true
+  - no_operator_approval_files
+  - no_operator_approval_triggers
+  - no_review_required_triggers
+  - no_never_auto_triggers
+
+operator_approval_file_patterns:
+  - BOOT_MANIFEST.yaml
+  - COMMANDS.yaml
+  - OPERATOR_RULES.yaml
+  - PROJECT_TREE.yaml
+  - CAPABILITY_REGISTRY.yaml
+  - PROVIDER_ROUTING.yaml
+  - core/gate_engine.py
+  - core/action_gate.py
+  - scripts/runner_poll_github_tasks.py
+  - scripts/*.service
+  - scripts/*.timer
+  - adapters/**
+  - adapters/*/*CONTRACT.md
+
+operator_approval_triggers:
+  - execution_mode_changed
+  - architecture_direction_changed
+  - external_service_added
+  - cost_related_change
+  - cross_repo_execution_enabled
+  - live_runtime_capability_added
+
+review_required_triggers:
+  - dirty_pr
+  - needs_human_review
+  - test_gap
+  - documentation_only_policy_change
+
+never_auto_triggers:
+  - level_red
+  - secrets
+  - deploy
+  - runtime_service
+  - force_push
+  - destructive_git
+  - autonomous_merge

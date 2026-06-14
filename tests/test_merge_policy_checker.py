@@ -7,13 +7,22 @@ import pytest
 from core.merge_policy_checker import (
     ASK_OPERATOR,
     AUTO_MERGE,
+    AUTO_MERGE_ALLOWED,
     BLOCKED,
+    DELEGATED_DECISIONS,
     NEVER_AUTO,
+    OPERATOR_APPROVAL_REQUIRED,
+    REVIEW_REQUIRED,
     DECISIONS,
+    DEFAULT_DELEGATED_POLICY_PATH,
     DEFAULT_POLICY_PATH,
+    DelegatedMergePolicyChecker,
+    DelegatedMergePolicyRequest,
     MergePolicyChecker,
     MergePolicyRequest,
+    check_delegated_merge_policy,
     check_merge_policy,
+    load_delegated_merge_policy,
     load_merge_decision_policy,
 )
 
@@ -68,6 +77,18 @@ def clean_request(**overrides: object) -> MergePolicyRequest:
     }
     values.update(overrides)
     return MergePolicyRequest(**values)
+
+
+def clean_delegated_request(**overrides: object) -> DelegatedMergePolicyRequest:
+    values = {
+        "changed_files": ("docs/ACTION_GATE.md",),
+        "clean_pr": True,
+        "evidence_present": True,
+        "risk_level": "green",
+        "triggers": (),
+    }
+    values.update(overrides)
+    return DelegatedMergePolicyRequest(**values)
 
 
 def test_clean_routine_pr_auto_merges_when_all_evidence_true() -> None:
@@ -165,3 +186,89 @@ def test_legacy_function_uses_aligned_result_fields() -> None:
 
     assert result.decision == ASK_OPERATOR
     assert result.hard_stop_files_found == ("BOOT_MANIFEST.yaml",)
+
+
+def test_legacy_default_policy_path_is_unchanged() -> None:
+    assert DEFAULT_POLICY_PATH == ROOT / "policies" / "MERGE_DECISION_POLICY.yaml"
+
+
+def test_delegated_policy_loading() -> None:
+    policy = load_delegated_merge_policy(DEFAULT_DELEGATED_POLICY_PATH)
+
+    assert (ROOT / "policies" / "DELEGATED_MERGE_POLICY.yaml").is_file()
+    assert policy["version"] == "1.0.0"
+    assert set(policy["verdicts"]) == DELEGATED_DECISIONS
+    assert policy["auto_merge_allowed_requires"] == [
+        "clean_pr",
+        "evidence_all_true",
+        "no_operator_approval_files",
+        "no_operator_approval_triggers",
+        "no_review_required_triggers",
+        "no_never_auto_triggers",
+    ]
+    assert set(HARD_STOP_FILES[:-1]).issubset(
+        set(policy["operator_approval_file_patterns"])
+    )
+    assert "adapters/**" in policy["operator_approval_file_patterns"]
+
+
+def test_delegated_clean_pr_allows_auto_merge_review_verdict() -> None:
+    result = DelegatedMergePolicyChecker(DEFAULT_DELEGATED_POLICY_PATH).check(
+        clean_pr_data()
+    )
+
+    assert result.verdict == AUTO_MERGE_ALLOWED
+    assert result.reasons == ()
+    assert result.protected_files_found == ()
+    assert result.review_triggers_found == ()
+
+
+def test_delegated_missing_evidence_requires_review() -> None:
+    result = DelegatedMergePolicyChecker(DEFAULT_DELEGATED_POLICY_PATH).check(
+        clean_pr_data(evidence=None)
+    )
+
+    assert result.verdict == REVIEW_REQUIRED
+    assert result.reasons == ("missing required merge evidence.",)
+
+
+def test_delegated_review_trigger_requires_review() -> None:
+    result = DelegatedMergePolicyChecker(DEFAULT_DELEGATED_POLICY_PATH).check(
+        clean_pr_data(triggers=("test_gap",))
+    )
+
+    assert result.verdict == REVIEW_REQUIRED
+    assert result.review_triggers_found == ("test_gap",)
+    assert result.reasons == ("review trigger found: test_gap",)
+
+
+def test_delegated_operator_file_requires_operator_approval() -> None:
+    result = DelegatedMergePolicyChecker(DEFAULT_DELEGATED_POLICY_PATH).check(
+        clean_pr_data(changed_files=("BOOT_MANIFEST.yaml",))
+    )
+
+    assert result.verdict == OPERATOR_APPROVAL_REQUIRED
+    assert result.protected_files_found == ("BOOT_MANIFEST.yaml",)
+    assert result.reasons == (
+        "operator approval file changed: BOOT_MANIFEST.yaml",
+    )
+
+
+def test_delegated_level_red_is_never_auto() -> None:
+    result = DelegatedMergePolicyChecker(DEFAULT_DELEGATED_POLICY_PATH).check(
+        clean_pr_data(risk_level="red", triggers=("deploy",))
+    )
+
+    assert result.verdict == NEVER_AUTO
+    assert result.reasons == (
+        "never-auto trigger found: risk_level:red, deploy",
+    )
+
+
+def test_delegated_function_uses_aligned_result_fields() -> None:
+    result = check_delegated_merge_policy(
+        clean_delegated_request(triggers=("needs_human_review",))
+    )
+
+    assert result.verdict == REVIEW_REQUIRED
+    assert result.review_triggers_found == ("needs_human_review",)
