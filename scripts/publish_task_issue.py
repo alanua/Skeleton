@@ -25,6 +25,7 @@ REQUIRED_SECTIONS = (
 )
 
 _SECTION_RE_TEMPLATE = r"(?m)^{section}\s*:"
+_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
 
 @dataclass(frozen=True)
@@ -73,8 +74,11 @@ def validate_task_body(body: str) -> None:
     fenced_body = "\n".join(stripped_newlines.splitlines()[1:-1])
     for section in REQUIRED_SECTIONS:
         pattern = _SECTION_RE_TEMPLATE.format(section=re.escape(section))
-        if re.search(pattern, fenced_body) is None:
+        matches = re.findall(pattern, fenced_body)
+        if not matches:
             raise PublishError(f"Task issue body is missing required section: {section}")
+        if len(matches) > 1:
+            raise PublishError(f"Task issue body has duplicate required section: {section}")
 
 
 def load_and_validate_body(path: Path) -> str:
@@ -84,10 +88,24 @@ def load_and_validate_body(path: Path) -> str:
 
 
 def _parse_issue_json(output: str) -> dict[str, Any]:
-    parsed = json.loads(output or "{}")
+    if output.strip() == "":
+        raise PublishError("gh issue view returned empty JSON.")
+    parsed = json.loads(output)
     if not isinstance(parsed, dict):
         raise PublishError("gh issue view returned non-object JSON.")
     return parsed
+
+
+def validate_repo(repo: str) -> str:
+    if repo.strip() != repo or not _REPO_RE.fullmatch(repo):
+        raise PublishError("--repo must be in owner/name form.")
+    return repo
+
+
+def validate_issue_number(issue_number: int | None) -> int | None:
+    if issue_number is not None and issue_number < 1:
+        raise PublishError("--issue must be a positive integer.")
+    return issue_number
 
 
 def _view_issue(repo: str, issue_ref: str | int) -> dict[str, Any]:
@@ -168,6 +186,8 @@ def _add_ready_label(repo: str, issue_number: int) -> None:
 
 def _verified_issue(issue: dict[str, Any], expected_body: str) -> PublishedIssue:
     remote_body = issue.get("body")
+    if not isinstance(remote_body, str):
+        raise PublishError("Remote issue read-back did not include a valid issue body.")
     if remote_body != expected_body:
         raise PublishError("Remote issue body does not match local file body after publish.")
 
@@ -187,6 +207,8 @@ def publish_task_issue(
     title: str | None = None,
     issue_number: int | None = None,
 ) -> PublishedIssue:
+    repo = validate_repo(repo)
+    issue_number = validate_issue_number(issue_number)
     body = load_and_validate_body(body_file)
 
     if issue_number is None:

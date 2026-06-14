@@ -38,6 +38,42 @@ def _issue_json(*, body: str = VALID_BODY, number: int = 861) -> str:
     )
 
 
+def test_invalid_repo_is_rejected_before_gh_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    body_file = _write_body(tmp_path)
+
+    def fake_run_command(args: list[str]) -> tuple[int, str]:
+        raise AssertionError(args)
+
+    monkeypatch.setattr(publisher, "run_command", fake_run_command)
+
+    with pytest.raises(publisher.PublishError, match="--repo"):
+        publisher.publish_task_issue(
+            repo="alanua/Skeleton extra",
+            title="Safe task",
+            body_file=body_file,
+        )
+
+
+def test_invalid_issue_number_is_rejected_before_gh_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    body_file = _write_body(tmp_path)
+
+    def fake_run_command(args: list[str]) -> tuple[int, str]:
+        raise AssertionError(args)
+
+    monkeypatch.setattr(publisher, "run_command", fake_run_command)
+
+    with pytest.raises(publisher.PublishError, match="--issue"):
+        publisher.publish_task_issue(
+            repo="alanua/Skeleton",
+            issue_number=0,
+            body_file=body_file,
+        )
+
+
 def test_valid_body_creates_issue_with_body_file_verifies_then_marks_ready(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -89,6 +125,19 @@ def test_missing_required_section_is_rejected(tmp_path: Path) -> None:
         publisher.load_and_validate_body(body_file)
 
 
+def test_duplicate_required_section_is_rejected(tmp_path: Path) -> None:
+    body_file = _write_body(
+        tmp_path,
+        VALID_BODY.replace(
+            "acceptance:\n- publisher verifies read-back\n",
+            "acceptance:\n- publisher verifies read-back\nacceptance:\n- duplicated\n",
+        ),
+    )
+
+    with pytest.raises(publisher.PublishError, match="duplicate required section: acceptance"):
+        publisher.load_and_validate_body(body_file)
+
+
 def test_read_back_mismatch_fails_closed_without_ready_label(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -106,6 +155,45 @@ def test_read_back_mismatch_fails_closed_without_ready_label(
     monkeypatch.setattr(publisher, "run_command", fake_run_command)
 
     with pytest.raises(publisher.PublishError, match="does not match"):
+        publisher.publish_task_issue(
+            repo="alanua/Skeleton",
+            title="Safe task",
+            body_file=body_file,
+        )
+
+    assert not any("--add-label" in call for call in calls)
+
+
+@pytest.mark.parametrize(
+    ("view_output", "message"),
+    [
+        ("", "empty JSON"),
+        ("[]", "non-object JSON"),
+        (json.dumps({"number": 861, "url": "https://github.com/alanua/Skeleton/issues/861"}), "valid issue body"),
+        (json.dumps({"number": "861", "url": "https://github.com/alanua/Skeleton/issues/861", "body": VALID_BODY}), "valid issue number"),
+        (json.dumps({"number": 861, "url": "", "body": VALID_BODY}), "valid issue URL"),
+    ],
+)
+def test_invalid_read_back_json_fails_closed_without_ready_label(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    view_output: str,
+    message: str,
+) -> None:
+    body_file = _write_body(tmp_path)
+    calls: list[list[str]] = []
+
+    def fake_run_command(args: list[str]) -> tuple[int, str]:
+        calls.append(args)
+        if args[:3] == ["gh", "issue", "create"]:
+            return 0, "https://github.com/alanua/Skeleton/issues/861\n"
+        if args[:3] == ["gh", "issue", "view"]:
+            return 0, view_output
+        raise AssertionError(args)
+
+    monkeypatch.setattr(publisher, "run_command", fake_run_command)
+
+    with pytest.raises(publisher.PublishError, match=message):
         publisher.publish_task_issue(
             repo="alanua/Skeleton",
             title="Safe task",

@@ -47,8 +47,14 @@ Required sections:
 
 The publisher fails closed when the body file is empty, the opening fence is
 missing, the closing fence is missing from EOF, a required section is absent, or
-the remote read-back body differs from the local file. On any validation or
-read-back failure, the issue must not be labeled `runner:ready`.
+a required section appears more than once. The `--repo` value must be in
+`owner/name` form, and `--issue` must be a positive integer when updating an
+existing issue.
+
+The publisher also fails closed when `gh issue view` does not return valid
+object JSON with a string body, positive integer issue number, and non-empty URL,
+or when the remote read-back body differs from the local file. On any validation
+or read-back failure, the issue must not be labeled `runner:ready`.
 
 ## Commands
 
