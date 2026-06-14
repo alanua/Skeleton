@@ -1,0 +1,165 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.hermes_skill_manifest.schema.json",
+  "type": "object",
+  "required": [
+    "schema",
+    "skill_id",
+    "version",
+    "name",
+    "summary",
+    "activation_state",
+    "public_safe",
+    "approval_required",
+    "runtime_install_allowed",
+    "network_required",
+    "inputs",
+    "outputs",
+    "allowed_operations",
+    "forbidden_operations",
+    "authority_boundary"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": "hermes.skill_manifest.v0"
+    },
+    "skill_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{2,63}$"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^v[0-9]+$"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "activation_state": {
+      "type": "string",
+      "enum": ["proposed", "review_only", "disabled"]
+    },
+    "public_safe": {
+      "type": "boolean",
+      "const": true
+    },
+    "approval_required": {
+      "type": "boolean",
+      "const": true
+    },
+    "runtime_install_allowed": {
+      "type": "boolean",
+      "const": false
+    },
+    "network_required": {
+      "type": "boolean",
+      "const": false
+    },
+    "inputs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/io_field"}
+    },
+    "outputs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/io_field"}
+    },
+    "allowed_operations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "enum": [
+          "read_public_safe_context",
+          "normalize_task_packet",
+          "validate_contract_shape",
+          "prepare_review_summary"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "forbidden_operations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "enum": [
+          "execute_shell",
+          "patch_files",
+          "install_server",
+          "start_runtime_service",
+          "change_workflows",
+          "access_private_data",
+          "access_secrets",
+          "mutate_queue",
+          "mutate_issues",
+          "merge",
+          "deploy",
+          "publish",
+          "promote_canon",
+          "approve_skill",
+          "activate_skill"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "authority_boundary": {
+      "type": "object",
+      "required": [
+        "review_only",
+        "mutation_allowed",
+        "activation_allowed",
+        "approval_path"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "review_only": {
+          "type": "boolean",
+          "const": true
+        },
+        "mutation_allowed": {
+          "type": "boolean",
+          "const": false
+        },
+        "activation_allowed": {
+          "type": "boolean",
+          "const": false
+        },
+        "approval_path": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "notes": {
+      "type": "string"
+    }
+  },
+  "$defs": {
+    "io_field": {
+      "type": "object",
+      "required": ["name", "description", "public_safe"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "public_safe": {
+          "type": "boolean",
+          "const": true
+        }
+      }
+    }
+  }
+}

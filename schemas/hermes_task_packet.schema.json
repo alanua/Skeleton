@@ -1,0 +1,208 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.hermes_task_packet.schema.json",
+  "type": "object",
+  "required": [
+    "schema",
+    "task_id",
+    "title",
+    "goal",
+    "worker_mode",
+    "public_safe",
+    "no_secrets",
+    "no_runtime_mutation",
+    "approval_required",
+    "source_context",
+    "scope",
+    "allowed_files",
+    "forbidden_actions",
+    "validation",
+    "expected_outputs",
+    "authority_boundary"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": "hermes.task_packet.v0"
+    },
+    "task_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "goal": {
+      "type": "string",
+      "minLength": 1
+    },
+    "worker_mode": {
+      "type": "string",
+      "enum": ["review_only", "dry_run", "contract_test"]
+    },
+    "public_safe": {
+      "type": "boolean",
+      "const": true
+    },
+    "no_secrets": {
+      "type": "boolean",
+      "const": true
+    },
+    "no_runtime_mutation": {
+      "type": "boolean",
+      "const": true
+    },
+    "approval_required": {
+      "type": "boolean",
+      "const": true
+    },
+    "source_context": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/source_context"}
+    },
+    "scope": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "allowed_files": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    },
+    "forbidden_actions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "enum": [
+          "server_install",
+          "runtime_service_change",
+          "workflow_change",
+          "protected_file_change",
+          "private_data_access",
+          "secret_access",
+          "queue_mutation",
+          "issue_mutation",
+          "merge",
+          "deploy",
+          "publish",
+          "host_maintenance",
+          "canon_promotion"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "validation": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/validation_command"}
+    },
+    "expected_outputs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "enum": [
+          "public_safe_contract",
+          "task_packet_schema",
+          "skill_manifest_schema",
+          "contract_tests",
+          "review_summary",
+          "draft_pr"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "authority_boundary": {
+      "type": "object",
+      "required": [
+        "review_only",
+        "mutation_allowed",
+        "runtime_install_allowed",
+        "approval_path"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "review_only": {
+          "type": "boolean",
+          "const": true
+        },
+        "mutation_allowed": {
+          "type": "boolean",
+          "const": false
+        },
+        "runtime_install_allowed": {
+          "type": "boolean",
+          "const": false
+        },
+        "approval_path": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "skill_manifest_ref": {
+      "type": "string",
+      "pattern": "^schemas/hermes_skill_manifest\\.schema\\.json$"
+    },
+    "notes": {
+      "type": "string"
+    }
+  },
+  "$defs": {
+    "source_context": {
+      "type": "object",
+      "required": ["source_type", "reference", "public_safe", "read_only"],
+      "additionalProperties": false,
+      "properties": {
+        "source_type": {
+          "type": "string",
+          "enum": [
+            "issue",
+            "pull_request",
+            "repository_documentation",
+            "schema",
+            "test",
+            "operator_context",
+            "other_public_safe_source"
+          ]
+        },
+        "reference": {
+          "type": "string",
+          "minLength": 1
+        },
+        "public_safe": {
+          "type": "boolean",
+          "const": true
+        },
+        "read_only": {
+          "type": "boolean",
+          "const": true
+        }
+      }
+    },
+    "validation_command": {
+      "type": "object",
+      "required": ["command", "purpose", "mutating"],
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "type": "string",
+          "minLength": 1
+        },
+        "purpose": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mutating": {
+          "type": "boolean",
+          "const": false
+        }
+      }
+    }
+  }
+}
