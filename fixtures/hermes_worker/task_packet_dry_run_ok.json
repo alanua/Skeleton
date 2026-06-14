@@ -1,0 +1,64 @@
+{
+  "schema": "hermes.task_packet.v0",
+  "task_id": "SYNTH-HERMES-DRY-RUN-001",
+  "title": "Synthetic Hermes dry-run fixture",
+  "goal": "Validate a public-safe Hermes dry-run packet without executing work.",
+  "worker_mode": "dry_run",
+  "public_safe": true,
+  "no_secrets": true,
+  "no_runtime_mutation": true,
+  "approval_required": true,
+  "source_context": [
+    {
+      "source_type": "other_public_safe_source",
+      "reference": "synthetic fixture generated for contract testing",
+      "public_safe": true,
+      "read_only": true
+    }
+  ],
+  "scope": [
+    "synthetic fixture loading",
+    "public-safe dry-run validation"
+  ],
+  "allowed_files": [
+    "fixtures/hermes_worker/task_packet_dry_run_ok.json",
+    "fixtures/hermes_worker/skill_manifest_review_only.json",
+    "fixtures/hermes_worker/skill_manifest_operator_approval.json",
+    "tests/test_hermes_worker_fixtures.py",
+    "docs/hermes_worker_v0.md"
+  ],
+  "forbidden_actions": [
+    "server_install",
+    "runtime_service_change",
+    "workflow_change",
+    "protected_file_change",
+    "private_data_access",
+    "secret_access",
+    "queue_mutation",
+    "issue_mutation",
+    "merge",
+    "deploy",
+    "publish",
+    "host_maintenance",
+    "canon_promotion"
+  ],
+  "validation": [
+    {
+      "command": "python3 -m pytest tests/test_hermes_worker.py tests/test_hermes_worker_fixtures.py",
+      "purpose": "Validate Hermes dry-run behavior and fixture loading.",
+      "mutating": false
+    }
+  ],
+  "expected_outputs": [
+    "review_summary",
+    "draft_pr"
+  ],
+  "authority_boundary": {
+    "review_only": true,
+    "mutation_allowed": false,
+    "runtime_install_allowed": false,
+    "approval_path": "authorized operator or reviewed process"
+  },
+  "skill_manifest_ref": "schemas/hermes_skill_manifest.schema.json",
+  "notes": "Synthetic public-safe fixture only; contains no private data, secrets, host paths, or live execution request."
+}

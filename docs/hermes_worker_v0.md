@@ -143,6 +143,21 @@ source context, private fields, unexpected payload values, or skill body content
 If private-looking field names are present, the executor records only redacted
 field names in diagnostics and emits a redaction warning.
 
+## Fixtures
+
+Synthetic public-safe fixtures live in `fixtures/hermes_worker/`.
+
+- `task_packet_dry_run_ok.json` is a complete dry-run task packet.
+- `skill_manifest_review_only.json` is a review-only skill manifest expected to
+  return `DRY_RUN_OK`.
+- `skill_manifest_operator_approval.json` is a public-safe approval-gated
+  manifest expected to return `OPERATOR_APPROVAL_REQUIRED`.
+
+The fixtures contain no private data, secrets, host-specific paths, live service
+requests, workflow changes, runtime mutation requests, or real operator content.
+They are loaded by `tests/test_hermes_worker_fixtures.py` and passed directly to
+`run_hermes_worker_dry_run`.
+
 ## Validation
 
 This contract is validated with:
@@ -150,6 +165,7 @@ This contract is validated with:
 ```sh
 python -m pytest tests/test_hermes_worker_contract.py
 python -m pytest tests/test_hermes_worker.py
+python -m pytest tests/test_hermes_worker_fixtures.py
 ```
 
 Passing tests confirm only that the static public-safe contract and schemas are

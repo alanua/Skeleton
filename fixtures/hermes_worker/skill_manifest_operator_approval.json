@@ -1,0 +1,57 @@
+{
+  "schema": "hermes.skill_manifest.v0",
+  "skill_id": "synthetic_operator_gate",
+  "version": "v0",
+  "name": "Synthetic Operator Gate",
+  "summary": "Represents a public-safe skill proposal that requires operator approval.",
+  "activation_state": "review_only",
+  "public_safe": true,
+  "approval_required": true,
+  "runtime_install_allowed": false,
+  "network_required": false,
+  "skill_tier": "operator_approval_required",
+  "inputs": [
+    {
+      "name": "task_packet",
+      "description": "Synthetic public-safe Hermes task packet.",
+      "public_safe": true
+    }
+  ],
+  "outputs": [
+    {
+      "name": "approval_review",
+      "description": "Public-safe operator approval review result.",
+      "public_safe": true
+    }
+  ],
+  "allowed_operations": [
+    "read_public_safe_context",
+    "normalize_task_packet",
+    "validate_contract_shape",
+    "prepare_review_summary"
+  ],
+  "forbidden_operations": [
+    "execute_shell",
+    "patch_files",
+    "install_server",
+    "start_runtime_service",
+    "change_workflows",
+    "access_private_data",
+    "access_secrets",
+    "mutate_queue",
+    "mutate_issues",
+    "merge",
+    "deploy",
+    "publish",
+    "promote_canon",
+    "approve_skill",
+    "activate_skill"
+  ],
+  "authority_boundary": {
+    "review_only": true,
+    "mutation_allowed": false,
+    "activation_allowed": false,
+    "approval_path": "authorized operator or reviewed process"
+  },
+  "notes": "Synthetic public-safe fixture only; records approval tier metadata without granting activation authority."
+}
