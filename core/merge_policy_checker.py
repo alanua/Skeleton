@@ -14,8 +14,16 @@ NEVER_AUTO = "NEVER_AUTO"
 BLOCKED = "BLOCKED"
 DECISIONS = frozenset({AUTO_MERGE, ASK_OPERATOR, NEVER_AUTO, BLOCKED})
 
+AUTO_MERGE_ALLOWED = "AUTO_MERGE_ALLOWED"
+REVIEW_REQUIRED = "REVIEW_REQUIRED"
+OPERATOR_APPROVAL_REQUIRED = "OPERATOR_APPROVAL_REQUIRED"
+DELEGATED_DECISIONS = frozenset(
+    {AUTO_MERGE_ALLOWED, REVIEW_REQUIRED, OPERATOR_APPROVAL_REQUIRED, NEVER_AUTO}
+)
+
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_POLICY_PATH = ROOT / "policies" / "MERGE_DECISION_POLICY.yaml"
+DEFAULT_DELEGATED_POLICY_PATH = ROOT / "policies" / "DELEGATED_MERGE_POLICY.yaml"
 
 
 @dataclass(frozen=True)
@@ -45,6 +53,26 @@ class MergePolicyRequest:
 
 
 MergePolicyDecision = MergePolicyResult
+
+
+@dataclass(frozen=True)
+class DelegatedMergePolicyResult:
+    verdict: str
+    reasons: tuple[str, ...]
+    protected_files_found: tuple[str, ...] = ()
+    review_triggers_found: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class DelegatedMergePolicyRequest:
+    changed_files: tuple[str, ...]
+    clean_pr: bool
+    evidence_present: bool
+    risk_level: str = "green"
+    triggers: tuple[str, ...] = ()
+
+
+DelegatedMergePolicyDecision = DelegatedMergePolicyResult
 
 
 class MergePolicyChecker:
@@ -125,6 +153,104 @@ class MergePolicyChecker:
         return MergePolicyResult(decision=AUTO_MERGE, reasons=())
 
 
+class DelegatedMergePolicyChecker:
+    """Review-only delegated merge policy checker.
+
+    This checker is additive to MergePolicyChecker. It does not perform network,
+    subprocess, filesystem write, or merge operations; it only evaluates supplied
+    PR metadata against a loaded policy mapping.
+    """
+
+    def __init__(
+        self, policy_path: Path | str = DEFAULT_DELEGATED_POLICY_PATH
+    ) -> None:
+        self.policy_path = Path(policy_path)
+        self.policy = load_delegated_merge_policy(self.policy_path)
+
+    def check(self, pr_data: Mapping[str, Any]) -> DelegatedMergePolicyResult:
+        changed_files = _string_tuple(pr_data.get("changed_files"))
+        triggers = _string_tuple(pr_data.get("triggers"))
+        risk_level = str(pr_data.get("risk_level", "green")).strip().lower()
+
+        protected_files = _matched_file_patterns(
+            changed_files,
+            _policy_string_list(self.policy.get("operator_approval_file_patterns")),
+        )
+        operator_triggers = _matched_triggers(
+            risk_level,
+            triggers,
+            _policy_string_list(self.policy.get("operator_approval_triggers")),
+        )
+        never_auto_triggers = _matched_level_red_triggers(
+            risk_level,
+            triggers,
+            _policy_string_list(self.policy.get("never_auto_triggers")),
+        )
+        review_triggers = _matched_triggers(
+            risk_level,
+            triggers,
+            _policy_string_list(self.policy.get("review_required_triggers")),
+        )
+
+        evidence_status = _evidence_status(pr_data)
+        if not evidence_status[0]:
+            return DelegatedMergePolicyResult(
+                verdict=REVIEW_REQUIRED,
+                reasons=(evidence_status[1],),
+                protected_files_found=protected_files,
+                review_triggers_found=review_triggers,
+            )
+
+        if never_auto_triggers:
+            return DelegatedMergePolicyResult(
+                verdict=NEVER_AUTO,
+                reasons=(
+                    "never-auto trigger found: " + ", ".join(never_auto_triggers),
+                ),
+                protected_files_found=protected_files,
+                review_triggers_found=review_triggers,
+            )
+
+        if protected_files:
+            return DelegatedMergePolicyResult(
+                verdict=OPERATOR_APPROVAL_REQUIRED,
+                reasons=(
+                    "operator approval file changed: " + ", ".join(protected_files),
+                ),
+                protected_files_found=protected_files,
+                review_triggers_found=review_triggers,
+            )
+
+        if operator_triggers:
+            return DelegatedMergePolicyResult(
+                verdict=OPERATOR_APPROVAL_REQUIRED,
+                reasons=(
+                    "operator approval trigger found: "
+                    + ", ".join(operator_triggers),
+                ),
+                protected_files_found=protected_files,
+                review_triggers_found=review_triggers,
+            )
+
+        if review_triggers:
+            return DelegatedMergePolicyResult(
+                verdict=REVIEW_REQUIRED,
+                reasons=("review trigger found: " + ", ".join(review_triggers),),
+                protected_files_found=protected_files,
+                review_triggers_found=review_triggers,
+            )
+
+        if not _bool_value(pr_data.get("clean_pr")):
+            return DelegatedMergePolicyResult(
+                verdict=REVIEW_REQUIRED,
+                reasons=("clean PR condition is not satisfied.",),
+                protected_files_found=protected_files,
+                review_triggers_found=review_triggers,
+            )
+
+        return DelegatedMergePolicyResult(verdict=AUTO_MERGE_ALLOWED, reasons=())
+
+
 def load_merge_decision_policy(
     policy_path: Path | str = DEFAULT_POLICY_PATH,
 ) -> dict[str, Any]:
@@ -149,6 +275,29 @@ def load_merge_decision_policy(
     return policy
 
 
+def load_delegated_merge_policy(
+    policy_path: Path | str = DEFAULT_DELEGATED_POLICY_PATH,
+) -> dict[str, Any]:
+    """Load the additive delegated merge review policy from YAML."""
+    policy = yaml.safe_load(Path(policy_path).read_text(encoding="utf-8"))
+    if not isinstance(policy, dict):
+        raise ValueError("delegated merge policy must be a mapping")
+
+    decisions = policy.get("verdicts")
+    if not isinstance(decisions, dict) or set(decisions) != DELEGATED_DECISIONS:
+        raise ValueError("delegated merge policy must define all verdict states")
+
+    required = policy.get("auto_merge_allowed_requires")
+    if not isinstance(required, list) or not required:
+        raise ValueError("delegated merge policy must define auto_merge_allowed_requires")
+
+    _policy_string_list(policy.get("operator_approval_file_patterns"))
+    _policy_string_list(policy.get("operator_approval_triggers"))
+    _policy_string_list(policy.get("review_required_triggers"))
+    _policy_string_list(policy.get("never_auto_triggers"))
+    return policy
+
+
 def check_merge_policy(
     request: MergePolicyRequest,
     policy: Optional[Mapping[str, Any]] = None,
@@ -168,6 +317,27 @@ def check_merge_policy(
             "evidence": {"present": request.evidence_present},
             "risk_level": request.risk_level,
             "triggers": tuple(triggers),
+        }
+    )
+
+
+def check_delegated_merge_policy(
+    request: DelegatedMergePolicyRequest,
+    policy: Optional[Mapping[str, Any]] = None,
+) -> DelegatedMergePolicyDecision:
+    """Compatibility wrapper around DelegatedMergePolicyChecker.check()."""
+    checker = DelegatedMergePolicyChecker.__new__(DelegatedMergePolicyChecker)
+    checker.policy_path = DEFAULT_DELEGATED_POLICY_PATH
+    checker.policy = (
+        dict(policy) if policy is not None else load_delegated_merge_policy()
+    )
+    return checker.check(
+        {
+            "changed_files": request.changed_files,
+            "clean_pr": request.clean_pr,
+            "evidence": {"present": request.evidence_present},
+            "risk_level": request.risk_level,
+            "triggers": request.triggers,
         }
     )
 
