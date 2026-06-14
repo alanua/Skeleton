@@ -1,0 +1,71 @@
+version: "1.0.0"
+policy_id: skeleton.delegated_merge_policy.public_safe.v1
+scope: review_verdict_only
+
+definition:
+  delegated_merge: >
+    Delegated merge is a REVIEW verdict produced from plain review data. It is
+    not a runtime action, does not enable automatic merging, and must not call
+    GitHub merge APIs or modify Runner behavior.
+  public_safety_boundary: >
+    Public output may include policy names, aggregate verdicts, reasons, and
+    synthetic test paths only. It must not include private paths, private
+    filenames, customer data, tokens, secrets, raw private rows, quantities,
+    screenshots, or local artifact paths.
+
+decision_outputs:
+  AUTO_MERGE_ALLOWED:
+    means: "All candidate requirements are satisfied for a review verdict."
+  REVIEW_REQUIRED:
+    means: "The change is not auto-merge eligible and needs normal reviewer attention."
+  OPERATOR_APPROVAL_REQUIRED:
+    means: "A protected path or protected operating area requires explicit operator approval."
+  NEVER_AUTO:
+    means: "The change must never receive an auto-merge-allowed verdict."
+
+auto_merge_candidate_requires:
+  - approved_scope
+  - validation_passed
+  - diff_clean
+  - no_secrets
+  - file_count_within_limit
+  - no_protected_files
+  - public_safe_output
+
+hard_stop_protected_paths:
+  - scripts/runner_poll_github_tasks.py
+  - BOOT_MANIFEST.yaml
+  - PROJECT_TREE.yaml
+  - OPERATOR_RULES.yaml
+  - CAPABILITY_REGISTRY.yaml
+  - .github/workflows/
+  - policies/
+  - deploy
+  - runtime
+  - secrets
+  - server
+  - finance
+  - legal
+  - governance
+  - Hermes install/service
+  - skill approval/promotion
+
+checker_contract:
+  inputs:
+    - changed_files
+    - validation_passed
+    - diff_clean
+    - secrets_detected
+    - approved_scope
+    - public_safe
+    - file_count_limit
+  output:
+    - verdict
+    - reasons
+  purity:
+    - deterministic
+    - pure_python
+    - no_network
+    - no_filesystem_writes
+    - no_github_api_calls
+    - no_subprocess

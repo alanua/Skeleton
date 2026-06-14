@@ -2,253 +2,203 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
-from pathlib import Path
-from typing import Any, Mapping, Optional
-
-import yaml
+from typing import Iterable, Mapping
 
 
-AUTO_MERGE = "AUTO_MERGE"
-ASK_OPERATOR = "ASK_OPERATOR"
+AUTO_MERGE_ALLOWED = "AUTO_MERGE_ALLOWED"
+REVIEW_REQUIRED = "REVIEW_REQUIRED"
+OPERATOR_APPROVAL_REQUIRED = "OPERATOR_APPROVAL_REQUIRED"
 NEVER_AUTO = "NEVER_AUTO"
-BLOCKED = "BLOCKED"
-DECISIONS = frozenset({AUTO_MERGE, ASK_OPERATOR, NEVER_AUTO, BLOCKED})
 
-ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_POLICY_PATH = ROOT / "policies" / "MERGE_DECISION_POLICY.yaml"
+DELEGATED_MERGE_VERDICTS = frozenset(
+    {
+        AUTO_MERGE_ALLOWED,
+        REVIEW_REQUIRED,
+        OPERATOR_APPROVAL_REQUIRED,
+        NEVER_AUTO,
+    }
+)
+
+PROTECTED_PATH_PATTERNS = (
+    "scripts/runner_poll_github_tasks.py",
+    "BOOT_MANIFEST.yaml",
+    "PROJECT_TREE.yaml",
+    "OPERATOR_RULES.yaml",
+    "CAPABILITY_REGISTRY.yaml",
+    ".github/workflows/**",
+    "policies/**",
+    "deploy/**",
+    "deploy",
+    "runtime/**",
+    "runtime",
+    "secrets/**",
+    "secrets",
+    "server/**",
+    "server",
+    "finance/**",
+    "finance",
+    "legal/**",
+    "legal",
+    "governance/**",
+    "governance",
+    "scripts/*.service",
+    "scripts/*.timer",
+    "skills/**/approval/**",
+    "skills/**/promotion/**",
+)
 
 
 @dataclass(frozen=True)
-class MergePolicyResult:
-    decision: str
+class DelegatedMergePolicyResult:
+    verdict: str
     reasons: tuple[str, ...]
-    hard_stop_files_found: tuple[str, ...] = ()
-    ask_triggers_found: tuple[str, ...] = ()
-
-    @property
-    def matched_files(self) -> tuple[str, ...]:
-        return self.hard_stop_files_found
-
-    @property
-    def matched_triggers(self) -> tuple[str, ...]:
-        return self.ask_triggers_found
+    protected_files: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
-class MergePolicyRequest:
+class DelegatedMergePolicyInput:
     changed_files: tuple[str, ...]
-    clean_pr: bool
-    evidence_present: bool
-    execution_mode_changed: bool = False
-    risk_level: str = "green"
-    triggers: tuple[str, ...] = ()
+    validation_passed: bool
+    diff_clean: bool
+    secrets_detected: bool
+    approved_scope: bool
+    public_safe: bool
+    file_count_limit: int
 
 
-MergePolicyDecision = MergePolicyResult
+def evaluate_delegated_merge_policy(
+    *,
+    changed_files: Iterable[str],
+    validation_passed: bool,
+    diff_clean: bool,
+    secrets_detected: bool,
+    approved_scope: bool,
+    public_safe: bool,
+    file_count_limit: int,
+) -> DelegatedMergePolicyResult:
+    """Return a delegated merge review verdict from plain input data.
 
+    This function is intentionally pure: it reads no files, writes no files,
+    starts no subprocesses, performs no network calls, and does not call any
+    GitHub API. The verdict is advisory review output only.
+    """
+    normalized_files = _normalize_changed_files(changed_files)
+    normalized_limit = _normalize_file_count_limit(file_count_limit)
+    protected_files = _matched_protected_files(normalized_files)
 
-class MergePolicyChecker:
-    def __init__(self, policy_path: Path | str = DEFAULT_POLICY_PATH) -> None:
-        self.policy_path = Path(policy_path)
-        self.policy = load_merge_decision_policy(self.policy_path)
-
-    def check(self, pr_data: Mapping[str, Any]) -> MergePolicyResult:
-        changed_files = _string_tuple(pr_data.get("changed_files"))
-        triggers = _string_tuple(pr_data.get("triggers"))
-        risk_level = str(pr_data.get("risk_level", "green")).strip().lower()
-
-        hard_stop_files = _matched_file_patterns(
-            changed_files,
-            _policy_string_list(
-                self.policy.get(
-                    "hard_stop_file_patterns",
-                    self.policy.get("protected_file_patterns"),
-                )
-            ),
-        )
-        ask_triggers = _matched_triggers(
-            risk_level,
-            triggers,
-            _policy_string_list(self.policy.get("ask_operator_triggers")),
-        )
-        level_red_triggers = _matched_level_red_triggers(
-            risk_level,
-            triggers,
-            _policy_string_list(
-                self.policy.get("level_red_triggers", self.policy.get("red_level_triggers"))
-            ),
+    never_auto_reasons = []
+    if secrets_detected:
+        never_auto_reasons.append("secrets detected")
+    if not public_safe:
+        never_auto_reasons.append("output is not public-safe")
+    if never_auto_reasons:
+        return DelegatedMergePolicyResult(
+            verdict=NEVER_AUTO,
+            reasons=tuple(never_auto_reasons),
+            protected_files=protected_files,
         )
 
-        evidence_status = _evidence_status(pr_data)
-        if not evidence_status[0]:
-            return MergePolicyResult(
-                decision=BLOCKED,
-                reasons=(evidence_status[1],),
-                hard_stop_files_found=hard_stop_files,
-                ask_triggers_found=ask_triggers,
-            )
+    if protected_files:
+        return DelegatedMergePolicyResult(
+            verdict=OPERATOR_APPROVAL_REQUIRED,
+            reasons=("protected files changed: " + ", ".join(protected_files),),
+            protected_files=protected_files,
+        )
 
-        if level_red_triggers:
-            return MergePolicyResult(
-                decision=NEVER_AUTO,
-                reasons=(
-                    "level_red trigger found: " + ", ".join(level_red_triggers),
-                ),
-                hard_stop_files_found=hard_stop_files,
-                ask_triggers_found=ask_triggers,
-            )
+    review_reasons = []
+    if not approved_scope:
+        review_reasons.append("approved scope is required")
+    if not validation_passed:
+        review_reasons.append("validation must pass")
+    if not diff_clean:
+        review_reasons.append("diff must be clean")
+    if len(normalized_files) > normalized_limit:
+        review_reasons.append(
+            f"file count exceeds limit: {len(normalized_files)} > {normalized_limit}"
+        )
 
-        if hard_stop_files:
-            return MergePolicyResult(
-                decision=ASK_OPERATOR,
-                reasons=("hard-stop file changed: " + ", ".join(hard_stop_files),),
-                hard_stop_files_found=hard_stop_files,
-                ask_triggers_found=ask_triggers,
-            )
+    if review_reasons:
+        return DelegatedMergePolicyResult(
+            verdict=REVIEW_REQUIRED,
+            reasons=tuple(review_reasons),
+            protected_files=protected_files,
+        )
 
-        if ask_triggers:
-            return MergePolicyResult(
-                decision=ASK_OPERATOR,
-                reasons=("operator review trigger found: " + ", ".join(ask_triggers),),
-                hard_stop_files_found=hard_stop_files,
-                ask_triggers_found=ask_triggers,
-            )
-
-        if not _bool_value(pr_data.get("clean_pr")):
-            return MergePolicyResult(
-                decision=ASK_OPERATOR,
-                reasons=("clean PR condition is not satisfied.",),
-                hard_stop_files_found=hard_stop_files,
-                ask_triggers_found=ask_triggers,
-            )
-
-        return MergePolicyResult(decision=AUTO_MERGE, reasons=())
-
-
-def load_merge_decision_policy(
-    policy_path: Path | str = DEFAULT_POLICY_PATH,
-) -> dict[str, Any]:
-    """Load the stage 1 merge decision policy from YAML."""
-    policy = yaml.safe_load(Path(policy_path).read_text(encoding="utf-8"))
-    if not isinstance(policy, dict):
-        raise ValueError("merge decision policy must be a mapping")
-
-    decisions = policy.get("decisions")
-    if not isinstance(decisions, dict) or set(decisions) != DECISIONS:
-        raise ValueError("merge decision policy must define all decision states")
-
-    required = policy.get("auto_merge_requires")
-    if not isinstance(required, list) or not required:
-        raise ValueError("merge decision policy must define auto_merge_requires")
-
-    _policy_string_list(
-        policy.get("hard_stop_file_patterns", policy.get("protected_file_patterns"))
-    )
-    _policy_string_list(policy.get("ask_operator_triggers"))
-    _policy_string_list(policy.get("level_red_triggers"))
-    return policy
-
-
-def check_merge_policy(
-    request: MergePolicyRequest,
-    policy: Optional[Mapping[str, Any]] = None,
-) -> MergePolicyDecision:
-    """Compatibility wrapper around MergePolicyChecker.check()."""
-    checker = MergePolicyChecker.__new__(MergePolicyChecker)
-    checker.policy_path = DEFAULT_POLICY_PATH
-    checker.policy = dict(policy) if policy is not None else load_merge_decision_policy()
-    triggers = list(request.triggers)
-    if request.execution_mode_changed:
-        triggers.append("execution_mode_changed")
-
-    return checker.check(
-        {
-            "changed_files": request.changed_files,
-            "clean_pr": request.clean_pr,
-            "evidence": {"present": request.evidence_present},
-            "risk_level": request.risk_level,
-            "triggers": tuple(triggers),
-        }
+    return DelegatedMergePolicyResult(
+        verdict=AUTO_MERGE_ALLOWED,
+        reasons=(),
+        protected_files=protected_files,
     )
 
 
-def _evidence_status(pr_data: Mapping[str, Any]) -> tuple[bool, str]:
-    evidence = pr_data.get("evidence")
-    if isinstance(evidence, Mapping):
-        if not evidence:
-            return False, "missing required merge evidence."
-        unverifiable = [
-            str(key)
-            for key, value in evidence.items()
-            if not isinstance(value, bool) or value is not True
-        ]
-        if unverifiable:
-            return False, "unverifiable merge evidence: " + ", ".join(unverifiable)
-        return True, ""
+def check_delegated_merge_policy(
+    request: DelegatedMergePolicyInput | Mapping[str, object],
+) -> DelegatedMergePolicyResult:
+    if isinstance(request, DelegatedMergePolicyInput):
+        return evaluate_delegated_merge_policy(
+            changed_files=request.changed_files,
+            validation_passed=request.validation_passed,
+            diff_clean=request.diff_clean,
+            secrets_detected=request.secrets_detected,
+            approved_scope=request.approved_scope,
+            public_safe=request.public_safe,
+            file_count_limit=request.file_count_limit,
+        )
 
-    if _bool_value(pr_data.get("evidence_present")) is True:
-        return True, ""
+    return evaluate_delegated_merge_policy(
+        changed_files=_required_value(request, "changed_files"),
+        validation_passed=_required_bool(request, "validation_passed"),
+        diff_clean=_required_bool(request, "diff_clean"),
+        secrets_detected=_required_bool(request, "secrets_detected"),
+        approved_scope=_required_bool(request, "approved_scope"),
+        public_safe=_required_bool(request, "public_safe"),
+        file_count_limit=_required_int(request, "file_count_limit"),
+    )
 
-    return False, "missing required merge evidence."
+
+def _normalize_changed_files(changed_files: Iterable[str]) -> tuple[str, ...]:
+    if isinstance(changed_files, str):
+        raise TypeError("changed_files must be an iterable of strings")
+
+    normalized = []
+    for changed_file in changed_files:
+        if not isinstance(changed_file, str):
+            raise TypeError("changed_files must contain only strings")
+        path = changed_file.strip().replace("\\", "/")
+        if path:
+            normalized.append(path)
+    return tuple(normalized)
 
 
-def _matched_file_patterns(
-    changed_files: tuple[str, ...],
-    patterns: tuple[str, ...],
-) -> tuple[str, ...]:
+def _normalize_file_count_limit(file_count_limit: int) -> int:
+    if not isinstance(file_count_limit, int) or isinstance(file_count_limit, bool):
+        raise TypeError("file_count_limit must be an integer")
+    if file_count_limit < 0:
+        raise ValueError("file_count_limit must be non-negative")
+    return file_count_limit
+
+
+def _matched_protected_files(changed_files: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(
         changed_file
         for changed_file in changed_files
-        if any(fnmatchcase(changed_file, pattern) for pattern in patterns)
+        if any(fnmatchcase(changed_file, pattern) for pattern in PROTECTED_PATH_PATTERNS)
     )
 
 
-def _matched_triggers(
-    risk_level: str,
-    triggers: tuple[str, ...],
-    policy_triggers: tuple[str, ...],
-) -> tuple[str, ...]:
-    matched = []
-    policy_trigger_set = set(policy_triggers)
-    matched.extend(trigger for trigger in triggers if trigger in policy_trigger_set)
-    if risk_level in policy_trigger_set:
-        matched.append(risk_level)
-    return tuple(matched)
+def _required_value(request: Mapping[str, object], key: str) -> object:
+    if key not in request:
+        raise KeyError(f"missing delegated merge policy input: {key}")
+    return request[key]
 
 
-def _matched_level_red_triggers(
-    risk_level: str,
-    triggers: tuple[str, ...],
-    policy_triggers: tuple[str, ...],
-) -> tuple[str, ...]:
-    matched = []
-    if risk_level == "red":
-        matched.append("risk_level:red")
-
-    policy_trigger_set = set(policy_triggers)
-    matched.extend(trigger for trigger in triggers if trigger in policy_trigger_set)
-    return tuple(matched)
+def _required_bool(request: Mapping[str, object], key: str) -> bool:
+    value = _required_value(request, key)
+    if not isinstance(value, bool):
+        raise TypeError(f"{key} must be a boolean")
+    return value
 
 
-def _string_tuple(value: object) -> tuple[str, ...]:
-    if value is None:
-        return ()
-    if isinstance(value, str):
-        return (value,)
-    if not isinstance(value, (list, tuple)) or not all(
-        isinstance(item, str) for item in value
-    ):
-        raise ValueError("PR data list values must be strings")
-    return tuple(value)
-
-
-def _policy_string_list(value: object) -> tuple[str, ...]:
-    if value is None:
-        return ()
-    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-        raise ValueError("policy list values must be lists of strings")
-    return tuple(value)
-
-
-def _bool_value(value: object) -> bool:
-    return isinstance(value, bool) and value is True
+def _required_int(request: Mapping[str, object], key: str) -> int:
+    value = _required_value(request, key)
+    return _normalize_file_count_limit(value)  # type: ignore[arg-type]
