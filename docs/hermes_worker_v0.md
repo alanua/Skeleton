@@ -1,9 +1,11 @@
 # Hermes Worker v0 Contract
 
-This document defines the public-safe Hermes Worker v0 contract. Version 0 is a
-static documentation and schema contract only. It does not add a runtime service,
-queue consumer, host process, GitHub workflow, server install, executor daemon,
-deployment path, merge path, or canon promotion path.
+This document defines the public-safe Hermes Worker v0 contract. Version 0 keeps
+the static documentation and schema contract only as its authority boundary, with
+a local dry-run executor for advisory validation. It does not add a runtime service.
+
+It does not add a queue consumer, host process, GitHub workflow, server install,
+executor daemon, deployment path, merge path, or canon promotion path.
 
 ## Purpose
 
@@ -23,8 +25,13 @@ secrets, raw private content, hidden transcripts, or host-specific state.
   manifest.
 - `tests/test_hermes_worker_contract.py` verifies the static contract and
   representative examples.
+- `core/hermes_worker.py` exposes a public-safe dry-run executor that reads a
+  provided task packet and optional skill manifest, validates contract shape, and
+  returns a structured result without performing external actions.
+- `tests/test_hermes_worker.py` verifies the dry-run executor.
 
-These artifacts are review inputs only. They do not create an active worker.
+These artifacts are review inputs only. The dry-run executor is local and
+advisory; it does not create an active worker.
 
 ## Worker Role
 
@@ -59,7 +66,7 @@ details are omitted and the remaining claim is still reviewable.
 
 ## Authority Boundary
 
-Hermes Worker v0 is contract and evidence only.
+Hermes Worker v0 is contract, dry-run validation, and evidence only.
 
 Hermes Worker v0 must not:
 
@@ -106,12 +113,43 @@ The manifest must include explicit activation controls:
 - `runtime_install_allowed` must be `false`;
 - `network_required` must be `false`.
 
+## Dry-Run Executor
+
+`run_hermes_worker_dry_run(task_packet, skill_manifest=None)` is the only
+Hermes Worker v0 executor entry point. It accepts a plain mapping or object and
+reads fields directly from that packet. It does not load files, call subprocesses,
+read environment variables, access a network, call a model or API, mutate
+repositories, mutate queues, or invoke GitHub operations.
+
+The dry-run executor returns only a public-safe structured result with:
+
+- `status`;
+- `task_id`;
+- `skill_id`;
+- `mode`;
+- `decision`;
+- `warnings`;
+- `diagnostics`.
+
+Allowed statuses are:
+
+- `DRY_RUN_OK`;
+- `REVIEW_REQUIRED`;
+- `OPERATOR_APPROVAL_REQUIRED`;
+- `BLOCKED`.
+
+The result intentionally does not echo task goals, titles, validation commands,
+source context, private fields, unexpected payload values, or skill body content.
+If private-looking field names are present, the executor records only redacted
+field names in diagnostics and emits a redaction warning.
+
 ## Validation
 
 This contract is validated with:
 
 ```sh
 python -m pytest tests/test_hermes_worker_contract.py
+python -m pytest tests/test_hermes_worker.py
 ```
 
 Passing tests confirm only that the static public-safe contract and schemas are
