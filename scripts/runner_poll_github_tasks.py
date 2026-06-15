@@ -86,6 +86,7 @@ PREFLIGHT_PR_REFRESH = "preflight_pr_refresh"
 HERMES_WORKER_PREFLIGHT = "hermes_worker_preflight"
 PREPARE_AUFMASS_PRIVATE_RUNTIME = "prepare_aufmass_private_runtime"
 RUN_AUFMASS_PRIVATE_DXF_REVIEW = "run_aufmass_private_dxf_review"
+DISPATCH_HERMES_AUFMASS_PRIVATE_PILOT = "dispatch_hermes_aufmass_private_pilot_v0"
 SUMMARIZE_AUFMASS_PRIVATE_REVIEW = "summarize_aufmass_private_review"
 BUILD_AUFMASS_PRIVATE_SHORTLIST = "build_aufmass_private_shortlist"
 BUILD_AUFMASS_PRIVATE_AREA_SCHEDULE = "build_aufmass_private_area_schedule"
@@ -109,6 +110,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         HERMES_WORKER_PREFLIGHT,
         PREPARE_AUFMASS_PRIVATE_RUNTIME,
         RUN_AUFMASS_PRIVATE_DXF_REVIEW,
+        DISPATCH_HERMES_AUFMASS_PRIVATE_PILOT,
         SUMMARIZE_AUFMASS_PRIVATE_REVIEW,
         BUILD_AUFMASS_PRIVATE_SHORTLIST,
         BUILD_AUFMASS_PRIVATE_AREA_SCHEDULE,
@@ -126,6 +128,35 @@ AUFMASS_PRIVATE_SOURCE_PACK_MANIFEST = "source_pack_manifest.json"
 AUFMASS_PRIVATE_AUTOMATION_REGISTRY = "automation_registry.private.json"
 AUFMASS_PRIVATE_AUTOMATION_REGISTRY_SCHEMA = (
     "skeleton.aufmass_private_automation_registry.v1"
+)
+HERMES_AUFMASS_PRIVATE_PILOT_ROUTE = "hermes_aufmass_private_pilot_v0"
+HERMES_AUFMASS_PRIVATE_PILOT_SUMMARY_SCHEMA = (
+    "skeleton.hermes_aufmass_private_pilot_public_summary.v0"
+)
+HERMES_AUFMASS_PRIVATE_PUBLIC_VALUE_ALLOWLIST = frozenset(
+    (
+        "blocked",
+        "missing",
+        "dry_run_ready",
+        "private_runtime_registration",
+        "private_runtime_route",
+        "pilot_mode_blocked",
+        "issue_text_rejected",
+        "google_workspace_readiness",
+        "public_aggregate_summary",
+        "ready_for_operator_review",
+        "resolve_private_runtime_route",
+        "remove_private_issue_content",
+        "use_dry_run_mode",
+        "configure_private_registry",
+        "configure_private_runtime_route",
+        "approve_private_runtime_route",
+        "configure_google_workspace_private_route",
+        "fix_private_summary_route",
+        "refresh_private_aggregate_summary",
+        "operator_review_private_route",
+        "review_private_outputs",
+    )
 )
 AUFMASS_PRIVATE_REQUIRED_MODULES = (
     "core.aufmass_engine",
@@ -2666,6 +2697,22 @@ def _source_pack_registry_entry(data: dict[str, Any], source_pack_id: str) -> di
     return None
 
 
+def _source_pack_registry_run_entry(
+    source_pack_entry: dict[str, Any], run_id: str | None
+) -> tuple[str | None, dict[str, Any] | None]:
+    resolved_run_id = run_id
+    runs = source_pack_entry.get("runs")
+    if resolved_run_id is None:
+        latest_run_id = source_pack_entry.get("latest_run_id")
+        if isinstance(latest_run_id, str) and _valid_aufmass_private_token(latest_run_id):
+            resolved_run_id = latest_run_id
+    if resolved_run_id is not None and isinstance(runs, dict):
+        run_entry = runs.get(resolved_run_id)
+        if isinstance(run_entry, dict):
+            return resolved_run_id, run_entry
+    return resolved_run_id, None
+
+
 def _resolve_aufmass_private_registry_entry(
     task_id: str,
     request: AufmassPrivateAutomationRequest,
@@ -2823,6 +2870,281 @@ def _artifact_count(summary: dict[str, Any]) -> int:
         return value
     artifacts = summary.get("private_artifacts")
     return len(artifacts) if isinstance(artifacts, list) else 0
+
+
+def _hermes_aufmass_private_pilot_report(
+    status: str,
+    request: AufmassPrivateAutomationRequest | None,
+    *,
+    run_id: str | None = None,
+    hermes_dispatch_status: str = "blocked",
+    google_workspace_status: str = "blocked",
+    created_private_table_count: int = 0,
+    source_manifest_row_count: int = 0,
+    room_review_row_count: int = 0,
+    openings_review_row_count: int = 0,
+    qa_issue_count: int = 0,
+    export_summary_row_count: int = 0,
+    current_phase: str = "blocked",
+    blocker_count: int = 1,
+    next_operator_action: str = "resolve_private_runtime_route",
+) -> str:
+    task_id = DISPATCH_HERMES_AUFMASS_PRIVATE_PILOT
+    heading = (
+        "DONE: Runner host maintenance task completed."
+        if status == "DONE"
+        else "BLOCKED: Runner host maintenance task did not complete."
+    )
+    source_pack_id = request.source_pack_id if request is not None else "missing"
+    safe_google_status = (
+        google_workspace_status
+        if google_workspace_status in {"configured", "missing", "blocked"}
+        else "blocked"
+    )
+    status_lines = [
+        f"status={status.lower()}",
+        f"maintenance_task_id={task_id}",
+        f"private_source_pack_id={source_pack_id}",
+    ]
+    if run_id is not None:
+        status_lines.append(f"run_id={run_id}")
+    status_lines.extend(
+        (
+            f"hermes_dispatch_status={_hermes_aufmass_private_public_value(hermes_dispatch_status)}",
+            f"google_workspace_status={safe_google_status}",
+            f"created_private_table_count={max(created_private_table_count, 0)}",
+            f"source_manifest_row_count={max(source_manifest_row_count, 0)}",
+            f"room_review_row_count={max(room_review_row_count, 0)}",
+            f"openings_review_row_count={max(openings_review_row_count, 0)}",
+            f"qa_issue_count={max(qa_issue_count, 0)}",
+            f"export_summary_row_count={max(export_summary_row_count, 0)}",
+            f"current_phase={_hermes_aufmass_private_public_value(current_phase)}",
+            f"blocker_count={max(blocker_count, 0)}",
+            f"next_operator_action={_hermes_aufmass_private_public_value(next_operator_action)}",
+        )
+    )
+    return "\n".join((heading, *status_lines))
+
+
+def _hermes_aufmass_private_public_value(value: object) -> str:
+    text = str(value or "").strip()
+    return (
+        text
+        if text in HERMES_AUFMASS_PRIVATE_PUBLIC_VALUE_ALLOWLIST
+        else "blocked"
+    )
+
+
+def _hermes_aufmass_private_pilot_summary_value(
+    summary: dict[str, Any], key: str, default: int = 0
+) -> int:
+    value = summary.get(key)
+    return value if isinstance(value, int) and value >= 0 else default
+
+
+def _hermes_aufmass_private_pilot_summary_path(
+    workspace_root: Path, route: dict[str, Any]
+) -> tuple[Path | None, str | None]:
+    raw_path = route.get("public_aggregate_summary")
+    if raw_path is None:
+        return None, None
+    path, reason = _private_registry_relative_path(
+        workspace_root, raw_path, "public_aggregate_summary"
+    )
+    return path, reason
+
+
+def _hermes_aufmass_private_pilot_route(
+    task_id: str,
+    request: AufmassPrivateAutomationRequest,
+    workspace_root: Path,
+) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    registry_path, reason = _resolve_private_registry_path(workspace_root)
+    if reason is not None or registry_path is None:
+        return None, None, reason or "registry_unavailable"
+    registry, reason = _read_json_file(registry_path)
+    if reason is not None or registry is None:
+        return None, None, f"registry_{reason or 'invalid'}"
+    if registry.get("schema") != AUFMASS_PRIVATE_AUTOMATION_REGISTRY_SCHEMA:
+        return None, None, "registry_schema_invalid"
+
+    source_pack_entry = _source_pack_registry_entry(registry, request.source_pack_id)
+    if source_pack_entry is None:
+        return None, None, "source_pack_not_registered"
+    resolved_run_id, run_entry = _source_pack_registry_run_entry(
+        source_pack_entry, request.run_id
+    )
+    if request.run_id is not None and run_entry is None:
+        return None, resolved_run_id, "run_not_registered"
+    route = None
+    if run_entry is not None:
+        candidate = run_entry.get(HERMES_AUFMASS_PRIVATE_PILOT_ROUTE)
+        route = candidate if isinstance(candidate, dict) else None
+    if route is None:
+        candidate = source_pack_entry.get(HERMES_AUFMASS_PRIVATE_PILOT_ROUTE)
+        route = candidate if isinstance(candidate, dict) else None
+    if route is None:
+        return None, resolved_run_id or "registry_default", "private_runtime_route_missing"
+    return route, resolved_run_id or "registry_default", None
+
+
+def dispatch_hermes_aufmass_private_pilot(body: str) -> str:
+    task_id = DISPATCH_HERMES_AUFMASS_PRIVATE_PILOT
+    request, report = _aufmass_private_automation_request(
+        task_id, body, include_mode=True
+    )
+    if report is not None:
+        return _hermes_aufmass_private_pilot_report("BLOCKED", request)
+    assert request is not None
+    if request.mode != "dry-run":
+        return _hermes_aufmass_private_pilot_report(
+            "BLOCKED",
+            request,
+            run_id=request.run_id,
+            hermes_dispatch_status="blocked",
+            google_workspace_status="blocked",
+            current_phase="pilot_mode_blocked",
+            blocker_count=1,
+            next_operator_action="use_dry_run_mode",
+        )
+    if _aufmass_private_metadata(body) != body:
+        return _hermes_aufmass_private_pilot_report(
+            "BLOCKED",
+            request,
+            run_id=request.run_id,
+            current_phase="issue_text_rejected",
+            blocker_count=1,
+            next_operator_action="remove_private_issue_content",
+        )
+
+    _checkout_path, workspace_root, reason = _aufmass_private_registered_paths()
+    if reason is not None or workspace_root is None:
+        return _hermes_aufmass_private_pilot_report(
+            "BLOCKED",
+            request,
+            run_id=request.run_id,
+            hermes_dispatch_status="blocked",
+            google_workspace_status="blocked",
+            current_phase="private_runtime_registration",
+            blocker_count=1,
+            next_operator_action="configure_private_registry",
+        )
+
+    route, run_id, reason = _hermes_aufmass_private_pilot_route(
+        task_id, request, workspace_root
+    )
+    if reason is not None or route is None:
+        return _hermes_aufmass_private_pilot_report(
+            "BLOCKED",
+            request,
+            run_id=run_id or request.run_id,
+            hermes_dispatch_status="missing",
+            google_workspace_status="missing",
+            current_phase="private_runtime_route",
+            blocker_count=1,
+            next_operator_action="configure_private_runtime_route",
+        )
+    if route.get("approved_private_runtime_route") is not True:
+        return _hermes_aufmass_private_pilot_report(
+            "BLOCKED",
+            request,
+            run_id=run_id,
+            hermes_dispatch_status="blocked",
+            google_workspace_status="blocked",
+            current_phase="private_runtime_route",
+            blocker_count=1,
+            next_operator_action="approve_private_runtime_route",
+        )
+
+    google_workspace_status = str(route.get("google_workspace_status") or "blocked")
+    if google_workspace_status not in {"configured", "missing", "blocked"}:
+        google_workspace_status = "blocked"
+    if google_workspace_status != "configured":
+        return _hermes_aufmass_private_pilot_report(
+            "BLOCKED",
+            request,
+            run_id=run_id,
+            hermes_dispatch_status="blocked",
+            google_workspace_status=google_workspace_status,
+            current_phase="google_workspace_readiness",
+            blocker_count=1,
+            next_operator_action="configure_google_workspace_private_route",
+        )
+
+    summary_path, reason = _hermes_aufmass_private_pilot_summary_path(
+        workspace_root, route
+    )
+    if reason is not None:
+        return _hermes_aufmass_private_pilot_report(
+            "BLOCKED",
+            request,
+            run_id=run_id,
+            hermes_dispatch_status="blocked",
+            google_workspace_status=google_workspace_status,
+            current_phase="public_aggregate_summary",
+            blocker_count=1,
+            next_operator_action="fix_private_summary_route",
+        )
+    summary: dict[str, Any] = {}
+    if summary_path is not None:
+        loaded_summary, reason = _read_json_file(summary_path)
+        if (
+            reason is not None
+            or loaded_summary is None
+            or loaded_summary.get("schema") != HERMES_AUFMASS_PRIVATE_PILOT_SUMMARY_SCHEMA
+        ):
+            return _hermes_aufmass_private_pilot_report(
+                "BLOCKED",
+                request,
+                run_id=run_id,
+                hermes_dispatch_status="blocked",
+                google_workspace_status=google_workspace_status,
+                current_phase="public_aggregate_summary",
+                blocker_count=1,
+                next_operator_action="refresh_private_aggregate_summary",
+            )
+        summary = loaded_summary
+
+    blocker_count = _hermes_aufmass_private_pilot_summary_value(
+        summary, "blocker_count", 0
+    )
+    hermes_dispatch_status = str(
+        summary.get("hermes_dispatch_status")
+        or route.get("hermes_dispatch_status")
+        or "dry_run_ready"
+    )
+    current_phase = str(summary.get("current_phase") or "dry_run_ready")
+    next_operator_action = str(
+        summary.get("next_operator_action") or "operator_review_private_route"
+    )
+    return _hermes_aufmass_private_pilot_report(
+        "DONE" if blocker_count == 0 else "BLOCKED",
+        request,
+        run_id=run_id,
+        hermes_dispatch_status=hermes_dispatch_status,
+        google_workspace_status=google_workspace_status,
+        created_private_table_count=_hermes_aufmass_private_pilot_summary_value(
+            summary, "created_private_table_count", 0
+        ),
+        source_manifest_row_count=_hermes_aufmass_private_pilot_summary_value(
+            summary, "source_manifest_row_count", 0
+        ),
+        room_review_row_count=_hermes_aufmass_private_pilot_summary_value(
+            summary, "room_review_row_count", 0
+        ),
+        openings_review_row_count=_hermes_aufmass_private_pilot_summary_value(
+            summary, "openings_review_row_count", 0
+        ),
+        qa_issue_count=_hermes_aufmass_private_pilot_summary_value(
+            summary, "qa_issue_count", 0
+        ),
+        export_summary_row_count=_hermes_aufmass_private_pilot_summary_value(
+            summary, "export_summary_row_count", 0
+        ),
+        current_phase=current_phase,
+        blocker_count=blocker_count,
+        next_operator_action=next_operator_action,
+    )
 
 
 def run_aufmass_private_dxf_review(body: str) -> str:
@@ -6117,6 +6439,8 @@ def dispatch_runtime_maintenance_task(
             return prepare_aufmass_private_runtime()
         if task_id == RUN_AUFMASS_PRIVATE_DXF_REVIEW:
             return run_aufmass_private_dxf_review(body)
+        if task_id == DISPATCH_HERMES_AUFMASS_PRIVATE_PILOT:
+            return dispatch_hermes_aufmass_private_pilot(body)
         if task_id == SUMMARIZE_AUFMASS_PRIVATE_REVIEW:
             return summarize_aufmass_private_review(body)
         if task_id == BUILD_AUFMASS_PRIVATE_SHORTLIST:
