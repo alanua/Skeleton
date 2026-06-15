@@ -3642,6 +3642,113 @@ def test_hermes_worker_preflight_issue_body_does_not_execute_commands() -> None:
     run_codex.assert_not_called()
 
 
+def _project_tree_for_private_memory_root(root: Path) -> dict[str, object]:
+    project_tree = json.loads(json.dumps(runner.load_runner_project_tree()))
+    project_tree["projects"]["runtime_private_memory_test"] = {
+        "repo": "private/runtime-memory-test",
+        "checkout_path": str(root / "main"),
+        "worktree_root": str(root),
+        "public": False,
+        "runner_enabled": True,
+        "execution_modes": {
+            "planning_only": False,
+            "codex_issue_worktree": True,
+            "live_cross_repo": False,
+        },
+        "requires_explicit_approval_for_mode_change": True,
+        "future_parallel_worktrees": False,
+        "runtime_approval_required": True,
+        "worktree_name_prefix": "runtime-private-memory-test",
+        "description": "Synthetic private route for aggregate inventory tests.",
+    }
+    return project_tree
+
+
+def test_inspect_private_memory_runtime_is_allowlisted() -> None:
+    assert (
+        runner.INSPECT_PRIVATE_MEMORY_RUNTIME == "inspect_private_memory_runtime"
+    )
+    assert runner.INSPECT_PRIVATE_MEMORY_RUNTIME in runner.RUNTIME_MAINTENANCE_TASK_IDS
+
+
+def test_inspect_private_memory_runtime_reports_aggregates_only(tmp_path: Path) -> None:
+    route_root = tmp_path / "registered-route"
+    checkout_root = route_root / "main"
+    checkout_root.mkdir(parents=True)
+    (route_root / runner.AUFMASS_PRIVATE_AUTOMATION_REGISTRY).write_text(
+        json.dumps({"schema": "must-not-leak", "token": "must-not-leak"}),
+        encoding="utf-8",
+    )
+    (route_root / "memory.toml").write_text("secret=must-not-leak", encoding="utf-8")
+    (route_root / "light.sql.txt").write_text("raw sql must not leak", encoding="utf-8")
+    db_path = route_root / "memory.sqlite"
+    connection = runner.sqlite3.connect(db_path)
+    try:
+        connection.execute("CREATE TABLE hidden_table(secret TEXT)")
+        connection.commit()
+    finally:
+        connection.close()
+    project_tree = _project_tree_for_private_memory_root(route_root)
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(
+        runner, "RUNNER_ALLOWED_TARGET_PATH_BASES", (tmp_path,)
+    ), mock.patch.object(
+        runner, "run_command"
+    ) as run:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.INSPECT_PRIVATE_MEMORY_RUNTIME,
+            str(runner.ROOT),
+            "sudo reboot\nTOKEN=must-not-leak\ncat private-memory.sqlite",
+        )
+
+    assert report.startswith("DONE:")
+    assert "maintenance_task_id=inspect_private_memory_runtime" in report
+    assert "approved_private_root_count=1" in report
+    assert "sqlite_db_count=1" in report
+    assert "sqlite_openable_count=1" in report
+    assert "sqlite_nonempty_count=1" in report
+    assert "json_registry_count=1" in report
+    assert "json_parseable_count=1" in report
+    assert "json_with_schema_count=1" in report
+    assert "automation_registry_present=true" in report
+    assert "light_sql_candidate_count=1" in report
+    assert "memory_config_count=1" in report
+    assert "next_operator_action=none" in report
+    assert "success_criteria" not in report
+    assert str(route_root) not in report
+    assert "registered-route" not in report
+    assert "memory.sqlite" not in report
+    assert "hidden_table" not in report
+    assert "must-not-leak" not in report
+    assert "sudo reboot" not in report
+    run.assert_not_called()
+
+
+def test_inspect_private_memory_runtime_blocks_without_registered_root() -> None:
+    project_tree = json.loads(json.dumps(runner.load_runner_project_tree()))
+    project_tree["projects"] = {
+        key: value
+        for key, value in project_tree["projects"].items()
+        if value.get("public") is not False
+    }
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(runner, "run_command") as run:
+        report = runner.inspect_private_memory_runtime()
+
+    assert report.startswith("BLOCKED:")
+    assert "maintenance_task_id=inspect_private_memory_runtime" in report
+    assert "approved_private_root_count=0" in report
+    assert "sqlite_db_count=0" in report
+    assert "automation_registry_present=false" in report
+    assert "next_operator_action=configure_private_memory_route" in report
+    assert "success_criteria" not in report
+    run.assert_not_called()
+
+
 def test_prepare_aufmass_private_runtime_is_allowlisted() -> None:
     assert runner.PREPARE_AUFMASS_PRIVATE_RUNTIME == "prepare_aufmass_private_runtime"
     assert runner.PREPARE_AUFMASS_PRIVATE_RUNTIME in runner.RUNTIME_MAINTENANCE_TASK_IDS

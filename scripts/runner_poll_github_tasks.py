@@ -10,6 +10,7 @@ import os
 import re
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -84,6 +85,7 @@ ENSURE_PROJECT_CHECKOUT = "ensure_project_checkout"
 VALIDATE_PR_BRANCH = "validate_pr_branch"
 PREFLIGHT_PR_REFRESH = "preflight_pr_refresh"
 HERMES_WORKER_PREFLIGHT = "hermes_worker_preflight"
+INSPECT_PRIVATE_MEMORY_RUNTIME = "inspect_private_memory_runtime"
 PREPARE_AUFMASS_PRIVATE_RUNTIME = "prepare_aufmass_private_runtime"
 RUN_AUFMASS_PRIVATE_DXF_REVIEW = "run_aufmass_private_dxf_review"
 SUMMARIZE_AUFMASS_PRIVATE_REVIEW = "summarize_aufmass_private_review"
@@ -107,6 +109,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         VALIDATE_PR_BRANCH,
         PREFLIGHT_PR_REFRESH,
         HERMES_WORKER_PREFLIGHT,
+        INSPECT_PRIVATE_MEMORY_RUNTIME,
         PREPARE_AUFMASS_PRIVATE_RUNTIME,
         RUN_AUFMASS_PRIVATE_DXF_REVIEW,
         SUMMARIZE_AUFMASS_PRIVATE_REVIEW,
@@ -127,6 +130,8 @@ AUFMASS_PRIVATE_AUTOMATION_REGISTRY = "automation_registry.private.json"
 AUFMASS_PRIVATE_AUTOMATION_REGISTRY_SCHEMA = (
     "skeleton.aufmass_private_automation_registry.v1"
 )
+PRIVATE_MEMORY_INVENTORY_MAX_FILES = 2000
+PRIVATE_MEMORY_JSON_MAX_BYTES = 2 * 1024 * 1024
 AUFMASS_PRIVATE_REQUIRED_MODULES = (
     "core.aufmass_engine",
     "core.aufmass_exporter",
@@ -2386,6 +2391,191 @@ def hermes_worker_preflight() -> str:
         *tool_lines,
     ]
     return _maintenance_report("DONE", task_id, status_lines, "met")
+
+
+def _registered_private_memory_roots() -> tuple[list[Path], int]:
+    roots: list[Path] = []
+    blockers = 0
+    project_tree = load_runner_project_tree()
+    projects = project_tree.get("projects")
+    if not isinstance(projects, dict):
+        return roots, 1
+
+    for project in projects.values():
+        if not isinstance(project, dict) or project.get("public") is not False:
+            continue
+        for field in ("checkout_path", "worktree_root"):
+            path = Path(str(project.get(field) or ""))
+            if not path.is_absolute():
+                blockers += 1
+                continue
+            if any(part == ".." for part in path.parts):
+                blockers += 1
+                continue
+            if not _path_is_under_allowed_target_base(path):
+                blockers += 1
+                continue
+            if path == ROOT or _path_is_relative_to(path, ROOT):
+                blockers += 1
+                continue
+            if any(path == root or _path_is_relative_to(path, root) for root in roots):
+                continue
+            roots = [root for root in roots if not _path_is_relative_to(root, path)]
+            roots.append(path)
+    return roots, blockers
+
+
+def _private_memory_candidate_kind(path: Path) -> str | None:
+    name = path.name.lower()
+    suffix = path.suffix.lower()
+    if suffix in {".db", ".sqlite", ".sqlite3"}:
+        return "sqlite"
+    if name == AUFMASS_PRIVATE_AUTOMATION_REGISTRY:
+        return "json_registry"
+    if "memory" in name:
+        return "memory_config"
+    if any(marker in name for marker in ("light", "lite", "sql")):
+        return "light_sql"
+    return None
+
+
+def _sqlite_private_memory_facts(path: Path) -> tuple[bool, bool]:
+    connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    try:
+        cursor = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' LIMIT 1"
+        )
+        return True, cursor.fetchone() is not None
+    finally:
+        connection.close()
+
+
+def _json_private_memory_registry_facts(path: Path) -> tuple[bool, bool]:
+    if path.stat().st_size > PRIVATE_MEMORY_JSON_MAX_BYTES:
+        return False, False
+    with path.open("r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    return True, isinstance(data, dict) and "schema" in data
+
+
+def _private_memory_runtime_report(status: str, status_lines: list[str]) -> str:
+    if status == "DONE":
+        heading = "DONE: Runner host maintenance task completed."
+    else:
+        heading = "BLOCKED: Runner host maintenance task did not complete."
+    return "\n".join(
+        (
+            heading,
+            f"maintenance_task_id={INSPECT_PRIVATE_MEMORY_RUNTIME}",
+            *status_lines,
+        )
+    )
+
+
+def inspect_private_memory_runtime() -> str:
+    roots, root_blockers = _registered_private_memory_roots()
+    status_counts = {
+        "approved_private_root_count": len(roots),
+        "sqlite_db_count": 0,
+        "sqlite_openable_count": 0,
+        "sqlite_nonempty_count": 0,
+        "json_registry_count": 0,
+        "json_parseable_count": 0,
+        "json_with_schema_count": 0,
+        "light_sql_candidate_count": 0,
+        "memory_config_count": 0,
+        "blocker_count": root_blockers,
+    }
+    automation_registry_present = False
+
+    if not roots:
+        return _private_memory_runtime_report(
+            "BLOCKED",
+            [
+                f"approved_private_root_count={status_counts['approved_private_root_count']}",
+                "sqlite_db_count=0",
+                "sqlite_openable_count=0",
+                "sqlite_nonempty_count=0",
+                "json_registry_count=0",
+                "json_parseable_count=0",
+                "json_with_schema_count=0",
+                "automation_registry_present=false",
+                "light_sql_candidate_count=0",
+                "memory_config_count=0",
+                f"blocker_count={status_counts['blocker_count']}",
+                "next_operator_action=configure_private_memory_route",
+            ],
+        )
+
+    inspected_files = 0
+    for root in roots:
+        if not root.is_dir():
+            status_counts["blocker_count"] += 1
+            continue
+        try:
+            walker = os.walk(root)
+            for dirpath, dirnames, filenames in walker:
+                dirnames[:] = [
+                    dirname
+                    for dirname in dirnames
+                    if dirname not in {".git", "__pycache__", ".codex"}
+                ]
+                for filename in filenames:
+                    inspected_files += 1
+                    if inspected_files > PRIVATE_MEMORY_INVENTORY_MAX_FILES:
+                        status_counts["blocker_count"] += 1
+                        break
+                    candidate = Path(dirpath) / filename
+                    kind = _private_memory_candidate_kind(candidate)
+                    if kind == "sqlite":
+                        status_counts["sqlite_db_count"] += 1
+                        try:
+                            openable, nonempty = _sqlite_private_memory_facts(candidate)
+                        except sqlite3.Error:
+                            status_counts["blocker_count"] += 1
+                        else:
+                            if openable:
+                                status_counts["sqlite_openable_count"] += 1
+                            if nonempty:
+                                status_counts["sqlite_nonempty_count"] += 1
+                    elif kind == "json_registry":
+                        status_counts["json_registry_count"] += 1
+                        automation_registry_present = True
+                        try:
+                            parseable, has_schema = _json_private_memory_registry_facts(
+                                candidate
+                            )
+                        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                            status_counts["blocker_count"] += 1
+                        else:
+                            if parseable:
+                                status_counts["json_parseable_count"] += 1
+                            if has_schema:
+                                status_counts["json_with_schema_count"] += 1
+                    elif kind == "light_sql":
+                        status_counts["light_sql_candidate_count"] += 1
+                    elif kind == "memory_config":
+                        status_counts["memory_config_count"] += 1
+                if inspected_files > PRIVATE_MEMORY_INVENTORY_MAX_FILES:
+                    break
+        except OSError:
+            status_counts["blocker_count"] += 1
+
+    status_lines = [
+        f"approved_private_root_count={status_counts['approved_private_root_count']}",
+        f"sqlite_db_count={status_counts['sqlite_db_count']}",
+        f"sqlite_openable_count={status_counts['sqlite_openable_count']}",
+        f"sqlite_nonempty_count={status_counts['sqlite_nonempty_count']}",
+        f"json_registry_count={status_counts['json_registry_count']}",
+        f"json_parseable_count={status_counts['json_parseable_count']}",
+        f"json_with_schema_count={status_counts['json_with_schema_count']}",
+        f"automation_registry_present={str(automation_registry_present).lower()}",
+        f"light_sql_candidate_count={status_counts['light_sql_candidate_count']}",
+        f"memory_config_count={status_counts['memory_config_count']}",
+        f"blocker_count={status_counts['blocker_count']}",
+        "next_operator_action=none",
+    ]
+    return _private_memory_runtime_report("DONE", status_lines)
 
 
 def _aufmass_private_registered_paths() -> tuple[Path | None, Path | None, str | None]:
@@ -6113,6 +6303,8 @@ def dispatch_runtime_maintenance_task(
             return preflight_pr_refresh(body)
         if task_id == HERMES_WORKER_PREFLIGHT:
             return hermes_worker_preflight()
+        if task_id == INSPECT_PRIVATE_MEMORY_RUNTIME:
+            return inspect_private_memory_runtime()
         if task_id == PREPARE_AUFMASS_PRIVATE_RUNTIME:
             return prepare_aufmass_private_runtime()
         if task_id == RUN_AUFMASS_PRIVATE_DXF_REVIEW:
