@@ -2034,6 +2034,37 @@ def _successful_maintenance_command(
     return 0, ""
 
 
+def _private_memory_config(tmp_path: Path, db_path: Path | None = None) -> Path:
+    config_path = tmp_path / "synthetic_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "schema": "skeleton.private_memory.config.v0",
+                "database": {"path": str(db_path or tmp_path / "memory.sqlite")},
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def _assert_private_memory_runner_report_is_public_safe(
+    report: str, tmp_path: Path
+) -> None:
+    lowered = report.lower()
+    assert str(tmp_path) not in report
+    assert "synthetic_config.json" not in report
+    assert "memory.sqlite" not in report
+    assert "select " not in lowered
+    assert "create table" not in lowered
+    assert "secret" not in lowered
+    assert "token" not in lowered
+    assert "credential" not in lowered
+    assert "drive" not in lowered
+
+
 def _issue_publish_inspection_body(
     *,
     repository: str = runner.REPO,
@@ -2262,6 +2293,120 @@ def test_unknown_maintenance_task_is_blocked() -> None:
         "Runtime maintenance task id `restart_everything` is not allowlisted.",
     )
     run_codex.assert_not_called()
+
+
+def test_private_memory_healthcheck_is_allowlisted_and_read_only_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "memory.sqlite"
+    config_path = _private_memory_config(tmp_path, db_path)
+    monkeypatch.setenv("SKELETON_PRIVATE_MEMORY_CONFIG", str(config_path))
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.PRIVATE_MEMORY_HEALTHCHECK, str(runner.ROOT)
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert "maintenance_task_id=private_memory_healthcheck" in report
+    assert "private_memory_write_requested=false" in report
+    assert "private_memory_writable_when_requested=false" in report
+    assert not db_path.exists()
+    _assert_private_memory_runner_report_is_public_safe(report, tmp_path)
+
+
+def test_private_memory_healthcheck_reports_sanitized_ready_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = _private_memory_config(tmp_path)
+    runner.write_public_heartbeat(
+        "synthetic-runner-seed",
+        source="synthetic-test",
+        config_path=config_path,
+    )
+    monkeypatch.setenv("SKELETON_PRIVATE_MEMORY_CONFIG", str(config_path))
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.PRIVATE_MEMORY_HEALTHCHECK, str(runner.ROOT)
+    )
+
+    assert report.startswith("DONE:")
+    assert "maintenance_task_id=private_memory_healthcheck" in report
+    assert "private_memory_status=DONE" in report
+    assert "private_memory_db_configured=true" in report
+    assert "private_memory_db_openable=true" in report
+    assert "private_memory_integrity_ok=true" in report
+    assert "private_memory_schema_present=true" in report
+    assert "private_memory_writable_when_requested=false" in report
+    assert "private_memory_heartbeat_ok=true" in report
+    _assert_private_memory_runner_report_is_public_safe(report, tmp_path)
+
+
+def test_private_memory_healthcheck_write_mode_requires_task_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = _private_memory_config(tmp_path)
+    monkeypatch.setenv("SKELETON_PRIVATE_MEMORY_CONFIG", str(config_path))
+    body = _maintenance_issue(
+        runner.PRIVATE_MEMORY_HEALTHCHECK,
+        "heartbeat_write=true",
+    )["body"]
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.PRIVATE_MEMORY_HEALTHCHECK, str(runner.ROOT), str(body)
+    )
+
+    assert report.startswith("DONE:")
+    assert "private_memory_write_requested=true" in report
+    assert "private_memory_writable_when_requested=true" in report
+    assert "private_memory_heartbeat_ok=true" in report
+    _assert_private_memory_runner_report_is_public_safe(report, tmp_path)
+
+
+def test_private_memory_healthcheck_blocks_invalid_write_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = _private_memory_config(tmp_path)
+    monkeypatch.setenv("SKELETON_PRIVATE_MEMORY_CONFIG", str(config_path))
+    body = _maintenance_issue(
+        runner.PRIVATE_MEMORY_HEALTHCHECK,
+        "heartbeat_write=please",
+    )["body"]
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.PRIVATE_MEMORY_HEALTHCHECK, str(runner.ROOT), str(body)
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=invalid_write_request_value" in report
+    assert not (tmp_path / "memory.sqlite").exists()
+    _assert_private_memory_runner_report_is_public_safe(report, tmp_path)
+
+
+def test_private_memory_healthcheck_blocks_connector_privacy_violation() -> None:
+    with mock.patch.object(
+        runner,
+        "healthcheck_private_memory",
+        return_value={
+            "schema": "skeleton.private_memory.healthcheck.v0",
+            "status": "DONE",
+            "db_configured": True,
+            "db_openable": True,
+            "integrity_ok": True,
+            "schema_present": True,
+            "table_count": 2,
+            "writable_when_requested": False,
+            "heartbeat_ok": True,
+            "error_class": None,
+            "next_operator_action": "file:unsafe-value",
+        },
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.PRIVATE_MEMORY_HEALTHCHECK, str(runner.ROOT)
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=privacy_violation" in report
+    assert "file:unsafe-value" not in report
 
 
 def test_issue_worktree_publish_inspection_is_allowlisted_and_bypasses_codex(

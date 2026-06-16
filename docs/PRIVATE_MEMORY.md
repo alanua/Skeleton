@@ -6,8 +6,10 @@ not contain a real database, real registry values, local server paths, secrets, 
 task payloads, provider outputs, Drive identifiers, or private project data.
 
 The connector in `core/private_memory.py` is a foundation for later Runner,
-Hermes, and OpenHands routing. This task does not wire it into the Runner
-dispatcher and does not enable live provider or model routing.
+Hermes, and OpenHands routing. The Runner now has a bounded maintenance
+healthcheck that reaches this connector through local server config only. This
+does not wire Hermes runtime, execute Aufmass, or enable live provider or model
+routing.
 
 ## Boundary
 
@@ -23,6 +25,8 @@ dispatcher and does not enable live provider or model routing.
 - Default healthchecks are read-only and must not create or modify a database.
 - SQLite read/write access is opened only when the caller explicitly requests a
   write operation.
+- Runner maintenance reports may include only aggregate booleans, counts, status,
+  error class names, and next-action tokens from the connector report.
 
 ## Config
 
@@ -64,5 +68,7 @@ private memory or wiring runtime dispatch.
 
 ## Current Project State
 
-Aufmass execution is paused. The private memory connector is present only as a
-public-safe foundation for future Runner, Hermes, and OpenHands integration.
+Aufmass execution is paused. Runner wiring is limited to the
+`private_memory_healthcheck` maintenance task. Hermes runtime wiring, worker
+routing, private task-state retrieval, and Aufmass use of private memory remain
+later tasks.
