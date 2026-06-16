@@ -62,6 +62,9 @@ database path stay local on Hetzner and are never committed.
   storage.
 - Public-safe heartbeat write/read using synthetic IDs.
 - Public-safe task-state heartbeat recording using synthetic task IDs.
+- Cross-project registry summarization through
+  `core/private_project_memory.py`, limited to public-safe aggregate counts and
+  next-action tokens.
 
 These operations are enough to prove the connector boundary without exposing
 private memory or wiring runtime dispatch.
@@ -70,5 +73,5 @@ private memory or wiring runtime dispatch.
 
 Aufmass execution is paused. Runner wiring is limited to the
 `private_memory_healthcheck` maintenance task. Hermes runtime wiring, worker
-routing, private task-state retrieval, and Aufmass use of private memory remain
-later tasks.
+routing, private task-state retrieval, real project memory ingestion, and
+Aufmass use of private memory remain later tasks.
