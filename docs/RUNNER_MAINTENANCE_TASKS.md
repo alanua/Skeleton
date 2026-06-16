@@ -45,6 +45,39 @@ block instead of waiting for operator input.
    missing or blank, or leave an existing nonblank setting unchanged.
 4. Verify the callback HMAC setting exists before reporting `DONE`.
 
+`private_memory_healthcheck` is a public-safe Runner boundary check for the
+server-local private SQLite memory connector. It may only:
+
+1. Read the private memory config location from the local Runner environment.
+2. Call the `core.private_memory` connector.
+3. Default to read-only healthcheck mode.
+4. Report sanitized aggregate status fields only: configured/openable booleans,
+   integrity and schema booleans, table count, heartbeat status, error class, and
+   next-action token.
+5. Fail closed as `BLOCKED` for missing config, invalid config, invalid registry,
+   database open failure, integrity failure, schema mismatch, write failure, or
+   any privacy violation.
+
+It must not report raw config paths, database paths, registry paths, table names,
+SQL text, row payloads, environment values, secrets, Drive identifiers, customer
+data, room names, quantities, addresses, or file output.
+
+Write-mode heartbeat is disabled by default. It is allowed only when the fenced
+task payload explicitly requests it, for example:
+
+````text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: private_memory_healthcheck
+
+```task
+heartbeat_write=true
+```
+````
+
+This task proves the Runner can reach the private SQLite boundary. It does not
+wire Hermes runtime, execute Aufmass, retrieve private task state, or enable live
+provider/model routing.
+
 `check_project_checkout` is read-only and must include target project metadata:
 
 ```text

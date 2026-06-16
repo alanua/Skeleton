@@ -26,6 +26,7 @@ if str(ROOT) not in sys.path:
 
 from core.audit_ledger import AuditLedger, validate_public_safe_payload
 from core.aufmass_source_pack import validate_source_pack_manifest
+from core.private_memory import healthcheck_private_memory, write_public_heartbeat
 from core.project_tree import get_project, get_project_by_repo, load_project_tree
 from core.skeleton_memory import SkeletonMemory
 from core.telegram_approval_buttons import build_pr_ready_card_payload
@@ -84,6 +85,7 @@ ENSURE_PROJECT_CHECKOUT = "ensure_project_checkout"
 VALIDATE_PR_BRANCH = "validate_pr_branch"
 PREFLIGHT_PR_REFRESH = "preflight_pr_refresh"
 HERMES_WORKER_PREFLIGHT = "hermes_worker_preflight"
+PRIVATE_MEMORY_HEALTHCHECK = "private_memory_healthcheck"
 PREPARE_AUFMASS_PRIVATE_RUNTIME = "prepare_aufmass_private_runtime"
 RUN_AUFMASS_PRIVATE_DXF_REVIEW = "run_aufmass_private_dxf_review"
 SUMMARIZE_AUFMASS_PRIVATE_REVIEW = "summarize_aufmass_private_review"
@@ -107,6 +109,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         VALIDATE_PR_BRANCH,
         PREFLIGHT_PR_REFRESH,
         HERMES_WORKER_PREFLIGHT,
+        PRIVATE_MEMORY_HEALTHCHECK,
         PREPARE_AUFMASS_PRIVATE_RUNTIME,
         RUN_AUFMASS_PRIVATE_DXF_REVIEW,
         SUMMARIZE_AUFMASS_PRIVATE_REVIEW,
@@ -2386,6 +2389,107 @@ def hermes_worker_preflight() -> str:
         *tool_lines,
     ]
     return _maintenance_report("DONE", task_id, status_lines, "met")
+
+
+_PRIVATE_MEMORY_HEALTHCHECK_REPORT_KEYS = (
+    "schema",
+    "status",
+    "db_configured",
+    "db_openable",
+    "integrity_ok",
+    "schema_present",
+    "table_count",
+    "writable_when_requested",
+    "heartbeat_ok",
+    "error_class",
+    "next_operator_action",
+)
+_PRIVATE_MEMORY_UNSAFE_VALUE_RE = re.compile(
+    r"(?i)(/|\\|file:|\.sqlite\b|\.db\b|secret|token|password|credential|drive|"
+    r"private_memory_[a-z_]*heartbeat|select\s|create\s+table)"
+)
+
+
+def _private_memory_healthcheck_write_requested(body: str) -> tuple[bool, str | None]:
+    payload = extract_task_block(body) or ""
+    if not payload.strip():
+        return False, None
+
+    requested: bool | None = None
+    for line in payload.splitlines():
+        if "=" in line:
+            raw_key, raw_value = line.split("=", 1)
+        elif ":" in line:
+            raw_key, raw_value = line.split(":", 1)
+        else:
+            continue
+        key = raw_key.strip().lower().replace("-", "_").replace(" ", "_")
+        if key not in {"request_write", "write_mode", "heartbeat_write"}:
+            continue
+        value = raw_value.strip().lower()
+        if value in {"true", "yes", "1"}:
+            requested = True
+        elif value in {"false", "no", "0"}:
+            requested = False
+        else:
+            return False, "invalid_write_request_value"
+
+    return bool(requested), None
+
+
+def _private_memory_report_lines(report: dict[str, object]) -> tuple[list[str], str | None]:
+    if not isinstance(report, dict):
+        return [], "invalid_connector_report"
+    unexpected_keys = set(report) - set(_PRIVATE_MEMORY_HEALTHCHECK_REPORT_KEYS)
+    if unexpected_keys:
+        return [], "unsafe_connector_report_key"
+
+    lines: list[str] = []
+    for key in _PRIVATE_MEMORY_HEALTHCHECK_REPORT_KEYS:
+        value = report.get(key)
+        if isinstance(value, bool):
+            text = "true" if value else "false"
+        elif isinstance(value, int):
+            text = str(value)
+        elif value is None:
+            text = "none"
+        elif isinstance(value, str):
+            text = value
+        else:
+            return [], "invalid_connector_report_value"
+        if _PRIVATE_MEMORY_UNSAFE_VALUE_RE.search(text):
+            return [], "privacy_violation"
+        lines.append(f"private_memory_{key}={text}")
+    return lines, None
+
+
+def private_memory_healthcheck(body: str = "") -> str:
+    task_id = PRIVATE_MEMORY_HEALTHCHECK
+    request_write, reason = _private_memory_healthcheck_write_requested(body)
+    if reason is not None:
+        return _maintenance_report("BLOCKED", task_id, [f"reason={reason}"], "not_met")
+
+    if request_write:
+        connector_report = write_public_heartbeat(
+            "runner-private-memory-healthcheck-v0",
+            source="runner-maintenance",
+            env=os.environ,
+        )
+    else:
+        connector_report = healthcheck_private_memory(env=os.environ)
+
+    status_lines, reason = _private_memory_report_lines(connector_report)
+    if reason is not None:
+        return _maintenance_report("BLOCKED", task_id, [f"reason={reason}"], "not_met")
+
+    status_lines.insert(
+        0,
+        f"private_memory_write_requested={'true' if request_write else 'false'}",
+    )
+    if connector_report.get("status") == "DONE":
+        return _maintenance_report("DONE", task_id, status_lines, "met")
+    status_lines.append("reason=private_memory_healthcheck_not_ready")
+    return _maintenance_report("BLOCKED", task_id, status_lines, "not_met")
 
 
 def _aufmass_private_registered_paths() -> tuple[Path | None, Path | None, str | None]:
@@ -6113,6 +6217,8 @@ def dispatch_runtime_maintenance_task(
             return preflight_pr_refresh(body)
         if task_id == HERMES_WORKER_PREFLIGHT:
             return hermes_worker_preflight()
+        if task_id == PRIVATE_MEMORY_HEALTHCHECK:
+            return private_memory_healthcheck(body)
         if task_id == PREPARE_AUFMASS_PRIVATE_RUNTIME:
             return prepare_aufmass_private_runtime()
         if task_id == RUN_AUFMASS_PRIVATE_DXF_REVIEW:
