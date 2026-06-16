@@ -69,6 +69,21 @@ database path stay local on Hetzner and are never committed.
 These operations are enough to prove the connector boundary without exposing
 private memory or wiring runtime dispatch.
 
+## Relationship To Graph Memory
+
+`docs/GRAPH_MEMORY.md` defines Graphify as a future private derived graph-memory
+layer. The SQLite private memory connector remains the canonical local project
+memory store. Graphify-derived nodes, edges, embeddings, labels, traversals, and
+summaries are cache/index state only: they may support orientation and review,
+but they do not outrank SQLite canonical memory, current GitHub state, protected
+repo rules, or human approval.
+
+Public reports about graph memory may contain only synthetic query identifiers,
+allowlisted status tokens, aggregate counts, error class names, and next-action
+tokens. Real graph outputs, private records, local paths, secrets, Drive IDs,
+Telegram IDs, customer data, Aufmass quantities, and Graphify payloads stay
+local/private.
+
 ## Current Project State
 
 Aufmass execution is paused. Runner wiring is limited to the

@@ -73,6 +73,18 @@ aggregate registry foundation. Both are intentionally public-safe foundations:
 they can report aggregate status, but they do not expose real memory content or
 wire live runtime services.
 
+## Relationship To Graph Memory
+
+`docs/GRAPH_MEMORY.md` defines the planned Graphify layer as private derived
+graph memory. It may index relationships across locally approved project memory
+records, but the registry remains public-safe aggregate orientation only.
+
+The authority order is human approval, current GitHub state, protected repo
+rules, SQLite canonical project memory, Graphify derived graph memory, then LLM
+inference. Registry summaries must not include Graphify nodes, edges, paths,
+labels, embeddings, scores, raw project records, local paths, customer data, or
+Aufmass quantities.
+
 ## Current State
 
 This is a foundation only. It does not run Aufmass, ingest real files, modify
