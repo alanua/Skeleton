@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.private_project_memory.schema.json",
+  "title": "Private Project Memory Public-Safe Registry Contract",
+  "oneOf": [
+    {"$ref": "#/$defs/project_status"},
+    {"$ref": "#/$defs/registry_summary"}
+  ],
+  "$defs": {
+    "safe_token": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+    },
+    "non_negative_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "project_state": {
+      "type": "string",
+      "enum": ["active", "paused", "blocked", "archived", "unknown"]
+    },
+    "attention_state": {
+      "type": "string",
+      "enum": ["none", "review", "operator", "blocked", "unknown"]
+    },
+    "next_operator_action": {
+      "type": "string",
+      "enum": [
+        "none",
+        "configure_project_memory_registry",
+        "review_blocked_project_memory",
+        "refresh_stale_project_memory",
+        "review_project_memory_attention",
+        "initialize_project_memory_schema"
+      ]
+    },
+    "project_status": {
+      "type": "object",
+      "required": [
+        "schema",
+        "project_ref",
+        "state",
+        "attention",
+        "schema_ready",
+        "stale",
+        "task_backlog_count",
+        "open_decision_count"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "skeleton.private_project_memory.project_status.v0"},
+        "project_ref": {"$ref": "#/$defs/safe_token"},
+        "state": {"$ref": "#/$defs/project_state"},
+        "attention": {"$ref": "#/$defs/attention_state"},
+        "schema_ready": {"type": "boolean"},
+        "stale": {"type": "boolean"},
+        "task_backlog_count": {"$ref": "#/$defs/non_negative_count"},
+        "open_decision_count": {"$ref": "#/$defs/non_negative_count"}
+      }
+    },
+    "registry_summary": {
+      "type": "object",
+      "required": [
+        "schema",
+        "status",
+        "project_count",
+        "state_counts",
+        "attention_counts",
+        "schema_ready_count",
+        "stale_project_count",
+        "blocked_project_count",
+        "total_task_backlog_count",
+        "total_open_decision_count",
+        "error_class",
+        "next_operator_action"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "skeleton.private_project_memory.registry_summary.v0"},
+        "status": {"type": "string", "enum": ["DONE", "BLOCKED"]},
+        "project_count": {"$ref": "#/$defs/non_negative_count"},
+        "state_counts": {
+          "type": "object",
+          "required": ["active", "paused", "blocked", "archived", "unknown"],
+          "additionalProperties": false,
+          "properties": {
+            "active": {"$ref": "#/$defs/non_negative_count"},
+            "paused": {"$ref": "#/$defs/non_negative_count"},
+            "blocked": {"$ref": "#/$defs/non_negative_count"},
+            "archived": {"$ref": "#/$defs/non_negative_count"},
+            "unknown": {"$ref": "#/$defs/non_negative_count"}
+          }
+        },
+        "attention_counts": {
+          "type": "object",
+          "required": ["none", "review", "operator", "blocked", "unknown"],
+          "additionalProperties": false,
+          "properties": {
+            "none": {"$ref": "#/$defs/non_negative_count"},
+            "review": {"$ref": "#/$defs/non_negative_count"},
+            "operator": {"$ref": "#/$defs/non_negative_count"},
+            "blocked": {"$ref": "#/$defs/non_negative_count"},
+            "unknown": {"$ref": "#/$defs/non_negative_count"}
+          }
+        },
+        "schema_ready_count": {"$ref": "#/$defs/non_negative_count"},
+        "stale_project_count": {"$ref": "#/$defs/non_negative_count"},
+        "blocked_project_count": {"$ref": "#/$defs/non_negative_count"},
+        "total_task_backlog_count": {"$ref": "#/$defs/non_negative_count"},
+        "total_open_decision_count": {"$ref": "#/$defs/non_negative_count"},
+        "error_class": {"type": ["string", "null"]},
+        "next_operator_action": {"$ref": "#/$defs/next_operator_action"}
+      }
+    }
+  }
+}
