@@ -53,6 +53,35 @@ _UNSAFE_VALUE_MARKERS = (
     "password",
     "credential",
 )
+_UNSAFE_WRITE_KEY_PARTS = (
+    "append",
+    "commit",
+    "delete",
+    "destination",
+    "insert",
+    "mutation",
+    "patch",
+    "persist",
+    "registry_record",
+    "target",
+    "update",
+    "upsert",
+    "write",
+)
+_UNSAFE_WRITE_VALUE_MARKERS = (
+    "append ",
+    "commit ",
+    "create table",
+    "delete from",
+    "insert into",
+    "patch ",
+    "persist ",
+    "registry.local.json",
+    "sqlite",
+    "update ",
+    "upsert ",
+    "write ",
+)
 
 
 @dataclass(frozen=True)
@@ -80,7 +109,9 @@ def summarize_project_memory_registry(records: Iterable[Mapping[str, Any]] | Non
     try:
         if records is None:
             raise PrivateProjectMemoryConfigError("missing registry records")
-        summary = _summarize_records(records)
+        registry_records = tuple(records)
+        _reject_write_shaped_input(registry_records)
+        summary = _summarize_records(registry_records)
         return _sanitize_summary(summary)
     except Exception as exc:  # noqa: BLE001 - reports must fail closed.
         return _blocked_summary(type(exc).__name__)
@@ -252,6 +283,22 @@ def _reject_unsafe_values(value: object) -> None:
     if isinstance(value, list):
         for nested in value:
             _reject_unsafe_values(nested)
+
+
+def _reject_write_shaped_input(value: object) -> None:
+    if isinstance(value, Mapping):
+        for key, nested in value.items():
+            lowered = str(key).lower()
+            if any(part in lowered for part in _UNSAFE_WRITE_KEY_PARTS):
+                raise PrivateProjectMemoryPrivacyError("write-shaped registry input")
+            _reject_write_shaped_input(nested)
+    elif isinstance(value, list) or isinstance(value, tuple):
+        for nested in value:
+            _reject_write_shaped_input(nested)
+    elif isinstance(value, str):
+        lowered = value.lower()
+        if any(marker in lowered for marker in _UNSAFE_WRITE_VALUE_MARKERS):
+            raise PrivateProjectMemoryPrivacyError("write-shaped registry input")
 
 
 def _looks_private(value: str) -> bool:

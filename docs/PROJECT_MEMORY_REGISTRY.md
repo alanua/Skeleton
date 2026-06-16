@@ -29,6 +29,12 @@ secrets, provider outputs, or environment values.
 Any invalid input, unsafe marker, unsupported schema, or unsafe report value
 fails closed with `BLOCKED` status.
 
+Write-shaped inputs also fail closed before aggregation. The public foundation
+does not accept append, insert, update, upsert, patch, commit, destination, or
+registry-record shaped payloads, even when the surrounding values are synthetic.
+Those inputs are reserved for a later private-only storage stage and must not
+become either a public summary or a local registry record through this module.
+
 ## Local Registry Input
 
 The public foundation accepts only synthetic aggregate project status records in
@@ -77,3 +83,7 @@ wire live runtime services.
 
 This is a foundation only. It does not run Aufmass, ingest real files, modify
 runtime services, route providers, or publish private project records.
+
+A full private project memory store is a later stage. This stage proves only the
+public-safe aggregate contract and the fail-closed boundary around unsafe
+write-shaped input.
