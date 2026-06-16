@@ -208,6 +208,57 @@ systemd, query GitHub, start Codex, or execute arbitrary issue text. Reports
 must be short and include only sanitized key/value status lines; they must not
 include raw command output, token values, raw host names, or issue-body text.
 
+`inspect_private_memory_runtime` is a read-only aggregate inventory check for
+private memory stores already registered in Runner private route metadata. It
+requires no target metadata:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: inspect_private_memory_runtime
+```
+
+It may only:
+
+1. Resolve approved private roots from local Runner project metadata already
+   marked private.
+2. Verify those roots are absolute, traversal-free, under Runner-managed bases,
+   and outside the public Skeleton checkout.
+3. Walk only those approved roots with Python stdlib directory traversal.
+4. Recognize private memory candidates internally by bounded filename and suffix
+   patterns.
+5. For candidate SQLite stores, open them read-only and check only whether they
+   contain any tables.
+6. For candidate JSON registries, parse only enough to check whether a top-level
+   schema field exists.
+
+It reports `DONE` when the aggregate inventory report is produced for at least
+one approved private root. If no approved private root is registered, it reports
+`BLOCKED` with `next_operator_action=configure_private_memory_route`. This task
+must not run shell commands, call Hermes, Google, Telegram, OAuth, systemd,
+network APIs, or execute arbitrary issue text. It must not report paths,
+filenames, database table names, registry keys or values, Drive IDs, Drive
+links, OAuth material, token values, environment values, room names, quantities,
+addresses, customer identifiers, or raw command/file output.
+
+The public report for `inspect_private_memory_runtime` may include only the
+status heading and these key/value fields:
+
+```text
+maintenance_task_id
+approved_private_root_count
+sqlite_db_count
+sqlite_openable_count
+sqlite_nonempty_count
+json_registry_count
+json_parseable_count
+json_with_schema_count
+automation_registry_present
+light_sql_candidate_count
+memory_config_count
+blocker_count
+next_operator_action
+```
+
 `prepare_aufmass_private_runtime` verifies that the registered private Aufmass
 runtime is ready for a controlled private pilot dry run. It requires no target
 metadata:
