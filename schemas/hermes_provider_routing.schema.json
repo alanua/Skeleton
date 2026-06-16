@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.hermes_provider_routing.schema.json",
+  "title": "Hermes Provider Routing Policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "policy_id",
+    "public_safe",
+    "live_provider_routes_enabled",
+    "provider_names_are_examples",
+    "roles",
+    "budget_gates",
+    "privacy_gates",
+    "aufmass_routing",
+    "failure_modes",
+    "sanitized_payload_contract"
+  ],
+  "properties": {
+    "schema": {"const": "hermes.provider_routing_policy.v0"},
+    "policy_id": {
+      "type": "string",
+      "pattern": "^hermes-provider-routing-[a-z0-9-]+$"
+    },
+    "public_safe": {"type": "boolean", "const": true},
+    "live_provider_routes_enabled": {"type": "boolean", "const": false},
+    "provider_names_are_examples": {"type": "boolean", "const": true},
+    "roles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["planner", "bulk_worker", "critic"],
+      "properties": {
+        "planner": {"$ref": "#/$defs/route_role"},
+        "bulk_worker": {"$ref": "#/$defs/route_role"},
+        "critic": {"$ref": "#/$defs/route_role"}
+      }
+    },
+    "budget_gates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "per_run_budget_required",
+        "token_cap_required",
+        "max_retries_required",
+        "manual_approval_before_live_provider_use",
+        "stop_on_unknown_cost_or_quota"
+      ],
+      "properties": {
+        "per_run_budget_required": {"type": "boolean", "const": true},
+        "token_cap_required": {"type": "boolean", "const": true},
+        "max_retries_required": {"type": "boolean", "const": true},
+        "manual_approval_before_live_provider_use": {
+          "type": "boolean",
+          "const": true
+        },
+        "stop_on_unknown_cost_or_quota": {"type": "boolean", "const": true}
+      }
+    },
+    "privacy_gates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "external_provider_private_data_default",
+        "approval_route_required_for_private_provider_use",
+        "forbidden_without_approval"
+      ],
+      "properties": {
+        "external_provider_private_data_default": {"const": "blocked"},
+        "approval_route_required_for_private_provider_use": {
+          "type": "boolean",
+          "const": true
+        },
+        "forbidden_without_approval": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "enum": [
+              "real_drawings",
+              "drive_links_or_ids",
+              "private_quantities",
+              "customer_data",
+              "secrets",
+              "environment_values",
+              "file_paths",
+              "private_task_packets"
+            ]
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "aufmass_routing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "private_local_hermes_handles_raw_artifacts",
+        "cheap_worker_sanitized_chunks_only_if_approved",
+        "critic_sanitized_aggregate_notes_only_if_approved",
+        "raw_drive_sheets_drawings_private_only"
+      ],
+      "properties": {
+        "private_local_hermes_handles_raw_artifacts": {
+          "type": "boolean",
+          "const": true
+        },
+        "cheap_worker_sanitized_chunks_only_if_approved": {
+          "type": "boolean",
+          "const": true
+        },
+        "critic_sanitized_aggregate_notes_only_if_approved": {
+          "type": "boolean",
+          "const": true
+        },
+        "raw_drive_sheets_drawings_private_only": {
+          "type": "boolean",
+          "const": true
+        }
+      }
+    },
+    "failure_modes": {
+      "type": "array",
+      "minItems": 7,
+      "items": {
+        "type": "string",
+        "enum": [
+          "model_drift",
+          "hallucinated_dimensions",
+          "private_leakage",
+          "provider_outage",
+          "quota_exhaustion",
+          "inconsistent_calibration",
+          "excessive_retries"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "sanitized_payload_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sanitized_only",
+        "no_live_provider_call",
+        "forbidden_content_patterns"
+      ],
+      "properties": {
+        "sanitized_only": {"type": "boolean", "const": true},
+        "no_live_provider_call": {"type": "boolean", "const": true},
+        "forbidden_content_patterns": {
+          "type": "array",
+          "minItems": 5,
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        }
+      }
+    },
+    "notes": {
+      "type": "array",
+      "items": {"type": "string", "maxLength": 240}
+    }
+  },
+  "$defs": {
+    "route_role": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "provider_example",
+        "provider_example_only",
+        "live_route_enabled",
+        "intended_use"
+      ],
+      "properties": {
+        "role": {
+          "type": "string",
+          "enum": ["planner", "bulk_worker", "critic"]
+        },
+        "provider_example": {"type": "string", "minLength": 1},
+        "provider_example_only": {"type": "boolean", "const": true},
+        "live_route_enabled": {"type": "boolean", "const": false},
+        "intended_use": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  }
+}
