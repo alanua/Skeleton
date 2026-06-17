@@ -2141,9 +2141,39 @@ def _publish_existing_issue_worktree_body(
     return str(body["body"])
 
 
+def _publish_target_project_issue_worktree_body(
+    *,
+    target_project: str = "lumenflow",
+    target_repository: str = "alanua/LumenFlow",
+    source_issue: int | str = 123,
+    base_branch: str = "main",
+    output_branch: str = "runner/issue-123",
+    allowed_files: tuple[str, ...] = ("README.md",),
+    draft_pr: str = "true",
+    extra_metadata: tuple[str, ...] = (),
+) -> str:
+    metadata = [
+        f"Target Project: {target_project}",
+        f"Target Repository: {target_repository}",
+        f"Source Issue: {source_issue}",
+        f"Base Branch: {base_branch}",
+        f"Output Branch: {output_branch}",
+        f"Draft PR: {draft_pr}",
+        *extra_metadata,
+        "Allowed Files:",
+    ]
+    metadata.extend(f"- {path}" for path in allowed_files)
+    body = _maintenance_issue(
+        runner.PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR,
+        metadata="\n".join(metadata),
+    )
+    return str(body["body"])
+
+
 def _issue_publish_commands(
     *,
     worktree_path: Path,
+    repository: str = runner.REPO,
     branch: str = "runner/issue-123",
     remote_url: str = "https://github.com/alanua/Skeleton.git",
     changed_files: tuple[str, ...] = ("scripts/runner_poll_github_tasks.py",),
@@ -2159,6 +2189,7 @@ def _issue_publish_commands(
     push_code: int = 0,
     pr_create_code: int = 0,
     pr_create_url: str = PR_URL,
+    commit_message: str = "Publish issue #123 worktree",
     raw_suffix: str = "",
 ) -> object:
     rev_parse_count = 0
@@ -2182,7 +2213,7 @@ def _issue_publish_commands(
             "pr",
             "list",
             "--repo",
-            runner.REPO,
+            repository,
             "--head",
             branch,
         ]:
@@ -2200,7 +2231,7 @@ def _issue_publish_commands(
             "git",
             "commit",
             "-m",
-            "Publish issue #123 worktree",
+            commit_message,
         ]:
             return commit_code, "commit failed output must not leak"
         if command == ["git", "diff", "--quiet", "main...HEAD", "--"]:
@@ -2217,7 +2248,7 @@ def _issue_publish_commands(
             "pr",
             "create",
             "--repo",
-            runner.REPO,
+            repository,
             "--base",
             "main",
         ]:
@@ -2232,6 +2263,40 @@ def _prepare_issue_publish_worktree(root: Path, issue_number: int = 123) -> Path
     worktree_path.mkdir(parents=True)
     (worktree_path / ".git").write_text("gitdir: /tmp/git-dir\n", encoding="utf-8")
     return worktree_path
+
+
+def _target_project_tree(
+    worktree_root: Path, *, runner_enabled: bool = True
+) -> dict[str, object]:
+    workspace_root = worktree_root.parent
+    return {
+        "version": "1.0.0",
+        "default_project": "skeleton",
+        "projects": {
+            "skeleton": {
+                "repo": runner.REPO,
+                "checkout_path": str(workspace_root / "repos" / "Skeleton"),
+                "worktree_root": str(workspace_root / "worktrees" / "skeleton"),
+                "public": True,
+                "runner_enabled": True,
+                "execution_modes": {"codex_issue_worktree": True},
+                "future_parallel_worktrees": True,
+                "runtime_approval_required": False,
+                "worktree_name_prefix": "skeleton",
+            },
+            "lumenflow": {
+                "repo": "alanua/LumenFlow",
+                "checkout_path": str(workspace_root / "repos" / "LumenFlow"),
+                "worktree_root": str(worktree_root),
+                "public": True,
+                "runner_enabled": runner_enabled,
+                "execution_modes": {"codex_issue_worktree": True},
+                "future_parallel_worktrees": True,
+                "runtime_approval_required": True,
+                "worktree_name_prefix": "lumenflow",
+            },
+        },
+    }
 
 
 def test_maintenance_task_bypasses_codex() -> None:
@@ -2517,6 +2582,204 @@ def test_publish_existing_issue_worktree_requires_draft_pr_true() -> None:
 
     assert report.startswith("NEEDS_OPERATOR:")
     assert "reason=draft_pr_required" in report
+
+
+def test_publish_target_project_issue_worktree_pr_uses_project_tree_and_target_repo(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_root = tmp_path / "lumenflow"
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    worktree_path = _prepare_issue_publish_worktree(target_root)
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=_target_project_tree(target_root)
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            repository="alanua/LumenFlow",
+            remote_url="https://github.com/alanua/LumenFlow.git",
+            changed_files=("README.md",),
+            commit_message="Publish target project issue #123 worktree",
+        ),
+    ) as run:
+        report = runner.publish_target_project_issue_worktree_pr(
+            _publish_target_project_issue_worktree_body()
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert runner.PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR in runner.RUNTIME_MAINTENANCE_TASK_IDS
+    assert report.startswith("DONE:")
+    assert "maintenance_task_id=publish_target_project_issue_worktree_pr" in report
+    assert "target_project=lumenflow" in report
+    assert "repository=alanua/LumenFlow" in report
+    assert f"worktree_root={target_root}" in report
+    assert f"issue_worktree={worktree_path}" in report
+    assert ["git", "add", "--", "README.md"] in commands
+    assert [
+        "git",
+        "commit",
+        "-m",
+        "Publish target project issue #123 worktree",
+    ] in commands
+    assert [
+        "git",
+        "push",
+        "origin",
+        "refs/heads/runner/issue-123:refs/heads/runner/issue-123",
+    ] in commands
+    assert [
+        "gh",
+        "pr",
+        "create",
+        "--repo",
+        "alanua/LumenFlow",
+        "--base",
+        "main",
+        "--head",
+        "runner/issue-123",
+        "--title",
+        "Runner task #123",
+        "--body",
+        "Automated Runner publish task from issue #123.",
+        "--draft",
+    ] in commands
+    assert all(
+        "alanua/Skeleton" not in command
+        for command in commands
+        if command[:3] == ["gh", "pr", "create"]
+    )
+    assert all("--force" not in command for command in commands)
+
+
+def test_publish_target_project_issue_worktree_pr_rejects_issue_path_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_root = tmp_path / "lumenflow"
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=_target_project_tree(target_root)
+    ), mock.patch.object(runner, "run_command") as run:
+        path_report = runner.publish_target_project_issue_worktree_pr(
+            _publish_target_project_issue_worktree_body(
+                extra_metadata=("Worktree Path: /tmp/attacker/issue-123",)
+            )
+        )
+        traversal_report = runner.publish_target_project_issue_worktree_pr(
+            _publish_target_project_issue_worktree_body(source_issue="../123")
+        )
+
+    assert path_report.startswith("NEEDS_OPERATOR:")
+    assert "reason=path_input_not_allowed" in path_report
+    assert traversal_report.startswith("NEEDS_OPERATOR:")
+    assert "reason=missing_or_invalid_source_issue" in traversal_report
+    run.assert_not_called()
+
+
+def test_publish_target_project_issue_worktree_pr_rejects_mismatched_repo_project(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_root = tmp_path / "lumenflow"
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=_target_project_tree(target_root)
+    ), mock.patch.object(runner, "run_command") as run:
+        report = runner.publish_target_project_issue_worktree_pr(
+            _publish_target_project_issue_worktree_body(
+                target_repository="alanua/Skeleton"
+            )
+        )
+
+    assert report.startswith("NEEDS_OPERATOR:")
+    assert "reason=target_project_repository_mismatch" in report
+    run.assert_not_called()
+
+
+def test_publish_target_project_issue_worktree_pr_rejects_runner_disabled_project(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_root = tmp_path / "lumenflow"
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    with mock.patch.object(
+        runner,
+        "load_runner_project_tree",
+        return_value=_target_project_tree(target_root, runner_enabled=False),
+    ), mock.patch.object(runner, "run_command") as run:
+        report = runner.publish_target_project_issue_worktree_pr(
+            _publish_target_project_issue_worktree_body()
+        )
+
+    assert report.startswith("NEEDS_OPERATOR:")
+    assert "reason=target_project_runner_disabled" in report
+    run.assert_not_called()
+
+
+def test_publish_target_project_issue_worktree_pr_enforces_allowed_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_root = tmp_path / "lumenflow"
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    worktree_path = _prepare_issue_publish_worktree(target_root)
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=_target_project_tree(target_root)
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            repository="alanua/LumenFlow",
+            remote_url="git@github.com:alanua/LumenFlow.git",
+            changed_files=("README.md", "secrets.env"),
+        ),
+    ) as run:
+        report = runner.publish_target_project_issue_worktree_pr(
+            _publish_target_project_issue_worktree_body()
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("BLOCKED:")
+    assert "reason=changed_tracked_files_outside_allowlist" in report
+    assert all(command[:2] != ["git", "add"] for command in commands)
+    assert all(command[:2] != ["git", "push"] for command in commands)
+
+
+def test_publish_target_project_issue_worktree_pr_ignores_codex_noise_and_reuses_existing_pr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_root = tmp_path / "lumenflow"
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    worktree_path = _prepare_issue_publish_worktree(target_root)
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=_target_project_tree(target_root)
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            repository="alanua/LumenFlow",
+            remote_url="https://github.com/alanua/LumenFlow.git",
+            changed_files=("README.md",),
+            untracked_files=(".codex/session.json",),
+            existing_pr_url="https://github.com/alanua/LumenFlow/pull/55",
+        ),
+    ) as run:
+        report = runner.publish_target_project_issue_worktree_pr(
+            _publish_target_project_issue_worktree_body()
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert "unexpected_untracked_files_count=0" in report
+    assert "existing_pr_url=https://github.com/alanua/LumenFlow/pull/55" in report
+    assert not any(".codex/session.json" in command for command in commands)
+    assert all(command[:3] != ["gh", "pr", "create"] for command in commands)
+    assert all(command[:2] != ["git", "push"] for command in commands)
 
 
 def test_issue_worktree_publish_inspection_valid_metadata_reports_done(
