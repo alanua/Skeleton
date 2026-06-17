@@ -35,6 +35,7 @@ def test_required_projects_are_present() -> None:
         "skeleton",
         "bauclock",
         "lavalamp",
+        "lumenflow",
         "aufmass_private",
         "home_automation",
     } <= set(tree["projects"])
@@ -61,6 +62,12 @@ def test_registry_has_real_runner_paths() -> None:
     assert get_project(tree, "lavalamp")["worktree_root"] == (
         "/home/agent/agent-dev/worktrees/lavalamp"
     )
+    assert get_project(tree, "lumenflow")["checkout_path"] == (
+        "/home/agent/agent-dev/repos/LumenFlow"
+    )
+    assert get_project(tree, "lumenflow")["worktree_root"] == (
+        "/home/agent/agent-dev/worktrees/lumenflow"
+    )
 
 
 def test_current_projects_resolve_through_registry() -> None:
@@ -69,6 +76,7 @@ def test_current_projects_resolve_through_registry() -> None:
     assert get_project_by_repo(tree, "alanua/Skeleton")["worktree_name_prefix"] == "skeleton"
     assert get_project_by_repo(tree, "alanua/bauclock")["worktree_name_prefix"] == "bauclock"
     assert get_project_by_repo(tree, "alanua/Lavalamp")["worktree_name_prefix"] == "lavalamp"
+    assert get_project_by_repo(tree, "alanua/LumenFlow")["worktree_name_prefix"] == "lumenflow"
 
 
 def test_future_registry_entry_resolves_without_code_changes() -> None:
@@ -122,7 +130,12 @@ def test_public_enabled_projects_are_codex_issue_worktree_projects() -> None:
         and project["execution_modes"]["codex_issue_worktree"] is True
     }
 
-    assert public_codex_issue_worktree_projects == {"skeleton", "bauclock", "lavalamp"}
+    assert public_codex_issue_worktree_projects == {
+        "skeleton",
+        "bauclock",
+        "lavalamp",
+        "lumenflow",
+    }
 
 
 def test_bauclock_stage_1_is_local_worktree_enabled() -> None:
@@ -146,6 +159,22 @@ def test_lavalamp_is_local_worktree_enabled_with_runtime_approval() -> None:
         "live_cross_repo": False,
     }
     assert lavalamp["runtime_approval_required"] is True
+
+
+def test_lumenflow_is_bootstrap_public_safe_route() -> None:
+    lumenflow = get_project(loaded_tree(), "lumenflow")
+
+    assert lumenflow["repo"] == "alanua/LumenFlow"
+    assert lumenflow["checkout_path"] == "/home/agent/agent-dev/repos/LumenFlow"
+    assert lumenflow["worktree_root"] == "/home/agent/agent-dev/worktrees/lumenflow"
+    assert lumenflow["public"] is True
+    assert lumenflow["runner_enabled"] is True
+    assert lumenflow["execution_modes"] == {
+        "planning_only": False,
+        "codex_issue_worktree": True,
+        "live_cross_repo": False,
+    }
+    assert lumenflow["runtime_approval_required"] is True
 
 
 def test_aufmass_private_is_enabled_only_for_gated_local_worktree_pilot() -> None:

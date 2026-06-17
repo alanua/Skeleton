@@ -19,6 +19,7 @@ CALLBACK_REPO_KEYS = {
     "s": "alanua/Skeleton",
     "b": "alanua/bauclock",
     "l": "alanua/Lavalamp",
+    "f": "alanua/LumenFlow",
 }
 CALLBACK_REPO_KEY_BY_REPO = {repo: key for key, repo in CALLBACK_REPO_KEYS.items()}
 GITHUB_API_BASE = "https://api.github.com"
@@ -45,7 +46,7 @@ _CALLBACK_RE = re.compile(
     r"(?P<head_marker>[0-9a-f]{8}|nosha):(?P<digest>[0-9a-f]{12})$"
 )
 _CALLBACK_V2_RE = re.compile(
-    r"^tpr2:(?P<action>approve|reject|details):(?P<repo_key>[sbl]):"
+    r"^tpr2:(?P<action>approve|reject|details):(?P<repo_key>[sblf]):"
     r"p(?P<pr_number>[1-9][0-9]{0,9}):"
     r"(?P<head_marker>[0-9a-f]{8}|nosha):(?P<digest>[0-9a-f]{12})$"
 )

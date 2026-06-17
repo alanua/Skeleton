@@ -226,6 +226,30 @@ Next actions:
 - Keep effect math and cylinder coordinate work as project-specific context with testable assumptions.
 - Avoid mixing with Jeeves runtime decisions.
 
+### lumenflow
+
+- Means: local-first browser/WebGL/p5.js generative ambient projection visuals
+- Repo: `alanua/LumenFlow`
+- Entrypoint: `projects/lumenflow/PROJECT_MANIFEST.yaml`
+- State file: `projects/lumenflow/STATE.yaml`
+- Status: `BOOTSTRAP_PLANNED`
+- State role: `handoff_not_canon_truth`
+- Last verified: `2026-06-17`
+- Evidence source: Skeleton issue 998 task packet and public-safe project registry metadata
+
+Summary:
+
+- LumenFlow is a public-safe code project for local-first generative ambient projection visuals.
+- Initial scope is a browser-based visual player targeting 1080p with particles, flow fields, trails, glow, and fullscreen or kiosk run notes for Linux Mint.
+- The project is bootstrap planned, not production.
+- Private home setup details, private photos, local IPs, personal device inventory, secrets, paid APIs, and live device or runtime changes are out of scope for stage 0.
+
+Next actions:
+
+- Keep implementation work routed to alanua/LumenFlow through the registered public project route.
+- Keep Skeleton changes limited to routing metadata and public-safe handoff context.
+- Do not add private media, secrets, local device configuration, Home Assistant integration, projector purchase recommendations, or runtime changes in stage 0.
+
 ### bauclock
 
 - Means: construction time tracking project
@@ -493,10 +517,11 @@ Add the requested bounded change here.
 ````
 
 The current queue repository stays `alanua/Skeleton`. Target routing stage 1
-accepts only `alanua/Skeleton`, `alanua/bauclock`, and `alanua/Lavalamp`, and
-uses that metadata for worktree path planning only. Cross-repository Codex
-execution, commits, pushes, and draft PR creation are not enabled in this
-stage.
+accepts the public projects registered in `PROJECT_TREE.yaml`, including
+`alanua/Skeleton`, `alanua/bauclock`, `alanua/Lavalamp`, and
+`alanua/LumenFlow`, and uses that metadata for worktree path planning only.
+Cross-repository Codex execution, commits, pushes, and draft PR creation are
+not enabled in this stage.
 
 Issue workspaces are standalone local clones under the configured worktree root,
 not linked Git worktrees. This keeps each issue workspace's writable Git metadata

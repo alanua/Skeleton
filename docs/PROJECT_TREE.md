@@ -21,4 +21,5 @@ worktrees, run git, call subprocesses, or write to the filesystem. Runner uses
 the metadata to decide which projects may execute from issue worktrees:
 Skeleton runs through the normal Skeleton issue-worktree PR flow, BauClock runs
 through the local target-project issue-worktree Stage 1 route without creating
-target-repo output, and Lavalamp remains planning-only.
+target-repo output, Lavalamp uses the public project route, and LumenFlow is
+registered as a public-safe bootstrap-planned code project route.

@@ -819,7 +819,12 @@ def test_runner_task_accepts_allowlisted_target_repository() -> None:
         has_target_repository_metadata=True,
     )
     assert runner.ALLOWED_TARGET_REPOSITORIES == frozenset(
-        ("alanua/Skeleton", "alanua/bauclock", "alanua/Lavalamp")
+        (
+            "alanua/Skeleton",
+            "alanua/bauclock",
+            "alanua/Lavalamp",
+            "alanua/LumenFlow",
+        )
     )
 
 
@@ -1805,6 +1810,21 @@ def test_target_repo_pr_card_uses_details_only_buttons() -> None:
     assert [button["text"] for button in buttons] == ["Деталі", "Відкрити PR"]
     assert buttons[0]["callback_data"].startswith("tpr2:details:l:p123:nosha:")
     assert len(buttons[0]["callback_data"].encode("utf-8")) <= runner.TELEGRAM_CALLBACK_DATA_LIMIT
+
+
+def test_lumenflow_target_repo_pr_card_uses_repo_callback_key() -> None:
+    card = runner.build_done_pr_ready_card_payload(
+        DONE_REPORT,
+        target_repository="alanua/LumenFlow",
+    )
+    assert card is not None
+    reply_markup = runner.card_payload_to_inline_keyboard(card)
+
+    details_button = reply_markup["inline_keyboard"][0][0]
+    assert details_button["callback_data"].startswith("tpr2:details:f:p123:nosha:")
+    assert len(details_button["callback_data"].encode("utf-8")) <= (
+        runner.TELEGRAM_CALLBACK_DATA_LIMIT
+    )
 
 
 def test_done_pr_card_keeps_technical_details_in_payload() -> None:

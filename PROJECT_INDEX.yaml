@@ -22,6 +22,11 @@ projects:
     entrypoint: projects/lavalamp/PROJECT_MANIFEST.yaml
     means: WLED transparent cylinder lava lamp project
 
+  lumenflow:
+    repo: alanua/LumenFlow
+    entrypoint: projects/lumenflow/PROJECT_MANIFEST.yaml
+    means: local-first browser/WebGL/p5.js generative ambient projection visuals
+
   bauclock:
     repo: alanua/bauclock
     entrypoint: projects/bauclock/PROJECT_MANIFEST.yaml

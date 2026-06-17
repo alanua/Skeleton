@@ -103,6 +103,21 @@ def test_parses_valid_v2_target_repo_callback_data() -> None:
     assert parsed.repo_key == "b"
 
 
+def test_parses_valid_v2_lumenflow_callback_data() -> None:
+    callback_data = signed_callback_data(
+        "details",
+        head_marker="nosha",
+        repo_key="f",
+        version=2,
+    )
+    parsed = poller.parse_callback_data(callback_data)
+
+    assert parsed.action == "details"
+    assert parsed.repo == "alanua/LumenFlow"
+    assert parsed.version == 2
+    assert parsed.repo_key == "f"
+
+
 @pytest.mark.parametrize(
     "callback_data",
     (
