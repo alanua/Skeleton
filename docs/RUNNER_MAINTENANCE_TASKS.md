@@ -78,6 +78,62 @@ This task proves the Runner can reach the private SQLite boundary. It does not
 wire Hermes runtime, execute Aufmass, retrieve private task state, or enable live
 provider/model routing.
 
+`hermes_private_memory_bridge_check` is the allowlisted Runner maintenance path
+for checking the Hermes private-memory bridge added in PR #994. It may only:
+
+1. Call `core.hermes_private_memory` bridge functions.
+2. Start with read-only orientation through the existing private-memory
+   connector boundary.
+3. Default to read-only orientation when no fenced task payload is provided.
+4. Run a synthetic heartbeat write only when the fenced task payload explicitly
+   requests `operation=heartbeat` and `write_enabled=true`.
+5. Run a synthetic note write only when the fenced task payload explicitly
+   requests `operation=note` and `write_enabled=true`.
+6. Report sanitized aggregate/token fields only: bridge schema, operation,
+   connector schema/status, configured/openable booleans, integrity and schema
+   booleans, writable/heartbeat booleans, bridge write gate status, error class,
+   and next-action token.
+7. Fail closed as `BLOCKED` for missing config, non-writable config, write
+   requests without the explicit gate, connector failure, or any privacy
+   violation.
+
+It must not report raw config paths, database paths, registry paths, table names,
+SQL text, row payloads, environment values, secrets, Drive identifiers, customer
+data, room names, quantities, addresses, or file output. It does not bypass the
+private-memory connector, does not execute Codex, and does not run shell text
+from the issue body.
+
+Example read-only orientation:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: hermes_private_memory_bridge_check
+```
+
+Example gated synthetic heartbeat:
+
+````text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: hermes_private_memory_bridge_check
+
+```task
+operation=heartbeat
+write_enabled=true
+```
+````
+
+Example gated synthetic note:
+
+````text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: hermes_private_memory_bridge_check
+
+```task
+operation=note
+write_enabled=true
+```
+````
+
 `check_project_checkout` is read-only and must include target project metadata:
 
 ```text
