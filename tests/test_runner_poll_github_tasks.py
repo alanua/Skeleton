@@ -1725,9 +1725,10 @@ def test_done_pr_report_builds_card_payload_from_runner_binding() -> None:
 
     assert localized_card is not None
     assert localized_card["text"] == (
-        "Проєкт: Skeleton\n"
-        "Статус: очікує схвалення\n"
-        "Коментар: Перевір у ChatGPT перед схваленням."
+        "Project: Skeleton\n"
+        "PR: #123\n"
+        "Status: очікує схвалення\n"
+        "Comment: Перевір у ChatGPT перед схваленням."
     )
     assert localized_card["buttons"][0]["label"] == "Деталі"
 
@@ -1751,12 +1752,13 @@ def test_done_pr_card_hides_technical_details_from_operator_text() -> None:
 
     text = str(card["text"])
     assert text == (
-        "Проєкт: Skeleton\n"
-        "Статус: очікує схвалення\n"
-        "Коментар: Перевір у ChatGPT перед схваленням."
+        "Project: Skeleton\n"
+        "PR: #123\n"
+        "Status: очікує схвалення\n"
+        "Comment: Перевір у ChatGPT перед схваленням."
     )
     assert HEAD_SHA not in text
-    assert "PR:" not in text
+    assert "Issue:" not in text
     assert "target_repo" not in text
     assert "Base:" not in text
     assert "Head:" not in text
@@ -1775,7 +1777,25 @@ def test_done_pr_card_shows_default_target_repo() -> None:
     assert card is not None
 
     text = str(card["text"])
-    assert "Проєкт: Skeleton" in text
+    assert "Project: Skeleton" in text
+    assert "PR: #123" in text
+    assert "Issue:" not in text
+
+
+def test_done_pr_card_shows_source_issue_and_pr_when_source_issue_available() -> None:
+    card = runner.build_done_pr_ready_card_payload(
+        DONE_REPORT,
+        source_issue_number=129,
+    )
+    assert card is not None
+
+    assert str(card["text"]) == (
+        "Project: Skeleton\n"
+        "Issue: #129\n"
+        "PR: #123\n"
+        "Status: очікує схвалення\n"
+        "Comment: Перевір у ChatGPT перед схваленням."
+    )
 
 
 def test_done_pr_card_shows_target_repo_without_misleading_repository_line() -> None:
@@ -1786,7 +1806,8 @@ def test_done_pr_card_shows_target_repo_without_misleading_repository_line() -> 
     assert card is not None
 
     text = str(card["text"])
-    assert "Проєкт: bauclock" in text
+    assert "Project: bauclock" in text
+    assert "PR: #123" in text
     assert "Repository: alanua/Skeleton" not in text
     assert "target_repo" not in text
     assert "Рекомендація: спочатку переглянути в ChatGPT або відкрити PR." not in text
@@ -1875,9 +1896,10 @@ def test_approve_reject_buttons_require_reliable_sha_and_changed_files() -> None
 
     assert [button["text"] for button in buttons] == ["Деталі", "Відкрити PR"]
     assert str(card["text"]) == (
-        "Проєкт: Skeleton\n"
-        "Статус: готово до перегляду\n"
-        "Коментар: Відкрий PR, якщо потрібні деталі."
+        "Project: Skeleton\n"
+        "PR: #123\n"
+        "Status: готово до перегляду\n"
+        "Comment: Відкрий PR, якщо потрібні деталі."
     )
 
 
@@ -1951,7 +1973,10 @@ def test_done_pr_card_uses_target_repository_from_issue_body() -> None:
     assert send.call_count == 1
     text = send.call_args.args[0]
     reply_markup = send.call_args.args[1]
-    assert "Проєкт: bauclock" in text
+    assert "Project: bauclock" in text
+    assert "Issue: #129" in text
+    assert "PR: #123" in text
+    assert "Issue: #123" not in text
     assert "Repository: alanua/Skeleton" not in text
     assert "target_repo" not in text
     assert [row[0]["text"] for row in reply_markup["inline_keyboard"]] == [
