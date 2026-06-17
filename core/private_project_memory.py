@@ -18,6 +18,18 @@ PROJECT_MEMORY_NEXT_ACTIONS = (
     "review_project_memory_attention",
     "initialize_project_memory_schema",
 )
+PROJECT_MEMORY_STATUS_ALLOWED_KEYS = frozenset(
+    (
+        "schema",
+        "project_ref",
+        "state",
+        "attention",
+        "schema_ready",
+        "stale",
+        "task_backlog_count",
+        "open_decision_count",
+    )
+)
 
 _SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _UNSAFE_KEY_PARTS = (
@@ -136,6 +148,7 @@ def _summarize_records(records: Iterable[Mapping[str, Any]]) -> ProjectMemoryReg
 def _validate_project_status(record: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(record, Mapping):
         raise PrivateProjectMemoryConfigError("project status must be an object")
+    _reject_unallowed_project_status_keys(record)
     _reject_unsafe_keys(record)
 
     if record.get("schema") != PROJECT_MEMORY_STATUS_SCHEMA:
@@ -168,6 +181,11 @@ def _validate_project_status(record: Mapping[str, Any]) -> dict[str, Any]:
         "task_backlog_count": task_backlog_count,
         "open_decision_count": open_decision_count,
     }
+
+
+def _reject_unallowed_project_status_keys(record: Mapping[str, Any]) -> None:
+    if set(record) - PROJECT_MEMORY_STATUS_ALLOWED_KEYS:
+        raise PrivateProjectMemoryPrivacyError("unsupported project status key")
 
 
 def _next_action(

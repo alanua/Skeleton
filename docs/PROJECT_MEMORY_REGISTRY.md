@@ -49,6 +49,21 @@ Each local record describes a single project using public-safe status fields:
 The current implementation does not ingest real files. Callers pass in-memory
 records that have already been reduced locally to public-safe fields.
 
+Runtime validation enforces this exact status-record key allowlist before any
+aggregation occurs:
+
+- `schema`
+- `project_ref`
+- `state`
+- `attention`
+- `schema_ready`
+- `stale`
+- `task_backlog_count`
+- `open_decision_count`
+
+Any other status-record key, including write-shaped markers such as `operation`,
+`action`, `actor`, or `neutral_unknown`, fails closed before aggregation.
+
 ## Aggregate Report
 
 The aggregate report uses schema
