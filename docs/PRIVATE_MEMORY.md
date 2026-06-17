@@ -11,6 +11,10 @@ healthcheck that reaches this connector through local server config only. This
 does not wire Hermes runtime, execute Aufmass, or enable live provider or model
 routing.
 
+`docs/HERMES_PRIVATE_MEMORY.md` defines the Hermes bridge contract v0. That
+bridge is read-first, write-gated, and uses this connector boundary only; it does
+not open private storage directly or publish private memory values.
+
 ## Boundary
 
 - GitHub receives only public-safe aggregate status such as whether a database is
@@ -62,6 +66,8 @@ database path stay local on Hetzner and are never committed.
   storage.
 - Public-safe heartbeat write/read using synthetic IDs.
 - Public-safe task-state heartbeat recording using synthetic task IDs.
+- Hermes private-memory bridge orientation and write-gated synthetic heartbeat
+  or note markers through `core/hermes_private_memory.py`.
 - Cross-project registry summarization through
   `core/private_project_memory.py`, limited to public-safe aggregate counts and
   next-action tokens.
