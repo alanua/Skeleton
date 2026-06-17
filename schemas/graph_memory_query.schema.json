@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.graph_memory_query.schema.json",
+  "title": "Graph Memory Public-Safe Query Contract",
+  "oneOf": [
+    {"$ref": "#/$defs/query_request"},
+    {"$ref": "#/$defs/query_report"}
+  ],
+  "$defs": {
+    "safe_token": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+    },
+    "non_negative_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "query_kind": {
+      "type": "string",
+      "enum": [
+        "relationship_overview",
+        "dependency_overview",
+        "staleness_overview",
+        "attention_overview",
+        "provenance_overview",
+        "blocked_item_overview"
+      ]
+    },
+    "query_status": {
+      "type": "string",
+      "enum": ["DONE", "BLOCKED"]
+    },
+    "project_scope": {
+      "type": "string",
+      "enum": ["single_project", "cross_project", "synthetic_fixture"]
+    },
+    "attention_state": {
+      "type": "string",
+      "enum": ["none", "review", "operator", "blocked", "unknown"]
+    },
+    "next_operator_action": {
+      "type": "string",
+      "enum": [
+        "none",
+        "configure_graph_memory",
+        "review_blocked_graph_query",
+        "refresh_canonical_memory",
+        "review_graph_provenance",
+        "run_public_safe_graph_pilot"
+      ]
+    },
+    "query_filters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "scope": {"$ref": "#/$defs/project_scope"},
+        "include_stale": {"type": "boolean"},
+        "include_blocked": {"type": "boolean"},
+        "attention": {"$ref": "#/$defs/attention_state"},
+        "synthetic_only": {"type": "boolean"}
+      }
+    },
+    "query_request": {
+      "type": "object",
+      "required": [
+        "schema",
+        "query_ref",
+        "project_ref",
+        "query_kind",
+        "filters"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "skeleton.graph_memory.query_request.v0"},
+        "query_ref": {"$ref": "#/$defs/safe_token"},
+        "project_ref": {"$ref": "#/$defs/safe_token"},
+        "query_kind": {"$ref": "#/$defs/query_kind"},
+        "filters": {"$ref": "#/$defs/query_filters"}
+      }
+    },
+    "aggregate_counts": {
+      "type": "object",
+      "required": [
+        "node_count",
+        "edge_count",
+        "relationship_count",
+        "stale_count",
+        "blocked_count",
+        "missing_provenance_count"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "node_count": {"$ref": "#/$defs/non_negative_count"},
+        "edge_count": {"$ref": "#/$defs/non_negative_count"},
+        "relationship_count": {"$ref": "#/$defs/non_negative_count"},
+        "stale_count": {"$ref": "#/$defs/non_negative_count"},
+        "blocked_count": {"$ref": "#/$defs/non_negative_count"},
+        "missing_provenance_count": {"$ref": "#/$defs/non_negative_count"}
+      }
+    },
+    "query_report": {
+      "type": "object",
+      "required": [
+        "schema",
+        "status",
+        "query_ref",
+        "query_kind",
+        "public_safe",
+        "synthetic_only",
+        "aggregate_counts",
+        "error_class",
+        "next_operator_action"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "skeleton.graph_memory.query_report.v0"},
+        "status": {"$ref": "#/$defs/query_status"},
+        "query_ref": {"$ref": "#/$defs/safe_token"},
+        "query_kind": {"$ref": "#/$defs/query_kind"},
+        "public_safe": {"const": true},
+        "synthetic_only": {"type": "boolean"},
+        "aggregate_counts": {"$ref": "#/$defs/aggregate_counts"},
+        "error_class": {"type": ["string", "null"]},
+        "next_operator_action": {"$ref": "#/$defs/next_operator_action"}
+      }
+    }
+  }
+}
