@@ -1833,6 +1833,7 @@ TELEGRAM_CALLBACK_REPO_KEYS = {
     "alanua/Skeleton": "s",
     "alanua/bauclock": "b",
     "alanua/Lavalamp": "l",
+    "alanua/LumenFlow": "f",
 }
 _NOTIFICATION_ISSUE_CACHE: dict[tuple[int, str], dict[str, Any]] = {}
 

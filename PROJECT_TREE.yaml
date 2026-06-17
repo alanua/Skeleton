@@ -49,6 +49,22 @@ projects:
     worktree_name_prefix: lavalamp
     description: Public Lavalamp project registered for future Runner routing.
 
+  lumenflow:
+    repo: alanua/LumenFlow
+    checkout_path: /home/agent/agent-dev/repos/LumenFlow
+    worktree_root: /home/agent/agent-dev/worktrees/lumenflow
+    public: true
+    runner_enabled: true
+    execution_modes:
+      planning_only: false
+      codex_issue_worktree: true
+      live_cross_repo: false
+    requires_explicit_approval_for_mode_change: true
+    future_parallel_worktrees: true
+    runtime_approval_required: true
+    worktree_name_prefix: lumenflow
+    description: Public-safe LumenFlow generative visuals project registered for bootstrap Runner routing.
+
   aufmass_private:
     repo: private/aufmass
     checkout_path: /home/agent/agent-dev/worktrees/aufmass-private/main

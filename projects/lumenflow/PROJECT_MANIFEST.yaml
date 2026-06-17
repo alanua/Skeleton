@@ -1,0 +1,12 @@
+schema: skeleton.project_manifest.v1
+project_id: lumenflow
+name: LumenFlow
+status: BOOTSTRAP_PLANNED
+entrypoint: projects/lumenflow/PROJECT_MANIFEST.yaml
+read_order:
+  - projects/lumenflow/PROJECT_MANIFEST.yaml
+  - projects/lumenflow/STATE.yaml
+source_repo: alanua/LumenFlow
+privacy_class: public_safe_code_project
+domain: home-automation/generative-visuals
+means: Local-first generative ambient projection player targeting 1080p browser-based visuals on older Linux Mint media PCs and used home projectors.

@@ -1,0 +1,15 @@
+schema: skeleton.project_state.v1
+project_id: lumenflow
+status: BOOTSTRAP_PLANNED
+state_role: handoff_not_canon_truth
+last_verified: '2026-06-17'
+evidence_source: Skeleton issue 998 task packet and public-safe project registry metadata
+summary:
+  - LumenFlow is a public-safe code project for local-first generative ambient projection visuals.
+  - Initial scope is a browser-based visual player targeting 1080p with particles, flow fields, trails, glow, and fullscreen or kiosk run notes for Linux Mint.
+  - The project is bootstrap planned, not production.
+  - Private home setup details, private photos, local IPs, personal device inventory, secrets, paid APIs, and live device or runtime changes are out of scope for stage 0.
+next_actions:
+  - Keep implementation work routed to alanua/LumenFlow through the registered public project route.
+  - Keep Skeleton changes limited to routing metadata and public-safe handoff context.
+  - Do not add private media, secrets, local device configuration, Home Assistant integration, projector purchase recommendations, or runtime changes in stage 0.
