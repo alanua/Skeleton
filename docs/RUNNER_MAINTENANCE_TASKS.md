@@ -78,6 +78,33 @@ This task proves the Runner can reach the private SQLite boundary. It does not
 wire Hermes runtime, execute Aufmass, retrieve private task state, or enable live
 provider/model routing.
 
+`hermes_private_memory_bridge_check` is a public-safe aggregate bridge check for
+the Hermes private-memory adapter. It requires no target metadata:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: hermes_private_memory_bridge_check
+```
+
+It may only:
+
+1. Call the Hermes private-memory bridge adapter functions.
+2. Run the fixed sequence: read-only orient, blocked heartbeat write without an
+   explicit gate, gated synthetic heartbeat, and gated synthetic note marker.
+3. Report only aggregate status fields for that sequence:
+   `hermes_bridge_status`, `orient_status`, `blocked_write_status`,
+   `gated_heartbeat_status`, `gated_note_status`,
+   `public_safe_report_ok`, `error_class`, and `next_operator_action`.
+4. Fail closed as `BLOCKED` with the same aggregate field shape if any bridge
+   function raises.
+
+It must not report exception messages, raw config paths, database paths, table
+names, SQL text, row payloads, environment values, secrets, tokens, Drive
+identifiers, customer data, room names, quantities, addresses, or private memory
+content. Bridge exceptions are summarized with safe tokens such as
+`HermesBridgeException` and `safe_operator_review`; they must not fall through
+to the generic maintenance-step exception report.
+
 `check_project_checkout` is read-only and must include target project metadata:
 
 ```text
