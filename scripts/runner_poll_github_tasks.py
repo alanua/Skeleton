@@ -1828,10 +1828,10 @@ def build_telegram_message(
         ]
     else:
         lines = [
-            f"project: {_telegram_project_name(target_repository)}",
-            f"target_repo: {target_repository}",
-            f"issue: #{issue_number}",
-            f"status: {status}",
+            f"Проєкт: {_telegram_project_name(target_repository)}",
+            f"Репозиторій: {target_repository}",
+            f"Задача: #{issue_number}",
+            f"Статус: {status}",
         ]
     if report:
         pr_url = extract_pr_url(report)
@@ -1921,13 +1921,20 @@ def _build_pr_ready_operator_text(
         if include_approval_instruction
         else "Відкрий PR, якщо потрібні деталі."
     )
-    lines = [
-        f"project: {_telegram_project_name(target_repository)}",
-        f"target_repo: {target_repository}",
-    ]
-    if source_issue_number is not None:
-        lines.append(f"issue: #{source_issue_number}")
-    lines.extend((f"status: {status}", f"comment: {comment}"))
+    if target_repository == REPO:
+        lines = [
+            f"Проєкт: {_telegram_project_name(target_repository)}",
+            f"Статус: {status}",
+            f"Коментар: {comment}",
+        ]
+    else:
+        lines = [
+            f"Проєкт: {_telegram_project_name(target_repository)}",
+            f"Репозиторій: {target_repository}",
+        ]
+        if source_issue_number is not None:
+            lines.append(f"Задача: #{source_issue_number}")
+        lines.extend((f"Статус: {status}", f"Коментар: {comment}"))
     return "\n".join(lines)
 
 
