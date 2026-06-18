@@ -26,6 +26,11 @@ if str(ROOT) not in sys.path:
 
 from core.audit_ledger import AuditLedger, validate_public_safe_payload
 from core.aufmass_source_pack import validate_source_pack_manifest
+from core.hermes_private_memory import (
+    orient_hermes_private_memory,
+    record_hermes_private_memory_note,
+    write_hermes_private_memory_heartbeat,
+)
 from core.private_memory import healthcheck_private_memory, write_public_heartbeat
 from core.project_tree import get_project, get_project_by_repo, load_project_tree
 from core.skeleton_memory import SkeletonMemory
@@ -86,6 +91,7 @@ VALIDATE_PR_BRANCH = "validate_pr_branch"
 PREFLIGHT_PR_REFRESH = "preflight_pr_refresh"
 HERMES_WORKER_PREFLIGHT = "hermes_worker_preflight"
 PRIVATE_MEMORY_HEALTHCHECK = "private_memory_healthcheck"
+HERMES_PRIVATE_MEMORY_BRIDGE_CHECK = "hermes_private_memory_bridge_check"
 PREPARE_AUFMASS_PRIVATE_RUNTIME = "prepare_aufmass_private_runtime"
 RUN_AUFMASS_PRIVATE_DXF_REVIEW = "run_aufmass_private_dxf_review"
 SUMMARIZE_AUFMASS_PRIVATE_REVIEW = "summarize_aufmass_private_review"
@@ -110,6 +116,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         PREFLIGHT_PR_REFRESH,
         HERMES_WORKER_PREFLIGHT,
         PRIVATE_MEMORY_HEALTHCHECK,
+        HERMES_PRIVATE_MEMORY_BRIDGE_CHECK,
         PREPARE_AUFMASS_PRIVATE_RUNTIME,
         RUN_AUFMASS_PRIVATE_DXF_REVIEW,
         SUMMARIZE_AUFMASS_PRIVATE_REVIEW,
@@ -2456,6 +2463,7 @@ _PRIVATE_MEMORY_UNSAFE_VALUE_RE = re.compile(
     r"(?i)(/|\\|file:|\.sqlite\b|\.db\b|secret|token|password|credential|drive|"
     r"private_memory_[a-z_]*heartbeat|select\s|create\s+table)"
 )
+_HERMES_BRIDGE_SAFE_STATUS_VALUES = frozenset({"DONE", "BLOCKED"})
 
 
 def _private_memory_healthcheck_write_requested(body: str) -> tuple[bool, str | None]:
@@ -2538,6 +2546,84 @@ def private_memory_healthcheck(body: str = "") -> str:
         return _maintenance_report("DONE", task_id, status_lines, "met")
     status_lines.append("reason=private_memory_healthcheck_not_ready")
     return _maintenance_report("BLOCKED", task_id, status_lines, "not_met")
+
+
+def _hermes_bridge_step_status(report: object) -> str:
+    if not isinstance(report, dict):
+        return "BLOCKED"
+    status = report.get("status")
+    if status in _HERMES_BRIDGE_SAFE_STATUS_VALUES:
+        return str(status)
+    return "BLOCKED"
+
+
+def _hermes_bridge_exception_report(task_id: str) -> str:
+    return _maintenance_report(
+        "BLOCKED",
+        task_id,
+        [
+            "hermes_bridge_status=BLOCKED",
+            "orient_status=BLOCKED",
+            "blocked_write_status=BLOCKED",
+            "gated_heartbeat_status=BLOCKED",
+            "gated_note_status=BLOCKED",
+            "public_safe_report_ok=true",
+            "error_class=HermesBridgeException",
+            "next_operator_action=safe_operator_review",
+        ],
+        "not_met",
+    )
+
+
+def hermes_private_memory_bridge_check() -> str:
+    task_id = HERMES_PRIVATE_MEMORY_BRIDGE_CHECK
+    try:
+        orient_report = orient_hermes_private_memory(env=os.environ)
+        blocked_write_report = write_hermes_private_memory_heartbeat(
+            "synthetic-runner-hermes-bridge-blocked-write-v0",
+            env=os.environ,
+        )
+        gated_heartbeat_report = write_hermes_private_memory_heartbeat(
+            "synthetic-runner-hermes-bridge-heartbeat-v0",
+            write_enabled=True,
+            env=os.environ,
+        )
+        gated_note_report = record_hermes_private_memory_note(
+            "synthetic-runner-hermes-bridge-note-v0",
+            "runner bridge check",
+            write_enabled=True,
+            env=os.environ,
+        )
+    except Exception:
+        return _hermes_bridge_exception_report(task_id)
+
+    orient_status = _hermes_bridge_step_status(orient_report)
+    blocked_write_status = _hermes_bridge_step_status(blocked_write_report)
+    gated_heartbeat_status = _hermes_bridge_step_status(gated_heartbeat_report)
+    gated_note_status = _hermes_bridge_step_status(gated_note_report)
+    bridge_status = (
+        "DONE"
+        if blocked_write_status == "BLOCKED"
+        and gated_heartbeat_status == "DONE"
+        and gated_note_status == "DONE"
+        else "BLOCKED"
+    )
+    next_operator_action = "none" if bridge_status == "DONE" else "safe_operator_review"
+    return _maintenance_report(
+        bridge_status,
+        task_id,
+        [
+            f"hermes_bridge_status={bridge_status}",
+            f"orient_status={orient_status}",
+            f"blocked_write_status={blocked_write_status}",
+            f"gated_heartbeat_status={gated_heartbeat_status}",
+            f"gated_note_status={gated_note_status}",
+            "public_safe_report_ok=true",
+            "error_class=none",
+            f"next_operator_action={next_operator_action}",
+        ],
+        "met" if bridge_status == "DONE" else "not_met",
+    )
 
 
 def _aufmass_private_registered_paths() -> tuple[Path | None, Path | None, str | None]:
@@ -6267,6 +6353,8 @@ def dispatch_runtime_maintenance_task(
             return hermes_worker_preflight()
         if task_id == PRIVATE_MEMORY_HEALTHCHECK:
             return private_memory_healthcheck(body)
+        if task_id == HERMES_PRIVATE_MEMORY_BRIDGE_CHECK:
+            return hermes_private_memory_bridge_check()
         if task_id == PREPARE_AUFMASS_PRIVATE_RUNTIME:
             return prepare_aufmass_private_runtime()
         if task_id == RUN_AUFMASS_PRIVATE_DXF_REVIEW:
