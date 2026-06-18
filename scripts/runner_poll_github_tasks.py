@@ -1815,13 +1815,24 @@ def extract_runner_report_pr_binding(
 
 
 def build_telegram_message(
-    issue_number: int, status: str, report: str | None = None
+    issue_number: int,
+    status: str,
+    report: str | None = None,
+    target_repository: str | None = None,
 ) -> str:
-    lines = [
-        f"Repository: {REPO}",
-        f"Issue: #{issue_number}",
-        f"Status: {status}",
-    ]
+    if target_repository is None:
+        lines = [
+            f"Repository: {REPO}",
+            f"Issue: #{issue_number}",
+            f"Status: {status}",
+        ]
+    else:
+        lines = [
+            f"project: {_telegram_project_name(target_repository)}",
+            f"target_repo: {target_repository}",
+            f"issue: #{issue_number}",
+            f"status: {status}",
+        ]
     if report:
         pr_url = extract_pr_url(report)
         if pr_url:
@@ -1900,6 +1911,7 @@ def _build_pr_ready_operator_text(
     pr_number: int,
     target_repository: str = REPO,
     *,
+    source_issue_number: int | None = None,
     include_approval_instruction: bool = True,
 ) -> str:
     del pr_number
@@ -1910,15 +1922,20 @@ def _build_pr_ready_operator_text(
         else "Відкрий PR, якщо потрібні деталі."
     )
     lines = [
-        f"Проєкт: {_telegram_project_name(target_repository)}",
-        f"Статус: {status}",
-        f"Коментар: {comment}",
+        f"project: {_telegram_project_name(target_repository)}",
+        f"target_repo: {target_repository}",
     ]
+    if source_issue_number is not None:
+        lines.append(f"issue: #{source_issue_number}")
+    lines.extend((f"status: {status}", f"comment: {comment}"))
     return "\n".join(lines)
 
 
 def _localize_pr_ready_card_payload(
-    card_payload: dict[str, Any], pr_number: int, target_repository: str = REPO
+    card_payload: dict[str, Any],
+    pr_number: int,
+    target_repository: str = REPO,
+    source_issue_number: int | None = None,
 ) -> dict[str, Any]:
     buttons = []
     for button in card_payload.get("buttons", []):
@@ -1938,6 +1955,7 @@ def _localize_pr_ready_card_payload(
         "text": _build_pr_ready_operator_text(
             pr_number,
             target_repository,
+            source_issue_number=source_issue_number,
             include_approval_instruction=True,
         ),
         "buttons": buttons,
@@ -1945,13 +1963,17 @@ def _localize_pr_ready_card_payload(
 
 
 def _build_details_only_card_payload(
-    pr_url: str, pr_number: int, target_repository: str = REPO
+    pr_url: str,
+    pr_number: int,
+    target_repository: str = REPO,
+    source_issue_number: int | None = None,
 ) -> dict[str, Any]:
     callback_base = {"repo": target_repository, "pr_number": pr_number, "pr_url": pr_url}
     return {
         "text": _build_pr_ready_operator_text(
             pr_number,
             target_repository,
+            source_issue_number=source_issue_number,
             include_approval_instruction=False,
         ),
         "buttons": [
@@ -1971,7 +1993,9 @@ def _build_details_only_card_payload(
 
 
 def build_done_pr_ready_card_payload(
-    report: str, target_repository: str = REPO
+    report: str,
+    target_repository: str = REPO,
+    source_issue_number: int | None = None,
 ) -> dict[str, Any] | None:
     pr_url = extract_pr_url(report)
     if not pr_url:
@@ -1983,10 +2007,14 @@ def build_done_pr_ready_card_payload(
 
     head_sha, changed_files = extract_runner_report_pr_binding(report)
     if head_sha is None or not changed_files:
-        return _build_details_only_card_payload(pr_url, pr_number, target_repository)
+        return _build_details_only_card_payload(
+            pr_url, pr_number, target_repository, source_issue_number
+        )
 
     if target_repository != REPO:
-        return _build_details_only_card_payload(pr_url, pr_number, target_repository)
+        return _build_details_only_card_payload(
+            pr_url, pr_number, target_repository, source_issue_number
+        )
 
     try:
         # Runner reports the commit pushed immediately before its draft PR URL;
@@ -2003,9 +2031,12 @@ def build_done_pr_ready_card_payload(
             ),
             pr_number,
             target_repository,
+            source_issue_number,
         )
     except ValueError:
-        return _build_details_only_card_payload(pr_url, pr_number, target_repository)
+        return _build_details_only_card_payload(
+            pr_url, pr_number, target_repository, source_issue_number
+        )
 
 
 def send_telegram_notification(
@@ -2096,7 +2127,15 @@ def notify_task_finished(
         if not should_notify_task_finished(issue_number, status):
             return
         issue = _NOTIFICATION_ISSUE_CACHE.pop((issue_number, status), None)
-        plain_message = build_telegram_message(issue_number, status, report)
+        target_repository = (
+            notification_target_repository(issue) if issue is not None else REPO
+        )
+        plain_target_repository = (
+            target_repository if target_repository != REPO else None
+        )
+        plain_message = build_telegram_message(
+            issue_number, status, report, plain_target_repository
+        )
         if status != "DONE" or not report:
             send_telegram_notification(plain_message)
             return
@@ -2104,7 +2143,8 @@ def notify_task_finished(
         try:
             card_payload = build_done_pr_ready_card_payload(
                 report,
-                notification_target_repository(issue) if issue is not None else REPO,
+                target_repository,
+                source_issue_number=issue_number,
             )
         except Exception:
             send_telegram_notification(plain_message)
