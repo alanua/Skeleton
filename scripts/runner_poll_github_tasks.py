@@ -1902,7 +1902,6 @@ def _build_pr_ready_operator_text(
     *,
     include_approval_instruction: bool = True,
 ) -> str:
-    del pr_number
     status = "очікує схвалення" if include_approval_instruction else "готово до перегляду"
     comment = (
         "Перевір у ChatGPT перед схваленням."
@@ -1910,9 +1909,10 @@ def _build_pr_ready_operator_text(
         else "Відкрий PR, якщо потрібні деталі."
     )
     lines = [
-        f"Проєкт: {_telegram_project_name(target_repository)}",
-        f"Статус: {status}",
-        f"Коментар: {comment}",
+        _telegram_project_name(target_repository),
+        f"Issue: #{pr_number}",
+        f"Status: {status}",
+        f"Comment: {comment}",
     ]
     return "\n".join(lines)
 
