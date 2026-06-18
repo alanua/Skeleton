@@ -1712,7 +1712,7 @@ def test_telegram_message_omits_placeholder_pr_url() -> None:
     assert "PR:" not in message
 
 
-def test_done_pr_report_builds_card_payload_from_runner_binding() -> None:
+def test_same_repo_done_pr_report_uses_default_card_payload() -> None:
     card = {
         "text": "PR card",
         "buttons": [
@@ -1726,15 +1726,11 @@ def test_done_pr_report_builds_card_payload_from_runner_binding() -> None:
     with mock.patch.object(
         runner, "build_pr_ready_card_payload", return_value=card
     ) as build_card:
-        localized_card = runner.build_done_pr_ready_card_payload(DONE_REPORT)
+        built_card = runner.build_done_pr_ready_card_payload(DONE_REPORT)
 
-    assert localized_card is not None
-    assert localized_card["text"] == (
-        "Проєкт: Skeleton\n"
-        "Статус: очікує схвалення\n"
-        "Коментар: Перевір у ChatGPT перед схваленням."
-    )
-    assert localized_card["buttons"][0]["label"] == "Деталі"
+    assert built_card is card
+    assert built_card["text"] == "PR card"
+    assert built_card["buttons"][0]["label"] == "Details"
 
     build_card.assert_called_once_with(
         repo=runner.REPO,
@@ -1750,30 +1746,20 @@ def test_done_pr_report_builds_card_payload_from_runner_binding() -> None:
     )
 
 
-def test_done_pr_card_hides_technical_details_from_operator_text() -> None:
+def test_same_repo_done_pr_card_preserves_default_skeleton_format() -> None:
     card = runner.build_done_pr_ready_card_payload(DONE_REPORT)
     assert card is not None
 
     text = str(card["text"])
-    assert text == (
-        "Проєкт: Skeleton\n"
-        "Статус: очікує схвалення\n"
-        "Коментар: Перевір у ChatGPT перед схваленням."
-    )
-    assert HEAD_SHA not in text
-    assert "PR:" not in text
+    assert text.startswith("PR ready for operator review\n")
+    assert f"Repository: {runner.REPO}" in text
+    assert "PR: #123" in text
+    assert f"Head SHA: {HEAD_SHA}" in text
+    assert "Changed files (2/2 shown):" in text
+    assert "scripts/runner_poll_github_tasks.py" in text
+    assert "docs/TELEGRAM_APPROVAL_BUTTONS.md" in text
     assert "target_repo" not in text
-    assert "Репозиторій:" not in text
-    assert "Base:" not in text
-    assert "Head:" not in text
-    assert "SHA" not in text
-    assert "Route:" not in text
-    assert "scripts/runner_poll_github_tasks.py" not in text
-    assert "docs/TELEGRAM_APPROVAL_BUTTONS.md" not in text
-    assert "Skeleton task completed" not in text
-    assert "Recommended action" not in text
-    assert "Рекомендація: спочатку переглянути в ChatGPT або відкрити PR." not in text
-    assert "Ця кнопка нічого не деплоїть" not in text
+    assert "Проєкт:" not in text
 
 
 def test_done_pr_card_shows_default_target_repo() -> None:
@@ -1781,7 +1767,8 @@ def test_done_pr_card_shows_default_target_repo() -> None:
     assert card is not None
 
     text = str(card["text"])
-    assert "Проєкт: Skeleton" in text
+    assert f"Repository: {runner.REPO}" in text
+    assert "Проєкт:" not in text
     assert "Репозиторій:" not in text
     assert "Задача:" not in text
 
@@ -1797,6 +1784,8 @@ def test_done_pr_card_shows_target_repo_without_misleading_repository_line() -> 
     assert "Проєкт: bauclock" in text
     assert "Репозиторій: alanua/bauclock" in text
     assert "Repository: alanua/Skeleton" not in text
+    assert HEAD_SHA not in text
+    assert "scripts/runner_poll_github_tasks.py" not in text
     assert "target_repo" not in text
     assert "Рекомендація: спочатку переглянути в ChatGPT або відкрити PR." not in text
     assert "Ця кнопка нічого не деплоїть і не запускає на сервері." not in text
@@ -1869,10 +1858,10 @@ def test_inline_keyboard_has_pr_review_buttons_when_binding_is_reliable() -> Non
     reply_markup = runner.card_payload_to_inline_keyboard(card)
     buttons = [row[0] for row in reply_markup["inline_keyboard"]]
     assert [button["text"] for button in buttons] == [
-        "Схвалити",
-        "Відхилити",
-        "Деталі",
-        "Відкрити PR",
+        "Approve",
+        "Reject",
+        "Details",
+        "Open PR",
     ]
     assert [button["action"] for button in card["buttons"]] == [
         "approve",
@@ -1915,11 +1904,13 @@ def test_approve_reject_buttons_require_reliable_sha_and_changed_files() -> None
     reply_markup = runner.card_payload_to_inline_keyboard(card)
     buttons = [row[0] for row in reply_markup["inline_keyboard"]]
 
-    assert [button["text"] for button in buttons] == ["Деталі", "Відкрити PR"]
+    assert [button["text"] for button in buttons] == ["Details", "Open PR"]
     assert str(card["text"]) == (
-        "Проєкт: Skeleton\n"
-        "Статус: готово до перегляду\n"
-        "Коментар: Відкрий PR, якщо потрібні деталі."
+        "PR ready for operator review\n"
+        "Repository: alanua/Skeleton\n"
+        "PR: #123\n"
+        "Tests: Runner pytest completed before draft PR creation.\n"
+        "Risk: Review the changed-file list before approval."
     )
 
 

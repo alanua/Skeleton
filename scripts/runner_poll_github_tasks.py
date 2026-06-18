@@ -1945,35 +1945,16 @@ def _build_pr_ready_operator_text(
     return "\n".join(lines)
 
 
-def _localize_pr_ready_card_payload(
-    card_payload: dict[str, Any],
-    pr_number: int,
-    target_repository: str = REPO,
-    source_issue_number: int | None = None,
-) -> dict[str, Any]:
-    buttons = []
-    for button in card_payload.get("buttons", []):
-        if not isinstance(button, dict):
-            continue
-        action = str(button.get("action") or "")
-        buttons.append(
-            {
-                **button,
-                "label": TELEGRAM_PR_READY_BUTTON_LABELS.get(
-                    action, str(button.get("label") or "")
-                ),
-            }
+def _build_skeleton_details_only_text(pr_number: int) -> str:
+    return "\n".join(
+        (
+            "PR ready for operator review",
+            f"Repository: {REPO}",
+            f"PR: #{pr_number}",
+            f"Tests: {TELEGRAM_CARD_TEST_SUMMARY}",
+            f"Risk: {TELEGRAM_CARD_RISK_SUMMARY}",
         )
-    return {
-        **card_payload,
-        "text": _build_pr_ready_operator_text(
-            pr_number,
-            target_repository,
-            source_issue_number=source_issue_number,
-            include_approval_instruction=True,
-        ),
-        "buttons": buttons,
-    }
+    )
 
 
 def _build_details_only_card_payload(
@@ -1983,6 +1964,23 @@ def _build_details_only_card_payload(
     source_issue_number: int | None = None,
 ) -> dict[str, Any]:
     callback_base = {"repo": target_repository, "pr_number": pr_number, "pr_url": pr_url}
+    if target_repository == REPO:
+        return {
+            "text": _build_skeleton_details_only_text(pr_number),
+            "buttons": [
+                {
+                    "action": "details",
+                    "label": "Details",
+                    "callback_payload": {**callback_base, "action": "details"},
+                },
+                {
+                    "action": "open_pr",
+                    "label": "Open PR",
+                    "callback_payload": {**callback_base, "action": "open_pr"},
+                    "url": pr_url,
+                },
+            ],
+        }
     return {
         "text": _build_pr_ready_operator_text(
             pr_number,
@@ -2033,19 +2031,14 @@ def build_done_pr_ready_card_payload(
     try:
         # Runner reports the commit pushed immediately before its draft PR URL;
         # that commit is the reviewed head for this DONE notification.
-        return _localize_pr_ready_card_payload(
-            build_pr_ready_card_payload(
-                repo=REPO,
-                pr_number=pr_number,
-                head_sha=head_sha,
-                changed_files=changed_files,
-                test_summary=TELEGRAM_CARD_TEST_SUMMARY,
-                risk_summary=TELEGRAM_CARD_RISK_SUMMARY,
-                pr_url=pr_url,
-            ),
-            pr_number,
-            target_repository,
-            source_issue_number,
+        return build_pr_ready_card_payload(
+            repo=REPO,
+            pr_number=pr_number,
+            head_sha=head_sha,
+            changed_files=changed_files,
+            test_summary=TELEGRAM_CARD_TEST_SUMMARY,
+            risk_summary=TELEGRAM_CARD_RISK_SUMMARY,
+            pr_url=pr_url,
         )
     except ValueError:
         return _build_details_only_card_payload(
