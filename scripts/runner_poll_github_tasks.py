@@ -1829,6 +1829,18 @@ def build_telegram_message(
     return "\n".join(lines)
 
 
+def _notification_source_issue(issue_number: int, issue: dict[str, Any] | None) -> int | None:
+    if issue is None:
+        return None
+    metadata = str(issue.get("body") or "").split("```task", 1)[0]
+    value = _body_field(metadata, "Source Issue")
+    if value is None:
+        return issue_number
+    if re.fullmatch(r"[1-9]\d*", value) is None:
+        return None
+    return int(value)
+
+
 TELEGRAM_CALLBACK_REPO_KEYS = {
     "alanua/Skeleton": "s",
     "alanua/bauclock": "b",
@@ -1900,9 +1912,9 @@ def _build_pr_ready_operator_text(
     pr_number: int,
     target_repository: str = REPO,
     *,
+    source_issue: int | None = None,
     include_approval_instruction: bool = True,
 ) -> str:
-    del pr_number
     status = "очікує схвалення" if include_approval_instruction else "готово до перегляду"
     comment = (
         "Перевір у ChatGPT перед схваленням."
@@ -1911,14 +1923,19 @@ def _build_pr_ready_operator_text(
     )
     lines = [
         f"Проєкт: {_telegram_project_name(target_repository)}",
-        f"Статус: {status}",
-        f"Коментар: {comment}",
     ]
+    if target_repository != REPO:
+        lines.append(f"Репозиторій: {target_repository}")
+        lines.append(f"Задача: #{source_issue or pr_number}")
+    lines.extend((f"Статус: {status}", f"Коментар: {comment}"))
     return "\n".join(lines)
 
 
 def _localize_pr_ready_card_payload(
-    card_payload: dict[str, Any], pr_number: int, target_repository: str = REPO
+    card_payload: dict[str, Any],
+    pr_number: int,
+    target_repository: str = REPO,
+    source_issue: int | None = None,
 ) -> dict[str, Any]:
     buttons = []
     for button in card_payload.get("buttons", []):
@@ -1938,6 +1955,7 @@ def _localize_pr_ready_card_payload(
         "text": _build_pr_ready_operator_text(
             pr_number,
             target_repository,
+            source_issue=source_issue,
             include_approval_instruction=True,
         ),
         "buttons": buttons,
@@ -1945,13 +1963,17 @@ def _localize_pr_ready_card_payload(
 
 
 def _build_details_only_card_payload(
-    pr_url: str, pr_number: int, target_repository: str = REPO
+    pr_url: str,
+    pr_number: int,
+    target_repository: str = REPO,
+    source_issue: int | None = None,
 ) -> dict[str, Any]:
     callback_base = {"repo": target_repository, "pr_number": pr_number, "pr_url": pr_url}
     return {
         "text": _build_pr_ready_operator_text(
             pr_number,
             target_repository,
+            source_issue=source_issue,
             include_approval_instruction=False,
         ),
         "buttons": [
@@ -1971,7 +1993,7 @@ def _build_details_only_card_payload(
 
 
 def build_done_pr_ready_card_payload(
-    report: str, target_repository: str = REPO
+    report: str, target_repository: str = REPO, source_issue: int | None = None
 ) -> dict[str, Any] | None:
     pr_url = extract_pr_url(report)
     if not pr_url:
@@ -1983,10 +2005,14 @@ def build_done_pr_ready_card_payload(
 
     head_sha, changed_files = extract_runner_report_pr_binding(report)
     if head_sha is None or not changed_files:
-        return _build_details_only_card_payload(pr_url, pr_number, target_repository)
+        return _build_details_only_card_payload(
+            pr_url, pr_number, target_repository, source_issue
+        )
 
     if target_repository != REPO:
-        return _build_details_only_card_payload(pr_url, pr_number, target_repository)
+        return _build_details_only_card_payload(
+            pr_url, pr_number, target_repository, source_issue
+        )
 
     try:
         # Runner reports the commit pushed immediately before its draft PR URL;
@@ -2003,9 +2029,26 @@ def build_done_pr_ready_card_payload(
             ),
             pr_number,
             target_repository,
+            source_issue,
         )
     except ValueError:
-        return _build_details_only_card_payload(pr_url, pr_number, target_repository)
+        return _build_details_only_card_payload(
+            pr_url, pr_number, target_repository, source_issue
+        )
+
+
+def build_operator_status_card_text(
+    issue_number: int,
+    status: str,
+    target_repository: str,
+    source_issue: int | None = None,
+) -> str:
+    lines = [f"Проєкт: {_telegram_project_name(target_repository)}"]
+    if target_repository != REPO:
+        lines.append(f"Репозиторій: {target_repository}")
+        lines.append(f"Задача: #{source_issue or issue_number}")
+    lines.append(f"Статус: {status}")
+    return "\n".join(lines)
 
 
 def send_telegram_notification(
@@ -2096,21 +2139,34 @@ def notify_task_finished(
         if not should_notify_task_finished(issue_number, status):
             return
         issue = _NOTIFICATION_ISSUE_CACHE.pop((issue_number, status), None)
+        target_repository = (
+            notification_target_repository(issue) if issue is not None else REPO
+        )
+        source_issue = _notification_source_issue(issue_number, issue)
         plain_message = build_telegram_message(issue_number, status, report)
         if status != "DONE" or not report:
+            if target_repository != REPO:
+                plain_message = build_operator_status_card_text(
+                    issue_number, status, target_repository, source_issue
+                )
             send_telegram_notification(plain_message)
             return
 
         try:
             card_payload = build_done_pr_ready_card_payload(
                 report,
-                notification_target_repository(issue) if issue is not None else REPO,
+                target_repository,
+                source_issue,
             )
         except Exception:
             send_telegram_notification(plain_message)
             return
 
         if card_payload is None:
+            if target_repository != REPO:
+                plain_message = build_operator_status_card_text(
+                    issue_number, status, target_repository, source_issue
+                )
             send_telegram_notification(plain_message)
             return
 

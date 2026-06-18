@@ -1816,8 +1816,17 @@ def test_lumenflow_target_repo_pr_card_uses_repo_callback_key() -> None:
     card = runner.build_done_pr_ready_card_payload(
         DONE_REPORT,
         target_repository="alanua/LumenFlow",
+        source_issue=1010,
     )
     assert card is not None
+    assert card["text"] == (
+        "Проєкт: LumenFlow\n"
+        "Репозиторій: alanua/LumenFlow\n"
+        "Задача: #1010\n"
+        "Статус: готово до перегляду\n"
+        "Коментар: Відкрий PR, якщо потрібні деталі."
+    )
+    assert "Repository: alanua/Skeleton" not in str(card["text"])
     reply_markup = runner.card_payload_to_inline_keyboard(card)
 
     details_button = reply_markup["inline_keyboard"][0][0]
@@ -1978,6 +1987,63 @@ def test_done_pr_card_uses_target_repository_from_issue_body() -> None:
         "Деталі",
         "Відкрити PR",
     ]
+
+
+def test_lumenflow_done_pr_card_uses_issue_number_as_source_issue() -> None:
+    issue = {
+        "number": 129,
+        "body": "Target Repository: alanua/LumenFlow\n\n```task\nDo it\n```",
+        "state": "open",
+        "closed": False,
+        "labels": [{"name": runner.LABEL_DONE}],
+    }
+
+    with mock.patch.object(
+        runner, "get_notification_issue", return_value=issue
+    ), mock.patch.object(runner, "send_telegram_notification") as send:
+        runner.notify_task_finished(129, "DONE", DONE_REPORT)
+
+    assert send.call_count == 1
+    assert send.call_args.args[0] == (
+        "Проєкт: LumenFlow\n"
+        "Репозиторій: alanua/LumenFlow\n"
+        "Задача: #129\n"
+        "Статус: готово до перегляду\n"
+        "Коментар: Відкрий PR, якщо потрібні деталі."
+    )
+    assert "alanua/Skeleton" not in send.call_args.args[0]
+
+
+def test_lumenflow_runtime_maintenance_card_includes_repo_and_source_issue() -> None:
+    issue = {
+        "number": 145,
+        "body": (
+            "Mode: RUNTIME_MAINTENANCE_TASK\n"
+            "Maintenance Task ID: check_project_checkout\n"
+            "Target Repository: alanua/LumenFlow\n"
+            "Source Issue: 1010"
+        ),
+        "state": "open",
+        "closed": False,
+        "labels": [{"name": runner.LABEL_BLOCKED}],
+    }
+    report = (
+        "BLOCKED: Runner host maintenance task did not complete.\n"
+        "maintenance_task_id=check_project_checkout\n"
+        "success_criteria=not_met"
+    )
+
+    with mock.patch.object(
+        runner, "get_notification_issue", return_value=issue
+    ), mock.patch.object(runner, "send_telegram_notification") as send:
+        runner.notify_task_finished(145, "BLOCKED", report)
+
+    send.assert_called_once_with(
+        "Проєкт: LumenFlow\n"
+        "Репозиторій: alanua/LumenFlow\n"
+        "Задача: #1010\n"
+        "Статус: BLOCKED"
+    )
 
 
 def test_done_pr_card_build_failure_falls_back_to_plain_done() -> None:
