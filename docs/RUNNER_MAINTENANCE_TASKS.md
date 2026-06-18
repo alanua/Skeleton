@@ -241,6 +241,41 @@ systemd, query GitHub, start Codex, or execute arbitrary issue text. Reports
 must be short and include only sanitized key/value status lines; they must not
 include raw command output, token values, raw host names, or issue-body text.
 
+`hermes_private_memory_bridge_check` is a public-safe Runner validation for the
+Hermes private-memory bridge. It requires no target metadata:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: hermes_private_memory_bridge_check
+```
+
+With no fenced task payload, the Runner must run the complete validation
+sequence in this fixed order:
+
+1. Read-first orientation through `core.hermes_private_memory`.
+2. Synthetic heartbeat write without an explicit gate, expected `BLOCKED`.
+3. Explicit-gated synthetic heartbeat through `core.hermes_private_memory`.
+4. Explicit-gated synthetic note through `core.hermes_private_memory`.
+
+The task may dispatch only this exact maintenance task id to the Hermes bridge.
+It must not execute issue text, run Codex, run shell commands, query GitHub, wire
+Hermes runtime services, bypass the private-memory connector, run Aufmass,
+ingest real project data, or expose private local details.
+
+The public GitHub report may include only aggregate token fields:
+`maintenance_task_id`, `hermes_bridge_status`, `orient_status`,
+`blocked_write_status`, `gated_heartbeat_status`, `gated_note_status`,
+`public_safe_report_ok`, `error_class`, `next_operator_action`, and
+`success_criteria`. Missing config, invalid config, non-writable local storage,
+bridge exceptions, unexpected write-gate behavior, failed gated writes, or any
+unsafe bridge report are reported as `BLOCKED` with a safe
+`next_operator_action`.
+
+Optional single-operation mode is limited to an allowlisted fenced payload field
+such as `operation=orient`, `operation=blocked_write`,
+`operation=gated_heartbeat`, or `operation=gated_note`. The default no-operation
+path remains the complete four-step validation sequence.
+
 `prepare_aufmass_private_runtime` verifies that the registered private Aufmass
 runtime is ready for a controlled private pilot dry run. It requires no target
 metadata:

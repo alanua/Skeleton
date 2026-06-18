@@ -26,6 +26,7 @@ if str(ROOT) not in sys.path:
 
 from core.audit_ledger import AuditLedger, validate_public_safe_payload
 from core.aufmass_source_pack import validate_source_pack_manifest
+from core import hermes_private_memory
 from core.private_memory import healthcheck_private_memory, write_public_heartbeat
 from core.project_tree import get_project, get_project_by_repo, load_project_tree
 from core.skeleton_memory import SkeletonMemory
@@ -85,6 +86,7 @@ ENSURE_PROJECT_CHECKOUT = "ensure_project_checkout"
 VALIDATE_PR_BRANCH = "validate_pr_branch"
 PREFLIGHT_PR_REFRESH = "preflight_pr_refresh"
 HERMES_WORKER_PREFLIGHT = "hermes_worker_preflight"
+HERMES_PRIVATE_MEMORY_BRIDGE_CHECK = "hermes_private_memory_bridge_check"
 PRIVATE_MEMORY_HEALTHCHECK = "private_memory_healthcheck"
 PREPARE_AUFMASS_PRIVATE_RUNTIME = "prepare_aufmass_private_runtime"
 RUN_AUFMASS_PRIVATE_DXF_REVIEW = "run_aufmass_private_dxf_review"
@@ -109,6 +111,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         VALIDATE_PR_BRANCH,
         PREFLIGHT_PR_REFRESH,
         HERMES_WORKER_PREFLIGHT,
+        HERMES_PRIVATE_MEMORY_BRIDGE_CHECK,
         PRIVATE_MEMORY_HEALTHCHECK,
         PREPARE_AUFMASS_PRIVATE_RUNTIME,
         RUN_AUFMASS_PRIVATE_DXF_REVIEW,
@@ -2437,6 +2440,235 @@ def hermes_worker_preflight() -> str:
         *tool_lines,
     ]
     return _maintenance_report("DONE", task_id, status_lines, "met")
+
+
+_HERMES_PRIVATE_MEMORY_REPORT_KEYS = (
+    "schema",
+    "status",
+    "operation",
+    "connector_schema",
+    "connector_status",
+    "db_configured",
+    "db_openable",
+    "integrity_ok",
+    "schema_present",
+    "writable_when_requested",
+    "heartbeat_ok",
+    "bridge_write_enabled",
+    "error_class",
+    "next_operator_action",
+)
+_HERMES_PRIVATE_MEMORY_OPERATIONS = frozenset(
+    ("full", "orient", "blocked_write", "gated_heartbeat", "gated_note")
+)
+_HERMES_PRIVATE_MEMORY_UNSAFE_VALUE_RE = re.compile(
+    r"(?i)(/|\\|file:|\.sqlite\b|\.db\b|secret|token|password|credential|drive|"
+    r"private_memory_heartbeat|private_memory_task_state_heartbeat|select\s|"
+    r"insert\s|update\s|delete\s|create\s+table|payload|content)"
+)
+_HERMES_PRIVATE_MEMORY_SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+
+
+def _hermes_private_memory_requested_operation(body: str) -> tuple[str, str | None]:
+    payload = extract_task_block(body) or ""
+    if not payload.strip():
+        return "full", None
+
+    requested: str | None = None
+    for line in payload.splitlines():
+        if "=" in line:
+            raw_key, raw_value = line.split("=", 1)
+        elif ":" in line:
+            raw_key, raw_value = line.split(":", 1)
+        else:
+            continue
+        key = raw_key.strip().lower().replace("-", "_").replace(" ", "_")
+        if key not in {"operation", "hermes_operation", "bridge_operation"}:
+            continue
+        value = raw_value.strip().lower().replace("-", "_").replace(" ", "_")
+        if value not in _HERMES_PRIVATE_MEMORY_OPERATIONS:
+            return "full", "invalid_hermes_private_memory_operation"
+        requested = value
+
+    return requested or "full", None
+
+
+def _hermes_private_memory_report_is_public_safe(report: object) -> bool:
+    if not isinstance(report, dict):
+        return False
+    if set(report) != set(_HERMES_PRIVATE_MEMORY_REPORT_KEYS):
+        return False
+    for key in _HERMES_PRIVATE_MEMORY_REPORT_KEYS:
+        value = report.get(key)
+        if isinstance(value, bool):
+            continue
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            return False
+        if not _HERMES_PRIVATE_MEMORY_SAFE_TOKEN_RE.fullmatch(value):
+            return False
+        if _HERMES_PRIVATE_MEMORY_UNSAFE_VALUE_RE.search(value):
+            return False
+    return True
+
+
+def _hermes_private_memory_status(report: object) -> str:
+    if not _hermes_private_memory_report_is_public_safe(report):
+        return "BLOCKED"
+    status = str(report.get("status"))
+    if status in {"DONE", "BLOCKED"}:
+        return status
+    return "BLOCKED"
+
+
+def _hermes_private_memory_expected_blocked(report: object) -> bool:
+    return (
+        _hermes_private_memory_report_is_public_safe(report)
+        and report.get("status") == "BLOCKED"
+        and report.get("error_class") == "HermesPrivateMemoryWriteGateError"
+        and report.get("bridge_write_enabled") is False
+    )
+
+
+def _hermes_private_memory_first_token(
+    reports: list[object], key: str, fallback: str
+) -> str:
+    for report in reports:
+        if not _hermes_private_memory_report_is_public_safe(report):
+            continue
+        value = report.get(key)
+        if isinstance(value, str) and value != "none":
+            return value
+    return fallback
+
+
+def hermes_private_memory_bridge_check(body: str = "") -> str:
+    task_id = HERMES_PRIVATE_MEMORY_BRIDGE_CHECK
+    operation, reason = _hermes_private_memory_requested_operation(body)
+    if reason is not None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                "hermes_bridge_status=BLOCKED",
+                "orient_status=BLOCKED",
+                "blocked_write_status=BLOCKED",
+                "gated_heartbeat_status=BLOCKED",
+                "gated_note_status=BLOCKED",
+                "public_safe_report_ok=true",
+                "error_class=none",
+                "next_operator_action=use_allowlisted_operation",
+            ],
+            "not_met",
+        )
+
+    reports_by_step: dict[str, object] = {}
+
+    def run_orient() -> None:
+        reports_by_step["orient"] = hermes_private_memory.orient_hermes_private_memory(
+            env=os.environ
+        )
+
+    def run_blocked_write() -> None:
+        reports_by_step[
+            "blocked_write"
+        ] = hermes_private_memory.write_hermes_private_memory_heartbeat(
+            "synthetic-hermes-runner-blocked-write-v0",
+            write_enabled=False,
+            env=os.environ,
+        )
+
+    def run_gated_heartbeat() -> None:
+        reports_by_step[
+            "gated_heartbeat"
+        ] = hermes_private_memory.write_hermes_private_memory_heartbeat(
+            "synthetic-hermes-runner-gated-heartbeat-v0",
+            write_enabled=True,
+            env=os.environ,
+        )
+
+    def run_gated_note() -> None:
+        reports_by_step[
+            "gated_note"
+        ] = hermes_private_memory.record_hermes_private_memory_note(
+            "synthetic-hermes-runner-gated-note-v0",
+            "ready",
+            write_enabled=True,
+            env=os.environ,
+        )
+
+    steps = (
+        ("orient", run_orient),
+        ("blocked_write", run_blocked_write),
+        ("gated_heartbeat", run_gated_heartbeat),
+        ("gated_note", run_gated_note),
+    )
+    for step_name, run_step in steps:
+        if operation not in {"full", step_name}:
+            continue
+        run_step()
+
+    reports = [reports_by_step.get(name) for name, _run_step in steps]
+    public_safe = all(
+        report is None or _hermes_private_memory_report_is_public_safe(report)
+        for report in reports
+    )
+    orient_status = _hermes_private_memory_status(reports_by_step.get("orient"))
+    blocked_expected = _hermes_private_memory_expected_blocked(
+        reports_by_step.get("blocked_write")
+    )
+    blocked_write_status = (
+        "EXPECTED_BLOCKED"
+        if blocked_expected
+        else _hermes_private_memory_status(reports_by_step.get("blocked_write"))
+    )
+    gated_heartbeat_status = _hermes_private_memory_status(
+        reports_by_step.get("gated_heartbeat")
+    )
+    gated_note_status = _hermes_private_memory_status(reports_by_step.get("gated_note"))
+
+    if operation == "full":
+        bridge_done = (
+            public_safe
+            and orient_status in {"DONE", "BLOCKED"}
+            and blocked_expected
+            and gated_heartbeat_status == "DONE"
+            and gated_note_status == "DONE"
+        )
+    elif operation == "blocked_write":
+        bridge_done = public_safe and blocked_expected
+    else:
+        bridge_done = (
+            public_safe
+            and _hermes_private_memory_status(reports_by_step.get(operation)) == "DONE"
+        )
+
+    report_values = [report for report in reports if report is not None]
+    error_class = _hermes_private_memory_first_token(report_values, "error_class", "none")
+    next_operator_action = _hermes_private_memory_first_token(
+        report_values, "next_operator_action", "none"
+    )
+    if bridge_done:
+        error_class = "none"
+        next_operator_action = "none"
+
+    status_lines = [
+        f"hermes_bridge_status={'DONE' if bridge_done else 'BLOCKED'}",
+        f"orient_status={orient_status}",
+        f"blocked_write_status={blocked_write_status}",
+        f"gated_heartbeat_status={gated_heartbeat_status}",
+        f"gated_note_status={gated_note_status}",
+        f"public_safe_report_ok={'true' if public_safe else 'false'}",
+        f"error_class={error_class}",
+        f"next_operator_action={next_operator_action}",
+    ]
+    return _maintenance_report(
+        "DONE" if bridge_done else "BLOCKED",
+        task_id,
+        status_lines,
+        "met" if bridge_done else "not_met",
+    )
 
 
 _PRIVATE_MEMORY_HEALTHCHECK_REPORT_KEYS = (
@@ -6265,6 +6497,8 @@ def dispatch_runtime_maintenance_task(
             return preflight_pr_refresh(body)
         if task_id == HERMES_WORKER_PREFLIGHT:
             return hermes_worker_preflight()
+        if task_id == HERMES_PRIVATE_MEMORY_BRIDGE_CHECK:
+            return hermes_private_memory_bridge_check(body)
         if task_id == PRIVATE_MEMORY_HEALTHCHECK:
             return private_memory_healthcheck(body)
         if task_id == PREPARE_AUFMASS_PRIVATE_RUNTIME:

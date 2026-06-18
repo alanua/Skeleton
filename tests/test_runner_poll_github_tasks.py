@@ -2135,6 +2135,52 @@ def _assert_private_memory_runner_report_is_public_safe(
     assert "drive" not in lowered
 
 
+def _assert_hermes_bridge_runner_report_is_public_safe(
+    report: str, tmp_path: Path, private_issue_text: str = ""
+) -> None:
+    lowered = report.lower()
+    assert str(tmp_path) not in report
+    assert "synthetic_config.json" not in report
+    assert "memory.sqlite" not in report
+    assert "private_memory_heartbeat" not in report
+    assert "private_memory_task_state_heartbeat" not in report
+    assert "select " not in lowered
+    assert "insert " not in lowered
+    assert "create table" not in lowered
+    assert "secret" not in lowered
+    assert "token" not in lowered
+    assert "credential" not in lowered
+    assert "drive" not in lowered
+    if private_issue_text:
+        assert private_issue_text not in report
+
+
+def _hermes_report(
+    operation: str,
+    status: str,
+    *,
+    write_enabled: bool = False,
+    error_class: str | None = None,
+    next_operator_action: str = "none",
+) -> dict[str, object]:
+    return {
+        "schema": "skeleton.hermes_private_memory.report.v0",
+        "status": status,
+        "operation": operation,
+        "connector_schema": "skeleton.private_memory.healthcheck.v0",
+        "connector_status": status,
+        "db_configured": status == "DONE",
+        "db_openable": status == "DONE",
+        "integrity_ok": status == "DONE",
+        "schema_present": status == "DONE",
+        "writable_when_requested": write_enabled,
+        "heartbeat_ok": status == "DONE",
+        "bridge_write_enabled": write_enabled,
+        "error_class": error_class,
+        "next_operator_action": next_operator_action,
+    }
+
+
 def _issue_publish_inspection_body(
     *,
     repository: str = runner.REPO,
@@ -2476,6 +2522,167 @@ def test_private_memory_healthcheck_blocks_connector_privacy_violation() -> None
 
     assert report.startswith("BLOCKED:")
     assert "reason=privacy_violation" in report
+    assert "file:unsafe-value" not in report
+
+
+def test_hermes_private_memory_bridge_check_is_allowlisted() -> None:
+    assert runner.HERMES_PRIVATE_MEMORY_BRIDGE_CHECK in runner.RUNTIME_MAINTENANCE_TASK_IDS
+
+
+def test_hermes_private_memory_bridge_default_runs_full_sequence_in_order() -> None:
+    calls: list[str] = []
+
+    def orient(**kwargs: object) -> dict[str, object]:
+        assert "env" in kwargs
+        calls.append("orient")
+        return _hermes_report("orient", "DONE")
+
+    def heartbeat(
+        heartbeat_id: str, *, write_enabled: bool, **kwargs: object
+    ) -> dict[str, object]:
+        assert "env" in kwargs
+        assert heartbeat_id.startswith("synthetic-hermes-runner-")
+        if write_enabled:
+            calls.append("gated_heartbeat")
+            return _hermes_report("heartbeat", "DONE", write_enabled=True)
+        calls.append("blocked_write")
+        return _hermes_report(
+            "heartbeat",
+            "BLOCKED",
+            error_class="HermesPrivateMemoryWriteGateError",
+            next_operator_action="operator_enable_hermes_private_memory_write",
+        )
+
+    def note(
+        note_id: str, state: str, *, write_enabled: bool, **kwargs: object
+    ) -> dict[str, object]:
+        assert "env" in kwargs
+        assert note_id.startswith("synthetic-hermes-runner-")
+        assert state == "ready"
+        assert write_enabled is True
+        calls.append("gated_note")
+        return _hermes_report("note", "DONE", write_enabled=True)
+
+    body = _maintenance_issue(runner.HERMES_PRIVATE_MEMORY_BRIDGE_CHECK)["body"]
+    with mock.patch.object(
+        runner.hermes_private_memory, "orient_hermes_private_memory", side_effect=orient
+    ), mock.patch.object(
+        runner.hermes_private_memory,
+        "write_hermes_private_memory_heartbeat",
+        side_effect=heartbeat,
+    ), mock.patch.object(
+        runner.hermes_private_memory,
+        "record_hermes_private_memory_note",
+        side_effect=note,
+    ), mock.patch.object(
+        runner, "run_command"
+    ) as run_command:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HERMES_PRIVATE_MEMORY_BRIDGE_CHECK, str(runner.ROOT), str(body)
+        )
+
+    assert calls == ["orient", "blocked_write", "gated_heartbeat", "gated_note"]
+    assert report.startswith("DONE:")
+    assert "maintenance_task_id=hermes_private_memory_bridge_check" in report
+    assert "hermes_bridge_status=DONE" in report
+    assert "orient_status=DONE" in report
+    assert "blocked_write_status=EXPECTED_BLOCKED" in report
+    assert "gated_heartbeat_status=DONE" in report
+    assert "gated_note_status=DONE" in report
+    assert "public_safe_report_ok=true" in report
+    assert "error_class=none" in report
+    assert "next_operator_action=none" in report
+    run_command.assert_not_called()
+
+
+def test_hermes_private_memory_bridge_default_uses_temporary_synthetic_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = _private_memory_config(tmp_path)
+    monkeypatch.setenv("SKELETON_PRIVATE_MEMORY_CONFIG", str(config_path))
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HERMES_PRIVATE_MEMORY_BRIDGE_CHECK, str(runner.ROOT)
+    )
+
+    assert report.startswith("DONE:")
+    assert "hermes_bridge_status=DONE" in report
+    assert "orient_status=BLOCKED" in report
+    assert "blocked_write_status=EXPECTED_BLOCKED" in report
+    assert "gated_heartbeat_status=DONE" in report
+    assert "gated_note_status=DONE" in report
+    assert "public_safe_report_ok=true" in report
+    _assert_hermes_bridge_runner_report_is_public_safe(report, tmp_path)
+
+
+def test_hermes_private_memory_bridge_missing_config_returns_public_safe_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("SKELETON_PRIVATE_MEMORY_CONFIG", raising=False)
+    private_issue_text = "local/private/customer-memory.sqlite"
+    body = _maintenance_issue(
+        runner.HERMES_PRIVATE_MEMORY_BRIDGE_CHECK,
+        private_issue_text,
+    )["body"]
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HERMES_PRIVATE_MEMORY_BRIDGE_CHECK, str(runner.ROOT), str(body)
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert "hermes_bridge_status=BLOCKED" in report
+    assert "public_safe_report_ok=true" in report
+    assert "error_class=PrivateMemoryConfigError" in report
+    assert "next_operator_action=configure_private_memory" in report
+    _assert_hermes_bridge_runner_report_is_public_safe(
+        report, tmp_path, private_issue_text
+    )
+
+
+def test_hermes_private_memory_bridge_non_writable_config_returns_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "memory.sqlite"
+    db_path.mkdir()
+    config_path = _private_memory_config(tmp_path, db_path)
+    monkeypatch.setenv("SKELETON_PRIVATE_MEMORY_CONFIG", str(config_path))
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HERMES_PRIVATE_MEMORY_BRIDGE_CHECK, str(runner.ROOT)
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert "hermes_bridge_status=BLOCKED" in report
+    assert "blocked_write_status=EXPECTED_BLOCKED" in report
+    assert "gated_heartbeat_status=BLOCKED" in report
+    assert "gated_note_status=BLOCKED" in report
+    assert "public_safe_report_ok=true" in report
+    assert "next_operator_action=configure_private_memory" in report
+    _assert_hermes_bridge_runner_report_is_public_safe(report, tmp_path)
+
+
+def test_hermes_private_memory_bridge_blocks_unsafe_bridge_report() -> None:
+    unsafe_report = _hermes_report("orient", "DONE")
+    unsafe_report["next_operator_action"] = "file:unsafe-value"
+
+    with mock.patch.object(
+        runner.hermes_private_memory,
+        "orient_hermes_private_memory",
+        return_value=unsafe_report,
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HERMES_PRIVATE_MEMORY_BRIDGE_CHECK,
+            str(runner.ROOT),
+            str(
+                _maintenance_issue(
+                    runner.HERMES_PRIVATE_MEMORY_BRIDGE_CHECK,
+                    "operation=orient",
+                )["body"]
+            ),
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "public_safe_report_ok=false" in report
     assert "file:unsafe-value" not in report
 
 
