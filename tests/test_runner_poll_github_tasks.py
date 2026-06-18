@@ -1763,6 +1763,7 @@ def test_done_pr_card_hides_technical_details_from_operator_text() -> None:
     assert HEAD_SHA not in text
     assert "PR:" not in text
     assert "target_repo" not in text
+    assert "Репозиторій:" not in text
     assert "Base:" not in text
     assert "Head:" not in text
     assert "SHA" not in text
@@ -1776,11 +1777,13 @@ def test_done_pr_card_hides_technical_details_from_operator_text() -> None:
 
 
 def test_done_pr_card_shows_default_target_repo() -> None:
-    card = runner.build_done_pr_ready_card_payload(DONE_REPORT)
+    card = runner.build_done_pr_ready_card_payload(DONE_REPORT, source_issue_number=129)
     assert card is not None
 
     text = str(card["text"])
     assert "Проєкт: Skeleton" in text
+    assert "Репозиторій:" not in text
+    assert "Задача:" not in text
 
 
 def test_done_pr_card_shows_target_repo_without_misleading_repository_line() -> None:
@@ -1792,10 +1795,29 @@ def test_done_pr_card_shows_target_repo_without_misleading_repository_line() -> 
 
     text = str(card["text"])
     assert "Проєкт: bauclock" in text
+    assert "Репозиторій: alanua/bauclock" in text
     assert "Repository: alanua/Skeleton" not in text
     assert "target_repo" not in text
     assert "Рекомендація: спочатку переглянути в ChatGPT або відкрити PR." not in text
     assert "Ця кнопка нічого не деплоїть і не запускає на сервері." not in text
+
+
+def test_cross_project_done_pr_card_shows_project_target_repo_and_issue() -> None:
+    card = runner.build_done_pr_ready_card_payload(
+        DONE_REPORT,
+        target_repository="alanua/LumenFlow",
+        source_issue_number=999,
+    )
+    assert card is not None
+
+    text = str(card["text"])
+    assert "Проєкт: LumenFlow" in text
+    assert "Репозиторій: alanua/LumenFlow" in text
+    assert "Задача: #999" in text
+    assert "project:" not in text
+    assert "target_repo:" not in text
+    assert "issue:" not in text
+    assert "Repository: alanua/Skeleton" not in text
 
 
 def test_target_repo_pr_card_uses_details_only_buttons() -> None:
@@ -1972,12 +1994,40 @@ def test_done_pr_card_uses_target_repository_from_issue_body() -> None:
     text = send.call_args.args[0]
     reply_markup = send.call_args.args[1]
     assert "Проєкт: bauclock" in text
+    assert "Репозиторій: alanua/bauclock" in text
+    assert "Задача: #129" in text
     assert "Repository: alanua/Skeleton" not in text
     assert "target_repo" not in text
     assert [row[0]["text"] for row in reply_markup["inline_keyboard"]] == [
         "Деталі",
         "Відкрити PR",
     ]
+
+
+def test_cross_project_blocked_status_uses_target_repository_from_issue_body() -> None:
+    issue = {
+        "number": 999,
+        "body": (
+            "Target Project: lumenflow\n"
+            "Target Repository: alanua/LumenFlow\n\n"
+            "```task\nDo it\n```"
+        ),
+        "state": "open",
+        "closed": False,
+        "labels": [{"name": runner.LABEL_BLOCKED}],
+    }
+
+    with mock.patch.object(
+        runner, "get_notification_issue", return_value=issue
+    ), mock.patch.object(runner, "send_telegram_notification") as send:
+        runner.notify_task_finished(999, "BLOCKED")
+
+    send.assert_called_once_with(
+        "Проєкт: LumenFlow\n"
+        "Репозиторій: alanua/LumenFlow\n"
+        "Задача: #999\n"
+        "Статус: BLOCKED"
+    )
 
 
 def test_done_pr_card_build_failure_falls_back_to_plain_done() -> None:
