@@ -105,8 +105,8 @@ Boot output required fields:
 - State file: `projects/skeleton/STATE.yaml`
 - Status: `DRAFT_HANDOFF`
 - State role: `handoff_not_canon_truth`
-- Last verified: `2026-06-08`
-- Evidence source: Skeleton main after PR #863 plus private operator diagnostics on Runner/Codex/Hermes. Private quota details remain outside the public repository.
+- Last verified: `2026-06-19`
+- Evidence source: Skeleton main at 48fd39b after PR #1006, PR #1022, and PR #1027, plus public GitHub issue/PR state reviewed for issue #1028. Runtime sync issue #1026 is treated as completed public state. No private runtime, provider, secret, project data, or deployment state was inspected.
 
 
 Summary:
@@ -117,20 +117,23 @@ Summary:
 - Truncated task fence detection blocks malformed Runner task bodies after PR 860.
 - Hermes queue-audit packet docs/schema landed after PR 858.
 - BauClock PR 52 status is recorded after PR 863.
-- Runner/Codex execution requires an explicit runtime preflight for execution user, authentication, supported model, and quota availability.
-- Codex must run from the Runner user context, not from root.
-- The current ChatGPT-account Codex setup requires a supported model configuration; unsupported Codex model defaults must fail closed before task execution.
-- Hermes must be quota-aware and bounded before further automation.
-- Gemini remains a future read-only reviewer/auditor candidate.
-- Antigravity remains a future lab-only worker candidate, not a production Runner executor.
+- PR
+- PR
+- PR
+- Runtime sync issue
+- PRs
+- Issues
+- Current public queue state has no open runner:ready issues and no open runner:running issues other than the active audit issue
+- Control issues
+- Project queues for BauClock, LumenFlow, Lavalamp, Aufmass, and Jeeves stay paused unless a separate operator-approved task opens them.
+- Runner/Codex execution still requires public-safe preflight checks before broader queue expansion.
+- Hermes remains bounded and non-executor unless a later reviewed change grants a narrower role.
 
 Next actions:
 
-- Sync the live Runner checkout to main after approved Skeleton changes.
-- Add Codex runtime preflight before starting further Codex tasks.
-- Add Hermes quota-aware review rules before using Hermes for queue audits.
-- Keep Gemini reviewer and Antigravity lab work in backlog until Codex and publisher paths are stable.
-- Continue runner:blocked cleanup only with evidence and without Codex retries while provider availability is constrained.
+- Create a narrow docs-only follow-up to refresh or close stale control issue language in
+- Create a protected-file review packet for any needed registry/provider/control-file updates and mark it NEEDS_OPERATOR before execution.
+- Create a public-safe Runner queue healthcheck task that only reports label/PR/issue state and does not start project queues.
 
 ### jeeves
 
@@ -355,6 +358,13 @@ Status: GitHub issue queue is working.
 
 Parser repair smoke status: 2026-06-12 docs-only Runner task completed normally.
 
+Post-1027 stabilization audit: 2026-06-19 current main is
+`48fd39b9986478ac029b55d67155670f70764c12`, which includes PR #1006,
+PR #1022, and PR #1027. Public GitHub issue state reviewed for this audit
+shows runtime sync issue #1026 completed and no open `runner:ready` queue
+items. The only open `runner:running` result observed during the audit was
+issue #1028, this active documentation/state reconciliation task.
+
 This document records the current operating status and runtime checklist for the
 Skeleton GitHub task queue Runner after the successful Telegram notification
 smoke test.
@@ -377,6 +387,94 @@ The only narrow exception is a target-project local-worktree `DONE` report with
 `Local worktree bounded finalization: success`; that report may include an older
 blocked status inside its quoted Codex-output fence without changing the final
 Runner result.
+
+## Current Queue Reconciliation
+
+This section is public-safe status only. It does not start queues, modify
+labels, merge PRs, sync runtime services, or touch target repositories.
+
+### Live
+
+- Runner issue lifecycle labels and completion reporting are live public-safe
+  capabilities.
+- Target-project issue-worktree draft PR publishing is present on current main
+  after PR #1006.
+- Ukrainian/simple operator-facing card behavior is present on current main
+  after PR #1022.
+- The narrow blocked-result exception for target-project local-worktree success
+  reports is present on current main after PR #1027.
+
+### Completed
+
+- PR #1006 merged the target-project worktree publish route.
+- PR #1022 merged the Ukrainian/simple operator-card repair.
+- PR #1027 merged the narrow blocked-result classification fix.
+- Runtime sync issue #1026 completed after PR #1006.
+- Issues #1021, #1019, #1013, and #1011 were cleaned up through the PR #1022
+  path.
+
+### Blocked
+
+- No new Skeleton-wide blocker is promoted by this audit.
+- Changes to protected control files or Runner code are outside this task and
+  must be reported as `NEEDS_OPERATOR` in a separate task.
+- Project queues remain blocked from this audit by scope, not by technical
+  failure.
+
+### Superseded
+
+- PR #1020 is superseded by merged PR #1022.
+- PR #1014 is superseded by merged PR #1022.
+- PR #1012 is superseded by merged PR #1022.
+
+### Stale
+
+- Issue #895 still describes the older #893/#822/#867 stabilization chain and
+  dependent project queue order. That language predates PR #1006, PR #1022,
+  issue #1026 completion, and PR #1027, so it is review context only.
+- Issue #867 still asks for broad control-plane cleanup including protected
+  registries/provider/control files. That is broader than this narrow
+  post-#1027 audit and must not be blindly re-run.
+- Older queue notes that recommend starting Aufmass, Lavalamp, BauClock,
+  LumenFlow, or Jeeves after Runner stabilization are not current execution
+  approval.
+
+### Review
+
+- Open review/control issues may be used as evidence for a new bounded task,
+  but they are not executable until refreshed and explicitly approved.
+- Open PRs returned by public search need separate PR review and are not part
+  of this queue reconciliation.
+
+### Operator-Gated
+
+- Do not add `runner:ready` to #895 or #867 without explicit operator approval
+  and a refreshed current-main task packet.
+- Do not start BauClock, LumenFlow, Lavalamp, Aufmass, or Jeeves queues from
+  this audit.
+- Do not edit protected files, Runner code, workflows, schemas, runtime
+  services, deploy files, secrets, or target repositories from this audit.
+
+## Stale Control Statements
+
+- #895 says to recover #822 and resume dependent Aufmass queue work after the
+  older #893/#867 stabilization chain. Current main now contains later Runner
+  stabilization work, the target-project publish route, the operator-card
+  repair, the completed #1026 sync state, and the #1027 classification fix.
+  Treat #895 as review/operator-gated, not as a runnable queue instruction.
+- #867 asks for broad state refresh across protected control files and provider
+  registries. The public state and queue docs are now partially reconciled by
+  this narrow audit; any protected-file update remains `NEEDS_OPERATOR`.
+
+## Next Safe Skeleton Tasks
+
+1. Create a narrow docs-only follow-up to refresh or close stale control issue
+   language in #895/#867 without editing protected control files.
+2. Create a protected-file review packet for any needed
+   registry/provider/control-file updates and mark it `NEEDS_OPERATOR` before
+   execution.
+3. Create a public-safe Runner queue healthcheck task that only reports
+   label/PR/issue state and does not start project queues.
 
 ## Labels
 
