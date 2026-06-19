@@ -419,6 +419,41 @@ Echoed task text later says DONE is also possible.
     assert result == runner.CodexTaskResult("BLOCKED", "BLOCKED")
 
 
+def test_codex_task_result_treats_bauclock_delivery_as_done_despite_status_echo() -> None:
+    output = """Implemented the BauClock runner status fix in the allowed files only.
+
+Changed files:
+- scripts/runner_poll_github_tasks.py
+- tests/test_runner_poll_github_tasks.py
+- docs/RUNNER_QUEUE_STATUS.md
+
+Test results:
+- python3 -m pytest tests/test_runner_poll_github_tasks.py -q: 151 passed
+- git diff --check: passed
+
+Previous runner state was BLOCKED: the full-suite failure was outside the
+bounded delivery scope.
+"""
+
+    result = runner.classify_codex_task_result(output, 0)
+
+    assert runner.blocked_output_marker(output) in {"BLOCKED", "Blocked:"}
+    assert runner.codex_output_blocked_marker(output) is None
+    assert result == runner.CodexTaskResult("DONE")
+
+
+def test_codex_task_result_keeps_pre_work_bauclock_blocker_blocked() -> None:
+    output = """BLOCKED: missing target repository checkout for BauClock.
+
+No files were changed.
+"""
+
+    result = runner.classify_codex_task_result(output, 0)
+
+    assert runner.codex_output_blocked_marker(output) == "BLOCKED"
+    assert result == runner.CodexTaskResult("BLOCKED", "BLOCKED")
+
+
 def test_codex_task_result_ignores_prompt_echo_before_assistant_done() -> None:
     blocked = "BLOCK" + "ED"
     output = f"""Reading additional input from stdin...
@@ -1099,6 +1134,59 @@ def test_process_issue_runs_target_project_bauclock_in_local_worktree(
     finalize_local.assert_called_once_with(str(issue_path), "codex output", expected_task)
     cleanup_target.assert_called_once_with("alanua/bauclock", 146)
     assert comment.call_args.args[1] == "DONE local report\nTarget Project: bauclock"
+
+
+def test_process_issue_marks_bauclock_delivery_done_despite_blocked_status_echo(
+    tmp_path: Path,
+) -> None:
+    issue_path = tmp_path / "bauclock" / "issue-146"
+    codex_output = """Implemented the BauClock change in the target worktree.
+
+Changed files:
+- tests/test_time_entries.py
+
+Test results:
+- python3 -m pytest -q: 12 passed
+
+Previous runner status was BLOCKED: delivery output was local-only.
+"""
+    issue = {
+        "number": 146,
+        "title": "Target project bauclock",
+        "body": "Target Project: bauclock\n\n```task\nDo it\n```",
+    }
+
+    with mock.patch.object(
+        runner, "verify_target_repository_checkout", return_value=None
+    ), mock.patch.object(
+        runner,
+        "prepare_target_repository_issue_worktree",
+        return_value=(0, "ready", issue_path),
+    ), mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, codex_output)
+    ), mock.patch.object(
+        runner, "finalize_local_worktree_success", return_value="DONE local report"
+    ) as finalize_local, mock.patch.object(
+        runner, "cleanup_target_repository_issue_worktree", return_value=(0, "")
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ) as comment, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(
+        runner, "notify_task_finished"
+    ) as notify:
+        runner.process_issue(issue)
+
+    finalize_local.assert_called_once()
+    assert comment.call_args.args[1] == "DONE local report\nTarget Project: bauclock"
+    assert set_label.call_args_list[-1] == mock.call(
+        146, runner.LABEL_RUNNING, runner.LABEL_DONE
+    )
+    notify.assert_called_once_with(
+        146, "DONE", "DONE local report\nTarget Project: bauclock"
+    )
 
 
 def test_process_issue_runs_target_project_lavalamp_when_project_tree_enables_worktree(

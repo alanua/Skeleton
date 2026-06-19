@@ -435,6 +435,10 @@ or `systemctl restart` while a task is running.
 - Codex delivery status is taken from the final report heading or explicit
   `RESULT: DONE` / `RESULT: NEEDS_OPERATOR` contract line, not from ordinary
   status words inside docs, task text, logs, test names, or quoted output.
+- For target-project local worktree delivery, changed-file and pytest evidence
+  can complete the Codex step even when the final answer mentions a previous
+  `BLOCKED:` runner status; pre-work `BLOCKED:` reports still block before
+  delivery finalization.
 - To recover an already completed issue worktree, create an operator-approved
   runtime maintenance issue using
   `Maintenance Task ID: publish_existing_issue_worktree` with explicit

@@ -237,6 +237,12 @@ _PYTEST_SUMMARY_LINE_RE = re.compile(
     r"(?i)\b(?:\d+\s+(?:passed|failed|skipped|xfailed|xpassed|error|errors|warnings?)"
     r"|no tests ran|failed|passed)\b"
 )
+_DELIVERED_WORK_OUTPUT_RES = (
+    re.compile(r"(?im)^Changed files:\s*$"),
+    re.compile(r"(?im)^Local worktree changed files:\s*$"),
+    re.compile(r"(?im)^(?:Test results|Pytest output):\s*$"),
+    _PYTEST_SUMMARY_LINE_RE,
+)
 _SAFE_CODEX_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,80}$")
 _TASK_FENCE_OPEN_LINE_RE = re.compile(r"^[ \t]*```task[ \t]*$")
 _FENCE_CLOSE_LINE_RE = re.compile(r"^[ \t]*```[ \t]*$")
@@ -817,6 +823,18 @@ def blocked_output_marker(output: str) -> str | None:
     return None
 
 
+def codex_output_blocked_marker(output: str) -> str | None:
+    final_answer = _without_fenced_blocks(final_codex_answer(output))
+    marker = blocked_output_marker(output)
+    if marker is None:
+        return None
+    if marker in {"BLOCKED", "Blocked:"} and any(
+        pattern.search(final_answer) for pattern in _DELIVERED_WORK_OUTPUT_RES
+    ):
+        return None
+    return marker
+
+
 def classify_codex_task_result(output: str, exit_code: int) -> CodexTaskResult:
     if exit_code != 0:
         return CodexTaskResult("BLOCKED", f"exit code {exit_code}")
@@ -825,7 +843,7 @@ def classify_codex_task_result(output: str, exit_code: int) -> CodexTaskResult:
     if status is not None:
         return CodexTaskResult(status, status if status == "BLOCKED" else None)
 
-    marker = blocked_output_marker(output)
+    marker = codex_output_blocked_marker(output)
     if marker is not None:
         return CodexTaskResult("BLOCKED", marker)
     return CodexTaskResult("DONE")
