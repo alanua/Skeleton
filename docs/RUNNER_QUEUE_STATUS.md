@@ -19,6 +19,14 @@ smoke test.
 7. The Runner changes the label to `runner:done` or `runner:blocked`.
 8. Telegram notification is sent after completion.
 
+Final report classification keeps explicit blockers authoritative. A `DONE`
+report that also contains an unfenced `BLOCKED:` line or `NEEDS_OPERATOR`
+action remains blocked, even when changed files or pytest output are present.
+The only narrow exception is a target-project local-worktree `DONE` report with
+`Local worktree bounded finalization: success`; that report may include an older
+blocked status inside its quoted Codex-output fence without changing the final
+Runner result.
+
 ## Labels
 
 - `runner:ready`

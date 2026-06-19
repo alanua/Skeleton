@@ -216,6 +216,15 @@ _FINAL_STATUS_DELIVERY_LINE_RE = re.compile(
 _FINAL_RESULT_LINE_RE = re.compile(
     r"^\s*RESULT:\s*(?P<result>DONE|BLOCKED|NEEDS_OPERATOR)\b", re.IGNORECASE
 )
+_REPORT_OPERATOR_REQUIRED_RE = re.compile(
+    r"^\s*(?:RESULT:\s*)?NEEDS_OPERATOR\b:?", re.IGNORECASE | re.MULTILINE
+)
+_LOCAL_WORKTREE_DONE_PREFIX = (
+    "DONE: Codex completed successfully in the local target-project worktree."
+)
+_LOCAL_WORKTREE_BOUNDED_FINALIZATION_EVIDENCE = (
+    "Local worktree bounded finalization: success"
+)
 _CODEX_TRANSCRIPT_TAIL_RE = re.compile(
     r"(?m)^(?:Reading additional input from stdin\.\.\.|OpenAI Codex v)"
 )
@@ -835,12 +844,36 @@ def runner_report_status(report: str) -> str:
     status = _first_final_status(report)
     if status != "DONE":
         return "BLOCKED"
+    report_without_fences = _without_fenced_blocks(report)
+    if blocked_output_marker(report_without_fences) is not None:
+        return "BLOCKED"
+    if _REPORT_OPERATOR_REQUIRED_RE.search(report_without_fences) is not None:
+        return "BLOCKED"
+    if report.startswith(_LOCAL_WORKTREE_DONE_PREFIX) and not _has_local_worktree_success_evidence(
+        report
+    ):
+        return "BLOCKED"
     if (
         "Codex completed successfully and produced file changes." in report
         and not extract_pr_url(report)
     ):
         return "BLOCKED"
     return "DONE"
+
+
+def _has_local_worktree_success_evidence(report: str) -> bool:
+    required_fragments = (
+        _LOCAL_WORKTREE_DONE_PREFIX,
+        _LOCAL_WORKTREE_BOUNDED_FINALIZATION_EVIDENCE,
+        "Selected Project: ",
+        "Selected Repository: ",
+        "Issue worktree: `",
+        "Target-repo output: not created.",
+        "Local worktree changed files:",
+        "Local worktree git diff:",
+        "Codex output:\n```",
+    )
+    return all(fragment in report for fragment in required_fragments)
 
 
 def blocked_final_report(report: str) -> str:
@@ -2321,8 +2354,8 @@ def finalize_local_worktree_success(
     )
     diff_summary = local_worktree_recovery_diff(workdir)
     return (
-        "DONE: Codex completed successfully in the local target-project "
-        "worktree.\n\n"
+        f"{_LOCAL_WORKTREE_DONE_PREFIX}\n\n"
+        f"{_LOCAL_WORKTREE_BOUNDED_FINALIZATION_EVIDENCE}\n"
         f"Selected Project: {runner_task.target_project}\n"
         f"Selected Repository: {runner_task.target_repository}\n"
         f"Issue worktree: `{workdir}`\n"

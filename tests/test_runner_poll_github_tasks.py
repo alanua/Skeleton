@@ -528,6 +528,84 @@ maintenance evidence text. They are not the final delivery status.
     assert runner.runner_report_status(report) == "DONE"
 
 
+def test_runner_report_status_blocks_done_report_with_publish_failure() -> None:
+    report = f"""DONE: Codex completed successfully and produced file changes.
+
+Changed files:
+- scripts/runner_poll_github_tasks.py
+
+Pytest output:
+```
+1 passed
+```
+
+BLOCKED: gh pr create failed.
+Draft PR: {PR_URL}
+"""
+
+    assert runner.runner_report_status(report) == "BLOCKED"
+
+
+def test_runner_report_status_blocks_operator_required_action() -> None:
+    report = """DONE: Codex completed successfully with no file changes.
+
+Changed files:
+- docs/example.md
+
+NEEDS_OPERATOR: approve publish retry.
+"""
+
+    assert runner.runner_report_status(report) == "BLOCKED"
+
+
+def test_runner_report_status_allows_local_worktree_quote_of_old_blocked() -> None:
+    report = f"""{runner._LOCAL_WORKTREE_DONE_PREFIX}
+
+{runner._LOCAL_WORKTREE_BOUNDED_FINALIZATION_EVIDENCE}
+Selected Project: demo
+Selected Repository: alanua/Demo
+Issue worktree: `/tmp/worktree`
+Target-repo output: not created.
+
+Local worktree changed files:
+- docs/example.md
+
+Local worktree git diff: none
+
+Codex output:
+```
+Earlier issue state:
+BLOCKED: waiting on operator.
+
+DONE: local changes completed.
+```
+"""
+
+    assert runner.runner_report_status(report) == "DONE"
+
+
+def test_runner_report_status_blocks_local_worktree_without_bounded_evidence() -> None:
+    report = f"""{runner._LOCAL_WORKTREE_DONE_PREFIX}
+
+Selected Project: demo
+Selected Repository: alanua/Demo
+Issue worktree: `/tmp/worktree`
+Target-repo output: not created.
+
+Local worktree changed files:
+- docs/example.md
+
+Local worktree git diff: none
+
+Codex output:
+```
+DONE: local changes completed.
+```
+"""
+
+    assert runner.runner_report_status(report) == "BLOCKED"
+
+
 def test_worktree_path_uses_env_root_when_set(tmp_path: Path) -> None:
     configured_root = tmp_path / "runner-worktrees"
     with mock.patch.dict(
@@ -3646,6 +3724,7 @@ def test_finalize_local_worktree_success_includes_recovery_diff() -> None:
         )
 
     assert "Selected Project: demo" in report
+    assert runner._LOCAL_WORKTREE_BOUNDED_FINALIZATION_EVIDENCE in report
     assert "Local worktree changed files:\n- docs/example.md" in report
     assert "Local worktree git diff: none" in report
 
