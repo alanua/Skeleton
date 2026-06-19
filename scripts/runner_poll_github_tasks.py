@@ -1829,9 +1829,8 @@ def build_telegram_message(
 ) -> str:
     if target_repository is None:
         lines = [
-            f"Repository: {REPO}",
-            f"Issue: #{issue_number}",
-            f"Status: {status}",
+            f"Проєкт: {_telegram_project_name(REPO)}",
+            f"Статус: {status}",
         ]
     else:
         lines = [
@@ -1840,7 +1839,7 @@ def build_telegram_message(
             f"Задача: #{issue_number}",
             f"Статус: {status}",
         ]
-    if report:
+    if report and target_repository is not None:
         pr_url = extract_pr_url(report)
         if pr_url:
             lines.append(f"PR: {pr_url}")
