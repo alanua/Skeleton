@@ -102,6 +102,7 @@ BACKFILL_SKELETON_MEMORY_RECENT = "backfill_skeleton_memory_recent"
 INSPECT_ISSUE_WORKTREE_FOR_PUBLISH = "inspect_issue_worktree_for_publish"
 PUBLISH_ISSUE_WORKTREE_PR = "publish_issue_worktree_pr"
 PUBLISH_EXISTING_ISSUE_WORKTREE = "publish_existing_issue_worktree"
+PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR = "publish_target_project_issue_worktree_pr"
 QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES = (
     "quarantine_stale_clean_skeleton_worktrees"
 )
@@ -127,6 +128,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         INSPECT_ISSUE_WORKTREE_FOR_PUBLISH,
         PUBLISH_ISSUE_WORKTREE_PR,
         PUBLISH_EXISTING_ISSUE_WORKTREE,
+        PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR,
         QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES,
     )
 )
@@ -354,6 +356,9 @@ class IssueWorktreePublishInspectionRequest:
     pr_title: str
     base_branch: str = "main"
     draft_pr: bool = True
+    target_project: str = "skeleton"
+    worktree_root: Path | None = None
+    target_project_route: bool = False
 
 
 @dataclass(frozen=True)
@@ -5558,17 +5563,54 @@ def _issue_worktree_publish_inspection_metadata(
     *,
     require_repository: bool = False,
     explicit_recovery_route: bool = False,
+    target_project_route: bool = False,
 ) -> tuple[IssueWorktreePublishInspectionRequest | None, str | None]:
     metadata = (body or "").split("```task", 1)[0]
-    repository = (
-        _body_field(metadata, "Target Repository")
-        if explicit_recovery_route
-        else _body_field(metadata, "Repository")
-    )
+    repository = None
+    target_project = "skeleton"
+    target_worktree_root: Path | None = None
+    if target_project_route:
+        if (
+            _body_field(metadata, "Worktree Path") is not None
+            or _body_field(metadata, "Issue Worktree") is not None
+            or _body_field(metadata, "Source Worktree") is not None
+        ):
+            return None, "path_input_not_allowed"
+        raw_target_project = _body_field(metadata, "Target Project")
+        raw_target_repository = _body_field(metadata, "Target Repository")
+        if raw_target_project is None:
+            return None, "missing_target_project"
+        if raw_target_repository is None:
+            return None, "missing_target_repository"
+        project_tree = load_runner_project_tree()
+        try:
+            project_from_project = get_project(project_tree, raw_target_project)
+            project_from_repository = get_project_by_repo(
+                project_tree, raw_target_repository
+            )
+        except (KeyError, ValueError):
+            return None, "unsupported_target_project_or_repository"
+        if project_from_project != project_from_repository:
+            return None, "target_project_repository_mismatch"
+        if project_from_project.get("public") is not True:
+            return None, "target_repository_not_public"
+        if project_from_project.get("runner_enabled") is not True:
+            return None, "target_project_runner_disabled"
+        if project_from_project.get("repo") != raw_target_repository:
+            return None, "target_repository_metadata_mismatch"
+        target_project = raw_target_project
+        repository = raw_target_repository
+        target_worktree_root = Path(project_from_project["worktree_root"])
+    else:
+        repository = (
+            _body_field(metadata, "Target Repository")
+            if explicit_recovery_route
+            else _body_field(metadata, "Repository")
+        )
     source_issue = _body_field(metadata, "Source Issue")
     expected_branch = (
         _body_field(metadata, "Output Branch")
-        if explicit_recovery_route
+        if explicit_recovery_route or target_project_route
         else _body_field(metadata, "Expected Branch")
     )
     base_branch = _body_field(metadata, "Base Branch") or "main"
@@ -5577,32 +5619,32 @@ def _issue_worktree_publish_inspection_metadata(
     )
     allowed_files, allowed_files_reason = _issue_publish_allowed_files(metadata)
 
-    if require_repository and repository != REPO:
+    if not target_project_route and require_repository and repository != REPO:
         return None, "unsupported_repository"
-    if repository is not None and repository != REPO:
+    if not target_project_route and repository is not None and repository != REPO:
         return None, "unsupported_repository"
-    if explicit_recovery_route and repository is None:
+    if (explicit_recovery_route or target_project_route) and repository is None:
         return None, "missing_target_repository"
     if not isinstance(source_issue, str) or re.fullmatch(r"[1-9]\d*", source_issue) is None:
         return None, "missing_or_invalid_source_issue"
     source_issue_number = int(source_issue)
     required_branch = f"runner/issue-{source_issue_number}"
-    if explicit_recovery_route:
+    if explicit_recovery_route or target_project_route:
         if not isinstance(expected_branch, str) or not _safe_issue_publish_branch_name(
             expected_branch
         ):
             return None, "missing_or_invalid_output_branch"
     elif expected_branch != required_branch:
         return None, "missing_or_invalid_expected_branch"
-    if explicit_recovery_route and expected_branch != required_branch:
+    if (explicit_recovery_route or target_project_route) and expected_branch != required_branch:
         return None, "output_branch_mismatch"
     if not _safe_issue_publish_base_branch(base_branch):
         return None, "missing_or_invalid_base_branch"
-    if explicit_recovery_route and base_branch != "main":
+    if (explicit_recovery_route or target_project_route) and base_branch != "main":
         return None, "unsupported_base_branch"
     if draft_pr_reason is not None:
         return None, draft_pr_reason
-    if explicit_recovery_route and draft_pr is not True:
+    if (explicit_recovery_route or target_project_route) and draft_pr is not True:
         return None, "draft_pr_required"
     if allowed_files_reason is not None:
         return None, allowed_files_reason
@@ -5619,6 +5661,9 @@ def _issue_worktree_publish_inspection_metadata(
             pr_title=pr_title,
             base_branch=base_branch,
             draft_pr=bool(draft_pr),
+            target_project=target_project,
+            worktree_root=target_worktree_root,
+            target_project_route=target_project_route,
         ),
         None,
     )
@@ -5637,6 +5682,32 @@ def _ensure_safe_issue_publish_worktree_path(path: str | Path) -> Path:
         candidate.relative_to(root)
     except ValueError as exc:
         raise ValueError("issue worktree is outside runner worktree root") from exc
+    return candidate
+
+
+def _target_project_issue_worktree_path(
+    request: IssueWorktreePublishInspectionRequest,
+) -> Path:
+    if request.worktree_root is None:
+        raise ValueError("target project worktree root is missing")
+    return request.worktree_root / f"issue-{request.source_issue}"
+
+
+def _ensure_safe_target_project_issue_publish_worktree_path(
+    request: IssueWorktreePublishInspectionRequest,
+) -> Path:
+    if request.worktree_root is None:
+        raise ValueError("target project worktree root is missing")
+    root = request.worktree_root.resolve(strict=False)
+    candidate = _target_project_issue_worktree_path(request).resolve(strict=False)
+    if candidate == root:
+        raise ValueError("issue worktree cannot be the target project worktree root")
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("issue worktree is outside target project worktree root") from exc
+    if candidate.name != f"issue-{request.source_issue}":
+        raise ValueError("issue worktree path does not end with the source issue")
     return candidate
 
 
@@ -5969,11 +6040,23 @@ def _issue_worktree_publish_pr_url(
 
 
 def _issue_worktree_publish_validated_report(
-    body: str, task_id: str, *, publish: bool, explicit_recovery_route: bool = False
+    body: str,
+    task_id: str,
+    *,
+    publish: bool,
+    explicit_recovery_route: bool = False,
+    target_project_route: bool = False,
 ) -> str:
-    failure_status = "NEEDS_OPERATOR" if explicit_recovery_route else "BLOCKED"
+    failure_status = (
+        "NEEDS_OPERATOR"
+        if explicit_recovery_route or target_project_route
+        else "BLOCKED"
+    )
     request, reason = _issue_worktree_publish_inspection_metadata(
-        body, require_repository=publish, explicit_recovery_route=explicit_recovery_route
+        body,
+        require_repository=publish,
+        explicit_recovery_route=explicit_recovery_route,
+        target_project_route=target_project_route,
     )
     if reason is not None:
         return _maintenance_report(
@@ -5982,6 +6065,7 @@ def _issue_worktree_publish_validated_report(
     assert request is not None
 
     status_lines = [
+        f"target_project={request.target_project}",
         f"repository={request.repository}",
         f"source_issue={request.source_issue}",
         f"base_branch={request.base_branch}",
@@ -5989,13 +6073,20 @@ def _issue_worktree_publish_validated_report(
         f"draft_pr={str(request.draft_pr).lower()}",
         f"allowed_files_count={len(request.allowed_files)}",
     ]
+    if request.worktree_root is not None:
+        status_lines.append(f"worktree_root={request.worktree_root}")
     try:
-        worktree_path = _ensure_safe_issue_publish_worktree_path(
-            _issue_publish_worktree_path(request.source_issue)
-        )
+        if target_project_route:
+            worktree_path = _ensure_safe_target_project_issue_publish_worktree_path(
+                request
+            )
+        else:
+            worktree_path = _ensure_safe_issue_publish_worktree_path(
+                _issue_publish_worktree_path(request.source_issue)
+            )
     except ValueError:
         return _maintenance_report(
-            "NEEDS_OPERATOR" if explicit_recovery_route else "BLOCKED",
+            failure_status,
             task_id,
             [*status_lines, "reason=issue_worktree_path_unsafe"],
             "not_met",
@@ -6004,14 +6095,14 @@ def _issue_worktree_publish_validated_report(
     status_lines.append(f"issue_worktree={worktree_path}")
     if not worktree_path.exists():
         return _maintenance_report(
-            "NEEDS_OPERATOR" if explicit_recovery_route else "BLOCKED",
+            failure_status,
             task_id,
             [*status_lines, "reason=issue_worktree_missing"],
             "not_met",
         )
     if not (worktree_path / ".git").exists():
         return _maintenance_report(
-            "NEEDS_OPERATOR" if explicit_recovery_route else "BLOCKED",
+            failure_status,
             task_id,
             [*status_lines, "reason=issue_worktree_git_missing"],
             "not_met",
@@ -6217,7 +6308,11 @@ def _issue_worktree_publish_validated_report(
                 "git",
                 "commit",
                 "-m",
-                f"Publish issue #{request.source_issue} worktree",
+                (
+                    f"Publish target project issue #{request.source_issue} worktree"
+                    if request.target_project_route
+                    else f"Publish issue #{request.source_issue} worktree"
+                ),
             ],
             cwd=worktree_path,
         )
@@ -6325,6 +6420,15 @@ def publish_existing_issue_worktree(body: str) -> str:
     )
 
 
+def publish_target_project_issue_worktree_pr(body: str) -> str:
+    return _issue_worktree_publish_validated_report(
+        body,
+        PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR,
+        publish=True,
+        target_project_route=True,
+    )
+
+
 def dispatch_runtime_maintenance_task(
     task_id: str, workdir: str, body: str = ""
 ) -> str:
@@ -6374,6 +6478,8 @@ def dispatch_runtime_maintenance_task(
             return publish_issue_worktree_pr(body)
         if task_id == PUBLISH_EXISTING_ISSUE_WORKTREE:
             return publish_existing_issue_worktree(body)
+        if task_id == PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR:
+            return publish_target_project_issue_worktree_pr(body)
         if task_id == QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES:
             return quarantine_stale_clean_skeleton_worktrees(body)
         return check_project_checkout(body)

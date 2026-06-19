@@ -588,6 +588,51 @@ as `NEEDS_OPERATOR` with sanitized key/value status lines only; raw command
 output, private paths outside the Runner worktree contract, secrets, task text,
 and quoted transcripts must not be included.
 
+`publish_target_project_issue_worktree_pr` is the bounded cross-project
+publisher for work that already exists in a registered public target-project
+issue worktree. It resolves the target repository and worktree root only through
+`PROJECT_TREE.yaml`; issue bodies must not provide source paths.
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: publish_target_project_issue_worktree_pr
+Target Project: lumenflow
+Target Repository: alanua/LumenFlow
+Source Issue: 1004
+Base Branch: main
+Output Branch: runner/issue-1004
+Draft PR: true
+Allowed Files:
+- README.md
+- docs/RUN_LINUX_MINT.md
+- deploy/home-runner/README.md
+- deploy/home-runner/app.yaml
+- deploy/home-runner/install.sh
+- deploy/home-runner/start.sh
+- deploy/home-runner/status.sh
+- deploy/home-runner/stop.sh
+- deploy/home-runner/rollback.sh
+```
+
+It may only:
+
+1. Validate `Target Project` and `Target Repository` against the same
+   public, `runner_enabled` `PROJECT_TREE.yaml` entry.
+2. Derive the source worktree as
+   `<registered target_project worktree_root>/issue-{Source Issue}`.
+3. Reject issue-provided source paths, absolute paths, traversal, mismatched
+   project/repository metadata, private repositories, and disabled projects.
+4. Validate current branch, origin remote, base branch, output branch, draft
+   status, changed tracked files, and allowed untracked files before publishing.
+5. Ignore only local `.codex/` untracked runtime artifacts.
+6. Run `git diff --check`, stage only validated files, commit with the
+   deterministic target-project publish message, push only the exact expected
+   branch ref, and create only a draft PR against `main`.
+7. Reuse an existing open PR for the same head branch instead of creating a
+   duplicate.
+8. Never merge, force-push, deploy, restart services, read secrets, execute
+   issue-provided commands, use broad `git add`, or support private repositories.
+
 `quarantine_stale_clean_skeleton_worktrees` removes only explicitly listed
 clean Skeleton issue worktrees and must include explicit worktree id metadata:
 
