@@ -1698,9 +1698,23 @@ def test_simple_done_notification_without_pr_url_keeps_plain_message() -> None:
 
     assert _request_payload(urlopen) == {
         "chat_id": ["telegram-chat-placeholder"],
-        "text": [f"Repository: {runner.REPO}\nIssue: #9\nStatus: DONE"],
+        "text": ["Проєкт: Skeleton\nСтатус: DONE"],
         "disable_web_page_preview": ["true"],
     }
+
+
+def test_same_repo_routine_notifications_stay_simple_ukrainian() -> None:
+    done_message = runner.build_telegram_message(9, "DONE", DONE_REPORT)
+    blocked_message = runner.build_telegram_message(9, "BLOCKED")
+
+    assert done_message == "Проєкт: Skeleton\nСтатус: DONE"
+    assert blocked_message == "Проєкт: Skeleton\nСтатус: BLOCKED"
+    for message in (done_message, blocked_message):
+        assert "Repository:" not in message
+        assert "Issue:" not in message
+        assert "PR:" not in message
+        assert "Репозиторій:" not in message
+        assert "Задача:" not in message
 
 
 def test_telegram_message_omits_placeholder_pr_url() -> None:
