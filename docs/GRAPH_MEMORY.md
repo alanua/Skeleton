@@ -122,3 +122,33 @@ not private project memory:
 
 The pilot is complete only when the public repo can explain the architecture and
 validate synthetic query envelopes without exposing real private graph memory.
+
+## Runtime Installation Boundary
+
+The Runner may install Graphify only through the approval-gated
+`install_graphify_runtime` maintenance task. That task pins the tool with
+`uv tool install --reinstall graphifyy==0.8.44`, verifies the local CLI contract,
+backs up only bounded Graphify-managed Codex and Hermes skill paths plus
+existing marker-only `.graphify_version` files discovered from the pinned
+Graphify 0.8.44 upstream platform destination allowlist, and installs skills
+with `graphify install --platform codex` and `graphify install --platform
+hermes`. The allowlist is exact and does not scan arbitrary home directories.
+
+The local smoke check is synthetic and AST-only in scope. It uses the supported
+Graphify 0.8.44 build form, `graphify <folder>`, with `GRAPHIFY_OUT` set to a
+temporary output directory and a bounded timeout. The smoke is successful only
+when `graph.json` exists and reports non-zero node and edge counts. The smoke
+environment is scrubbed of model credentials and keeps network access, hooks,
+services, ports, and private indexing disabled.
+
+Unsupported command shapes are outside the contract: `graphify ingest`,
+`graphify install-skills`, `--source`, `--extractor`, and `--no-semantic` must
+not appear in Runner runtime commands or tests. If a post-backup skill install
+or smoke step fails, the Runner restores the bounded Codex and Hermes skill
+paths and allowlisted `.graphify_version` files from the private recovery
+snapshot. A successful runtime install retains the private recovery snapshot for
+operator recovery. Public reports remain aggregate-only and must not include paths,
+Graphify command output, environment values, profile content, node IDs, edge IDs,
+labels, summaries, or graph payloads.
+
+Runtime/server/service integration remains blocked by issue #1047.
