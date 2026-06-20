@@ -2719,6 +2719,299 @@ def test_hermes_private_memory_bridge_exception_returns_safe_aggregate_report(
     assert "token" not in report.lower()
 
 
+def _graphify_runtime_body(approval: str | None = runner.GRAPHIFY_RUNTIME_APPROVAL) -> str:
+    metadata = ""
+    if approval is not None:
+        metadata = f"Operator Approval: {approval}"
+    return str(
+        _maintenance_issue(
+            runner.INSTALL_GRAPHIFY_RUNTIME,
+            metadata=metadata,
+        )["body"]
+    )
+
+
+def _graphify_managed_paths(tmp_path: Path) -> tuple[Path, ...]:
+    return tuple(
+        tmp_path / relative_path for relative_path in runner.GRAPHIFY_PROFILE_RELATIVE_PATHS
+    )
+
+
+def _write_smoke_graph(command: list[str], node_count: int = 2, edge_count: int = 1) -> None:
+    output_arg = next(part for part in command if part.startswith("GRAPHIFY_OUT="))
+    output_dir = Path(output_arg.split("=", 1)[1])
+    output_dir.mkdir(parents=True)
+    (output_dir / "graph.json").write_text(
+        json.dumps(
+            {
+                "nodes": [{"id": f"node-{index}"} for index in range(node_count)],
+                "edges": [{"source": "node-0", "target": "node-1"} for _ in range(edge_count)],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _successful_graphify_runtime_command(
+    command: list[str], cwd: str | Path | None = None
+) -> tuple[int, str]:
+    del cwd
+    if command == list(runner.GRAPHIFY_TOOL_INSTALL_COMMAND):
+        return 0, ""
+    if command == list(runner.GRAPHIFY_VERSION_COMMAND):
+        return 0, "graphify 0.8.44\n"
+    if command == list(runner.GRAPHIFY_INSTALL_HELP_COMMAND):
+        return 0, "Usage: graphify install --platform {codex,hermes}\n"
+    if command == list(runner.GRAPHIFY_BUILD_HELP_COMMAND):
+        return 0, "Usage: graphify [OPTIONS] FOLDER\n"
+    if command in (
+        list(runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND),
+        list(runner.GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND),
+    ):
+        return 0, ""
+    return 2, "unexpected command"
+
+
+def test_graphify_runtime_requires_exact_operator_approval() -> None:
+    with mock.patch.object(runner, "run_command") as run:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.INSTALL_GRAPHIFY_RUNTIME,
+            str(runner.ROOT),
+            _graphify_runtime_body(approval=None),
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "maintenance_task_id=install_graphify_runtime" in report
+    assert "reason=missing_operator_approval" in report
+    run.assert_not_called()
+
+
+def test_graphify_runtime_uses_verified_0844_commands_and_retains_snapshot(
+    tmp_path: Path,
+) -> None:
+    commands: list[list[str]] = []
+    managed_paths = _graphify_managed_paths(tmp_path / "home")
+    codex_skill = managed_paths[0]
+    codex_skill.mkdir(parents=True)
+    (codex_skill / "SKILL.md").write_text("original\n", encoding="utf-8")
+    snapshot_parent = tmp_path / "snapshots"
+
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        commands.append(command)
+        return _successful_graphify_runtime_command(command, cwd)
+
+    def smoke(command: list[str]) -> tuple[int, str]:
+        commands.append(command)
+        _write_smoke_graph(command, node_count=3, edge_count=2)
+        return 0, "synthetic graph built\n"
+
+    with mock.patch.object(
+        runner, "_graphify_managed_profile_paths", return_value=managed_paths
+    ), mock.patch.object(
+        runner, "_graphify_private_snapshot_parent", return_value=snapshot_parent
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run
+    ), mock.patch.object(
+        runner, "_run_graphify_smoke_command", side_effect=smoke
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.INSTALL_GRAPHIFY_RUNTIME,
+            str(runner.ROOT),
+            _graphify_runtime_body(),
+        )
+
+    assert report.startswith("DONE:")
+    assert "approval_status=verified" in report
+    assert "recovery_snapshot_status=retained" in report
+    assert "synthetic_smoke_timeout_seconds=45" in report
+    assert "synthetic_graph_node_count=3" in report
+    assert "synthetic_graph_edge_count=2" in report
+    assert "managed_version_marker_count=8" in report
+    assert any(snapshot_parent.iterdir())
+    assert list(runner.GRAPHIFY_TOOL_INSTALL_COMMAND) in commands
+    assert list(runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND) in commands
+    assert list(runner.GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND) in commands
+    smoke_commands = [command for command in commands if command[:2] == ["env", "-i"]]
+    assert len(smoke_commands) == 1
+    smoke_command = smoke_commands[0]
+    assert smoke_command[-2] == "graphify"
+    assert "GRAPHIFY_OUT=" in " ".join(smoke_command)
+    assert all("OPENAI" not in part for part in smoke_command)
+    assert all("ANTHROPIC" not in part for part in smoke_command)
+    command_words = [" ".join(command) for command in commands]
+    assert all("install-skills" not in command for command in command_words)
+    assert all(" ingest " not in f" {command} " for command in command_words)
+    assert all("--source" not in command for command in command_words)
+    assert all("--extractor" not in command for command in command_words)
+    assert all("--no-semantic" not in command for command in command_words)
+    assert str(tmp_path) not in report
+    assert "synthetic graph built" not in report
+
+
+def test_graphify_managed_paths_include_version_markers(tmp_path: Path) -> None:
+    managed_paths = runner._graphify_managed_profile_paths(tmp_path)
+
+    for relative_path in runner.GRAPHIFY_OWNED_VERSION_MARKER_RELATIVE_PATHS:
+        assert tmp_path / relative_path in managed_paths
+
+
+def test_graphify_runtime_preflight_blocks_before_profile_mutation(tmp_path: Path) -> None:
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        del cwd
+        if command == list(runner.GRAPHIFY_TOOL_INSTALL_COMMAND):
+            return 0, ""
+        if command == list(runner.GRAPHIFY_VERSION_COMMAND):
+            return 0, "graphify 0.8.44\n"
+        if command == list(runner.GRAPHIFY_INSTALL_HELP_COMMAND):
+            return 0, "Usage: graphify install\n"
+        return 2, "unexpected command"
+
+    with mock.patch.object(
+        runner, "_graphify_managed_profile_paths", return_value=_graphify_managed_paths(tmp_path)
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run
+    ) as run_command, mock.patch.object(
+        runner, "_backup_graphify_profiles"
+    ) as backup:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.INSTALL_GRAPHIFY_RUNTIME,
+            str(runner.ROOT),
+            _graphify_runtime_body(),
+        )
+
+    commands = [call.args[0] for call in run_command.call_args_list]
+    assert report.startswith("BLOCKED:")
+    assert "reason=graphify_cli_contract_unverified" in report
+    assert list(runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND) not in commands
+    assert list(runner.GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND) not in commands
+    backup.assert_not_called()
+
+
+def test_graphify_runtime_restores_after_codex_install_failure(tmp_path: Path) -> None:
+    managed_paths = _graphify_managed_paths(tmp_path / "home")
+    codex_skill = managed_paths[0]
+    codex_skill.mkdir(parents=True)
+    (codex_skill / "SKILL.md").write_text("original\n", encoding="utf-8")
+
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        if command == list(runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND):
+            (codex_skill / "SKILL.md").write_text("mutated\n", encoding="utf-8")
+            return 1, "codex failure must not leak"
+        return _successful_graphify_runtime_command(command, cwd)
+
+    with mock.patch.object(
+        runner, "_graphify_managed_profile_paths", return_value=managed_paths
+    ), mock.patch.object(
+        runner, "_graphify_private_snapshot_parent", return_value=tmp_path / "snapshots"
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.INSTALL_GRAPHIFY_RUNTIME,
+            str(runner.ROOT),
+            _graphify_runtime_body(),
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=codex_skill_install_failed" in report
+    assert "rollback_status=restored" in report
+    assert (codex_skill / "SKILL.md").read_text(encoding="utf-8") == "original\n"
+    assert "codex failure must not leak" not in report
+    assert str(tmp_path) not in report
+
+
+def test_graphify_runtime_restores_after_hermes_install_failure(tmp_path: Path) -> None:
+    managed_paths = _graphify_managed_paths(tmp_path / "home")
+    codex_skill = managed_paths[0]
+    codex_skill.mkdir(parents=True)
+    (codex_skill / "SKILL.md").write_text("original\n", encoding="utf-8")
+
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        if command == list(runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND):
+            (codex_skill / "SKILL.md").write_text("mutated\n", encoding="utf-8")
+            managed_paths[2].mkdir(parents=True)
+            return 0, ""
+        if command == list(runner.GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND):
+            (managed_paths[2] / "SKILL.md").write_text("partial\n", encoding="utf-8")
+            return 1, "hermes failure must not leak"
+        return _successful_graphify_runtime_command(command, cwd)
+
+    with mock.patch.object(
+        runner, "_graphify_managed_profile_paths", return_value=managed_paths
+    ), mock.patch.object(
+        runner, "_graphify_private_snapshot_parent", return_value=tmp_path / "snapshots"
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.INSTALL_GRAPHIFY_RUNTIME,
+            str(runner.ROOT),
+            _graphify_runtime_body(),
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=hermes_skill_install_failed" in report
+    assert "rollback_status=restored" in report
+    assert (codex_skill / "SKILL.md").read_text(encoding="utf-8") == "original\n"
+    assert not managed_paths[2].exists()
+    assert "hermes failure must not leak" not in report
+    assert str(tmp_path) not in report
+
+
+def test_graphify_runtime_restores_when_smoke_graph_json_is_empty(tmp_path: Path) -> None:
+    managed_paths = _graphify_managed_paths(tmp_path / "home")
+    codex_skill = managed_paths[0]
+    codex_skill.mkdir(parents=True)
+    (codex_skill / "SKILL.md").write_text("original\n", encoding="utf-8")
+
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        if command == list(runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND):
+            (codex_skill / "SKILL.md").write_text("codex mutated\n", encoding="utf-8")
+        if command == list(runner.GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND):
+            managed_paths[2].mkdir(parents=True)
+            (managed_paths[2] / "SKILL.md").write_text("hermes partial\n", encoding="utf-8")
+        return _successful_graphify_runtime_command(command, cwd)
+
+    def smoke(command: list[str]) -> tuple[int, str]:
+        _write_smoke_graph(command, node_count=1, edge_count=0)
+        return 0, "smoke output must not leak"
+
+    with mock.patch.object(
+        runner, "_graphify_managed_profile_paths", return_value=managed_paths
+    ), mock.patch.object(
+        runner, "_graphify_private_snapshot_parent", return_value=tmp_path / "snapshots"
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run
+    ), mock.patch.object(
+        runner, "_run_graphify_smoke_command", side_effect=smoke
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.INSTALL_GRAPHIFY_RUNTIME,
+            str(runner.ROOT),
+            _graphify_runtime_body(),
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=synthetic_graph_json_empty" in report
+    assert "rollback_status=restored" in report
+    assert (codex_skill / "SKILL.md").read_text(encoding="utf-8") == "original\n"
+    assert not managed_paths[2].exists()
+    assert "smoke output must not leak" not in report
+    assert str(tmp_path) not in report
+
+
+def test_graphify_smoke_command_has_bounded_timeout() -> None:
+    def timeout_run(*args: object, **kwargs: object) -> object:
+        assert kwargs["timeout"] == runner.GRAPHIFY_SMOKE_TIMEOUT_SECONDS
+        raise runner.subprocess.TimeoutExpired(cmd=["graphify"], timeout=1)
+
+    with mock.patch.object(runner.subprocess, "run", side_effect=timeout_run):
+        code, output = runner._run_graphify_smoke_command(["graphify", "synthetic"])
+
+    assert code == 124
+    assert output == ""
+
+
 def test_issue_worktree_publish_inspection_is_allowlisted_and_bypasses_codex(
     tmp_path: Path,
 ) -> None:
