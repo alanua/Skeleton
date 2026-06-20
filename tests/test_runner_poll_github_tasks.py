@@ -2778,6 +2778,27 @@ def _successful_graphify_runtime_command(
     return 2, "unexpected command"
 
 
+def _assert_graphify_report_is_public_safe(report: str, *unsafe_values: object) -> None:
+    assert "maintenance_step_raised" not in report
+    assert "traceback" not in report.lower()
+    assert "exception" not in report.lower() or "error_class=" in report
+    unsafe_fragments = [
+        "/tmp/",
+        str(Path.home()),
+        "secret",
+        "token",
+        "PATH=",
+        "HOME=",
+        "GRAPHIFY_OUT=",
+        "OPENAI",
+        "ANTHROPIC",
+    ]
+    unsafe_fragments.extend(str(value) for value in unsafe_values)
+    for fragment in unsafe_fragments:
+        if fragment:
+            assert fragment not in report
+
+
 def test_graphify_platform_destination_allowlist_matches_pinned_upstream() -> None:
     pinned_upstream = {
         "aider": (Path(".aider") / "graphify" / "SKILL.md",),
@@ -2962,6 +2983,100 @@ def test_graphify_runtime_preflight_blocks_before_profile_mutation(tmp_path: Pat
     backup.assert_not_called()
 
 
+def test_graphify_runtime_missing_uv_blocks_before_backup_or_skill_install(
+    tmp_path: Path,
+) -> None:
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        del cwd
+        assert command == list(runner.GRAPHIFY_TOOL_INSTALL_COMMAND)
+        raise FileNotFoundError("uv missing at /tmp/private-token")
+
+    with mock.patch.object(
+        runner, "_graphify_managed_profile_paths", return_value=_graphify_managed_paths(tmp_path)
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run
+    ) as run_command, mock.patch.object(
+        runner, "_backup_graphify_profiles"
+    ) as backup:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.INSTALL_GRAPHIFY_RUNTIME,
+            str(runner.ROOT),
+            _graphify_runtime_body(),
+        )
+
+    commands = [call.args[0] for call in run_command.call_args_list]
+    assert report.startswith("BLOCKED:")
+    assert "reason=graphify_tool_command_unavailable" in report
+    assert commands == [list(runner.GRAPHIFY_TOOL_INSTALL_COMMAND)]
+    assert list(runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND) not in commands
+    assert list(runner.GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND) not in commands
+    backup.assert_not_called()
+    _assert_graphify_report_is_public_safe(report, "uv missing", "/tmp/private-token")
+
+
+def test_graphify_runtime_missing_graphify_preflight_blocks_before_profile_mutation(
+    tmp_path: Path,
+) -> None:
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        del cwd
+        if command == list(runner.GRAPHIFY_TOOL_INSTALL_COMMAND):
+            return 0, ""
+        raise FileNotFoundError("graphify missing at /tmp/graphify-secret")
+
+    with mock.patch.object(
+        runner, "_graphify_managed_profile_paths", return_value=_graphify_managed_paths(tmp_path)
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run
+    ) as run_command, mock.patch.object(
+        runner, "_backup_graphify_profiles"
+    ) as backup:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.INSTALL_GRAPHIFY_RUNTIME,
+            str(runner.ROOT),
+            _graphify_runtime_body(),
+        )
+
+    commands = [call.args[0] for call in run_command.call_args_list]
+    assert report.startswith("BLOCKED:")
+    assert "reason=graphify_cli_command_unavailable" in report
+    assert list(runner.GRAPHIFY_VERSION_COMMAND) in commands
+    assert list(runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND) not in commands
+    assert list(runner.GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND) not in commands
+    backup.assert_not_called()
+    _assert_graphify_report_is_public_safe(report, "graphify missing", "/tmp/graphify-secret")
+
+
+def test_graphify_runtime_permission_error_reports_safe_blocker(
+    tmp_path: Path,
+) -> None:
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        del cwd
+        assert command == list(runner.GRAPHIFY_TOOL_INSTALL_COMMAND)
+        raise PermissionError("permission denied for /tmp/private-token")
+
+    with mock.patch.object(
+        runner, "_graphify_managed_profile_paths", return_value=_graphify_managed_paths(tmp_path)
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run
+    ), mock.patch.object(
+        runner, "_backup_graphify_profiles"
+    ) as backup:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.INSTALL_GRAPHIFY_RUNTIME,
+            str(runner.ROOT),
+            _graphify_runtime_body(),
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=graphify_command_permission_denied" in report
+    backup.assert_not_called()
+    _assert_graphify_report_is_public_safe(
+        report,
+        "permission denied",
+        "/tmp/private-token",
+    )
+
+
 def test_graphify_runtime_restores_after_codex_install_failure(tmp_path: Path) -> None:
     managed_paths = _graphify_managed_paths(tmp_path / "home")
     codex_skill = managed_paths[0]
@@ -3126,6 +3241,54 @@ def test_graphify_runtime_restores_when_smoke_graph_json_is_empty(tmp_path: Path
     assert str(tmp_path) not in report
 
 
+def test_graphify_runtime_restores_when_smoke_subprocess_os_error(
+    tmp_path: Path,
+) -> None:
+    managed_paths = _graphify_managed_paths(tmp_path / "home")
+    codex_skill = managed_paths[0]
+    codex_skill.mkdir(parents=True)
+    (codex_skill / "SKILL.md").write_text("original\n", encoding="utf-8")
+
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        if command == list(runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND):
+            (codex_skill / "SKILL.md").write_text("codex mutated\n", encoding="utf-8")
+        if command == list(runner.GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND):
+            managed_paths[2].mkdir(parents=True)
+            (managed_paths[2] / "SKILL.md").write_text("hermes partial\n", encoding="utf-8")
+        return _successful_graphify_runtime_command(command, cwd)
+
+    def fail_smoke(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise OSError("smoke failed under /tmp/private-secret")
+
+    with mock.patch.object(
+        runner, "_graphify_managed_profile_paths", return_value=managed_paths
+    ), mock.patch.object(
+        runner, "_graphify_private_snapshot_parent", return_value=tmp_path / "snapshots"
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run
+    ), mock.patch.object(
+        runner.subprocess, "run", side_effect=fail_smoke
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.INSTALL_GRAPHIFY_RUNTIME,
+            str(runner.ROOT),
+            _graphify_runtime_body(),
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=graphify_command_os_error" in report
+    assert "rollback_status=restored" in report
+    assert (codex_skill / "SKILL.md").read_text(encoding="utf-8") == "original\n"
+    assert not managed_paths[2].exists()
+    _assert_graphify_report_is_public_safe(
+        report,
+        "smoke failed",
+        "/tmp/private-secret",
+        str(tmp_path),
+    )
+
+
 def test_graphify_smoke_command_has_bounded_timeout() -> None:
     def timeout_run(*args: object, **kwargs: object) -> object:
         assert kwargs["timeout"] == runner.GRAPHIFY_SMOKE_TIMEOUT_SECONDS
@@ -3136,6 +3299,30 @@ def test_graphify_smoke_command_has_bounded_timeout() -> None:
 
     assert code == 124
     assert output == ""
+
+
+def test_graphify_unexpected_handler_exception_reports_safe_graphify_bucket() -> None:
+    with mock.patch.object(
+        runner,
+        "_graphify_existing_version_marker_count",
+        side_effect=RuntimeError("raw exception text /tmp/private-token"),
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.INSTALL_GRAPHIFY_RUNTIME,
+            str(runner.ROOT),
+            _graphify_runtime_body(),
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=graphify_handler_exception" in report
+    assert "error_class=graphify_unexpected_exception" in report
+    assert "next_operator_action=safe_operator_review" in report
+    _assert_graphify_report_is_public_safe(
+        report,
+        "RuntimeError",
+        "raw exception text",
+        "/tmp/private-token",
+    )
 
 
 def test_issue_worktree_publish_inspection_is_allowlisted_and_bypasses_codex(

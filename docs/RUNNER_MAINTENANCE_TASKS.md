@@ -161,6 +161,18 @@ Graphify output, command output, environment values, secrets, tokens, model
 credentials, profile content, node IDs, edge IDs, labels, summaries, or generated
 graph payloads.
 
+Graphify command launch failures are reported only through stable public-safe
+reason tokens. A missing pinned-tool command reports
+`graphify_tool_command_unavailable`; a missing Graphify CLI command during
+preflight, skill install, or smoke reports `graphify_cli_command_unavailable`;
+permission failures report `graphify_command_permission_denied`; other bounded
+OS or subprocess launch failures report `graphify_command_os_error`. Unexpected
+handler exceptions are converted to `reason=graphify_handler_exception` with
+`error_class=graphify_unexpected_exception` and
+`next_operator_action=safe_operator_review`. These reports must not include raw
+exception text, command output, command paths, profile paths, backup paths,
+environment values, secrets, or tokens.
+
 `check_project_checkout` is read-only and must include target project metadata:
 
 ```text
