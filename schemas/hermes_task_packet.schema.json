@@ -145,6 +145,63 @@
         }
       }
     },
+    "provider_route": {
+      "type": "object",
+      "required": [
+        "route_alias",
+        "provider_role",
+        "provider_example",
+        "provider_example_only",
+        "live_route_enabled",
+        "budget_units",
+        "token_cap",
+        "chunk_token_cap",
+        "max_retries"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "route_alias": {
+          "type": "string",
+          "enum": ["LOW", "MID", "HIGH"]
+        },
+        "provider_role": {
+          "type": "string",
+          "enum": ["bulk_worker", "planner", "critic"]
+        },
+        "provider_example": {
+          "type": "string",
+          "minLength": 1
+        },
+        "provider_example_only": {
+          "type": "boolean",
+          "const": true
+        },
+        "live_route_enabled": {
+          "type": "boolean",
+          "const": false
+        },
+        "budget_units": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "token_cap": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200000
+        },
+        "chunk_token_cap": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20000
+        },
+        "max_retries": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3
+        }
+      }
+    },
     "skill_manifest_ref": {
       "type": "string",
       "pattern": "^schemas/hermes_skill_manifest\\.schema\\.json$"
