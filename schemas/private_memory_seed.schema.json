@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://alanua.github.io/skeleton/schemas/private_memory_seed.schema.json",
+  "title": "Private Memory Seed Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "manifest_version",
+    "record_count",
+    "status_history_count",
+    "checksums"
+  ],
+  "properties": {
+    "schema": {
+      "const": "skeleton.private_memory_seed.manifest.v1"
+    },
+    "manifest_version": {
+      "const": 1
+    },
+    "record_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000
+    },
+    "status_history_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 5000
+    },
+    "checksums": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["records.sqlite"],
+      "properties": {
+        "records.sqlite": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    }
+  }
+}

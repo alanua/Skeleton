@@ -105,6 +105,44 @@ content. Bridge exceptions are summarized with safe tokens such as
 `HermesBridgeException` and `safe_operator_review`; they must not fall through
 to the generic maintenance-step exception report.
 
+`private_memory_seed_import_v1` is a controlled importer for an
+operator-staged local private-memory seed ZIP. It is blocked unless the fenced
+task payload opens the exact write gate:
+
+````text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: private_memory_seed_import_v1
+
+```task
+write_gate=private_memory_seed_import_v1
+```
+````
+
+It may only:
+
+1. Resolve the target private SQLite database and staged seed ZIP through the
+   existing local private-memory config or bootstrap registry boundary.
+2. Read the staged ZIP locally; issue text must not supply paths, records, SQL,
+   shell commands, or row payloads.
+3. Accept only allowlisted ZIP members, the supported manifest version, matching
+   checksums, bounded member sizes, bounded record/status counts, valid seed
+   SQLite integrity, the expected seed schema, and allowlisted payload classes.
+4. Create a consistent SQLite snapshot before writing.
+5. Import transactionally into dedicated `private_memory_import_*` namespace
+   tables without changing existing connector tables.
+6. Preserve provenance, status history, and audit records.
+7. Roll back fully on failure and return `BLOCKED`.
+8. Be idempotent when the same staged package is imported again.
+9. Report only aggregate fields: status booleans, count totals, idempotency,
+   error class token, and next-action token.
+
+It must not report raw config paths, database paths, registry paths, ZIP paths,
+table payloads, row content, source locators, SQL text, graph labels, secrets,
+tokens, provider data, customer data, addresses, quantities, or private memory
+content. This task does not perform live ingestion during code review; the exact
+gated runtime import requires a separate operator-approved maintenance issue
+after staging.
+
 `check_project_checkout` is read-only and must include target project metadata:
 
 ```text
