@@ -633,6 +633,50 @@ It may only:
 8. Never merge, force-push, deploy, restart services, read secrets, execute
    issue-provided commands, use broad `git add`, or support private repositories.
 
+`install_graphify_runtime_v1` installs the pinned Graphify runtime and
+assistant skills on the Runner host only when explicitly operator-approved:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: install_graphify_runtime_v1
+```
+
+It may only:
+
+1. Use the pinned package `graphifyy==0.8.44`.
+2. Inspect the uv tool inventory with `uv tool list`.
+3. Install an absent tool with exactly
+   `uv tool install graphifyy==0.8.44`.
+4. Replace a wrong installed version with exactly
+   `uv tool install --reinstall graphifyy==0.8.44`.
+5. Run a fail-closed CLI capability preflight before any Graphify-managed
+   profile backup or skill installation.
+6. Install only the verified Graphify 0.8.44 platform skills with
+   `graphify install --platform codex` and
+   `graphify install --platform hermes`.
+7. Smoke-test the runtime with a temporary generated Python-only corpus using
+   the supported `graphify <path> --no-viz` build form, run from a temporary
+   private output directory so the default `graphify-out` output stays private.
+8. Remove model/API environment variables from the smoke execution environment
+   and require non-zero aggregate graph node and edge counts.
+9. Delete the temporary smoke corpus and output before reporting.
+10. Back up only exact Graphify-managed Codex/Hermes skill paths that already
+    exist and will be changed. Backup directories must be `0700`; copied files
+    must not gain broader permissions; symlinks and unexpected file types are
+    rejected.
+
+It reports only aggregate status lines such as package version, platform names,
+preflight step status, smoke node/edge counts, environment-removal counts, and
+backup item counts. It must not print command output, local profile paths,
+temporary paths, source text, environment values, secrets, tokens, private
+corpus content, graph payloads, or issue-body text.
+
+This task must not use sudo, services, ports, hooks, watch mode, MCP, HTTP,
+Neo4j, FalkorDB, optional database integrations, private corpus access,
+`graphify ingest`, or unsupported Graphify flags. Unsupported CLI contracts,
+failed smoke validation, unsafe backup inputs, install failures, and skill
+install failures are reported as `BLOCKED`.
+
 `quarantine_stale_clean_skeleton_worktrees` removes only explicitly listed
 clean Skeleton issue worktrees and must include explicit worktree id metadata:
 

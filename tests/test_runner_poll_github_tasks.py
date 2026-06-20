@@ -4,6 +4,8 @@ import csv
 import json
 import os
 import re
+import shutil
+import stat
 import urllib.parse
 from pathlib import Path
 from unittest import mock
@@ -7170,6 +7172,247 @@ def test_maintenance_report_does_not_include_command_output_token_values() -> No
 
     assert report.startswith("BLOCKED:")
     assert token not in report
+
+
+def _successful_graphify_command(
+    command: list[str], cwd: str | Path | None = None
+) -> tuple[int, str]:
+    del cwd
+    if command == ["uv", "--version"]:
+        return 0, "uv 0.7.0\n"
+    if command == ["uv", "tool", "list"]:
+        return 0, ""
+    if command == ["uv", "tool", "install", runner.GRAPHIFY_PINNED_PACKAGE]:
+        return 0, ""
+    if command == ["uv", "tool", "install", "--reinstall", runner.GRAPHIFY_PINNED_PACKAGE]:
+        return 0, ""
+    if command == ["graphify", "--version"]:
+        return 0, f"graphify {runner.GRAPHIFY_VERSION}\n"
+    if command == ["graphify", "install", "--help"]:
+        return 0, "usage: graphify install --platform codex hermes\n"
+    if command == ["graphify", "--help"]:
+        return 0, "usage: graphify [PATH] --no-viz\n"
+    if command in (
+        ["graphify", "install", "--platform", "codex"],
+        ["graphify", "install", "--platform", "hermes"],
+    ):
+        return 0, ""
+    return 2, f"unexpected command: {command}"
+
+
+def _successful_graphify_smoke() -> tuple[list[str], str | None]:
+    return (
+        [
+            "smoke_corpus_language=python",
+            "smoke_corpus_files=1",
+            "smoke_api_env_removed_count=1",
+            "smoke_model_env_removed_count=1",
+            "smoke_semantic_model_env_available=false",
+            "step=graphify_python_smoke status=done",
+            "smoke_node_count=2",
+            "smoke_edge_count=1",
+            "smoke_aggregate_count=3",
+            "step=graphify_smoke_cleanup status=done",
+        ],
+        None,
+    )
+
+
+def test_graphify_runtime_task_is_allowlisted_with_exact_id() -> None:
+    assert runner.INSTALL_GRAPHIFY_RUNTIME == "install_graphify_runtime_v1"
+    assert runner.INSTALL_GRAPHIFY_RUNTIME in runner.RUNTIME_MAINTENANCE_TASK_IDS
+
+
+def test_graphify_runtime_absent_tool_uses_pinned_install_and_supported_cli_forms() -> None:
+    with mock.patch.object(
+        runner, "run_command", side_effect=_successful_graphify_command
+    ) as run, mock.patch.object(
+        runner, "_run_graphify_python_smoke", side_effect=_successful_graphify_smoke
+    ), mock.patch.object(
+        runner, "_backup_graphify_managed_skill_paths", return_value=(0, None)
+    ):
+        report = runner.install_graphify_runtime()
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert ["uv", "tool", "install", runner.GRAPHIFY_PINNED_PACKAGE] in commands
+    assert ["uv", "tool", "install", "--reinstall", runner.GRAPHIFY_PINNED_PACKAGE] not in commands
+    assert ["graphify", "install", "--help"] in commands
+    assert ["graphify", "install", "--platform", "codex"] in commands
+    assert ["graphify", "install", "--platform", "hermes"] in commands
+    flattened = " ".join(" ".join(command) for command in commands)
+    assert "ingest" not in flattened
+    assert "--watch" not in flattened
+    assert "--mcp" not in flattened
+    assert "neo4j" not in flattened.lower()
+    assert "falkor" not in flattened.lower()
+    assert "sudo" not in flattened
+
+
+def test_graphify_runtime_wrong_version_uses_reinstall() -> None:
+    def command(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        if command == ["uv", "tool", "list"]:
+            return 0, "graphifyy v0.8.43\n"
+        return _successful_graphify_command(command, cwd)
+
+    with mock.patch.object(
+        runner, "run_command", side_effect=command
+    ) as run, mock.patch.object(
+        runner, "_run_graphify_python_smoke", side_effect=_successful_graphify_smoke
+    ), mock.patch.object(
+        runner, "_backup_graphify_managed_skill_paths", return_value=(0, None)
+    ):
+        report = runner.install_graphify_runtime()
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert ["uv", "tool", "install", "--reinstall", runner.GRAPHIFY_PINNED_PACKAGE] in commands
+
+
+def test_graphify_capability_preflight_runs_before_backup_or_skill_install() -> None:
+    events: list[str] = []
+
+    def command(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        events.append(" ".join(command))
+        return _successful_graphify_command(command, cwd)
+
+    def backup(_backup_root: Path) -> tuple[int, str | None]:
+        events.append("backup")
+        return 0, None
+
+    with mock.patch.object(
+        runner, "run_command", side_effect=command
+    ) as run, mock.patch.object(
+        runner, "_run_graphify_python_smoke", side_effect=_successful_graphify_smoke
+    ), mock.patch.object(
+        runner, "_backup_graphify_managed_skill_paths", side_effect=backup
+    ) as backup:
+        report = runner.install_graphify_runtime()
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert backup.called
+    assert events.index("graphify install --help") < events.index("backup")
+    assert events.index("graphify --help") < events.index("backup")
+    assert events.index("backup") < events.index("graphify install --platform codex")
+    assert commands.index(["graphify", "install", "--platform", "codex"]) > commands.index(
+        ["graphify", "install", "--help"]
+    )
+
+
+def test_graphify_unsupported_cli_contract_returns_blocked_before_backup() -> None:
+    def unsupported(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        if command == ["graphify", "install", "--help"]:
+            return 0, "usage: graphify install\n"
+        return _successful_graphify_command(command, cwd)
+
+    with mock.patch.object(
+        runner, "run_command", side_effect=unsupported
+    ) as run, mock.patch.object(
+        runner, "_run_graphify_python_smoke"
+    ) as smoke, mock.patch.object(
+        runner, "_backup_graphify_managed_skill_paths"
+    ) as backup:
+        report = runner.install_graphify_runtime()
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("BLOCKED:")
+    assert "reason=unsupported_cli_contract" in report
+    assert ["graphify", "install", "--platform", "codex"] not in commands
+    smoke.assert_not_called()
+    backup.assert_not_called()
+
+
+def test_graphify_backup_only_exact_managed_paths_private_and_rejects_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    managed_file = tmp_path / "home" / ".codex" / "skills" / "graphify" / "SKILL.md"
+    managed_file.parent.mkdir(parents=True)
+    managed_file.write_text("skill\n", encoding="utf-8")
+    os.chmod(managed_file, 0o600)
+    unrelated = tmp_path / "home" / ".codex" / "credentials.json"
+    unrelated.write_text("secret\n", encoding="utf-8")
+    backup = tmp_path / "backup"
+    monkeypatch.setattr(runner, "GRAPHIFY_MANAGED_SKILL_PATHS", (managed_file,))
+
+    copied_count, reason = runner._backup_graphify_managed_skill_paths(backup)
+
+    assert copied_count == 1
+    assert reason is None
+    assert stat.S_IMODE(backup.stat().st_mode) == 0o700
+    copied_files = [path for path in backup.rglob("*") if path.is_file()]
+    assert len(copied_files) == 1
+    assert copied_files[0].read_text(encoding="utf-8") == "skill\n"
+    assert stat.S_IMODE(copied_files[0].stat().st_mode) == 0o600
+    assert "secret" not in copied_files[0].read_text(encoding="utf-8")
+
+    symlink = tmp_path / "home" / ".hermes" / "skills" / "graphify" / "SKILL.md"
+    symlink.parent.mkdir(parents=True)
+    symlink.symlink_to(managed_file)
+    monkeypatch.setattr(runner, "GRAPHIFY_MANAGED_SKILL_PATHS", (symlink,))
+    copied_count, reason = runner._backup_graphify_managed_skill_paths(tmp_path / "backup2")
+    assert copied_count == 0
+    assert reason == "backup_symlink_rejected"
+
+
+def test_graphify_smoke_python_only_removes_model_api_env_and_deletes_temp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "secret")
+    monkeypatch.setenv("GRAPHIFY_MODEL", "model")
+    temp_roots: list[Path] = []
+
+    class RecordedTemporaryDirectory:
+        def __init__(self, prefix: str) -> None:
+            self.path = tmp_path / f"{prefix}root"
+
+        def __enter__(self) -> str:
+            temp_roots.append(self.path)
+            self.path.mkdir()
+            return str(self.path)
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            shutil.rmtree(self.path)
+
+    def subprocess_run(
+        command: list[str],
+        cwd: str | None = None,
+        check: bool = False,
+        capture_output: bool = False,
+        text: bool = False,
+        env: dict[str, str] | None = None,
+    ) -> mock.MagicMock:
+        assert command[0] == "graphify"
+        assert command[-1] == "--no-viz"
+        corpus = Path(command[1])
+        assert {path.suffix for path in corpus.iterdir()} == {".py"}
+        assert cwd is not None
+        assert env is not None
+        assert "OPENAI_API_KEY" not in env
+        assert "GRAPHIFY_MODEL" not in env
+        output = Path(cwd) / "graphify-out"
+        output.mkdir()
+        (output / "graph.json").write_text(
+            json.dumps({"nodes": [{"id": "a"}], "edges": [{"source": "a", "target": "b"}]}),
+            encoding="utf-8",
+        )
+        result = mock.MagicMock()
+        result.returncode = 0
+        result.stdout = ""
+        result.stderr = ""
+        return result
+
+    with mock.patch.object(
+        runner.tempfile, "TemporaryDirectory", RecordedTemporaryDirectory
+    ), mock.patch.object(runner.subprocess, "run", side_effect=subprocess_run):
+        lines, reason = runner._run_graphify_python_smoke()
+
+    assert reason is None
+    assert "smoke_corpus_language=python" in lines
+    assert "smoke_semantic_model_env_available=false" in lines
+    assert "smoke_aggregate_count=2" in lines
+    assert temp_roots and not temp_roots[0].exists()
+
 
 def test_codex_exec_command_default_env_unset_keeps_existing_command(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(runner.CODEX_MODEL_ENV, raising=False)
