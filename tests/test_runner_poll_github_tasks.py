@@ -1776,7 +1776,7 @@ def test_simple_done_notification_without_pr_url_keeps_plain_message() -> None:
 
     assert _request_payload(urlopen) == {
         "chat_id": ["telegram-chat-placeholder"],
-        "text": ["Проєкт: Skeleton\nСтатус: DONE"],
+        "text": ["Проєкт: Skeleton\nЗадача: #9\nСтатус: DONE"],
         "disable_web_page_preview": ["true"],
     }
 
@@ -1785,14 +1785,14 @@ def test_same_repo_routine_notifications_stay_simple_ukrainian() -> None:
     done_message = runner.build_telegram_message(9, "DONE", DONE_REPORT)
     blocked_message = runner.build_telegram_message(9, "BLOCKED")
 
-    assert done_message == "Проєкт: Skeleton\nСтатус: DONE"
-    assert blocked_message == "Проєкт: Skeleton\nСтатус: BLOCKED"
+    assert done_message == "Проєкт: Skeleton\nЗадача: #9\nСтатус: DONE"
+    assert blocked_message == "Проєкт: Skeleton\nЗадача: #9\nСтатус: BLOCKED"
     for message in (done_message, blocked_message):
         assert "Repository:" not in message
         assert "Issue:" not in message
         assert "PR:" not in message
         assert "Репозиторій:" not in message
-        assert "Задача:" not in message
+        assert "Задача: #9" in message
 
 
 def test_telegram_message_omits_placeholder_pr_url() -> None:
@@ -1875,7 +1875,7 @@ def test_done_pr_card_shows_default_target_repo() -> None:
     text = str(card["text"])
     assert "Проєкт: Skeleton" in text
     assert "Репозиторій:" not in text
-    assert "Задача:" not in text
+    assert "Задача: #129" in text
 
 
 def test_done_pr_card_shows_target_repo_without_misleading_repository_line() -> None:
