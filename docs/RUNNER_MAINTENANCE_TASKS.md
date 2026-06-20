@@ -105,6 +105,39 @@ content. Bridge exceptions are summarized with safe tokens such as
 `HermesBridgeException` and `safe_operator_review`; they must not fall through
 to the generic maintenance-step exception report.
 
+`hermes_model_inventory` is a bounded inventory of the real Hermes model routes
+described by approved server-side private metadata:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: hermes_model_inventory
+```
+
+It may only:
+
+1. Read the private model-route registry path from the local Runner environment.
+2. Parse the dedicated private registry schema
+   `skeleton.hermes_model_routes.private.v1`.
+3. Require explicit metadata for every route: configured, authenticated, locally
+   reachable, quota-known, enabled, and LOW/MID/HIGH capability booleans.
+4. Count LOW/MID/HIGH suitability only for routes where every readiness boolean
+   is true and the matching capability boolean is true.
+5. Save the detailed inventory atomically and idempotently through the existing
+   private-memory connector, keyed by an opaque deterministic inventory id.
+6. Verify private readback by that opaque inventory id before reporting `DONE`.
+7. Report to GitHub only `hermes_model_inventory_*` aggregate lines containing
+   the public schema, status token, opaque inventory id, route count, alias
+   count, readiness counts, capability counts, and LOW/MID/HIGH suitability
+   counts.
+
+It must not call models, probe provider APIs, make live inference requests,
+read secrets, print raw registry paths, print concrete provider/model names,
+print aliases, infer defaults, hard-code runtime readiness, change services,
+deploy, merge, or publish private details. Missing, unreadable, malformed,
+ambiguous, or unsupported private metadata, unavailable private storage, failed
+private writes, or failed private readback all fail closed as `BLOCKED` with
+zero counts and no public failure detail beyond the aggregate inventory fields.
+
 `check_project_checkout` is read-only and must include target project metadata:
 
 ```text
