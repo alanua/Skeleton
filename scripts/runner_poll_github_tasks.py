@@ -328,8 +328,11 @@ class RunnerTask:
 
 @dataclass(frozen=True)
 class UniversalCodexBranchTask:
-    runner_task: RunnerTask
+    runner_task: RunnerTask | None
     task_key: str
+    action: str
+    executor_type: str
+    payload: dict[str, Any]
     risk: str
     timeout_seconds: float
 
@@ -1226,20 +1229,23 @@ def extract_universal_runner_task(
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         return True, None, f"Universal runner task payload is invalid: {exc}"
 
-    if universal_task.mode != "codex_branch_task":
+    if universal_task.executor_type not in {
+        "codex_branch_task",
+        "hermes_private_task",
+        "local_module_task",
+        "runtime_maintenance_task",
+        "read_only_probe",
+    }:
         return (
             True,
             None,
-            "Only codex_branch_task is handled by this GitHub poller route.",
+            "Universal runner task executor_type is not allowlisted.",
         )
     gate = gate_universal_runner_task(universal_task)
     if gate.status != "RUNNING":
         reasons = ", ".join(str(reason) for reason in gate.public.get("reasons", ()))
         return True, None, f"Universal runner task requires operator approval: {reasons}."
 
-    task_text = str(universal_task.payload.get("task") or "").strip()
-    if not task_text:
-        return True, None, "codex_branch_task payload.task is required."
     target_project = str(universal_task.payload.get("target_project") or "skeleton")
     target_repository = str(
         universal_task.payload.get("target_repository") or QUEUE_REPOSITORY
@@ -1249,17 +1255,27 @@ def extract_universal_runner_task(
     if target_project not in ALLOWED_TARGET_PROJECTS:
         return True, None, "codex_branch_task target project is not allowlisted."
 
+    runner_task = None
+    if universal_task.executor_type == "codex_branch_task":
+        task_text = str(universal_task.payload.get("task") or "").strip()
+        if not task_text:
+            return True, None, "codex_branch_task payload.task is required."
+        runner_task = RunnerTask(
+            content=task_text,
+            target_project=target_project,
+            has_target_project_metadata=True,
+            target_repository=target_repository,
+            has_target_repository_metadata=True,
+        )
+
     return (
         True,
         UniversalCodexBranchTask(
-            runner_task=RunnerTask(
-                content=task_text,
-                target_project=target_project,
-                has_target_project_metadata=True,
-                target_repository=target_repository,
-                has_target_repository_metadata=True,
-            ),
+            runner_task=runner_task,
             task_key=universal_task.task_key,
+            action=universal_task.action,
+            executor_type=universal_task.executor_type,
+            payload=dict(universal_task.payload),
             risk=universal_task.risk,
             timeout_seconds=universal_task.timeout_seconds,
         ),
@@ -1521,7 +1537,26 @@ def sanitize_public_report(report: str) -> str:
         r"\g<label>: none",
         report,
     )
-    return sanitize_public_text(report)
+    safe_urls: dict[str, str] = {}
+    for index, url in enumerate(_allowlisted_public_github_urls(report)):
+        token = f"__SKELETON_SAFE_GITHUB_URL_{index}__"
+        safe_urls[token] = url
+        report = report.replace(url, token)
+    sanitized = sanitize_public_text(report)
+    for token, url in safe_urls.items():
+        sanitized = sanitized.replace(token, url)
+    return sanitized
+
+
+def _allowlisted_public_github_urls(text: str) -> list[str]:
+    urls: list[str] = []
+    for match in re.finditer(
+        r"https://github\.com/(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/(?:pull|issues)/[1-9]\d*/?",
+        text or "",
+    ):
+        if match.group("repo") in ALLOWED_TARGET_REPOSITORIES:
+            urls.append(match.group(0))
+    return urls
 
 
 def runner_memory_config_from_env() -> RunnerMemoryConfig | None:
@@ -7258,6 +7293,67 @@ def process_runtime_maintenance_issue(
     notify_task_finished(issue_number, "BLOCKED", report)
 
 
+def dispatch_universal_issue_task(
+    task: UniversalCodexBranchTask,
+    workdir: str,
+    body: str = "",
+) -> str:
+    if task.executor_type == "runtime_maintenance_task":
+        task_id = str(task.payload.get("command_id") or task.payload.get("task_id") or "")
+        return dispatch_runtime_maintenance_task(task_id, workdir, body)
+    if task.executor_type in {"local_module_task", "hermes_private_task", "read_only_probe"}:
+        return _maintenance_report(
+            "BLOCKED",
+            str(task.payload.get("command_id") or task.executor_type),
+            [
+                f"executor_type={task.executor_type}",
+                "reason=adapter_not_configured_in_github_poller",
+            ],
+            "not_met",
+        )
+    return _maintenance_report(
+        "BLOCKED",
+        task.executor_type,
+        ["reason=unsupported_universal_issue_executor"],
+        "not_met",
+    )
+
+
+def process_universal_issue_task(
+    issue_number: int,
+    task: UniversalCodexBranchTask,
+    workdir: str,
+    body: str = "",
+    memory_warning: str | None = None,
+) -> None:
+    report = dispatch_universal_issue_task(task, workdir, body)
+    universal = github_status_for_universal_state(
+        "COMPLETED" if maintenance_report_is_done(report) else "FAILED"
+    )
+    report = (
+        f"{report}\n"
+        f"universal_state={universal['state']}\n"
+        f"next_action={universal['next_action']}"
+    )
+    status = "DONE" if maintenance_report_is_done(report) else "BLOCKED"
+    warning = record_runner_executor_result(
+        issue_number,
+        "skeleton",
+        status,
+        status,
+        task.executor_type,
+        report,
+    )
+    report = append_memory_warning(report, warning or memory_warning)
+    post_issue_comment(issue_number, report)
+    set_issue_label(
+        issue_number,
+        LABEL_RUNNING,
+        LABEL_DONE if status == "DONE" else LABEL_BLOCKED,
+    )
+    notify_task_finished(issue_number, status, report)
+
+
 def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
     issue_number = int(issue["number"])
     if not is_open_task_issue(issue):
@@ -7309,9 +7405,11 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
 
         if maintenance_mode:
             task_content = ""
-        elif universal_mode and universal_task is not None:
+        elif universal_mode and universal_task is not None and universal_task.runner_task is not None:
             runner_task = universal_task.runner_task
             task_content = runner_task.content
+        elif universal_mode and universal_task is not None:
+            task_content = ""
         else:
             runner_task, task_reason = extract_runner_task(issue_body)
             if runner_task is None:
@@ -7364,7 +7462,13 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
 
         set_issue_label(issue_number, LABEL_READY, LABEL_RUNNING)
         claimed = True
-        executor_name = "maintenance" if maintenance_mode or merge_mode else "codex"
+        executor_name = (
+            universal_task.executor_type
+            if universal_mode and universal_task is not None
+            else "maintenance"
+            if maintenance_mode or merge_mode
+            else "codex"
+        )
         pickup_memory_warning = record_runner_task_picked_up(
             issue_number,
             runner_task.target_project if runner_task is not None else "skeleton",
@@ -7383,6 +7487,20 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             else:
                 process_runtime_maintenance_issue(
                     issue_number, maintenance_task_id, coordinator_workdir, issue_body
+                )
+            return
+        if universal_mode and universal_task is not None and universal_task.runner_task is None:
+            if pickup_memory_warning:
+                process_universal_issue_task(
+                    issue_number,
+                    universal_task,
+                    coordinator_workdir,
+                    issue_body,
+                    pickup_memory_warning,
+                )
+            else:
+                process_universal_issue_task(
+                    issue_number, universal_task, coordinator_workdir, issue_body
                 )
             return
         if merge_mode and merge_request is not None:

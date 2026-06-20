@@ -655,6 +655,20 @@ def test_sanitize_public_report_redacts_private_boundary_values() -> None:
     assert "raw" not in sanitized
 
 
+def test_sanitize_public_report_preserves_allowlisted_project_pr_urls() -> None:
+    report = (
+        "Draft PR: https://github.com/alanua/Lavalamp/pull/44\n"
+        "Private PR: https://github.com/private/Secret/pull/1\n"
+        "Issue: https://github.com/alanua/Skeleton/issues/1066"
+    )
+
+    sanitized = runner.sanitize_public_report(report)
+
+    assert "https://github.com/alanua/Lavalamp/pull/44" in sanitized
+    assert "https://github.com/alanua/Skeleton/issues/1066" in sanitized
+    assert "https://github.com/private/Secret/pull/1" not in sanitized
+
+
 def test_target_repository_worktree_paths_are_deterministic(tmp_path: Path) -> None:
     skeleton_root = tmp_path / "skeleton"
     with mock.patch.dict(
@@ -1553,6 +1567,81 @@ def test_universal_codex_branch_task_protected_resource_blocks_before_claim() ->
     assert "protected_resource_requires_operator_approval" in block.call_args.args[1]
     set_label.assert_not_called()
     run_codex.assert_not_called()
+
+
+def test_all_universal_executor_types_are_reachable_through_issue_route(
+    tmp_path: Path,
+) -> None:
+    coordinator = tmp_path / "repo"
+    issue_path = tmp_path / "worktree"
+    coordinator.mkdir()
+
+    for index, executor_type in enumerate(
+        (
+            "codex_branch_task",
+            "hermes_private_task",
+            "local_module_task",
+            "runtime_maintenance_task",
+            "read_only_probe",
+        ),
+        start=1,
+    ):
+        payload = {"command_id": "safe_command"}
+        if executor_type == "codex_branch_task":
+            payload = {
+                "task": "Do bounded work",
+                "target_project": "skeleton",
+                "target_repository": "alanua/Skeleton",
+            }
+        issue = {
+            "number": 160 + index,
+            "title": f"Universal {executor_type}",
+            "body": (
+                "Mode: UNIVERSAL_RUNNER_TASK\n\n"
+                "```json\n"
+                + json.dumps(
+                    {
+                        "schema": "skeleton.runner_task.v1",
+                        "task_id": f"u-{index}",
+                        "task_key": f"issue-{160 + index}",
+                        "action": "START",
+                        "executor_type": executor_type,
+                        "risk": "YELLOW",
+                        "payload": payload,
+                    }
+                )
+                + "\n```"
+            ),
+        }
+        with mock.patch.object(
+            runner, "prepare_issue_branch", return_value=(0, "", issue_path)
+        ) as prepare, mock.patch.object(
+            runner, "cleanup_runtime_artifacts"
+        ), mock.patch.object(
+            runner, "run_codex_task", return_value=(0, "codex output")
+        ) as run_codex, mock.patch.object(
+            runner, "finalize_success", return_value="DONE report"
+        ), mock.patch.object(
+            runner, "dispatch_universal_issue_task", return_value="DONE: mocked"
+        ) as dispatch_universal, mock.patch.object(
+            runner, "post_issue_comment"
+        ), mock.patch.object(
+            runner, "set_issue_label"
+        ), mock.patch.object(
+            runner, "notify_task_finished"
+        ), mock.patch.object(
+            runner, "cleanup_issue_worktree", return_value=(0, "")
+        ):
+            runner.process_issue(issue, workdir=str(coordinator))
+
+        if executor_type == "codex_branch_task":
+            prepare.assert_called_once()
+            run_codex.assert_called_once()
+            dispatch_universal.assert_not_called()
+        else:
+            prepare.assert_not_called()
+            run_codex.assert_not_called()
+            dispatch_universal.assert_called_once()
 
 
 def test_process_issue_runs_target_repository_lavalamp_in_registered_worktree(

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "skeleton.runner_task.v1",
   "type": "object",
-  "required": ["schema", "task_id", "task_key", "mode", "risk"],
+  "required": ["schema", "task_id", "task_key", "action", "executor_type", "risk"],
   "additionalProperties": false,
   "properties": {
     "schema": {
@@ -21,27 +21,47 @@
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,120}$"
     },
-    "mode": {
+    "action": {
+      "type": "string",
+      "enum": [
+        "START",
+        "STATUS",
+        "CONTINUE",
+        "CANCEL"
+      ]
+    },
+    "executor_type": {
       "type": "string",
       "enum": [
         "codex_branch_task",
+        "hermes_private_task",
         "local_module_task",
-        "hermes_task",
-        "STATUS",
-        "CANCEL",
-        "codex_issue_worktree",
-        "local_command"
+        "runtime_maintenance_task",
+        "read_only_probe"
       ]
     },
     "risk": {
       "type": "string",
       "enum": ["LOW", "YELLOW", "RED", "low", "yellow", "red"]
     },
-    "operator_approved": {
-      "type": "boolean"
-    },
-    "operator_approval": {
-      "type": "boolean"
+    "approval_evidence": {
+      "type": "object",
+      "required": ["source", "evidence_id", "verified"],
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "type": "string",
+          "enum": ["operator_event", "signed_telegram_callback"]
+        },
+        "evidence_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{2,160}$"
+        },
+        "verified": {
+          "type": "boolean",
+          "const": true
+        }
+      }
     },
     "timeout_seconds": {
       "type": "number",
@@ -50,17 +70,25 @@
     },
     "resources": {
       "type": "array",
-      "items": {"type": "string"}
-    },
-    "files": {
-      "type": "array",
-      "items": {"type": "string"}
+      "items": {}
     },
     "payload": {
       "type": "object"
     },
-    "params": {
-      "type": "object"
+    "allowed_scope": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "forbidden_actions": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "validation": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "privacy_boundary": {
+      "type": "string"
     }
   }
 }

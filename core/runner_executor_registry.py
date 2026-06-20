@@ -108,7 +108,7 @@ class RunnerExecutorRegistry:
     ) -> RegisteredCommandResult:
         return self.local_commands.run(command_id, payload)
 
-    def run_hermes_task(
+    def run_hermes_private_task(
         self, command_id: str, payload: Mapping[str, Any]
     ) -> RegisteredCommandResult:
         if self.hermes is None:
@@ -117,6 +117,26 @@ class RunnerExecutorRegistry:
                 public={"reason": "hermes_adapter_missing", "command_id": command_id},
             )
         return self.hermes.dispatch(command_id, payload)
+
+    def run_hermes_task(
+        self, command_id: str, payload: Mapping[str, Any]
+    ) -> RegisteredCommandResult:
+        return self.run_hermes_private_task(command_id, payload)
+
+    def run_runtime_maintenance_task(
+        self, command_id: str, payload: Mapping[str, Any]
+    ) -> RegisteredCommandResult:
+        return self.local_commands.run(command_id, payload)
+
+    def run_read_only_probe(
+        self, command_id: str, payload: Mapping[str, Any]
+    ) -> RegisteredCommandResult:
+        return self.local_commands.run(command_id, payload)
+
+    def run_codex_branch_task(
+        self, command_id: str, payload: Mapping[str, Any]
+    ) -> RegisteredCommandResult:
+        return self.local_commands.run(command_id, payload)
 
 
 _COMMAND_ID_RE = re.compile(r"^[a-z][a-z0-9_]{2,80}$")

@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import fcntl
 import json
+import multiprocessing
 import os
 from pathlib import Path
 import re
 import tempfile
 import time
 from typing import Any
+import threading
+
+from jsonschema import Draft202012Validator
 
 from core.audit_ledger import validate_public_safe_payload
 from core.runner_executor_registry import RegisteredCommandResult, RunnerExecutorRegistry
@@ -29,21 +32,52 @@ TASK_STATUSES = frozenset(
 )
 TERMINAL_STATUSES = frozenset({"CANCELLED", "FAILED", "COMPLETED"})
 RISK_LEVELS = frozenset({"LOW", "YELLOW", "RED"})
+TASK_ACTIONS = frozenset({"START", "STATUS", "CONTINUE", "CANCEL"})
+EXECUTOR_TYPES = frozenset(
+    {
+        "codex_branch_task",
+        "hermes_private_task",
+        "local_module_task",
+        "runtime_maintenance_task",
+        "read_only_probe",
+    }
+)
 STALE_LEASE_SECONDS = 15 * 60
+SCHEMA_PATH = Path(__file__).resolve().parents[1] / "schemas" / "universal_runner_task.schema.json"
+
+
+@dataclass(frozen=True)
+class ApprovalEvidence:
+    source: str
+    evidence_id: str
+    verified: bool
 
 
 @dataclass(frozen=True)
 class RunnerTaskEnvelope:
     task_id: str
     task_key: str
-    mode: str
+    action: str
+    executor_type: str
     risk: str
     payload: dict[str, Any]
-    resources: tuple[str, ...] = ()
-    operator_approved: bool = False
+    resources: tuple[Any, ...] = ()
+    approval_evidence: ApprovalEvidence | None = None
     timeout_seconds: float = 60.0
+    allowed_scope: tuple[str, ...] = ()
+    forbidden_actions: tuple[str, ...] = ()
+    validation: tuple[str, ...] = ()
+    privacy_boundary: str | None = None
     schema_id: str = SCHEMA_ID
     legacy_schema_id: str | None = None
+
+    @property
+    def mode(self) -> str:
+        return self.executor_type
+
+    @property
+    def operator_approved(self) -> bool:
+        return self.approval_evidence is not None and self.approval_evidence.verified
 
 
 @dataclass(frozen=True)
@@ -53,23 +87,18 @@ class UniversalTaskResult:
 
 
 def normalize_task(raw: Mapping[str, Any]) -> RunnerTaskEnvelope:
-    schema_id = str(raw.get("schema") or raw.get("schema_id") or SCHEMA_ID)
-    legacy_schema_id = None
-    if schema_id in LEGACY_SCHEMA_IDS:
-        legacy_schema_id = schema_id
-        schema_id = SCHEMA_ID
+    canonical, legacy_schema_id = _canonicalize_raw_task(raw)
+    _validate_against_schema(canonical)
+    schema_id = str(canonical.get("schema"))
     if schema_id != SCHEMA_ID:
         raise ValueError("runner task schema must be skeleton.runner_task.v1.")
 
-    payload = dict(raw.get("payload") or raw.get("params") or {})
-    resources = tuple(str(item) for item in raw.get("resources") or raw.get("files") or ())
-    mode = str(raw.get("mode") or raw.get("task_type") or "").strip()
-    if mode == "codex_issue_worktree":
-        mode = "codex_branch_task"
-    if mode == "local_command":
-        mode = "local_module_task"
+    payload = dict(canonical.get("payload") or {})
+    resources = tuple(canonical.get("resources") or ())
+    executor_type = str(canonical.get("executor_type") or "").strip()
+    action = str(canonical.get("action") or "").strip().upper()
 
-    timeout_raw = raw.get("timeout_seconds", 60)
+    timeout_raw = canonical.get("timeout_seconds", 60)
     try:
         timeout_seconds = float(timeout_raw)
     except (TypeError, ValueError) as exc:
@@ -77,26 +106,101 @@ def normalize_task(raw: Mapping[str, Any]) -> RunnerTaskEnvelope:
     if timeout_seconds <= 0 or timeout_seconds > 3600:
         raise ValueError("timeout_seconds must be between 0 and 3600.")
 
-    risk = str(raw.get("risk") or "YELLOW").upper()
+    risk = str(canonical.get("risk") or "YELLOW").upper()
+    approval_evidence = _approval_evidence(canonical.get("approval_evidence"))
     return RunnerTaskEnvelope(
-        task_id=_required_token(raw, "task_id"),
-        task_key=_required_token(raw, "task_key"),
-        mode=mode,
+        task_id=_required_token(canonical, "task_id"),
+        task_key=_required_token(canonical, "task_key"),
+        action=action,
+        executor_type=executor_type,
         risk=risk,
         payload=payload,
         resources=resources,
-        operator_approved=raw.get("operator_approved") is True
-        or raw.get("operator_approval") is True,
+        approval_evidence=approval_evidence,
         timeout_seconds=timeout_seconds,
+        allowed_scope=tuple(str(item) for item in canonical.get("allowed_scope") or ()),
+        forbidden_actions=tuple(str(item) for item in canonical.get("forbidden_actions") or ()),
+        validation=tuple(str(item) for item in canonical.get("validation") or ()),
+        privacy_boundary=(
+            str(canonical["privacy_boundary"]) if "privacy_boundary" in canonical else None
+        ),
         schema_id=schema_id,
         legacy_schema_id=legacy_schema_id,
     )
+
+
+def _canonicalize_raw_task(raw: Mapping[str, Any]) -> tuple[dict[str, Any], str | None]:
+    canonical = dict(raw)
+    schema_id = str(canonical.get("schema") or canonical.get("schema_id") or SCHEMA_ID)
+    legacy_schema_id = None
+    if schema_id in LEGACY_SCHEMA_IDS:
+        legacy_schema_id = schema_id
+        schema_id = SCHEMA_ID
+    if schema_id != SCHEMA_ID:
+        raise ValueError("runner task schema must be skeleton.runner_task.v1.")
+    canonical["schema"] = schema_id
+    canonical.pop("schema_id", None)
+
+    if "payload" not in canonical and "params" in canonical:
+        canonical["payload"] = canonical.pop("params")
+    if "resources" not in canonical and "files" in canonical:
+        canonical["resources"] = canonical.pop("files")
+    else:
+        canonical.pop("files", None)
+    canonical.pop("params", None)
+
+    mode = str(canonical.pop("mode", canonical.pop("task_type", "")) or "").strip()
+    if mode:
+        mode_map = {
+            "codex_issue_worktree": "codex_branch_task",
+            "local_command": "local_module_task",
+            "hermes_task": "hermes_private_task",
+            "RUNNER_TASK": "codex_branch_task",
+            "RUNTIME_MAINTENANCE_TASK": "runtime_maintenance_task",
+        }
+        canonical.setdefault("executor_type", mode_map.get(mode, mode))
+        canonical.setdefault("action", "START")
+
+    legacy_operator_approved = canonical.pop("operator_approved", None)
+    legacy_operator_approval = canonical.pop("operator_approval", None)
+    if legacy_operator_approved is True or legacy_operator_approval is True:
+        raise ValueError("operator approval must be verified approval_evidence.")
+    return canonical, legacy_schema_id
+
+
+def _validate_against_schema(canonical: Mapping[str, Any]) -> None:
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    validator = Draft202012Validator(schema)
+    errors = sorted(validator.iter_errors(dict(canonical)), key=lambda error: list(error.path))
+    if errors:
+        first = errors[0]
+        location = ".".join(str(part) for part in first.path) or "<root>"
+        raise ValueError(f"universal runner task schema violation at {location}: {first.message}")
+
+
+def _approval_evidence(raw: Any) -> ApprovalEvidence | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping):
+        raise ValueError("approval_evidence must be an object.")
+    source = str(raw.get("source") or "")
+    evidence_id = str(raw.get("evidence_id") or "")
+    verified = raw.get("verified") is True
+    if source not in {"operator_event", "signed_telegram_callback"} or not verified:
+        return None
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{2,160}", evidence_id) is None:
+        return None
+    return ApprovalEvidence(source=source, evidence_id=evidence_id, verified=True)
 
 
 def gate_task(task: RunnerTaskEnvelope) -> UniversalTaskResult:
     reasons: list[str] = []
     if task.risk not in RISK_LEVELS:
         reasons.append("risk_level_invalid")
+    if task.action not in TASK_ACTIONS:
+        reasons.append("action_invalid")
+    if task.executor_type not in EXECUTOR_TYPES:
+        reasons.append("executor_type_invalid")
     if task.risk == "RED" and not task.operator_approved:
         reasons.append("red_risk_requires_operator_approval")
     protected = detect_protected_resources(task)
@@ -116,18 +220,48 @@ def gate_task(task: RunnerTaskEnvelope) -> UniversalTaskResult:
 
 def detect_protected_resources(task: RunnerTaskEnvelope) -> set[str]:
     protected: set[str] = set()
-    candidates = list(task.resources)
-    for key in ("file", "files", "path", "paths", "resource", "resources"):
-        value = task.payload.get(key)
-        if isinstance(value, str):
-            candidates.append(value)
-        elif isinstance(value, list):
-            candidates.extend(str(item) for item in value)
+    candidates = [*task.resources]
+    candidates.extend(_structured_resource_candidates(task.payload))
+    candidates.extend(task.allowed_scope)
+    candidates.extend(task.forbidden_actions)
+    candidates.extend(task.validation)
+    if task.privacy_boundary:
+        candidates.append(task.privacy_boundary)
     for candidate in candidates:
-        reason = protected_resource_reason(candidate)
+        reason = protected_resource_reason(str(candidate))
         if reason is not None:
             protected.add(reason)
     return protected
+
+
+def _structured_resource_candidates(value: Any) -> list[str]:
+    candidates: list[str] = []
+    if isinstance(value, str):
+        candidates.append(value)
+    elif isinstance(value, Mapping):
+        for key, nested in value.items():
+            if str(key).lower() in {
+                "file",
+                "files",
+                "path",
+                "paths",
+                "resource",
+                "resources",
+                "target",
+                "targets",
+                "scope",
+                "allowed_scope",
+                "forbidden_actions",
+            }:
+                candidates.extend(_structured_resource_candidates(nested))
+            elif isinstance(nested, (Mapping, list, tuple)):
+                candidates.extend(_structured_resource_candidates(nested))
+            elif isinstance(nested, str):
+                candidates.append(nested)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            candidates.extend(_structured_resource_candidates(item))
+    return candidates
 
 
 def protected_resource_reason(resource: str) -> str | None:
@@ -139,30 +273,93 @@ def protected_resource_reason(resource: str) -> str | None:
         return "absolute_or_user_path"
     if any(part in {"..", "secrets", "private"} for part in lowered.split("/")):
         return "private_or_traversal_path"
-    if lowered in {".env", "boot_manifest.yaml", "project_tree.yaml", "operator_rules.yaml", "capability_registry.yaml"}:
+    protected_exact = {
+        ".env",
+        "boot_manifest.yaml",
+        "project_tree.yaml",
+        "operator_rules.yaml",
+        "capability_registry.yaml",
+        "scripts/runner_poll_github_tasks.py",
+        "core/action_gate.py",
+        "core/gate_engine.py",
+    }
+    if lowered in protected_exact:
         return "protected_control_file"
     if lowered.endswith(".env") or lowered.startswith(".github/workflows/"):
         return "protected_control_file"
+    if lowered.startswith(("secrets/", "deploy/", "server/", "finance/", "legal/", "governance/")):
+        return "protected_domain_boundary"
+    if "runner core" in lowered or "runner_core" in lowered:
+        return "protected_runner_core"
+    if any(
+        token in lowered
+        for token in (
+            "control manifest",
+            "workflow",
+            "secret",
+            "deploy",
+            "server",
+            "finance",
+            "legal",
+            "governance",
+            "adapter boundary",
+            "adapter_boundar",
+        )
+    ):
+        return "protected_domain_boundary"
     if "drive.google.com" in lowered or "docs.google.com" in lowered:
         return "private_drive_reference"
     return None
 
 
 def run_with_timeout(
-    handler: Callable[[], UniversalTaskResult], timeout_seconds: float
+    handler: Callable[[], UniversalTaskResult],
+    timeout_seconds: float,
+    *,
+    on_heartbeat: Callable[[], None] | None = None,
+    heartbeat_interval_seconds: float = 5.0,
 ) -> UniversalTaskResult:
-    executor = ThreadPoolExecutor(max_workers=1)
-    future = executor.submit(handler)
+    context = multiprocessing.get_context("fork")
+    queue: multiprocessing.Queue[Any] = context.Queue(maxsize=1)
+    process = context.Process(target=_run_handler_in_child, args=(handler, queue))
+    process.start()
+    deadline = time.monotonic() + timeout_seconds
+    last_heartbeat = 0.0
+    while process.is_alive() and time.monotonic() < deadline:
+        now = time.monotonic()
+        if on_heartbeat is not None and now - last_heartbeat >= heartbeat_interval_seconds:
+            on_heartbeat()
+            last_heartbeat = now
+        process.join(timeout=min(0.05, max(0.0, deadline - now)))
+    if process.is_alive():
+        process.terminate()
+        process.join(timeout=1.0)
+    if process.is_alive():
+        process.kill()
+        process.join(timeout=1.0)
     try:
-        return future.result(timeout=timeout_seconds)
-    except TimeoutError:
-        future.cancel()
+        kind, payload = queue.get_nowait()
+    except Exception:
         return UniversalTaskResult(
             status="CANCELLED",
             public={"reason": "timeout", "timeout_seconds": timeout_seconds},
         )
-    finally:
-        executor.shutdown(wait=False, cancel_futures=True)
+    if kind == "result" and isinstance(payload, UniversalTaskResult):
+        return payload
+    if kind == "result" and isinstance(payload, Mapping):
+        return UniversalTaskResult(
+            status=str(payload.get("status") or "FAILED").upper(),
+            public=dict(payload.get("public") or {}),
+        )
+    return UniversalTaskResult(status="FAILED", public={"reason": str(payload)})
+
+
+def _run_handler_in_child(handler: Callable[[], UniversalTaskResult], queue: Any) -> None:
+    try:
+        result = handler()
+        queue.put(("result", result))
+    except Exception:
+        queue.put(("error", "worker_raised"))
 
 
 class AtomicTaskStateStore:
@@ -193,15 +390,24 @@ class AtomicTaskStateStore:
                     )
                 record["status"] = "FAILED"
                 record["stale_recovered_at"] = now
+            if task.action == "CONTINUE" and (
+                record is None or record.get("status") != "CHECKPOINTED"
+            ):
+                return UniversalTaskResult(
+                    status="FAILED",
+                    public={"reason": "checkpoint_missing", "task_key": task.task_key},
+                )
             tasks[task.task_key] = {
                 "schema": SCHEMA_ID,
                 "task_id": task.task_id,
                 "task_key": task.task_key,
-                "mode": task.mode,
+                "action": task.action,
+                "executor_type": task.executor_type,
                 "risk": task.risk,
                 "status": "RUNNING",
                 "updated_at": now,
                 "lease": {"owner": owner, "acquired_at": now, "heartbeat_at": now},
+                "context": _adapter_context(task),
             }
             self._write_unlocked(state)
         return UniversalTaskResult(status="RUNNING", public={"task_key": task.task_key})
@@ -226,6 +432,53 @@ class AtomicTaskStateStore:
                 record.pop("lease", None)
             self._write_unlocked(state)
         return UniversalTaskResult(status=status, public=dict(public or {}))
+
+    def persist(
+        self,
+        task: RunnerTaskEnvelope,
+        status: str,
+        public: Mapping[str, Any] | None = None,
+    ) -> UniversalTaskResult:
+        status = status.upper()
+        if status not in TASK_STATUSES:
+            raise ValueError("unknown task status.")
+        validate_public_safe_payload({"public": dict(public or {})})
+        now = _utc_now()
+        with self._locked():
+            state = self._read_unlocked()
+            record = state.setdefault("tasks", {}).setdefault(task.task_key, {})
+            record.update(
+                {
+                    "schema": SCHEMA_ID,
+                    "task_id": task.task_id,
+                    "task_key": task.task_key,
+                    "action": task.action,
+                    "executor_type": task.executor_type,
+                    "risk": task.risk,
+                    "status": status,
+                    "public": dict(public or {}),
+                    "updated_at": now,
+                    "context": _adapter_context(task),
+                }
+            )
+            if status in TERMINAL_STATUSES or status in {"NEEDS_OPERATOR", "CHECKPOINTED"}:
+                record.pop("lease", None)
+            self._write_unlocked(state)
+        return UniversalTaskResult(status=status, public=dict(public or {}))
+
+    def heartbeat(self, task_key: str, owner: str) -> bool:
+        with self._locked():
+            state = self._read_unlocked()
+            record = state.setdefault("tasks", {}).get(task_key)
+            if record is None or record.get("status") != "RUNNING":
+                return False
+            lease = record.setdefault("lease", {})
+            if lease.get("owner") != owner:
+                return False
+            lease["heartbeat_at"] = _utc_now()
+            record["updated_at"] = lease["heartbeat_at"]
+            self._write_unlocked(state)
+        return True
 
     def status(self, task_key: str) -> UniversalTaskResult:
         record = self.get(task_key)
@@ -298,37 +551,52 @@ def execute_universal_task(
     *,
     owner: str = "runner",
 ) -> UniversalTaskResult:
-    if task.mode == "STATUS":
+    if task.action == "STATUS":
         return store.status(task.task_key)
-    if task.mode == "CANCEL":
+    if task.action == "CANCEL":
         return store.cancel(task.task_key)
 
     gate = gate_task(task)
     if gate.status != "RUNNING":
-        return store.update(task.task_key, gate.status, gate.public) if store.get(task.task_key) else gate
+        return store.persist(task, gate.status, gate.public)
 
     acquired = store.acquire(task, owner)
     if acquired.status != "RUNNING" or acquired.public.get("reason") == "lease_active":
         return acquired
 
     def _run() -> UniversalTaskResult:
-        if task.mode == "local_module_task":
+        payload = _adapter_payload(task)
+        command_id = str(task.payload.get("command_id") or task.payload.get("task_id") or "")
+        if task.executor_type == "local_module_task":
             result = registry.run_local_module_task(
-                str(task.payload.get("command_id") or ""), task.payload
+                command_id, payload
             )
             return _from_registered_result(result)
-        if task.mode == "hermes_task":
-            result = registry.run_hermes_task(
-                str(task.payload.get("command_id") or ""), task.payload
+        if task.executor_type == "hermes_private_task":
+            result = registry.run_hermes_private_task(
+                command_id, payload
             )
+            return _from_registered_result(result)
+        if task.executor_type == "runtime_maintenance_task":
+            result = registry.run_runtime_maintenance_task(command_id, payload)
+            return _from_registered_result(result)
+        if task.executor_type == "read_only_probe":
+            result = registry.run_read_only_probe(command_id, payload)
+            return _from_registered_result(result)
+        if task.executor_type == "codex_branch_task":
+            result = registry.run_codex_branch_task(command_id, payload)
             return _from_registered_result(result)
         return UniversalTaskResult(
             status="FAILED",
-            public={"reason": "unsupported_universal_task_mode", "mode": task.mode},
+            public={"reason": "unsupported_universal_executor_type", "executor_type": task.executor_type},
         )
 
-    result = run_with_timeout(_run, task.timeout_seconds)
-    return store.update(task.task_key, result.status, result.public)
+    result = run_with_timeout(
+        _run,
+        task.timeout_seconds,
+        on_heartbeat=lambda: store.heartbeat(task.task_key, owner),
+    )
+    return store.persist(task, result.status, result.public)
 
 
 def github_status_for_universal_state(status: str) -> dict[str, str]:
@@ -342,7 +610,45 @@ def github_status_for_universal_state(status: str) -> dict[str, str]:
         "COMPLETED": ("success", "Task completed."),
     }
     state, description = mapping.get(normalized, ("failure", "Unknown task status."))
-    return {"state": state, "description": description}
+    next_action = {
+        "CHECKPOINTED": "CONTINUE",
+        "NEEDS_OPERATOR": "START_WITH_APPROVAL",
+        "RUNNING": "STATUS",
+        "CANCELLED": "START",
+        "FAILED": "START",
+        "COMPLETED": "NONE",
+    }.get(normalized, "START")
+    return {"state": state, "description": description, "next_action": next_action}
+
+
+def _adapter_context(task: RunnerTaskEnvelope) -> dict[str, Any]:
+    return {
+        "task_id": task.task_id,
+        "task_key": task.task_key,
+        "action": task.action,
+        "executor_type": task.executor_type,
+        "risk": task.risk,
+        "allowed_scope": list(task.allowed_scope),
+        "forbidden_actions": list(task.forbidden_actions),
+        "validation": list(task.validation),
+        "privacy_boundary": task.privacy_boundary,
+        "timeout_seconds": task.timeout_seconds,
+        "approval_evidence": (
+            {
+                "source": task.approval_evidence.source,
+                "evidence_id": task.approval_evidence.evidence_id,
+                "verified": True,
+            }
+            if task.approval_evidence is not None
+            else None
+        ),
+    }
+
+
+def _adapter_payload(task: RunnerTaskEnvelope) -> dict[str, Any]:
+    payload = dict(task.payload)
+    payload["runner_context"] = _adapter_context(task)
+    return payload
 
 
 def sanitize_public_text(text: str) -> str:

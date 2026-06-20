@@ -21,6 +21,12 @@ accepts only registered command ids and dispatches them through
 `core.runner_executor_registry`. Arbitrary command text in an issue or JSON
 payload is data, not executable input.
 
+Runtime maintenance can also be represented by the universal envelope with
+`action=START` and `executor_type=runtime_maintenance_task`. The GitHub issue
+poller routes that envelope through the same allowlisted maintenance dispatcher;
+legacy `Mode: RUNTIME_MAINTENANCE_TASK` issues remain supported for
+compatibility.
+
 ## Current allowlist
 
 `sync_telegram_callback_poller_runtime` may only:
