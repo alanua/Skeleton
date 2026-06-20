@@ -24,6 +24,41 @@ The bulk worker should receive only bounded, public-safe, sanitized chunks. The
 critic should receive only sanitized summaries, aggregate calibration notes, and
 claimed conclusions that need audit.
 
+## Public Task Router
+
+`core/hermes_task_router.py` is a public-safe static router. It classifies
+synthetic or sanitized subtasks as `LOW`, `MID`, or `HIGH` and emits only one
+of these public route aliases:
+
+| Class | Alias | Intended public-safe task shape |
+| --- | --- | --- |
+| `LOW` | `AUFMASS_WORKER_LOW` | Deterministic extraction, normalization, repetitive calculations, and candidate generation. |
+| `MID` | `AUFMASS_REVIEW_MID` | Geometry/evidence review, contradiction checks, tolerance decisions, and rework instructions. |
+| `HIGH` | `AUFMASS_EXPERT_HIGH` | Unresolved high-impact ambiguity, method approval or rejection, and final expert adjudication. |
+
+The router considers task type, ambiguity, impact, evidence quality, privacy
+class, retry count, and operator gate state. The emitted task packet includes
+route metadata for budget, retry, evidence, privacy, and operator approval.
+provider/model names stay out of public task packets; aliases are the only
+route identifiers.
+
+Supported transitions are explicit:
+
+- `LOW->MID` when a low-cost task needs review because ambiguity, impact,
+  retry, or evidence conditions exceed low-risk handling.
+- `MID->LOW_REWORK` when review produces bounded rework instructions that can
+  be handled by a low-cost worker later.
+- `MID->HIGH` when review exposes unresolved high-impact ambiguity or a method
+  approval/rejection decision.
+- `HIGH->REQUEST_EVIDENCE` when expert handling cannot proceed because
+  evidence is missing, insufficient, or cannot cross the public-safe boundary.
+
+Never silently downgrade HIGH to a cheaper route. If a caller requests
+`AUFMASS_WORKER_LOW` or `AUFMASS_REVIEW_MID` for a task classified as `HIGH`,
+the router must fail closed instead of substituting a cheaper alias. Fail closed
+also applies when any requested alias is unavailable. These failures are local
+validation errors only; they do not call providers or change runtime services.
+
 ## Troitsa-inspired pattern
 
 The policy borrows the general shape of a three-role pattern: one model plans,

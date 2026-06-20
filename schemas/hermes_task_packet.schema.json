@@ -145,6 +145,9 @@
         }
       }
     },
+    "route": {
+      "$ref": "#/$defs/task_route"
+    },
     "skill_manifest_ref": {
       "type": "string",
       "pattern": "^schemas/hermes_skill_manifest\\.schema\\.json$"
@@ -201,6 +204,116 @@
         "mutating": {
           "type": "boolean",
           "const": false
+        }
+      }
+    },
+    "task_route": {
+      "type": "object",
+      "required": [
+        "classification",
+        "alias",
+        "transition",
+        "reason_codes",
+        "budget",
+        "retry",
+        "evidence",
+        "privacy",
+        "operator_approval"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "classification": {
+          "type": "string",
+          "enum": ["LOW", "MID", "HIGH"]
+        },
+        "alias": {
+          "type": "string",
+          "enum": [
+            "AUFMASS_WORKER_LOW",
+            "AUFMASS_REVIEW_MID",
+            "AUFMASS_EXPERT_HIGH"
+          ]
+        },
+        "transition": {
+          "type": "string",
+          "enum": [
+            "STAY",
+            "LOW->MID",
+            "MID->LOW_REWORK",
+            "MID->HIGH",
+            "HIGH->REQUEST_EVIDENCE"
+          ]
+        },
+        "reason_codes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "budget": {
+          "type": "object",
+          "required": ["budget_units", "token_cap", "live_route_enabled"],
+          "additionalProperties": false,
+          "properties": {
+            "budget_units": {"type": "integer", "minimum": 0},
+            "token_cap": {"type": "integer", "minimum": 1},
+            "live_route_enabled": {"type": "boolean", "const": false}
+          }
+        },
+        "retry": {
+          "type": "object",
+          "required": ["count", "max"],
+          "additionalProperties": false,
+          "properties": {
+            "count": {"type": "integer", "minimum": 0},
+            "max": {"type": "integer", "minimum": 0}
+          }
+        },
+        "evidence": {
+          "type": "object",
+          "required": ["quality", "items", "contains_real_artifacts"],
+          "additionalProperties": false,
+          "properties": {
+            "quality": {
+              "type": "string",
+              "enum": [
+                "missing",
+                "insufficient",
+                "weak",
+                "sufficient",
+                "strong",
+                "contradictory"
+              ]
+            },
+            "items": {
+              "type": "array",
+              "minItems": 1,
+              "items": {"type": "string", "minLength": 1}
+            },
+            "contains_real_artifacts": {"type": "boolean", "const": false}
+          }
+        },
+        "privacy": {
+          "type": "object",
+          "required": ["class", "public_safe", "no_secrets"],
+          "additionalProperties": false,
+          "properties": {
+            "class": {
+              "type": "string",
+              "enum": ["public", "public_safe", "synthetic", "sanitized", "private"]
+            },
+            "public_safe": {"type": "boolean"},
+            "no_secrets": {"type": "boolean", "const": true}
+          }
+        },
+        "operator_approval": {
+          "type": "object",
+          "required": ["required", "gate", "approved"],
+          "additionalProperties": false,
+          "properties": {
+            "required": {"type": "boolean", "const": true},
+            "gate": {"type": "boolean"},
+            "approved": {"type": "boolean", "const": false}
+          }
         }
       }
     }
