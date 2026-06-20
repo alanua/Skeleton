@@ -4,6 +4,12 @@ Runtime maintenance tasks are host Runner actions. They are not Codex tasks:
 Codex stays inside its workspace sandbox and must not be asked to reach systemd
 or host runtime paths.
 
+The legacy `RUNTIME_MAINTENANCE_TASK` packet remains supported for compatibility.
+New universal packets should use `Mode: UNIVERSAL_RUNNER_TASK` with
+`executor_type=runtime_maintenance_task` and a server-side registered
+`maintenance_task_id` in `target`. Both routes dispatch only through registered
+Runner adapters; issue text is never interpreted as a shell command.
+
 The Runner accepts a runtime maintenance issue only when the issue is explicitly
 operator-approved and declares the maintenance mode and allowlisted task id:
 

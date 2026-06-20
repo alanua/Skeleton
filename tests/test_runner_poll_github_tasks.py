@@ -7228,3 +7228,119 @@ def test_codex_exec_command_rejects_invalid_model_before_run_command(monkeypatch
             runner.run_codex_task("Task body", "/tmp/work", None)
 
     run_command.assert_not_called()
+
+
+def _universal_task_issue_body(**updates: object) -> str:
+    payload: dict[str, object] = {
+        "schema": "skeleton.universal_runner_task.v1",
+        "task_id": "task-1",
+        "idempotency_key": "idem-poller-1",
+        "action": "START",
+        "executor_type": "read_only_probe",
+        "capability": "read_only",
+        "risk_class": "low",
+        "target": {"resource": "docs/UNIVERSAL_RUNNER_TASKS.md"},
+        "repo": runner.REPO,
+        "branch": "runner/universal",
+        "task": "Probe public docs only.",
+        "allowed_files_or_resources": ["docs/UNIVERSAL_RUNNER_TASKS.md"],
+        "forbidden_actions": ["merge", "deploy", "service_restart"],
+        "validation": {},
+        "expected_output": "aggregate public status",
+        "privacy_boundary": "public-safe aggregate status only",
+        "timeout_seconds": 30,
+        "approval_requirement": "none",
+        "private_payload_ref": None,
+    }
+    payload.update(updates)
+    return "\n".join(
+        (
+            f"Mode: {runner.UNIVERSAL_RUNNER_TASK_MODE}",
+            "",
+            "```task",
+            json.dumps(payload, sort_keys=True),
+            "```",
+        )
+    )
+
+
+def test_universal_runner_task_free_form_prose_is_rejected() -> None:
+    body = "\n".join(
+        (
+            f"Mode: {runner.UNIVERSAL_RUNNER_TASK_MODE}",
+            "",
+            "```task",
+            "please run a private command",
+            "```",
+        )
+    )
+
+    found, task, reason = runner.extract_universal_runner_task(body)
+
+    assert found is True
+    assert task is None
+    assert "must be JSON" in str(reason)
+
+
+def test_universal_runner_task_processes_read_only_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    comments: list[str] = []
+    label_edits: list[tuple[int, str, str]] = []
+    monkeypatch.setenv("SKELETON_UNIVERSAL_RUNNER_STATE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(
+        runner, "post_issue_comment", lambda _number, body: comments.append(body)
+    )
+    monkeypatch.setattr(
+        runner,
+        "set_issue_label",
+        lambda number, remove, add: label_edits.append((number, remove, add)),
+    )
+    monkeypatch.setattr(runner, "notify_task_finished", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        runner, "record_runner_task_picked_up", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        runner, "record_runner_executor_result", lambda *args, **kwargs: None
+    )
+
+    runner.process_issue(
+        {
+            "number": 991,
+            "title": "Universal task",
+            "body": _universal_task_issue_body(idempotency_key="idem-poller-2"),
+            "state": "OPEN",
+        },
+        workdir=str(tmp_path),
+    )
+
+    assert comments
+    assert "executor_type=read_only_probe" in comments[0]
+    assert "state=COMPLETED" in comments[0]
+    assert label_edits[-1] == (991, runner.LABEL_RUNNING, runner.LABEL_DONE)
+
+
+def test_universal_runner_task_rejects_unknown_capability() -> None:
+    body = _universal_task_issue_body(capability="write_anywhere")
+
+    found, task, reason = runner.extract_universal_runner_task(body)
+
+    assert found is True
+    assert task is not None
+    assert reason is None
+
+
+def test_legacy_task_modes_remain_detected() -> None:
+    maintenance_body = (
+        f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}\n"
+        f"Maintenance Task ID: {runner.CHECK_SKELETON_FRESHNESS}"
+    )
+    codex_body = "```task\nUpdate docs only.\n```"
+
+    assert runner.extract_runtime_maintenance_task_id(maintenance_body) == (
+        True,
+        runner.CHECK_SKELETON_FRESHNESS,
+    )
+    assert runner.extract_runner_task(codex_body)[0] is not None
+    assert runner.has_runner_task_body(maintenance_body) is True
+    assert runner.has_runner_task_body(codex_body) is True
