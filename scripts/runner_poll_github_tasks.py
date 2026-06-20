@@ -90,6 +90,7 @@ ENSURE_PROJECT_CHECKOUT = "ensure_project_checkout"
 VALIDATE_PR_BRANCH = "validate_pr_branch"
 PREFLIGHT_PR_REFRESH = "preflight_pr_refresh"
 HERMES_WORKER_PREFLIGHT = "hermes_worker_preflight"
+HERMES_MODEL_INVENTORY_PREFLIGHT = "hermes_model_inventory_preflight_v1"
 PRIVATE_MEMORY_HEALTHCHECK = "private_memory_healthcheck"
 HERMES_PRIVATE_MEMORY_BRIDGE_CHECK = "hermes_private_memory_bridge_check"
 PREPARE_AUFMASS_PRIVATE_RUNTIME = "prepare_aufmass_private_runtime"
@@ -116,6 +117,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         VALIDATE_PR_BRANCH,
         PREFLIGHT_PR_REFRESH,
         HERMES_WORKER_PREFLIGHT,
+        HERMES_MODEL_INVENTORY_PREFLIGHT,
         PRIVATE_MEMORY_HEALTHCHECK,
         HERMES_PRIVATE_MEMORY_BRIDGE_CHECK,
         PREPARE_AUFMASS_PRIVATE_RUNTIME,
@@ -2482,6 +2484,126 @@ def hermes_worker_preflight() -> str:
         f"runner_root_exists={str(ROOT.exists()).lower()}",
         *tool_lines,
     ]
+    return _maintenance_report("DONE", task_id, status_lines, "met")
+
+
+_HERMES_MODEL_ROUTE_METADATA: tuple[dict[str, object], ...] = (
+    {
+        "route_alias": "local_hermes",
+        "capability_class": "high",
+        "readiness": "auth_missing",
+        "quota_visibility": "unknown",
+        "vision": "unknown",
+        "tools": "unknown",
+        "cost_class": "local",
+        "suitability": {"LOW": "unknown", "MID": "unknown", "HIGH": "unknown"},
+    },
+    {
+        "route_alias": "bulk_worker",
+        "capability_class": "mid",
+        "readiness": "unavailable",
+        "quota_visibility": "unavailable",
+        "vision": "no",
+        "tools": "no",
+        "cost_class": "low",
+        "suitability": {"LOW": "not_suitable", "MID": "not_suitable", "HIGH": "not_suitable"},
+    },
+    {
+        "route_alias": "critic",
+        "capability_class": "high",
+        "readiness": "unavailable",
+        "quota_visibility": "unavailable",
+        "vision": "unknown",
+        "tools": "unknown",
+        "cost_class": "unknown",
+        "suitability": {"LOW": "not_suitable", "MID": "not_suitable", "HIGH": "not_suitable"},
+    },
+)
+_HERMES_ROUTE_SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+-]{0,60}$")
+_HERMES_ROUTE_UNSAFE_TOKEN_RE = re.compile(
+    r"(?i)(/|\\|://|secret|token|password|credential|api[_-]?key|bearer|"
+    r"s[k]-[A-Za-z0-9]|g[h]p_[A-Za-z0-9]|\.env|config|localhost|"
+    r"\d+\.\d+\.\d+\.\d+)"
+)
+_HERMES_ROUTE_ALLOWED_VALUES = {
+    "capability_class": frozenset({"low", "mid", "high", "unknown"}),
+    "readiness": frozenset({"ready", "unavailable", "auth_missing", "unknown"}),
+    "quota_visibility": frozenset({"visible", "unknown", "unavailable"}),
+    "vision": frozenset({"yes", "no", "unknown"}),
+    "tools": frozenset({"yes", "no", "unknown"}),
+    "cost_class": frozenset({"low", "mid", "high", "local", "unknown"}),
+    "suitability": frozenset({"suitable", "not_suitable", "unknown"}),
+}
+
+
+def _hermes_public_token(value: object, *, fallback: str = "unknown") -> str:
+    text = str(value or "").strip()
+    if (
+        not text
+        or _HERMES_ROUTE_SAFE_TOKEN_RE.fullmatch(text) is None
+        or _HERMES_ROUTE_UNSAFE_TOKEN_RE.search(text) is not None
+    ):
+        return fallback
+    return text
+
+
+def _hermes_allowed_value(
+    route: dict[str, object], key: str, *, fallback: str = "unknown"
+) -> str:
+    value = _hermes_public_token(route.get(key), fallback=fallback).lower()
+    allowed = _HERMES_ROUTE_ALLOWED_VALUES[key]
+    return value if value in allowed else fallback
+
+
+def _hermes_route_suitability(
+    route: dict[str, object], work_class: str
+) -> str:
+    suitability = route.get("suitability")
+    if not isinstance(suitability, dict):
+        return "unknown"
+    value = _hermes_public_token(suitability.get(work_class), fallback="unknown").lower()
+    if value not in _HERMES_ROUTE_ALLOWED_VALUES["suitability"]:
+        return "unknown"
+    if _hermes_allowed_value(route, "readiness") != "ready" and value == "suitable":
+        return "unknown"
+    return value
+
+
+def _hermes_model_route_line(index: int, route: dict[str, object]) -> str:
+    alias = _hermes_public_token(route.get("route_alias"), fallback="redacted")
+    return (
+        f"route_{index}_alias={alias} "
+        f"capability_class={_hermes_allowed_value(route, 'capability_class')} "
+        f"readiness={_hermes_allowed_value(route, 'readiness')} "
+        f"quota_visibility={_hermes_allowed_value(route, 'quota_visibility')} "
+        f"vision={_hermes_allowed_value(route, 'vision')} "
+        f"tools={_hermes_allowed_value(route, 'tools')} "
+        f"cost_class={_hermes_allowed_value(route, 'cost_class')} "
+        f"low_suitability={_hermes_route_suitability(route, 'LOW')} "
+        f"mid_suitability={_hermes_route_suitability(route, 'MID')} "
+        f"high_suitability={_hermes_route_suitability(route, 'HIGH')}"
+    )
+
+
+def hermes_model_inventory_preflight() -> str:
+    task_id = HERMES_MODEL_INVENTORY_PREFLIGHT
+    routes = tuple(
+        route
+        for route in _HERMES_MODEL_ROUTE_METADATA
+        if isinstance(route, dict)
+    )
+    status_lines = [
+        "inventory_schema=hermes_model_inventory_preflight_v1",
+        "report_mode=read_only",
+        "metadata_source=local_approved_route_metadata",
+        "runtime_mutation=false",
+        "model_calls=false",
+        f"route_count={len(routes)}",
+    ]
+    status_lines.extend(
+        _hermes_model_route_line(index, route)
+        for index, route in enumerate(routes, start=1)
+    )
     return _maintenance_report("DONE", task_id, status_lines, "met")
 
 
@@ -6489,6 +6611,8 @@ def dispatch_runtime_maintenance_task(
             return preflight_pr_refresh(body)
         if task_id == HERMES_WORKER_PREFLIGHT:
             return hermes_worker_preflight()
+        if task_id == HERMES_MODEL_INVENTORY_PREFLIGHT:
+            return hermes_model_inventory_preflight()
         if task_id == PRIVATE_MEMORY_HEALTHCHECK:
             return private_memory_healthcheck(body)
         if task_id == HERMES_PRIVATE_MEMORY_BRIDGE_CHECK:

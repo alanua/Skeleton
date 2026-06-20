@@ -4296,6 +4296,154 @@ def test_hermes_worker_preflight_issue_body_does_not_execute_commands() -> None:
     run_codex.assert_not_called()
 
 
+def test_hermes_model_inventory_preflight_is_allowlisted() -> None:
+    assert (
+        runner.HERMES_MODEL_INVENTORY_PREFLIGHT
+        == "hermes_model_inventory_preflight_v1"
+    )
+    assert runner.HERMES_MODEL_INVENTORY_PREFLIGHT in runner.RUNTIME_MAINTENANCE_TASK_IDS
+
+
+def test_hermes_model_inventory_preflight_reports_route_suitability() -> None:
+    metadata = (
+        {
+            "route_alias": "planner",
+            "capability_class": "high",
+            "readiness": "ready",
+            "quota_visibility": "visible",
+            "vision": "yes",
+            "tools": "yes",
+            "cost_class": "mid",
+            "suitability": {
+                "LOW": "suitable",
+                "MID": "suitable",
+                "HIGH": "suitable",
+            },
+        },
+        {
+            "route_alias": "bulk_worker",
+            "capability_class": "low",
+            "readiness": "unavailable",
+            "quota_visibility": "unavailable",
+            "vision": "no",
+            "tools": "no",
+            "cost_class": "low",
+            "suitability": {
+                "LOW": "not_suitable",
+                "MID": "not_suitable",
+                "HIGH": "not_suitable",
+            },
+        },
+        {
+            "route_alias": "critic",
+            "capability_class": "high",
+            "readiness": "auth_missing",
+            "quota_visibility": "visible",
+            "vision": "unknown",
+            "tools": "no",
+            "cost_class": "high",
+            "suitability": {
+                "LOW": "unknown",
+                "MID": "unknown",
+                "HIGH": "unknown",
+            },
+        },
+        {
+            "route_alias": "quota_unknown",
+            "capability_class": "mid",
+            "readiness": "ready",
+            "quota_visibility": "unknown",
+            "vision": "no",
+            "tools": "yes",
+            "cost_class": "unknown",
+            "suitability": {
+                "LOW": "suitable",
+                "MID": "unknown",
+                "HIGH": "unknown",
+            },
+        },
+    )
+
+    with mock.patch.object(runner, "_HERMES_MODEL_ROUTE_METADATA", metadata):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HERMES_MODEL_INVENTORY_PREFLIGHT,
+            str(runner.ROOT),
+            "TOKEN=must-not-leak\ncodex exec unsafe",
+        )
+
+    assert report.startswith("DONE:")
+    assert "maintenance_task_id=hermes_model_inventory_preflight_v1" in report
+    assert "inventory_schema=hermes_model_inventory_preflight_v1" in report
+    assert "metadata_source=local_approved_route_metadata" in report
+    assert "runtime_mutation=false" in report
+    assert "model_calls=false" in report
+    assert "route_count=4" in report
+    assert (
+        "route_1_alias=planner capability_class=high readiness=ready "
+        "quota_visibility=visible vision=yes tools=yes cost_class=mid "
+        "low_suitability=suitable mid_suitability=suitable "
+        "high_suitability=suitable"
+    ) in report
+    assert (
+        "route_2_alias=bulk_worker capability_class=low readiness=unavailable "
+        "quota_visibility=unavailable vision=no tools=no cost_class=low "
+        "low_suitability=not_suitable mid_suitability=not_suitable "
+        "high_suitability=not_suitable"
+    ) in report
+    assert (
+        "route_3_alias=critic capability_class=high readiness=auth_missing "
+        "quota_visibility=visible vision=unknown tools=no cost_class=high "
+        "low_suitability=unknown mid_suitability=unknown "
+        "high_suitability=unknown"
+    ) in report
+    assert (
+        "route_4_alias=quota_unknown capability_class=mid readiness=ready "
+        "quota_visibility=unknown vision=no tools=yes cost_class=unknown "
+        "low_suitability=suitable mid_suitability=unknown "
+        "high_suitability=unknown"
+    ) in report
+    assert "must-not-leak" not in report
+    assert "codex exec" not in report
+
+
+def test_hermes_model_inventory_preflight_redacts_unsafe_metadata() -> None:
+    metadata = (
+        {
+            "route_alias": "https://localhost:11434/private/model",
+            "capability_class": "/etc/hermes/config",
+            "readiness": "ready",
+            "quota_visibility": "SKELETON_PROVIDER_TOKEN",
+            "vision": "yes",
+            "tools": "api-key",
+            "cost_class": "secret-cost",
+            "suitability": {
+                "LOW": "suitable",
+                "MID": "customer-token",
+                "HIGH": "/private/high",
+            },
+        },
+    )
+
+    with mock.patch.object(runner, "_HERMES_MODEL_ROUTE_METADATA", metadata):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HERMES_MODEL_INVENTORY_PREFLIGHT,
+            str(runner.ROOT),
+        )
+
+    assert "route_1_alias=redacted" in report
+    assert "capability_class=unknown" in report
+    assert "quota_visibility=unknown" in report
+    assert "tools=unknown" in report
+    assert "cost_class=unknown" in report
+    assert "low_suitability=suitable" in report
+    assert "mid_suitability=unknown" in report
+    assert "high_suitability=unknown" in report
+    assert "localhost" not in report
+    assert "SKELETON_PROVIDER_TOKEN" not in report
+    assert "/private" not in report
+    assert "api-key" not in report
+
+
 def test_prepare_aufmass_private_runtime_is_allowlisted() -> None:
     assert runner.PREPARE_AUFMASS_PRIVATE_RUNTIME == "prepare_aufmass_private_runtime"
     assert runner.PREPARE_AUFMASS_PRIVATE_RUNTIME in runner.RUNTIME_MAINTENANCE_TASK_IDS

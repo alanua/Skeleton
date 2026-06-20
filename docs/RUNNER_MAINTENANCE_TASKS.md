@@ -268,6 +268,31 @@ systemd, query GitHub, start Codex, or execute arbitrary issue text. Reports
 must be short and include only sanitized key/value status lines; they must not
 include raw command output, token values, raw host names, or issue-body text.
 
+`hermes_model_inventory_preflight_v1` is a read-only, report-only inventory of
+locally approved Hermes model route metadata. It requires no target metadata:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: hermes_model_inventory_preflight_v1
+```
+
+It may only:
+
+1. Read bounded route metadata that is already approved in Runner code.
+2. Report only public-safe route alias, capability class, readiness, quota
+   visibility, vision support, tools support, cost class, and LOW/MID/HIGH
+   suitability.
+3. Keep unknown, unavailable, auth-missing, and quota-unknown states explicit.
+4. Redact unsafe route aliases or config-looking metadata before reporting.
+
+It reports `DONE` when the inventory report is produced. This task must not call
+models, read runtime provider configuration, read secrets or environment values,
+probe live quota, mutate runtime routing, install dependencies, query GitHub, or
+execute arbitrary issue text. Reports must not include provider endpoints, model
+ids that are not approved public aliases, API keys, token names or values, local
+paths, environment variable names, private route names, raw command output, or
+issue-body text.
+
 `prepare_aufmass_private_runtime` verifies that the registered private Aufmass
 runtime is ready for a controlled private pilot dry run. It requires no target
 metadata:
