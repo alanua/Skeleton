@@ -418,7 +418,7 @@ def test_notify_task_finished_normal_runner_task_notifies() -> None:
     ) as send:
         runner.notify_task_finished(14, "DONE", "DONE report")
 
-    send.assert_called_once_with("Проєкт: Skeleton\nСтатус: DONE")
+    send.assert_called_once_with("Проєкт: Skeleton\nЗадача: #14\nСтатус: DONE")
 
 
 def test_notify_task_finished_guard_failure_suppresses_notification_safely() -> None:
@@ -435,6 +435,7 @@ def test_done_telegram_message_uses_localized_operator_text() -> None:
 
     assert runner.build_telegram_message(9, "DONE", report) == (
         "Проєкт: Skeleton\n"
+        "Задача: #9\n"
         "Статус: DONE"
     )
 

@@ -1868,6 +1868,7 @@ def build_telegram_message(
     if target_repository is None:
         lines = [
             f"Проєкт: {_telegram_project_name(REPO)}",
+            f"Задача: #{issue_number}",
             f"Статус: {status}",
         ]
     else:
@@ -1968,9 +1969,10 @@ def _build_pr_ready_operator_text(
     if target_repository == REPO:
         lines = [
             f"Проєкт: {_telegram_project_name(target_repository)}",
-            f"Статус: {status}",
-            f"Коментар: {comment}",
         ]
+        if source_issue_number is not None:
+            lines.append(f"Задача: #{source_issue_number}")
+        lines.extend((f"Статус: {status}", f"Коментар: {comment}"))
     else:
         lines = [
             f"Проєкт: {_telegram_project_name(target_repository)}",
