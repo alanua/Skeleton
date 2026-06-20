@@ -26,6 +26,7 @@ if str(ROOT) not in sys.path:
 
 from core.audit_ledger import AuditLedger, validate_public_safe_payload
 from core.aufmass_source_pack import validate_source_pack_manifest
+from core.hermes_model_inventory import public_hermes_model_inventory_report
 from core.hermes_private_memory import (
     orient_hermes_private_memory,
     record_hermes_private_memory_note,
@@ -92,6 +93,7 @@ PREFLIGHT_PR_REFRESH = "preflight_pr_refresh"
 HERMES_WORKER_PREFLIGHT = "hermes_worker_preflight"
 PRIVATE_MEMORY_HEALTHCHECK = "private_memory_healthcheck"
 HERMES_PRIVATE_MEMORY_BRIDGE_CHECK = "hermes_private_memory_bridge_check"
+HERMES_MODEL_INVENTORY = "hermes_model_inventory"
 PREPARE_AUFMASS_PRIVATE_RUNTIME = "prepare_aufmass_private_runtime"
 RUN_AUFMASS_PRIVATE_DXF_REVIEW = "run_aufmass_private_dxf_review"
 SUMMARIZE_AUFMASS_PRIVATE_REVIEW = "summarize_aufmass_private_review"
@@ -118,6 +120,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         HERMES_WORKER_PREFLIGHT,
         PRIVATE_MEMORY_HEALTHCHECK,
         HERMES_PRIVATE_MEMORY_BRIDGE_CHECK,
+        HERMES_MODEL_INVENTORY,
         PREPARE_AUFMASS_PRIVATE_RUNTIME,
         RUN_AUFMASS_PRIVATE_DXF_REVIEW,
         SUMMARIZE_AUFMASS_PRIVATE_REVIEW,
@@ -2662,6 +2665,64 @@ def hermes_private_memory_bridge_check() -> str:
             f"next_operator_action={next_operator_action}",
         ],
         "met" if bridge_status == "DONE" else "not_met",
+    )
+
+
+_HERMES_MODEL_INVENTORY_REPORT_KEYS = (
+    "schema",
+    "status",
+    "inventory_id",
+    "route_count",
+    "alias_count",
+    "configured_count",
+    "authenticated_count",
+    "locally_reachable_count",
+    "quota_known_count",
+    "enabled_count",
+    "low_capability_count",
+    "mid_capability_count",
+    "high_capability_count",
+    "low_suitability_count",
+    "mid_suitability_count",
+    "high_suitability_count",
+)
+_HERMES_MODEL_INVENTORY_SAFE_VALUE_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
+
+
+def _hermes_model_inventory_report_lines(
+    report: dict[str, object],
+) -> tuple[list[str], str]:
+    lines: list[str] = []
+    for key in _HERMES_MODEL_INVENTORY_REPORT_KEYS:
+        value = report.get(key)
+        if isinstance(value, bool):
+            text = "true" if value else "false"
+        elif isinstance(value, int):
+            text = str(value)
+        elif isinstance(value, str):
+            text = value
+        else:
+            return [], "BLOCKED"
+        if _HERMES_MODEL_INVENTORY_SAFE_VALUE_RE.fullmatch(text) is None:
+            return [], "BLOCKED"
+        lines.append(f"hermes_model_inventory_{key}={text}")
+    status = "DONE" if report.get("status") == "DONE" else "BLOCKED"
+    return lines, status
+
+
+def hermes_model_inventory() -> str:
+    task_id = HERMES_MODEL_INVENTORY
+    report = public_hermes_model_inventory_report(env=os.environ)
+    status_lines, status = _hermes_model_inventory_report_lines(report)
+    if not status_lines:
+        status_lines, status = _hermes_model_inventory_report_lines(
+            public_hermes_model_inventory_report(env={})
+        )
+    return _maintenance_report(
+        status,
+        task_id,
+        status_lines,
+        "met" if status == "DONE" else "not_met",
     )
 
 
@@ -6493,6 +6554,8 @@ def dispatch_runtime_maintenance_task(
             return private_memory_healthcheck(body)
         if task_id == HERMES_PRIVATE_MEMORY_BRIDGE_CHECK:
             return hermes_private_memory_bridge_check()
+        if task_id == HERMES_MODEL_INVENTORY:
+            return hermes_model_inventory()
         if task_id == PREPARE_AUFMASS_PRIVATE_RUNTIME:
             return prepare_aufmass_private_runtime()
         if task_id == RUN_AUFMASS_PRIVATE_DXF_REVIEW:

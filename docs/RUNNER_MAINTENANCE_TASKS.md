@@ -105,6 +105,37 @@ content. Bridge exceptions are summarized with safe tokens such as
 `HermesBridgeException` and `safe_operator_review`; they must not fall through
 to the generic maintenance-step exception report.
 
+`hermes_model_inventory` is a bounded read-only inventory of the real Hermes
+model routes described by approved server-side private metadata:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: hermes_model_inventory
+```
+
+It may only:
+
+1. Read the private model-route registry path from the local Runner environment.
+2. Parse the dedicated private registry schema
+   `skeleton.hermes_model_routes.private.v1`.
+3. Require explicit metadata for every route: configured, authenticated, locally
+   reachable, quota-known, enabled, and LOW/MID/HIGH capability booleans.
+4. Count LOW/MID/HIGH suitability only for routes where every readiness boolean
+   is true and the matching capability boolean is true.
+5. Return concrete provider/model names only inside the private in-process
+   inventory artifact.
+6. Report to GitHub only `hermes_model_inventory_*` aggregate lines containing
+   the public schema, status token, opaque inventory id, route count, alias
+   count, readiness counts, capability counts, and LOW/MID/HIGH suitability
+   counts.
+
+It must not call models, probe provider APIs, make live inference requests,
+read secrets, print raw registry paths, print concrete provider/model names,
+print aliases, infer defaults, or hard-code runtime readiness. Missing,
+unreadable, malformed, ambiguous, or unsupported private metadata fails closed
+as `BLOCKED` with zero counts and no public failure detail beyond the aggregate
+inventory fields.
+
 `check_project_checkout` is read-only and must include target project metadata:
 
 ```text

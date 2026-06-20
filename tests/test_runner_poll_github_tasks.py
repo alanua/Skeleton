@@ -2719,6 +2719,100 @@ def test_hermes_private_memory_bridge_exception_returns_safe_aggregate_report(
     assert "token" not in report.lower()
 
 
+def _hermes_model_registry(tmp_path: Path) -> Path:
+    path = tmp_path / "hermes_model_routes.private.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema": "skeleton.hermes_model_routes.private.v1",
+                "routes": [
+                    {
+                        "route_id": "private_route_low",
+                        "provider": "private-provider-alpha",
+                        "model": "private/model-low",
+                        "aliases": ["low_alias"],
+                        "configured": True,
+                        "authenticated": True,
+                        "locally_reachable": True,
+                        "quota_known": True,
+                        "enabled": True,
+                        "capabilities": {"LOW": True, "MID": False, "HIGH": False},
+                    },
+                    {
+                        "route_id": "private_route_mid",
+                        "provider": "private-provider-beta",
+                        "model": "private/model-mid",
+                        "aliases": ["mid_alias", "balanced_alias"],
+                        "configured": True,
+                        "authenticated": False,
+                        "locally_reachable": True,
+                        "quota_known": True,
+                        "enabled": True,
+                        "capabilities": {"LOW": True, "MID": True, "HIGH": False},
+                    },
+                ],
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_hermes_model_inventory_is_allowlisted_and_public_safe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry_path = _hermes_model_registry(tmp_path)
+    monkeypatch.setenv(
+        "SKELETON_HERMES_MODEL_ROUTE_REGISTRY",
+        str(registry_path),
+    )
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HERMES_MODEL_INVENTORY,
+        str(runner.ROOT),
+    )
+
+    assert report.startswith("DONE:")
+    assert "maintenance_task_id=hermes_model_inventory" in report
+    assert "hermes_model_inventory_route_count=2" in report
+    assert "hermes_model_inventory_alias_count=3" in report
+    assert "hermes_model_inventory_configured_count=2" in report
+    assert "hermes_model_inventory_authenticated_count=1" in report
+    assert "hermes_model_inventory_locally_reachable_count=2" in report
+    assert "hermes_model_inventory_quota_known_count=2" in report
+    assert "hermes_model_inventory_enabled_count=2" in report
+    assert "hermes_model_inventory_low_capability_count=2" in report
+    assert "hermes_model_inventory_mid_capability_count=1" in report
+    assert "hermes_model_inventory_high_capability_count=0" in report
+    assert "hermes_model_inventory_low_suitability_count=1" in report
+    assert "hermes_model_inventory_mid_suitability_count=0" in report
+    assert "hermes_model_inventory_high_suitability_count=0" in report
+    assert "private-provider" not in report
+    assert "private/model" not in report
+    assert "low_alias" not in report
+    assert str(tmp_path) not in report
+
+
+def test_hermes_model_inventory_missing_registry_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SKELETON_HERMES_MODEL_ROUTE_REGISTRY", raising=False)
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HERMES_MODEL_INVENTORY,
+        str(runner.ROOT),
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert "maintenance_task_id=hermes_model_inventory" in report
+    assert "hermes_model_inventory_inventory_id=unavailable" in report
+    assert "hermes_model_inventory_route_count=0" in report
+    assert "reason=" not in report
+    assert "success_criteria=not_met" in report
+
+
 def test_issue_worktree_publish_inspection_is_allowlisted_and_bypasses_codex(
     tmp_path: Path,
 ) -> None:
