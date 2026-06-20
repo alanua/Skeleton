@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 import re
+import sqlite3
 import urllib.parse
+import zipfile
 from pathlib import Path
 from unittest import mock
 
@@ -2212,6 +2215,72 @@ def _private_memory_config(tmp_path: Path, db_path: Path | None = None) -> Path:
     return config_path
 
 
+def _private_memory_seed_config(tmp_path: Path) -> Path:
+    seed_db = tmp_path / "records.sqlite"
+    with sqlite3.connect(seed_db) as connection:
+        connection.execute(
+            """
+            CREATE TABLE seed_records (
+                record_id TEXT PRIMARY KEY,
+                payload_class TEXT NOT NULL,
+                canonical_text TEXT NOT NULL,
+                source_locator TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE seed_status_history (
+                record_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                changed_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO seed_records VALUES (
+                'synthetic-record-001', 'note', 'synthetic text',
+                'synthetic-source-001', '2026-01-01T00:00:00+00:00'
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO seed_status_history VALUES (
+                'synthetic-record-001', 'created', '2026-01-01T00:00:00+00:00'
+            )
+            """
+        )
+    seed_bytes = seed_db.read_bytes()
+    manifest = {
+        "schema": "skeleton.private_memory_seed.manifest.v1",
+        "manifest_version": 1,
+        "record_count": 1,
+        "status_history_count": 1,
+        "checksums": {"records.sqlite": hashlib.sha256(seed_bytes).hexdigest()},
+    }
+    seed_zip = tmp_path / "seed.zip"
+    with zipfile.ZipFile(seed_zip, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("manifest.json", json.dumps(manifest, sort_keys=True))
+        archive.writestr("records.sqlite", seed_bytes)
+    config_path = tmp_path / "synthetic_seed_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "schema": "skeleton.private_memory.config.v0",
+                "database": {"path": str(tmp_path / "memory.sqlite")},
+                "private_memory_seed": {"path": str(seed_zip)},
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return config_path
+
+
 def _assert_private_memory_runner_report_is_public_safe(
     report: str, tmp_path: Path
 ) -> None:
@@ -2219,6 +2288,10 @@ def _assert_private_memory_runner_report_is_public_safe(
     assert str(tmp_path) not in report
     assert "synthetic_config.json" not in report
     assert "memory.sqlite" not in report
+    assert "records.sqlite" not in report
+    assert "seed.zip" not in report
+    assert "synthetic text" not in report
+    assert "synthetic-source-001" not in report
     assert "select " not in lowered
     assert "create table" not in lowered
     assert "secret" not in lowered
@@ -2634,6 +2707,77 @@ def test_private_memory_healthcheck_blocks_connector_privacy_violation() -> None
     assert report.startswith("BLOCKED:")
     assert "reason=privacy_violation" in report
     assert "file:unsafe-value" not in report
+
+
+def test_private_memory_seed_import_task_id_is_allowlisted() -> None:
+    assert runner.PRIVATE_MEMORY_SEED_IMPORT == "private_memory_seed_import_v1"
+    assert runner.PRIVATE_MEMORY_SEED_IMPORT in runner.RUNTIME_MAINTENANCE_TASK_IDS
+
+
+def test_private_memory_seed_import_requires_explicit_write_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = _private_memory_seed_config(tmp_path)
+    monkeypatch.setenv("SKELETON_PRIVATE_MEMORY_CONFIG", str(config_path))
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.PRIVATE_MEMORY_SEED_IMPORT,
+        str(runner.ROOT),
+        _maintenance_issue(runner.PRIVATE_MEMORY_SEED_IMPORT)["body"],
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert "maintenance_task_id=private_memory_seed_import_v1" in report
+    assert "private_memory_seed_import_write_gate_open=false" in report
+    assert "PrivateMemorySeedImportWriteGateError" in report
+    assert not (tmp_path / "memory.sqlite").exists()
+    _assert_private_memory_runner_report_is_public_safe(report, tmp_path)
+
+
+def test_private_memory_seed_import_gated_report_is_aggregate_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = _private_memory_seed_config(tmp_path)
+    monkeypatch.setenv("SKELETON_PRIVATE_MEMORY_CONFIG", str(config_path))
+    body = _maintenance_issue(
+        runner.PRIVATE_MEMORY_SEED_IMPORT,
+        "write_gate=private_memory_seed_import_v1",
+    )["body"]
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.PRIVATE_MEMORY_SEED_IMPORT,
+        str(runner.ROOT),
+        str(body),
+    )
+
+    assert report.startswith("DONE:")
+    assert "private_memory_seed_import_status=DONE" in report
+    assert "private_memory_seed_import_imported_record_count=1" in report
+    assert "private_memory_seed_import_canonical_record_count=1" in report
+    assert "private_memory_seed_import_transaction_committed=true" in report
+    _assert_private_memory_runner_report_is_public_safe(report, tmp_path)
+
+
+def test_private_memory_seed_import_blocks_invalid_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = _private_memory_seed_config(tmp_path)
+    monkeypatch.setenv("SKELETON_PRIVATE_MEMORY_CONFIG", str(config_path))
+    body = _maintenance_issue(
+        runner.PRIVATE_MEMORY_SEED_IMPORT,
+        "write_gate=run_anything",
+    )["body"]
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.PRIVATE_MEMORY_SEED_IMPORT,
+        str(runner.ROOT),
+        str(body),
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=invalid_seed_import_write_gate" in report
+    assert not (tmp_path / "memory.sqlite").exists()
+    _assert_private_memory_runner_report_is_public_safe(report, tmp_path)
 
 
 def test_hermes_private_memory_bridge_check_runs_full_sequence_in_order() -> None:

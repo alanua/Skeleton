@@ -32,6 +32,7 @@ from core.hermes_private_memory import (
     write_hermes_private_memory_heartbeat,
 )
 from core.private_memory import healthcheck_private_memory, write_public_heartbeat
+from core.private_memory_import import import_private_memory_seed
 from core.project_tree import get_project, get_project_by_repo, load_project_tree
 from core.skeleton_memory import SkeletonMemory
 from core.telegram_approval_buttons import build_pr_ready_card_payload
@@ -92,6 +93,7 @@ PREFLIGHT_PR_REFRESH = "preflight_pr_refresh"
 HERMES_WORKER_PREFLIGHT = "hermes_worker_preflight"
 PRIVATE_MEMORY_HEALTHCHECK = "private_memory_healthcheck"
 HERMES_PRIVATE_MEMORY_BRIDGE_CHECK = "hermes_private_memory_bridge_check"
+PRIVATE_MEMORY_SEED_IMPORT = "private_memory_seed_import_v1"
 PREPARE_AUFMASS_PRIVATE_RUNTIME = "prepare_aufmass_private_runtime"
 RUN_AUFMASS_PRIVATE_DXF_REVIEW = "run_aufmass_private_dxf_review"
 SUMMARIZE_AUFMASS_PRIVATE_REVIEW = "summarize_aufmass_private_review"
@@ -118,6 +120,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         HERMES_WORKER_PREFLIGHT,
         PRIVATE_MEMORY_HEALTHCHECK,
         HERMES_PRIVATE_MEMORY_BRIDGE_CHECK,
+        PRIVATE_MEMORY_SEED_IMPORT,
         PREPARE_AUFMASS_PRIVATE_RUNTIME,
         RUN_AUFMASS_PRIVATE_DXF_REVIEW,
         SUMMARIZE_AUFMASS_PRIVATE_REVIEW,
@@ -2584,6 +2587,107 @@ def private_memory_healthcheck(body: str = "") -> str:
     if connector_report.get("status") == "DONE":
         return _maintenance_report("DONE", task_id, status_lines, "met")
     status_lines.append("reason=private_memory_healthcheck_not_ready")
+    return _maintenance_report("BLOCKED", task_id, status_lines, "not_met")
+
+
+_PRIVATE_MEMORY_SEED_IMPORT_REPORT_KEYS = (
+    "schema",
+    "status",
+    "write_gate_open",
+    "package_present",
+    "archive_valid",
+    "manifest_valid",
+    "checksum_valid",
+    "sqlite_valid",
+    "snapshot_created",
+    "transaction_committed",
+    "batch_count",
+    "imported_record_count",
+    "status_history_count",
+    "audit_record_count",
+    "canonical_record_count",
+    "idempotent",
+    "error_class",
+    "next_operator_action",
+)
+
+
+def _private_memory_seed_import_write_enabled(body: str) -> tuple[bool, str | None]:
+    payload = extract_task_block(body) or ""
+    if not payload.strip():
+        return False, None
+
+    enabled = False
+    for line in payload.splitlines():
+        if "=" in line:
+            raw_key, raw_value = line.split("=", 1)
+        elif ":" in line:
+            raw_key, raw_value = line.split(":", 1)
+        else:
+            continue
+        key = raw_key.strip().lower().replace("-", "_").replace(" ", "_")
+        value = raw_value.strip()
+        lowered_value = value.lower()
+        if key == "write_gate":
+            if value == PRIVATE_MEMORY_SEED_IMPORT:
+                enabled = True
+            else:
+                return False, "invalid_seed_import_write_gate"
+        elif key in {"write_enabled", "request_write", "seed_import_write"}:
+            if lowered_value in {"true", "yes", "1"}:
+                enabled = True
+            elif lowered_value in {"false", "no", "0"}:
+                enabled = False
+            else:
+                return False, "invalid_seed_import_write_value"
+    return enabled, None
+
+
+def _private_memory_seed_import_report_lines(
+    report: dict[str, object],
+) -> tuple[list[str], str | None]:
+    if not isinstance(report, dict):
+        return [], "invalid_seed_import_report"
+    unexpected_keys = set(report) - set(_PRIVATE_MEMORY_SEED_IMPORT_REPORT_KEYS)
+    if unexpected_keys:
+        return [], "unsafe_seed_import_report_key"
+
+    lines: list[str] = []
+    for key in _PRIVATE_MEMORY_SEED_IMPORT_REPORT_KEYS:
+        value = report.get(key)
+        if isinstance(value, bool):
+            text = "true" if value else "false"
+        elif isinstance(value, int):
+            text = str(value)
+        elif value is None:
+            text = "none"
+        elif isinstance(value, str):
+            text = value
+        else:
+            return [], "invalid_seed_import_report_value"
+        if _PRIVATE_MEMORY_UNSAFE_VALUE_RE.search(text):
+            return [], "privacy_violation"
+        lines.append(f"private_memory_seed_import_{key}={text}")
+    return lines, None
+
+
+def private_memory_seed_import(body: str = "") -> str:
+    task_id = PRIVATE_MEMORY_SEED_IMPORT
+    write_enabled, reason = _private_memory_seed_import_write_enabled(body)
+    if reason is not None:
+        return _maintenance_report("BLOCKED", task_id, [f"reason={reason}"], "not_met")
+
+    connector_report = import_private_memory_seed(
+        write_enabled=write_enabled,
+        env=os.environ,
+    )
+    status_lines, reason = _private_memory_seed_import_report_lines(connector_report)
+    if reason is not None:
+        return _maintenance_report("BLOCKED", task_id, [f"reason={reason}"], "not_met")
+
+    if connector_report.get("status") == "DONE":
+        return _maintenance_report("DONE", task_id, status_lines, "met")
+    status_lines.append("reason=private_memory_seed_import_not_ready")
     return _maintenance_report("BLOCKED", task_id, status_lines, "not_met")
 
 
@@ -6493,6 +6597,8 @@ def dispatch_runtime_maintenance_task(
             return private_memory_healthcheck(body)
         if task_id == HERMES_PRIVATE_MEMORY_BRIDGE_CHECK:
             return hermes_private_memory_bridge_check()
+        if task_id == PRIVATE_MEMORY_SEED_IMPORT:
+            return private_memory_seed_import(body)
         if task_id == PREPARE_AUFMASS_PRIVATE_RUNTIME:
             return prepare_aufmass_private_runtime()
         if task_id == RUN_AUFMASS_PRIVATE_DXF_REVIEW:
