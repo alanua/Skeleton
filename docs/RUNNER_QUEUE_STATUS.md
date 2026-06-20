@@ -4,6 +4,18 @@ Status: GitHub issue queue is working.
 
 Parser repair smoke status: 2026-06-12 docs-only Runner task completed normally.
 
+Source audit status: 2026-06-19 issue #1028 completed the post-#1027 source
+audit. The audit preserved the current merged Runner repairs, classified stale
+control references, and did not approve new project execution.
+
+Queue result at the verified point: no open `runner:ready` or `runner:running`
+items remained. This is a point-in-time result and normal future queue changes
+can create new ready or running items.
+
+Stale control classification: issues #895 and #867 remain
+stale/review/operator-gated records. They are not executable Runner
+instructions.
+
 This document records the current operating status and runtime checklist for the
 Skeleton GitHub task queue Runner after the successful Telegram notification
 smoke test.
