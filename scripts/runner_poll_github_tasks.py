@@ -2890,6 +2890,13 @@ def _restore_graphify_profiles(backup: GraphifyProfileBackup) -> str:
     return "restored"
 
 
+def _restore_graphify_profiles_safely(backup: GraphifyProfileBackup) -> str:
+    try:
+        return _restore_graphify_profiles(backup)
+    except Exception:
+        return "failed"
+
+
 def _graphify_runtime_blocked_report(
     status_lines: list[str],
     reason: str,
@@ -3052,11 +3059,9 @@ def install_graphify_runtime(body: str) -> str:
         f"managed_version_marker_count={_graphify_existing_version_marker_count()}",
     ]
     if approval != GRAPHIFY_RUNTIME_APPROVAL:
-        return _maintenance_report(
-            "BLOCKED",
-            task_id,
-            [*status_lines, "reason=missing_operator_approval"],
-            "not_met",
+        return _graphify_runtime_blocked_report(
+            status_lines,
+            "missing_operator_approval",
         )
     status_lines.append("approval_status=verified")
 
@@ -3083,32 +3088,40 @@ def install_graphify_runtime(body: str) -> str:
     if backup is None:
         return _graphify_runtime_blocked_report(status_lines, "profile_backup_failed")
 
-    code, _output = run_command(list(GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND), cwd=ROOT)
-    if code != 0:
-        rollback_status = _restore_graphify_profiles(backup)
-        return _graphify_runtime_blocked_report(
-            [*status_lines, "step=install_codex_skill status=failed"],
-            "codex_skill_install_failed",
-            rollback_status,
-        )
-    status_lines.append("step=install_codex_skill status=done")
+    try:
+        code, _output = run_command(list(GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND), cwd=ROOT)
+        if code != 0:
+            rollback_status = _restore_graphify_profiles_safely(backup)
+            return _graphify_runtime_blocked_report(
+                [*status_lines, "step=install_codex_skill status=failed"],
+                "codex_skill_install_failed",
+                rollback_status,
+            )
+        status_lines.append("step=install_codex_skill status=done")
 
-    code, _output = run_command(list(GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND), cwd=ROOT)
-    if code != 0:
-        rollback_status = _restore_graphify_profiles(backup)
-        return _graphify_runtime_blocked_report(
-            [*status_lines, "step=install_hermes_skill status=failed"],
-            "hermes_skill_install_failed",
-            rollback_status,
-        )
-    status_lines.append("step=install_hermes_skill status=done")
+        code, _output = run_command(list(GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND), cwd=ROOT)
+        if code != 0:
+            rollback_status = _restore_graphify_profiles_safely(backup)
+            return _graphify_runtime_blocked_report(
+                [*status_lines, "step=install_hermes_skill status=failed"],
+                "hermes_skill_install_failed",
+                rollback_status,
+            )
+        status_lines.append("step=install_hermes_skill status=done")
 
-    reason = _run_graphify_ast_smoke(status_lines)
-    if reason is not None:
-        rollback_status = _restore_graphify_profiles(backup)
+        reason = _run_graphify_ast_smoke(status_lines)
+        if reason is not None:
+            rollback_status = _restore_graphify_profiles_safely(backup)
+            return _graphify_runtime_blocked_report(
+                status_lines,
+                reason,
+                rollback_status,
+            )
+    except Exception:
+        rollback_status = _restore_graphify_profiles_safely(backup)
         return _graphify_runtime_blocked_report(
-            status_lines,
-            reason,
+            [*status_lines, "step=graphify_runtime status=unexpected_failure"],
+            "unexpected_graphify_runtime_failure",
             rollback_status,
         )
 

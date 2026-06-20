@@ -136,8 +136,9 @@ It may only:
 7. Run that smoke with a scrubbed environment: no model credentials, no network
    enablement, no hooks, no services, no ports, and no private indexing.
 8. Roll back the bounded Codex and Hermes skill paths and allowlisted
-   `.graphify_version` files from the private recovery snapshot if either skill
-   install or the synthetic smoke fails after the backup is taken.
+   `.graphify_version` files from the private recovery snapshot if any skill
+   install, synthetic smoke, or other unexpected runtime failure occurs after
+   the backup is taken.
 9. Retain the private recovery snapshot after successful completion.
 
 The marker allowlist is limited to user-level skill destinations that
