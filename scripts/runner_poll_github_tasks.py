@@ -35,6 +35,13 @@ from core.private_memory import healthcheck_private_memory, write_public_heartbe
 from core.project_tree import get_project, get_project_by_repo, load_project_tree
 from core.skeleton_memory import SkeletonMemory
 from core.telegram_approval_buttons import build_pr_ready_card_payload
+from core.universal_runner_task import (
+    SCHEMA_ID as UNIVERSAL_RUNNER_TASK_SCHEMA_ID,
+    gate_task as gate_universal_runner_task,
+    github_status_for_universal_state,
+    normalize_task as normalize_universal_runner_task,
+    sanitize_public_text,
+)
 
 
 QUEUE_REPOSITORY = "alanua/Skeleton"
@@ -82,6 +89,7 @@ TELEGRAM_PR_READY_BUTTON_LABELS = {
     "open_pr": "Відкрити PR",
 }
 RUNTIME_MAINTENANCE_MODE = "RUNTIME_MAINTENANCE_TASK"
+UNIVERSAL_RUNNER_TASK_MODE = "UNIVERSAL_RUNNER_TASK"
 SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME = "sync_telegram_callback_poller_runtime"
 ENSURE_TELEGRAM_CALLBACK_LOCAL_CONFIG = "ensure_telegram_callback_local_config"
 CHECK_PROJECT_CHECKOUT = "check_project_checkout"
@@ -254,6 +262,9 @@ _SAFE_CODEX_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,80}$")
 _TASK_FENCE_OPEN_LINE_RE = re.compile(r"^[ \t]*```task[ \t]*$")
 _FENCE_CLOSE_LINE_RE = re.compile(r"^[ \t]*```[ \t]*$")
 _AUFMASS_PRIVATE_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{2,80}$")
+_UNIVERSAL_TASK_JSON_RE = re.compile(
+    r"```(?:json|task)?\s*(?P<payload>\{.*?\})\s*```", re.DOTALL
+)
 
 
 @dataclass(frozen=True)
@@ -313,6 +324,14 @@ class RunnerTask:
     has_target_project_metadata: bool = False
     target_repository: str = QUEUE_REPOSITORY
     has_target_repository_metadata: bool = False
+
+
+@dataclass(frozen=True)
+class UniversalCodexBranchTask:
+    runner_task: RunnerTask
+    task_key: str
+    risk: str
+    timeout_seconds: float
 
 
 @dataclass(frozen=True)
@@ -1187,6 +1206,67 @@ def extract_runtime_maintenance_task_id(body: str) -> tuple[bool, str | None]:
     return True, task_id.group("task_id") if task_id else None
 
 
+def extract_universal_runner_task(
+    body: str,
+) -> tuple[bool, UniversalCodexBranchTask | None, str | None]:
+    mode_found = re.search(
+        rf"^\s*Mode:\s*{UNIVERSAL_RUNNER_TASK_MODE}\s*$",
+        body or "",
+        re.MULTILINE,
+    )
+    if mode_found is None:
+        return False, None, None
+
+    payload_match = _UNIVERSAL_TASK_JSON_RE.search(body or "")
+    if payload_match is None:
+        return True, None, "Universal runner task JSON payload is missing."
+    try:
+        raw_payload = json.loads(payload_match.group("payload"))
+        universal_task = normalize_universal_runner_task(raw_payload)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        return True, None, f"Universal runner task payload is invalid: {exc}"
+
+    if universal_task.mode != "codex_branch_task":
+        return (
+            True,
+            None,
+            "Only codex_branch_task is handled by this GitHub poller route.",
+        )
+    gate = gate_universal_runner_task(universal_task)
+    if gate.status != "RUNNING":
+        reasons = ", ".join(str(reason) for reason in gate.public.get("reasons", ()))
+        return True, None, f"Universal runner task requires operator approval: {reasons}."
+
+    task_text = str(universal_task.payload.get("task") or "").strip()
+    if not task_text:
+        return True, None, "codex_branch_task payload.task is required."
+    target_project = str(universal_task.payload.get("target_project") or "skeleton")
+    target_repository = str(
+        universal_task.payload.get("target_repository") or QUEUE_REPOSITORY
+    )
+    if target_repository not in ALLOWED_TARGET_REPOSITORIES:
+        return True, None, "codex_branch_task target repository is not allowlisted."
+    if target_project not in ALLOWED_TARGET_PROJECTS:
+        return True, None, "codex_branch_task target project is not allowlisted."
+
+    return (
+        True,
+        UniversalCodexBranchTask(
+            runner_task=RunnerTask(
+                content=task_text,
+                target_project=target_project,
+                has_target_project_metadata=True,
+                target_repository=target_repository,
+                has_target_repository_metadata=True,
+            ),
+            task_key=universal_task.task_key,
+            risk=universal_task.risk,
+            timeout_seconds=universal_task.timeout_seconds,
+        ),
+        None,
+    )
+
+
 def extract_telegram_approved_pr_merge_request(
     body: str,
 ) -> tuple[bool, TelegramApprovedPrMergeRequest | None, str | None]:
@@ -1242,7 +1322,13 @@ def _body_field(body: str, field: str) -> str | None:
 def has_runner_task_body(body: str) -> bool:
     maintenance_mode, _task_id = extract_runtime_maintenance_task_id(body)
     merge_mode, _request, _reason = extract_telegram_approved_pr_merge_request(body)
-    return extract_task_block(body) is not None or maintenance_mode or merge_mode
+    universal_mode, _task, _reason = extract_universal_runner_task(body)
+    return (
+        extract_task_block(body) is not None
+        or maintenance_mode
+        or merge_mode
+        or universal_mode
+    )
 
 
 def build_codex_task_prompt(
@@ -1430,11 +1516,12 @@ def extract_pr_url(report: str) -> str | None:
 
 
 def sanitize_public_report(report: str) -> str:
-    return re.sub(
+    report = re.sub(
         r"(?m)^(?P<label>(?:Draft )?PR):\s*\{PR_URL\}\s*$",
         r"\g<label>: none",
         report,
     )
+    return sanitize_public_text(report)
 
 
 def runner_memory_config_from_env() -> RunnerMemoryConfig | None:
@@ -7189,9 +7276,18 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
         maintenance_mode, maintenance_task_id = extract_runtime_maintenance_task_id(
             issue_body
         )
+        universal_mode, universal_task, universal_reason = extract_universal_runner_task(
+            issue_body
+        )
         merge_mode, merge_request, merge_reason = (
             extract_telegram_approved_pr_merge_request(issue_body)
         )
+        if universal_mode and universal_task is None:
+            block_issue(
+                issue_number,
+                universal_reason or "Universal runner task request is malformed.",
+            )
+            return
         if maintenance_mode and maintenance_task_id is None:
             block_issue(
                 issue_number,
@@ -7213,6 +7309,9 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
 
         if maintenance_mode:
             task_content = ""
+        elif universal_mode and universal_task is not None:
+            runner_task = universal_task.runner_task
+            task_content = runner_task.content
         else:
             runner_task, task_reason = extract_runner_task(issue_body)
             if runner_task is None:

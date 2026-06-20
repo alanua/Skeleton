@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.runner_task.v1",
+  "type": "object",
+  "required": ["schema", "task_id", "task_key", "mode", "risk"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "enum": [
+        "skeleton.runner_task.v1",
+        "skeleton.universal_runner_task.v1",
+        "skeleton.runner_task.preview.v1"
+      ]
+    },
+    "task_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,120}$"
+    },
+    "task_key": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,120}$"
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "codex_branch_task",
+        "local_module_task",
+        "hermes_task",
+        "STATUS",
+        "CANCEL",
+        "codex_issue_worktree",
+        "local_command"
+      ]
+    },
+    "risk": {
+      "type": "string",
+      "enum": ["LOW", "YELLOW", "RED", "low", "yellow", "red"]
+    },
+    "operator_approved": {
+      "type": "boolean"
+    },
+    "operator_approval": {
+      "type": "boolean"
+    },
+    "timeout_seconds": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 3600
+    },
+    "resources": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "files": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "payload": {
+      "type": "object"
+    },
+    "params": {
+      "type": "object"
+    }
+  }
+}

@@ -16,6 +16,11 @@ Issue text is not a shell script. The host Runner dispatches only task ids that
 exist in its code allowlist and ignores any command-looking text in the issue.
 Missing or unknown maintenance task ids are reported as `BLOCKED`.
 
+Universal `local_module_task` follows the same production boundary: the Runner
+accepts only registered command ids and dispatches them through
+`core.runner_executor_registry`. Arbitrary command text in an issue or JSON
+payload is data, not executable input.
+
 ## Current allowlist
 
 `sync_telegram_callback_poller_runtime` may only:
