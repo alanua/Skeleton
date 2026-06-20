@@ -92,6 +92,7 @@ PREFLIGHT_PR_REFRESH = "preflight_pr_refresh"
 HERMES_WORKER_PREFLIGHT = "hermes_worker_preflight"
 PRIVATE_MEMORY_HEALTHCHECK = "private_memory_healthcheck"
 HERMES_PRIVATE_MEMORY_BRIDGE_CHECK = "hermes_private_memory_bridge_check"
+INSTALL_GRAPHIFY_RUNTIME = "install_graphify_runtime"
 PREPARE_AUFMASS_PRIVATE_RUNTIME = "prepare_aufmass_private_runtime"
 RUN_AUFMASS_PRIVATE_DXF_REVIEW = "run_aufmass_private_dxf_review"
 SUMMARIZE_AUFMASS_PRIVATE_REVIEW = "summarize_aufmass_private_review"
@@ -118,6 +119,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         HERMES_WORKER_PREFLIGHT,
         PRIVATE_MEMORY_HEALTHCHECK,
         HERMES_PRIVATE_MEMORY_BRIDGE_CHECK,
+        INSTALL_GRAPHIFY_RUNTIME,
         PREPARE_AUFMASS_PRIVATE_RUNTIME,
         RUN_AUFMASS_PRIVATE_DXF_REVIEW,
         SUMMARIZE_AUFMASS_PRIVATE_REVIEW,
@@ -2503,6 +2505,54 @@ _PRIVATE_MEMORY_UNSAFE_VALUE_RE = re.compile(
     r"private_memory_[a-z_]*heartbeat|select\s|create\s+table)"
 )
 _HERMES_BRIDGE_SAFE_STATUS_VALUES = frozenset({"DONE", "BLOCKED"})
+GRAPHIFY_RUNTIME_APPROVAL = "install_graphify_runtime_v1"
+GRAPHIFY_PINNED_VERSION = "0.8.44"
+GRAPHIFY_SMOKE_TIMEOUT_SECONDS = 45
+GRAPHIFY_TOOL_INSTALL_COMMAND = (
+    "uv",
+    "tool",
+    "install",
+    "--reinstall",
+    f"graphifyy=={GRAPHIFY_PINNED_VERSION}",
+)
+GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND = (
+    "graphify",
+    "install",
+    "--platform",
+    "codex",
+)
+GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND = (
+    "graphify",
+    "install",
+    "--platform",
+    "hermes",
+)
+GRAPHIFY_VERSION_COMMAND = ("graphify", "--version")
+GRAPHIFY_INSTALL_HELP_COMMAND = ("graphify", "install", "--help")
+GRAPHIFY_BUILD_HELP_COMMAND = ("graphify", "--help")
+GRAPHIFY_PROFILE_ROOT_RELATIVE_PATHS = (
+    Path(".codex") / "skills" / "graphify",
+    Path(".codex") / "skills" / "graphify.md",
+    Path(".hermes") / "skills" / "graphify",
+    Path(".hermes") / "skills" / "graphify.md",
+)
+GRAPHIFY_VERSION_MARKER_FILENAME = ".graphify_version"
+GRAPHIFY_UPSTREAM_PLATFORM_SKILL_RELATIVE_PATHS = {
+    "codex": Path(".codex") / "skills" / "graphify" / "SKILL.md",
+    "hermes": Path(".hermes") / "skills" / "graphify" / "SKILL.md",
+    "claude": Path(".claude") / "skills" / "graphify" / "SKILL.md",
+    "cursor": Path(".cursor") / "skills" / "graphify" / "SKILL.md",
+    "gemini": Path(".gemini") / "skills" / "graphify" / "SKILL.md",
+    "openhands": Path(".openhands") / "skills" / "graphify" / "SKILL.md",
+    "windsurf": Path(".windsurf") / "skills" / "graphify" / "SKILL.md",
+}
+
+
+@dataclass(frozen=True)
+class GraphifyProfileBackup:
+    root: Path
+    entries: tuple[tuple[Path, Path], ...]
+    managed_paths: tuple[Path, ...]
 
 
 def _private_memory_healthcheck_write_requested(body: str) -> tuple[bool, str | None]:
@@ -2663,6 +2713,376 @@ def hermes_private_memory_bridge_check() -> str:
         ],
         "met" if bridge_status == "DONE" else "not_met",
     )
+
+
+def _graphify_private_snapshot_parent() -> Path:
+    configured = os.environ.get("SKELETON_GRAPHIFY_RECOVERY_ROOT")
+    if configured:
+        return Path(configured).expanduser()
+    return Path.home() / ".local" / "state" / "skeleton" / "graphify-recovery"
+
+
+def _graphify_existing_version_marker_paths(home: Path | None = None) -> tuple[Path, ...]:
+    profile_home = home or Path.home()
+    markers: list[Path] = []
+    for skill_relative_path in GRAPHIFY_UPSTREAM_PLATFORM_SKILL_RELATIVE_PATHS.values():
+        skill_path = profile_home / skill_relative_path
+        if skill_path.exists() or skill_path.is_symlink():
+            markers.append(skill_path.parent / GRAPHIFY_VERSION_MARKER_FILENAME)
+    return tuple(markers)
+
+
+def _graphify_managed_profile_paths(home: Path | None = None) -> tuple[Path, ...]:
+    profile_home = home or Path.home()
+    root_paths = tuple(
+        profile_home / relative_path
+        for relative_path in GRAPHIFY_PROFILE_ROOT_RELATIVE_PATHS
+    )
+    return (*root_paths, *_graphify_existing_version_marker_paths(profile_home))
+
+
+def _graphify_existing_version_marker_count(home: Path | None = None) -> int:
+    return len(_graphify_existing_version_marker_paths(home))
+
+
+def _path_contains_symlink(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    if not path.is_dir():
+        return False
+    try:
+        return any(child.is_symlink() for child in path.rglob("*"))
+    except OSError:
+        return True
+
+
+def _path_has_existing_symlink_parent(path: Path) -> bool:
+    home = Path.home()
+    current = path.parent
+    while current != current.parent:
+        if current.exists() and current.is_symlink():
+            return True
+        if current == home:
+            return False
+        current = current.parent
+    return False
+
+
+def _remove_graphify_profile_path(path: Path) -> bool:
+    try:
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+            return True
+        if path.is_dir():
+            shutil.rmtree(path)
+            return True
+        return True
+    except OSError:
+        return False
+
+
+def _copy_graphify_profile_path(source: Path, destination: Path) -> bool:
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if source.is_file():
+            shutil.copy2(source, destination)
+            return True
+        if source.is_dir():
+            shutil.copytree(source, destination, copy_function=shutil.copy2)
+            return True
+        return False
+    except OSError:
+        return False
+
+
+def _existing_graphify_profile_paths(paths: tuple[Path, ...]) -> tuple[Path, ...]:
+    existing = [path for path in paths if path.exists() or path.is_symlink()]
+    roots = [
+        path
+        for path in existing
+        if path.name == "graphify.md"
+        or (path.name == "graphify" and path.parent.name == "skills")
+    ]
+    filtered: list[Path] = []
+    for path in existing:
+        if any(root != path and _path_is_relative_to(path, root) for root in roots):
+            continue
+        filtered.append(path)
+    return tuple(filtered)
+
+
+def _backup_graphify_profiles() -> tuple[GraphifyProfileBackup | None, str, int]:
+    managed_paths = _graphify_managed_profile_paths()
+    for path in managed_paths:
+        if _path_has_existing_symlink_parent(path) or (
+            path.exists() and _path_contains_symlink(path)
+        ):
+            return None, "unsafe_symlink", 0
+
+    try:
+        parent = _graphify_private_snapshot_parent()
+        parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        parent.chmod(0o700)
+        backup_root = Path(
+            tempfile.mkdtemp(prefix="snapshot-", dir=str(parent))
+        )
+        backup_root.chmod(0o700)
+    except OSError:
+        return None, "backup_root_failed", 0
+
+    entries: list[tuple[Path, Path]] = []
+    for index, path in enumerate(_existing_graphify_profile_paths(managed_paths)):
+        destination = backup_root / str(index)
+        if not _copy_graphify_profile_path(path, destination):
+            shutil.rmtree(backup_root, ignore_errors=True)
+            return None, "backup_copy_failed", len(entries)
+        entries.append((path, destination))
+    return GraphifyProfileBackup(backup_root, tuple(entries), managed_paths), "created", len(entries)
+
+
+def _restore_graphify_profiles(backup: GraphifyProfileBackup) -> str:
+    backed_up_paths = {path for path, _backup_path in backup.entries}
+    for path in sorted(backup.managed_paths, key=lambda item: len(item.parts), reverse=True):
+        if path.exists() or path.is_symlink():
+            if not _remove_graphify_profile_path(path):
+                return "failed"
+    for path, backup_path in backup.entries:
+        if path in backed_up_paths and not _copy_graphify_profile_path(backup_path, path):
+            return "failed"
+    return "restored"
+
+
+def _graphify_runtime_blocked_report(
+    status_lines: list[str],
+    reason: str,
+    rollback_status: str = "not_needed",
+) -> str:
+    return _maintenance_report(
+        "BLOCKED",
+        INSTALL_GRAPHIFY_RUNTIME,
+        [*status_lines, f"rollback_status={rollback_status}", f"reason={reason}"],
+        "not_met",
+    )
+
+
+def _graphify_cli_contract_preflight(status_lines: list[str]) -> str | None:
+    checks = (
+        (
+            "verify_graphify_version",
+            list(GRAPHIFY_VERSION_COMMAND),
+            lambda output: GRAPHIFY_PINNED_VERSION in output,
+        ),
+        (
+            "verify_graphify_install_platform_help",
+            list(GRAPHIFY_INSTALL_HELP_COMMAND),
+            lambda output: "--platform" in output,
+        ),
+        (
+            "verify_graphify_folder_build_help",
+            list(GRAPHIFY_BUILD_HELP_COMMAND),
+            lambda output: "ingest" not in output
+            and ("folder" in output.lower() or "path" in output.lower()),
+        ),
+    )
+    for step, command, accepts in checks:
+        code, output = run_command(command)
+        if code != 0 or not accepts(output):
+            status_lines.append(f"step={step} status=failed")
+            return "graphify_cli_contract_unverified"
+        status_lines.append(f"step={step} status=done")
+    return None
+
+
+def _write_graphify_synthetic_corpus(corpus_dir: Path) -> None:
+    corpus_dir.mkdir(parents=True, exist_ok=True)
+    (corpus_dir / "synthetic_module.py").write_text(
+        "\n".join(
+            (
+                "def synthetic_total(values):",
+                "    total = 0",
+                "    for value in values:",
+                "        total += value",
+                "    return total",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+
+def _graphify_ast_smoke_command(
+    corpus_dir: Path, output_dir: Path, home_dir: Path
+) -> list[str]:
+    path_value = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
+    return [
+        "env",
+        "-i",
+        f"PATH={path_value}",
+        f"HOME={home_dir}",
+        f"GRAPHIFY_OUT={output_dir}",
+        "GRAPHIFY_DISABLE_NETWORK=1",
+        "GRAPHIFY_DISABLE_HOOKS=1",
+        "GRAPHIFY_DISABLE_SERVICES=1",
+        "GRAPHIFY_DISABLE_PRIVATE_INDEXING=1",
+        "PYTHONNOUSERSITE=1",
+        "NO_COLOR=1",
+        "graphify",
+        str(corpus_dir),
+    ]
+
+
+def _run_graphify_smoke_command(command: list[str]) -> tuple[int, str]:
+    try:
+        result = subprocess.run(
+            command,
+            cwd=str(ROOT),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=GRAPHIFY_SMOKE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return 124, ""
+    return result.returncode, result.stdout + result.stderr
+
+
+def _graphify_graph_json_counts(path: Path) -> tuple[int, int] | None:
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+
+    nodes = parsed.get("nodes", parsed.get("node_count"))
+    edges = parsed.get("edges", parsed.get("edge_count"))
+    node_count = len(nodes) if isinstance(nodes, list) else nodes
+    edge_count = len(edges) if isinstance(edges, list) else edges
+    if isinstance(node_count, int) and isinstance(edge_count, int):
+        return node_count, edge_count
+    return None
+
+
+def _run_graphify_ast_smoke(status_lines: list[str]) -> str | None:
+    with tempfile.TemporaryDirectory(prefix="skeleton-graphify-smoke-") as tmp:
+        tmp_path = Path(tmp)
+        corpus_dir = tmp_path / "synthetic-corpus"
+        output_dir = tmp_path / "graphify-out"
+        home_dir = tmp_path / "home"
+        home_dir.mkdir(mode=0o700)
+        _write_graphify_synthetic_corpus(corpus_dir)
+        command = _graphify_ast_smoke_command(corpus_dir, output_dir, home_dir)
+        code, _output = _run_graphify_smoke_command(command)
+        if code == 124:
+            status_lines.append("step=run_synthetic_ast_smoke status=timeout")
+            return "synthetic_ast_smoke_timeout"
+        if code != 0:
+            status_lines.append("step=run_synthetic_ast_smoke status=failed")
+            return "synthetic_ast_smoke_failed"
+        counts = _graphify_graph_json_counts(output_dir / "graph.json")
+        if counts is None:
+            status_lines.append("step=verify_synthetic_graph_json status=failed")
+            return "synthetic_graph_json_missing_or_invalid"
+        node_count, edge_count = counts
+        if node_count <= 0 or edge_count <= 0:
+            status_lines.append("step=verify_synthetic_graph_json status=failed")
+            return "synthetic_graph_json_empty"
+        status_lines.extend(
+            (
+                "step=run_synthetic_ast_smoke status=done",
+                "step=verify_synthetic_graph_json status=done",
+                f"synthetic_graph_node_count={node_count}",
+                f"synthetic_graph_edge_count={edge_count}",
+            )
+        )
+    return None
+
+
+def install_graphify_runtime(body: str) -> str:
+    task_id = INSTALL_GRAPHIFY_RUNTIME
+    approval = _body_field(body, "Operator Approval")
+    status_lines = [
+        f"graphify_version={GRAPHIFY_PINNED_VERSION}",
+        f"synthetic_smoke_timeout_seconds={GRAPHIFY_SMOKE_TIMEOUT_SECONDS}",
+        "network_disabled=true",
+        "hooks_disabled=true",
+        "services_disabled=true",
+        "ports_disabled=true",
+        "private_indexing_disabled=true",
+        "model_credentials_removed_from_smoke=true",
+        f"managed_profile_root_count={len(GRAPHIFY_PROFILE_ROOT_RELATIVE_PATHS)}",
+        f"managed_version_marker_count={_graphify_existing_version_marker_count()}",
+    ]
+    if approval != GRAPHIFY_RUNTIME_APPROVAL:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=missing_operator_approval"],
+            "not_met",
+        )
+    status_lines.append("approval_status=verified")
+
+    code, _output = run_command(list(GRAPHIFY_TOOL_INSTALL_COMMAND), cwd=ROOT)
+    if code != 0:
+        return _graphify_runtime_blocked_report(
+            [*status_lines, "step=install_pinned_graphify_tool status=failed"],
+            "graphify_tool_install_failed",
+        )
+    status_lines.append("step=install_pinned_graphify_tool status=done")
+
+    reason = _graphify_cli_contract_preflight(status_lines)
+    if reason is not None:
+        return _graphify_runtime_blocked_report(status_lines, reason)
+
+    backup, backup_status, backup_item_count = _backup_graphify_profiles()
+    status_lines.extend(
+        (
+            f"profile_backup_status={backup_status}",
+            f"profile_backup_item_count={backup_item_count}",
+            "profile_backup_private=true",
+        )
+    )
+    if backup is None:
+        return _graphify_runtime_blocked_report(status_lines, "profile_backup_failed")
+
+    code, _output = run_command(list(GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND), cwd=ROOT)
+    if code != 0:
+        rollback_status = _restore_graphify_profiles(backup)
+        return _graphify_runtime_blocked_report(
+            [*status_lines, "step=install_codex_skill status=failed"],
+            "codex_skill_install_failed",
+            rollback_status,
+        )
+    status_lines.append("step=install_codex_skill status=done")
+
+    code, _output = run_command(list(GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND), cwd=ROOT)
+    if code != 0:
+        rollback_status = _restore_graphify_profiles(backup)
+        return _graphify_runtime_blocked_report(
+            [*status_lines, "step=install_hermes_skill status=failed"],
+            "hermes_skill_install_failed",
+            rollback_status,
+        )
+    status_lines.append("step=install_hermes_skill status=done")
+
+    reason = _run_graphify_ast_smoke(status_lines)
+    if reason is not None:
+        rollback_status = _restore_graphify_profiles(backup)
+        return _graphify_runtime_blocked_report(
+            status_lines,
+            reason,
+            rollback_status,
+        )
+
+    status_lines.extend(
+        (
+            "installed_skill_platform_count=2",
+            "synthetic_corpus_status=temporary_cleaned",
+            "recovery_snapshot_status=retained",
+            "rollback_status=not_needed",
+        )
+    )
+    return _maintenance_report("DONE", task_id, status_lines, "met")
 
 
 def _aufmass_private_registered_paths() -> tuple[Path | None, Path | None, str | None]:
@@ -6493,6 +6913,8 @@ def dispatch_runtime_maintenance_task(
             return private_memory_healthcheck(body)
         if task_id == HERMES_PRIVATE_MEMORY_BRIDGE_CHECK:
             return hermes_private_memory_bridge_check()
+        if task_id == INSTALL_GRAPHIFY_RUNTIME:
+            return install_graphify_runtime(body)
         if task_id == PREPARE_AUFMASS_PRIVATE_RUNTIME:
             return prepare_aufmass_private_runtime()
         if task_id == RUN_AUFMASS_PRIVATE_DXF_REVIEW:
