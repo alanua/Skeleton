@@ -105,8 +105,8 @@ Boot output required fields:
 - State file: `projects/skeleton/STATE.yaml`
 - Status: `DRAFT_HANDOFF`
 - State role: `handoff_not_canon_truth`
-- Last verified: `2026-06-08`
-- Evidence source: Skeleton main after PR #863 plus private operator diagnostics on Runner/Codex/Hermes. Private quota details remain outside the public repository.
+- Last verified: `2026-06-19`
+- Evidence source: Skeleton main after PR #863, the completed source audit from issue #1028, and private operator diagnostics on Runner/Codex/Hermes. Private quota details remain outside the public repository.
 
 
 Summary:
@@ -117,6 +117,9 @@ Summary:
 - Truncated task fence detection blocks malformed Runner task bodies after PR 860.
 - Hermes queue-audit packet docs/schema landed after PR 858.
 - BauClock PR 52 status is recorded after PR 863.
+- Issue #1028 completed the post-#1027 source audit and confirmed the current merged repairs and stale control issues.
+- At the 2026-06-19 verification point, no open runner:ready or runner:running items remained; normal future queue changes can create new ready or running items.
+- Issues #895 and #867 remain stale review/operator-gated control records, not executable Runner instructions.
 - Runner/Codex execution requires an explicit runtime preflight for execution user, authentication, supported model, and quota availability.
 - Codex must run from the Runner user context, not from root.
 - The current ChatGPT-account Codex setup requires a supported model configuration; unsupported Codex model defaults must fail closed before task execution.
@@ -129,8 +132,6 @@ Next actions:
 - Sync the live Runner checkout to main after approved Skeleton changes.
 - Add Codex runtime preflight before starting further Codex tasks.
 - Add Hermes quota-aware review rules before using Hermes for queue audits.
-- Keep Gemini reviewer and Antigravity lab work in backlog until Codex and publisher paths are stable.
-- Continue runner:blocked cleanup only with evidence and without Codex retries while provider availability is constrained.
 
 ### jeeves
 
@@ -354,6 +355,18 @@ The current runner queue status is mirrored below from `docs/RUNNER_QUEUE_STATUS
 Status: GitHub issue queue is working.
 
 Parser repair smoke status: 2026-06-12 docs-only Runner task completed normally.
+
+Source audit status: 2026-06-19 issue #1028 completed the post-#1027 source
+audit. The audit preserved the current merged Runner repairs, classified stale
+control references, and did not approve new project execution.
+
+Queue result at the verified point: no open `runner:ready` or `runner:running`
+items remained. This is a point-in-time result and normal future queue changes
+can create new ready or running items.
+
+Stale control classification: issues #895 and #867 remain
+stale/review/operator-gated records. They are not executable Runner
+instructions.
 
 This document records the current operating status and runtime checklist for the
 Skeleton GitHub task queue Runner after the successful Telegram notification
