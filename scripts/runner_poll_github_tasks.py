@@ -106,6 +106,7 @@ PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR = "publish_target_project_issue_worktre
 QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES = (
     "quarantine_stale_clean_skeleton_worktrees"
 )
+INSTALL_GRAPHIFY_RUNTIME = "install_graphify_runtime_v1"
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
         SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
@@ -130,7 +131,21 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         PUBLISH_EXISTING_ISSUE_WORKTREE,
         PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR,
         QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES,
+        INSTALL_GRAPHIFY_RUNTIME,
     )
+)
+GRAPHIFY_PACKAGE = "graphifyy"
+GRAPHIFY_VERSION = "0.8.44"
+GRAPHIFY_PINNED_PACKAGE = f"{GRAPHIFY_PACKAGE}=={GRAPHIFY_VERSION}"
+GRAPHIFY_SKILL_PLATFORMS = ("codex", "hermes")
+GRAPHIFY_MANAGED_SKILL_PATHS = (
+    Path.home() / ".codex" / "skills" / "graphify" / "SKILL.md",
+    Path.home() / ".codex" / "skills" / "graphify" / "references",
+    Path.home() / ".hermes" / "skills" / "graphify" / "SKILL.md",
+    Path.home() / ".hermes" / "skills" / "graphify" / "references",
+)
+GRAPHIFY_SMOKE_ENV_TOKEN_RE = re.compile(
+    r"(?:API|TOKEN|KEY|SECRET|MODEL|OPENAI|ANTHROPIC|GEMINI|AZURE|KIMI|OLLAMA|BEDROCK)"
 )
 AUFMASS_PRIVATE_PROJECT_ID = "aufmass_private"
 AUFMASS_PRIVATE_REGISTERED_REPO = "private/aufmass"
@@ -6012,6 +6027,274 @@ def quarantine_stale_clean_skeleton_worktrees(body: str) -> str:
     return _maintenance_report("DONE", task_id, status_lines, "met")
 
 
+def _installed_graphify_tool_version(uv_tool_list_output: str) -> str | None:
+    pattern = re.compile(rf"(?im)^\s*{re.escape(GRAPHIFY_PACKAGE)}\s+v?([0-9][^\s]*)")
+    match = pattern.search(uv_tool_list_output or "")
+    if match is not None:
+        return match.group(1)
+    pattern = re.compile(rf"(?im)\b{re.escape(GRAPHIFY_PACKAGE)}\s+v?([0-9][^\s]*)")
+    match = pattern.search(uv_tool_list_output or "")
+    return match.group(1) if match is not None else None
+
+
+def _graphify_install_command(installed_version: str | None) -> list[str] | None:
+    if installed_version is None:
+        return ["uv", "tool", "install", GRAPHIFY_PINNED_PACKAGE]
+    if installed_version != GRAPHIFY_VERSION:
+        return ["uv", "tool", "install", "--reinstall", GRAPHIFY_PINNED_PACKAGE]
+    return None
+
+
+def _graphify_capability_preflight() -> tuple[list[str], str | None]:
+    status_lines: list[str] = []
+    checks = (
+        (
+            "graphify_version",
+            ["graphify", "--version"],
+            (GRAPHIFY_VERSION,),
+        ),
+        (
+            "graphify_install_help",
+            ["graphify", "install", "--help"],
+            ("--platform", "codex", "hermes"),
+        ),
+        (
+            "graphify_build_help",
+            ["graphify", "--help"],
+            ("--no-viz",),
+        ),
+    )
+    for step, command, expected_tokens in checks:
+        code, output = run_command(command)
+        if code != 0:
+            return [*status_lines, f"step={step} status=failed"], "cli_preflight_failed"
+        missing = [token for token in expected_tokens if token not in output]
+        if missing:
+            return (
+                [*status_lines, f"step={step} status=failed"],
+                "unsupported_cli_contract",
+            )
+        status_lines.append(f"step={step} status=done")
+    return status_lines, None
+
+
+def _graphify_smoke_environment() -> tuple[dict[str, str], int, int]:
+    sanitized: dict[str, str] = {}
+    api_removed_count = 0
+    model_removed_count = 0
+    for key, value in os.environ.items():
+        upper_key = key.upper()
+        if GRAPHIFY_SMOKE_ENV_TOKEN_RE.search(upper_key):
+            if "MODEL" in upper_key:
+                model_removed_count += 1
+            else:
+                api_removed_count += 1
+            continue
+        sanitized[key] = value
+    return sanitized, api_removed_count, model_removed_count
+
+
+def _graphify_graph_counts(graph_path: Path) -> tuple[int, int] | None:
+    try:
+        graph = json.loads(graph_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(graph, dict):
+        return None
+    raw_nodes = graph.get("nodes", ())
+    raw_edges = graph.get("edges", graph.get("links", ()))
+    node_count = len(raw_nodes) if isinstance(raw_nodes, list) else 0
+    edge_count = len(raw_edges) if isinstance(raw_edges, list) else 0
+    return node_count, edge_count
+
+
+def _run_graphify_python_smoke() -> tuple[list[str], str | None]:
+    env, api_removed_count, model_removed_count = _graphify_smoke_environment()
+    status_lines = [
+        "smoke_corpus_language=python",
+        "smoke_corpus_files=1",
+        f"smoke_api_env_removed_count={api_removed_count}",
+        f"smoke_model_env_removed_count={model_removed_count}",
+        "smoke_semantic_model_env_available=false",
+    ]
+    with tempfile.TemporaryDirectory(prefix="graphify-smoke-") as temp_root:
+        root = Path(temp_root)
+        corpus = root / "corpus"
+        corpus.mkdir(mode=0o700)
+        (corpus / "sample.py").write_text(
+            "\n".join(
+                (
+                    "class SmokeNode:",
+                    "    def value(self) -> int:",
+                    "        return 1",
+                    "",
+                    "def smoke_edge() -> int:",
+                    "    return SmokeNode().value()",
+                    "",
+                )
+            ),
+            encoding="utf-8",
+        )
+        output_parent = root / "private-output"
+        output_parent.mkdir(mode=0o700)
+        result = subprocess.run(
+            ["graphify", str(corpus), "--no-viz"],
+            cwd=str(output_parent),
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        if result.returncode != 0:
+            return [*status_lines, "step=graphify_python_smoke status=failed"], "smoke_failed"
+        counts = _graphify_graph_counts(output_parent / "graphify-out" / "graph.json")
+        if counts is None:
+            return [*status_lines, "step=graphify_smoke_counts status=failed"], "smoke_graph_missing"
+        node_count, edge_count = counts
+        status_lines.extend(
+            (
+                "step=graphify_python_smoke status=done",
+                f"smoke_node_count={node_count}",
+                f"smoke_edge_count={edge_count}",
+                f"smoke_aggregate_count={node_count + edge_count}",
+            )
+        )
+        if node_count <= 0 or edge_count <= 0:
+            return status_lines, "smoke_graph_empty"
+    status_lines.append("step=graphify_smoke_cleanup status=done")
+    return status_lines, None
+
+
+def _copy_graphify_backup_path(source: Path, destination: Path) -> str | None:
+    try:
+        stat_result = source.lstat()
+    except OSError:
+        return "backup_stat_failed"
+    if source.is_symlink():
+        return "backup_symlink_rejected"
+    if source.is_file():
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        os.chmod(destination, stat_result.st_mode & 0o777)
+        return None
+    if source.is_dir():
+        destination.mkdir(parents=True, exist_ok=True)
+        os.chmod(destination, stat_result.st_mode & 0o777)
+        for child in source.rglob("*"):
+            if child.is_symlink():
+                return "backup_symlink_rejected"
+            child_destination = destination / child.relative_to(source)
+            try:
+                child_stat = child.lstat()
+            except OSError:
+                return "backup_stat_failed"
+            if child.is_dir():
+                child_destination.mkdir(parents=True, exist_ok=True)
+                os.chmod(child_destination, child_stat.st_mode & 0o777)
+            elif child.is_file():
+                child_destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(child, child_destination)
+                os.chmod(child_destination, child_stat.st_mode & 0o777)
+            else:
+                return "backup_unexpected_file_type"
+        return None
+    return "backup_unexpected_file_type"
+
+
+def _backup_graphify_managed_skill_paths(backup_root: Path) -> tuple[int, str | None]:
+    backup_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(backup_root, 0o700)
+    copied_count = 0
+    for index, source in enumerate(GRAPHIFY_MANAGED_SKILL_PATHS):
+        if not source.exists() and not source.is_symlink():
+            continue
+        reason = _copy_graphify_backup_path(source, backup_root / f"managed-{index}")
+        if reason is not None:
+            return copied_count, reason
+        copied_count += 1
+    return copied_count, None
+
+
+def install_graphify_runtime() -> str:
+    task_id = INSTALL_GRAPHIFY_RUNTIME
+    status_lines = [
+        f"package={GRAPHIFY_PINNED_PACKAGE}",
+        "platforms=codex,hermes",
+    ]
+
+    code, _output = run_command(["uv", "--version"])
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "step=uv_version status=failed", "reason=uv_missing"],
+            "not_met",
+        )
+    status_lines.append("step=uv_version status=done")
+
+    code, output = run_command(["uv", "tool", "list"])
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "step=uv_tool_list status=failed"],
+            "not_met",
+        )
+    installed_version = _installed_graphify_tool_version(output)
+    status_lines.append(
+        f"installed_graphify_version={installed_version or 'absent'}"
+    )
+    install_command = _graphify_install_command(installed_version)
+    if install_command is not None:
+        install_action = "install" if installed_version is None else "reinstall"
+        code, _output = run_command(install_command)
+        if code != 0:
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [*status_lines, f"step=uv_tool_{install_action} status=failed"],
+                "not_met",
+            )
+        status_lines.append(f"step=uv_tool_{install_action} status=done")
+    else:
+        status_lines.append("step=uv_tool_install status=skipped")
+
+    preflight_lines, reason = _graphify_capability_preflight()
+    status_lines.extend(preflight_lines)
+    if reason is not None:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, f"reason={reason}"], "not_met"
+        )
+
+    smoke_lines, reason = _run_graphify_python_smoke()
+    status_lines.extend(smoke_lines)
+    if reason is not None:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, f"reason={reason}"], "not_met"
+        )
+
+    with tempfile.TemporaryDirectory(prefix="graphify-managed-backup-") as backup_dir:
+        copied_count, reason = _backup_graphify_managed_skill_paths(Path(backup_dir))
+        status_lines.append(f"backup_managed_paths_count={copied_count}")
+        if reason is not None:
+            return _maintenance_report(
+                "BLOCKED", task_id, [*status_lines, f"reason={reason}"], "not_met"
+            )
+
+        for platform in GRAPHIFY_SKILL_PLATFORMS:
+            code, _output = run_command(["graphify", "install", "--platform", platform])
+            if code != 0:
+                return _maintenance_report(
+                    "BLOCKED",
+                    task_id,
+                    [*status_lines, f"step=install_{platform}_skill status=failed"],
+                    "not_met",
+                )
+            status_lines.append(f"step=install_{platform}_skill status=done")
+
+    return _maintenance_report("DONE", task_id, status_lines, "met")
+
+
 def _is_ignored_issue_publish_untracked_path(path: str) -> bool:
     return path == ".codex" or path.startswith(".codex/")
 
@@ -6517,6 +6800,8 @@ def dispatch_runtime_maintenance_task(
             return publish_target_project_issue_worktree_pr(body)
         if task_id == QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES:
             return quarantine_stale_clean_skeleton_worktrees(body)
+        if task_id == INSTALL_GRAPHIFY_RUNTIME:
+            return install_graphify_runtime()
         return check_project_checkout(body)
     except Exception:
         return _maintenance_report(

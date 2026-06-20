@@ -122,3 +122,16 @@ not private project memory:
 
 The pilot is complete only when the public repo can explain the architecture and
 validate synthetic query envelopes without exposing real private graph memory.
+
+## Runtime Installer Boundary
+
+The Runner maintenance installer for Graphify is `install_graphify_runtime_v1`.
+It is a host maintenance task, not a Codex workspace task, and must use the
+pinned `graphifyy==0.8.44` package. Its public report is aggregate-only: package
+version, platform names, CLI preflight status, temporary Python-only smoke graph
+counts, environment-removal counts, backup counts, and final status.
+
+The installer must not publish Graphify output, profile paths, temporary paths,
+source text, graph JSON, environment values, secrets, model/API values, private
+corpus content, or assistant profile content. Runtime smoke output is temporary
+private cache state and is deleted before the maintenance report is posted.
