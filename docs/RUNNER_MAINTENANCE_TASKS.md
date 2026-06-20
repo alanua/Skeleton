@@ -105,6 +105,53 @@ content. Bridge exceptions are summarized with safe tokens such as
 `HermesBridgeException` and `safe_operator_review`; they must not fall through
 to the generic maintenance-step exception report.
 
+`install_graphify_runtime_v1` installs and validates the pinned Graphify runtime
+on the Runner host only after explicit operator approval:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: install_graphify_runtime_v1
+Operator Approval: install_graphify_runtime_v1
+```
+
+It may only:
+
+1. Require the exact operator approval field shown above before doing any host
+   work.
+2. Require Python 3.10 or newer.
+3. Require `uv` to be available and install only `graphifyy==0.8.44` with
+   `uv tool install graphifyy==0.8.44` when the pinned version is not already
+   installed.
+4. Treat an already installed `graphify --version` result of `0.8.44` as
+   idempotent.
+5. Verify `graphify --version` resolves to `0.8.44` and `graphify --help`
+   succeeds.
+6. Create server-local backups of existing Codex and Hermes user profile files
+   before invoking Graphify skill installation.
+7. Invoke Graphify skill installation only for Codex and Hermes user profiles.
+8. Run one smoke test against a temporary synthetic Python corpus made only of
+   generated `.py` files.
+9. Run the smoke test with local AST extraction only, with model/API environment
+   variables removed from the smoke subprocess.
+10. Validate only that graph output exists with non-zero aggregate node and edge
+    counts.
+11. Delete the temporary synthetic corpus and smoke outputs after validation.
+
+It must not run Graphify against the Skeleton checkout, SQLite memory, Gmail,
+Drive, PDFs, images, or private documents. It must not enable `--watch`, install
+git hooks, start MCP or HTTP servers, bind network ports, install Neo4j or
+FalkorDB, install optional cloud-model extras, use `sudo`, or report paths,
+environment values, configuration contents, graph labels, corpus text, command
+output, or private source identifiers.
+
+Reports are aggregate-only and public-safe. The allowed fields are:
+`status`, `maintenance_task_id`, `python_compatible`, `uv_available`,
+`install_status`, `installed_version_ok`, `codex_skill_status`,
+`hermes_skill_status`, `synthetic_ast_smoke_status`, `aggregate_node_count`,
+`aggregate_edge_count`, `outbound_semantic_calls_enabled=false`,
+`hooks_enabled=false`, `service_enabled=false`, `error_class`, and
+`next_operator_action`.
+
 `check_project_checkout` is read-only and must include target project metadata:
 
 ```text

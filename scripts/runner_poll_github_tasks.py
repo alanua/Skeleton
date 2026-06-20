@@ -106,6 +106,7 @@ PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR = "publish_target_project_issue_worktre
 QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES = (
     "quarantine_stale_clean_skeleton_worktrees"
 )
+INSTALL_GRAPHIFY_RUNTIME = "install_graphify_runtime_v1"
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
         SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
@@ -130,7 +131,20 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         PUBLISH_EXISTING_ISSUE_WORKTREE,
         PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR,
         QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES,
+        INSTALL_GRAPHIFY_RUNTIME,
     )
+)
+GRAPHIFY_PINNED_PACKAGE = "graphifyy==0.8.44"
+GRAPHIFY_PINNED_VERSION = "0.8.44"
+GRAPHIFY_OPERATOR_APPROVAL_FIELD = "Operator Approval"
+GRAPHIFY_OPERATOR_APPROVAL_VALUE = INSTALL_GRAPHIFY_RUNTIME
+GRAPHIFY_MODEL_API_ENV_MARKERS = (
+    "OPENAI",
+    "ANTHROPIC",
+    "GEMINI",
+    "GOOGLE_API",
+    "API_KEY",
+    "MODEL",
 )
 AUFMASS_PRIVATE_PROJECT_ID = "aufmass_private"
 AUFMASS_PRIVATE_REGISTERED_REPO = "private/aufmass"
@@ -4020,6 +4034,364 @@ def _verify_maintenance_command_output(
     )
 
 
+def _graphify_report(
+    *,
+    status: str,
+    python_compatible: bool,
+    uv_available: bool,
+    install_status: str,
+    installed_version_ok: bool,
+    codex_skill_status: str,
+    hermes_skill_status: str,
+    synthetic_ast_smoke_status: str,
+    aggregate_node_count: int,
+    aggregate_edge_count: int,
+    error_class: str,
+    next_operator_action: str,
+) -> str:
+    return _maintenance_report(
+        status,
+        INSTALL_GRAPHIFY_RUNTIME,
+        [
+            f"status={status}",
+            f"python_compatible={str(python_compatible).lower()}",
+            f"uv_available={str(uv_available).lower()}",
+            f"install_status={install_status}",
+            f"installed_version_ok={str(installed_version_ok).lower()}",
+            f"codex_skill_status={codex_skill_status}",
+            f"hermes_skill_status={hermes_skill_status}",
+            f"synthetic_ast_smoke_status={synthetic_ast_smoke_status}",
+            f"aggregate_node_count={aggregate_node_count}",
+            f"aggregate_edge_count={aggregate_edge_count}",
+            "outbound_semantic_calls_enabled=false",
+            "hooks_enabled=false",
+            "service_enabled=false",
+            f"error_class={error_class}",
+            f"next_operator_action={next_operator_action}",
+        ],
+        "met" if status == "DONE" else "not_met",
+    )
+
+
+def _graphify_operator_approved(body: str) -> bool:
+    return (
+        _body_field(body, GRAPHIFY_OPERATOR_APPROVAL_FIELD)
+        == GRAPHIFY_OPERATOR_APPROVAL_VALUE
+    )
+
+
+def _graphify_version_from_output(output: str) -> str | None:
+    match = re.search(r"\b(?P<version>\d+\.\d+\.\d+)\b", output or "")
+    return match.group("version") if match else None
+
+
+def _graphify_installed_version() -> tuple[bool, str | None]:
+    if shutil.which("graphify") is None:
+        return False, None
+    code, output = run_command(["graphify", "--version"])
+    if code != 0:
+        return False, None
+    return True, _graphify_version_from_output(output)
+
+
+def _backup_graphify_assistant_profiles() -> bool:
+    backup_root = (
+        Path.home()
+        / ".local"
+        / "share"
+        / "skeleton-runner"
+        / "backups"
+        / "graphify"
+        / INSTALL_GRAPHIFY_RUNTIME
+        / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    )
+    backup_root.mkdir(parents=True, exist_ok=False)
+    copied_any = False
+    for profile_name in (".codex", ".hermes"):
+        source = Path.home() / profile_name
+        destination = backup_root / profile_name
+        if source.is_dir():
+            shutil.copytree(source, destination, symlinks=True)
+            copied_any = True
+        elif source.is_file():
+            shutil.copy2(source, destination)
+            copied_any = True
+    if not copied_any:
+        (backup_root / "no-existing-assistant-profile-files").write_text(
+            "no existing Codex or Hermes profile files were present\n",
+            encoding="utf-8",
+        )
+    return True
+
+
+def _graphify_smoke_env() -> dict[str, str]:
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if not any(marker in key.upper() for marker in GRAPHIFY_MODEL_API_ENV_MARKERS)
+    }
+
+
+def _graphify_aggregate_graph_counts(output_root: Path) -> tuple[int, int]:
+    node_count = 0
+    edge_count = 0
+    for path in output_root.rglob("*"):
+        if not path.is_file() or path.suffix not in {".json", ".jsonl"}:
+            continue
+        try:
+            if path.suffix == ".jsonl":
+                records = [
+                    json.loads(line)
+                    for line in path.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
+                for record in records:
+                    kind = str(record.get("kind", "")).lower()
+                    if kind == "node":
+                        node_count += 1
+                    elif kind == "edge":
+                        edge_count += 1
+                continue
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            nodes = payload.get("nodes", [])
+            edges = payload.get("edges", [])
+            if isinstance(nodes, list):
+                node_count += len(nodes)
+            elif isinstance(nodes, int):
+                node_count += nodes
+            if isinstance(edges, list):
+                edge_count += len(edges)
+            elif isinstance(edges, int):
+                edge_count += edges
+        elif isinstance(payload, list):
+            for record in payload:
+                if not isinstance(record, dict):
+                    continue
+                kind = str(record.get("kind", "")).lower()
+                if kind == "node":
+                    node_count += 1
+                elif kind == "edge":
+                    edge_count += 1
+    return node_count, edge_count
+
+
+def _run_graphify_synthetic_ast_smoke() -> tuple[str, int, int, str]:
+    with tempfile.TemporaryDirectory(prefix="graphify-synthetic-") as temp_dir:
+        temp_root = Path(temp_dir)
+        corpus = temp_root / "corpus"
+        output_root = temp_root / "graph"
+        corpus.mkdir()
+        output_root.mkdir()
+        (corpus / "alpha.py").write_text(
+            "def alpha(value):\n    return value + 1\n",
+            encoding="utf-8",
+        )
+        (corpus / "beta.py").write_text(
+            "from alpha import alpha\n\nresult = alpha(1)\n",
+            encoding="utf-8",
+        )
+        if any(path.suffix != ".py" for path in corpus.rglob("*") if path.is_file()):
+            return "blocked", 0, 0, "UnsafeSyntheticCorpus"
+        try:
+            result = subprocess.run(
+                [
+                    "graphify",
+                    "ingest",
+                    "--source",
+                    str(corpus),
+                    "--output",
+                    str(output_root),
+                    "--extractor",
+                    "ast",
+                    "--no-semantic",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=_graphify_smoke_env(),
+                timeout=120,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return "blocked", 0, 0, "SyntheticAstSmokeFailed"
+        if result.returncode != 0:
+            return "blocked", 0, 0, "SyntheticAstSmokeFailed"
+        node_count, edge_count = _graphify_aggregate_graph_counts(output_root)
+        if node_count <= 0 or edge_count <= 0:
+            return "blocked", node_count, edge_count, "SyntheticGraphEmpty"
+        return "done", node_count, edge_count, "none"
+
+
+def install_graphify_runtime(body: str) -> str:
+    if not _graphify_operator_approved(body):
+        return _graphify_report(
+            status="BLOCKED",
+            python_compatible=sys.version_info >= (3, 10),
+            uv_available=shutil.which("uv") is not None,
+            install_status="not_started",
+            installed_version_ok=False,
+            codex_skill_status="not_started",
+            hermes_skill_status="not_started",
+            synthetic_ast_smoke_status="not_started",
+            aggregate_node_count=0,
+            aggregate_edge_count=0,
+            error_class="MissingOperatorApproval",
+            next_operator_action="add_operator_approval",
+        )
+
+    python_compatible = sys.version_info >= (3, 10)
+    uv_available = shutil.which("uv") is not None
+    if not python_compatible:
+        return _graphify_report(
+            status="BLOCKED",
+            python_compatible=False,
+            uv_available=uv_available,
+            install_status="not_started",
+            installed_version_ok=False,
+            codex_skill_status="not_started",
+            hermes_skill_status="not_started",
+            synthetic_ast_smoke_status="not_started",
+            aggregate_node_count=0,
+            aggregate_edge_count=0,
+            error_class="UnsupportedPython",
+            next_operator_action="upgrade_python_runtime",
+        )
+    if not uv_available:
+        return _graphify_report(
+            status="BLOCKED",
+            python_compatible=True,
+            uv_available=False,
+            install_status="not_started",
+            installed_version_ok=False,
+            codex_skill_status="not_started",
+            hermes_skill_status="not_started",
+            synthetic_ast_smoke_status="not_started",
+            aggregate_node_count=0,
+            aggregate_edge_count=0,
+            error_class="MissingUv",
+            next_operator_action="install_uv_user_tooling",
+        )
+
+    _present, existing_version = _graphify_installed_version()
+    if existing_version == GRAPHIFY_PINNED_VERSION:
+        install_status = "already_installed"
+    else:
+        code, _output = run_command(["uv", "tool", "install", GRAPHIFY_PINNED_PACKAGE])
+        if code != 0:
+            return _graphify_report(
+                status="BLOCKED",
+                python_compatible=True,
+                uv_available=True,
+                install_status="failed",
+                installed_version_ok=False,
+                codex_skill_status="not_started",
+                hermes_skill_status="not_started",
+                synthetic_ast_smoke_status="not_started",
+                aggregate_node_count=0,
+                aggregate_edge_count=0,
+                error_class="InstallFailed",
+                next_operator_action="review_runner_host_tool_install",
+            )
+        install_status = "installed"
+
+    _present, installed_version = _graphify_installed_version()
+    installed_version_ok = installed_version == GRAPHIFY_PINNED_VERSION
+    code, _output = run_command(["graphify", "--help"])
+    help_ok = code == 0
+    if not installed_version_ok or not help_ok:
+        return _graphify_report(
+            status="BLOCKED",
+            python_compatible=True,
+            uv_available=True,
+            install_status=install_status,
+            installed_version_ok=installed_version_ok,
+            codex_skill_status="not_started",
+            hermes_skill_status="not_started",
+            synthetic_ast_smoke_status="not_started",
+            aggregate_node_count=0,
+            aggregate_edge_count=0,
+            error_class="VersionVerificationFailed",
+            next_operator_action="review_runner_host_tool_install",
+        )
+
+    try:
+        _backup_graphify_assistant_profiles()
+    except OSError:
+        return _graphify_report(
+            status="BLOCKED",
+            python_compatible=True,
+            uv_available=True,
+            install_status=install_status,
+            installed_version_ok=True,
+            codex_skill_status="not_started",
+            hermes_skill_status="not_started",
+            synthetic_ast_smoke_status="not_started",
+            aggregate_node_count=0,
+            aggregate_edge_count=0,
+            error_class="AssistantProfileBackupFailed",
+            next_operator_action="review_runner_host_profile_permissions",
+        )
+
+    skill_commands = (
+        ("codex", ["graphify", "install-skills", "--assistant", "codex", "--user"]),
+        ("hermes", ["graphify", "install-skills", "--assistant", "hermes", "--user"]),
+    )
+    skill_status = {"codex": "not_started", "hermes": "not_started"}
+    for assistant, command in skill_commands:
+        code, _output = run_command(command)
+        if code != 0:
+            skill_status[assistant] = "failed"
+            return _graphify_report(
+                status="BLOCKED",
+                python_compatible=True,
+                uv_available=True,
+                install_status=install_status,
+                installed_version_ok=True,
+                codex_skill_status=skill_status["codex"],
+                hermes_skill_status=skill_status["hermes"],
+                synthetic_ast_smoke_status="not_started",
+                aggregate_node_count=0,
+                aggregate_edge_count=0,
+                error_class="SkillInstallFailed",
+                next_operator_action="review_runner_host_skill_install",
+            )
+        skill_status[assistant] = "installed"
+
+    smoke_status, node_count, edge_count, error_class = _run_graphify_synthetic_ast_smoke()
+    if smoke_status != "done":
+        return _graphify_report(
+            status="BLOCKED",
+            python_compatible=True,
+            uv_available=True,
+            install_status=install_status,
+            installed_version_ok=True,
+            codex_skill_status=skill_status["codex"],
+            hermes_skill_status=skill_status["hermes"],
+            synthetic_ast_smoke_status=smoke_status,
+            aggregate_node_count=node_count,
+            aggregate_edge_count=edge_count,
+            error_class=error_class,
+            next_operator_action="review_graphify_synthetic_ast_smoke",
+        )
+
+    return _graphify_report(
+        status="DONE",
+        python_compatible=True,
+        uv_available=True,
+        install_status=install_status,
+        installed_version_ok=True,
+        codex_skill_status=skill_status["codex"],
+        hermes_skill_status=skill_status["hermes"],
+        synthetic_ast_smoke_status=smoke_status,
+        aggregate_node_count=node_count,
+        aggregate_edge_count=edge_count,
+        error_class="none",
+        next_operator_action="none",
+    )
+
+
 def sync_telegram_callback_poller_runtime(workdir: str) -> str:
     task_id = SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME
     status_lines: list[str] = []
@@ -6517,6 +6889,8 @@ def dispatch_runtime_maintenance_task(
             return publish_target_project_issue_worktree_pr(body)
         if task_id == QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES:
             return quarantine_stale_clean_skeleton_worktrees(body)
+        if task_id == INSTALL_GRAPHIFY_RUNTIME:
+            return install_graphify_runtime(body)
         return check_project_checkout(body)
     except Exception:
         return _maintenance_report(

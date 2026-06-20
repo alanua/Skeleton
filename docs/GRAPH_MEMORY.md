@@ -1,9 +1,10 @@
 # Graph Memory
 
 Skeleton may adopt Graphify as a private derived graph-memory layer for local
-orientation across projects. This is an architecture specification only. It does
-not install Graphify, run Graphify, add a runtime service, ingest private files,
-or publish graph output.
+orientation across projects. This is primarily an architecture specification.
+The only public Runner runtime entry point currently documented here is the
+allowlisted installer `install_graphify_runtime_v1`, which installs and validates
+the pinned Graphify tool on the Runner host without indexing private data.
 
 Graphify is not a source of truth for Skeleton. It is a private local index built
 from already-approved local memory records and repository metadata so an operator
@@ -122,3 +123,29 @@ not private project memory:
 
 The pilot is complete only when the public repo can explain the architecture and
 validate synthetic query envelopes without exposing real private graph memory.
+
+## Runtime Installer Boundary
+
+The `install_graphify_runtime_v1` maintenance task is not a graph-memory pilot
+and is not an ingestion path. It requires a separate runtime maintenance issue
+with:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: install_graphify_runtime_v1
+Operator Approval: install_graphify_runtime_v1
+```
+
+That task may install `graphifyy==0.8.44`, install Graphify user-profile skills
+for Codex and Hermes only, verify `graphify --version` and `graphify --help`,
+and run a local AST smoke test on a temporary synthetic Python corpus. The smoke
+test removes model/API environment variables from its subprocess and deletes the
+temporary corpus and outputs after validation.
+
+It must not index the Skeleton checkout, SQLite memory, Gmail, Drive, PDFs,
+images, private documents, or any other external source. It must not enable
+watch mode, git hooks, services, MCP or HTTP servers, network ports, Neo4j,
+FalkorDB, cloud-model extras, or sudo. Its report is limited to aggregate
+public-safe fields such as compatibility booleans, install and skill statuses,
+non-zero node/edge counts from synthetic output, error class, and next-action
+tokens.

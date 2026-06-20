@@ -2719,6 +2719,362 @@ def test_hermes_private_memory_bridge_exception_returns_safe_aggregate_report(
     assert "token" not in report.lower()
 
 
+def _graphify_issue_body(*, approved: bool = True) -> str:
+    metadata = (
+        f"{runner.GRAPHIFY_OPERATOR_APPROVAL_FIELD}: "
+        f"{runner.GRAPHIFY_OPERATOR_APPROVAL_VALUE}"
+        if approved
+        else ""
+    )
+    return str(
+        _maintenance_issue(
+            runner.INSTALL_GRAPHIFY_RUNTIME,
+            metadata=metadata,
+        )["body"]
+    )
+
+
+def _graphify_smoke_subprocess(
+    smoke_calls: list[dict[str, object]],
+) -> object:
+    def run(command: list[str], **kwargs: object) -> object:
+        assert command[:2] == ["graphify", "ingest"]
+        assert "--no-semantic" in command
+        assert "--watch" not in command
+        source = Path(command[command.index("--source") + 1])
+        output = Path(command[command.index("--output") + 1])
+        source_files = [path for path in source.rglob("*") if path.is_file()]
+        assert source_files
+        assert all(path.suffix == ".py" for path in source_files)
+        env = kwargs.get("env")
+        assert isinstance(env, dict)
+        assert "OPENAI_API_KEY" not in env
+        assert "ANTHROPIC_API_KEY" not in env
+        assert "SKELETON_CODEX_MODEL" not in env
+        (output / "graph.json").write_text(
+            json.dumps(
+                {
+                    "nodes": [{"id": "n1"}, {"id": "n2"}],
+                    "edges": [{"source": "n1", "target": "n2"}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        smoke_calls.append({"source": source, "output": output, "env": env})
+        completed = mock.MagicMock()
+        completed.returncode = 0
+        completed.stdout = ""
+        completed.stderr = ""
+        return completed
+
+    return run
+
+
+def test_install_graphify_runtime_is_allowlisted() -> None:
+    assert runner.INSTALL_GRAPHIFY_RUNTIME in runner.RUNTIME_MAINTENANCE_TASK_IDS
+
+
+def test_install_graphify_runtime_without_operator_approval_is_blocked() -> None:
+    with mock.patch.object(runner, "run_command") as run:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.INSTALL_GRAPHIFY_RUNTIME,
+            str(runner.ROOT),
+            _graphify_issue_body(approved=False),
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "maintenance_task_id=install_graphify_runtime_v1" in report
+    assert "status=BLOCKED" in report
+    assert "error_class=MissingOperatorApproval" in report
+    assert "next_operator_action=add_operator_approval" in report
+    assert "aggregate_node_count=0" in report
+    assert "aggregate_edge_count=0" in report
+    run.assert_not_called()
+
+
+def test_install_graphify_runtime_blocks_unsupported_python(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runner.sys, "version_info", (3, 9, 18))
+    with (
+        mock.patch.object(runner.shutil, "which", return_value="/usr/bin/uv"),
+        mock.patch.object(runner, "run_command") as run,
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.INSTALL_GRAPHIFY_RUNTIME,
+            str(runner.ROOT),
+            _graphify_issue_body(),
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "python_compatible=false" in report
+    assert "error_class=UnsupportedPython" in report
+    assert "next_operator_action=upgrade_python_runtime" in report
+    run.assert_not_called()
+
+
+def test_install_graphify_runtime_blocks_missing_uv_with_safe_next_action() -> None:
+    def which(tool: str) -> str | None:
+        return None if tool == "uv" else f"/usr/bin/{tool}"
+
+    with (
+        mock.patch.object(runner.shutil, "which", side_effect=which),
+        mock.patch.object(runner, "run_command") as run,
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.INSTALL_GRAPHIFY_RUNTIME,
+            str(runner.ROOT),
+            _graphify_issue_body(),
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "uv_available=false" in report
+    assert "install_status=not_started" in report
+    assert "error_class=MissingUv" in report
+    assert "next_operator_action=install_uv_user_tooling" in report
+    run.assert_not_called()
+
+
+def test_install_graphify_runtime_correct_existing_version_is_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    smoke_calls: list[dict[str, object]] = []
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-secret")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "synthetic-secret")
+    monkeypatch.setenv("SKELETON_CODEX_MODEL", "synthetic-model")
+
+    def run_command(command: list[str], cwd: str | None = None) -> tuple[int, str]:
+        del cwd
+        if command == ["graphify", "--version"]:
+            return 0, "graphify 0.8.44\n"
+        if command == ["graphify", "--help"]:
+            return 0, "help output must not be reported"
+        if command in (
+            ["graphify", "install-skills", "--assistant", "codex", "--user"],
+            ["graphify", "install-skills", "--assistant", "hermes", "--user"],
+        ):
+            return 0, "skill output must not be reported"
+        return 9, "unexpected command"
+
+    with (
+        mock.patch.object(runner.shutil, "which", return_value="/usr/bin/tool"),
+        mock.patch.object(runner, "run_command", side_effect=run_command) as run,
+        mock.patch.object(
+            runner, "_backup_graphify_assistant_profiles", return_value=True
+        ),
+        mock.patch.object(
+            runner.subprocess,
+            "run",
+            side_effect=_graphify_smoke_subprocess(smoke_calls),
+        ),
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.INSTALL_GRAPHIFY_RUNTIME,
+            str(runner.ROOT),
+            _graphify_issue_body(),
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert "install_status=already_installed" in report
+    assert "installed_version_ok=true" in report
+    assert "codex_skill_status=installed" in report
+    assert "hermes_skill_status=installed" in report
+    assert "synthetic_ast_smoke_status=done" in report
+    assert "aggregate_node_count=2" in report
+    assert "aggregate_edge_count=1" in report
+    assert "outbound_semantic_calls_enabled=false" in report
+    assert "hooks_enabled=false" in report
+    assert "service_enabled=false" in report
+    assert ["uv", "tool", "install", runner.GRAPHIFY_PINNED_PACKAGE] not in commands
+    assert smoke_calls
+    assert not Path(smoke_calls[0]["source"]).exists()
+    assert not Path(smoke_calls[0]["output"]).exists()
+
+
+def test_install_graphify_runtime_wrong_version_uses_pinned_install_command() -> None:
+    version_calls = 0
+    smoke_calls: list[dict[str, object]] = []
+
+    def run_command(command: list[str], cwd: str | None = None) -> tuple[int, str]:
+        nonlocal version_calls
+        del cwd
+        if command == ["graphify", "--version"]:
+            version_calls += 1
+            if version_calls == 1:
+                return 0, "graphify 0.8.43\n"
+            return 0, "graphify 0.8.44\n"
+        if command == ["uv", "tool", "install", runner.GRAPHIFY_PINNED_PACKAGE]:
+            return 0, "install output must not be reported"
+        if command == ["graphify", "--help"]:
+            return 0, ""
+        if command in (
+            ["graphify", "install-skills", "--assistant", "codex", "--user"],
+            ["graphify", "install-skills", "--assistant", "hermes", "--user"],
+        ):
+            return 0, ""
+        return 9, "unexpected command"
+
+    with (
+        mock.patch.object(runner.shutil, "which", return_value="/usr/bin/tool"),
+        mock.patch.object(runner, "run_command", side_effect=run_command) as run,
+        mock.patch.object(
+            runner, "_backup_graphify_assistant_profiles", return_value=True
+        ),
+        mock.patch.object(
+            runner.subprocess,
+            "run",
+            side_effect=_graphify_smoke_subprocess(smoke_calls),
+        ),
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.INSTALL_GRAPHIFY_RUNTIME,
+            str(runner.ROOT),
+            _graphify_issue_body(),
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert "install_status=installed" in report
+    assert ["uv", "tool", "install", "graphifyy==0.8.44"] in commands
+
+
+def test_install_graphify_runtime_invokes_only_codex_and_hermes_skill_commands() -> None:
+    smoke_calls: list[dict[str, object]] = []
+
+    def run_command(command: list[str], cwd: str | None = None) -> tuple[int, str]:
+        del cwd
+        if command == ["graphify", "--version"]:
+            return 0, "0.8.44\n"
+        if command == ["graphify", "--help"]:
+            return 0, ""
+        if command[:2] == ["graphify", "install-skills"]:
+            return 0, ""
+        return 9, "unexpected command"
+
+    with (
+        mock.patch.object(runner.shutil, "which", return_value="/usr/bin/tool"),
+        mock.patch.object(runner, "run_command", side_effect=run_command) as run,
+        mock.patch.object(
+            runner, "_backup_graphify_assistant_profiles", return_value=True
+        ),
+        mock.patch.object(
+            runner.subprocess,
+            "run",
+            side_effect=_graphify_smoke_subprocess(smoke_calls),
+        ),
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.INSTALL_GRAPHIFY_RUNTIME,
+            str(runner.ROOT),
+            _graphify_issue_body(),
+        )
+
+    skill_commands = [
+        call.args[0]
+        for call in run.call_args_list
+        if call.args[0][:2] == ["graphify", "install-skills"]
+    ]
+    assert report.startswith("DONE:")
+    assert skill_commands == [
+        ["graphify", "install-skills", "--assistant", "codex", "--user"],
+        ["graphify", "install-skills", "--assistant", "hermes", "--user"],
+    ]
+
+
+def test_install_graphify_runtime_report_is_aggregate_only(tmp_path: Path) -> None:
+    unsafe_output = (
+        f"{tmp_path}/Skeleton OPENAI_API_KEY=secret graph label corpus text"
+    )
+
+    def run_command(command: list[str], cwd: str | None = None) -> tuple[int, str]:
+        del cwd
+        if command == ["graphify", "--version"]:
+            return 0, "0.8.44\n"
+        if command == ["graphify", "--help"]:
+            return 0, unsafe_output
+        if command[:2] == ["graphify", "install-skills"]:
+            return 0, unsafe_output
+        return 9, unsafe_output
+
+    def smoke() -> tuple[str, int, int, str]:
+        return "done", 3, 2, "none"
+
+    with (
+        mock.patch.object(runner.shutil, "which", return_value="/usr/bin/tool"),
+        mock.patch.object(runner, "run_command", side_effect=run_command),
+        mock.patch.object(
+            runner, "_backup_graphify_assistant_profiles", return_value=True
+        ),
+        mock.patch.object(runner, "_run_graphify_synthetic_ast_smoke", side_effect=smoke),
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.INSTALL_GRAPHIFY_RUNTIME,
+            str(runner.ROOT),
+            _graphify_issue_body(),
+        )
+
+    assert report.startswith("DONE:")
+    assert "aggregate_node_count=3" in report
+    assert "aggregate_edge_count=2" in report
+    assert str(tmp_path) not in report
+    assert "Skeleton" not in report
+    assert "OPENAI_API_KEY" not in report
+    assert "secret" not in report.lower()
+    assert "graph label" not in report
+    assert "corpus text" not in report
+
+
+def test_install_graphify_runtime_does_not_touch_hooks_services_ports_or_private_paths() -> None:
+    smoke_calls: list[dict[str, object]] = []
+
+    def run_command(command: list[str], cwd: str | None = None) -> tuple[int, str]:
+        del cwd
+        forbidden_tokens = {
+            "sudo",
+            "systemctl",
+            "--watch",
+            "mcp",
+            "http",
+            "serve",
+            "server",
+            "neo4j",
+            "falkordb",
+            "hook",
+        }
+        assert not any(token in forbidden_tokens for token in command)
+        assert str(runner.ROOT) not in " ".join(command)
+        if command == ["graphify", "--version"]:
+            return 0, "0.8.44\n"
+        if command == ["graphify", "--help"]:
+            return 0, ""
+        if command[:2] == ["graphify", "install-skills"]:
+            return 0, ""
+        return 9, "unexpected command"
+
+    with (
+        mock.patch.object(runner.shutil, "which", return_value="/usr/bin/tool"),
+        mock.patch.object(runner, "run_command", side_effect=run_command),
+        mock.patch.object(
+            runner, "_backup_graphify_assistant_profiles", return_value=True
+        ),
+        mock.patch.object(
+            runner.subprocess,
+            "run",
+            side_effect=_graphify_smoke_subprocess(smoke_calls),
+        ),
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.INSTALL_GRAPHIFY_RUNTIME,
+            str(runner.ROOT),
+            _graphify_issue_body(),
+        )
+
+    assert report.startswith("DONE:")
+    assert "hooks_enabled=false" in report
+    assert "service_enabled=false" in report
+
+
 def test_issue_worktree_publish_inspection_is_allowlisted_and_bypasses_codex(
     tmp_path: Path,
 ) -> None:
