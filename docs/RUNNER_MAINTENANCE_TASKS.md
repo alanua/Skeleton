@@ -630,6 +630,23 @@ Allowed Files:
 - path/explicitly/allowed.ext
 ```
 
+When the GitHub existing-PR lookup is unavailable, this route remains
+fail-closed unless the issue also contains an explicit structured override:
+
+```text
+Publish Override: {"action":"publish_existing_issue_worktree","allowed_files":["path/explicitly/allowed.ext"],"base_branch":"main","draft_pr":true,"output_branch":"runner/issue-822","source_issue":822,"target_repository":"alanua/Skeleton"}
+```
+
+The override must exactly match the maintenance action, target repository,
+source issue, output branch, base branch, draft flag, and explicit allowlisted
+file set from the same issue. It only authorizes staging/committing/pushing
+those files and creating a draft PR after the runner verifies that the output
+branch is absent remotely. It never authorizes merge, deploy, runtime
+activation, canon promotion, secrets, destructive cleanup, force-push, broad
+`git add`, or issue-provided commands. Runner labels, task completion text,
+generic chat approvals such as `+`, model output, and other issues are not
+approval sources.
+
 It may only:
 
 1. Validate `Target Repository` as exactly `alanua/Skeleton`.
@@ -643,9 +660,13 @@ It may only:
 8. Verify Git metadata, current branch, and origin remote before reading diffs.
 9. Verify changed tracked files are a subset of the explicit allowlist.
 10. Ignore only local `.codex/` untracked runtime artifacts; never stage them.
-11. Stage only validated publish files, push only the exact output branch, and
+11. Reuse an existing open PR when lookup succeeds with a match.
+12. Treat a successful empty lookup as normal new draft-PR publication.
+13. If lookup is unavailable, require an exact structured override and verify
+    the output branch is absent remotely before publishing.
+14. Stage only validated publish files, push only the exact output branch, and
     create only a draft PR against the base branch.
-12. Never merge, force-push, deploy, restart services, read secrets, execute
+15. Never merge, force-push, deploy, restart services, read secrets, execute
     issue-provided commands, or use broad `git add`.
 
 It reports `DONE` only when an existing open PR is found or when the exact
@@ -653,6 +674,17 @@ branch push and draft PR creation succeed. Operator-action failures are reported
 as `NEEDS_OPERATOR` with sanitized key/value status lines only; raw command
 output, private paths outside the Runner worktree contract, secrets, task text,
 and quoted transcripts must not be included.
+
+Stable lookup and override reason tokens are:
+
+- `existing_pr_found`
+- `existing_pr_not_found`
+- `existing_pr_lookup_unavailable`
+- `publish_override_missing`
+- `publish_override_malformed`
+- `publish_override_scope_mismatch`
+- `remote_branch_conflict`
+- `publish_override_valid`
 
 `publish_target_project_issue_worktree_pr` is the bounded cross-project
 publisher for work that already exists in a registered public target-project

@@ -373,6 +373,12 @@ class IssueWorktreePublishInspectionRequest:
 
 
 @dataclass(frozen=True)
+class IssueWorktreePublishExistingPrLookup:
+    pr_url: str | None
+    reason: str
+
+
+@dataclass(frozen=True)
 class StaleCleanSkeletonWorktreeQuarantineRequest:
     worktree_ids: tuple[str, ...]
     protected_ids: frozenset[str]
@@ -6584,7 +6590,7 @@ def _is_ignored_issue_publish_untracked_path(path: str) -> bool:
 
 def _issue_worktree_publish_existing_pr_url(
     request: IssueWorktreePublishInspectionRequest, worktree_path: Path
-) -> tuple[str | None, str | None]:
+) -> IssueWorktreePublishExistingPrLookup:
     code, output = run_command(
         [
             "gh",
@@ -6604,11 +6610,72 @@ def _issue_worktree_publish_existing_pr_url(
         cwd=worktree_path,
     )
     if code != 0:
-        return None, "read_existing_pr_failed"
+        return IssueWorktreePublishExistingPrLookup(
+            pr_url=None, reason="existing_pr_lookup_unavailable"
+        )
     pr_url = output.strip()
     if pr_url and _PUBLIC_GITHUB_PR_URL_RE.fullmatch(pr_url) is None:
-        return None, "read_existing_pr_failed"
-    return pr_url or None, None
+        return IssueWorktreePublishExistingPrLookup(
+            pr_url=None, reason="existing_pr_lookup_unavailable"
+        )
+    if pr_url:
+        return IssueWorktreePublishExistingPrLookup(
+            pr_url=pr_url, reason="existing_pr_found"
+        )
+    return IssueWorktreePublishExistingPrLookup(
+        pr_url=None, reason="existing_pr_not_found"
+    )
+
+
+def _issue_worktree_publish_override_reason(
+    metadata: str, request: IssueWorktreePublishInspectionRequest
+) -> str:
+    raw_override = _body_field(metadata, "Publish Override")
+    if raw_override is None:
+        return "publish_override_missing"
+    try:
+        override = json.loads(raw_override)
+    except json.JSONDecodeError:
+        return "publish_override_malformed"
+    if not isinstance(override, dict):
+        return "publish_override_malformed"
+    expected_keys = {
+        "action",
+        "target_repository",
+        "source_issue",
+        "output_branch",
+        "base_branch",
+        "allowed_files",
+        "draft_pr",
+    }
+    if set(override) != expected_keys:
+        return "publish_override_malformed"
+    allowed_files = override.get("allowed_files")
+    if (
+        override.get("action") != PUBLISH_EXISTING_ISSUE_WORKTREE
+        or override.get("target_repository") != request.repository
+        or override.get("source_issue") != request.source_issue
+        or override.get("output_branch") != request.expected_branch
+        or override.get("base_branch") != request.base_branch
+        or override.get("draft_pr") is not True
+        or not isinstance(allowed_files, list)
+        or not all(isinstance(path, str) for path in allowed_files)
+        or any(not _safe_issue_publish_file_path(path) for path in allowed_files)
+        or len(set(allowed_files)) != len(allowed_files)
+        or set(allowed_files) != set(request.allowed_files)
+    ):
+        return "publish_override_scope_mismatch"
+    return "publish_override_valid"
+
+
+def _issue_worktree_publish_remote_branch_absent(
+    request: IssueWorktreePublishInspectionRequest, worktree_path: Path
+) -> bool:
+    code, output = run_command(
+        ["git", "ls-remote", "--heads", "origin", request.expected_branch],
+        cwd=worktree_path,
+    )
+    return code == 0 and not output.strip()
 
 
 def _issue_worktree_publish_pr_url(
@@ -6648,6 +6715,7 @@ def _issue_worktree_publish_validated_report(
     explicit_recovery_route: bool = False,
     target_project_route: bool = False,
 ) -> str:
+    metadata = (body or "").split("```task", 1)[0]
     failure_status = (
         "NEEDS_OPERATOR"
         if explicit_recovery_route or target_project_route
@@ -6693,7 +6761,10 @@ def _issue_worktree_publish_validated_report(
             "not_met",
         )
 
-    status_lines.append(f"issue_worktree={worktree_path}")
+    if explicit_recovery_route:
+        status_lines.append(f"issue_worktree_id=issue-{request.source_issue}")
+    else:
+        status_lines.append(f"issue_worktree={worktree_path}")
     if not worktree_path.exists():
         return _maintenance_report(
             failure_status,
@@ -6842,24 +6913,79 @@ def _issue_worktree_publish_validated_report(
     if not publish:
         return _maintenance_report("DONE", task_id, status_lines, "met")
 
-    existing_pr_url, existing_pr_reason = _issue_worktree_publish_existing_pr_url(
-        request, worktree_path
-    )
-    if existing_pr_reason is not None:
-        return _maintenance_report(
-            "BLOCKED",
-            task_id,
-            [*status_lines, f"step=read_existing_pr status=failed reason={existing_pr_reason}"],
-            "not_met",
+    existing_pr_lookup = _issue_worktree_publish_existing_pr_url(request, worktree_path)
+    status_lines.append(f"existing_pr_lookup={existing_pr_lookup.reason}")
+    if existing_pr_lookup.reason == "existing_pr_lookup_unavailable":
+        if not explicit_recovery_route:
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [
+                    *status_lines,
+                    "step=read_existing_pr status=failed "
+                    "reason=existing_pr_lookup_unavailable",
+                ],
+                "not_met",
+            )
+        override_reason = _issue_worktree_publish_override_reason(metadata, request)
+        if override_reason != "publish_override_valid":
+            return _maintenance_report(
+                failure_status,
+                task_id,
+                [
+                    *status_lines,
+                    f"step=publish_override status=failed reason={override_reason}",
+                    "reason=existing_pr_lookup_unavailable",
+                ],
+                "not_met",
+            )
+        status_lines.append(
+            "step=publish_override status=done reason=publish_override_valid"
         )
-    status_lines.append("step=read_existing_pr status=done")
-    if existing_pr_url is not None:
+        if not _issue_worktree_publish_remote_branch_absent(request, worktree_path):
+            return _maintenance_report(
+                failure_status,
+                task_id,
+                [
+                    *status_lines,
+                    "step=verify_remote_branch_absent status=failed "
+                    "reason=remote_branch_conflict",
+                ],
+                "not_met",
+            )
+        status_lines.append("step=verify_remote_branch_absent status=done")
+    elif existing_pr_lookup.reason == "existing_pr_found":
+        assert existing_pr_lookup.pr_url is not None
         return _maintenance_report(
             "DONE",
             task_id,
-            [*status_lines, f"existing_pr_url={existing_pr_url}"],
+            [
+                *status_lines,
+                "step=read_existing_pr status=done",
+                f"existing_pr_url={existing_pr_lookup.pr_url}",
+            ],
             "met",
         )
+    else:
+        status_lines.append("step=read_existing_pr status=done")
+        if (
+            explicit_recovery_route
+            and _body_field(metadata, "Publish Override") is not None
+        ):
+            status_lines.append(
+                "step=publish_override status=skipped reason=existing_pr_not_found"
+            )
+        if existing_pr_lookup.reason != "existing_pr_not_found":
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [
+                    *status_lines,
+                    "step=read_existing_pr status=failed "
+                    "reason=existing_pr_lookup_unavailable",
+                ],
+                "not_met",
+            )
 
     if validated_publish_files:
         code, _output = run_command(
