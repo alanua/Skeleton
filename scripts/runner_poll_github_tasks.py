@@ -33,8 +33,13 @@ from core.hermes_private_memory import (
 )
 from core.private_memory import healthcheck_private_memory, write_public_heartbeat
 from core.project_tree import get_project, get_project_by_repo, load_project_tree
+from core.runner_executor_registry import (
+    UniversalTaskExecutor,
+    default_runner_executor_registry,
+)
 from core.skeleton_memory import SkeletonMemory
 from core.telegram_approval_buttons import build_pr_ready_card_payload
+from core.universal_runner_task import SCHEMA_ID, UniversalRunnerTask, UniversalTaskError
 
 
 QUEUE_REPOSITORY = "alanua/Skeleton"
@@ -82,6 +87,7 @@ TELEGRAM_PR_READY_BUTTON_LABELS = {
     "open_pr": "Відкрити PR",
 }
 RUNTIME_MAINTENANCE_MODE = "RUNTIME_MAINTENANCE_TASK"
+UNIVERSAL_RUNNER_TASK_MODE = "UNIVERSAL_RUNNER_TASK"
 SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME = "sync_telegram_callback_poller_runtime"
 ENSURE_TELEGRAM_CALLBACK_LOCAL_CONFIG = "ensure_telegram_callback_local_config"
 CHECK_PROJECT_CHECKOUT = "check_project_checkout"
@@ -1193,6 +1199,37 @@ def extract_runtime_maintenance_task_id(body: str) -> tuple[bool, str | None]:
     return True, task_id.group("task_id") if task_id else None
 
 
+def has_universal_runner_task_mode(body: str) -> bool:
+    return (
+        re.search(
+            rf"^\s*Mode:\s*{UNIVERSAL_RUNNER_TASK_MODE}\s*$",
+            body or "",
+            re.MULTILINE,
+        )
+        is not None
+    )
+
+
+def extract_universal_runner_task(
+    body: str,
+) -> tuple[bool, UniversalRunnerTask | None, str | None]:
+    mode_found = has_universal_runner_task_mode(body)
+    task_block = extract_task_block(body)
+    if task_block is None:
+        if mode_found:
+            return True, None, "Universal runner task requires a fenced JSON task block."
+        return False, None, None
+
+    schema_hint = f'"schema": "{SCHEMA_ID}"' in task_block or f'"schema":"{SCHEMA_ID}"' in task_block
+    if not mode_found and not schema_hint:
+        return False, None, None
+
+    try:
+        return True, UniversalRunnerTask.from_json(task_block), None
+    except UniversalTaskError as exc:
+        return True, None, f"Universal runner task rejected: {exc}"
+
+
 def extract_telegram_approved_pr_merge_request(
     body: str,
 ) -> tuple[bool, TelegramApprovedPrMergeRequest | None, str | None]:
@@ -1247,8 +1284,16 @@ def _body_field(body: str, field: str) -> str | None:
 
 def has_runner_task_body(body: str) -> bool:
     maintenance_mode, _task_id = extract_runtime_maintenance_task_id(body)
+    universal_mode, _universal_task, _universal_reason = extract_universal_runner_task(
+        body
+    )
     merge_mode, _request, _reason = extract_telegram_approved_pr_merge_request(body)
-    return extract_task_block(body) is not None or maintenance_mode or merge_mode
+    return (
+        extract_task_block(body) is not None
+        or maintenance_mode
+        or universal_mode
+        or merge_mode
+    )
 
 
 def build_codex_task_prompt(
@@ -7405,6 +7450,49 @@ def process_runtime_maintenance_issue(
     notify_task_finished(issue_number, "BLOCKED", report)
 
 
+def build_universal_runner_executor(workdir: str) -> UniversalTaskExecutor:
+    registry = default_runner_executor_registry(
+        maintenance_dispatcher=dispatch_runtime_maintenance_task,
+        maintenance_workdir=workdir,
+    )
+    return UniversalTaskExecutor(registry)
+
+
+def process_universal_runner_issue(
+    issue_number: int,
+    task: UniversalRunnerTask,
+    workdir: str,
+    memory_warning: str | None = None,
+) -> None:
+    executor = build_universal_runner_executor(workdir)
+    record = executor.execute(task)
+    report = (
+        f"{record.public_status}: universal runner task {record.state.lower()}.\n"
+        f"task_id={record.task_id}\n"
+        f"executor_type={record.executor_type}\n"
+        f"action={record.action}\n"
+        f"state={record.state}\n\n"
+        f"{record.public_report}"
+    )
+    status = "DONE" if record.state == "COMPLETED" else "BLOCKED"
+    warning = record_runner_executor_result(
+        issue_number,
+        "skeleton",
+        status,
+        record.public_status,
+        task.executor_type,
+        report,
+    )
+    report = append_memory_warning(report, warning or memory_warning)
+    post_issue_comment(issue_number, report)
+    set_issue_label(
+        issue_number,
+        LABEL_RUNNING,
+        LABEL_DONE if status == "DONE" else LABEL_BLOCKED,
+    )
+    notify_task_finished(issue_number, status, report)
+
+
 def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
     issue_number = int(issue["number"])
     if not is_open_task_issue(issue):
@@ -7423,9 +7511,18 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
         maintenance_mode, maintenance_task_id = extract_runtime_maintenance_task_id(
             issue_body
         )
+        universal_mode, universal_task, universal_reason = extract_universal_runner_task(
+            issue_body
+        )
         merge_mode, merge_request, merge_reason = (
             extract_telegram_approved_pr_merge_request(issue_body)
         )
+        if universal_mode and universal_task is None:
+            block_issue(
+                issue_number,
+                universal_reason or "Universal runner task envelope is malformed.",
+            )
+            return
         if maintenance_mode and maintenance_task_id is None:
             block_issue(
                 issue_number,
@@ -7445,7 +7542,9 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             )
             return
 
-        if maintenance_mode:
+        if universal_mode:
+            task_content = ""
+        elif maintenance_mode:
             task_content = ""
         else:
             runner_task, task_reason = extract_runner_task(issue_body)
@@ -7499,13 +7598,32 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
 
         set_issue_label(issue_number, LABEL_READY, LABEL_RUNNING)
         claimed = True
-        executor_name = "maintenance" if maintenance_mode or merge_mode else "codex"
+        executor_name = (
+            universal_task.executor_type
+            if universal_mode and universal_task is not None
+            else "maintenance"
+            if maintenance_mode or merge_mode
+            else "codex"
+        )
         pickup_memory_warning = record_runner_task_picked_up(
             issue_number,
             runner_task.target_project if runner_task is not None else "skeleton",
             executor_name,
         )
 
+        if universal_mode and universal_task is not None:
+            if pickup_memory_warning:
+                process_universal_runner_issue(
+                    issue_number,
+                    universal_task,
+                    coordinator_workdir,
+                    pickup_memory_warning,
+                )
+            else:
+                process_universal_runner_issue(
+                    issue_number, universal_task, coordinator_workdir
+                )
+            return
         if maintenance_mode and maintenance_task_id is not None:
             if pickup_memory_warning:
                 process_runtime_maintenance_issue(
