@@ -2893,6 +2893,13 @@ def _restore_graphify_profiles(backup: GraphifyProfileBackup) -> str:
     return "restored"
 
 
+def _restore_graphify_profiles_safely(backup: GraphifyProfileBackup) -> str:
+    try:
+        return _restore_graphify_profiles(backup)
+    except Exception:
+        return "failed"
+
+
 def _graphify_runtime_blocked_report(
     status_lines: list[str],
     reason: str,
@@ -3158,7 +3165,7 @@ def install_graphify_runtime(body: str) -> str:
         )
         if reason is not None:
             status_lines.append("step=install_codex_skill status=failed")
-            rollback_status = _restore_graphify_profiles(backup)
+            rollback_status = _restore_graphify_profiles_safely(backup)
             return _graphify_runtime_blocked_report(
                 status_lines,
                 reason,
@@ -3166,7 +3173,7 @@ def install_graphify_runtime(body: str) -> str:
             )
         if code != 0:
             status_lines.append("step=install_codex_skill status=failed")
-            rollback_status = _restore_graphify_profiles(backup)
+            rollback_status = _restore_graphify_profiles_safely(backup)
             return _graphify_runtime_blocked_report(
                 status_lines,
                 "codex_skill_install_failed",
@@ -3181,7 +3188,7 @@ def install_graphify_runtime(body: str) -> str:
         )
         if reason is not None:
             status_lines.append("step=install_hermes_skill status=failed")
-            rollback_status = _restore_graphify_profiles(backup)
+            rollback_status = _restore_graphify_profiles_safely(backup)
             return _graphify_runtime_blocked_report(
                 status_lines,
                 reason,
@@ -3189,7 +3196,7 @@ def install_graphify_runtime(body: str) -> str:
             )
         if code != 0:
             status_lines.append("step=install_hermes_skill status=failed")
-            rollback_status = _restore_graphify_profiles(backup)
+            rollback_status = _restore_graphify_profiles_safely(backup)
             return _graphify_runtime_blocked_report(
                 status_lines,
                 "hermes_skill_install_failed",
@@ -3199,14 +3206,14 @@ def install_graphify_runtime(body: str) -> str:
 
         reason = _run_graphify_ast_smoke(status_lines)
         if reason is not None:
-            rollback_status = _restore_graphify_profiles(backup)
+            rollback_status = _restore_graphify_profiles_safely(backup)
             return _graphify_runtime_blocked_report(
                 status_lines,
                 reason,
                 rollback_status,
             )
     except Exception:
-        rollback_status = _restore_graphify_profiles(backup)
+        rollback_status = _restore_graphify_profiles_safely(backup)
         return _graphify_runtime_blocked_report(
             status_lines,
             GRAPHIFY_RUNTIME_UNEXPECTED_FAILURE_REASON,
