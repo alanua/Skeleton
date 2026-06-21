@@ -2538,6 +2538,9 @@ GRAPHIFY_PROFILE_ROOT_RELATIVE_PATHS = (
 )
 GRAPHIFY_VERSION_MARKER_FILENAME = ".graphify_version"
 GRAPHIFY_UPSTREAM_COMMIT = "5d053721aba875156cf2a6ddd6953d8beee98147"
+GRAPHIFY_RUNTIME_UNEXPECTED_FAILURE_REASON = "graphify_runtime_unexpected_failure"
+GRAPHIFY_COMMAND_PERMISSION_REASON = "graphify_command_permission_denied"
+GRAPHIFY_COMMAND_LAUNCH_REASON = "graphify_command_launch_failed"
 GRAPHIFY_UPSTREAM_PLATFORM_SKILL_RELATIVE_PATHS = {
     "aider": (Path(".aider") / "graphify" / "SKILL.md",),
     "amp": (Path(".config") / "agents" / "skills" / "graphify" / "SKILL.md",),
@@ -2903,6 +2906,34 @@ def _graphify_runtime_blocked_report(
     )
 
 
+def _graphify_command_exception_reason(
+    error: Exception, command_unavailable_reason: str
+) -> str:
+    if isinstance(error, PermissionError):
+        return GRAPHIFY_COMMAND_PERMISSION_REASON
+    if isinstance(error, FileNotFoundError):
+        return command_unavailable_reason
+    if isinstance(error, (OSError, subprocess.SubprocessError)):
+        return GRAPHIFY_COMMAND_LAUNCH_REASON
+    return GRAPHIFY_RUNTIME_UNEXPECTED_FAILURE_REASON
+
+
+def _run_graphify_runtime_command(
+    command: list[str],
+    *,
+    command_unavailable_reason: str,
+    cwd: str | Path | None = None,
+) -> tuple[int | None, str, str | None]:
+    try:
+        code, output = run_command(command, cwd=cwd)
+    except Exception as error:
+        return None, "", _graphify_command_exception_reason(
+            error,
+            command_unavailable_reason,
+        )
+    return code, output, None
+
+
 def _graphify_cli_contract_preflight(status_lines: list[str]) -> str | None:
     checks = (
         (
@@ -2923,7 +2954,13 @@ def _graphify_cli_contract_preflight(status_lines: list[str]) -> str | None:
         ),
     )
     for step, command, accepts in checks:
-        code, output = run_command(command)
+        code, output, reason = _run_graphify_runtime_command(
+            command,
+            command_unavailable_reason="graphify_cli_command_unavailable",
+        )
+        if reason is not None:
+            status_lines.append(f"step={step} status=failed")
+            return reason
         if code != 0 or not accepts(output):
             status_lines.append(f"step={step} status=failed")
             return "graphify_cli_contract_unverified"
@@ -2981,6 +3018,12 @@ def _run_graphify_smoke_command(command: list[str]) -> tuple[int, str]:
         )
     except subprocess.TimeoutExpired:
         return 124, ""
+    except PermissionError:
+        return 126, ""
+    except FileNotFoundError:
+        return 127, ""
+    except (OSError, subprocess.SubprocessError):
+        return 125, ""
     return result.returncode, result.stdout + result.stderr
 
 
@@ -3014,6 +3057,15 @@ def _run_graphify_ast_smoke(status_lines: list[str]) -> str | None:
         if code == 124:
             status_lines.append("step=run_synthetic_ast_smoke status=timeout")
             return "synthetic_ast_smoke_timeout"
+        if code == 126:
+            status_lines.append("step=run_synthetic_ast_smoke status=failed")
+            return GRAPHIFY_COMMAND_PERMISSION_REASON
+        if code == 127:
+            status_lines.append("step=run_synthetic_ast_smoke status=failed")
+            return "graphify_cli_command_unavailable"
+        if code == 125:
+            status_lines.append("step=run_synthetic_ast_smoke status=failed")
+            return GRAPHIFY_COMMAND_LAUNCH_REASON
         if code != 0:
             status_lines.append("step=run_synthetic_ast_smoke status=failed")
             return "synthetic_ast_smoke_failed"
@@ -3060,7 +3112,16 @@ def install_graphify_runtime(body: str) -> str:
         )
     status_lines.append("approval_status=verified")
 
-    code, _output = run_command(list(GRAPHIFY_TOOL_INSTALL_COMMAND), cwd=ROOT)
+    code, _output, reason = _run_graphify_runtime_command(
+        list(GRAPHIFY_TOOL_INSTALL_COMMAND),
+        command_unavailable_reason="graphify_tool_command_unavailable",
+        cwd=ROOT,
+    )
+    if reason is not None:
+        return _graphify_runtime_blocked_report(
+            [*status_lines, "step=install_pinned_graphify_tool status=failed"],
+            reason,
+        )
     if code != 0:
         return _graphify_runtime_blocked_report(
             [*status_lines, "step=install_pinned_graphify_tool status=failed"],
@@ -3068,11 +3129,17 @@ def install_graphify_runtime(body: str) -> str:
         )
     status_lines.append("step=install_pinned_graphify_tool status=done")
 
-    reason = _graphify_cli_contract_preflight(status_lines)
-    if reason is not None:
-        return _graphify_runtime_blocked_report(status_lines, reason)
+    try:
+        reason = _graphify_cli_contract_preflight(status_lines)
+        if reason is not None:
+            return _graphify_runtime_blocked_report(status_lines, reason)
 
-    backup, backup_status, backup_item_count = _backup_graphify_profiles()
+        backup, backup_status, backup_item_count = _backup_graphify_profiles()
+    except Exception:
+        return _graphify_runtime_blocked_report(
+            status_lines,
+            GRAPHIFY_RUNTIME_UNEXPECTED_FAILURE_REASON,
+        )
     status_lines.extend(
         (
             f"profile_backup_status={backup_status}",
@@ -3083,32 +3150,66 @@ def install_graphify_runtime(body: str) -> str:
     if backup is None:
         return _graphify_runtime_blocked_report(status_lines, "profile_backup_failed")
 
-    code, _output = run_command(list(GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND), cwd=ROOT)
-    if code != 0:
-        rollback_status = _restore_graphify_profiles(backup)
-        return _graphify_runtime_blocked_report(
-            [*status_lines, "step=install_codex_skill status=failed"],
-            "codex_skill_install_failed",
-            rollback_status,
+    try:
+        code, _output, reason = _run_graphify_runtime_command(
+            list(GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND),
+            command_unavailable_reason="graphify_cli_command_unavailable",
+            cwd=ROOT,
         )
-    status_lines.append("step=install_codex_skill status=done")
+        if reason is not None:
+            status_lines.append("step=install_codex_skill status=failed")
+            rollback_status = _restore_graphify_profiles(backup)
+            return _graphify_runtime_blocked_report(
+                status_lines,
+                reason,
+                rollback_status,
+            )
+        if code != 0:
+            status_lines.append("step=install_codex_skill status=failed")
+            rollback_status = _restore_graphify_profiles(backup)
+            return _graphify_runtime_blocked_report(
+                status_lines,
+                "codex_skill_install_failed",
+                rollback_status,
+            )
+        status_lines.append("step=install_codex_skill status=done")
 
-    code, _output = run_command(list(GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND), cwd=ROOT)
-    if code != 0:
-        rollback_status = _restore_graphify_profiles(backup)
-        return _graphify_runtime_blocked_report(
-            [*status_lines, "step=install_hermes_skill status=failed"],
-            "hermes_skill_install_failed",
-            rollback_status,
+        code, _output, reason = _run_graphify_runtime_command(
+            list(GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND),
+            command_unavailable_reason="graphify_cli_command_unavailable",
+            cwd=ROOT,
         )
-    status_lines.append("step=install_hermes_skill status=done")
+        if reason is not None:
+            status_lines.append("step=install_hermes_skill status=failed")
+            rollback_status = _restore_graphify_profiles(backup)
+            return _graphify_runtime_blocked_report(
+                status_lines,
+                reason,
+                rollback_status,
+            )
+        if code != 0:
+            status_lines.append("step=install_hermes_skill status=failed")
+            rollback_status = _restore_graphify_profiles(backup)
+            return _graphify_runtime_blocked_report(
+                status_lines,
+                "hermes_skill_install_failed",
+                rollback_status,
+            )
+        status_lines.append("step=install_hermes_skill status=done")
 
-    reason = _run_graphify_ast_smoke(status_lines)
-    if reason is not None:
+        reason = _run_graphify_ast_smoke(status_lines)
+        if reason is not None:
+            rollback_status = _restore_graphify_profiles(backup)
+            return _graphify_runtime_blocked_report(
+                status_lines,
+                reason,
+                rollback_status,
+            )
+    except Exception:
         rollback_status = _restore_graphify_profiles(backup)
         return _graphify_runtime_blocked_report(
             status_lines,
-            reason,
+            GRAPHIFY_RUNTIME_UNEXPECTED_FAILURE_REASON,
             rollback_status,
         )
 
