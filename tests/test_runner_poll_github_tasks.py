@@ -3313,6 +3313,45 @@ def test_graphify_runtime_restore_failure_reports_failed_safely(tmp_path: Path) 
     assert str(tmp_path) not in report
 
 
+def test_graphify_runtime_restore_exception_reports_failed_safely(
+    tmp_path: Path,
+) -> None:
+    managed_paths = _graphify_managed_paths(tmp_path / "home")
+    codex_skill = managed_paths[0]
+    codex_skill.mkdir(parents=True)
+    (codex_skill / "SKILL.md").write_text("original\n", encoding="utf-8")
+
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        if command == list(runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND):
+            (codex_skill / "SKILL.md").write_text("mutated\n", encoding="utf-8")
+            raise RuntimeError("raw mutation detail must not leak")
+        return _successful_graphify_runtime_command(command, cwd)
+
+    with mock.patch.object(
+        runner, "_graphify_managed_profile_paths", return_value=managed_paths
+    ), mock.patch.object(
+        runner, "_graphify_private_snapshot_parent", return_value=tmp_path / "snapshots"
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run
+    ), mock.patch.object(
+        runner,
+        "_restore_graphify_profiles",
+        side_effect=RuntimeError("raw restore detail must not leak"),
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.INSTALL_GRAPHIFY_RUNTIME,
+            str(runner.ROOT),
+            _graphify_runtime_body(),
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=graphify_runtime_unexpected_failure" in report
+    assert "rollback_status=failed" in report
+    assert "raw mutation detail must not leak" not in report
+    assert "raw restore detail must not leak" not in report
+    assert str(tmp_path) not in report
+
+
 def test_graphify_runtime_restores_when_smoke_graph_json_is_empty(tmp_path: Path) -> None:
     managed_paths = _graphify_managed_paths(tmp_path / "home")
     codex_skill = managed_paths[0]
