@@ -1,0 +1,616 @@
+schema: skeleton.rule_enforcement_registry.v1
+version: 0.2.0
+status: stage0_inventory_only
+program: Skeleton Rules Rebuild
+stage: stage0_foundation
+boundary:
+  runtime_behavior_changed: false
+  merge_enabled: false
+  canon_promotion_enabled: false
+  skeleton_jeeves_boundary: preserved
+issue_refs:
+  - "#883"
+  - "#867"
+  - "#916"
+  - "#1066"
+  - "#1085"
+  - "#1088"
+source_coverage:
+  - source_file: BOOT_MANIFEST.yaml
+    classification: covered
+    notes: Boot route and Runner Inbox route boundaries are inventoried.
+  - source_file: CAPABILITY_REGISTRY.yaml
+    classification: covered
+    notes: Capability status and live runtime flags are inventoried.
+  - source_file: COMMANDS.yaml
+    classification: covered
+    notes: Operator command gates, continuation, batching, and canon-write routing are inventoried.
+  - source_file: HELPER_REGISTRY.yaml
+    classification: covered
+    notes: Helper authority boundaries are inventoried.
+  - source_file: MEMORY_ROUTING.yaml
+    classification: covered
+    notes: Public/private memory and risky action routing are inventoried.
+  - source_file: OPERATOR_RULES.yaml
+    classification: duplicated
+    notes: Existing advisory registry overlaps with command, memory, and gate rules.
+  - source_file: PROJECT_TREE.yaml
+    classification: needs_review
+    notes: Project routing includes public and private routes; Stage 0 records only boundary classes.
+  - source_file: PROVIDER_ROUTING.yaml
+    classification: covered
+    notes: Provider tiers, budget guard, and audit routing are inventoried.
+  - source_file: core/action_gate.py
+    classification: covered
+    notes: Dry-run action gate is inventoried without live activation.
+  - source_file: core/audit_ledger.py
+    classification: covered
+    notes: Public-safe audit ledger privacy checks are inventoried.
+  - source_file: core/gate_engine.py
+    classification: covered
+    notes: PatchPlan write gate is inventoried.
+  - source_file: core/memory_manager.py
+    classification: covered
+    notes: Public/private memory route classifier is inventoried.
+  - source_file: core/merge_policy_checker.py
+    classification: covered
+    notes: Merge decision and delegated merge checkers are inventoried.
+  - source_file: core/project_tree.py
+    classification: covered
+    notes: Registered project route loading is inventoried.
+  - source_file: docs/ACTION_GATE.md
+    classification: covered
+    notes: Action gate documentation is inventoried.
+  - source_file: docs/JEEVES_BRIDGE.md
+    classification: advisory
+    notes: Skeleton/Jeeves boundary statement is advisory in Stage 0.
+  - source_file: docs/RUNNER_MAINTENANCE_TASKS.md
+    classification: needs_review
+    notes: Maintenance task policy is broad; full task inventory remains Stage 1 work.
+  - source_file: docs/RUNNER_QUEUE_STATUS.md
+    classification: advisory
+    notes: Current queue status is advisory state, not a durable rule source.
+  - source_file: policies/DELEGATED_MERGE_POLICY.yaml
+    classification: duplicated
+    notes: Delegated review-only merge policy overlaps with merge decision policy and action gate.
+  - source_file: policies/MERGE_DECISION_POLICY.yaml
+    classification: duplicated
+    notes: Stage 1 merge policy overlaps with delegated merge policy and action gate.
+  - source_file: policies/RULE_ENFORCEMENT_REGISTRY.yaml
+    classification: covered
+    notes: Stage 0 registry policy is inventoried.
+  - source_file: schemas/action_gate.schema.json
+    classification: covered
+    notes: Schema source inventoried.
+  - source_file: schemas/aufmass_dxf_extract.schema.json
+    classification: covered
+    notes: Schema source inventoried.
+  - source_file: schemas/aufmass_export.schema.json
+    classification: covered
+    notes: Schema source inventoried.
+  - source_file: schemas/aufmass_input.schema.json
+    classification: covered
+    notes: Schema source inventoried.
+  - source_file: schemas/aufmass_manual_input.schema.json
+    classification: covered
+    notes: Schema source inventoried.
+  - source_file: schemas/aufmass_opening_height_review.schema.json
+    classification: covered
+    notes: Schema source inventoried.
+  - source_file: schemas/aufmass_private_pilot_manifest.schema.json
+    classification: covered
+    notes: Schema source inventoried.
+  - source_file: schemas/aufmass_room_match.schema.json
+    classification: covered
+    notes: Schema source inventoried.
+  - source_file: schemas/aufmass_room_review.schema.json
+    classification: covered
+    notes: Schema source inventoried.
+  - source_file: schemas/aufmass_section_alignment.schema.json
+    classification: covered
+    notes: Schema source inventoried.
+  - source_file: schemas/aufmass_source_pack.schema.json
+    classification: covered
+    notes: Schema source inventoried.
+  - source_file: schemas/aufmass_wall_area_review.schema.json
+    classification: covered
+    notes: Schema source inventoried.
+  - source_file: schemas/boot_manifest.schema.json
+    classification: covered
+    notes: Schema source inventoried.
+  - source_file: schemas/boot_report.schema.json
+    classification: covered
+    notes: Schema source inventoried.
+  - source_file: schemas/command.schema.json
+    classification: covered
+    notes: Schema source inventoried.
+  - source_file: schemas/graph_memory_query.schema.json
+    classification: covered
+    notes: Schema source inventoried.
+  - source_file: schemas/hermes_provider_routing.schema.json
+    classification: covered
+    notes: Schema source inventoried.
+  - source_file: schemas/hermes_queue_audit_packet.schema.json
+    classification: covered
+    notes: Schema source inventoried.
+  - source_file: schemas/hermes_skill_manifest.schema.json
+    classification: covered
+    notes: Schema source inventoried.
+  - source_file: schemas/hermes_task_packet.schema.json
+    classification: covered
+    notes: Schema source inventoried.
+  - source_file: schemas/memory_record.schema.json
+    classification: covered
+    notes: Schema source inventoried.
+  - source_file: schemas/memory_store.schema.json
+    classification: covered
+    notes: Schema source inventoried.
+  - source_file: schemas/mode.schema.json
+    classification: covered
+    notes: Schema source inventoried.
+  - source_file: schemas/operator_event.schema.json
+    classification: covered
+    notes: Schema source inventoried.
+  - source_file: schemas/patch_plan.schema.json
+    classification: covered
+    notes: Schema source inventoried.
+  - source_file: schemas/private_project_memory.schema.json
+    classification: covered
+    notes: Schema source inventoried.
+  - source_file: schemas/project_manifest.schema.json
+    classification: covered
+    notes: Schema source inventoried.
+  - source_file: schemas/project_state.schema.json
+    classification: covered
+    notes: Schema source inventoried.
+  - source_file: schemas/rule_enforcement_registry.schema.json
+    classification: covered
+    notes: Stage 0 registry schema is inventoried.
+  - source_file: schemas/runner_bridge.schema.json
+    classification: covered
+    notes: Schema source inventoried.
+  - source_file: schemas/skeleton_evidence_packet.schema.json
+    classification: covered
+    notes: Schema source inventoried.
+  - source_file: schemas/skeleton_governance_contract.schema.json
+    classification: covered
+    notes: Schema source inventoried.
+  - source_file: schemas/skeleton_governance_gate_fixture.schema.json
+    classification: covered
+    notes: Schema source inventoried.
+  - source_file: schemas/skeleton_memory_event.schema.json
+    classification: covered
+    notes: Schema source inventoried.
+  - source_file: schemas/skeleton_role_manifest.schema.json
+    classification: covered
+    notes: Schema source inventoried.
+  - source_file: schemas/skeleton_task_template.schema.json
+    classification: covered
+    notes: Schema source inventoried.
+  - source_file: schemas/telegram_approval_buttons.schema.json
+    classification: covered
+    notes: Schema source inventoried.
+  - source_file: schemas/telegram_operator_event_bridge.schema.json
+    classification: covered
+    notes: Schema source inventoried.
+  - source_file: scripts/runner_poll_github_tasks.py
+    classification: needs_review
+    notes: Runner task, merge, queue, maintenance, and private boundary logic is large and partially live.
+rules:
+  - rule_id: merge_requires_exact_operator_approval
+    title: Merge requests require exact operator approval
+    source_file: core/action_gate.py
+    source_locator: validate_action_request
+    owner_component: action_gate
+    lifecycle: active
+    enforcement: runtime_gate
+    gate_entrypoint: core.action_gate.validate_action_request
+    reason_tokens:
+      - user_approved_must_be_true
+      - expected_head_sha_must_be_valid
+      - expected_files_must_be_safe
+    test_evidence:
+      - tests/test_action_gate.py
+      - tests/test_merge_policy_checker.py
+    audit_evidence:
+      - docs/ACTION_GATE.md
+      - schemas/action_gate.schema.json
+    protected_actions:
+      - merge_pull_request
+    approval_scope: exact_pr_head_and_files
+    public_private_boundary: public_only
+    supersedes: []
+    superseded_by: []
+    notes: Dry-run gate only; no merge action is enabled by this registry.
+  - rule_id: merge_policy_hard_stop_files_ask_operator
+    title: Hard-stop merge policy files ask the operator
+    source_file: policies/MERGE_DECISION_POLICY.yaml
+    source_locator: hard_stop_file_patterns
+    owner_component: merge_policy_checker
+    lifecycle: active
+    enforcement: preflight_gate
+    gate_entrypoint: core.merge_policy_checker.MergePolicyChecker.check
+    reason_tokens:
+      - hard_stop_file_changed
+      - operator_review_trigger_found
+    test_evidence:
+      - tests/test_merge_policy_checker.py
+    audit_evidence:
+      - policies/MERGE_DECISION_POLICY.yaml:hard_stop_file_patterns
+    protected_actions:
+      - instruction_change
+    approval_scope: exact_pr_head_and_files
+    public_private_boundary: public_only
+    supersedes: []
+    superseded_by: []
+    notes: Stage 0 records the existing decision policy as preflight evidence.
+  - rule_id: delegated_merge_review_only
+    title: Delegated merge policy remains review-only
+    source_file: policies/DELEGATED_MERGE_POLICY.yaml
+    source_locator: scope
+    owner_component: merge_policy_checker
+    lifecycle: advisory
+    enforcement: documentation_only
+    gate_entrypoint: policies/DELEGATED_MERGE_POLICY.yaml:scope
+    reason_tokens:
+      - review_trigger_found
+    test_evidence:
+      - tests/test_merge_policy_checker.py
+    audit_evidence:
+      - policies/DELEGATED_MERGE_POLICY.yaml:scope
+    protected_actions:
+      - merge_pull_request
+    approval_scope: exact_pr_head_and_files
+    public_private_boundary: public_only
+    supersedes: []
+    superseded_by: []
+    notes: Advisory inventory only; not counted as active enforcement.
+  - rule_id: runtime_maintenance_requires_allowlisted_task
+    title: Runtime maintenance requires an allowlisted task id
+    source_file: scripts/runner_poll_github_tasks.py
+    source_locator: dispatch_runtime_maintenance_task
+    owner_component: runner_maintenance
+    lifecycle: active
+    enforcement: runtime_gate
+    gate_entrypoint: scripts.runner_poll_github_tasks.dispatch_runtime_maintenance_task
+    reason_tokens:
+      - missing_runtime_maintenance_task_id
+      - unknown_maintenance_task_id
+      - blocked_runtime_maintenance_task
+    test_evidence:
+      - tests/test_runner_poll_github_tasks.py
+    audit_evidence:
+      - docs/RUNNER_MAINTENANCE_TASKS.md
+    protected_actions:
+      - runtime_maintenance_task
+    approval_scope: exact_task_id
+    public_private_boundary: public_summary_private_detail
+    supersedes: []
+    superseded_by: []
+    notes: Stage 0 inventories the allowlist; it does not add maintenance actions.
+  - rule_id: secrets_never_public_outputs
+    title: Secrets and credentials never enter public outputs
+    source_file: OPERATOR_RULES.yaml
+    source_locator: rules.no_secrets_in_public_outputs
+    owner_component: operator_rules
+    lifecycle: active
+    enforcement: route_validation
+    gate_entrypoint: core.audit_ledger.validate_public_safe_payload
+    reason_tokens:
+      - secret_material_detected
+      - private_locator_detected
+    test_evidence:
+      - tests/test_audit_ledger.py
+      - tests/test_operator_rules_registry.py
+    audit_evidence:
+      - OPERATOR_RULES.yaml:rules.no_secrets_in_public_outputs
+      - core/audit_ledger.py:validate_public_safe_payload
+    protected_actions:
+      - public_output
+    approval_scope: exact_private_boundary
+    public_private_boundary: no_private_data
+    supersedes: []
+    superseded_by: []
+    notes: Keeps Stage 0 reports public-safe and count-oriented.
+  - rule_id: provider_budget_hard_stop
+    title: Provider calls respect budget and quota hard stops
+    source_file: PROVIDER_ROUTING.yaml
+    source_locator: budget_guard
+    owner_component: provider_routing
+    lifecycle: active
+    enforcement: route_validation
+    gate_entrypoint: PROVIDER_ROUTING.yaml:budget_guard
+    reason_tokens:
+      - provider_budget_hard_stop
+      - provider_quota_limit
+    test_evidence:
+      - tests/test_hermes_provider_routing_policy.py
+    audit_evidence:
+      - PROVIDER_ROUTING.yaml:budget_guard
+    protected_actions:
+      - provider_call
+    approval_scope: exact_provider_tier_and_budget
+    public_private_boundary: public_summary_private_detail
+    supersedes: []
+    superseded_by: []
+    notes: Registry records existing policy only; no provider call is made.
+  - rule_id: canon_promotion_requires_explicit_approval
+    title: Canon promotion requires explicit approval
+    source_file: MEMORY_ROUTING.yaml
+    source_locator: runner_inbox_rule
+    owner_component: memory_routing
+    lifecycle: active
+    enforcement: route_validation
+    gate_entrypoint: core.gate_engine.GateEngine.check_patch_plan
+    reason_tokens:
+      - canon_requires_explicit_operator_approval
+      - current_rule_read_must_be_true
+      - operator_approval_required
+    test_evidence:
+      - tests/test_write_gate.py
+      - tests/test_memory_routing.py
+    audit_evidence:
+      - MEMORY_ROUTING.yaml:runner_inbox_rule
+      - core/gate_engine.py:GateEngine.check_patch_plan
+    protected_actions:
+      - canon_promotion
+    approval_scope: exact_memory_classification
+    public_private_boundary: public_summary_private_detail
+    supersedes: []
+    superseded_by: []
+    notes: Public-safe review queue entries are not automatic canon.
+  - rule_id: public_private_memory_route_boundary
+    title: Public/private memory routes preserve boundary
+    source_file: MEMORY_ROUTING.yaml
+    source_locator: routes
+    owner_component: memory_routing
+    lifecycle: active
+    enforcement: route_validation
+    gate_entrypoint: core.memory_manager.route_memory_record
+    reason_tokens:
+      - route_private_context_privately
+      - secrets_never_to_public_storage
+    test_evidence:
+      - tests/test_memory_manager.py
+      - tests/test_private_memory.py
+    audit_evidence:
+      - MEMORY_ROUTING.yaml:routes
+      - core/memory_manager.py:route_memory_record
+    protected_actions:
+      - memory_write
+    approval_scope: exact_memory_classification
+    public_private_boundary: public_summary_private_detail
+    supersedes: []
+    superseded_by: []
+    notes: Public reports may carry aggregate status only.
+  - rule_id: destructive_actions_require_separate_approval
+    title: Destructive actions require separate explicit approval
+    source_file: MEMORY_ROUTING.yaml
+    source_locator: risky_action_rule
+    owner_component: action_gate
+    lifecycle: active
+    enforcement: route_validation
+    gate_entrypoint: MEMORY_ROUTING.yaml:risky_action_rule
+    reason_tokens:
+      - destructive_operations_require_approval
+      - risky_actions_require_separate_approval
+    test_evidence:
+      - tests/test_operator_rules_registry.py
+    audit_evidence:
+      - MEMORY_ROUTING.yaml:risky_action_rule
+    protected_actions:
+      - destructive_operations
+    approval_scope: exact_route_and_target
+    public_private_boundary: public_summary_private_detail
+    supersedes: []
+    superseded_by: []
+    notes: Stage 0 does not add destructive capability.
+  - rule_id: runner_task_envelope_required
+    title: Runner tasks require a bounded task envelope
+    source_file: scripts/runner_poll_github_tasks.py
+    source_locator: extract_runner_task
+    owner_component: runner_queue
+    lifecycle: active
+    enforcement: runtime_gate
+    gate_entrypoint: scripts.runner_poll_github_tasks.extract_runner_task
+    reason_tokens:
+      - missing_task_envelope
+      - malformed_task_envelope
+    test_evidence:
+      - tests/test_runner_poll.py
+      - tests/test_runner_poll_github_tasks.py
+    audit_evidence:
+      - docs/RUNNER_QUEUE_STATUS.md
+    protected_actions:
+      - runner_task
+    approval_scope: exact_queue_issue
+    public_private_boundary: public_only
+    supersedes: []
+    superseded_by: []
+    notes: Existing Runner queue behavior is inventoried only.
+  - rule_id: executor_selection_stays_allowlisted
+    title: Executor selection stays allowlisted
+    source_file: HELPER_REGISTRY.yaml
+    source_locator: helpers
+    owner_component: helper_registry
+    lifecycle: active
+    enforcement: route_validation
+    gate_entrypoint: HELPER_REGISTRY.yaml:helpers
+    reason_tokens:
+      - executor_not_allowlisted
+      - helper_boundary_violation
+    test_evidence:
+      - tests/test_helper_registry.py
+    audit_evidence:
+      - HELPER_REGISTRY.yaml:helpers
+    protected_actions:
+      - executor_selection
+    approval_scope: exact_executor_lane
+    public_private_boundary: public_summary_private_detail
+    supersedes: []
+    superseded_by: []
+    notes: Helpers retain declared authority boundaries.
+  - rule_id: queue_retry_checkpoint_cancel_sanitized
+    title: Queue retry, checkpoint, and cancel reporting stays sanitized
+    source_file: scripts/runner_poll_github_tasks.py
+    source_locator: sanitize_public_report
+    owner_component: runner_queue
+    lifecycle: needs_review
+    enforcement: test_only
+    gate_entrypoint: tests/test_runner_poll_github_tasks.py
+    reason_tokens:
+      - queue_report_public_safe
+      - cancelled
+      - checkpoint_required
+    test_evidence:
+      - tests/test_runner_poll_github_tasks.py
+    audit_evidence:
+      - docs/RUNNER_QUEUE_STATUS.md
+    protected_actions:
+      - queue_retry
+      - queue_checkpoint
+      - queue_cancel
+    approval_scope: exact_queue_issue
+    public_private_boundary: public_summary_private_detail
+    supersedes: []
+    superseded_by: []
+    notes: Needs Stage 1 decomposition because queue state handling is spread through the Runner script.
+  - rule_id: cross_project_routes_require_registered_project
+    title: Cross-project routes require a registered project route
+    source_file: PROJECT_TREE.yaml
+    source_locator: projects
+    owner_component: project_tree
+    lifecycle: active
+    enforcement: route_validation
+    gate_entrypoint: core.project_tree.load_project_tree
+    reason_tokens:
+      - unknown_project_route
+      - live_cross_repo_not_enabled
+      - runtime_approval_required
+    test_evidence:
+      - tests/test_project_tree.py
+      - tests/test_runner_worktree.py
+    audit_evidence:
+      - PROJECT_TREE.yaml:projects
+    protected_actions:
+      - cross_project_routing
+    approval_scope: exact_project_route
+    public_private_boundary: public_summary_private_detail
+    supersedes: []
+    superseded_by: []
+    notes: Stage 0 reports no private checkout paths or environment details.
+  - rule_id: skeleton_jeeves_boundary_preserved
+    title: Skeleton and Jeeves remain separate runtime domains
+    source_file: docs/JEEVES_BRIDGE.md
+    source_locator: Skeleton must not become the Jeeves runtime
+    owner_component: architecture_boundary
+    lifecycle: advisory
+    enforcement: documentation_only
+    gate_entrypoint: docs/JEEVES_BRIDGE.md
+    reason_tokens:
+      - skeleton_is_control_layer
+      - jeeves_runtime_separate
+    test_evidence:
+      - tests/test_project_manifests.py
+      - tests/test_adapter_contracts.py
+    audit_evidence:
+      - docs/JEEVES_BRIDGE.md
+    protected_actions:
+      - jeeves_runtime_boundary
+    approval_scope: exact_project_route
+    public_private_boundary: public_summary_private_detail
+    supersedes: []
+    superseded_by: []
+    notes: Advisory Stage 0 boundary record; no Jeeves runtime activation.
+  - rule_id: private_maintenance_reports_aggregate_only
+    title: Private maintenance reports aggregate status only
+    source_file: docs/RUNNER_MAINTENANCE_TASKS.md
+    source_locator: private_memory_healthcheck
+    owner_component: runner_maintenance
+    lifecycle: needs_review
+    enforcement: test_only
+    gate_entrypoint: tests/test_runner_poll_github_tasks.py
+    reason_tokens:
+      - public_safe_report_ok
+      - privacy_violation
+      - safe_operator_review
+    test_evidence:
+      - tests/test_runner_poll_github_tasks.py
+      - tests/test_hermes_private_memory.py
+    audit_evidence:
+      - docs/RUNNER_MAINTENANCE_TASKS.md
+    protected_actions:
+      - private_maintenance_report
+    approval_scope: exact_private_boundary
+    public_private_boundary: public_summary_private_detail
+    supersedes: []
+    superseded_by: []
+    notes: Needs review because aggregate-only privacy is test-covered but not a single active gate.
+  - rule_id: operator_rules_registry_advisory_only
+    title: Operator rules registry remains advisory in Stage 0
+    source_file: OPERATOR_RULES.yaml
+    source_locator: enforcement_model
+    owner_component: operator_rules
+    lifecycle: advisory
+    enforcement: documentation_only
+    gate_entrypoint: OPERATOR_RULES.yaml:enforcement_model
+    reason_tokens:
+      - registry_only
+    test_evidence:
+      - tests/test_operator_rules_registry.py
+    audit_evidence:
+      - OPERATOR_RULES.yaml:enforcement_model
+    protected_actions: []
+    approval_scope: none
+    public_private_boundary: not_applicable
+    supersedes: []
+    superseded_by: []
+    notes: Existing operator registry explicitly says it is not a runtime enforcement layer.
+  - rule_id: universal_runner_task_contract_missing
+    title: Universal runner task contract source is not present
+    source_file: docs/RUNNER_MAINTENANCE_TASKS.md
+    source_locator: Runtime maintenance tasks are host Runner actions
+    owner_component: runner_queue
+    lifecycle: planned
+    enforcement: none
+    gate_entrypoint: ""
+    reason_tokens: []
+    test_evidence: []
+    audit_evidence:
+      - docs/RUNNER_MAINTENANCE_TASKS.md
+    protected_actions:
+      - universal_runner_task_contract
+    approval_scope: exact_queue_issue
+    public_private_boundary: public_summary_private_detail
+    supersedes: []
+    superseded_by: []
+    notes: Stage 0 found no universal_runner_task module or universal task docs in this checkout; Stage 1 should decide whether to add or retire that source.
+  - rule_id: legacy_merge_review_overlap
+    title: Legacy merge review sources overlap
+    source_file: policies/MERGE_DECISION_POLICY.yaml
+    source_locator: auto_merge_requires
+    owner_component: merge_policy_checker
+    lifecycle: superseded
+    enforcement: documentation_only
+    gate_entrypoint: policies/DELEGATED_MERGE_POLICY.yaml
+    reason_tokens:
+      - merge_policy_overlap
+    test_evidence:
+      - tests/test_merge_policy_checker.py
+    audit_evidence:
+      - policies/MERGE_DECISION_POLICY.yaml:auto_merge_requires
+    protected_actions:
+      - merge_pull_request
+    approval_scope: exact_pr_head_and_files
+    public_private_boundary: public_only
+    supersedes: []
+    superseded_by:
+      - delegated_merge_review_only
+    notes: Kept as inventory because merge policy and delegated policy intentionally overlap.
+next_stages:
+  - stage: stage1_gate_tokens
+    goal: Normalize stable reason-token constants and map each active runtime or preflight gate to tests.
+  - stage: stage2_runner_decomposition
+    goal: Split Runner queue and maintenance policies into explicit task-envelope, executor, retry, checkpoint, cancel, and report-sanitization contracts.
+  - stage: stage3_runtime_activation
+    goal: Activate only reviewed enforcement paths behind explicit operator approval, with no autonomous merge, deploy, secrets, canon promotion, or Skeleton/Jeeves boundary change.
