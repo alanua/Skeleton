@@ -2264,6 +2264,7 @@ def _publish_existing_issue_worktree_body(
     allowed_files: tuple[str, ...] = ("scripts/runner_poll_github_tasks.py",),
     draft_pr: str = "true",
     pr_title: str | None = None,
+    publish_override: object | None = None,
 ) -> str:
     metadata = [
         f"Target Repository: {target_repository}",
@@ -2274,6 +2275,14 @@ def _publish_existing_issue_worktree_body(
     ]
     if pr_title is not None:
         metadata.append(f"PR Title: {pr_title}")
+    if publish_override is not None:
+        if isinstance(publish_override, str):
+            metadata.append(f"Publish Override: {publish_override}")
+        else:
+            metadata.append(
+                "Publish Override: "
+                f"{json.dumps(publish_override, separators=(',', ':'), sort_keys=True)}"
+            )
     metadata.append("Allowed Files:")
     metadata.extend(f"- {path}" for path in allowed_files)
     body = _maintenance_issue(
@@ -2281,6 +2290,27 @@ def _publish_existing_issue_worktree_body(
         metadata="\n".join(metadata),
     )
     return str(body["body"])
+
+
+def _valid_publish_existing_override(
+    *,
+    target_repository: str = runner.REPO,
+    source_issue: int = 123,
+    base_branch: str = "main",
+    output_branch: str = "runner/issue-123",
+    allowed_files: tuple[str, ...] = ("scripts/runner_poll_github_tasks.py",),
+    draft_pr: bool = True,
+    action: str = runner.PUBLISH_EXISTING_ISSUE_WORKTREE,
+) -> dict[str, object]:
+    return {
+        "action": action,
+        "target_repository": target_repository,
+        "source_issue": source_issue,
+        "output_branch": output_branch,
+        "base_branch": base_branch,
+        "allowed_files": list(allowed_files),
+        "draft_pr": draft_pr,
+    }
 
 
 def _publish_target_project_issue_worktree_body(
@@ -2322,6 +2352,9 @@ def _issue_publish_commands(
     untracked_files: tuple[str, ...] = (),
     validated_publish_files: tuple[str, ...] | None = None,
     existing_pr_url: str = "",
+    existing_pr_code: int = 0,
+    remote_branch_exists: bool = False,
+    ls_remote_code: int = 0,
     branch_diff_code: int = 1,
     diff_check_code: int = 0,
     add_code: int = 0,
@@ -2359,7 +2392,14 @@ def _issue_publish_commands(
             "--head",
             branch,
         ]:
-            return 0, f"{existing_pr_url}\n" if existing_pr_url else ""
+            return existing_pr_code, f"{existing_pr_url}\n" if existing_pr_url else ""
+        if command == ["git", "ls-remote", "--heads", "origin", branch]:
+            output = (
+                f"{post_commit_head}\trefs/heads/{branch}\n"
+                if remote_branch_exists
+                else ""
+            )
+            return ls_remote_code, output
         if command == ["git", "diff", "--check", "--", *expected_publish_files]:
             return diff_check_code, "diff check output must not leak"
         if command == ["git", "rev-parse", "HEAD"]:
@@ -3521,9 +3561,273 @@ def test_publish_existing_issue_worktree_is_allowlisted_and_creates_draft_pr(
     assert "repository=alanua/Skeleton" in report
     assert "base_branch=main" in report
     assert "draft_pr=true" in report
+    assert "existing_pr_lookup=existing_pr_not_found" in report
     assert ["git", "add", "--", "scripts/runner_poll_github_tasks.py"] in commands
     assert not any(".codex/session.json" in command for command in commands)
     assert commands[-1][-1] == "--draft"
+
+
+def test_publish_existing_issue_worktree_reuses_existing_pr_when_lookup_succeeds(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path)
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            existing_pr_url=PR_URL,
+        ),
+    ) as run:
+        report = runner.publish_existing_issue_worktree(
+            _publish_existing_issue_worktree_body()
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert "existing_pr_lookup=existing_pr_found" in report
+    assert f"existing_pr_url={PR_URL}" in report
+    assert all(command[:2] != ["git", "push"] for command in commands)
+    assert all(command[:3] != ["gh", "pr", "create"] for command in commands)
+
+
+def test_publish_existing_issue_worktree_lookup_unavailable_without_override_blocks(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path)
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            existing_pr_code=1,
+        ),
+    ) as run:
+        report = runner.publish_existing_issue_worktree(
+            _publish_existing_issue_worktree_body()
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("NEEDS_OPERATOR:")
+    assert "existing_pr_lookup=existing_pr_lookup_unavailable" in report
+    assert "reason=publish_override_missing" in report
+    assert "reason=existing_pr_lookup_unavailable" in report
+    assert all(command[:2] != ["git", "add"] for command in commands)
+    assert all(command[:2] != ["git", "push"] for command in commands)
+    assert all(command[:3] != ["gh", "pr", "create"] for command in commands)
+
+
+def test_publish_existing_issue_worktree_valid_override_publishes_when_remote_absent(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path)
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            existing_pr_code=1,
+            untracked_files=(
+                ".codex/session.json",
+                "tests/test_runner_poll_github_tasks.py",
+            ),
+            validated_publish_files=(
+                "scripts/runner_poll_github_tasks.py",
+                "tests/test_runner_poll_github_tasks.py",
+            ),
+        ),
+    ) as run:
+        report = runner.publish_existing_issue_worktree(
+            _publish_existing_issue_worktree_body(
+                allowed_files=(
+                    "scripts/runner_poll_github_tasks.py",
+                    "tests/test_runner_poll_github_tasks.py",
+                ),
+                publish_override=_valid_publish_existing_override(
+                    allowed_files=(
+                        "scripts/runner_poll_github_tasks.py",
+                        "tests/test_runner_poll_github_tasks.py",
+                    )
+                ),
+            )
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert "existing_pr_lookup=existing_pr_lookup_unavailable" in report
+    assert "reason=publish_override_valid" in report
+    assert "step=verify_remote_branch_absent status=done" in report
+    assert "draft_pr_url=" in report
+    assert not any(".codex/session.json" in command for command in commands)
+    assert [
+        "git",
+        "add",
+        "--",
+        "scripts/runner_poll_github_tasks.py",
+        "tests/test_runner_poll_github_tasks.py",
+    ] in commands
+    assert commands[-1][-1] == "--draft"
+    assert all(
+        command[:2] != ["gh", "pr"] or "merge" not in command
+        for command in commands
+    )
+
+
+@pytest.mark.parametrize(
+    ("override_update", "reason"),
+    (
+        ({"target_repository": "alanua/Other"}, "publish_override_scope_mismatch"),
+        ({"source_issue": 999}, "publish_override_scope_mismatch"),
+        ({"output_branch": "runner/issue-999"}, "publish_override_scope_mismatch"),
+        ({"base_branch": "develop"}, "publish_override_scope_mismatch"),
+        (
+            {"allowed_files": ["docs/RUNNER_MAINTENANCE_TASKS.md"]},
+            "publish_override_scope_mismatch",
+        ),
+        ({"draft_pr": False}, "publish_override_scope_mismatch"),
+        ({"extra": "field"}, "publish_override_malformed"),
+    ),
+)
+def test_publish_existing_issue_worktree_wrong_override_scope_blocks(
+    tmp_path: Path, override_update: dict[str, object], reason: str
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path)
+    override = _valid_publish_existing_override()
+    override.update(override_update)
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            existing_pr_code=1,
+        ),
+    ) as run:
+        report = runner.publish_existing_issue_worktree(
+            _publish_existing_issue_worktree_body(publish_override=override)
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("NEEDS_OPERATOR:")
+    assert f"reason={reason}" in report
+    assert all(command[:2] != ["git", "add"] for command in commands)
+    assert all(command[:2] != ["git", "push"] for command in commands)
+    assert all(command[:3] != ["gh", "pr", "create"] for command in commands)
+
+
+def test_publish_existing_issue_worktree_malformed_override_blocks(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path)
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            existing_pr_code=1,
+        ),
+    ) as run:
+        report = runner.publish_existing_issue_worktree(
+            _publish_existing_issue_worktree_body(publish_override="{not-json")
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("NEEDS_OPERATOR:")
+    assert "reason=publish_override_malformed" in report
+    assert all(command[:2] != ["git", "push"] for command in commands)
+
+
+def test_publish_existing_issue_worktree_remote_branch_conflict_blocks(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path)
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            existing_pr_code=1,
+            remote_branch_exists=True,
+        ),
+    ) as run:
+        report = runner.publish_existing_issue_worktree(
+            _publish_existing_issue_worktree_body(
+                publish_override=_valid_publish_existing_override()
+            )
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("NEEDS_OPERATOR:")
+    assert "reason=publish_override_valid" in report
+    assert "reason=remote_branch_conflict" in report
+    assert all(command[:2] != ["git", "add"] for command in commands)
+    assert all(command[:2] != ["git", "push"] for command in commands)
+    assert all(command[:3] != ["gh", "pr", "create"] for command in commands)
+
+
+def test_publish_existing_issue_worktree_generic_approval_text_does_not_count(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path)
+    body = (
+        _publish_existing_issue_worktree_body()
+        + "\n```task\n+\nrunner:done\nTask complete\n```"
+    )
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            existing_pr_code=1,
+        ),
+    ) as run:
+        report = runner.publish_existing_issue_worktree(body)
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("NEEDS_OPERATOR:")
+    assert "reason=publish_override_missing" in report
+    assert all(command[:2] != ["git", "push"] for command in commands)
+
+
+def test_publish_existing_issue_worktree_public_report_is_sanitized(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path)
+    raw_error = (
+        f"{tmp_path}/issue-123 token=secret gh stderr command output must not leak"
+    )
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            existing_pr_code=1,
+            existing_pr_url=raw_error,
+        ),
+    ):
+        report = runner.publish_existing_issue_worktree(
+            _publish_existing_issue_worktree_body()
+        )
+
+    assert str(tmp_path) not in report
+    assert raw_error not in report
+    assert "token=secret" not in report
+    assert "command output" not in report
 
 
 def test_publish_existing_issue_worktree_requires_draft_pr_true() -> None:
