@@ -144,11 +144,16 @@ services, ports, and private indexing disabled.
 Unsupported command shapes are outside the contract: `graphify ingest`,
 `graphify install-skills`, `--source`, `--extractor`, and `--no-semantic` must
 not appear in Runner runtime commands or tests. If a post-backup skill install
-or smoke step fails, the Runner restores the bounded Codex and Hermes skill
-paths and allowlisted `.graphify_version` files from the private recovery
-snapshot. A successful runtime install retains the private recovery snapshot for
-operator recovery. Public reports remain aggregate-only and must not include paths,
-Graphify command output, environment values, profile content, node IDs, edge IDs,
-labels, summaries, or graph payloads.
+or smoke step fails, or if any unexpected runtime failure occurs after backup,
+the Runner restores the bounded Codex and Hermes skill paths and allowlisted
+`.graphify_version` files from the private recovery snapshot. Missing `uv`,
+missing `graphify`, permission failures, OS/subprocess launch failures, and
+unexpected failures use stable public-safe reason tokens; pre-backup failures
+report `rollback_status=not_needed`, while post-backup failures report
+`rollback_status=restored` or `rollback_status=failed`. A successful runtime
+install retains the private recovery snapshot for operator recovery. Public
+reports remain aggregate-only and must not include paths, Graphify command
+output, environment values, profile content, node IDs, edge IDs, labels,
+summaries, or graph payloads.
 
 Runtime/server/service integration remains blocked by issue #1047.

@@ -137,7 +137,8 @@ It may only:
    enablement, no hooks, no services, no ports, and no private indexing.
 8. Roll back the bounded Codex and Hermes skill paths and allowlisted
    `.graphify_version` files from the private recovery snapshot if either skill
-   install or the synthetic smoke fails after the backup is taken.
+   install, the synthetic smoke, or any unexpected runtime failure fails after
+   the backup is taken.
 9. Retain the private recovery snapshot after successful completion.
 
 The marker allowlist is limited to user-level skill destinations that
@@ -152,6 +153,15 @@ graphify-looking paths.
 
 Runtime/server/service integration remains blocked by issue #1047; this task
 only installs the local tool and approved assistant skills.
+
+Command diagnostics are public-safe and stable. A missing `uv` executable reports
+`graphify_tool_command_unavailable`; a missing `graphify` executable reports
+`graphify_cli_command_unavailable`; permission failures report
+`graphify_command_permission_denied`; bounded OS/subprocess launch failures
+report `graphify_command_launch_failed`; and unexpected exceptions report
+`graphify_runtime_unexpected_failure`. Failures before the recovery snapshot
+report `rollback_status=not_needed`. Failures after the recovery snapshot report
+`rollback_status=restored` or `rollback_status=failed`.
 
 It must not run `graphify ingest`, `graphify install-skills`, `--source`,
 `--extractor`, `--no-semantic`, live private indexing, hooks, services, network
