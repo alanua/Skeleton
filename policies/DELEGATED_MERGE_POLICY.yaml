@@ -4,7 +4,7 @@ scope: delegated_merge_review
 
 verdicts:
   AUTO_MERGE_ALLOWED:
-    means: "All delegated review conditions allow auto-merge consideration."
+    means: "All delegated review conditions allow merge consideration; this is not executable merge authority without exact operator merge approval."
   REVIEW_REQUIRED:
     means: "The PR requires review before any merge decision is made."
   OPERATOR_APPROVAL_REQUIRED:

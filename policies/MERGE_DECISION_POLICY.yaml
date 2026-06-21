@@ -4,7 +4,7 @@ scope: stage1_foundation
 
 decisions:
   AUTO_MERGE:
-    means: "All auto-merge conditions are satisfied."
+    means: "All merge conditions are satisfied, including exact operator merge approval."
   ASK_OPERATOR:
     means: "The PR may be mergeable, but needs explicit operator review first."
   NEVER_AUTO:
@@ -18,6 +18,15 @@ auto_merge_requires:
   - no_hard_stop_files
   - no_ask_operator_triggers
   - no_level_red_triggers
+  - operator_merge_approval_valid
+
+operator_merge_approval_requires:
+  - action=merge_pull_request
+  - repository_full_name
+  - pull_request_number
+  - expected_head_sha
+  - merge_method
+  - no_task_explicit_merge_prohibition_unless_superseded
 
 hard_stop_file_patterns:
   - BOOT_MANIFEST.yaml
