@@ -2512,30 +2512,60 @@ _PRIVATE_MEMORY_UNSAFE_VALUE_RE = re.compile(
 )
 _HERMES_BRIDGE_SAFE_STATUS_VALUES = frozenset({"DONE", "BLOCKED"})
 GRAPHIFY_RUNTIME_APPROVAL = "install_graphify_runtime_v1"
+GRAPHIFY_UV_PINNED_VERSION = "0.11.23"
 GRAPHIFY_PINNED_VERSION = "0.8.44"
 GRAPHIFY_SMOKE_TIMEOUT_SECONDS = 45
 GRAPHIFY_TOOL_INSTALL_COMMAND = (
-    "uv",
     "tool",
     "install",
     "--reinstall",
     f"graphifyy=={GRAPHIFY_PINNED_VERSION}",
 )
 GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND = (
+    "tool",
+    "run",
+    "--from",
+    f"graphifyy=={GRAPHIFY_PINNED_VERSION}",
     "graphify",
     "install",
     "--platform",
     "codex",
 )
 GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND = (
+    "tool",
+    "run",
+    "--from",
+    f"graphifyy=={GRAPHIFY_PINNED_VERSION}",
     "graphify",
     "install",
     "--platform",
     "hermes",
 )
-GRAPHIFY_VERSION_COMMAND = ("graphify", "--version")
-GRAPHIFY_INSTALL_HELP_COMMAND = ("graphify", "install", "--help")
-GRAPHIFY_BUILD_HELP_COMMAND = ("graphify", "--help")
+GRAPHIFY_VERSION_COMMAND = (
+    "tool",
+    "run",
+    "--from",
+    f"graphifyy=={GRAPHIFY_PINNED_VERSION}",
+    "graphify",
+    "--version",
+)
+GRAPHIFY_INSTALL_HELP_COMMAND = (
+    "tool",
+    "run",
+    "--from",
+    f"graphifyy=={GRAPHIFY_PINNED_VERSION}",
+    "graphify",
+    "install",
+    "--help",
+)
+GRAPHIFY_BUILD_HELP_COMMAND = (
+    "tool",
+    "run",
+    "--from",
+    f"graphifyy=={GRAPHIFY_PINNED_VERSION}",
+    "graphify",
+    "--help",
+)
 GRAPHIFY_PROFILE_ROOT_RELATIVE_PATHS = (
     Path(".codex") / "skills" / "graphify",
     Path(".codex") / "skills" / "graphify.md",
@@ -2547,6 +2577,8 @@ GRAPHIFY_UPSTREAM_COMMIT = "5d053721aba875156cf2a6ddd6953d8beee98147"
 GRAPHIFY_RUNTIME_UNEXPECTED_FAILURE_REASON = "graphify_runtime_unexpected_failure"
 GRAPHIFY_COMMAND_PERMISSION_REASON = "graphify_command_permission_denied"
 GRAPHIFY_COMMAND_LAUNCH_REASON = "graphify_command_launch_failed"
+GRAPHIFY_UV_BIN_DIR_ENV = "SKELETON_GRAPHIFY_UV_BIN_DIR"
+GRAPHIFY_UV_INSTALL_TIMEOUT_SECONDS = 120
 GRAPHIFY_UPSTREAM_PLATFORM_SKILL_RELATIVE_PATHS = {
     "aider": (Path(".aider") / "graphify" / "SKILL.md",),
     "amp": (Path(".config") / "agents" / "skills" / "graphify" / "SKILL.md",),
@@ -2752,6 +2784,90 @@ def _graphify_private_snapshot_parent() -> Path:
     return Path.home() / ".local" / "state" / "skeleton" / "graphify-recovery"
 
 
+def _graphify_managed_uv_bin_dir() -> Path:
+    configured = os.environ.get(GRAPHIFY_UV_BIN_DIR_ENV)
+    if configured:
+        return Path(configured).expanduser()
+    return Path.home() / ".local" / "state" / "skeleton" / "graphify-runtime" / "uv-bin"
+
+
+def _graphify_requested_uv_version(body: str) -> str:
+    requested = _body_field(body, "Requested Version") or _body_field(
+        body,
+        "Requested uv Version",
+    )
+    if requested is None or not requested.strip():
+        return "missing"
+    if requested.strip() == GRAPHIFY_UV_PINNED_VERSION:
+        return GRAPHIFY_UV_PINNED_VERSION
+    return "unsupported"
+
+
+def _graphify_uv_path(bin_dir: Path) -> Path:
+    return bin_dir / "uv"
+
+
+def _run_graphify_uv_installer(bin_dir: Path) -> tuple[int | None, str, str | None]:
+    env = os.environ.copy()
+    env["UV_INSTALL_DIR"] = str(bin_dir)
+    env["INSTALLER_NO_MODIFY_PATH"] = "1"
+    command = [
+        "sh",
+        "-c",
+        (
+            "curl -LsSf "
+            f"https://astral.sh/uv/{GRAPHIFY_UV_PINNED_VERSION}/install.sh | sh"
+        ),
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            cwd=str(ROOT),
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=GRAPHIFY_UV_INSTALL_TIMEOUT_SECONDS,
+        )
+    except Exception as error:
+        return None, "", _graphify_command_exception_reason(
+            error,
+            "graphify_uv_installer_unavailable",
+        )
+    return result.returncode, result.stdout + result.stderr, None
+
+
+def _verify_graphify_managed_uv_bin(bin_dir: Path) -> str | None:
+    uv_path = _graphify_uv_path(bin_dir)
+    try:
+        entries = list(bin_dir.iterdir())
+    except OSError:
+        return "managed_uv_bin_unreadable"
+
+    for entry in entries:
+        if entry.name == "uv":
+            continue
+        try:
+            if entry.is_file() or entry.is_symlink():
+                entry.unlink()
+        except OSError:
+            return "managed_uv_bin_contains_unapproved_entry"
+
+    try:
+        remaining_names = sorted(entry.name for entry in bin_dir.iterdir())
+    except OSError:
+        return "managed_uv_bin_unreadable"
+    if remaining_names != ["uv"]:
+        return "managed_uv_bin_contains_unapproved_entry"
+    if uv_path.is_symlink() or not uv_path.is_file() or not os.access(uv_path, os.X_OK):
+        return "managed_uv_not_regular_executable"
+    return None
+
+
+def _graphify_uv_command(uv_path: Path, suffix: tuple[str, ...]) -> list[str]:
+    return [str(uv_path), *suffix]
+
+
 def _graphify_existing_version_marker_paths(home: Path | None = None) -> tuple[Path, ...]:
     profile_home = home or Path.home()
     markers: list[Path] = []
@@ -2947,21 +3063,21 @@ def _run_graphify_runtime_command(
     return code, output, None
 
 
-def _graphify_cli_contract_preflight(status_lines: list[str]) -> str | None:
+def _graphify_cli_contract_preflight(status_lines: list[str], uv_path: Path) -> str | None:
     checks = (
         (
             "verify_graphify_version",
-            list(GRAPHIFY_VERSION_COMMAND),
+            _graphify_uv_command(uv_path, GRAPHIFY_VERSION_COMMAND),
             lambda output: GRAPHIFY_PINNED_VERSION in output,
         ),
         (
             "verify_graphify_install_platform_help",
-            list(GRAPHIFY_INSTALL_HELP_COMMAND),
+            _graphify_uv_command(uv_path, GRAPHIFY_INSTALL_HELP_COMMAND),
             lambda output: "--platform" in output,
         ),
         (
             "verify_graphify_folder_build_help",
-            list(GRAPHIFY_BUILD_HELP_COMMAND),
+            _graphify_uv_command(uv_path, GRAPHIFY_BUILD_HELP_COMMAND),
             lambda output: "ingest" not in output
             and ("folder" in output.lower() or "path" in output.lower()),
         ),
@@ -2999,7 +3115,7 @@ def _write_graphify_synthetic_corpus(corpus_dir: Path) -> None:
 
 
 def _graphify_ast_smoke_command(
-    corpus_dir: Path, output_dir: Path, home_dir: Path
+    corpus_dir: Path, output_dir: Path, home_dir: Path, uv_path: Path
 ) -> list[str]:
     path_value = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
     return [
@@ -3014,6 +3130,11 @@ def _graphify_ast_smoke_command(
         "GRAPHIFY_DISABLE_PRIVATE_INDEXING=1",
         "PYTHONNOUSERSITE=1",
         "NO_COLOR=1",
+        str(uv_path),
+        "tool",
+        "run",
+        "--from",
+        f"graphifyy=={GRAPHIFY_PINNED_VERSION}",
         "graphify",
         str(corpus_dir),
     ]
@@ -3057,7 +3178,7 @@ def _graphify_graph_json_counts(path: Path) -> tuple[int, int] | None:
     return None
 
 
-def _run_graphify_ast_smoke(status_lines: list[str]) -> str | None:
+def _run_graphify_ast_smoke(status_lines: list[str], uv_path: Path) -> str | None:
     with tempfile.TemporaryDirectory(prefix="skeleton-graphify-smoke-") as tmp:
         tmp_path = Path(tmp)
         corpus_dir = tmp_path / "synthetic-corpus"
@@ -3065,7 +3186,7 @@ def _run_graphify_ast_smoke(status_lines: list[str]) -> str | None:
         home_dir = tmp_path / "home"
         home_dir.mkdir(mode=0o700)
         _write_graphify_synthetic_corpus(corpus_dir)
-        command = _graphify_ast_smoke_command(corpus_dir, output_dir, home_dir)
+        command = _graphify_ast_smoke_command(corpus_dir, output_dir, home_dir, uv_path)
         code, _output = _run_graphify_smoke_command(command)
         if code == 124:
             status_lines.append("step=run_synthetic_ast_smoke status=timeout")
@@ -3104,8 +3225,12 @@ def _run_graphify_ast_smoke(status_lines: list[str]) -> str | None:
 def install_graphify_runtime(body: str) -> str:
     task_id = INSTALL_GRAPHIFY_RUNTIME
     approval = _body_field(body, "Operator Approval")
+    requested_version = _graphify_requested_uv_version(body)
     status_lines = [
+        f"requested_version={requested_version}",
+        f"managed_uv_version={GRAPHIFY_UV_PINNED_VERSION}",
         f"graphify_version={GRAPHIFY_PINNED_VERSION}",
+        f"managed_uv_install_timeout_seconds={GRAPHIFY_UV_INSTALL_TIMEOUT_SECONDS}",
         f"synthetic_smoke_timeout_seconds={GRAPHIFY_SMOKE_TIMEOUT_SECONDS}",
         "network_disabled=true",
         "hooks_disabled=true",
@@ -3124,9 +3249,51 @@ def install_graphify_runtime(body: str) -> str:
             "not_met",
         )
     status_lines.append("approval_status=verified")
+    if requested_version == "missing":
+        return _graphify_runtime_blocked_report(
+            status_lines,
+            "missing_uv_version",
+        )
+    if requested_version != GRAPHIFY_UV_PINNED_VERSION:
+        return _graphify_runtime_blocked_report(
+            status_lines,
+            "unsupported_uv_version",
+        )
+
+    uv_bin_dir = _graphify_managed_uv_bin_dir()
+    uv_path = _graphify_uv_path(uv_bin_dir)
+    try:
+        uv_bin_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        uv_bin_dir.chmod(0o700)
+    except OSError:
+        return _graphify_runtime_blocked_report(
+            [*status_lines, "step=install_managed_uv status=failed"],
+            "managed_uv_bin_prepare_failed",
+        )
+
+    code, _output, reason = _run_graphify_uv_installer(uv_bin_dir)
+    if reason is not None:
+        return _graphify_runtime_blocked_report(
+            [*status_lines, "step=install_managed_uv status=failed"],
+            reason,
+        )
+    if code != 0:
+        return _graphify_runtime_blocked_report(
+            [*status_lines, "step=install_managed_uv status=failed"],
+            "managed_uv_install_failed",
+        )
+    status_lines.append("step=install_managed_uv status=done")
+
+    reason = _verify_graphify_managed_uv_bin(uv_bin_dir)
+    if reason is not None:
+        return _graphify_runtime_blocked_report(
+            [*status_lines, "step=verify_managed_uv_bin status=failed"],
+            reason,
+        )
+    status_lines.append("step=verify_managed_uv_bin status=done")
 
     code, _output, reason = _run_graphify_runtime_command(
-        list(GRAPHIFY_TOOL_INSTALL_COMMAND),
+        _graphify_uv_command(uv_path, GRAPHIFY_TOOL_INSTALL_COMMAND),
         command_unavailable_reason="graphify_tool_command_unavailable",
         cwd=ROOT,
     )
@@ -3143,7 +3310,7 @@ def install_graphify_runtime(body: str) -> str:
     status_lines.append("step=install_pinned_graphify_tool status=done")
 
     try:
-        reason = _graphify_cli_contract_preflight(status_lines)
+        reason = _graphify_cli_contract_preflight(status_lines, uv_path)
         if reason is not None:
             return _graphify_runtime_blocked_report(status_lines, reason)
 
@@ -3165,7 +3332,7 @@ def install_graphify_runtime(body: str) -> str:
 
     try:
         code, _output, reason = _run_graphify_runtime_command(
-            list(GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND),
+            _graphify_uv_command(uv_path, GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND),
             command_unavailable_reason="graphify_cli_command_unavailable",
             cwd=ROOT,
         )
@@ -3188,7 +3355,7 @@ def install_graphify_runtime(body: str) -> str:
         status_lines.append("step=install_codex_skill status=done")
 
         code, _output, reason = _run_graphify_runtime_command(
-            list(GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND),
+            _graphify_uv_command(uv_path, GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND),
             command_unavailable_reason="graphify_cli_command_unavailable",
             cwd=ROOT,
         )
@@ -3210,7 +3377,7 @@ def install_graphify_runtime(body: str) -> str:
             )
         status_lines.append("step=install_hermes_skill status=done")
 
-        reason = _run_graphify_ast_smoke(status_lines)
+        reason = _run_graphify_ast_smoke(status_lines, uv_path)
         if reason is not None:
             rollback_status = _restore_graphify_profiles_safely(backup)
             return _graphify_runtime_blocked_report(

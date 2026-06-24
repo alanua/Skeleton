@@ -112,34 +112,47 @@ approval field:
 ```text
 Mode: RUNTIME_MAINTENANCE_TASK
 Maintenance Task ID: install_graphify_runtime
+Requested Version: 0.11.23
 Operator Approval: install_graphify_runtime_v1
 ```
 
 It may only:
 
-1. Install or replace the pinned Graphify tool with
+1. Install the pinned managed `uv` version `0.11.23` into the Runner-managed
+   uv bin directory. The public `requested_version` report value is normalized
+   to `0.11.23`, `missing`, or `unsupported`; rejected raw values must never be
+   copied into the report.
+2. Verify that the managed uv bin directory contains only the approved regular
+   executable `uv`. Any additional installer-created direct entry, including
+   `uvx`, is removed by bounded cleanup when possible; verification must pass
+   after cleanup or the task reports `BLOCKED`.
+3. Install or replace the pinned Graphify tool with the validated managed uv:
    `uv tool install --reinstall graphifyy==0.8.44`.
-2. Verify the installed CLI contract before mutating assistant profiles:
-   `graphify --version`, `graphify install --help`, and `graphify --help`.
-3. Back up only the bounded Graphify-managed Codex and Hermes skill paths plus
+4. Verify the installed CLI contract before mutating assistant profiles, with
+   Graphify resolved through the validated managed uv:
+   `uv tool run --from graphifyy==0.8.44 graphify --version`,
+   `uv tool run --from graphifyy==0.8.44 graphify install --help`, and
+   `uv tool run --from graphifyy==0.8.44 graphify --help`.
+5. Back up only the bounded Graphify-managed Codex and Hermes skill paths plus
    existing marker-only `.graphify_version` files discovered from the pinned
    Graphify 0.8.44 upstream platform destination allowlist, using a private
    `0700` recovery root and no symlink traversal.
-4. Install skills with the Graphify 0.8.44 command forms:
-   `graphify install --platform codex` and
-   `graphify install --platform hermes`.
-5. Run a temporary synthetic AST smoke using the supported build form
-   `graphify <folder>` with `GRAPHIFY_OUT` pointed at a temporary output
-   directory and a bounded timeout.
-6. Verify the smoke output by reading `graph.json` and confirming non-zero node
+6. Install skills with the Graphify 0.8.44 command forms resolved through the
+   validated managed uv:
+   `uv tool run --from graphifyy==0.8.44 graphify install --platform codex` and
+   `uv tool run --from graphifyy==0.8.44 graphify install --platform hermes`.
+7. Run a temporary synthetic AST smoke using the supported build form
+   `uv tool run --from graphifyy==0.8.44 graphify <folder>` with `GRAPHIFY_OUT`
+   pointed at a temporary output directory and a bounded timeout.
+8. Verify the smoke output by reading `graph.json` and confirming non-zero node
    and edge counts.
-7. Run that smoke with a scrubbed environment: no model credentials, no network
+9. Run that smoke with a scrubbed environment: no model credentials, no network
    enablement, no hooks, no services, no ports, and no private indexing.
-8. Roll back the bounded Codex and Hermes skill paths and allowlisted
+10. Roll back the bounded Codex and Hermes skill paths and allowlisted
    `.graphify_version` files from the private recovery snapshot if either skill
    install, the synthetic smoke, or any unexpected runtime failure fails after
    the backup is taken.
-9. Retain the private recovery snapshot after successful completion.
+11. Retain the private recovery snapshot after successful completion.
 
 The marker allowlist is limited to user-level skill destinations that
 Graphify 0.8.44 `_refresh_all_version_stamps()` can visit from
