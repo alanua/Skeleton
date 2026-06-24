@@ -86,6 +86,9 @@ SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME = "sync_telegram_callback_poller_runtime"
 ENSURE_TELEGRAM_CALLBACK_LOCAL_CONFIG = "ensure_telegram_callback_local_config"
 CHECK_PROJECT_CHECKOUT = "check_project_checkout"
 CHECK_SKELETON_FRESHNESS = "check_skeleton_freshness"
+RUNTIME_SYNC_MAIN = "runtime_sync_main"
+VALIDATE_CURRENT_MAIN = "validate_current_main"
+AUFMASS_DEPENDENCY_PREFLIGHT = "aufmass_dependency_preflight"
 ENSURE_PROJECT_CHECKOUT = "ensure_project_checkout"
 VALIDATE_PR_BRANCH = "validate_pr_branch"
 PREFLIGHT_PR_REFRESH = "preflight_pr_refresh"
@@ -113,6 +116,9 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         ENSURE_TELEGRAM_CALLBACK_LOCAL_CONFIG,
         CHECK_PROJECT_CHECKOUT,
         CHECK_SKELETON_FRESHNESS,
+        RUNTIME_SYNC_MAIN,
+        VALIDATE_CURRENT_MAIN,
+        AUFMASS_DEPENDENCY_PREFLIGHT,
         ENSURE_PROJECT_CHECKOUT,
         VALIDATE_PR_BRANCH,
         PREFLIGHT_PR_REFRESH,
@@ -155,6 +161,10 @@ RUNNER_ALLOWED_TARGET_PATH_BASES = (
     RUNNER_PROJECT_CHECKOUT_BASE / "worktrees",
 )
 PR_BRANCH_VALIDATION_WORKTREE_DIR = "validate-pr-branch"
+CURRENT_MAIN_VALIDATION_PROFILES = {
+    "full_pytest": (("python3", "-m", "pytest", "-q"),),
+    "runner_pytest": (("python3", "-m", "pytest", "-q", "tests/test_runner_poll_github_tasks.py"),),
+}
 PR_BRANCH_VALIDATION_PROFILES = {
     "full_pytest": (("python3", "-m", "pytest", "-q"),),
     "knowledge_intake": (
@@ -191,6 +201,16 @@ TELEGRAM_CALLBACK_POLLER_RUNTIME_FILES = (
     f"scripts/{TELEGRAM_CALLBACK_POLLER_SERVICE}",
     f"scripts/{TELEGRAM_CALLBACK_POLLER_TIMER}",
 )
+AUFMASS_PREFLIGHT_VENV_DIR = RUNNER_PROJECT_CHECKOUT_BASE / "runtime" / "aufmass-preflight-venv"
+AUFMASS_PREFLIGHT_WHEEL_CACHE = RUNNER_PROJECT_CHECKOUT_BASE / "runtime" / "aufmass-wheel-cache"
+AUFMASS_PREFLIGHT_PACKAGE_BOUNDS = (
+    "numpy>=2.0,<2.5",
+    "ezdxf>=1.4,<2",
+    "shapely>=2.1,<2.2",
+    "networkx>=3.4,<4",
+    "pillow>=11,<13",
+)
+AUFMASS_PREFLIGHT_SMOKE_COMPONENTS = ("numpy", "ezdxf", "shapely", "networkx", "pillow")
 
 _HEAD_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 _CALLBACK_DIGEST_RE = re.compile(r"^[0-9a-f]{12}$")
@@ -4998,6 +5018,614 @@ def _count_bounded_cli_rows(output: str) -> int:
     return len([line for line in (output or "").splitlines() if line.strip()])
 
 
+_PUBLIC_REPORT_UNIX_PATH_RE = re.compile(r"(?<!\w)/(?:[^\s`'\"<>|]+/)*[^\s`'\"<>|]+")
+_PUBLIC_REPORT_WINDOWS_PATH_RE = re.compile(
+    r"(?i)\b[A-Z]:\\(?:[^\\\s`'\"<>|]+\\)*[^\\\s`'\"<>|]+"
+)
+_PUBLIC_REPORT_URL_RE = re.compile(r"(?i)\b(?:https?|ssh|git|file)://[^\s`'\"<>]+")
+_PUBLIC_REPORT_IP_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+_PUBLIC_REPORT_TOKEN_RE = re.compile(
+    r"(?i)\b(?:ghp|github_pat|sk|xox[baprs]?|ya29|glpat|pat)_[A-Za-z0-9._-]{8,}\b"
+)
+_PUBLIC_REPORT_ENV_VALUE_RE = re.compile(
+    r"\b[A-Z][A-Z0-9_]{2,80}=(?P<value>[^\s]+)"
+)
+_PUBLIC_REPORT_DRIVE_RE = re.compile(
+    r"(?i)\b(?:drive|gdrive|google[_-]?drive|docs\.google\.com|"
+    r"drive\.google\.com)[^\s`'\"<>]*"
+)
+
+
+def sanitize_maintenance_public_value(value: object) -> str:
+    text = str(value or "")
+    replacements = (
+        (_PUBLIC_REPORT_URL_RE, "[redacted-url]"),
+        (_PUBLIC_REPORT_WINDOWS_PATH_RE, "[redacted-path]"),
+        (_PUBLIC_REPORT_UNIX_PATH_RE, "[redacted-path]"),
+        (_PUBLIC_REPORT_IP_RE, "[redacted-ip]"),
+        (_PUBLIC_REPORT_DRIVE_RE, "[redacted-drive]"),
+        (_PUBLIC_REPORT_TOKEN_RE, "[redacted-token]"),
+    )
+    for pattern, replacement in replacements:
+        text = pattern.sub(replacement, text)
+    text = _PUBLIC_REPORT_ENV_VALUE_RE.sub(
+        lambda match: match.group(0).split("=", 1)[0] + "=[redacted-env]",
+        text,
+    )
+    text = re.sub(r"[^A-Za-z0-9._:=,+<>\[\] -]+", "_", text)
+    return (text.strip() or "unknown")[:240]
+
+
+def _verify_registered_skeleton_main_checkout(
+    task_id: str,
+) -> tuple[RegisteredProjectCheckout | None, list[str], str | None]:
+    projects = load_runner_project_tree().get("projects")
+    project_items = projects.items() if isinstance(projects, dict) else ()
+    skeleton_projects = [
+        (project_id, project)
+        for project_id, project in project_items
+        if isinstance(project, dict) and project.get("repo") == REPO
+    ]
+    if len(skeleton_projects) != 1:
+        return None, [], _maintenance_report(
+            "BLOCKED",
+            task_id,
+            ["target_repository=alanua/Skeleton", "reason=skeleton_checkout_unknown"],
+            "not_met",
+        )
+    target_project, project = skeleton_projects[0]
+    checkout_path = Path(str(project["checkout_path"]))
+    status_lines = [
+        f"target_project={target_project}",
+        f"target_repository={project['repo']}",
+        "checkout_reference=registered_skeleton_checkout",
+    ]
+    if any(part == ".." for part in checkout_path.parts):
+        return None, status_lines, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=checkout_path_traversal"],
+            "not_met",
+        )
+    if not _project_checkout_path_is_under_runner_base(checkout_path):
+        return None, status_lines, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=checkout_path_unsafe"],
+            "not_met",
+        )
+    registered_checkout = RegisteredProjectCheckout(
+        target_project=target_project,
+        repo=str(project["repo"]),
+        checkout_path_text=str(project["checkout_path"]),
+        checkout_path=checkout_path,
+        status_lines=status_lines,
+    )
+
+    if not checkout_path.exists():
+        return None, status_lines, _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=checkout_path_missing"], "not_met"
+        )
+    if not (checkout_path / ".git").exists():
+        return None, status_lines, _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=checkout_git_missing"], "not_met"
+        )
+
+    origin_url, failure = _run_freshness_command(
+        ["git", "-C", str(checkout_path), "remote", "get-url", "origin"],
+        status_lines,
+        "read_origin_remote",
+    )
+    if failure is not None or origin_url is None:
+        return None, status_lines, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, failure or "reason=origin_read_failed"],
+            "not_met",
+        )
+    if not _remote_url_matches_project_repo(origin_url, registered_checkout.repo):
+        return None, status_lines, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "step=verify_origin_remote status=failed"],
+            "not_met",
+        )
+    status_lines.append("step=verify_origin_remote status=done")
+    branch, failure = _run_freshness_command(
+        ["git", "-C", str(checkout_path), "rev-parse", "--abbrev-ref", "HEAD"],
+        status_lines,
+        "read_current_branch",
+    )
+    if failure is not None or branch != "main":
+        return None, status_lines, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, failure or "reason=current_branch_not_main"],
+            "not_met",
+        )
+    return registered_checkout, status_lines, None
+
+
+def _read_verified_origin_main_sha(
+    task_id: str, checkout_path: Path, status_lines: list[str]
+) -> tuple[str | None, str | None]:
+    origin_main_sha, failure = _run_freshness_command(
+        ["git", "-C", str(checkout_path), "rev-parse", "origin/main"],
+        status_lines,
+        "read_origin_main",
+    )
+    if (
+        failure is not None
+        or origin_main_sha is None
+        or _HEAD_SHA_RE.fullmatch(origin_main_sha) is None
+    ):
+        return None, failure or "reason=origin_main_read_failed"
+    github_main_output, failure = _run_freshness_command(
+        ["git", "-C", str(checkout_path), "ls-remote", "origin", "refs/heads/main"],
+        status_lines,
+        "read_github_main",
+    )
+    parts = (github_main_output or "").split()
+    github_main_sha = parts[0] if parts else ""
+    if (
+        failure is not None
+        or _HEAD_SHA_RE.fullmatch(github_main_sha) is None
+        or len(parts) < 2
+        or parts[1] != "refs/heads/main"
+    ):
+        return None, failure or "reason=github_main_read_failed"
+    if origin_main_sha != github_main_sha:
+        return None, "reason=origin_main_not_current_github_main"
+    return origin_main_sha.lower(), None
+
+
+def runtime_sync_main() -> str:
+    task_id = RUNTIME_SYNC_MAIN
+    registered_checkout, status_lines, report = _verify_registered_skeleton_main_checkout(
+        task_id
+    )
+    if report is not None:
+        return report
+    assert registered_checkout is not None
+    checkout_path = registered_checkout.checkout_path
+    before_sha, failure = _run_freshness_command(
+        ["git", "-C", str(checkout_path), "rev-parse", "HEAD"],
+        status_lines,
+        "read_before_head",
+    )
+    if failure is not None or before_sha is None or _HEAD_SHA_RE.fullmatch(before_sha) is None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, failure or "reason=before_head_read_failed"],
+            "not_met",
+        )
+    dirty, failure = _run_freshness_command(
+        ["git", "-C", str(checkout_path), "status", "--porcelain"],
+        status_lines,
+        "read_worktree_status",
+    )
+    if failure is not None or (dirty or "").strip():
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, failure or "reason=unsafe_dirty_state"],
+            "not_met",
+        )
+    _, failure = _run_freshness_command(
+        ["git", "-C", str(checkout_path), "fetch", "--prune", "origin", "main"],
+        status_lines,
+        "fetch_origin_main",
+    )
+    if failure is not None:
+        return _maintenance_report("BLOCKED", task_id, [*status_lines, failure], "not_met")
+    target_sha, failure = _read_verified_origin_main_sha(task_id, checkout_path, status_lines)
+    if failure is not None or target_sha is None:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, failure or "reason=target_sha_unknown"], "not_met"
+        )
+    _, failure = _run_freshness_command(
+        ["git", "-C", str(checkout_path), "reset", "--hard", target_sha],
+        status_lines,
+        "reset_to_origin_main",
+    )
+    if failure is not None:
+        return _maintenance_report("BLOCKED", task_id, [*status_lines, failure], "not_met")
+    after_sha, failure = _run_freshness_command(
+        ["git", "-C", str(checkout_path), "rev-parse", "HEAD"],
+        status_lines,
+        "read_after_head",
+    )
+    if failure is not None or after_sha is None or after_sha.lower() != target_sha:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, failure or "reason=after_sha_mismatch"],
+            "not_met",
+        )
+    clean, failure = _run_freshness_command(
+        ["git", "-C", str(checkout_path), "status", "--porcelain"],
+        status_lines,
+        "verify_clean_status",
+    )
+    if failure is not None or (clean or "").strip():
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, failure or "reason=post_sync_dirty_state"],
+            "not_met",
+        )
+    status_lines.extend(
+        (
+            f"before_sha={before_sha.lower()}",
+            f"target_sha={target_sha}",
+            f"after_sha={after_sha.lower()}",
+            "clean_status=true",
+        )
+    )
+    return _maintenance_report("DONE", task_id, status_lines, "met")
+
+
+def _current_main_validation_profile(body: str) -> tuple[str | None, str | None]:
+    metadata = (body or "").split("```task", 1)[0]
+    profile = _body_field(metadata, "Validation Profile") or "full_pytest"
+    if profile not in CURRENT_MAIN_VALIDATION_PROFILES:
+        return None, "unsupported_validation_profile"
+    return profile, None
+
+
+def _pytest_result_count(output: str) -> str:
+    counts: dict[str, int] = {}
+    for count, name in re.findall(
+        r"\b(\d+)\s+(passed|failed|skipped|xfailed|xpassed|errors?|warnings?)\b",
+        output or "",
+        flags=re.IGNORECASE,
+    ):
+        key = name.lower()
+        if key == "error":
+            key = "errors"
+        counts[key] = counts.get(key, 0) + int(count)
+    if not counts and re.search(r"\bno tests ran\b", output or "", re.IGNORECASE):
+        return "no_tests_ran"
+    return ",".join(f"{key}:{counts[key]}" for key in sorted(counts)) or "unknown"
+
+
+def validate_current_main(body: str = "") -> str:
+    task_id = VALIDATE_CURRENT_MAIN
+    profile, reason = _current_main_validation_profile(body)
+    if reason is not None or profile is None:
+        return _maintenance_report("BLOCKED", task_id, [f"reason={reason}"], "not_met")
+    registered_checkout, status_lines, report = _verify_registered_skeleton_main_checkout(
+        task_id
+    )
+    if report is not None:
+        return report
+    assert registered_checkout is not None
+    checkout_path = registered_checkout.checkout_path
+    _, failure = _run_freshness_command(
+        ["git", "-C", str(checkout_path), "fetch", "--prune", "origin", "main"],
+        status_lines,
+        "fetch_origin_main",
+    )
+    if failure is not None:
+        return _maintenance_report("BLOCKED", task_id, [*status_lines, failure], "not_met")
+    validated_sha, failure = _read_verified_origin_main_sha(task_id, checkout_path, status_lines)
+    if failure is not None or validated_sha is None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, failure or "reason=current_main_unproven"],
+            "not_met",
+        )
+    head_sha, failure = _run_freshness_command(
+        ["git", "-C", str(checkout_path), "rev-parse", "HEAD"],
+        status_lines,
+        "read_checkout_head",
+    )
+    if failure is not None or head_sha is None or head_sha.lower() != validated_sha:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, failure or "reason=checkout_head_not_current_main"],
+            "not_met",
+        )
+    started = time.monotonic()
+    result_count = "unknown"
+    for command in CURRENT_MAIN_VALIDATION_PROFILES[profile]:
+        code, output = run_command(list(command), cwd=checkout_path)
+        result_count = _pytest_result_count(output)
+        if code != 0:
+            duration_ms = int((time.monotonic() - started) * 1000)
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [
+                    *status_lines,
+                    f"validated_sha={validated_sha}",
+                    f"profile={profile}",
+                    f"test_result=failed",
+                    f"test_count={result_count}",
+                    f"duration_ms={duration_ms}",
+                ],
+                "not_met",
+            )
+    duration_ms = int((time.monotonic() - started) * 1000)
+    return _maintenance_report(
+        "DONE",
+        task_id,
+        [
+            *status_lines,
+            f"validated_sha={validated_sha}",
+            f"profile={profile}",
+            "test_result=passed",
+            f"test_count={result_count}",
+            f"duration_ms={duration_ms}",
+        ],
+        "met",
+    )
+
+
+AUFMASS_PREFLIGHT_SMOKE_SCRIPT = r"""
+import hashlib
+import json
+
+outcomes = {}
+versions = {}
+geos_version = "unknown"
+try:
+    import numpy
+    arr = numpy.array([[1, 2], [3, 4]], dtype=numpy.int64)
+    outcomes["numpy"] = hashlib.sha256(arr.tobytes()).hexdigest()[:16]
+    versions["numpy"] = numpy.__version__
+except Exception as exc:
+    raise SystemExit("numpy_failed") from exc
+try:
+    import ezdxf
+    doc = ezdxf.new("R2010")
+    doc.modelspace().add_line((0, 0), (1, 1))
+    outcomes["ezdxf"] = hashlib.sha256(doc.dxfversion.encode("ascii")).hexdigest()[:16]
+    versions["ezdxf"] = ezdxf.__version__
+except Exception as exc:
+    raise SystemExit("ezdxf_failed") from exc
+try:
+    import shapely
+    from shapely.geometry import Polygon
+    poly = Polygon([(0, 0), (2, 0), (2, 2), (0, 2)])
+    outcomes["shapely"] = hashlib.sha256(f"{poly.area:.3f}".encode("ascii")).hexdigest()[:16]
+    versions["shapely"] = shapely.__version__
+    geos_version = getattr(shapely, "geos_version_string", "unknown")
+except Exception as exc:
+    raise SystemExit("shapely_failed") from exc
+try:
+    import networkx
+    graph = networkx.Graph()
+    graph.add_weighted_edges_from([("a", "b", 2), ("b", "c", 3)])
+    path = networkx.shortest_path(graph, "a", "c", weight="weight")
+    outcomes["networkx"] = hashlib.sha256(",".join(path).encode("ascii")).hexdigest()[:16]
+    versions["networkx"] = networkx.__version__
+except Exception as exc:
+    raise SystemExit("networkx_failed") from exc
+try:
+    from PIL import Image
+    image = Image.new("RGB", (2, 2), (12, 34, 56))
+    outcomes["pillow"] = hashlib.sha256(image.tobytes()).hexdigest()[:16]
+    versions["pillow"] = Image.__version__
+except Exception as exc:
+    raise SystemExit("pillow_failed") from exc
+print(json.dumps({"versions": versions, "geos_version": geos_version, "outcomes": outcomes}, sort_keys=True))
+"""
+
+
+def _run_aufmass_preflight_command(
+    task_id: str,
+    command: list[str],
+    status_lines: list[str],
+    step: str,
+    *,
+    cwd: Path | None = None,
+) -> tuple[str | None, str | None]:
+    code, output = run_command(command, cwd=cwd)
+    if code == 0:
+        status_lines.append(f"step={step} status=done")
+        return output.strip(), None
+    return None, f"step={step} status=failed exit_code={code}"
+
+
+def _aufmass_preflight_python() -> Path:
+    if sys.platform == "win32":
+        return AUFMASS_PREFLIGHT_VENV_DIR / "Scripts" / "python.exe"
+    return AUFMASS_PREFLIGHT_VENV_DIR / "bin" / "python"
+
+
+def _safe_aufmass_preflight_path(path: Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(RUNNER_PROJECT_CHECKOUT_BASE)
+    except ValueError:
+        return False
+    return True
+
+
+def _parse_aufmass_smoke_output(output: str) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        parsed = json.loads(output)
+    except json.JSONDecodeError:
+        return None, "smoke_output_invalid"
+    if not isinstance(parsed, dict):
+        return None, "smoke_output_invalid"
+    outcomes = parsed.get("outcomes")
+    versions = parsed.get("versions")
+    if not isinstance(outcomes, dict) or not isinstance(versions, dict):
+        return None, "smoke_output_invalid"
+    if set(outcomes) != set(AUFMASS_PREFLIGHT_SMOKE_COMPONENTS):
+        return None, "smoke_components_missing"
+    if set(versions) != set(AUFMASS_PREFLIGHT_SMOKE_COMPONENTS):
+        return None, "resolved_versions_missing"
+    return parsed, None
+
+
+def aufmass_dependency_preflight() -> str:
+    task_id = AUFMASS_DEPENDENCY_PREFLIGHT
+    status_lines = [
+        f"selected_python={sanitize_maintenance_public_value(sys.version.split()[0])}",
+        f"architecture={sanitize_maintenance_public_value(os.uname().machine if hasattr(os, 'uname') else sys.platform)}",
+        "rollback_readiness=remove_isolated_preflight_venv_and_cache",
+    ]
+    if not _safe_aufmass_preflight_path(AUFMASS_PREFLIGHT_VENV_DIR) or not _safe_aufmass_preflight_path(
+        AUFMASS_PREFLIGHT_WHEEL_CACHE
+    ):
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "stable_blocker=unsafe_preflight_path"],
+            "not_met",
+        )
+    try:
+        AUFMASS_PREFLIGHT_WHEEL_CACHE.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "cache_ready=false", "stable_blocker=cache_prepare_failed"],
+            "not_met",
+        )
+    output, failure = _run_aufmass_preflight_command(
+        task_id,
+        ["python3", "-m", "venv", str(AUFMASS_PREFLIGHT_VENV_DIR)],
+        status_lines,
+        "ensure_isolated_venv",
+    )
+    del output
+    if failure is not None:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, failure, "stable_blocker=venv_prepare_failed"], "not_met"
+        )
+    venv_python = _aufmass_preflight_python()
+    if not venv_python.exists():
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "venv_ready=false", "stable_blocker=venv_python_missing"],
+            "not_met",
+        )
+    status_lines.append("venv_ready=true")
+    status_lines.append("cache_ready=true")
+    _, failure = _run_aufmass_preflight_command(
+        task_id,
+        [
+            str(venv_python),
+            "-m",
+            "pip",
+            "download",
+            "--only-binary=:all:",
+            "--dest",
+            str(AUFMASS_PREFLIGHT_WHEEL_CACHE),
+            *AUFMASS_PREFLIGHT_PACKAGE_BOUNDS,
+        ],
+        status_lines,
+        "resolve_binary_wheels",
+    )
+    if failure is not None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, failure, "source_build_blocked=true", "stable_blocker=binary_wheel_resolution_failed"],
+            "not_met",
+        )
+    _, failure = _run_aufmass_preflight_command(
+        task_id,
+        [str(venv_python), "-m", "pip", "index", "versions", "PyMuPDF"],
+        status_lines,
+        "inspect_pymupdf_metadata",
+    )
+    if failure is not None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, failure, "stable_blocker=pymupdf_metadata_unavailable"],
+            "not_met",
+        )
+    _, failure = _run_aufmass_preflight_command(
+        task_id,
+        [
+            str(venv_python),
+            "-m",
+            "pip",
+            "install",
+            "--no-index",
+            "--find-links",
+            str(AUFMASS_PREFLIGHT_WHEEL_CACHE),
+            *AUFMASS_PREFLIGHT_PACKAGE_BOUNDS,
+        ],
+        status_lines,
+        "install_isolated_wheels",
+    )
+    if failure is not None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, failure, "stable_blocker=isolated_install_failed"],
+            "not_met",
+        )
+    smoke_one, failure = _run_aufmass_preflight_command(
+        task_id,
+        [str(venv_python), "-c", AUFMASS_PREFLIGHT_SMOKE_SCRIPT],
+        status_lines,
+        "run_synthetic_smoke_once",
+    )
+    if failure is not None or smoke_one is None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, failure or "reason=synthetic_smoke_failed", "stable_blocker=synthetic_smoke_failed"],
+            "not_met",
+        )
+    parsed_one, reason = _parse_aufmass_smoke_output(smoke_one)
+    if reason is not None or parsed_one is None:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, f"stable_blocker={reason}"], "not_met"
+        )
+    smoke_two, failure = _run_aufmass_preflight_command(
+        task_id,
+        [str(venv_python), "-c", AUFMASS_PREFLIGHT_SMOKE_SCRIPT],
+        status_lines,
+        "run_synthetic_smoke_repeat",
+    )
+    parsed_two, reason = _parse_aufmass_smoke_output(smoke_two or "")
+    if failure is not None or parsed_two is None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, failure or f"stable_blocker={reason}"],
+            "not_met",
+        )
+    if parsed_one["outcomes"] != parsed_two["outcomes"]:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "stable_blocker=synthetic_smoke_hash_unstable"],
+            "not_met",
+        )
+    versions = {
+        str(key): sanitize_maintenance_public_value(value)
+        for key, value in parsed_one["versions"].items()
+    }
+    status_lines.extend(
+        (
+            "resolved_versions="
+            + ",".join(f"{key}:{versions[key]}" for key in sorted(versions)),
+            f"geos_version={sanitize_maintenance_public_value(parsed_one.get('geos_version'))}",
+            "smoke_numpy=passed",
+            "smoke_ezdxf=passed",
+            "smoke_shapely=passed",
+            "smoke_networkx=passed",
+            "smoke_pillow=passed",
+            "smoke_hashes=stable",
+            "stable_blocker=none",
+        )
+    )
+    return _maintenance_report("DONE", task_id, status_lines, "met")
+
+
 def _classify_skeleton_checkout_sync(
     checkout_path: Path, head_sha: str, github_main_sha: str
 ) -> tuple[str | None, str | None]:
@@ -7173,6 +7801,12 @@ def dispatch_runtime_maintenance_task(
             return ensure_telegram_callback_local_config()
         if task_id == CHECK_SKELETON_FRESHNESS:
             return check_skeleton_freshness()
+        if task_id == RUNTIME_SYNC_MAIN:
+            return runtime_sync_main()
+        if task_id == VALIDATE_CURRENT_MAIN:
+            return validate_current_main(body)
+        if task_id == AUFMASS_DEPENDENCY_PREFLIGHT:
+            return aufmass_dependency_preflight()
         if task_id == ENSURE_PROJECT_CHECKOUT:
             return ensure_project_checkout(body)
         if task_id == VALIDATE_PR_BRANCH:

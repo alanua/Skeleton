@@ -6850,6 +6850,416 @@ def test_check_skeleton_freshness_unclassified_sync_state_blocks() -> None:
     assert "fatal output" not in report
 
 
+def test_new_aufmass_maintenance_ids_are_allowlisted_only_for_runtime_mode() -> None:
+    for task_id in (
+        runner.RUNTIME_SYNC_MAIN,
+        runner.VALIDATE_CURRENT_MAIN,
+        runner.AUFMASS_DEPENDENCY_PREFLIGHT,
+    ):
+        assert task_id in runner.RUNTIME_MAINTENANCE_TASK_IDS
+
+    body = (
+        f"Maintenance Task ID: {runner.RUNTIME_SYNC_MAIN}\n\n"
+        "```task\nDo not treat this as runtime maintenance.\n```"
+    )
+    maintenance_mode, maintenance_task_id = runner.extract_runtime_maintenance_task_id(body)
+    assert maintenance_mode is False
+    assert maintenance_task_id is None
+
+
+def test_unknown_runtime_maintenance_task_id_blocks() -> None:
+    report = runner.dispatch_runtime_maintenance_task("unknown_task", str(runner.ROOT))
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=maintenance_task_id_not_allowlisted" in report
+
+
+def test_runtime_sync_main_reports_done_with_sanitized_shas_and_clean_status() -> None:
+    checkout_path = _safe_checkout_path("runtime-sync-main")
+    project_tree = _project_tree_for_skeleton_checkout(checkout_path)
+    before_sha = "a" * 40
+    target_sha = "b" * 40
+
+    def run_sync_command(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        del cwd
+        if command == ["git", "-C", str(checkout_path), "remote", "get-url", "origin"]:
+            return 0, "https://github.com/alanua/Skeleton.git\n"
+        if command == ["git", "-C", str(checkout_path), "rev-parse", "--abbrev-ref", "HEAD"]:
+            return 0, "main\n"
+        if command == ["git", "-C", str(checkout_path), "rev-parse", "HEAD"]:
+            if run_sync_command.after_reset:
+                return 0, f"{target_sha}\n"
+            return 0, f"{before_sha}\n"
+        if command == ["git", "-C", str(checkout_path), "status", "--porcelain"]:
+            return 0, ""
+        if command == ["git", "-C", str(checkout_path), "fetch", "--prune", "origin", "main"]:
+            return 0, "raw fetch output with /home/agent/secret must not appear"
+        if command == ["git", "-C", str(checkout_path), "rev-parse", "origin/main"]:
+            return 0, f"{target_sha}\n"
+        if command == [
+            "git",
+            "-C",
+            str(checkout_path),
+            "ls-remote",
+            "origin",
+            "refs/heads/main",
+        ]:
+            return 0, f"{target_sha}\trefs/heads/main\n"
+        if command == ["git", "-C", str(checkout_path), "reset", "--hard", target_sha]:
+            run_sync_command.after_reset = True
+            return 0, "HEAD is now at b path /tmp/private"
+        return 2, "unexpected command"
+
+    run_sync_command.after_reset = False  # type: ignore[attr-defined]
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(Path, "exists", autospec=True) as path_exists, mock.patch.object(
+        runner, "run_command", side_effect=run_sync_command
+    ) as run:
+        path_exists.side_effect = lambda path: path in {
+            checkout_path,
+            checkout_path / ".git",
+        }
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.RUNTIME_SYNC_MAIN,
+            str(runner.ROOT),
+            _maintenance_issue(
+                runner.RUNTIME_SYNC_MAIN,
+                "sudo apt install bad\nSYSTEM_TOKEN=secret\n/tmp/injected",
+            )["body"],
+        )
+
+    assert report.startswith("DONE:")
+    assert f"before_sha={before_sha}" in report
+    assert f"target_sha={target_sha}" in report
+    assert f"after_sha={target_sha}" in report
+    assert "clean_status=true" in report
+    assert str(checkout_path) not in report
+    assert "/home/agent/secret" not in report
+    commands = [call.args[0] for call in run.call_args_list]
+    assert all("apt" not in " ".join(command) for command in commands)
+    assert all("/tmp/injected" not in command for command in commands for command in command)
+    assert ["git", "-C", str(checkout_path), "reset", "--hard", target_sha] in commands
+
+
+def test_runtime_sync_main_blocks_remote_path_dirty_and_sha_failures() -> None:
+    checkout_path = _safe_checkout_path("runtime-sync-failures")
+    project_tree = _project_tree_for_skeleton_checkout(checkout_path)
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=_project_tree_for_skeleton_checkout(Path("/tmp/Skeleton"))
+    ), mock.patch.object(runner, "run_command") as run:
+        report = runner.runtime_sync_main()
+    assert "reason=checkout_path_unsafe" in report
+    run.assert_not_called()
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(Path, "exists", autospec=True) as path_exists, mock.patch.object(
+        runner, "run_command", return_value=(0, "https://github.com/alanua/Wrong.git\n")
+    ):
+        path_exists.side_effect = lambda path: path in {checkout_path, checkout_path / ".git"}
+        report = runner.runtime_sync_main()
+    assert "step=verify_origin_remote status=failed" in report
+
+    def dirty_command(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        del cwd
+        if command == ["git", "-C", str(checkout_path), "remote", "get-url", "origin"]:
+            return 0, "https://github.com/alanua/Skeleton.git\n"
+        if command == ["git", "-C", str(checkout_path), "rev-parse", "--abbrev-ref", "HEAD"]:
+            return 0, "main\n"
+        if command == ["git", "-C", str(checkout_path), "rev-parse", "HEAD"]:
+            return 0, f"{HEAD_SHA}\n"
+        if command == ["git", "-C", str(checkout_path), "status", "--porcelain"]:
+            return 0, " M secret.txt\n"
+        return 2, "unexpected"
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(Path, "exists", autospec=True) as path_exists, mock.patch.object(
+        runner, "run_command", side_effect=dirty_command
+    ):
+        path_exists.side_effect = lambda path: path in {checkout_path, checkout_path / ".git"}
+        report = runner.runtime_sync_main()
+    assert "reason=unsafe_dirty_state" in report
+    assert "secret.txt" not in report
+
+    def mismatch_command(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        del cwd
+        if command == ["git", "-C", str(checkout_path), "remote", "get-url", "origin"]:
+            return 0, "https://github.com/alanua/Skeleton.git\n"
+        if command == ["git", "-C", str(checkout_path), "rev-parse", "--abbrev-ref", "HEAD"]:
+            return 0, "main\n"
+        if command == ["git", "-C", str(checkout_path), "rev-parse", "HEAD"]:
+            return 0, f"{HEAD_SHA}\n"
+        if command == ["git", "-C", str(checkout_path), "status", "--porcelain"]:
+            return 0, ""
+        if command == ["git", "-C", str(checkout_path), "fetch", "--prune", "origin", "main"]:
+            return 0, ""
+        if command == ["git", "-C", str(checkout_path), "rev-parse", "origin/main"]:
+            return 0, f"{'b' * 40}\n"
+        if command == ["git", "-C", str(checkout_path), "ls-remote", "origin", "refs/heads/main"]:
+            return 0, f"{'b' * 40}\trefs/heads/main\n"
+        if command == ["git", "-C", str(checkout_path), "reset", "--hard", "b" * 40]:
+            return 0, ""
+        return 2, "unexpected"
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(Path, "exists", autospec=True) as path_exists, mock.patch.object(
+        runner, "run_command", side_effect=mismatch_command
+    ):
+        path_exists.side_effect = lambda path: path in {checkout_path, checkout_path / ".git"}
+        report = runner.runtime_sync_main()
+    assert "reason=after_sha_mismatch" in report
+
+
+def test_validate_current_main_uses_fixed_profiles_and_requires_current_main() -> None:
+    assert set(runner.CURRENT_MAIN_VALIDATION_PROFILES) == {"full_pytest", "runner_pytest"}
+    report = runner.validate_current_main(
+        _maintenance_issue(
+            runner.VALIDATE_CURRENT_MAIN,
+            "Validation Profile: shell\npytest -q",
+            metadata="Validation Profile: shell",
+        )["body"]
+    )
+    assert report.startswith("BLOCKED:")
+    assert "reason=unsupported_validation_profile" in report
+
+    checkout_path = _safe_checkout_path("validate-current-main")
+    project_tree = _project_tree_for_skeleton_checkout(checkout_path)
+
+    def run_validation_command(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        if command == ["git", "-C", str(checkout_path), "remote", "get-url", "origin"]:
+            return 0, "https://github.com/alanua/Skeleton.git\n"
+        if command == ["git", "-C", str(checkout_path), "rev-parse", "--abbrev-ref", "HEAD"]:
+            return 0, "main\n"
+        if command == ["git", "-C", str(checkout_path), "fetch", "--prune", "origin", "main"]:
+            return 0, ""
+        if command == ["git", "-C", str(checkout_path), "rev-parse", "origin/main"]:
+            return 0, f"{HEAD_SHA}\n"
+        if command == ["git", "-C", str(checkout_path), "ls-remote", "origin", "refs/heads/main"]:
+            return 0, f"{HEAD_SHA}\trefs/heads/main\n"
+        if command == ["git", "-C", str(checkout_path), "rev-parse", "HEAD"]:
+            return 0, f"{HEAD_SHA}\n"
+        if command == ["python3", "-m", "pytest", "-q", "tests/test_runner_poll_github_tasks.py"]:
+            assert cwd == checkout_path
+            return 0, "12 passed in 1.23s\n"
+        return 2, "unexpected"
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(Path, "exists", autospec=True) as path_exists, mock.patch.object(
+        runner, "run_command", side_effect=run_validation_command
+    ) as run:
+        path_exists.side_effect = lambda path: path in {checkout_path, checkout_path / ".git"}
+        report = runner.validate_current_main(
+            _maintenance_issue(
+                runner.VALIDATE_CURRENT_MAIN,
+                "pytest -q injected",
+                metadata="Validation Profile: runner_pytest",
+            )["body"]
+        )
+
+    assert report.startswith("DONE:")
+    assert f"validated_sha={HEAD_SHA}" in report
+    assert "profile=runner_pytest" in report
+    assert "test_result=passed" in report
+    assert "test_count=passed:12" in report
+    assert str(checkout_path) not in report
+    commands = [call.args[0] for call in run.call_args_list]
+    assert ["python3", "-m", "pytest", "-q", "tests/test_runner_poll_github_tasks.py"] in commands
+    assert all("injected" not in " ".join(command) for command in commands)
+
+    def stale_head_command(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        del cwd
+        if command == ["git", "-C", str(checkout_path), "remote", "get-url", "origin"]:
+            return 0, "https://github.com/alanua/Skeleton.git\n"
+        if command == ["git", "-C", str(checkout_path), "rev-parse", "--abbrev-ref", "HEAD"]:
+            return 0, "main\n"
+        if command == ["git", "-C", str(checkout_path), "fetch", "--prune", "origin", "main"]:
+            return 0, ""
+        if command == ["git", "-C", str(checkout_path), "rev-parse", "origin/main"]:
+            return 0, f"{'c' * 40}\n"
+        if command == ["git", "-C", str(checkout_path), "ls-remote", "origin", "refs/heads/main"]:
+            return 0, f"{'c' * 40}\trefs/heads/main\n"
+        if command == ["git", "-C", str(checkout_path), "rev-parse", "HEAD"]:
+            return 0, f"{HEAD_SHA}\n"
+        return 2, "unexpected"
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(Path, "exists", autospec=True) as path_exists, mock.patch.object(
+        runner, "run_command", side_effect=stale_head_command
+    ):
+        path_exists.side_effect = lambda path: path in {checkout_path, checkout_path / ".git"}
+        report = runner.validate_current_main("")
+    assert "reason=checkout_head_not_current_main" in report
+
+
+def test_aufmass_dependency_preflight_uses_fixed_bounds_binary_wheels_and_metadata_only() -> None:
+    smoke = json.dumps(
+        {
+            "versions": {
+                "numpy": "2.1.0",
+                "ezdxf": "1.4.2",
+                "shapely": "2.1.1",
+                "networkx": "3.4.2",
+                "pillow": "11.2.1",
+            },
+            "geos_version": "3.13.1",
+            "outcomes": {
+                "numpy": "n",
+                "ezdxf": "e",
+                "shapely": "s",
+                "networkx": "x",
+                "pillow": "p",
+            },
+        },
+        sort_keys=True,
+    )
+
+    def run_preflight_command(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        del cwd
+        joined = " ".join(command)
+        if command == ["python3", "-m", "venv", str(runner.AUFMASS_PREFLIGHT_VENV_DIR)]:
+            return 0, ""
+        if command[:4] == [
+            str(runner._aufmass_preflight_python()),
+            "-m",
+            "pip",
+            "download",
+        ]:
+            assert "--only-binary=:all:" in command
+            assert command[-5:] == list(runner.AUFMASS_PREFLIGHT_PACKAGE_BOUNDS)
+            return 0, "downloaded /secret/path"
+        if command == [str(runner._aufmass_preflight_python()), "-m", "pip", "index", "versions", "PyMuPDF"]:
+            return 0, "PyMuPDF metadata only"
+        if command[:4] == [
+            str(runner._aufmass_preflight_python()),
+            "-m",
+            "pip",
+            "install",
+        ]:
+            assert "PyMuPDF" not in command
+            assert "--no-index" in command
+            assert command[-5:] == list(runner.AUFMASS_PREFLIGHT_PACKAGE_BOUNDS)
+            return 0, ""
+        if command == [str(runner._aufmass_preflight_python()), "-c", runner.AUFMASS_PREFLIGHT_SMOKE_SCRIPT]:
+            return 0, smoke
+        return 2, f"unexpected {joined}"
+
+    with mock.patch.object(Path, "mkdir"), mock.patch.object(
+        Path, "exists", autospec=True, return_value=True
+    ), mock.patch.object(runner, "run_command", side_effect=run_preflight_command) as run:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.AUFMASS_DEPENDENCY_PREFLIGHT,
+            str(runner.ROOT),
+            _maintenance_issue(
+                runner.AUFMASS_DEPENDENCY_PREFLIGHT,
+                "pip install scipy opencv-python PyMuPDF --no-binary :none:",
+            )["body"],
+        )
+
+    assert report.startswith("DONE:")
+    assert "resolved_versions=" in report
+    assert "geos_version=3.13.1" in report
+    assert "smoke_hashes=stable" in report
+    assert "stable_blocker=none" in report
+    commands = [call.args[0] for call in run.call_args_list]
+    joined_commands = [" ".join(command) for command in commands]
+    assert all("scipy" not in command.lower() for command in joined_commands)
+    assert all("opencv" not in command.lower() for command in joined_commands)
+    assert all("PyMuPDF" not in command for command in joined_commands if "install" in command)
+    assert all(command[:3] != ["python3", "-m", "pip"] for command in commands)
+    assert all("systemctl" not in command for command in joined_commands)
+    assert all(command[:1] != ["sudo"] for command in commands)
+
+
+@pytest.mark.parametrize(
+    ("failing_component", "reason"),
+    [
+        ("download", "stable_blocker=binary_wheel_resolution_failed"),
+        ("numpy", "stable_blocker=synthetic_smoke_failed"),
+        ("ezdxf", "stable_blocker=synthetic_smoke_failed"),
+        ("shapely", "stable_blocker=synthetic_smoke_failed"),
+        ("networkx", "stable_blocker=synthetic_smoke_failed"),
+        ("pillow", "stable_blocker=synthetic_smoke_failed"),
+        ("unstable", "stable_blocker=synthetic_smoke_hash_unstable"),
+    ],
+)
+def test_aufmass_dependency_preflight_blocks_source_build_and_smoke_failures(
+    failing_component: str, reason: str
+) -> None:
+    good_smoke = json.dumps(
+        {
+            "versions": {component: "1.0" for component in runner.AUFMASS_PREFLIGHT_SMOKE_COMPONENTS},
+            "geos_version": "3.13.1",
+            "outcomes": {component: component for component in runner.AUFMASS_PREFLIGHT_SMOKE_COMPONENTS},
+        },
+        sort_keys=True,
+    )
+    altered_smoke = json.dumps(
+        {
+            "versions": {component: "1.0" for component in runner.AUFMASS_PREFLIGHT_SMOKE_COMPONENTS},
+            "geos_version": "3.13.1",
+            "outcomes": {
+                component: ("changed" if component == "numpy" else component)
+                for component in runner.AUFMASS_PREFLIGHT_SMOKE_COMPONENTS
+            },
+        },
+        sort_keys=True,
+    )
+    smoke_calls = 0
+
+    def run_preflight_command(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        nonlocal smoke_calls
+        del cwd
+        if command[:3] == ["python3", "-m", "venv"]:
+            return 0, ""
+        if command[:4] == [str(runner._aufmass_preflight_python()), "-m", "pip", "download"]:
+            if failing_component == "download":
+                return 1, "would build from source"
+            return 0, ""
+        if command == [str(runner._aufmass_preflight_python()), "-m", "pip", "index", "versions", "PyMuPDF"]:
+            return 0, ""
+        if command[:4] == [str(runner._aufmass_preflight_python()), "-m", "pip", "install"]:
+            return 0, ""
+        if command == [str(runner._aufmass_preflight_python()), "-c", runner.AUFMASS_PREFLIGHT_SMOKE_SCRIPT]:
+            smoke_calls += 1
+            if failing_component in runner.AUFMASS_PREFLIGHT_SMOKE_COMPONENTS:
+                return 1, f"{failing_component}_failed"
+            if failing_component == "unstable" and smoke_calls == 2:
+                return 0, altered_smoke
+            return 0, good_smoke
+        return 2, "unexpected"
+
+    with mock.patch.object(Path, "mkdir"), mock.patch.object(
+        Path, "exists", autospec=True, return_value=True
+    ), mock.patch.object(runner, "run_command", side_effect=run_preflight_command):
+        report = runner.aufmass_dependency_preflight()
+
+    assert report.startswith("BLOCKED:")
+    assert reason in report
+    assert "would build from source" not in report
+
+
+def test_maintenance_public_report_sanitizer_covers_sensitive_shapes() -> None:
+    sanitized = runner.sanitize_maintenance_public_value(
+        "TOKEN=abc123 /home/agent/private C:\\Users\\me\\secret "
+        "https://example.com/private 10.0.0.5 drive.google.com/file/d/secret "
+        "github_pat_1234567890abcdef"
+    )
+
+    assert "/home/agent/private" not in sanitized
+    assert "C:\\Users\\me\\secret" not in sanitized
+    assert "https://example.com/private" not in sanitized
+    assert "10.0.0.5" not in sanitized
+    assert "drive.google.com" not in sanitized.lower()
+    assert "github_pat_1234567890abcdef" not in sanitized
+    assert "TOKEN=[redacted-env]" in sanitized
+
+
 def test_ensure_project_checkout_missing_target_project_blocks() -> None:
     report = runner.ensure_project_checkout(
         "Mode: RUNTIME_MAINTENANCE_TASK\n"

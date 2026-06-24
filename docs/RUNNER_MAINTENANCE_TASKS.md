@@ -196,6 +196,60 @@ matches the registered repository. Missing target metadata, unknown projects,
 unsafe paths, missing checkouts, missing `.git`, failed origin reads, and remote
 mismatches are reported as `BLOCKED`.
 
+`runtime_sync_main` may only synchronize the registered Skeleton checkout:
+
+1. Resolve the single registered `alanua/Skeleton` checkout from internal
+   `PROJECT_TREE.yaml` metadata.
+2. Verify the path is under the Runner checkout base, the checkout exists, `.git`
+   exists, origin matches `alanua/Skeleton`, and the current branch is `main`.
+3. Verify the worktree is clean before any reset.
+4. Run only the fixed `origin main` fetch, prove `origin/main` matches
+   `refs/heads/main` from the remote, and reset the registered checkout to that
+   SHA.
+5. Verify the resulting `HEAD` equals the target SHA and the worktree is clean.
+
+It never reads command, path, repository, branch, package, or service input from
+the issue body. It must not touch target-project checkouts, restart services,
+deploy, run package managers, merge, push, or process Aufmass data. Reports are
+limited to sanitized before/target/after SHA and clean status.
+
+`validate_current_main` validates only verified current Skeleton `main`.
+
+Allowed profiles are fixed:
+
+1. `full_pytest`: `python3 -m pytest -q`
+2. `runner_pytest`: `python3 -m pytest -q tests/test_runner_poll_github_tasks.py`
+
+The default profile is `full_pytest`. The task first proves the registered
+Skeleton checkout is on `main`, origin is `alanua/Skeleton`, `origin/main`
+matches the remote `refs/heads/main`, and local `HEAD` equals that current main
+SHA. It then runs only the fixed command for the selected profile. Reports are
+limited to validated SHA, profile, test result, test count, duration, and success
+criteria.
+
+`aufmass_dependency_preflight` prepares only a Runner-managed isolated preflight
+virtual environment and wheel cache derived from internal configuration. It must
+not modify system Python, activate runtime services, install unbounded packages,
+or use package/version/path input from an issue.
+
+Allowed dependency bounds are fixed:
+
+1. `numpy>=2.0,<2.5`
+2. `ezdxf>=1.4,<2`
+3. `shapely>=2.1,<2.2`
+4. `networkx>=3.4,<4`
+5. `pillow>=11,<13`
+
+The resolver must prefer binary wheels with `--only-binary=:all:` and block
+before any unexpected source build. PyMuPDF is inspected with metadata-only pip
+indexing and is not installed. The smoke suite is synthetic and covers only
+NumPy, ezdxf, Shapely/GEOS, NetworkX, and Pillow; it is repeated and deterministic
+hashes must match. Reports are limited to selected Python, architecture,
+resolved versions, GEOS version, cache/venv readiness, smoke outcomes, rollback
+readiness, and a stable blocker token. It must not use real drawings or private
+inputs, and it must not install OCR, OpenCV, SciPy, rtree, mesh, BRep, IFC, or
+Open3D dependencies.
+
 `ensure_project_checkout` prepares only a missing registered project checkout and
 must include target project metadata:
 
