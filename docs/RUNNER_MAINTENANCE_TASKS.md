@@ -36,6 +36,40 @@ Missing or unknown maintenance task ids are reported as `BLOCKED`.
 Every privileged host command uses non-interactive `sudo -n`; the Runner must
 block instead of waiting for operator input.
 
+`runtime_sync_main` is the generic repository-only synchronization route for the
+registered Skeleton checkout. It requires no target metadata:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: runtime_sync_main
+```
+
+It may only:
+
+1. Resolve the single registered `alanua/Skeleton` checkout from
+   `PROJECT_TREE.yaml`.
+2. Verify the registered checkout path is safe using the same path rules as
+   `check_project_checkout`.
+3. Verify the checkout exists, `.git` exists, and `origin` is exactly
+   `https://github.com/alanua/Skeleton.git`.
+4. Verify the checkout has no tracked changes and no unexpected untracked files.
+5. Run only bounded repository synchronization commands against that checkout:
+   `git -C {checkout_path} fetch --prune origin main`,
+   `git -C {checkout_path} checkout main`, and
+   `git -C {checkout_path} pull --ff-only origin main`.
+6. Verify `origin/main` matches `ls-remote origin refs/heads/main`.
+7. Verify `HEAD` equals `origin/main` after synchronization before reporting
+   `DONE`.
+
+It ignores issue-provided paths, target-project metadata, and command-looking
+text. It must not stop, start, reload, install, package, configure, or inspect
+services, runtime units, secrets, target projects, callback runtime files, or
+non-Skeleton checkouts. Missing checkouts, missing `.git`, unsafe paths, wrong
+origin, failed reads, dirty state, unexpected untracked files, failed sync, and
+SHA mismatches are reported as `BLOCKED` with stable reason tokens. Reports must
+not include absolute host paths, raw command output, environment values, or
+credentials.
+
 `ensure_telegram_callback_local_config` may only:
 
 1. Create `/etc/skeleton-runner.env` if it is missing without reading config
@@ -274,8 +308,10 @@ Failed validation profile commands include the allowlisted command and a
 bounded, sanitized output block between `failed_output_start` and
 `failed_output_end`; long output is truncated with an explicit marker.
 
-`check_skeleton_freshness` is a short status-only check before Skeleton project
-work starts or after recent merges. It requires no target metadata:
+`check_skeleton_freshness` is a short public-safe repository freshness and
+cleanliness proof before Skeleton project work starts or after recent merges.
+GitHub `main` is the source of truth, verified through `origin/main` and
+`ls-remote origin refs/heads/main`. It requires no target metadata:
 
 ```text
 Mode: RUNTIME_MAINTENANCE_TASK
@@ -287,31 +323,32 @@ It may only:
 1. Use the registered Skeleton checkout from `PROJECT_TREE.yaml`.
 2. Verify the checkout path is safe using the same path rules as
    `check_project_checkout`.
-3. Run only bounded Git and GitHub status queries:
+3. Verify the checkout exists, `.git` exists, and `origin` is exactly
+   `https://github.com/alanua/Skeleton.git`.
+4. Run only bounded Git status queries:
    `git -C {checkout_path} remote get-url origin`,
    `git -C {checkout_path} fetch --prune origin main`,
+   `git -C {checkout_path} branch --show-current`,
    `git -C {checkout_path} rev-parse HEAD`,
    `git -C {checkout_path} rev-parse origin/main`,
    `git -C {checkout_path} ls-remote origin refs/heads/main`,
-   `git -C {checkout_path} merge-base --is-ancestor`,
-   `gh pr list --repo alanua/Skeleton --state open`, and
-   `gh issue list --repo alanua/Skeleton --state open`.
-4. Report whether GitHub `main` is the source of truth.
-5. Report whether the live Runner checkout is equal to, ahead of, behind, or
-   diverged from the current GitHub `main` SHA.
-6. Report whether `docs/NOTEBOOKLM_SOURCEPACK.md` may need refresh when
-   sourcepack or NotebookLM context is relevant.
-7. Flag open PRs or issues that may need rebase, retest, or scope review against
-   current `main`.
-8. Remind that old chats and old branches are not canon.
+   `git -C {checkout_path} status --porcelain=v1`, and, only when an
+   `Expected Merge SHA:` is supplied,
+   `git -C {checkout_path} cat-file -e {sha}^{commit}`.
+5. Verify `origin/main` matches `ls-remote origin refs/heads/main`.
+6. Report the current GitHub `main` SHA as `origin_main_sha`, plus aggregate
+   evidence fields only: `current_branch`, `current_head_sha`,
+   `expected_merge_sha_present`, `checkout_clean`, `unexpected_untracked_count`,
+   and `success_criteria`.
 
-It reports `DONE` when the freshness report was produced. It reports `BLOCKED`
-for unsafe paths, missing checkouts, missing `.git`, failed origin reads, failed
-GitHub `main` SHA reads, GitHub query failures, or any unclassified sync state.
-The report must be short, human-readable, and must not include raw command
-output. It may include only safe synthesized status lines such as current
-`main` SHA, checkout sync state, open PR/issue counts, and bounded reminder
-notes.
+It reports `DONE` only when the checkout is clean, has no unexpected untracked
+files, `HEAD` equals verified `origin/main`, and any requested expected merge SHA
+is present. It reports `BLOCKED` for unsafe paths, missing checkouts, missing
+`.git`, failed origin reads, wrong origin, failed fetch/read, `origin/main`
+mismatch, dirty state, unexpected untracked files, invalid or missing expected
+merge SHA, or `HEAD`/`origin/main` mismatch. The report must not include
+absolute host paths, raw command output, environment values, credentials,
+untracked file names, or issue-provided command text. old chats and old branches are not canon.
 
 `hermes_worker_preflight` is a read-only, report-only host inventory preflight
 for the future Hermes worker. It requires no target metadata:
