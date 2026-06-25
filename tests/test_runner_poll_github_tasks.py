@@ -5041,23 +5041,168 @@ def test_blocked_maintenance_output_is_not_labeled_runner_done() -> None:
     notify.assert_called_once_with(145, "BLOCKED", report)
 
 
-def test_not_met_maintenance_output_is_not_labeled_runner_done() -> None:
+def test_needs_operator_maintenance_output_records_and_notifies_exact_status() -> None:
+    report = (
+        "NEEDS_OPERATOR: Runner host maintenance task needs operator action.\n"
+        "maintenance_task_id=publish_existing_issue_worktree\n"
+        "reason=missing_operator_approval\n"
+        "success_criteria=not_met"
+    )
+    with mock.patch.object(
+        runner, "dispatch_runtime_maintenance_task", return_value=report
+    ), mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ) as record, mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ) as notify, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label:
+        runner.process_runtime_maintenance_issue(
+            145, runner.PUBLISH_EXISTING_ISSUE_WORKTREE, str(runner.ROOT)
+        )
+
+    record.assert_called_once_with(
+        145,
+        "skeleton",
+        "NEEDS_OPERATOR",
+        "NEEDS_OPERATOR",
+        "maintenance",
+        report,
+    )
+    set_label.assert_called_once_with(145, runner.LABEL_RUNNING, runner.LABEL_BLOCKED)
+    notify.assert_called_once_with(145, "NEEDS_OPERATOR", report)
+
+
+def test_maintenance_report_status_blocks_middle_top_level_blocked() -> None:
+    report = (
+        "DONE: maintenance step returned\n"
+        "maintenance_task_id=sync_telegram_callback_poller_runtime\n"
+        "BLOCKED: step failed\n"
+        "success_criteria=met"
+    )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+
+
+def test_maintenance_report_status_blocks_middle_duplicate_done() -> None:
+    report = (
+        "DONE: maintenance step returned\n"
+        "maintenance_task_id=sync_telegram_callback_poller_runtime\n"
+        "DONE: duplicate status\n"
+        "success_criteria=met"
+    )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+
+
+def test_maintenance_report_status_ignores_blocked_diagnostic_assignment() -> None:
+    report = (
+        "DONE: maintenance step returned\n"
+        "maintenance_task_id=sync_telegram_callback_poller_runtime\n"
+        "blocked_write_status=BLOCKED\n"
+        "success_criteria=met"
+    )
+
+    assert runner.maintenance_report_status(report) == "DONE"
+
+
+def test_maintenance_report_status_ignores_done_diagnostic_assignment() -> None:
+    report = (
+        "BLOCKED: maintenance step failed\n"
+        "maintenance_task_id=private_memory_healthcheck\n"
+        "private_memory_status=DONE\n"
+        "success_criteria=not_met"
+    )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+
+
+def test_maintenance_report_status_accepts_single_last_line_status() -> None:
+    report = (
+        "maintenance_task_id=sync_telegram_callback_poller_runtime\n"
+        "success_criteria=not_met\n"
+        "NEEDS_OPERATOR: approve runtime action"
+    )
+
+    assert runner.maintenance_report_status(report) == "NEEDS_OPERATOR"
+
+
+def test_maintenance_report_status_blocks_missing_top_level_status() -> None:
+    report = (
+        "maintenance_task_id=sync_telegram_callback_poller_runtime\n"
+        "blocked_write_status=BLOCKED\n"
+        "success_criteria=not_met"
+    )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+
+
+def test_maintenance_report_is_done_requires_success_criteria_met() -> None:
     report = (
         "DONE: maintenance step returned\n"
         "maintenance_task_id=sync_telegram_callback_poller_runtime\n"
         "success_criteria=not_met"
     )
-    with mock.patch.object(
-        runner, "dispatch_runtime_maintenance_task", return_value=report
-    ), mock.patch.object(runner, "post_issue_comment"), mock.patch.object(
-        runner, "notify_task_finished"
-    ) as notify, mock.patch.object(runner, "set_issue_label") as set_label:
-        runner.process_runtime_maintenance_issue(
-            145, runner.SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME, str(runner.ROOT)
-        )
 
-    set_label.assert_called_once_with(145, runner.LABEL_RUNNING, runner.LABEL_BLOCKED)
-    notify.assert_called_once_with(145, "BLOCKED", report)
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert runner.maintenance_report_is_done(report) is False
+
+
+def test_maintenance_report_sanitizer_drops_multiline_status_line() -> None:
+    report = runner._maintenance_report(
+        "BLOCKED",
+        runner.SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
+        ["reason=maintenance_step_raised\nstatus=BLOCKED", "reason=maintenance_step_raised"],
+        "not_met",
+    )
+
+    assert "reason=maintenance_step_raised\nstatus=BLOCKED" not in report
+    assert "reason=maintenance_step_raised" in report
+
+
+def test_maintenance_report_sanitizer_drops_failed_command() -> None:
+    report = runner._maintenance_report(
+        "BLOCKED",
+        runner.VALIDATE_PR_BRANCH,
+        [
+            "step=validation_profile_command_1 status=failed exit_code=1",
+            "failed_command=python3 -m pytest -q tests/test_knowledge_intake.py",
+        ],
+        "not_met",
+    )
+
+    assert "failed_command=" not in report
+    assert "step=validation_profile_command_1 status=failed exit_code=1" in report
+
+
+@pytest.mark.parametrize(
+    "sensitive_value",
+    [
+        "github-token-must-not-leak",
+        "client-secret-value",
+        "api_key-value",
+        "access_key-value",
+        "db-password-value",
+        "credential-value",
+        "private_key-value",
+        "bearer-value",
+        "authorization-value",
+    ],
+)
+def test_maintenance_report_sanitizer_drops_sensitive_values(
+    sensitive_value: str,
+) -> None:
+    report = runner._maintenance_report(
+        "BLOCKED",
+        runner.SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
+        [f"reason={sensitive_value}", "reason=maintenance_step_raised"],
+        "not_met",
+    )
+
+    assert sensitive_value not in report
+    assert "reason=maintenance_step_raised" in report
 
 
 def test_maintenance_privileged_commands_are_non_interactive() -> None:
@@ -5099,7 +5244,7 @@ def test_local_callback_config_task_maintains_only_callback_hmac_setting() -> No
 
     commands = [call.args[0] for call in run.call_args_list]
     assert report.startswith("DONE:")
-    assert "step=verify_callback_hmac_secret status=done" in report
+    assert "step=verify_callback_hmac_secret" not in report
     assert ["sudo", "-n", "touch", runner.TELEGRAM_CALLBACK_LOCAL_CONFIG] in commands
     assert [
         "sudo",
@@ -5144,7 +5289,7 @@ def test_local_callback_config_task_reports_blocked_on_verification_failure() ->
         report = runner.ensure_telegram_callback_local_config()
 
     assert report.startswith("BLOCKED:")
-    assert "step=verify_callback_hmac_secret status=failed exit_code=1" in report
+    assert "step=verify_callback_hmac_secret" not in report
     assert "local config value" not in report
 
 
@@ -5833,13 +5978,13 @@ def test_run_aufmass_private_dxf_review_dry_run_uses_bounded_module_invocation(
 
     assert report.startswith("DONE:")
     assert "maintenance_task_id=run_aufmass_private_dxf_review" in report
-    assert "source_pack_id=pack_token" in report
+    assert "source_pack_id=pack_token" not in report
     assert "mode=dry-run" in report
     assert "branch=dxf-assisted" in report
     assert "selected_source_count=1" in report
     assert "dxf_source_count=1" in report
     assert "artifact_count=1" in report
-    assert "run_id=run_token" in report
+    assert "run_id=run_token" not in report
     assert str(workspace) not in report
     assert "source.dxf" not in report
     assert "rm -rf" not in report
@@ -5949,8 +6094,8 @@ def test_summarize_aufmass_private_review_redacts_private_rows_and_quantities(
 
     assert report.startswith("DONE:")
     assert "maintenance_task_id=summarize_aufmass_private_review" in report
-    assert "source_pack_id=pack_token" in report
-    assert "run_id=run_token" in report
+    assert "source_pack_id=pack_token" not in report
+    assert "run_id=run_token" not in report
     assert "review_table_count=1" in report
     assert "row_count=2" in report
     assert "source_token_count=1" in report
@@ -6005,8 +6150,8 @@ def test_build_aufmass_private_shortlist_writes_private_artifacts_and_public_cou
 
     assert report.startswith("DONE:")
     assert "maintenance_task_id=build_aufmass_private_shortlist" in report
-    assert "source_pack_id=pack_token" in report
-    assert "run_id=run_token" in report
+    assert "source_pack_id=pack_token" not in report
+    assert "run_id=run_token" not in report
     assert "input_table_count=1" in report
     assert "input_row_count=2" in report
     assert "shortlist_row_count=1" in report
@@ -6078,8 +6223,8 @@ def test_build_aufmass_private_area_schedule_writes_explicit_room_and_wall_field
 
     assert report.startswith("DONE:")
     assert "maintenance_task_id=build_aufmass_private_area_schedule" in report
-    assert "source_pack_id=pack_token" in report
-    assert "run_id=run_token" in report
+    assert "source_pack_id=pack_token" not in report
+    assert "run_id=run_token" not in report
     assert "room_area_row_count=1" in report
     assert "wall_area_row_count=1" in report
     assert "warning_count=0" in report
@@ -7667,10 +7812,7 @@ def test_validate_pr_branch_failed_knowledge_intake_command_reports_output(
 
     assert report.startswith("BLOCKED:")
     assert "step=validation_profile_command_1 status=failed exit_code=1" in report
-    assert (
-        "failed_command=python3 -m pytest -q tests/test_knowledge_intake.py"
-        in report
-    )
+    assert "failed_command=" not in report
     assert "failed_output_start" in report
     assert "AssertionError: expected unknown entry to be rejected" in report
     assert "SKELETON_TG_CALLBACK_HMAC_SECRET=should-not-leak" not in report

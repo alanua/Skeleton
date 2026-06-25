@@ -238,6 +238,199 @@ _SENSITIVE_OUTPUT_VALUE_RE = re.compile(
     r"(?i)\b([A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASS|KEY|CREDENTIAL|AUTH)"
     r"[A-Z0-9_]*)\s*=\s*([^\s]+)"
 )
+_MAINTENANCE_TOP_LEVEL_STATUS_RE = re.compile(
+    r"^\s*(DONE|BLOCKED|NEEDS_OPERATOR)\b:?", re.IGNORECASE
+)
+_MAINTENANCE_SENSITIVE_VALUE_RE = re.compile(
+    r"(?i)(?:token|secret|api_key|access_key|password|credential|private_key|bearer|authorization)"
+)
+_MAINTENANCE_STATUS_TOKEN_RE = re.compile(
+    r"(?P<key>[a-z][a-z0-9_]{0,80})=(?P<value>\S+)"
+)
+_MAINTENANCE_PUBLIC_TEXT_BLOCK_MARKERS = frozenset(
+    {
+        "failed_output_start",
+        "failed_output_end",
+        "remove_stderr_start",
+        "remove_stderr_end",
+    }
+)
+_MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
+    {
+        "action",
+        "ahead_by",
+        "allowed_files_count",
+        "allowed_untracked_files",
+        "allowed_untracked_files_count",
+        "approval_status",
+        "approved_head_sha",
+        "artifact_count",
+        "base_branch",
+        "base_ref",
+        "base_sha",
+        "behind_by",
+        "blocked_write_status",
+        "branch",
+        "canon_note",
+        "changed_file",
+        "changed_file_count",
+        "changed_files",
+        "changed_files_count",
+        "changed_tracked_files",
+        "changed_tracked_files_count",
+        "check",
+        "checkout_head_sha",
+        "checkout_path",
+        "checkout_sync_state",
+        "command_unavailable_reason",
+        "compare_ahead_by",
+        "compare_behind_by",
+        "compare_state",
+        "compare_status",
+        "current_branch",
+        "decision_records_skipped",
+        "decision_records_written",
+        "diagnostic_count",
+        "draft",
+        "draft_pr",
+        "draft_pr_url",
+        "dxf_source_count",
+        "error_class",
+        "existing_pr_lookup",
+        "existing_pr_url",
+        "expected_branch",
+        "expected_head_sha",
+        "exit_code",
+        "explicit_recovery_route",
+        "file_on_main",
+        "files_on_main_count",
+        "gated_heartbeat_status",
+        "gated_note_status",
+        "git_worktree_list_registers_path",
+        "git_worktree_list_status",
+        "github_main_sha",
+        "github_main_source_of_truth",
+        "graphify_version",
+        "head_branch",
+        "head_ref",
+        "head_repository",
+        "head_sha",
+        "hermes_bridge_status",
+        "host_id_sha256_12",
+        "input_row_count",
+        "input_table_count",
+        "installed_skill_platform_count",
+        "inventory_schema",
+        "issue_number",
+        "issue_worktree",
+        "issue_worktree_id",
+        "kernel_release",
+        "ledger_events_written",
+        "listed_worktrees_count",
+        "machine",
+        "maintenance_task_id",
+        "managed_version_marker_count",
+        "merge_action",
+        "mergeable",
+        "mergeable_state",
+        "memory_events_existing",
+        "memory_events_written",
+        "missing_file",
+        "missing_dependency_module",
+        "mode",
+        "model_credentials_removed_from_smoke",
+        "mutation_mode",
+        "network_disabled",
+        "next_action",
+        "next_operator_action",
+        "open_issues_count",
+        "open_pull_requests_count",
+        "orient_status",
+        "pilot_mode",
+        "pilot_summary_schema",
+        "ports_disabled",
+        "pr_number",
+        "pr_state",
+        "pr_title",
+        "pr_url",
+        "private_memory_db_configured",
+        "private_memory_db_openable",
+        "private_memory_heartbeat_ok",
+        "private_memory_integrity_ok",
+        "private_memory_schema_present",
+        "private_memory_status",
+        "private_memory_writable_when_requested",
+        "private_memory_write_requested",
+        "private_workspace",
+        "profile_backup_item_count",
+        "profile_backup_private",
+        "profile_backup_status",
+        "project_id",
+        "project_state_existing",
+        "project_state_written",
+        "protected_worktrees_count",
+        "public_safe_report_ok",
+        "pull_request",
+        "python_version",
+        "reason",
+        "recovery_snapshot_status",
+        "removed_worktrees_count",
+        "report_drawings",
+        "report_mode",
+        "report_private_paths",
+        "report_quantities",
+        "review_table_count",
+        "repository",
+        "rollback_status",
+        "room_area_row_count",
+        "row_count",
+        "run_id",
+        "runner_root_exists",
+        "runner_status",
+        "selected_source_count",
+        "services_disabled",
+        "shortlist_row_count",
+        "skipped_worktrees_count",
+        "source_issue",
+        "source_issue_number",
+        "source_pack_error_count",
+        "source_pack_id",
+        "source_pack_warning_count",
+        "source_token_count",
+        "sourcepack_note",
+        "status",
+        "status_count_approved",
+        "status_count_needs_review",
+        "step",
+        "success_criteria",
+        "synthetic_corpus_status",
+        "synthetic_graph_edge_count",
+        "synthetic_graph_node_count",
+        "synthetic_smoke_timeout_seconds",
+        "system",
+        "target_project",
+        "target_project_route",
+        "target_repository",
+        "test_summary",
+        "tool_codex",
+        "tool_gh",
+        "tool_git",
+        "tool_python3",
+        "tracked_files_match_allowlist",
+        "unexpected_untracked_files",
+        "unexpected_untracked_files_count",
+        "validated_publish_files",
+        "validated_publish_files_count",
+        "validation_profile",
+        "validation_state",
+        "wall_area_row_count",
+        "warning_count",
+        "worktree",
+        "worktree_id",
+        "worktree_ids",
+        "worktree_root",
+    }
+)
 RUNNER_MEMORY_DB_ENV = "SKELETON_RUNNER_MEMORY_DB"
 RUNNER_MEMORY_LEDGER_ENV = "SKELETON_RUNNER_MEMORY_LEDGER"
 RUNNER_MEMORY_DIR_ENV = "SKELETON_RUNNER_MEMORY_DIR"
@@ -2437,10 +2630,63 @@ def _maintenance_report(
         (
             heading,
             f"maintenance_task_id={task_id}",
-            *status_lines,
+            *_sanitize_maintenance_status_lines(status_lines),
             f"success_criteria={success_criteria}",
         )
     )
+
+
+def _sanitize_maintenance_status_lines(status_lines: list[str]) -> list[str]:
+    sanitized: list[str] = []
+    in_text_block = False
+    for line in status_lines:
+        if line in _MAINTENANCE_PUBLIC_TEXT_BLOCK_MARKERS and line.endswith("_start"):
+            sanitized.append(line)
+            in_text_block = True
+            continue
+        if line in _MAINTENANCE_PUBLIC_TEXT_BLOCK_MARKERS and line.endswith("_end"):
+            sanitized.append(line)
+            in_text_block = False
+            continue
+        if in_text_block:
+            sanitized.append(line)
+            continue
+        safe_line = _sanitize_maintenance_status_line(line)
+        if safe_line is not None:
+            sanitized.append(safe_line)
+    return sanitized
+
+
+def _sanitize_maintenance_status_line(line: str) -> str | None:
+    if "\n" in line or "\r" in line:
+        return None
+    if line.count("=") == 1:
+        key, value = line.split("=", 1)
+        if key not in _MAINTENANCE_PUBLIC_STATUS_KEYS or not value.strip():
+            return None
+        if _MAINTENANCE_SENSITIVE_VALUE_RE.search(value):
+            return None
+        return line
+    tokens = list(_MAINTENANCE_STATUS_TOKEN_RE.finditer(line))
+    if not tokens:
+        return None
+    if "".join(match.group(0) for match in tokens) == "":
+        return None
+    position = 0
+    for match in tokens:
+        separator = line[position : match.start()]
+        if separator.strip():
+            return None
+        key = match.group("key")
+        value = match.group("value")
+        if key not in _MAINTENANCE_PUBLIC_STATUS_KEYS:
+            return None
+        if _MAINTENANCE_SENSITIVE_VALUE_RE.search(value):
+            return None
+        position = match.end()
+    if line[position:].strip():
+        return None
+    return line
 
 
 _HOST_INVENTORY_VALUE_RE = re.compile(r"[^A-Za-z0-9._:+-]+")
@@ -7222,11 +7468,25 @@ def dispatch_runtime_maintenance_task(
 
 
 def maintenance_report_is_done(report: str) -> bool:
-    return (
-        report.startswith("DONE:")
-        and re.search(r"\bBLOCKED\b", report) is None
-        and re.search(r"^success_criteria=not_met\s*$", report, re.MULTILINE) is None
+    return maintenance_report_status(report) == "DONE" and not any(
+        line.strip() == "success_criteria=not_met" for line in report.splitlines()
     )
+
+
+def maintenance_report_status(report: str) -> str:
+    text = _ANSI_ESCAPE_RE.sub("", _without_fenced_blocks(report or ""))
+    lines = [line for line in text.splitlines() if line.strip()]
+    matches: list[tuple[int, str]] = []
+    for index, line in enumerate(lines):
+        match = _MAINTENANCE_TOP_LEVEL_STATUS_RE.match(line)
+        if match is not None:
+            matches.append((index, match.group(1).upper()))
+    if len(matches) != 1:
+        return "BLOCKED"
+    index, status = matches[0]
+    if index not in (0, len(lines) - 1):
+        return "BLOCKED"
+    return status
 
 
 def get_pr_merge_state(pr_number: int) -> dict[str, Any]:
@@ -7377,32 +7637,23 @@ def process_runtime_maintenance_issue(
     memory_warning: str | None = None,
 ) -> None:
     report = dispatch_runtime_maintenance_task(task_id, workdir, body)
-    if maintenance_report_is_done(report):
-        warning = record_runner_executor_result(
-            issue_number,
-            "skeleton",
-            "DONE",
-            "DONE",
-            "maintenance",
-            report,
-        )
-        report = append_memory_warning(report, warning or memory_warning)
-        post_issue_comment(issue_number, report)
-        set_issue_label(issue_number, LABEL_RUNNING, LABEL_DONE)
-        notify_task_finished(issue_number, "DONE", report)
-        return
+    status = maintenance_report_status(report)
     warning = record_runner_executor_result(
         issue_number,
         "skeleton",
-        "BLOCKED",
-        "BLOCKED",
+        status,
+        status,
         "maintenance",
         report,
     )
     report = append_memory_warning(report, warning or memory_warning)
     post_issue_comment(issue_number, report)
-    set_issue_label(issue_number, LABEL_RUNNING, LABEL_BLOCKED)
-    notify_task_finished(issue_number, "BLOCKED", report)
+    set_issue_label(
+        issue_number,
+        LABEL_RUNNING,
+        LABEL_DONE if status == "DONE" else LABEL_BLOCKED,
+    )
+    notify_task_finished(issue_number, status, report)
 
 
 def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
