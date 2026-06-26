@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.aufmass_foundation.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "status",
+    "building_part_profile",
+    "apartment_graph",
+    "room_and_zone_model",
+    "room_geometry_candidate",
+    "geometry_evidence",
+    "dxf_crosscheck",
+    "foundation_provenance",
+    "qa"
+  ],
+  "properties": {
+    "contract": {"const": "AUFMASS_FOUNDATION"},
+    "status": {
+      "enum": [
+        "source_candidate",
+        "fast_estimate_accepted",
+        "estimated_repair",
+        "dxf_crosschecked",
+        "needs_scale",
+        "needs_room_review",
+        "needs_zone_review",
+        "material_source_conflict",
+        "full_resolver_required",
+        "failed_safe"
+      ]
+    },
+    "building_part_profile": {
+      "enum": ["FRONT_HOUSE", "SIDE_WING", "REAR_HOUSE", "ATTIC", "UNKNOWN"]
+    },
+    "apartment_graph": {"$ref": "#/$defs/apartment_graph"},
+    "room_and_zone_model": {"$ref": "#/$defs/room_and_zone_model"},
+    "room_geometry_candidate": {"type": ["object", "null"]},
+    "geometry_evidence": {"type": ["object", "null"]},
+    "dxf_crosscheck": {"type": ["object", "null"]},
+    "foundation_provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["primary_source", "dxf_role", "source_geometry_immutable"],
+      "properties": {
+        "primary_source": {"const": "calibrated_pdf_image"},
+        "dxf_role": {"const": "selected_room_crosscheck_only"},
+        "source_geometry_immutable": {"const": true}
+      }
+    },
+    "qa": {
+      "type": "object",
+      "required": [
+        "physical_room_count",
+        "functional_zone_count",
+        "selected_room_count",
+        "whole_dxf_enumeration_used",
+        "unrelated_geometry_ignored",
+        "quantity_ready"
+      ],
+      "properties": {
+        "physical_room_count": {"type": "integer", "minimum": 0},
+        "functional_zone_count": {"type": "integer", "minimum": 0},
+        "selected_room_count": {"type": "integer", "minimum": 0, "maximum": 1},
+        "whole_dxf_enumeration_used": {"const": false},
+        "unrelated_geometry_ignored": {"const": true},
+        "quantity_ready": {"type": "boolean"},
+        "blockers": {"type": "array", "items": {"type": "string"}}
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "apartment_graph": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "boundary", "entrance_ids", "nodes", "edges"],
+      "properties": {
+        "contract": {"const": "APARTMENT_GRAPH"},
+        "boundary": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": {"type": "number"}
+          }
+        },
+        "entrance_ids": {"type": "array", "items": {"type": "string"}},
+        "nodes": {"type": "array", "items": {"type": "object"}},
+        "edges": {"type": "array", "items": {"type": "object"}}
+      }
+    },
+    "room_and_zone_model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "physical_rooms",
+        "functional_zones",
+        "selected_room_id",
+        "label_or_color_splits_room"
+      ],
+      "properties": {
+        "contract": {"const": "ROOM_AND_ZONE_MODEL"},
+        "physical_rooms": {"type": "array", "items": {"type": "object"}},
+        "functional_zones": {"type": "array", "items": {"type": "object"}},
+        "selected_room_id": {"type": ["string", "null"]},
+        "label_or_color_splits_room": {"const": false}
+      }
+    }
+  }
+}
