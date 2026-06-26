@@ -1,0 +1,185 @@
+name: Bounded manual patch 1149
+
+on:
+  push:
+    branches:
+      - runner/issue-1149
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-validate:
+    if: github.event.head_commit.message != 'fix: harden maintenance report sanitizer'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: runner/issue-1149
+          fetch-depth: 0
+
+      - name: Apply deterministic patch
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          script_path = Path("scripts/runner_poll_github_tasks.py")
+          text = script_path.read_text(encoding="utf-8")
+
+          constants_pattern = re.compile(
+              r"_MAINTENANCE_STATUS_TOKEN_RE = re\.compile\(\n.*?\n\)\n"
+              r"_MAINTENANCE_PUBLIC_TEXT_BLOCK_MARKERS = frozenset\(\n.*?\n\)\n"
+              r"_MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset\(",
+              re.DOTALL,
+          )
+          constants_replacement = '''_MAINTENANCE_ASSIGNMENT_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,80}$")
+          _MAINTENANCE_SYMBOLIC_VALUE_RE = re.compile(
+              r"^[A-Za-z0-9._:+,@/\\[\\]{}()#-]+$"
+          )
+          _MAINTENANCE_PR_URL_KEYS = frozenset(
+              {"draft_pr_url", "existing_pr_url", "pr_url"}
+          )
+          _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset('''
+          text, count = constants_pattern.subn(constants_replacement, text, count=1)
+          if count != 1:
+              raise SystemExit("constants block replacement did not match exactly once")
+
+          for key in (
+              "checkout_path",
+              "issue_worktree",
+              "private_workspace",
+              "worktree_root",
+          ):
+              text = text.replace(f'        "{key}",\n', "")
+
+          functions_pattern = re.compile(
+              r"def _sanitize_maintenance_status_lines\(status_lines: list\[str\]\) -> list\[str\]:\n"
+              r".*?\n_HOST_INVENTORY_VALUE_RE =",
+              re.DOTALL,
+          )
+          functions_replacement = '''def _sanitize_maintenance_status_lines(status_lines: list[str]) -> list[str]:
+              sanitized: list[str] = []
+              for line in status_lines:
+                  safe_line = _sanitize_maintenance_status_line(line)
+                  if safe_line is not None:
+                      sanitized.append(safe_line)
+              return sanitized
+
+
+          def _maintenance_status_value_is_safe(key: str, value: str) -> bool:
+              if not value or value.count("=") or _MAINTENANCE_SENSITIVE_VALUE_RE.search(value):
+                  return False
+              if value.startswith(("/", "~")) or "\\\\" in value or ".." in value:
+                  return False
+              if key in _MAINTENANCE_PR_URL_KEYS:
+                  return _PUBLIC_GITHUB_PR_URL_RE.fullmatch(value) is not None
+              if "://" in value:
+                  return False
+              return _MAINTENANCE_SYMBOLIC_VALUE_RE.fullmatch(value) is not None
+
+
+          def _sanitize_maintenance_status_line(line: str) -> str | None:
+              if "\\n" in line or "\\r" in line:
+                  return None
+              tokens = line.strip().split()
+              if not tokens:
+                  return None
+              normalized: list[str] = []
+              for token in tokens:
+                  if token.count("=") != 1:
+                      return None
+                  key, value = token.split("=", 1)
+                  if (
+                      _MAINTENANCE_ASSIGNMENT_KEY_RE.fullmatch(key) is None
+                      or key not in _MAINTENANCE_PUBLIC_STATUS_KEYS
+                      or not _maintenance_status_value_is_safe(key, value)
+                  ):
+                      return None
+                  normalized.append(f"{key}={value}")
+              return " ".join(normalized)
+
+
+          _HOST_INVENTORY_VALUE_RE ='''
+          text, count = functions_pattern.subn(functions_replacement, text, count=1)
+          if count != 1:
+              raise SystemExit("sanitizer function replacement did not match exactly once")
+
+          script_path.write_text(text, encoding="utf-8")
+
+          test_path = Path("tests/test_runner_poll_github_tasks.py")
+          tests = test_path.read_text(encoding="utf-8")
+          marker = "def test_maintenance_report_sanitizer_rejects_raw_blocks_paths_and_prose()"
+          if marker not in tests:
+              tests += '''\n\n
+def test_maintenance_report_sanitizer_rejects_raw_blocks_paths_and_prose() -> None:
+              report = runner._maintenance_report(
+                  "BLOCKED",
+                  runner.VALIDATE_PR_BRANCH,
+                  [
+                      "failed_output_start",
+                      "AssertionError: private details",
+                      "failed_output_end",
+                      "remove_stderr_start",
+                      "arbitrary stderr text",
+                      "remove_stderr_end",
+                      "reason=arbitrary free text",
+                      "checkout_path=/home/agent/private",
+                      "pr_url=https://example.com/not-a-pr",
+                      "raw_output=plain_text",
+                      "stdout=plain_text",
+                      "stderr=plain_text",
+                      "failed_command=plain_text",
+                      "step=validation_profile_command_1 status=failed exit_code=1",
+                      "reason=maintenance_step_raised",
+                      "pr_url=https://github.com/alanua/Skeleton/pull/1168",
+                  ],
+                  "not_met",
+              )
+
+              for unsafe in (
+                  "failed_output_start",
+                  "AssertionError: private details",
+                  "failed_output_end",
+                  "remove_stderr_start",
+                  "arbitrary stderr text",
+                  "remove_stderr_end",
+                  "reason=arbitrary free text",
+                  "/home/agent/private",
+                  "https://example.com/not-a-pr",
+                  "raw_output=plain_text",
+                  "stdout=plain_text",
+                  "stderr=plain_text",
+                  "failed_command=plain_text",
+              ):
+                  assert unsafe not in report
+              assert "step=validation_profile_command_1 status=failed exit_code=1" in report
+              assert "reason=maintenance_step_raised" in report
+              assert "pr_url=https://github.com/alanua/Skeleton/pull/1168" in report
+          '''
+              test_path.write_text(tests, encoding="utf-8")
+          PY
+
+      - name: Focused tests
+        run: python3 -m pytest -q tests/test_runner_poll_github_tasks.py -k 'maintenance or codex_task_result'
+
+      - name: Full runner test file
+        run: python3 -m pytest -q tests/test_runner_poll_github_tasks.py
+
+      - name: Full pytest
+        run: python3 -m pytest -q
+
+      - name: Diff check
+        run: git diff --check
+
+      - name: Commit bounded patch
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git rm .github/workflows/manual-patch-1149.yml
+          git add scripts/runner_poll_github_tasks.py tests/test_runner_poll_github_tasks.py
+          git commit -m 'fix: harden maintenance report sanitizer'
+          git push origin HEAD:runner/issue-1149
