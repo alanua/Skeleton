@@ -29,8 +29,15 @@ jobs:
         run: rm scripts/apply_issue_1118_manual_patch.py .github/workflows/issue-1118-manual-finalize.yml
       - name: Verify bounded worktree diff
         run: python -c "import subprocess; changed=set(subprocess.check_output(['git','diff','--name-only'], text=True).splitlines()); expected={'core/aufmass_geometry/facade.py','tests/test_aufmass_geometry_core2d.py','scripts/apply_issue_1118_manual_patch.py','.github/workflows/issue-1118-manual-finalize.yml'}; assert changed == expected, (changed, expected)"
-      - name: Geometry and DXF tests
-        run: python -m pytest -q tests/test_aufmass_geometry_core2d.py --junitxml=/tmp/aufmass.xml
+      - name: Capture geometry and DXF tests
+        continue-on-error: true
+        run: python -m pytest tests/test_aufmass_geometry_core2d.py -x --junitxml=/tmp/aufmass.xml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: issue-1118-geometry-report
+          path: /tmp/aufmass.xml
+      - name: Geometry and DXF test gate
+        run: python -m pytest -q tests/test_aufmass_geometry_core2d.py
       - name: Enforce zero skipped geometry tests
         run: python -c "import xml.etree.ElementTree as ET; root=ET.parse('/tmp/aufmass.xml').getroot(); skipped=sum(int(s.get('skipped','0')) for s in ([root] if root.tag=='testsuite' else root.findall('testsuite'))); assert skipped == 0, skipped"
       - name: Healthcheck
