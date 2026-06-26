@@ -25,7 +25,12 @@ jobs:
       - run: python scripts/apply_issue_1149_patch.py
       - run: rm scripts/apply_issue_1149_patch.py .github/workflows/issue-1149-execute.yml
       - run: python -m pytest -q tests/test_runner_poll_github_tasks.py -k 'maintenance or codex_task_result'
-      - run: python -m pytest tests/test_runner_poll_github_tasks.py -x -vv
+      - continue-on-error: true
+        run: python -m pytest tests/test_runner_poll_github_tasks.py -x --junitxml=runner-test.xml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: issue-1149-runner-test-report
+          path: runner-test.xml
       - run: python -m pytest -q
       - run: git diff --check
       - run: |
