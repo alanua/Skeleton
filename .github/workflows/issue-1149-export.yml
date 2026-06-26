@@ -1,4 +1,4 @@
-name: Issue 1149 export checkout
+name: Issue 1149 export git checkout
 
 on:
   pull_request:
@@ -18,8 +18,9 @@ jobs:
           ref: runner/issue-1149
           fetch-depth: 1
           show-progress: false
-      - run: tar --exclude=.git -czf /tmp/skeleton-checkout.tar.gz .
+          persist-credentials: false
+      - run: tar -czf /tmp/skeleton-git-checkout.tar.gz .
       - uses: actions/upload-artifact@v4
         with:
-          name: issue-1149-checkout
-          path: /tmp/skeleton-checkout.tar.gz
+          name: issue-1149-git-checkout
+          path: /tmp/skeleton-git-checkout.tar.gz
