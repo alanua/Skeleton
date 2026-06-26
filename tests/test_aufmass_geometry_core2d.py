@@ -335,3 +335,90 @@ def _rectangle_payload(gap_m: float) -> dict[str, object]:
             {"id": "d", "start": [0, 3], "end": [0, 0]},
         ],
     }
+
+
+
+def test_failure_manifests_remain_schema_valid() -> None:
+    jsonschema = pytest.importorskip("jsonschema")
+    schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
+    validator = jsonschema.Draft202012Validator(schema)
+
+    cluster_failure = {
+        "unit": "m",
+        "room_id": "room-chain-schema",
+        "tolerance_mm": 5,
+        "segments": [
+            {"id": "a", "start": [0, 0], "end": [4, 0]},
+            {"id": "b", "start": [4.004, 0], "end": [4.008, 0]},
+            {"id": "c", "start": [4.008, 0], "end": [4, 3]},
+            {"id": "d", "start": [4, 3], "end": [0, 3]},
+            {"id": "e", "start": [0, 3], "end": [0, 0]},
+        ],
+    }
+    unmeasurable = {
+        "unit": "m",
+        "room_id": "room-unmeasurable-schema",
+        "tolerance_mm": 5,
+        "segments": [
+            {"id": "a", "start": [0, 0], "end": [1, 0]},
+            {"id": "b", "start": [1.004, 0], "end": [2, 0]},
+            {"id": "c", "start": [1, 0], "end": [1, 1]},
+        ],
+    }
+
+    for payload, reason in (
+        (cluster_failure, "endpoint_cluster_exceeds_tolerance"),
+        (unmeasurable, "unmeasurable_gap_repair_delta"),
+    ):
+        result = process_geometry(payload)
+        assert result["status"] == "REVIEW_REQUIRED"
+        assert result["room_geometry_candidate"]["failure_reason"] == reason
+        validator.validate(result)
+        evidence = next(
+            item
+            for item in result["simplification_evidence"]
+            if item.get("failure_reason") == reason
+        )
+        assert evidence["area_delta_m2"] == 0.0
+        assert evidence["perimeter_delta_m"] == 0.0
+        assert evidence["repair_applied"] is False
+
+
+def test_gap_repair_is_id_and_direction_independent() -> None:
+    baseline = process_geometry(_rectangle_payload(gap_m=0.004))
+    shuffled_reversed = process_geometry(
+        {
+            "unit": "m",
+            "room_id": "room-gap-shuffled",
+            "tolerance_mm": 5,
+            "segments": [
+                {"id": "z-wall", "start": [0, 3], "end": [4, 3]},
+                {"id": "a-wall", "start": [4, 0], "end": [0, 0]},
+                {"id": "m-wall", "start": [0, 0], "end": [0, 3]},
+                {"id": "b-wall", "start": [4, 3], "end": [4.004, 0]},
+            ],
+        }
+    )
+
+    assert baseline["status"] == "ACCEPTED"
+    assert shuffled_reversed["status"] == "ACCEPTED"
+    baseline_evidence = next(
+        item
+        for item in baseline["simplification_evidence"]
+        if item["method"] == "endpoint_gap_bridge"
+    )
+    shuffled_evidence = next(
+        item
+        for item in shuffled_reversed["simplification_evidence"]
+        if item["method"] == "endpoint_gap_bridge"
+    )
+    assert shuffled_evidence["area_delta_m2"] == baseline_evidence["area_delta_m2"]
+    assert shuffled_evidence["perimeter_delta_m"] == baseline_evidence["perimeter_delta_m"]
+    assert (
+        shuffled_reversed["accepted_room_shell"]["area_m2"]
+        == baseline["accepted_room_shell"]["area_m2"]
+    )
+    assert (
+        shuffled_reversed["accepted_room_shell"]["perimeter_m"]
+        == baseline["accepted_room_shell"]["perimeter_m"]
+    )

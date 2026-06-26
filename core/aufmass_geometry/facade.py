@@ -255,16 +255,76 @@ def _normalize_segments(
                 }
             )
 
+    normalized = _normalized_segments_from_snap_points(
+        source_entities,
+        snap_points,
+        tolerance_mm,
+    )
+    failed_cluster = any(
+        item.get("failure_reason") == "endpoint_cluster_exceeds_tolerance"
+        for item in evidence
+    )
+    if failed_cluster:
+        normalized = _normalized_segments_from_source(source_entities, tolerance_mm)
+        for item in evidence:
+            if item.get("method") == "endpoint_gap_bridge":
+                item["area_delta_m2"] = 0.0
+                item["perimeter_delta_m"] = 0.0
+                item["repair_applied"] = False
+        return normalized, evidence
+
+    gap_evidence = [item for item in evidence if item["method"] == "endpoint_gap_bridge"]
+    if gap_evidence:
+        deltas = _measure_gap_repair_deltas(source_entities, normalized)
+        if deltas is None:
+            normalized = _normalized_segments_from_source(source_entities, tolerance_mm)
+            for item in gap_evidence:
+                item["area_delta_m2"] = 0.0
+                item["perimeter_delta_m"] = 0.0
+                item["repair_applied"] = False
+                item["review_status"] = REVIEW_REQUIRED
+                item["failure_reason"] = "unmeasurable_gap_repair_delta"
+            return normalized, evidence
+        for item in gap_evidence:
+            item["area_delta_m2"] = _round(deltas["area_delta_m2"])
+            item["perimeter_delta_m"] = _round(deltas["perimeter_delta_m"])
+            item["repair_applied"] = True
+
+    return normalized, evidence
+
+
+def _normalized_segments_from_source(
+    source_entities: list[dict[str, Any]],
+    tolerance_mm: float,
+) -> list[dict[str, Any]]:
+    source_points: dict[tuple[str, str], list[float]] = {}
+    for entity in source_entities:
+        source_id = entity["source_entity_id"]
+        source_points[(source_id, "start")] = _point(entity["start"])
+        source_points[(source_id, "end")] = _point(entity["end"])
+    return _normalized_segments_from_snap_points(
+        source_entities,
+        source_points,
+        tolerance_mm,
+    )
+
+
+def _normalized_segments_from_snap_points(
+    source_entities: list[dict[str, Any]],
+    snap_points: dict[tuple[str, str], list[float]],
+    tolerance_mm: float,
+) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     for entity in source_entities:
-        start = snap_points[(entity["source_entity_id"], "start")]
-        end = snap_points[(entity["source_entity_id"], "end")]
+        source_id = entity["source_entity_id"]
+        start = snap_points[(source_id, "start")]
+        end = snap_points[(source_id, "end")]
         length = float(np.linalg.norm(np.array(end) - np.array(start)))
         normalized.append(
             {
                 "contract": "NORMALIZED_SEGMENT",
-                "segment_id": f"norm-{entity['source_entity_id']}",
-                "source_entity_id": entity["source_entity_id"],
+                "segment_id": f"norm-{source_id}",
+                "source_entity_id": source_id,
                 "layer": entity["layer"],
                 "start": start,
                 "end": end,
@@ -275,23 +335,7 @@ def _normalize_segments(
                 },
             }
         )
-    normalized = sorted(normalized, key=lambda segment: segment["segment_id"])
-    if any(item.get("failure_reason") == "endpoint_cluster_exceeds_tolerance" for item in evidence):
-        return normalized, evidence
-
-    gap_evidence = [item for item in evidence if item["method"] == "endpoint_gap_bridge"]
-    if gap_evidence:
-        deltas = _measure_gap_repair_deltas(source_entities, normalized)
-        if deltas is None:
-            for item in gap_evidence:
-                item["review_status"] = REVIEW_REQUIRED
-                item["failure_reason"] = "unmeasurable_gap_repair_delta"
-            return normalized, evidence
-        for item in gap_evidence:
-            item["area_delta_m2"] = _round(deltas["area_delta_m2"])
-            item["perimeter_delta_m"] = _round(deltas["perimeter_delta_m"])
-
-    return normalized, evidence
+    return sorted(normalized, key=lambda segment: segment["segment_id"])
 
 
 def _cluster_diameter(cluster: list[tuple[str, str, np.ndarray]]) -> float:
@@ -306,31 +350,123 @@ def _measure_gap_repair_deltas(
     source_entities: list[dict[str, Any]],
     normalized_segments: list[dict[str, Any]],
 ) -> dict[str, float] | None:
-    before = _polygon_from_segment_chain(source_entities, "source_entity_id")
-    after = _polygon_from_segment_chain(normalized_segments, "segment_id")
+    ordered = _ordered_closed_segment_chain(normalized_segments)
+    if ordered is None:
+        return None
+
+    source_by_id = {
+        entity["source_entity_id"]: entity
+        for entity in source_entities
+    }
+    before_segments: list[tuple[list[float], list[float]]] = []
+    after_segments: list[tuple[list[float], list[float]]] = []
+    for segment, forward in ordered:
+        source = source_by_id.get(segment["source_entity_id"])
+        if source is None:
+            return None
+        after_segments.append(_oriented_segment_points(segment, forward))
+        before_segments.append(_oriented_segment_points(source, forward))
+
+    before = _polygon_from_oriented_segments(before_segments)
+    after = _polygon_from_oriented_segments(after_segments)
     if before is None or after is None:
         return None
+
     original_length = sum(
         float(np.linalg.norm(_array(entity["end"]) - _array(entity["start"])))
         for entity in source_entities
     )
-    normalized_length = sum(float(segment["length_m"]) for segment in normalized_segments)
+    normalized_length = sum(
+        float(np.linalg.norm(_array(segment["end"]) - _array(segment["start"])))
+        for segment in normalized_segments
+    )
     return {
         "area_delta_m2": abs(float(before.area - after.area)),
         "perimeter_delta_m": abs(float(original_length - normalized_length)),
     }
 
 
-def _polygon_from_segment_chain(
+def _ordered_closed_segment_chain(
     segments: list[dict[str, Any]],
-    id_key: str,
-) -> Polygon | None:
-    ordered = sorted(segments, key=lambda segment: str(segment[id_key]))
-    if len(ordered) < 3:
+) -> list[tuple[dict[str, Any], bool]] | None:
+    if len(segments) < 3:
         return None
-    coords = [_point(segment["start"]) for segment in ordered]
-    coords.append(_point(ordered[-1]["end"]))
-    polygon = Polygon(coords)
+
+    edges: list[
+        tuple[dict[str, Any], tuple[float, float], tuple[float, float]]
+    ] = []
+    adjacency: dict[
+        tuple[float, float],
+        list[tuple[int, tuple[float, float]]],
+    ] = {}
+    geometric_edges: set[
+        tuple[tuple[float, float], tuple[float, float]]
+    ] = set()
+
+    for index, segment in enumerate(segments):
+        start = tuple(_point(segment["start"]))
+        end = tuple(_point(segment["end"]))
+        if start == end:
+            return None
+        edge_key = (start, end) if start < end else (end, start)
+        if edge_key in geometric_edges:
+            return None
+        geometric_edges.add(edge_key)
+        edges.append((segment, start, end))
+        adjacency.setdefault(start, []).append((index, end))
+        adjacency.setdefault(end, []).append((index, start))
+
+    if any(len(neighbours) != 2 for neighbours in adjacency.values()):
+        return None
+
+    start_point = min(adjacency)
+    current = start_point
+    unused = set(range(len(edges)))
+    ordered: list[tuple[dict[str, Any], bool]] = []
+    while unused:
+        candidates = sorted(
+            (neighbour, edge_index)
+            for edge_index, neighbour in adjacency[current]
+            if edge_index in unused
+        )
+        if not candidates:
+            return None
+        neighbour, edge_index = candidates[0]
+        segment, edge_start, edge_end = edges[edge_index]
+        forward = edge_start == current and edge_end == neighbour
+        ordered.append((segment, forward))
+        unused.remove(edge_index)
+        current = neighbour
+
+    if current != start_point:
+        return None
+    return ordered
+
+
+def _oriented_segment_points(
+    segment: dict[str, Any],
+    forward: bool,
+) -> tuple[list[float], list[float]]:
+    start = _point(segment["start"])
+    end = _point(segment["end"])
+    return (start, end) if forward else (end, start)
+
+
+def _polygon_from_oriented_segments(
+    oriented_segments: list[tuple[list[float], list[float]]],
+) -> Polygon | None:
+    coordinates: list[list[float]] = []
+    for start, end in oriented_segments:
+        if not coordinates:
+            coordinates.append(start)
+        elif coordinates[-1] != start:
+            coordinates.append(start)
+        coordinates.append(end)
+
+    unique_points = {tuple(point) for point in coordinates}
+    if len(unique_points) < 3:
+        return None
+    polygon = Polygon(coordinates)
     if polygon.area <= 0 or not polygon.is_valid:
         return None
     return polygon
