@@ -93,6 +93,27 @@ def test_material_pdf_dxf_conflict_is_not_quantity_ready(monkeypatch) -> None:
     assert result["qa"]["quantity_ready"] is False
 
 
+def test_dxf_cannot_be_the_primary_topology_source() -> None:
+    plan = _plan()
+    plan["source_kind"] = "dxf"
+
+    result = build_aufmass_foundation(plan)
+
+    assert result["status"] == "failed_safe"
+    assert result["qa"]["blockers"] == ["primary_source_must_be_pdf_or_image"]
+
+
+def test_duplicate_physical_room_ids_fail_closed(monkeypatch) -> None:
+    _patch_geometry(monkeypatch)
+    plan = _plan()
+    plan["physical_rooms"][1]["room_id"] = "open-space"
+
+    result = build_aufmass_foundation(plan)
+
+    assert result["status"] == "needs_room_review"
+    assert result["qa"]["blockers"] == ["duplicate_physical_room_id"]
+
+
 def test_missing_calibration_returns_needs_scale() -> None:
     plan = _plan()
     plan["calibration"] = {"status": "unknown", "evidence": []}
@@ -174,21 +195,31 @@ def _plan():
             {
                 "room_id": "open-space",
                 "room_type": "open_physical_room",
-                "boundary_segments": [
-                    {"id": "s1", "start": [0.0, 0.0], "end": [6.0, 0.0]},
-                    {"id": "s2", "start": [6.0, 0.0], "end": [6.0, 4.0]},
-                    {"id": "s3", "start": [6.0, 4.0], "end": [0.0, 4.0]},
-                    {"id": "s4", "start": [0.0, 4.0], "end": [0.0, 0.0]},
-                ],
+                "boundary_segments": _rectangle_segments("open", 0.0, 0.0, 6.0, 4.0),
                 "zones": [
                     {"zone_id": "source-circulation", "role": "circulation_zone", "color_token": "c1"},
                     {"zone_id": "source-cooking", "role": "cooking_zone", "color_token": "c2"},
                     {"zone_id": "source-living", "role": "living_zone", "color_token": "c3"},
                 ],
             },
-            {"room_id": "service-space", "room_type": "service_room", "zones": []},
-            {"room_id": "room-b", "room_type": "physical_room", "zones": []},
-            {"room_id": "room-c", "room_type": "physical_room", "zones": []},
+            {
+                "room_id": "service-space",
+                "room_type": "service_room",
+                "boundary_segments": _rectangle_segments("service", 6.0, 0.0, 8.0, 2.0),
+                "zones": [],
+            },
+            {
+                "room_id": "room-b",
+                "room_type": "physical_room",
+                "boundary_segments": _rectangle_segments("room-b", 8.0, 0.0, 10.0, 3.0),
+                "zones": [],
+            },
+            {
+                "room_id": "room-c",
+                "room_type": "physical_room",
+                "boundary_segments": _rectangle_segments("room-c", 10.0, 0.0, 12.0, 4.0),
+                "zones": [],
+            },
         ],
         "connections": [
             {"from": "open-space", "to": "service-space"},
@@ -196,3 +227,12 @@ def _plan():
             {"from": "open-space", "to": "room-c"},
         ],
     }
+
+
+def _rectangle_segments(prefix, min_x, min_y, max_x, max_y):
+    return [
+        {"id": f"{prefix}-1", "start": [min_x, min_y], "end": [max_x, min_y]},
+        {"id": f"{prefix}-2", "start": [max_x, min_y], "end": [max_x, max_y]},
+        {"id": f"{prefix}-3", "start": [max_x, max_y], "end": [min_x, max_y]},
+        {"id": f"{prefix}-4", "start": [min_x, max_y], "end": [min_x, min_y]},
+    ]
