@@ -24,11 +24,13 @@ jobs:
       - name: Install exact geometry profile
         run: python -m pip install 'PyYAML>=6' 'pytest>=8' 'jsonschema>=4.22,<5' 'numpy==2.4.6' 'ezdxf==1.4.4' 'shapely==2.1.2' 'networkx==3.6.1' 'pillow==12.2.0'
       - name: Apply bounded repair
-        run: python scripts/apply_issue_1118_manual_patch.py
+        run: |
+          python scripts/apply_issue_1118_manual_patch.py
+          python scripts/apply_issue_1118_geometry_order_patch.py
       - name: Remove temporary patch files
-        run: rm scripts/apply_issue_1118_manual_patch.py .github/workflows/issue-1118-manual-finalize.yml
+        run: rm scripts/apply_issue_1118_manual_patch.py scripts/apply_issue_1118_geometry_order_patch.py .github/workflows/issue-1118-manual-finalize.yml
       - name: Verify bounded worktree diff
-        run: python -c "import subprocess; changed=set(subprocess.check_output(['git','diff','--name-only'], text=True).splitlines()); expected={'core/aufmass_geometry/facade.py','tests/test_aufmass_geometry_core2d.py','scripts/apply_issue_1118_manual_patch.py','.github/workflows/issue-1118-manual-finalize.yml'}; assert changed == expected, (changed, expected)"
+        run: python -c "import subprocess; changed=set(subprocess.check_output(['git','diff','--name-only'], text=True).splitlines()); expected={'core/aufmass_geometry/facade.py','tests/test_aufmass_geometry_core2d.py','scripts/apply_issue_1118_manual_patch.py','scripts/apply_issue_1118_geometry_order_patch.py','.github/workflows/issue-1118-manual-finalize.yml'}; assert changed == expected, (changed, expected)"
       - name: Capture geometry and DXF tests
         continue-on-error: true
         run: python -m pytest tests/test_aufmass_geometry_core2d.py -x --junitxml=/tmp/aufmass.xml
