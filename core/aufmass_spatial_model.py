@@ -44,6 +44,9 @@ def build_aufmass_foundation(
     function accepts any DXF evidence. DXF input is selected-room evidence only.
     """
     source = deepcopy(plan_candidate)
+    source_kind = str(source.get("source_kind") or "").lower()
+    if source_kind not in {"pdf", "image", "pdf_image", "operator_annotated_image"}:
+        return _failed_foundation("failed_safe", "UNKNOWN", ["primary_source_must_be_pdf_or_image"])
     building_part = _building_part(source.get("building_part_profile"))
     if not _calibration_confirmed(source.get("calibration")):
         return _failed_foundation("needs_scale", building_part, ["calibration_not_confirmed"])
@@ -60,6 +63,7 @@ def build_aufmass_foundation(
         return _failed_foundation("needs_room_review", building_part, ["physical_rooms_missing"])
 
     room_id_map: dict[str, str] = {}
+    seen_source_room_ids: set[str] = set()
     normalized_rooms: list[dict[str, Any]] = []
     normalized_zones: list[dict[str, Any]] = []
     seen_zone_ids: set[str] = set()
@@ -67,6 +71,12 @@ def build_aufmass_foundation(
         if not isinstance(room, dict):
             return _failed_foundation("needs_room_review", building_part, ["invalid_room_record"])
         source_room_id = str(room.get("room_id") or f"source-room-{room_index:03d}")
+        if source_room_id in seen_source_room_ids:
+            return _failed_foundation("needs_room_review", building_part, ["duplicate_physical_room_id"])
+        seen_source_room_ids.add(source_room_id)
+        boundary_segments = room.get("boundary_segments")
+        if not isinstance(boundary_segments, list) or len(boundary_segments) < 3:
+            return _failed_foundation("needs_room_review", building_part, ["physical_room_boundary_missing"])
         public_room_id = f"room-{room_index:03d}"
         room_id_map[source_room_id] = public_room_id
         zone_ids: list[str] = []
@@ -96,6 +106,7 @@ def build_aufmass_foundation(
                 "room_type": _room_type(room.get("room_type")),
                 "zone_ids": zone_ids,
                 "boundary_source": "calibrated_pdf_image",
+                "boundary_segment_count": len(boundary_segments),
             }
         )
 
@@ -345,6 +356,18 @@ def _calibration_confirmed(value: Any) -> bool:
 
 def _building_part(value: Any) -> str:
     normalized = str(value or "UNKNOWN").upper().replace(" ", "_")
+    aliases = {
+        "VH": "FRONT_HOUSE",
+        "VORDERHAUS": "FRONT_HOUSE",
+        "SF": "SIDE_WING",
+        "SEITENFLÜGEL": "SIDE_WING",
+        "SEITENFLUEGEL": "SIDE_WING",
+        "HH": "REAR_HOUSE",
+        "HINTERHAUS": "REAR_HOUSE",
+        "DG": "ATTIC",
+        "DACHGESCHOSS": "ATTIC",
+    }
+    normalized = aliases.get(normalized, normalized)
     allowed = {"FRONT_HOUSE", "SIDE_WING", "REAR_HOUSE", "ATTIC", "UNKNOWN"}
     return normalized if normalized in allowed else "UNKNOWN"
 
