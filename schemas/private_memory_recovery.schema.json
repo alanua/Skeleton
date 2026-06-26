@@ -1,0 +1,177 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.private_memory.recovery.v1",
+  "oneOf": [
+    {"$ref": "#/$defs/canonical_revision"},
+    {"$ref": "#/$defs/memory_event"},
+    {"$ref": "#/$defs/fact_history_entry"},
+    {"$ref": "#/$defs/tombstone_event"},
+    {"$ref": "#/$defs/snapshot_manifest"},
+    {"$ref": "#/$defs/restore_report"},
+    {"$ref": "#/$defs/integrity_report"}
+  ],
+  "$defs": {
+    "canonical_revision": {
+      "type": "object",
+      "required": ["schema", "current_revision", "updated_at"],
+      "properties": {
+        "schema": {"const": "skeleton.private_memory.canonical_revision.v1"},
+        "current_revision": {"type": "integer", "minimum": 0},
+        "updated_at": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "memory_event": {
+      "type": "object",
+      "required": [
+        "schema",
+        "event_type",
+        "namespace",
+        "fact_id",
+        "actor_ref",
+        "reason_code",
+        "approval_ref",
+        "transaction_ref",
+        "timestamp",
+        "previous_hash",
+        "new_hash",
+        "canonical_revision"
+      ],
+      "properties": {
+        "schema": {"const": "skeleton.private_memory.memory_event.v1"},
+        "event_type": {"enum": ["create", "update", "supersede", "revoke", "delete"]},
+        "namespace": {"type": "string"},
+        "fact_id": {"type": "string"},
+        "actor_ref": {"type": "string"},
+        "reason_code": {"type": "string"},
+        "approval_ref": {"type": "string"},
+        "transaction_ref": {"type": "string"},
+        "timestamp": {"type": "string"},
+        "previous_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$|^0{64}$"},
+        "new_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$|^0{64}$"},
+        "canonical_revision": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "fact_history_entry": {
+      "type": "object",
+      "required": [
+        "schema",
+        "event_type",
+        "namespace",
+        "fact_id",
+        "previous_hash",
+        "new_hash",
+        "canonical_revision",
+        "timestamp"
+      ],
+      "properties": {
+        "schema": {"const": "skeleton.private_memory.fact_history_entry.v1"},
+        "event_type": {"enum": ["create", "update", "supersede", "revoke", "delete"]},
+        "namespace": {"type": "string"},
+        "fact_id": {"type": "string"},
+        "previous_hash": {"type": "string"},
+        "new_hash": {"type": "string"},
+        "canonical_revision": {"type": "integer", "minimum": 1},
+        "timestamp": {"type": "string"}
+      },
+      "additionalProperties": true
+    },
+    "tombstone_event": {
+      "type": "object",
+      "required": ["schema", "namespace", "fact_id", "canonical_revision", "timestamp"],
+      "properties": {
+        "schema": {"const": "skeleton.private_memory.tombstone_event.v1"},
+        "namespace": {"type": "string"},
+        "fact_id": {"type": "string"},
+        "canonical_revision": {"type": "integer", "minimum": 1},
+        "timestamp": {"type": "string"}
+      },
+      "additionalProperties": true
+    },
+    "snapshot_manifest": {
+      "type": "object",
+      "required": [
+        "schema",
+        "snapshot_id",
+        "canonical_revision",
+        "schema_version",
+        "created_at",
+        "aggregate_counts",
+        "content_hash",
+        "canonical_state_hash"
+      ],
+      "properties": {
+        "schema": {"const": "skeleton.private_memory.snapshot_manifest.v1"},
+        "snapshot_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},
+        "canonical_revision": {"type": "integer", "minimum": 0},
+        "schema_version": {"type": "string"},
+        "created_at": {"type": "string"},
+        "aggregate_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+        "content_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "canonical_state_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "restore_report": {
+      "type": "object",
+      "required": [
+        "schema",
+        "status",
+        "snapshot_id",
+        "canonical_revision",
+        "integrity_ok",
+        "content_hash_match",
+        "activation_required",
+        "activated",
+        "error_class",
+        "next_operator_action"
+      ],
+      "properties": {
+        "schema": {"const": "skeleton.private_memory.restore_report.v1"},
+        "status": {"enum": ["DONE", "BLOCKED"]},
+        "snapshot_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$|^unknown$"},
+        "canonical_revision": {"type": "integer", "minimum": 0},
+        "integrity_ok": {"type": "boolean"},
+        "content_hash_match": {"type": "boolean"},
+        "activation_required": {"type": "boolean"},
+        "activated": {"type": "boolean"},
+        "error_class": {"type": ["string", "null"]},
+        "next_operator_action": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "integrity_report": {
+      "type": "object",
+      "required": [
+        "schema",
+        "status",
+        "integrity_ok",
+        "revision_ok",
+        "history_ok",
+        "destructive_mutation_ok",
+        "canonical_revision",
+        "event_count",
+        "fact_count",
+        "tombstone_count",
+        "error_class",
+        "next_operator_action"
+      ],
+      "properties": {
+        "schema": {"const": "skeleton.private_memory.integrity_report.v1"},
+        "status": {"enum": ["DONE", "BLOCKED"]},
+        "integrity_ok": {"type": "boolean"},
+        "revision_ok": {"type": "boolean"},
+        "history_ok": {"type": "boolean"},
+        "destructive_mutation_ok": {"type": "boolean"},
+        "canonical_revision": {"type": "integer", "minimum": 0},
+        "event_count": {"type": "integer", "minimum": 0},
+        "fact_count": {"type": "integer", "minimum": 0},
+        "tombstone_count": {"type": "integer", "minimum": 0},
+        "error_class": {"type": ["string", "null"]},
+        "next_operator_action": {"type": "string"}
+      },
+      "additionalProperties": false
+    }
+  }
+}

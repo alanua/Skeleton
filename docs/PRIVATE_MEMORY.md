@@ -96,3 +96,18 @@ Aufmass execution is paused. Runner wiring is limited to the
 `private_memory_healthcheck` maintenance task. Hermes runtime wiring, worker
 routing, private task-state retrieval, real project memory ingestion, and
 Aufmass use of private memory remain later tasks.
+
+## Canonical Recovery Layer
+
+`core.private_memory.CanonicalPrivateMemoryStore` adds a local-only canonical
+SQLite layer for approved state changes. It uses one monotonic
+`canonical_revision`, immutable event/history tables, tombstones instead of
+physical deletes, WAL where SQLite supports it, sanitized integrity reports, and
+snapshot/isolated-restore helpers from `core.private_memory_backup`. Isolated
+restore verifies a target but never activates a live runtime database; activation
+requires a separate approval path outside this layer. Bulk writes require a real
+pre-operation snapshot artifact plus manifest and run atomically in one SQLite
+transaction.
+
+See `docs/PRIVATE_MEMORY_RECOVERY.md` for the recovery contract and synthetic
+evidence. No live restore action or runtime wiring is performed by this layer.
