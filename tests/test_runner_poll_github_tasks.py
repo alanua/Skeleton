@@ -3869,8 +3869,8 @@ def test_publish_target_project_issue_worktree_pr_uses_project_tree_and_target_r
     assert "maintenance_task_id=publish_target_project_issue_worktree_pr" in report
     assert "target_project=lumenflow" in report
     assert "repository=alanua/LumenFlow" in report
-    assert f"worktree_root={target_root}" in report
-    assert f"issue_worktree={worktree_path}" in report
+    assert f"worktree_root={target_root}" not in report
+    assert f"issue_worktree={worktree_path}" not in report
     assert ["git", "add", "--", "README.md"] in commands
     assert [
         "git",
@@ -4212,7 +4212,7 @@ def test_issue_worktree_publish_inspection_unexpected_untracked_except_codex_blo
     assert report.startswith("BLOCKED:")
     assert "unexpected_untracked_files_count=1" in report
     assert "reason=unexpected_untracked_files" in report
-    assert 'unexpected_untracked_files=["scratch.txt"]' in report
+    assert 'unexpected_untracked_files=["scratch.txt"]' not in report
 
 
 def test_issue_worktree_publish_inspection_ignores_arbitrary_commands(
@@ -4396,11 +4396,11 @@ def test_quarantine_stale_clean_skeleton_worktrees_reports_remove_128_stderr(
     commands = [call.args[0] for call in run.call_args_list]
     assert report.startswith("BLOCKED:")
     assert "worktree=issue-128 action=remove_failed exit_code=128" in report
-    assert "remove_stderr_start" in report
-    assert "fatal: validation failed for worktree remove" in report
-    assert "[redacted environment variable]" in report
+    assert "remove_stderr_start" not in report
+    assert "fatal: validation failed for worktree remove" not in report
+    assert "[redacted environment variable]" not in report
     assert "must-not-leak" not in report
-    assert "remove_stderr_end" in report
+    assert "remove_stderr_end" not in report
     assert "git_worktree_list_registers_path=true" in report
     assert commands == [
         ["git", "remote", "get-url", "origin"],
@@ -4440,7 +4440,7 @@ def test_quarantine_stale_clean_skeleton_worktrees_skips_unregistered_not_workin
     commands = [call.args[0] for call in run.call_args_list]
     assert report.startswith("DONE:")
     assert "worktree=issue-794 action=skipped_unregistered exit_code=128" in report
-    assert f"fatal: '{worktree_path}' is not a working tree" in report
+    assert f"fatal: '{worktree_path}' is not a working tree" not in report
     assert "git_worktree_list_registers_path=false" in report
     assert "removed_worktrees_count=0" in report
     assert "skipped_worktrees_count=1" in report
@@ -4628,7 +4628,7 @@ def test_publish_issue_worktree_pr_unexpected_untracked_file_blocks(
     commands = [call.args[0] for call in run.call_args_list]
     assert report.startswith("BLOCKED:")
     assert "unexpected_untracked_files_count=1" in report
-    assert 'unexpected_untracked_files=["scratch.txt"]' in report
+    assert 'unexpected_untracked_files=["scratch.txt"]' not in report
     assert "reason=unexpected_untracked_files" in report
     assert all(command[:2] != ["git", "add"] for command in commands)
     assert all(command[:2] != ["git", "commit"] for command in commands)
@@ -4666,7 +4666,7 @@ def test_publish_issue_worktree_pr_allowlisted_untracked_file_is_committed(
     assert "allowed_untracked_files_count=1" in report
     assert (
         'allowed_untracked_files=["tests/test_runner_poll_github_tasks.py"]'
-        in report
+        not in report
     )
     assert "validated_publish_files_count=2" in report
     assert ["git", "add", "--", *validated_publish_files] in commands
@@ -5041,23 +5041,168 @@ def test_blocked_maintenance_output_is_not_labeled_runner_done() -> None:
     notify.assert_called_once_with(145, "BLOCKED", report)
 
 
-def test_not_met_maintenance_output_is_not_labeled_runner_done() -> None:
+def test_needs_operator_maintenance_output_records_and_notifies_exact_status() -> None:
+    report = (
+        "NEEDS_OPERATOR: Runner host maintenance task needs operator action.\n"
+        "maintenance_task_id=publish_existing_issue_worktree\n"
+        "reason=missing_operator_approval\n"
+        "success_criteria=not_met"
+    )
+    with mock.patch.object(
+        runner, "dispatch_runtime_maintenance_task", return_value=report
+    ), mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ) as record, mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ) as notify, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label:
+        runner.process_runtime_maintenance_issue(
+            145, runner.PUBLISH_EXISTING_ISSUE_WORKTREE, str(runner.ROOT)
+        )
+
+    record.assert_called_once_with(
+        145,
+        "skeleton",
+        "NEEDS_OPERATOR",
+        "NEEDS_OPERATOR",
+        "maintenance",
+        report,
+    )
+    set_label.assert_called_once_with(145, runner.LABEL_RUNNING, runner.LABEL_BLOCKED)
+    notify.assert_called_once_with(145, "NEEDS_OPERATOR", report)
+
+
+def test_maintenance_report_status_blocks_middle_top_level_blocked() -> None:
+    report = (
+        "DONE: maintenance step returned\n"
+        "maintenance_task_id=sync_telegram_callback_poller_runtime\n"
+        "BLOCKED: step failed\n"
+        "success_criteria=met"
+    )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+
+
+def test_maintenance_report_status_blocks_middle_duplicate_done() -> None:
+    report = (
+        "DONE: maintenance step returned\n"
+        "maintenance_task_id=sync_telegram_callback_poller_runtime\n"
+        "DONE: duplicate status\n"
+        "success_criteria=met"
+    )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+
+
+def test_maintenance_report_status_ignores_blocked_diagnostic_assignment() -> None:
+    report = (
+        "DONE: maintenance step returned\n"
+        "maintenance_task_id=sync_telegram_callback_poller_runtime\n"
+        "blocked_write_status=BLOCKED\n"
+        "success_criteria=met"
+    )
+
+    assert runner.maintenance_report_status(report) == "DONE"
+
+
+def test_maintenance_report_status_ignores_done_diagnostic_assignment() -> None:
+    report = (
+        "BLOCKED: maintenance step failed\n"
+        "maintenance_task_id=private_memory_healthcheck\n"
+        "private_memory_status=DONE\n"
+        "success_criteria=not_met"
+    )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+
+
+def test_maintenance_report_status_accepts_single_last_line_status() -> None:
+    report = (
+        "maintenance_task_id=sync_telegram_callback_poller_runtime\n"
+        "success_criteria=not_met\n"
+        "NEEDS_OPERATOR: approve runtime action"
+    )
+
+    assert runner.maintenance_report_status(report) == "NEEDS_OPERATOR"
+
+
+def test_maintenance_report_status_blocks_missing_top_level_status() -> None:
+    report = (
+        "maintenance_task_id=sync_telegram_callback_poller_runtime\n"
+        "blocked_write_status=BLOCKED\n"
+        "success_criteria=not_met"
+    )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+
+
+def test_maintenance_report_is_done_requires_success_criteria_met() -> None:
     report = (
         "DONE: maintenance step returned\n"
         "maintenance_task_id=sync_telegram_callback_poller_runtime\n"
         "success_criteria=not_met"
     )
-    with mock.patch.object(
-        runner, "dispatch_runtime_maintenance_task", return_value=report
-    ), mock.patch.object(runner, "post_issue_comment"), mock.patch.object(
-        runner, "notify_task_finished"
-    ) as notify, mock.patch.object(runner, "set_issue_label") as set_label:
-        runner.process_runtime_maintenance_issue(
-            145, runner.SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME, str(runner.ROOT)
-        )
 
-    set_label.assert_called_once_with(145, runner.LABEL_RUNNING, runner.LABEL_BLOCKED)
-    notify.assert_called_once_with(145, "BLOCKED", report)
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert runner.maintenance_report_is_done(report) is False
+
+
+def test_maintenance_report_sanitizer_drops_multiline_status_line() -> None:
+    report = runner._maintenance_report(
+        "BLOCKED",
+        runner.SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
+        ["reason=maintenance_step_raised\nstatus=BLOCKED", "reason=maintenance_step_raised"],
+        "not_met",
+    )
+
+    assert "reason=maintenance_step_raised\nstatus=BLOCKED" not in report
+    assert "reason=maintenance_step_raised" in report
+
+
+def test_maintenance_report_sanitizer_drops_failed_command() -> None:
+    report = runner._maintenance_report(
+        "BLOCKED",
+        runner.VALIDATE_PR_BRANCH,
+        [
+            "step=validation_profile_command_1 status=failed exit_code=1",
+            "failed_command=python3 -m pytest -q tests/test_knowledge_intake.py",
+        ],
+        "not_met",
+    )
+
+    assert "failed_command=" not in report
+    assert "step=validation_profile_command_1 status=failed exit_code=1" in report
+
+
+@pytest.mark.parametrize(
+    "sensitive_value",
+    [
+        "github-token-must-not-leak",
+        "client-secret-value",
+        "api_key-value",
+        "access_key-value",
+        "db-password-value",
+        "credential-value",
+        "private_key-value",
+        "bearer-value",
+        "authorization-value",
+    ],
+)
+def test_maintenance_report_sanitizer_drops_sensitive_values(
+    sensitive_value: str,
+) -> None:
+    report = runner._maintenance_report(
+        "BLOCKED",
+        runner.SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
+        [f"reason={sensitive_value}", "reason=maintenance_step_raised"],
+        "not_met",
+    )
+
+    assert sensitive_value not in report
+    assert "reason=maintenance_step_raised" in report
 
 
 def test_maintenance_privileged_commands_are_non_interactive() -> None:
@@ -5099,7 +5244,7 @@ def test_local_callback_config_task_maintains_only_callback_hmac_setting() -> No
 
     commands = [call.args[0] for call in run.call_args_list]
     assert report.startswith("DONE:")
-    assert "step=verify_callback_hmac_secret status=done" in report
+    assert "step=verify_callback_hmac_secret" not in report
     assert ["sudo", "-n", "touch", runner.TELEGRAM_CALLBACK_LOCAL_CONFIG] in commands
     assert [
         "sudo",
@@ -5144,7 +5289,7 @@ def test_local_callback_config_task_reports_blocked_on_verification_failure() ->
         report = runner.ensure_telegram_callback_local_config()
 
     assert report.startswith("BLOCKED:")
-    assert "step=verify_callback_hmac_secret status=failed exit_code=1" in report
+    assert "step=verify_callback_hmac_secret" not in report
     assert "local config value" not in report
 
 
@@ -5390,7 +5535,7 @@ def test_prepare_aufmass_private_runtime_reports_done_without_private_paths() ->
 
     assert report.startswith("DONE:")
     assert "maintenance_task_id=prepare_aufmass_private_runtime" in report
-    assert "private_workspace=registered" in report
+    assert "private_workspace=registered" not in report
     assert "report_private_paths=false" in report
     assert "report_drawings=false" in report
     assert "report_quantities=false" in report
@@ -5833,13 +5978,13 @@ def test_run_aufmass_private_dxf_review_dry_run_uses_bounded_module_invocation(
 
     assert report.startswith("DONE:")
     assert "maintenance_task_id=run_aufmass_private_dxf_review" in report
-    assert "source_pack_id=pack_token" in report
+    assert "source_pack_id=pack_token" not in report
     assert "mode=dry-run" in report
     assert "branch=dxf-assisted" in report
     assert "selected_source_count=1" in report
     assert "dxf_source_count=1" in report
     assert "artifact_count=1" in report
-    assert "run_id=run_token" in report
+    assert "run_id=run_token" not in report
     assert str(workspace) not in report
     assert "source.dxf" not in report
     assert "rm -rf" not in report
@@ -5949,8 +6094,8 @@ def test_summarize_aufmass_private_review_redacts_private_rows_and_quantities(
 
     assert report.startswith("DONE:")
     assert "maintenance_task_id=summarize_aufmass_private_review" in report
-    assert "source_pack_id=pack_token" in report
-    assert "run_id=run_token" in report
+    assert "source_pack_id=pack_token" not in report
+    assert "run_id=run_token" not in report
     assert "review_table_count=1" in report
     assert "row_count=2" in report
     assert "source_token_count=1" in report
@@ -6005,8 +6150,8 @@ def test_build_aufmass_private_shortlist_writes_private_artifacts_and_public_cou
 
     assert report.startswith("DONE:")
     assert "maintenance_task_id=build_aufmass_private_shortlist" in report
-    assert "source_pack_id=pack_token" in report
-    assert "run_id=run_token" in report
+    assert "source_pack_id=pack_token" not in report
+    assert "run_id=run_token" not in report
     assert "input_table_count=1" in report
     assert "input_row_count=2" in report
     assert "shortlist_row_count=1" in report
@@ -6078,8 +6223,8 @@ def test_build_aufmass_private_area_schedule_writes_explicit_room_and_wall_field
 
     assert report.startswith("DONE:")
     assert "maintenance_task_id=build_aufmass_private_area_schedule" in report
-    assert "source_pack_id=pack_token" in report
-    assert "run_id=run_token" in report
+    assert "source_pack_id=pack_token" not in report
+    assert "run_id=run_token" not in report
     assert "room_area_row_count=1" in report
     assert "wall_area_row_count=1" in report
     assert "warning_count=0" in report
@@ -7189,7 +7334,7 @@ def test_preflight_pr_refresh_closed_pr_reports_manual_review() -> None:
 
     assert report.startswith("DONE:")
     assert "pr_state=CLOSED" in report
-    assert "next_action=manual review required" in report
+    assert "next_action=manual_review_required" in report
 
 
 def test_preflight_pr_refresh_head_sha_mismatch_blocks() -> None:
@@ -7221,7 +7366,7 @@ def test_preflight_pr_refresh_identical_to_main_reports_obsolete() -> None:
 
     assert report.startswith("DONE:")
     assert "compare_status=identical" in report
-    assert "next_action=mark obsolete" in report
+    assert "next_action=mark_obsolete" in report
 
 
 def test_preflight_pr_refresh_behind_only_new_files_recommends_fresh_pr() -> None:
@@ -7241,7 +7386,7 @@ def test_preflight_pr_refresh_behind_only_new_files_recommends_fresh_pr() -> Non
     assert report.startswith("DONE:")
     assert "compare_status=diverged" in report
     assert "files_on_main_count=0" in report
-    assert "next_action=create fresh PR" in report
+    assert "next_action=create_fresh_pr" in report
 
 
 def test_preflight_pr_refresh_overlapping_main_files_requires_manual_review() -> None:
@@ -7260,7 +7405,7 @@ def test_preflight_pr_refresh_overlapping_main_files_requires_manual_review() ->
 
     assert report.startswith("DONE:")
     assert "files_on_main_count=1" in report
-    assert "next_action=manual review required" in report
+    assert "next_action=manual_review_required" in report
 
 
 def test_preflight_pr_refresh_open_current_pr_recommends_validate_and_merge() -> None:
@@ -7276,7 +7421,7 @@ def test_preflight_pr_refresh_open_current_pr_recommends_validate_and_merge() ->
         report = runner.preflight_pr_refresh(_preflight_pr_issue_body())
 
     assert report.startswith("DONE:")
-    assert "next_action=validate and merge" in report
+    assert "next_action=validate_and_merge" in report
 
 
 def test_preflight_pr_refresh_task_makes_no_mutating_calls() -> None:
@@ -7667,15 +7812,12 @@ def test_validate_pr_branch_failed_knowledge_intake_command_reports_output(
 
     assert report.startswith("BLOCKED:")
     assert "step=validation_profile_command_1 status=failed exit_code=1" in report
-    assert (
-        "failed_command=python3 -m pytest -q tests/test_knowledge_intake.py"
-        in report
-    )
-    assert "failed_output_start" in report
-    assert "AssertionError: expected unknown entry to be rejected" in report
+    assert "failed_command=" not in report
+    assert "failed_output_start" not in report
+    assert "AssertionError: expected unknown entry to be rejected" not in report
     assert "SKELETON_TG_CALLBACK_HMAC_SECRET=should-not-leak" not in report
-    assert "[redacted environment variable]" in report
-    assert "failed_output_end" in report
+    assert "[redacted environment variable]" not in report
+    assert "failed_output_end" not in report
 
 
 def test_validate_pr_branch_reports_missing_dependency_module_names(
@@ -7747,13 +7889,12 @@ def test_validate_pr_branch_failed_command_output_is_truncated(
     ):
         report = runner.validate_pr_branch(_validate_pr_issue_body())
 
-    output_block = report.split("failed_output_start\n", 1)[1].split(
-        "\nfailed_output_end", 1
-    )[0]
     assert report.startswith("BLOCKED:")
-    assert "pytest failure line" in output_block
-    assert runner.VALIDATION_FAILED_OUTPUT_TRUNCATED_MARKER in output_block
-    assert len(output_block) <= runner.VALIDATION_FAILED_OUTPUT_LIMIT
+    assert "step=validation_profile_command_1 status=failed exit_code=1" in report
+    assert "pytest failure line" not in report
+    assert runner.VALIDATION_FAILED_OUTPUT_TRUNCATED_MARKER not in report
+    assert "failed_output_start" not in report
+    assert "failed_output_end" not in report
 
 
 def test_validate_pr_branch_issue_body_does_not_execute_arbitrary_commands(
@@ -8258,3 +8399,50 @@ def test_codex_exec_command_rejects_invalid_model_before_run_command(monkeypatch
             runner.run_codex_task("Task body", "/tmp/work", None)
 
     run_command.assert_not_called()
+
+
+
+def test_maintenance_report_sanitizer_rejects_raw_blocks_paths_and_prose() -> None:
+    report = runner._maintenance_report(
+        "BLOCKED",
+        runner.VALIDATE_PR_BRANCH,
+        [
+            "failed_output_start",
+            "AssertionError: private details",
+            "failed_output_end",
+            "remove_stderr_start",
+            "arbitrary stderr text",
+            "remove_stderr_end",
+            "reason=arbitrary free text",
+            "checkout_path=/home/agent/private",
+            "pr_url=https://example.com/not-a-pr",
+            "raw_output=plain_text",
+            "stdout=plain_text",
+            "stderr=plain_text",
+            "failed_command=plain_text",
+            "step=validation_profile_command_1 status=failed exit_code=1",
+            "reason=maintenance_step_raised",
+            "pr_url=https://github.com/alanua/Skeleton/pull/1168",
+        ],
+        "not_met",
+    )
+
+    for unsafe in (
+        "failed_output_start",
+        "AssertionError: private details",
+        "failed_output_end",
+        "remove_stderr_start",
+        "arbitrary stderr text",
+        "remove_stderr_end",
+        "reason=arbitrary free text",
+        "/home/agent/private",
+        "https://example.com/not-a-pr",
+        "raw_output=plain_text",
+        "stdout=plain_text",
+        "stderr=plain_text",
+        "failed_command=plain_text",
+    ):
+        assert unsafe not in report
+    assert "step=validation_profile_command_1 status=failed exit_code=1" in report
+    assert "reason=maintenance_step_raised" in report
+    assert "pr_url=https://github.com/alanua/Skeleton/pull/1168" in report
