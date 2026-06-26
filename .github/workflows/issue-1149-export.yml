@@ -1,0 +1,27 @@
+name: Issue 1149 export patch result
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    if: github.event.pull_request.number == 1168
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: runner/issue-1149
+          fetch-depth: 1
+          show-progress: false
+      - run: python scripts/apply_issue_1149_patch.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: issue-1149-patched-files
+          path: |
+            scripts/runner_poll_github_tasks.py
+            tests/test_runner_poll_github_tasks.py
