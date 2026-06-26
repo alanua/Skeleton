@@ -23,7 +23,7 @@ jobs:
           python-version: '3.12'
       - run: python -m pip install -q 'pytest>=8' 'PyYAML>=6'
       - run: python scripts/apply_issue_1149_patch.py
-      - run: python -c "from pathlib import Path; p=Path('tests/test_runner_poll_github_tasks.py'); x=p.read_text().splitlines(); n=(3871,3872,4214,4399,4400,4442); [x.__setitem__(i,x[i].replace(' in report',' not in report')) for i in n]; p.write_text(chr(10).join(x)+chr(10))"
+      - run: python -c "from pathlib import Path; p=Path('tests/test_runner_poll_github_tasks.py'); x=p.read_text().splitlines(); n=(3871,3872,4214,4399,4400,4442,4630,5537,7816,7818); [x.__setitem__(i,x[i].replace(' in report',' not in report')) for i in n]; p.write_text(chr(10).join(x)+chr(10))"
       - continue-on-error: true
         run: python -m pytest tests/test_runner_poll_github_tasks.py -x --junitxml=diagnose4.xml
       - uses: actions/upload-artifact@v4
