@@ -1117,3 +1117,16 @@ entries:
       Runner operations.
     status: BACKLOG
     canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-06-26-LOOP-ENGINEERING-001
+    source_batch: loop_engineering_review_candidate_2026_06_26
+    date: '2026-06-26'
+    classification: REVIEW
+    priority: high
+    target_project: skeleton
+    summary: "Loop Engineering defines an external control loop around agents: trigger, classify, isolate, execute, validate, persist state, decide the next step, then stop, retry, or escalate."
+    existing_match: Related to Runner/Codex bounded task loops, dev-department role split, structured events, review filtering, and approval-gated execution; not a duplicate because it specifies full loop controls and persistence requirements.
+    risk: Infinite goal loops, YOLO or full-permission agents, unrestricted MCP or arbitrary shell, agent self-approval, auto-merge for protected or high-risk work, chat context as the only process memory, or fallback that hides failures would break Skeleton safety boundaries.
+    recommended_action: "Review as a high-priority bounded-route candidate only. Require external process memory outside model context; short isolated restartable iterations; maker/checker split when risk justifies it; machine-verifiable success criteria where possible; max_iterations, timeout, retry limit, budget bound, stop conditions, fallback, and failure output for every loop; git worktrees or equivalent isolation for parallel code agents; persisted attempt state, evidence, failures, and next action between iterations; no automatic merge from passing tests; operator approval for protected or high-risk changes; bounded allowlisted connectors and MCP access; and stop/escalate on privacy, scope, protected-file, or repeated-error boundaries."
+    status: REVIEW
+    canon_status: not_canon_until_promoted
