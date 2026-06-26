@@ -167,6 +167,20 @@ For code or file changes, Runner should:
 9. open a draft PR;
 10. write validation logs to GitHub issue or PR comment.
 
+### 8.1 Retry refresh rule
+
+Before retrying a failed Runner task:
+
+1. treat review comments as evidence, not as the active task source;
+2. compare the newest blocker and current diff with the active issue task body;
+3. if the task is stale, ambiguous, contradictory, points to the wrong file or function, or repeats the same blocker, stop before another Runner call;
+4. rewrite the active issue task with the exact file and function, required behavior, forbidden scope and files, and direct regression tests;
+5. verify that the rewritten issue body is what Runner will read;
+6. allow one retry after the task is corrected;
+7. if the same defect remains or a previously fixed part regresses, mark the task blocked and finish one bounded correction in the existing PR with tests;
+8. do not create a second PR or repeat an unchanged task;
+9. minimize Runner calls, elapsed time, quota, and tokens.
+
 ## 9. Codex control checklist
 
 After every Codex result, verify:
@@ -317,30 +331,3 @@ Lavalamp has additional boundaries:
 - flash firmware only after explicit operator command.
 
 ## 18. Non-code projects
-
-Skeleton can also manage non-code projects such as documents, drawings, Aufmaß, planning, or administrative workflows.
-
-For non-code projects:
-- project identity still belongs in PROJECT_MANIFEST.yaml;
-- working state still belongs in STATE.yaml;
-- private Drive files are private working memory, not public canon;
-- durable file changes still require PatchPlan;
-- no private documents are published to public repos unless explicitly approved.
-
-## 19. Main principle
-
-The human sets direction.
-
-The model plans and critiques.
-
-The human approves.
-
-Runner executes.
-
-GitHub records.
-
-Tests validate.
-
-Gemini audits when needed.
-
-The operator decides merge and deploy.
