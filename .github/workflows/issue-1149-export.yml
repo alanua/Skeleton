@@ -1,4 +1,4 @@
-name: Issue 1149 export patch result
+name: Issue 1149 export checkout
 
 on:
   pull_request:
@@ -18,10 +18,8 @@ jobs:
           ref: runner/issue-1149
           fetch-depth: 1
           show-progress: false
-      - run: python scripts/apply_issue_1149_patch.py
+      - run: tar --exclude=.git -czf skeleton-checkout.tar.gz .
       - uses: actions/upload-artifact@v4
         with:
-          name: issue-1149-patched-files
-          path: |
-            scripts/runner_poll_github_tasks.py
-            tests/test_runner_poll_github_tasks.py
+          name: issue-1149-checkout
+          path: skeleton-checkout.tar.gz
