@@ -244,15 +244,27 @@ _MAINTENANCE_TOP_LEVEL_STATUS_RE = re.compile(
 _MAINTENANCE_SENSITIVE_VALUE_RE = re.compile(
     r"(?i)(?:token|secret|api_key|access_key|password|credential|private_key|bearer|authorization)"
 )
-_MAINTENANCE_STATUS_TOKEN_RE = re.compile(
-    r"(?P<key>[a-z][a-z0-9_]{0,80})=(?P<value>\S+)"
+_MAINTENANCE_ASSIGNMENT_KEY_RE = re.compile(
+    r"^[a-z][a-z0-9_]{0,80}$"
 )
-_MAINTENANCE_PUBLIC_TEXT_BLOCK_MARKERS = frozenset(
+_MAINTENANCE_SYMBOLIC_VALUE_RE = re.compile(
+    r"^[A-Za-z0-9._:+,@/\[\]{}()#-]+$"
+)
+_MAINTENANCE_PR_URL_KEYS = frozenset(
+    {"draft_pr_url", "existing_pr_url", "pr_url"}
+)
+_MAINTENANCE_FORBIDDEN_STATUS_KEYS = frozenset(
     {
-        "failed_output_start",
-        "failed_output_end",
-        "remove_stderr_start",
-        "remove_stderr_end",
+        "checkout_path",
+        "exception",
+        "failed_command",
+        "issue_worktree",
+        "private_workspace",
+        "raw_output",
+        "stderr",
+        "stdout",
+        "traceback",
+        "worktree_root",
     }
 )
 _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
@@ -2638,55 +2650,50 @@ def _maintenance_report(
 
 def _sanitize_maintenance_status_lines(status_lines: list[str]) -> list[str]:
     sanitized: list[str] = []
-    in_text_block = False
     for line in status_lines:
-        if line in _MAINTENANCE_PUBLIC_TEXT_BLOCK_MARKERS and line.endswith("_start"):
-            sanitized.append(line)
-            in_text_block = True
-            continue
-        if line in _MAINTENANCE_PUBLIC_TEXT_BLOCK_MARKERS and line.endswith("_end"):
-            sanitized.append(line)
-            in_text_block = False
-            continue
-        if in_text_block:
-            sanitized.append(line)
-            continue
         safe_line = _sanitize_maintenance_status_line(line)
         if safe_line is not None:
             sanitized.append(safe_line)
     return sanitized
 
 
+def _maintenance_status_value_is_safe(key: str, value: str) -> bool:
+    if (
+        not value
+        or "=" in value
+        or _MAINTENANCE_SENSITIVE_VALUE_RE.search(value)
+        or value.startswith(("/", "~"))
+        or "\\" in value
+        or ".." in value
+    ):
+        return False
+    if key in _MAINTENANCE_PR_URL_KEYS:
+        return _PUBLIC_GITHUB_PR_URL_RE.fullmatch(value) is not None
+    if "://" in value:
+        return False
+    return _MAINTENANCE_SYMBOLIC_VALUE_RE.fullmatch(value) is not None
+
+
 def _sanitize_maintenance_status_line(line: str) -> str | None:
     if "\n" in line or "\r" in line:
         return None
-    if line.count("=") == 1:
-        key, value = line.split("=", 1)
-        if key not in _MAINTENANCE_PUBLIC_STATUS_KEYS or not value.strip():
-            return None
-        if _MAINTENANCE_SENSITIVE_VALUE_RE.search(value):
-            return None
-        return line
-    tokens = list(_MAINTENANCE_STATUS_TOKEN_RE.finditer(line))
+    tokens = line.strip().split()
     if not tokens:
         return None
-    if "".join(match.group(0) for match in tokens) == "":
-        return None
-    position = 0
-    for match in tokens:
-        separator = line[position : match.start()]
-        if separator.strip():
+    normalized: list[str] = []
+    for token in tokens:
+        if token.count("=") != 1:
             return None
-        key = match.group("key")
-        value = match.group("value")
-        if key not in _MAINTENANCE_PUBLIC_STATUS_KEYS:
+        key, value = token.split("=", 1)
+        if (
+            _MAINTENANCE_ASSIGNMENT_KEY_RE.fullmatch(key) is None
+            or key not in _MAINTENANCE_PUBLIC_STATUS_KEYS
+            or key in _MAINTENANCE_FORBIDDEN_STATUS_KEYS
+            or not _maintenance_status_value_is_safe(key, value)
+        ):
             return None
-        if _MAINTENANCE_SENSITIVE_VALUE_RE.search(value):
-            return None
-        position = match.end()
-    if line[position:].strip():
-        return None
-    return line
+        normalized.append(f"{key}={value}")
+    return " ".join(normalized)
 
 
 _HOST_INVENTORY_VALUE_RE = re.compile(r"[^A-Za-z0-9._:+-]+")
@@ -5680,28 +5687,28 @@ def _preflight_refresh_next_action(
 ) -> str:
     if str(pr_state.get("state") or "").upper() != "OPEN":
         if compare_state is not None and int(compare_state.get("ahead_by") or 0) == 0:
-            return "mark obsolete"
-        return "manual review required"
+            return "mark_obsolete"
+        return "manual_review_required"
     if pr_state.get("baseRefName") != "main":
-        return "manual review required"
+        return "manual_review_required"
     if (
         not pr_state.get("headRefName")
         or _head_repository_name_with_owner(pr_state) != REPO
     ):
-        return "manual review required"
+        return "manual_review_required"
     if compare_state is None:
-        return "manual review required"
+        return "manual_review_required"
 
     ahead_by = int(compare_state.get("ahead_by") or 0)
     behind_by = int(compare_state.get("behind_by") or 0)
     compare_status = str(compare_state.get("status") or "")
     if ahead_by == 0 or compare_status == "identical":
-        return "mark obsolete"
+        return "mark_obsolete"
     if files_on_main:
-        return "manual review required"
+        return "manual_review_required"
     if changed_files and behind_by > 0:
-        return "create fresh PR"
-    return "validate and merge"
+        return "create_fresh_pr"
+    return "validate_and_merge"
 
 
 def preflight_pr_refresh(body: str) -> str:

@@ -3869,8 +3869,8 @@ def test_publish_target_project_issue_worktree_pr_uses_project_tree_and_target_r
     assert "maintenance_task_id=publish_target_project_issue_worktree_pr" in report
     assert "target_project=lumenflow" in report
     assert "repository=alanua/LumenFlow" in report
-    assert f"worktree_root={target_root}" in report
-    assert f"issue_worktree={worktree_path}" in report
+    assert f"worktree_root={target_root}" not in report
+    assert f"issue_worktree={worktree_path}" not in report
     assert ["git", "add", "--", "README.md"] in commands
     assert [
         "git",
@@ -4212,7 +4212,7 @@ def test_issue_worktree_publish_inspection_unexpected_untracked_except_codex_blo
     assert report.startswith("BLOCKED:")
     assert "unexpected_untracked_files_count=1" in report
     assert "reason=unexpected_untracked_files" in report
-    assert 'unexpected_untracked_files=["scratch.txt"]' in report
+    assert 'unexpected_untracked_files=["scratch.txt"]' not in report
 
 
 def test_issue_worktree_publish_inspection_ignores_arbitrary_commands(
@@ -4396,11 +4396,11 @@ def test_quarantine_stale_clean_skeleton_worktrees_reports_remove_128_stderr(
     commands = [call.args[0] for call in run.call_args_list]
     assert report.startswith("BLOCKED:")
     assert "worktree=issue-128 action=remove_failed exit_code=128" in report
-    assert "remove_stderr_start" in report
-    assert "fatal: validation failed for worktree remove" in report
-    assert "[redacted environment variable]" in report
+    assert "remove_stderr_start" not in report
+    assert "fatal: validation failed for worktree remove" not in report
+    assert "[redacted environment variable]" not in report
     assert "must-not-leak" not in report
-    assert "remove_stderr_end" in report
+    assert "remove_stderr_end" not in report
     assert "git_worktree_list_registers_path=true" in report
     assert commands == [
         ["git", "remote", "get-url", "origin"],
@@ -4440,7 +4440,7 @@ def test_quarantine_stale_clean_skeleton_worktrees_skips_unregistered_not_workin
     commands = [call.args[0] for call in run.call_args_list]
     assert report.startswith("DONE:")
     assert "worktree=issue-794 action=skipped_unregistered exit_code=128" in report
-    assert f"fatal: '{worktree_path}' is not a working tree" in report
+    assert f"fatal: '{worktree_path}' is not a working tree" not in report
     assert "git_worktree_list_registers_path=false" in report
     assert "removed_worktrees_count=0" in report
     assert "skipped_worktrees_count=1" in report
@@ -4628,7 +4628,7 @@ def test_publish_issue_worktree_pr_unexpected_untracked_file_blocks(
     commands = [call.args[0] for call in run.call_args_list]
     assert report.startswith("BLOCKED:")
     assert "unexpected_untracked_files_count=1" in report
-    assert 'unexpected_untracked_files=["scratch.txt"]' in report
+    assert 'unexpected_untracked_files=["scratch.txt"]' not in report
     assert "reason=unexpected_untracked_files" in report
     assert all(command[:2] != ["git", "add"] for command in commands)
     assert all(command[:2] != ["git", "commit"] for command in commands)
@@ -4666,7 +4666,7 @@ def test_publish_issue_worktree_pr_allowlisted_untracked_file_is_committed(
     assert "allowed_untracked_files_count=1" in report
     assert (
         'allowed_untracked_files=["tests/test_runner_poll_github_tasks.py"]'
-        in report
+        not in report
     )
     assert "validated_publish_files_count=2" in report
     assert ["git", "add", "--", *validated_publish_files] in commands
@@ -5535,7 +5535,7 @@ def test_prepare_aufmass_private_runtime_reports_done_without_private_paths() ->
 
     assert report.startswith("DONE:")
     assert "maintenance_task_id=prepare_aufmass_private_runtime" in report
-    assert "private_workspace=registered" in report
+    assert "private_workspace=registered" not in report
     assert "report_private_paths=false" in report
     assert "report_drawings=false" in report
     assert "report_quantities=false" in report
@@ -7334,7 +7334,7 @@ def test_preflight_pr_refresh_closed_pr_reports_manual_review() -> None:
 
     assert report.startswith("DONE:")
     assert "pr_state=CLOSED" in report
-    assert "next_action=manual review required" in report
+    assert "next_action=manual_review_required" in report
 
 
 def test_preflight_pr_refresh_head_sha_mismatch_blocks() -> None:
@@ -7366,7 +7366,7 @@ def test_preflight_pr_refresh_identical_to_main_reports_obsolete() -> None:
 
     assert report.startswith("DONE:")
     assert "compare_status=identical" in report
-    assert "next_action=mark obsolete" in report
+    assert "next_action=mark_obsolete" in report
 
 
 def test_preflight_pr_refresh_behind_only_new_files_recommends_fresh_pr() -> None:
@@ -7386,7 +7386,7 @@ def test_preflight_pr_refresh_behind_only_new_files_recommends_fresh_pr() -> Non
     assert report.startswith("DONE:")
     assert "compare_status=diverged" in report
     assert "files_on_main_count=0" in report
-    assert "next_action=create fresh PR" in report
+    assert "next_action=create_fresh_pr" in report
 
 
 def test_preflight_pr_refresh_overlapping_main_files_requires_manual_review() -> None:
@@ -7405,7 +7405,7 @@ def test_preflight_pr_refresh_overlapping_main_files_requires_manual_review() ->
 
     assert report.startswith("DONE:")
     assert "files_on_main_count=1" in report
-    assert "next_action=manual review required" in report
+    assert "next_action=manual_review_required" in report
 
 
 def test_preflight_pr_refresh_open_current_pr_recommends_validate_and_merge() -> None:
@@ -7421,7 +7421,7 @@ def test_preflight_pr_refresh_open_current_pr_recommends_validate_and_merge() ->
         report = runner.preflight_pr_refresh(_preflight_pr_issue_body())
 
     assert report.startswith("DONE:")
-    assert "next_action=validate and merge" in report
+    assert "next_action=validate_and_merge" in report
 
 
 def test_preflight_pr_refresh_task_makes_no_mutating_calls() -> None:
@@ -7813,11 +7813,11 @@ def test_validate_pr_branch_failed_knowledge_intake_command_reports_output(
     assert report.startswith("BLOCKED:")
     assert "step=validation_profile_command_1 status=failed exit_code=1" in report
     assert "failed_command=" not in report
-    assert "failed_output_start" in report
-    assert "AssertionError: expected unknown entry to be rejected" in report
+    assert "failed_output_start" not in report
+    assert "AssertionError: expected unknown entry to be rejected" not in report
     assert "SKELETON_TG_CALLBACK_HMAC_SECRET=should-not-leak" not in report
-    assert "[redacted environment variable]" in report
-    assert "failed_output_end" in report
+    assert "[redacted environment variable]" not in report
+    assert "failed_output_end" not in report
 
 
 def test_validate_pr_branch_reports_missing_dependency_module_names(
@@ -7889,13 +7889,12 @@ def test_validate_pr_branch_failed_command_output_is_truncated(
     ):
         report = runner.validate_pr_branch(_validate_pr_issue_body())
 
-    output_block = report.split("failed_output_start\n", 1)[1].split(
-        "\nfailed_output_end", 1
-    )[0]
     assert report.startswith("BLOCKED:")
-    assert "pytest failure line" in output_block
-    assert runner.VALIDATION_FAILED_OUTPUT_TRUNCATED_MARKER in output_block
-    assert len(output_block) <= runner.VALIDATION_FAILED_OUTPUT_LIMIT
+    assert "step=validation_profile_command_1 status=failed exit_code=1" in report
+    assert "pytest failure line" not in report
+    assert runner.VALIDATION_FAILED_OUTPUT_TRUNCATED_MARKER not in report
+    assert "failed_output_start" not in report
+    assert "failed_output_end" not in report
 
 
 def test_validate_pr_branch_issue_body_does_not_execute_arbitrary_commands(
@@ -8400,3 +8399,50 @@ def test_codex_exec_command_rejects_invalid_model_before_run_command(monkeypatch
             runner.run_codex_task("Task body", "/tmp/work", None)
 
     run_command.assert_not_called()
+
+
+
+def test_maintenance_report_sanitizer_rejects_raw_blocks_paths_and_prose() -> None:
+    report = runner._maintenance_report(
+        "BLOCKED",
+        runner.VALIDATE_PR_BRANCH,
+        [
+            "failed_output_start",
+            "AssertionError: private details",
+            "failed_output_end",
+            "remove_stderr_start",
+            "arbitrary stderr text",
+            "remove_stderr_end",
+            "reason=arbitrary free text",
+            "checkout_path=/home/agent/private",
+            "pr_url=https://example.com/not-a-pr",
+            "raw_output=plain_text",
+            "stdout=plain_text",
+            "stderr=plain_text",
+            "failed_command=plain_text",
+            "step=validation_profile_command_1 status=failed exit_code=1",
+            "reason=maintenance_step_raised",
+            "pr_url=https://github.com/alanua/Skeleton/pull/1168",
+        ],
+        "not_met",
+    )
+
+    for unsafe in (
+        "failed_output_start",
+        "AssertionError: private details",
+        "failed_output_end",
+        "remove_stderr_start",
+        "arbitrary stderr text",
+        "remove_stderr_end",
+        "reason=arbitrary free text",
+        "/home/agent/private",
+        "https://example.com/not-a-pr",
+        "raw_output=plain_text",
+        "stdout=plain_text",
+        "stderr=plain_text",
+        "failed_command=plain_text",
+    ):
+        assert unsafe not in report
+    assert "step=validation_profile_command_1 status=failed exit_code=1" in report
+    assert "reason=maintenance_step_raised" in report
+    assert "pr_url=https://github.com/alanua/Skeleton/pull/1168" in report
