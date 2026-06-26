@@ -25,6 +25,35 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_POLICY_PATH = ROOT / "policies" / "MERGE_DECISION_POLICY.yaml"
 DEFAULT_DELEGATED_POLICY_PATH = ROOT / "policies" / "DELEGATED_MERGE_POLICY.yaml"
 
+MERGE_APPROVAL_ACTION = "merge_pull_request"
+OPERATOR_MERGE_APPROVAL_MISSING = "operator_merge_approval_missing"
+OPERATOR_MERGE_APPROVAL_MALFORMED = "operator_merge_approval_malformed"
+OPERATOR_MERGE_APPROVAL_SCOPE_MISMATCH = "operator_merge_approval_scope_mismatch"
+OPERATOR_MERGE_APPROVAL_HEAD_MISMATCH = "operator_merge_approval_head_mismatch"
+TASK_EXPLICITLY_FORBIDS_MERGE = "task_explicitly_forbids_merge"
+OPERATOR_MERGE_APPROVAL_VALID = "operator_merge_approval_valid"
+
+MERGE_APPROVAL_REASON_TOKENS = frozenset(
+    {
+        OPERATOR_MERGE_APPROVAL_MISSING,
+        OPERATOR_MERGE_APPROVAL_MALFORMED,
+        OPERATOR_MERGE_APPROVAL_SCOPE_MISMATCH,
+        OPERATOR_MERGE_APPROVAL_HEAD_MISMATCH,
+        TASK_EXPLICITLY_FORBIDS_MERGE,
+        OPERATOR_MERGE_APPROVAL_VALID,
+    }
+)
+
+_HEAD_SHA_LENGTHS = (40, 64)
+_EXPLICIT_MERGE_PROHIBITIONS = (
+    "do not merge",
+    "no merge",
+    "draft pr only",
+    "draft pull request only",
+    "must not merge",
+    "may not merge",
+)
+
 
 @dataclass(frozen=True)
 class MergePolicyResult:
@@ -32,6 +61,7 @@ class MergePolicyResult:
     reasons: tuple[str, ...]
     hard_stop_files_found: tuple[str, ...] = ()
     ask_triggers_found: tuple[str, ...] = ()
+    public_metadata: Mapping[str, str | int] | None = None
 
     @property
     def matched_files(self) -> tuple[str, ...]:
@@ -50,6 +80,12 @@ class MergePolicyRequest:
     execution_mode_changed: bool = False
     risk_level: str = "green"
     triggers: tuple[str, ...] = ()
+    repository: str | None = None
+    pr_number: int | None = None
+    expected_head_sha: str | None = None
+    merge_method: str | None = None
+    operator_merge_approval: Mapping[str, Any] | None = None
+    task_body: str = ""
 
 
 MergePolicyDecision = MergePolicyResult
@@ -73,6 +109,13 @@ class DelegatedMergePolicyRequest:
 
 
 DelegatedMergePolicyDecision = DelegatedMergePolicyResult
+
+
+@dataclass(frozen=True)
+class OperatorMergeApprovalValidation:
+    valid: bool
+    reason_token: str
+    public_metadata: Mapping[str, str | int]
 
 
 class MergePolicyChecker:
@@ -150,7 +193,32 @@ class MergePolicyChecker:
                 ask_triggers_found=ask_triggers,
             )
 
-        return MergePolicyResult(decision=AUTO_MERGE, reasons=())
+        approval_result = validate_operator_merge_approval(
+            pr_data.get("operator_merge_approval"),
+            repository=pr_data.get("repository"),
+            pr_number=pr_data.get("pr_number"),
+            expected_head_sha=pr_data.get("expected_head_sha"),
+            merge_method=pr_data.get("merge_method"),
+            task_body=str(pr_data.get("task_body") or pr_data.get("body") or ""),
+        )
+        if not approval_result.valid:
+            return MergePolicyResult(
+                decision=(
+                    BLOCKED
+                    if approval_result.reason_token == TASK_EXPLICITLY_FORBIDS_MERGE
+                    else ASK_OPERATOR
+                ),
+                reasons=(approval_result.reason_token,),
+                hard_stop_files_found=hard_stop_files,
+                ask_triggers_found=ask_triggers,
+                public_metadata=approval_result.public_metadata,
+            )
+
+        return MergePolicyResult(
+            decision=AUTO_MERGE,
+            reasons=(OPERATOR_MERGE_APPROVAL_VALID,),
+            public_metadata=approval_result.public_metadata,
+        )
 
 
 class DelegatedMergePolicyChecker:
@@ -317,7 +385,112 @@ def check_merge_policy(
             "evidence": {"present": request.evidence_present},
             "risk_level": request.risk_level,
             "triggers": tuple(triggers),
+            "repository": request.repository,
+            "pr_number": request.pr_number,
+            "expected_head_sha": request.expected_head_sha,
+            "merge_method": request.merge_method,
+            "operator_merge_approval": request.operator_merge_approval,
+            "task_body": request.task_body,
         }
+    )
+
+
+def validate_operator_merge_approval(
+    approval: object,
+    *,
+    repository: object,
+    pr_number: object,
+    expected_head_sha: object,
+    merge_method: object,
+    task_body: str = "",
+) -> OperatorMergeApprovalValidation:
+    """Validate an action-specific, PR-state-bound merge approval object.
+
+    The returned metadata is intentionally bounded and public-safe. It never
+    echoes the approval payload or raw task/comment text.
+    """
+    metadata = _merge_approval_public_metadata(
+        repository=repository,
+        pr_number=pr_number,
+        expected_head_sha=expected_head_sha,
+        merge_method=merge_method,
+    )
+    prohibition = _explicit_merge_prohibition(task_body)
+
+    if approval is None:
+        reason = (
+            TASK_EXPLICITLY_FORBIDS_MERGE
+            if prohibition is not None
+            else OPERATOR_MERGE_APPROVAL_MISSING
+        )
+        return OperatorMergeApprovalValidation(False, reason, metadata)
+
+    if not isinstance(approval, Mapping):
+        if prohibition is not None:
+            return OperatorMergeApprovalValidation(
+                False, TASK_EXPLICITLY_FORBIDS_MERGE, metadata
+            )
+        return OperatorMergeApprovalValidation(
+            False, OPERATOR_MERGE_APPROVAL_MALFORMED, metadata
+        )
+
+    if prohibition is not None and approval.get("supersedes_task_prohibition") != prohibition:
+        return OperatorMergeApprovalValidation(
+            False, TASK_EXPLICITLY_FORBIDS_MERGE, metadata
+        )
+
+    required_fields = (
+        "action",
+        "repository",
+        "pr_number",
+        "expected_head_sha",
+        "merge_method",
+    )
+    if any(field not in approval for field in required_fields):
+        return OperatorMergeApprovalValidation(
+            False, OPERATOR_MERGE_APPROVAL_MALFORMED, metadata
+        )
+
+    approved_action = approval.get("action")
+    approved_repo = approval.get("repository")
+    approved_pr = approval.get("pr_number")
+    approved_head = approval.get("expected_head_sha")
+    approved_method = approval.get("merge_method")
+    if (
+        not isinstance(approved_action, str)
+        or not isinstance(approved_repo, str)
+        or not isinstance(approved_method, str)
+        or not isinstance(approved_head, str)
+        or not isinstance(approved_pr, int)
+        or isinstance(approved_pr, bool)
+        or not _valid_repo(repository)
+        or not isinstance(pr_number, int)
+        or isinstance(pr_number, bool)
+        or not _valid_head_sha(expected_head_sha)
+        or not _valid_head_sha(approved_head)
+        or not _valid_merge_method(merge_method)
+    ):
+        return OperatorMergeApprovalValidation(
+            False, OPERATOR_MERGE_APPROVAL_MALFORMED, metadata
+        )
+
+    if str(expected_head_sha).lower() != approved_head.lower():
+        return OperatorMergeApprovalValidation(
+            False, OPERATOR_MERGE_APPROVAL_HEAD_MISMATCH, metadata
+        )
+
+    if (
+        approved_action != MERGE_APPROVAL_ACTION
+        or approved_repo != repository
+        or approved_pr != pr_number
+        or approved_method != merge_method
+    ):
+        return OperatorMergeApprovalValidation(
+            False, OPERATOR_MERGE_APPROVAL_SCOPE_MISMATCH, metadata
+        )
+
+    return OperatorMergeApprovalValidation(
+        True, OPERATOR_MERGE_APPROVAL_VALID, metadata
     )
 
 
@@ -340,6 +513,57 @@ def check_delegated_merge_policy(
             "triggers": request.triggers,
         }
     )
+
+
+def _merge_approval_public_metadata(
+    *,
+    repository: object,
+    pr_number: object,
+    expected_head_sha: object,
+    merge_method: object,
+) -> dict[str, str | int]:
+    metadata: dict[str, str | int] = {}
+    if isinstance(repository, str) and _valid_repo(repository):
+        metadata["repository"] = repository
+    if isinstance(pr_number, int) and not isinstance(pr_number, bool) and pr_number > 0:
+        metadata["pr_number"] = pr_number
+    if isinstance(expected_head_sha, str) and _valid_head_sha(expected_head_sha):
+        metadata["expected_head_sha"] = expected_head_sha.lower()
+    if isinstance(merge_method, str) and _valid_merge_method(merge_method):
+        metadata["merge_method"] = merge_method
+    return metadata
+
+
+def _valid_repo(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    parts = value.split("/")
+    return (
+        len(parts) == 2
+        and all(part != "" for part in parts)
+        and all(
+            all(char.isalnum() or char in ".-_" for char in part)
+            for part in parts
+        )
+    )
+
+
+def _valid_head_sha(value: object) -> bool:
+    if not isinstance(value, str) or len(value) not in _HEAD_SHA_LENGTHS:
+        return False
+    return all(char in "0123456789abcdefABCDEF" for char in value)
+
+
+def _valid_merge_method(value: object) -> bool:
+    return isinstance(value, str) and value in {"merge", "squash", "rebase"}
+
+
+def _explicit_merge_prohibition(body: str) -> str | None:
+    lowered = body.lower()
+    for phrase in _EXPLICIT_MERGE_PROHIBITIONS:
+        if phrase in lowered:
+            return phrase
+    return None
 
 
 def _evidence_status(pr_data: Mapping[str, Any]) -> tuple[bool, str]:

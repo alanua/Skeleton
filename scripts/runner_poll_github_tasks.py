@@ -31,6 +31,11 @@ from core.hermes_private_memory import (
     record_hermes_private_memory_note,
     write_hermes_private_memory_heartbeat,
 )
+from core.merge_policy_checker import (
+    MERGE_APPROVAL_ACTION,
+    OPERATOR_MERGE_APPROVAL_VALID,
+    validate_operator_merge_approval,
+)
 from core.private_memory import healthcheck_private_memory, write_public_heartbeat
 from core.project_tree import get_project, get_project_by_repo, load_project_tree
 from core.skeleton_memory import SkeletonMemory
@@ -7563,6 +7568,21 @@ def _pr_merge_block_reason(
     request: TelegramApprovedPrMergeRequest,
     pr_state: dict[str, Any],
 ) -> str | None:
+    approval_validation = validate_operator_merge_approval(
+        {
+            "action": MERGE_APPROVAL_ACTION,
+            "repository": REPO,
+            "pr_number": request.pr_number,
+            "expected_head_sha": request.approved_head_sha,
+            "merge_method": request.action,
+        },
+        repository=REPO,
+        pr_number=request.pr_number,
+        expected_head_sha=request.approved_head_sha,
+        merge_method=request.action,
+    )
+    if approval_validation.reason_token != OPERATOR_MERGE_APPROVAL_VALID:
+        return f"reason={approval_validation.reason_token}"
     if not telegram_approve_digest_is_signed(request):
         return "Telegram approve callback HMAC signature is invalid."
     if pr_state.get("number") != request.pr_number:

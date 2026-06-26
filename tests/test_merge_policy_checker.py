@@ -18,12 +18,20 @@ from core.merge_policy_checker import (
     DEFAULT_POLICY_PATH,
     DelegatedMergePolicyChecker,
     DelegatedMergePolicyRequest,
+    MERGE_APPROVAL_ACTION,
+    OPERATOR_MERGE_APPROVAL_HEAD_MISMATCH,
+    OPERATOR_MERGE_APPROVAL_MALFORMED,
+    OPERATOR_MERGE_APPROVAL_MISSING,
+    OPERATOR_MERGE_APPROVAL_SCOPE_MISMATCH,
+    OPERATOR_MERGE_APPROVAL_VALID,
     MergePolicyChecker,
     MergePolicyRequest,
+    TASK_EXPLICITLY_FORBIDS_MERGE,
     check_delegated_merge_policy,
     check_merge_policy,
     load_delegated_merge_policy,
     load_merge_decision_policy,
+    validate_operator_merge_approval,
 )
 
 
@@ -49,6 +57,11 @@ ASK_OPERATOR_TRIGGERS = (
     "live_runtime_capability_added",
 )
 
+REPOSITORY = "alanua/Skeleton"
+PR_NUMBER = 1081
+HEAD_SHA = "a" * 40
+MERGE_METHOD = "squash"
+
 
 def clean_pr_data(**overrides: object) -> dict[str, object]:
     values: dict[str, object] = {
@@ -61,6 +74,10 @@ def clean_pr_data(**overrides: object) -> dict[str, object]:
         },
         "risk_level": "green",
         "triggers": (),
+        "repository": REPOSITORY,
+        "pr_number": PR_NUMBER,
+        "expected_head_sha": HEAD_SHA,
+        "merge_method": MERGE_METHOD,
     }
     values.update(overrides)
     return values
@@ -91,13 +108,199 @@ def clean_delegated_request(**overrides: object) -> DelegatedMergePolicyRequest:
     return DelegatedMergePolicyRequest(**values)
 
 
-def test_clean_routine_pr_auto_merges_when_all_evidence_true() -> None:
+def valid_merge_approval(**overrides: object) -> dict[str, object]:
+    approval: dict[str, object] = {
+        "action": MERGE_APPROVAL_ACTION,
+        "repository": REPOSITORY,
+        "pr_number": PR_NUMBER,
+        "expected_head_sha": HEAD_SHA,
+        "merge_method": MERGE_METHOD,
+    }
+    approval.update(overrides)
+    return approval
+
+
+def test_clean_routine_pr_without_approval_does_not_get_merge_authority() -> None:
     result = MergePolicyChecker(DEFAULT_POLICY_PATH).check(clean_pr_data())
 
-    assert result.decision == AUTO_MERGE
-    assert result.reasons == ()
+    assert result.decision == ASK_OPERATOR
+    assert result.reasons == (OPERATOR_MERGE_APPROVAL_MISSING,)
     assert result.hard_stop_files_found == ()
     assert result.ask_triggers_found == ()
+
+
+def test_clean_routine_pr_auto_merges_only_with_exact_operator_merge_approval() -> None:
+    result = MergePolicyChecker(DEFAULT_POLICY_PATH).check(
+        clean_pr_data(operator_merge_approval=valid_merge_approval())
+    )
+
+    assert result.decision == AUTO_MERGE
+    assert result.reasons == (OPERATOR_MERGE_APPROVAL_VALID,)
+    assert result.public_metadata == {
+        "repository": REPOSITORY,
+        "pr_number": PR_NUMBER,
+        "expected_head_sha": HEAD_SHA,
+        "merge_method": MERGE_METHOD,
+    }
+
+
+def test_exact_valid_approval_passes_pure_validation_gate() -> None:
+    result = validate_operator_merge_approval(
+        valid_merge_approval(),
+        repository=REPOSITORY,
+        pr_number=PR_NUMBER,
+        expected_head_sha=HEAD_SHA,
+        merge_method=MERGE_METHOD,
+    )
+
+    assert result.valid is True
+    assert result.reason_token == OPERATOR_MERGE_APPROVAL_VALID
+
+
+@pytest.mark.parametrize(
+    ("override", "reason"),
+    (
+        ({"repository": "alanua/Other"}, OPERATOR_MERGE_APPROVAL_SCOPE_MISMATCH),
+        ({"pr_number": 1073}, OPERATOR_MERGE_APPROVAL_SCOPE_MISMATCH),
+        ({"action": "deploy_runtime"}, OPERATOR_MERGE_APPROVAL_SCOPE_MISMATCH),
+        ({"merge_method": "merge"}, OPERATOR_MERGE_APPROVAL_SCOPE_MISMATCH),
+    ),
+)
+def test_wrong_approval_scope_blocks(
+    override: dict[str, object], reason: str
+) -> None:
+    result = validate_operator_merge_approval(
+        valid_merge_approval(**override),
+        repository=REPOSITORY,
+        pr_number=PR_NUMBER,
+        expected_head_sha=HEAD_SHA,
+        merge_method=MERGE_METHOD,
+    )
+
+    assert result.valid is False
+    assert result.reason_token == reason
+
+
+def test_changed_head_sha_invalidates_prior_approval() -> None:
+    result = validate_operator_merge_approval(
+        valid_merge_approval(expected_head_sha="b" * 40),
+        repository=REPOSITORY,
+        pr_number=PR_NUMBER,
+        expected_head_sha=HEAD_SHA,
+        merge_method=MERGE_METHOD,
+    )
+
+    assert result.valid is False
+    assert result.reason_token == OPERATOR_MERGE_APPROVAL_HEAD_MISMATCH
+
+
+@pytest.mark.parametrize(
+    "approval",
+    (
+        None,
+        "+",
+        "runner:done",
+        {"tests_passed": True, "reviewer_approved": True},
+        {
+            "action": "install_graphify_runtime",
+            "repository": REPOSITORY,
+            "pr_number": PR_NUMBER,
+            "expected_head_sha": HEAD_SHA,
+            "merge_method": MERGE_METHOD,
+        },
+    ),
+)
+def test_generic_status_review_and_runtime_approval_do_not_count(
+    approval: object,
+) -> None:
+    result = MergePolicyChecker(DEFAULT_POLICY_PATH).check(
+        clean_pr_data(
+            operator_merge_approval=approval,
+            evidence={
+                "tests_passed": True,
+                "diff_check_passed": True,
+                "reviewer_approved": True,
+                "runner_done": True,
+            },
+        )
+    )
+
+    assert result.decision == ASK_OPERATOR
+    assert result.reasons in {
+        (OPERATOR_MERGE_APPROVAL_MISSING,),
+        (OPERATOR_MERGE_APPROVAL_MALFORMED,),
+        (OPERATOR_MERGE_APPROVAL_SCOPE_MISMATCH,),
+    }
+
+
+def test_issue_1073_no_merge_shape_blocks_even_with_structured_approval() -> None:
+    body = (
+        "Incident: issue #1073 explicitly prohibited merge.\n"
+        "Expected output: Draft PR only. No merge."
+    )
+    result = MergePolicyChecker(DEFAULT_POLICY_PATH).check(
+        clean_pr_data(
+            pr_number=1081,
+            task_body=body,
+            operator_merge_approval=valid_merge_approval(pr_number=1081),
+        )
+    )
+
+    assert result.decision == BLOCKED
+    assert result.reasons == (TASK_EXPLICITLY_FORBIDS_MERGE,)
+
+
+def test_no_merge_prohibition_dominates_generic_plus_approval() -> None:
+    result = MergePolicyChecker(DEFAULT_POLICY_PATH).check(
+        clean_pr_data(task_body="do not merge", operator_merge_approval="+")
+    )
+
+    assert result.decision == BLOCKED
+    assert result.reasons == (TASK_EXPLICITLY_FORBIDS_MERGE,)
+
+
+def test_later_explicit_superseding_merge_approval_can_clear_no_merge() -> None:
+    body = "Expected output: draft PR only."
+    result = MergePolicyChecker(DEFAULT_POLICY_PATH).check(
+        clean_pr_data(
+            task_body=body,
+            operator_merge_approval=valid_merge_approval(
+                supersedes_task_prohibition="draft pr only",
+            ),
+        )
+    )
+
+    assert result.decision == AUTO_MERGE
+    assert result.reasons == (OPERATOR_MERGE_APPROVAL_VALID,)
+
+
+def test_public_report_exposes_no_approval_payload_or_raw_comment_text() -> None:
+    raw_comment = "operator said + and pasted private token secret-value"
+    result = MergePolicyChecker(DEFAULT_POLICY_PATH).check(
+        clean_pr_data(
+            task_body=raw_comment,
+            operator_merge_approval=valid_merge_approval(
+                private_comment=raw_comment,
+            ),
+        )
+    )
+
+    public_text = repr((result.reasons, result.public_metadata))
+    assert "secret-value" not in public_text
+    assert raw_comment not in public_text
+
+
+def test_missing_or_malformed_approval_fields_block() -> None:
+    result = validate_operator_merge_approval(
+        {"action": MERGE_APPROVAL_ACTION, "repository": REPOSITORY},
+        repository=REPOSITORY,
+        pr_number=PR_NUMBER,
+        expected_head_sha=HEAD_SHA,
+        merge_method=MERGE_METHOD,
+    )
+
+    assert result.valid is False
+    assert result.reason_token == OPERATOR_MERGE_APPROVAL_MALFORMED
 
 
 @pytest.mark.parametrize("changed_file", HARD_STOP_FILES)
@@ -175,6 +378,15 @@ def test_policy_loading() -> None:
         "no_hard_stop_files",
         "no_ask_operator_triggers",
         "no_level_red_triggers",
+        "operator_merge_approval_valid",
+    ]
+    assert policy["operator_merge_approval_requires"] == [
+        "action=merge_pull_request",
+        "repository_full_name",
+        "pull_request_number",
+        "expected_head_sha",
+        "merge_method",
+        "no_task_explicit_merge_prohibition_unless_superseded",
     ]
     assert set(HARD_STOP_FILES[:-1]).issubset(set(policy["hard_stop_file_patterns"]))
     assert "adapters/**" in policy["hard_stop_file_patterns"]
