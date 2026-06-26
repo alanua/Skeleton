@@ -1,0 +1,18 @@
+{
+  "unit": "m",
+  "room_id": "seitenfluegel-room-001",
+  "tolerance_mm": 5,
+  "source": {"kind": "segments"},
+  "segments": [
+    {"id": "s001", "layer": "WALLS", "start": [0.0, 0.0], "end": [5.998, 0.001]},
+    {"id": "s002", "layer": "WALLS", "start": [6.002, -0.001], "end": [6.0, 3.4]},
+    {"id": "s003", "layer": "WALLS", "start": [6.0, 3.4], "end": [3.1, 3.401]},
+    {"id": "s004", "layer": "WALLS", "start": [3.1, 3.401], "end": [3.1, 3.8]},
+    {"id": "s005", "layer": "WALLS", "start": [3.1, 3.8], "end": [0.0, 3.8]},
+    {"id": "s006", "layer": "WALLS", "start": [0.0, 3.8], "end": [0.001, 0.002]}
+  ],
+  "zones": [
+    {"zone_id": "zone-wohnen", "label": "Wohnen"},
+    {"zone_id": "zone-essen", "label": "Essen"}
+  ]
+}
