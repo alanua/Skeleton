@@ -18,8 +18,8 @@ jobs:
           ref: runner/issue-1149
           fetch-depth: 1
           show-progress: false
-      - run: tar --exclude=.git --exclude=skeleton-checkout.tar.gz -czf skeleton-checkout.tar.gz .
+      - run: tar --exclude=.git -czf /tmp/skeleton-checkout.tar.gz .
       - uses: actions/upload-artifact@v4
         with:
           name: issue-1149-checkout
-          path: skeleton-checkout.tar.gz
+          path: /tmp/skeleton-checkout.tar.gz
