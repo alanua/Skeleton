@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.aufmass_geometry_manifest.schema.json",
+  "type": "object",
+  "required": [
+    "contract",
+    "engine",
+    "status",
+    "tolerance_mm",
+    "unit",
+    "source_entities",
+    "normalized_segments",
+    "simplification_evidence",
+    "room_geometry_candidate",
+    "accepted_room_shell",
+    "ordered_wall_segments",
+    "room_zone_graph",
+    "qa",
+    "manifest_hash"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "contract": {"const": "GEOMETRY_RESULT_MANIFEST"},
+    "engine": {"const": "core2d"},
+    "status": {"enum": ["ACCEPTED", "REVIEW_REQUIRED"]},
+    "tolerance_mm": {"type": "number"},
+    "unit": {"const": "m"},
+    "source_entities": {"type": "array", "items": {"$ref": "#/$defs/source_entity"}},
+    "normalized_segments": {"type": "array", "items": {"$ref": "#/$defs/normalized_segment"}},
+    "simplification_evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence"}},
+    "room_geometry_candidate": {"type": "object"},
+    "accepted_room_shell": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/shell"}]},
+    "ordered_wall_segments": {"type": "array", "items": {"$ref": "#/$defs/wall_segment"}},
+    "room_zone_graph": {"type": "object"},
+    "qa": {"type": "object"},
+    "manifest_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  },
+  "$defs": {
+    "point": {
+      "type": "array",
+      "prefixItems": [{"type": "number"}, {"type": "number"}],
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "source_entity": {
+      "type": "object",
+      "required": ["contract", "source_entity_id", "entity_type", "layer", "start", "end", "immutable", "provenance"],
+      "additionalProperties": false,
+      "properties": {
+        "contract": {"const": "SOURCE_ENTITY"},
+        "source_entity_id": {"type": "string"},
+        "entity_type": {"type": "string"},
+        "layer": {"type": "string"},
+        "start": {"$ref": "#/$defs/point"},
+        "end": {"$ref": "#/$defs/point"},
+        "immutable": {"const": true},
+        "provenance": {"type": "object"}
+      }
+    },
+    "normalized_segment": {
+      "type": "object",
+      "required": ["contract", "segment_id", "source_entity_id", "layer", "start", "end", "length_m", "normalization"],
+      "additionalProperties": false,
+      "properties": {
+        "contract": {"const": "NORMALIZED_SEGMENT"},
+        "segment_id": {"type": "string"},
+        "source_entity_id": {"type": "string"},
+        "layer": {"type": "string"},
+        "start": {"$ref": "#/$defs/point"},
+        "end": {"$ref": "#/$defs/point"},
+        "length_m": {"type": "number"},
+        "normalization": {"type": "object"}
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "required": ["contract", "method", "affected_segments", "tolerance_mm", "area_delta_m2", "perimeter_delta_m", "review_status"],
+      "properties": {
+        "contract": {"const": "SIMPLIFICATION_EVIDENCE"},
+        "method": {"type": "string"},
+        "affected_segments": {"type": "array", "items": {"type": "string"}},
+        "tolerance_mm": {"type": "number"},
+        "area_delta_m2": {"type": "number"},
+        "perimeter_delta_m": {"type": "number"},
+        "review_status": {"enum": ["ACCEPTED", "REVIEW_REQUIRED"]}
+      }
+    },
+    "shell": {
+      "type": "object",
+      "required": ["contract", "room_id", "shell_id", "exterior", "holes", "area_m2", "area_report_m2", "perimeter_m", "orientation"],
+      "additionalProperties": false,
+      "properties": {
+        "contract": {"const": "ACCEPTED_ROOM_SHELL"},
+        "room_id": {"type": "string"},
+        "shell_id": {"type": "string"},
+        "exterior": {"type": "array", "items": {"$ref": "#/$defs/point"}},
+        "holes": {"type": "array"},
+        "area_m2": {"type": "number"},
+        "area_report_m2": {"type": "number"},
+        "perimeter_m": {"type": "number"},
+        "orientation": {"type": "string"}
+      }
+    },
+    "wall_segment": {
+      "type": "object",
+      "required": ["contract", "room_id", "order", "wall_segment_id", "source_segment_id", "start", "end", "length_m"],
+      "additionalProperties": false,
+      "properties": {
+        "contract": {"const": "ORDERED_WALL_SEGMENT"},
+        "room_id": {"type": "string"},
+        "order": {"type": "integer"},
+        "wall_segment_id": {"type": "string"},
+        "source_segment_id": {"type": ["string", "null"]},
+        "start": {"$ref": "#/$defs/point"},
+        "end": {"$ref": "#/$defs/point"},
+        "length_m": {"type": "number"}
+      }
+    }
+  }
+}
