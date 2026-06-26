@@ -26,6 +26,12 @@ jobs:
       - run: python -c "from pathlib import Path; p=Path('tests/test_runner_poll_github_tasks.py'); x=p.read_text().splitlines(); x[3871]=x[3871].replace(' in report',' not in report'); p.write_text(chr(10).join(x)+chr(10))"
       - run: rm scripts/apply_issue_1149_patch.py .github/workflows/issue-1149-execute.yml .github/workflows/issue-1149-export.yml .github/workflows/issue-1149-finalize.yml
       - run: python -m pytest -q tests/test_runner_poll_github_tasks.py -k 'maintenance or codex_task_result'
+      - continue-on-error: true
+        run: python -m pytest tests/test_runner_poll_github_tasks.py -x --junitxml=finalize-runner-test.xml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: issue-1149-finalize-runner-test
+          path: finalize-runner-test.xml
       - run: python -m pytest -q tests/test_runner_poll_github_tasks.py
       - run: python -m pytest -q
       - run: git diff --check
