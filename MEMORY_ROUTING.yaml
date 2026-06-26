@@ -33,7 +33,7 @@ routes:
       - REVIEW
       - BACKLOG
       - REJECTED
-    canon_rule: CANON_requires_explicit_operator_approval_and_separate_promotion
+    canon_rule: CANON_requires_approval_and_must_not_be_promoted_automatically
     forbids:
       - private_data
       - secrets
