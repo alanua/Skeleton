@@ -16,11 +16,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: runner/issue-1149
-          fetch-depth: 0
+          fetch-depth: 1
+          show-progress: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python -m pip install 'pytest>=8' 'PyYAML>=6'
+      - run: python -m pip install -q 'pytest>=8' 'PyYAML>=6'
       - run: python scripts/apply_issue_1149_patch.py
       - run: rm scripts/apply_issue_1149_patch.py .github/workflows/issue-1149-execute.yml
       - run: python -m pytest -q tests/test_runner_poll_github_tasks.py -k 'maintenance or codex_task_result'
