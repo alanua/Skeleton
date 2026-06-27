@@ -16,10 +16,10 @@ _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 HERMES_MEMORY_OPERATIONS = frozenset(
     {
         "memory.lookup_exact",
-        "memory.search_semantic",
+        "memory.get_conflicts",
+        "memory.get_override_history",
+        "memory.get_audit_log",
         "memory.get_index_freshness",
-        "graph.query_code",
-        "graph.get_index_freshness",
         "memory.propose_patch",
     }
 )
@@ -86,11 +86,16 @@ class HermesMemoryAdapter:
         project_id = self._binding.project_id
         if operation == "memory.lookup_exact":
             return {"project_id": project_id, "key": _safe_identifier(parameters.get("key"), "key")}
-        if operation == "memory.search_semantic":
-            return {"project_id": project_id, "query": _safe_identifier(parameters.get("query"), "query")}
-        if operation == "graph.query_code":
-            return {"project_id": project_id, "query": _safe_identifier(parameters.get("query"), "query")}
-        if operation in {"memory.get_index_freshness", "graph.get_index_freshness"}:
+        if operation == "memory.get_conflicts":
+            return {"project_id": project_id}
+        if operation == "memory.get_override_history":
+            return {
+                "project_id": project_id,
+                "override_ref": _safe_identifier(parameters.get("override_ref"), "override_ref"),
+            }
+        if operation == "memory.get_audit_log":
+            return {"project_id": project_id}
+        if operation == "memory.get_index_freshness":
             return {"project_id": project_id}
         if operation == "memory.propose_patch":
             proposal = parameters.get("proposal")
@@ -162,10 +167,16 @@ def _public_payload_summary(*, operation: str, payload: Mapping[str, Any]) -> di
             "canonical_ref": payload.get("canonical_ref"),
             "canonical_revision": payload.get("canonical_revision"),
         }
-    if operation in {"memory.search_semantic", "graph.query_code"}:
-        results = payload.get("results")
-        return {"result_count": len(results) if isinstance(results, list) else 0}
-    if operation in {"memory.get_index_freshness", "graph.get_index_freshness"}:
+    if operation == "memory.get_conflicts":
+        conflicts = payload.get("conflicts")
+        return {"conflict_count": len(conflicts) if isinstance(conflicts, list) else 0}
+    if operation == "memory.get_override_history":
+        events = payload.get("events")
+        return {"event_count": len(events) if isinstance(events, list) else 0}
+    if operation == "memory.get_audit_log":
+        events = payload.get("events")
+        return {"event_count": len(events) if isinstance(events, list) else 0}
+    if operation == "memory.get_index_freshness":
         return {"freshness_checked": True}
     if operation == "memory.propose_patch":
         event = payload.get("proposal_event")

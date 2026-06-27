@@ -28,10 +28,10 @@
       "type": "string",
       "enum": [
         "memory.lookup_exact",
-        "memory.search_semantic",
+        "memory.get_conflicts",
+        "memory.get_override_history",
+        "memory.get_audit_log",
         "memory.get_index_freshness",
-        "graph.query_code",
-        "graph.get_index_freshness",
         "memory.propose_patch"
       ]
     },

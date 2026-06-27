@@ -44,12 +44,13 @@ def request(namespace: str, suffix: str, payload: dict[str, object]) -> dict[str
     }
 
 
-def proposal(namespace: str = "aufmass", **overrides: object) -> dict[str, object]:
+def proposal(namespace: str = "aufmass", project_id: str | None = None, **overrides: object) -> dict[str, object]:
     source_hash = "0" * 64
+    project_id = project_id or namespace
     values: dict[str, object] = {
         "schema": PATCH_PROPOSAL_SCHEMA,
         "namespace": namespace,
-        "project_id": namespace,
+        "project_id": project_id,
         "object_id": "object-001",
         "entity_scope": "room",
         "fact_type": "status",
@@ -57,13 +58,17 @@ def proposal(namespace: str = "aufmass", **overrides: object) -> dict[str, objec
         "source_evidence_hash": source_hash,
         "proposed_value": {"state": "ready"},
         "provenance_refs": [
-            {"ref": f"exact-{namespace}-primary", "kind": "exact_source", "evidence_hash": source_hash}
+            {
+                "ref": f"exact-{namespace}-{project_id}-primary",
+                "kind": "exact_source",
+                "evidence_hash": source_hash,
+            }
         ],
         "actor_ref": "actor-001",
         "reason_code": "operator-confirmed",
         "approval_tier": "operator",
         "approval_ref": "approval-001",
-        "confirmed_via_exact_ref": f"exact-{namespace}-primary",
+        "confirmed_via_exact_ref": f"exact-{namespace}-{project_id}-primary",
         "confirmed_canonical_revision": 3,
     }
     values.update(overrides)
@@ -79,7 +84,7 @@ def test_valid_aufmass_exact_lookup_succeeds() -> None:
     assert result["namespace"] == "aufmass"
     assert payload["namespace"] == "aufmass"
     assert payload["authoritative"] is True
-    assert payload["canonical_ref"] == "canon-aufmass-primary"
+    assert payload["canonical_ref"] == "canon-aufmass-aufmass-primary"
     assert payload["canonical_revision"] == 3
     assert payload["provenance_refs"][0]["kind"] == "exact_source"
     assert payload["source_kind"] == "canonical_sqlite"
@@ -151,9 +156,9 @@ def test_stale_index_backed_proposal_fails() -> None:
         source_evidence_hash=source_hash,
         provenance_refs=[
             {"ref": "semantic-ref-001", "kind": "semantic_only", "evidence_hash": "1" * 64},
-            {"ref": "exact-bauclock-primary", "kind": "exact_source", "evidence_hash": source_hash},
+            {"ref": "exact-bauclock-bauclock-primary", "kind": "exact_source", "evidence_hash": source_hash},
         ],
-        confirmed_via_exact_ref="exact-bauclock-primary",
+        confirmed_via_exact_ref="exact-bauclock-bauclock-primary",
     )
 
     with pytest.raises(MemoryGatewayPolicyError) as excinfo:
@@ -217,6 +222,72 @@ def test_aufmass_conflict_query_excludes_bauclock_conflicts() -> None:
     assert result["payload"]["conflicts"] == []
 
 
+def test_aufmass_project_a_cannot_read_project_b_scoped_state() -> None:
+    patch_registry = MemoryPatchProposalRegistry()
+    project_b_proposal = proposal(
+        namespace="aufmass",
+        project_id="project-b",
+        proposed_value={"state": "blocked"},
+        approval_ref="approval-b",
+    )
+    patch_registry.propose(project_b_proposal)
+    patch_registry.propose(
+        proposal(
+            namespace="aufmass",
+            project_id="project-b",
+            proposed_value={"state": "changed"},
+            approval_ref="approval-b2",
+        )
+    )
+    override_registry = MemoryOverrideRegistry()
+    override = override_registry.propose_override(
+        {
+            "namespace": "aufmass",
+            "project_id": "project-b",
+            "object_id": "object-001",
+            "normalized_target": "primary_fact",
+            "canonical_ref": "canon-aufmass-project-b-primary",
+            "canonical_value": {"state": "ready-project-b"},
+            "override_value": {"state": "blocked"},
+            "actor_ref": "actor-001",
+            "reason_code": "operator-override",
+            "evidence_refs": [
+                {"ref": "exact-ref-001", "kind": "exact_source", "evidence_hash": "0" * 64}
+            ],
+        }
+    )
+    gw = MemoryGateway(
+        capability_token(namespaces=("aufmass",)),
+        patch_registry=patch_registry,
+        override_registry=override_registry,
+    )
+    gw.propose_patch(namespace="aufmass", project_id="project-b", proposal=project_b_proposal)
+
+    project_a_exact = gw.lookup_exact(namespace="aufmass", project_id="project-a", key="primary_fact")
+    project_b_exact = gw.lookup_exact(namespace="aufmass", project_id="project-b", key="primary_fact")
+
+    assert project_a_exact["payload"]["canonical_ref"] == "canon-aufmass-project-a-primary"
+    assert project_b_exact["payload"]["canonical_ref"] == "canon-aufmass-project-b-primary"
+    assert gw.get_conflicts(namespace="aufmass", project_id="project-a")["payload"]["conflicts"] == []
+    assert (
+        gw.get_override_history(
+            namespace="aufmass",
+            project_id="project-a",
+            override_ref=str(override["override_ref"]),
+        )["payload"]["events"]
+        == []
+    )
+    assert gw.get_audit_log(namespace="aufmass", project_id="project-a")["payload"]["events"] == []
+    assert (
+        gw.get_memory_index_freshness(namespace="aufmass", project_id="project-a")["payload"]["mempalace"][
+            "source_snapshot_id"
+        ]
+        != gw.get_memory_index_freshness(namespace="aufmass", project_id="project-b")["payload"]["mempalace"][
+            "source_snapshot_id"
+        ]
+    )
+
+
 def test_conflict_and_override_queries_return_distinct_event_classes() -> None:
     patch_registry = MemoryPatchProposalRegistry()
     patch_registry.propose(proposal())
@@ -264,6 +335,7 @@ def test_freshness_fields_are_mandatory_and_deterministic() -> None:
         "indexed_at",
         "stale",
         "index_namespace",
+        "project_id",
     }
     assert set(memory["mempalace"]) == {
         "indexed_canonical_revision",
@@ -272,8 +344,9 @@ def test_freshness_fields_are_mandatory_and_deterministic() -> None:
         "indexed_at",
         "stale",
         "index_namespace",
+        "project_id",
     }
-    assert set(memory["canonical_sqlite"]) == {"current_canonical_revision"}
+    assert set(memory["canonical_sqlite"]) == {"current_canonical_revision", "project_id"}
     assert json.dumps(memory, sort_keys=True) == json.dumps(memory, sort_keys=True)
 
 

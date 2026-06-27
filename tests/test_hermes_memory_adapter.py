@@ -5,6 +5,7 @@ import inspect
 import pytest
 
 from core.hermes_memory_adapter import (
+    HERMES_MEMORY_OPERATIONS,
     HERMES_MEMORY_REQUEST_SCHEMA,
     HermesMemoryAdapter,
     HermesMemoryAdapterError,
@@ -45,13 +46,17 @@ def proposal(project_id: str = "project-a", **overrides: object) -> dict[str, ob
         "source_evidence_hash": source_hash,
         "proposed_value": {"state": "ready"},
         "provenance_refs": [
-            {"ref": "exact-aufmass-primary", "kind": "exact_source", "evidence_hash": source_hash}
+            {
+                "ref": f"exact-aufmass-{project_id}-primary",
+                "kind": "exact_source",
+                "evidence_hash": source_hash,
+            }
         ],
         "actor_ref": "actor-001",
         "reason_code": "operator-confirmed",
         "approval_tier": "operator",
         "approval_ref": "approval-001",
-        "confirmed_via_exact_ref": "exact-aufmass-primary",
+        "confirmed_via_exact_ref": f"exact-aufmass-{project_id}-primary",
         "confirmed_canonical_revision": 3,
     }
     values.update(overrides)
@@ -72,6 +77,26 @@ def test_two_project_ids_under_aufmass_are_distinct_bindings() -> None:
     assert result_a["project_id"] == "project-a"
     assert result_b["namespace"] == "aufmass"
     assert result_b["project_id"] == "project-b"
+
+
+def test_hermes_memory_operations_are_exactly_six_memory_capabilities() -> None:
+    assert HERMES_MEMORY_OPERATIONS == {
+        "memory.lookup_exact",
+        "memory.get_conflicts",
+        "memory.get_override_history",
+        "memory.get_audit_log",
+        "memory.get_index_freshness",
+        "memory.propose_patch",
+    }
+
+
+def test_adapter_rejects_gateway_semantic_and_graph_operations() -> None:
+    adapter = HermesMemoryAdapter(gateway=gateway(), namespace="aufmass", project_id="project-a")
+
+    for operation in ("memory.search_semantic", "graph.query_code", "graph.get_index_freshness"):
+        with pytest.raises(HermesMemoryAdapterError) as excinfo:
+            adapter.run(request("project-a", operation, {"query": "primary"}))
+        assert excinfo.value.reason_code == "OPERATION_NOT_ALLOWLISTED"
 
 
 def test_project_a_binding_cannot_read_or_propose_for_project_b() -> None:

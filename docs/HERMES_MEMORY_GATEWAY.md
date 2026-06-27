@@ -24,6 +24,35 @@ boundaries, approval requirements, and the allowlisted operation before creating
 The adapter then builds a `skeleton.hermes_memory_request.v1` request and calls
 `MemoryGateway.execute`. It has no storage-specific read or write path.
 
+Hermes exposes exactly these memory operations:
+
+- `memory.lookup_exact`
+- `memory.get_conflicts`
+- `memory.get_override_history`
+- `memory.get_audit_log`
+- `memory.get_index_freshness`
+- `memory.propose_patch`
+
+The broader Memory Gateway still preserves semantic search, graph query, and
+separate graph freshness commands for the Gateway contract. Those commands are
+not Hermes adapter operations.
+
+## Isolation
+
+Canonical exact reads, conflicts, override history, audit events, freshness
+metadata, and patch proposals are filtered by the explicit project scope.
+Projects sharing a namespace, for example `aufmass/project-a` and
+`aufmass/project-b`, do not share project-scoped records or events.
+
+## Idempotency
+
+`MemoryPatchProposalRegistry.lookup_by_idempotency_key(...)` is the bounded
+public lookup API for exact proposal idempotency. Callers must not inspect
+underscore/private registry fields.
+
+`DUPLICATE_EXISTING` is classified only when the exact idempotency key already
+exists. The same dedupe target with a changed payload remains `REVIEW_REQUIRED`.
+
 ## Writes
 
 Canonical writes remain disabled for Hermes. `memory.propose_patch` only records a
@@ -32,3 +61,4 @@ new proposal. Repeating the same proposal against reused gateway/registry state
 returns `DUPLICATE_EXISTING`.
 
 Operator approval remains mandatory for canonical promotion outside this adapter.
+Proposal events keep `canonical_write_performed=false`.
