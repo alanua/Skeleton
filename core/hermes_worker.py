@@ -3,6 +3,19 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from core.hermes_memory_adapter import (
+    HERMES_MEMORY_REQUEST_SCHEMA,
+    HermesMemoryAdapter,
+)
+from core.memory_gateway import MemoryGateway, capability_token
+from core.memory_override import MemoryOverrideRegistry
+from core.memory_patch_proposal import (
+    PATCH_PROPOSAL_SCHEMA,
+    MemoryPatchProposalRegistry,
+    canonical_dedupe_key,
+    canonical_idempotency_key,
+)
+
 
 SAFE_STATUSES = {
     "DRY_RUN_OK",
@@ -71,6 +84,8 @@ OPERATOR_APPROVAL_TIERS = {
     "restricted",
 }
 
+HERMES_MEMORY_TASK_SCHEMA = "hermes.memory_task_packet.v1"
+
 
 def run_hermes_worker_dry_run(
     task_packet: object,
@@ -137,6 +152,125 @@ def run_hermes_worker_dry_run(
             "redacted_fields": private_fields,
         },
     }
+
+
+def run_hermes_aufmass_memory_gateway_scenario() -> dict[str, object]:
+    """Run the public synthetic Hermes memory flow without canonical writes."""
+
+    namespace = "aufmass"
+    project_id = "aufmass"
+    patch_registry = MemoryPatchProposalRegistry()
+    override_registry = MemoryOverrideRegistry()
+    exact_ref = {
+        "ref": "exact-aufmass-synthetic-room-rule",
+        "kind": "exact_source",
+        "evidence_hash": "3" * 64,
+    }
+    patch_registry.propose(
+        _synthetic_room_rule_proposal(
+            exact_ref=exact_ref,
+            proposed_value={"state": "accepted", "rule_code": "synthetic-room-rule-v1"},
+            approval_ref="approval-synthetic-001",
+        )
+    )
+    patch_registry.propose(
+        _synthetic_room_rule_proposal(
+            exact_ref=exact_ref,
+            proposed_value={"state": "candidate-conflict", "rule_code": "synthetic-room-rule-v1"},
+            approval_ref="approval-synthetic-002",
+        )
+    )
+    override = override_registry.propose_override(
+        {
+            "namespace": namespace,
+            "project_id": project_id,
+            "object_id": "synthetic-room-rule",
+            "normalized_target": "synthetic_room_rule",
+            "canonical_ref": "canon-aufmass-synthetic-room-rule",
+            "canonical_value": {"state": "accepted"},
+            "override_value": {"state": "candidate-conflict"},
+            "actor_ref": "hermes-synthetic",
+            "reason_code": "synthetic-override-inspection",
+            "evidence_refs": [exact_ref],
+        }
+    )
+    gateway = MemoryGateway(
+        capability_token(namespaces=(namespace,), public_mode=True),
+        patch_registry=patch_registry,
+        override_registry=override_registry,
+    )
+    adapter = HermesMemoryAdapter(gateway=gateway)
+
+    read = adapter.execute(_hermes_memory_request("memory.lookup_exact", {"key": "synthetic_room_rule"}))
+    conflicts = adapter.execute(_hermes_memory_request("memory.get_conflicts", {}))
+    overrides = adapter.execute(
+        _hermes_memory_request(
+            "memory.get_override_history",
+            {"override_ref": str(override["override_ref"])},
+        )
+    )
+    freshness = adapter.execute(_hermes_memory_request("memory.get_index_freshness", {}))
+    proposal = _synthetic_room_rule_proposal(
+        exact_ref=exact_ref,
+        proposed_value={"state": "candidate-review", "rule_code": "synthetic-room-rule-v1"},
+        approval_ref="approval-synthetic-003",
+    )
+    proposed = adapter.execute(_hermes_memory_request("memory.propose_patch", {"proposal": proposal}))
+    repeated = adapter.execute(_hermes_memory_request("memory.propose_patch", {"proposal": proposal}))
+    audit = adapter.execute(_hermes_memory_request("memory.get_audit_log", {}))
+
+    return {
+        "schema": "hermes.aufmass_memory_gateway_scenario.v1",
+        "namespace": namespace,
+        "project_id": project_id,
+        "read": read,
+        "conflicts": conflicts,
+        "overrides": overrides,
+        "freshness": freshness,
+        "proposal": proposed,
+        "repeated_proposal": repeated,
+        "audit": audit,
+        "canonical_write_performed": False,
+    }
+
+
+def _hermes_memory_request(capability: str, payload: Mapping[str, object]) -> dict[str, object]:
+    return {
+        "schema": HERMES_MEMORY_REQUEST_SCHEMA,
+        "namespace": "aufmass",
+        "project_id": "aufmass",
+        "capability": capability,
+        "payload": dict(payload),
+    }
+
+
+def _synthetic_room_rule_proposal(
+    *,
+    exact_ref: Mapping[str, object],
+    proposed_value: Mapping[str, object],
+    approval_ref: str,
+) -> dict[str, object]:
+    values: dict[str, object] = {
+        "schema": PATCH_PROPOSAL_SCHEMA,
+        "namespace": "aufmass",
+        "project_id": "aufmass",
+        "object_id": "synthetic-room-rule",
+        "entity_scope": "room",
+        "fact_type": "room_rule",
+        "normalized_target": "synthetic_room_rule",
+        "source_evidence_hash": exact_ref["evidence_hash"],
+        "proposed_value": dict(proposed_value),
+        "provenance_refs": [dict(exact_ref)],
+        "actor_ref": "hermes-synthetic",
+        "reason_code": "synthetic-candidate-source",
+        "approval_tier": "operator",
+        "approval_ref": approval_ref,
+        "confirmed_via_exact_ref": exact_ref["ref"],
+        "confirmed_canonical_revision": 3,
+    }
+    values["dedupe_key"] = canonical_dedupe_key(values)
+    values["idempotency_key"] = canonical_idempotency_key(values)
+    return values
 
 
 def _missing_fields(reader: "_PlainReader | None", required: tuple[str, ...]) -> list[str]:

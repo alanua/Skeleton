@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.hermes_memory_request.schema.json",
+  "title": "Hermes Memory Request",
+  "type": "object",
+  "required": ["schema", "namespace", "project_id", "capability", "payload"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "skeleton.hermes_memory.request.v1"},
+    "namespace": {"$ref": "#/$defs/namespace"},
+    "project_id": {"$ref": "#/$defs/namespace"},
+    "capability": {
+      "type": "string",
+      "enum": [
+        "memory.lookup_exact",
+        "memory.get_conflicts",
+        "memory.get_override_history",
+        "memory.get_audit_log",
+        "memory.get_index_freshness",
+        "memory.propose_patch"
+      ]
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "$defs": {
+    "namespace": {
+      "type": "string",
+      "enum": ["aufmass", "bauclock", "skeleton", "home_automation", "legal_private"]
+    }
+  }
+}

@@ -367,7 +367,7 @@ def _normalize_token(token: GatewayCapabilityToken | Mapping[str, Any]) -> Gatew
 
 
 def _canonical_seed() -> dict[str, dict[str, dict[str, object]]]:
-    return {
+    seed = {
         namespace: {
             "primary_fact": {
                 "canonical_ref": f"canon-{namespace}-primary",
@@ -385,6 +385,24 @@ def _canonical_seed() -> dict[str, dict[str, dict[str, object]]]:
         }
         for namespace in ALLOWED_NAMESPACES
     }
+    seed["aufmass"]["synthetic_room_rule"] = {
+        "canonical_ref": "canon-aufmass-synthetic-room-rule",
+        "canonical_revision": 3,
+        "fact_type": "room_rule",
+        "value": {
+            "rule_code": "synthetic-room-rule-v1",
+            "state": "accepted",
+            "measurement_basis": "bounded-public-synthetic",
+        },
+        "provenance_refs": [
+            {
+                "ref": "exact-aufmass-synthetic-room-rule",
+                "kind": "exact_source",
+                "evidence_hash": "3" * 64,
+            }
+        ],
+    }
+    return seed
 
 
 def _semantic_seed() -> dict[str, list[dict[str, object]]]:

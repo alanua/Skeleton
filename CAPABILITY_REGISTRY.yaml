@@ -327,6 +327,48 @@ capabilities:
     added: "2026-06-27"
     description: Versioned synthetic gateway contract for namespace-isolated exact memory, derived semantic/code-graph retrieval, freshness metadata, audit metadata, conflict/override separation, and PatchProposal-only writes.
 
+  hermes_memory_gateway:
+    status: stage1_synthetic
+    module: core/hermes_memory_adapter.py
+    entry: HermesMemoryAdapter.execute
+    stage: stage_1_synthetic_contract
+    live_runtime_execution: false
+    namespaces:
+      - aufmass
+      - bauclock
+      - skeleton
+      - home_automation
+      - legal_private
+    capabilities:
+      - memory.lookup_exact
+      - memory.get_conflicts
+      - memory.get_override_history
+      - memory.get_audit_log
+      - memory.get_index_freshness
+      - memory.propose_patch
+    write_gate_outcomes:
+      - APPROVED_FOR_OPERATOR
+      - REVIEW_REQUIRED
+      - BLOCKED
+      - DUPLICATE_EXISTING
+    requires:
+      - core/memory_gateway.py
+      - core/hermes_memory_adapter.py
+      - schemas/hermes_memory_request.schema.json
+      - schemas/hermes_memory_result.schema.json
+      - docs/HERMES_MEMORY_GATEWAY.md
+    forbidden:
+      - direct_sqlite
+      - direct_graphify
+      - direct_mempalace
+      - direct_filesystem_paths
+      - direct_local_registries
+      - autonomous_canonical_write
+      - implicit_model_confidence_approval
+    tested: true
+    added: "2026-06-27"
+    description: Hermes-only Memory Gateway adapter for namespace-bound canonical exact reads, conflict/override/audit/freshness inspection, and non-destructive PatchProposal generation with operator-gated outcomes.
+
   codex_runtime_preflight:
     status: planned
     module: scripts/runner_poll_github_tasks.py

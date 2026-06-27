@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from core.hermes_worker import run_hermes_worker_dry_run
+from core.hermes_worker import (
+    run_hermes_aufmass_memory_gateway_scenario,
+    run_hermes_worker_dry_run,
+)
 
 
 def task_packet(**overrides: object) -> dict[str, object]:
@@ -240,3 +243,26 @@ def test_task_packet_can_be_plain_object() -> None:
 
     assert result["status"] == "DRY_RUN_OK"
     assert result["task_id"] == "ISSUE-949"
+
+
+def test_full_synthetic_aufmass_memory_flow_ends_at_operator_gate() -> None:
+    result = run_hermes_aufmass_memory_gateway_scenario()
+
+    assert result["namespace"] == "aufmass"
+    assert result["project_id"] == "aufmass"
+    assert result["read"]["payload"]["value"]["state"] == "accepted"
+    assert result["read"]["payload"]["canonical_revision"] == 3
+    assert result["conflicts"]["payload"]["event_class"] == "source_value_conflict"
+    assert result["conflicts"]["payload"]["conflicts"][0]["conflict_ref"].startswith("proposal-conflict-")
+    assert result["overrides"]["payload"]["event_class"] == "override_lifecycle"
+    assert result["proposal"]["write_gate"]["outcome"] == "REVIEW_REQUIRED"
+    assert result["proposal"]["write_gate"]["canonical_commit_allowed"] is False
+    assert result["proposal"]["canonical_write_performed"] is False
+    assert result["repeated_proposal"]["write_gate"]["outcome"] == "DUPLICATE_EXISTING"
+    assert result["canonical_write_performed"] is False
+
+    serialized = repr(result).lower()
+    assert "private" not in serialized
+    assert "room name" not in serialized
+    assert "/tmp" not in serialized
+    assert ".db" not in serialized
