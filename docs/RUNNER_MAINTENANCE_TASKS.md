@@ -274,6 +274,48 @@ Failed validation profile commands include the allowlisted command and a
 bounded, sanitized output block between `failed_output_start` and
 `failed_output_end`; long output is truncated with an explicit marker.
 
+`runtime_sync_main` synchronizes only the registered Skeleton checkout to the
+configured `origin/main` by fast-forward. It requires no target metadata:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: runtime_sync_main
+Expected Head SHA: 0123456789abcdef0123456789abcdef01234567
+```
+
+`Expected Head SHA` is optional. When present, it must be a 40-character commit
+SHA and must match both `origin/main` after fetch and final `HEAD`.
+
+It may only:
+
+1. Use the single registered Skeleton checkout from `PROJECT_TREE.yaml`.
+2. Verify the checkout path is safe using the same path rules as
+   `check_project_checkout`.
+3. Verify the checkout exists, has `.git`, and has an `origin` remote matching
+   `alanua/Skeleton`.
+4. Require the active branch to be exactly `main`; detached HEAD and any other
+   branch are blocked.
+5. Require a clean checkout before fetching or fast-forwarding.
+6. Run only bounded Git commands:
+   `git -C {checkout_path} remote get-url origin`,
+   `git -C {checkout_path} symbolic-ref --short HEAD`,
+   `git -C {checkout_path} status --porcelain`,
+   `git -C {checkout_path} fetch --prune origin main`,
+   `git -C {checkout_path} rev-parse HEAD`,
+   `git -C {checkout_path} rev-parse origin/main`,
+   `git -C {checkout_path} merge-base --is-ancestor`, and
+   `git -C {checkout_path} merge --ff-only origin/main`.
+7. Fast-forward only when the registered checkout is behind `origin/main`.
+8. Verify final `HEAD` matches `origin/main`, and the expected head SHA when
+   supplied.
+
+It reports `DONE` only when the checkout is already equal to `origin/main` or
+was fast-forwarded to it. It reports `BLOCKED` for invalid expected SHA, unsafe
+paths, missing checkouts, missing `.git`, wrong origin, detached HEAD, non-main
+branches, dirty state, fetch failure, ahead or diverged state, fast-forward
+failure, final head mismatch, and expected head mismatch. Reports must not
+include absolute host paths or raw command output.
+
 `check_skeleton_freshness` is a short status-only check before Skeleton project
 work starts or after recent merges. It requires no target metadata:
 
@@ -289,6 +331,7 @@ It may only:
    `check_project_checkout`.
 3. Run only bounded Git and GitHub status queries:
    `git -C {checkout_path} remote get-url origin`,
+   `git -C {checkout_path} status --porcelain`,
    `git -C {checkout_path} fetch --prune origin main`,
    `git -C {checkout_path} rev-parse HEAD`,
    `git -C {checkout_path} rev-parse origin/main`,
@@ -305,13 +348,14 @@ It may only:
    current `main`.
 8. Remind that old chats and old branches are not canon.
 
-It reports `DONE` when the freshness report was produced. It reports `BLOCKED`
-for unsafe paths, missing checkouts, missing `.git`, failed origin reads, failed
-GitHub `main` SHA reads, GitHub query failures, or any unclassified sync state.
-The report must be short, human-readable, and must not include raw command
-output. It may include only safe synthesized status lines such as current
-`main` SHA, checkout sync state, open PR/issue counts, and bounded reminder
-notes.
+It reports `DONE` when the checkout is clean and equal to, or safely ahead of,
+current GitHub `main` and the freshness report was produced. It reports
+`BLOCKED` for unsafe paths, missing checkouts, missing `.git`, failed origin
+reads, dirty state, behind state, diverged state, failed GitHub `main` SHA
+reads, GitHub query failures, or any unclassified sync state. The report must be
+short, human-readable, and must not include raw command output or absolute host
+paths. It may include only safe synthesized status lines such as current `main`
+SHA, checkout sync state, open PR/issue counts, and bounded reminder notes.
 
 `hermes_worker_preflight` is a read-only, report-only host inventory preflight
 for the future Hermes worker. It requires no target metadata:
