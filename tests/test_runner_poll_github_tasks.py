@@ -5336,6 +5336,16 @@ def _skeleton_freshness_issue_body(task_body: str = "") -> str:
     return "\n".join(lines)
 
 
+def _runtime_sync_main_issue_body(task_body: str = "") -> str:
+    lines = [
+        "Mode: RUNTIME_MAINTENANCE_TASK",
+        f"Maintenance Task ID: {runner.RUNTIME_SYNC_MAIN}",
+    ]
+    if task_body:
+        lines.extend(("", "```task", task_body, "```"))
+    return "\n".join(lines)
+
+
 def _project_tree_for_skeleton_checkout(checkout_path: Path) -> dict[str, object]:
     project_tree = json.loads(json.dumps(runner.load_runner_project_tree()))
     project_tree["projects"]["skeleton"]["checkout_path"] = str(checkout_path)
@@ -6759,8 +6769,8 @@ def test_check_skeleton_freshness_is_allowlisted() -> None:
 def test_check_skeleton_freshness_reports_done_with_bounded_status_queries() -> None:
     checkout_path = _safe_checkout_path("skeleton-fresh")
     project_tree = _project_tree_for_skeleton_checkout(checkout_path)
-    github_main_sha = "b" * 40
-    checkout_head_sha = "a" * 40
+    github_main_sha = HEAD_SHA
+    checkout_head_sha = HEAD_SHA
 
     def run_freshness_command(
         command: list[str], cwd: str | Path | None = None
@@ -6768,6 +6778,8 @@ def test_check_skeleton_freshness_reports_done_with_bounded_status_queries() -> 
         del cwd
         if command == ["git", "-C", str(checkout_path), "remote", "get-url", "origin"]:
             return 0, "https://github.com/alanua/Skeleton.git\n"
+        if command == ["git", "-C", str(checkout_path), "status", "--short"]:
+            return 0, ""
         if command == [
             "git",
             "-C",
@@ -6829,7 +6841,8 @@ def test_check_skeleton_freshness_reports_done_with_bounded_status_queries() -> 
     assert f"checkout_head_sha={checkout_head_sha}" in report
     assert f"github_main_sha={github_main_sha}" in report
     assert "github_main_source_of_truth=true" in report
-    assert "checkout_sync_state=behind" in report
+    assert "checkout_sync_state=equal" in report
+    assert "clean_worktree=true" in report
     assert "open_pull_requests_count=2" in report
     assert "open_issues_count=1" in report
     assert "NOTEBOOKLM_SOURCEPACK.md" in report
@@ -6839,22 +6852,102 @@ def test_check_skeleton_freshness_reports_done_with_bounded_status_queries() -> 
     commands = [call.args[0] for call in run.call_args_list]
     assert commands == [
         ["git", "-C", str(checkout_path), "remote", "get-url", "origin"],
+        ["git", "-C", str(checkout_path), "status", "--short"],
         ["git", "-C", str(checkout_path), "fetch", "--prune", "origin", "main"],
         ["git", "-C", str(checkout_path), "rev-parse", "HEAD"],
         ["git", "-C", str(checkout_path), "rev-parse", "origin/main"],
         ["git", "-C", str(checkout_path), "ls-remote", "origin", "refs/heads/main"],
-        [
+        ["gh", "pr", "list", "--repo", runner.REPO, "--state", "open"],
+        ["gh", "issue", "list", "--repo", runner.REPO, "--state", "open"],
+    ]
+
+
+def test_check_skeleton_freshness_dirty_checkout_blocks_without_raw_status() -> None:
+    checkout_path = _safe_checkout_path("skeleton-dirty")
+    project_tree = _project_tree_for_skeleton_checkout(checkout_path)
+
+    def run_freshness_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        del cwd
+        if command == ["git", "-C", str(checkout_path), "remote", "get-url", "origin"]:
+            return 0, "https://github.com/alanua/Skeleton.git\n"
+        if command == ["git", "-C", str(checkout_path), "status", "--short"]:
+            return 0, " M scripts/secret-output.py\n"
+        return 2, "unexpected command"
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(Path, "exists", autospec=True) as path_exists, mock.patch.object(
+        runner, "run_command", side_effect=run_freshness_command
+    ):
+        path_exists.side_effect = lambda path: path in {
+            checkout_path,
+            checkout_path / ".git",
+        }
+        report = runner.check_skeleton_freshness()
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=checkout_dirty" in report
+    assert "clean_worktree=false" in report
+    assert "secret-output.py" not in report
+
+
+def test_check_skeleton_freshness_behind_checkout_blocks() -> None:
+    checkout_path = _safe_checkout_path("skeleton-behind")
+    project_tree = _project_tree_for_skeleton_checkout(checkout_path)
+    github_main_sha = "b" * 40
+
+    def run_freshness_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        del cwd
+        if command == ["git", "-C", str(checkout_path), "remote", "get-url", "origin"]:
+            return 0, "https://github.com/alanua/Skeleton.git\n"
+        if command == ["git", "-C", str(checkout_path), "status", "--short"]:
+            return 0, ""
+        if command[:4] == ["git", "-C", str(checkout_path), "fetch"]:
+            return 0, ""
+        if command == ["git", "-C", str(checkout_path), "rev-parse", "HEAD"]:
+            return 0, f"{HEAD_SHA}\n"
+        if command == ["git", "-C", str(checkout_path), "rev-parse", "origin/main"]:
+            return 0, f"{github_main_sha}\n"
+        if command == [
+            "git",
+            "-C",
+            str(checkout_path),
+            "ls-remote",
+            "origin",
+            "refs/heads/main",
+        ]:
+            return 0, f"{github_main_sha}\trefs/heads/main\n"
+        if command == [
             "git",
             "-C",
             str(checkout_path),
             "merge-base",
             "--is-ancestor",
-            checkout_head_sha,
+            HEAD_SHA,
             github_main_sha,
-        ],
-        ["gh", "pr", "list", "--repo", runner.REPO, "--state", "open"],
-        ["gh", "issue", "list", "--repo", runner.REPO, "--state", "open"],
-    ]
+        ]:
+            return 0, ""
+        return 2, "unexpected command"
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(Path, "exists", autospec=True) as path_exists, mock.patch.object(
+        runner, "run_command", side_effect=run_freshness_command
+    ):
+        path_exists.side_effect = lambda path: path in {
+            checkout_path,
+            checkout_path / ".git",
+        }
+        report = runner.check_skeleton_freshness()
+
+    assert report.startswith("BLOCKED:")
+    assert "checkout_sync_state=behind" in report
+    assert "reason=checkout_not_current" in report
+    assert "query_open_pull_requests" not in report
 
 
 def test_check_skeleton_freshness_unsafe_path_blocks_before_commands() -> None:
@@ -6914,6 +7007,8 @@ def test_check_skeleton_freshness_github_query_failure_blocks_safely() -> None:
         del cwd
         if command == ["git", "-C", str(checkout_path), "remote", "get-url", "origin"]:
             return 0, "https://github.com/alanua/Skeleton.git\n"
+        if command == ["git", "-C", str(checkout_path), "status", "--short"]:
+            return 0, ""
         if command[:4] == ["git", "-C", str(checkout_path), "fetch"]:
             return 0, ""
         if command == ["git", "-C", str(checkout_path), "rev-parse", "HEAD"]:
@@ -6960,6 +7055,8 @@ def test_check_skeleton_freshness_unclassified_sync_state_blocks() -> None:
         del cwd
         if command == ["git", "-C", str(checkout_path), "remote", "get-url", "origin"]:
             return 0, "https://github.com/alanua/Skeleton.git\n"
+        if command == ["git", "-C", str(checkout_path), "status", "--short"]:
+            return 0, ""
         if command[:4] == ["git", "-C", str(checkout_path), "fetch"]:
             return 0, ""
         if command == ["git", "-C", str(checkout_path), "rev-parse", "HEAD"]:
@@ -6993,6 +7090,136 @@ def test_check_skeleton_freshness_unclassified_sync_state_blocks() -> None:
     assert report.startswith("BLOCKED:")
     assert "step=classify_checkout_behind status=failed exit_code=128" in report
     assert "fatal output" not in report
+
+
+def test_runtime_sync_main_is_allowlisted() -> None:
+    assert runner.RUNTIME_SYNC_MAIN == "runtime_sync_main"
+    assert runner.RUNTIME_SYNC_MAIN in runner.RUNTIME_MAINTENANCE_TASK_IDS
+
+
+def test_runtime_sync_main_fast_forwards_clean_behind_checkout() -> None:
+    checkout_path = _safe_checkout_path("skeleton-sync-main")
+    project_tree = _project_tree_for_skeleton_checkout(checkout_path)
+    origin_main_sha = "b" * 40
+    synced = False
+
+    def run_sync_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        nonlocal synced
+        del cwd
+        if command == ["git", "-C", str(checkout_path), "remote", "get-url", "origin"]:
+            return 0, "https://github.com/alanua/Skeleton.git\n"
+        if command == ["git", "-C", str(checkout_path), "status", "--short"]:
+            return 0, ""
+        if command == [
+            "git",
+            "-C",
+            str(checkout_path),
+            "fetch",
+            "--prune",
+            "origin",
+            "main",
+        ]:
+            return 0, "raw fetch output must not appear"
+        if command == ["git", "-C", str(checkout_path), "rev-parse", "HEAD"]:
+            return 0, f"{origin_main_sha if synced else HEAD_SHA}\n"
+        if command == ["git", "-C", str(checkout_path), "rev-parse", "origin/main"]:
+            return 0, f"{origin_main_sha}\n"
+        if command == [
+            "git",
+            "-C",
+            str(checkout_path),
+            "merge-base",
+            "--is-ancestor",
+            HEAD_SHA,
+            origin_main_sha,
+        ]:
+            return 0, ""
+        if command == [
+            "git",
+            "-C",
+            str(checkout_path),
+            "merge",
+            "--ff-only",
+            "origin/main",
+        ]:
+            synced = True
+            return 0, "raw merge output must not appear"
+        return 2, "unexpected command"
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(Path, "exists", autospec=True) as path_exists, mock.patch.object(
+        runner, "run_command", side_effect=run_sync_command
+    ) as run:
+        path_exists.side_effect = lambda path: path in {
+            checkout_path,
+            checkout_path / ".git",
+        }
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.RUNTIME_SYNC_MAIN,
+            str(runner.ROOT),
+            _runtime_sync_main_issue_body("git reset --hard must not run"),
+        )
+
+    assert report.startswith("DONE:")
+    assert "maintenance_task_id=runtime_sync_main" in report
+    assert f"checkout_head_sha={origin_main_sha}" in report
+    assert f"github_main_sha={origin_main_sha}" in report
+    assert "checkout_sync_state=equal" in report
+    assert "action=fast_forwarded" in report
+    assert "raw fetch output" not in report
+    assert "raw merge output" not in report
+    commands = [call.args[0] for call in run.call_args_list]
+    assert commands == [
+        ["git", "-C", str(checkout_path), "remote", "get-url", "origin"],
+        ["git", "-C", str(checkout_path), "status", "--short"],
+        ["git", "-C", str(checkout_path), "fetch", "--prune", "origin", "main"],
+        ["git", "-C", str(checkout_path), "rev-parse", "HEAD"],
+        ["git", "-C", str(checkout_path), "rev-parse", "origin/main"],
+        [
+            "git",
+            "-C",
+            str(checkout_path),
+            "merge-base",
+            "--is-ancestor",
+            HEAD_SHA,
+            origin_main_sha,
+        ],
+        ["git", "-C", str(checkout_path), "merge", "--ff-only", "origin/main"],
+        ["git", "-C", str(checkout_path), "rev-parse", "HEAD"],
+    ]
+
+
+def test_runtime_sync_main_dirty_checkout_blocks_without_raw_status() -> None:
+    checkout_path = _safe_checkout_path("skeleton-sync-dirty")
+    project_tree = _project_tree_for_skeleton_checkout(checkout_path)
+
+    def run_sync_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        del cwd
+        if command == ["git", "-C", str(checkout_path), "remote", "get-url", "origin"]:
+            return 0, "https://github.com/alanua/Skeleton.git\n"
+        if command == ["git", "-C", str(checkout_path), "status", "--short"]:
+            return 0, "?? local-secret.txt\n"
+        return 2, "unexpected command"
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(Path, "exists", autospec=True) as path_exists, mock.patch.object(
+        runner, "run_command", side_effect=run_sync_command
+    ):
+        path_exists.side_effect = lambda path: path in {
+            checkout_path,
+            checkout_path / ".git",
+        }
+        report = runner.runtime_sync_main()
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=checkout_dirty" in report
+    assert "local-secret.txt" not in report
 
 
 def test_ensure_project_checkout_missing_target_project_blocks() -> None:

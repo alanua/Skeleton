@@ -274,6 +274,37 @@ Failed validation profile commands include the allowlisted command and a
 bounded, sanitized output block between `failed_output_start` and
 `failed_output_end`; long output is truncated with an explicit marker.
 
+`runtime_sync_main` is a narrow maintenance task for updating the registered
+Skeleton checkout to the current `origin/main` by fast-forward only:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: runtime_sync_main
+```
+
+It may only:
+
+1. Use the registered Skeleton checkout from `PROJECT_TREE.yaml`.
+2. Verify the checkout path is safe using the same path rules as
+   `check_project_checkout`.
+3. Verify `origin` still points at `alanua/Skeleton`.
+4. Block if `git status --short` reports any local tracked or untracked
+   changes.
+5. Run only bounded Git commands:
+   `git -C {checkout_path} remote get-url origin`,
+   `git -C {checkout_path} status --short`,
+   `git -C {checkout_path} fetch --prune origin main`,
+   `git -C {checkout_path} rev-parse HEAD`,
+   `git -C {checkout_path} rev-parse origin/main`,
+   `git -C {checkout_path} merge-base --is-ancestor`, and
+   `git -C {checkout_path} merge --ff-only origin/main`.
+
+It reports `DONE` when the checkout was already current or was fast-forwarded
+to `origin/main`. It reports `BLOCKED` for unsafe paths, missing checkouts,
+missing `.git`, failed origin reads, wrong remotes, dirty checkouts, failed
+fetches, unreadable SHAs, unclassified ancestry, ahead/diverged checkouts, or
+failed fast-forwards. Reports must not include raw command output.
+
 `check_skeleton_freshness` is a short status-only check before Skeleton project
 work starts or after recent merges. It requires no target metadata:
 
@@ -289,6 +320,7 @@ It may only:
    `check_project_checkout`.
 3. Run only bounded Git and GitHub status queries:
    `git -C {checkout_path} remote get-url origin`,
+   `git -C {checkout_path} status --short`,
    `git -C {checkout_path} fetch --prune origin main`,
    `git -C {checkout_path} rev-parse HEAD`,
    `git -C {checkout_path} rev-parse origin/main`,
@@ -297,21 +329,23 @@ It may only:
    `gh pr list --repo alanua/Skeleton --state open`, and
    `gh issue list --repo alanua/Skeleton --state open`.
 4. Report whether GitHub `main` is the source of truth.
-5. Report whether the live Runner checkout is equal to, ahead of, behind, or
-   diverged from the current GitHub `main` SHA.
+5. Block if the live Runner checkout is dirty, behind, or diverged from the
+   current GitHub `main` SHA; otherwise report whether it is equal to or ahead
+   of current GitHub `main`.
 6. Report whether `docs/NOTEBOOKLM_SOURCEPACK.md` may need refresh when
    sourcepack or NotebookLM context is relevant.
 7. Flag open PRs or issues that may need rebase, retest, or scope review against
    current `main`.
 8. Remind that old chats and old branches are not canon.
 
-It reports `DONE` when the freshness report was produced. It reports `BLOCKED`
-for unsafe paths, missing checkouts, missing `.git`, failed origin reads, failed
-GitHub `main` SHA reads, GitHub query failures, or any unclassified sync state.
-The report must be short, human-readable, and must not include raw command
-output. It may include only safe synthesized status lines such as current
-`main` SHA, checkout sync state, open PR/issue counts, and bounded reminder
-notes.
+It reports `DONE` when the freshness report was produced for a clean checkout
+that is equal to or ahead of current GitHub `main`. It reports `BLOCKED` for
+unsafe paths, missing checkouts, missing `.git`, failed origin reads, dirty
+checkouts, failed GitHub `main` SHA reads, behind or diverged checkouts, GitHub
+query failures, or any unclassified sync state. The report must be short,
+human-readable, and must not include raw command output. It may include only
+safe synthesized status lines such as current `main` SHA, checkout sync state,
+open PR/issue counts, and bounded reminder notes.
 
 `hermes_worker_preflight` is a read-only, report-only host inventory preflight
 for the future Hermes worker. It requires no target metadata:
