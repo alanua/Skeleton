@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.hermes_memory_result.schema.json",
+  "type": "object",
+  "required": [
+    "schema",
+    "status",
+    "decision",
+    "payload"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "schema": {
+      "const": "skeleton.hermes_memory_result.v1"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "DRY_RUN_OK",
+        "OPERATOR_APPROVAL_REQUIRED",
+        "DUPLICATE_EXISTING",
+        "BLOCKED",
+        "REVIEW_REQUIRED"
+      ]
+    },
+    "namespace": {
+      "type": ["string", "null"]
+    },
+    "project_id": {
+      "type": ["string", "null"]
+    },
+    "operation": {
+      "type": "string"
+    },
+    "decision": {
+      "type": "object",
+      "required": ["allowed", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "allowed": {"type": "boolean"},
+        "reason": {"type": "string"}
+      }
+    },
+    "payload": {
+      "type": "object"
+    }
+  }
+}

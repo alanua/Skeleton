@@ -61,6 +61,8 @@ class PatchProposalResult:
     conflict_ref: str | None
     approval_ref: str | None
     confirmed_canonical_revision: int
+    canonical_write_performed: bool
+    operator_approval_required: bool
 
 
 class MemoryPatchProposalError(ValueError):
@@ -128,7 +130,9 @@ class MemoryPatchProposalRegistry:
             raise MemoryPatchProposalIdempotencyError("idempotency key reused with different payload")
         existing_for_idempotency = self._event_by_idempotency.get(idempotency_key)
         if existing_for_idempotency is not None:
-            return deepcopy(existing_for_idempotency)
+            event = deepcopy(existing_for_idempotency)
+            event["status"] = "DUPLICATE_EXISTING"
+            return event
 
         dedupe_key = str(normalized["dedupe_key"])
         existing_for_dedupe = self._events_by_dedupe.get(dedupe_key)
@@ -148,6 +152,8 @@ class MemoryPatchProposalRegistry:
                 conflict_ref=str(conflict["conflict_ref"]),
                 approval_ref=str(normalized["approval_ref"]),
                 confirmed_canonical_revision=int(normalized["confirmed_canonical_revision"]),
+                canonical_write_performed=False,
+                operator_approval_required=True,
             )
             event = asdict(result)
             self._payload_hash_by_idempotency[idempotency_key] = payload_hash
@@ -168,6 +174,8 @@ class MemoryPatchProposalRegistry:
                 conflict_ref=str(conflict["conflict_ref"]),
                 approval_ref=str(normalized["approval_ref"]),
                 confirmed_canonical_revision=int(normalized["confirmed_canonical_revision"]),
+                canonical_write_performed=False,
+                operator_approval_required=True,
             )
             event = asdict(result)
             self._events_by_dedupe[dedupe_key] = event
@@ -187,6 +195,13 @@ class MemoryPatchProposalRegistry:
     def get_conflicts(self) -> list[dict[str, object]]:
         return deepcopy(self._conflicts)
 
+    def lookup_by_idempotency_key(self, idempotency_key: str) -> dict[str, object] | None:
+        """Return a public-safe copy of an existing event for an exact idempotency key."""
+        if not isinstance(idempotency_key, str):
+            return None
+        event = self._event_by_idempotency.get(idempotency_key)
+        return deepcopy(event) if event is not None else None
+
     def _record_acceptance(self, proposal: Mapping[str, Any]) -> dict[str, object]:
         self._sequence += 1
         event_ref = f"proposal-event-{self._sequence:06d}"
@@ -201,6 +216,8 @@ class MemoryPatchProposalRegistry:
             conflict_ref=None,
             approval_ref=str(proposal["approval_ref"]),
             confirmed_canonical_revision=int(proposal["confirmed_canonical_revision"]),
+            canonical_write_performed=False,
+            operator_approval_required=True,
         )
         event = asdict(result)
         event["value_hash"] = stable_hash(proposal["proposed_value"])
@@ -218,6 +235,8 @@ class MemoryPatchProposalRegistry:
             "event_ref": f"proposal-event-{self._sequence:06d}",
             "conflict_ref": conflict_ref,
             "dedupe_key": proposal["dedupe_key"],
+            "namespace": proposal["namespace"],
+            "project_id": proposal["project_id"],
             "existing_canonical_ref": existing_target["canonical_ref"],
             "existing_event_ref": existing_target["event_ref"],
             "reason_code": "same_target_distinct_evidence_or_value",
