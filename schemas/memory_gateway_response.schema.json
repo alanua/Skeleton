@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.memory_gateway_response.schema.json",
+  "title": "Memory Gateway Response",
+  "type": "object",
+  "required": ["schema", "contract_version", "namespace", "command", "payload"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "skeleton.memory_gateway.response.v1"},
+    "contract_version": {"const": "1.0.0"},
+    "namespace": {"$ref": "#/$defs/namespace"},
+    "command": {"type": "string"},
+    "payload": {
+      "type": "object",
+      "additionalProperties": true,
+      "not": {
+        "anyOf": [
+          {"required": ["raw_path"]},
+          {"required": ["local_path"]},
+          {"required": ["storage_api"]},
+          {"required": ["raw_content"]}
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "namespace": {
+      "type": "string",
+      "enum": ["aufmass", "bauclock", "skeleton", "home_automation", "legal_private"]
+    }
+  }
+}
