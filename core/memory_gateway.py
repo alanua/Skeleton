@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Mapping
 
 from core.memory_gateway_policy import (
-    ALLOWED_COMMAND_SUFFIXES,
     ALLOWED_NAMESPACES,
     EXACT_CONFIRMATION_REVISION_MISMATCH,
     GRAPH_RESULT_NOT_CANON_CONFIRMED,
@@ -35,13 +35,32 @@ MEMORY_GATEWAY_CONTRACT_VERSION = "1.0.0"
 class GatewayCapabilityToken:
     schema: str
     namespaces: tuple[str, ...]
+    project_id: str
     public_mode: bool = True
 
 
-def capability_token(*, namespaces: tuple[str, ...], public_mode: bool = True) -> GatewayCapabilityToken:
+REQUIRED_MEMORY_COMMAND_SUFFIXES = frozenset(
+    {
+        "memory.lookup_exact",
+        "memory.get_conflicts",
+        "memory.get_override_history",
+        "memory.get_audit_log",
+        "memory.get_index_freshness",
+        "memory.propose_patch",
+    }
+)
+
+
+def capability_token(
+    *,
+    namespaces: tuple[str, ...],
+    project_id: str | None = None,
+    public_mode: bool = True,
+) -> GatewayCapabilityToken:
     return GatewayCapabilityToken(
         schema="skeleton.memory_gateway.capability_token.v1",
         namespaces=namespaces,
+        project_id=project_id or namespaces[0],
         public_mode=public_mode,
     )
 
@@ -61,8 +80,6 @@ class MemoryGateway:
         self._override_registry = override_registry or MemoryOverrideRegistry()
         self._audit_log: list[dict[str, object]] = []
         self._canonical = _canonical_seed()
-        self._semantic = _semantic_seed()
-        self._graph = _graph_seed()
         self._freshness = _freshness_seed()
 
     def execute(self, request: Mapping[str, Any]) -> dict[str, object]:
@@ -81,22 +98,22 @@ class MemoryGateway:
 
         handlers = {
             "memory.lookup_exact": self.lookup_exact,
-            "memory.search_semantic": self.search_semantic,
             "memory.get_conflicts": self.get_conflicts,
             "memory.get_override_history": self.get_override_history,
             "memory.get_audit_log": self.get_audit_log,
             "memory.get_index_freshness": self.get_memory_index_freshness,
-            "graph.query_code": self.query_code,
-            "graph.get_index_freshness": self.get_graph_index_freshness,
             "memory.propose_patch": self.propose_patch,
         }
+        if suffix not in handlers:
+            raise MemoryGatewayPolicyError("COMMAND_NOT_ALLOWLISTED", "command is not allowlisted")
         return handlers[suffix](namespace=namespace, **payload)
 
     def lookup_exact(self, *, namespace: str, key: str) -> dict[str, object]:
         namespace = self._authorize_namespace(namespace)
+        project_id = self._bound_project_id()
         key = _safe_lookup_key(key)
         try:
-            record = self._canonical[namespace][key]
+            record = self._canonical[namespace][project_id][key]
         except KeyError as exc:
             raise MemoryGatewayPolicyError("CANONICAL_FACT_NOT_FOUND", "canonical fact not found") from exc
         return self._response(
@@ -105,111 +122,70 @@ class MemoryGateway:
             payload={
                 **deepcopy(record),
                 "namespace": namespace,
+                "project_id": project_id,
                 "authoritative": True,
                 "authority_classification": "canonical_exact",
                 "source_kind": "canonical_sqlite",
             },
         )
 
-    def search_semantic(self, *, namespace: str, query: str) -> dict[str, object]:
-        namespace = self._authorize_namespace(namespace)
-        _safe_lookup_key(query)
-        results = []
-        for result in self._semantic[namespace]:
-            rendered = deepcopy(result)
-            rendered.update(
-                {
-                    "namespace": namespace,
-                    "authoritative": False,
-                    "authority_classification": "derived_semantic",
-                    "source_kind": "mempalace",
-                    "freshness": deepcopy(self._freshness[namespace]["mempalace"]),
-                }
-            )
-            results.append(rendered)
-        return self._response(
-            namespace=namespace,
-            command_suffix="memory.search_semantic",
-            payload={"results": results},
-        )
-
-    def query_code(self, *, namespace: str, query: str) -> dict[str, object]:
-        namespace = self._authorize_namespace(namespace)
-        _safe_lookup_key(query)
-        results = []
-        for result in self._graph[namespace]:
-            rendered = deepcopy(result)
-            rendered.update(
-                {
-                    "namespace": namespace,
-                    "authoritative": False,
-                    "authoritative_scope": "code_graph",
-                    "authority_classification": "derived_code_graph",
-                    "source_kind": "graphify",
-                    "freshness": deepcopy(self._freshness[namespace]["graphify"]),
-                }
-            )
-            results.append(rendered)
-        return self._response(namespace=namespace, command_suffix="graph.query_code", payload={"results": results})
-
     def get_memory_index_freshness(self, *, namespace: str) -> dict[str, object]:
         namespace = self._authorize_namespace(namespace)
+        project_id = self._bound_project_id()
         return self._response(
             namespace=namespace,
             command_suffix="memory.get_index_freshness",
             payload={
-                "mempalace": deepcopy(self._freshness[namespace]["mempalace"]),
-                "canonical_sqlite": deepcopy(self._freshness[namespace]["canonical_sqlite"]),
+                "project_id": project_id,
+                "mempalace": deepcopy(self._freshness[namespace][project_id]["mempalace"]),
+                "canonical_sqlite": deepcopy(self._freshness[namespace][project_id]["canonical_sqlite"]),
             },
-        )
-
-    def get_graph_index_freshness(self, *, namespace: str) -> dict[str, object]:
-        namespace = self._authorize_namespace(namespace)
-        return self._response(
-            namespace=namespace,
-            command_suffix="graph.get_index_freshness",
-            payload={"graphify": deepcopy(self._freshness[namespace]["graphify"])},
         )
 
     def get_conflicts(self, *, namespace: str) -> dict[str, object]:
         namespace = self._authorize_namespace(namespace)
+        project_id = self._bound_project_id()
         conflicts = [
             _sanitized_conflict(conflict)
             for conflict in self._patch_registry.get_conflicts()
-            if _conflict_belongs_to_namespace(conflict, namespace)
+            if _conflict_belongs_to_binding(conflict, namespace, project_id)
         ]
         return self._response(
             namespace=namespace,
             command_suffix="memory.get_conflicts",
             payload={
                 "event_class": "source_value_conflict",
+                "project_id": project_id,
                 "conflicts": conflicts,
             },
         )
 
     def get_override_history(self, *, namespace: str, override_ref: str) -> dict[str, object]:
         namespace = self._authorize_namespace(namespace)
+        project_id = self._bound_project_id()
         history = [
             event
             for event in self._override_registry.get_override_history(override_ref)
-            if event.get("namespace") == namespace
+            if event.get("namespace") == namespace and event.get("project_id") == project_id
         ]
         return self._response(
             namespace=namespace,
             command_suffix="memory.get_override_history",
-            payload={"event_class": "override_lifecycle", "events": history},
+            payload={"event_class": "override_lifecycle", "project_id": project_id, "events": history},
         )
 
     def get_audit_log(self, *, namespace: str) -> dict[str, object]:
         namespace = self._authorize_namespace(namespace)
+        project_id = self._bound_project_id()
         return self._response(
             namespace=namespace,
             command_suffix="memory.get_audit_log",
             payload={
+                "project_id": project_id,
                 "events": [
                     deepcopy(event)
                     for event in self._audit_log
-                    if event.get("namespace") == namespace
+                    if event.get("namespace") == namespace and event.get("project_id") == project_id
                 ]
             },
         )
@@ -220,10 +196,13 @@ class MemoryGateway:
             raise MemoryGatewayPolicyError("INVALID_PATCH_PROPOSAL", "proposal must be an object")
         if proposal.get("namespace") != namespace:
             raise MemoryGatewayPolicyError("NAMESPACE_NOT_AUTHORIZED", "proposal namespace mismatch")
+        if proposal.get("project_id") != self._bound_project_id():
+            raise MemoryGatewayPolicyError("PROJECT_NOT_AUTHORIZED", "proposal project mismatch")
         self._validate_patch_evidence(namespace, proposal)
         event = self._patch_registry.propose(proposal)
         self._append_audit_event(
             namespace=namespace,
+            project_id=self._bound_project_id(),
             actor_ref=proposal.get("actor_ref"),
             reason_code=proposal.get("reason_code"),
             approval_ref=proposal.get("approval_ref"),
@@ -236,7 +215,8 @@ class MemoryGateway:
         )
 
     def _validate_patch_evidence(self, namespace: str, proposal: Mapping[str, Any]) -> None:
-        canonical_revision = self._freshness[namespace]["canonical_sqlite"]["current_canonical_revision"]
+        project_id = self._bound_project_id()
+        canonical_revision = self._freshness[namespace][project_id]["canonical_sqlite"]["current_canonical_revision"]
         if proposal.get("confirmed_canonical_revision") != canonical_revision:
             raise MemoryGatewayPolicyError(
                 EXACT_CONFIRMATION_REVISION_MISMATCH,
@@ -253,7 +233,7 @@ class MemoryGateway:
                     SEMANTIC_RESULT_NOT_CANON_CONFIRMED,
                     "semantic evidence requires exact canonical confirmation",
                 )
-            if self._freshness[namespace]["mempalace"]["stale"]:
+            if self._freshness[namespace][project_id]["mempalace"]["stale"]:
                 raise MemoryGatewayPolicyError(
                     STALE_INDEX_RESULT_NOT_PATCH_ELIGIBLE,
                     "stale semantic index cannot support a patch proposal",
@@ -264,7 +244,7 @@ class MemoryGateway:
                     GRAPH_RESULT_NOT_CANON_CONFIRMED,
                     "graph evidence requires exact canonical confirmation",
                 )
-            if self._freshness[namespace]["graphify"]["stale"]:
+            if self._freshness[namespace][project_id]["graphify"]["stale"]:
                 raise MemoryGatewayPolicyError(
                     STALE_INDEX_RESULT_NOT_PATCH_ELIGIBLE,
                     "stale graph index cannot support a patch proposal",
@@ -275,10 +255,11 @@ class MemoryGateway:
         target = proposal.get("normalized_target")
         confirmed_ref = proposal.get("confirmed_via_exact_ref")
         source_evidence_hash = proposal.get("source_evidence_hash")
+        project_id = self._bound_project_id()
         if not isinstance(target, str) or not isinstance(confirmed_ref, str):
             raise MemoryGatewayPolicyError("INVALID_PATCH_PROPOSAL", "exact confirmation target is invalid")
-        canonical = self._canonical[namespace].get(target)
-        current_revision = self._freshness[namespace]["canonical_sqlite"]["current_canonical_revision"]
+        canonical = self._canonical[namespace][project_id].get(target)
+        current_revision = self._freshness[namespace][project_id]["canonical_sqlite"]["current_canonical_revision"]
         if canonical is None or canonical.get("canonical_revision") != current_revision:
             raise MemoryGatewayPolicyError(
                 "EXACT_CONFIRMATION_NOT_CANONICAL",
@@ -307,6 +288,7 @@ class MemoryGateway:
         self,
         *,
         namespace: str,
+        project_id: str,
         actor_ref: object,
         reason_code: object,
         approval_ref: object,
@@ -315,6 +297,7 @@ class MemoryGateway:
         event = {
             "schema": MEMORY_GATEWAY_AUDIT_SCHEMA,
             "namespace": namespace,
+            "project_id": project_id,
             "event_ref": f"memory-gateway-audit-{len(self._audit_log) + 1:06d}",
             "actor_ref": sanitized_actor_ref(actor_ref),
             "reason_code": sanitized_reason_code(reason_code),
@@ -329,6 +312,9 @@ class MemoryGateway:
         if self._token.public_mode and authorized in PUBLIC_MODE_FORBIDDEN_NAMESPACES:
             raise MemoryGatewayPolicyError("PRIVATE_NAMESPACE_PUBLIC_MODE_FORBIDDEN", "namespace is private")
         return authorized
+
+    def _bound_project_id(self) -> str:
+        return _safe_project_id(self._token.project_id)
 
     def _response(self, *, namespace: str, command_suffix: str, payload: Mapping[str, Any]) -> dict[str, object]:
         response = {
@@ -345,11 +331,13 @@ class MemoryGateway:
 def _normalize_token(token: GatewayCapabilityToken | Mapping[str, Any]) -> GatewayCapabilityToken:
     if isinstance(token, GatewayCapabilityToken):
         raw_namespaces = token.namespaces
+        raw_project_id = token.project_id
         public_mode = token.public_mode
     elif isinstance(token, Mapping):
         if token.get("schema") != "skeleton.memory_gateway.capability_token.v1":
             raise MemoryGatewayPolicyError("INVALID_CAPABILITY_TOKEN", "capability token schema is invalid")
         raw_namespaces = token.get("namespaces")
+        raw_project_id = token.get("project_id")
         public_mode = bool(token.get("public_mode", True))
     else:
         raise MemoryGatewayPolicyError("INVALID_CAPABILITY_TOKEN", "capability token must be an object")
@@ -359,99 +347,88 @@ def _normalize_token(token: GatewayCapabilityToken | Mapping[str, Any]) -> Gatew
         validate_namespace(namespace, allowed_namespaces=ALLOWED_NAMESPACES)
         for namespace in raw_namespaces
     )
+    project_id = _safe_project_id(raw_project_id or namespaces[0])
     return GatewayCapabilityToken(
         schema="skeleton.memory_gateway.capability_token.v1",
         namespaces=namespaces,
+        project_id=project_id,
         public_mode=public_mode,
     )
 
 
-def _canonical_seed() -> dict[str, dict[str, dict[str, object]]]:
+def _canonical_seed() -> dict[str, dict[str, dict[str, dict[str, object]]]]:
     return {
-        namespace: {
-            "primary_fact": {
-                "canonical_ref": f"canon-{namespace}-primary",
-                "canonical_revision": 3,
-                "fact_type": "status",
-                "value": {"state": "ready"},
-                "provenance_refs": [
-                    {
-                        "ref": f"exact-{namespace}-primary",
-                        "kind": "exact_source",
-                        "evidence_hash": "0" * 64,
-                    }
-                ],
-            }
-        }
+        namespace: _canonical_projects(namespace)
         for namespace in ALLOWED_NAMESPACES
     }
 
 
-def _semantic_seed() -> dict[str, list[dict[str, object]]]:
+def _canonical_projects(namespace: str) -> dict[str, dict[str, dict[str, object]]]:
+    project_ids = [namespace]
+    if namespace == "aufmass":
+        project_ids.extend(["project-a", "project-b"])
+    return {project_id: {"primary_fact": _canonical_fixture(namespace, project_id)} for project_id in project_ids}
+
+
+def _canonical_fixture(namespace: str, project_id: str) -> dict[str, object]:
+    evidence_hash = stable_project_hash(namespace, project_id)
     return {
-        namespace: [
+        "canonical_ref": f"canon-{namespace}-{project_id}-primary",
+        "canonical_revision": 3,
+        "fact_type": "status",
+        "value": {"state": f"ready-{project_id}"},
+        "provenance_refs": [
             {
-                "result_ref": f"semantic-{namespace}-primary",
-                "canonical_ref_hint": f"canon-{namespace}-primary",
-                "canonical_revision_hint": 3,
-                "provenance_refs": [
-                    {
-                        "ref": f"semantic-{namespace}-summary",
-                        "kind": "semantic_only",
-                        "evidence_hash": "1" * 64,
-                    }
-                ],
+                "ref": f"exact-{namespace}-{project_id}-primary",
+                "kind": "exact_source",
+                "evidence_hash": evidence_hash,
             }
-        ]
-        for namespace in ALLOWED_NAMESPACES
+        ],
     }
 
 
-def _graph_seed() -> dict[str, list[dict[str, object]]]:
-    return {
-        namespace: [
-            {
-                "result_ref": f"graph-{namespace}-primary",
-                "canonical_ref_hint": f"canon-{namespace}-primary",
-                "canonical_revision_hint": 3,
-                "provenance_refs": [
-                    {
-                        "ref": f"graph-{namespace}-edge",
-                        "kind": "code_graph",
-                        "evidence_hash": "2" * 64,
-                    }
-                ],
-            }
-        ]
-        for namespace in ALLOWED_NAMESPACES
-    }
-
-
-def _freshness_seed() -> dict[str, dict[str, dict[str, object]]]:
+def _freshness_seed() -> dict[str, dict[str, dict[str, dict[str, object]]]]:
     freshness = {}
     for namespace in ALLOWED_NAMESPACES:
-        stale = namespace == "bauclock"
+        projects = [namespace]
+        if namespace == "aufmass":
+            projects.extend(["project-a", "project-b"])
         freshness[namespace] = {
+            project_id: _freshness_fixture(namespace, project_id)
+            for project_id in projects
+        }
+    return freshness
+
+
+def _freshness_fixture(namespace: str, project_id: str) -> dict[str, dict[str, object]]:
+    stale = namespace == "bauclock"
+    return {
             "graphify": {
                 "indexed_repo_commit": "commit-indexed-0003",
                 "current_repo_commit": "commit-current-0004" if stale else "commit-indexed-0003",
                 "indexed_at": "2026-06-27T00:00:00Z",
                 "stale": stale,
                 "index_namespace": namespace,
+                "project_id": project_id,
             },
             "mempalace": {
                 "indexed_canonical_revision": 2 if stale else 3,
                 "current_canonical_revision": 3,
-                "source_snapshot_id": f"snapshot-{namespace}-0003",
+                "source_snapshot_id": f"snapshot-{namespace}-{project_id}-0003",
                 "indexed_at": "2026-06-27T00:00:00Z",
                 "stale": stale,
                 "index_namespace": namespace,
+                "project_id": project_id,
             },
             "canonical_sqlite": {
                 "current_canonical_revision": 3,
+                "project_id": project_id,
             },
         }
-    return freshness
+
+
+def stable_project_hash(namespace: str, project_id: str) -> str:
+    return hashlib.sha256(f"{namespace}:{project_id}:primary".encode("utf-8")).hexdigest()
 
 
 def _safe_lookup_key(value: object) -> str:
@@ -467,6 +444,8 @@ def _sanitized_conflict(conflict: Mapping[str, object]) -> dict[str, object]:
         "status",
         "event_ref",
         "conflict_ref",
+        "namespace",
+        "project_id",
         "dedupe_key",
         "existing_canonical_ref",
         "existing_event_ref",
@@ -475,13 +454,17 @@ def _sanitized_conflict(conflict: Mapping[str, object]) -> dict[str, object]:
     return {key: deepcopy(conflict[key]) for key in allowed_keys if key in conflict}
 
 
-def _conflict_belongs_to_namespace(conflict: Mapping[str, object], namespace: str) -> bool:
-    existing_canonical_ref = conflict.get("existing_canonical_ref")
-    if not isinstance(existing_canonical_ref, str):
-        return False
-    return existing_canonical_ref.startswith(f"canonical-{namespace}-")
+def _conflict_belongs_to_binding(conflict: Mapping[str, object], namespace: str, project_id: str) -> bool:
+    return conflict.get("namespace") == namespace and conflict.get("project_id") == project_id
 
 
 def allowed_command_names(namespace: str) -> list[str]:
     namespace = validate_namespace(namespace, allowed_namespaces=ALLOWED_NAMESPACES)
-    return [command_name(namespace, suffix) for suffix in sorted(ALLOWED_COMMAND_SUFFIXES)]
+    return [command_name(namespace, suffix) for suffix in sorted(REQUIRED_MEMORY_COMMAND_SUFFIXES)]
+
+
+def _safe_project_id(value: object) -> str:
+    if not isinstance(value, str) or not value or len(value) > 128:
+        raise MemoryGatewayPolicyError("PROJECT_REQUIRED", "project_id is mandatory")
+    validate_public_payload({"project_id": value})
+    return value

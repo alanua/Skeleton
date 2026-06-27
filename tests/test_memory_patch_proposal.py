@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -13,6 +14,9 @@ from core.memory_patch_proposal import (
     canonical_idempotency_key,
     stable_hash,
 )
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def proposal(**overrides: object) -> dict[str, object]:
@@ -43,14 +47,25 @@ def proposal(**overrides: object) -> dict[str, object]:
     return values
 
 
-def test_exact_duplicate_returns_existing_ref() -> None:
+def test_same_idempotency_key_returns_duplicate_existing_ref() -> None:
     registry = MemoryPatchProposalRegistry()
     first = registry.propose(proposal())
     duplicate = registry.propose(proposal())
 
-    assert duplicate["status"] == "ACCEPTED"
+    assert duplicate["status"] == "DUPLICATE_EXISTING"
     assert duplicate["event_ref"] == first["event_ref"]
     assert duplicate["canonical_ref"] == first["canonical_ref"]
+
+
+def test_public_idempotency_lookup_returns_existing_event() -> None:
+    registry = MemoryPatchProposalRegistry()
+    payload = proposal()
+    first = registry.propose(payload)
+
+    found = registry.lookup_by_idempotency(str(payload["idempotency_key"]))
+
+    assert found == first
+    assert found is not first
 
 
 def test_same_evidence_and_target_with_changed_value_is_not_exact_duplicate() -> None:
@@ -64,6 +79,17 @@ def test_same_evidence_and_target_with_changed_value_is_not_exact_duplicate() ->
     assert result["event_ref"] != first["event_ref"]
     assert result["canonical_ref"] is None
     assert result["conflict_ref"] == registry.get_conflicts()[0]["conflict_ref"]
+
+
+def test_changed_payload_same_dedupe_target_is_review_required_not_duplicate() -> None:
+    registry = MemoryPatchProposalRegistry()
+    registry.propose(proposal())
+    changed = proposal(proposed_value={"state": "changed"}, approval_ref="approval-002")
+
+    result = registry.propose(changed)
+
+    assert result["status"] == "REVIEW_REQUIRED"
+    assert result["status"] != "DUPLICATE_EXISTING"
 
 
 def test_same_idempotency_key_with_changed_payload_fails() -> None:
@@ -154,3 +180,13 @@ def test_no_private_looking_value_leaks_to_public_reports() -> None:
     assert "secret" not in serialized
     assert "token" not in serialized
     assert "/" not in serialized
+
+
+def test_gateway_uses_public_registry_lookup_instead_of_private_registry_fields() -> None:
+    gateway_source = (ROOT / "core" / "memory_gateway.py").read_text(encoding="utf-8")
+
+    assert "._events_by_dedupe" not in gateway_source
+    assert "._payload_hash_by_dedupe" not in gateway_source
+    assert "._payload_hash_by_idempotency" not in gateway_source
+    assert "._event_by_idempotency" not in gateway_source
+    assert "._accepted_by_target" not in gateway_source

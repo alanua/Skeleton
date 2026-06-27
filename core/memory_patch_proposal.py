@@ -123,12 +123,14 @@ class MemoryPatchProposalRegistry:
         normalized = _validate_proposal(proposal)
         payload_hash = stable_hash(_payload_without_idempotency(normalized))
         idempotency_key = str(normalized["idempotency_key"])
+        existing_for_idempotency = self.lookup_by_idempotency(idempotency_key)
         previous_payload_hash = self._payload_hash_by_idempotency.get(idempotency_key)
         if previous_payload_hash is not None and previous_payload_hash != payload_hash:
             raise MemoryPatchProposalIdempotencyError("idempotency key reused with different payload")
-        existing_for_idempotency = self._event_by_idempotency.get(idempotency_key)
         if existing_for_idempotency is not None:
-            return deepcopy(existing_for_idempotency)
+            duplicate = deepcopy(existing_for_idempotency)
+            duplicate["status"] = "DUPLICATE_EXISTING"
+            return duplicate
 
         dedupe_key = str(normalized["dedupe_key"])
         existing_for_dedupe = self._events_by_dedupe.get(dedupe_key)
@@ -187,10 +189,21 @@ class MemoryPatchProposalRegistry:
     def get_conflicts(self) -> list[dict[str, object]]:
         return deepcopy(self._conflicts)
 
+    def lookup_by_idempotency(self, idempotency_key: str) -> dict[str, object] | None:
+        """Return a bounded public event for a known idempotency key."""
+        idempotency_key = _expected_key(
+            idempotency_key,
+            None,
+            _IDEMPOTENCY_PREFIX,
+            "idempotency_key",
+        )
+        event = self._event_by_idempotency.get(idempotency_key)
+        return deepcopy(event) if event is not None else None
+
     def _record_acceptance(self, proposal: Mapping[str, Any]) -> dict[str, object]:
         self._sequence += 1
         event_ref = f"proposal-event-{self._sequence:06d}"
-        canonical_ref = f"canonical-{proposal['namespace']}-{self._sequence:06d}"
+        canonical_ref = f"canonical-{proposal['namespace']}-{proposal['project_id']}-{self._sequence:06d}"
         result = PatchProposalResult(
             schema=PATCH_PROPOSAL_EVENT_SCHEMA,
             status="ACCEPTED",
@@ -217,6 +230,8 @@ class MemoryPatchProposalRegistry:
             "status": "REVIEW_REQUIRED",
             "event_ref": f"proposal-event-{self._sequence:06d}",
             "conflict_ref": conflict_ref,
+            "namespace": proposal["namespace"],
+            "project_id": proposal["project_id"],
             "dedupe_key": proposal["dedupe_key"],
             "existing_canonical_ref": existing_target["canonical_ref"],
             "existing_event_ref": existing_target["event_ref"],
