@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Mapping
@@ -29,6 +30,7 @@ MEMORY_GATEWAY_REQUEST_SCHEMA = "skeleton.memory_gateway.request.v1"
 MEMORY_GATEWAY_RESPONSE_SCHEMA = "skeleton.memory_gateway.response.v1"
 MEMORY_GATEWAY_AUDIT_SCHEMA = "skeleton.memory_gateway.audit_event.v1"
 MEMORY_GATEWAY_CONTRACT_VERSION = "1.0.0"
+_SAFE_PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
 
 @dataclass(frozen=True)
@@ -92,8 +94,9 @@ class MemoryGateway:
         }
         return handlers[suffix](namespace=namespace, **payload)
 
-    def lookup_exact(self, *, namespace: str, key: str) -> dict[str, object]:
+    def lookup_exact(self, *, namespace: str, key: str, project_id: object = None) -> dict[str, object]:
         namespace = self._authorize_namespace(namespace)
+        project_id = self._optional_project_id(project_id)
         key = _safe_lookup_key(key)
         try:
             record = self._canonical[namespace][key]
@@ -105,14 +108,16 @@ class MemoryGateway:
             payload={
                 **deepcopy(record),
                 "namespace": namespace,
+                **({"project_id": project_id} if project_id is not None else {}),
                 "authoritative": True,
                 "authority_classification": "canonical_exact",
                 "source_kind": "canonical_sqlite",
             },
         )
 
-    def search_semantic(self, *, namespace: str, query: str) -> dict[str, object]:
+    def search_semantic(self, *, namespace: str, query: str, project_id: object = None) -> dict[str, object]:
         namespace = self._authorize_namespace(namespace)
+        project_id = self._optional_project_id(project_id)
         _safe_lookup_key(query)
         results = []
         for result in self._semantic[namespace]:
@@ -120,6 +125,7 @@ class MemoryGateway:
             rendered.update(
                 {
                     "namespace": namespace,
+                    **({"project_id": project_id} if project_id is not None else {}),
                     "authoritative": False,
                     "authority_classification": "derived_semantic",
                     "source_kind": "mempalace",
@@ -133,8 +139,9 @@ class MemoryGateway:
             payload={"results": results},
         )
 
-    def query_code(self, *, namespace: str, query: str) -> dict[str, object]:
+    def query_code(self, *, namespace: str, query: str, project_id: object = None) -> dict[str, object]:
         namespace = self._authorize_namespace(namespace)
+        project_id = self._optional_project_id(project_id)
         _safe_lookup_key(query)
         results = []
         for result in self._graph[namespace]:
@@ -142,6 +149,7 @@ class MemoryGateway:
             rendered.update(
                 {
                     "namespace": namespace,
+                    **({"project_id": project_id} if project_id is not None else {}),
                     "authoritative": False,
                     "authoritative_scope": "code_graph",
                     "authority_classification": "derived_code_graph",
@@ -152,23 +160,29 @@ class MemoryGateway:
             results.append(rendered)
         return self._response(namespace=namespace, command_suffix="graph.query_code", payload={"results": results})
 
-    def get_memory_index_freshness(self, *, namespace: str) -> dict[str, object]:
+    def get_memory_index_freshness(self, *, namespace: str, project_id: object = None) -> dict[str, object]:
         namespace = self._authorize_namespace(namespace)
+        project_id = self._optional_project_id(project_id)
         return self._response(
             namespace=namespace,
             command_suffix="memory.get_index_freshness",
             payload={
+                **({"project_id": project_id} if project_id is not None else {}),
                 "mempalace": deepcopy(self._freshness[namespace]["mempalace"]),
                 "canonical_sqlite": deepcopy(self._freshness[namespace]["canonical_sqlite"]),
             },
         )
 
-    def get_graph_index_freshness(self, *, namespace: str) -> dict[str, object]:
+    def get_graph_index_freshness(self, *, namespace: str, project_id: object = None) -> dict[str, object]:
         namespace = self._authorize_namespace(namespace)
+        project_id = self._optional_project_id(project_id)
         return self._response(
             namespace=namespace,
             command_suffix="graph.get_index_freshness",
-            payload={"graphify": deepcopy(self._freshness[namespace]["graphify"])},
+            payload={
+                **({"project_id": project_id} if project_id is not None else {}),
+                "graphify": deepcopy(self._freshness[namespace]["graphify"]),
+            },
         )
 
     def get_conflicts(self, *, namespace: str) -> dict[str, object]:
@@ -214,13 +228,20 @@ class MemoryGateway:
             },
         )
 
-    def propose_patch(self, *, namespace: str, proposal: Mapping[str, Any]) -> dict[str, object]:
+    def propose_patch(
+        self, *, namespace: str, proposal: Mapping[str, Any], project_id: object = None
+    ) -> dict[str, object]:
         namespace = self._authorize_namespace(namespace)
+        bound_project_id = self._optional_project_id(project_id)
         if not isinstance(proposal, Mapping):
             raise MemoryGatewayPolicyError("INVALID_PATCH_PROPOSAL", "proposal must be an object")
         if proposal.get("namespace") != namespace:
             raise MemoryGatewayPolicyError("NAMESPACE_NOT_AUTHORIZED", "proposal namespace mismatch")
+        proposal_project_id = self._optional_project_id(proposal.get("project_id"))
+        if bound_project_id is not None and proposal_project_id != bound_project_id:
+            raise MemoryGatewayPolicyError("PROJECT_NOT_AUTHORIZED", "proposal project_id mismatch")
         self._validate_patch_evidence(namespace, proposal)
+        duplicate_existing = _proposal_exists(self._patch_registry, proposal)
         event = self._patch_registry.propose(proposal)
         self._append_audit_event(
             namespace=namespace,
@@ -232,7 +253,13 @@ class MemoryGateway:
         return self._response(
             namespace=namespace,
             command_suffix="memory.propose_patch",
-            payload={"proposal_event": event},
+            payload={
+                "project_id": proposal_project_id,
+                "proposal_event": event,
+                "idempotency_classification": (
+                    "DUPLICATE_EXISTING" if duplicate_existing else "NEW_PROPOSAL"
+                ),
+            },
         )
 
     def _validate_patch_evidence(self, namespace: str, proposal: Mapping[str, Any]) -> None:
@@ -329,6 +356,16 @@ class MemoryGateway:
         if self._token.public_mode and authorized in PUBLIC_MODE_FORBIDDEN_NAMESPACES:
             raise MemoryGatewayPolicyError("PRIVATE_NAMESPACE_PUBLIC_MODE_FORBIDDEN", "namespace is private")
         return authorized
+
+    def _optional_project_id(self, project_id: object) -> str | None:
+        if project_id is None:
+            return None
+        if not isinstance(project_id, str) or not _SAFE_PROJECT_ID_RE.fullmatch(project_id):
+            raise MemoryGatewayPolicyError("PROJECT_ID_REQUIRED", "project_id is mandatory")
+        if project_id == "*" or "*" in project_id:
+            raise MemoryGatewayPolicyError("WILDCARD_PROJECT_FORBIDDEN", "wildcard project access is forbidden")
+        validate_public_payload({"project_id": project_id})
+        return project_id
 
     def _response(self, *, namespace: str, command_suffix: str, payload: Mapping[str, Any]) -> dict[str, object]:
         response = {
@@ -459,6 +496,22 @@ def _safe_lookup_key(value: object) -> str:
         raise MemoryGatewayPolicyError("INVALID_LOOKUP_KEY", "lookup key must be a bounded string")
     validate_public_payload({"lookup_key": value})
     return value
+
+
+def _proposal_exists(registry: MemoryPatchProposalRegistry, proposal: Mapping[str, Any]) -> bool:
+    idempotency_key = proposal.get("idempotency_key")
+    dedupe_key = proposal.get("dedupe_key")
+    event_by_idempotency = getattr(registry, "_event_by_idempotency", {})
+    events_by_dedupe = getattr(registry, "_events_by_dedupe", {})
+    return (
+        isinstance(event_by_idempotency, Mapping)
+        and isinstance(idempotency_key, str)
+        and idempotency_key in event_by_idempotency
+    ) or (
+        isinstance(events_by_dedupe, Mapping)
+        and isinstance(dedupe_key, str)
+        and dedupe_key in events_by_dedupe
+    )
 
 
 def _sanitized_conflict(conflict: Mapping[str, object]) -> dict[str, object]:
