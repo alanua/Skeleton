@@ -176,7 +176,7 @@ class MemoryGateway:
         conflicts = [
             _sanitized_conflict(conflict)
             for conflict in self._patch_registry.get_conflicts()
-            if conflict.get("dedupe_key") is not None
+            if _conflict_belongs_to_namespace(conflict, namespace)
         ]
         return self._response(
             namespace=namespace,
@@ -269,6 +269,39 @@ class MemoryGateway:
                     STALE_INDEX_RESULT_NOT_PATCH_ELIGIBLE,
                     "stale graph index cannot support a patch proposal",
                 )
+        self._validate_canonical_exact_confirmation(namespace, proposal)
+
+    def _validate_canonical_exact_confirmation(self, namespace: str, proposal: Mapping[str, Any]) -> None:
+        target = proposal.get("normalized_target")
+        confirmed_ref = proposal.get("confirmed_via_exact_ref")
+        source_evidence_hash = proposal.get("source_evidence_hash")
+        if not isinstance(target, str) or not isinstance(confirmed_ref, str):
+            raise MemoryGatewayPolicyError("INVALID_PATCH_PROPOSAL", "exact confirmation target is invalid")
+        canonical = self._canonical[namespace].get(target)
+        current_revision = self._freshness[namespace]["canonical_sqlite"]["current_canonical_revision"]
+        if canonical is None or canonical.get("canonical_revision") != current_revision:
+            raise MemoryGatewayPolicyError(
+                "EXACT_CONFIRMATION_NOT_CANONICAL",
+                "exact confirmation is not bound to a current canonical record",
+            )
+        canonical_refs = canonical.get("provenance_refs")
+        if not isinstance(canonical_refs, list):
+            raise MemoryGatewayPolicyError(
+                "EXACT_CONFIRMATION_NOT_CANONICAL",
+                "canonical exact provenance is unavailable",
+            )
+        for ref in canonical_refs:
+            if (
+                isinstance(ref, Mapping)
+                and ref.get("kind") == "exact_source"
+                and ref.get("ref") == confirmed_ref
+                and ref.get("evidence_hash") == source_evidence_hash
+            ):
+                return
+        raise MemoryGatewayPolicyError(
+            "EXACT_CONFIRMATION_NOT_CANONICAL",
+            "exact confirmation does not match current canonical provenance",
+        )
 
     def _append_audit_event(
         self,
@@ -440,6 +473,13 @@ def _sanitized_conflict(conflict: Mapping[str, object]) -> dict[str, object]:
         "reason_code",
     }
     return {key: deepcopy(conflict[key]) for key in allowed_keys if key in conflict}
+
+
+def _conflict_belongs_to_namespace(conflict: Mapping[str, object], namespace: str) -> bool:
+    existing_canonical_ref = conflict.get("existing_canonical_ref")
+    if not isinstance(existing_canonical_ref, str):
+        return False
+    return existing_canonical_ref.startswith(f"canonical-{namespace}-")
 
 
 def allowed_command_names(namespace: str) -> list[str]:
