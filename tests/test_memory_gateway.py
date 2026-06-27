@@ -25,7 +25,6 @@ from core.memory_patch_proposal import (
     MemoryPatchProposalRegistry,
     canonical_dedupe_key,
     canonical_idempotency_key,
-    stable_hash,
 )
 
 
@@ -46,7 +45,7 @@ def request(namespace: str, suffix: str, payload: dict[str, object]) -> dict[str
 
 
 def proposal(namespace: str = "aufmass", **overrides: object) -> dict[str, object]:
-    source_hash = stable_hash({"source": f"exact-{namespace}-primary"})
+    source_hash = "0" * 64
     values: dict[str, object] = {
         "schema": PATCH_PROPOSAL_SCHEMA,
         "namespace": namespace,
@@ -58,13 +57,13 @@ def proposal(namespace: str = "aufmass", **overrides: object) -> dict[str, objec
         "source_evidence_hash": source_hash,
         "proposed_value": {"state": "ready"},
         "provenance_refs": [
-            {"ref": "exact-ref-001", "kind": "exact_source", "evidence_hash": source_hash}
+            {"ref": f"exact-{namespace}-primary", "kind": "exact_source", "evidence_hash": source_hash}
         ],
         "actor_ref": "actor-001",
         "reason_code": "operator-confirmed",
         "approval_tier": "operator",
         "approval_ref": "approval-001",
-        "confirmed_via_exact_ref": "exact-ref-001",
+        "confirmed_via_exact_ref": f"exact-{namespace}-primary",
         "confirmed_canonical_revision": 3,
     }
     values.update(overrides)
@@ -146,15 +145,15 @@ def test_graph_backed_proposal_without_exact_confirmation_fails() -> None:
 
 
 def test_stale_index_backed_proposal_fails() -> None:
-    source_hash = stable_hash({"source": "exact-bauclock-primary"})
+    source_hash = "0" * 64
     candidate = proposal(
         namespace="bauclock",
         source_evidence_hash=source_hash,
         provenance_refs=[
             {"ref": "semantic-ref-001", "kind": "semantic_only", "evidence_hash": "1" * 64},
-            {"ref": "exact-ref-001", "kind": "exact_source", "evidence_hash": source_hash},
+            {"ref": "exact-bauclock-primary", "kind": "exact_source", "evidence_hash": source_hash},
         ],
-        confirmed_via_exact_ref="exact-ref-001",
+        confirmed_via_exact_ref="exact-bauclock-primary",
     )
 
     with pytest.raises(MemoryGatewayPolicyError) as excinfo:
@@ -170,6 +169,52 @@ def test_exact_confirmation_at_wrong_canonical_revision_fails() -> None:
         gateway("aufmass").propose_patch(namespace="aufmass", proposal=candidate)
 
     assert excinfo.value.reason_code == EXACT_CONFIRMATION_REVISION_MISMATCH
+
+
+def test_fabricated_exact_confirmation_is_rejected() -> None:
+    source_hash = "a" * 64
+    candidate = proposal(
+        source_evidence_hash=source_hash,
+        provenance_refs=[
+            {"ref": "exact-fabricated-primary", "kind": "exact_source", "evidence_hash": source_hash}
+        ],
+        confirmed_via_exact_ref="exact-fabricated-primary",
+        confirmed_canonical_revision=3,
+    )
+
+    with pytest.raises(MemoryGatewayPolicyError) as excinfo:
+        gateway("aufmass").propose_patch(namespace="aufmass", proposal=candidate)
+
+    assert excinfo.value.reason_code == "EXACT_CONFIRMATION_NOT_CANONICAL"
+
+
+def test_genuine_current_exact_confirmation_succeeds() -> None:
+    gw = gateway("aufmass")
+    exact = gw.lookup_exact(namespace="aufmass", key="primary_fact")["payload"]
+    exact_ref = exact["provenance_refs"][0]
+    candidate = proposal(
+        source_evidence_hash=exact_ref["evidence_hash"],
+        provenance_refs=[exact_ref],
+        confirmed_via_exact_ref=exact_ref["ref"],
+        confirmed_canonical_revision=exact["canonical_revision"],
+    )
+
+    result = gw.propose_patch(namespace="aufmass", proposal=candidate)
+
+    assert result["payload"]["proposal_event"]["status"] == "ACCEPTED"
+
+
+def test_aufmass_conflict_query_excludes_bauclock_conflicts() -> None:
+    patch_registry = MemoryPatchProposalRegistry()
+    patch_registry.propose(proposal(namespace="bauclock"))
+    patch_registry.propose(
+        proposal(namespace="bauclock", proposed_value={"state": "blocked"}, approval_ref="approval-002")
+    )
+    gw = MemoryGateway(capability_token(namespaces=("aufmass", "bauclock")), patch_registry=patch_registry)
+
+    result = gw.get_conflicts(namespace="aufmass")
+
+    assert result["payload"]["conflicts"] == []
 
 
 def test_conflict_and_override_queries_return_distinct_event_classes() -> None:
