@@ -3,12 +3,62 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from core.hermes_memory_adapter import (
+    HERMES_MEMORY_OPERATIONS,
+    HERMES_MEMORY_REQUEST_SCHEMA,
+    HermesMemoryAdapter,
+    HermesMemoryAdapterError,
+    blocked_result,
+)
+from core.memory_gateway import MemoryGateway
+from core.memory_gateway_policy import MemoryGatewayPolicyError
+
 
 SAFE_STATUSES = {
     "DRY_RUN_OK",
     "REVIEW_REQUIRED",
     "OPERATOR_APPROVAL_REQUIRED",
     "BLOCKED",
+}
+
+HERMES_MEMORY_TASK_SCHEMA = {
+    "type": "object",
+    "required": [
+        "schema",
+        "task_id",
+        "namespace",
+        "project_id",
+        "operation",
+        "parameters",
+        "public_safe",
+        "no_secrets",
+        "no_runtime_mutation",
+        "approval_required",
+        "authority_boundary",
+    ],
+    "additionalProperties": False,
+    "properties": {
+        "schema": {"const": "hermes.memory_task_packet.v1"},
+        "task_id": {"type": "string", "minLength": 1},
+        "namespace": {"type": "string", "minLength": 1},
+        "project_id": {"type": "string", "minLength": 1},
+        "operation": {"type": "string", "enum": sorted(HERMES_MEMORY_OPERATIONS)},
+        "parameters": {"type": "object"},
+        "public_safe": {"const": True},
+        "no_secrets": {"const": True},
+        "no_runtime_mutation": {"const": True},
+        "approval_required": {"const": True},
+        "authority_boundary": {
+            "type": "object",
+            "required": ["review_only", "mutation_allowed", "runtime_install_allowed"],
+            "additionalProperties": True,
+            "properties": {
+                "review_only": {"const": True},
+                "mutation_allowed": {"const": False},
+                "runtime_install_allowed": {"const": False},
+            },
+        },
+    },
 }
 
 SAFE_WORKER_MODES = {"review_only", "dry_run", "contract_test"}
@@ -137,6 +187,68 @@ def run_hermes_worker_dry_run(
             "redacted_fields": private_fields,
         },
     }
+
+
+def run_hermes_memory_task_packet(
+    task_packet: Mapping[str, Any],
+    *,
+    gateway: MemoryGateway,
+) -> dict[str, object]:
+    """Validate and route a Hermes memory task packet through the gateway adapter."""
+
+    try:
+        _validate_hermes_memory_task(task_packet)
+        boundary = task_packet["authority_boundary"]
+        if (
+            not isinstance(boundary, Mapping)
+            or boundary.get("review_only") is not True
+            or boundary.get("mutation_allowed") is not False
+            or boundary.get("runtime_install_allowed") is not False
+        ):
+            return blocked_result("INVALID_AUTHORITY_BOUNDARY")
+        adapter = HermesMemoryAdapter(
+            gateway=gateway,
+            namespace=str(task_packet["namespace"]),
+            project_id=str(task_packet["project_id"]),
+        )
+        return adapter.run(
+            {
+                "schema": HERMES_MEMORY_REQUEST_SCHEMA,
+                "namespace": task_packet["namespace"],
+                "project_id": task_packet["project_id"],
+                "operation": task_packet["operation"],
+                "parameters": task_packet["parameters"],
+            }
+        )
+    except (HermesMemoryAdapterError, MemoryGatewayPolicyError) as exc:
+        reason_code = getattr(exc, "reason_code", "HERMES_MEMORY_GATEWAY_BLOCKED")
+        return blocked_result(
+            str(reason_code),
+            namespace=task_packet.get("namespace") if isinstance(task_packet, Mapping) else None,
+            project_id=task_packet.get("project_id") if isinstance(task_packet, Mapping) else None,
+        )
+
+
+def _validate_hermes_memory_task(task_packet: Mapping[str, Any]) -> None:
+    if not isinstance(task_packet, Mapping):
+        raise HermesMemoryAdapterError("INVALID_HERMES_MEMORY_TASK", "task packet must be an object")
+    required = HERMES_MEMORY_TASK_SCHEMA["required"]
+    if not isinstance(required, list) or any(field not in task_packet for field in required):
+        raise HermesMemoryAdapterError("INVALID_HERMES_MEMORY_TASK", "task packet missing required fields")
+    if set(task_packet) - set(HERMES_MEMORY_TASK_SCHEMA["properties"]):
+        raise HermesMemoryAdapterError("INVALID_HERMES_MEMORY_TASK", "task packet has extra fields")
+    if task_packet.get("schema") != "hermes.memory_task_packet.v1":
+        raise HermesMemoryAdapterError("INVALID_HERMES_MEMORY_TASK", "task packet schema is invalid")
+    if task_packet.get("operation") not in HERMES_MEMORY_OPERATIONS:
+        raise HermesMemoryAdapterError("INVALID_HERMES_MEMORY_TASK", "memory operation is invalid")
+    for field in ("task_id", "namespace", "project_id"):
+        if not isinstance(task_packet.get(field), str) or not task_packet.get(field):
+            raise HermesMemoryAdapterError("INVALID_HERMES_MEMORY_TASK", f"{field} is invalid")
+    if not isinstance(task_packet.get("parameters"), Mapping):
+        raise HermesMemoryAdapterError("INVALID_HERMES_MEMORY_TASK", "parameters must be an object")
+    for field in ("public_safe", "no_secrets", "no_runtime_mutation", "approval_required"):
+        if task_packet.get(field) is not True:
+            raise HermesMemoryAdapterError("INVALID_HERMES_MEMORY_TASK", f"{field} must be true")
 
 
 def _missing_fields(reader: "_PlainReader | None", required: tuple[str, ...]) -> list[str]:

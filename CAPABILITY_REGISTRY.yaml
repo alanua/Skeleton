@@ -327,6 +327,22 @@ capabilities:
     added: "2026-06-27"
     description: Versioned synthetic gateway contract for namespace-isolated exact memory, derived semantic/code-graph retrieval, freshness metadata, audit metadata, conflict/override separation, and PatchProposal-only writes.
 
+  hermes_memory_gateway:
+    status: stage1_dry_run
+    module: core/hermes_memory_adapter.py
+    entry: run_hermes_memory_task_packet
+    stage: stage_1_synthetic_contract
+    live_runtime_execution: false
+    requires:
+      - core/hermes_worker.py
+      - core/memory_gateway.py
+      - schemas/hermes_memory_request.schema.json
+      - schemas/hermes_memory_result.schema.json
+      - docs/HERMES_MEMORY_GATEWAY.md
+    tested: true
+    added: "2026-06-27"
+    description: Validated Hermes memory task entrypoint bound to one explicit namespace/project_id pair, routed only through MemoryGateway, with canonical writes disabled and operator approval mandatory.
+
   codex_runtime_preflight:
     status: planned
     module: scripts/runner_poll_github_tasks.py

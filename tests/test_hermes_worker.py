@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from core.hermes_worker import run_hermes_worker_dry_run
+from core.hermes_worker import run_hermes_memory_task_packet, run_hermes_worker_dry_run
+from core.memory_gateway import MemoryGateway, capability_token
+from core.memory_patch_proposal import (
+    PATCH_PROPOSAL_SCHEMA,
+    canonical_dedupe_key,
+    canonical_idempotency_key,
+)
 
 
 def task_packet(**overrides: object) -> dict[str, object]:
@@ -125,6 +131,56 @@ def skill_manifest(**overrides: object) -> dict[str, object]:
     return manifest
 
 
+def memory_task_packet(**overrides: object) -> dict[str, object]:
+    packet: dict[str, object] = {
+        "schema": "hermes.memory_task_packet.v1",
+        "task_id": "MEMORY-001",
+        "namespace": "aufmass",
+        "project_id": "project-a",
+        "operation": "memory.lookup_exact",
+        "parameters": {"key": "primary_fact"},
+        "public_safe": True,
+        "no_secrets": True,
+        "no_runtime_mutation": True,
+        "approval_required": True,
+        "authority_boundary": {
+            "review_only": True,
+            "mutation_allowed": False,
+            "runtime_install_allowed": False,
+        },
+    }
+    packet.update(overrides)
+    return packet
+
+
+def memory_proposal(project_id: str = "project-a", **overrides: object) -> dict[str, object]:
+    source_hash = "0" * 64
+    values: dict[str, object] = {
+        "schema": PATCH_PROPOSAL_SCHEMA,
+        "namespace": "aufmass",
+        "project_id": project_id,
+        "object_id": "object-001",
+        "entity_scope": "room",
+        "fact_type": "status",
+        "normalized_target": "primary_fact",
+        "source_evidence_hash": source_hash,
+        "proposed_value": {"state": "ready"},
+        "provenance_refs": [
+            {"ref": "exact-aufmass-primary", "kind": "exact_source", "evidence_hash": source_hash}
+        ],
+        "actor_ref": "actor-001",
+        "reason_code": "operator-confirmed",
+        "approval_tier": "operator",
+        "approval_ref": "approval-001",
+        "confirmed_via_exact_ref": "exact-aufmass-primary",
+        "confirmed_canonical_revision": 3,
+    }
+    values.update(overrides)
+    values["dedupe_key"] = canonical_dedupe_key(values)
+    values["idempotency_key"] = canonical_idempotency_key(values)
+    return values
+
+
 @dataclass
 class PacketObject:
     schema: str
@@ -240,3 +296,39 @@ def test_task_packet_can_be_plain_object() -> None:
 
     assert result["status"] == "DRY_RUN_OK"
     assert result["task_id"] == "ISSUE-949"
+
+
+def test_worker_accepts_valid_memory_task_packet_and_routes_adapter() -> None:
+    gw = MemoryGateway(capability_token(namespaces=("aufmass",)))
+
+    result = run_hermes_memory_task_packet(memory_task_packet(), gateway=gw)
+
+    assert result["status"] == "DRY_RUN_OK"
+    assert result["namespace"] == "aufmass"
+    assert result["project_id"] == "project-a"
+    assert result["operation"] == "memory.lookup_exact"
+    assert result["payload"]["authority_classification"] == "canonical_exact"
+
+
+def test_worker_memory_packet_malformed_fails_closed() -> None:
+    gw = MemoryGateway(capability_token(namespaces=("aufmass",)))
+    packet = memory_task_packet()
+    del packet["project_id"]
+
+    result = run_hermes_memory_task_packet(packet, gateway=gw)
+
+    assert result["status"] == "BLOCKED"
+    assert result["decision"] == {"allowed": False, "reason": "INVALID_HERMES_MEMORY_TASK"}
+
+
+def test_worker_cross_project_memory_proposal_fails_closed() -> None:
+    gw = MemoryGateway(capability_token(namespaces=("aufmass",)))
+    packet = memory_task_packet(
+        operation="memory.propose_patch",
+        parameters={"proposal": memory_proposal(project_id="project-b")},
+    )
+
+    result = run_hermes_memory_task_packet(packet, gateway=gw)
+
+    assert result["status"] == "BLOCKED"
+    assert result["decision"] == {"allowed": False, "reason": "PROJECT_NOT_AUTHORIZED"}
