@@ -292,7 +292,6 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "changed_tracked_files_count",
         "check",
         "checkout_head_sha",
-        "checkout_path",
         "checkout_sync_state",
         "command_unavailable_reason",
         "compare_ahead_by",
@@ -5104,7 +5103,6 @@ def _registered_project_checkout(
         (
             f"target_project={target_project}",
             f"target_repository={project['repo']}",
-            f"checkout_path={checkout_path_text}",
         )
     )
     if any(part == ".." for part in checkout_path.parts):
@@ -5212,7 +5210,6 @@ def _registered_skeleton_checkout(
     status_lines = [
         f"target_project={target_project}",
         f"target_repository={project['repo']}",
-        f"checkout_path={checkout_path_text}",
     ]
     if any(part == ".." for part in checkout_path.parts):
         return None, _maintenance_report(

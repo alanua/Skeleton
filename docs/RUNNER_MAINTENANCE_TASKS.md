@@ -194,7 +194,9 @@ It may only:
 It reports `DONE` only when the checkout exists, `.git` exists, and origin
 matches the registered repository. Missing target metadata, unknown projects,
 unsafe paths, missing checkouts, missing `.git`, failed origin reads, and remote
-mismatches are reported as `BLOCKED`.
+mismatches are reported as `BLOCKED`. Public reports must not include the
+registered `checkout_path` value or any absolute host path; the path is only for
+internal validation and Git commands.
 
 `ensure_project_checkout` prepares only a missing registered project checkout and
 must include target project metadata:
@@ -222,7 +224,9 @@ It reports `DONE` only when the checkout exists, `.git` exists, and origin
 matches the registered repository. It reports `BLOCKED` for missing target
 metadata, unknown projects, unsafe paths, path traversal, existing checkouts
 without `.git`, wrong remotes, clone failures, failed origin reads, and remote
-mismatches after preparation.
+mismatches after preparation. Public reports must not include the registered
+`checkout_path` value or any absolute host path; the path is only for internal
+validation, parent preparation, clone, and Git commands.
 
 `validate_pr_branch` validates an open pull request branch for an allowlisted
 public repository and must include pull request metadata:
@@ -309,9 +313,9 @@ It reports `DONE` when the freshness report was produced. It reports `BLOCKED`
 for unsafe paths, missing checkouts, missing `.git`, failed origin reads, failed
 GitHub `main` SHA reads, GitHub query failures, or any unclassified sync state.
 The report must be short, human-readable, and must not include raw command
-output. It may include only safe synthesized status lines such as current
-`main` SHA, checkout sync state, open PR/issue counts, and bounded reminder
-notes.
+output, the registered `checkout_path` value, or any absolute host path. It may
+include only safe synthesized status lines such as current `main` SHA, checkout
+sync state, open PR/issue counts, and bounded reminder notes.
 
 `hermes_worker_preflight` is a read-only, report-only host inventory preflight
 for the future Hermes worker. It requires no target metadata:

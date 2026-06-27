@@ -6607,6 +6607,11 @@ def _safe_checkout_path(name: str) -> Path:
     return runner.RUNNER_PROJECT_CHECKOUT_BASE / "worktrees" / name
 
 
+def _assert_public_report_omits_checkout_path(report: str, checkout_path: Path) -> None:
+    assert "checkout_path=" not in report
+    assert str(checkout_path) not in report
+
+
 def test_check_project_checkout_missing_target_project_blocks() -> None:
     report = runner.check_project_checkout(
         "Mode: RUNTIME_MAINTENANCE_TASK\n"
@@ -6836,6 +6841,7 @@ def test_check_skeleton_freshness_reports_done_with_bounded_status_queries() -> 
     assert "old_chats_and_old_branches_are_not_canon" in report
     assert "raw fetch output" not in report
     assert "Fix runner" not in report
+    _assert_public_report_omits_checkout_path(report, checkout_path)
     commands = [call.args[0] for call in run.call_args_list]
     assert commands == [
         ["git", "-C", str(checkout_path), "remote", "get-url", "origin"],
@@ -6882,6 +6888,7 @@ def test_check_skeleton_freshness_missing_git_blocks() -> None:
 
     assert report.startswith("BLOCKED:")
     assert "reason=checkout_git_missing" in report
+    _assert_public_report_omits_checkout_path(report, checkout_path)
     run.assert_not_called()
 
 
