@@ -306,6 +306,27 @@ capabilities:
     added: "2026-05-21"
     description: Writes an explicit-path deterministic local memory routing audit ledger and public-safe session/project state snapshots without canon promotion.
 
+  memory_gateway:
+    status: stage1_dry_run
+    module: core/memory_gateway.py
+    entry: MemoryGateway.execute
+    stage: stage_1_synthetic_contract
+    live_runtime_execution: false
+    namespaces:
+      - aufmass
+      - bauclock
+      - skeleton
+      - home_automation
+      - legal_private
+    requires:
+      - core/memory_gateway_policy.py
+      - schemas/memory_gateway_request.schema.json
+      - schemas/memory_gateway_response.schema.json
+      - docs/MEMORY_GATEWAY.md
+    tested: true
+    added: "2026-06-27"
+    description: Versioned synthetic gateway contract for namespace-isolated exact memory, derived semantic/code-graph retrieval, freshness metadata, audit metadata, conflict/override separation, and PatchProposal-only writes.
+
   codex_runtime_preflight:
     status: planned
     module: scripts/runner_poll_github_tasks.py
