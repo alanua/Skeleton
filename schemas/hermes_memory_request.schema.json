@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.hermes_memory_request.schema.json",
+  "title": "Hermes Memory Request",
+  "type": "object",
+  "required": ["schema", "namespace", "project_id", "capability", "payload"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "skeleton.hermes_memory.request.v1"},
+    "namespace": {"$ref": "#/$defs/safe_token"},
+    "project_id": {"$ref": "#/$defs/safe_token"},
+    "capability": {
+      "type": "string",
+      "enum": [
+        "lookup_exact",
+        "get_conflicts",
+        "get_override_history",
+        "get_audit_log",
+        "get_index_freshness",
+        "propose_patch"
+      ]
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "$defs": {
+    "safe_token": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+    }
+  }
+}

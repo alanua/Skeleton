@@ -48,9 +48,19 @@ def test_exact_duplicate_returns_existing_ref() -> None:
     first = registry.propose(proposal())
     duplicate = registry.propose(proposal())
 
-    assert duplicate["status"] == "ACCEPTED"
+    assert duplicate["status"] == "DUPLICATE_EXISTING"
     assert duplicate["event_ref"] == first["event_ref"]
     assert duplicate["canonical_ref"] == first["canonical_ref"]
+
+
+def test_public_idempotency_lookup_returns_exact_existing_event() -> None:
+    registry = MemoryPatchProposalRegistry()
+    candidate = proposal()
+    first = registry.propose(candidate)
+
+    found = registry.lookup_by_idempotency_key(str(candidate["idempotency_key"]))
+
+    assert found == first
 
 
 def test_same_evidence_and_target_with_changed_value_is_not_exact_duplicate() -> None:

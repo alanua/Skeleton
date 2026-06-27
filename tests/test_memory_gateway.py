@@ -35,21 +35,25 @@ def gateway(*namespaces: str, public_mode: bool = True) -> MemoryGateway:
     return MemoryGateway(capability_token(namespaces=namespaces or ("aufmass",), public_mode=public_mode))
 
 
-def request(namespace: str, suffix: str, payload: dict[str, object]) -> dict[str, object]:
+def request(
+    namespace: str, suffix: str, payload: dict[str, object], project_id: str | None = None
+) -> dict[str, object]:
     return {
         "schema": MEMORY_GATEWAY_REQUEST_SCHEMA,
         "namespace": namespace,
+        "project_id": project_id or namespace,
         "command": f"{namespace}.{suffix}",
         "payload": payload,
     }
 
 
-def proposal(namespace: str = "aufmass", **overrides: object) -> dict[str, object]:
+def proposal(namespace: str = "aufmass", project_id: str | None = None, **overrides: object) -> dict[str, object]:
     source_hash = "0" * 64
+    project_id = project_id or namespace
     values: dict[str, object] = {
         "schema": PATCH_PROPOSAL_SCHEMA,
         "namespace": namespace,
-        "project_id": namespace,
+        "project_id": project_id,
         "object_id": "object-001",
         "entity_scope": "room",
         "fact_type": "status",
@@ -57,13 +61,17 @@ def proposal(namespace: str = "aufmass", **overrides: object) -> dict[str, objec
         "source_evidence_hash": source_hash,
         "proposed_value": {"state": "ready"},
         "provenance_refs": [
-            {"ref": f"exact-{namespace}-primary", "kind": "exact_source", "evidence_hash": source_hash}
+            {
+                "ref": f"exact-{namespace}-{project_id}-primary",
+                "kind": "exact_source",
+                "evidence_hash": source_hash,
+            }
         ],
         "actor_ref": "actor-001",
         "reason_code": "operator-confirmed",
         "approval_tier": "operator",
         "approval_ref": "approval-001",
-        "confirmed_via_exact_ref": f"exact-{namespace}-primary",
+        "confirmed_via_exact_ref": f"exact-{namespace}-{project_id}-primary",
         "confirmed_canonical_revision": 3,
     }
     values.update(overrides)
@@ -77,9 +85,11 @@ def test_valid_aufmass_exact_lookup_succeeds() -> None:
     payload = result["payload"]
 
     assert result["namespace"] == "aufmass"
+    assert result["project_id"] == "aufmass"
     assert payload["namespace"] == "aufmass"
+    assert payload["project_id"] == "aufmass"
     assert payload["authoritative"] is True
-    assert payload["canonical_ref"] == "canon-aufmass-primary"
+    assert payload["canonical_ref"] == "canon-aufmass-aufmass-primary"
     assert payload["canonical_revision"] == 3
     assert payload["provenance_refs"][0]["kind"] == "exact_source"
     assert payload["source_kind"] == "canonical_sqlite"
@@ -102,8 +112,8 @@ def test_wildcard_namespace_access_fails_closed() -> None:
 
 def test_semantic_and_graph_results_are_structurally_non_authoritative() -> None:
     gw = gateway("aufmass")
-    semantic = gw.search_semantic(namespace="aufmass", query="primary")
-    graph = gw.query_code(namespace="aufmass", query="primary")
+    semantic = gw.search_semantic(namespace="aufmass", project_id="aufmass", query="primary")
+    graph = gw.query_code(namespace="aufmass", project_id="aufmass", query="primary")
 
     semantic_result = semantic["payload"]["results"][0]
     graph_result = graph["payload"]["results"][0]
@@ -125,7 +135,7 @@ def test_semantic_backed_proposal_without_exact_confirmation_fails() -> None:
     )
 
     with pytest.raises(MemoryGatewayPolicyError) as excinfo:
-        gateway("aufmass").propose_patch(namespace="aufmass", proposal=candidate)
+        gateway("aufmass").propose_patch(namespace="aufmass", project_id="aufmass", proposal=candidate)
 
     assert excinfo.value.reason_code == SEMANTIC_RESULT_NOT_CANON_CONFIRMED
 
@@ -139,7 +149,7 @@ def test_graph_backed_proposal_without_exact_confirmation_fails() -> None:
     )
 
     with pytest.raises(MemoryGatewayPolicyError) as excinfo:
-        gateway("aufmass").propose_patch(namespace="aufmass", proposal=candidate)
+        gateway("aufmass").propose_patch(namespace="aufmass", project_id="aufmass", proposal=candidate)
 
     assert excinfo.value.reason_code == GRAPH_RESULT_NOT_CANON_CONFIRMED
 
@@ -157,7 +167,7 @@ def test_stale_index_backed_proposal_fails() -> None:
     )
 
     with pytest.raises(MemoryGatewayPolicyError) as excinfo:
-        gateway("bauclock").propose_patch(namespace="bauclock", proposal=candidate)
+        gateway("bauclock").propose_patch(namespace="bauclock", project_id="bauclock", proposal=candidate)
 
     assert excinfo.value.reason_code == STALE_INDEX_RESULT_NOT_PATCH_ELIGIBLE
 
@@ -166,7 +176,7 @@ def test_exact_confirmation_at_wrong_canonical_revision_fails() -> None:
     candidate = proposal(confirmed_canonical_revision=2)
 
     with pytest.raises(MemoryGatewayPolicyError) as excinfo:
-        gateway("aufmass").propose_patch(namespace="aufmass", proposal=candidate)
+        gateway("aufmass").propose_patch(namespace="aufmass", project_id="aufmass", proposal=candidate)
 
     assert excinfo.value.reason_code == EXACT_CONFIRMATION_REVISION_MISMATCH
 
@@ -183,14 +193,14 @@ def test_fabricated_exact_confirmation_is_rejected() -> None:
     )
 
     with pytest.raises(MemoryGatewayPolicyError) as excinfo:
-        gateway("aufmass").propose_patch(namespace="aufmass", proposal=candidate)
+        gateway("aufmass").propose_patch(namespace="aufmass", project_id="aufmass", proposal=candidate)
 
     assert excinfo.value.reason_code == "EXACT_CONFIRMATION_NOT_CANONICAL"
 
 
 def test_genuine_current_exact_confirmation_succeeds() -> None:
     gw = gateway("aufmass")
-    exact = gw.lookup_exact(namespace="aufmass", key="primary_fact")["payload"]
+    exact = gw.lookup_exact(namespace="aufmass", project_id="aufmass", key="primary_fact")["payload"]
     exact_ref = exact["provenance_refs"][0]
     candidate = proposal(
         source_evidence_hash=exact_ref["evidence_hash"],
@@ -199,7 +209,7 @@ def test_genuine_current_exact_confirmation_succeeds() -> None:
         confirmed_canonical_revision=exact["canonical_revision"],
     )
 
-    result = gw.propose_patch(namespace="aufmass", proposal=candidate)
+    result = gw.propose_patch(namespace="aufmass", project_id="aufmass", proposal=candidate)
 
     assert result["payload"]["proposal_event"]["status"] == "ACCEPTED"
 
@@ -212,9 +222,75 @@ def test_aufmass_conflict_query_excludes_bauclock_conflicts() -> None:
     )
     gw = MemoryGateway(capability_token(namespaces=("aufmass", "bauclock")), patch_registry=patch_registry)
 
-    result = gw.get_conflicts(namespace="aufmass")
+    result = gw.get_conflicts(namespace="aufmass", project_id="aufmass")
 
     assert result["payload"]["conflicts"] == []
+
+
+def test_aufmass_project_a_cannot_read_project_b_scoped_state() -> None:
+    patch_registry = MemoryPatchProposalRegistry()
+    project_b_proposal = proposal(
+        namespace="aufmass",
+        project_id="project-b",
+        proposed_value={"state": "blocked"},
+        approval_ref="approval-b",
+    )
+    patch_registry.propose(project_b_proposal)
+    patch_registry.propose(
+        proposal(
+            namespace="aufmass",
+            project_id="project-b",
+            proposed_value={"state": "changed"},
+            approval_ref="approval-b2",
+        )
+    )
+    override_registry = MemoryOverrideRegistry()
+    override = override_registry.propose_override(
+        {
+            "namespace": "aufmass",
+            "project_id": "project-b",
+            "object_id": "object-001",
+            "normalized_target": "primary_fact",
+            "canonical_ref": "canon-aufmass-project-b-primary",
+            "canonical_value": {"state": "ready-project-b"},
+            "override_value": {"state": "blocked"},
+            "actor_ref": "actor-001",
+            "reason_code": "operator-override",
+            "evidence_refs": [
+                {"ref": "exact-ref-001", "kind": "exact_source", "evidence_hash": "0" * 64}
+            ],
+        }
+    )
+    gw = MemoryGateway(
+        capability_token(namespaces=("aufmass",)),
+        patch_registry=patch_registry,
+        override_registry=override_registry,
+    )
+    gw.propose_patch(namespace="aufmass", project_id="project-b", proposal=project_b_proposal)
+
+    project_a_exact = gw.lookup_exact(namespace="aufmass", project_id="project-a", key="primary_fact")
+    project_b_exact = gw.lookup_exact(namespace="aufmass", project_id="project-b", key="primary_fact")
+
+    assert project_a_exact["payload"]["canonical_ref"] == "canon-aufmass-project-a-primary"
+    assert project_b_exact["payload"]["canonical_ref"] == "canon-aufmass-project-b-primary"
+    assert gw.get_conflicts(namespace="aufmass", project_id="project-a")["payload"]["conflicts"] == []
+    assert (
+        gw.get_override_history(
+            namespace="aufmass",
+            project_id="project-a",
+            override_ref=str(override["override_ref"]),
+        )["payload"]["events"]
+        == []
+    )
+    assert gw.get_audit_log(namespace="aufmass", project_id="project-a")["payload"]["events"] == []
+    assert (
+        gw.get_memory_index_freshness(namespace="aufmass", project_id="project-a")["payload"]["mempalace"][
+            "source_snapshot_id"
+        ]
+        != gw.get_memory_index_freshness(namespace="aufmass", project_id="project-b")["payload"]["mempalace"][
+            "source_snapshot_id"
+        ]
+    )
 
 
 def test_conflict_and_override_queries_return_distinct_event_classes() -> None:
@@ -244,8 +320,12 @@ def test_conflict_and_override_queries_return_distinct_event_classes() -> None:
         override_registry=override_registry,
     )
 
-    conflicts = gw.get_conflicts(namespace="aufmass")["payload"]
-    history = gw.get_override_history(namespace="aufmass", override_ref=str(override["override_ref"]))["payload"]
+    conflicts = gw.get_conflicts(namespace="aufmass", project_id="aufmass")["payload"]
+    history = gw.get_override_history(
+        namespace="aufmass",
+        project_id="aufmass",
+        override_ref=str(override["override_ref"]),
+    )["payload"]
 
     assert conflicts["event_class"] == "source_value_conflict"
     assert conflicts["conflicts"][0]["conflict_ref"].startswith("proposal-conflict-")
@@ -255,8 +335,8 @@ def test_conflict_and_override_queries_return_distinct_event_classes() -> None:
 
 def test_freshness_fields_are_mandatory_and_deterministic() -> None:
     gw = gateway("aufmass")
-    memory = gw.get_memory_index_freshness(namespace="aufmass")["payload"]
-    graph = gw.get_graph_index_freshness(namespace="aufmass")["payload"]["graphify"]
+    memory = gw.get_memory_index_freshness(namespace="aufmass", project_id="aufmass")["payload"]
+    graph = gw.get_graph_index_freshness(namespace="aufmass", project_id="aufmass")["payload"]["graphify"]
 
     assert set(graph) == {
         "indexed_repo_commit",
@@ -264,6 +344,7 @@ def test_freshness_fields_are_mandatory_and_deterministic() -> None:
         "indexed_at",
         "stale",
         "index_namespace",
+        "project_id",
     }
     assert set(memory["mempalace"]) == {
         "indexed_canonical_revision",
@@ -272,27 +353,28 @@ def test_freshness_fields_are_mandatory_and_deterministic() -> None:
         "indexed_at",
         "stale",
         "index_namespace",
+        "project_id",
     }
-    assert set(memory["canonical_sqlite"]) == {"current_canonical_revision"}
+    assert set(memory["canonical_sqlite"]) == {"current_canonical_revision", "project_id"}
     assert json.dumps(memory, sort_keys=True) == json.dumps(memory, sort_keys=True)
 
 
 def test_direct_storage_api_object_cannot_escape_gateway_schema() -> None:
     with pytest.raises(MemoryGatewayPolicyError) as excinfo:
-        gateway("aufmass").lookup_exact(namespace="aufmass", key="/tmp/private.db")
+        gateway("aufmass").lookup_exact(namespace="aufmass", project_id="aufmass", key="/tmp/private.db")
 
     assert excinfo.value.reason_code == "UNSAFE_PUBLIC_PAYLOAD"
 
 
 def test_no_private_looking_strings_or_paths_in_public_reports() -> None:
     gw = gateway("aufmass")
-    gw.propose_patch(namespace="aufmass", proposal=proposal())
+    gw.propose_patch(namespace="aufmass", project_id="aufmass", proposal=proposal())
 
     reports = [
-        gw.lookup_exact(namespace="aufmass", key="primary_fact"),
-        gw.search_semantic(namespace="aufmass", query="primary"),
-        gw.query_code(namespace="aufmass", query="primary"),
-        gw.get_audit_log(namespace="aufmass"),
+        gw.lookup_exact(namespace="aufmass", project_id="aufmass", key="primary_fact"),
+        gw.search_semantic(namespace="aufmass", project_id="aufmass", query="primary"),
+        gw.query_code(namespace="aufmass", project_id="aufmass", query="primary"),
+        gw.get_audit_log(namespace="aufmass", project_id="aufmass"),
     ]
     serialized = json.dumps(reports, sort_keys=True).lower()
 
