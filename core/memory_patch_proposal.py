@@ -112,6 +112,7 @@ class MemoryPatchProposalRegistry:
 
     def __init__(self) -> None:
         self._events_by_dedupe: dict[str, dict[str, object]] = {}
+        self._payload_hash_by_dedupe: dict[str, str] = {}
         self._payload_hash_by_idempotency: dict[str, str] = {}
         self._event_by_idempotency: dict[str, dict[str, object]] = {}
         self._accepted_by_target: dict[tuple[str, str, str, str, str, str], dict[str, object]] = {}
@@ -132,9 +133,26 @@ class MemoryPatchProposalRegistry:
         dedupe_key = str(normalized["dedupe_key"])
         existing_for_dedupe = self._events_by_dedupe.get(dedupe_key)
         if existing_for_dedupe is not None:
+            if self._payload_hash_by_dedupe.get(dedupe_key) == payload_hash:
+                self._payload_hash_by_idempotency[idempotency_key] = payload_hash
+                self._event_by_idempotency[idempotency_key] = existing_for_dedupe
+                return deepcopy(existing_for_dedupe)
+            conflict = self._record_conflict(normalized, existing_for_dedupe)
+            result = PatchProposalResult(
+                schema=PATCH_PROPOSAL_EVENT_SCHEMA,
+                status="REVIEW_REQUIRED",
+                event_ref=str(conflict["event_ref"]),
+                canonical_ref=None,
+                dedupe_key=dedupe_key,
+                idempotency_key=idempotency_key,
+                conflict_ref=str(conflict["conflict_ref"]),
+                approval_ref=str(normalized["approval_ref"]),
+                confirmed_canonical_revision=int(normalized["confirmed_canonical_revision"]),
+            )
+            event = asdict(result)
             self._payload_hash_by_idempotency[idempotency_key] = payload_hash
-            self._event_by_idempotency[idempotency_key] = existing_for_dedupe
-            return deepcopy(existing_for_dedupe)
+            self._event_by_idempotency[idempotency_key] = event
+            return deepcopy(event)
 
         target_key = _target_key(normalized)
         existing_target = self._accepted_by_target.get(target_key)
@@ -153,12 +171,14 @@ class MemoryPatchProposalRegistry:
             )
             event = asdict(result)
             self._events_by_dedupe[dedupe_key] = event
+            self._payload_hash_by_dedupe[dedupe_key] = payload_hash
             self._payload_hash_by_idempotency[idempotency_key] = payload_hash
             self._event_by_idempotency[idempotency_key] = event
             return deepcopy(event)
 
         event = self._record_acceptance(normalized)
         self._events_by_dedupe[dedupe_key] = event
+        self._payload_hash_by_dedupe[dedupe_key] = payload_hash
         self._payload_hash_by_idempotency[idempotency_key] = payload_hash
         self._event_by_idempotency[idempotency_key] = event
         self._accepted_by_target[target_key] = event

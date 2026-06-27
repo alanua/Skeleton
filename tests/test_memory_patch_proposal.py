@@ -53,6 +53,19 @@ def test_exact_duplicate_returns_existing_ref() -> None:
     assert duplicate["canonical_ref"] == first["canonical_ref"]
 
 
+def test_same_evidence_and_target_with_changed_value_is_not_exact_duplicate() -> None:
+    registry = MemoryPatchProposalRegistry()
+    first = registry.propose(proposal())
+    changed = proposal(proposed_value={"state": "changed"}, approval_ref="approval-002")
+
+    result = registry.propose(changed)
+
+    assert result["status"] == "REVIEW_REQUIRED"
+    assert result["event_ref"] != first["event_ref"]
+    assert result["canonical_ref"] is None
+    assert result["conflict_ref"] == registry.get_conflicts()[0]["conflict_ref"]
+
+
 def test_same_idempotency_key_with_changed_payload_fails() -> None:
     registry = MemoryPatchProposalRegistry()
     first_payload = proposal()

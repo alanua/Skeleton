@@ -21,6 +21,7 @@ OVERRIDE_EVENT_TYPES = (
     "OVERRIDE_SUPERSESSION",
     "OVERRIDE_REVOCATION",
 )
+_TERMINAL_OVERRIDE_EVENTS = {"OVERRIDE_SUPERSESSION", "OVERRIDE_REVOCATION"}
 
 
 @dataclass(frozen=True)
@@ -77,6 +78,7 @@ class MemoryOverrideRegistry:
         approval_ref: str,
         evidence_refs: list[Mapping[str, Any]],
     ) -> dict[str, object]:
+        self._reject_terminal_transition(override_ref)
         proposal = self._require_latest_payload(override_ref)
         actor_ref = _safe_token(actor_ref, "actor_ref")
         approval_ref = _safe_token(approval_ref, "approval_ref")
@@ -91,6 +93,7 @@ class MemoryOverrideRegistry:
         )
 
     def activate_override(self, override_ref: str) -> dict[str, object]:
+        self._reject_terminal_transition(override_ref)
         approval = self._latest_event(override_ref, "OVERRIDE_APPROVAL")
         if approval is None:
             raise MemoryOverrideValidationError("override activation requires approval")
@@ -118,9 +121,7 @@ class MemoryOverrideRegistry:
         actor_ref: str,
         approval_ref: str,
     ) -> dict[str, object]:
-        active = self._latest_event(override_ref, "OVERRIDE_ACTIVATION")
-        if active is None:
-            raise MemoryOverrideValidationError("active override required for supersession")
+        active = self._require_active_event(override_ref, "supersession")
         payload = self._require_latest_payload(override_ref)
         event = self._append_event(
             "OVERRIDE_SUPERSESSION",
@@ -134,9 +135,7 @@ class MemoryOverrideRegistry:
         return deepcopy(event)
 
     def revoke_override(self, override_ref: str, *, actor_ref: str, approval_ref: str) -> dict[str, object]:
-        active = self._latest_event(override_ref, "OVERRIDE_ACTIVATION")
-        if active is None:
-            raise MemoryOverrideValidationError("active override required for revocation")
+        active = self._require_active_event(override_ref, "revocation")
         payload = self._require_latest_payload(override_ref)
         event = self._append_event(
             "OVERRIDE_REVOCATION",
@@ -149,7 +148,9 @@ class MemoryOverrideRegistry:
         self._active_by_target.pop(_target_key(payload), None)
         return deepcopy(event)
 
-    def get_active_fact(self, *, namespace: str, project_id: str, object_id: str, normalized_target: str) -> dict[str, object] | None:
+    def get_active_fact(
+        self, *, namespace: str, project_id: str, object_id: str, normalized_target: str
+    ) -> dict[str, object] | None:
         key = (
             _safe_token(namespace, "namespace"),
             _safe_token(project_id, "project_id"),
@@ -175,7 +176,7 @@ class MemoryOverrideRegistry:
 
     def get_override_history(self, override_ref: str) -> list[dict[str, object]]:
         override_ref = _safe_token(override_ref, "override_ref")
-        return deepcopy(self._events_by_override.get(override_ref, []))
+        return [_public_event(event) for event in self._events_by_override.get(override_ref, [])]
 
     def _append_event(
         self,
@@ -208,9 +209,7 @@ class MemoryOverrideRegistry:
         event_dict = asdict(event)
         event_dict["_payload"] = deepcopy(dict(payload))
         self._events_by_override.setdefault(event.override_ref, []).append(event_dict)
-        public_event = deepcopy(event_dict)
-        public_event.pop("_payload", None)
-        return public_event
+        return _public_event(event_dict)
 
     def _require_latest_payload(self, override_ref: str) -> dict[str, Any]:
         override_ref = _safe_token(override_ref, "override_ref")
@@ -225,6 +224,27 @@ class MemoryOverrideRegistry:
             if event["event_type"] == event_type:
                 return event
         return None
+
+    def _latest_lifecycle_event(self, override_ref: str) -> dict[str, object] | None:
+        override_ref = _safe_token(override_ref, "override_ref")
+        history = self._events_by_override.get(override_ref, [])
+        return history[-1] if history else None
+
+    def _reject_terminal_transition(self, override_ref: str) -> None:
+        latest = self._latest_lifecycle_event(override_ref)
+        if latest is not None and latest["event_type"] in _TERMINAL_OVERRIDE_EVENTS:
+            raise MemoryOverrideValidationError("override lifecycle is already terminal")
+
+    def _require_active_event(self, override_ref: str, transition: str) -> dict[str, object]:
+        self._reject_terminal_transition(override_ref)
+        active = self._latest_event(override_ref, "OVERRIDE_ACTIVATION")
+        if active is None:
+            raise MemoryOverrideValidationError(f"active override required for {transition}")
+        payload = self._require_latest_payload(override_ref)
+        current_active = self._active_by_target.get(_target_key(payload))
+        if current_active is None or current_active["event_ref"] != active["event_ref"]:
+            raise MemoryOverrideValidationError(f"active override required for {transition}")
+        return active
 
 
 def _validate_override_payload(
@@ -249,7 +269,15 @@ def _validate_override_payload(
     if required - set(proposal):
         raise MemoryOverrideValidationError("override proposal missing required field")
     normalized = dict(proposal)
-    for key in ("namespace", "project_id", "object_id", "normalized_target", "canonical_ref", "actor_ref", "reason_code"):
+    for key in (
+        "namespace",
+        "project_id",
+        "object_id",
+        "normalized_target",
+        "canonical_ref",
+        "actor_ref",
+        "reason_code",
+    ):
         normalized[key] = _safe_token(normalized[key], key)
     if "approval_ref" in normalized:
         normalized["approval_ref"] = _safe_token(normalized["approval_ref"], "approval_ref")
@@ -280,3 +308,9 @@ def _target_key(payload: Mapping[str, Any]) -> tuple[str, str, str, str]:
         str(payload["object_id"]),
         str(payload["normalized_target"]),
     )
+
+
+def _public_event(event: Mapping[str, object]) -> dict[str, object]:
+    public_event = deepcopy(dict(event))
+    public_event.pop("_payload", None)
+    return public_event

@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from core.memory_override import MemoryOverrideRegistry, OVERRIDE_EVENT_TYPES
+import pytest
+
+from core.memory_override import (
+    MemoryOverrideRegistry,
+    MemoryOverrideValidationError,
+    OVERRIDE_EVENT_TYPES,
+)
 from core.memory_patch_proposal import stable_hash
 
 
@@ -29,6 +35,18 @@ def override_payload(**overrides: object) -> dict[str, object]:
     }
     values.update(overrides)
     return values
+
+
+def activate_override(registry: MemoryOverrideRegistry, **overrides: object) -> dict[str, object]:
+    proposed = registry.propose_override(override_payload(**overrides))
+    registry.approve_override(
+        str(proposed["override_ref"]),
+        actor_ref="operator-001",
+        approval_ref="approval-override-001",
+        evidence_refs=evidence_refs(),
+    )
+    registry.activate_override(str(proposed["override_ref"]))
+    return proposed
 
 
 def test_override_lifecycle_preserves_old_value_and_audit_chain() -> None:
@@ -64,14 +82,7 @@ def test_override_lifecycle_preserves_old_value_and_audit_chain() -> None:
 
 def test_override_history_and_conflict_queries_remain_distinct() -> None:
     registry = MemoryOverrideRegistry()
-    proposed = registry.propose_override(override_payload())
-    registry.approve_override(
-        str(proposed["override_ref"]),
-        actor_ref="operator-001",
-        approval_ref="approval-override-001",
-        evidence_refs=evidence_refs(),
-    )
-    registry.activate_override(str(proposed["override_ref"]))
+    proposed = activate_override(registry)
 
     assert registry.get_conflicts() == []
     assert len(registry.get_override_history(str(proposed["override_ref"]))) == 3
@@ -79,14 +90,7 @@ def test_override_history_and_conflict_queries_remain_distinct() -> None:
 
 def test_override_supersession_and_revocation_are_ordered_lifecycle_events() -> None:
     registry = MemoryOverrideRegistry()
-    proposed = registry.propose_override(override_payload())
-    registry.approve_override(
-        str(proposed["override_ref"]),
-        actor_ref="operator-001",
-        approval_ref="approval-override-001",
-        evidence_refs=evidence_refs(),
-    )
-    registry.activate_override(str(proposed["override_ref"]))
+    proposed = activate_override(registry)
     registry.supersede_override(
         str(proposed["override_ref"]),
         replacement_override_ref="override-replacement-001",
@@ -94,14 +98,7 @@ def test_override_supersession_and_revocation_are_ordered_lifecycle_events() -> 
         approval_ref="approval-override-002",
     )
 
-    second = registry.propose_override(override_payload(normalized_target="synthetic-target-b"))
-    registry.approve_override(
-        str(second["override_ref"]),
-        actor_ref="operator-001",
-        approval_ref="approval-override-003",
-        evidence_refs=evidence_refs(),
-    )
-    registry.activate_override(str(second["override_ref"]))
+    second = activate_override(registry, normalized_target="synthetic-target-b")
     registry.revoke_override(
         str(second["override_ref"]),
         actor_ref="operator-001",
@@ -125,3 +122,80 @@ def test_override_supersession_and_revocation_are_ordered_lifecycle_events() -> 
         "OVERRIDE_SUPERSESSION",
         "OVERRIDE_REVOCATION",
     }
+
+
+def test_superseded_override_cannot_be_superseded_or_revoked_again() -> None:
+    registry = MemoryOverrideRegistry()
+    proposed = activate_override(registry)
+    override_ref = str(proposed["override_ref"])
+    registry.supersede_override(
+        override_ref,
+        replacement_override_ref="override-replacement-001",
+        actor_ref="operator-001",
+        approval_ref="approval-override-002",
+    )
+
+    with pytest.raises(MemoryOverrideValidationError):
+        registry.supersede_override(
+            override_ref,
+            replacement_override_ref="override-replacement-002",
+            actor_ref="operator-001",
+            approval_ref="approval-override-003",
+        )
+    with pytest.raises(MemoryOverrideValidationError):
+        registry.revoke_override(
+            override_ref,
+            actor_ref="operator-001",
+            approval_ref="approval-override-004",
+        )
+
+
+def test_revoked_override_cannot_be_revoked_or_superseded_again() -> None:
+    registry = MemoryOverrideRegistry()
+    proposed = activate_override(registry)
+    override_ref = str(proposed["override_ref"])
+    registry.revoke_override(
+        override_ref,
+        actor_ref="operator-001",
+        approval_ref="approval-override-002",
+    )
+
+    with pytest.raises(MemoryOverrideValidationError):
+        registry.revoke_override(
+            override_ref,
+            actor_ref="operator-001",
+            approval_ref="approval-override-003",
+        )
+    with pytest.raises(MemoryOverrideValidationError):
+        registry.supersede_override(
+            override_ref,
+            replacement_override_ref="override-replacement-001",
+            actor_ref="operator-001",
+            approval_ref="approval-override-004",
+        )
+
+
+def test_override_history_contains_only_public_event_fields() -> None:
+    registry = MemoryOverrideRegistry()
+    proposed = activate_override(registry)
+
+    history = registry.get_override_history(str(proposed["override_ref"]))
+
+    assert history
+    for event in history:
+        assert set(event) == {
+            "schema",
+            "event_type",
+            "override_ref",
+            "event_ref",
+            "namespace",
+            "project_id",
+            "object_id",
+            "normalized_target",
+            "actor_ref",
+            "approval_ref",
+            "evidence_hash",
+            "supersedes_event_ref",
+            "canonical_ref",
+        }
+        assert not any(field.startswith("_") for field in event)
