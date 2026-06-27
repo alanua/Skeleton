@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.private_project_memory.patch_proposal.schema.json",
+  "title": "Private Project Memory Patch Proposal",
+  "type": "object",
+  "required": [
+    "namespace",
+    "project_id",
+    "object_id",
+    "entity_scope",
+    "fact_type",
+    "normalized_target",
+    "source_evidence_hash",
+    "dedupe_key",
+    "idempotency_key",
+    "proposed_value",
+    "provenance_refs",
+    "actor_ref",
+    "reason_code",
+    "approval_tier",
+    "confirmed_via_exact_ref",
+    "confirmed_canonical_revision"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "schema": {"const": "skeleton.private_project_memory.patch_proposal.v1"},
+    "namespace": {"$ref": "#/$defs/safe_token"},
+    "project_id": {"$ref": "#/$defs/safe_token"},
+    "object_id": {"$ref": "#/$defs/safe_token"},
+    "entity_scope": {"$ref": "#/$defs/safe_token"},
+    "fact_type": {"$ref": "#/$defs/safe_token"},
+    "normalized_target": {"$ref": "#/$defs/safe_token"},
+    "source_evidence_hash": {"$ref": "#/$defs/sha256"},
+    "dedupe_key": {"type": "string", "pattern": "^memory-dedupe:v1:[0-9a-f]{64}$"},
+    "idempotency_key": {"type": "string", "pattern": "^memory-idempotency:v1:[0-9a-f]{64}$"},
+    "proposed_value": {},
+    "provenance_refs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["ref", "kind", "evidence_hash"],
+        "additionalProperties": false,
+        "properties": {
+          "ref": {"$ref": "#/$defs/safe_token"},
+          "kind": {"type": "string", "enum": ["exact_source", "semantic_only"]},
+          "evidence_hash": {"$ref": "#/$defs/sha256"}
+        }
+      }
+    },
+    "actor_ref": {"$ref": "#/$defs/safe_token"},
+    "reason_code": {"$ref": "#/$defs/safe_token"},
+    "approval_tier": {"$ref": "#/$defs/safe_token"},
+    "approval_ref": {"$ref": "#/$defs/safe_token"},
+    "confirmed_via_exact_ref": {"$ref": "#/$defs/safe_token"},
+    "confirmed_canonical_revision": {"type": "integer", "minimum": 0}
+  },
+  "$defs": {
+    "safe_token": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

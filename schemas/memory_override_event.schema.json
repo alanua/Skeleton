@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.private_project_memory.override_event.schema.json",
+  "title": "Private Project Memory Override Event",
+  "type": "object",
+  "required": [
+    "schema",
+    "event_type",
+    "override_ref",
+    "event_ref",
+    "namespace",
+    "project_id",
+    "object_id",
+    "normalized_target",
+    "actor_ref",
+    "canonical_ref"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "skeleton.private_project_memory.override_event.v1"},
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "OVERRIDE_PROPOSAL",
+        "OVERRIDE_APPROVAL",
+        "OVERRIDE_ACTIVATION",
+        "OVERRIDE_SUPERSESSION",
+        "OVERRIDE_REVOCATION"
+      ]
+    },
+    "override_ref": {"$ref": "#/$defs/safe_token"},
+    "event_ref": {"$ref": "#/$defs/safe_token"},
+    "namespace": {"$ref": "#/$defs/safe_token"},
+    "project_id": {"$ref": "#/$defs/safe_token"},
+    "object_id": {"$ref": "#/$defs/safe_token"},
+    "normalized_target": {"$ref": "#/$defs/safe_token"},
+    "actor_ref": {"$ref": "#/$defs/safe_token"},
+    "approval_ref": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},
+    "evidence_hash": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "supersedes_event_ref": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},
+    "canonical_ref": {"$ref": "#/$defs/safe_token"}
+  },
+  "$defs": {
+    "safe_token": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+    }
+  }
+}

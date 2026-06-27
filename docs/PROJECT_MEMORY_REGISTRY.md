@@ -88,6 +88,63 @@ aggregate registry foundation. Both are intentionally public-safe foundations:
 they can report aggregate status, but they do not expose real memory content or
 wire live runtime services.
 
+## Canonical Patch Proposals
+
+Canonical project memory writes must enter through an explicit patch-proposal
+contract before any canonical fact is accepted. The proposal shape is documented
+by `schemas/memory_patch_proposal.schema.json` and implemented in
+`core/memory_patch_proposal.py`.
+
+Every proposal must carry namespace-scoped identity fields, exact evidence,
+operator approval metadata, and the canonical revision observed before the
+write:
+
+- `namespace`
+- `project_id`
+- `object_id`
+- `entity_scope`
+- `fact_type`
+- `normalized_target`
+- `source_evidence_hash`
+- `dedupe_key`
+- `idempotency_key`
+- `proposed_value`
+- `provenance_refs`
+- `actor_ref`
+- `reason_code`
+- `approval_tier`
+- `confirmed_via_exact_ref`
+- `confirmed_canonical_revision`
+
+The dedupe key is never trusted from caller text. The server recomputes it from
+`namespace`, `project_id`, `object_id`, `entity_scope`, `fact_type`,
+`normalized_target`, and `source_evidence_hash`, then fails closed if the caller
+key differs or is malformed. Idempotency keys must be explicit and well-formed;
+reusing an idempotency key with a different payload is rejected.
+
+Exact duplicate proposals return the existing accepted event and canonical ref.
+The same target with different evidence or value becomes `REVIEW_REQUIRED`.
+Semantic-only evidence cannot authorize a canonical write. Accepted events record
+the explicit approval ref and the confirmed canonical revision.
+
+## As-Built Overrides
+
+Operator overrides are not ordinary patch conflicts. They use the separate event
+family documented by `schemas/memory_override_event.schema.json` and implemented
+in `core/memory_override.py`:
+
+- `OVERRIDE_PROPOSAL`
+- `OVERRIDE_APPROVAL`
+- `OVERRIDE_ACTIVATION`
+- `OVERRIDE_SUPERSESSION`
+- `OVERRIDE_REVOCATION`
+
+An active fact can point at an approved override activation event while the
+previous canonical value and canonical ref remain intact in the audit chain.
+Override activation requires explicit operator approval and exact evidence refs.
+Approved override history is returned by `get_override_history`; unresolved
+ordinary proposal conflicts are returned separately by `get_conflicts`.
+
 ## Relationship To Graph Memory
 
 `docs/GRAPH_MEMORY.md` defines the planned Graphify layer as private derived
