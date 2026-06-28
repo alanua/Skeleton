@@ -86,6 +86,7 @@ SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME = "sync_telegram_callback_poller_runtime"
 ENSURE_TELEGRAM_CALLBACK_LOCAL_CONFIG = "ensure_telegram_callback_local_config"
 CHECK_PROJECT_CHECKOUT = "check_project_checkout"
 CHECK_SKELETON_FRESHNESS = "check_skeleton_freshness"
+RUNTIME_SYNC_MAIN = "runtime_sync_main"
 ENSURE_PROJECT_CHECKOUT = "ensure_project_checkout"
 VALIDATE_PR_BRANCH = "validate_pr_branch"
 PREFLIGHT_PR_REFRESH = "preflight_pr_refresh"
@@ -113,6 +114,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         ENSURE_TELEGRAM_CALLBACK_LOCAL_CONFIG,
         CHECK_PROJECT_CHECKOUT,
         CHECK_SKELETON_FRESHNESS,
+        RUNTIME_SYNC_MAIN,
         ENSURE_PROJECT_CHECKOUT,
         VALIDATE_PR_BRANCH,
         PREFLIGHT_PR_REFRESH,
@@ -5212,7 +5214,6 @@ def _registered_skeleton_checkout(
     status_lines = [
         f"target_project={target_project}",
         f"target_repository={project['repo']}",
-        f"checkout_path={checkout_path_text}",
     ]
     if any(part == ".." for part in checkout_path.parts):
         return None, _maintenance_report(
@@ -5245,6 +5246,154 @@ def _run_freshness_command(
         status_lines.append(f"step={step} status=done")
         return output.strip(), None
     return None, f"step={step} status=failed exit_code={code}"
+
+
+def _skeleton_expected_head_sha(body: str) -> tuple[str | None, str | None]:
+    metadata = (body or "").split("```task", 1)[0]
+    expected_head_sha = _body_field(metadata, "Expected Head SHA")
+    if expected_head_sha is None:
+        return None, None
+    if _HEAD_SHA_RE.fullmatch(expected_head_sha) is None:
+        return None, "invalid_expected_head_sha"
+    return expected_head_sha.lower(), None
+
+
+def _verify_skeleton_checkout_present(
+    task_id: str, registered_checkout: RegisteredProjectCheckout
+) -> str | None:
+    checkout_path = registered_checkout.checkout_path
+    status_lines = registered_checkout.status_lines
+    if not checkout_path.exists():
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=checkout_path_missing"],
+            "not_met",
+        )
+    if not (checkout_path / ".git").exists():
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=checkout_git_missing"],
+            "not_met",
+        )
+    return None
+
+
+def _read_skeleton_origin(
+    task_id: str,
+    registered_checkout: RegisteredProjectCheckout,
+    status_lines: list[str],
+) -> str | None:
+    checkout_path = registered_checkout.checkout_path
+    origin_url, failure = _run_freshness_command(
+        ["git", "-C", str(checkout_path), "remote", "get-url", "origin"],
+        status_lines,
+        "read_origin_remote",
+    )
+    if failure is not None or origin_url is None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, failure or "reason=origin_read_failed"],
+            "not_met",
+        )
+    if not _remote_url_matches_project_repo(origin_url, registered_checkout.repo):
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "step=verify_origin_remote status=failed"],
+            "not_met",
+        )
+    status_lines.append("step=verify_origin_remote status=done")
+    return None
+
+
+def _read_skeleton_clean_state(
+    task_id: str, checkout_path: Path, status_lines: list[str]
+) -> str | None:
+    status_output, failure = _run_freshness_command(
+        ["git", "-C", str(checkout_path), "status", "--porcelain"],
+        status_lines,
+        "read_worktree_status",
+    )
+    if failure is not None or status_output is None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, failure or "reason=worktree_status_read_failed"],
+            "not_met",
+        )
+    if status_output.strip():
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=checkout_dirty"],
+            "not_met",
+        )
+    return None
+
+
+def _read_skeleton_current_branch(
+    task_id: str, checkout_path: Path, status_lines: list[str]
+) -> str | None:
+    current_branch, failure = _run_freshness_command(
+        ["git", "-C", str(checkout_path), "symbolic-ref", "--short", "HEAD"],
+        status_lines,
+        "read_current_branch",
+    )
+    if failure is not None or current_branch is None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, failure or "step=read_current_branch status=failed", "reason=detached_head"],
+            "not_met",
+        )
+    if current_branch != "main":
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, f"current_branch={current_branch}", "reason=branch_not_main"],
+            "not_met",
+        )
+    status_lines.append("current_branch=main")
+    return None
+
+
+def _fetch_skeleton_origin_main(
+    task_id: str, checkout_path: Path, status_lines: list[str]
+) -> str | None:
+    _output, failure = _run_freshness_command(
+        ["git", "-C", str(checkout_path), "fetch", "--prune", "origin", "main"],
+        status_lines,
+        "fetch_origin_main",
+    )
+    if failure is not None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, failure],
+            "not_met",
+        )
+    return None
+
+
+def _read_skeleton_sha(
+    task_id: str, checkout_path: Path, ref: str, status_lines: list[str], step: str
+) -> tuple[str | None, str | None]:
+    sha, failure = _run_freshness_command(
+        ["git", "-C", str(checkout_path), "rev-parse", ref],
+        status_lines,
+        step,
+    )
+    if failure is not None or sha is None or _HEAD_SHA_RE.fullmatch(sha) is None:
+        return None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, failure or f"reason={step}_failed"],
+            "not_met",
+        )
+    return sha.lower(), None
 
 
 def _count_bounded_cli_rows(output: str) -> int:
@@ -5300,82 +5449,36 @@ def check_skeleton_freshness() -> str:
 
     checkout_path = registered_checkout.checkout_path
     status_lines = list(registered_checkout.status_lines)
-    if not checkout_path.exists():
-        return _maintenance_report(
-            "BLOCKED",
-            task_id,
-            [*status_lines, "reason=checkout_path_missing"],
-            "not_met",
-        )
-    if not (checkout_path / ".git").exists():
-        return _maintenance_report(
-            "BLOCKED",
-            task_id,
-            [*status_lines, "reason=checkout_git_missing"],
-            "not_met",
+    present_report = _verify_skeleton_checkout_present(task_id, registered_checkout)
+    if present_report is not None:
+        return present_report
+
+    origin_report = _read_skeleton_origin(task_id, registered_checkout, status_lines)
+    if origin_report is not None:
+        return origin_report
+
+    clean_report = _read_skeleton_clean_state(task_id, checkout_path, status_lines)
+    if clean_report is not None:
+        return clean_report
+
+    fetch_report = _fetch_skeleton_origin_main(task_id, checkout_path, status_lines)
+    if fetch_report is not None:
+        return fetch_report
+
+    head_sha, failure_report = _read_skeleton_sha(
+        task_id, checkout_path, "HEAD", status_lines, "read_checkout_head"
+    )
+    if failure_report is not None or head_sha is None:
+        return failure_report or _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=checkout_head_read_failed"], "not_met"
         )
 
-    command = ["git", "-C", str(checkout_path), "remote", "get-url", "origin"]
-    origin_url, failure = _run_freshness_command(
-        command, status_lines, "read_origin_remote"
+    origin_main_sha, failure_report = _read_skeleton_sha(
+        task_id, checkout_path, "origin/main", status_lines, "read_origin_main"
     )
-    if failure is not None or origin_url is None:
-        return _maintenance_report(
-            "BLOCKED",
-            task_id,
-            [*status_lines, failure or "reason=origin_read_failed"],
-            "not_met",
-        )
-    if not _remote_url_matches_project_repo(origin_url, registered_checkout.repo):
-        return _maintenance_report(
-            "BLOCKED",
-            task_id,
-            [*status_lines, "step=verify_origin_remote status=failed"],
-            "not_met",
-        )
-    status_lines.append("step=verify_origin_remote status=done")
-
-    _, failure = _run_freshness_command(
-        ["git", "-C", str(checkout_path), "fetch", "--prune", "origin", "main"],
-        status_lines,
-        "fetch_origin_main",
-    )
-    if failure is not None:
-        return _maintenance_report(
-            "BLOCKED",
-            task_id,
-            [*status_lines, failure],
-            "not_met",
-        )
-
-    head_sha, failure = _run_freshness_command(
-        ["git", "-C", str(checkout_path), "rev-parse", "HEAD"],
-        status_lines,
-        "read_checkout_head",
-    )
-    if failure is not None or head_sha is None or _HEAD_SHA_RE.fullmatch(head_sha) is None:
-        return _maintenance_report(
-            "BLOCKED",
-            task_id,
-            [*status_lines, failure or "reason=checkout_head_read_failed"],
-            "not_met",
-        )
-
-    origin_main_sha, failure = _run_freshness_command(
-        ["git", "-C", str(checkout_path), "rev-parse", "origin/main"],
-        status_lines,
-        "read_origin_main",
-    )
-    if (
-        failure is not None
-        or origin_main_sha is None
-        or _HEAD_SHA_RE.fullmatch(origin_main_sha) is None
-    ):
-        return _maintenance_report(
-            "BLOCKED",
-            task_id,
-            [*status_lines, failure or "reason=origin_main_read_failed"],
-            "not_met",
+    if failure_report is not None or origin_main_sha is None:
+        return failure_report or _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=origin_main_read_failed"], "not_met"
         )
 
     github_main_output, failure = _run_freshness_command(
@@ -5423,6 +5526,19 @@ def check_skeleton_freshness() -> str:
             [*status_lines, "reason=unclassified_sync_state"],
             "not_met",
         )
+    if sync_state in {"behind", "diverged"}:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                *status_lines,
+                f"checkout_head_sha={head_sha}",
+                f"github_main_sha={github_main_sha}",
+                f"checkout_sync_state={sync_state}",
+                f"reason=checkout_{sync_state}",
+            ],
+            "not_met",
+        )
 
     open_prs_output, failure = _run_freshness_command(
         ["gh", "pr", "list", "--repo", REPO, "--state", "open"],
@@ -5461,6 +5577,155 @@ def check_skeleton_freshness() -> str:
             "sourcepack_note=refresh_docs/NOTEBOOKLM_SOURCEPACK.md_when_sourcepack_or_notebooklm_context_changes",
             "review_note=open_prs_and_issues_may_need_rebase_retest_or_scope_review_against_current_main",
             "canon_note=old_chats_and_old_branches_are_not_canon",
+        )
+    )
+    return _maintenance_report("DONE", task_id, status_lines, "met")
+
+
+def runtime_sync_main(body: str) -> str:
+    task_id = RUNTIME_SYNC_MAIN
+    expected_head_sha, reason = _skeleton_expected_head_sha(body)
+    if reason is not None:
+        return _maintenance_report("BLOCKED", task_id, [f"reason={reason}"], "not_met")
+
+    registered_checkout, report = _registered_skeleton_checkout(task_id)
+    if report is not None:
+        return report
+    assert registered_checkout is not None
+
+    checkout_path = registered_checkout.checkout_path
+    status_lines = list(registered_checkout.status_lines)
+    if expected_head_sha is not None:
+        status_lines.append(f"expected_head_sha={expected_head_sha}")
+
+    present_report = _verify_skeleton_checkout_present(task_id, registered_checkout)
+    if present_report is not None:
+        return present_report
+
+    origin_report = _read_skeleton_origin(task_id, registered_checkout, status_lines)
+    if origin_report is not None:
+        return origin_report
+
+    branch_report = _read_skeleton_current_branch(task_id, checkout_path, status_lines)
+    if branch_report is not None:
+        return branch_report
+
+    clean_report = _read_skeleton_clean_state(task_id, checkout_path, status_lines)
+    if clean_report is not None:
+        return clean_report
+
+    fetch_report = _fetch_skeleton_origin_main(task_id, checkout_path, status_lines)
+    if fetch_report is not None:
+        return fetch_report
+
+    head_sha, failure_report = _read_skeleton_sha(
+        task_id, checkout_path, "HEAD", status_lines, "read_checkout_head"
+    )
+    if failure_report is not None or head_sha is None:
+        return failure_report or _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=checkout_head_read_failed"], "not_met"
+        )
+
+    origin_main_sha, failure_report = _read_skeleton_sha(
+        task_id, checkout_path, "origin/main", status_lines, "read_origin_main"
+    )
+    if failure_report is not None or origin_main_sha is None:
+        return failure_report or _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=origin_main_read_failed"], "not_met"
+        )
+    if expected_head_sha is not None and origin_main_sha != expected_head_sha:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                *status_lines,
+                f"github_main_sha={origin_main_sha}",
+                "reason=expected_head_sha_mismatch",
+            ],
+            "not_met",
+        )
+
+    sync_state, failure = _classify_skeleton_checkout_sync(
+        checkout_path, head_sha, origin_main_sha
+    )
+    if failure is not None or sync_state is None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, failure or "reason=unclassified_sync_state"],
+            "not_met",
+        )
+    if sync_state in {"ahead", "diverged"}:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                *status_lines,
+                f"checkout_head_sha={head_sha}",
+                f"github_main_sha={origin_main_sha}",
+                f"checkout_sync_state={sync_state}",
+                f"reason=checkout_{sync_state}",
+            ],
+            "not_met",
+        )
+    if sync_state == "behind":
+        code, _output = run_command(
+            ["git", "-C", str(checkout_path), "merge", "--ff-only", "origin/main"]
+        )
+        if code != 0:
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [*status_lines, f"step=fast_forward_main status=failed exit_code={code}"],
+                "not_met",
+            )
+        status_lines.append("step=fast_forward_main status=done")
+    elif sync_state == "equal":
+        status_lines.append("step=fast_forward_main status=not_needed")
+    else:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=unclassified_sync_state"],
+            "not_met",
+        )
+
+    final_head_sha, failure_report = _read_skeleton_sha(
+        task_id, checkout_path, "HEAD", status_lines, "read_final_head"
+    )
+    if failure_report is not None or final_head_sha is None:
+        return failure_report or _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=final_head_read_failed"], "not_met"
+        )
+    if final_head_sha != origin_main_sha:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                *status_lines,
+                f"checkout_head_sha={final_head_sha}",
+                f"github_main_sha={origin_main_sha}",
+                "reason=final_head_mismatch",
+            ],
+            "not_met",
+        )
+    if expected_head_sha is not None and final_head_sha != expected_head_sha:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                *status_lines,
+                f"checkout_head_sha={final_head_sha}",
+                "reason=expected_head_sha_mismatch",
+            ],
+            "not_met",
+        )
+
+    status_lines.extend(
+        (
+            f"checkout_head_sha={final_head_sha}",
+            f"github_main_sha={origin_main_sha}",
+            "checkout_sync_state=equal",
         )
     )
     return _maintenance_report("DONE", task_id, status_lines, "met")
@@ -6995,8 +7260,10 @@ def _issue_worktree_publish_validated_report(
         f"draft_pr={str(request.draft_pr).lower()}",
         f"allowed_files_count={len(request.allowed_files)}",
     ]
-    if request.worktree_root is not None:
-        status_lines.append(f"worktree_root={request.worktree_root}")
+    if target_project_route:
+        status_lines.append(
+            f"target_project_route={request.target_project}:{request.repository}"
+        )
     try:
         if target_project_route:
             worktree_path = _ensure_safe_target_project_issue_publish_worktree_path(
@@ -7014,10 +7281,7 @@ def _issue_worktree_publish_validated_report(
             "not_met",
         )
 
-    if explicit_recovery_route:
-        status_lines.append(f"issue_worktree_id=issue-{request.source_issue}")
-    else:
-        status_lines.append(f"issue_worktree={worktree_path}")
+    status_lines.append(f"issue_worktree_id=issue-{request.source_issue}")
     if not worktree_path.exists():
         return _maintenance_report(
             failure_status,
@@ -7426,6 +7690,8 @@ def dispatch_runtime_maintenance_task(
             return ensure_telegram_callback_local_config()
         if task_id == CHECK_SKELETON_FRESHNESS:
             return check_skeleton_freshness()
+        if task_id == RUNTIME_SYNC_MAIN:
+            return runtime_sync_main(body)
         if task_id == ENSURE_PROJECT_CHECKOUT:
             return ensure_project_checkout(body)
         if task_id == VALIDATE_PR_BRANCH:
