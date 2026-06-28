@@ -1,0 +1,45 @@
+{
+  "schema": "skeleton.home_edge.profile.v1",
+  "node_id": "home-edge-01",
+  "hostname": "home-edge-01",
+  "tailscale_ip": "100.127.35.74",
+  "controller": {
+    "host": "hetzner-agent-runner-1",
+    "tailscale_ip": "100.69.215.63"
+  },
+  "ssh": {
+    "target_user": "valertos08",
+    "user_route": "tailscale ssh valertos08@home-edge-01",
+    "privileged_route": "tailscale ssh root@home-edge-01"
+  },
+  "os": "Linux Mint 22.2 (Ubuntu noble base)",
+  "hardware": {
+    "ram": "8 GB",
+    "root_free": "about 23 GB"
+  },
+  "primary_network": {
+    "interface": "enp1s0",
+    "address": "192.168.1.54/24",
+    "gateway": "192.168.1.1",
+    "policy": "preserve_default_route"
+  },
+  "capabilities": [
+    "network_diagnostics",
+    "usb_modem_diagnostics",
+    "mikrotik_asus_work",
+    "esp_wled_build_and_flash",
+    "media_tasks",
+    "docker",
+    "ansible",
+    "python_tooling",
+    "node_tooling"
+  ],
+  "safety_boundaries": [
+    "keep_default_route_on_enp1s0_until_separately_approved",
+    "do_not_disconnect_operator_internet",
+    "do_not_flash_modem_firmware_or_modify_imei",
+    "do_not_expose_ssh_routeros_webfig_winbox_or_agent_apis_publicly",
+    "do_not_store_sim_pin_passwords_tokens_or_private_credentials",
+    "destructive_firmware_or_gateway_changes_require_separate_approval_and_rollback_evidence"
+  ]
+}
