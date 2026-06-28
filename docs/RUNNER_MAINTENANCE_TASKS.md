@@ -195,6 +195,10 @@ It reports `DONE` only when the checkout exists, `.git` exists, and origin
 matches the registered repository. Missing target metadata, unknown projects,
 unsafe paths, missing checkouts, missing `.git`, failed origin reads, and remote
 mismatches are reported as `BLOCKED`.
+Public reports include only `target_project`, `target_repository`, and
+`target_project_route=registered_checkout` for the registered checkout route;
+the registered checkout path remains internal to validation and bounded Git
+commands.
 
 `ensure_project_checkout` prepares only a missing registered project checkout and
 must include target project metadata:
@@ -223,6 +227,8 @@ matches the registered repository. It reports `BLOCKED` for missing target
 metadata, unknown projects, unsafe paths, path traversal, existing checkouts
 without `.git`, wrong remotes, clone failures, failed origin reads, and remote
 mismatches after preparation.
+Public reports use the same registered checkout route fields as
+`check_project_checkout` and do not include the registered checkout path.
 
 `validate_pr_branch` validates an open pull request branch for an allowlisted
 public repository and must include pull request metadata:
@@ -274,6 +280,51 @@ Failed validation profile commands include the allowlisted command and a
 bounded, sanitized output block between `failed_output_start` and
 `failed_output_end`; long output is truncated with an explicit marker.
 
+`runtime_sync_main` synchronizes only the registered Skeleton checkout to the
+configured `origin/main` by fast-forward. It requires no target metadata:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: runtime_sync_main
+Expected Head SHA: 0123456789abcdef0123456789abcdef01234567
+```
+
+`Expected Head SHA` is optional. When present, it must be a 40-character commit
+SHA and must match both `origin/main` after fetch and final `HEAD`.
+
+It may only:
+
+1. Use the single registered Skeleton checkout from `PROJECT_TREE.yaml`.
+2. Verify the checkout path is safe using the same path rules as
+   `check_project_checkout`.
+3. Verify the checkout exists, has `.git`, and has an `origin` remote matching
+   `alanua/Skeleton`.
+4. Require the active branch to be exactly `main`; detached HEAD and any other
+   branch are blocked.
+5. Require a clean checkout before fetching or fast-forwarding.
+6. Run only bounded Git commands:
+   `git -C {checkout_path} remote get-url origin`,
+   `git -C {checkout_path} symbolic-ref --short HEAD`,
+   `git -C {checkout_path} status --porcelain`,
+   `git -C {checkout_path} fetch --prune origin main`,
+   `git -C {checkout_path} rev-parse HEAD`,
+   `git -C {checkout_path} rev-parse origin/main`,
+   `git -C {checkout_path} merge-base --is-ancestor`, and
+   `git -C {checkout_path} merge --ff-only origin/main`.
+7. Fast-forward only when the registered checkout is behind `origin/main`.
+8. Verify final `HEAD` matches `origin/main`, and the expected head SHA when
+   supplied.
+
+It reports `DONE` only when the checkout is already equal to `origin/main` or
+was fast-forwarded to it. It reports `BLOCKED` for invalid expected SHA, unsafe
+paths, missing checkouts, missing `.git`, wrong origin, detached HEAD, non-main
+branches, dirty state, fetch failure, ahead or diverged state, fast-forward
+failure, final head mismatch, and expected head mismatch. Reports must not
+include absolute host paths or raw command output.
+Public reports include only `target_project`, `target_repository`, and
+`target_project_route=registered_checkout` for the registered Skeleton checkout;
+the checkout path remains internal to validation and bounded Git commands.
+
 `check_skeleton_freshness` is a short status-only check before Skeleton project
 work starts or after recent merges. It requires no target metadata:
 
@@ -289,6 +340,7 @@ It may only:
    `check_project_checkout`.
 3. Run only bounded Git and GitHub status queries:
    `git -C {checkout_path} remote get-url origin`,
+   `git -C {checkout_path} status --porcelain`,
    `git -C {checkout_path} fetch --prune origin main`,
    `git -C {checkout_path} rev-parse HEAD`,
    `git -C {checkout_path} rev-parse origin/main`,
@@ -305,13 +357,17 @@ It may only:
    current `main`.
 8. Remind that old chats and old branches are not canon.
 
-It reports `DONE` when the freshness report was produced. It reports `BLOCKED`
-for unsafe paths, missing checkouts, missing `.git`, failed origin reads, failed
-GitHub `main` SHA reads, GitHub query failures, or any unclassified sync state.
-The report must be short, human-readable, and must not include raw command
-output. It may include only safe synthesized status lines such as current
-`main` SHA, checkout sync state, open PR/issue counts, and bounded reminder
-notes.
+It reports `DONE` when the checkout is clean and equal to, or safely ahead of,
+current GitHub `main` and the freshness report was produced. It reports
+`BLOCKED` for unsafe paths, missing checkouts, missing `.git`, failed origin
+reads, dirty state, behind state, diverged state, failed GitHub `main` SHA
+reads, GitHub query failures, or any unclassified sync state. The report must be
+short, human-readable, and must not include raw command output or absolute host
+paths. It may include only safe synthesized status lines such as current `main`
+SHA, checkout sync state, open PR/issue counts, and bounded reminder notes.
+Public reports use the same registered Skeleton checkout route fields as
+`runtime_sync_main`; the checkout path remains internal to validation and
+bounded Git commands.
 
 `hermes_worker_preflight` is a read-only, report-only host inventory preflight
 for the future Hermes worker. It requires no target metadata:
@@ -672,8 +728,10 @@ It may only:
 It reports `DONE` only when an existing open PR is found or when the exact
 branch push and draft PR creation succeed. Operator-action failures are reported
 as `NEEDS_OPERATOR` with sanitized key/value status lines only; raw command
-output, private paths outside the Runner worktree contract, secrets, task text,
-and quoted transcripts must not be included.
+output, registered checkout paths, absolute host paths, private paths outside
+the Runner worktree contract, secrets, task text, and quoted transcripts must
+not be included. Public reports may retain target identity with symbolic fields
+such as `target_project`, `repository`, and `issue_worktree_id`.
 
 Stable lookup and override reason tokens are:
 
@@ -730,6 +788,12 @@ It may only:
    duplicate.
 8. Never merge, force-push, deploy, restart services, read secrets, execute
    issue-provided commands, use broad `git add`, or support private repositories.
+
+It reports only public-safe route identity such as `target_project`,
+`repository`, `target_project_route`, and `issue_worktree_id`. The registered
+checkout path, resolved worktree root, and absolute source worktree path remain
+internal validation and Git-command inputs and must not be printed in `DONE`,
+`BLOCKED`, or `NEEDS_OPERATOR` reports.
 
 `quarantine_stale_clean_skeleton_worktrees` removes only explicitly listed
 clean Skeleton issue worktrees and must include explicit worktree id metadata:
