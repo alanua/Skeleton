@@ -2771,6 +2771,128 @@ def test_hermes_private_memory_bridge_exception_returns_safe_aggregate_report(
     assert "token" not in report.lower()
 
 
+def test_hermes_memory_gateway_smoke_verifies_synthetic_gateway_contract() -> None:
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HERMES_MEMORY_GATEWAY_SMOKE, str(runner.ROOT)
+    )
+
+    assert report.startswith("DONE:")
+    assert "maintenance_task_id=hermes_memory_gateway_smoke" in report
+    assert "hermes_memory_gateway_status=DONE" in report
+    assert "hermes_memory_operations_verified=6" in report
+    assert "hermes_memory_lookup_status=DRY_RUN_OK" in report
+    assert "hermes_memory_conflicts_status=DRY_RUN_OK" in report
+    assert "hermes_memory_override_status=DRY_RUN_OK" in report
+    assert "hermes_memory_audit_status=DRY_RUN_OK" in report
+    assert "hermes_memory_freshness_status=DRY_RUN_OK" in report
+    assert "hermes_memory_proposal_status=OPERATOR_APPROVAL_REQUIRED" in report
+    assert "hermes_memory_idempotent_retry_status=DUPLICATE_EXISTING" in report
+    assert "hermes_memory_cross_project_status=BLOCKED" in report
+    assert "hermes_memory_cross_namespace_status=BLOCKED" in report
+    assert "hermes_memory_proposal_only=true" in report
+    assert "hermes_memory_canonical_write_performed=false" in report
+    assert "public_safe_report_ok=true" in report
+    assert "success_criteria=met" in report
+    _assert_private_memory_runner_report_is_public_safe(report, Path("/tmp/synthetic"))
+    assert "primary_fact" not in report
+    assert "proposal-event" not in report
+    assert "canonical-" not in report
+
+
+def test_hermes_memory_gateway_smoke_uses_worker_task_packets_only() -> None:
+    calls: list[dict[str, object]] = []
+
+    def run_packet(packet: dict[str, object], **kwargs: object) -> dict[str, object]:
+        assert set(kwargs) == {"gateway"}
+        calls.append(packet)
+        operation = str(packet["operation"])
+        if operation == "memory.propose_patch" and len(
+            [call for call in calls if call["operation"] == "memory.propose_patch"]
+        ) == 1:
+            return {
+                "status": "OPERATOR_APPROVAL_REQUIRED",
+                "decision": {
+                    "allowed": False,
+                    "reason": "canonical_write_requires_operator_approval",
+                },
+            }
+        if operation == "memory.propose_patch" and len(
+            [call for call in calls if call["operation"] == "memory.propose_patch"]
+        ) == 2:
+            return {"status": "DUPLICATE_EXISTING", "decision": {"allowed": False}}
+        parameters = packet.get("parameters")
+        proposal = parameters.get("proposal") if isinstance(parameters, dict) else None
+        if (
+            isinstance(proposal, dict)
+            and proposal.get("project_id") == "project-b"
+        ) or packet["namespace"] == "skeleton":
+            return {"status": "BLOCKED", "decision": {"allowed": False}}
+        return {"status": "DRY_RUN_OK", "decision": {"allowed": True}}
+
+    with mock.patch.object(
+        runner, "run_hermes_memory_task_packet", side_effect=run_packet
+    ) as worker:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HERMES_MEMORY_GATEWAY_SMOKE, str(runner.ROOT)
+        )
+
+    assert report.startswith("DONE:")
+    assert worker.call_count == 9
+    operations = [call["operation"] for call in calls]
+    assert operations[:6] == [
+        "memory.lookup_exact",
+        "memory.get_conflicts",
+        "memory.get_override_history",
+        "memory.get_audit_log",
+        "memory.get_index_freshness",
+        "memory.propose_patch",
+    ]
+    assert operations[6:] == [
+        "memory.propose_patch",
+        "memory.propose_patch",
+        "memory.lookup_exact",
+    ]
+    assert all(call["public_safe"] is True for call in calls)
+    assert all(call["no_secrets"] is True for call in calls)
+    assert all(call["no_runtime_mutation"] is True for call in calls)
+    assert all(call["approval_required"] is True for call in calls)
+    assert all(
+        call["authority_boundary"] == {
+            "review_only": True,
+            "mutation_allowed": False,
+            "runtime_install_allowed": False,
+        }
+        for call in calls
+    )
+
+
+def test_hermes_memory_gateway_smoke_exception_returns_safe_aggregate_report(
+    tmp_path: Path,
+) -> None:
+    unsafe_message = f"leaked {tmp_path}/memory.sqlite token primary_fact"
+    with mock.patch.object(
+        runner,
+        "run_hermes_memory_task_packet",
+        side_effect=RuntimeError(unsafe_message),
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HERMES_MEMORY_GATEWAY_SMOKE, str(runner.ROOT)
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "maintenance_task_id=hermes_memory_gateway_smoke" in report
+    assert "hermes_memory_gateway_status=BLOCKED" in report
+    assert "hermes_memory_operations_verified=0" in report
+    assert "public_safe_report_ok=true" in report
+    assert "error_class=HermesMemoryGatewaySmokeException" in report
+    assert "next_operator_action=safe_operator_review" in report
+    assert unsafe_message not in report
+    assert str(tmp_path) not in report
+    assert "memory.sqlite" not in report
+    assert "token" not in report.lower()
+    assert "primary_fact" not in report
+
+
 def _graphify_runtime_body(approval: str | None = runner.GRAPHIFY_RUNTIME_APPROVAL) -> str:
     metadata = ""
     if approval is not None:

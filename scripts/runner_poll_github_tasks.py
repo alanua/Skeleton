@@ -26,6 +26,13 @@ if str(ROOT) not in sys.path:
 
 from core.audit_ledger import AuditLedger, validate_public_safe_payload
 from core.aufmass_source_pack import validate_source_pack_manifest
+from core.hermes_worker import run_hermes_memory_task_packet
+from core.memory_gateway import MemoryGateway, capability_token
+from core.memory_patch_proposal import (
+    PATCH_PROPOSAL_SCHEMA,
+    canonical_dedupe_key,
+    canonical_idempotency_key,
+)
 from core.hermes_private_memory import (
     orient_hermes_private_memory,
     record_hermes_private_memory_note,
@@ -93,6 +100,7 @@ PREFLIGHT_PR_REFRESH = "preflight_pr_refresh"
 HERMES_WORKER_PREFLIGHT = "hermes_worker_preflight"
 PRIVATE_MEMORY_HEALTHCHECK = "private_memory_healthcheck"
 HERMES_PRIVATE_MEMORY_BRIDGE_CHECK = "hermes_private_memory_bridge_check"
+HERMES_MEMORY_GATEWAY_SMOKE = "hermes_memory_gateway_smoke"
 INSTALL_GRAPHIFY_RUNTIME = "install_graphify_runtime"
 PREPARE_AUFMASS_PRIVATE_RUNTIME = "prepare_aufmass_private_runtime"
 RUN_AUFMASS_PRIVATE_DXF_REVIEW = "run_aufmass_private_dxf_review"
@@ -121,6 +129,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         HERMES_WORKER_PREFLIGHT,
         PRIVATE_MEMORY_HEALTHCHECK,
         HERMES_PRIVATE_MEMORY_BRIDGE_CHECK,
+        HERMES_MEMORY_GATEWAY_SMOKE,
         INSTALL_GRAPHIFY_RUNTIME,
         PREPARE_AUFMASS_PRIVATE_RUNTIME,
         RUN_AUFMASS_PRIVATE_DXF_REVIEW,
@@ -330,6 +339,19 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "head_repository",
         "head_sha",
         "hermes_bridge_status",
+        "hermes_memory_audit_status",
+        "hermes_memory_canonical_write_performed",
+        "hermes_memory_conflicts_status",
+        "hermes_memory_cross_namespace_status",
+        "hermes_memory_cross_project_status",
+        "hermes_memory_freshness_status",
+        "hermes_memory_gateway_status",
+        "hermes_memory_idempotent_retry_status",
+        "hermes_memory_lookup_status",
+        "hermes_memory_operations_verified",
+        "hermes_memory_override_status",
+        "hermes_memory_proposal_only",
+        "hermes_memory_proposal_status",
         "host_id_sha256_12",
         "input_row_count",
         "input_table_count",
@@ -2992,6 +3014,232 @@ def hermes_private_memory_bridge_check() -> str:
             f"next_operator_action={next_operator_action}",
         ],
         "met" if bridge_status == "DONE" else "not_met",
+    )
+
+
+_HERMES_MEMORY_SMOKE_OPERATIONS = (
+    "memory.lookup_exact",
+    "memory.get_conflicts",
+    "memory.get_override_history",
+    "memory.get_audit_log",
+    "memory.get_index_freshness",
+    "memory.propose_patch",
+)
+_HERMES_MEMORY_SMOKE_NAMESPACE = "aufmass"
+_HERMES_MEMORY_SMOKE_PROJECT = "project-a"
+_HERMES_MEMORY_SMOKE_OTHER_PROJECT = "project-b"
+_HERMES_MEMORY_SMOKE_OTHER_NAMESPACE = "skeleton"
+
+
+def _hermes_memory_smoke_packet(
+    operation: str,
+    parameters: dict[str, object],
+    *,
+    namespace: str = _HERMES_MEMORY_SMOKE_NAMESPACE,
+    project_id: str = _HERMES_MEMORY_SMOKE_PROJECT,
+    task_id: str | None = None,
+) -> dict[str, object]:
+    return {
+        "schema": "hermes.memory_task_packet.v1",
+        "task_id": task_id or f"runner-hermes-memory-smoke-{operation.replace('.', '-')}",
+        "namespace": namespace,
+        "project_id": project_id,
+        "operation": operation,
+        "parameters": parameters,
+        "public_safe": True,
+        "no_secrets": True,
+        "no_runtime_mutation": True,
+        "approval_required": True,
+        "authority_boundary": {
+            "review_only": True,
+            "mutation_allowed": False,
+            "runtime_install_allowed": False,
+        },
+    }
+
+
+def _hermes_memory_smoke_proposal(
+    *,
+    namespace: str = _HERMES_MEMORY_SMOKE_NAMESPACE,
+    project_id: str = _HERMES_MEMORY_SMOKE_PROJECT,
+) -> dict[str, object]:
+    proposal: dict[str, object] = {
+        "schema": PATCH_PROPOSAL_SCHEMA,
+        "namespace": namespace,
+        "project_id": project_id,
+        "object_id": "synthetic-object-001",
+        "entity_scope": "synthetic",
+        "fact_type": "status",
+        "normalized_target": "primary_fact",
+        "source_evidence_hash": "0" * 64,
+        "proposed_value": {"state": "reviewed"},
+        "provenance_refs": [
+            {
+                "ref": f"exact-{namespace}-{project_id}-primary",
+                "kind": "exact_source",
+                "evidence_hash": "0" * 64,
+            }
+        ],
+        "actor_ref": "runner-hermes-memory-smoke",
+        "reason_code": "synthetic-smoke",
+        "approval_tier": "operator",
+        "approval_ref": "runner-hermes-memory-smoke-approval",
+        "confirmed_via_exact_ref": f"exact-{namespace}-{project_id}-primary",
+        "confirmed_canonical_revision": 3,
+    }
+    proposal["dedupe_key"] = canonical_dedupe_key(proposal)
+    proposal["idempotency_key"] = canonical_idempotency_key(proposal)
+    return proposal
+
+
+def _hermes_memory_smoke_status(result: object) -> str:
+    if not isinstance(result, dict):
+        return "BLOCKED"
+    status = result.get("status")
+    return str(status) if isinstance(status, str) else "BLOCKED"
+
+
+def _hermes_memory_smoke_canonical_write_performed(result: object) -> bool | None:
+    if not isinstance(result, dict):
+        return None
+    decision = result.get("decision")
+    if (
+        result.get("status") == "OPERATOR_APPROVAL_REQUIRED"
+        and isinstance(decision, dict)
+        and decision.get("allowed") is False
+        and decision.get("reason") == "canonical_write_requires_operator_approval"
+    ):
+        return False
+    return None
+
+
+def hermes_memory_gateway_smoke() -> str:
+    task_id = HERMES_MEMORY_GATEWAY_SMOKE
+    try:
+        gateway = MemoryGateway(
+            capability_token(namespaces=(_HERMES_MEMORY_SMOKE_NAMESPACE,))
+        )
+        operation_packets = {
+            "memory.lookup_exact": _hermes_memory_smoke_packet(
+                "memory.lookup_exact", {"key": "primary_fact"}
+            ),
+            "memory.get_conflicts": _hermes_memory_smoke_packet(
+                "memory.get_conflicts", {}
+            ),
+            "memory.get_override_history": _hermes_memory_smoke_packet(
+                "memory.get_override_history", {"override_ref": "synthetic-override"}
+            ),
+            "memory.get_audit_log": _hermes_memory_smoke_packet(
+                "memory.get_audit_log", {}
+            ),
+            "memory.get_index_freshness": _hermes_memory_smoke_packet(
+                "memory.get_index_freshness", {}
+            ),
+            "memory.propose_patch": _hermes_memory_smoke_packet(
+                "memory.propose_patch",
+                {"proposal": _hermes_memory_smoke_proposal()},
+            ),
+        }
+        results = {
+            operation: run_hermes_memory_task_packet(packet, gateway=gateway)
+            for operation, packet in operation_packets.items()
+        }
+        retry_result = run_hermes_memory_task_packet(
+            operation_packets["memory.propose_patch"], gateway=gateway
+        )
+        cross_project_result = run_hermes_memory_task_packet(
+            _hermes_memory_smoke_packet(
+                "memory.propose_patch",
+                {
+                    "proposal": _hermes_memory_smoke_proposal(
+                        project_id=_HERMES_MEMORY_SMOKE_OTHER_PROJECT
+                    )
+                },
+            ),
+            gateway=gateway,
+        )
+        cross_namespace_result = run_hermes_memory_task_packet(
+            _hermes_memory_smoke_packet(
+                "memory.lookup_exact",
+                {"key": "primary_fact"},
+                namespace=_HERMES_MEMORY_SMOKE_OTHER_NAMESPACE,
+            ),
+            gateway=gateway,
+        )
+    except Exception:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                "hermes_memory_gateway_status=BLOCKED",
+                "hermes_memory_operations_verified=0",
+                "hermes_memory_proposal_only=false",
+                "hermes_memory_canonical_write_performed=unknown",
+                "public_safe_report_ok=true",
+                "error_class=HermesMemoryGatewaySmokeException",
+                "next_operator_action=safe_operator_review",
+            ],
+            "not_met",
+        )
+
+    statuses = {
+        operation: _hermes_memory_smoke_status(result)
+        for operation, result in results.items()
+    }
+    proposal_status = statuses["memory.propose_patch"]
+    retry_status = _hermes_memory_smoke_status(retry_result)
+    cross_project_status = _hermes_memory_smoke_status(cross_project_result)
+    cross_namespace_status = _hermes_memory_smoke_status(cross_namespace_result)
+    canonical_write = _hermes_memory_smoke_canonical_write_performed(
+        results["memory.propose_patch"]
+    )
+    operations_verified = sum(
+        1
+        for operation in _HERMES_MEMORY_SMOKE_OPERATIONS
+        if (
+            statuses[operation] == "DRY_RUN_OK"
+            if operation != "memory.propose_patch"
+            else proposal_status == "OPERATOR_APPROVAL_REQUIRED"
+        )
+    )
+    proposal_only = (
+        proposal_status == "OPERATOR_APPROVAL_REQUIRED"
+        and retry_status == "DUPLICATE_EXISTING"
+        and canonical_write is False
+    )
+    isolation_verified = (
+        cross_project_status == "BLOCKED" and cross_namespace_status == "BLOCKED"
+    )
+    smoke_status = (
+        "DONE"
+        if operations_verified == len(_HERMES_MEMORY_SMOKE_OPERATIONS)
+        and proposal_only
+        and isolation_verified
+        else "BLOCKED"
+    )
+    return _maintenance_report(
+        smoke_status,
+        task_id,
+        [
+            f"hermes_memory_gateway_status={smoke_status}",
+            f"hermes_memory_operations_verified={operations_verified}",
+            f"hermes_memory_lookup_status={statuses['memory.lookup_exact']}",
+            f"hermes_memory_conflicts_status={statuses['memory.get_conflicts']}",
+            f"hermes_memory_override_status={statuses['memory.get_override_history']}",
+            f"hermes_memory_audit_status={statuses['memory.get_audit_log']}",
+            f"hermes_memory_freshness_status={statuses['memory.get_index_freshness']}",
+            f"hermes_memory_proposal_status={proposal_status}",
+            f"hermes_memory_idempotent_retry_status={retry_status}",
+            f"hermes_memory_cross_project_status={cross_project_status}",
+            f"hermes_memory_cross_namespace_status={cross_namespace_status}",
+            f"hermes_memory_proposal_only={'true' if proposal_only else 'false'}",
+            "hermes_memory_canonical_write_performed="
+            f"{str(canonical_write).lower() if canonical_write is not None else 'unknown'}",
+            "public_safe_report_ok=true",
+            "error_class=none",
+            f"next_operator_action={'none' if smoke_status == 'DONE' else 'safe_operator_review'}",
+        ],
+        "met" if smoke_status == "DONE" else "not_met",
     )
 
 
@@ -7703,6 +7951,8 @@ def dispatch_runtime_maintenance_task(
             return private_memory_healthcheck(body)
         if task_id == HERMES_PRIVATE_MEMORY_BRIDGE_CHECK:
             return hermes_private_memory_bridge_check()
+        if task_id == HERMES_MEMORY_GATEWAY_SMOKE:
+            return hermes_memory_gateway_smoke()
         if task_id == INSTALL_GRAPHIFY_RUNTIME:
             return install_graphify_runtime(body)
         if task_id == PREPARE_AUFMASS_PRIVATE_RUNTIME:

@@ -105,6 +105,41 @@ content. Bridge exceptions are summarized with safe tokens such as
 `HermesBridgeException` and `safe_operator_review`; they must not fall through
 to the generic maintenance-step exception report.
 
+`hermes_memory_gateway_smoke` is a public-safe synthetic smoke for the reviewed
+Hermes Memory Gateway boundary. It requires no target metadata:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: hermes_memory_gateway_smoke
+```
+
+It may only:
+
+1. Build synthetic `hermes.memory_task_packet.v1` fixtures.
+2. Call `run_hermes_memory_task_packet` with an in-memory synthetic
+   `MemoryGateway`.
+3. Verify the six reviewed Hermes operations:
+   `memory.lookup_exact`, `memory.get_conflicts`,
+   `memory.get_override_history`, `memory.get_audit_log`,
+   `memory.get_index_freshness`, and `memory.propose_patch`.
+4. Verify project isolation with a cross-project proposal that must fail closed.
+5. Verify namespace isolation with an out-of-namespace packet that must fail
+   closed.
+6. Verify proposal-only behavior: new proposals require operator approval,
+   canonical writes are not performed, and retrying the same proposal is
+   idempotent as `DUPLICATE_EXISTING`.
+7. Report only aggregate status fields:
+   `hermes_memory_gateway_status`, `hermes_memory_operations_verified`,
+   per-operation status tokens, isolation status tokens,
+   `hermes_memory_proposal_only`, `hermes_memory_canonical_write_performed`,
+   `public_safe_report_ok`, `error_class`, and `next_operator_action`.
+
+It must not run runtime services, merge, access real storage, open SQLite, read
+or write private memory directly, call Graphify or MemPalace, use private data,
+or report raw gateway payloads, proposal event refs, canonical refs, file paths,
+environment values, secrets, tokens, addresses, room names, quantities, customer
+data, or exception messages.
+
 `install_graphify_runtime` is an approval-gated host runtime task for installing
 the pinned Graphify assistant skills on the Runner host. It requires the exact
 approval field:
