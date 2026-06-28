@@ -1341,7 +1341,7 @@ def test_process_issue_blocks_unsafe_target_worktree_root_before_claim() -> None
         runner.process_issue(issue)
 
     assert "reason=registered_target_path_invalid" in block.call_args.args[1]
-    assert "worktree_root" in block.call_args.args[1]
+    assert "worktree_root" not in block.call_args.args[1]
     set_label.assert_not_called()
     prepare_target.assert_not_called()
     run_codex.assert_not_called()
@@ -1372,7 +1372,7 @@ def test_process_issue_blocks_unsafe_target_checkout_path_before_claim() -> None
         runner.process_issue(issue)
 
     assert "reason=registered_target_path_invalid" in block.call_args.args[1]
-    assert "checkout_path" in block.call_args.args[1]
+    assert "checkout_path" not in block.call_args.args[1]
     set_label.assert_not_called()
     prepare_target.assert_not_called()
     run_codex.assert_not_called()
@@ -6706,6 +6706,9 @@ def test_check_project_checkout_matching_remote_reports_done() -> None:
 
     assert report.startswith("DONE:")
     assert "success_criteria=met" in report
+    assert "target_project_route=registered_checkout" in report
+    assert "checkout_path=" not in report
+    assert str(checkout_path) not in report
     run.assert_called_once_with(
         ["git", "-C", str(checkout_path), "remote", "get-url", "origin"]
     )
@@ -6826,6 +6829,9 @@ def test_check_skeleton_freshness_reports_done_with_bounded_status_queries() -> 
 
     assert report.startswith("DONE:")
     assert "maintenance_task_id=check_skeleton_freshness" in report
+    assert "target_project_route=registered_checkout" in report
+    assert "checkout_path=" not in report
+    assert str(checkout_path) not in report
     assert f"checkout_head_sha={checkout_head_sha}" in report
     assert f"github_main_sha={github_main_sha}" in report
     assert "github_main_source_of_truth=true" in report
@@ -6882,6 +6888,9 @@ def test_check_skeleton_freshness_missing_git_blocks() -> None:
 
     assert report.startswith("BLOCKED:")
     assert "reason=checkout_git_missing" in report
+    assert "target_project_route=registered_checkout" in report
+    assert "checkout_path=" not in report
+    assert str(checkout_path) not in report
     run.assert_not_called()
 
 
@@ -7051,6 +7060,9 @@ def test_ensure_project_checkout_existing_valid_reports_done_without_preparation
         report = runner.ensure_project_checkout(_ensure_checkout_issue_body())
 
     assert report.startswith("DONE:")
+    assert "target_project_route=registered_checkout" in report
+    assert "checkout_path=" not in report
+    assert str(checkout_path) not in report
     assert "step=prepare_checkout_parent" not in report
     assert "step=prepare_checkout" not in report
     run.assert_called_once_with(
@@ -7743,6 +7755,9 @@ def test_validate_pr_branch_bauclock_time_ledger_profile_uses_target_checkout(
     assert report.startswith("DONE:")
     assert "repository=alanua/bauclock" in report
     assert "pull_request=52" in report
+    assert "target_project_route=registered_checkout" in report
+    assert "checkout_path=" not in report
+    assert str(checkout_path) not in report
     assert "head_ref=runner/issue-668" in report
     assert f"head_sha={HEAD_SHA}" in report
     assert [
@@ -7811,6 +7826,9 @@ def test_validate_pr_branch_failed_knowledge_intake_command_reports_output(
         )
 
     assert report.startswith("BLOCKED:")
+    assert "target_project_route=registered_checkout" in report
+    assert "checkout_path=" not in report
+    assert str(validation_path) not in report
     assert "step=validation_profile_command_1 status=failed exit_code=1" in report
     assert "failed_command=" not in report
     assert "failed_output_start" not in report

@@ -718,20 +718,19 @@ def _validated_registered_target_path(
 
 def verify_target_repository_checkout(target_repository: str) -> str | None:
     try:
-        worktree_root_path = target_repository_worktree_root(target_repository)
+        target_repository_worktree_root(target_repository)
         checkout_path = target_repository_checkout_path(target_repository)
     except ValueError as exc:
+        del exc
         return (
             "Target repository route is invalid:\n```\n"
             f"target_repository={target_repository}\n"
             f"reason=registered_target_path_invalid\n"
-            f"detail={exc}\n"
             "```"
         )
     status_lines = [
         f"target_repository={target_repository}",
-        f"worktree_root={worktree_root_path}",
-        f"checkout_path={checkout_path}",
+        "target_project_route=registered_checkout",
     ]
     if not checkout_path.exists():
         return "Target repository checkout is unavailable:\n```\n" + "\n".join(
@@ -5072,6 +5071,14 @@ def _remote_url_matches_project_repo(remote_url: str, repo: str) -> bool:
     return remote_url.removesuffix(".git") in candidates
 
 
+def _registered_checkout_status_lines(target_project: str, repo: object) -> list[str]:
+    return [
+        f"target_project={target_project}",
+        f"target_repository={repo}",
+        "target_project_route=registered_checkout",
+    ]
+
+
 def _registered_project_checkout(
     task_id: str, body: str
 ) -> tuple[RegisteredProjectCheckout | None, str | None]:
@@ -5099,14 +5106,7 @@ def _registered_project_checkout(
 
     checkout_path_text = str(project["checkout_path"])
     checkout_path = Path(checkout_path_text)
-    status_lines: list[str] = []
-    status_lines.extend(
-        (
-            f"target_project={target_project}",
-            f"target_repository={project['repo']}",
-            f"checkout_path={checkout_path_text}",
-        )
-    )
+    status_lines = _registered_checkout_status_lines(target_project, project["repo"])
     if any(part == ".." for part in checkout_path.parts):
         return None, _maintenance_report(
             "BLOCKED",
@@ -5210,9 +5210,7 @@ def _registered_skeleton_checkout(
     checkout_path_text = str(project["checkout_path"])
     checkout_path = Path(checkout_path_text)
     status_lines = [
-        f"target_project={target_project}",
-        f"target_repository={project['repo']}",
-        f"checkout_path={checkout_path_text}",
+        *_registered_checkout_status_lines(target_project, project["repo"]),
     ]
     if any(part == ".." for part in checkout_path.parts):
         return None, _maintenance_report(
@@ -5933,7 +5931,7 @@ def validate_pr_branch(body: str) -> str:
             [*status_lines, f"reason={checkout_block_reason or 'checkout_unavailable'}"],
             "not_met",
         )
-    status_lines.append(f"checkout_path={checkout_path}")
+    status_lines.append("target_project_route=registered_checkout")
 
     try:
         pr_state = _get_pr_branch_validation_state(

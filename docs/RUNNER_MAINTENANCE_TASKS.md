@@ -194,7 +194,9 @@ It may only:
 It reports `DONE` only when the checkout exists, `.git` exists, and origin
 matches the registered repository. Missing target metadata, unknown projects,
 unsafe paths, missing checkouts, missing `.git`, failed origin reads, and remote
-mismatches are reported as `BLOCKED`.
+mismatches are reported as `BLOCKED`. Public `DONE` and `BLOCKED` reports must
+identify the target project and repository but must not print the registered
+checkout path.
 
 `ensure_project_checkout` prepares only a missing registered project checkout and
 must include target project metadata:
@@ -222,7 +224,8 @@ It reports `DONE` only when the checkout exists, `.git` exists, and origin
 matches the registered repository. It reports `BLOCKED` for missing target
 metadata, unknown projects, unsafe paths, path traversal, existing checkouts
 without `.git`, wrong remotes, clone failures, failed origin reads, and remote
-mismatches after preparation.
+mismatches after preparation. Public reports must not print the registered
+checkout path, including preparation failures.
 
 `validate_pr_branch` validates an open pull request branch for an allowlisted
 public repository and must include pull request metadata:
@@ -269,7 +272,8 @@ unsupported repositories or profiles, closed PRs, non-`main` base branches,
 expected head SHA mismatches, unsafe validation paths, fetch or checkout
 failures, head mismatches, and test failures are reported as `BLOCKED`. Reports
 include the exact repository, PR number, PR head branch, head SHA, allowlisted
-commands, pass/fail status, and any detected missing dependency module names.
+commands, pass/fail status, and any detected missing dependency module names,
+but not registered checkout paths or validation worktree paths.
 Failed validation profile commands include the allowlisted command and a
 bounded, sanitized output block between `failed_output_start` and
 `failed_output_end`; long output is truncated with an explicit marker.
@@ -304,6 +308,10 @@ It may only:
 7. Flag open PRs or issues that may need rebase, retest, or scope review against
    current `main`.
 8. Remind that old chats and old branches are not canon.
+
+Public `DONE` and `BLOCKED` reports must omit the registered Skeleton checkout
+path while still reporting repository identity, SHAs, sync state, and bounded
+step status.
 
 It reports `DONE` when the freshness report was produced. It reports `BLOCKED`
 for unsafe paths, missing checkouts, missing `.git`, failed origin reads, failed
