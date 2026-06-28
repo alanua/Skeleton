@@ -1,0 +1,64 @@
+{
+  "schema": "skeleton.home_edge.diagnostic.v1",
+  "source": "issue_runtime_facts_initial_registration",
+  "node": {
+    "node_id": "home-edge-01",
+    "hostname": "home-edge-01",
+    "tailscale_ip": "100.127.35.74",
+    "target_user": "valertos08",
+    "os_expected": "Linux Mint 22.2 (Ubuntu noble base)"
+  },
+  "controller": {
+    "host": "hetzner-agent-runner-1",
+    "tailscale_ip": "100.69.215.63"
+  },
+  "summary": {
+    "status": "registered_pending_live_runner_refresh",
+    "route": {
+      "status": "unchanged",
+      "expected_interface": "enp1s0",
+      "expected_gateway": "192.168.1.1",
+      "observed_interface": "enp1s0",
+      "observed_gateway": "192.168.1.1"
+    },
+    "tailscale": {
+      "status": "working",
+      "expected_ip": "100.127.35.74",
+      "controller_ip": "100.69.215.63"
+    },
+    "modem": {
+      "status": "identified",
+      "model": "Huawei E3372",
+      "usb_id": "12d1:1506",
+      "drivers": [
+        "option",
+        "huawei_cdc_ncm",
+        "usb-storage"
+      ],
+      "network_interface": "wwx001e101f0000",
+      "serial_ports": [
+        "/dev/ttyUSB0",
+        "/dev/ttyUSB1"
+      ],
+      "control_port": "/dev/cdc-wdm3",
+      "modemmanager_path": "/org/freedesktop/ModemManager1/Modem/0",
+      "sim_lock_state": "locked",
+      "connection_mode": "ModemManager_NCM_not_generic_ethernet"
+    },
+    "huawei_diag_profile": {
+      "status": "ignored",
+      "action": "do_not_use_generic_ethernet_profile_for_e3372_ncm_modem"
+    },
+    "next_prepared_action": {
+      "status": "prepared_not_executed",
+      "requires_private_secret_route": true,
+      "operator_approval_required": true,
+      "steps": [
+        "unlock SIM through an operator-approved private secret route",
+        "create or update O2 APN profile in ModemManager",
+        "test antenna placement and signal before gateway migration",
+        "plan later MikroTik migration with rollback evidence"
+      ]
+    }
+  }
+}
