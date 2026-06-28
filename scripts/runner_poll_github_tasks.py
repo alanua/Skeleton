@@ -27,6 +27,7 @@ if str(ROOT) not in sys.path:
 from core.audit_ledger import AuditLedger, validate_public_safe_payload
 from core.aufmass_source_pack import validate_source_pack_manifest
 from core.hermes_private_memory import (
+    HERMES_PRIVATE_MEMORY_REPORT_SCHEMA,
     orient_hermes_private_memory,
     record_hermes_private_memory_note,
     write_hermes_private_memory_heartbeat,
@@ -301,6 +302,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "compare_behind_by",
         "compare_state",
         "compare_status",
+        "contract_version",
         "current_branch",
         "decision_records_skipped",
         "decision_records_written",
@@ -329,7 +331,6 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "head_ref",
         "head_repository",
         "head_sha",
-        "hermes_bridge_status",
         "host_id_sha256_12",
         "input_row_count",
         "input_table_count",
@@ -421,6 +422,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "synthetic_graph_edge_count",
         "synthetic_graph_node_count",
         "synthetic_smoke_timeout_seconds",
+        "smoke_status",
         "system",
         "target_project",
         "target_project_route",
@@ -2761,6 +2763,29 @@ _PRIVATE_MEMORY_UNSAFE_VALUE_RE = re.compile(
     r"private_memory_[a-z_]*heartbeat|select\s|create\s+table)"
 )
 _HERMES_BRIDGE_SAFE_STATUS_VALUES = frozenset({"DONE", "BLOCKED"})
+_HERMES_BRIDGE_REPORT_BOOL_KEYS = frozenset(
+    {
+        "db_configured",
+        "db_openable",
+        "integrity_ok",
+        "schema_present",
+        "writable_when_requested",
+        "heartbeat_ok",
+        "bridge_write_enabled",
+    }
+)
+_HERMES_BRIDGE_REPORT_REQUIRED_KEYS = frozenset(
+    {
+        "schema",
+        "status",
+        "operation",
+        "connector_schema",
+        "connector_status",
+        "error_class",
+        "next_operator_action",
+        *_HERMES_BRIDGE_REPORT_BOOL_KEYS,
+    }
+)
 GRAPHIFY_RUNTIME_APPROVAL = "install_graphify_runtime_v1"
 GRAPHIFY_PINNED_VERSION = "0.8.44"
 GRAPHIFY_SMOKE_TIMEOUT_SECONDS = 45
@@ -2926,12 +2951,42 @@ def _hermes_bridge_step_status(report: object) -> str:
     return "BLOCKED"
 
 
+def _hermes_bridge_blocked_write_envelope_is_complete(report: object) -> bool:
+    if not isinstance(report, dict):
+        return False
+    if not _HERMES_BRIDGE_REPORT_REQUIRED_KEYS.issubset(report):
+        return False
+    expected_values = {
+        "schema": HERMES_PRIVATE_MEMORY_REPORT_SCHEMA,
+        "status": "BLOCKED",
+        "operation": "heartbeat",
+        "writable_when_requested": False,
+        "bridge_write_enabled": False,
+        "error_class": "HermesPrivateMemoryWriteGateError",
+        "next_operator_action": "operator_enable_hermes_private_memory_write",
+    }
+    for key, expected in expected_values.items():
+        if report.get(key) != expected:
+            return False
+    for key in _HERMES_BRIDGE_REPORT_BOOL_KEYS:
+        if not isinstance(report.get(key), bool):
+            return False
+    connector_schema = report.get("connector_schema")
+    if (
+        not isinstance(connector_schema, str)
+        or _PRIVATE_MEMORY_UNSAFE_VALUE_RE.search(connector_schema)
+    ):
+        return False
+    return report.get("connector_status") in _HERMES_BRIDGE_SAFE_STATUS_VALUES
+
+
 def _hermes_bridge_exception_report(task_id: str) -> str:
     return _maintenance_report(
         "BLOCKED",
         task_id,
         [
-            "hermes_bridge_status=BLOCKED",
+            f"contract_version={HERMES_PRIVATE_MEMORY_REPORT_SCHEMA}",
+            "smoke_status=BLOCKED",
             "orient_status=BLOCKED",
             "blocked_write_status=BLOCKED",
             "gated_heartbeat_status=BLOCKED",
@@ -2970,28 +3025,35 @@ def hermes_private_memory_bridge_check() -> str:
     blocked_write_status = _hermes_bridge_step_status(blocked_write_report)
     gated_heartbeat_status = _hermes_bridge_step_status(gated_heartbeat_report)
     gated_note_status = _hermes_bridge_step_status(gated_note_report)
-    bridge_status = (
+    blocked_write_envelope_ok = _hermes_bridge_blocked_write_envelope_is_complete(
+        blocked_write_report
+    )
+    smoke_status = (
         "DONE"
-        if blocked_write_status == "BLOCKED"
+        if blocked_write_envelope_ok
         and gated_heartbeat_status == "DONE"
         and gated_note_status == "DONE"
         else "BLOCKED"
     )
-    next_operator_action = "none" if bridge_status == "DONE" else "safe_operator_review"
+    next_operator_action = "none" if smoke_status == "DONE" else "safe_operator_review"
+    status_lines = [
+        f"contract_version={HERMES_PRIVATE_MEMORY_REPORT_SCHEMA}",
+        f"smoke_status={smoke_status}",
+        f"orient_status={orient_status}",
+        f"blocked_write_status={blocked_write_status}",
+        f"gated_heartbeat_status={gated_heartbeat_status}",
+        f"gated_note_status={gated_note_status}",
+        "public_safe_report_ok=true",
+        "error_class=none",
+        f"next_operator_action={next_operator_action}",
+    ]
+    if not blocked_write_envelope_ok:
+        status_lines.append("reason=blocked_write_envelope_incomplete")
     return _maintenance_report(
-        bridge_status,
+        smoke_status,
         task_id,
-        [
-            f"hermes_bridge_status={bridge_status}",
-            f"orient_status={orient_status}",
-            f"blocked_write_status={blocked_write_status}",
-            f"gated_heartbeat_status={gated_heartbeat_status}",
-            f"gated_note_status={gated_note_status}",
-            "public_safe_report_ok=true",
-            "error_class=none",
-            f"next_operator_action={next_operator_action}",
-        ],
-        "met" if bridge_status == "DONE" else "not_met",
+        status_lines,
+        "met" if smoke_status == "DONE" else "not_met",
     )
 
 

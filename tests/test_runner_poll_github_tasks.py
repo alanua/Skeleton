@@ -2691,6 +2691,24 @@ def test_private_memory_healthcheck_blocks_connector_privacy_violation() -> None
 def test_hermes_private_memory_bridge_check_runs_full_sequence_in_order() -> None:
     calls: list[str] = []
 
+    def blocked_heartbeat_envelope() -> dict[str, object]:
+        return {
+            "schema": runner.HERMES_PRIVATE_MEMORY_REPORT_SCHEMA,
+            "status": "BLOCKED",
+            "operation": "heartbeat",
+            "connector_schema": "skeleton.private_memory.healthcheck.v0",
+            "connector_status": "DONE",
+            "db_configured": True,
+            "db_openable": True,
+            "integrity_ok": True,
+            "schema_present": True,
+            "writable_when_requested": False,
+            "heartbeat_ok": False,
+            "bridge_write_enabled": False,
+            "error_class": "HermesPrivateMemoryWriteGateError",
+            "next_operator_action": "operator_enable_hermes_private_memory_write",
+        }
+
     def orient(**kwargs: object) -> dict[str, object]:
         assert kwargs == {"env": runner.os.environ}
         calls.append("orient")
@@ -2700,9 +2718,9 @@ def test_hermes_private_memory_bridge_check_runs_full_sequence_in_order() -> Non
         heartbeat_id: str, **kwargs: object
     ) -> dict[str, object]:
         calls.append(f"heartbeat:{heartbeat_id}:{kwargs.get('write_enabled', False)}")
-        return {
-            "status": "DONE" if kwargs.get("write_enabled") is True else "BLOCKED"
-        }
+        if kwargs.get("write_enabled") is True:
+            return {"status": "DONE"}
+        return blocked_heartbeat_envelope()
 
     def note(note_id: str, state: str, **kwargs: object) -> dict[str, object]:
         calls.append(f"note:{note_id}:{state}:{kwargs.get('write_enabled', False)}")
@@ -2721,12 +2739,14 @@ def test_hermes_private_memory_bridge_check_runs_full_sequence_in_order() -> Non
 
     assert report.startswith("DONE:")
     assert "maintenance_task_id=hermes_private_memory_bridge_check" in report
-    assert "hermes_bridge_status=DONE" in report
+    assert f"contract_version={runner.HERMES_PRIVATE_MEMORY_REPORT_SCHEMA}" in report
+    assert "smoke_status=DONE" in report
     assert "orient_status=BLOCKED" in report
     assert "blocked_write_status=BLOCKED" in report
     assert "gated_heartbeat_status=DONE" in report
     assert "gated_note_status=DONE" in report
     assert "public_safe_report_ok=true" in report
+    assert "reason=blocked_write_envelope_incomplete" not in report
     assert "reason=maintenance_step_raised" not in report
     assert calls == [
         "orient",
@@ -2734,6 +2754,35 @@ def test_hermes_private_memory_bridge_check_runs_full_sequence_in_order() -> Non
         "heartbeat:synthetic-runner-hermes-bridge-heartbeat-v0:True",
         "note:synthetic-runner-hermes-bridge-note-v0:runner bridge check:True",
     ]
+
+
+def test_hermes_private_memory_bridge_check_rejects_partial_blocked_write_envelope() -> None:
+    def heartbeat(
+        heartbeat_id: str, **kwargs: object
+    ) -> dict[str, object]:
+        if kwargs.get("write_enabled") is True:
+            return {"status": "DONE"}
+        return {"status": "BLOCKED"}
+
+    with mock.patch.object(
+        runner, "orient_hermes_private_memory", return_value={"status": "DONE"}
+    ), mock.patch.object(
+        runner, "write_hermes_private_memory_heartbeat", side_effect=heartbeat
+    ), mock.patch.object(
+        runner, "record_hermes_private_memory_note", return_value={"status": "DONE"}
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HERMES_PRIVATE_MEMORY_BRIDGE_CHECK, str(runner.ROOT)
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert f"contract_version={runner.HERMES_PRIVATE_MEMORY_REPORT_SCHEMA}" in report
+    assert "smoke_status=BLOCKED" in report
+    assert "blocked_write_status=BLOCKED" in report
+    assert "gated_heartbeat_status=DONE" in report
+    assert "gated_note_status=DONE" in report
+    assert "reason=blocked_write_envelope_incomplete" in report
+    assert "success_criteria=not_met" in report
 
 
 def test_hermes_private_memory_bridge_exception_returns_safe_aggregate_report(
@@ -2753,7 +2802,8 @@ def test_hermes_private_memory_bridge_exception_returns_safe_aggregate_report(
 
     assert report.startswith("BLOCKED:")
     assert "maintenance_task_id=hermes_private_memory_bridge_check" in report
-    assert "hermes_bridge_status=BLOCKED" in report
+    assert f"contract_version={runner.HERMES_PRIVATE_MEMORY_REPORT_SCHEMA}" in report
+    assert "smoke_status=BLOCKED" in report
     assert "orient_status=BLOCKED" in report
     assert "blocked_write_status=BLOCKED" in report
     assert "gated_heartbeat_status=BLOCKED" in report

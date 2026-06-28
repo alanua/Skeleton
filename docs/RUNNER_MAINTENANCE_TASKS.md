@@ -91,11 +91,13 @@ It may only:
 1. Call the Hermes private-memory bridge adapter functions.
 2. Run the fixed sequence: read-only orient, blocked heartbeat write without an
    explicit gate, gated synthetic heartbeat, and gated synthetic note marker.
-3. Report only aggregate status fields for that sequence:
-   `hermes_bridge_status`, `orient_status`, `blocked_write_status`,
-   `gated_heartbeat_status`, `gated_note_status`,
+3. Validate the ungated heartbeat response as a complete blocked bridge report
+   envelope for the existing Hermes private-memory report schema.
+4. Report only aggregate status fields for that sequence:
+   `contract_version`, `smoke_status`, `orient_status`,
+   `blocked_write_status`, `gated_heartbeat_status`, `gated_note_status`,
    `public_safe_report_ok`, `error_class`, and `next_operator_action`.
-4. Fail closed as `BLOCKED` with the same aggregate field shape if any bridge
+5. Fail closed as `BLOCKED` with the same aggregate field shape if any bridge
    function raises.
 
 It must not report exception messages, raw config paths, database paths, table
