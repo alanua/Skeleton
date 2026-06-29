@@ -123,6 +123,7 @@ QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES = (
     "quarantine_stale_clean_skeleton_worktrees"
 )
 HOME_EDGE_01_READ_ONLY_DIAGNOSTIC = "home_edge_01_read_only_diagnostic"
+HOME_EDGE_01_BOUNDED_MODEM_PROBE = "home_edge_01_bounded_modem_probe"
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
         SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
@@ -151,6 +152,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR,
         QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES,
         HOME_EDGE_01_READ_ONLY_DIAGNOSTIC,
+        HOME_EDGE_01_BOUNDED_MODEM_PROBE,
     )
 )
 AUFMASS_PRIVATE_PROJECT_ID = "aufmass_private"
@@ -318,6 +320,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "compare_behind_by",
         "compare_state",
         "compare_status",
+        "connection_test",
         "current_branch",
         "decision_records_skipped",
         "decision_records_written",
@@ -372,6 +375,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "missing_file",
         "missing_dependency_module",
         "mode",
+        "modem_action_status",
         "model_credentials_removed_from_smoke",
         "mutation_mode",
         "network_disabled",
@@ -402,7 +406,9 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "project_id",
         "project_state_existing",
         "project_state_written",
+        "primary_route_preserved",
         "protected_worktrees_count",
+        "public_safe_report",
         "public_safe_report_ok",
         "pull_request",
         "python_version",
@@ -436,6 +442,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "status_token",
         "status_count_approved",
         "status_count_needs_review",
+        "tailscale_after",
+        "tailscale_before",
         "step",
         "success_criteria",
         "synthetic_corpus_status",
@@ -7730,6 +7738,40 @@ def home_edge_01_read_only_diagnostic() -> str:
     )
 
 
+def home_edge_01_bounded_modem_probe() -> str:
+    task_id = HOME_EDGE_01_BOUNDED_MODEM_PROBE
+    from core.home_edge.modem_action import run_home_edge_01_modem_probe
+
+    result = run_home_edge_01_modem_probe()
+    public = result.public_summary()
+    status_lines = [
+        "report_mode=bounded_modem_probe",
+        "node_id=home-edge-01",
+        f"modem_action_status={public['status']}",
+        f"connection_test={public['connection_test']}",
+        f"reason={public['reason']}",
+        f"rollback_status={public['rollback_status']}",
+        f"tailscale_before={public['tailscale_before']}",
+        f"tailscale_after={public['tailscale_after']}",
+        f"primary_route_preserved={str(public['route_preserved']).lower()}",
+        "public_safe_report=aggregate_only",
+    ]
+    success = (
+        public["status"] == "done"
+        and public["connection_test"] == "ok"
+        and public["rollback_status"] == "deleted"
+        and public["tailscale_before"] == "healthy"
+        and public["tailscale_after"] == "healthy"
+        and public["route_preserved"] is True
+    )
+    return _maintenance_report(
+        "DONE" if success else "BLOCKED",
+        task_id,
+        status_lines,
+        "met" if success else "not_met",
+    )
+
+
 HERMES_MEMORY_GATEWAY_SMOKE_NAMESPACE = "aufmass"
 HERMES_MEMORY_GATEWAY_SMOKE_PROJECT_ID = "project-a"
 HERMES_MEMORY_GATEWAY_SMOKE_LOOKUP_KEY = "primary_fact"
@@ -8202,6 +8244,8 @@ def dispatch_runtime_maintenance_task(
             return quarantine_stale_clean_skeleton_worktrees(body)
         if task_id == HOME_EDGE_01_READ_ONLY_DIAGNOSTIC:
             return home_edge_01_read_only_diagnostic()
+        if task_id == HOME_EDGE_01_BOUNDED_MODEM_PROBE:
+            return home_edge_01_bounded_modem_probe()
         return check_project_checkout(body)
     except Exception:
         return _maintenance_report(

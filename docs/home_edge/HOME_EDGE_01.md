@@ -25,6 +25,12 @@ Universal does not mean unrestricted shell. Each capability is exposed as a type
 
 A USB modem is optional. The gateway remains valid when no modem is physically attached to the media PC. Modem observations are reported only when a live probe sees the device.
 
+The bounded GSM workflow uses a reserved non-default APN profile name only after a
+fail-closed preflight proves that name is absent. The runtime captures the UUID created
+by the current run and uses only that UUID for modification, activation, validation and
+rollback deletion. A saved but inactive or disconnected profile is not a successful
+connection test, and public Runner reports stay aggregate-only.
+
 ## Deployment
 
 Repository contracts are merged first. A separate approved runtime task then activates and validates the fixed transport from the actual Runner service context.
