@@ -9065,3 +9065,76 @@ def test_hermes_memory_gateway_smoke_isolation_reason_must_be_exact(
     assert report_lines[-2] == "hermes_memory_smoke_status=blocked"
     assert f"status_token={expected_token}" in report
     assert "error_class=none" not in report
+
+
+def test_home_edge_private_modem_task_is_allowlisted_and_requires_marker() -> None:
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_01_PRIVATE_SIM_UNLOCK_O2_APN_TEST,
+        str(runner.ROOT),
+        "\n".join(
+            (
+                f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+                f"Maintenance Task ID: {runner.HOME_EDGE_01_PRIVATE_SIM_UNLOCK_O2_APN_TEST}",
+            )
+        ),
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert (
+        f"maintenance_task_id={runner.HOME_EDGE_01_PRIVATE_SIM_UNLOCK_O2_APN_TEST}"
+        in report
+    )
+    assert "status_token=missing_runtime_approval" in report
+    assert "secret_source=private_inherited_descriptor" in report
+
+
+def test_home_edge_private_modem_task_reports_sanitized_aggregate_statuses_only() -> None:
+    body = "\n".join(
+        (
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {runner.HOME_EDGE_01_PRIVATE_SIM_UNLOCK_O2_APN_TEST}",
+            "Runtime Approval Marker: APPROVE_HOME_EDGE_01_PRIVATE_SIM_UNLOCK_O2_APN_TEST",
+        )
+    )
+    fake_artifact = {
+        "task_id": runner.HOME_EDGE_01_PRIVATE_SIM_UNLOCK_O2_APN_TEST,
+        "node_id": "home-edge-01",
+        "approval_status": "verified",
+        "secret_source": "private_inherited_descriptor",
+        "route_before": "ok",
+        "tailscale_before": "ok",
+        "sim_unlock": "ok",
+        "apn_profile": "ok",
+        "connection_test": "ok",
+        "rollback": "rolled_back",
+        "route_after": "ok",
+        "tailscale_after": "ok",
+        "status": "ok",
+        "reason": "done",
+        "private_host": "runtime-host",
+        "pin": "1111",
+        "raw_output": "secret",
+    }
+
+    with mock.patch(
+        "core.home_edge.modem_action.run_private_sim_unlock_o2_apn_test",
+        return_value=fake_artifact,
+    ) as run_action:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HOME_EDGE_01_PRIVATE_SIM_UNLOCK_O2_APN_TEST,
+            str(runner.ROOT),
+            body,
+        )
+
+    assert report.startswith("DONE:")
+    assert "route_before=ok" in report
+    assert "tailscale_after=ok" in report
+    assert "sim_unlock=ok" in report
+    assert "apn_profile=ok" in report
+    assert "rollback=rolled_back" in report
+    assert "runtime-host" not in report
+    assert "1111" not in report
+    assert "raw_output" not in report
+    run_action.assert_called_once_with(
+        runtime_approval_marker="APPROVE_HOME_EDGE_01_PRIVATE_SIM_UNLOCK_O2_APN_TEST"
+    )
