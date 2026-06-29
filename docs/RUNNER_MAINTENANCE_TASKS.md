@@ -390,6 +390,55 @@ systemd, query GitHub, start Codex, or execute arbitrary issue text. Reports
 must be short and include only sanitized key/value status lines; they must not
 include raw command output, token values, raw host names, or issue-body text.
 
+`hermes_memory_gateway_smoke` is a bounded public-safe contract smoke for the
+Hermes Memory Gateway adapter. It requires no target metadata:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: hermes_memory_gateway_smoke
+```
+
+It may only:
+
+1. Use the synthetic namespace `aufmass` and a fixed synthetic project scope.
+2. Create one in-memory Memory Gateway and reuse it for the full smoke.
+3. Route Hermes memory operations only through `run_hermes_memory_task_packet`.
+4. Verify exactly these six operations:
+   `memory.lookup_exact`, `memory.get_conflicts`,
+   `memory.get_override_history`, `memory.get_audit_log`,
+   `memory.get_index_freshness`, and `memory.propose_patch`.
+5. For each successful result, require the Hermes result schema, exact
+   operation, namespace, project id, Gateway response schema, exact namespaced
+   Gateway command, and Gateway contract version.
+6. Require exact lookup payloads to be authoritative `canonical_exact` results
+   from `canonical_sqlite` with a bounded canonical reference and integer
+   canonical revision.
+7. Require conflict, override-history, and audit summaries to contain bounded
+   non-negative counts, and freshness summaries to report
+   `freshness_checked=true`.
+8. Require the first patch proposal to return
+   `OPERATOR_APPROVAL_REQUIRED`, `canonical_write_requires_operator_approval`,
+   and `NEW_PROPOSAL`; require an identical retry through the same Gateway to
+   return `DUPLICATE_EXISTING`, `proposal_already_exists`, and duplicate
+   classification.
+9. Run exact lookup before proposal and after duplicate retry, and require the
+   public exact summary, canonical reference, and canonical revision to remain
+   unchanged as the no-canonical-write proof.
+10. Require cross-project isolation to use the Hermes result schema,
+    `status=BLOCKED`, and decision reason `PROJECT_NOT_AUTHORIZED`; require
+    cross-namespace isolation to use the Hermes result schema, `status=BLOCKED`,
+    and decision reason `NAMESPACE_NOT_AUTHORIZED`.
+
+It reports `DONE` only when the full reviewed contract matches. Any envelope,
+scope, command, payload, decision, isolation-reason, isolation status,
+isolation schema, idempotency, or before/after-state mismatch is `BLOCKED` with
+one stable sanitized failure token. The public report is aggregate only: it may
+include the task id, operation count, contract version, and exactly one final
+smoke status, but it must not print task packets, proposal content, canonical
+values, event refs, paths, SQL, table names, environment values, secrets,
+tokens, customer data, drawings, measurements, quantities, or raw exception
+text.
+
 `prepare_aufmass_private_runtime` verifies that the registered private Aufmass
 runtime is ready for a controlled private pilot dry run. It requires no target
 metadata:
