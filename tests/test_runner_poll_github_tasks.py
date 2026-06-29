@@ -8885,6 +8885,32 @@ def test_hermes_memory_gateway_smoke_is_allowlisted_and_reports_aggregate_only()
     assert "primary_fact" not in report
 
 
+def test_hermes_memory_gateway_smoke_duplicate_status_output_blocks() -> None:
+    def duplicate_report_lines() -> list[str]:
+        return [
+            f"hermes_gateway_contract={runner.MEMORY_GATEWAY_CONTRACT_VERSION}",
+            "hermes_memory_operation_count=6",
+            "hermes_memory_smoke_status=done",
+        ]
+
+    with mock.patch.object(
+        runner,
+        "_hermes_memory_gateway_smoke_report_lines",
+        side_effect=duplicate_report_lines,
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HERMES_MEMORY_GATEWAY_SMOKE, str(runner.ROOT)
+        )
+
+    report_lines = report.splitlines()
+    assert report.startswith("BLOCKED:")
+    assert report.count("hermes_memory_smoke_status=") == 1
+    assert report_lines[-2] == "hermes_memory_smoke_status=blocked"
+    assert "status_token=hermes_memory_smoke_status_count_mismatch" in report
+    assert "reason=hermes_memory_smoke_status_count_mismatch" in report
+    assert "success_criteria=not_met" in report
+
+
 @pytest.mark.parametrize(
     ("case_name", "expected_token"),
     (
@@ -8973,6 +8999,12 @@ def test_hermes_memory_gateway_smoke_contract_mismatches_block(
     (
         (
             "hermes-memory-gateway-smoke-cross-project",
+            "__result__",
+            "not-a-result",
+            "hermes_isolation_result_schema_mismatch",
+        ),
+        (
+            "hermes-memory-gateway-smoke-cross-project",
             "schema",
             "wrong.schema",
             "hermes_isolation_result_schema_mismatch",
@@ -9009,6 +9041,8 @@ def test_hermes_memory_gateway_smoke_isolation_schema_and_status_must_fail_close
         result = _cloned_mapping(original(packet, gateway=gateway))
         assert isinstance(result, dict)
         if str(packet.get("task_id")) == isolation_task_id:
+            if field_name == "__result__":
+                return field_value
             result[field_name] = field_value
         return result
 
@@ -9021,6 +9055,53 @@ def test_hermes_memory_gateway_smoke_isolation_schema_and_status_must_fail_close
 
     assert report.startswith("BLOCKED:")
     report_lines = report.splitlines()
+    assert report.count("hermes_memory_smoke_status=") == 1
+    assert report_lines[-2] == "hermes_memory_smoke_status=blocked"
+    assert f"status_token={expected_token}" in report
+    assert f"reason={expected_token}" in report
+
+
+@pytest.mark.parametrize(
+    ("isolation_task_id", "decision", "expected_token"),
+    (
+        (
+            "hermes-memory-gateway-smoke-cross-project",
+            None,
+            "hermes_isolation_decision_mismatch",
+        ),
+        (
+            "hermes-memory-gateway-smoke-cross-namespace",
+            {"allowed": True, "reason": "NAMESPACE_NOT_AUTHORIZED"},
+            "hermes_isolation_decision_mismatch",
+        ),
+        (
+            "hermes-memory-gateway-smoke-cross-project",
+            {"reason": "PROJECT_NOT_AUTHORIZED"},
+            "hermes_isolation_decision_mismatch",
+        ),
+    ),
+)
+def test_hermes_memory_gateway_smoke_isolation_decision_must_fail_closed(
+    isolation_task_id: str, decision: object, expected_token: str
+) -> None:
+    original = runner.run_hermes_memory_task_packet
+
+    def corrupting_worker(packet: dict[str, object], *, gateway: object) -> dict[str, object]:
+        result = _cloned_mapping(original(packet, gateway=gateway))
+        assert isinstance(result, dict)
+        if str(packet.get("task_id")) == isolation_task_id:
+            result["decision"] = decision
+        return result
+
+    with mock.patch.object(
+        runner, "run_hermes_memory_task_packet", side_effect=corrupting_worker
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HERMES_MEMORY_GATEWAY_SMOKE, str(runner.ROOT)
+        )
+
+    report_lines = report.splitlines()
+    assert report.startswith("BLOCKED:")
     assert report.count("hermes_memory_smoke_status=") == 1
     assert report_lines[-2] == "hermes_memory_smoke_status=blocked"
     assert f"status_token={expected_token}" in report

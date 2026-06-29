@@ -425,19 +425,20 @@ It may only:
    public exact summary, canonical reference, and canonical revision to remain
    unchanged as the no-canonical-write proof.
 10. Require cross-project isolation to use the Hermes result schema,
-    `status=BLOCKED`, and decision reason `PROJECT_NOT_AUTHORIZED`; require
-    cross-namespace isolation to use the Hermes result schema, `status=BLOCKED`,
-    and decision reason `NAMESPACE_NOT_AUTHORIZED`.
+    `status=BLOCKED`, `decision.allowed=false`, and exact decision reason
+    `PROJECT_NOT_AUTHORIZED`; require cross-namespace isolation to use the
+    Hermes result schema, `status=BLOCKED`, `decision.allowed=false`, and exact
+    decision reason `NAMESPACE_NOT_AUTHORIZED`.
 
 It reports `DONE` only when the full reviewed contract matches. Any envelope,
 scope, command, payload, decision, isolation-reason, isolation status,
-isolation schema, idempotency, or before/after-state mismatch is `BLOCKED` with
-one stable sanitized failure token. The public report is aggregate only: it may
-include the task id, operation count, the `MEMORY_GATEWAY_CONTRACT_VERSION`
-value, and exactly one final smoke status, but it must not print task packets,
-proposal content, canonical values, event refs, paths, SQL, table names,
-environment values, secrets, tokens, customer data, drawings, measurements,
-quantities, or raw exception text.
+isolation decision, isolation schema, idempotency, or before/after-state
+mismatch is `BLOCKED` with one stable sanitized failure token. The public
+report is aggregate only: it may include the task id, operation count, the
+`MEMORY_GATEWAY_CONTRACT_VERSION` value, and exactly one final smoke status,
+but it must not print task packets, proposal content, canonical values, event
+refs, paths, SQL, table names, environment values, secrets, tokens, customer
+data, drawings, measurements, quantities, or raw exception text.
 
 `prepare_aufmass_private_runtime` verifies that the registered private Aufmass
 runtime is ready for a controlled private pilot dry run. It requires no target
