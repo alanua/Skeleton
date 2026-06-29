@@ -35,6 +35,21 @@ CALLBACK_DIGEST = runner.hmac.new(
     f"tpr1:approve:p123:{HEAD_SHA[:8]}".encode("ascii"),
     runner.hashlib.sha256,
 ).hexdigest()[:12]
+_REAL_INSTALL_GRAPHIFY_UV_RUNTIME = runner._install_graphify_uv_runtime
+
+
+@pytest.fixture(autouse=True)
+def _stub_graphify_uv_runtime_install(monkeypatch: pytest.MonkeyPatch) -> None:
+    def install_uv(status_lines: list[str]) -> str | None:
+        status_lines.extend(
+            (
+                "step=install_pinned_uv status=done",
+                "step=cleanup_pinned_uv_bin status=done",
+            )
+        )
+        return None
+
+    monkeypatch.setattr(runner, "_install_graphify_uv_runtime", install_uv)
 
 
 def _merge_issue_body(
@@ -2771,14 +2786,20 @@ def test_hermes_private_memory_bridge_exception_returns_safe_aggregate_report(
     assert "token" not in report.lower()
 
 
-def _graphify_runtime_body(approval: str | None = runner.GRAPHIFY_RUNTIME_APPROVAL) -> str:
-    metadata = ""
+def _graphify_runtime_body(
+    approval: str | None = runner.GRAPHIFY_RUNTIME_APPROVAL,
+    *,
+    extra_metadata: str = "",
+) -> str:
+    metadata_parts = []
     if approval is not None:
-        metadata = f"Operator Approval: {approval}"
+        metadata_parts.append(f"Operator Approval: {approval}")
+    if extra_metadata:
+        metadata_parts.append(extra_metadata)
     return str(
         _maintenance_issue(
             runner.INSTALL_GRAPHIFY_RUNTIME,
-            metadata=metadata,
+            metadata="\n".join(metadata_parts),
         )["body"]
     )
 
@@ -2814,7 +2835,7 @@ def _successful_graphify_runtime_command(
     command: list[str], cwd: str | Path | None = None
 ) -> tuple[int, str]:
     del cwd
-    if command == list(runner.GRAPHIFY_TOOL_INSTALL_COMMAND):
+    if command[1:] == list(runner.GRAPHIFY_TOOL_INSTALL_COMMAND[1:]):
         return 0, ""
     if command == list(runner.GRAPHIFY_VERSION_COMMAND):
         return 0, "graphify 0.8.44\n"
@@ -2886,6 +2907,102 @@ def test_graphify_runtime_requires_exact_operator_approval() -> None:
     run.assert_not_called()
 
 
+def test_graphify_runtime_reports_supported_requested_uv_version(tmp_path: Path) -> None:
+    managed_paths = _graphify_managed_paths(tmp_path / "home")
+
+    def smoke(command: list[str]) -> tuple[int, str]:
+        _write_smoke_graph(command)
+        return 0, ""
+
+    with mock.patch.object(
+        runner, "_graphify_managed_profile_paths", return_value=managed_paths
+    ), mock.patch.object(
+        runner, "_graphify_private_snapshot_parent", return_value=tmp_path / "snapshots"
+    ), mock.patch.object(
+        runner, "run_command", side_effect=_successful_graphify_runtime_command
+    ) as run, mock.patch.object(
+        runner, "_run_graphify_smoke_command", side_effect=smoke
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.INSTALL_GRAPHIFY_RUNTIME,
+            str(runner.ROOT),
+            _graphify_runtime_body(
+                extra_metadata=f"Requested UV Version: {runner.GRAPHIFY_UV_PINNED_VERSION}"
+            ),
+        )
+
+    assert "uv_requested_version=0.11.23" in report
+    assert "unsupported_uv_version" not in report
+    run.assert_called()
+
+
+def test_graphify_runtime_blocks_unsupported_requested_uv_version_without_echoing() -> None:
+    rejected = "0.99.99-raw-input-must-not-leak"
+    with mock.patch.object(runner, "run_command") as run:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.INSTALL_GRAPHIFY_RUNTIME,
+            str(runner.ROOT),
+            _graphify_runtime_body(extra_metadata=f"Requested UV Version: {rejected}"),
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "uv_requested_version=unsupported" in report
+    assert "reason=unsupported_uv_version" in report
+    assert rejected not in report
+    run.assert_not_called()
+
+
+def test_graphify_uv_cleanup_keeps_only_regular_executable_uv(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "managed-bin"
+    bin_dir.mkdir()
+    uv = bin_dir / "uv"
+    uv.write_text("#!/bin/sh\n", encoding="utf-8")
+    uv.chmod(0o755)
+    uvx = bin_dir / "uvx"
+    uvx.write_text("#!/bin/sh\n", encoding="utf-8")
+    uvx.chmod(0o755)
+    (bin_dir / "unexpected").write_text("extra\n", encoding="utf-8")
+
+    assert runner._cleanup_graphify_uv_managed_bin(bin_dir)
+    assert sorted(path.name for path in bin_dir.iterdir()) == ["uv"]
+    assert uv.is_file()
+    assert not uv.is_symlink()
+    assert os.access(uv, os.X_OK)
+
+
+def test_graphify_uv_installer_cleanup_removes_realistic_uvx(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bin_dir = tmp_path / "uv-bin"
+
+    def run_installer(command: list[str], env: dict[str, str]) -> int:
+        assert command[:2] == ["sh", "-c"]
+        assert env["UV_VERSION"] == runner.GRAPHIFY_UV_PINNED_VERSION
+        assert env["UV_INSTALL_DIR"] == str(bin_dir)
+        assert env["INSTALLER_NO_MODIFY_PATH"] == "1"
+        install_dir = Path(env["UV_INSTALL_DIR"])
+        install_dir.mkdir(parents=True, exist_ok=True)
+        for executable in ("uv", "uvx"):
+            path = install_dir / executable
+            path.write_text("#!/bin/sh\n", encoding="utf-8")
+            path.chmod(0o755)
+        return 0
+
+    monkeypatch.setenv("SKELETON_GRAPHIFY_UV_BIN_DIR", str(bin_dir))
+    monkeypatch.setattr(runner, "_run_graphify_uv_installer", run_installer)
+
+    status_lines: list[str] = []
+    reason = _REAL_INSTALL_GRAPHIFY_UV_RUNTIME(status_lines)
+
+    assert reason is None
+    assert "step=install_pinned_uv status=done" in status_lines
+    assert "step=cleanup_pinned_uv_bin status=done" in status_lines
+    assert sorted(path.name for path in bin_dir.iterdir()) == ["uv"]
+    assert (bin_dir / "uv").is_file()
+    assert not (bin_dir / "uvx").exists()
+
+
 def test_graphify_runtime_uses_verified_0844_commands_and_retains_snapshot(
     tmp_path: Path,
 ) -> None:
@@ -2927,8 +3044,16 @@ def test_graphify_runtime_uses_verified_0844_commands_and_retains_snapshot(
     assert "synthetic_graph_node_count=3" in report
     assert "synthetic_graph_edge_count=2" in report
     assert "managed_version_marker_count=" in report
+    assert "uv_version=0.11.23" in report
+    assert "uv_requested_version=missing" in report
     assert any(snapshot_parent.iterdir())
-    assert list(runner.GRAPHIFY_TOOL_INSTALL_COMMAND) in commands
+    graphify_tool_installs = [
+        command
+        for command in commands
+        if command[1:] == list(runner.GRAPHIFY_TOOL_INSTALL_COMMAND[1:])
+    ]
+    assert len(graphify_tool_installs) == 1
+    assert graphify_tool_installs[0][0].endswith("/uv")
     assert list(runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND) in commands
     assert list(runner.GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND) in commands
     smoke_commands = [command for command in commands if command[:2] == ["env", "-i"]]
@@ -2985,7 +3110,7 @@ def test_graphify_managed_paths_discover_existing_allowlisted_version_markers(
 def test_graphify_runtime_preflight_blocks_before_profile_mutation(tmp_path: Path) -> None:
     def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
         del cwd
-        if command == list(runner.GRAPHIFY_TOOL_INSTALL_COMMAND):
+        if command[1:] == list(runner.GRAPHIFY_TOOL_INSTALL_COMMAND[1:]):
             return 0, ""
         if command == list(runner.GRAPHIFY_VERSION_COMMAND):
             return 0, "graphify 0.8.44\n"
@@ -3015,14 +3140,16 @@ def test_graphify_runtime_preflight_blocks_before_profile_mutation(tmp_path: Pat
 
 
 def test_graphify_runtime_reports_missing_uv_before_backup(tmp_path: Path) -> None:
-    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
-        del command, cwd
-        raise FileNotFoundError("raw uv path must not leak")
+    def install_uv(status_lines: list[str]) -> str:
+        status_lines.append("step=install_pinned_uv status=failed")
+        return "uv_installer_launch_failed"
 
     with mock.patch.object(
         runner, "_graphify_managed_profile_paths", return_value=_graphify_managed_paths(tmp_path)
     ), mock.patch.object(
-        runner, "run_command", side_effect=run
+        runner, "_install_graphify_uv_runtime", side_effect=install_uv
+    ), mock.patch.object(
+        runner, "run_command"
     ), mock.patch.object(
         runner, "_backup_graphify_profiles"
     ) as backup:
@@ -3033,9 +3160,8 @@ def test_graphify_runtime_reports_missing_uv_before_backup(tmp_path: Path) -> No
         )
 
     assert report.startswith("BLOCKED:")
-    assert "reason=graphify_tool_command_unavailable" in report
+    assert "reason=uv_installer_launch_failed" in report
     assert "rollback_status=not_needed" in report
-    assert "raw uv path must not leak" not in report
     backup.assert_not_called()
 
 
@@ -3044,7 +3170,7 @@ def test_graphify_runtime_reports_missing_graphify_during_preflight(
 ) -> None:
     def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
         del cwd
-        if command == list(runner.GRAPHIFY_TOOL_INSTALL_COMMAND):
+        if command[1:] == list(runner.GRAPHIFY_TOOL_INSTALL_COMMAND[1:]):
             return 0, ""
         raise FileNotFoundError("raw graphify path must not leak")
 
@@ -3110,7 +3236,7 @@ def test_graphify_runtime_unexpected_prebackup_failure_is_public_safe(
 ) -> None:
     def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
         del cwd
-        if command == list(runner.GRAPHIFY_TOOL_INSTALL_COMMAND):
+        if command[1:] == list(runner.GRAPHIFY_TOOL_INSTALL_COMMAND[1:]):
             return 0, ""
         raise RuntimeError("raw unexpected detail must not leak")
 
