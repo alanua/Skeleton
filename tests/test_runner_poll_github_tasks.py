@@ -8854,3 +8854,179 @@ def test_maintenance_report_sanitizer_rejects_raw_blocks_paths_and_prose() -> No
     assert "step=validation_profile_command_1 status=failed exit_code=1" in report
     assert "reason=maintenance_step_raised" in report
     assert "pr_url=https://github.com/alanua/Skeleton/pull/1168" in report
+
+
+def _cloned_mapping(value: object) -> object:
+    return json.loads(json.dumps(value))
+
+
+def test_hermes_memory_gateway_smoke_is_allowlisted_and_reports_aggregate_only() -> None:
+    assert runner.HERMES_MEMORY_GATEWAY_SMOKE in runner.RUNTIME_MAINTENANCE_TASK_IDS
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HERMES_MEMORY_GATEWAY_SMOKE, str(runner.ROOT)
+    )
+
+    assert report.startswith("DONE:")
+    assert "maintenance_task_id=hermes_memory_gateway_smoke" in report
+    assert "hermes_memory_operation_count=6" in report
+    assert (
+        f"hermes_gateway_contract={runner.MEMORY_GATEWAY_CONTRACT_VERSION}" in report
+    )
+    assert report.count("hermes_memory_smoke_status=") == 1
+    assert "hermes_memory_smoke_status=done" in report
+    assert "success_criteria=met" in report
+    assert "hermes.memory_task_packet" not in report
+    assert "proposal-event" not in report
+    assert "canon-" not in report
+    assert "canonical_revision" not in report
+    assert "primary_fact" not in report
+
+
+@pytest.mark.parametrize(
+    ("case_name", "expected_token"),
+    (
+        ("wrong_schema", "hermes_result_schema_mismatch"),
+        ("wrong_operation", "hermes_result_operation_mismatch"),
+        ("wrong_gateway_command", "hermes_gateway_command_mismatch"),
+        ("wrong_namespace", "hermes_result_namespace_mismatch"),
+        ("wrong_project", "hermes_result_project_mismatch"),
+        ("wrong_lookup_payload", "hermes_lookup_payload_semantics_mismatch"),
+        ("wrong_isolation_reason", "hermes_cross_namespace_reason_mismatch"),
+        ("wrong_duplicate_result", "hermes_duplicate_classification_mismatch"),
+        ("changed_after_state", "hermes_canonical_after_state_changed"),
+    ),
+)
+def test_hermes_memory_gateway_smoke_contract_mismatches_block(
+    case_name: str, expected_token: str
+) -> None:
+    original = runner.run_hermes_memory_task_packet
+    call_counts: dict[str, int] = {}
+
+    def corrupting_worker(packet: dict[str, object], *, gateway: object) -> dict[str, object]:
+        result = _cloned_mapping(original(packet, gateway=gateway))
+        assert isinstance(result, dict)
+        operation = str(packet.get("operation"))
+        task_packet_id = str(packet.get("task_id"))
+        call_counts[operation] = call_counts.get(operation, 0) + 1
+
+        if case_name == "wrong_schema" and operation == "memory.lookup_exact":
+            result["schema"] = "wrong.schema"
+        elif case_name == "wrong_operation" and operation == "memory.get_conflicts":
+            result["operation"] = "memory.lookup_exact"
+        elif case_name == "wrong_gateway_command" and operation == "memory.get_audit_log":
+            gateway_result = result.get("gateway")
+            assert isinstance(gateway_result, dict)
+            gateway_result["command"] = "aufmass.memory.search_semantic"
+        elif case_name == "wrong_namespace" and operation == "memory.get_index_freshness":
+            result["namespace"] = "bauclock"
+        elif case_name == "wrong_project" and operation == "memory.get_conflicts":
+            result["project_id"] = "project-b"
+        elif case_name == "wrong_lookup_payload" and operation == "memory.lookup_exact":
+            payload = result.get("payload")
+            assert isinstance(payload, dict)
+            payload["canonical_revision"] = "3"
+        elif (
+            case_name == "wrong_isolation_reason"
+            and task_packet_id == "hermes-memory-gateway-smoke-cross-namespace"
+        ):
+            result["decision"] = {"allowed": False, "reason": "BLOCKED"}
+        elif (
+            case_name == "wrong_duplicate_result"
+            and operation == "memory.propose_patch"
+            and result.get("status") == "DUPLICATE_EXISTING"
+        ):
+            payload = result.get("payload")
+            assert isinstance(payload, dict)
+            payload["classification"] = "NEW_PROPOSAL"
+        elif (
+            case_name == "changed_after_state"
+            and operation == "memory.lookup_exact"
+            and call_counts[operation] == 2
+        ):
+            payload = result.get("payload")
+            assert isinstance(payload, dict)
+            payload["canonical_revision"] = 4
+        return result
+
+    with mock.patch.object(
+        runner, "run_hermes_memory_task_packet", side_effect=corrupting_worker
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HERMES_MEMORY_GATEWAY_SMOKE, str(runner.ROOT)
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert report.count("hermes_memory_smoke_status=") == 1
+    assert f"status_token={expected_token}" in report
+    assert f"reason={expected_token}" in report
+    assert "error_class=none" not in report
+    assert "success_criteria=not_met" in report
+
+
+@pytest.mark.parametrize(
+    ("isolation_task_id", "field_name", "field_value", "expected_token"),
+    (
+        (
+            "hermes-memory-gateway-smoke-cross-project",
+            "schema",
+            "wrong.schema",
+            "hermes_isolation_result_schema_mismatch",
+        ),
+        (
+            "hermes-memory-gateway-smoke-cross-namespace",
+            "status",
+            "DRY_RUN_OK",
+            "hermes_isolation_status_mismatch",
+        ),
+    ),
+)
+def test_hermes_memory_gateway_smoke_isolation_schema_and_status_must_fail_closed(
+    isolation_task_id: str,
+    field_name: str,
+    field_value: str,
+    expected_token: str,
+) -> None:
+    original = runner.run_hermes_memory_task_packet
+
+    def corrupting_worker(packet: dict[str, object], *, gateway: object) -> dict[str, object]:
+        result = _cloned_mapping(original(packet, gateway=gateway))
+        assert isinstance(result, dict)
+        if str(packet.get("task_id")) == isolation_task_id:
+            result[field_name] = field_value
+        return result
+
+    with mock.patch.object(
+        runner, "run_hermes_memory_task_packet", side_effect=corrupting_worker
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HERMES_MEMORY_GATEWAY_SMOKE, str(runner.ROOT)
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert report.count("hermes_memory_smoke_status=") == 1
+    assert f"status_token={expected_token}" in report
+    assert f"reason={expected_token}" in report
+
+
+def test_hermes_memory_gateway_smoke_cross_project_reason_must_be_exact() -> None:
+    original = runner.run_hermes_memory_task_packet
+
+    def corrupting_worker(packet: dict[str, object], *, gateway: object) -> dict[str, object]:
+        result = _cloned_mapping(original(packet, gateway=gateway))
+        assert isinstance(result, dict)
+        if str(packet.get("task_id")) == "hermes-memory-gateway-smoke-cross-project":
+            result["decision"] = {"allowed": False, "reason": "BLOCKED"}
+        return result
+
+    with mock.patch.object(
+        runner, "run_hermes_memory_task_packet", side_effect=corrupting_worker
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HERMES_MEMORY_GATEWAY_SMOKE, str(runner.ROOT)
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert report.count("hermes_memory_smoke_status=") == 1
+    assert "status_token=hermes_cross_project_reason_mismatch" in report
+    assert "error_class=none" not in report
