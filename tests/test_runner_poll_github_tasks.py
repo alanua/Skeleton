@@ -7712,6 +7712,41 @@ def test_ensure_project_checkout_task_never_runs_forbidden_commands_or_codex() -
     run_codex.assert_not_called()
 
 
+def test_home_edge_bounded_modem_probe_report_is_aggregate_only() -> None:
+    class Result:
+        def public_summary(self) -> dict[str, object]:
+            return {
+                "schema": "skeleton.home_edge.modem_action.public.v1",
+                "status": "done",
+                "connection_test": "ok",
+                "reason": "bounded_uuid_connection_validated",
+                "rollback_status": "deleted",
+                "tailscale_before": "healthy",
+                "tailscale_after": "healthy",
+                "route_preserved": True,
+            }
+
+    private_values = [
+        "private-host",
+        "1234",
+        "o2.private.test",
+        "raw modem output",
+        "11111111-2222-3333-4444-555555555555",
+    ]
+
+    with mock.patch(
+        "core.home_edge.modem_action.run_home_edge_01_modem_probe",
+        return_value=Result(),
+    ):
+        report = runner.home_edge_01_bounded_modem_probe()
+
+    assert report.startswith("DONE:")
+    assert "connection_test=ok" in report
+    assert "public_safe_report=aggregate_only" in report
+    for value in private_values:
+        assert value not in report
+
+
 def test_validate_pr_branch_missing_pr_number_blocks() -> None:
     report = runner.validate_pr_branch(_validate_pr_issue_body(pr_number=None))
 
