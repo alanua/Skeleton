@@ -15,10 +15,10 @@ from core.home_edge.remote import AUDITED_COMMANDS, HomeEdgeRemoteError, run_aud
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run audited read-only commands on home-edge-01 over Tailscale SSH.")
+    parser = argparse.ArgumentParser(description="Run typed audited actions on home-edge-01.")
     parser.add_argument("command", choices=sorted(AUDITED_COMMANDS))
-    parser.add_argument("--artifact", default=str(DEFAULT_ARTIFACT_PATH), help="JSON artifact path for diagnostic commands.")
-    parser.add_argument("--operator-report", action="store_true", help="Print concise operator report after JSON artifact is written.")
+    parser.add_argument("--artifact", default=str(DEFAULT_ARTIFACT_PATH))
+    parser.add_argument("--operator-report", action="store_true")
     args = parser.parse_args(argv)
 
     try:
