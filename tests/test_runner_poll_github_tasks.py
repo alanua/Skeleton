@@ -8873,7 +8873,9 @@ def test_hermes_memory_gateway_smoke_is_allowlisted_and_reports_aggregate_only()
     assert (
         f"hermes_gateway_contract={runner.MEMORY_GATEWAY_CONTRACT_VERSION}" in report
     )
+    report_lines = report.splitlines()
     assert report.count("hermes_memory_smoke_status=") == 1
+    assert report_lines[-2] == "hermes_memory_smoke_status=done"
     assert "hermes_memory_smoke_status=done" in report
     assert "success_criteria=met" in report
     assert "hermes.memory_task_packet" not in report
@@ -8957,7 +8959,9 @@ def test_hermes_memory_gateway_smoke_contract_mismatches_block(
         )
 
     assert report.startswith("BLOCKED:")
+    report_lines = report.splitlines()
     assert report.count("hermes_memory_smoke_status=") == 1
+    assert report_lines[-2] == "hermes_memory_smoke_status=blocked"
     assert f"status_token={expected_token}" in report
     assert f"reason={expected_token}" in report
     assert "error_class=none" not in report
@@ -8978,6 +8982,18 @@ def test_hermes_memory_gateway_smoke_contract_mismatches_block(
             "status",
             "DRY_RUN_OK",
             "hermes_isolation_status_mismatch",
+        ),
+        (
+            "hermes-memory-gateway-smoke-cross-project",
+            "status",
+            "DRY_RUN_OK",
+            "hermes_isolation_status_mismatch",
+        ),
+        (
+            "hermes-memory-gateway-smoke-cross-namespace",
+            "schema",
+            "wrong.schema",
+            "hermes_isolation_result_schema_mismatch",
         ),
     ),
 )
@@ -9004,18 +9020,35 @@ def test_hermes_memory_gateway_smoke_isolation_schema_and_status_must_fail_close
         )
 
     assert report.startswith("BLOCKED:")
+    report_lines = report.splitlines()
     assert report.count("hermes_memory_smoke_status=") == 1
+    assert report_lines[-2] == "hermes_memory_smoke_status=blocked"
     assert f"status_token={expected_token}" in report
     assert f"reason={expected_token}" in report
 
 
-def test_hermes_memory_gateway_smoke_cross_project_reason_must_be_exact() -> None:
+@pytest.mark.parametrize(
+    ("isolation_task_id", "expected_token"),
+    (
+        (
+            "hermes-memory-gateway-smoke-cross-project",
+            "hermes_cross_project_reason_mismatch",
+        ),
+        (
+            "hermes-memory-gateway-smoke-cross-namespace",
+            "hermes_cross_namespace_reason_mismatch",
+        ),
+    ),
+)
+def test_hermes_memory_gateway_smoke_isolation_reason_must_be_exact(
+    isolation_task_id: str, expected_token: str
+) -> None:
     original = runner.run_hermes_memory_task_packet
 
     def corrupting_worker(packet: dict[str, object], *, gateway: object) -> dict[str, object]:
         result = _cloned_mapping(original(packet, gateway=gateway))
         assert isinstance(result, dict)
-        if str(packet.get("task_id")) == "hermes-memory-gateway-smoke-cross-project":
+        if str(packet.get("task_id")) == isolation_task_id:
             result["decision"] = {"allowed": False, "reason": "BLOCKED"}
         return result
 
@@ -9027,6 +9060,8 @@ def test_hermes_memory_gateway_smoke_cross_project_reason_must_be_exact() -> Non
         )
 
     assert report.startswith("BLOCKED:")
+    report_lines = report.splitlines()
     assert report.count("hermes_memory_smoke_status=") == 1
-    assert "status_token=hermes_cross_project_reason_mismatch" in report
+    assert report_lines[-2] == "hermes_memory_smoke_status=blocked"
+    assert f"status_token={expected_token}" in report
     assert "error_class=none" not in report

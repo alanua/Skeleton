@@ -7731,11 +7731,10 @@ def _hermes_memory_gateway_smoke_packet(
     }
 
 
-def _hermes_memory_gateway_smoke_report_lines(smoke_status: str) -> list[str]:
+def _hermes_memory_gateway_smoke_report_lines() -> list[str]:
     return [
         f"hermes_gateway_contract={MEMORY_GATEWAY_CONTRACT_VERSION}",
         f"hermes_memory_operation_count={len(HERMES_MEMORY_GATEWAY_SMOKE_OPERATIONS)}",
-        f"hermes_memory_smoke_status={smoke_status}",
     ]
 
 
@@ -7744,9 +7743,10 @@ def _hermes_memory_gateway_smoke_failure(task_id: str, token: str) -> str:
         "BLOCKED",
         task_id,
         [
-            *_hermes_memory_gateway_smoke_report_lines("blocked"),
+            *_hermes_memory_gateway_smoke_report_lines(),
             f"status_token={token}",
             f"reason={token}",
+            "hermes_memory_smoke_status=blocked",
         ],
         "not_met",
     )
@@ -8081,7 +8081,10 @@ def hermes_memory_gateway_smoke() -> str:
         return _maintenance_report(
             "DONE",
             task_id,
-            _hermes_memory_gateway_smoke_report_lines("done"),
+            [
+                *_hermes_memory_gateway_smoke_report_lines(),
+                "hermes_memory_smoke_status=done",
+            ],
             "met",
         )
     except Exception:
@@ -8089,10 +8092,11 @@ def hermes_memory_gateway_smoke() -> str:
             "BLOCKED",
             task_id,
             [
-                *_hermes_memory_gateway_smoke_report_lines("blocked"),
+                *_hermes_memory_gateway_smoke_report_lines(),
                 "status_token=hermes_memory_gateway_smoke_exception",
                 "reason=hermes_memory_gateway_smoke_exception",
                 "error_class=contract_exception",
+                "hermes_memory_smoke_status=blocked",
             ],
             "not_met",
         )

@@ -433,11 +433,11 @@ It reports `DONE` only when the full reviewed contract matches. Any envelope,
 scope, command, payload, decision, isolation-reason, isolation status,
 isolation schema, idempotency, or before/after-state mismatch is `BLOCKED` with
 one stable sanitized failure token. The public report is aggregate only: it may
-include the task id, operation count, contract version, and exactly one final
-smoke status, but it must not print task packets, proposal content, canonical
-values, event refs, paths, SQL, table names, environment values, secrets,
-tokens, customer data, drawings, measurements, quantities, or raw exception
-text.
+include the task id, operation count, the `MEMORY_GATEWAY_CONTRACT_VERSION`
+value, and exactly one final smoke status, but it must not print task packets,
+proposal content, canonical values, event refs, paths, SQL, table names,
+environment values, secrets, tokens, customer data, drawings, measurements,
+quantities, or raw exception text.
 
 `prepare_aufmass_private_runtime` verifies that the registered private Aufmass
 runtime is ready for a controlled private pilot dry run. It requires no target
