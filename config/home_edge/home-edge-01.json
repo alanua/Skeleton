@@ -1,0 +1,66 @@
+{
+  "schema": "skeleton.home_edge.profile.template.v2",
+  "node_id": "home-edge-template-01",
+  "hostname": "home-edge-template-01",
+  "tailscale_ip": "100.64.0.10",
+  "controller": {
+    "host": "controller-template-01",
+    "tailscale_ip": "100.64.0.20"
+  },
+  "ssh": {
+    "target_user": "home-edge-user",
+    "transport": "openssh_over_tailscale_ip",
+    "identity_env": "SKELETON_HOME_EDGE_01_SSH_IDENTITY_FILE",
+    "known_hosts_env": "SKELETON_HOME_EDGE_01_SSH_KNOWN_HOSTS_FILE",
+    "strict_host_key_checking": true,
+    "interactive_fallback": "tailscale_ssh_operator_only"
+  },
+  "gateway": {
+    "task_model": "typed_allowlisted_actions",
+    "risk_lanes": [
+      "read_only",
+      "approved_mutation",
+      "destructive_manual"
+    ],
+    "raw_shell_from_issue_payload": "forbidden"
+  },
+  "os": "Linux template host",
+  "hardware": {
+    "ram": "template",
+    "root_free": "template",
+    "role": "media_pc_and_universal_home_edge"
+  },
+  "primary_network": {
+    "interface": "eth-template0",
+    "address": "192.0.2.54/24",
+    "gateway": "192.0.2.1",
+    "policy": "preserve_default_route"
+  },
+  "capabilities": [
+    "system_administration",
+    "network_diagnostics",
+    "router_and_gateway_management",
+    "home_automation",
+    "docker_and_containers",
+    "service_management",
+    "file_and_backup_operations",
+    "browser_and_desktop_diagnostics",
+    "media_tasks",
+    "usb_and_hardware_diagnostics",
+    "esp_wled_build_and_flash",
+    "ansible",
+    "python_tooling",
+    "node_tooling",
+    "monitoring_and_logs"
+  ],
+  "safety_boundaries": [
+    "fixed_runner_target_only",
+    "no_raw_shell_from_issue_payload",
+    "keep_default_route_until_separately_approved",
+    "do_not_disconnect_operator_internet",
+    "do_not_expose_management_interfaces_publicly",
+    "do_not_store_runtime_credentials_or_subscriber_identifiers",
+    "mutating_actions_require_typed_adapter_risk_lane_and_audit",
+    "destructive_changes_require_separate_approval_and_rollback_evidence"
+  ]
+}

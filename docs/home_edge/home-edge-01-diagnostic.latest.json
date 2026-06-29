@@ -1,0 +1,87 @@
+{
+  "schema": "skeleton.home_edge.diagnostic.v2",
+  "source": "repository_template",
+  "evidence": {
+    "registration": {
+      "state": "template",
+      "source": "config/home_edge/home-edge-01.json"
+    },
+    "runtime": {
+      "state": "unverified",
+      "transport": {
+        "state": "unverified",
+        "adapter": "openssh",
+        "target": "home-edge-user@100.64.0.10",
+        "strict_host_key_checking": true,
+        "reason": "runtime_bootstrap_not_executed"
+      }
+    }
+  },
+  "node": {
+    "evidence": "template",
+    "node_id": "home-edge-template-01",
+    "hostname": "home-edge-template-01",
+    "tailscale_ip": "100.64.0.10",
+    "target_user": "home-edge-user",
+    "os_expected": "Linux template host"
+  },
+  "controller": {
+    "evidence": "template",
+    "host": "controller-template-01",
+    "tailscale_ip": "100.64.0.20"
+  },
+  "summary": {
+    "status": "unverified",
+    "gateway": {
+      "status": "unverified",
+      "evidence": "unverified"
+    },
+    "route": {
+      "status": "unverified",
+      "evidence": "unverified",
+      "expected": {
+        "state": "template",
+        "interface": "eth-template0",
+        "gateway": "192.0.2.1"
+      },
+      "observed": {
+        "state": "unverified",
+        "interface": null,
+        "gateway": null
+      }
+    },
+    "tailscale": {
+      "status": "unverified",
+      "evidence": "unverified",
+      "expected": {
+        "state": "template",
+        "ip": "100.64.0.10"
+      },
+      "observed": {
+        "state": "unverified",
+        "ips": []
+      }
+    },
+    "modem": {
+      "status": "unverified",
+      "evidence": "unverified",
+      "registered_expectation": {
+        "state": "template",
+        "role": "optional_external_or_attached_usb_modem"
+      },
+      "observed": null
+    },
+    "capability_inventory": {
+      "status": "unverified",
+      "evidence": "unverified",
+      "observed": null
+    },
+    "next_prepared_action": {
+      "schema": "skeleton.home_edge.prepared_action.v2",
+      "action_id": "bootstrap_home_edge_runner_transport",
+      "status": "prepared_not_executed",
+      "operator_approval_required": true,
+      "public_artifact_contains_secret_material": false
+    }
+  }
+}

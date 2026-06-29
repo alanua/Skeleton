@@ -122,6 +122,7 @@ PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR = "publish_target_project_issue_worktre
 QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES = (
     "quarantine_stale_clean_skeleton_worktrees"
 )
+HOME_EDGE_01_READ_ONLY_DIAGNOSTIC = "home_edge_01_read_only_diagnostic"
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
         SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
@@ -149,6 +150,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         PUBLISH_EXISTING_ISSUE_WORKTREE,
         PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR,
         QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES,
+        HOME_EDGE_01_READ_ONLY_DIAGNOSTIC,
     )
 )
 AUFMASS_PRIVATE_PROJECT_ID = "aufmass_private"
@@ -312,6 +314,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "checkout_path",
         "checkout_sync_state",
         "command_unavailable_reason",
+        "connection_mode",
         "compare_ahead_by",
         "compare_behind_by",
         "compare_state",
@@ -349,6 +352,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "hermes_memory_operation_count",
         "hermes_memory_smoke_status",
         "host_id_sha256_12",
+        "huawei_diag_profile",
         "input_row_count",
         "input_table_count",
         "installed_skill_platform_count",
@@ -370,9 +374,12 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "missing_file",
         "missing_dependency_module",
         "mode",
+        "modem_lock_state",
+        "modem_status",
         "model_credentials_removed_from_smoke",
         "mutation_mode",
         "network_disabled",
+        "node_id",
         "next_action",
         "next_operator_action",
         "open_issues_count",
@@ -411,6 +418,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "report_mode",
         "report_private_paths",
         "report_quantities",
+        "route_status",
         "review_table_count",
         "repository",
         "rollback_status",
@@ -444,6 +452,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "target_project",
         "target_project_route",
         "target_repository",
+        "tailscale_status",
         "test_summary",
         "tool_codex",
         "tool_gh",
@@ -8102,6 +8111,42 @@ def hermes_memory_gateway_smoke() -> str:
         )
 
 
+def home_edge_01_read_only_diagnostic() -> str:
+    task_id = HOME_EDGE_01_READ_ONLY_DIAGNOSTIC
+    from core.home_edge.diagnostics import DEFAULT_ARTIFACT_PATH
+    from core.home_edge.remote import compact_status, run_audited_home_edge_command
+
+    artifact = run_audited_home_edge_command(
+        "diagnostic",
+        artifact_path=ROOT / DEFAULT_ARTIFACT_PATH,
+    )
+    compact = compact_status(artifact)
+    status_lines = [
+        "inventory_schema=home_edge_diagnostic_v1",
+        "report_mode=read_only",
+        f"node_id={compact['node']}",
+        f"route_status={compact['route_status']}",
+        f"tailscale_status={compact['tailscale_status']}",
+        f"modem_status={compact['modem_status']}",
+        f"modem_lock_state={compact['modem_lock_state']}",
+        f"connection_mode={compact['connection_mode']}",
+        "huawei_diag_profile=ignored",
+        "next_operator_action=private_runtime_profile_and_probe_approval",
+        "diagnostic_count=1",
+    ]
+    success = (
+        compact["route_status"] == "unchanged"
+        and compact["tailscale_status"] == "healthy"
+        and compact["modem_status"] == "identified"
+    )
+    return _maintenance_report(
+        "DONE" if success else "NEEDS_OPERATOR",
+        task_id,
+        status_lines,
+        "met" if success else "not_met",
+    )
+
+
 def dispatch_runtime_maintenance_task(
     task_id: str, workdir: str, body: str = ""
 ) -> str:
@@ -8161,6 +8206,8 @@ def dispatch_runtime_maintenance_task(
             return publish_target_project_issue_worktree_pr(body)
         if task_id == QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES:
             return quarantine_stale_clean_skeleton_worktrees(body)
+        if task_id == HOME_EDGE_01_READ_ONLY_DIAGNOSTIC:
+            return home_edge_01_read_only_diagnostic()
         return check_project_checkout(body)
     except Exception:
         return _maintenance_report(
