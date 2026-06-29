@@ -7712,6 +7712,60 @@ def test_ensure_project_checkout_task_never_runs_forbidden_commands_or_codex() -
     run_codex.assert_not_called()
 
 
+def test_home_edge_private_sim_unlock_report_is_aggregate_only() -> None:
+    private_values = [
+        "private-host",
+        "1234",
+        "internet",
+        "raw modem output",
+        "11111111-2222-3333-4444-555555555555",
+        "wwan0",
+    ]
+    artifact = {
+        "task_id": "home_edge_01_private_sim_unlock_o2_apn_test",
+        "node_id": "home-edge-01",
+        "approval_status": "verified",
+        "secret_source": "private_inherited_descriptor",
+        "route_before": "ok",
+        "tailscale_before": "ok",
+        "sim_unlock": "ok",
+        "apn_profile": "ok",
+        "connection_test": "ok",
+        "rollback": "rolled_back",
+        "route_after": "ok",
+        "tailscale_after": "ok",
+        "status": "ok",
+        "reason": "done",
+    }
+    body = (
+        "Task: home_edge_01_private_sim_unlock_o2_apn_test\n"
+        "Runtime Approval Marker: "
+        "APPROVE_HOME_EDGE_01_PRIVATE_SIM_UNLOCK_O2_APN_TEST\n"
+    )
+
+    with mock.patch(
+        "core.home_edge.modem_action.run_private_sim_unlock_o2_apn_test",
+        return_value=artifact,
+    ):
+        report = runner.home_edge_01_private_sim_unlock_o2_apn_test(body)
+
+    assert report.startswith("DONE:")
+    assert "connection_test=ok" in report
+    assert "status=ok" in report
+    for value in private_values:
+        assert value not in report
+
+
+def test_home_edge_private_sim_unlock_missing_approval_blocks_before_transport() -> None:
+    report = runner.home_edge_01_private_sim_unlock_o2_apn_test(
+        "Task: home_edge_01_private_sim_unlock_o2_apn_test\n"
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert "status_token=missing_runtime_approval" in report
+    assert "reason=missing_runtime_approval" in report
+
+
 def test_validate_pr_branch_missing_pr_number_blocks() -> None:
     report = runner.validate_pr_branch(_validate_pr_issue_body(pr_number=None))
 

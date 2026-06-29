@@ -123,6 +123,9 @@ QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES = (
     "quarantine_stale_clean_skeleton_worktrees"
 )
 HOME_EDGE_01_READ_ONLY_DIAGNOSTIC = "home_edge_01_read_only_diagnostic"
+HOME_EDGE_01_PRIVATE_SIM_UNLOCK_O2_APN_TEST = (
+    "home_edge_01_private_sim_unlock_o2_apn_test"
+)
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
         SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
@@ -151,6 +154,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR,
         QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES,
         HOME_EDGE_01_READ_ONLY_DIAGNOSTIC,
+        HOME_EDGE_01_PRIVATE_SIM_UNLOCK_O2_APN_TEST,
     )
 )
 AUFMASS_PRIVATE_PROJECT_ID = "aufmass_private"
@@ -318,6 +322,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "compare_behind_by",
         "compare_state",
         "compare_status",
+        "connection_test",
         "current_branch",
         "decision_records_skipped",
         "decision_records_written",
@@ -372,6 +377,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "missing_file",
         "missing_dependency_module",
         "mode",
+        "modem_action_status",
         "model_credentials_removed_from_smoke",
         "mutation_mode",
         "network_disabled",
@@ -402,7 +408,9 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "project_id",
         "project_state_existing",
         "project_state_written",
+        "primary_route_preserved",
         "protected_worktrees_count",
+        "public_safe_report",
         "public_safe_report_ok",
         "pull_request",
         "python_version",
@@ -436,6 +444,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "status_token",
         "status_count_approved",
         "status_count_needs_review",
+        "tailscale_after",
+        "tailscale_before",
         "step",
         "success_criteria",
         "synthetic_corpus_status",
@@ -7730,6 +7740,57 @@ def home_edge_01_read_only_diagnostic() -> str:
     )
 
 
+def home_edge_01_private_sim_unlock_o2_apn_test(body: str) -> str:
+    task_id = HOME_EDGE_01_PRIVATE_SIM_UNLOCK_O2_APN_TEST
+    from core.home_edge.modem_action import (
+        RUNTIME_APPROVAL_MARKER,
+        compact_status,
+        run_private_sim_unlock_o2_apn_test,
+    )
+
+    marker = _body_field(body, "Runtime Approval Marker")
+    artifact = run_private_sim_unlock_o2_apn_test(
+        runtime_approval_marker=marker,
+    )
+    compact = compact_status(artifact)
+    status_lines = [
+        "report_mode=approved_mutation",
+        f"node_id={compact['node_id']}",
+        f"approval_status={compact['approval_status']}",
+        f"secret_source={compact['secret_source']}",
+        f"route_before={compact['route_before']}",
+        f"tailscale_before={compact['tailscale_before']}",
+        f"sim_unlock={compact['sim_unlock']}",
+        f"apn_profile={compact['apn_profile']}",
+        f"connection_test={compact['connection_test']}",
+        f"rollback={compact['rollback']}",
+        f"route_after={compact['route_after']}",
+        f"tailscale_after={compact['tailscale_after']}",
+        f"status={compact['status']}",
+        f"reason={compact['reason']}",
+    ]
+    if marker != RUNTIME_APPROVAL_MARKER:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "status_token=missing_runtime_approval"],
+            "not_met",
+        )
+    success = (
+        compact["status"] == "ok"
+        and compact["route_before"] == "ok"
+        and compact["tailscale_before"] == "ok"
+        and compact["route_after"] == "ok"
+        and compact["tailscale_after"] == "ok"
+    )
+    return _maintenance_report(
+        "DONE" if success else "BLOCKED",
+        task_id,
+        status_lines,
+        "met" if success else "not_met",
+    )
+
+
 HERMES_MEMORY_GATEWAY_SMOKE_NAMESPACE = "aufmass"
 HERMES_MEMORY_GATEWAY_SMOKE_PROJECT_ID = "project-a"
 HERMES_MEMORY_GATEWAY_SMOKE_LOOKUP_KEY = "primary_fact"
@@ -8202,6 +8263,8 @@ def dispatch_runtime_maintenance_task(
             return quarantine_stale_clean_skeleton_worktrees(body)
         if task_id == HOME_EDGE_01_READ_ONLY_DIAGNOSTIC:
             return home_edge_01_read_only_diagnostic()
+        if task_id == HOME_EDGE_01_PRIVATE_SIM_UNLOCK_O2_APN_TEST:
+            return home_edge_01_private_sim_unlock_o2_apn_test(body)
         return check_project_checkout(body)
     except Exception:
         return _maintenance_report(
