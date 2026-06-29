@@ -18,8 +18,11 @@ class HomeEdgeProfile:
     controller_host: str
     controller_tailscale_ip: str
     target_user: str
-    user_route: str
-    privileged_route: str
+    transport: str
+    identity_env: str
+    known_hosts_env: str
+    task_model: str
+    risk_lanes: tuple[str, ...]
     os: str
     primary_network: dict[str, Any]
     capabilities: tuple[str, ...]
@@ -29,21 +32,42 @@ class HomeEdgeProfile:
     def from_mapping(cls, data: dict[str, Any]) -> "HomeEdgeProfile":
         ssh = _mapping(data, "ssh")
         controller = _mapping(data, "controller")
+        gateway = _mapping(data, "gateway")
         primary_network = _mapping(data, "primary_network")
-        return cls(
+        profile = cls(
             node_id=_string(data, "node_id"),
             hostname=_string(data, "hostname"),
             tailscale_ip=_string(data, "tailscale_ip"),
             controller_host=_string(controller, "host"),
             controller_tailscale_ip=_string(controller, "tailscale_ip"),
             target_user=_string(ssh, "target_user"),
-            user_route=_string(ssh, "user_route"),
-            privileged_route=_string(ssh, "privileged_route"),
+            transport=_string(ssh, "transport"),
+            identity_env=_string(ssh, "identity_env"),
+            known_hosts_env=_string(ssh, "known_hosts_env"),
+            task_model=_string(gateway, "task_model"),
+            risk_lanes=tuple(_strings(gateway, "risk_lanes")),
             os=_string(data, "os"),
             primary_network=dict(primary_network),
             capabilities=tuple(_strings(data, "capabilities")),
             safety_boundaries=tuple(_strings(data, "safety_boundaries")),
         )
+        profile.validate_fixed_runner_contract()
+        return profile
+
+    def validate_fixed_runner_contract(self) -> None:
+        expected = {
+            "node_id": "home-edge-01",
+            "hostname": "home-edge-01",
+            "tailscale_ip": "100.127.35.74",
+            "target_user": "valertos08",
+            "transport": "openssh_over_tailscale_ip",
+            "identity_env": "SKELETON_HOME_EDGE_01_SSH_IDENTITY_FILE",
+            "known_hosts_env": "SKELETON_HOME_EDGE_01_SSH_KNOWN_HOSTS_FILE",
+            "task_model": "typed_allowlisted_actions",
+        }
+        for field, value in expected.items():
+            if getattr(self, field) != value:
+                raise ValueError(f"home-edge fixed contract mismatch for {field}")
 
 
 def load_home_edge_profile(path: str | Path = DEFAULT_PROFILE_PATH) -> HomeEdgeProfile:
