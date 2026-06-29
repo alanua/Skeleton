@@ -122,6 +122,7 @@ PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR = "publish_target_project_issue_worktre
 QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES = (
     "quarantine_stale_clean_skeleton_worktrees"
 )
+HOME_EDGE_01_READ_ONLY_DIAGNOSTIC = "home_edge_01_read_only_diagnostic"
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
         SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
@@ -149,6 +150,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         PUBLISH_EXISTING_ISSUE_WORKTREE,
         PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR,
         QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES,
+        HOME_EDGE_01_READ_ONLY_DIAGNOSTIC,
     )
 )
 AUFMASS_PRIVATE_PROJECT_ID = "aufmass_private"
@@ -7691,6 +7693,43 @@ def publish_target_project_issue_worktree_pr(body: str) -> str:
     )
 
 
+def home_edge_01_read_only_diagnostic() -> str:
+    task_id = HOME_EDGE_01_READ_ONLY_DIAGNOSTIC
+    from core.home_edge.diagnostics import compact_status, run_audited_home_edge_command
+
+    artifact = run_audited_home_edge_command(
+        "diagnostic",
+        artifact_path=Path(tempfile.gettempdir())
+        / "skeleton-home-edge"
+        / "home-edge-01-diagnostic.latest.json",
+    )
+    compact = compact_status(artifact)
+    status_lines = [
+        "inventory_schema=home_edge_diagnostic_v1",
+        "report_mode=read_only",
+        f"node_id={compact['node']}",
+        f"route_status={compact['route_status']}",
+        f"tailscale_status={compact['tailscale_status']}",
+        f"modem_status={compact['modem_status']}",
+        f"modem_lock_state={compact['modem_lock_state']}",
+        f"connection_mode={compact['connection_mode']}",
+        "huawei_diag_profile=ignored",
+        "next_operator_action=private_sim_unlock_o2_apn_signal_test",
+        "diagnostic_count=1",
+    ]
+    success = (
+        compact["route_status"] == "unchanged"
+        and compact["tailscale_status"] == "healthy"
+        and compact["modem_status"] == "identified"
+    )
+    return _maintenance_report(
+        "DONE" if success else "NEEDS_OPERATOR",
+        task_id,
+        status_lines,
+        "met" if success else "not_met",
+    )
+
+
 HERMES_MEMORY_GATEWAY_SMOKE_NAMESPACE = "aufmass"
 HERMES_MEMORY_GATEWAY_SMOKE_PROJECT_ID = "project-a"
 HERMES_MEMORY_GATEWAY_SMOKE_LOOKUP_KEY = "primary_fact"
@@ -8161,6 +8200,8 @@ def dispatch_runtime_maintenance_task(
             return publish_target_project_issue_worktree_pr(body)
         if task_id == QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES:
             return quarantine_stale_clean_skeleton_worktrees(body)
+        if task_id == HOME_EDGE_01_READ_ONLY_DIAGNOSTIC:
+            return home_edge_01_read_only_diagnostic()
         return check_project_checkout(body)
     except Exception:
         return _maintenance_report(
