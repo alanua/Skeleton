@@ -1,31 +1,28 @@
-# Home Edge 01
+# home-edge-01
 
-`home-edge-01` is the universal local node controlled by the Hetzner Skeleton Runner over the existing Tailscale connection.
+`home-edge-01` is the house media PC and universal local execution edge.
 
-Profile: `config/home_edge/home-edge-01.json`
+## Fixed identity
 
-Audited route:
-
-```bash
-python3 scripts/home_edge_remote.py diagnostic --operator-report
-python3 scripts/home_edge_remote.py identity
-python3 scripts/home_edge_remote.py tool_inventory
-python3 scripts/home_edge_remote.py modem_diagnostic
-python3 scripts/home_edge_remote.py prepare_private_unlock_plan
+```text
+Node: home-edge-01
+Tailscale IP: 100.127.35.74
+User: valertos08
+Controller: hetzner-agent-runner-1 / 100.69.215.63
 ```
 
-The diagnostic route is read-only. It uses `tailscale ssh valertos08@home-edge-01 python3 -` and writes a public-safe JSON artifact to `docs/home_edge/home-edge-01-diagnostic.latest.json`.
+The default route is registered as `enp1s0` through `192.168.1.1`. Runtime evidence must verify it; repository registration is not treated as a live observation.
 
-Safety rules:
+## Universal scope
 
-- Keep the default route on `enp1s0` through `192.168.1.1` unchanged until a separate gateway migration is approved.
-- Treat the Huawei E3372 as a ModemManager/NCM modem. Ignore the failed generic Ethernet profile `huawei-diag`; do not use it as the connection path.
-- Do not print or store SIM PIN, passwords, tokens, IMEI, IMSI, ICCID, or private credentials in GitHub artifacts.
-- Do not flash modem firmware, erase NVRAM, unlock bootloaders, alter IMEI, or expose management APIs publicly.
+The node is intended for system administration, networking, routers, home automation, containers, services, files and backups, browser and desktop recovery, media work, USB hardware, ESP/WLED tooling, monitoring and logs.
 
-Prepared next action, not executed:
+Universal does not mean unrestricted shell. Each capability is exposed as a typed action with a reviewed implementation and risk classification.
 
-1. Unlock the SIM only through an operator-approved private secret route.
-2. Configure the O2 APN through ModemManager after unlock.
-3. Test antenna placement and signal fields before any gateway migration.
-4. Plan the later MikroTik migration with rollback evidence.
+## Modem role
+
+A USB modem is optional. The gateway remains valid when no modem is physically attached to the media PC. Modem observations are reported only when a live probe sees the device.
+
+## Deployment
+
+Repository contracts are merged first. A separate approved runtime task then activates and validates the fixed transport from the actual Runner service context.
