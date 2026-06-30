@@ -2797,6 +2797,7 @@ GRAPHIFY_RUNTIME_COMMAND_TIMEOUT_SECONDS = 120
 GRAPHIFY_PACKAGE_TOOLING_TIMEOUT_SECONDS = 30
 GRAPHIFY_USER_BOOTSTRAP_TIMEOUT_SECONDS = 120
 GRAPHIFY_UV_PACKAGE_TOOLING_UNAVAILABLE_REASON = "graphify_python_package_tooling_unavailable"
+GRAPHIFY_PIP_BREAK_SYSTEM_PACKAGES_FLAG = "--break-system-packages"
 GRAPHIFY_TOOL_INSTALL_COMMAND = (
     "uv",
     "tool",
@@ -3329,6 +3330,42 @@ def _graphify_python_package_tooling_preflight(status_lines: list[str]) -> str |
     return None
 
 
+def _graphify_pip_install_supports_break_system_packages(
+    python_executable: Path,
+    status_lines: list[str],
+) -> bool:
+    command = [str(python_executable), "-m", "pip", "install", "--help"]
+    code, output, reason = _run_graphify_python_command(
+        command,
+        timeout=GRAPHIFY_PACKAGE_TOOLING_TIMEOUT_SECONDS,
+        cwd=ROOT,
+    )
+    if reason is not None or code != 0:
+        status_lines.append("step=detect_pip_break_system_packages status=unavailable")
+        return False
+    if GRAPHIFY_PIP_BREAK_SYSTEM_PACKAGES_FLAG not in output:
+        status_lines.append("step=detect_pip_break_system_packages status=unsupported")
+        return False
+    status_lines.append("step=detect_pip_break_system_packages status=supported")
+    return True
+
+
+def _graphify_uv_user_bootstrap_command(
+    python_executable: Path,
+    *,
+    use_break_system_packages: bool,
+) -> list[str]:
+    command = [str(python_executable), *GRAPHIFY_UV_USER_BOOTSTRAP_COMMAND[1:]]
+    if not use_break_system_packages:
+        return command
+    insert_at = len(command) - 1
+    return [
+        *command[:insert_at],
+        GRAPHIFY_PIP_BREAK_SYSTEM_PACKAGES_FLAG,
+        *command[insert_at:],
+    ]
+
+
 def _graphify_bootstrap_uv(status_lines: list[str]) -> tuple[Path | None, str | None]:
     reason = _graphify_python_package_tooling_preflight(status_lines)
     if reason is not None:
@@ -3337,7 +3374,13 @@ def _graphify_bootstrap_uv(status_lines: list[str]) -> tuple[Path | None, str | 
     if python_executable is None:
         status_lines.append("step=bootstrap_pinned_uv_tool status=failed")
         return None, GRAPHIFY_UV_PACKAGE_TOOLING_UNAVAILABLE_REASON
-    command = [str(python_executable), *GRAPHIFY_UV_USER_BOOTSTRAP_COMMAND[1:]]
+    command = _graphify_uv_user_bootstrap_command(
+        python_executable,
+        use_break_system_packages=_graphify_pip_install_supports_break_system_packages(
+            python_executable,
+            status_lines,
+        ),
+    )
     code, _output, reason = _run_graphify_python_command(
         command,
         timeout=GRAPHIFY_USER_BOOTSTRAP_TIMEOUT_SECONDS,
