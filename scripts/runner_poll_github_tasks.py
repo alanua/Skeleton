@@ -2797,6 +2797,7 @@ GRAPHIFY_RUNTIME_COMMAND_TIMEOUT_SECONDS = 120
 GRAPHIFY_PACKAGE_TOOLING_TIMEOUT_SECONDS = 30
 GRAPHIFY_USER_BOOTSTRAP_TIMEOUT_SECONDS = 120
 GRAPHIFY_UV_PACKAGE_TOOLING_UNAVAILABLE_REASON = "graphify_python_package_tooling_unavailable"
+GRAPHIFY_PIP_BREAK_SYSTEM_PACKAGES_FLAG = "--break-system-packages"
 GRAPHIFY_TOOL_INSTALL_COMMAND = (
     "uv",
     "tool",
@@ -3329,6 +3330,30 @@ def _graphify_python_package_tooling_preflight(status_lines: list[str]) -> str |
     return None
 
 
+def _graphify_pip_failure_is_externally_managed(output: str) -> bool:
+    normalized = output.lower()
+    return "externally-managed-environment" in normalized or (
+        "externally managed" in normalized
+        and GRAPHIFY_PIP_BREAK_SYSTEM_PACKAGES_FLAG in normalized
+    )
+
+
+def _graphify_uv_user_bootstrap_command(
+    python_executable: Path,
+    *,
+    use_break_system_packages: bool,
+) -> list[str]:
+    command = [str(python_executable), *GRAPHIFY_UV_USER_BOOTSTRAP_COMMAND[1:]]
+    if not use_break_system_packages:
+        return command
+    insert_at = len(command) - 1
+    return [
+        *command[:insert_at],
+        GRAPHIFY_PIP_BREAK_SYSTEM_PACKAGES_FLAG,
+        *command[insert_at:],
+    ]
+
+
 def _graphify_bootstrap_uv(status_lines: list[str]) -> tuple[Path | None, str | None]:
     reason = _graphify_python_package_tooling_preflight(status_lines)
     if reason is not None:
@@ -3337,15 +3362,31 @@ def _graphify_bootstrap_uv(status_lines: list[str]) -> tuple[Path | None, str | 
     if python_executable is None:
         status_lines.append("step=bootstrap_pinned_uv_tool status=failed")
         return None, GRAPHIFY_UV_PACKAGE_TOOLING_UNAVAILABLE_REASON
-    command = [str(python_executable), *GRAPHIFY_UV_USER_BOOTSTRAP_COMMAND[1:]]
-    code, _output, reason = _run_graphify_python_command(
-        command,
+    code, output, reason = _run_graphify_python_command(
+        _graphify_uv_user_bootstrap_command(
+            python_executable,
+            use_break_system_packages=False,
+        ),
         timeout=GRAPHIFY_USER_BOOTSTRAP_TIMEOUT_SECONDS,
         cwd=ROOT,
     )
     if reason is not None or code != 0:
-        status_lines.append("step=bootstrap_pinned_uv_tool status=failed")
-        return None, reason or "graphify_uv_bootstrap_failed"
+        if reason is not None or not _graphify_pip_failure_is_externally_managed(output):
+            status_lines.append("step=bootstrap_pinned_uv_tool status=failed")
+            return None, reason or "graphify_uv_bootstrap_failed"
+        status_lines.append("step=bootstrap_pinned_uv_tool status=externally_managed")
+        code, _fallback_output, reason = _run_graphify_python_command(
+            _graphify_uv_user_bootstrap_command(
+                python_executable,
+                use_break_system_packages=True,
+            ),
+            timeout=GRAPHIFY_USER_BOOTSTRAP_TIMEOUT_SECONDS,
+            cwd=ROOT,
+        )
+        if reason is not None or code != 0:
+            status_lines.append("step=bootstrap_pinned_uv_tool_fallback status=failed")
+            return None, reason or "graphify_uv_bootstrap_failed"
+        status_lines.append("step=bootstrap_pinned_uv_tool_fallback status=done")
     uv_executable = _graphify_resolve_user_script("uv")
     if uv_executable is None:
         status_lines.append("step=resolve_pinned_uv_tool status=failed")

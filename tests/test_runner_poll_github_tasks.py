@@ -3377,6 +3377,131 @@ def test_graphify_runtime_reports_missing_pip_before_user_bootstrap(
     backup.assert_not_called()
 
 
+def test_graphify_runtime_bootstrap_falls_back_only_after_externally_managed_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    python_executable = tmp_path / "python"
+    python_executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    python_executable.chmod(0o700)
+    user_uv = tmp_path / "user-bin" / "uv"
+    commands: list[list[str]] = []
+    status_lines: list[str] = []
+    monkeypatch.setattr(runner, "_graphify_python_executable", lambda: python_executable)
+    monkeypatch.setattr(
+        runner,
+        "_graphify_resolve_user_script",
+        lambda name: user_uv if name == "uv" else None,
+    )
+
+    def run_python(
+        command: list[str],
+        timeout: int,
+        cwd: str | Path | None = None,
+    ) -> tuple[int, str, str | None]:
+        del timeout, cwd
+        commands.append(command)
+        if command[-2:] == ["pip", "--version"]:
+            return 0, "pip 24.0\n", None
+        if command[:4] == [str(python_executable), "-m", "pip", "install"]:
+            if runner.GRAPHIFY_PIP_BREAK_SYSTEM_PACKAGES_FLAG in command:
+                return 0, "", None
+            return (
+                1,
+                "error: externally-managed-environment\n"
+                "hint: pass --break-system-packages to override\n",
+                None,
+            )
+        return 2, "unexpected command", None
+
+    monkeypatch.setattr(runner, "_run_graphify_python_command", run_python)
+
+    uv_executable, reason = runner._graphify_bootstrap_uv(status_lines)
+
+    assert uv_executable == user_uv
+    assert reason is None
+    assert commands == [
+        [str(python_executable), "-m", "pip", "--version"],
+        [
+            str(python_executable),
+            "-m",
+            "pip",
+            "install",
+            "--user",
+            "--disable-pip-version-check",
+            "--no-input",
+            f"uv=={runner.UV_PINNED_VERSION}",
+        ],
+        [
+            str(python_executable),
+            "-m",
+            "pip",
+            "install",
+            "--user",
+            "--disable-pip-version-check",
+            "--no-input",
+            runner.GRAPHIFY_PIP_BREAK_SYSTEM_PACKAGES_FLAG,
+            f"uv=={runner.UV_PINNED_VERSION}",
+        ],
+    ]
+    assert "step=bootstrap_pinned_uv_tool status=externally_managed" in status_lines
+    assert "step=bootstrap_pinned_uv_tool_fallback status=done" in status_lines
+    assert "step=bootstrap_pinned_uv_tool status=done" in status_lines
+
+
+def test_graphify_runtime_bootstrap_stops_without_fallback_for_other_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    python_executable = tmp_path / "python"
+    python_executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    python_executable.chmod(0o700)
+    commands: list[list[str]] = []
+    status_lines: list[str] = []
+    monkeypatch.setattr(runner, "_graphify_python_executable", lambda: python_executable)
+    monkeypatch.setattr(
+        runner,
+        "_graphify_resolve_user_script",
+        lambda name: pytest.fail("uv should not resolve after failed bootstrap"),
+    )
+
+    def run_python(
+        command: list[str],
+        timeout: int,
+        cwd: str | Path | None = None,
+    ) -> tuple[int, str, str | None]:
+        del timeout, cwd
+        commands.append(command)
+        if command[-2:] == ["pip", "--version"]:
+            return 0, "pip 24.0\n", None
+        if command[:4] == [str(python_executable), "-m", "pip", "install"]:
+            return 1, "Could not find a version that satisfies the requirement\n", None
+        return 2, "unexpected command", None
+
+    monkeypatch.setattr(runner, "_run_graphify_python_command", run_python)
+
+    uv_executable, reason = runner._graphify_bootstrap_uv(status_lines)
+
+    assert uv_executable is None
+    assert reason == "graphify_uv_bootstrap_failed"
+    assert commands == [
+        [str(python_executable), "-m", "pip", "--version"],
+        [
+            str(python_executable),
+            "-m",
+            "pip",
+            "install",
+            "--user",
+            "--disable-pip-version-check",
+            "--no-input",
+            f"uv=={runner.UV_PINNED_VERSION}",
+        ],
+    ]
+    assert runner.GRAPHIFY_PIP_BREAK_SYSTEM_PACKAGES_FLAG not in commands[-1]
+    assert "step=bootstrap_pinned_uv_tool status=failed" in status_lines
+    assert not any("bootstrap_pinned_uv_tool_fallback" in line for line in status_lines)
+
+
 def test_graphify_runtime_reports_missing_graphify_during_preflight(
     tmp_path: Path,
 ) -> None:

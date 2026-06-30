@@ -126,9 +126,14 @@ It may only:
    `graphify_python_package_tooling_unavailable` before any profile mutation.
 3. Bootstrap the exact pinned uv user tool noninteractively with
    `python -m pip install --user --disable-pip-version-check --no-input
-   uv==0.11.24`, then resolve the expected user scripts `uv` candidate as an
-   absolute executable regular file and verify that exact resolved executable
-   reports `uv 0.11.24` before any Graphify command runs.
+   uv==0.11.24` as the first attempt. Only if that attempt fails with pip
+   output that specifically identifies an externally managed Python environment
+   may the Runner make one fallback attempt by adding `--break-system-packages`
+   to the same `--user` install command while keeping the exact `uv==0.11.24`
+   pin. All other bootstrap failures stop safely. It then resolves the expected
+   user scripts `uv` candidate as an absolute executable regular file and
+   verifies that exact resolved executable reports `uv 0.11.24` before any
+   Graphify command runs.
 4. Install or replace the pinned Graphify tool with the resolved uv executable:
    `uv tool install --reinstall graphifyy==0.8.44`.
 5. Resolve the expected user scripts `graphify` candidate as an absolute
