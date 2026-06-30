@@ -12,6 +12,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import time
 import urllib.parse
@@ -2783,14 +2784,28 @@ _PRIVATE_MEMORY_UNSAFE_VALUE_RE = re.compile(
 )
 _HERMES_BRIDGE_SAFE_STATUS_VALUES = frozenset({"DONE", "BLOCKED"})
 GRAPHIFY_RUNTIME_APPROVAL = "install_graphify_runtime_v1"
+UV_PINNED_VERSION = "0.11.24"
 GRAPHIFY_PINNED_VERSION = "0.8.44"
 GRAPHIFY_SMOKE_TIMEOUT_SECONDS = 45
+GRAPHIFY_PACKAGE_TOOLING_TIMEOUT_SECONDS = 30
+GRAPHIFY_USER_BOOTSTRAP_TIMEOUT_SECONDS = 120
+GRAPHIFY_UV_PACKAGE_TOOLING_UNAVAILABLE_REASON = "graphify_python_package_tooling_unavailable"
 GRAPHIFY_TOOL_INSTALL_COMMAND = (
     "uv",
     "tool",
     "install",
     "--reinstall",
     f"graphifyy=={GRAPHIFY_PINNED_VERSION}",
+)
+GRAPHIFY_UV_USER_BOOTSTRAP_COMMAND = (
+    "python",
+    "-m",
+    "pip",
+    "install",
+    "--user",
+    "--disable-pip-version-check",
+    "--no-input",
+    f"uv=={UV_PINNED_VERSION}",
 )
 GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND = (
     "graphify",
@@ -3190,6 +3205,160 @@ def _graphify_runtime_blocked_report(
     )
 
 
+def _graphify_python_executable() -> Path | None:
+    executable = Path(sys.executable).expanduser()
+    if not executable.is_absolute():
+        return None
+    try:
+        resolved = executable.resolve(strict=True)
+    except OSError:
+        return None
+    if not resolved.is_file() or not os.access(resolved, os.X_OK):
+        return None
+    return resolved
+
+
+def _graphify_user_scripts_dir() -> Path | None:
+    raw_path = sysconfig.get_path("scripts", f"{os.name}_user")
+    if not raw_path:
+        return None
+    scripts_dir = Path(raw_path).expanduser()
+    if not scripts_dir.is_absolute():
+        return None
+    try:
+        return scripts_dir.resolve(strict=False)
+    except OSError:
+        return None
+
+
+def _graphify_validate_executable(path: Path, expected_parent: Path | None = None) -> Path | None:
+    if not path.is_absolute():
+        return None
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError:
+        return None
+    if expected_parent is not None:
+        expected_resolved = expected_parent.resolve(strict=False)
+        if not _path_is_relative_to(resolved, expected_resolved):
+            return None
+    if not resolved.is_file() or not os.access(resolved, os.X_OK):
+        return None
+    return resolved
+
+
+def _graphify_resolve_path_executable(command_name: str) -> Path | None:
+    resolved = shutil.which(command_name)
+    if resolved is None:
+        return None
+    return _graphify_validate_executable(Path(resolved).expanduser())
+
+
+def _graphify_resolve_user_script(command_name: str) -> Path | None:
+    scripts_dir = _graphify_user_scripts_dir()
+    if scripts_dir is None:
+        return None
+    candidates = [scripts_dir / command_name]
+    if os.name == "nt" and not command_name.lower().endswith(".exe"):
+        candidates.append(scripts_dir / f"{command_name}.exe")
+    for candidate in candidates:
+        executable = _graphify_validate_executable(candidate, scripts_dir)
+        if executable is not None:
+            return executable
+    return None
+
+
+def _graphify_command_with_executable(command: tuple[str, ...], executable: Path) -> list[str]:
+    return [str(executable), *command[1:]]
+
+
+def _run_graphify_python_command(
+    command: list[str],
+    *,
+    timeout: int,
+    cwd: str | Path | None = None,
+) -> tuple[int | None, str, str | None]:
+    try:
+        result = subprocess.run(
+            command,
+            cwd=str(cwd) if cwd is not None else None,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env={
+                **os.environ,
+                "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+                "PIP_NO_INPUT": "1",
+            },
+        )
+    except subprocess.TimeoutExpired:
+        return None, "", GRAPHIFY_COMMAND_LAUNCH_REASON
+    except Exception as error:
+        return None, "", _graphify_command_exception_reason(
+            error,
+            GRAPHIFY_UV_PACKAGE_TOOLING_UNAVAILABLE_REASON,
+        )
+    return result.returncode, result.stdout + result.stderr, None
+
+
+def _graphify_python_package_tooling_preflight(status_lines: list[str]) -> str | None:
+    python_executable = _graphify_python_executable()
+    if python_executable is None:
+        status_lines.append("step=verify_python_package_tooling status=failed")
+        return GRAPHIFY_UV_PACKAGE_TOOLING_UNAVAILABLE_REASON
+    command = [str(python_executable), "-m", "pip", "--version"]
+    code, _output, reason = _run_graphify_python_command(
+        command,
+        timeout=GRAPHIFY_PACKAGE_TOOLING_TIMEOUT_SECONDS,
+        cwd=ROOT,
+    )
+    if reason is not None or code != 0:
+        status_lines.append("step=verify_python_package_tooling status=failed")
+        return reason or GRAPHIFY_UV_PACKAGE_TOOLING_UNAVAILABLE_REASON
+    status_lines.append("step=verify_python_package_tooling status=done")
+    return None
+
+
+def _graphify_bootstrap_uv(status_lines: list[str]) -> tuple[Path | None, str | None]:
+    reason = _graphify_python_package_tooling_preflight(status_lines)
+    if reason is not None:
+        return None, reason
+    python_executable = _graphify_python_executable()
+    if python_executable is None:
+        status_lines.append("step=bootstrap_pinned_uv_tool status=failed")
+        return None, GRAPHIFY_UV_PACKAGE_TOOLING_UNAVAILABLE_REASON
+    command = [str(python_executable), *GRAPHIFY_UV_USER_BOOTSTRAP_COMMAND[1:]]
+    code, _output, reason = _run_graphify_python_command(
+        command,
+        timeout=GRAPHIFY_USER_BOOTSTRAP_TIMEOUT_SECONDS,
+        cwd=ROOT,
+    )
+    if reason is not None or code != 0:
+        status_lines.append("step=bootstrap_pinned_uv_tool status=failed")
+        return None, reason or "graphify_uv_bootstrap_failed"
+    uv_executable = _graphify_resolve_user_script("uv")
+    if uv_executable is None:
+        status_lines.append("step=resolve_pinned_uv_tool status=failed")
+        return None, "graphify_tool_command_unavailable"
+    status_lines.extend(
+        (
+            "step=bootstrap_pinned_uv_tool status=done",
+            "step=resolve_pinned_uv_tool status=done",
+        )
+    )
+    return uv_executable, None
+
+
+def _graphify_resolve_graphify_cli(status_lines: list[str]) -> tuple[Path | None, str | None]:
+    graphify_executable = _graphify_resolve_user_script("graphify")
+    if graphify_executable is None:
+        status_lines.append("step=resolve_graphify_cli status=failed")
+        return None, "graphify_cli_command_unavailable"
+    status_lines.append("step=resolve_graphify_cli status=done")
+    return graphify_executable, None
+
+
 def _graphify_command_exception_reason(
     error: Exception, command_unavailable_reason: str
 ) -> str:
@@ -3218,21 +3387,33 @@ def _run_graphify_runtime_command(
     return code, output, None
 
 
-def _graphify_cli_contract_preflight(status_lines: list[str]) -> str | None:
+def _graphify_cli_contract_preflight(
+    status_lines: list[str],
+    graphify_executable: Path,
+) -> str | None:
     checks = (
         (
             "verify_graphify_version",
-            list(GRAPHIFY_VERSION_COMMAND),
+            _graphify_command_with_executable(
+                GRAPHIFY_VERSION_COMMAND,
+                graphify_executable,
+            ),
             lambda output: GRAPHIFY_PINNED_VERSION in output,
         ),
         (
             "verify_graphify_install_platform_help",
-            list(GRAPHIFY_INSTALL_HELP_COMMAND),
+            _graphify_command_with_executable(
+                GRAPHIFY_INSTALL_HELP_COMMAND,
+                graphify_executable,
+            ),
             lambda output: "--platform" in output,
         ),
         (
             "verify_graphify_folder_build_help",
-            list(GRAPHIFY_BUILD_HELP_COMMAND),
+            _graphify_command_with_executable(
+                GRAPHIFY_BUILD_HELP_COMMAND,
+                graphify_executable,
+            ),
             lambda output: "ingest" not in output
             and ("folder" in output.lower() or "path" in output.lower()),
         ),
@@ -3270,13 +3451,11 @@ def _write_graphify_synthetic_corpus(corpus_dir: Path) -> None:
 
 
 def _graphify_ast_smoke_command(
-    corpus_dir: Path, output_dir: Path, home_dir: Path
+    corpus_dir: Path, output_dir: Path, home_dir: Path, graphify_executable: Path
 ) -> list[str]:
-    path_value = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
     return [
         "env",
         "-i",
-        f"PATH={path_value}",
         f"HOME={home_dir}",
         f"GRAPHIFY_OUT={output_dir}",
         "GRAPHIFY_DISABLE_NETWORK=1",
@@ -3285,7 +3464,7 @@ def _graphify_ast_smoke_command(
         "GRAPHIFY_DISABLE_PRIVATE_INDEXING=1",
         "PYTHONNOUSERSITE=1",
         "NO_COLOR=1",
-        "graphify",
+        str(graphify_executable),
         str(corpus_dir),
     ]
 
@@ -3328,7 +3507,7 @@ def _graphify_graph_json_counts(path: Path) -> tuple[int, int] | None:
     return None
 
 
-def _run_graphify_ast_smoke(status_lines: list[str]) -> str | None:
+def _run_graphify_ast_smoke(status_lines: list[str], graphify_executable: Path) -> str | None:
     with tempfile.TemporaryDirectory(prefix="skeleton-graphify-smoke-") as tmp:
         tmp_path = Path(tmp)
         corpus_dir = tmp_path / "synthetic-corpus"
@@ -3336,7 +3515,12 @@ def _run_graphify_ast_smoke(status_lines: list[str]) -> str | None:
         home_dir = tmp_path / "home"
         home_dir.mkdir(mode=0o700)
         _write_graphify_synthetic_corpus(corpus_dir)
-        command = _graphify_ast_smoke_command(corpus_dir, output_dir, home_dir)
+        command = _graphify_ast_smoke_command(
+            corpus_dir,
+            output_dir,
+            home_dir,
+            graphify_executable,
+        )
         code, _output = _run_graphify_smoke_command(command)
         if code == 124:
             status_lines.append("step=run_synthetic_ast_smoke status=timeout")
@@ -3376,8 +3560,11 @@ def install_graphify_runtime(body: str) -> str:
     task_id = INSTALL_GRAPHIFY_RUNTIME
     approval = _body_field(body, "Operator Approval")
     status_lines = [
+        f"uv_version={UV_PINNED_VERSION}",
         f"graphify_version={GRAPHIFY_PINNED_VERSION}",
         f"synthetic_smoke_timeout_seconds={GRAPHIFY_SMOKE_TIMEOUT_SECONDS}",
+        f"python_package_tooling_timeout_seconds={GRAPHIFY_PACKAGE_TOOLING_TIMEOUT_SECONDS}",
+        f"user_bootstrap_timeout_seconds={GRAPHIFY_USER_BOOTSTRAP_TIMEOUT_SECONDS}",
         "network_disabled=true",
         "hooks_disabled=true",
         "services_disabled=true",
@@ -3393,11 +3580,22 @@ def install_graphify_runtime(body: str) -> str:
             task_id,
             [*status_lines, "reason=missing_operator_approval"],
             "not_met",
-        )
+    )
     status_lines.append("approval_status=verified")
 
+    uv_executable = _graphify_resolve_path_executable("uv")
+    if uv_executable is None:
+        uv_executable, reason = _graphify_bootstrap_uv(status_lines)
+        if reason is not None or uv_executable is None:
+            return _graphify_runtime_blocked_report(
+                status_lines,
+                reason or "graphify_tool_command_unavailable",
+            )
+    else:
+        status_lines.append("step=resolve_pinned_uv_tool status=done")
+
     code, _output, reason = _run_graphify_runtime_command(
-        list(GRAPHIFY_TOOL_INSTALL_COMMAND),
+        _graphify_command_with_executable(GRAPHIFY_TOOL_INSTALL_COMMAND, uv_executable),
         command_unavailable_reason="graphify_tool_command_unavailable",
         cwd=ROOT,
     )
@@ -3414,7 +3612,13 @@ def install_graphify_runtime(body: str) -> str:
     status_lines.append("step=install_pinned_graphify_tool status=done")
 
     try:
-        reason = _graphify_cli_contract_preflight(status_lines)
+        graphify_executable, reason = _graphify_resolve_graphify_cli(status_lines)
+        if reason is not None or graphify_executable is None:
+            return _graphify_runtime_blocked_report(
+                status_lines,
+                reason or "graphify_cli_command_unavailable",
+            )
+        reason = _graphify_cli_contract_preflight(status_lines, graphify_executable)
         if reason is not None:
             return _graphify_runtime_blocked_report(status_lines, reason)
 
@@ -3436,7 +3640,10 @@ def install_graphify_runtime(body: str) -> str:
 
     try:
         code, _output, reason = _run_graphify_runtime_command(
-            list(GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND),
+            _graphify_command_with_executable(
+                GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND,
+                graphify_executable,
+            ),
             command_unavailable_reason="graphify_cli_command_unavailable",
             cwd=ROOT,
         )
@@ -3459,7 +3666,10 @@ def install_graphify_runtime(body: str) -> str:
         status_lines.append("step=install_codex_skill status=done")
 
         code, _output, reason = _run_graphify_runtime_command(
-            list(GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND),
+            _graphify_command_with_executable(
+                GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND,
+                graphify_executable,
+            ),
             command_unavailable_reason="graphify_cli_command_unavailable",
             cwd=ROOT,
         )
@@ -3481,7 +3691,7 @@ def install_graphify_runtime(body: str) -> str:
             )
         status_lines.append("step=install_hermes_skill status=done")
 
-        reason = _run_graphify_ast_smoke(status_lines)
+        reason = _run_graphify_ast_smoke(status_lines, graphify_executable)
         if reason is not None:
             rollback_status = _restore_graphify_profiles_safely(backup)
             return _graphify_runtime_blocked_report(

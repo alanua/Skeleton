@@ -126,12 +126,15 @@ validate synthetic query envelopes without exposing real private graph memory.
 ## Runtime Installation Boundary
 
 The Runner may install Graphify only through the approval-gated
-`install_graphify_runtime` maintenance task. That task pins the tool with
-`uv tool install --reinstall graphifyy==0.8.44`, verifies the local CLI contract,
-backs up only bounded Graphify-managed Codex and Hermes skill paths plus
-existing marker-only `.graphify_version` files discovered from the pinned
-Graphify 0.8.44 upstream platform destination allowlist, and installs skills
-with `graphify install --platform codex` and `graphify install --platform
+`install_graphify_runtime` maintenance task. That task preflights bounded
+Python package tooling, bootstraps exact pinned uv with `python -m pip install
+--user --disable-pip-version-check --no-input uv==0.11.24`, installs the pinned
+Graphify package with the resolved uv executable and `uv tool install
+--reinstall graphifyy==0.8.44`, verifies the local CLI contract with a resolved
+Graphify executable, backs up only bounded Graphify-managed Codex and Hermes
+skill paths plus existing marker-only `.graphify_version` files discovered from
+the pinned Graphify 0.8.44 upstream platform destination allowlist, and installs
+skills with `graphify install --platform codex` and `graphify install --platform
 hermes`. The allowlist is exact and does not scan arbitrary home directories.
 
 The local smoke check is synthetic and AST-only in scope. It uses the supported
@@ -146,14 +149,16 @@ Unsupported command shapes are outside the contract: `graphify ingest`,
 not appear in Runner runtime commands or tests. If a post-backup skill install
 or smoke step fails, or if any unexpected runtime failure occurs after backup,
 the Runner restores the bounded Codex and Hermes skill paths and allowlisted
-`.graphify_version` files from the private recovery snapshot. Missing `uv`,
-missing `graphify`, permission failures, OS/subprocess launch failures, and
+`.graphify_version` files from the private recovery snapshot. Unavailable
+Python package tooling, missing or unsafe resolved `uv`, missing or unsafe
+resolved `graphify`, permission failures, OS/subprocess launch failures, and
 unexpected failures use stable public-safe reason tokens; pre-backup failures
 report `rollback_status=not_needed`, while post-backup failures report
-`rollback_status=restored` or `rollback_status=failed`. A successful runtime
-install retains the private recovery snapshot for operator recovery. Public
-reports remain aggregate-only and must not include paths, Graphify command
-output, environment values, profile content, node IDs, edge IDs, labels,
+`rollback_status=restored` or `rollback_status=failed`. The Runner must never
+fall back to bare PATH execution if explicit executable resolution fails. A
+successful runtime install retains the private recovery snapshot for operator
+recovery. Public reports remain aggregate-only and must not include paths,
+Graphify command output, environment values, profile content, node IDs, edge IDs, labels,
 summaries, or graph payloads.
 
 Runtime/server/service integration remains blocked by issue #1047.
