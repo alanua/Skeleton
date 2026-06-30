@@ -360,6 +360,56 @@ Public reports include only `target_project`, `target_repository`, and
 `target_project_route=registered_checkout` for the registered Skeleton checkout;
 the checkout path remains internal to validation and bounded Git commands.
 
+`recover_skeleton_checkout` resets the registered Skeleton checkout to
+`origin/main` while preserving any dirty tracked and untracked work in a private
+pending recovery bundle. It requires no target metadata:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: recover_skeleton_checkout
+Expected Head SHA: 0123456789abcdef0123456789abcdef01234567
+```
+
+`Expected Head SHA` is optional. When present, it must be a 40-character commit
+SHA and must match both `origin/main` after fetch and final `HEAD`.
+
+It may only:
+
+1. Use the single registered Skeleton checkout from `PROJECT_TREE.yaml`.
+2. Verify the checkout path is safe using the same path rules as
+   `check_project_checkout`.
+3. Verify the checkout exists, has `.git`, has an `origin` remote matching
+   `alanua/Skeleton`, and is on branch `main`.
+4. Read dirty state with `git -C {checkout_path} status --porcelain`.
+5. If dirty state exists, stash tracked and untracked work, read the stash SHA,
+   create `refs/skeleton-runner/pending-recovery/{stash_sha}`, create a private
+   Git bundle for that ref, and verify the bundle before any reset.
+6. If any failure happens before the recovery bundle verifies, restore the stash
+   before reporting. If restoration cannot complete after a verified bundle
+   exists, retain the stash-bound pending recovery state for operator recovery.
+7. Reject recovery roots that are relative, include path traversal, include a
+   symlink component, are not owned by the Runner user, are not directories, or
+   do not have `0700` permissions.
+8. Reset only with `git -C {checkout_path} reset --hard origin/main`, clean
+   untracked files with `git -C {checkout_path} clean -fd`, run a bounded final
+   `git -C {checkout_path} status --porcelain --untracked-files=all`, and
+   verify final `HEAD`.
+
+It reports `DONE` only when the final status output is empty, final `HEAD`
+matches `origin/main`, and the optional expected head matches. It reports
+`final_clean_state=true` only for an empty final status; any tracked or
+untracked state that remains after a successful clean is reported as `BLOCKED`.
+It reports `NEEDS_OPERATOR` for recovery-stash, recovery-root, recovery-ref,
+recovery-bundle, and pre-reset recovery verification failures. It reports
+`BLOCKED` for invalid expected SHA, unsafe checkout paths, missing checkout,
+missing `.git`, wrong origin, detached HEAD, non-main branch, fetch failure,
+reset failure, clean failure, final dirty state, final head mismatch, or
+expected head mismatch. Recovery reports are aggregate-only status tokens such
+as stash, ref, artifact, restore, reset, and final cleanliness status; they must
+not include private recovery paths, stash payloads, raw local changes, or raw
+command output. This task must not merge, push, create pull requests, deploy,
+read secrets, mutate services, or execute issue-provided commands.
+
 `check_skeleton_freshness` is a short status-only check before Skeleton project
 work starts or after recent merges. It requires no target metadata:
 

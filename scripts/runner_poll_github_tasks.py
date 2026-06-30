@@ -10,6 +10,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import sysconfig
@@ -101,6 +102,7 @@ ENSURE_TELEGRAM_CALLBACK_LOCAL_CONFIG = "ensure_telegram_callback_local_config"
 CHECK_PROJECT_CHECKOUT = "check_project_checkout"
 CHECK_SKELETON_FRESHNESS = "check_skeleton_freshness"
 RUNTIME_SYNC_MAIN = "runtime_sync_main"
+RECOVER_SKELETON_CHECKOUT = "recover_skeleton_checkout"
 ENSURE_PROJECT_CHECKOUT = "ensure_project_checkout"
 VALIDATE_PR_BRANCH = "validate_pr_branch"
 PREFLIGHT_PR_REFRESH = "preflight_pr_refresh"
@@ -131,6 +133,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         CHECK_PROJECT_CHECKOUT,
         CHECK_SKELETON_FRESHNESS,
         RUNTIME_SYNC_MAIN,
+        RECOVER_SKELETON_CHECKOUT,
         ENSURE_PROJECT_CHECKOUT,
         VALIDATE_PR_BRANCH,
         PREFLIGHT_PR_REFRESH,
@@ -335,6 +338,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "exit_code",
         "explicit_recovery_route",
         "file_on_main",
+        "final_clean_state",
         "files_on_main_count",
         "gated_heartbeat_status",
         "gated_note_status",
@@ -408,7 +412,12 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "pull_request",
         "python_version",
         "reason",
+        "recovery_artifact_status",
+        "recovery_ref_status",
+        "recovery_restore_status",
+        "recovery_stash_status",
         "recovery_snapshot_status",
+        "reset_status",
         "removed_worktrees_count",
         "report_drawings",
         "report_mode",
@@ -5696,6 +5705,152 @@ def _skeleton_expected_head_sha(body: str) -> tuple[str | None, str | None]:
     return expected_head_sha.lower(), None
 
 
+def _skeleton_checkout_recovery_root() -> Path:
+    configured = os.environ.get("SKELETON_RUNNER_CHECKOUT_RECOVERY_ROOT")
+    if configured:
+        return Path(configured).expanduser()
+    return Path.home() / ".local" / "state" / "skeleton" / "checkout-recovery"
+
+
+def _path_has_symlink_component(path: Path) -> bool:
+    current = Path(path.anchor) if path.is_absolute() else Path()
+    parts = path.parts[1:] if path.is_absolute() else path.parts
+    for part in parts:
+        current = current / part
+        try:
+            if current.is_symlink():
+                return True
+        except OSError:
+            return True
+    return False
+
+
+def _ensure_private_skeleton_checkout_recovery_root() -> Path:
+    root = _skeleton_checkout_recovery_root()
+    if not root.is_absolute():
+        raise ValueError("recovery root must be absolute")
+    if ".." in root.parts or _path_has_symlink_component(root):
+        raise ValueError("recovery root is unsafe")
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    root_stat = root.stat()
+    if not stat.S_ISDIR(root_stat.st_mode):
+        raise ValueError("recovery root is not a directory")
+    if root_stat.st_uid != os.getuid():
+        raise ValueError("recovery root is not owned by the current user")
+    if stat.S_IMODE(root_stat.st_mode) != 0o700:
+        raise ValueError("recovery root permissions are unsafe")
+    return root
+
+
+def _restore_skeleton_checkout_stash(checkout_path: Path) -> str:
+    code, _output = run_command(
+        ["git", "-C", str(checkout_path), "stash", "apply", "stash@{0}"]
+    )
+    if code != 0:
+        return "failed"
+    code, _output = run_command(
+        ["git", "-C", str(checkout_path), "stash", "drop", "stash@{0}"]
+    )
+    if code != 0:
+        return "failed"
+    return "restored"
+
+
+def _create_verified_skeleton_checkout_recovery(
+    checkout_path: Path, status_lines: list[str]
+) -> tuple[str | None, str | None]:
+    code, _output = run_command(
+        [
+            "git",
+            "-C",
+            str(checkout_path),
+            "stash",
+            "push",
+            "--include-untracked",
+            "-m",
+            "skeleton-runner-checkout-recovery",
+        ]
+    )
+    if code != 0:
+        return None, "recovery_stash_failed"
+    status_lines.append("recovery_stash_status=created")
+
+    code, output = run_command(
+        ["git", "-C", str(checkout_path), "rev-parse", "refs/stash"]
+    )
+    stash_sha = (
+        output.strip().splitlines()[0].lower()
+        if code == 0 and output.strip()
+        else ""
+    )
+    if code != 0 or _HEAD_SHA_RE.fullmatch(stash_sha) is None:
+        restore_status = _restore_skeleton_checkout_stash(checkout_path)
+        status_lines.append(f"recovery_restore_status={restore_status}")
+        return None, "recovery_stash_sha_invalid"
+
+    try:
+        recovery_root = _ensure_private_skeleton_checkout_recovery_root()
+    except (OSError, ValueError):
+        restore_status = _restore_skeleton_checkout_stash(checkout_path)
+        status_lines.append(f"recovery_restore_status={restore_status}")
+        return None, "recovery_root_unavailable"
+
+    recovery_ref = f"refs/skeleton-runner/pending-recovery/{stash_sha}"
+    code, _output = run_command(
+        ["git", "-C", str(checkout_path), "update-ref", recovery_ref, stash_sha]
+    )
+    if code != 0:
+        restore_status = _restore_skeleton_checkout_stash(checkout_path)
+        status_lines.append(f"recovery_restore_status={restore_status}")
+        return None, "recovery_ref_failed"
+    status_lines.append("recovery_ref_status=created")
+
+    bundle_path = recovery_root / f"skeleton-checkout-{stash_sha}.bundle"
+    try:
+        bundle_path.relative_to(recovery_root)
+    except ValueError:
+        restore_status = _restore_skeleton_checkout_stash(checkout_path)
+        status_lines.append(f"recovery_restore_status={restore_status}")
+        return stash_sha, "recovery_artifact_path_unsafe"
+
+    code, _output = run_command(
+        [
+            "git",
+            "-C",
+            str(checkout_path),
+            "bundle",
+            "create",
+            str(bundle_path),
+            recovery_ref,
+        ]
+    )
+    if code != 0:
+        restore_status = _restore_skeleton_checkout_stash(checkout_path)
+        status_lines.append(f"recovery_restore_status={restore_status}")
+        run_command(["git", "-C", str(checkout_path), "update-ref", "-d", recovery_ref])
+        try:
+            bundle_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return stash_sha, "recovery_artifact_create_failed"
+
+    code, _output = run_command(
+        ["git", "-C", str(checkout_path), "bundle", "verify", str(bundle_path)]
+    )
+    if code != 0:
+        restore_status = _restore_skeleton_checkout_stash(checkout_path)
+        status_lines.append(f"recovery_restore_status={restore_status}")
+        run_command(["git", "-C", str(checkout_path), "update-ref", "-d", recovery_ref])
+        try:
+            bundle_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return stash_sha, "recovery_artifact_verify_failed"
+
+    status_lines.append("recovery_artifact_status=verified")
+    return stash_sha, None
+
+
 def _verify_skeleton_checkout_present(
     task_id: str, registered_checkout: RegisteredProjectCheckout
 ) -> str | None:
@@ -5916,7 +6071,10 @@ def check_skeleton_freshness() -> str:
     )
     if failure_report is not None or origin_main_sha is None:
         return failure_report or _maintenance_report(
-            "BLOCKED", task_id, [*status_lines, "reason=origin_main_read_failed"], "not_met"
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=origin_main_read_failed"],
+            "not_met",
         )
 
     github_main_output, failure = _run_freshness_command(
@@ -6155,6 +6313,175 @@ def runtime_sync_main(body: str) -> str:
                 *status_lines,
                 f"checkout_head_sha={final_head_sha}",
                 "reason=expected_head_sha_mismatch",
+            ],
+            "not_met",
+        )
+
+    status_lines.extend(
+        (
+            f"checkout_head_sha={final_head_sha}",
+            f"github_main_sha={origin_main_sha}",
+            "checkout_sync_state=equal",
+        )
+    )
+    return _maintenance_report("DONE", task_id, status_lines, "met")
+
+
+def recover_skeleton_checkout(body: str) -> str:
+    task_id = RECOVER_SKELETON_CHECKOUT
+    expected_head_sha, reason = _skeleton_expected_head_sha(body)
+    if reason is not None:
+        return _maintenance_report("BLOCKED", task_id, [f"reason={reason}"], "not_met")
+
+    registered_checkout, report = _registered_skeleton_checkout(task_id)
+    if report is not None:
+        return report
+    assert registered_checkout is not None
+
+    checkout_path = registered_checkout.checkout_path
+    status_lines = list(registered_checkout.status_lines)
+    if expected_head_sha is not None:
+        status_lines.append(f"expected_head_sha={expected_head_sha}")
+
+    present_report = _verify_skeleton_checkout_present(task_id, registered_checkout)
+    if present_report is not None:
+        return present_report
+
+    origin_report = _read_skeleton_origin(task_id, registered_checkout, status_lines)
+    if origin_report is not None:
+        return origin_report
+
+    branch_report = _read_skeleton_current_branch(task_id, checkout_path, status_lines)
+    if branch_report is not None:
+        return branch_report
+
+    status_output, failure = _run_freshness_command(
+        ["git", "-C", str(checkout_path), "status", "--porcelain"],
+        status_lines,
+        "read_worktree_status",
+    )
+    if failure is not None or status_output is None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, failure or "reason=worktree_status_read_failed"],
+            "not_met",
+        )
+
+    fetch_report = _fetch_skeleton_origin_main(task_id, checkout_path, status_lines)
+    if fetch_report is not None:
+        return fetch_report
+
+    origin_main_sha, failure_report = _read_skeleton_sha(
+        task_id, checkout_path, "origin/main", status_lines, "read_origin_main"
+    )
+    if failure_report is not None or origin_main_sha is None:
+        return failure_report or _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=origin_main_read_failed"], "not_met"
+        )
+    if expected_head_sha is not None and origin_main_sha != expected_head_sha:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                *status_lines,
+                f"github_main_sha={origin_main_sha}",
+                "reason=expected_head_sha_mismatch",
+            ],
+            "not_met",
+        )
+
+    if status_output.strip():
+        _stash_sha, recovery_reason = _create_verified_skeleton_checkout_recovery(
+            checkout_path, status_lines
+        )
+        if recovery_reason is not None:
+            return _maintenance_report(
+                "NEEDS_OPERATOR",
+                task_id,
+                [*status_lines, f"reason={recovery_reason}"],
+                "not_met",
+            )
+    else:
+        status_lines.append("recovery_stash_status=not_needed")
+
+    code, _output = run_command(
+        ["git", "-C", str(checkout_path), "reset", "--hard", "origin/main"]
+    )
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, f"reset_status=failed", f"exit_code={code}"],
+            "not_met",
+        )
+    status_lines.append("reset_status=hard_origin_main")
+
+    code, _output = run_command(["git", "-C", str(checkout_path), "clean", "-fd"])
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, f"step=clean_untracked status=failed exit_code={code}"],
+            "not_met",
+        )
+    status_lines.append("step=clean_untracked status=done")
+
+    final_status_output, final_status_failure = _run_freshness_command(
+        [
+            "git",
+            "-C",
+            str(checkout_path),
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+        ],
+        status_lines,
+        "read_final_worktree_status",
+    )
+    if final_status_failure is not None or final_status_output is None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                *status_lines,
+                "final_clean_state=false",
+                final_status_failure or "reason=final_worktree_status_read_failed",
+            ],
+            "not_met",
+        )
+    if final_status_output.strip():
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                *status_lines,
+                "final_clean_state=false",
+                "reason=final_checkout_dirty",
+            ],
+            "not_met",
+        )
+    status_lines.append("final_clean_state=true")
+
+    final_head_sha, failure_report = _read_skeleton_sha(
+        task_id, checkout_path, "HEAD", status_lines, "read_final_head"
+    )
+    if failure_report is not None or final_head_sha is None:
+        return failure_report or _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=final_head_read_failed"],
+            "not_met",
+        )
+    if final_head_sha != origin_main_sha:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                *status_lines,
+                f"checkout_head_sha={final_head_sha}",
+                f"github_main_sha={origin_main_sha}",
+                "reason=final_head_mismatch",
             ],
             "not_met",
         )
@@ -8578,6 +8905,8 @@ def dispatch_runtime_maintenance_task(
             return check_skeleton_freshness()
         if task_id == RUNTIME_SYNC_MAIN:
             return runtime_sync_main(body)
+        if task_id == RECOVER_SKELETON_CHECKOUT:
+            return recover_skeleton_checkout(body)
         if task_id == ENSURE_PROJECT_CHECKOUT:
             return ensure_project_checkout(body)
         if task_id == VALIDATE_PR_BRANCH:

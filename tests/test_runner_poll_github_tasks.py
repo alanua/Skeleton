@@ -6222,6 +6222,20 @@ def _runtime_sync_main_issue_body(
     return "\n".join(lines)
 
 
+def _recover_skeleton_checkout_issue_body(
+    expected_head_sha: str | None = None, task_body: str = ""
+) -> str:
+    lines = [
+        "Mode: RUNTIME_MAINTENANCE_TASK",
+        f"Maintenance Task ID: {runner.RECOVER_SKELETON_CHECKOUT}",
+    ]
+    if expected_head_sha is not None:
+        lines.append(f"Expected Head SHA: {expected_head_sha}")
+    if task_body:
+        lines.extend(("", "```task", task_body, "```"))
+    return "\n".join(lines)
+
+
 def _project_tree_for_skeleton_checkout(checkout_path: Path) -> dict[str, object]:
     project_tree = json.loads(json.dumps(runner.load_runner_project_tree()))
     project_tree["projects"]["skeleton"]["checkout_path"] = str(checkout_path)
@@ -8253,6 +8267,254 @@ def test_runtime_sync_main_blocks_fetch_and_fast_forward_failures() -> None:
     assert report.startswith("BLOCKED:")
     assert "step=fast_forward_main status=failed exit_code=128" in report
     assert "merge output" not in report
+
+
+def _prepare_recover_skeleton_checkout_repo(tmp_path: Path) -> tuple[Path, Path, Path]:
+    origin = tmp_path / "origin.git"
+    seed = tmp_path / "seed"
+    checkout_path = tmp_path / "checkout"
+    assert runner.run_command(["git", "init", "--bare", str(origin)])[0] == 0
+    assert runner.run_command(["git", "init", str(seed)])[0] == 0
+    assert (
+        runner.run_command(["git", "config", "user.email", "runner@example.test"], cwd=seed)[0]
+        == 0
+    )
+    assert runner.run_command(["git", "config", "user.name", "Runner"], cwd=seed)[
+        0
+    ] == 0
+    (seed / "tracked.txt").write_text("base\n", encoding="utf-8")
+    assert runner.run_command(["git", "add", "tracked.txt"], cwd=seed)[0] == 0
+    assert runner.run_command(["git", "commit", "-m", "base"], cwd=seed)[0] == 0
+    assert runner.run_command(["git", "branch", "-M", "main"], cwd=seed)[0] == 0
+    assert runner.run_command(
+        ["git", "remote", "add", "origin", str(origin)], cwd=seed
+    )[0] == 0
+    assert runner.run_command(["git", "push", "-u", "origin", "main"], cwd=seed)[
+        0
+    ] == 0
+    assert runner.run_command(["git", "clone", str(origin), str(checkout_path)])[0] == 0
+    assert runner.run_command(["git", "checkout", "main"], cwd=checkout_path)[0] == 0
+    assert runner.run_command(
+        ["git", "config", "user.email", "runner@example.test"], cwd=checkout_path
+    )[0] == 0
+    assert runner.run_command(
+        ["git", "config", "user.name", "Runner"], cwd=checkout_path
+    )[0] == 0
+    return origin, seed, checkout_path
+
+
+def _recover_from_bundle(checkout_path: Path, recovery_root: Path) -> None:
+    bundles = sorted(recovery_root.glob("skeleton-checkout-*.bundle"))
+    assert len(bundles) == 1
+    stash_sha = bundles[0].stem.removeprefix("skeleton-checkout-")
+    recovery_ref = f"refs/recovery/{stash_sha}"
+    fetch_refspec = f"refs/skeleton-runner/pending-recovery/{stash_sha}:{recovery_ref}"
+    assert runner.run_command(
+        ["git", "fetch", str(bundles[0]), fetch_refspec], cwd=checkout_path
+    )[0] == 0
+    assert runner.run_command(["git", "stash", "apply", recovery_ref], cwd=checkout_path)[
+        0
+    ] == 0
+
+
+def test_recover_skeleton_checkout_is_allowlisted() -> None:
+    assert runner.RECOVER_SKELETON_CHECKOUT == "recover_skeleton_checkout"
+    assert runner.RECOVER_SKELETON_CHECKOUT in runner.RUNTIME_MAINTENANCE_TASK_IDS
+
+
+def test_recover_skeleton_checkout_bundle_recovers_tracked_and_untracked_after_reset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _origin, _seed, checkout_path = _prepare_recover_skeleton_checkout_repo(tmp_path)
+    recovery_root = tmp_path / "recovery"
+    monkeypatch.setenv("SKELETON_RUNNER_CHECKOUT_RECOVERY_ROOT", str(recovery_root))
+    tracked = checkout_path / "tracked.txt"
+    untracked = checkout_path / "new.txt"
+    tracked.write_text("base\nmodified\n", encoding="utf-8")
+    untracked.write_text("untracked\n", encoding="utf-8")
+    project_tree = _project_tree_for_skeleton_checkout(checkout_path)
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(
+        runner, "_project_checkout_path_is_under_runner_base", return_value=True
+    ), mock.patch.object(
+        runner, "_remote_url_matches_project_repo", return_value=True
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.RECOVER_SKELETON_CHECKOUT,
+            str(runner.ROOT),
+            _recover_skeleton_checkout_issue_body(task_body="git push\nsudo env"),
+        )
+
+    assert report.startswith("DONE:")
+    assert "maintenance_task_id=recover_skeleton_checkout" in report
+    assert "recovery_stash_status=created" in report
+    assert "recovery_ref_status=created" in report
+    assert "recovery_artifact_status=verified" in report
+    assert "reset_status=hard_origin_main" in report
+    assert "final_clean_state=true" in report
+    assert str(recovery_root) not in report
+    assert "modified" not in report
+    assert tracked.read_text(encoding="utf-8") == "base\n"
+    assert not untracked.exists()
+
+    _recover_from_bundle(checkout_path, recovery_root)
+    assert tracked.read_text(encoding="utf-8") == "base\nmodified\n"
+    assert untracked.read_text(encoding="utf-8") == "untracked\n"
+
+
+def test_recover_skeleton_checkout_preverification_failure_restores_and_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _origin, _seed, checkout_path = _prepare_recover_skeleton_checkout_repo(tmp_path)
+    recovery_root = tmp_path / "recovery"
+    monkeypatch.setenv("SKELETON_RUNNER_CHECKOUT_RECOVERY_ROOT", str(recovery_root))
+    tracked = checkout_path / "tracked.txt"
+    untracked = checkout_path / "new.txt"
+    tracked.write_text("base\nmodified\n", encoding="utf-8")
+    untracked.write_text("untracked\n", encoding="utf-8")
+    project_tree = _project_tree_for_skeleton_checkout(checkout_path)
+    original_run_command = runner.run_command
+
+    def fail_bundle_verify(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        if command[:5] == ["git", "-C", str(checkout_path), "bundle", "verify"]:
+            return 1, "bundle verify output must not leak"
+        return original_run_command(command, cwd=cwd)
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(
+        runner, "_project_checkout_path_is_under_runner_base", return_value=True
+    ), mock.patch.object(
+        runner, "_remote_url_matches_project_repo", return_value=True
+    ), mock.patch.object(
+        runner, "run_command", side_effect=fail_bundle_verify
+    ):
+        report = runner.recover_skeleton_checkout(_recover_skeleton_checkout_issue_body())
+
+    assert report.startswith("NEEDS_OPERATOR:")
+    assert "reason=recovery_artifact_verify_failed" in report
+    assert "recovery_restore_status=restored" in report
+    assert "bundle verify output" not in report
+    assert tracked.read_text(encoding="utf-8") == "base\nmodified\n"
+    assert untracked.read_text(encoding="utf-8") == "untracked\n"
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(
+        runner, "_project_checkout_path_is_under_runner_base", return_value=True
+    ), mock.patch.object(
+        runner, "_remote_url_matches_project_repo", return_value=True
+    ):
+        retry_report = runner.recover_skeleton_checkout(
+            _recover_skeleton_checkout_issue_body()
+        )
+
+    assert retry_report.startswith("DONE:")
+    assert "recovery_artifact_status=verified" in retry_report
+    assert tracked.read_text(encoding="utf-8") == "base\n"
+    assert not untracked.exists()
+    _recover_from_bundle(checkout_path, recovery_root)
+    assert tracked.read_text(encoding="utf-8") == "base\nmodified\n"
+    assert untracked.read_text(encoding="utf-8") == "untracked\n"
+
+
+def test_recover_skeleton_checkout_blocks_when_final_status_dirty_after_clean() -> None:
+    checkout_path = _safe_checkout_path("skeleton-recover-final-dirty")
+    project_tree = _project_tree_for_skeleton_checkout(checkout_path)
+    origin_main_sha = "b" * 40
+
+    def run_recover_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        del cwd
+        if command == ["git", "-C", str(checkout_path), "remote", "get-url", "origin"]:
+            return 0, "https://github.com/alanua/Skeleton.git\n"
+        if command == ["git", "-C", str(checkout_path), "symbolic-ref", "--short", "HEAD"]:
+            return 0, "main\n"
+        if command == ["git", "-C", str(checkout_path), "status", "--porcelain"]:
+            return 0, ""
+        if command == ["git", "-C", str(checkout_path), "fetch", "--prune", "origin", "main"]:
+            return 0, ""
+        if command == ["git", "-C", str(checkout_path), "rev-parse", "origin/main"]:
+            return 0, f"{origin_main_sha}\n"
+        if command == [
+            "git",
+            "-C",
+            str(checkout_path),
+            "reset",
+            "--hard",
+            "origin/main",
+        ]:
+            return 0, ""
+        if command == ["git", "-C", str(checkout_path), "clean", "-fd"]:
+            return 0, ""
+        if command == [
+            "git",
+            "-C",
+            str(checkout_path),
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+        ]:
+            return 0, " M scripts/runner_poll_github_tasks.py\n?? scratch.txt\n"
+        return 2, "unexpected command output must not appear"
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(Path, "exists", autospec=True) as path_exists, mock.patch.object(
+        runner, "run_command", side_effect=run_recover_command
+    ) as run:
+        path_exists.side_effect = lambda path: path in {
+            checkout_path,
+            checkout_path / ".git",
+        }
+        report = runner.recover_skeleton_checkout(_recover_skeleton_checkout_issue_body())
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("BLOCKED:")
+    assert "step=clean_untracked status=done" in report
+    assert "step=read_final_worktree_status status=done" in report
+    assert "final_clean_state=false" in report
+    assert "reason=final_checkout_dirty" in report
+    assert "scripts/runner_poll_github_tasks.py" not in report
+    assert "scratch.txt" not in report
+    assert [
+        "git",
+        "-C",
+        str(checkout_path),
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+    ] in commands
+    assert ["git", "-C", str(checkout_path), "rev-parse", "HEAD"] not in commands
+
+
+def test_recover_skeleton_checkout_rejects_unsafe_recovery_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    symlink_root = tmp_path / "recovery-link"
+    symlink_root.symlink_to(tmp_path)
+    monkeypatch.setenv("SKELETON_RUNNER_CHECKOUT_RECOVERY_ROOT", str(symlink_root))
+    with pytest.raises(ValueError, match="unsafe"):
+        runner._ensure_private_skeleton_checkout_recovery_root()
+
+    loose_root = tmp_path / "loose-recovery"
+    loose_root.mkdir(mode=0o700)
+    loose_root.chmod(0o755)
+    monkeypatch.setenv("SKELETON_RUNNER_CHECKOUT_RECOVERY_ROOT", str(loose_root))
+    with pytest.raises(ValueError, match="permissions"):
+        runner._ensure_private_skeleton_checkout_recovery_root()
+
+    owned_root = tmp_path / "owned-recovery"
+    owned_root.mkdir(mode=0o700)
+    monkeypatch.setenv("SKELETON_RUNNER_CHECKOUT_RECOVERY_ROOT", str(owned_root))
+    with mock.patch.object(runner.os, "getuid", return_value=os.getuid() + 1):
+        with pytest.raises(ValueError, match="owned"):
+            runner._ensure_private_skeleton_checkout_recovery_root()
 
 
 def test_ensure_project_checkout_missing_target_project_blocks() -> None:
