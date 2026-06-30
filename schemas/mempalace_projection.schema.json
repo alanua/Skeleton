@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.mempalace_projection.schema.json",
+  "title": "MemPalace Synthetic Projection",
+  "type": "object",
+  "required": [
+    "schema",
+    "namespace",
+    "project_id",
+    "source_snapshot_id",
+    "current_canonical_revision",
+    "indexed_at",
+    "documents"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "skeleton.mempalace_projection.v1"},
+    "namespace": {"const": "skeleton"},
+    "project_id": {"const": "mempalace_synthetic"},
+    "source_snapshot_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},
+    "current_canonical_revision": {"type": "integer", "minimum": 1},
+    "indexed_at": {"type": "string", "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+    "documents": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {"$ref": "#/$defs/document"}
+    }
+  },
+  "$defs": {
+    "safe_token": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+    },
+    "bounded_text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 180,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9 .,:;_()#-]{0,511}$"
+    },
+    "document": {
+      "type": "object",
+      "required": [
+        "item_id",
+        "canonical_ref",
+        "canonical_revision",
+        "title",
+        "bounded_text",
+        "tags",
+        "source_attribution",
+        "deleted"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "item_id": {"$ref": "#/$defs/safe_token"},
+        "canonical_ref": {"$ref": "#/$defs/safe_token"},
+        "canonical_revision": {"type": "integer", "minimum": 1},
+        "title": {"type": "string", "minLength": 1, "maxLength": 96},
+        "bounded_text": {"$ref": "#/$defs/bounded_text"},
+        "tags": {
+          "type": "array",
+          "maxItems": 12,
+          "items": {"$ref": "#/$defs/safe_token"}
+        },
+        "source_attribution": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "items": {"$ref": "#/$defs/source_attribution"}
+        },
+        "deleted": {"type": "boolean"}
+      }
+    },
+    "source_attribution": {
+      "type": "object",
+      "required": ["source_ref", "kind", "evidence_hash"],
+      "additionalProperties": false,
+      "properties": {
+        "source_ref": {"$ref": "#/$defs/safe_token"},
+        "kind": {"$ref": "#/$defs/safe_token"},
+        "evidence_hash": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"}
+      }
+    }
+  }
+}
