@@ -32,6 +32,8 @@ MEMORY_GATEWAY_REQUEST_SCHEMA = "skeleton.memory_gateway.request.v1"
 MEMORY_GATEWAY_RESPONSE_SCHEMA = "skeleton.memory_gateway.response.v1"
 MEMORY_GATEWAY_AUDIT_SCHEMA = "skeleton.memory_gateway.audit_event.v1"
 MEMORY_GATEWAY_CONTRACT_VERSION = "1.0.0"
+GRAPHIFY_SYNTHETIC_NAMESPACE = "skeleton"
+GRAPHIFY_SYNTHETIC_PROJECT_ID = "graphify_synthetic"
 _SAFE_PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
 
@@ -60,6 +62,7 @@ class MemoryGateway:
         patch_registry: MemoryPatchProposalRegistry | None = None,
         override_registry: MemoryOverrideRegistry | None = None,
         mempalace_adapter: MemPalaceAdapter | None = None,
+        graphify_adapter: object | None = None,
     ) -> None:
         self._token = _normalize_token(token)
         self._patch_registry = patch_registry or MemoryPatchProposalRegistry()
@@ -70,6 +73,7 @@ class MemoryGateway:
         self._graph = _graph_seed()
         self._freshness = _freshness_seed()
         self._mempalace_adapter = mempalace_adapter
+        self._graphify_adapter = graphify_adapter
 
     def execute(self, request: Mapping[str, Any]) -> dict[str, object]:
         if not isinstance(request, Mapping):
@@ -166,6 +170,25 @@ class MemoryGateway:
         namespace = self._authorize_namespace(namespace)
         project_id = self._scope_project_id(namespace, project_id)
         _safe_lookup_key(query)
+        if _is_graphify_synthetic_scope(namespace, project_id):
+            if self._graphify_adapter is None:
+                raise MemoryGatewayPolicyError(
+                    "GRAPHIFY_ADAPTER_REQUIRED",
+                    "synthetic Graphify route requires explicit adapter injection",
+                )
+            adapter_response = self._graphify_adapter.query_code(
+                namespace=namespace,
+                project_id=project_id,
+                query=query,
+            )
+            if _is_gateway_response(adapter_response):
+                return adapter_response
+            return self._response(
+                namespace=namespace,
+                command_suffix="graph.query_code",
+                payload={"results": adapter_response["results"]},
+            )
+        _reject_wrong_graphify_synthetic_scope(namespace, project_id)
         results = []
         for result in self._graph[(namespace, project_id)]:
             rendered = deepcopy(result)
@@ -225,6 +248,27 @@ class MemoryGateway:
     def get_graph_index_freshness(self, *, namespace: str, project_id: object = None) -> dict[str, object]:
         namespace = self._authorize_namespace(namespace)
         project_id = self._scope_project_id(namespace, project_id)
+        if _is_graphify_synthetic_scope(namespace, project_id):
+            if self._graphify_adapter is None:
+                raise MemoryGatewayPolicyError(
+                    "GRAPHIFY_ADAPTER_REQUIRED",
+                    "synthetic Graphify route requires explicit adapter injection",
+                )
+            adapter_response = self._graphify_adapter.get_index_freshness(
+                namespace=namespace,
+                project_id=project_id,
+            )
+            if _is_gateway_response(adapter_response):
+                return adapter_response
+            return self._response(
+                namespace=namespace,
+                command_suffix="graph.get_index_freshness",
+                payload={
+                    "project_id": project_id,
+                    "graphify": adapter_response,
+                },
+            )
+        _reject_wrong_graphify_synthetic_scope(namespace, project_id)
         return self._response(
             namespace=namespace,
             command_suffix="graph.get_index_freshness",
@@ -488,6 +532,19 @@ def _normalize_token(token: GatewayCapabilityToken | Mapping[str, Any]) -> Gatew
 
 def _is_mempalace_synthetic_scope(namespace: str, project_id: str) -> bool:
     return namespace == MEMPALACE_SYNTHETIC_NAMESPACE and project_id == MEMPALACE_SYNTHETIC_PROJECT_ID
+
+
+def _is_graphify_synthetic_scope(namespace: str, project_id: str) -> bool:
+    return namespace == GRAPHIFY_SYNTHETIC_NAMESPACE and project_id == GRAPHIFY_SYNTHETIC_PROJECT_ID
+
+
+def _reject_wrong_graphify_synthetic_scope(namespace: str, project_id: str) -> None:
+    if project_id == GRAPHIFY_SYNTHETIC_PROJECT_ID:
+        raise MemoryGatewayPolicyError("PROJECT_NOT_AUTHORIZED", "synthetic Graphify route scope mismatch")
+
+
+def _is_gateway_response(value: object) -> bool:
+    return isinstance(value, Mapping) and value.get("schema") == MEMORY_GATEWAY_RESPONSE_SCHEMA
 
 
 def _has_stale_index_reference(provenance_refs: list[object]) -> bool:
