@@ -12,7 +12,12 @@ from core.mempalace_adapter import MemPalaceAdapter
 from core.mempalace_projection import MEMPALACE_SYNTHETIC_NAMESPACE, MEMPALACE_SYNTHETIC_PROJECT_ID, load_projection
 from core.memory_gateway import MEMORY_GATEWAY_REQUEST_SCHEMA, MemoryGateway, capability_token
 from core.memory_gateway_policy import STALE_INDEX_RESULT_NOT_PATCH_ELIGIBLE, MemoryGatewayPolicyError
-from core.memory_patch_proposal import PATCH_PROPOSAL_SCHEMA, canonical_dedupe_key, canonical_idempotency_key
+from core.memory_patch_proposal import (
+    PATCH_PROPOSAL_SCHEMA,
+    MemoryPatchProposalRegistry,
+    canonical_dedupe_key,
+    canonical_idempotency_key,
+)
 from scripts import mempalace_synthetic_benchmark
 from scripts.mempalace_synthetic_benchmark import run_benchmark
 
@@ -124,15 +129,31 @@ def test_gateway_marks_all_synthetic_results_non_authoritative() -> None:
     assert all(result["authoritative"] is False for result in payload["results"])
 
 
-def test_stale_mempalace_proposal_rejected_without_audit_event() -> None:
-    gw = gateway()
-    result = MemPalaceAdapter(projection()).search_semantic(
-        namespace=MEMPALACE_SYNTHETIC_NAMESPACE,
-        project_id=MEMPALACE_SYNTHETIC_PROJECT_ID,
-        query="door attribution",
-        current_canonical_revision=4,
-    )["results"][0]
+def test_gateway_proposal_rejects_stale_synthetic_semantic_evidence_without_event() -> None:
+    stale_projection = projection()
+    stale_projection["current_canonical_revision"] = 4
+    patch_registry = MemoryPatchProposalRegistry()
+    gw = MemoryGateway(
+        capability_token(namespaces=(MEMPALACE_SYNTHETIC_NAMESPACE,)),
+        patch_registry=patch_registry,
+        mempalace_adapter=MemPalaceAdapter(stale_projection),
+    )
+    result = gw.execute(gateway_request("door attribution"))["payload"]["results"][0]
+    assert result["stale"] is True
+
     candidate = proposal_from_result(result)
+    candidate["provenance_refs"] = [
+        {
+            "ref": candidate["provenance_refs"][0]["ref"],
+            "kind": "semantic_only",
+            "evidence_hash": candidate["provenance_refs"][0]["evidence_hash"],
+            "indexed_canonical_revision": result["indexed_canonical_revision"],
+            "current_canonical_revision": result["indexed_canonical_revision"],
+            "stale": False,
+        }
+    ]
+    candidate["dedupe_key"] = canonical_dedupe_key(candidate)
+    candidate["idempotency_key"] = canonical_idempotency_key(candidate)
 
     with pytest.raises(MemoryGatewayPolicyError) as excinfo:
         gw.propose_patch(
@@ -142,6 +163,7 @@ def test_stale_mempalace_proposal_rejected_without_audit_event() -> None:
         )
 
     assert excinfo.value.reason_code == STALE_INDEX_RESULT_NOT_PATCH_ELIGIBLE
+    assert patch_registry.lookup_by_idempotency_key(candidate["idempotency_key"]) is None
     audit = gw.get_audit_log(
         namespace=MEMPALACE_SYNTHETIC_NAMESPACE,
         project_id=MEMPALACE_SYNTHETIC_PROJECT_ID,

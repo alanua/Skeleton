@@ -330,7 +330,7 @@ class MemoryGateway:
                 STALE_INDEX_RESULT_NOT_PATCH_ELIGIBLE,
                 "stale derived index cannot support a patch proposal",
             )
-        freshness = self._freshness.get((namespace, project_id), {})
+        freshness = self._freshness_for_patch_evidence(namespace, project_id)
         mempalace_freshness = freshness.get("mempalace", {})
         graph_freshness = freshness.get("graphify", {})
         if has_semantic:
@@ -367,6 +367,29 @@ class MemoryGateway:
                 "exact confirmation revision does not match current canonical revision",
             )
         self._validate_canonical_exact_confirmation(namespace, project_id, proposal)
+
+    def _freshness_for_patch_evidence(self, namespace: str, project_id: str) -> dict[str, object]:
+        freshness: dict[str, object] = deepcopy(self._freshness.get((namespace, project_id), {}))
+        if not _is_mempalace_synthetic_scope(namespace, project_id):
+            return freshness
+        if self._mempalace_adapter is None:
+            raise MemoryGatewayPolicyError(
+                "MEMPALACE_ADAPTER_REQUIRED",
+                "synthetic MemPalace route requires explicit adapter injection",
+            )
+        try:
+            mempalace_freshness = self._mempalace_adapter.get_index_freshness(
+                namespace=namespace,
+                project_id=project_id,
+            )
+        except MemPalaceAdapterError as exc:
+            raise MemoryGatewayPolicyError(exc.reason_code, str(exc)) from exc
+        freshness["mempalace"] = mempalace_freshness
+        freshness["canonical_sqlite"] = {
+            "current_canonical_revision": mempalace_freshness["current_canonical_revision"],
+            "project_id": project_id,
+        }
+        return freshness
 
     def _validate_canonical_exact_confirmation(
         self, namespace: str, project_id: str, proposal: Mapping[str, Any]
