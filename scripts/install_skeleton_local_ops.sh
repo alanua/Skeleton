@@ -9,7 +9,7 @@ VENV="$INSTALL_ROOT/venv"
 BIN="$INSTALL_ROOT/bin"
 CLI="$BIN/skeleton-local"
 
-[[ -f "$REPO_ROOT/scripts/skeleton_local_ops.py" ]] || {
+[[ -f "$REPO_ROOT/scripts/skeleton_local.py" ]] || {
   echo 'BLOCKED: Skeleton repository not found' >&2
   exit 2
 }
@@ -26,7 +26,7 @@ cat > "$CLI" <<WRAPPER
 #!/usr/bin/env bash
 set -euo pipefail
 export PYTHONPATH="$REPO_ROOT"
-exec "$VENV/bin/python" "$REPO_ROOT/scripts/skeleton_local_ops.py" "\$@"
+exec "$VENV/bin/python" "$REPO_ROOT/scripts/skeleton_local.py" "\$@"
 WRAPPER
 chmod 700 "$CLI"
 
@@ -56,6 +56,14 @@ chmod 700 "$SMOKE"
   --reason install_check \
   --approval operator_approved \
   --transaction aufmass-install-check-v1
+"$CLI" --private-root "$PRIVATE_ROOT" aufmass calculate \
+  --input "$SMOKE/example.json" \
+  --output-dir "$SMOKE/result" \
+  --write-memory \
+  --actor operator \
+  --reason install_check \
+  --approval operator_approved \
+  --transaction aufmass-install-check-v1
 BACKUP_JSON="$("$CLI" --private-root "$PRIVATE_ROOT" memory backup)"
 SNAPSHOT_ID="$(printf '%s' "$BACKUP_JSON" | "$VENV/bin/python" -c 'import json,sys; print(json.load(sys.stdin)["snapshot_id"])')"
 "$CLI" --private-root "$PRIVATE_ROOT" memory verify-backup \
@@ -67,4 +75,4 @@ printf '%s\n' \
   "COMMAND: $CLI" \
   "PRIVATE DATA: $PRIVATE_ROOT" \
   'MEMORY: working and backup verified' \
-  'AUFMASS: example calculation verified'
+  'AUFMASS: repeated example calculation verified'
