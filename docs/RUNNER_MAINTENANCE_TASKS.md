@@ -158,8 +158,9 @@ It may only:
 9. Run a temporary synthetic AST smoke using the supported build form
    `graphify <folder>` with `GRAPHIFY_OUT` pointed at a temporary output
    directory and a bounded timeout.
-10. Verify the smoke output by reading `graph.json` and confirming non-zero node
-   and edge counts.
+10. Verify the smoke output by reading `<folder>/graphify-out/graph.json` and
+   confirming non-zero node and edge counts. Node-link `links`, legacy `edges`,
+   and `edge_count` graph forms are accepted.
 11. Run that smoke with a scrubbed environment: no model credentials, no network
    enablement, no hooks, no services, no ports, and no private indexing.
 12. Roll back the bounded Codex and Hermes skill paths and allowlisted
