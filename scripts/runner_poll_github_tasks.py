@@ -10,6 +10,7 @@ import os
 import re
 import shlex
 import shutil
+import site
 import subprocess
 import sys
 import tempfile
@@ -454,6 +455,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "tracked_files_match_allowlist",
         "unexpected_untracked_files",
         "unexpected_untracked_files_count",
+        "uv_install_status",
+        "uv_version",
         "validated_publish_files",
         "validated_publish_files_count",
         "validation_profile",
@@ -645,13 +648,18 @@ def cleanup_runtime_artifacts(workdir: str | Path) -> None:
             artifact.unlink()
 
 
-def run_command(args: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+def run_command(
+    args: list[str],
+    cwd: str | Path | None = None,
+    timeout: int | None = None,
+) -> tuple[int, str]:
     result = subprocess.run(
         args,
         cwd=str(cwd) if cwd is not None else None,
         check=False,
         capture_output=True,
         text=True,
+        timeout=timeout,
     )
     return result.returncode, result.stdout + result.stderr
 
@@ -2783,8 +2791,19 @@ _PRIVATE_MEMORY_UNSAFE_VALUE_RE = re.compile(
 )
 _HERMES_BRIDGE_SAFE_STATUS_VALUES = frozenset({"DONE", "BLOCKED"})
 GRAPHIFY_RUNTIME_APPROVAL = "install_graphify_runtime_v1"
+GRAPHIFY_UV_PINNED_VERSION = "0.11.24"
 GRAPHIFY_PINNED_VERSION = "0.8.44"
 GRAPHIFY_SMOKE_TIMEOUT_SECONDS = 45
+GRAPHIFY_TOOL_TIMEOUT_SECONDS = 120
+GRAPHIFY_UV_BOOTSTRAP_COMMAND = (
+    sys.executable,
+    "-m",
+    "pip",
+    "install",
+    "--user",
+    f"uv=={GRAPHIFY_UV_PINNED_VERSION}",
+)
+GRAPHIFY_UV_VERSION_COMMAND = ("uv", "--version")
 GRAPHIFY_TOOL_INSTALL_COMMAND = (
     "uv",
     "tool",
@@ -2818,6 +2837,7 @@ GRAPHIFY_UPSTREAM_COMMIT = "5d053721aba875156cf2a6ddd6953d8beee98147"
 GRAPHIFY_RUNTIME_UNEXPECTED_FAILURE_REASON = "graphify_runtime_unexpected_failure"
 GRAPHIFY_COMMAND_PERMISSION_REASON = "graphify_command_permission_denied"
 GRAPHIFY_COMMAND_LAUNCH_REASON = "graphify_command_launch_failed"
+GRAPHIFY_COMMAND_TIMEOUT_REASON = "graphify_command_timeout"
 GRAPHIFY_UPSTREAM_PLATFORM_SKILL_RELATIVE_PATHS = {
     "aider": (Path(".aider") / "graphify" / "SKILL.md",),
     "amp": (Path(".config") / "agents" / "skills" / "graphify" / "SKILL.md",),
@@ -3193,6 +3213,8 @@ def _graphify_runtime_blocked_report(
 def _graphify_command_exception_reason(
     error: Exception, command_unavailable_reason: str
 ) -> str:
+    if isinstance(error, subprocess.TimeoutExpired):
+        return GRAPHIFY_COMMAND_TIMEOUT_REASON
     if isinstance(error, PermissionError):
         return GRAPHIFY_COMMAND_PERMISSION_REASON
     if isinstance(error, FileNotFoundError):
@@ -3207,15 +3229,134 @@ def _run_graphify_runtime_command(
     *,
     command_unavailable_reason: str,
     cwd: str | Path | None = None,
+    timeout: int | None = None,
+    timeout_reason: str = GRAPHIFY_COMMAND_TIMEOUT_REASON,
 ) -> tuple[int | None, str, str | None]:
     try:
-        code, output = run_command(command, cwd=cwd)
+        code, output = run_command(command, cwd=cwd, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None, "", timeout_reason
     except Exception as error:
         return None, "", _graphify_command_exception_reason(
             error,
             command_unavailable_reason,
         )
     return code, output, None
+
+
+def _graphify_uv_user_executable_candidates() -> tuple[Path, ...]:
+    if os.name == "nt":
+        names = ("uv.exe", "uv")
+        script_dir = Path(site.getuserbase()) / "Scripts"
+    else:
+        names = ("uv",)
+        script_dir = Path(site.getuserbase()) / "bin"
+    return tuple(script_dir / name for name in names)
+
+
+def _graphify_uv_version_is_pinned(output: str) -> bool:
+    parts = output.strip().split()
+    return len(parts) >= 2 and parts[0] == "uv" and parts[1] == GRAPHIFY_UV_PINNED_VERSION
+
+
+def _verify_graphify_uv_executable(executable: str) -> tuple[bool, str | None]:
+    code, output, reason = _run_graphify_runtime_command(
+        [executable, "--version"],
+        command_unavailable_reason="graphify_uv_command_unavailable",
+        cwd=ROOT,
+        timeout=GRAPHIFY_TOOL_TIMEOUT_SECONDS,
+    )
+    if reason is not None:
+        return False, reason
+    if code != 0 or not _graphify_uv_version_is_pinned(output):
+        return False, "graphify_uv_version_unverified"
+    return True, None
+
+
+def _resolve_graphify_user_uv_executable() -> str | None:
+    for candidate in _graphify_uv_user_executable_candidates():
+        if candidate.is_file() or candidate.is_symlink():
+            return str(candidate)
+    return None
+
+
+def _ensure_graphify_uv_runtime(status_lines: list[str]) -> tuple[str | None, str | None]:
+    code, output, reason = _run_graphify_runtime_command(
+        list(GRAPHIFY_UV_VERSION_COMMAND),
+        command_unavailable_reason="graphify_uv_command_unavailable",
+        cwd=ROOT,
+        timeout=GRAPHIFY_TOOL_TIMEOUT_SECONDS,
+    )
+    if reason is None and code == 0 and _graphify_uv_version_is_pinned(output):
+        status_lines.extend(
+            (
+                "step=verify_pinned_uv status=done",
+                "uv_install_status=reused",
+            )
+        )
+        return shutil.which("uv") or "uv", None
+    if reason in {
+        GRAPHIFY_COMMAND_PERMISSION_REASON,
+        GRAPHIFY_COMMAND_LAUNCH_REASON,
+        GRAPHIFY_COMMAND_TIMEOUT_REASON,
+    }:
+        status_lines.append("step=verify_pinned_uv status=failed")
+        return None, reason
+
+    user_uv = _resolve_graphify_user_uv_executable()
+    if user_uv is not None:
+        verified, verify_reason = _verify_graphify_uv_executable(user_uv)
+        if verified:
+            status_lines.extend(
+                (
+                    "step=verify_pinned_uv status=done",
+                    "uv_install_status=reused",
+                )
+            )
+            return user_uv, None
+        if verify_reason in {
+            GRAPHIFY_COMMAND_PERMISSION_REASON,
+            GRAPHIFY_COMMAND_LAUNCH_REASON,
+            GRAPHIFY_COMMAND_TIMEOUT_REASON,
+        }:
+            status_lines.append("step=verify_pinned_uv status=failed")
+            return None, verify_reason
+
+    code, _output, reason = _run_graphify_runtime_command(
+        list(GRAPHIFY_UV_BOOTSTRAP_COMMAND),
+        command_unavailable_reason="graphify_uv_python_package_tooling_unavailable",
+        cwd=ROOT,
+        timeout=GRAPHIFY_TOOL_TIMEOUT_SECONDS,
+        timeout_reason="graphify_uv_bootstrap_timeout",
+    )
+    if reason is not None:
+        status_lines.append("step=install_pinned_uv_user_tool status=failed")
+        return None, reason
+    if code != 0:
+        status_lines.append("step=install_pinned_uv_user_tool status=failed")
+        return None, "graphify_uv_bootstrap_failed"
+    status_lines.append("step=install_pinned_uv_user_tool status=done")
+
+    user_uv = _resolve_graphify_user_uv_executable()
+    if user_uv is None:
+        status_lines.append("step=resolve_pinned_uv_user_tool status=failed")
+        return None, "graphify_uv_executable_unresolved"
+    verified, verify_reason = _verify_graphify_uv_executable(user_uv)
+    if not verified:
+        status_lines.append("step=verify_pinned_uv status=failed")
+        return None, verify_reason or "graphify_uv_version_unverified"
+    status_lines.extend(
+        (
+            "step=resolve_pinned_uv_user_tool status=done",
+            "step=verify_pinned_uv status=done",
+            "uv_install_status=provisioned",
+        )
+    )
+    return user_uv, None
+
+
+def _graphify_tool_install_command(uv_executable: str) -> list[str]:
+    return [uv_executable, *GRAPHIFY_TOOL_INSTALL_COMMAND[1:]]
 
 
 def _graphify_cli_contract_preflight(status_lines: list[str]) -> str | None:
@@ -3241,6 +3382,7 @@ def _graphify_cli_contract_preflight(status_lines: list[str]) -> str | None:
         code, output, reason = _run_graphify_runtime_command(
             command,
             command_unavailable_reason="graphify_cli_command_unavailable",
+            timeout=GRAPHIFY_TOOL_TIMEOUT_SECONDS,
         )
         if reason is not None:
             status_lines.append(f"step={step} status=failed")
@@ -3376,6 +3518,7 @@ def install_graphify_runtime(body: str) -> str:
     task_id = INSTALL_GRAPHIFY_RUNTIME
     approval = _body_field(body, "Operator Approval")
     status_lines = [
+        f"uv_version={GRAPHIFY_UV_PINNED_VERSION}",
         f"graphify_version={GRAPHIFY_PINNED_VERSION}",
         f"synthetic_smoke_timeout_seconds={GRAPHIFY_SMOKE_TIMEOUT_SECONDS}",
         "network_disabled=true",
@@ -3396,10 +3539,15 @@ def install_graphify_runtime(body: str) -> str:
         )
     status_lines.append("approval_status=verified")
 
+    uv_executable, reason = _ensure_graphify_uv_runtime(status_lines)
+    if reason is not None or uv_executable is None:
+        return _graphify_runtime_blocked_report(status_lines, reason or "graphify_uv_unavailable")
+
     code, _output, reason = _run_graphify_runtime_command(
-        list(GRAPHIFY_TOOL_INSTALL_COMMAND),
+        _graphify_tool_install_command(uv_executable),
         command_unavailable_reason="graphify_tool_command_unavailable",
         cwd=ROOT,
+        timeout=GRAPHIFY_TOOL_TIMEOUT_SECONDS,
     )
     if reason is not None:
         return _graphify_runtime_blocked_report(
@@ -3439,6 +3587,7 @@ def install_graphify_runtime(body: str) -> str:
             list(GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND),
             command_unavailable_reason="graphify_cli_command_unavailable",
             cwd=ROOT,
+            timeout=GRAPHIFY_TOOL_TIMEOUT_SECONDS,
         )
         if reason is not None:
             status_lines.append("step=install_codex_skill status=failed")
@@ -3462,6 +3611,7 @@ def install_graphify_runtime(body: str) -> str:
             list(GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND),
             command_unavailable_reason="graphify_cli_command_unavailable",
             cwd=ROOT,
+            timeout=GRAPHIFY_TOOL_TIMEOUT_SECONDS,
         )
         if reason is not None:
             status_lines.append("step=install_hermes_skill status=failed")

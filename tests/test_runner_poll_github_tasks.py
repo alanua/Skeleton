@@ -2811,10 +2811,18 @@ def _write_smoke_graph(command: list[str], node_count: int = 2, edge_count: int 
 
 
 def _successful_graphify_runtime_command(
-    command: list[str], cwd: str | Path | None = None
+    command: list[str],
+    cwd: str | Path | None = None,
+    timeout: int | None = None,
 ) -> tuple[int, str]:
-    del cwd
-    if command == list(runner.GRAPHIFY_TOOL_INSTALL_COMMAND):
+    del cwd, timeout
+    if command == list(runner.GRAPHIFY_UV_VERSION_COMMAND):
+        return 0, "uv 0.11.24\n"
+    if command == list(runner.GRAPHIFY_UV_BOOTSTRAP_COMMAND):
+        return 0, ""
+    if len(command) == 2 and command[1] == "--version" and Path(command[0]).name == "uv":
+        return 0, "uv 0.11.24\n"
+    if command[1:] == list(runner.GRAPHIFY_TOOL_INSTALL_COMMAND[1:]):
         return 0, ""
     if command == list(runner.GRAPHIFY_VERSION_COMMAND):
         return 0, "graphify 0.8.44\n"
@@ -2896,9 +2904,13 @@ def test_graphify_runtime_uses_verified_0844_commands_and_retains_snapshot(
     (codex_skill / "SKILL.md").write_text("original\n", encoding="utf-8")
     snapshot_parent = tmp_path / "snapshots"
 
-    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        timeout: int | None = None,
+    ) -> tuple[int, str]:
         commands.append(command)
-        return _successful_graphify_runtime_command(command, cwd)
+        return _successful_graphify_runtime_command(command, cwd, timeout)
 
     def smoke(command: list[str]) -> tuple[int, str]:
         commands.append(command)
@@ -2928,7 +2940,11 @@ def test_graphify_runtime_uses_verified_0844_commands_and_retains_snapshot(
     assert "synthetic_graph_edge_count=2" in report
     assert "managed_version_marker_count=" in report
     assert any(snapshot_parent.iterdir())
-    assert list(runner.GRAPHIFY_TOOL_INSTALL_COMMAND) in commands
+    assert list(runner.GRAPHIFY_UV_VERSION_COMMAND) in commands
+    assert any(
+        command[1:] == list(runner.GRAPHIFY_TOOL_INSTALL_COMMAND[1:])
+        for command in commands
+    )
     assert list(runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND) in commands
     assert list(runner.GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND) in commands
     smoke_commands = [command for command in commands if command[:2] == ["env", "-i"]]
@@ -2983,9 +2999,15 @@ def test_graphify_managed_paths_discover_existing_allowlisted_version_markers(
 
 
 def test_graphify_runtime_preflight_blocks_before_profile_mutation(tmp_path: Path) -> None:
-    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
-        del cwd
-        if command == list(runner.GRAPHIFY_TOOL_INSTALL_COMMAND):
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        timeout: int | None = None,
+    ) -> tuple[int, str]:
+        del cwd, timeout
+        if command == list(runner.GRAPHIFY_UV_VERSION_COMMAND):
+            return 0, "uv 0.11.24\n"
+        if command[1:] == list(runner.GRAPHIFY_TOOL_INSTALL_COMMAND[1:]):
             return 0, ""
         if command == list(runner.GRAPHIFY_VERSION_COMMAND):
             return 0, "graphify 0.8.44\n"
@@ -3014,37 +3036,335 @@ def test_graphify_runtime_preflight_blocks_before_profile_mutation(tmp_path: Pat
     backup.assert_not_called()
 
 
-def test_graphify_runtime_reports_missing_uv_before_backup(tmp_path: Path) -> None:
-    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
-        del command, cwd
-        raise FileNotFoundError("raw uv path must not leak")
+def test_graphify_runtime_repairs_missing_uv_before_backup(tmp_path: Path) -> None:
+    commands: list[list[str]] = []
+    user_uv = str(tmp_path / "user-bin" / "uv")
+
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        timeout: int | None = None,
+    ) -> tuple[int, str]:
+        commands.append(command)
+        if command == list(runner.GRAPHIFY_UV_VERSION_COMMAND):
+            raise FileNotFoundError("raw service PATH must not leak")
+        if command == list(runner.GRAPHIFY_UV_BOOTSTRAP_COMMAND):
+            return 0, ""
+        if command == [user_uv, "--version"]:
+            return 0, "uv 0.11.24\n"
+        return _successful_graphify_runtime_command(command, cwd, timeout)
+
+    def smoke(command: list[str]) -> tuple[int, str]:
+        _write_smoke_graph(command)
+        return 0, ""
 
     with mock.patch.object(
         runner, "_graphify_managed_profile_paths", return_value=_graphify_managed_paths(tmp_path)
     ), mock.patch.object(
+        runner, "_graphify_private_snapshot_parent", return_value=tmp_path / "snapshots"
+    ), mock.patch.object(
+        runner, "_resolve_graphify_user_uv_executable", side_effect=(None, user_uv)
+    ), mock.patch.object(
         runner, "run_command", side_effect=run
     ), mock.patch.object(
-        runner, "_backup_graphify_profiles"
-    ) as backup:
+        runner, "_run_graphify_smoke_command", side_effect=smoke
+    ):
         report = runner.dispatch_runtime_maintenance_task(
             runner.INSTALL_GRAPHIFY_RUNTIME,
             str(runner.ROOT),
             _graphify_runtime_body(),
         )
 
-    assert report.startswith("BLOCKED:")
-    assert "reason=graphify_tool_command_unavailable" in report
+    assert report.startswith("DONE:")
+    assert "step=install_pinned_uv_user_tool status=done" in report
+    assert "uv_install_status=provisioned" in report
+    assert list(runner.GRAPHIFY_UV_BOOTSTRAP_COMMAND) in commands
+    assert any(command[0] == user_uv and command[1:] == list(runner.GRAPHIFY_TOOL_INSTALL_COMMAND[1:]) for command in commands)
     assert "rollback_status=not_needed" in report
-    assert "raw uv path must not leak" not in report
-    backup.assert_not_called()
+    assert "raw service PATH must not leak" not in report
+
+
+def test_graphify_uv_and_graphify_package_pins_are_exact() -> None:
+    assert runner.GRAPHIFY_UV_PINNED_VERSION == "0.11.24"
+    assert runner.GRAPHIFY_PINNED_VERSION == "0.8.44"
+    assert runner.GRAPHIFY_UV_BOOTSTRAP_COMMAND[-1] == "uv==0.11.24"
+    assert runner.GRAPHIFY_TOOL_INSTALL_COMMAND[-1] == "graphifyy==0.8.44"
+
+
+def test_graphify_uv_reuses_exact_pinned_path_uv() -> None:
+    commands: list[list[str]] = []
+
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        timeout: int | None = None,
+    ) -> tuple[int, str]:
+        del cwd, timeout
+        commands.append(command)
+        return 0, "uv 0.11.24\n"
+
+    status_lines: list[str] = []
+    with mock.patch.object(runner, "run_command", side_effect=run), mock.patch.object(
+        runner.shutil, "which", return_value="/safe/user/bin/uv"
+    ):
+        executable, reason = runner._ensure_graphify_uv_runtime(status_lines)
+
+    assert executable == "/safe/user/bin/uv"
+    assert reason is None
+    assert commands == [list(runner.GRAPHIFY_UV_VERSION_COMMAND)]
+    assert list(runner.GRAPHIFY_UV_BOOTSTRAP_COMMAND) not in commands
+    assert "uv_install_status=reused" in status_lines
+
+
+def test_graphify_uv_uses_verified_user_executable_when_service_path_missing(
+    tmp_path: Path,
+) -> None:
+    commands: list[list[str]] = []
+    user_uv = str(tmp_path / "bin" / "uv")
+
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        timeout: int | None = None,
+    ) -> tuple[int, str]:
+        del cwd, timeout
+        commands.append(command)
+        if command == list(runner.GRAPHIFY_UV_VERSION_COMMAND):
+            raise FileNotFoundError("raw PATH must not leak")
+        if command == [user_uv, "--version"]:
+            return 0, "uv 0.11.24\n"
+        return 2, "unexpected command"
+
+    status_lines: list[str] = []
+    with mock.patch.object(runner, "run_command", side_effect=run), mock.patch.object(
+        runner, "_resolve_graphify_user_uv_executable", return_value=user_uv
+    ):
+        executable, reason = runner._ensure_graphify_uv_runtime(status_lines)
+
+    assert executable == user_uv
+    assert reason is None
+    assert list(runner.GRAPHIFY_UV_BOOTSTRAP_COMMAND) not in commands
+    assert "uv_install_status=reused" in status_lines
+    assert all(str(tmp_path) not in line for line in status_lines)
+
+
+def test_graphify_uv_leaves_different_system_uv_untouched_and_uses_user_uv(
+    tmp_path: Path,
+) -> None:
+    commands: list[list[str]] = []
+    user_uv = str(tmp_path / "bin" / "uv")
+
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        timeout: int | None = None,
+    ) -> tuple[int, str]:
+        del cwd, timeout
+        commands.append(command)
+        if command == list(runner.GRAPHIFY_UV_VERSION_COMMAND):
+            return 0, "uv 0.10.0\n"
+        if command == [user_uv, "--version"]:
+            return 0, "uv 0.11.24\n"
+        return 2, "unexpected command"
+
+    status_lines: list[str] = []
+    with mock.patch.object(runner, "run_command", side_effect=run), mock.patch.object(
+        runner, "_resolve_graphify_user_uv_executable", return_value=user_uv
+    ):
+        executable, reason = runner._ensure_graphify_uv_runtime(status_lines)
+
+    assert executable == user_uv
+    assert reason is None
+    assert list(runner.GRAPHIFY_UV_BOOTSTRAP_COMMAND) not in commands
+    assert "uv_install_status=reused" in status_lines
+
+
+def test_graphify_uv_reports_missing_python_package_tooling_safely() -> None:
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        timeout: int | None = None,
+    ) -> tuple[int, str]:
+        del cwd, timeout
+        if command in (
+            list(runner.GRAPHIFY_UV_VERSION_COMMAND),
+            list(runner.GRAPHIFY_UV_BOOTSTRAP_COMMAND),
+        ):
+            raise FileNotFoundError("raw pip path must not leak")
+        return 2, "unexpected command"
+
+    status_lines: list[str] = []
+    with mock.patch.object(runner, "run_command", side_effect=run), mock.patch.object(
+        runner, "_resolve_graphify_user_uv_executable", return_value=None
+    ):
+        executable, reason = runner._ensure_graphify_uv_runtime(status_lines)
+
+    assert executable is None
+    assert reason == "graphify_uv_python_package_tooling_unavailable"
+    assert "step=install_pinned_uv_user_tool status=failed" in status_lines
+    assert all("raw pip path" not in line for line in status_lines)
+
+
+def test_graphify_uv_reports_bootstrap_timeout_safely() -> None:
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        timeout: int | None = None,
+    ) -> tuple[int, str]:
+        del cwd
+        if command == list(runner.GRAPHIFY_UV_VERSION_COMMAND):
+            raise FileNotFoundError("raw PATH must not leak")
+        if command == list(runner.GRAPHIFY_UV_BOOTSTRAP_COMMAND):
+            assert timeout == runner.GRAPHIFY_TOOL_TIMEOUT_SECONDS
+            raise runner.subprocess.TimeoutExpired(cmd=command, timeout=timeout)
+        return 2, "unexpected command"
+
+    status_lines: list[str] = []
+    with mock.patch.object(runner, "run_command", side_effect=run), mock.patch.object(
+        runner, "_resolve_graphify_user_uv_executable", return_value=None
+    ):
+        executable, reason = runner._ensure_graphify_uv_runtime(status_lines)
+
+    assert executable is None
+    assert reason == "graphify_uv_bootstrap_timeout"
+    assert "step=install_pinned_uv_user_tool status=failed" in status_lines
+
+
+@pytest.mark.parametrize(
+    ("bootstrap_result", "reason"),
+    (
+        (PermissionError("raw permission must not leak"), runner.GRAPHIFY_COMMAND_PERMISSION_REASON),
+        ((1, "raw install output must not leak"), "graphify_uv_bootstrap_failed"),
+    ),
+)
+def test_graphify_uv_reports_bootstrap_permission_and_install_failures_safely(
+    bootstrap_result: Exception | tuple[int, str],
+    reason: str,
+) -> None:
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        timeout: int | None = None,
+    ) -> tuple[int, str]:
+        del cwd, timeout
+        if command == list(runner.GRAPHIFY_UV_VERSION_COMMAND):
+            raise FileNotFoundError("raw PATH must not leak")
+        if command == list(runner.GRAPHIFY_UV_BOOTSTRAP_COMMAND):
+            if isinstance(bootstrap_result, Exception):
+                raise bootstrap_result
+            return bootstrap_result
+        return 2, "unexpected command"
+
+    status_lines: list[str] = []
+    with mock.patch.object(runner, "run_command", side_effect=run), mock.patch.object(
+        runner, "_resolve_graphify_user_uv_executable", return_value=None
+    ):
+        executable, actual_reason = runner._ensure_graphify_uv_runtime(status_lines)
+
+    assert executable is None
+    assert actual_reason == reason
+    assert "step=install_pinned_uv_user_tool status=failed" in status_lines
+    assert all("raw " not in line for line in status_lines)
+
+
+def test_graphify_uv_reports_unresolved_user_executable_after_bootstrap() -> None:
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        timeout: int | None = None,
+    ) -> tuple[int, str]:
+        del cwd, timeout
+        if command == list(runner.GRAPHIFY_UV_VERSION_COMMAND):
+            raise FileNotFoundError("raw PATH must not leak")
+        if command == list(runner.GRAPHIFY_UV_BOOTSTRAP_COMMAND):
+            return 0, ""
+        return 2, "unexpected command"
+
+    status_lines: list[str] = []
+    with mock.patch.object(runner, "run_command", side_effect=run), mock.patch.object(
+        runner, "_resolve_graphify_user_uv_executable", side_effect=(None, None)
+    ):
+        executable, reason = runner._ensure_graphify_uv_runtime(status_lines)
+
+    assert executable is None
+    assert reason == "graphify_uv_executable_unresolved"
+    assert "step=resolve_pinned_uv_user_tool status=failed" in status_lines
+
+
+def test_graphify_uv_reports_wrong_user_version_after_bootstrap(tmp_path: Path) -> None:
+    user_uv = str(tmp_path / "bin" / "uv")
+
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        timeout: int | None = None,
+    ) -> tuple[int, str]:
+        del cwd, timeout
+        if command == list(runner.GRAPHIFY_UV_VERSION_COMMAND):
+            raise FileNotFoundError("raw PATH must not leak")
+        if command == list(runner.GRAPHIFY_UV_BOOTSTRAP_COMMAND):
+            return 0, ""
+        if command == [user_uv, "--version"]:
+            return 0, "uv 0.11.23\n"
+        return 2, "unexpected command"
+
+    status_lines: list[str] = []
+    with mock.patch.object(runner, "run_command", side_effect=run), mock.patch.object(
+        runner, "_resolve_graphify_user_uv_executable", side_effect=(None, user_uv)
+    ):
+        executable, reason = runner._ensure_graphify_uv_runtime(status_lines)
+
+    assert executable is None
+    assert reason == "graphify_uv_version_unverified"
+    assert "step=verify_pinned_uv status=failed" in status_lines
+    assert all(str(tmp_path) not in line for line in status_lines)
+
+
+def test_graphify_uv_resolution_is_idempotent_for_existing_user_uv(
+    tmp_path: Path,
+) -> None:
+    commands: list[list[str]] = []
+    user_uv = str(tmp_path / "bin" / "uv")
+
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        timeout: int | None = None,
+    ) -> tuple[int, str]:
+        del cwd, timeout
+        commands.append(command)
+        if command == list(runner.GRAPHIFY_UV_VERSION_COMMAND):
+            raise FileNotFoundError("raw PATH must not leak")
+        if command == [user_uv, "--version"]:
+            return 0, "uv 0.11.24\n"
+        return 2, "unexpected command"
+
+    with mock.patch.object(runner, "run_command", side_effect=run), mock.patch.object(
+        runner, "_resolve_graphify_user_uv_executable", return_value=user_uv
+    ):
+        first_status: list[str] = []
+        second_status: list[str] = []
+        first = runner._ensure_graphify_uv_runtime(first_status)
+        second = runner._ensure_graphify_uv_runtime(second_status)
+
+    assert first == (user_uv, None)
+    assert second == (user_uv, None)
+    assert list(runner.GRAPHIFY_UV_BOOTSTRAP_COMMAND) not in commands
+    assert first_status == second_status
 
 
 def test_graphify_runtime_reports_missing_graphify_during_preflight(
     tmp_path: Path,
 ) -> None:
-    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
-        del cwd
-        if command == list(runner.GRAPHIFY_TOOL_INSTALL_COMMAND):
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        timeout: int | None = None,
+    ) -> tuple[int, str]:
+        del cwd, timeout
+        if command == list(runner.GRAPHIFY_UV_VERSION_COMMAND):
+            return 0, "uv 0.11.24\n"
+        if command[1:] == list(runner.GRAPHIFY_TOOL_INSTALL_COMMAND[1:]):
             return 0, ""
         raise FileNotFoundError("raw graphify path must not leak")
 
@@ -3081,7 +3401,11 @@ def test_graphify_runtime_reports_public_safe_launch_failures_before_backup(
     error: Exception,
     reason: str,
 ) -> None:
-    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        timeout: int | None = None,
+    ) -> tuple[int, str]:
         del command, cwd
         raise error
 
@@ -3108,7 +3432,11 @@ def test_graphify_runtime_reports_public_safe_launch_failures_before_backup(
 def test_graphify_runtime_unexpected_prebackup_failure_is_public_safe(
     tmp_path: Path,
 ) -> None:
-    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        timeout: int | None = None,
+    ) -> tuple[int, str]:
         del cwd
         if command == list(runner.GRAPHIFY_TOOL_INSTALL_COMMAND):
             return 0, ""
@@ -3140,7 +3468,11 @@ def test_graphify_runtime_restores_after_codex_install_failure(tmp_path: Path) -
     codex_skill.mkdir(parents=True)
     (codex_skill / "SKILL.md").write_text("original\n", encoding="utf-8")
 
-    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        timeout: int | None = None,
+    ) -> tuple[int, str]:
         if command == list(runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND):
             (codex_skill / "SKILL.md").write_text("mutated\n", encoding="utf-8")
             return 1, "codex failure must not leak"
@@ -3175,7 +3507,11 @@ def test_graphify_runtime_restores_after_unexpected_codex_mutation_failure(
     codex_skill.mkdir(parents=True)
     (codex_skill / "SKILL.md").write_text("original\n", encoding="utf-8")
 
-    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        timeout: int | None = None,
+    ) -> tuple[int, str]:
         if command == list(runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND):
             (codex_skill / "SKILL.md").write_text("mutated\n", encoding="utf-8")
             raise RuntimeError("raw codex failure must not leak")
@@ -3208,7 +3544,11 @@ def test_graphify_runtime_restores_after_hermes_install_failure(tmp_path: Path) 
     codex_skill.mkdir(parents=True)
     (codex_skill / "SKILL.md").write_text("original\n", encoding="utf-8")
 
-    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        timeout: int | None = None,
+    ) -> tuple[int, str]:
         if command == list(runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND):
             (codex_skill / "SKILL.md").write_text("mutated\n", encoding="utf-8")
             managed_paths[2].mkdir(parents=True)
@@ -3248,7 +3588,11 @@ def test_graphify_runtime_restores_after_unexpected_hermes_mutation_failure(
     codex_skill.mkdir(parents=True)
     (codex_skill / "SKILL.md").write_text("original\n", encoding="utf-8")
 
-    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        timeout: int | None = None,
+    ) -> tuple[int, str]:
         if command == list(runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND):
             (codex_skill / "SKILL.md").write_text("codex mutated\n", encoding="utf-8")
             return 0, ""
@@ -3294,7 +3638,11 @@ def test_graphify_runtime_restores_third_platform_version_stamp_after_later_fail
     third_marker.write_text("graphify 0.8.43\n", encoding="utf-8")
     managed_paths = _graphify_managed_paths(home)
 
-    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        timeout: int | None = None,
+    ) -> tuple[int, str]:
         if command == list(runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND):
             codex_skill.write_text("mutated codex\n", encoding="utf-8")
             third_marker.write_text("graphify 0.8.44\n", encoding="utf-8")
@@ -3337,7 +3685,11 @@ def test_graphify_runtime_restore_failure_reports_failed_safely(tmp_path: Path) 
     codex_skill.mkdir(parents=True)
     (codex_skill / "SKILL.md").write_text("original\n", encoding="utf-8")
 
-    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        timeout: int | None = None,
+    ) -> tuple[int, str]:
         if command == list(runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND):
             (codex_skill / "SKILL.md").write_text("mutated\n", encoding="utf-8")
             return 1, "raw install output must not leak"
@@ -3373,7 +3725,11 @@ def test_graphify_runtime_restore_exception_reports_failed_safely(
     codex_skill.mkdir(parents=True)
     (codex_skill / "SKILL.md").write_text("original\n", encoding="utf-8")
 
-    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        timeout: int | None = None,
+    ) -> tuple[int, str]:
         if command == list(runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND):
             (codex_skill / "SKILL.md").write_text("mutated\n", encoding="utf-8")
             raise RuntimeError("raw mutation detail must not leak")
@@ -3410,7 +3766,11 @@ def test_graphify_runtime_restores_when_smoke_graph_json_is_empty(tmp_path: Path
     codex_skill.mkdir(parents=True)
     (codex_skill / "SKILL.md").write_text("original\n", encoding="utf-8")
 
-    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        timeout: int | None = None,
+    ) -> tuple[int, str]:
         if command == list(runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND):
             (codex_skill / "SKILL.md").write_text("codex mutated\n", encoding="utf-8")
         if command == list(runner.GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND):
@@ -3454,7 +3814,11 @@ def test_graphify_runtime_restores_after_smoke_subprocess_launch_failure(
     codex_skill.mkdir(parents=True)
     (codex_skill / "SKILL.md").write_text("original\n", encoding="utf-8")
 
-    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        timeout: int | None = None,
+    ) -> tuple[int, str]:
         if command == list(runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND):
             (codex_skill / "SKILL.md").write_text("codex mutated\n", encoding="utf-8")
         if command == list(runner.GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND):

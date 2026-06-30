@@ -117,29 +117,36 @@ Operator Approval: install_graphify_runtime_v1
 
 It may only:
 
-1. Install or replace the pinned Graphify tool with
-   `uv tool install --reinstall graphifyy==0.8.44`.
-2. Verify the installed CLI contract before mutating assistant profiles:
+1. Reuse an exact `uv==0.11.24` executable when already verified, or install
+   the pinned user-level `uv==0.11.24` package through the current Python
+   package tooling without sudo, shell pipelines, service changes, or replacing
+   a system-managed executable.
+2. Resolve and verify the pinned user-level `uv` executable explicitly before
+   Graphify operations when the service `PATH` does not already expose the exact
+   pinned version.
+3. Install or replace the pinned Graphify tool with
+   `uv tool install --reinstall graphifyy==0.8.44` using the verified `uv`.
+4. Verify the installed CLI contract before mutating assistant profiles:
    `graphify --version`, `graphify install --help`, and `graphify --help`.
-3. Back up only the bounded Graphify-managed Codex and Hermes skill paths plus
+5. Back up only the bounded Graphify-managed Codex and Hermes skill paths plus
    existing marker-only `.graphify_version` files discovered from the pinned
    Graphify 0.8.44 upstream platform destination allowlist, using a private
    `0700` recovery root and no symlink traversal.
-4. Install skills with the Graphify 0.8.44 command forms:
+6. Install skills with the Graphify 0.8.44 command forms:
    `graphify install --platform codex` and
    `graphify install --platform hermes`.
-5. Run a temporary synthetic AST smoke using the supported build form
+7. Run a temporary synthetic AST smoke using the supported build form
    `graphify <folder>` with `GRAPHIFY_OUT` pointed at a temporary output
    directory and a bounded timeout.
-6. Verify the smoke output by reading `graph.json` and confirming non-zero node
+8. Verify the smoke output by reading `graph.json` and confirming non-zero node
    and edge counts.
-7. Run that smoke with a scrubbed environment: no model credentials, no network
+9. Run that smoke with a scrubbed environment: no model credentials, no network
    enablement, no hooks, no services, no ports, and no private indexing.
-8. Roll back the bounded Codex and Hermes skill paths and allowlisted
+10. Roll back the bounded Codex and Hermes skill paths and allowlisted
    `.graphify_version` files from the private recovery snapshot if either skill
    install, the synthetic smoke, or any unexpected runtime failure fails after
    the backup is taken.
-9. Retain the private recovery snapshot after successful completion.
+11. Retain the private recovery snapshot after successful completion.
 
 The marker allowlist is limited to user-level skill destinations that
 Graphify 0.8.44 `_refresh_all_version_stamps()` can visit from
@@ -154,9 +161,11 @@ graphify-looking paths.
 Runtime/server/service integration remains blocked by issue #1047; this task
 only installs the local tool and approved assistant skills.
 
-Command diagnostics are public-safe and stable. A missing `uv` executable reports
-`graphify_tool_command_unavailable`; a missing `graphify` executable reports
-`graphify_cli_command_unavailable`; permission failures report
+Command diagnostics are public-safe and stable. Missing or wrong `uv` is repaired
+only through the pinned user-level bootstrap; missing Python package tooling,
+bootstrap timeout, install failure, unresolved executable, or wrong verified
+version report stable `graphify_uv_*` reason tokens. A missing `graphify`
+executable reports `graphify_cli_command_unavailable`; permission failures report
 `graphify_command_permission_denied`; bounded OS/subprocess launch failures
 report `graphify_command_launch_failed`; and unexpected exceptions report
 `graphify_runtime_unexpected_failure`. Failures before the recovery snapshot

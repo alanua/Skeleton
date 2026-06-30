@@ -126,7 +126,11 @@ validate synthetic query envelopes without exposing real private graph memory.
 ## Runtime Installation Boundary
 
 The Runner may install Graphify only through the approval-gated
-`install_graphify_runtime` maintenance task. That task pins the tool with
+`install_graphify_runtime` maintenance task. That task first verifies
+`uv==0.11.24`: it reuses an exact existing executable when available, otherwise
+it provisions the pinned user-level copy through current Python package tooling,
+resolves that executable explicitly, and verifies the exact version before any
+Graphify operation. It then pins the tool with
 `uv tool install --reinstall graphifyy==0.8.44`, verifies the local CLI contract,
 backs up only bounded Graphify-managed Codex and Hermes skill paths plus
 existing marker-only `.graphify_version` files discovered from the pinned
@@ -146,10 +150,11 @@ Unsupported command shapes are outside the contract: `graphify ingest`,
 not appear in Runner runtime commands or tests. If a post-backup skill install
 or smoke step fails, or if any unexpected runtime failure occurs after backup,
 the Runner restores the bounded Codex and Hermes skill paths and allowlisted
-`.graphify_version` files from the private recovery snapshot. Missing `uv`,
+`.graphify_version` files from the private recovery snapshot. Missing, wrong, or
+unresolved `uv` states use stable public-safe `graphify_uv_*` reason tokens;
 missing `graphify`, permission failures, OS/subprocess launch failures, and
-unexpected failures use stable public-safe reason tokens; pre-backup failures
-report `rollback_status=not_needed`, while post-backup failures report
+unexpected failures also use stable public-safe reason tokens. Pre-backup
+failures report `rollback_status=not_needed`, while post-backup failures report
 `rollback_status=restored` or `rollback_status=failed`. A successful runtime
 install retains the private recovery snapshot for operator recovery. Public
 reports remain aggregate-only and must not include paths, Graphify command
