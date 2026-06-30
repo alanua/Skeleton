@@ -1,0 +1,65 @@
+{
+  "schema": "skeleton.graphify_synthetic_fixture.v1",
+  "namespace": "skeleton",
+  "project_id": "graphify_synthetic",
+  "indexed_repo_commit": "commit-indexed-graph-0001",
+  "current_repo_commit": "commit-indexed-graph-0001",
+  "indexed_at": "2026-06-29T00:00:00Z",
+  "graph_schema_version": "skeleton.graphify.synthetic_graph.v1",
+  "relationships": [
+    {
+      "result_ref": "graph-result-module-gateway-adapter",
+      "query_kind": "module_relationship",
+      "relationship_kind": "Memory gateway delegates synthetic graph queries to injected adapter",
+      "source_ref": "src-synthetic-module-gateway-adapter",
+      "evidence_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "related_refs": ["module-core-memory_gateway", "module-core-graphify_adapter"],
+      "deleted": false
+    },
+    {
+      "result_ref": "graph-result-schema-query-report",
+      "query_kind": "schema_relationship",
+      "relationship_kind": "Graph query report follows aggregate public schema",
+      "source_ref": "src-synthetic-schema-query-report",
+      "evidence_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "related_refs": ["schema-graph_memory_query", "module-core-graphify_adapter"],
+      "deleted": false
+    },
+    {
+      "result_ref": "graph-result-test-memory-gateway",
+      "query_kind": "test_relationship",
+      "relationship_kind": "Gateway graph tests cover explicit adapter injection",
+      "source_ref": "src-synthetic-test-memory-gateway",
+      "evidence_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "related_refs": ["test-memory_gateway_graph", "module-core-memory_gateway"],
+      "deleted": false
+    },
+    {
+      "result_ref": "graph-result-dependency-policy",
+      "query_kind": "dependency_relationship",
+      "relationship_kind": "Graph adapter depends only on gateway public payload policy",
+      "source_ref": "src-synthetic-dependency-policy",
+      "evidence_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "related_refs": ["module-core-graphify_adapter", "module-core-memory_gateway_policy"],
+      "deleted": false
+    },
+    {
+      "result_ref": "graph-result-provenance-fixture",
+      "query_kind": "provenance_relationship",
+      "relationship_kind": "Synthetic relationships require source attribution",
+      "source_ref": "src-synthetic-provenance-fixture",
+      "evidence_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "related_refs": ["fixture-graphify-synthetic", "schema-graph_memory_query"],
+      "deleted": false
+    },
+    {
+      "result_ref": "graph-result-deleted-legacy",
+      "query_kind": "module_relationship",
+      "relationship_kind": "Deleted synthetic relationship is hidden from reports",
+      "source_ref": "src-synthetic-deleted-legacy",
+      "evidence_hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "related_refs": ["module-core-legacy", "module-core-graphify_adapter"],
+      "deleted": true
+    }
+  ]
+}

@@ -87,6 +87,26 @@ synthetic:
   excerpts.
 - Unsafe, unsupported, or over-broad requests resolve to `BLOCKED`.
 
+## Synthetic MemoryGateway Adapter
+
+The first implemented adapter is `core/graphify_adapter.py`. It is read-only,
+requires explicit injection into `MemoryGateway`, and serves only the public
+synthetic `skeleton` project id `graphify_synthetic`. Normal gateway
+construction does not load the fixture.
+
+The adapter accepts only module, schema, test, dependency, and provenance
+relationship query kinds. Results are deterministic, bounded, non-authoritative
+derived code-graph diagnostics with source attribution, indexed/current commit
+metadata, indexed time, graph schema version, and stale state. Stale diagnostics
+remain readable, but stale graph provenance cannot support a `PatchProposal`.
+
+The adapter has no runtime Graphify path: no CLI execution, filesystem scan,
+write, reindex, watch, hook, service, port, MCP call, network provider, model
+credential, canonical SQLite mutation, profile mutation, or Hermes activation.
+Malformed fixtures, missing provenance, private-looking values, deleted items,
+unsupported query kinds, scope mismatches, and excessive result counts fail
+closed.
+
 This contract is suitable for tests and public planning. A future private
 adapter may translate local operator questions into private Graphify calls, but
 that adapter must redact outputs before anything crosses into GitHub-visible

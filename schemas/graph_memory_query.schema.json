@@ -23,7 +23,12 @@
         "staleness_overview",
         "attention_overview",
         "provenance_overview",
-        "blocked_item_overview"
+        "blocked_item_overview",
+        "module_relationship",
+        "schema_relationship",
+        "test_relationship",
+        "dependency_relationship",
+        "provenance_relationship"
       ]
     },
     "query_status": {
