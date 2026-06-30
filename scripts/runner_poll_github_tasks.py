@@ -3706,7 +3706,7 @@ def _graphify_graph_json_counts(path: Path) -> tuple[int, int] | None:
         return None
 
     nodes = parsed.get("nodes", parsed.get("node_count"))
-    edges = parsed.get("edges", parsed.get("edge_count"))
+    edges = parsed.get("edges", parsed.get("links", parsed.get("edge_count")))
     node_count = len(nodes) if isinstance(nodes, list) else nodes
     edge_count = len(edges) if isinstance(edges, list) else edges
     if isinstance(node_count, int) and isinstance(edge_count, int):
@@ -3744,7 +3744,7 @@ def _run_graphify_ast_smoke(status_lines: list[str], graphify_executable: Path) 
         if code != 0:
             status_lines.append("step=run_synthetic_ast_smoke status=failed")
             return "synthetic_ast_smoke_failed"
-        counts = _graphify_graph_json_counts(output_dir / "graph.json")
+        counts = _graphify_graph_json_counts(corpus_dir / "graphify-out" / "graph.json")
         if counts is None:
             status_lines.append("step=verify_synthetic_graph_json status=failed")
             return "synthetic_graph_json_missing_or_invalid"

@@ -157,9 +157,10 @@ allowlist is exact and does not scan arbitrary home directories.
 The local smoke check is synthetic and AST-only in scope. It uses the supported
 Graphify 0.8.44 build form, `graphify <folder>`, with `GRAPHIFY_OUT` set to a
 temporary output directory and a bounded timeout. The smoke is successful only
-when `graph.json` exists and reports non-zero node and edge counts. The smoke
-environment is scrubbed of model credentials and keeps network access, hooks,
-services, ports, and private indexing disabled.
+when `<folder>/graphify-out/graph.json` exists and reports non-zero node and
+edge counts. Node-link `links`, legacy `edges`, and `edge_count` graph forms are
+accepted. The smoke environment is scrubbed of model credentials and keeps
+network access, hooks, services, ports, and private indexing disabled.
 
 Unsupported command shapes are outside the contract: `graphify ingest`,
 `graphify install-skills`, `--source`, `--extractor`, and `--no-semantic` must

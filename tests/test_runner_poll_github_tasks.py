@@ -2798,15 +2798,29 @@ def _graphify_platform_version_marker(tmp_path: Path, platform: str) -> Path:
     return _graphify_platform_skill(tmp_path, platform).parent / runner.GRAPHIFY_VERSION_MARKER_FILENAME
 
 
-def _write_smoke_graph(command: list[str], node_count: int = 2, edge_count: int = 1) -> None:
+def _write_smoke_graph(
+    command: list[str],
+    node_count: int = 2,
+    edge_count: int = 1,
+    *,
+    relationship_key: str = "edges",
+) -> None:
     output_arg = next(part for part in command if part.startswith("GRAPHIFY_OUT="))
     output_dir = Path(output_arg.split("=", 1)[1])
     output_dir.mkdir(parents=True)
     (output_dir / "graph.json").write_text(
+        json.dumps({"nodes": [], "edges": []}),
+        encoding="utf-8",
+    )
+    graph_dir = Path(command[-1]) / "graphify-out"
+    graph_dir.mkdir(parents=True)
+    (graph_dir / "graph.json").write_text(
         json.dumps(
             {
                 "nodes": [{"id": f"node-{index}"} for index in range(node_count)],
-                "edges": [{"source": "node-0", "target": "node-1"} for _ in range(edge_count)],
+                relationship_key: [
+                    {"source": "node-0", "target": "node-1"} for _ in range(edge_count)
+                ],
             }
         ),
         encoding="utf-8",
@@ -2815,6 +2829,67 @@ def _write_smoke_graph(command: list[str], node_count: int = 2, edge_count: int 
 
 def _same_graphify_command(command: list[str], template: tuple[str, ...]) -> bool:
     return Path(command[0]).name == template[0] and command[1:] == list(template[1:])
+
+
+@pytest.mark.parametrize(
+    ("graph", "expected"),
+    (
+        (
+            {
+                "nodes": [{"id": "node-0"}, {"id": "node-1"}],
+                "edges": [{"source": "node-0", "target": "node-1"}],
+            },
+            (2, 1),
+        ),
+        (
+            {
+                "nodes": [{"id": "node-0"}, {"id": "node-1"}, {"id": "node-2"}],
+                "links": [
+                    {"source": "node-0", "target": "node-1"},
+                    {"source": "node-1", "target": "node-2"},
+                ],
+            },
+            (3, 2),
+        ),
+        ({"node_count": 4, "edge_count": 3}, (4, 3)),
+    ),
+)
+def test_graphify_graph_json_counts_supports_edges_links_and_counts(
+    tmp_path: Path,
+    graph: dict[str, object],
+    expected: tuple[int, int],
+) -> None:
+    graph_path = tmp_path / "graph.json"
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
+
+    assert runner._graphify_graph_json_counts(graph_path) == expected
+
+
+@pytest.mark.parametrize(
+    "graph_text",
+    (
+        "",
+        "not json",
+        "[]",
+        "{}",
+        json.dumps({"nodes": [], "edges": []}),
+        json.dumps({"nodes": [{"id": "node-0"}]}),
+        json.dumps({"node_count": 1}),
+        json.dumps({"nodes": [{"id": "node-0"}], "links": "not-a-list-or-count"}),
+    ),
+)
+def test_graphify_graph_json_counts_fails_closed_for_missing_malformed_or_empty_graph(
+    tmp_path: Path,
+    graph_text: str,
+) -> None:
+    assert runner._graphify_graph_json_counts(tmp_path / "missing-graph.json") is None
+
+    graph_path = tmp_path / "graph.json"
+    graph_path.write_text(graph_text, encoding="utf-8")
+
+    counts = runner._graphify_graph_json_counts(graph_path)
+
+    assert counts is None or counts[0] <= 0 or counts[1] <= 0
 
 
 def _successful_graphify_runtime_command(
@@ -2997,6 +3072,48 @@ def test_graphify_runtime_uses_verified_0844_commands_and_retains_snapshot(
     assert all("--no-semantic" not in command for command in command_words)
     assert str(tmp_path) not in report
     assert "synthetic graph built" not in report
+
+
+def test_graphify_runtime_accepts_node_link_links_from_corpus_output(
+    tmp_path: Path,
+) -> None:
+    commands: list[list[str]] = []
+    managed_paths = _graphify_managed_paths(tmp_path / "home")
+    snapshot_parent = tmp_path / "snapshots"
+
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        **kwargs: object,
+    ) -> tuple[int, str]:
+        commands.append(command)
+        return _successful_graphify_runtime_command(command, cwd, **kwargs)
+
+    def smoke(command: list[str]) -> tuple[int, str]:
+        commands.append(command)
+        _write_smoke_graph(command, node_count=2, edge_count=3, relationship_key="links")
+        return 0, '{"graph": "raw smoke graph content must not leak"}'
+
+    with mock.patch.object(
+        runner, "_graphify_managed_profile_paths", return_value=managed_paths
+    ), mock.patch.object(
+        runner, "_graphify_private_snapshot_parent", return_value=snapshot_parent
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run
+    ), mock.patch.object(
+        runner, "_run_graphify_smoke_command", side_effect=smoke
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.INSTALL_GRAPHIFY_RUNTIME,
+            str(runner.ROOT),
+            _graphify_runtime_body(),
+        )
+
+    assert report.startswith("DONE:")
+    assert "synthetic_graph_node_count=2" in report
+    assert "synthetic_graph_edge_count=3" in report
+    assert "raw smoke graph content must not leak" not in report
+    assert str(tmp_path) not in report
 
 
 def test_graphify_runtime_reuses_exact_path_uv_without_bootstrap(
