@@ -6,6 +6,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from core.graphify_adapter import GraphifyAdapterError
 from core.mempalace_adapter import MemPalaceAdapter, MemPalaceAdapterError
 from core.mempalace_projection import MEMPALACE_SYNTHETIC_NAMESPACE, MEMPALACE_SYNTHETIC_PROJECT_ID
 from core.memory_gateway_policy import (
@@ -166,7 +167,14 @@ class MemoryGateway:
             payload={"results": results},
         )
 
-    def query_code(self, *, namespace: str, query: str, project_id: object = None) -> dict[str, object]:
+    def query_code(
+        self,
+        *,
+        namespace: str,
+        query: str,
+        project_id: object = None,
+        limit: int = 5,
+    ) -> dict[str, object]:
         namespace = self._authorize_namespace(namespace)
         project_id = self._scope_project_id(namespace, project_id)
         _safe_lookup_key(query)
@@ -176,19 +184,25 @@ class MemoryGateway:
                     "GRAPHIFY_ADAPTER_REQUIRED",
                     "synthetic Graphify route requires explicit adapter injection",
                 )
-            adapter_response = self._graphify_adapter.query_code(
-                namespace=namespace,
-                project_id=project_id,
-                query=query,
-            )
+            try:
+                adapter_response = self._graphify_adapter.query_code(
+                    namespace=namespace,
+                    project_id=project_id,
+                    query=query,
+                    limit=limit,
+                )
+            except GraphifyAdapterError as exc:
+                raise MemoryGatewayPolicyError(exc.reason_code, str(exc)) from exc
             if _is_gateway_response(adapter_response):
                 return adapter_response
             return self._response(
                 namespace=namespace,
                 command_suffix="graph.query_code",
-                payload={"results": adapter_response["results"]},
+                payload=adapter_response,
             )
         _reject_wrong_graphify_synthetic_scope(namespace, project_id)
+        if (namespace, project_id) not in self._graph:
+            raise MemoryGatewayPolicyError("PROJECT_NOT_AUTHORIZED", "graph project scope is not authorized")
         results = []
         for result in self._graph[(namespace, project_id)]:
             rendered = deepcopy(result)
@@ -254,10 +268,13 @@ class MemoryGateway:
                     "GRAPHIFY_ADAPTER_REQUIRED",
                     "synthetic Graphify route requires explicit adapter injection",
                 )
-            adapter_response = self._graphify_adapter.get_index_freshness(
-                namespace=namespace,
-                project_id=project_id,
-            )
+            try:
+                adapter_response = self._graphify_adapter.get_index_freshness(
+                    namespace=namespace,
+                    project_id=project_id,
+                )
+            except GraphifyAdapterError as exc:
+                raise MemoryGatewayPolicyError(exc.reason_code, str(exc)) from exc
             if _is_gateway_response(adapter_response):
                 return adapter_response
             return self._response(
@@ -269,6 +286,8 @@ class MemoryGateway:
                 },
             )
         _reject_wrong_graphify_synthetic_scope(namespace, project_id)
+        if (namespace, project_id) not in self._freshness:
+            raise MemoryGatewayPolicyError("PROJECT_NOT_AUTHORIZED", "graph project scope is not authorized")
         return self._response(
             namespace=namespace,
             command_suffix="graph.get_index_freshness",

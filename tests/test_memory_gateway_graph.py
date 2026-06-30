@@ -11,7 +11,7 @@ from core.memory_gateway_policy import MemoryGatewayPolicyError
 
 
 class SyntheticGraphifyAdapter:
-    def query_code(self, *, namespace: str, project_id: str, query: str) -> dict[str, object]:
+    def query_code(self, *, namespace: str, project_id: str, query: str, limit: int = 5) -> dict[str, object]:
         return {
             "results": [
                 {
