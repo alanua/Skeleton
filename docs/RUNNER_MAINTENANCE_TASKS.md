@@ -136,29 +136,37 @@ It may only:
    Graphify command runs.
 4. Install or replace the pinned Graphify tool with the resolved uv executable:
    `uv tool install --reinstall graphifyy==0.8.44`.
-5. Resolve the expected user scripts `graphify` candidate as an absolute
-   executable regular file before every Graphify command, then verify the
-   installed CLI contract before mutating assistant profiles:
+5. Resolve Graphify only from uv's own tool executable directory, using the
+   already verified uv executable for bounded `uv tool dir --bin` and
+   `uv tool dir` queries. Each query must exit successfully and return exactly
+   one non-empty absolute path; multiline, blank, relative, or otherwise
+   malformed output fails closed. The Runner checks only the exact
+   `<uv-tool-bin>/graphify` candidate. On Unix, a uv-managed symlink is accepted
+   only when its resolved target is an executable regular file contained within
+   the verified uv tools root; broken links, escapes, non-files, and
+   non-executables are rejected. Copied executables remain accepted when the
+   executable regular file stays under the verified uv tool-bin directory.
+6. Verify the installed CLI contract before mutating assistant profiles:
    `graphify --version`, `graphify install --help`, and `graphify --help`.
-6. Back up only the bounded Graphify-managed Codex and Hermes skill paths plus
+7. Back up only the bounded Graphify-managed Codex and Hermes skill paths plus
    existing marker-only `.graphify_version` files discovered from the pinned
    Graphify 0.8.44 upstream platform destination allowlist, using a private
    `0700` recovery root and no symlink traversal.
-7. Install skills with the Graphify 0.8.44 command forms:
+8. Install skills with the Graphify 0.8.44 command forms:
    `graphify install --platform codex` and
    `graphify install --platform hermes`.
-8. Run a temporary synthetic AST smoke using the supported build form
+9. Run a temporary synthetic AST smoke using the supported build form
    `graphify <folder>` with `GRAPHIFY_OUT` pointed at a temporary output
    directory and a bounded timeout.
-9. Verify the smoke output by reading `graph.json` and confirming non-zero node
+10. Verify the smoke output by reading `graph.json` and confirming non-zero node
    and edge counts.
-10. Run that smoke with a scrubbed environment: no model credentials, no network
+11. Run that smoke with a scrubbed environment: no model credentials, no network
    enablement, no hooks, no services, no ports, and no private indexing.
-11. Roll back the bounded Codex and Hermes skill paths and allowlisted
+12. Roll back the bounded Codex and Hermes skill paths and allowlisted
    `.graphify_version` files from the private recovery snapshot if either skill
    install, the synthetic smoke, or any unexpected runtime failure fails after
    the backup is taken.
-12. Retain the private recovery snapshot after successful completion.
+13. Retain the private recovery snapshot after successful completion.
 
 The marker allowlist is limited to user-level skill destinations that
 Graphify 0.8.44 `_refresh_all_version_stamps()` can visit from
