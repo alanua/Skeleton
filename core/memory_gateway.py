@@ -6,6 +6,8 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from core.mempalace_adapter import MemPalaceAdapter, MemPalaceAdapterError
+from core.mempalace_projection import MEMPALACE_SYNTHETIC_NAMESPACE, MEMPALACE_SYNTHETIC_PROJECT_ID
 from core.memory_gateway_policy import (
     ALLOWED_COMMAND_SUFFIXES,
     ALLOWED_NAMESPACES,
@@ -57,6 +59,7 @@ class MemoryGateway:
         *,
         patch_registry: MemoryPatchProposalRegistry | None = None,
         override_registry: MemoryOverrideRegistry | None = None,
+        mempalace_adapter: MemPalaceAdapter | None = None,
     ) -> None:
         self._token = _normalize_token(token)
         self._patch_registry = patch_registry or MemoryPatchProposalRegistry()
@@ -66,6 +69,7 @@ class MemoryGateway:
         self._semantic = _semantic_seed()
         self._graph = _graph_seed()
         self._freshness = _freshness_seed()
+        self._mempalace_adapter = mempalace_adapter
 
     def execute(self, request: Mapping[str, Any]) -> dict[str, object]:
         if not isinstance(request, Mapping):
@@ -119,6 +123,21 @@ class MemoryGateway:
         namespace = self._authorize_namespace(namespace)
         project_id = self._scope_project_id(namespace, project_id)
         _safe_lookup_key(query)
+        if _is_mempalace_synthetic_scope(namespace, project_id):
+            adapter = self._require_mempalace_adapter()
+            try:
+                pilot = adapter.search_semantic(
+                    namespace=namespace,
+                    project_id=project_id,
+                    query=query,
+                )
+            except MemPalaceAdapterError as exc:
+                raise MemoryGatewayPolicyError(exc.reason_code, str(exc)) from exc
+            return self._response(
+                namespace=namespace,
+                command_suffix="memory.search_semantic",
+                payload={"results": pilot["results"], "authoritative": False},
+            )
         results = []
         for result in self._semantic[(namespace, project_id)]:
             rendered = deepcopy(result)
@@ -163,6 +182,25 @@ class MemoryGateway:
     def get_memory_index_freshness(self, *, namespace: str, project_id: object = None) -> dict[str, object]:
         namespace = self._authorize_namespace(namespace)
         project_id = self._scope_project_id(namespace, project_id)
+        if _is_mempalace_synthetic_scope(namespace, project_id):
+            adapter = self._require_mempalace_adapter()
+            try:
+                freshness = adapter.get_index_freshness(namespace=namespace, project_id=project_id)
+            except MemPalaceAdapterError as exc:
+                raise MemoryGatewayPolicyError(exc.reason_code, str(exc)) from exc
+            return self._response(
+                namespace=namespace,
+                command_suffix="memory.get_index_freshness",
+                payload={
+                    "project_id": project_id,
+                    "mempalace": freshness,
+                    "canonical_sqlite": {
+                        "current_canonical_revision": freshness["current_canonical_revision"],
+                        "project_id": project_id,
+                    },
+                    "authoritative": False,
+                },
+            )
         return self._response(
             namespace=namespace,
             command_suffix="memory.get_index_freshness",
@@ -271,7 +309,8 @@ class MemoryGateway:
         )
 
     def _validate_patch_evidence(self, namespace: str, project_id: str, proposal: Mapping[str, Any]) -> None:
-        canonical_revision = self._freshness[(namespace, project_id)]["canonical_sqlite"]["current_canonical_revision"]
+        memory_freshness = self._memory_freshness(namespace, project_id)
+        canonical_revision = memory_freshness["canonical_sqlite"]["current_canonical_revision"]
         if proposal.get("confirmed_canonical_revision") != canonical_revision:
             raise MemoryGatewayPolicyError(
                 EXACT_CONFIRMATION_REVISION_MISMATCH,
@@ -288,7 +327,7 @@ class MemoryGateway:
                     SEMANTIC_RESULT_NOT_CANON_CONFIRMED,
                     "semantic evidence requires exact canonical confirmation",
                 )
-            if self._freshness[(namespace, project_id)]["mempalace"]["stale"]:
+            if memory_freshness["mempalace"]["stale"]:
                 raise MemoryGatewayPolicyError(
                     STALE_INDEX_RESULT_NOT_PATCH_ELIGIBLE,
                     "stale semantic index cannot support a patch proposal",
@@ -314,8 +353,21 @@ class MemoryGateway:
         source_evidence_hash = proposal.get("source_evidence_hash")
         if not isinstance(target, str) or not isinstance(confirmed_ref, str):
             raise MemoryGatewayPolicyError("INVALID_PATCH_PROPOSAL", "exact confirmation target is invalid")
-        canonical = self._canonical[(namespace, project_id)].get(target)
-        current_revision = self._freshness[(namespace, project_id)]["canonical_sqlite"]["current_canonical_revision"]
+        if _is_mempalace_synthetic_scope(namespace, project_id):
+            adapter = self._require_mempalace_adapter()
+            try:
+                canonical = adapter.canonical_exact_for_target(
+                    namespace=namespace,
+                    project_id=project_id,
+                    normalized_target=target,
+                )
+                freshness = adapter.get_index_freshness(namespace=namespace, project_id=project_id)
+            except MemPalaceAdapterError as exc:
+                raise MemoryGatewayPolicyError(exc.reason_code, str(exc)) from exc
+            current_revision = freshness["current_canonical_revision"]
+        else:
+            canonical = self._canonical[(namespace, project_id)].get(target)
+            current_revision = self._freshness[(namespace, project_id)]["canonical_sqlite"]["current_canonical_revision"]
         if canonical is None or canonical.get("canonical_revision") != current_revision:
             raise MemoryGatewayPolicyError(
                 "EXACT_CONFIRMATION_NOT_CANONICAL",
@@ -382,6 +434,33 @@ class MemoryGateway:
     def _scope_project_id(self, namespace: str, project_id: object) -> str:
         return self._optional_project_id(project_id) or namespace
 
+    def _require_mempalace_adapter(self) -> MemPalaceAdapter:
+        if self._mempalace_adapter is None:
+            raise MemoryGatewayPolicyError(
+                "MEMPALACE_ADAPTER_NOT_CONFIGURED",
+                "synthetic MemPalace pilot requires an injected adapter",
+            )
+        return self._mempalace_adapter
+
+    def _memory_freshness(self, namespace: str, project_id: str) -> dict[str, dict[str, object]]:
+        if _is_mempalace_synthetic_scope(namespace, project_id):
+            adapter = self._require_mempalace_adapter()
+            try:
+                freshness = adapter.get_index_freshness(namespace=namespace, project_id=project_id)
+            except MemPalaceAdapterError as exc:
+                raise MemoryGatewayPolicyError(exc.reason_code, str(exc)) from exc
+            return {
+                "mempalace": freshness,
+                "canonical_sqlite": {
+                    "current_canonical_revision": freshness["current_canonical_revision"],
+                    "project_id": project_id,
+                },
+            }
+        try:
+            return self._freshness[(namespace, project_id)]
+        except KeyError as exc:
+            raise MemoryGatewayPolicyError("PROJECT_NOT_AUTHORIZED", "project scope is not initialized") from exc
+
     def _response(self, *, namespace: str, command_suffix: str, payload: Mapping[str, Any]) -> dict[str, object]:
         response = {
             "schema": MEMORY_GATEWAY_RESPONSE_SCHEMA,
@@ -416,6 +495,10 @@ def _normalize_token(token: GatewayCapabilityToken | Mapping[str, Any]) -> Gatew
         namespaces=namespaces,
         public_mode=public_mode,
     )
+
+
+def _is_mempalace_synthetic_scope(namespace: str, project_id: str) -> bool:
+    return namespace == MEMPALACE_SYNTHETIC_NAMESPACE and project_id == MEMPALACE_SYNTHETIC_PROJECT_ID
 
 
 def _seed_scopes() -> tuple[tuple[str, str], ...]:
