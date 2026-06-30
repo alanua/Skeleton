@@ -1,0 +1,31 @@
+status: REVIEW
+scope:
+  - local_private_memory
+  - local_aufmass
+runtime:
+  public_port: false
+  system_service: false
+  deployment: false
+privacy:
+  private_values_in_github: false
+  local_private_root_required: true
+capabilities:
+  memory:
+    - initialize
+    - health
+    - put
+    - get
+    - history
+    - delete
+    - import
+    - backup
+    - verify_backup
+    - isolated_restore
+  aufmass:
+    - example
+    - validate
+    - calculate
+    - json_export
+    - csv_export
+    - audit_export
+    - optional_memory_record
