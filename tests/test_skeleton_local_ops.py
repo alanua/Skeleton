@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CLI = ROOT / "scripts" / "skeleton_local_ops.py"
+CLI = ROOT / "scripts" / "skeleton_local.py"
 
 
 def run_cli(private_root: Path, *args: str, expected: int = 0) -> dict[str, object]:
@@ -101,7 +101,7 @@ def test_memory_roundtrip_idempotency_backup_and_restore(tmp_path: Path) -> None
     assert (restored_root / "memory" / "canonical.sqlite").is_file()
 
 
-def test_aufmass_calculation_and_memory_record(tmp_path: Path) -> None:
+def test_aufmass_calculation_and_memory_record_is_repeatable(tmp_path: Path) -> None:
     private_root = tmp_path / "private"
     run_cli(private_root, "memory", "init")
     input_path = tmp_path / "input.json"
@@ -142,7 +142,7 @@ def test_aufmass_calculation_and_memory_record(tmp_path: Path) -> None:
     assert validated["accepted_room_count"] == 1
     assert validated["blocked_room_count"] == 1
 
-    calculated = run_cli(
+    first = run_cli(
         private_root,
         "aufmass", "calculate",
         "--input", str(input_path),
@@ -150,8 +150,19 @@ def test_aufmass_calculation_and_memory_record(tmp_path: Path) -> None:
         "--write-memory",
         *mutation_args("aufmass-001"),
     )
-    assert calculated["calculation_status"] == "PARTIAL_WITH_BLOCKERS"
-    assert calculated["memory_written"] is True
+    assert first["calculation_status"] == "PARTIAL_WITH_BLOCKERS"
+    assert first["memory_written"] is True
+    assert first["memory_idempotent"] is False
+
+    repeated = run_cli(
+        private_root,
+        "aufmass", "calculate",
+        "--input", str(input_path),
+        "--output-dir", str(output_dir),
+        "--write-memory",
+        *mutation_args("aufmass-001"),
+    )
+    assert repeated["memory_idempotent"] is True
 
     results = json.loads((output_dir / "aufmass_results.json").read_text(encoding="utf-8"))
     assert results["summary"]["floor_area"] == 12.0
