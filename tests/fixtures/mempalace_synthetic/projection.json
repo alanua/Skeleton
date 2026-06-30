@@ -1,0 +1,58 @@
+{
+  "schema": "skeleton.mempalace_projection.v1",
+  "namespace": "skeleton",
+  "project_id": "mempalace_synthetic",
+  "source_snapshot_id": "snapshot-mempalace-synthetic-0001",
+  "current_canonical_revision": 3,
+  "indexed_at": "2026-06-29T00:00:00Z",
+  "documents": [
+    {
+      "item_id": "synthetic-door-policy",
+      "canonical_ref": "canon-synth-door-policy",
+      "canonical_revision": 3,
+      "title": "Door Sensor Policy",
+      "bounded_text": "Door sensor events use monotonic ordering and require source attribution before retrieval.",
+      "tags": ["door", "sensor", "policy", "attribution"],
+      "source_attribution": [
+        {
+          "source_ref": "src-synth-door-policy",
+          "kind": "synthetic_projection",
+          "evidence_hash": "1111111111111111111111111111111111111111111111111111111111111111"
+        }
+      ],
+      "deleted": false
+    },
+    {
+      "item_id": "synthetic-window-threshold",
+      "canonical_ref": "canon-synth-window-threshold",
+      "canonical_revision": 3,
+      "title": "Window Threshold Rule",
+      "bounded_text": "Window signal quality below seven requires caution status and a bounded reviewer note.",
+      "tags": ["window", "threshold", "quality", "caution"],
+      "source_attribution": [
+        {
+          "source_ref": "src-synth-window-threshold",
+          "kind": "synthetic_projection",
+          "evidence_hash": "2222222222222222222222222222222222222222222222222222222222222222"
+        }
+      ],
+      "deleted": false
+    },
+    {
+      "item_id": "synthetic-ventilation-schedule",
+      "canonical_ref": "canon-synth-ventilation-schedule",
+      "canonical_revision": 3,
+      "title": "Ventilation Schedule",
+      "bounded_text": "Ventilation review runs weekly and records aggregate timing without raw discussion fields.",
+      "tags": ["ventilation", "schedule", "aggregate", "timing"],
+      "source_attribution": [
+        {
+          "source_ref": "src-synth-ventilation-schedule",
+          "kind": "synthetic_projection",
+          "evidence_hash": "3333333333333333333333333333333333333333333333333333333333333333"
+        }
+      ],
+      "deleted": false
+    }
+  ]
+}

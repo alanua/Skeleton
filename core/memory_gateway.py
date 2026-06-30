@@ -4,8 +4,11 @@ import json
 import re
 from copy import deepcopy
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Mapping
 
+from core.mempalace_adapter import MemPalaceAdapter, MemPalaceAdapterError
+from core.mempalace_projection import MEMPALACE_SYNTHETIC_NAMESPACE, MEMPALACE_SYNTHETIC_PROJECT_ID
 from core.memory_gateway_policy import (
     ALLOWED_COMMAND_SUFFIXES,
     ALLOWED_NAMESPACES,
@@ -57,6 +60,7 @@ class MemoryGateway:
         *,
         patch_registry: MemoryPatchProposalRegistry | None = None,
         override_registry: MemoryOverrideRegistry | None = None,
+        mempalace_adapter: MemPalaceAdapter | None = None,
     ) -> None:
         self._token = _normalize_token(token)
         self._patch_registry = patch_registry or MemoryPatchProposalRegistry()
@@ -66,6 +70,7 @@ class MemoryGateway:
         self._semantic = _semantic_seed()
         self._graph = _graph_seed()
         self._freshness = _freshness_seed()
+        self._mempalace_adapter = mempalace_adapter or _default_mempalace_adapter()
 
     def execute(self, request: Mapping[str, Any]) -> dict[str, object]:
         if not isinstance(request, Mapping):
@@ -119,6 +124,20 @@ class MemoryGateway:
         namespace = self._authorize_namespace(namespace)
         project_id = self._scope_project_id(namespace, project_id)
         _safe_lookup_key(query)
+        if _is_mempalace_synthetic_scope(namespace, project_id):
+            try:
+                pilot = self._mempalace_adapter.search_semantic(
+                    namespace=namespace,
+                    project_id=project_id,
+                    query=query,
+                )
+            except MemPalaceAdapterError as exc:
+                raise MemoryGatewayPolicyError(exc.reason_code, str(exc)) from exc
+            return self._response(
+                namespace=namespace,
+                command_suffix="memory.search_semantic",
+                payload={"results": pilot["results"], "authoritative": False},
+            )
         results = []
         for result in self._semantic[(namespace, project_id)]:
             rendered = deepcopy(result)
@@ -163,6 +182,27 @@ class MemoryGateway:
     def get_memory_index_freshness(self, *, namespace: str, project_id: object = None) -> dict[str, object]:
         namespace = self._authorize_namespace(namespace)
         project_id = self._scope_project_id(namespace, project_id)
+        if _is_mempalace_synthetic_scope(namespace, project_id):
+            try:
+                freshness = self._mempalace_adapter.get_index_freshness(
+                    namespace=namespace,
+                    project_id=project_id,
+                )
+            except MemPalaceAdapterError as exc:
+                raise MemoryGatewayPolicyError(exc.reason_code, str(exc)) from exc
+            return self._response(
+                namespace=namespace,
+                command_suffix="memory.get_index_freshness",
+                payload={
+                    "project_id": project_id,
+                    "mempalace": freshness,
+                    "canonical_sqlite": {
+                        "current_canonical_revision": freshness["current_canonical_revision"],
+                        "project_id": project_id,
+                    },
+                    "authoritative": False,
+                },
+            )
         return self._response(
             namespace=namespace,
             command_suffix="memory.get_index_freshness",
@@ -416,6 +456,15 @@ def _normalize_token(token: GatewayCapabilityToken | Mapping[str, Any]) -> Gatew
         namespaces=namespaces,
         public_mode=public_mode,
     )
+
+
+def _default_mempalace_adapter() -> MemPalaceAdapter:
+    fixture = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "mempalace_synthetic" / "projection.json"
+    return MemPalaceAdapter(json.loads(fixture.read_text(encoding="utf-8")))
+
+
+def _is_mempalace_synthetic_scope(namespace: str, project_id: str) -> bool:
+    return namespace == MEMPALACE_SYNTHETIC_NAMESPACE and project_id == MEMPALACE_SYNTHETIC_PROJECT_ID
 
 
 def _seed_scopes() -> tuple[tuple[str, str], ...]:

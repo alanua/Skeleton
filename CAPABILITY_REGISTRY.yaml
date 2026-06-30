@@ -320,12 +320,39 @@ capabilities:
       - legal_private
     requires:
       - core/memory_gateway_policy.py
+      - core/mempalace_adapter.py
+      - core/mempalace_projection.py
       - schemas/memory_gateway_request.schema.json
       - schemas/memory_gateway_response.schema.json
+      - schemas/mempalace_projection.schema.json
+      - schemas/mempalace_result.schema.json
       - docs/MEMORY_GATEWAY.md
+      - docs/MEMPALACE_PILOT.md
     tested: true
     added: "2026-06-27"
     description: Versioned synthetic gateway contract for namespace-isolated exact memory, derived semantic/code-graph retrieval, freshness metadata, audit metadata, conflict/override separation, and PatchProposal-only writes.
+
+  mempalace_synthetic_pilot:
+    status: stage1_dry_run
+    module: core/mempalace_adapter.py
+    entry: MemPalaceAdapter.search_semantic
+    stage: stage_1_synthetic_contract
+    live_runtime_execution: false
+    namespaces:
+      - skeleton
+    project_id: mempalace_synthetic
+    requires:
+      - core/mempalace_adapter.py
+      - core/mempalace_projection.py
+      - core/memory_gateway.py
+      - schemas/mempalace_projection.schema.json
+      - schemas/mempalace_result.schema.json
+      - tests/fixtures/mempalace_synthetic/projection.json
+      - scripts/mempalace_synthetic_benchmark.py
+      - docs/MEMPALACE_PILOT.md
+    tested: true
+    added: "2026-06-29"
+    description: Local-only read-only synthetic MemPalace pilot behind MemoryGateway for bounded retrieval, attribution, deletion, rebuild, staleness, namespace isolation, and aggregate resource-cost measurement without private ingestion or live services.
 
   hermes_memory_gateway:
     status: stage1_dry_run
