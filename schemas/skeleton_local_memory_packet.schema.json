@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.local_memory_packet.v1",
+  "type": "object",
+  "required": ["schema", "facts"],
+  "properties": {
+    "schema": {"const": "skeleton.local_memory_packet.v1"},
+    "facts": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 500,
+      "items": {
+        "type": "object",
+        "required": ["namespace", "fact_id", "value"],
+        "properties": {
+          "namespace": {"type": "string"},
+          "fact_id": {"type": "string"},
+          "value": {}
+        }
+      }
+    }
+  }
+}
