@@ -14,6 +14,8 @@ from scripts import runner_poll_github_tasks as runner
 from scripts import telegram_callback_poller as callback_poller
 
 
+ORIGINAL_GRAPHIFY_RESOLVE_USER_SCRIPT = runner._graphify_resolve_user_script
+
 HEAD_SHA = "a" * 40
 PR_URL = "https://github.com/alanua/Skeleton/pull/123"
 DONE_REPORT = f"""DONE: Codex completed successfully and produced file changes.
@@ -2810,24 +2812,53 @@ def _write_smoke_graph(command: list[str], node_count: int = 2, edge_count: int 
     )
 
 
+def _same_graphify_command(command: list[str], template: tuple[str, ...]) -> bool:
+    return Path(command[0]).name == template[0] and command[1:] == list(template[1:])
+
+
 def _successful_graphify_runtime_command(
-    command: list[str], cwd: str | Path | None = None
+    command: list[str],
+    cwd: str | Path | None = None,
+    *,
+    timeout: int | None = None,
 ) -> tuple[int, str]:
     del cwd
-    if command == list(runner.GRAPHIFY_TOOL_INSTALL_COMMAND):
+    assert timeout == runner.GRAPHIFY_RUNTIME_COMMAND_TIMEOUT_SECONDS
+    if Path(command[0]).name == "uv" and command[1:] == ["--version"]:
+        return 0, "uv 0.11.24\n"
+    if _same_graphify_command(command, runner.GRAPHIFY_TOOL_INSTALL_COMMAND):
         return 0, ""
-    if command == list(runner.GRAPHIFY_VERSION_COMMAND):
+    if _same_graphify_command(command, runner.GRAPHIFY_VERSION_COMMAND):
         return 0, "graphify 0.8.44\n"
-    if command == list(runner.GRAPHIFY_INSTALL_HELP_COMMAND):
+    if _same_graphify_command(command, runner.GRAPHIFY_INSTALL_HELP_COMMAND):
         return 0, "Usage: graphify install --platform {codex,hermes}\n"
-    if command == list(runner.GRAPHIFY_BUILD_HELP_COMMAND):
+    if _same_graphify_command(command, runner.GRAPHIFY_BUILD_HELP_COMMAND):
         return 0, "Usage: graphify [OPTIONS] FOLDER\n"
-    if command in (
-        list(runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND),
-        list(runner.GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND),
-    ):
+    if _same_graphify_command(
+        command,
+        runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND,
+    ) or _same_graphify_command(command, runner.GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND):
         return 0, ""
     return 2, "unexpected command"
+
+
+@pytest.fixture(autouse=True)
+def _default_graphify_tool_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    uv = tmp_path / "user-bin" / "uv"
+    graphify = tmp_path / "user-bin" / "graphify"
+    monkeypatch.setattr(
+        runner,
+        "_graphify_resolve_path_executable",
+        lambda name: uv if name == "uv" else None,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_graphify_resolve_user_script",
+        lambda name: graphify if name == "graphify" else uv,
+    )
 
 
 def test_graphify_platform_destination_allowlist_matches_pinned_upstream() -> None:
@@ -2896,9 +2927,13 @@ def test_graphify_runtime_uses_verified_0844_commands_and_retains_snapshot(
     (codex_skill / "SKILL.md").write_text("original\n", encoding="utf-8")
     snapshot_parent = tmp_path / "snapshots"
 
-    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        **kwargs: object,
+    ) -> tuple[int, str]:
         commands.append(command)
-        return _successful_graphify_runtime_command(command, cwd)
+        return _successful_graphify_runtime_command(command, cwd, **kwargs)
 
     def smoke(command: list[str]) -> tuple[int, str]:
         commands.append(command)
@@ -2928,13 +2963,23 @@ def test_graphify_runtime_uses_verified_0844_commands_and_retains_snapshot(
     assert "synthetic_graph_edge_count=2" in report
     assert "managed_version_marker_count=" in report
     assert any(snapshot_parent.iterdir())
-    assert list(runner.GRAPHIFY_TOOL_INSTALL_COMMAND) in commands
-    assert list(runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND) in commands
-    assert list(runner.GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND) in commands
+    assert any(
+        _same_graphify_command(command, runner.GRAPHIFY_TOOL_INSTALL_COMMAND)
+        for command in commands
+    )
+    assert any(
+        _same_graphify_command(command, runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND)
+        for command in commands
+    )
+    assert any(
+        _same_graphify_command(command, runner.GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND)
+        for command in commands
+    )
     smoke_commands = [command for command in commands if command[:2] == ["env", "-i"]]
     assert len(smoke_commands) == 1
     smoke_command = smoke_commands[0]
-    assert smoke_command[-2] == "graphify"
+    assert Path(smoke_command[-2]).name == "graphify"
+    assert Path(smoke_command[-2]).is_absolute()
     assert "GRAPHIFY_OUT=" in " ".join(smoke_command)
     assert all("OPENAI" not in part for part in smoke_command)
     assert all("ANTHROPIC" not in part for part in smoke_command)
@@ -2946,6 +2991,215 @@ def test_graphify_runtime_uses_verified_0844_commands_and_retains_snapshot(
     assert all("--no-semantic" not in command for command in command_words)
     assert str(tmp_path) not in report
     assert "synthetic graph built" not in report
+
+
+def test_graphify_runtime_reuses_exact_path_uv_without_bootstrap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path_uv = tmp_path / "system-bin" / "uv"
+    commands: list[list[str]] = []
+    status_lines: list[str] = []
+    monkeypatch.setattr(
+        runner,
+        "_graphify_resolve_path_executable",
+        lambda name: path_uv if name == "uv" else None,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_graphify_resolve_user_script",
+        lambda name: pytest.fail("user uv should not be checked"),
+    )
+
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        **kwargs: object,
+    ) -> tuple[int, str]:
+        del cwd, kwargs
+        commands.append(command)
+        if command == [str(path_uv), "--version"]:
+            return 0, "uv 0.11.24\n"
+        return 2, "unexpected command"
+
+    with mock.patch.object(runner, "run_command", side_effect=run):
+        uv_executable, reason = runner._graphify_resolve_verified_uv(status_lines)
+
+    assert uv_executable == path_uv
+    assert reason is None
+    assert commands == [[str(path_uv), "--version"]]
+    assert "step=verify_path_uv status=done" in status_lines
+
+
+def test_graphify_runtime_preserves_wrong_path_uv_and_reuses_exact_user_uv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path_uv = tmp_path / "system-bin" / "uv"
+    user_uv = tmp_path / "user-bin" / "uv"
+    commands: list[list[str]] = []
+    status_lines: list[str] = []
+    monkeypatch.setattr(
+        runner,
+        "_graphify_resolve_path_executable",
+        lambda name: path_uv if name == "uv" else None,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_graphify_resolve_user_script",
+        lambda name: user_uv if name == "uv" else None,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_graphify_bootstrap_uv",
+        lambda status_lines: pytest.fail("wrong PATH uv must not force bootstrap"),
+    )
+
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        **kwargs: object,
+    ) -> tuple[int, str]:
+        del cwd, kwargs
+        commands.append(command)
+        if command == [str(path_uv), "--version"]:
+            return 0, "uv 0.11.23\n"
+        if command == [str(user_uv), "--version"]:
+            return 0, "uv 0.11.24\n"
+        return 2, "unexpected command"
+
+    with mock.patch.object(runner, "run_command", side_effect=run):
+        uv_executable, reason = runner._graphify_resolve_verified_uv(status_lines)
+
+    assert uv_executable == user_uv
+    assert reason is None
+    assert commands == [[str(path_uv), "--version"], [str(user_uv), "--version"]]
+    assert "step=verify_path_uv status=failed" in status_lines
+    assert "step=verify_user_uv status=done" in status_lines
+
+
+def test_graphify_runtime_reuses_exact_user_uv_outside_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user_uv = tmp_path / "user-bin" / "uv"
+    commands: list[list[str]] = []
+    status_lines: list[str] = []
+    monkeypatch.setattr(runner, "_graphify_resolve_path_executable", lambda name: None)
+    monkeypatch.setattr(
+        runner,
+        "_graphify_resolve_user_script",
+        lambda name: user_uv if name == "uv" else None,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_graphify_bootstrap_uv",
+        lambda status_lines: pytest.fail("exact user uv should be reused"),
+    )
+
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        **kwargs: object,
+    ) -> tuple[int, str]:
+        del cwd, kwargs
+        commands.append(command)
+        if command == [str(user_uv), "--version"]:
+            return 0, "uv 0.11.24\n"
+        return 2, "unexpected command"
+
+    with mock.patch.object(runner, "run_command", side_effect=run):
+        uv_executable, reason = runner._graphify_resolve_verified_uv(status_lines)
+
+    assert uv_executable == user_uv
+    assert reason is None
+    assert commands == [[str(user_uv), "--version"]]
+    assert "step=verify_user_uv status=done" in status_lines
+
+
+def test_graphify_runtime_blocks_wrong_user_uv_after_bootstrap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user_uv = tmp_path / "user-bin" / "uv"
+    commands: list[list[str]] = []
+    status_lines: list[str] = []
+    monkeypatch.setattr(runner, "_graphify_resolve_path_executable", lambda name: None)
+    monkeypatch.setattr(runner, "_graphify_resolve_user_script", lambda name: None)
+    monkeypatch.setattr(
+        runner,
+        "_graphify_bootstrap_uv",
+        lambda status_lines: (user_uv, None),
+    )
+
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        **kwargs: object,
+    ) -> tuple[int, str]:
+        del cwd, kwargs
+        commands.append(command)
+        if command == [str(user_uv), "--version"]:
+            return 0, "uv 0.11.23\n"
+        return 2, "unexpected command"
+
+    with mock.patch.object(runner, "run_command", side_effect=run):
+        uv_executable, reason = runner._graphify_resolve_verified_uv(status_lines)
+
+    assert uv_executable is None
+    assert reason == runner.GRAPHIFY_UV_VERSION_MISMATCH_REASON
+    assert commands == [[str(user_uv), "--version"]]
+    assert "step=verify_bootstrapped_user_uv status=failed" in status_lines
+
+
+def test_graphify_runtime_reports_unresolved_path_uv_executable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path_uv = tmp_path / "missing-bin" / "uv"
+    status_lines: list[str] = []
+    monkeypatch.setattr(
+        runner,
+        "_graphify_resolve_path_executable",
+        lambda name: path_uv if name == "uv" else None,
+    )
+    monkeypatch.setattr(runner, "_graphify_resolve_user_script", lambda name: None)
+    monkeypatch.setattr(
+        runner,
+        "_graphify_bootstrap_uv",
+        lambda status_lines: pytest.fail("unresolved PATH uv should block"),
+    )
+
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        **kwargs: object,
+    ) -> tuple[int, str]:
+        del command, cwd, kwargs
+        raise FileNotFoundError("raw executable detail must not leak")
+
+    with mock.patch.object(runner, "run_command", side_effect=run):
+        uv_executable, reason = runner._graphify_resolve_verified_uv(status_lines)
+
+    assert uv_executable is None
+    assert reason == "graphify_tool_command_unavailable"
+    assert "step=verify_path_uv status=failed" in status_lines
+
+
+def test_graphify_runtime_command_timeout_has_public_safe_reason() -> None:
+    def run(*args: object, **kwargs: object) -> tuple[int, str]:
+        del args, kwargs
+        raise runner.subprocess.TimeoutExpired(cmd=["uv"], timeout=1)
+
+    with mock.patch.object(runner, "run_command", side_effect=run):
+        code, output, reason = runner._run_graphify_runtime_command(
+            ["uv", "--version"],
+            command_unavailable_reason="graphify_tool_command_unavailable",
+        )
+
+    assert code is None
+    assert output == ""
+    assert reason == runner.GRAPHIFY_COMMAND_TIMEOUT_REASON
 
 
 def test_graphify_managed_paths_discover_existing_allowlisted_version_markers(
@@ -2983,13 +3237,19 @@ def test_graphify_managed_paths_discover_existing_allowlisted_version_markers(
 
 
 def test_graphify_runtime_preflight_blocks_before_profile_mutation(tmp_path: Path) -> None:
-    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        **kwargs: object,
+    ) -> tuple[int, str]:
         del cwd
-        if command == list(runner.GRAPHIFY_TOOL_INSTALL_COMMAND):
+        if Path(command[0]).name == "uv" and command[1:] == ["--version"]:
+            return 0, "uv 0.11.24\n"
+        if _same_graphify_command(command, runner.GRAPHIFY_TOOL_INSTALL_COMMAND):
             return 0, ""
-        if command == list(runner.GRAPHIFY_VERSION_COMMAND):
+        if _same_graphify_command(command, runner.GRAPHIFY_VERSION_COMMAND):
             return 0, "graphify 0.8.44\n"
-        if command == list(runner.GRAPHIFY_INSTALL_HELP_COMMAND):
+        if _same_graphify_command(command, runner.GRAPHIFY_INSTALL_HELP_COMMAND):
             return 0, "Usage: graphify install\n"
         return 2, "unexpected command"
 
@@ -3009,13 +3269,23 @@ def test_graphify_runtime_preflight_blocks_before_profile_mutation(tmp_path: Pat
     commands = [call.args[0] for call in run_command.call_args_list]
     assert report.startswith("BLOCKED:")
     assert "reason=graphify_cli_contract_unverified" in report
-    assert list(runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND) not in commands
-    assert list(runner.GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND) not in commands
+    assert not any(
+        _same_graphify_command(command, runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND)
+        for command in commands
+    )
+    assert not any(
+        _same_graphify_command(command, runner.GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND)
+        for command in commands
+    )
     backup.assert_not_called()
 
 
 def test_graphify_runtime_reports_missing_uv_before_backup(tmp_path: Path) -> None:
-    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        **kwargs: object,
+    ) -> tuple[int, str]:
         del command, cwd
         raise FileNotFoundError("raw uv path must not leak")
 
@@ -3039,12 +3309,86 @@ def test_graphify_runtime_reports_missing_uv_before_backup(tmp_path: Path) -> No
     backup.assert_not_called()
 
 
+def test_graphify_runtime_does_not_run_bare_uv_when_resolution_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runner, "_graphify_resolve_path_executable", lambda name: None)
+    monkeypatch.setattr(runner, "_graphify_resolve_user_script", lambda name: None)
+    monkeypatch.setattr(
+        runner,
+        "_graphify_bootstrap_uv",
+        lambda status_lines: (None, "graphify_tool_command_unavailable"),
+    )
+
+    with mock.patch.object(
+        runner, "_graphify_managed_profile_paths", return_value=_graphify_managed_paths(tmp_path)
+    ), mock.patch.object(
+        runner, "run_command", return_value=(0, "bare uv would have succeeded")
+    ) as run, mock.patch.object(
+        runner, "_backup_graphify_profiles"
+    ) as backup:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.INSTALL_GRAPHIFY_RUNTIME,
+            str(runner.ROOT),
+            _graphify_runtime_body(),
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=graphify_tool_command_unavailable" in report
+    run.assert_not_called()
+    backup.assert_not_called()
+
+
+def test_graphify_runtime_reports_missing_pip_before_user_bootstrap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    python_executable = tmp_path / "python"
+    python_executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    python_executable.chmod(0o700)
+    monkeypatch.setattr(runner, "_graphify_resolve_path_executable", lambda name: None)
+    monkeypatch.setattr(runner, "_graphify_resolve_user_script", lambda name: None)
+    monkeypatch.setattr(runner, "_graphify_python_executable", lambda: python_executable)
+    monkeypatch.setattr(
+        runner,
+        "_run_graphify_python_command",
+        lambda command, timeout, cwd=None: (1, "No module named pip", None),
+    )
+
+    with mock.patch.object(
+        runner, "_graphify_managed_profile_paths", return_value=_graphify_managed_paths(tmp_path)
+    ), mock.patch.object(
+        runner, "run_command", return_value=(0, "bare uv would have succeeded")
+    ) as run, mock.patch.object(
+        runner, "_backup_graphify_profiles"
+    ) as backup:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.INSTALL_GRAPHIFY_RUNTIME,
+            str(runner.ROOT),
+            _graphify_runtime_body(),
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert f"reason={runner.GRAPHIFY_UV_PACKAGE_TOOLING_UNAVAILABLE_REASON}" in report
+    assert "step=verify_python_package_tooling status=failed" in report
+    assert "step=bootstrap_pinned_uv_tool" not in report
+    run.assert_not_called()
+    backup.assert_not_called()
+
+
 def test_graphify_runtime_reports_missing_graphify_during_preflight(
     tmp_path: Path,
 ) -> None:
-    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        **kwargs: object,
+    ) -> tuple[int, str]:
         del cwd
-        if command == list(runner.GRAPHIFY_TOOL_INSTALL_COMMAND):
+        if Path(command[0]).name == "uv" and command[1:] == ["--version"]:
+            return 0, "uv 0.11.24\n"
+        if _same_graphify_command(command, runner.GRAPHIFY_TOOL_INSTALL_COMMAND):
             return 0, ""
         raise FileNotFoundError("raw graphify path must not leak")
 
@@ -3068,6 +3412,37 @@ def test_graphify_runtime_reports_missing_graphify_during_preflight(
     backup.assert_not_called()
 
 
+def test_graphify_user_script_resolution_rejects_unsafe_symlinks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scripts_dir = tmp_path / "user-bin"
+    scripts_dir.mkdir()
+    out_of_bound_target = tmp_path / "outside-uv"
+    out_of_bound_target.write_text("#!/bin/sh\n", encoding="utf-8")
+    out_of_bound_target.chmod(0o700)
+    (scripts_dir / "uv").symlink_to(out_of_bound_target)
+    monkeypatch.setattr(runner, "_graphify_user_scripts_dir", lambda: scripts_dir)
+    monkeypatch.setattr(
+        runner,
+        "_graphify_resolve_user_script",
+        ORIGINAL_GRAPHIFY_RESOLVE_USER_SCRIPT,
+    )
+
+    assert runner._graphify_resolve_user_script("uv") is None
+
+    (scripts_dir / "uv").unlink()
+    (scripts_dir / "uv").symlink_to(scripts_dir / "missing-uv")
+    assert runner._graphify_resolve_user_script("uv") is None
+
+    (scripts_dir / "uv").unlink()
+    safe_target = scripts_dir / "uv-real"
+    safe_target.write_text("#!/bin/sh\n", encoding="utf-8")
+    safe_target.chmod(0o700)
+    (scripts_dir / "uv").symlink_to(safe_target)
+    assert runner._graphify_resolve_user_script("uv") == safe_target.resolve()
+
+
 @pytest.mark.parametrize(
     ("error", "reason"),
     (
@@ -3081,7 +3456,11 @@ def test_graphify_runtime_reports_public_safe_launch_failures_before_backup(
     error: Exception,
     reason: str,
 ) -> None:
-    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        **kwargs: object,
+    ) -> tuple[int, str]:
         del command, cwd
         raise error
 
@@ -3108,9 +3487,13 @@ def test_graphify_runtime_reports_public_safe_launch_failures_before_backup(
 def test_graphify_runtime_unexpected_prebackup_failure_is_public_safe(
     tmp_path: Path,
 ) -> None:
-    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        **kwargs: object,
+    ) -> tuple[int, str]:
         del cwd
-        if command == list(runner.GRAPHIFY_TOOL_INSTALL_COMMAND):
+        if _same_graphify_command(command, runner.GRAPHIFY_TOOL_INSTALL_COMMAND):
             return 0, ""
         raise RuntimeError("raw unexpected detail must not leak")
 
@@ -3140,11 +3523,15 @@ def test_graphify_runtime_restores_after_codex_install_failure(tmp_path: Path) -
     codex_skill.mkdir(parents=True)
     (codex_skill / "SKILL.md").write_text("original\n", encoding="utf-8")
 
-    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
-        if command == list(runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND):
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        **kwargs: object,
+    ) -> tuple[int, str]:
+        if _same_graphify_command(command, runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND):
             (codex_skill / "SKILL.md").write_text("mutated\n", encoding="utf-8")
             return 1, "codex failure must not leak"
-        return _successful_graphify_runtime_command(command, cwd)
+        return _successful_graphify_runtime_command(command, cwd, **kwargs)
 
     with mock.patch.object(
         runner, "_graphify_managed_profile_paths", return_value=managed_paths
@@ -3175,11 +3562,15 @@ def test_graphify_runtime_restores_after_unexpected_codex_mutation_failure(
     codex_skill.mkdir(parents=True)
     (codex_skill / "SKILL.md").write_text("original\n", encoding="utf-8")
 
-    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
-        if command == list(runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND):
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        **kwargs: object,
+    ) -> tuple[int, str]:
+        if _same_graphify_command(command, runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND):
             (codex_skill / "SKILL.md").write_text("mutated\n", encoding="utf-8")
             raise RuntimeError("raw codex failure must not leak")
-        return _successful_graphify_runtime_command(command, cwd)
+        return _successful_graphify_runtime_command(command, cwd, **kwargs)
 
     with mock.patch.object(
         runner, "_graphify_managed_profile_paths", return_value=managed_paths
@@ -3208,15 +3599,19 @@ def test_graphify_runtime_restores_after_hermes_install_failure(tmp_path: Path) 
     codex_skill.mkdir(parents=True)
     (codex_skill / "SKILL.md").write_text("original\n", encoding="utf-8")
 
-    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
-        if command == list(runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND):
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        **kwargs: object,
+    ) -> tuple[int, str]:
+        if _same_graphify_command(command, runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND):
             (codex_skill / "SKILL.md").write_text("mutated\n", encoding="utf-8")
             managed_paths[2].mkdir(parents=True)
             return 0, ""
-        if command == list(runner.GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND):
+        if _same_graphify_command(command, runner.GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND):
             (managed_paths[2] / "SKILL.md").write_text("partial\n", encoding="utf-8")
             return 1, "hermes failure must not leak"
-        return _successful_graphify_runtime_command(command, cwd)
+        return _successful_graphify_runtime_command(command, cwd, **kwargs)
 
     with mock.patch.object(
         runner, "_graphify_managed_profile_paths", return_value=managed_paths
@@ -3248,15 +3643,19 @@ def test_graphify_runtime_restores_after_unexpected_hermes_mutation_failure(
     codex_skill.mkdir(parents=True)
     (codex_skill / "SKILL.md").write_text("original\n", encoding="utf-8")
 
-    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
-        if command == list(runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND):
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        **kwargs: object,
+    ) -> tuple[int, str]:
+        if _same_graphify_command(command, runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND):
             (codex_skill / "SKILL.md").write_text("codex mutated\n", encoding="utf-8")
             return 0, ""
-        if command == list(runner.GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND):
+        if _same_graphify_command(command, runner.GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND):
             managed_paths[2].mkdir(parents=True)
             (managed_paths[2] / "SKILL.md").write_text("hermes partial\n", encoding="utf-8")
             raise RuntimeError("raw hermes failure must not leak")
-        return _successful_graphify_runtime_command(command, cwd)
+        return _successful_graphify_runtime_command(command, cwd, **kwargs)
 
     with mock.patch.object(
         runner, "_graphify_managed_profile_paths", return_value=managed_paths
@@ -3294,19 +3693,23 @@ def test_graphify_runtime_restores_third_platform_version_stamp_after_later_fail
     third_marker.write_text("graphify 0.8.43\n", encoding="utf-8")
     managed_paths = _graphify_managed_paths(home)
 
-    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
-        if command == list(runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND):
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        **kwargs: object,
+    ) -> tuple[int, str]:
+        if _same_graphify_command(command, runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND):
             codex_skill.write_text("mutated codex\n", encoding="utf-8")
             third_marker.write_text("graphify 0.8.44\n", encoding="utf-8")
             return 0, ""
-        if command == list(runner.GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND):
+        if _same_graphify_command(command, runner.GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND):
             _graphify_platform_skill(home, "hermes").parent.mkdir(parents=True)
             _graphify_platform_skill(home, "hermes").write_text(
                 "partial hermes\n",
                 encoding="utf-8",
             )
             return 1, "hermes failure must not leak"
-        return _successful_graphify_runtime_command(command, cwd)
+        return _successful_graphify_runtime_command(command, cwd, **kwargs)
 
     with mock.patch.object(
         runner, "_graphify_managed_profile_paths", return_value=managed_paths
@@ -3337,11 +3740,15 @@ def test_graphify_runtime_restore_failure_reports_failed_safely(tmp_path: Path) 
     codex_skill.mkdir(parents=True)
     (codex_skill / "SKILL.md").write_text("original\n", encoding="utf-8")
 
-    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
-        if command == list(runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND):
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        **kwargs: object,
+    ) -> tuple[int, str]:
+        if _same_graphify_command(command, runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND):
             (codex_skill / "SKILL.md").write_text("mutated\n", encoding="utf-8")
             return 1, "raw install output must not leak"
-        return _successful_graphify_runtime_command(command, cwd)
+        return _successful_graphify_runtime_command(command, cwd, **kwargs)
 
     with mock.patch.object(
         runner, "_graphify_managed_profile_paths", return_value=managed_paths
@@ -3373,11 +3780,15 @@ def test_graphify_runtime_restore_exception_reports_failed_safely(
     codex_skill.mkdir(parents=True)
     (codex_skill / "SKILL.md").write_text("original\n", encoding="utf-8")
 
-    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
-        if command == list(runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND):
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        **kwargs: object,
+    ) -> tuple[int, str]:
+        if _same_graphify_command(command, runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND):
             (codex_skill / "SKILL.md").write_text("mutated\n", encoding="utf-8")
             raise RuntimeError("raw mutation detail must not leak")
-        return _successful_graphify_runtime_command(command, cwd)
+        return _successful_graphify_runtime_command(command, cwd, **kwargs)
 
     with mock.patch.object(
         runner, "_graphify_managed_profile_paths", return_value=managed_paths
@@ -3410,13 +3821,17 @@ def test_graphify_runtime_restores_when_smoke_graph_json_is_empty(tmp_path: Path
     codex_skill.mkdir(parents=True)
     (codex_skill / "SKILL.md").write_text("original\n", encoding="utf-8")
 
-    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
-        if command == list(runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND):
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        **kwargs: object,
+    ) -> tuple[int, str]:
+        if _same_graphify_command(command, runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND):
             (codex_skill / "SKILL.md").write_text("codex mutated\n", encoding="utf-8")
-        if command == list(runner.GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND):
+        if _same_graphify_command(command, runner.GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND):
             managed_paths[2].mkdir(parents=True)
             (managed_paths[2] / "SKILL.md").write_text("hermes partial\n", encoding="utf-8")
-        return _successful_graphify_runtime_command(command, cwd)
+        return _successful_graphify_runtime_command(command, cwd, **kwargs)
 
     def smoke(command: list[str]) -> tuple[int, str]:
         _write_smoke_graph(command, node_count=1, edge_count=0)
@@ -3454,13 +3869,17 @@ def test_graphify_runtime_restores_after_smoke_subprocess_launch_failure(
     codex_skill.mkdir(parents=True)
     (codex_skill / "SKILL.md").write_text("original\n", encoding="utf-8")
 
-    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
-        if command == list(runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND):
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        **kwargs: object,
+    ) -> tuple[int, str]:
+        if _same_graphify_command(command, runner.GRAPHIFY_CODEX_SKILL_INSTALL_COMMAND):
             (codex_skill / "SKILL.md").write_text("codex mutated\n", encoding="utf-8")
-        if command == list(runner.GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND):
+        if _same_graphify_command(command, runner.GRAPHIFY_HERMES_SKILL_INSTALL_COMMAND):
             managed_paths[2].mkdir(parents=True)
             (managed_paths[2] / "SKILL.md").write_text("hermes partial\n", encoding="utf-8")
-        return _successful_graphify_runtime_command(command, cwd)
+        return _successful_graphify_runtime_command(command, cwd, **kwargs)
 
     with mock.patch.object(
         runner, "_graphify_managed_profile_paths", return_value=managed_paths
