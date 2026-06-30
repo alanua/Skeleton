@@ -138,12 +138,21 @@ after pip output specifically identifies an externally managed Python
 environment. Any bootstrapped user-level uv is version-verified before Graphify
 commands run. The task installs the pinned Graphify package with the
 resolved uv executable and `uv tool install --reinstall graphifyy==0.8.44`,
-verifies the local CLI contract with a resolved Graphify executable, backs up
-only bounded Graphify-managed Codex and Hermes skill paths plus existing
+then resolves Graphify only from uv's own tool executable directory using that
+same verified uv executable for bounded `uv tool dir --bin` and `uv tool dir`
+queries. Each query must exit successfully and return exactly one non-empty
+absolute path; multiline, blank, relative, or malformed output fails closed. The
+Runner checks only the exact `<uv-tool-bin>/graphify` candidate. On Unix, a
+uv-managed symlink is accepted only when its resolved target is an executable
+regular file contained within the verified uv tools root; broken links, escapes,
+non-files, and non-executables are rejected. Copied executables remain accepted
+when the executable regular file stays under the verified uv tool-bin directory.
+Only after this resolution does the Runner verify the local CLI contract, back
+up bounded Graphify-managed Codex and Hermes skill paths plus existing
 marker-only `.graphify_version` files discovered from the pinned Graphify 0.8.44
-upstream platform destination allowlist, and installs skills with
-`graphify install --platform codex` and `graphify install --platform hermes`.
-The allowlist is exact and does not scan arbitrary home directories.
+upstream platform destination allowlist, and install skills with `graphify
+install --platform codex` and `graphify install --platform hermes`. The
+allowlist is exact and does not scan arbitrary home directories.
 
 The local smoke check is synthetic and AST-only in scope. It uses the supported
 Graphify 0.8.44 build form, `graphify <folder>`, with `GRAPHIFY_OUT` set to a

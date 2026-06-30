@@ -2805,6 +2805,8 @@ GRAPHIFY_TOOL_INSTALL_COMMAND = (
     "--reinstall",
     f"graphifyy=={GRAPHIFY_PINNED_VERSION}",
 )
+GRAPHIFY_UV_TOOL_BIN_DIR_COMMAND = ("uv", "tool", "dir", "--bin")
+GRAPHIFY_UV_TOOL_ROOT_DIR_COMMAND = ("uv", "tool", "dir")
 GRAPHIFY_UV_USER_BOOTSTRAP_COMMAND = (
     "python",
     "-m",
@@ -3400,8 +3402,96 @@ def _graphify_bootstrap_uv(status_lines: list[str]) -> tuple[Path | None, str | 
     return uv_executable, None
 
 
-def _graphify_resolve_graphify_cli(status_lines: list[str]) -> tuple[Path | None, str | None]:
-    graphify_executable = _graphify_resolve_user_script("graphify")
+def _graphify_parse_uv_tool_dir_output(output: str) -> Path | None:
+    lines = output.splitlines()
+    if len(lines) != 1:
+        return None
+    raw_path = lines[0]
+    if not raw_path or raw_path.strip() != raw_path:
+        return None
+    path = Path(raw_path)
+    if not path.is_absolute():
+        return None
+    try:
+        return path.resolve(strict=False)
+    except OSError:
+        return None
+
+
+def _graphify_resolve_uv_tool_dir(
+    uv_executable: Path,
+    command: tuple[str, ...],
+) -> tuple[Path | None, str | None]:
+    code, output, reason = _run_graphify_runtime_command(
+        _graphify_command_with_executable(command, uv_executable),
+        command_unavailable_reason="graphify_tool_command_unavailable",
+        cwd=ROOT,
+    )
+    if reason is not None:
+        return None, reason
+    if code != 0:
+        return None, "graphify_tool_command_unavailable"
+    path = _graphify_parse_uv_tool_dir_output(output)
+    if path is None:
+        return None, "graphify_tool_command_unavailable"
+    return path, None
+
+
+def _graphify_resolve_uv_tool_graphify(
+    uv_tool_bin_dir: Path,
+    uv_tool_root_dir: Path,
+) -> Path | None:
+    candidates = [uv_tool_bin_dir / "graphify"]
+    if os.name == "nt":
+        candidates.append(uv_tool_bin_dir / "graphify.exe")
+    for candidate in candidates:
+        if not candidate.is_absolute():
+            continue
+        try:
+            candidate_resolved = candidate.resolve(strict=True)
+        except OSError:
+            continue
+        if os.name != "nt" and candidate.is_symlink():
+            try:
+                root_resolved = uv_tool_root_dir.resolve(strict=False)
+            except OSError:
+                continue
+            if not _path_is_relative_to(candidate_resolved, root_resolved):
+                continue
+            if candidate_resolved.is_file() and os.access(candidate_resolved, os.X_OK):
+                return candidate_resolved
+            continue
+        executable = _graphify_validate_executable(candidate, uv_tool_bin_dir)
+        if executable is not None:
+            return executable
+    return None
+
+
+def _graphify_resolve_graphify_cli(
+    status_lines: list[str], uv_executable: Path
+) -> tuple[Path | None, str | None]:
+    uv_tool_bin_dir, reason = _graphify_resolve_uv_tool_dir(
+        uv_executable,
+        GRAPHIFY_UV_TOOL_BIN_DIR_COMMAND,
+    )
+    if reason is not None or uv_tool_bin_dir is None:
+        status_lines.append("step=resolve_graphify_tool_bin_dir status=failed")
+        return None, reason or "graphify_cli_command_unavailable"
+    status_lines.append("step=resolve_graphify_tool_bin_dir status=done")
+
+    uv_tool_root_dir, reason = _graphify_resolve_uv_tool_dir(
+        uv_executable,
+        GRAPHIFY_UV_TOOL_ROOT_DIR_COMMAND,
+    )
+    if reason is not None or uv_tool_root_dir is None:
+        status_lines.append("step=resolve_graphify_tool_root_dir status=failed")
+        return None, reason or "graphify_cli_command_unavailable"
+    status_lines.append("step=resolve_graphify_tool_root_dir status=done")
+
+    graphify_executable = _graphify_resolve_uv_tool_graphify(
+        uv_tool_bin_dir,
+        uv_tool_root_dir,
+    )
     if graphify_executable is None:
         status_lines.append("step=resolve_graphify_cli status=failed")
         return None, "graphify_cli_command_unavailable"
@@ -3727,7 +3817,10 @@ def install_graphify_runtime(body: str) -> str:
     status_lines.append("step=install_pinned_graphify_tool status=done")
 
     try:
-        graphify_executable, reason = _graphify_resolve_graphify_cli(status_lines)
+        graphify_executable, reason = _graphify_resolve_graphify_cli(
+            status_lines,
+            uv_executable,
+        )
         if reason is not None or graphify_executable is None:
             return _graphify_runtime_blocked_report(
                 status_lines,

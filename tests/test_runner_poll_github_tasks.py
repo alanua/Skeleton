@@ -15,6 +15,7 @@ from scripts import telegram_callback_poller as callback_poller
 
 
 ORIGINAL_GRAPHIFY_RESOLVE_USER_SCRIPT = runner._graphify_resolve_user_script
+ORIGINAL_GRAPHIFY_RESOLVE_GRAPHIFY_CLI = runner._graphify_resolve_graphify_cli
 
 HEAD_SHA = "a" * 40
 PR_URL = "https://github.com/alanua/Skeleton/pull/123"
@@ -2859,6 +2860,11 @@ def _default_graphify_tool_resolution(
         "_graphify_resolve_user_script",
         lambda name: graphify if name == "graphify" else uv,
     )
+    monkeypatch.setattr(
+        runner,
+        "_graphify_resolve_graphify_cli",
+        lambda status_lines, uv_executable: (graphify, None),
+    )
 
 
 def test_graphify_platform_destination_allowlist_matches_pinned_upstream() -> None:
@@ -3566,6 +3572,191 @@ def test_graphify_user_script_resolution_rejects_unsafe_symlinks(
     safe_target.chmod(0o700)
     (scripts_dir / "uv").symlink_to(safe_target)
     assert runner._graphify_resolve_user_script("uv") == safe_target.resolve()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uv symlink policy is Unix-specific")
+def test_graphify_runtime_accepts_valid_uv_managed_graphify_symlink(
+    tmp_path: Path,
+) -> None:
+    tool_bin = tmp_path / "tool-bin"
+    tool_root = tmp_path / "tools"
+    graphify_target = tool_root / "graphifyy" / "bin" / "graphify"
+    tool_bin.mkdir()
+    graphify_target.parent.mkdir(parents=True)
+    graphify_target.write_text("#!/bin/sh\n", encoding="utf-8")
+    graphify_target.chmod(0o700)
+    (tool_bin / "graphify").symlink_to(graphify_target)
+
+    assert (
+        runner._graphify_resolve_uv_tool_graphify(tool_bin, tool_root)
+        == graphify_target.resolve()
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uv symlink policy is Unix-specific")
+def test_graphify_runtime_rejects_uv_managed_graphify_symlink_escape(
+    tmp_path: Path,
+) -> None:
+    tool_bin = tmp_path / "tool-bin"
+    tool_root = tmp_path / "tools"
+    escaped_target = tmp_path / "outside" / "graphify"
+    tool_bin.mkdir()
+    escaped_target.parent.mkdir()
+    escaped_target.write_text("#!/bin/sh\n", encoding="utf-8")
+    escaped_target.chmod(0o700)
+    (tool_bin / "graphify").symlink_to(escaped_target)
+
+    assert runner._graphify_resolve_uv_tool_graphify(tool_bin, tool_root) is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uv symlink policy is Unix-specific")
+def test_graphify_runtime_rejects_broken_and_nonexecutable_graphify_candidate(
+    tmp_path: Path,
+) -> None:
+    tool_bin = tmp_path / "tool-bin"
+    tool_root = tmp_path / "tools"
+    tool_bin.mkdir()
+    tool_root.mkdir()
+    candidate = tool_bin / "graphify"
+    candidate.symlink_to(tool_root / "missing" / "graphify")
+    assert runner._graphify_resolve_uv_tool_graphify(tool_bin, tool_root) is None
+
+    candidate.unlink()
+    target = tool_root / "graphifyy" / "bin" / "graphify"
+    target.parent.mkdir(parents=True)
+    target.write_text("#!/bin/sh\n", encoding="utf-8")
+    target.chmod(0o600)
+    candidate.symlink_to(target)
+    assert runner._graphify_resolve_uv_tool_graphify(tool_bin, tool_root) is None
+
+
+@pytest.mark.parametrize(
+    "output",
+    (
+        "",
+        "~/tool-bin\n",
+        "relative/tool/bin\n",
+        "/tmp/tool-bin\n/tmp/tools\n",
+        " /tmp/tool-bin\n",
+        "/tmp/tool-bin \n",
+    ),
+)
+def test_graphify_runtime_rejects_malformed_uv_tool_dir_output(output: str) -> None:
+    assert runner._graphify_parse_uv_tool_dir_output(output) is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uv symlink policy is Unix-specific")
+def test_graphify_runtime_uses_exact_verified_uv_for_tool_dir_queries(
+    tmp_path: Path,
+) -> None:
+    uv_executable = tmp_path / "verified" / "uv"
+    tool_bin = tmp_path / "tool-bin"
+    tool_root = tmp_path / "tools"
+    graphify_target = tool_root / "graphifyy" / "bin" / "graphify"
+    commands: list[list[str]] = []
+    status_lines: list[str] = []
+    uv_executable.parent.mkdir()
+    uv_executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    uv_executable.chmod(0o700)
+    tool_bin.mkdir()
+    graphify_target.parent.mkdir(parents=True)
+    graphify_target.write_text("#!/bin/sh\n", encoding="utf-8")
+    graphify_target.chmod(0o700)
+    (tool_bin / "graphify").symlink_to(graphify_target)
+
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        **kwargs: object,
+    ) -> tuple[int, str]:
+        del cwd, kwargs
+        commands.append(command)
+        if command == [
+            str(uv_executable),
+            *runner.GRAPHIFY_UV_TOOL_BIN_DIR_COMMAND[1:],
+        ]:
+            return 0, f"{tool_bin}\n"
+        if command == [
+            str(uv_executable),
+            *runner.GRAPHIFY_UV_TOOL_ROOT_DIR_COMMAND[1:],
+        ]:
+            return 0, f"{tool_root}\n"
+        return 2, "unexpected command"
+
+    with mock.patch.object(runner, "run_command", side_effect=run), mock.patch.object(
+        runner,
+        "_graphify_resolve_graphify_cli",
+        ORIGINAL_GRAPHIFY_RESOLVE_GRAPHIFY_CLI,
+    ):
+        graphify_executable, reason = runner._graphify_resolve_graphify_cli(
+            status_lines,
+            uv_executable,
+        )
+
+    assert graphify_executable == graphify_target.resolve()
+    assert reason is None
+    assert commands == [
+        [str(uv_executable), *runner.GRAPHIFY_UV_TOOL_BIN_DIR_COMMAND[1:]],
+        [str(uv_executable), *runner.GRAPHIFY_UV_TOOL_ROOT_DIR_COMMAND[1:]],
+    ]
+    assert "step=resolve_graphify_tool_bin_dir status=done" in status_lines
+    assert "step=resolve_graphify_tool_root_dir status=done" in status_lines
+
+
+def test_graphify_runtime_blocks_before_profile_mutation_on_tool_dir_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    uv_executable = tmp_path / "user-bin" / "uv"
+    uv_executable.parent.mkdir()
+    uv_executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    uv_executable.chmod(0o700)
+    monkeypatch.setattr(
+        runner,
+        "_graphify_resolve_path_executable",
+        lambda name: uv_executable if name == "uv" else None,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_graphify_resolve_graphify_cli",
+        ORIGINAL_GRAPHIFY_RESOLVE_GRAPHIFY_CLI,
+    )
+
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        **kwargs: object,
+    ) -> tuple[int, str]:
+        del cwd, kwargs
+        if command == [str(uv_executable), "--version"]:
+            return 0, "uv 0.11.24\n"
+        if _same_graphify_command(command, runner.GRAPHIFY_TOOL_INSTALL_COMMAND):
+            return 0, ""
+        if command == [
+            str(uv_executable),
+            *runner.GRAPHIFY_UV_TOOL_BIN_DIR_COMMAND[1:],
+        ]:
+            return 0, "relative/tool-bin\n"
+        return 2, "unexpected command"
+
+    with mock.patch.object(
+        runner, "_graphify_managed_profile_paths", return_value=_graphify_managed_paths(tmp_path)
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run
+    ), mock.patch.object(
+        runner, "_backup_graphify_profiles"
+    ) as backup:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.INSTALL_GRAPHIFY_RUNTIME,
+            str(runner.ROOT),
+            _graphify_runtime_body(),
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=graphify_tool_command_unavailable" in report
+    assert "step=resolve_graphify_tool_bin_dir status=failed" in report
+    assert "rollback_status=not_needed" in report
+    backup.assert_not_called()
 
 
 @pytest.mark.parametrize(
