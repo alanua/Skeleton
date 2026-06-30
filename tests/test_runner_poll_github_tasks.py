@@ -3377,6 +3377,114 @@ def test_graphify_runtime_reports_missing_pip_before_user_bootstrap(
     backup.assert_not_called()
 
 
+def test_graphify_runtime_bootstraps_user_uv_with_externally_managed_pip_flag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    python_executable = tmp_path / "python"
+    python_executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    python_executable.chmod(0o700)
+    user_uv = tmp_path / "user-bin" / "uv"
+    commands: list[list[str]] = []
+    status_lines: list[str] = []
+    monkeypatch.setattr(runner, "_graphify_python_executable", lambda: python_executable)
+    monkeypatch.setattr(
+        runner,
+        "_graphify_resolve_user_script",
+        lambda name: user_uv if name == "uv" else None,
+    )
+
+    def run_python(
+        command: list[str],
+        timeout: int,
+        cwd: str | Path | None = None,
+    ) -> tuple[int, str, str | None]:
+        del timeout, cwd
+        commands.append(command)
+        if command[-2:] == ["pip", "--version"]:
+            return 0, "pip 24.0\n", None
+        if command[-3:] == ["pip", "install", "--help"]:
+            return 0, "--break-system-packages\n", None
+        if command[:4] == [str(python_executable), "-m", "pip", "install"]:
+            return 0, "", None
+        return 2, "unexpected command", None
+
+    monkeypatch.setattr(runner, "_run_graphify_python_command", run_python)
+
+    uv_executable, reason = runner._graphify_bootstrap_uv(status_lines)
+
+    assert uv_executable == user_uv
+    assert reason is None
+    install_command = commands[-1]
+    assert install_command == [
+        str(python_executable),
+        "-m",
+        "pip",
+        "install",
+        "--user",
+        "--disable-pip-version-check",
+        "--no-input",
+        runner.GRAPHIFY_PIP_BREAK_SYSTEM_PACKAGES_FLAG,
+        f"uv=={runner.UV_PINNED_VERSION}",
+    ]
+    assert "step=detect_pip_break_system_packages status=supported" in status_lines
+    assert "step=bootstrap_pinned_uv_tool status=done" in status_lines
+
+
+def test_graphify_runtime_bootstrap_keeps_original_user_uv_command_without_flag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    python_executable = tmp_path / "python"
+    python_executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    python_executable.chmod(0o700)
+    user_uv = tmp_path / "user-bin" / "uv"
+    commands: list[list[str]] = []
+    status_lines: list[str] = []
+    monkeypatch.setattr(runner, "_graphify_python_executable", lambda: python_executable)
+    monkeypatch.setattr(
+        runner,
+        "_graphify_resolve_user_script",
+        lambda name: user_uv if name == "uv" else None,
+    )
+
+    def run_python(
+        command: list[str],
+        timeout: int,
+        cwd: str | Path | None = None,
+    ) -> tuple[int, str, str | None]:
+        del timeout, cwd
+        commands.append(command)
+        if command[-2:] == ["pip", "--version"]:
+            return 0, "pip 22.0\n", None
+        if command[-3:] == ["pip", "install", "--help"]:
+            return 0, "Usage: pip install [options]\n", None
+        if command[:4] == [str(python_executable), "-m", "pip", "install"]:
+            return 0, "", None
+        return 2, "unexpected command", None
+
+    monkeypatch.setattr(runner, "_run_graphify_python_command", run_python)
+
+    uv_executable, reason = runner._graphify_bootstrap_uv(status_lines)
+
+    assert uv_executable == user_uv
+    assert reason is None
+    install_command = commands[-1]
+    assert install_command == [
+        str(python_executable),
+        "-m",
+        "pip",
+        "install",
+        "--user",
+        "--disable-pip-version-check",
+        "--no-input",
+        f"uv=={runner.UV_PINNED_VERSION}",
+    ]
+    assert runner.GRAPHIFY_PIP_BREAK_SYSTEM_PACKAGES_FLAG not in install_command
+    assert "step=detect_pip_break_system_packages status=unsupported" in status_lines
+    assert "step=bootstrap_pinned_uv_tool status=done" in status_lines
+
+
 def test_graphify_runtime_reports_missing_graphify_during_preflight(
     tmp_path: Path,
 ) -> None:

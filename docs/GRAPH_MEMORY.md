@@ -132,8 +132,11 @@ untouched, checks for an existing exact user-level `uv` from the expected user
 scripts directory before pip, preflights bounded Python package tooling, and
 bootstraps exact pinned uv with `python -m pip install --user
 --disable-pip-version-check --no-input uv==0.11.24` only when no exact PATH or
-user-level uv exists. Any bootstrapped user-level uv is version-verified before
-Graphify commands run. The task installs the pinned Graphify package with the
+user-level uv exists. If pip advertises `--break-system-packages`, the Runner
+may add that flag to the same user-level install path for externally managed
+Python hosts without changing the exact `uv==0.11.24` pin. Any bootstrapped
+user-level uv is version-verified before Graphify commands run. The task installs
+the pinned Graphify package with the
 resolved uv executable and `uv tool install --reinstall graphifyy==0.8.44`,
 verifies the local CLI contract with a resolved Graphify executable, backs up
 only bounded Graphify-managed Codex and Hermes skill paths plus existing
