@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.aufmass.local_input.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "project_ref", "unit", "rooms"],
+  "properties": {
+    "schema": {"const": "skeleton.aufmass.local_input.v1"},
+    "project_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},
+    "unit": {"const": "m"},
+    "rooms": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["room_id", "calculation_status"],
+        "properties": {
+          "room_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},
+          "calculation_status": {"enum": ["accepted_input", "estimate_with_review", "blocked"]},
+          "blocker": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},
+          "polygon": {
+            "type": "array",
+            "minItems": 3,
+            "items": {
+              "type": "array",
+              "prefixItems": [{"type": "number"}, {"type": "number"}],
+              "minItems": 2,
+              "maxItems": 2
+            }
+          },
+          "height_m": {"type": "number", "exclusiveMinimum": 0},
+          "height_status": {"enum": ["confirmed", "estimated_review"]},
+          "openings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["opening_id", "width_m", "height_m", "count", "status"],
+              "properties": {
+                "opening_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},
+                "width_m": {"type": "number", "exclusiveMinimum": 0},
+                "height_m": {"type": "number", "exclusiveMinimum": 0},
+                "count": {"type": "integer", "minimum": 1},
+                "status": {"enum": ["confirmed", "estimated_review"]}
+              }
+            }
+          },
+          "source_evidence_refs": {
+            "type": "array",
+            "items": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"}
+          }
+        }
+      }
+    }
+  }
+}
