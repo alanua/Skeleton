@@ -108,6 +108,7 @@ VALIDATE_PR_BRANCH = "validate_pr_branch"
 PREFLIGHT_PR_REFRESH = "preflight_pr_refresh"
 HERMES_WORKER_PREFLIGHT = "hermes_worker_preflight"
 HERMES_MEMORY_GATEWAY_SMOKE = "hermes_memory_gateway_smoke"
+MEMPALACE_SYNTHETIC_RUNTIME_SMOKE = "mempalace_synthetic_runtime_smoke"
 PRIVATE_MEMORY_HEALTHCHECK = "private_memory_healthcheck"
 HERMES_PRIVATE_MEMORY_BRIDGE_CHECK = "hermes_private_memory_bridge_check"
 INSTALL_GRAPHIFY_RUNTIME = "install_graphify_runtime"
@@ -139,6 +140,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         PREFLIGHT_PR_REFRESH,
         HERMES_WORKER_PREFLIGHT,
         HERMES_MEMORY_GATEWAY_SMOKE,
+        MEMPALACE_SYNTHETIC_RUNTIME_SMOKE,
         PRIVATE_MEMORY_HEALTHCHECK,
         HERMES_PRIVATE_MEMORY_BRIDGE_CHECK,
         INSTALL_GRAPHIFY_RUNTIME,
@@ -306,6 +308,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "behind_by",
         "blocked_write_status",
         "branch",
+        "build_ms",
         "canon_note",
         "changed_file",
         "changed_file_count",
@@ -322,10 +325,12 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "compare_behind_by",
         "compare_state",
         "compare_status",
+        "canonical_write_enabled",
         "current_branch",
         "decision_records_skipped",
         "decision_records_written",
         "diagnostic_count",
+        "disk_bytes",
         "draft",
         "draft_pr",
         "draft_pr_url",
@@ -369,6 +374,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "machine",
         "maintenance_task_id",
         "managed_version_marker_count",
+        "model_credentials_used",
         "merge_action",
         "mergeable",
         "mergeable_state",
@@ -380,6 +386,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "model_credentials_removed_from_smoke",
         "mutation_mode",
         "network_disabled",
+        "network_provider_enabled",
         "next_action",
         "next_operator_action",
         "open_issues_count",
@@ -388,6 +395,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "pilot_mode",
         "pilot_summary_schema",
         "ports_disabled",
+        "ports_enabled",
         "pr_number",
         "pr_state",
         "pr_title",
@@ -409,6 +417,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "project_state_written",
         "protected_worktrees_count",
         "public_safe_report_ok",
+        "quality_score",
+        "quality_threshold",
         "pull_request",
         "python_version",
         "reason",
@@ -424,6 +434,10 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "report_private_paths",
         "report_quantities",
         "review_table_count",
+        "runtime_smoke_check_count",
+        "runtime_smoke_decision",
+        "runtime_smoke_stable_reason",
+        "ram_bytes",
         "repository",
         "rollback_status",
         "room_area_row_count",
@@ -433,6 +447,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "runner_status",
         "selected_source_count",
         "services_disabled",
+        "services_enabled",
         "shortlist_row_count",
         "skipped_worktrees_count",
         "source_issue",
@@ -449,6 +464,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "step",
         "success_criteria",
         "synthetic_corpus_status",
+        "live_private_ingestion",
         "synthetic_graph_edge_count",
         "synthetic_graph_node_count",
         "synthetic_smoke_timeout_seconds",
@@ -8886,6 +8902,269 @@ def hermes_memory_gateway_smoke() -> str:
         )
 
 
+MEMPALACE_SYNTHETIC_BENCHMARK_SCHEMA = "skeleton.mempalace_synthetic_benchmark.v1"
+MEMPALACE_SYNTHETIC_NAMESPACE = "skeleton"
+MEMPALACE_SYNTHETIC_PROJECT_ID = "mempalace_synthetic"
+MEMPALACE_SYNTHETIC_BENCHMARK_TIMEOUT_SECONDS = 60
+MEMPALACE_SYNTHETIC_REQUIRED_STABLE_REASONS = frozenset(
+    (
+        "namespace_isolation_proven",
+        "deletion_and_rebuild_pass",
+        "source_attribution_present",
+        "synthetic_quality_threshold_met",
+        "bounded_resources_documented",
+    )
+)
+MEMPALACE_SYNTHETIC_PRIVATE_MARKERS = tuple(
+    marker.lower()
+    for marker in (
+        "aufmass",
+        "bauclock",
+        "legal",
+        "contact",
+        "address",
+        "phone",
+        "email",
+        "secret",
+        "password",
+        "credential",
+        "token",
+        "private",
+        "/tmp",
+        "/home/",
+        ".db",
+        ".sqlite",
+    )
+)
+
+
+def _mempalace_runtime_smoke_reject_issue_input(body: str) -> str | None:
+    if not body:
+        return None
+    if "```task" in body:
+        return "issue_controlled_input_not_allowed"
+    metadata = body.split("```", 1)[0]
+    allowed_lines = {
+        f"Mode: {RUNTIME_MAINTENANCE_MODE}",
+        f"Maintenance Task ID: {MEMPALACE_SYNTHETIC_RUNTIME_SMOKE}",
+    }
+    for line in metadata.splitlines():
+        stripped = line.strip()
+        if stripped and stripped not in allowed_lines:
+            return "issue_controlled_input_not_allowed"
+    return None
+
+
+def _mempalace_runtime_smoke_preflight(
+    task_id: str,
+) -> tuple[RegisteredProjectCheckout | None, list[str], str | None]:
+    registered_checkout, report = _registered_skeleton_checkout(task_id)
+    if report is not None or registered_checkout is None:
+        return None, [], report
+
+    checkout_path = registered_checkout.checkout_path
+    status_lines = list(registered_checkout.status_lines)
+    present_report = _verify_skeleton_checkout_present(task_id, registered_checkout)
+    if present_report is not None:
+        return None, status_lines, present_report
+
+    origin_report = _read_skeleton_origin(task_id, registered_checkout, status_lines)
+    if origin_report is not None:
+        return None, status_lines, origin_report
+
+    branch_report = _read_skeleton_current_branch(task_id, checkout_path, status_lines)
+    if branch_report is not None:
+        return None, status_lines, branch_report
+
+    clean_report = _read_skeleton_clean_state(task_id, checkout_path, status_lines)
+    if clean_report is not None:
+        return None, status_lines, clean_report
+
+    fetch_report = _fetch_skeleton_origin_main(task_id, checkout_path, status_lines)
+    if fetch_report is not None:
+        return None, status_lines, fetch_report
+
+    head_sha, failure_report = _read_skeleton_sha(
+        task_id, checkout_path, "HEAD", status_lines, "read_checkout_head"
+    )
+    if failure_report is not None or head_sha is None:
+        return None, status_lines, failure_report
+    origin_main_sha, failure_report = _read_skeleton_sha(
+        task_id, checkout_path, "origin/main", status_lines, "read_origin_main"
+    )
+    if failure_report is not None or origin_main_sha is None:
+        return None, status_lines, failure_report
+    if head_sha != origin_main_sha:
+        return None, status_lines, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=checkout_not_current_main"],
+            "not_met",
+        )
+    return registered_checkout, status_lines, None
+
+
+def _mempalace_benchmark_output_has_private_marker(output: str) -> bool:
+    lowered = (output or "").lower()
+    return any(marker in lowered for marker in MEMPALACE_SYNTHETIC_PRIVATE_MARKERS)
+
+
+def _parse_mempalace_benchmark_json(output: str) -> tuple[dict[str, object] | None, str | None]:
+    decoder = json.JSONDecoder()
+    try:
+        parsed, end = decoder.raw_decode(output)
+    except json.JSONDecodeError:
+        return None, "malformed_benchmark_json"
+    if output[end:].strip():
+        return None, "benchmark_extra_output"
+    if not isinstance(parsed, dict):
+        return None, "malformed_benchmark_json"
+    return parsed, None
+
+
+def _validate_mempalace_benchmark_report(report: dict[str, object]) -> str | None:
+    if report.get("schema") != MEMPALACE_SYNTHETIC_BENCHMARK_SCHEMA:
+        return "benchmark_schema_mismatch"
+    if (
+        report.get("namespace") != MEMPALACE_SYNTHETIC_NAMESPACE
+        or report.get("project_id") != MEMPALACE_SYNTHETIC_PROJECT_ID
+    ):
+        return "benchmark_scope_mismatch"
+    if report.get("decision") != "PASS":
+        return "benchmark_decision_not_pass"
+
+    quality_score = report.get("quality_score")
+    quality_threshold = report.get("quality_threshold")
+    if (
+        isinstance(quality_score, bool)
+        or isinstance(quality_threshold, bool)
+        or not isinstance(quality_score, (int, float))
+        or not isinstance(quality_threshold, (int, float))
+        or float(quality_score) < float(quality_threshold)
+    ):
+        return "benchmark_quality_threshold_not_met"
+
+    checks = report.get("checks")
+    if not isinstance(checks, list) or not checks:
+        return "benchmark_missing_checks"
+    for check in checks:
+        if not isinstance(check, dict) or check.get("passed") is not True:
+            return "benchmark_failed_check"
+
+    stable_reasons = report.get("stable_reasons")
+    if (
+        not isinstance(stable_reasons, list)
+        or not all(isinstance(reason, str) for reason in stable_reasons)
+        or not MEMPALACE_SYNTHETIC_REQUIRED_STABLE_REASONS <= set(stable_reasons)
+    ):
+        return "benchmark_missing_stable_reason"
+
+    resource_report = report.get("resource_report")
+    if not isinstance(resource_report, dict):
+        return "benchmark_resource_report_missing"
+    for key in (
+        "aggregate_disk_bytes",
+        "aggregate_ram_bytes",
+        "aggregate_build_ms",
+    ):
+        value = resource_report.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return "benchmark_resource_report_malformed"
+    return None
+
+
+def mempalace_synthetic_runtime_smoke(body: str) -> str:
+    task_id = MEMPALACE_SYNTHETIC_RUNTIME_SMOKE
+    input_reason = _mempalace_runtime_smoke_reject_issue_input(body)
+    if input_reason is not None:
+        return _maintenance_report("BLOCKED", task_id, [f"reason={input_reason}"], "not_met")
+
+    registered_checkout, status_lines, preflight_report = _mempalace_runtime_smoke_preflight(
+        task_id
+    )
+    if preflight_report is not None or registered_checkout is None:
+        return preflight_report or _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=checkout_preflight_failed"], "not_met"
+        )
+
+    try:
+        exit_code, output = run_command(
+            ["python3", "scripts/mempalace_synthetic_benchmark.py"],
+            cwd=registered_checkout.checkout_path,
+            timeout=MEMPALACE_SYNTHETIC_BENCHMARK_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=benchmark_timeout"],
+            "not_met",
+        )
+    except Exception:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=benchmark_launch_failed"],
+            "not_met",
+        )
+
+    if _mempalace_benchmark_output_has_private_marker(output):
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=private_like_benchmark_output"],
+            "not_met",
+        )
+    if exit_code != 0:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, f"exit_code={exit_code}", "reason=benchmark_nonzero_exit"],
+            "not_met",
+        )
+
+    benchmark_report, parse_reason = _parse_mempalace_benchmark_json(output)
+    if parse_reason is not None or benchmark_report is None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, f"reason={parse_reason or 'malformed_benchmark_json'}"],
+            "not_met",
+        )
+    validation_reason = _validate_mempalace_benchmark_report(benchmark_report)
+    if validation_reason is not None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, f"reason={validation_reason}"],
+            "not_met",
+        )
+
+    resource_report = benchmark_report["resource_report"]
+    assert isinstance(resource_report, dict)
+    stable_reasons = benchmark_report["stable_reasons"]
+    assert isinstance(stable_reasons, list)
+    checks = benchmark_report["checks"]
+    assert isinstance(checks, list)
+    report_lines = [
+        "runtime_smoke_decision=PASS",
+        f"quality_score={benchmark_report['quality_score']}",
+        f"quality_threshold={benchmark_report['quality_threshold']}",
+        f"runtime_smoke_check_count={len(checks)}",
+        f"disk_bytes={resource_report['aggregate_disk_bytes']}",
+        f"ram_bytes={resource_report['aggregate_ram_bytes']}",
+        f"build_ms={resource_report['aggregate_build_ms']}",
+        "live_private_ingestion=false",
+        "canonical_write_enabled=false",
+        "services_enabled=false",
+        "ports_enabled=false",
+        "network_provider_enabled=false",
+        "model_credentials_used=false",
+    ]
+    report_lines.extend(f"runtime_smoke_stable_reason={reason}" for reason in stable_reasons)
+    return _maintenance_report("DONE", task_id, report_lines, "met")
+
+
 def dispatch_runtime_maintenance_task(
     task_id: str, workdir: str, body: str = ""
 ) -> str:
@@ -8917,6 +9196,8 @@ def dispatch_runtime_maintenance_task(
             return hermes_worker_preflight()
         if task_id == HERMES_MEMORY_GATEWAY_SMOKE:
             return hermes_memory_gateway_smoke()
+        if task_id == MEMPALACE_SYNTHETIC_RUNTIME_SMOKE:
+            return mempalace_synthetic_runtime_smoke(body)
         if task_id == PRIVATE_MEMORY_HEALTHCHECK:
             return private_memory_healthcheck(body)
         if task_id == HERMES_PRIVATE_MEMORY_BRIDGE_CHECK:

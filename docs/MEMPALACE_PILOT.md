@@ -58,3 +58,21 @@ The public benchmark report emits `PASS`, `CAUTION`, or `REJECT` with stable rea
 
 No raw text dump, path, private fixture, credential, service endpoint, or external dependency detail is included in the report.
 The script exits zero only for `PASS`; `CAUTION` and `REJECT` are non-zero.
+
+## Runner Maintenance Smoke
+
+The allowlisted Runner maintenance task
+`mempalace_synthetic_runtime_smoke` runs only this benchmark from the registered
+clean Skeleton checkout:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: mempalace_synthetic_runtime_smoke
+```
+
+The handler accepts no issue-controlled path, command, namespace, project,
+fixture, query, dependency, or environment input. Its public report is limited
+to the benchmark decision, quality score/threshold, check count, aggregate
+disk/RAM/build metrics, stable reason codes, and disabled-state booleans. Live
+private ingestion, canonical writes, services, ports, network providers, and
+model credentials remain disabled.

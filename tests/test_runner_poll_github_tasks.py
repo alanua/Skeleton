@@ -2577,6 +2577,320 @@ def test_unknown_maintenance_task_is_blocked() -> None:
     run_codex.assert_not_called()
 
 
+def _mempalace_runtime_smoke_body(*, extra: tuple[str, ...] = ()) -> str:
+    return str(
+        _maintenance_issue(
+            runner.MEMPALACE_SYNTHETIC_RUNTIME_SMOKE,
+            metadata="\n".join(extra),
+        )["body"]
+    )
+
+
+def _mempalace_benchmark_report(**overrides: object) -> dict[str, object]:
+    report: dict[str, object] = {
+        "schema": "skeleton.mempalace_synthetic_benchmark.v1",
+        "namespace": "skeleton",
+        "project_id": "mempalace_synthetic",
+        "quality_threshold": 0.8,
+        "quality_score": 1.0,
+        "resource_report": {
+            "aggregate_disk_bytes": 1000,
+            "aggregate_ram_bytes": 2000,
+            "aggregate_build_ms": 12,
+        },
+        "checks": [
+            {"check": "namespace_isolation", "passed": True},
+            {"check": "retrieval_synthetic-door-policy", "passed": True},
+            {"check": "deletion_removes_retrieval_result", "passed": True},
+            {"check": "clean_rebuild_manifest", "passed": True},
+            {"check": "bounded_resources", "passed": True},
+        ],
+        "decision": "PASS",
+        "stable_reasons": [
+            "namespace_isolation_proven",
+            "deletion_and_rebuild_pass",
+            "source_attribution_present",
+            "synthetic_quality_threshold_met",
+            "bounded_resources_documented",
+        ],
+    }
+    report.update(overrides)
+    return report
+
+
+def _mempalace_smoke_project_tree(checkout_path: Path) -> dict[str, object]:
+    return {
+        "projects": {
+            "skeleton": {
+                "repo": runner.REPO,
+                "checkout_path": str(checkout_path),
+                "public": True,
+            }
+        }
+    }
+
+
+def _mempalace_smoke_commands(
+    checkout_path: Path,
+    *,
+    benchmark_exit: int = 0,
+    benchmark_output: str | None = None,
+    worktree_status: str = "",
+    head_sha: str = HEAD_SHA,
+    origin_main_sha: str = HEAD_SHA,
+    benchmark_side_effect: object | None = None,
+) -> mock.Mock:
+    if benchmark_output is None:
+        benchmark_output = json.dumps(_mempalace_benchmark_report(), sort_keys=True)
+
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        *,
+        timeout: int | None = None,
+    ) -> tuple[int, str]:
+        assert not any(
+            part in {"pip", "systemctl", "curl", "wget", "gh", "sqlite3"}
+            for part in command
+        )
+        if command == ["git", "-C", str(checkout_path), "remote", "get-url", "origin"]:
+            return 0, "https://github.com/alanua/Skeleton.git\n"
+        if command == ["git", "-C", str(checkout_path), "symbolic-ref", "--short", "HEAD"]:
+            return 0, "main\n"
+        if command == ["git", "-C", str(checkout_path), "status", "--porcelain"]:
+            return 0, worktree_status
+        if command == ["git", "-C", str(checkout_path), "fetch", "--prune", "origin", "main"]:
+            return 0, ""
+        if command == ["git", "-C", str(checkout_path), "rev-parse", "HEAD"]:
+            return 0, f"{head_sha}\n"
+        if command == ["git", "-C", str(checkout_path), "rev-parse", "origin/main"]:
+            return 0, f"{origin_main_sha}\n"
+        if command == ["python3", "scripts/mempalace_synthetic_benchmark.py"]:
+            assert Path(cwd or "") == checkout_path
+            assert timeout == runner.MEMPALACE_SYNTHETIC_BENCHMARK_TIMEOUT_SECONDS
+            if isinstance(benchmark_side_effect, BaseException):
+                raise benchmark_side_effect
+            return benchmark_exit, benchmark_output or ""
+        raise AssertionError(f"unexpected command: {command!r}")
+
+    return mock.Mock(side_effect=run)
+
+
+def test_mempalace_synthetic_runtime_smoke_happy_path_public_report(
+    tmp_path: Path,
+) -> None:
+    checkout_path = tmp_path / "repos" / "Skeleton"
+    checkout_path.mkdir(parents=True)
+    (checkout_path / ".git").mkdir()
+    run = _mempalace_smoke_commands(checkout_path)
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=_mempalace_smoke_project_tree(checkout_path)
+    ), mock.patch.object(
+        runner, "_project_checkout_path_is_under_runner_base", return_value=True
+    ), mock.patch.object(runner, "run_command", run):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.MEMPALACE_SYNTHETIC_RUNTIME_SMOKE,
+            str(runner.ROOT),
+            _mempalace_runtime_smoke_body(),
+        )
+
+    assert report.startswith("DONE:")
+    assert "maintenance_task_id=mempalace_synthetic_runtime_smoke" in report
+    assert "runtime_smoke_decision=PASS" in report
+    assert "quality_score=1.0" in report
+    assert "quality_threshold=0.8" in report
+    assert "runtime_smoke_check_count=5" in report
+    assert "disk_bytes=1000" in report
+    assert "ram_bytes=2000" in report
+    assert "build_ms=12" in report
+    assert "live_private_ingestion=false" in report
+    assert "canonical_write_enabled=false" in report
+    assert "services_enabled=false" in report
+    assert "ports_enabled=false" in report
+    assert "network_provider_enabled=false" in report
+    assert "model_credentials_used=false" in report
+    assert "runtime_smoke_stable_reason=namespace_isolation_proven" in report
+    assert str(checkout_path) not in report
+    run.assert_any_call(
+        ["python3", "scripts/mempalace_synthetic_benchmark.py"],
+        cwd=checkout_path,
+        timeout=runner.MEMPALACE_SYNTHETIC_BENCHMARK_TIMEOUT_SECONDS,
+    )
+
+
+def test_mempalace_synthetic_runtime_smoke_task_id_allowlisted() -> None:
+    assert runner.MEMPALACE_SYNTHETIC_RUNTIME_SMOKE in runner.RUNTIME_MAINTENANCE_TASK_IDS
+
+
+def test_mempalace_synthetic_runtime_smoke_rejects_issue_controlled_input(
+    tmp_path: Path,
+) -> None:
+    checkout_path = tmp_path / "repos" / "Skeleton"
+    run = _mempalace_smoke_commands(checkout_path)
+    body = _mempalace_runtime_smoke_body(
+        extra=(
+            "Command: python3 -m pip install unsafe",
+            "Path: /tmp/private.sqlite",
+            "Fixture: private_customer_record",
+        )
+    )
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=_mempalace_smoke_project_tree(checkout_path)
+    ), mock.patch.object(
+        runner, "_project_checkout_path_is_under_runner_base", return_value=True
+    ), mock.patch.object(runner, "run_command", run):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.MEMPALACE_SYNTHETIC_RUNTIME_SMOKE, str(runner.ROOT), body
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=issue_controlled_input_not_allowed" in report
+    assert run.call_count == 0
+
+
+@pytest.mark.parametrize(
+    ("worktree_status", "head_sha", "origin_main_sha", "expected_reason"),
+    (
+        (" M scripts/runner_poll_github_tasks.py\n", HEAD_SHA, HEAD_SHA, "checkout_dirty"),
+        ("", "b" * 40, HEAD_SHA, "checkout_not_current_main"),
+    ),
+)
+def test_mempalace_synthetic_runtime_smoke_blocks_checkout_before_benchmark(
+    tmp_path: Path,
+    worktree_status: str,
+    head_sha: str,
+    origin_main_sha: str,
+    expected_reason: str,
+) -> None:
+    checkout_path = tmp_path / "repos" / "Skeleton"
+    checkout_path.mkdir(parents=True)
+    (checkout_path / ".git").mkdir()
+    run = _mempalace_smoke_commands(
+        checkout_path,
+        worktree_status=worktree_status,
+        head_sha=head_sha,
+        origin_main_sha=origin_main_sha,
+    )
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=_mempalace_smoke_project_tree(checkout_path)
+    ), mock.patch.object(
+        runner, "_project_checkout_path_is_under_runner_base", return_value=True
+    ), mock.patch.object(runner, "run_command", run):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.MEMPALACE_SYNTHETIC_RUNTIME_SMOKE,
+            str(runner.ROOT),
+            _mempalace_runtime_smoke_body(),
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert f"reason={expected_reason}" in report
+    assert not any(
+        call.args[0] == ["python3", "scripts/mempalace_synthetic_benchmark.py"]
+        for call in run.call_args_list
+    )
+
+
+@pytest.mark.parametrize(
+    ("benchmark_exit", "benchmark_output", "side_effect", "expected_reason"),
+    (
+        (0, "", runner.subprocess.TimeoutExpired(cmd=["python3"], timeout=1), "benchmark_timeout"),
+        (1, json.dumps(_mempalace_benchmark_report(), sort_keys=True), None, "benchmark_nonzero_exit"),
+        (0, "{", None, "malformed_benchmark_json"),
+        (0, json.dumps(_mempalace_benchmark_report()) + "\nextra", None, "benchmark_extra_output"),
+        (
+            0,
+            json.dumps(_mempalace_benchmark_report(schema="wrong.schema"), sort_keys=True),
+            None,
+            "benchmark_schema_mismatch",
+        ),
+        (
+            0,
+            json.dumps(_mempalace_benchmark_report(namespace="other"), sort_keys=True),
+            None,
+            "benchmark_scope_mismatch",
+        ),
+        (
+            0,
+            json.dumps(_mempalace_benchmark_report(project_id="other"), sort_keys=True),
+            None,
+            "benchmark_scope_mismatch",
+        ),
+        (
+            0,
+            json.dumps(_mempalace_benchmark_report(decision="CAUTION"), sort_keys=True),
+            None,
+            "benchmark_decision_not_pass",
+        ),
+        (
+            0,
+            json.dumps(_mempalace_benchmark_report(decision="REJECT"), sort_keys=True),
+            None,
+            "benchmark_decision_not_pass",
+        ),
+        (
+            0,
+            json.dumps(
+                _mempalace_benchmark_report(checks=[{"check": "namespace_isolation", "passed": False}]),
+                sort_keys=True,
+            ),
+            None,
+            "benchmark_failed_check",
+        ),
+        (
+            0,
+            json.dumps(_mempalace_benchmark_report(checks=[]), sort_keys=True),
+            None,
+            "benchmark_missing_checks",
+        ),
+        (
+            0,
+            json.dumps(_mempalace_benchmark_report(stable_reasons=[]), sort_keys=True),
+            None,
+            "benchmark_missing_stable_reason",
+        ),
+        (
+            0,
+            json.dumps(_mempalace_benchmark_report(stable_reasons=["secret"]), sort_keys=True),
+            None,
+            "private_like_benchmark_output",
+        ),
+    ),
+)
+def test_mempalace_synthetic_runtime_smoke_blocks_bad_benchmark_results(
+    tmp_path: Path,
+    benchmark_exit: int,
+    benchmark_output: str,
+    side_effect: object | None,
+    expected_reason: str,
+) -> None:
+    checkout_path = tmp_path / "repos" / "Skeleton"
+    checkout_path.mkdir(parents=True)
+    (checkout_path / ".git").mkdir()
+    run = _mempalace_smoke_commands(
+        checkout_path,
+        benchmark_exit=benchmark_exit,
+        benchmark_output=benchmark_output,
+        benchmark_side_effect=side_effect,
+    )
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=_mempalace_smoke_project_tree(checkout_path)
+    ), mock.patch.object(
+        runner, "_project_checkout_path_is_under_runner_base", return_value=True
+    ), mock.patch.object(runner, "run_command", run):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.MEMPALACE_SYNTHETIC_RUNTIME_SMOKE,
+            str(runner.ROOT),
+            _mempalace_runtime_smoke_body(),
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert f"reason={expected_reason}" in report
+
+
 def test_private_memory_healthcheck_is_allowlisted_and_read_only_by_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

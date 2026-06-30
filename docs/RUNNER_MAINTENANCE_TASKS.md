@@ -524,6 +524,45 @@ proposal content, canonical values, event refs, paths, SQL, table names,
 environment values, secrets, tokens, customer data, drawings, measurements,
 quantities, or raw exception text.
 
+`mempalace_synthetic_runtime_smoke` is a bounded public-safe maintenance task
+for the deterministic MemPalace synthetic benchmark. It requires no target
+metadata and accepts no fenced task payload:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: mempalace_synthetic_runtime_smoke
+```
+
+It may only:
+
+1. Resolve the registered clean Skeleton checkout from `PROJECT_TREE.yaml`.
+2. Require that checkout to be present, have the Skeleton origin, be on current
+   `main`, and have a clean worktree before any benchmark command runs.
+3. Run exactly `python3 scripts/mempalace_synthetic_benchmark.py` from that
+   registered checkout with a bounded timeout.
+4. Require the benchmark to emit one JSON object only, exit zero, and use schema
+   `skeleton.mempalace_synthetic_benchmark.v1`.
+5. Require namespace `skeleton`, project id `mempalace_synthetic`, decision
+   `PASS`, `quality_score >= quality_threshold`, at least one check, and every
+   check passed.
+6. Require stable reasons proving namespace isolation, deletion/rebuild,
+   source attribution, quality threshold, and bounded resources.
+7. Report only public aggregate benchmark fields: decision, quality
+   score/threshold, check count, aggregate disk/RAM/build metrics, stable
+   reasons, and disabled-state booleans.
+
+It always reports `live_private_ingestion=false`,
+`canonical_write_enabled=false`, `services_enabled=false`,
+`ports_enabled=false`, `network_provider_enabled=false`, and
+`model_credentials_used=false`. It must not accept issue-controlled paths,
+commands, namespaces, project ids, fixtures, queries, dependencies, or
+environment input. It must not install dependencies, mutate profiles, start
+services, open ports, access private data, Graphify data, SQLite contents,
+Gmail, Drive, PDFs, drawings, or real project records. Malformed JSON, extra
+output, timeout, nonzero exit, missing checks, failed checks, schema/scope
+mismatch, `CAUTION`/`REJECT`, missing stable reasons, private-like output,
+checkout mismatch, or dirty state are all `BLOCKED`.
+
 `prepare_aufmass_private_runtime` verifies that the registered private Aufmass
 runtime is ready for a controlled private pilot dry run. It requires no target
 metadata:
