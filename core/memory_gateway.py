@@ -6,6 +6,15 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from core.canonical_memory import (
+    CANONICAL_OPERATOR_PREFERENCES_NAMESPACE,
+    CANONICAL_OPERATOR_PREFERENCES_SCOPE,
+    FAST_AUTONOMOUS_EXECUTION_KEY,
+)
+from core.canonical_memory_import import (
+    CanonicalMemoryImportError,
+    import_approved_operator_preference_manifest,
+)
 from core.canonical_memory_manifest import prepare_canonical_memory_manifest
 from core.graphify_adapter import GraphifyAdapterError
 from core.mempalace_adapter import MemPalaceAdapter, MemPalaceAdapterError
@@ -28,6 +37,7 @@ from core.memory_gateway_policy import (
 )
 from core.memory_override import MemoryOverrideRegistry
 from core.memory_patch_proposal import MemoryPatchProposalRegistry
+from core.skeleton_memory import SkeletonMemory
 
 
 MEMORY_GATEWAY_REQUEST_SCHEMA = "skeleton.memory_gateway.request.v1"
@@ -65,6 +75,7 @@ class MemoryGateway:
         override_registry: MemoryOverrideRegistry | None = None,
         mempalace_adapter: MemPalaceAdapter | None = None,
         graphify_adapter: object | None = None,
+        skeleton_memory: SkeletonMemory | None = None,
     ) -> None:
         self._token = _normalize_token(token)
         self._patch_registry = patch_registry or MemoryPatchProposalRegistry()
@@ -76,6 +87,7 @@ class MemoryGateway:
         self._freshness = _freshness_seed()
         self._mempalace_adapter = mempalace_adapter
         self._graphify_adapter = graphify_adapter
+        self._skeleton_memory = skeleton_memory
 
     def execute(self, request: Mapping[str, Any]) -> dict[str, object]:
         if not isinstance(request, Mapping):
@@ -99,10 +111,17 @@ class MemoryGateway:
             "memory.get_audit_log": self.get_audit_log,
             "memory.get_index_freshness": self.get_memory_index_freshness,
             "memory.prepare_canonical_manifest": self.prepare_canonical_manifest,
+            "memory.import_canonical_manifest": self.import_canonical_manifest,
             "graph.query_code": self.query_code,
             "graph.get_index_freshness": self.get_graph_index_freshness,
             "memory.propose_patch": self.propose_patch,
         }
+        if suffix == "memory.import_canonical_manifest":
+            return self.import_canonical_manifest(
+                namespace=namespace,
+                manifest=payload.get("manifest"),
+                project_id=payload.get("project_id"),
+            )
         return handlers[suffix](namespace=namespace, **payload)
 
     def lookup_exact(self, *, namespace: str, key: str, project_id: object = None) -> dict[str, object]:
@@ -112,7 +131,9 @@ class MemoryGateway:
         try:
             record = self._canonical[(namespace, project_id)][key]
         except KeyError as exc:
-            raise MemoryGatewayPolicyError("CANONICAL_FACT_NOT_FOUND", "canonical fact not found") from exc
+            record = self._lookup_sqlite_canonical_exact(namespace=namespace, project_id=project_id, key=key)
+            if record is None:
+                raise MemoryGatewayPolicyError("CANONICAL_FACT_NOT_FOUND", "canonical fact not found") from exc
         return self._response(
             namespace=namespace,
             command_suffix="memory.lookup_exact",
@@ -382,6 +403,46 @@ class MemoryGateway:
             },
         )
 
+    def import_canonical_manifest(
+        self, *, namespace: str, manifest: Mapping[str, Any], project_id: object = None, **_untrusted_inputs: object
+    ) -> dict[str, object]:
+        namespace = self._authorize_namespace(namespace)
+        if namespace != "skeleton":
+            raise MemoryGatewayPolicyError(
+                "CANONICAL_IMPORT_NAMESPACE_NOT_AUTHORIZED",
+                "canonical import is only available through skeleton namespace",
+            )
+        project_id = self._scope_project_id(namespace, project_id)
+        if project_id != "skeleton":
+            raise MemoryGatewayPolicyError(
+                "PROJECT_NOT_AUTHORIZED",
+                "canonical import is not project-scoped",
+            )
+        if self._skeleton_memory is None:
+            raise MemoryGatewayPolicyError(
+                "TRUSTED_STORE_REQUIRED",
+                "canonical import requires an injected SkeletonMemory store",
+            )
+        if not isinstance(manifest, Mapping):
+            raise MemoryGatewayPolicyError("INVALID_CANONICAL_MANIFEST", "manifest must be an object")
+        try:
+            receipt = import_approved_operator_preference_manifest(
+                store=self._skeleton_memory,
+                manifest=manifest,
+                exact_lookup=lambda key: self.lookup_exact(
+                    namespace="skeleton",
+                    project_id="skeleton",
+                    key=key,
+                ),
+            )
+        except CanonicalMemoryImportError as exc:
+            raise MemoryGatewayPolicyError(exc.reason_code, str(exc)) from exc
+        return self._response(
+            namespace=namespace,
+            command_suffix="memory.import_canonical_manifest",
+            payload=receipt,
+        )
+
     def propose_patch(
         self, *, namespace: str, proposal: Mapping[str, Any], project_id: object = None
     ) -> dict[str, object]:
@@ -580,6 +641,48 @@ class MemoryGateway:
         }
         json.dumps(response, allow_nan=False, sort_keys=True)
         return response
+
+    def _lookup_sqlite_canonical_exact(
+        self,
+        *,
+        namespace: str,
+        project_id: str,
+        key: str,
+    ) -> dict[str, object] | None:
+        if (
+            self._skeleton_memory is None
+            or namespace != "skeleton"
+            or project_id != "skeleton"
+            or key != FAST_AUTONOMOUS_EXECUTION_KEY
+        ):
+            return None
+        record = self._skeleton_memory.lookup_canonical_record(
+            namespace=CANONICAL_OPERATOR_PREFERENCES_NAMESPACE,
+            scope=CANONICAL_OPERATOR_PREFERENCES_SCOPE,
+            key=FAST_AUTONOMOUS_EXECUTION_KEY,
+        )
+        if record is None:
+            return None
+        return {
+            "canonical_ref": f"canon-{CANONICAL_OPERATOR_PREFERENCES_NAMESPACE}-{record['version']}",
+            "canonical_revision": record["canonical_revision"],
+            "created_revision": record["created_revision"],
+            "imported_at": record["imported_at"],
+            "fact_type": "operator_working_style_preference",
+            "canonical_namespace": record["namespace"],
+            "scope": record["scope"],
+            "key": record["key"],
+            "version": record["version"],
+            "integrity_hash": record["integrity_hash"],
+            "normalized_manifest_json": record["manifest_json"],
+            "provenance_refs": [
+                {
+                    "ref": record["provenance_ref"],
+                    "kind": "exact_source",
+                    "evidence_hash": record["integrity_hash"],
+                }
+            ],
+        }
 
 
 def _normalize_token(token: GatewayCapabilityToken | Mapping[str, Any]) -> GatewayCapabilityToken:

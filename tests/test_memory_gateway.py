@@ -12,6 +12,7 @@ from core.memory_gateway import (
     allowed_command_names,
     capability_token,
 )
+from core.skeleton_memory import SkeletonMemory
 from core.canonical_memory_manifest import (
     APPROVED_OPERATOR_RULE_CATEGORIES,
     canonical_manifest_integrity_hash,
@@ -408,6 +409,31 @@ def test_canonical_manifest_preparation_readback_is_non_authoritative() -> None:
     assert excinfo.value.reason_code == "CANONICAL_FACT_NOT_FOUND"
 
 
+def test_canonical_manifest_import_command_reads_back_authoritative() -> None:
+    manifest = json.loads(
+        (ROOT / "fixtures" / "canonical_memory" / "operator_preferences_fast_autonomous_execution_v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    memory = SkeletonMemory()
+    gw = MemoryGateway(capability_token(namespaces=("skeleton",)), skeleton_memory=memory)
+
+    result = gw.execute(request("skeleton", "memory.import_canonical_manifest", {"manifest": manifest}))
+    payload = result["payload"]
+    exact = gw.lookup_exact(namespace="skeleton", project_id="skeleton", key="fast_autonomous_execution_v1")[
+        "payload"
+    ]
+
+    assert payload["idempotency_classification"] == "NEW_IMPORT"
+    assert payload["snapshot_status"] == "created"
+    assert payload["read_back_status"] == "verified"
+    assert payload["rollback_status"] == "not_required"
+    assert payload["authoritative"] is True
+    assert exact["authoritative"] is True
+    assert exact["canonical_revision"] == payload["canonical_revision"]
+    assert exact["integrity_hash"] == canonical_manifest_integrity_hash(manifest)
+
+
 def test_canonical_manifest_preparation_rejects_invalid_manifest() -> None:
     manifest = json.loads(
         (ROOT / "fixtures" / "canonical_memory" / "operator_preferences_fast_autonomous_execution_v1.json").read_text(
@@ -452,6 +478,7 @@ def test_required_namespaces_and_allowlisted_commands_are_registered() -> None:
             f"{namespace}.memory.get_audit_log",
             f"{namespace}.memory.get_index_freshness",
             f"{namespace}.memory.prepare_canonical_manifest",
+            f"{namespace}.memory.import_canonical_manifest",
             f"{namespace}.graph.query_code",
             f"{namespace}.graph.get_index_freshness",
             f"{namespace}.memory.propose_patch",

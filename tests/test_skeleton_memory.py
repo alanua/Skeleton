@@ -25,6 +25,9 @@ def test_schema_initializes_expected_tables() -> None:
         "decision_records",
         "canon_candidates",
         "private_reference_stubs",
+        "canonical_memory_records",
+        "canonical_import_snapshots",
+        "canonical_import_receipts",
     }.issubset(table_names(memory.connection))
 
 
