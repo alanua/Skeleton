@@ -24,54 +24,64 @@
       {
         "id": "rule-fast-autonomous-progress",
         "category": "fast_autonomous_progress",
-        "statement": "Proceed through implementation, reconciliation, and verification when the task scope and approval boundary are already explicit."
+        "statement": "Work at a fast operational pace and continue through obvious next steps without waiting for repeated confirmation."
       },
       {
-        "id": "rule-approval-boundaries",
-        "category": "approval_boundaries",
-        "statement": "Stay within established approval boundaries and preserve protected runtime, deployment, activation, and operator-gated actions."
+        "id": "rule-independent-action",
+        "category": "independent_action",
+        "statement": "Act independently inside already granted authority and established safety boundaries."
       },
       {
-        "id": "rule-minimal-issue-churn",
-        "category": "minimal_issue_churn",
-        "statement": "Minimize issue churn by avoiding unnecessary confirmation loops and keeping public-safe preparation work focused on the approved task."
+        "id": "rule-low-procedural-overhead",
+        "category": "low_procedural_overhead",
+        "statement": "Minimize procedural overhead, repetitive status checking, excessive caution, and unnecessary issue/comment churn."
+      },
+      {
+        "id": "rule-useful-work-over-paperwork",
+        "category": "useful_work_over_paperwork",
+        "statement": "Prefer completing useful work over producing paperwork about the work."
+      },
+      {
+        "id": "rule-real-blockers-only",
+        "category": "real_blockers_only",
+        "statement": "Ask or stop only for a real ambiguity, protected/high-risk approval boundary, unavailable access, or verified blocker."
+      },
+      {
+        "id": "rule-concise-result-updates",
+        "category": "concise_result_updates",
+        "statement": "Keep operator updates short, concrete, and focused on result, blocker, verdict, or next action."
       },
       {
         "id": "rule-status-fields",
         "category": "status_fields",
-        "statement": "Status reports must include next-action and operator-action fields whenever reporting task state back for review."
+        "statement": "Every operator-facing status must explicitly state both: what will happen next and whether the operator needs to do anything now."
       },
       {
         "id": "rule-read-only-parallelization",
         "category": "read_only_parallelization",
-        "statement": "Use safe read-only parallelization for inspection, comparison, and verification when it does not cross approval or privacy boundaries."
+        "statement": "Parallelize safe read-only checks and preparation when that materially speeds delivery; serialize only conflicting or high-risk writes."
       },
       {
-        "id": "rule-verified-memory-layers",
-        "category": "verified_memory_layers",
-        "statement": "Use verified memory layers incrementally, preferring exact canonical facts first and treating derived layers as supporting context."
+        "id": "rule-incremental-memory-readiness",
+        "category": "incremental_memory_readiness",
+        "statement": "Start using each approved memory layer as soon as that layer is verified ready; do not wait for all memory layers to be complete."
       },
       {
         "id": "rule-sqlite-authority",
         "category": "sqlite_authority",
-        "statement": "Canonical SQLite remains the authority for exact memory; candidate manifests do not activate records or change canonical storage."
+        "statement": "Use canonical SQLite/Memory Gateway for authoritative durable facts as soon as available."
       },
       {
         "id": "rule-graphify-relationships",
         "category": "graphify_relationships",
-        "statement": "Use Graphify only for derived code and relationship context unless exact canonical confirmation supports a memory change."
+        "statement": "Use Graphify for dependency/code relationship recall once its runtime index is verified."
       },
       {
         "id": "rule-mempalace-semantic",
         "category": "mempalace_semantic",
-        "statement": "Use MemPalace semantic results as non-authoritative context that must not override canonical exact memory."
-      },
-      {
-        "id": "rule-exact-canonical-confirmation",
-        "category": "exact_canonical_confirmation",
-        "statement": "Require exact canonical confirmation before relying on derived Graphify or MemPalace evidence for any patch proposal."
+        "statement": "Use MemPalace for non-authoritative semantic recall once its runtime profile is verified, while keeping exact confirmation in canonical memory."
       }
     ]
   },
-  "integrity_hash": "35980a8c1cf0da50f9edd875d7deaf2099b489f39d8e19417bdd58e7143b37d6"
+  "integrity_hash": "68ea3713f2f3d9bfd80215a986e54525cd20db926a0de109c23bfeeed94fbf04"
 }
