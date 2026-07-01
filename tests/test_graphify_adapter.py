@@ -14,6 +14,7 @@ from core.graphify_adapter import (
     GRAPHIFY_SYNTHETIC_PROJECT_ID,
     GraphifyAdapter,
     GraphifyAdapterError,
+    LocalGraphifyIndex,
     load_synthetic_fixture,
 )
 from core.memory_gateway import MEMORY_GATEWAY_REQUEST_SCHEMA, MemoryGateway, capability_token
@@ -254,6 +255,36 @@ def test_deleted_fixture_items_and_raw_private_markers_do_not_escape_public_outp
         "local_path",
     ):
         assert forbidden not in serialized
+
+
+def test_local_graphify_index_validates_hash_and_counts_on_status_and_load(tmp_path: Path) -> None:
+    index_path = tmp_path / "graphify.index.json"
+    facts = [
+        {
+            "namespace": "skeleton.notes",
+            "fact_id": "note1",
+            "canonical_ref": "skeleton.notes:note1",
+            "value": {"summary": "alpha", "tags": ["ops"]},
+            "value_hash": "a" * 64,
+            "canonical_revision": 1,
+        }
+    ]
+    LocalGraphifyIndex.rebuild_from_facts(index_path, facts=facts, canonical_revision=1)
+    payload = json.loads(index_path.read_text(encoding="utf-8"))
+    payload["relationship_count"] += 1
+    index_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert LocalGraphifyIndex.status(index_path, current_canonical_revision=1)["state"] == "BLOCKED"
+    with pytest.raises(GraphifyAdapterError):
+        LocalGraphifyIndex(index_path)
+
+
+def test_local_graphify_rejects_empty_queries(tmp_path: Path) -> None:
+    index_path = tmp_path / "graphify.index.json"
+    LocalGraphifyIndex.rebuild_from_facts(index_path, facts=[], canonical_revision=1)
+
+    with pytest.raises(GraphifyAdapterError):
+        LocalGraphifyIndex(index_path).query(query="!!!")
 
 
 def test_adapter_does_not_call_subprocess_network_service_write_or_runtime_mutation(monkeypatch: pytest.MonkeyPatch) -> None:
