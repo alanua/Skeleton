@@ -49,10 +49,14 @@ The private root is created with mode `0700`. SQLite and derived files are writt
 
 Canonical facts and history are preserved. Initialization validates a non-empty existing database and never recreates or overwrites a valid one. The approved `fast_autonomous_execution_v1` manifest is imported idempotently through the Memory Gateway path and mirrored into the private SQLite authority.
 
-After every successful canonical put or delete, both derived indexes are rebuilt from the same active SQLite facts before success is reported. If an index rebuild fails, the canonical database is restored from its pre-mutation snapshot and the mutation is reported as blocked.
+After every successful canonical put or delete, both derived indexes are rebuilt from the same active SQLite facts before success is reported. The canonical mutation and both derived index rebuilds run under one inter-process exclusive lock so concurrent writers cannot observe a half-rebuilt stack.
+
+If an index rebuild fails, the canonical database is restored from a logical SQLite backup made through SQLite's backup API instead of raw database bytes. Rollback removes stale `-wal` and `-shm` sidecars before reporting the mutation as blocked.
 
 Graphify and MemPalace never write canonical SQLite directly.
 
 ## Status
 
-`skeleton-memory status` reports only aggregate counts and `READY`, `STALE`, or `BLOCKED` states. It does not print private values, local paths, records, index contents, or backup contents.
+`skeleton-memory status` reports only aggregate counts and `READY`, `STALE`, or `BLOCKED` states. Local Graphify and MemPalace index loads and status checks validate the stored `index_hash` and aggregate counts before reporting readiness. Empty derived-index queries are rejected. Stale derived indexes remain non-authoritative and cannot support write proposals.
+
+Status output does not print private values, local paths, records, index contents, or backup contents.

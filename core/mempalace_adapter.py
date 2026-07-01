@@ -93,8 +93,7 @@ class LocalMemPalaceIndex:
             return {"state": "STALE", "indexed_canonical_revision": 0, "item_count": 0}
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-            if data.get("schema") != LOCAL_MEMPALACE_INDEX_SCHEMA:
-                raise MemPalaceAdapterError("INVALID_LOCAL_INDEX", "local MemPalace index schema is invalid")
+            _validate_local_mempalace_index(data)
             indexed = int(data.get("indexed_canonical_revision", 0))
             state = "READY" if indexed == current_canonical_revision else "STALE"
             return {
@@ -107,7 +106,10 @@ class LocalMemPalaceIndex:
             return {"state": "BLOCKED", "indexed_canonical_revision": 0, "item_count": 0, "authoritative": False}
 
     def search(self, *, query: str, limit: int = 5) -> dict[str, object]:
-        terms = set(query_terms(query))
+        try:
+            terms = set(query_terms(query))
+        except MemPalaceProjectionError as exc:
+            raise MemPalaceAdapterError(exc.reason_code, str(exc)) from exc
         limit = _bounded_limit(limit)
         scored = []
         for document in self._index["documents"]:
@@ -131,7 +133,7 @@ class LocalMemPalaceIndex:
                         "source_attribution": [deepcopy(document["source_attribution"])],
                         "indexed_canonical_revision": self._index["indexed_canonical_revision"],
                         "current_canonical_revision": self._index["current_canonical_revision"],
-                        "stale": False,
+                        "stale": self._index["indexed_canonical_revision"] != self._index["current_canonical_revision"],
                         "bounded_text": bounded_excerpt(str(document["text"])),
                     },
                 )
@@ -146,8 +148,7 @@ class LocalMemPalaceIndex:
 
     def _load(self) -> dict[str, Any]:
         data = json.loads(self.index_path.read_text(encoding="utf-8"))
-        if data.get("schema") != LOCAL_MEMPALACE_INDEX_SCHEMA:
-            raise MemPalaceAdapterError("INVALID_LOCAL_INDEX", "local MemPalace index schema is invalid")
+        _validate_local_mempalace_index(data)
         return data
 
 
@@ -321,6 +322,25 @@ def _flatten_text(value: Any) -> str:
 
 def _item_id(canonical_ref: str) -> str:
     return "mempalace-" + bytes_hash(canonical_ref.encode("utf-8"))[:24]
+
+
+def _validate_local_mempalace_index(data: object) -> Mapping[str, Any]:
+    if not isinstance(data, Mapping) or data.get("schema") != LOCAL_MEMPALACE_INDEX_SCHEMA:
+        raise MemPalaceAdapterError("INVALID_LOCAL_INDEX", "local MemPalace index schema is invalid")
+    documents = data.get("documents")
+    if not isinstance(documents, list):
+        raise MemPalaceAdapterError("INVALID_LOCAL_INDEX", "local MemPalace documents must be an array")
+    if int(data.get("item_count", -1)) != len(documents):
+        raise MemPalaceAdapterError("INVALID_LOCAL_INDEX", "local MemPalace item count is invalid")
+    expected_hash = data.get("index_hash")
+    if not isinstance(expected_hash, str) or len(expected_hash) != 64:
+        raise MemPalaceAdapterError("INVALID_LOCAL_INDEX", "local MemPalace index hash is invalid")
+    without_hash = dict(data)
+    without_hash.pop("index_hash", None)
+    actual_hash = bytes_hash(canonical_json(without_hash).encode("utf-8"))
+    if actual_hash != expected_hash:
+        raise MemPalaceAdapterError("INVALID_LOCAL_INDEX", "local MemPalace index hash mismatch")
+    return data
 
 
 def atomic_write_json_private(path: Path, payload: Mapping[str, Any]) -> None:

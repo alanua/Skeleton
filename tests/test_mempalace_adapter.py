@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from core.mempalace_adapter import MemPalaceAdapter
+from core.mempalace_adapter import LocalMemPalaceIndex, MemPalaceAdapter, MemPalaceAdapterError
 from core.mempalace_projection import MEMPALACE_SYNTHETIC_NAMESPACE, MEMPALACE_SYNTHETIC_PROJECT_ID, load_projection
 from core.memory_gateway import MEMORY_GATEWAY_REQUEST_SCHEMA, MemoryGateway, capability_token
 from core.memory_gateway_policy import STALE_INDEX_RESULT_NOT_PATCH_ELIGIBLE, MemoryGatewayPolicyError
@@ -242,6 +242,36 @@ def test_rebuild_reproduces_deterministic_index_manifest() -> None:
     adapter = MemPalaceAdapter(projection())
 
     assert adapter.manifest == adapter.rebuild_manifest()
+
+
+def test_local_mempalace_index_validates_hash_and_counts_on_status_and_load(tmp_path: Path) -> None:
+    index_path = tmp_path / "mempalace.index.json"
+    facts = [
+        {
+            "namespace": "skeleton.notes",
+            "fact_id": "note1",
+            "canonical_ref": "skeleton.notes:note1",
+            "value": {"summary": "alpha beta"},
+            "value_hash": "a" * 64,
+            "canonical_revision": 1,
+        }
+    ]
+    LocalMemPalaceIndex.rebuild_from_facts(index_path, facts=facts, canonical_revision=1)
+    payload = json.loads(index_path.read_text(encoding="utf-8"))
+    payload["documents"][0]["tokens"].append("tampered")
+    index_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert LocalMemPalaceIndex.status(index_path, current_canonical_revision=1)["state"] == "BLOCKED"
+    with pytest.raises(MemPalaceAdapterError):
+        LocalMemPalaceIndex(index_path)
+
+
+def test_local_mempalace_rejects_empty_queries(tmp_path: Path) -> None:
+    index_path = tmp_path / "mempalace.index.json"
+    LocalMemPalaceIndex.rebuild_from_facts(index_path, facts=[], canonical_revision=1)
+
+    with pytest.raises(MemPalaceAdapterError):
+        LocalMemPalaceIndex(index_path).search(query="   ")
 
 
 def test_unsupported_arbitrary_field_rejected() -> None:

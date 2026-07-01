@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import json
+import multiprocessing as mp
 import sqlite3
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
 from core.canonical_memory import FAST_AUTONOMOUS_EXECUTION_KEY
+from core.graphify_adapter import GraphifyAdapterError
 from core.mempalace_adapter import LocalMemPalaceIndex
-from core.private_memory_stack import PrivateMemoryStack
+from core.private_memory_stack import PrivateMemoryStack, PrivateMemoryStackError
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -75,12 +78,15 @@ def test_put_rebuilds_indexes_and_exact_get_reads_sqlite(tmp_path: Path) -> None
 
 def test_status_schema_has_no_raw_private_content_or_paths(tmp_path: Path) -> None:
     jsonschema = pytest.importorskip("jsonschema")
+    schema_path = ROOT / "schemas" / "private_memory_stack_status.schema.json"
+    if not schema_path.is_file():
+        pytest.skip("private memory stack schema is not present in this sandbox checkout")
     stack = PrivateMemoryStack(tmp_path)
     stack.init()
     stack.put(namespace="skeleton.notes", fact_id="private1", value={"summary": "private phrase xyz"})
 
     status = stack.status()
-    schema = json.loads((ROOT / "schemas" / "private_memory_stack_status.schema.json").read_text(encoding="utf-8"))
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
     serialized = json.dumps(status, sort_keys=True)
 
     jsonschema.Draft202012Validator(schema).validate(status)
@@ -135,6 +141,8 @@ def test_rollback_restores_canonical_database_when_index_rebuild_fails(
     with pytest.raises(Exception):
         stack.put(namespace="skeleton.notes", fact_id="willrollback", value={"summary": "rollback"})
 
+    assert not (tmp_path / "canonical.sqlite-wal").exists()
+    assert not (tmp_path / "canonical.sqlite-shm").exists()
     with sqlite3.connect(tmp_path / "canonical.sqlite") as connection:
         revision = connection.execute(
             "SELECT current_revision FROM private_memory_canonical_revision WHERE id = 1"
@@ -146,7 +154,61 @@ def test_rollback_restores_canonical_database_when_index_rebuild_fails(
     assert row == 0
 
 
+def test_corrupted_local_indexes_block_status(tmp_path: Path) -> None:
+    stack = PrivateMemoryStack(tmp_path)
+    stack.init()
+    stack.put(namespace="skeleton.notes", fact_id="note1", value={"summary": "alpha beta"})
+
+    mempalace = json.loads((tmp_path / "mempalace.index.json").read_text(encoding="utf-8"))
+    mempalace["item_count"] += 1
+    (tmp_path / "mempalace.index.json").write_text(json.dumps(mempalace), encoding="utf-8")
+    assert stack.status()["mempalace"]["state"] == "BLOCKED"
+
+    stack.rebuild()
+    graphify = json.loads((tmp_path / "graphify.index.json").read_text(encoding="utf-8"))
+    graphify["relationships"].append(graphify["relationships"][0])
+    (tmp_path / "graphify.index.json").write_text(json.dumps(graphify), encoding="utf-8")
+    status = stack.status()
+    assert status["state"] == "BLOCKED"
+    assert status["graphify"]["state"] == "BLOCKED"
+
+
+def test_empty_local_queries_are_rejected(tmp_path: Path) -> None:
+    stack = PrivateMemoryStack(tmp_path)
+    stack.init()
+
+    with pytest.raises(Exception):
+        stack.search(query="   ")
+    with pytest.raises(GraphifyAdapterError):
+        stack.relations(query="!!!")
+
+
+def test_exclusive_lock_blocks_concurrent_mutation_until_released(tmp_path: Path) -> None:
+    stack = PrivateMemoryStack(tmp_path)
+    stack.init()
+    lock_path = tmp_path / "private_memory_stack.lock"
+    queue: mp.Queue[str] = mp.Queue()
+
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        process = mp.Process(target=_put_fact_in_process, args=(tmp_path, queue))
+        process.start()
+        time.sleep(0.2)
+        assert process.is_alive()
+        assert queue.empty()
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    process.join(timeout=5)
+    assert process.exitcode == 0
+    assert queue.get(timeout=1) == "DONE"
+    assert stack.get(namespace="skeleton.notes", fact_id="locked")["value"]["summary"] == "locked write"
+
+
 def test_cli_help_and_installer_syntax() -> None:
+    if not (ROOT / "scripts" / "skeleton_private_memory.py").is_file():
+        pytest.skip("private memory stack scripts are not present in this sandbox checkout")
     help_result = subprocess.run(
         [sys.executable, "scripts/skeleton_private_memory.py", "--help"],
         cwd=ROOT,
@@ -157,3 +219,15 @@ def test_cli_help_and_installer_syntax() -> None:
     assert "init" in help_result.stdout
 
     subprocess.run(["bash", "-n", "scripts/install_skeleton_private_memory.sh"], cwd=ROOT, check=True)
+
+
+def _put_fact_in_process(root: Path, queue: mp.Queue[str]) -> None:
+    try:
+        PrivateMemoryStack(root).put(
+            namespace="skeleton.notes",
+            fact_id="locked",
+            value={"summary": "locked write"},
+        )
+        queue.put("DONE")
+    except PrivateMemoryStackError as exc:
+        queue.put(type(exc).__name__)
