@@ -1,0 +1,48 @@
+name: Read-only audit validation
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: readonly-audit-validation-${{ github.event.pull_request.head.sha || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Snapshot and validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact event SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run fixed read-only audit validation
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PIP_DISABLE_PIP_VERSION_CHECK: "1"
+        run: python3 scripts/readonly_audit_snapshot.py --output-dir audit_evidence
+
+      - name: Upload audit evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: readonly-audit-evidence-${{ github.run_id }}
+          path: |
+            audit_evidence/audit_manifest.json
+            audit_evidence/validation_summary.json
+          if-no-files-found: error
+          retention-days: 7
