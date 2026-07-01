@@ -1,0 +1,58 @@
+# Private Memory Stack
+
+Skeleton private memory is a local-only stack for an operator server. SQLite is the only authority. Graphify and MemPalace are derived local indexes rebuilt from active SQLite facts.
+
+Aufmass is out of scope.
+
+## Install
+
+```bash
+bash scripts/install_skeleton_private_memory.sh
+```
+
+The installer creates `~/.local/bin/skeleton-memory`, runs a private smoke test with synthetic temporary values, deletes the temporary fact, and rebuilds indexes. It does not start a service, open a port, contact a provider, request credentials, or upload data.
+
+Set a private root when needed:
+
+```bash
+export SKELETON_PRIVATE_MEMORY_ROOT="$HOME/.local/share/skeleton-private-memory"
+```
+
+## Commands
+
+```bash
+skeleton-memory init
+skeleton-memory put skeleton.notes note1 --json '{"summary":"local fact","tags":["ops"]}'
+skeleton-memory get skeleton.notes note1
+skeleton-memory search "local fact" --limit 5
+skeleton-memory relations ops --limit 5
+skeleton-memory rebuild
+skeleton-memory backup --snapshot-id snapshot-001
+skeleton-memory status
+```
+
+`get` is exact and authoritative because it reads canonical SQLite directly. `search` and `relations` are non-authoritative derived results and include canonical refs and revisions for exact confirmation.
+
+## Storage
+
+All runtime files stay under one configured private root:
+
+- `canonical.sqlite`: canonical private memory database
+- `mempalace.index.json`: derived semantic index
+- `graphify.index.json`: derived relationship index
+- `backups/*.sqlite`: local SQLite snapshots
+- `memory_gateway_import.sqlite`: local receipt database for the approved Memory Gateway manifest import path
+
+The private root is created with mode `0700`. SQLite and derived files are written with mode `0600`. SQLite WAL and integrity checks are enabled where supported.
+
+## Authority
+
+Canonical facts and history are preserved. Initialization validates a non-empty existing database and never recreates or overwrites a valid one. The approved `fast_autonomous_execution_v1` manifest is imported idempotently through the Memory Gateway path and mirrored into the private SQLite authority.
+
+After every successful canonical put or delete, both derived indexes are rebuilt from the same active SQLite facts before success is reported. If an index rebuild fails, the canonical database is restored from its pre-mutation snapshot and the mutation is reported as blocked.
+
+Graphify and MemPalace never write canonical SQLite directly.
+
+## Status
+
+`skeleton-memory status` reports only aggregate counts and `READY`, `STALE`, or `BLOCKED` states. It does not print private values, local paths, records, index contents, or backup contents.

@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 from copy import deepcopy
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any, Mapping
 
 from core.memory_gateway_policy import validate_public_payload
+from core.private_memory_history import bytes_hash, canonical_json, utc_now
 
 
 GRAPHIFY_RESULT_SCHEMA = "skeleton.graphify_result.v1"
+LOCAL_GRAPHIFY_INDEX_SCHEMA = "skeleton.private_memory_stack.graphify_index.v1"
 GRAPHIFY_FIXTURE_SCHEMA = "graphify.graph.json"
 GRAPHIFY_SYNTHETIC_NAMESPACE = "skeleton"
 GRAPHIFY_SYNTHETIC_PROJECT_ID = "graphify_synthetic"
@@ -61,6 +66,145 @@ class GraphifyAdapterError(ValueError):
     def __init__(self, reason_code: str, message: str) -> None:
         super().__init__(message)
         self.reason_code = reason_code
+
+
+class LocalGraphifyIndex:
+    """Local-private derived graph index that never writes canonical SQLite."""
+
+    def __init__(self, index_path: str | Path) -> None:
+        self.index_path = Path(index_path)
+        self._index = self._load()
+
+    @classmethod
+    def rebuild_from_facts(
+        cls,
+        index_path: str | Path,
+        *,
+        facts: list[Mapping[str, Any]],
+        canonical_revision: int,
+    ) -> dict[str, object]:
+        relationships = []
+        for fact in facts:
+            canonical_ref = str(fact["canonical_ref"])
+            namespace = str(fact["namespace"])
+            revision = int(fact["canonical_revision"])
+            attribution = {
+                "canonical_ref": canonical_ref,
+                "canonical_revision": revision,
+                "source_kind": "canonical_sqlite",
+                "value_hash": str(fact["value_hash"]),
+            }
+            relationships.append(
+                _local_relationship(
+                    source=canonical_ref,
+                    target=f"namespace:{namespace}",
+                    relationship_kind="namespace_member",
+                    query_terms=[namespace, "namespace", "member"],
+                    attribution=attribution,
+                )
+            )
+            value = fact["value"]
+            for tag in _safe_tags(value):
+                relationships.append(
+                    _local_relationship(
+                        source=canonical_ref,
+                        target=f"tag:{tag}",
+                        relationship_kind="tagged",
+                        query_terms=[tag, "tagged", namespace],
+                        attribution=attribution,
+                    )
+                )
+            for explicit in _explicit_relationships(value):
+                relationships.append(
+                    _local_relationship(
+                        source=canonical_ref,
+                        target=explicit["target"],
+                        relationship_kind=explicit["kind"],
+                        query_terms=[explicit["target"], explicit["kind"], namespace],
+                        attribution=attribution,
+                    )
+                )
+        payload = {
+            "schema": LOCAL_GRAPHIFY_INDEX_SCHEMA,
+            "authoritative": False,
+            "authority_classification": "derived_relationship_graph",
+            "current_canonical_revision": canonical_revision,
+            "indexed_canonical_revision": canonical_revision,
+            "indexed_at": utc_now(),
+            "relationship_count": len(relationships),
+            "relationships": sorted(relationships, key=lambda item: (item["source"], item["target"], item["kind"])),
+        }
+        payload["index_hash"] = bytes_hash(canonical_json(payload).encode("utf-8"))
+        atomic_write_json_private(Path(index_path), payload)
+        return cls.status(index_path, current_canonical_revision=canonical_revision)
+
+    @staticmethod
+    def status(index_path: str | Path, *, current_canonical_revision: int) -> dict[str, object]:
+        path = Path(index_path)
+        if not path.is_file():
+            return {"state": "STALE", "indexed_canonical_revision": 0, "relationship_count": 0}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if data.get("schema") != LOCAL_GRAPHIFY_INDEX_SCHEMA:
+                raise GraphifyAdapterError("INVALID_LOCAL_GRAPH", "local Graphify index schema is invalid")
+            indexed = int(data.get("indexed_canonical_revision", 0))
+            return {
+                "state": "READY" if indexed == current_canonical_revision else "STALE",
+                "indexed_canonical_revision": indexed,
+                "relationship_count": int(data.get("relationship_count", 0)),
+                "authoritative": False,
+            }
+        except Exception:
+            return {
+                "state": "BLOCKED",
+                "indexed_canonical_revision": 0,
+                "relationship_count": 0,
+                "authoritative": False,
+            }
+
+    def query(self, *, query: str, limit: int = 5) -> dict[str, object]:
+        terms = set(_local_terms(query))
+        limit = _bounded_limit(limit)
+        scored = []
+        for relationship in self._index["relationships"]:
+            haystack = set(relationship["query_terms"])
+            if not terms & haystack:
+                continue
+            score = len(terms & haystack)
+            scored.append(
+                (
+                    -score,
+                    relationship["source"],
+                    relationship["target"],
+                    {
+                        "schema": GRAPHIFY_RESULT_SCHEMA,
+                        "authoritative": False,
+                        "authority_classification": "derived_relationship_graph",
+                        "canonical_ref": relationship["source"],
+                        "canonical_revision": relationship["source_attribution"]["canonical_revision"],
+                        "relationship_kind": relationship["kind"],
+                        "source_ref": relationship["source"],
+                        "target_ref": relationship["target"],
+                        "source_attribution": [deepcopy(relationship["source_attribution"])],
+                        "indexed_canonical_revision": self._index["indexed_canonical_revision"],
+                        "current_canonical_revision": self._index["current_canonical_revision"],
+                        "stale": False,
+                    },
+                )
+            )
+        return {
+            "schema": "skeleton.private_memory_stack.relation_query.v1",
+            "authoritative": False,
+            "authority_classification": "derived_relationship_graph",
+            "confirmation_required": "exact_get_reads_canonical_sqlite",
+            "results": [item for _, _, _, item in sorted(scored)[:limit]],
+        }
+
+    def _load(self) -> dict[str, Any]:
+        data = json.loads(self.index_path.read_text(encoding="utf-8"))
+        if data.get("schema") != LOCAL_GRAPHIFY_INDEX_SCHEMA:
+            raise GraphifyAdapterError("INVALID_LOCAL_GRAPH", "local Graphify index schema is invalid")
+        return data
 
 
 @dataclass(frozen=True)
@@ -467,6 +611,80 @@ def _fixture_to_dict(fixture: GraphifySyntheticFixture) -> dict[str, object]:
             for relationship in fixture.relationships
         ],
     }
+
+
+def _local_relationship(
+    *,
+    source: str,
+    target: str,
+    relationship_kind: str,
+    query_terms: list[str],
+    attribution: Mapping[str, object],
+) -> dict[str, object]:
+    return {
+        "source": source,
+        "target": target,
+        "kind": relationship_kind,
+        "query_terms": sorted(set(_local_terms(" ".join(query_terms + [source, target, relationship_kind])))),
+        "source_attribution": dict(attribution),
+    }
+
+
+def _safe_tags(value: Any) -> list[str]:
+    if not isinstance(value, Mapping):
+        return []
+    raw = value.get("tags")
+    if not isinstance(raw, list):
+        return []
+    tags = []
+    for item in raw:
+        if isinstance(item, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}", item):
+            tags.append(item)
+    return tags[:16]
+
+
+def _explicit_relationships(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, Mapping):
+        return []
+    raw = value.get("relationships")
+    if not isinstance(raw, list):
+        return []
+    relationships = []
+    for item in raw:
+        if not isinstance(item, Mapping):
+            continue
+        target = item.get("target") or item.get("target_ref")
+        kind = item.get("kind") or item.get("relationship_kind")
+        if (
+            isinstance(target, str)
+            and isinstance(kind, str)
+            and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", target)
+            and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}", kind)
+        ):
+            relationships.append({"target": target, "kind": kind})
+    return relationships[:32]
+
+
+def _local_terms(value: str) -> list[str]:
+    if not isinstance(value, str) or not value.strip() or len(value) > 256:
+        raise GraphifyAdapterError("INVALID_LOCAL_GRAPH_QUERY", "query must be a bounded string")
+    return re.findall(r"[a-z0-9]+", value.lower())
+
+
+def atomic_write_json_private(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+            handle.write("\n")
+        tmp.chmod(0o600)
+        os.replace(tmp, path)
+        path.chmod(0o600)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
 
 
 def dumps_public(value: Mapping[str, Any]) -> str:

@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.skeleton.local/private_memory_stack_status.schema.json",
+  "title": "Skeleton Private Memory Stack Status",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "state", "canonical_sqlite", "mempalace", "graphify"],
+  "properties": {
+    "schema": {
+      "const": "skeleton.private_memory_stack.status.v1"
+    },
+    "state": {
+      "enum": ["READY", "STALE", "BLOCKED"]
+    },
+    "canonical_sqlite": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "canonical_revision", "active_fact_count", "event_count", "tombstone_count", "wal_enabled"],
+      "properties": {
+        "state": {"enum": ["READY", "BLOCKED"]},
+        "canonical_revision": {"type": "integer", "minimum": 0},
+        "active_fact_count": {"type": "integer", "minimum": 0},
+        "event_count": {"type": "integer", "minimum": 0},
+        "tombstone_count": {"type": "integer", "minimum": 0},
+        "wal_enabled": {"type": "boolean"}
+      }
+    },
+    "mempalace": {
+      "$ref": "#/$defs/indexStatus"
+    },
+    "graphify": {
+      "$ref": "#/$defs/graphStatus"
+    }
+  },
+  "$defs": {
+    "indexStatus": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["state", "indexed_canonical_revision"],
+      "properties": {
+        "state": {"enum": ["READY", "STALE", "BLOCKED"]},
+        "indexed_canonical_revision": {"type": "integer", "minimum": 0},
+        "item_count": {"type": "integer", "minimum": 0},
+        "authoritative": {"const": false}
+      }
+    },
+    "graphStatus": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["state", "indexed_canonical_revision"],
+      "properties": {
+        "state": {"enum": ["READY", "STALE", "BLOCKED"]},
+        "indexed_canonical_revision": {"type": "integer", "minimum": 0},
+        "relationship_count": {"type": "integer", "minimum": 0},
+        "authoritative": {"const": false}
+      }
+    }
+  }
+}
