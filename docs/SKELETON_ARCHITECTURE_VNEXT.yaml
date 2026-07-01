@@ -1,0 +1,324 @@
+schema: skeleton.architecture_vnext.v1
+status:
+  code: ACTIVE_ARCHITECTURE / OPERATOR_APPROVED / HUMAN_GATED
+  canon_condition: This document is repository canon only while present on reviewed GitHub main.
+  public_control_canon:
+    repo: alanua/Skeleton
+    ref: main
+  private_canon: Canonical private SQLite remains the private source of truth for approved private facts, decisions, overrides, provenance, and task history.
+  boot_entrypoint: BOOT_MANIFEST.yaml
+identity:
+  skeleton: human-controlled, model-neutral construction, governance, and execution-control framework
+  not:
+    - Jeeves
+    - product assistant runtime
+    - secrets store
+    - autonomous organization
+  jeeves: separate future assistant/product/runtime that may reuse only reviewed Skeleton patterns and interfaces
+authority_principle:
+  order:
+    - current explicit operator instruction for the task
+    - reviewed GitHub main control files
+    - validated project/task contracts
+    - approved private canonical state when relevant
+    - derived indexes and worker evidence
+    - model inference and chat memory
+  invariant: Lower layers cannot silently override higher layers.
+governance_kernel:
+  responsibilities:
+    - boot and authority precedence
+    - classification and privacy routing
+    - executable rule registry
+    - capability and actor-role checks
+    - Approval Object validation
+    - protected-resource detection
+    - public-safe reason tokens
+    - append-only audit evidence
+loop_controller:
+  pipeline:
+    - trigger
+    - classify
+    - isolate
+    - execute
+    - validate
+    - persist_state
+    - decide
+    - stop_retry_escalate
+  states:
+    - CREATED
+    - READY
+    - RUNNING
+    - CHECKPOINTED
+    - NEEDS_OPERATOR
+    - HUMAN_REVIEW
+    - BLOCKED
+    - CANCELLED
+    - DONE
+  controls:
+    - short_clean_context_iterations
+    - external_process_memory
+    - max_iterations
+    - timeout
+    - bounded_retries_and_budget
+    - lease_heartbeat
+    - checkpoint_resume_cancel
+    - maker_checker_separation_when_risk_justifies
+    - machine_verifiable_success_criteria_where_possible
+    - passing_tests_do_not_imply_automatic_merge
+    - repeated_error_protected_scope_privacy_boundary_or_unsafe_fallback_escalates
+task_envelope:
+  role: canonical execution request
+  carrier_rule: GitHub Issues are the durable carrier and queue view, not the only state database and not the approval object.
+  fields:
+    - task_id
+    - idempotency_key
+    - project
+    - repository
+    - branch_or_worktree
+    - action
+    - executor_type
+    - goal
+    - allowed_scope
+    - allowed_files
+    - forbidden_actions
+    - validation
+    - expected_output
+    - privacy_boundary
+    - risk_level
+    - timeout_retry_checkpoint_policy
+    - actor_role
+    - selected_adapter
+    - approval_evidence_references
+    - expected_evidence_packet
+    - publish_capability_result
+approval_object:
+  role: action-specific approval
+  bound_to:
+    - actor_or_operator
+    - exact_action
+    - target_repository_node_or_device
+    - exact_target_state_plan_hash_or_reviewed_head_sha
+    - allowed_side_effect
+    - expiry
+    - required_evidence
+    - forbidden_shortcuts
+  forbidden_inferences:
+    - generic_chat_agreement
+    - task_completion
+    - model_output
+    - labels
+  gated_actions:
+    - merge
+    - deploy
+    - runtime_mutation
+    - secrets
+    - canon_promotion
+    - destructive_actions
+execution_broker:
+  runner: controlled execution broker
+  adapter_selection:
+    by:
+      - actor_role
+      - capabilities
+      - risk
+      - privacy
+      - available_credentials
+    invariant: Model names are not authority identities.
+  roles:
+    operator: approval authority and final gate
+    planner_reviewer: scopes, plans, critiques, and reviews
+    execution_broker: dispatches, validates, publishes, and reports
+    bounded_maker_executor: makes bounded changes inside assigned scope
+    checker_auditor: reviews evidence and risks
+    local_physical_node_executor: executes allowlisted local physical tasks
+    status_notification_projection: displays status without becoming canon
+  boundaries:
+    chatgpt: plans, scopes, and reviews
+    runner: owns controlled dispatch, worktrees, validation, publication mechanics, and result reporting
+    codex_openhands_style_workers: bounded makers, never authority
+    gemini_claude_kimi_style_workers: temporary reviewers/auditors unless separately assigned a tested bounded role
+    hermes: bounded worker/interface using Memory Gateway, not direct canonical writes
+    multi_model_output: evidence, not majority-vote truth
+home_edge_node:
+  node_id: home-edge-01
+  role: universal controlled local execution node
+  controller_path:
+    - Skeleton Governance/Loop
+    - Hetzner Runner
+    - Tailscale transport
+    - home-edge-01
+  status: architecture-approved
+  implementation_status:
+    issue_1253: Home Edge programme architecture evidence
+    pr_1254: current unmerged Home Edge evidence, not merged/live implementation
+    issue_1256: planned controlled-mutation capability, not proof of live execution
+  purpose:
+    - local tasks cloud Runner cannot safely perform directly
+    - home network and router diagnostics/configuration
+    - USB, modem, and serial work
+    - ESP/WLED build, OTA, and serial flashing
+    - media and projector workloads
+    - Docker/local services
+    - future Home Assistant and smart-home support
+    - local/private or latency-sensitive work
+    - avoid using the operator as a routine terminal typist
+  authority_boundary: execution_plane_not_control_plane_not_canon
+  boundaries:
+    - public_unrestricted_shell_or_agent_api_is_prohibited
+    - allowlisted_and_audited_transport_once_activated
+    - versioned_NodeProfile_capability_manifest_once_activated
+    - ActionPlan_with_plan_dry_run_execute_verify_rollback_for_every_mutation_once_activated
+    - verify_exact_device_identity_free_space_power_network_and_recovery_path_before_mutation
+    - preserve_primary_connectivity_and_Tailscale_recovery
+    - atomic_writes_backups_execution_ids_and_idempotency
+    - secrets_and_private_payloads_remain_local_private
+    - public_reports_only_status_hashes_bounded_metadata_evidence_refs_and_reason_tokens
+  firmware_risk_classes:
+    green: firmware build/validation
+    yellow: verified recoverable ESP/WLED OTA or serial flashing
+    red: modem/router/bootloader firmware, disk/boot/primary-gateway, or recovery-threatening action
+evidence_and_delivery:
+  worker_evidence_packet:
+    - claim_result
+    - authority_sources_read
+    - files_resources_read_and_touched
+    - commands_tools_invoked_public_safe
+    - validation_and_tests
+    - target_head_plan_hashes
+    - risks_and_privacy_result
+    - rollback_postflight_status_when_applicable
+    - publish_result
+    - next_valid_gate_action
+  delivery_invariant:
+    before_expensive_execution_preflight:
+      - workspace_creation
+      - writable_git_metadata
+      - authentication
+      - push_capability
+      - draft_pr_publication_capability
+      - expected_destination
+    can_publish_false_rule: Do not run the full maker task unless the operator explicitly approves a local-only/checkpoint result.
+memory_and_state:
+  authority_classes:
+    operational_task_run_event_state: operational state for tasks, runs, events, checkpoints, leases, and delivery
+    approved_private_canonical_facts: private canon for approved facts, decisions, overrides, provenance, and task history
+  rules:
+    - Memory Gateway is the only normal entrance.
+    - Hermes/Skeleton may exact-read and create PatchProposal.
+    - Canonical writes require schema validation, identity, dedupe, idempotency, reconciliation, approval, append-only audit, and readback verification.
+    - Graphify and MemPalace are optional derived/rebuildable indexes.
+    - Graphify is relationship/dependency orientation.
+    - MemPalace is semantic retrieval.
+    - Neither Graphify nor MemPalace can write canon or override SQLite/GitHub/operator authority.
+    - Private/public namespace isolation and deletion/backup/freshness contracts are mandatory.
+interface_projections:
+  surfaces:
+    - Telegram
+    - Control Board/dashboard
+    - NotebookLM/sourcepacks
+    - future UI
+  rule: Projections may display, request bounded actions, or prepare proposals, but must not become canon or bypass TaskEnvelope, Loop Controller, Approval Object, Evidence Packet, or GitHub review.
+component_status_matrix:
+  governance_kernel:
+    architecture_status: Target architecture approved; authority ordering, privacy routing, protected-resource detection, and audit evidence must govern VNext work.
+    implementation_status: Partially implemented on reviewed GitHub main through boot/control files, operator rules, policy docs, tests, and review gates; no autonomous runtime authority is live.
+  loop_controller:
+    architecture_status: Target architecture approved; loop state, bounded retries, checkpoints, leases, and stop/escalate behavior must define future execution.
+    implementation_status: Partially implemented by existing Runner issue/worktree/test/PR flow; the full canonical Loop Controller is not live as a separate activated runtime.
+  task_envelope:
+    architecture_status: Target architecture approved; TaskEnvelope must be the canonical execution request.
+    implementation_status: Partially implemented through GitHub issue task contracts and Runner scope fields; no standalone canonical TaskEnvelope service is live.
+  approval_object:
+    architecture_status: Target architecture approved; approvals must be action-specific, state-bound, expiring, evidenced, and forbidden from generic inference.
+    implementation_status: Partially implemented through reviewed approval gates and action-gate policy; no general Approval Object runtime may be treated as live.
+  evidence_packet:
+    architecture_status: Target architecture approved; workers must produce public-safe evidence packets for claims, touched resources, validation, risks, and next gates.
+    implementation_status: Partially implemented through Runner DONE/BLOCKED reports and tests; the full canonical Evidence Packet schema is not activated as a live runtime contract.
+  delivery_preflight:
+    architecture_status: Target architecture approved; Runner must verify workspace, writable Git metadata, auth, push, draft PR capability, and destination before expensive execution.
+    implementation_status: Planned/non-live as the VNext can_publish preflight; current host-only smoke or task success must not be called the activated delivery preflight.
+  private_sqlite_memory_gateway:
+    architecture_status: Target architecture approved; Memory Gateway must be the normal entrance and canonical writes must require validation, approval, audit, and readback.
+    implementation_status: Reviewed main contains public-safe memory gateway/canonical SQLite components and tests; private canonical activation/import is not live unless separately activated with operator-approved local runtime evidence.
+  graphify:
+    architecture_status: Target architecture approved as a private derived relationship/dependency index that must not write canon or outrank SQLite/GitHub/operator authority.
+    implementation_status: Reviewed main contains bounded public-safe Graphify adapter evidence; Graphify runtime, ingestion, Gateway activation, and private graph data access are not live.
+  mempalace:
+    architecture_status: Target architecture approved as a private derived semantic retrieval index that must remain rebuildable and non-authoritative.
+    implementation_status: Reviewed main contains bounded synthetic MemPalace pilot evidence; MemPalace runtime, Gateway activation, and private semantic index access are not live.
+  home_edge_transport:
+    architecture_status: Target architecture approved; Home Edge transport must be allowlisted, audited, node-profiled, and recovery-preserving once activated.
+    implementation_status: "#1253/#1254 remain unmerged evidence; no Home Edge transport is live from this document or this PR."
+  home_edge_mutations:
+    architecture_status: Target architecture approved; mutations must use ActionPlan plan/dry_run/execute/verify/rollback and exact risk approval once activated.
+    implementation_status: "#1256 remains planned controlled-mutation capability; no Home Edge mutation execution is live from this document or this PR."
+  telegram_control_board:
+    architecture_status: Target architecture approved as read-only/status and bounded-action projections that must not become canon or bypass review gates.
+    implementation_status: Telegram notification/poller evidence exists on reviewed main, but the VNext Control Board and projection authority model are not live or canonical activation.
+supersession:
+  entries:
+    - source: Exoskeleton documents
+      status: historical_foundation_evidence
+      disposition: retained as foundation evidence
+    - source: docs/SKELETON_BUILD_PLAN.md
+      status: merged_canon_foundation
+      disposition: retained as foundation/history; superseded for current target architecture while VNext is present on reviewed main
+    - source: docs/DEVELOPMENT_DEPARTMENT_ROADMAP.md
+      status: merged_canon_foundation
+      disposition: retained as foundation/history; superseded for current target architecture while VNext is present on reviewed main
+    - source: docs/SKELETON_GOVERNANCE_CONTRACT_V1.md
+      status: merged_canon_foundation
+      disposition: retained and absorbed as static foundation
+    - source: "issue #1088 Rules Rebuild"
+      status: active_programme
+      disposition: active implementation programme under VNext Governance Kernel
+    - source: "issue #1066 / PR #1070"
+      status: review_evidence
+      disposition: useful design evidence only; do not merge wholesale; decompose onto current main
+    - source: "issue #1089 unpublished Stage 0"
+      status: review_evidence
+      disposition: useful validated evidence; recreate on current main rather than recover blindly
+    - source: "issues #1121/#1130/#1179"
+      status: active_programme
+      disposition: memory programme absorbed into Memory and State Plane
+    - source: "issue #1182 Loop Engineering"
+      status: operator_approved_on_main
+      disposition: promoted from REVIEW candidate into this architecture only while present on reviewed GitHub main
+    - source: "issue #1253 / PR #1254"
+      status: unmerged_pr_evidence
+      disposition: Home Edge programme mapped into Execution Plane; implementation remains unmerged until reviewed and merged
+    - source: "issue #1256"
+      status: planned_programme
+      disposition: planned controlled-mutation capability, not proof of live execution
+implementation_sequence:
+  - id: P0
+    name: delivery_integrity_and_can_publish_preflight
+  - id: P1
+    name: official_architecture_consolidation
+  - id: P2
+    name: rules_rebuild_stage_0_on_current_main
+  - id: P3
+    name: task_envelope_and_loop_controller_primitives
+  - id: P4
+    name: approval_object_actor_roles_evidence_packet_and_data_classification_gate
+  - id: P5
+    name: memory_gateway_private_canonical_activation_and_operational_private_state_separation
+  - id: P6
+    name: graphify_and_mempalace_as_independent_derived_pilots
+  - id: P7
+    name: home_edge_transport_review_merge_then_controlled_actionplan_mutations
+  - id: P8
+    name: telegram_control_board_read_only_projections
+  - id: P9
+    name: jeeves_bridge_after_contracts_are_stable
+decisions:
+  - no_autonomous_self_improvement
+  - no_agent_self_approval
+  - no_automatic_merge_because_tests_passed
+  - no_direct_model_hermes_gemini_writes_to_canonical_sqlite
+  - no_graphify_mempalace_canon_authority
+  - no_unrestricted_MCP_arbitrary_issue_shell_or_public_Home_Edge_shell
+  - no_broad_permanent_multi_agent_council
+  - use_temporary_bounded_roles_and_evidence_based_comparison
+  - one_active_execution_per_conflicting_resource_set_not_global_serialization_forever
+  - protected_high_risk_actions_remain_operator_gated
