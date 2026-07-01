@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.runner_task.v1",
+  "type": "object",
+  "required": ["schema", "task_id", "task_key", "action", "executor_type", "risk"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "enum": [
+        "skeleton.runner_task.v1",
+        "skeleton.universal_runner_task.v1",
+        "skeleton.runner_task.preview.v1"
+      ]
+    },
+    "task_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,120}$"
+    },
+    "task_key": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,120}$"
+    },
+    "action": {
+      "type": "string",
+      "enum": [
+        "START",
+        "STATUS",
+        "CONTINUE",
+        "CANCEL"
+      ]
+    },
+    "executor_type": {
+      "type": "string",
+      "enum": [
+        "codex_branch_task",
+        "hermes_private_task",
+        "local_module_task",
+        "runtime_maintenance_task",
+        "read_only_probe"
+      ]
+    },
+    "risk": {
+      "type": "string",
+      "enum": ["LOW", "YELLOW", "RED", "low", "yellow", "red"]
+    },
+    "approval_evidence": {
+      "type": "object",
+      "required": ["source", "evidence_id", "verified"],
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "type": "string",
+          "enum": ["operator_event", "signed_telegram_callback"]
+        },
+        "evidence_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{2,160}$"
+        },
+        "verified": {
+          "type": "boolean",
+          "const": true
+        }
+      }
+    },
+    "timeout_seconds": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 3600
+    },
+    "resources": {
+      "type": "array",
+      "items": {}
+    },
+    "payload": {
+      "type": "object"
+    },
+    "allowed_scope": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "forbidden_actions": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "validation": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "privacy_boundary": {
+      "type": "string"
+    }
+  }
+}
