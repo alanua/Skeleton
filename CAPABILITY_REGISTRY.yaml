@@ -354,6 +354,26 @@ capabilities:
     added: "2026-06-29"
     description: Local-only read-only synthetic MemPalace pilot behind MemoryGateway for bounded retrieval, attribution, deletion, rebuild, staleness, namespace isolation, and aggregate resource-cost measurement without private ingestion or live services.
 
+  graphify_memory_adapter:
+    status: stage1_dry_run
+    module: core/graphify_adapter.py
+    entry: GraphifyAdapter.query_code
+    stage: stage_1_synthetic_contract
+    live_runtime_execution: false
+    namespaces:
+      - skeleton
+    project_id: graphify_synthetic
+    requires:
+      - core/graphify_adapter.py
+      - core/memory_gateway.py
+      - schemas/graph_query.schema.json
+      - schemas/graph_query_result.schema.json
+      - tests/fixtures/graphify_synthetic/graph.json
+      - docs/GRAPHIFY_MEMORY_ADAPTER.md
+    tested: true
+    added: "2026-07-01"
+    description: Read-only Graphify code-graph adapter behind MemoryGateway for bounded public-safe module, schema, test, dependency, and provenance queries using only the approved pinned runtime profile metadata and synthetic contract tests.
+
   hermes_memory_gateway:
     status: stage1_dry_run
     module: core/hermes_memory_adapter.py

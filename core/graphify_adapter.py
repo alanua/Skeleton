@@ -14,6 +14,8 @@ GRAPHIFY_FIXTURE_SCHEMA = "skeleton.graphify_synthetic_fixture.v1"
 GRAPHIFY_SYNTHETIC_NAMESPACE = "skeleton"
 GRAPHIFY_SYNTHETIC_PROJECT_ID = "graphify_synthetic"
 GRAPHIFY_SCHEMA_VERSION = "skeleton.graphify.synthetic_graph.v1"
+GRAPHIFY_APPROVED_RUNTIME_PROFILE = "graphify-hermes-readonly-0.8.44"
+GRAPHIFY_APPROVED_RUNTIME_VERSION = "0.8.44"
 GRAPHIFY_ALLOWED_QUERY_KINDS = frozenset(
     {
         "module_relationship",
@@ -40,7 +42,30 @@ _FORBIDDEN_MARKERS = (
     "token",
     "password",
     "credential",
+    "private",
+    "client",
+    "drawing",
+    "photo",
+    "quantity",
     "private-value",
+)
+_FORBIDDEN_QUERY_OPTIONS = frozenset(
+    {
+        "args",
+        "argv",
+        "command",
+        "env",
+        "environment",
+        "graphify_args",
+        "hook",
+        "mcp",
+        "path",
+        "port",
+        "reindex",
+        "service",
+        "watch",
+        "write",
+    }
 )
 _REPORT_KIND_BY_QUERY_KIND = {
     "module_relationship": "relationship_overview",
@@ -65,6 +90,7 @@ class SyntheticRelationship:
     query_kind: str
     relationship_kind: str
     source_ref: str
+    source_paths_public_safe: tuple[str, ...]
     evidence_hash: str
     related_refs: tuple[str, ...]
     deleted: bool = False
@@ -75,6 +101,10 @@ class SyntheticRelationship:
 class GraphifySyntheticFixture:
     namespace: str
     project_id: str
+    index_namespace: str
+    runtime_profile: str
+    runtime_version: str
+    runtime_available: bool
     indexed_repo_commit: str
     current_repo_commit: str
     indexed_at: str
@@ -99,7 +129,9 @@ class GraphifyAdapter:
         project_id: str,
         query: str,
         limit: int = GRAPHIFY_MAX_RESULTS,
+        **options: object,
     ) -> dict[str, object]:
+        _reject_query_options(options)
         self._authorize_scope(namespace=namespace, project_id=project_id)
         query_kind = _query_kind(query)
         limit = _bounded_limit(limit)
@@ -112,21 +144,26 @@ class GraphifyAdapter:
             raise GraphifyAdapterError("GRAPHIFY_RESULT_LIMIT_EXCEEDED", "query result count exceeds limit")
 
         stale = self._fixture.indexed_repo_commit != self._fixture.current_repo_commit
+        query_ref = f"graph-query-{query_kind}"
         results = [
             {
                 "schema": GRAPHIFY_RESULT_SCHEMA,
                 "authoritative": False,
+                "authoritative_scope": "code_graph",
                 "authority_classification": "derived_code_graph",
                 "namespace": self._fixture.namespace,
                 "project_id": self._fixture.project_id,
+                "query_ref": query_ref,
                 "result_ref": relationship.result_ref,
                 "relationship_kind": relationship.relationship_kind,
                 "query_kind": relationship.query_kind,
                 "related_refs": list(relationship.related_refs),
+                "source_paths_public_safe": list(relationship.source_paths_public_safe),
                 "source_attribution": [
                     {
                         "source_ref": relationship.source_ref,
                         "kind": "synthetic_code_relationship",
+                        "source_paths_public_safe": list(relationship.source_paths_public_safe),
                         "evidence_hash": relationship.evidence_hash,
                     }
                 ],
@@ -148,9 +185,12 @@ class GraphifyAdapter:
             }
             for relationship in sorted(matches, key=lambda item: item.result_ref)
         ]
+        source_paths_public_safe = sorted(
+            {path for relationship in matches for path in relationship.source_paths_public_safe}
+        )
         report = _query_report(
             query_kind=query_kind,
-            query_ref=f"graph-query-{query_kind}",
+            query_ref=query_ref,
             results=results,
             relationship_count=len(matches),
             fixture=self._fixture,
@@ -160,7 +200,16 @@ class GraphifyAdapter:
             "namespace": self._fixture.namespace,
             "project_id": self._fixture.project_id,
             "authoritative": False,
+            "authoritative_scope": "code_graph",
             "authority_classification": "derived_code_graph",
+            "query_ref": query_ref,
+            "result_refs": [result["result_ref"] for result in results],
+            "source_paths_public_safe": source_paths_public_safe,
+            "indexed_repo_commit": self._fixture.indexed_repo_commit,
+            "current_repo_commit": self._fixture.current_repo_commit,
+            "indexed_at": self._fixture.indexed_at,
+            "stale": stale,
+            "graph_schema_version": self._fixture.graph_schema_version,
             "results": results,
             "query_report": report,
         }
@@ -177,6 +226,7 @@ class GraphifyAdapter:
             "project_id": self._fixture.project_id,
             "graph_schema_version": self._fixture.graph_schema_version,
             "authoritative": False,
+            "authoritative_scope": "code_graph",
             "authority_classification": "derived_code_graph",
         }
         return validate_public_payload(freshness)
@@ -201,6 +251,10 @@ def load_synthetic_fixture(data: Mapping[str, Any]) -> GraphifySyntheticFixture:
         "schema",
         "namespace",
         "project_id",
+        "index_namespace",
+        "runtime_profile",
+        "runtime_version",
+        "runtime_available",
         "indexed_repo_commit",
         "current_repo_commit",
         "indexed_at",
@@ -214,6 +268,16 @@ def load_synthetic_fixture(data: Mapping[str, Any]) -> GraphifySyntheticFixture:
     project_id = _safe_token(data["project_id"], "project_id")
     if namespace != GRAPHIFY_SYNTHETIC_NAMESPACE or project_id != GRAPHIFY_SYNTHETIC_PROJECT_ID:
         raise GraphifyAdapterError("GRAPHIFY_SCOPE_NOT_AUTHORIZED", "fixture scope is not authorized")
+    index_namespace = _safe_token(data["index_namespace"], "index_namespace")
+    if index_namespace != namespace:
+        raise GraphifyAdapterError("GRAPHIFY_INDEX_NAMESPACE_MISMATCH", "index namespace mismatch")
+    if _safe_token(data["runtime_profile"], "runtime_profile") != GRAPHIFY_APPROVED_RUNTIME_PROFILE:
+        raise GraphifyAdapterError("GRAPHIFY_RUNTIME_PROFILE_NOT_APPROVED", "runtime profile is not approved")
+    if _safe_token(data["runtime_version"], "runtime_version") != GRAPHIFY_APPROVED_RUNTIME_VERSION:
+        raise GraphifyAdapterError("GRAPHIFY_RUNTIME_VERSION_MISMATCH", "runtime version is not pinned")
+    runtime_available = data["runtime_available"]
+    if runtime_available is not True:
+        raise GraphifyAdapterError("GRAPHIFY_RUNTIME_UNAVAILABLE", "approved Graphify runtime is unavailable")
     relationships_value = data["relationships"]
     if not isinstance(relationships_value, list) or not relationships_value:
         raise GraphifyAdapterError("GRAPHIFY_FIXTURE_MALFORMED", "relationships must be a non-empty array")
@@ -223,10 +287,14 @@ def load_synthetic_fixture(data: Mapping[str, Any]) -> GraphifySyntheticFixture:
     fixture = GraphifySyntheticFixture(
         namespace=namespace,
         project_id=project_id,
+        index_namespace=index_namespace,
+        runtime_profile=GRAPHIFY_APPROVED_RUNTIME_PROFILE,
+        runtime_version=GRAPHIFY_APPROVED_RUNTIME_VERSION,
+        runtime_available=True,
         indexed_repo_commit=_commit(data["indexed_repo_commit"], "indexed_repo_commit"),
         current_repo_commit=_commit(data["current_repo_commit"], "current_repo_commit"),
         indexed_at=_timestamp(data["indexed_at"], "indexed_at"),
-        graph_schema_version=_safe_token(data["graph_schema_version"], "graph_schema_version"),
+        graph_schema_version=_graph_schema_version(data["graph_schema_version"]),
         relationships=relationships,
     )
     validate_public_payload(_fixture_to_dict(fixture))
@@ -241,6 +309,7 @@ def _relationship(value: object) -> SyntheticRelationship:
         "query_kind",
         "relationship_kind",
         "source_ref",
+        "source_paths_public_safe",
         "evidence_hash",
         "related_refs",
         "deleted",
@@ -253,6 +322,7 @@ def _relationship(value: object) -> SyntheticRelationship:
             "query_kind",
             "relationship_kind",
             "source_ref",
+            "source_paths_public_safe",
             "evidence_hash",
             "related_refs",
             "deleted",
@@ -267,6 +337,9 @@ def _relationship(value: object) -> SyntheticRelationship:
     source_ref = _safe_token(value["source_ref"], "source_ref")
     if not source_ref.startswith("src-synthetic-"):
         raise GraphifyAdapterError("GRAPHIFY_MISSING_PROVENANCE", "synthetic source provenance is required")
+    source_paths = value["source_paths_public_safe"]
+    if not isinstance(source_paths, list) or not source_paths or len(source_paths) > 6:
+        raise GraphifyAdapterError("GRAPHIFY_FIXTURE_MALFORMED", "source_paths_public_safe must be bounded")
     if not isinstance(value["deleted"], bool):
         raise GraphifyAdapterError("GRAPHIFY_FIXTURE_MALFORMED", "deleted must be boolean")
     blocked = value.get("blocked", False)
@@ -277,6 +350,7 @@ def _relationship(value: object) -> SyntheticRelationship:
         query_kind=query_kind,
         relationship_kind=_public_text(value["relationship_kind"], "relationship_kind"),
         source_ref=source_ref,
+        source_paths_public_safe=tuple(_safe_token(item, "source_paths_public_safe") for item in source_paths),
         evidence_hash=_evidence_hash(value["evidence_hash"]),
         related_refs=tuple(_safe_token(item, "related_ref") for item in related_refs),
         deleted=value["deleted"],
@@ -335,6 +409,18 @@ def _bounded_limit(value: object) -> int:
     return value
 
 
+def _reject_query_options(options: Mapping[str, object]) -> None:
+    if not options:
+        return
+    for key in options:
+        if not isinstance(key, str):
+            raise GraphifyAdapterError("GRAPHIFY_UNSUPPORTED_QUERY_OPTION", "query option is unsupported")
+        if key in _FORBIDDEN_QUERY_OPTIONS or key not in {"include_stale"}:
+            raise GraphifyAdapterError("GRAPHIFY_UNSUPPORTED_QUERY_OPTION", "query option is unsupported")
+    if "include_stale" in options and not isinstance(options["include_stale"], bool):
+        raise GraphifyAdapterError("GRAPHIFY_UNSUPPORTED_QUERY_OPTION", "include_stale must be boolean")
+
+
 def _safe_token(value: object, field: str) -> str:
     if not isinstance(value, str) or not _SAFE_TOKEN_RE.fullmatch(value):
         raise GraphifyAdapterError("GRAPHIFY_FIXTURE_MALFORMED", f"{field} must be a safe token")
@@ -368,6 +454,13 @@ def _evidence_hash(value: object) -> str:
     return value
 
 
+def _graph_schema_version(value: object) -> str:
+    schema_version = _safe_token(value, "graph_schema_version")
+    if schema_version != GRAPHIFY_SCHEMA_VERSION:
+        raise GraphifyAdapterError("GRAPHIFY_GRAPH_SCHEMA_VERSION_MISMATCH", "graph schema version is not pinned")
+    return schema_version
+
+
 def _reject_private_markers(value: str, field: str) -> None:
     lowered = value.lower()
     if any(marker in lowered for marker in _FORBIDDEN_MARKERS):
@@ -379,6 +472,10 @@ def _fixture_to_dict(fixture: GraphifySyntheticFixture) -> dict[str, object]:
         "schema": GRAPHIFY_FIXTURE_SCHEMA,
         "namespace": fixture.namespace,
         "project_id": fixture.project_id,
+        "index_namespace": fixture.index_namespace,
+        "runtime_profile": fixture.runtime_profile,
+        "runtime_version": fixture.runtime_version,
+        "runtime_available": fixture.runtime_available,
         "indexed_repo_commit": fixture.indexed_repo_commit,
         "current_repo_commit": fixture.current_repo_commit,
         "indexed_at": fixture.indexed_at,
@@ -389,6 +486,7 @@ def _fixture_to_dict(fixture: GraphifySyntheticFixture) -> dict[str, object]:
                 "query_kind": relationship.query_kind,
                 "relationship_kind": relationship.relationship_kind,
                 "source_ref": relationship.source_ref,
+                "source_paths_public_safe": list(relationship.source_paths_public_safe),
                 "evidence_hash": relationship.evidence_hash,
                 "related_refs": list(relationship.related_refs),
                 "deleted": relationship.deleted,

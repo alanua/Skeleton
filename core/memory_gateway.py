@@ -176,6 +176,7 @@ class MemoryGateway:
         query: str,
         project_id: object = None,
         limit: int = 5,
+        **options: object,
     ) -> dict[str, object]:
         namespace = self._authorize_namespace(namespace)
         project_id = self._scope_project_id(namespace, project_id)
@@ -192,6 +193,7 @@ class MemoryGateway:
                     project_id=project_id,
                     query=query,
                     limit=limit,
+                    **options,
                 )
             except GraphifyAdapterError as exc:
                 raise MemoryGatewayPolicyError(exc.reason_code, str(exc)) from exc
@@ -203,6 +205,8 @@ class MemoryGateway:
                 payload=adapter_response,
             )
         _reject_wrong_graphify_synthetic_scope(namespace, project_id)
+        if options:
+            raise MemoryGatewayPolicyError("GRAPHIFY_UNSUPPORTED_QUERY_OPTION", "query option is unsupported")
         if (namespace, project_id) not in self._graph:
             raise MemoryGatewayPolicyError("PROJECT_NOT_AUTHORIZED", "graph project scope is not authorized")
         results = []
@@ -437,6 +441,8 @@ class MemoryGateway:
             else freshness.get("mempalace", {})
         )
         graph_freshness = freshness.get("graphify", {})
+        if has_graph:
+            graph_freshness = self._graphify_index_freshness(namespace, project_id)
         if has_semantic:
             if isinstance(mempalace_freshness, Mapping) and mempalace_freshness.get("stale"):
                 raise MemoryGatewayPolicyError(
@@ -486,6 +492,22 @@ class MemoryGateway:
                 project_id=project_id,
             )
         except MemPalaceAdapterError as exc:
+            raise MemoryGatewayPolicyError(exc.reason_code, str(exc)) from exc
+
+    def _graphify_index_freshness(self, namespace: str, project_id: str) -> Mapping[str, object]:
+        if not _is_graphify_synthetic_scope(namespace, project_id):
+            return self._freshness.get((namespace, project_id), {}).get("graphify", {})
+        if self._graphify_adapter is None:
+            raise MemoryGatewayPolicyError(
+                "GRAPHIFY_ADAPTER_REQUIRED",
+                "synthetic Graphify route requires explicit adapter injection",
+            )
+        try:
+            return self._graphify_adapter.get_index_freshness(
+                namespace=namespace,
+                project_id=project_id,
+            )
+        except GraphifyAdapterError as exc:
             raise MemoryGatewayPolicyError(exc.reason_code, str(exc)) from exc
 
     def _validate_canonical_exact_confirmation(

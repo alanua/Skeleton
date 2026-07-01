@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.graph_query_result.schema.json",
+  "title": "Graphify Memory Gateway Public Result",
+  "type": "object",
+  "required": [
+    "schema",
+    "namespace",
+    "project_id",
+    "authoritative",
+    "authoritative_scope",
+    "query_ref",
+    "result_refs",
+    "source_paths_public_safe",
+    "indexed_repo_commit",
+    "current_repo_commit",
+    "indexed_at",
+    "stale",
+    "graph_schema_version",
+    "results",
+    "query_report"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "skeleton.graphify_query_response.v1"},
+    "namespace": {"const": "skeleton"},
+    "project_id": {"const": "graphify_synthetic"},
+    "authoritative": {"const": false},
+    "authoritative_scope": {"const": "code_graph"},
+    "authority_classification": {"const": "derived_code_graph"},
+    "query_ref": {"$ref": "#/$defs/safe_token"},
+    "result_refs": {
+      "type": "array",
+      "maxItems": 5,
+      "items": {"$ref": "#/$defs/safe_token"}
+    },
+    "source_paths_public_safe": {
+      "type": "array",
+      "maxItems": 30,
+      "items": {"$ref": "#/$defs/safe_token"}
+    },
+    "indexed_repo_commit": {"$ref": "#/$defs/safe_token"},
+    "current_repo_commit": {"$ref": "#/$defs/safe_token"},
+    "indexed_at": {
+      "type": "string",
+      "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "stale": {"type": "boolean"},
+    "graph_schema_version": {"$ref": "#/$defs/safe_token"},
+    "results": {
+      "type": "array",
+      "maxItems": 5,
+      "items": {"$ref": "#/$defs/result"}
+    },
+    "query_report": {"type": "object"}
+  },
+  "$defs": {
+    "safe_token": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^[A-Fa-f0-9]{64}$"
+    },
+    "result": {
+      "type": "object",
+      "required": [
+        "schema",
+        "authoritative",
+        "authoritative_scope",
+        "namespace",
+        "project_id",
+        "query_ref",
+        "result_ref",
+        "query_kind",
+        "related_refs",
+        "source_paths_public_safe",
+        "source_attribution",
+        "provenance_refs",
+        "indexed_repo_commit",
+        "current_repo_commit",
+        "indexed_at",
+        "graph_schema_version",
+        "stale"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "schema": {"const": "skeleton.graphify_result.v1"},
+        "authoritative": {"const": false},
+        "authoritative_scope": {"const": "code_graph"},
+        "namespace": {"const": "skeleton"},
+        "project_id": {"const": "graphify_synthetic"},
+        "query_ref": {"$ref": "#/$defs/safe_token"},
+        "result_ref": {"$ref": "#/$defs/safe_token"},
+        "query_kind": {"$ref": "#/$defs/safe_token"},
+        "related_refs": {
+          "type": "array",
+          "maxItems": 6,
+          "items": {"$ref": "#/$defs/safe_token"}
+        },
+        "source_paths_public_safe": {
+          "type": "array",
+          "maxItems": 6,
+          "items": {"$ref": "#/$defs/safe_token"}
+        },
+        "source_attribution": {"type": "array", "minItems": 1, "maxItems": 1},
+        "provenance_refs": {"type": "array", "minItems": 1, "maxItems": 1},
+        "indexed_repo_commit": {"$ref": "#/$defs/safe_token"},
+        "current_repo_commit": {"$ref": "#/$defs/safe_token"},
+        "indexed_at": {
+          "type": "string",
+          "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+        },
+        "graph_schema_version": {"$ref": "#/$defs/safe_token"},
+        "stale": {"type": "boolean"}
+      }
+    }
+  }
+}
