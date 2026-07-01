@@ -4,10 +4,8 @@ Status: ACTIVE_ARCHITECTURE / OPERATOR_APPROVED / HUMAN_GATED
 
 This document is the current target architecture for Skeleton VNext. This
 document is repository canon only while present on reviewed GitHub `main`.
-This document is repository canon only while present on reviewed GitHub `main`.
-Until then, GitHub `main` remains public control/code/policy canon,
-`BOOT_MANIFEST.yaml` remains the entrypoint, and this task must not modify
-`BOOT_MANIFEST.yaml`.
+GitHub `main` remains public control/code/policy canon, and
+`BOOT_MANIFEST.yaml` remains the entrypoint.
 
 Canonical private SQLite remains the private source of truth for approved private
 facts, decisions, overrides, provenance, and task history. Public GitHub records
@@ -255,7 +253,7 @@ Controller, Approval Object, Evidence Packet, or GitHub review boundary.
 | Component | architecture_status | implementation_status |
 | --- | --- | --- |
 | `governance_kernel` | Target architecture approved; authority ordering, privacy routing, protected-resource detection, and audit evidence must govern VNext work. | Partially implemented on reviewed GitHub `main` through boot/control files, operator rules, policy docs, tests, and review gates; no autonomous runtime authority is live. |
-| `loop_controller` | Target architecture approved; loop state, bounded retries, checkpoints, leases, and stop/escalate behavior must define future execution. | Partially implemented by existing Runner issue/worktree/test/PR flow; the full canonical Loop Controller is not live as a separate activated runtime. |
+| `loop_controller` | Target architecture approved; loop state, bounded retries, checkpoints, and stop/escalate behavior must define future execution. | Partially implemented by existing Runner issue/worktree/test/PR flow; the full canonical Loop Controller is not live as a separate activated runtime. |
 | `task_envelope` | Target architecture approved; TaskEnvelope must be the canonical execution request. | Partially implemented through GitHub issue task contracts and Runner scope fields; no standalone canonical TaskEnvelope service is live. |
 | `approval_object` | Target architecture approved; approvals must be action-specific, state-bound, expiring, evidenced, and forbidden from generic inference. | Partially implemented through reviewed approval gates and action-gate policy; no general Approval Object runtime may be treated as live. |
 | `evidence_packet` | Target architecture approved; workers must produce public-safe evidence packets for claims, touched resources, validation, risks, and next gates. | Partially implemented through Runner DONE/BLOCKED reports and tests; the full canonical Evidence Packet schema is not activated as a live runtime contract. |
@@ -265,7 +263,7 @@ Controller, Approval Object, Evidence Packet, or GitHub review boundary.
 | `mempalace` | Target architecture approved as a private derived semantic retrieval index that must remain rebuildable and non-authoritative. | Reviewed `main` contains bounded synthetic MemPalace pilot evidence; MemPalace runtime, Gateway activation, and private semantic index access are not live. |
 | `home_edge_transport` | Target architecture approved; Home Edge transport must be allowlisted, audited, node-profiled, and recovery-preserving once activated. | #1253/#1254 remain unmerged evidence; no Home Edge transport is live from this document or this PR. |
 | `home_edge_mutations` | Target architecture approved; mutations must use ActionPlan plan/dry_run/execute/verify/rollback and exact risk approval once activated. | #1256 remains planned controlled-mutation capability; no Home Edge mutation execution is live from this document or this PR. |
-| `telegram_control_board` | Target architecture approved as read-only/status and bounded-action projections that must not become canon or bypass review gates. | Telegram notification/poller evidence exists on reviewed `main`, but the VNext Control Board and projection authority model are not live or canonical activation. |
+| `telegram_control_board` | Target architecture approved as read-only/status and bounded-action projections that must not become canon or bypass review gates. | Telegram notification/poller evidence exists on reviewed `main`, but the VNext Control Board and projection authority model are not live or canonically activated. |
 
 ## Supersession Map
 
