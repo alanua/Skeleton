@@ -12,7 +12,10 @@ from core.memory_gateway import (
     allowed_command_names,
     capability_token,
 )
-from core.canonical_memory_manifest import canonical_manifest_integrity_hash
+from core.canonical_memory_manifest import (
+    APPROVED_OPERATOR_RULE_CATEGORIES,
+    canonical_manifest_integrity_hash,
+)
 from core.memory_gateway_policy import (
     EXACT_CONFIRMATION_REVISION_MISMATCH,
     GRAPH_RESULT_NOT_CANON_CONFIRMED,
@@ -396,6 +399,8 @@ def test_canonical_manifest_preparation_readback_is_non_authoritative() -> None:
     assert payload["integrity_check"] == "verified"
     assert payload["integrity_hash"] == canonical_manifest_integrity_hash(manifest)
     assert payload["manifest"] == manifest
+    readback_rules = payload["manifest"]["record"]["operating_rules"]
+    assert {rule["category"] for rule in readback_rules} == APPROVED_OPERATOR_RULE_CATEGORIES
 
     with pytest.raises(MemoryGatewayPolicyError) as excinfo:
         gw.lookup_exact(namespace="skeleton", key="fast_autonomous_execution_v1")

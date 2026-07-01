@@ -6,6 +6,7 @@
   "required": [
     "schema",
     "namespace",
+    "scope",
     "key",
     "record_type",
     "version",
@@ -20,6 +21,7 @@
   "properties": {
     "schema": {"const": "skeleton.canonical_memory_manifest.v1"},
     "namespace": {"const": "skeleton.operator_preferences"},
+    "scope": {"const": "global_operator_working_style"},
     "key": {"const": "fast_autonomous_execution_v1"},
     "record_type": {"const": "operator_working_style_preference"},
     "version": {"type": "integer", "minimum": 1},
@@ -57,12 +59,33 @@
         "preference_summary": {"type": "string", "maxLength": 240},
         "operating_rules": {
           "type": "array",
-          "minItems": 1,
-          "items": {"type": "string", "maxLength": 240}
+          "minItems": 10,
+          "items": {
+            "type": "object",
+            "required": ["id", "category", "statement"],
+            "additionalProperties": false,
+            "properties": {
+              "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},
+              "category": {
+                "enum": [
+                  "fast_autonomous_progress",
+                  "approval_boundaries",
+                  "minimal_issue_churn",
+                  "status_fields",
+                  "read_only_parallelization",
+                  "verified_memory_layers",
+                  "sqlite_authority",
+                  "graphify_relationships",
+                  "mempalace_semantic",
+                  "exact_canonical_confirmation"
+                ]
+              },
+              "statement": {"type": "string", "maxLength": 320}
+            }
+          }
         }
       }
     },
     "integrity_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
   }
 }
-

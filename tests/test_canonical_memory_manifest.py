@@ -5,6 +5,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from core.canonical_memory_manifest import (
+    APPROVED_OPERATOR_RULE_CATEGORIES,
     CANONICAL_MEMORY_MANIFEST_SCHEMA,
     canonical_manifest_from_dict,
     canonical_manifest_integrity_hash,
@@ -30,6 +31,7 @@ def test_valid_operator_preference_manifest_passes() -> None:
     assert result.ok is True
     assert result.errors == []
     assert canonical_manifest_from_dict(manifest)["key"] == "fast_autonomous_execution_v1"
+    assert canonical_manifest_from_dict(manifest)["scope"] == "global_operator_working_style"
 
 
 def test_integrity_hash_is_deterministic_and_verified() -> None:
@@ -39,7 +41,13 @@ def test_integrity_hash_is_deterministic_and_verified() -> None:
     assert canonical_manifest_integrity_hash(deepcopy(manifest)) == manifest["integrity_hash"]
 
     tampered = deepcopy(manifest)
-    tampered["record"]["operating_rules"].append("Add an unapproved rule.")  # type: ignore[index]
+    tampered["record"]["operating_rules"].append(  # type: ignore[index]
+        {
+            "id": "rule-unapproved",
+            "category": "unsupported_category",
+            "statement": "Add an unapproved rule.",
+        }
+    )
     result = validate_canonical_memory_manifest(tampered)
 
     assert result.ok is False
@@ -64,6 +72,7 @@ def test_rejects_raw_transcript_private_values_and_local_paths() -> None:
 def test_rejects_unsupported_namespace_missing_provenance_and_sqlite_write_intent() -> None:
     manifest = load_manifest()
     manifest["namespace"] = "skeleton.private_operator_preferences"
+    manifest["scope"] = "private_operator_working_style"
     manifest["authority"] = "canonical_sqlite"
     del manifest["provenance"]
 
@@ -72,6 +81,7 @@ def test_rejects_unsupported_namespace_missing_provenance_and_sqlite_write_inten
     assert result.ok is False
     assert {
         "unsupported_namespace",
+        "unsupported_scope",
         "direct_sqlite_write_intent",
         "missing_required",
         "integrity_hash_mismatch",
@@ -83,8 +93,20 @@ def test_schema_matches_manifest_constants() -> None:
 
     assert schema["$id"] == "skeleton.canonical_memory_manifest.schema.json"
     assert schema["properties"]["schema"]["const"] == CANONICAL_MEMORY_MANIFEST_SCHEMA
+    assert "scope" in schema["required"]
     assert schema["properties"]["namespace"]["const"] == "skeleton.operator_preferences"
+    assert schema["properties"]["scope"]["const"] == "global_operator_working_style"
     assert schema["properties"]["authority"]["const"] == "candidate_manifest_only"
+
+
+def test_manifest_readback_contains_every_approved_durable_rule_category() -> None:
+    manifest = canonical_manifest_from_dict(load_manifest())
+    rules = manifest["record"]["operating_rules"]  # type: ignore[index]
+    categories = {rule["category"] for rule in rules}  # type: ignore[index]
+
+    assert categories == APPROVED_OPERATOR_RULE_CATEGORIES
+    assert len(rules) == len(APPROVED_OPERATOR_RULE_CATEGORIES)  # type: ignore[arg-type]
+    assert all(set(rule) == {"id", "category", "statement"} for rule in rules)  # type: ignore[union-attr]
 
 
 def test_docs_state_import_remains_gated() -> None:
@@ -93,4 +115,3 @@ def test_docs_state_import_remains_gated() -> None:
     assert "manifest-only" in doc
     assert "does not write to canonical SQLite" in doc
     assert "approved GitHub issue comment reference `4846756659`" in doc
-

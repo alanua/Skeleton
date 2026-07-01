@@ -1,6 +1,7 @@
 {
   "schema": "skeleton.canonical_memory_manifest.v1",
   "namespace": "skeleton.operator_preferences",
+  "scope": "global_operator_working_style",
   "key": "fast_autonomous_execution_v1",
   "record_type": "operator_working_style_preference",
   "version": 1,
@@ -20,11 +21,57 @@
   "record": {
     "preference_summary": "Prefer fast autonomous execution on bounded approved Skeleton tasks while preserving explicit safety gates.",
     "operating_rules": [
-      "Proceed through implementation and verification when task scope and approval boundary are already explicit.",
-      "Avoid unnecessary confirmation loops for reversible public-safe preparation work.",
-      "Keep privacy boundaries, protected runtime behavior, and operator approval gates intact.",
-      "Report concise status, changed files, and verification results for review."
+      {
+        "id": "rule-fast-autonomous-progress",
+        "category": "fast_autonomous_progress",
+        "statement": "Proceed through implementation, reconciliation, and verification when the task scope and approval boundary are already explicit."
+      },
+      {
+        "id": "rule-approval-boundaries",
+        "category": "approval_boundaries",
+        "statement": "Stay within established approval boundaries and preserve protected runtime, deployment, activation, and operator-gated actions."
+      },
+      {
+        "id": "rule-minimal-issue-churn",
+        "category": "minimal_issue_churn",
+        "statement": "Minimize issue churn by avoiding unnecessary confirmation loops and keeping public-safe preparation work focused on the approved task."
+      },
+      {
+        "id": "rule-status-fields",
+        "category": "status_fields",
+        "statement": "Status reports must include next-action and operator-action fields whenever reporting task state back for review."
+      },
+      {
+        "id": "rule-read-only-parallelization",
+        "category": "read_only_parallelization",
+        "statement": "Use safe read-only parallelization for inspection, comparison, and verification when it does not cross approval or privacy boundaries."
+      },
+      {
+        "id": "rule-verified-memory-layers",
+        "category": "verified_memory_layers",
+        "statement": "Use verified memory layers incrementally, preferring exact canonical facts first and treating derived layers as supporting context."
+      },
+      {
+        "id": "rule-sqlite-authority",
+        "category": "sqlite_authority",
+        "statement": "Canonical SQLite remains the authority for exact memory; candidate manifests do not activate records or change canonical storage."
+      },
+      {
+        "id": "rule-graphify-relationships",
+        "category": "graphify_relationships",
+        "statement": "Use Graphify only for derived code and relationship context unless exact canonical confirmation supports a memory change."
+      },
+      {
+        "id": "rule-mempalace-semantic",
+        "category": "mempalace_semantic",
+        "statement": "Use MemPalace semantic results as non-authoritative context that must not override canonical exact memory."
+      },
+      {
+        "id": "rule-exact-canonical-confirmation",
+        "category": "exact_canonical_confirmation",
+        "statement": "Require exact canonical confirmation before relying on derived Graphify or MemPalace evidence for any patch proposal."
+      }
     ]
   },
-  "integrity_hash": "081fe742b3e4feb7a64ad423b6222e8808ac6f4542f9021d1e6288f7f98f9897"
+  "integrity_hash": "35980a8c1cf0da50f9edd875d7deaf2099b489f39d8e19417bdd58e7143b37d6"
 }

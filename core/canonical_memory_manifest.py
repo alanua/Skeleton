@@ -9,6 +9,7 @@ from typing import Any, Mapping
 
 from core.canonical_memory import (
     CANONICAL_OPERATOR_PREFERENCES_NAMESPACE,
+    CANONICAL_OPERATOR_PREFERENCES_SCOPE,
     FAST_AUTONOMOUS_EXECUTION_KEY,
     OPERATOR_WORKING_STYLE_RECORD_TYPE,
 )
@@ -20,6 +21,20 @@ SUPPORTED_PRIVACY_CLASSIFICATIONS = frozenset({"public_safe_operator_preference"
 SUPPORTED_AUTHORITY = frozenset({"candidate_manifest_only"})
 SUPPORTED_PROVENANCE_KINDS = frozenset({"approved_github_issue_comment"})
 SUPPORTED_SUPERSESSION_STATUS = frozenset({"initial", "supersedes"})
+APPROVED_OPERATOR_RULE_CATEGORIES = frozenset(
+    {
+        "fast_autonomous_progress",
+        "approval_boundaries",
+        "minimal_issue_churn",
+        "status_fields",
+        "read_only_parallelization",
+        "verified_memory_layers",
+        "sqlite_authority",
+        "graphify_relationships",
+        "mempalace_semantic",
+        "exact_canonical_confirmation",
+    }
+)
 FORBIDDEN_FIELD_NAMES = frozenset(
     {
         "raw_chat",
@@ -97,6 +112,7 @@ def validate_canonical_memory_manifest(data: Mapping[str, Any]) -> ValidationRes
 
     _require(data, "schema", "$.schema", errors)
     _require(data, "namespace", "$.namespace", errors)
+    _require(data, "scope", "$.scope", errors)
     _require(data, "key", "$.key", errors)
     _require(data, "record_type", "$.record_type", errors)
     _require(data, "version", "$.version", errors)
@@ -111,6 +127,8 @@ def validate_canonical_memory_manifest(data: Mapping[str, Any]) -> ValidationRes
         errors.append(_issue("$.schema", "unsupported_schema", "manifest schema is unsupported"))
     if data.get("namespace") not in SUPPORTED_CANONICAL_NAMESPACES:
         errors.append(_issue("$.namespace", "unsupported_namespace", "canonical namespace is unsupported"))
+    if data.get("scope") != CANONICAL_OPERATOR_PREFERENCES_SCOPE:
+        errors.append(_issue("$.scope", "unsupported_scope", "canonical scope is unsupported"))
     if data.get("key") != FAST_AUTONOMOUS_EXECUTION_KEY:
         errors.append(_issue("$.key", "unsupported_key", "canonical key is unsupported"))
     if data.get("record_type") != OPERATOR_WORKING_STYLE_RECORD_TYPE:
@@ -137,6 +155,12 @@ def validate_canonical_memory_manifest(data: Mapping[str, Any]) -> ValidationRes
             errors.append(_issue("$.supersession.supersedes", "invalid_supersedes", "supersedes must be an array"))
     elif "supersession" in data:
         errors.append(_issue("$.supersession", "invalid_supersession", "supersession must be an object"))
+
+    record = data.get("record")
+    if isinstance(record, Mapping):
+        _validate_record(record, errors)
+    elif "record" in data:
+        errors.append(_issue("$.record", "invalid_record", "record must be an object"))
 
     integrity_hash = data.get("integrity_hash")
     if not isinstance(integrity_hash, str) or not _SHA256_RE.fullmatch(integrity_hash):
@@ -191,6 +215,32 @@ def _validate_provenance(provenance: Mapping[str, Any], errors: list[ValidationI
         errors.append(_issue("$.provenance.approval_ref", "invalid_approval_ref", "approval ref must be a safe token"))
 
 
+def _validate_record(record: Mapping[str, Any], errors: list[ValidationIssue]) -> None:
+    operating_rules = record.get("operating_rules")
+    if not isinstance(operating_rules, list) or not operating_rules:
+        errors.append(_issue("$.record.operating_rules", "invalid_operating_rules", "operating rules must be a non-empty array"))
+        return
+    categories = set()
+    for index, rule in enumerate(operating_rules):
+        path = f"$.record.operating_rules[{index}]"
+        if not isinstance(rule, Mapping):
+            errors.append(_issue(path, "invalid_operating_rule", "operating rule must be an object"))
+            continue
+        category = rule.get("category")
+        if category not in APPROVED_OPERATOR_RULE_CATEGORIES:
+            errors.append(_issue(f"{path}.category", "unsupported_operating_rule_category", "operating rule category is unsupported"))
+            continue
+        categories.add(category)
+        if not isinstance(rule.get("id"), str) or not _SAFE_TOKEN_RE.fullmatch(rule["id"]):
+            errors.append(_issue(f"{path}.id", "invalid_operating_rule_id", "operating rule id must be a safe token"))
+        statement = rule.get("statement")
+        if not isinstance(statement, str) or not statement or len(statement) > 320:
+            errors.append(_issue(f"{path}.statement", "invalid_operating_rule_statement", "operating rule statement must be bounded text"))
+    missing = APPROVED_OPERATOR_RULE_CATEGORIES - categories
+    if missing:
+        errors.append(_issue("$.record.operating_rules", "missing_approved_operating_rule_category", "approved operating rule categories are incomplete"))
+
+
 def _reject_private_or_raw_values(value: Any, path: str, errors: list[ValidationIssue]) -> None:
     if isinstance(value, Mapping):
         for key, child in value.items():
@@ -229,4 +279,3 @@ def _issue_to_dict(issue: ValidationIssue) -> dict[str, str]:
         "code": issue.code,
         "message": issue.message,
     }
-
