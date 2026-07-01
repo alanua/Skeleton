@@ -24,6 +24,27 @@ The bulk worker should receive only bounded, public-safe, sanitized chunks. The
 critic should receive only sanitized summaries, aggregate calibration notes, and
 claimed conclusions that need audit.
 
+## Static Alias Router
+
+`core/hermes_task_router.py` defines contract-test-only aliases for synthetic
+public-safe task packets:
+
+| Alias | Static role | Live route |
+| --- | --- | --- |
+| `LOW` | `bulk_worker` | Disabled |
+| `MID` | `planner` | Disabled |
+| `HIGH` | `critic` | Disabled |
+
+Aliases are metadata only. They do not select a provider SDK, read credentials,
+open a network connection, enqueue work, mutate issues, or change runtime
+configuration. The router validates each emitted packet against
+`schemas/hermes_task_packet.schema.json` before returning it.
+
+The router rejects public task-packet inputs that are URL-like, path-like,
+secret-like, private/non-public, or mutating. Budget units, token caps,
+chunk-token caps, and retry counts must stay within the schema bounds. Validation
+commands in emitted packets must be non-mutating.
+
 ## Troitsa-inspired pattern
 
 The policy borrows the general shape of a three-role pattern: one model plans,
