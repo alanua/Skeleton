@@ -52,6 +52,8 @@ def test_markdown_contains_required_status_sections_and_diagrams() -> None:
     assert "GitHub `main` remains public control/code/policy canon" in text
     assert "Canonical private SQLite remains the private source of truth" in text
     assert "`BOOT_MANIFEST.yaml` remains the entrypoint" in text
+    assert "Until then" not in text
+    assert "this task must not modify" not in text
 
     for section in [
         "## Identity And Boundary",
@@ -90,7 +92,8 @@ def test_markdown_status_matrix_has_all_components_and_separate_statuses() -> No
     assert "planned controlled-mutation capability; no Home Edge mutation execution is live" in section
     assert "Graphify runtime, ingestion, Gateway activation, and private graph data access are not live" in section
     assert "MemPalace runtime, Gateway activation, and private semantic index access are not live" in section
-    assert "not live or canonical activation" in section
+    assert "not live or canonically activated" in section
+    assert "not live or canonical activation" not in section
 
 
 def test_yaml_has_status_matrix_with_exact_components_and_split_status_fields() -> None:
