@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.canonical_memory_manifest.schema.json",
+  "title": "Canonical Memory Migration Manifest",
+  "type": "object",
+  "required": [
+    "schema",
+    "namespace",
+    "key",
+    "record_type",
+    "version",
+    "authority",
+    "privacy_classification",
+    "provenance",
+    "supersession",
+    "record",
+    "integrity_hash"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "skeleton.canonical_memory_manifest.v1"},
+    "namespace": {"const": "skeleton.operator_preferences"},
+    "key": {"const": "fast_autonomous_execution_v1"},
+    "record_type": {"const": "operator_working_style_preference"},
+    "version": {"type": "integer", "minimum": 1},
+    "authority": {"const": "candidate_manifest_only"},
+    "privacy_classification": {"const": "public_safe_operator_preference"},
+    "provenance": {
+      "type": "object",
+      "required": ["kind", "repo", "issue_number", "comment_id", "approval_ref"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"const": "approved_github_issue_comment"},
+        "repo": {"const": "alanua-Skeleton"},
+        "issue_number": {"const": 1194},
+        "comment_id": {"const": 4846756659},
+        "approval_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"}
+      }
+    },
+    "supersession": {
+      "type": "object",
+      "required": ["status", "supersedes"],
+      "additionalProperties": false,
+      "properties": {
+        "status": {"enum": ["initial", "supersedes"]},
+        "supersedes": {
+          "type": "array",
+          "items": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"}
+        }
+      }
+    },
+    "record": {
+      "type": "object",
+      "required": ["preference_summary", "operating_rules"],
+      "additionalProperties": false,
+      "properties": {
+        "preference_summary": {"type": "string", "maxLength": 240},
+        "operating_rules": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "maxLength": 240}
+        }
+      }
+    },
+    "integrity_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  }
+}
+

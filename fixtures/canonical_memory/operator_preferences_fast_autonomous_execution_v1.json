@@ -1,0 +1,30 @@
+{
+  "schema": "skeleton.canonical_memory_manifest.v1",
+  "namespace": "skeleton.operator_preferences",
+  "key": "fast_autonomous_execution_v1",
+  "record_type": "operator_working_style_preference",
+  "version": 1,
+  "authority": "candidate_manifest_only",
+  "privacy_classification": "public_safe_operator_preference",
+  "provenance": {
+    "kind": "approved_github_issue_comment",
+    "repo": "alanua-Skeleton",
+    "issue_number": 1194,
+    "comment_id": 4846756659,
+    "approval_ref": "issue-1194-comment-4846756659"
+  },
+  "supersession": {
+    "status": "initial",
+    "supersedes": []
+  },
+  "record": {
+    "preference_summary": "Prefer fast autonomous execution on bounded approved Skeleton tasks while preserving explicit safety gates.",
+    "operating_rules": [
+      "Proceed through implementation and verification when task scope and approval boundary are already explicit.",
+      "Avoid unnecessary confirmation loops for reversible public-safe preparation work.",
+      "Keep privacy boundaries, protected runtime behavior, and operator approval gates intact.",
+      "Report concise status, changed files, and verification results for review."
+    ]
+  },
+  "integrity_hash": "081fe742b3e4feb7a64ad423b6222e8808ac6f4542f9021d1e6288f7f98f9897"
+}

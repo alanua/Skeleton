@@ -12,6 +12,7 @@ from core.memory_gateway import (
     allowed_command_names,
     capability_token,
 )
+from core.canonical_memory_manifest import canonical_manifest_integrity_hash
 from core.memory_gateway_policy import (
     EXACT_CONFIRMATION_REVISION_MISMATCH,
     GRAPH_RESULT_NOT_CANON_CONFIRMED,
@@ -377,6 +378,60 @@ def test_no_private_looking_strings_or_paths_in_public_reports() -> None:
     assert ".sqlite" not in serialized
 
 
+def test_canonical_manifest_preparation_readback_is_non_authoritative() -> None:
+    manifest = json.loads(
+        (ROOT / "fixtures" / "canonical_memory" / "operator_preferences_fast_autonomous_execution_v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    gw = gateway("skeleton")
+
+    result = gw.execute(request("skeleton", "memory.prepare_canonical_manifest", {"manifest": manifest}))
+    payload = result["payload"]
+
+    assert payload["preparation_status"] == "PREPARED_FOR_OPERATOR_REVIEW"
+    assert payload["authority"] == "candidate_manifest_only"
+    assert payload["authoritative"] is False
+    assert payload["source_kind"] == "canonical_memory_manifest"
+    assert payload["integrity_check"] == "verified"
+    assert payload["integrity_hash"] == canonical_manifest_integrity_hash(manifest)
+    assert payload["manifest"] == manifest
+
+    with pytest.raises(MemoryGatewayPolicyError) as excinfo:
+        gw.lookup_exact(namespace="skeleton", key="fast_autonomous_execution_v1")
+
+    assert excinfo.value.reason_code == "CANONICAL_FACT_NOT_FOUND"
+
+
+def test_canonical_manifest_preparation_rejects_invalid_manifest() -> None:
+    manifest = json.loads(
+        (ROOT / "fixtures" / "canonical_memory" / "operator_preferences_fast_autonomous_execution_v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    manifest["authority"] = "canonical_sqlite"
+
+    with pytest.raises(MemoryGatewayPolicyError) as excinfo:
+        gateway("skeleton").execute(
+            request("skeleton", "memory.prepare_canonical_manifest", {"manifest": manifest})
+        )
+
+    assert excinfo.value.reason_code == "INVALID_CANONICAL_MANIFEST"
+
+
+def test_canonical_manifest_preparation_is_skeleton_namespace_only() -> None:
+    manifest = json.loads(
+        (ROOT / "fixtures" / "canonical_memory" / "operator_preferences_fast_autonomous_execution_v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    with pytest.raises(MemoryGatewayPolicyError) as excinfo:
+        gateway("aufmass").execute(request("aufmass", "memory.prepare_canonical_manifest", {"manifest": manifest}))
+
+    assert excinfo.value.reason_code == "CANONICAL_MANIFEST_NAMESPACE_NOT_AUTHORIZED"
+
+
 def test_required_namespaces_and_allowlisted_commands_are_registered() -> None:
     expected_namespaces = {"aufmass", "bauclock", "skeleton", "home_automation", "legal_private"}
     registry = yaml.safe_load((ROOT / "CAPABILITY_REGISTRY.yaml").read_text(encoding="utf-8"))
@@ -391,6 +446,7 @@ def test_required_namespaces_and_allowlisted_commands_are_registered() -> None:
             f"{namespace}.memory.get_override_history",
             f"{namespace}.memory.get_audit_log",
             f"{namespace}.memory.get_index_freshness",
+            f"{namespace}.memory.prepare_canonical_manifest",
             f"{namespace}.graph.query_code",
             f"{namespace}.graph.get_index_freshness",
             f"{namespace}.memory.propose_patch",

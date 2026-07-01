@@ -6,6 +6,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from core.canonical_memory_manifest import prepare_canonical_memory_manifest
 from core.graphify_adapter import GraphifyAdapterError
 from core.mempalace_adapter import MemPalaceAdapter, MemPalaceAdapterError
 from core.mempalace_projection import MEMPALACE_SYNTHETIC_NAMESPACE, MEMPALACE_SYNTHETIC_PROJECT_ID
@@ -97,6 +98,7 @@ class MemoryGateway:
             "memory.get_override_history": self.get_override_history,
             "memory.get_audit_log": self.get_audit_log,
             "memory.get_index_freshness": self.get_memory_index_freshness,
+            "memory.prepare_canonical_manifest": self.prepare_canonical_manifest,
             "graph.query_code": self.query_code,
             "graph.get_index_freshness": self.get_graph_index_freshness,
             "memory.propose_patch": self.propose_patch,
@@ -342,6 +344,41 @@ class MemoryGateway:
                     for event in self._audit_log
                     if event.get("namespace") == namespace and event.get("project_id") == project_id
                 ]
+            },
+        )
+
+    def prepare_canonical_manifest(
+        self, *, namespace: str, manifest: Mapping[str, Any], project_id: object = None
+    ) -> dict[str, object]:
+        namespace = self._authorize_namespace(namespace)
+        if namespace != "skeleton":
+            raise MemoryGatewayPolicyError(
+                "CANONICAL_MANIFEST_NAMESPACE_NOT_AUTHORIZED",
+                "canonical manifest preparation is only available through skeleton namespace",
+            )
+        project_id = self._scope_project_id(namespace, project_id)
+        if project_id != "skeleton":
+            raise MemoryGatewayPolicyError(
+                "PROJECT_NOT_AUTHORIZED",
+                "canonical manifest preparation is not project-scoped",
+            )
+        if not isinstance(manifest, Mapping):
+            raise MemoryGatewayPolicyError("INVALID_CANONICAL_MANIFEST", "manifest must be an object")
+        prepared = prepare_canonical_memory_manifest(manifest)
+        if prepared["status"] == "REJECTED":
+            raise MemoryGatewayPolicyError("INVALID_CANONICAL_MANIFEST", "canonical manifest failed validation")
+        return self._response(
+            namespace=namespace,
+            command_suffix="memory.prepare_canonical_manifest",
+            payload={
+                "project_id": project_id,
+                "preparation_status": prepared["status"],
+                "authority": prepared["authority"],
+                "authoritative": prepared["authoritative"],
+                "source_kind": "canonical_memory_manifest",
+                "integrity_hash": prepared["integrity_hash"],
+                "integrity_check": prepared["integrity_check"],
+                "manifest": prepared["manifest"],
             },
         )
 
