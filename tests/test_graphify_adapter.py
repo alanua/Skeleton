@@ -9,6 +9,7 @@ import pytest
 
 from core.graphify_adapter import (
     GRAPHIFY_MAX_RESULTS,
+    GRAPHIFY_RUNTIME_VERSION,
     GRAPHIFY_SYNTHETIC_NAMESPACE,
     GRAPHIFY_SYNTHETIC_PROJECT_ID,
     GraphifyAdapter,
@@ -97,18 +98,36 @@ def test_approved_query_returns_deterministic_bounded_attributed_results() -> No
     assert result["authority_classification"] == "derived_code_graph"
     assert result["source_attribution"] == [
         {
-            "source_ref": "src-synthetic-module-gateway-adapter",
+            "source_ref": "src-core-memory_gateway_py",
+            "source_path": "core/memory_gateway.py",
             "kind": "synthetic_code_relationship",
             "evidence_hash": "a" * 64,
         }
     ]
+    assert result["related_refs"] == ["core-memory_gateway_py", "core-graphify_adapter_py"]
+    assert result["provenance_refs"][0]["source_path"] == "core/memory_gateway.py"
     assert result["indexed_repo_commit"] == "commit-indexed-graph-0001"
     assert result["current_repo_commit"] == "commit-indexed-graph-0001"
     assert result["indexed_at"] == "2026-06-29T00:00:00Z"
+    assert result["graphify_runtime_version"] == GRAPHIFY_RUNTIME_VERSION
     assert result["graph_schema_version"] == "skeleton.graphify.synthetic_graph.v1"
     assert result["stale"] is False
     assert payload["query_report"]["aggregate_counts"]["relationship_count"] == 1
     assert json.dumps(payload, sort_keys=True) == json.dumps(payload, sort_keys=True)
+
+
+def test_checked_in_graphify_graph_json_fixture_loads_directly_and_preserves_repo_paths() -> None:
+    adapter = GraphifyAdapter(fixture())
+    payload = adapter.query_code(
+        namespace=GRAPHIFY_SYNTHETIC_NAMESPACE,
+        project_id=GRAPHIFY_SYNTHETIC_PROJECT_ID,
+        query="provenance_relationship",
+    )
+    result = payload["results"][0]
+
+    assert adapter.fixture.graphify_runtime_version == "0.8.44"
+    assert result["source_attribution"][0]["source_path"] == "tests/fixtures/graphify_synthetic/graph.json"
+    assert result["related_refs"][0] == "tests-fixtures-graphify_synthetic-graph_json"
 
 
 def test_public_query_report_validates_against_schema() -> None:
@@ -140,32 +159,32 @@ def test_unsupported_kind_and_wrong_scope_fail_closed() -> None:
 
 def test_private_path_value_malformed_fixture_missing_provenance_and_excessive_results_fail_closed() -> None:
     private_value = fixture()
-    private_value["relationships"][0]["source_ref"] = "src-synthetic-private-value"
+    private_value["nodes"][0]["path"] = "/tmp/private-value.py"
     with pytest.raises(GraphifyAdapterError) as private_exc:
         GraphifyAdapter(private_value)
     assert private_exc.value.reason_code == "GRAPHIFY_PRIVATE_VALUE_REJECTED"
 
     malformed = fixture()
-    malformed["relationships"][0]["raw_payload"] = {"node_id": "node-001"}
+    del malformed["links"][0]["target"]
     with pytest.raises(GraphifyAdapterError) as malformed_exc:
         load_synthetic_fixture(malformed)
     assert malformed_exc.value.reason_code == "GRAPHIFY_FIXTURE_MALFORMED"
 
     missing_provenance = fixture()
-    del missing_provenance["relationships"][0]["source_ref"]
+    missing_provenance["links"][0]["source"] = "missing-node"
     with pytest.raises(GraphifyAdapterError) as provenance_exc:
         GraphifyAdapter(missing_provenance)
     assert provenance_exc.value.reason_code == "GRAPHIFY_MISSING_PROVENANCE"
 
     excessive = fixture()
-    excessive["relationships"] = [
+    excessive["links"] = [
         {
+            "source": "core/memory_gateway.py",
+            "target": "core/graphify_adapter.py",
             "result_ref": f"graph-result-module-extra-{index}",
             "query_kind": "module_relationship",
             "relationship_kind": "Extra synthetic module relationship",
-            "source_ref": f"src-synthetic-module-extra-{index}",
             "evidence_hash": f"{index + 1:064x}"[-64:],
-            "related_refs": [f"module-extra-{index}", "module-core-graphify_adapter"],
             "deleted": False,
         }
         for index in range(GRAPHIFY_MAX_RESULTS + 1)
@@ -177,7 +196,7 @@ def test_private_path_value_malformed_fixture_missing_provenance_and_excessive_r
 
 def test_stale_graph_readable_but_cannot_support_patch_proposal() -> None:
     stale_fixture = fixture()
-    stale_fixture["current_repo_commit"] = "commit-current-graph-0002"
+    stale_fixture["graph"]["current_repo_commit"] = "commit-current-graph-0002"
     gw = gateway(stale_fixture)
     result = gw.execute(graph_request("module_relationship"))["payload"]["results"][0]
     candidate = proposal_from_result(result)
@@ -196,7 +215,7 @@ def test_stale_graph_readable_but_cannot_support_patch_proposal() -> None:
 
 def test_freshness_reports_exact_indexed_current_commit_and_stale_state() -> None:
     stale_fixture = fixture()
-    stale_fixture["current_repo_commit"] = "commit-current-graph-0002"
+    stale_fixture["graph"]["current_repo_commit"] = "commit-current-graph-0002"
 
     graphify = gateway(stale_fixture).get_graph_index_freshness(
         namespace=GRAPHIFY_SYNTHETIC_NAMESPACE,
@@ -211,6 +230,7 @@ def test_freshness_reports_exact_indexed_current_commit_and_stale_state() -> Non
         "index_namespace": GRAPHIFY_SYNTHETIC_NAMESPACE,
         "project_id": GRAPHIFY_SYNTHETIC_PROJECT_ID,
         "graph_schema_version": "skeleton.graphify.synthetic_graph.v1",
+        "graphify_runtime_version": "0.8.44",
         "authoritative": False,
         "authority_classification": "derived_code_graph",
     }
@@ -246,3 +266,26 @@ def test_adapter_does_not_call_subprocess_network_service_write_or_runtime_mutat
     result = gw.execute(graph_request("provenance_relationship"))
 
     assert result["payload"]["query_report"]["synthetic_only"] is True
+
+
+def test_unverified_runtime_version_and_unsafe_repo_relative_path_fail_closed() -> None:
+    wrong_version = fixture()
+    wrong_version["graph"]["graphify_runtime_version"] = "0.8.43"
+    with pytest.raises(GraphifyAdapterError) as version_exc:
+        GraphifyAdapter(wrong_version)
+    assert version_exc.value.reason_code == "GRAPHIFY_RUNTIME_VERSION_UNVERIFIED"
+
+    traversal = fixture()
+    traversal["nodes"][0]["path"] = "core/../private.py"
+    with pytest.raises(GraphifyAdapterError) as path_exc:
+        GraphifyAdapter(traversal)
+    assert path_exc.value.reason_code == "GRAPHIFY_PRIVATE_VALUE_REJECTED"
+
+
+def test_legacy_graphify_edges_key_is_accepted_for_runtime_0_8_44_fixture() -> None:
+    legacy = fixture()
+    legacy["edges"] = legacy.pop("links")
+
+    payload = gateway(legacy).execute(graph_request("module_relationship"))["payload"]
+
+    assert payload["results"][0]["source_attribution"][0]["source_path"] == "core/memory_gateway.py"
