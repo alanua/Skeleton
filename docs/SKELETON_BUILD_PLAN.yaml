@@ -1,5 +1,6 @@
 schema: skeleton.build_plan_registry.v1
 status: PUBLIC_SAFE_PLANNING
+superseded_for_target_architecture_by: docs/SKELETON_ARCHITECTURE_VNEXT.md
 source_of_truth:
   repo: alanua/Skeleton
   ref: main

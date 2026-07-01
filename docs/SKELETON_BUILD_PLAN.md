@@ -3,6 +3,12 @@
 Status: public-safe planning artifact
 Scope: Skeleton itself, not product runtime implementation
 
+Historical/foundation notice: this document remains retained history and
+foundation context. This document is repository canon only while present on
+reviewed GitHub `main`; the active target architecture is
+`docs/SKELETON_ARCHITECTURE_VNEXT.md` when that file is present on reviewed
+GitHub `main`.
+
 ## Purpose
 
 Skeleton is the human-controlled construction and control layer for project
