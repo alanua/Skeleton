@@ -25,6 +25,7 @@ ALLOWED_COMMAND_SUFFIXES = frozenset(
         "memory.get_override_history",
         "memory.get_audit_log",
         "memory.get_index_freshness",
+        "memory.prepare_canonical_manifest",
         "graph.query_code",
         "graph.get_index_freshness",
         "memory.propose_patch",
