@@ -12,7 +12,9 @@ This layer is intentionally manifest-only:
 - provenance: approved GitHub issue comment reference `4846756659`
 - privacy classification: `public_safe_operator_preference`
 
-The approved durable rule set is encoded as separate bounded operating rules for fast autonomous progress, established approval boundaries, minimal issue churn, mandatory next-action and operator-action status fields, safe read-only parallelization, incremental use of verified memory layers, canonical SQLite authority, derived Graphify relationship use, non-authoritative MemPalace semantic use, and exact canonical confirmation.
+The candidate binds the exact 12-rule specification approved in comment `4846756659`: fast obvious-next-step progress, independent action inside granted authority, low procedural overhead, useful work over paperwork, real-blocker-only stopping, concise result-focused updates, explicit next-action/operator-action status fields, safe read-only parallelization, incremental use of verified memory layers, canonical SQLite/Memory Gateway authority, Graphify relationship recall, and non-authoritative MemPalace semantic recall with exact canonical confirmation.
+
+Each accepted rule has one fixed ID, category, and statement. Validation rejects changed statements even when the integrity hash is recomputed, duplicate IDs or categories, missing or extra rules, and unsupported fields at the top level or inside provenance, supersession, record, and rule objects. The JSON schema applies equivalent exact-count, uniqueness, and fixed-rule bounds.
 
 The manifest does not include raw chat, transcript fields, private values, local paths, secrets, customer data, environment values, or direct SQLite write intent. Its integrity hash is computed from deterministic JSON over the manifest with `integrity_hash` removed.
 
