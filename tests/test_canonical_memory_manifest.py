@@ -64,6 +64,7 @@ def test_rejects_raw_transcript_private_values_and_local_paths() -> None:
 def test_rejects_unsupported_namespace_missing_provenance_and_sqlite_write_intent() -> None:
     manifest = load_manifest()
     manifest["namespace"] = "skeleton.private_operator_preferences"
+    manifest["scope"] = "private_operator_working_style"
     manifest["authority"] = "canonical_sqlite"
     del manifest["provenance"]
 
@@ -72,6 +73,7 @@ def test_rejects_unsupported_namespace_missing_provenance_and_sqlite_write_inten
     assert result.ok is False
     assert {
         "unsupported_namespace",
+        "unsupported_scope",
         "direct_sqlite_write_intent",
         "missing_required",
         "integrity_hash_mismatch",
@@ -83,7 +85,9 @@ def test_schema_matches_manifest_constants() -> None:
 
     assert schema["$id"] == "skeleton.canonical_memory_manifest.schema.json"
     assert schema["properties"]["schema"]["const"] == CANONICAL_MEMORY_MANIFEST_SCHEMA
+    assert "scope" in schema["required"]
     assert schema["properties"]["namespace"]["const"] == "skeleton.operator_preferences"
+    assert schema["properties"]["scope"]["const"] == "global_operator_working_style"
     assert schema["properties"]["authority"]["const"] == "candidate_manifest_only"
 
 
@@ -93,4 +97,3 @@ def test_docs_state_import_remains_gated() -> None:
     assert "manifest-only" in doc
     assert "does not write to canonical SQLite" in doc
     assert "approved GitHub issue comment reference `4846756659`" in doc
-

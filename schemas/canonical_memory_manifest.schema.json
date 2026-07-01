@@ -6,6 +6,7 @@
   "required": [
     "schema",
     "namespace",
+    "scope",
     "key",
     "record_type",
     "version",
@@ -20,6 +21,7 @@
   "properties": {
     "schema": {"const": "skeleton.canonical_memory_manifest.v1"},
     "namespace": {"const": "skeleton.operator_preferences"},
+    "scope": {"const": "global_operator_working_style"},
     "key": {"const": "fast_autonomous_execution_v1"},
     "record_type": {"const": "operator_working_style_preference"},
     "version": {"type": "integer", "minimum": 1},
@@ -65,4 +67,3 @@
     "integrity_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
   }
 }
-

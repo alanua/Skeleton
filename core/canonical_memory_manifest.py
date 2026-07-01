@@ -9,6 +9,7 @@ from typing import Any, Mapping
 
 from core.canonical_memory import (
     CANONICAL_OPERATOR_PREFERENCES_NAMESPACE,
+    CANONICAL_OPERATOR_PREFERENCES_SCOPE,
     FAST_AUTONOMOUS_EXECUTION_KEY,
     OPERATOR_WORKING_STYLE_RECORD_TYPE,
 )
@@ -97,6 +98,7 @@ def validate_canonical_memory_manifest(data: Mapping[str, Any]) -> ValidationRes
 
     _require(data, "schema", "$.schema", errors)
     _require(data, "namespace", "$.namespace", errors)
+    _require(data, "scope", "$.scope", errors)
     _require(data, "key", "$.key", errors)
     _require(data, "record_type", "$.record_type", errors)
     _require(data, "version", "$.version", errors)
@@ -111,6 +113,8 @@ def validate_canonical_memory_manifest(data: Mapping[str, Any]) -> ValidationRes
         errors.append(_issue("$.schema", "unsupported_schema", "manifest schema is unsupported"))
     if data.get("namespace") not in SUPPORTED_CANONICAL_NAMESPACES:
         errors.append(_issue("$.namespace", "unsupported_namespace", "canonical namespace is unsupported"))
+    if data.get("scope") != CANONICAL_OPERATOR_PREFERENCES_SCOPE:
+        errors.append(_issue("$.scope", "unsupported_scope", "canonical scope is unsupported"))
     if data.get("key") != FAST_AUTONOMOUS_EXECUTION_KEY:
         errors.append(_issue("$.key", "unsupported_key", "canonical key is unsupported"))
     if data.get("record_type") != OPERATOR_WORKING_STYLE_RECORD_TYPE:
@@ -229,4 +233,3 @@ def _issue_to_dict(issue: ValidationIssue) -> dict[str, str]:
         "code": issue.code,
         "message": issue.message,
     }
-

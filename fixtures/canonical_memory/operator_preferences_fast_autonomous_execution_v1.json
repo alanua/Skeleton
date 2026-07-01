@@ -1,6 +1,7 @@
 {
   "schema": "skeleton.canonical_memory_manifest.v1",
   "namespace": "skeleton.operator_preferences",
+  "scope": "global_operator_working_style",
   "key": "fast_autonomous_execution_v1",
   "record_type": "operator_working_style_preference",
   "version": 1,
@@ -26,5 +27,5 @@
       "Report concise status, changed files, and verification results for review."
     ]
   },
-  "integrity_hash": "081fe742b3e4feb7a64ad423b6222e8808ac6f4542f9021d1e6288f7f98f9897"
+  "integrity_hash": "fa8d7e27a2d450175ca92044fa7a83813845d6e708b98f9297fbc29e2e861e23"
 }
