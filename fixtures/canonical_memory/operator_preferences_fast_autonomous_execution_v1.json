@@ -1,6 +1,7 @@
 {
   "schema": "skeleton.canonical_memory_manifest.v1",
   "namespace": "skeleton.operator_preferences",
+  "scope": "global_operator_working_style",
   "key": "fast_autonomous_execution_v1",
   "record_type": "operator_working_style_preference",
   "version": 1,
@@ -20,11 +21,67 @@
   "record": {
     "preference_summary": "Prefer fast autonomous execution on bounded approved Skeleton tasks while preserving explicit safety gates.",
     "operating_rules": [
-      "Proceed through implementation and verification when task scope and approval boundary are already explicit.",
-      "Avoid unnecessary confirmation loops for reversible public-safe preparation work.",
-      "Keep privacy boundaries, protected runtime behavior, and operator approval gates intact.",
-      "Report concise status, changed files, and verification results for review."
+      {
+        "id": "rule-fast-autonomous-progress",
+        "category": "fast_autonomous_progress",
+        "statement": "Work at a fast operational pace and continue through obvious next steps without waiting for repeated confirmation."
+      },
+      {
+        "id": "rule-independent-action",
+        "category": "independent_action",
+        "statement": "Act independently inside already granted authority and established safety boundaries."
+      },
+      {
+        "id": "rule-low-procedural-overhead",
+        "category": "low_procedural_overhead",
+        "statement": "Minimize procedural overhead, repetitive status checking, excessive caution, and unnecessary issue/comment churn."
+      },
+      {
+        "id": "rule-useful-work-over-paperwork",
+        "category": "useful_work_over_paperwork",
+        "statement": "Prefer completing useful work over producing paperwork about the work."
+      },
+      {
+        "id": "rule-real-blockers-only",
+        "category": "real_blockers_only",
+        "statement": "Ask or stop only for a real ambiguity, protected/high-risk approval boundary, unavailable access, or verified blocker."
+      },
+      {
+        "id": "rule-concise-result-updates",
+        "category": "concise_result_updates",
+        "statement": "Keep operator updates short, concrete, and focused on result, blocker, verdict, or next action."
+      },
+      {
+        "id": "rule-status-fields",
+        "category": "status_fields",
+        "statement": "Every operator-facing status must explicitly state both: what will happen next and whether the operator needs to do anything now."
+      },
+      {
+        "id": "rule-read-only-parallelization",
+        "category": "read_only_parallelization",
+        "statement": "Parallelize safe read-only checks and preparation when that materially speeds delivery; serialize only conflicting or high-risk writes."
+      },
+      {
+        "id": "rule-incremental-memory-readiness",
+        "category": "incremental_memory_readiness",
+        "statement": "Start using each approved memory layer as soon as that layer is verified ready; do not wait for all memory layers to be complete."
+      },
+      {
+        "id": "rule-sqlite-authority",
+        "category": "sqlite_authority",
+        "statement": "Use canonical SQLite/Memory Gateway for authoritative durable facts as soon as available."
+      },
+      {
+        "id": "rule-graphify-relationships",
+        "category": "graphify_relationships",
+        "statement": "Use Graphify for dependency/code relationship recall once its runtime index is verified."
+      },
+      {
+        "id": "rule-mempalace-semantic",
+        "category": "mempalace_semantic",
+        "statement": "Use MemPalace for non-authoritative semantic recall once its runtime profile is verified, while keeping exact confirmation in canonical memory."
+      }
     ]
   },
-  "integrity_hash": "081fe742b3e4feb7a64ad423b6222e8808ac6f4542f9021d1e6288f7f98f9897"
+  "integrity_hash": "68ea3713f2f3d9bfd80215a986e54525cd20db926a0de109c23bfeeed94fbf04"
 }
