@@ -24,12 +24,17 @@ GRAPHIFY_ALLOWED_QUERY_KINDS = frozenset(
     }
 )
 GRAPHIFY_MAX_RESULTS = 5
+GRAPHIFY_RUNTIME_PROFILE = "synthetic-fixture-readonly"
+GRAPHIFY_RUNTIME_VERSION = "graphify-unavailable-v1"
+GRAPHIFY_RUNTIME_AVAILABLE = False
 
 _SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _COMMIT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{6,127}$")
 _ISO_UTC_RE = re.compile(r"^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 _HASH_RE = re.compile(r"^[A-Fa-f0-9]{64}$")
 _PUBLIC_TEXT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .,:;_()#-]{0,179}$")
+_URL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+_REPO_PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 _FORBIDDEN_MARKERS = (
     "/",
     "\\",
@@ -65,6 +70,7 @@ class SyntheticRelationship:
     query_kind: str
     relationship_kind: str
     source_ref: str
+    source_path: str
     evidence_hash: str
     related_refs: tuple[str, ...]
     deleted: bool = False
@@ -75,6 +81,10 @@ class SyntheticRelationship:
 class GraphifySyntheticFixture:
     namespace: str
     project_id: str
+    runtime_profile: str
+    runtime_version: str
+    runtime_available: bool
+    index_namespace: str
     indexed_repo_commit: str
     current_repo_commit: str
     indexed_at: str
@@ -122,7 +132,7 @@ class GraphifyAdapter:
                 "result_ref": relationship.result_ref,
                 "relationship_kind": relationship.relationship_kind,
                 "query_kind": relationship.query_kind,
-                "related_refs": list(relationship.related_refs),
+                "related_refs": [_public_ref_from_path(path) for path in relationship.related_refs],
                 "source_attribution": [
                     {
                         "source_ref": relationship.source_ref,
@@ -173,8 +183,11 @@ class GraphifyAdapter:
             "current_repo_commit": self._fixture.current_repo_commit,
             "indexed_at": self._fixture.indexed_at,
             "stale": self._fixture.indexed_repo_commit != self._fixture.current_repo_commit,
-            "index_namespace": self._fixture.namespace,
+            "index_namespace": self._fixture.index_namespace,
             "project_id": self._fixture.project_id,
+            "runtime_profile": self._fixture.runtime_profile,
+            "runtime_version": self._fixture.runtime_version,
+            "runtime_available": self._fixture.runtime_available,
             "graph_schema_version": self._fixture.graph_schema_version,
             "authoritative": False,
             "authority_classification": "derived_code_graph",
@@ -201,6 +214,10 @@ def load_synthetic_fixture(data: Mapping[str, Any]) -> GraphifySyntheticFixture:
         "schema",
         "namespace",
         "project_id",
+        "runtime_profile",
+        "runtime_version",
+        "runtime_available",
+        "index_namespace",
         "indexed_repo_commit",
         "current_repo_commit",
         "indexed_at",
@@ -214,6 +231,18 @@ def load_synthetic_fixture(data: Mapping[str, Any]) -> GraphifySyntheticFixture:
     project_id = _safe_token(data["project_id"], "project_id")
     if namespace != GRAPHIFY_SYNTHETIC_NAMESPACE or project_id != GRAPHIFY_SYNTHETIC_PROJECT_ID:
         raise GraphifyAdapterError("GRAPHIFY_SCOPE_NOT_AUTHORIZED", "fixture scope is not authorized")
+    runtime_profile = _safe_token(data["runtime_profile"], "runtime_profile")
+    runtime_version = _safe_token(data["runtime_version"], "runtime_version")
+    runtime_available = data["runtime_available"]
+    if (
+        runtime_profile != GRAPHIFY_RUNTIME_PROFILE
+        or runtime_version != GRAPHIFY_RUNTIME_VERSION
+        or runtime_available is not GRAPHIFY_RUNTIME_AVAILABLE
+    ):
+        raise GraphifyAdapterError("GRAPHIFY_FIXTURE_MALFORMED", "runtime profile is not pinned")
+    index_namespace = _safe_token(data["index_namespace"], "index_namespace")
+    if index_namespace != GRAPHIFY_SYNTHETIC_NAMESPACE:
+        raise GraphifyAdapterError("GRAPHIFY_SCOPE_NOT_AUTHORIZED", "index namespace is not authorized")
     relationships_value = data["relationships"]
     if not isinstance(relationships_value, list) or not relationships_value:
         raise GraphifyAdapterError("GRAPHIFY_FIXTURE_MALFORMED", "relationships must be a non-empty array")
@@ -223,6 +252,10 @@ def load_synthetic_fixture(data: Mapping[str, Any]) -> GraphifySyntheticFixture:
     fixture = GraphifySyntheticFixture(
         namespace=namespace,
         project_id=project_id,
+        runtime_profile=runtime_profile,
+        runtime_version=runtime_version,
+        runtime_available=runtime_available,
+        index_namespace=index_namespace,
         indexed_repo_commit=_commit(data["indexed_repo_commit"], "indexed_repo_commit"),
         current_repo_commit=_commit(data["current_repo_commit"], "current_repo_commit"),
         indexed_at=_timestamp(data["indexed_at"], "indexed_at"),
@@ -241,6 +274,7 @@ def _relationship(value: object) -> SyntheticRelationship:
         "query_kind",
         "relationship_kind",
         "source_ref",
+        "source_path",
         "evidence_hash",
         "related_refs",
         "deleted",
@@ -253,6 +287,7 @@ def _relationship(value: object) -> SyntheticRelationship:
             "query_kind",
             "relationship_kind",
             "source_ref",
+            "source_path",
             "evidence_hash",
             "related_refs",
             "deleted",
@@ -277,8 +312,9 @@ def _relationship(value: object) -> SyntheticRelationship:
         query_kind=query_kind,
         relationship_kind=_public_text(value["relationship_kind"], "relationship_kind"),
         source_ref=source_ref,
+        source_path=_repo_relative_path(value["source_path"], "source_path"),
         evidence_hash=_evidence_hash(value["evidence_hash"]),
-        related_refs=tuple(_safe_token(item, "related_ref") for item in related_refs),
+        related_refs=tuple(_repo_relative_path(item, "related_ref") for item in related_refs),
         deleted=value["deleted"],
         blocked=blocked,
     )
@@ -362,6 +398,28 @@ def _public_text(value: object, field: str) -> str:
     return value
 
 
+def _repo_relative_path(value: object, field: str) -> str:
+    if not isinstance(value, str) or not value or len(value) > 180:
+        raise GraphifyAdapterError("GRAPHIFY_FIXTURE_MALFORMED", f"{field} must be a bounded repository-relative path")
+    lowered = value.lower()
+    if (
+        value.startswith(("/", "~"))
+        or "\\" in value
+        or _URL_SCHEME_RE.match(value)
+        or any(
+            marker in lowered
+            for marker in (".sqlite", ".db", "secret", "token", "password", "credential", "private")
+        )
+    ):
+        raise GraphifyAdapterError("GRAPHIFY_PRIVATE_VALUE_REJECTED", f"{field} contains private-looking value")
+    parts = value.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        raise GraphifyAdapterError("GRAPHIFY_FIXTURE_MALFORMED", f"{field} must be a bounded repository-relative path")
+    if not all(_REPO_PATH_SEGMENT_RE.fullmatch(part) for part in parts):
+        raise GraphifyAdapterError("GRAPHIFY_FIXTURE_MALFORMED", f"{field} must be a bounded repository-relative path")
+    return value
+
+
 def _evidence_hash(value: object) -> str:
     if not isinstance(value, str) or not _HASH_RE.fullmatch(value):
         raise GraphifyAdapterError("GRAPHIFY_MISSING_PROVENANCE", "evidence hash is required")
@@ -379,6 +437,10 @@ def _fixture_to_dict(fixture: GraphifySyntheticFixture) -> dict[str, object]:
         "schema": GRAPHIFY_FIXTURE_SCHEMA,
         "namespace": fixture.namespace,
         "project_id": fixture.project_id,
+        "runtime_profile": fixture.runtime_profile,
+        "runtime_version": fixture.runtime_version,
+        "runtime_available": fixture.runtime_available,
+        "index_namespace": fixture.index_namespace,
         "indexed_repo_commit": fixture.indexed_repo_commit,
         "current_repo_commit": fixture.current_repo_commit,
         "indexed_at": fixture.indexed_at,
@@ -389,14 +451,19 @@ def _fixture_to_dict(fixture: GraphifySyntheticFixture) -> dict[str, object]:
                 "query_kind": relationship.query_kind,
                 "relationship_kind": relationship.relationship_kind,
                 "source_ref": relationship.source_ref,
+                "source_path": _public_ref_from_path(relationship.source_path),
                 "evidence_hash": relationship.evidence_hash,
-                "related_refs": list(relationship.related_refs),
+                "related_refs": [_public_ref_from_path(path) for path in relationship.related_refs],
                 "deleted": relationship.deleted,
                 "blocked": relationship.blocked,
             }
             for relationship in fixture.relationships
         ],
     }
+
+
+def _public_ref_from_path(value: str) -> str:
+    return "repo-" + value.replace("/", "-").replace(".", "-")
 
 
 def dumps_public(value: Mapping[str, Any]) -> str:
