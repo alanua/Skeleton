@@ -223,7 +223,7 @@ component_status_matrix:
     architecture_status: Target architecture approved; authority ordering, privacy routing, protected-resource detection, and audit evidence must govern VNext work.
     implementation_status: Partially implemented on reviewed GitHub main through boot/control files, operator rules, policy docs, tests, and review gates; no autonomous runtime authority is live.
   loop_controller:
-    architecture_status: Target architecture approved; loop state, bounded retries, checkpoints, leases, and stop/escalate behavior must define future execution.
+    architecture_status: Target architecture approved; loop state, bounded retries, checkpoints, and stop/escalate behavior must define future execution.
     implementation_status: Partially implemented by existing Runner issue/worktree/test/PR flow; the full canonical Loop Controller is not live as a separate activated runtime.
   task_envelope:
     architecture_status: Target architecture approved; TaskEnvelope must be the canonical execution request.
@@ -254,7 +254,7 @@ component_status_matrix:
     implementation_status: "#1256 remains planned controlled-mutation capability; no Home Edge mutation execution is live from this document or this PR."
   telegram_control_board:
     architecture_status: Target architecture approved as read-only/status and bounded-action projections that must not become canon or bypass review gates.
-    implementation_status: Telegram notification/poller evidence exists on reviewed main, but the VNext Control Board and projection authority model are not live or canonical activation.
+    implementation_status: Telegram notification/poller evidence exists on reviewed main, but the VNext Control Board and projection authority model are not live or canonically activated.
 supersession:
   entries:
     - source: Exoskeleton documents
