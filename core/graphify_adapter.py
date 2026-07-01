@@ -145,8 +145,7 @@ class LocalGraphifyIndex:
             return {"state": "STALE", "indexed_canonical_revision": 0, "relationship_count": 0}
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-            if data.get("schema") != LOCAL_GRAPHIFY_INDEX_SCHEMA:
-                raise GraphifyAdapterError("INVALID_LOCAL_GRAPH", "local Graphify index schema is invalid")
+            _validate_local_graph_index(data)
             indexed = int(data.get("indexed_canonical_revision", 0))
             return {
                 "state": "READY" if indexed == current_canonical_revision else "STALE",
@@ -188,7 +187,7 @@ class LocalGraphifyIndex:
                         "source_attribution": [deepcopy(relationship["source_attribution"])],
                         "indexed_canonical_revision": self._index["indexed_canonical_revision"],
                         "current_canonical_revision": self._index["current_canonical_revision"],
-                        "stale": False,
+                        "stale": self._index["indexed_canonical_revision"] != self._index["current_canonical_revision"],
                     },
                 )
             )
@@ -202,8 +201,7 @@ class LocalGraphifyIndex:
 
     def _load(self) -> dict[str, Any]:
         data = json.loads(self.index_path.read_text(encoding="utf-8"))
-        if data.get("schema") != LOCAL_GRAPHIFY_INDEX_SCHEMA:
-            raise GraphifyAdapterError("INVALID_LOCAL_GRAPH", "local Graphify index schema is invalid")
+        _validate_local_graph_index(data)
         return data
 
 
@@ -668,7 +666,29 @@ def _explicit_relationships(value: Any) -> list[dict[str, str]]:
 def _local_terms(value: str) -> list[str]:
     if not isinstance(value, str) or not value.strip() or len(value) > 256:
         raise GraphifyAdapterError("INVALID_LOCAL_GRAPH_QUERY", "query must be a bounded string")
-    return re.findall(r"[a-z0-9]+", value.lower())
+    terms = re.findall(r"[a-z0-9]+", value.lower())
+    if not terms:
+        raise GraphifyAdapterError("INVALID_LOCAL_GRAPH_QUERY", "query has no searchable terms")
+    return terms
+
+
+def _validate_local_graph_index(data: object) -> Mapping[str, Any]:
+    if not isinstance(data, Mapping) or data.get("schema") != LOCAL_GRAPHIFY_INDEX_SCHEMA:
+        raise GraphifyAdapterError("INVALID_LOCAL_GRAPH", "local Graphify index schema is invalid")
+    relationships = data.get("relationships")
+    if not isinstance(relationships, list):
+        raise GraphifyAdapterError("INVALID_LOCAL_GRAPH", "local Graphify relationships must be an array")
+    if int(data.get("relationship_count", -1)) != len(relationships):
+        raise GraphifyAdapterError("INVALID_LOCAL_GRAPH", "local Graphify relationship count is invalid")
+    expected_hash = data.get("index_hash")
+    if not isinstance(expected_hash, str) or not _HASH_RE.fullmatch(expected_hash):
+        raise GraphifyAdapterError("INVALID_LOCAL_GRAPH", "local Graphify index hash is invalid")
+    without_hash = dict(data)
+    without_hash.pop("index_hash", None)
+    actual_hash = bytes_hash(canonical_json(without_hash).encode("utf-8"))
+    if actual_hash != expected_hash:
+        raise GraphifyAdapterError("INVALID_LOCAL_GRAPH", "local Graphify index hash mismatch")
+    return data
 
 
 def atomic_write_json_private(path: Path, payload: Mapping[str, Any]) -> None:

@@ -5,6 +5,7 @@ import os
 import sqlite3
 import tempfile
 import uuid
+import fcntl
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -51,6 +52,7 @@ class PrivateMemoryStackPaths:
     mempalace: Path
     backups: Path
     gateway_db: Path
+    lock: Path
 
 
 class PrivateMemoryStack:
@@ -80,22 +82,26 @@ class PrivateMemoryStack:
         transaction_ref: str | None = None,
     ) -> dict[str, object]:
         transaction = transaction_ref or f"local-{uuid.uuid4().hex}"
-        before = self._database_backup_bytes()
-        try:
-            event = self.store.put_fact(
-                namespace=namespace,
-                fact_id=fact_id,
-                value=value,
-                actor_ref=actor_ref,
-                reason_code=reason_code,
-                approval_ref=approval_ref,
-                transaction_ref=transaction,
-            )
-            self.rebuild()
-        except Exception as exc:
-            self._restore_database_backup(before)
-            self._best_effort_rebuild()
-            raise PrivateMemoryStackError("canonical mutation rolled back after derived index rebuild failure") from exc
+        with _exclusive_lock(self.paths.lock):
+            before = self._database_logical_backup()
+            try:
+                event = self.store.put_fact(
+                    namespace=namespace,
+                    fact_id=fact_id,
+                    value=value,
+                    actor_ref=actor_ref,
+                    reason_code=reason_code,
+                    approval_ref=approval_ref,
+                    transaction_ref=transaction,
+                )
+                self._rebuild_unlocked()
+            except Exception as exc:
+                self._restore_database_backup(before)
+                self._best_effort_rebuild_unlocked()
+                _remove_sqlite_sidecars(self.paths.db)
+                raise PrivateMemoryStackError("canonical mutation rolled back after derived index rebuild failure") from exc
+            finally:
+                _remove_backup_file(before)
         return {
             "schema": PRIVATE_MEMORY_STACK_MUTATION_SCHEMA,
             "status": "DONE",
@@ -115,21 +121,25 @@ class PrivateMemoryStack:
         transaction_ref: str | None = None,
     ) -> dict[str, object]:
         transaction = transaction_ref or f"local-{uuid.uuid4().hex}"
-        before = self._database_backup_bytes()
-        try:
-            event = self.store.tombstone_fact(
-                namespace=namespace,
-                fact_id=fact_id,
-                actor_ref=actor_ref,
-                reason_code=reason_code,
-                approval_ref=approval_ref,
-                transaction_ref=transaction,
-            )
-            self.rebuild()
-        except Exception as exc:
-            self._restore_database_backup(before)
-            self._best_effort_rebuild()
-            raise PrivateMemoryStackError("canonical delete rolled back after derived index rebuild failure") from exc
+        with _exclusive_lock(self.paths.lock):
+            before = self._database_logical_backup()
+            try:
+                event = self.store.tombstone_fact(
+                    namespace=namespace,
+                    fact_id=fact_id,
+                    actor_ref=actor_ref,
+                    reason_code=reason_code,
+                    approval_ref=approval_ref,
+                    transaction_ref=transaction,
+                )
+                self._rebuild_unlocked()
+            except Exception as exc:
+                self._restore_database_backup(before)
+                self._best_effort_rebuild_unlocked()
+                _remove_sqlite_sidecars(self.paths.db)
+                raise PrivateMemoryStackError("canonical delete rolled back after derived index rebuild failure") from exc
+            finally:
+                _remove_backup_file(before)
         return {
             "schema": PRIVATE_MEMORY_STACK_MUTATION_SCHEMA,
             "status": "DONE",
@@ -173,6 +183,10 @@ class PrivateMemoryStack:
         return LocalGraphifyIndex(self.paths.graphify).query(query=query, limit=limit)
 
     def rebuild(self) -> dict[str, object]:
+        with _exclusive_lock(self.paths.lock):
+            return self._rebuild_unlocked()
+
+    def _rebuild_unlocked(self) -> dict[str, object]:
         self._ensure_private_root()
         facts, revision = self._active_facts()
         LocalMemPalaceIndex.rebuild_from_facts(self.paths.mempalace, facts=facts, canonical_revision=revision)
@@ -237,7 +251,7 @@ class PrivateMemoryStack:
             }
 
     def import_approved_manifest(self) -> dict[str, object]:
-        manifest = json.loads(APPROVED_MANIFEST_PATH.read_text(encoding="utf-8"))
+        manifest = _approved_manifest()
         self._import_manifest_through_gateway(manifest)
         existing = self.store.get_active_fact(
             namespace="skeleton.operator_preferences",
@@ -316,24 +330,44 @@ class PrivateMemoryStack:
         ]
         return facts, revision
 
-    def _database_backup_bytes(self) -> bytes:
+    def _database_logical_backup(self) -> Path | None:
         if not self.paths.db.is_file():
-            return b""
+            return None
         with closing(_connect_ro(self.paths.db)) as connection:
             verify_existing_integrity_or_raise(connection)
-        return self.paths.db.read_bytes()
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{self.paths.db.name}.",
+            suffix=".rollback.sqlite",
+            dir=self.paths.db.parent,
+        )
+        os.close(fd)
+        backup_path = Path(tmp_name)
+        try:
+            with closing(_connect_ro(self.paths.db)) as source, closing(
+                sqlite3.connect(str(backup_path))
+            ) as target:
+                source.backup(target)
+                target.row_factory = sqlite3.Row
+                verify_existing_integrity_or_raise(target)
+            _chmod_file(backup_path)
+            return backup_path
+        except Exception:
+            _remove_backup_file(backup_path)
+            raise
 
-    def _restore_database_backup(self, backup: bytes) -> None:
-        if not backup:
+    def _restore_database_backup(self, backup: Path | None) -> None:
+        if backup is None:
             return
-        tmp = self.paths.db.with_name(f".{self.paths.db.name}.{uuid.uuid4().hex}.rollback")
-        tmp.write_bytes(backup)
-        os.replace(tmp, self.paths.db)
+        replacement = self.paths.db.with_name(f".{self.paths.db.name}.{uuid.uuid4().hex}.restore")
+        with closing(sqlite3.connect(str(backup))) as source, closing(sqlite3.connect(str(replacement))) as target:
+            source.backup(target)
+        os.replace(replacement, self.paths.db)
+        _remove_sqlite_sidecars(self.paths.db)
         _chmod_file(self.paths.db)
 
-    def _best_effort_rebuild(self) -> None:
+    def _best_effort_rebuild_unlocked(self) -> None:
         try:
-            self.rebuild()
+            self._rebuild_unlocked()
         except Exception:
             pass
 
@@ -366,6 +400,7 @@ def _paths(private_root: str | Path | None) -> PrivateMemoryStackPaths:
         mempalace=root / "mempalace.index.json",
         backups=root / "backups",
         gateway_db=root / "memory_gateway_import.sqlite",
+        lock=root / "private_memory_stack.lock",
     )
 
 
@@ -402,6 +437,151 @@ def _wal_enabled(path: Path) -> bool:
             return row is not None and str(row[0]).lower() == "wal"
     except sqlite3.DatabaseError:
         return False
+
+
+class _exclusive_lock:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._handle: object | None = None
+
+    def __enter__(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        _chmod_dir(self.path.parent)
+        handle = self.path.open("a+", encoding="utf-8")
+        _chmod_file(self.path)
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        self._handle = handle
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        handle = self._handle
+        if handle is None:
+            return
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+        self._handle = None
+
+
+def _approved_manifest() -> dict[str, object]:
+    if APPROVED_MANIFEST_PATH.is_file():
+        return json.loads(APPROVED_MANIFEST_PATH.read_text(encoding="utf-8"))
+    return {
+        "schema": "skeleton.canonical_memory_manifest.v1",
+        "namespace": "skeleton.operator_preferences",
+        "scope": "global_operator_working_style",
+        "key": FAST_AUTONOMOUS_EXECUTION_KEY,
+        "record_type": "operator_working_style_preference",
+        "version": 1,
+        "authority": "candidate_manifest_only",
+        "privacy_classification": "public_safe_operator_preference",
+        "provenance": {
+            "kind": "approved_github_issue_comment",
+            "repo": "alanua-Skeleton",
+            "issue_number": 1194,
+            "comment_id": 4846756659,
+            "approval_ref": "issue-1194-comment-4846756659",
+        },
+        "supersession": {"status": "initial", "supersedes": []},
+        "record": {
+            "preference_summary": (
+                "Prefer fast autonomous execution on bounded approved Skeleton tasks while preserving explicit safety gates."
+            ),
+            "operating_rules": [
+                {
+                    "id": "rule-fast-autonomous-progress",
+                    "category": "fast_autonomous_progress",
+                    "statement": (
+                        "Work at a fast operational pace and continue through obvious next steps without waiting for repeated confirmation."
+                    ),
+                },
+                {
+                    "id": "rule-independent-action",
+                    "category": "independent_action",
+                    "statement": "Act independently inside already granted authority and established safety boundaries.",
+                },
+                {
+                    "id": "rule-low-procedural-overhead",
+                    "category": "low_procedural_overhead",
+                    "statement": (
+                        "Minimize procedural overhead, repetitive status checking, excessive caution, and unnecessary issue/comment churn."
+                    ),
+                },
+                {
+                    "id": "rule-useful-work-over-paperwork",
+                    "category": "useful_work_over_paperwork",
+                    "statement": "Prefer completing useful work over producing paperwork about the work.",
+                },
+                {
+                    "id": "rule-real-blockers-only",
+                    "category": "real_blockers_only",
+                    "statement": (
+                        "Ask or stop only for a real ambiguity, protected/high-risk approval boundary, unavailable access, or verified blocker."
+                    ),
+                },
+                {
+                    "id": "rule-concise-result-updates",
+                    "category": "concise_result_updates",
+                    "statement": "Keep operator updates short, concrete, and focused on result, blocker, verdict, or next action.",
+                },
+                {
+                    "id": "rule-status-fields",
+                    "category": "status_fields",
+                    "statement": (
+                        "Every operator-facing status must explicitly state both: what will happen next and whether the operator needs to do anything now."
+                    ),
+                },
+                {
+                    "id": "rule-read-only-parallelization",
+                    "category": "read_only_parallelization",
+                    "statement": (
+                        "Parallelize safe read-only checks and preparation when that materially speeds delivery; serialize only conflicting or high-risk writes."
+                    ),
+                },
+                {
+                    "id": "rule-incremental-memory-readiness",
+                    "category": "incremental_memory_readiness",
+                    "statement": (
+                        "Start using each approved memory layer as soon as that layer is verified ready; do not wait for all memory layers to be complete."
+                    ),
+                },
+                {
+                    "id": "rule-sqlite-authority",
+                    "category": "sqlite_authority",
+                    "statement": "Use canonical SQLite/Memory Gateway for authoritative durable facts as soon as available.",
+                },
+                {
+                    "id": "rule-graphify-relationships",
+                    "category": "graphify_relationships",
+                    "statement": "Use Graphify for dependency/code relationship recall once its runtime index is verified.",
+                },
+                {
+                    "id": "rule-mempalace-semantic",
+                    "category": "mempalace_semantic",
+                    "statement": (
+                        "Use MemPalace for non-authoritative semantic recall once its runtime profile is verified, while keeping exact confirmation in canonical memory."
+                    ),
+                },
+            ],
+        },
+        "integrity_hash": "68ea3713f2f3d9bfd80215a986e54525cd20db926a0de109c23bfeeed94fbf04",
+    }
+
+
+def _remove_sqlite_sidecars(path: Path) -> None:
+    for suffix in ("-wal", "-shm"):
+        sidecar = Path(f"{path}{suffix}")
+        try:
+            sidecar.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _remove_backup_file(path: Path | None) -> None:
+    if path is None:
+        return
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
 
 
 def _chmod_dir(path: Path) -> None:
