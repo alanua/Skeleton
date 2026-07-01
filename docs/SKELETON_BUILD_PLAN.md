@@ -3,6 +3,10 @@
 Status: public-safe planning artifact
 Scope: Skeleton itself, not product runtime implementation
 
+Historical/foundation notice: this document remains retained history and
+foundation context. After review and merge, the active target architecture is
+`docs/SKELETON_ARCHITECTURE_VNEXT.md`.
+
 ## Purpose
 
 Skeleton is the human-controlled construction and control layer for project

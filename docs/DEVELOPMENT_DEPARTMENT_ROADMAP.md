@@ -3,6 +3,10 @@
 Status: public-safe planning artifact
 Scope: managed development department built on Skeleton
 
+Historical/foundation notice: this document remains retained history and
+foundation context. After review and merge, the active target architecture is
+`docs/SKELETON_ARCHITECTURE_VNEXT.md`.
+
 ## Purpose
 
 The development department is the controlled human-led system for turning
