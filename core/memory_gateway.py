@@ -394,7 +394,11 @@ class MemoryGateway:
                 "stale derived index cannot support a patch proposal",
             )
         freshness = self._freshness.get((namespace, project_id), {})
-        mempalace_freshness = freshness.get("mempalace", {})
+        mempalace_freshness = (
+            self._mempalace_index_freshness(namespace, project_id)
+            if has_semantic
+            else freshness.get("mempalace", {})
+        )
         graph_freshness = freshness.get("graphify", {})
         if has_semantic:
             if isinstance(mempalace_freshness, Mapping) and mempalace_freshness.get("stale"):
@@ -418,18 +422,34 @@ class MemoryGateway:
                     GRAPH_RESULT_NOT_CANON_CONFIRMED,
                     "graph evidence requires exact canonical confirmation",
                 )
-        canonical_freshness = freshness.get("canonical_sqlite", {})
-        canonical_revision = (
-            canonical_freshness.get("current_canonical_revision")
-            if isinstance(canonical_freshness, Mapping)
-            else None
+        canonical_freshness = (
+            mempalace_freshness
+            if _is_mempalace_synthetic_scope(namespace, project_id)
+            else freshness.get("canonical_sqlite", {})
         )
+        canonical_revision = _current_canonical_revision(canonical_freshness)
         if canonical_revision is not None and proposal.get("confirmed_canonical_revision") != canonical_revision:
             raise MemoryGatewayPolicyError(
                 EXACT_CONFIRMATION_REVISION_MISMATCH,
                 "exact confirmation revision does not match current canonical revision",
             )
         self._validate_canonical_exact_confirmation(namespace, project_id, proposal)
+
+    def _mempalace_index_freshness(self, namespace: str, project_id: str) -> Mapping[str, object]:
+        if not _is_mempalace_synthetic_scope(namespace, project_id):
+            return self._freshness.get((namespace, project_id), {}).get("mempalace", {})
+        if self._mempalace_adapter is None:
+            raise MemoryGatewayPolicyError(
+                "MEMPALACE_ADAPTER_REQUIRED",
+                "synthetic MemPalace route requires explicit adapter injection",
+            )
+        try:
+            return self._mempalace_adapter.get_index_freshness(
+                namespace=namespace,
+                project_id=project_id,
+            )
+        except MemPalaceAdapterError as exc:
+            raise MemoryGatewayPolicyError(exc.reason_code, str(exc)) from exc
 
     def _validate_canonical_exact_confirmation(
         self, namespace: str, project_id: str, proposal: Mapping[str, Any]
@@ -577,6 +597,12 @@ def _has_stale_index_reference(provenance_refs: list[object]) -> bool:
         if indexed_revision is not None and current_revision is not None and indexed_revision != current_revision:
             return True
     return False
+
+
+def _current_canonical_revision(freshness: object) -> object:
+    if isinstance(freshness, Mapping):
+        return freshness.get("current_canonical_revision")
+    return None
 
 
 def _seed_scopes() -> tuple[tuple[str, str], ...]:
