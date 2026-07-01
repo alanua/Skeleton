@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.canonical_memory_import_receipt.schema.json",
+  "title": "Canonical Memory Import Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "status",
+    "idempotency_classification",
+    "namespace_token",
+    "scope_token",
+    "key_token",
+    "version",
+    "canonical_revision",
+    "integrity_hash",
+    "snapshot_status",
+    "read_back_status",
+    "rollback_status",
+    "authoritative"
+  ],
+  "properties": {
+    "schema": {"const": "skeleton.canonical_memory_import_receipt.v1"},
+    "status": {"const": "IMPORTED"},
+    "idempotency_classification": {"enum": ["NEW_IMPORT", "DUPLICATE_EXISTING"]},
+    "namespace_token": {"const": "skeleton.operator_preferences"},
+    "scope_token": {"const": "global_operator_working_style"},
+    "key_token": {"const": "fast_autonomous_execution_v1"},
+    "version": {"const": 1},
+    "canonical_revision": {"type": "integer", "minimum": 1},
+    "integrity_hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "snapshot_status": {"const": "created"},
+    "read_back_status": {"const": "verified"},
+    "rollback_status": {"enum": ["not_required", "completed"]},
+    "authoritative": {"type": "boolean"}
+  }
+}

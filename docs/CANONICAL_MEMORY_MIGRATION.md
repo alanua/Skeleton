@@ -2,7 +2,7 @@
 
 Issue 1194 prepares the first public-safe canonical memory migration layer for an approved operator preference candidate.
 
-This layer is intentionally manifest-only:
+This layer starts from one approved manifest:
 
 - canonical target namespace: `skeleton.operator_preferences`
 - scope: `global_operator_working_style`
@@ -18,4 +18,14 @@ Each accepted rule has one fixed ID, category, and statement. Validation rejects
 
 The manifest does not include raw chat, transcript fields, private values, local paths, secrets, customer data, environment values, or direct SQLite write intent. Its integrity hash is computed from deterministic JSON over the manifest with `integrity_hash` removed.
 
-Runtime import remains gated because the existing Memory Gateway has no verified local import API with approval provenance, snapshot, integrity check, and rollback. The gateway route added for this layer only validates and reads back the manifest for operator review. It returns `authoritative: false` and does not write to canonical SQLite or activate the record as canonical exact memory.
+The first bounded local import path is implemented but must only be called with a trusted, caller-injected `SkeletonMemory` instance. Callers cannot provide a database path, SQL, command, environment, namespace, scope, key, or version. The sole gateway command is `skeleton.memory.import_canonical_manifest`, and it accepts only the exact approved manifest.
+
+The import path validates the merged manifest with the canonical-memory manifest validator, then additionally requires exact approval provenance `issue-1194-comment-4846756659`, namespace `skeleton.operator_preferences`, scope `global_operator_working_style`, key `fast_autonomous_execution_v1`, version `1`, candidate-only authority, and the approved integrity hash.
+
+Before mutation, the importer opens a transaction and records a recoverable pre-import snapshot marker in the same SQLite store. It assigns a monotonic canonical revision, preserves provenance, version, supersession, integrity hash, created revision, imported-at metadata, and `authoritative=true`, then reads back through `MemoryGateway.lookup_exact`. The read-back must match the byte-equivalent normalized manifest JSON, integrity hash, current revision, and authoritative status before commit.
+
+Repeated import of the same manifest is idempotent and returns the existing canonical revision. Changed manifest content, recomputed statement hashes, missing approval provenance, namespace/scope/key/version mismatches, unsupported fields, conflicting existing versions, unavailable snapshots, write failures, and read-back mismatches fail closed and roll back the transaction.
+
+The public receipt is aggregate-only: status, idempotency classification, namespace token, scope token, key token, version, canonical revision, integrity hash, snapshot status, read-back status, rollback status, and authoritative boolean. It does not include database paths, SQL, raw transcripts, local paths, secrets, customer data, or the manifest body.
+
+This task does not execute a live/runtime import and does not activate operator preferences outside isolated tests. A fresh ChatGPT review is required before any runtime handler or local activation.

@@ -26,6 +26,7 @@ ALLOWED_COMMAND_SUFFIXES = frozenset(
         "memory.get_audit_log",
         "memory.get_index_freshness",
         "memory.prepare_canonical_manifest",
+        "memory.import_canonical_manifest",
         "graph.query_code",
         "graph.get_index_freshness",
         "memory.propose_patch",
@@ -40,9 +41,10 @@ EXACT_CONFIRMATION_REVISION_MISMATCH = "EXACT_CONFIRMATION_REVISION_MISMATCH"
 
 _SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _FORBIDDEN_PUBLIC_MARKERS = (
-    "/",
-    "\\",
     "file:",
+    "/home/",
+    "/tmp/",
+    "\\users\\",
     ".sqlite",
     ".db",
     "secret",

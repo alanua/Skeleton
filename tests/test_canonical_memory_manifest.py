@@ -149,7 +149,7 @@ def test_manifest_contains_every_exact_approved_rule() -> None:
 
 def test_docs_keep_import_gated() -> None:
     doc = DOC_PATH.read_text(encoding="utf-8")
-    assert "manifest-only" in doc
-    assert "does not write to canonical SQLite" in doc
+    assert "bounded local import path is implemented" in doc
+    assert "does not execute a live/runtime import" in doc
     assert "approved GitHub issue comment reference `4846756659`" in doc
     assert "exact 12-rule specification" in doc
