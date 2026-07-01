@@ -645,6 +645,56 @@ values, filenames, drawing names, source labels, room names, layers, dimensions,
 areas, quantities, raw JSON, CSV contents, command output, secrets, or issue-body
 text.
 
+`dispatch_hermes_aufmass_private_pilot_v0` prepares only the public-safe Runner
+maintenance dispatch envelope for the private Hermes Aufmass pilot packet:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: dispatch_hermes_aufmass_private_pilot_v0
+Private Source Pack ID: opaque-token
+Run ID: optional-opaque-token
+Pilot Mode: dry-run
+```
+
+`Run ID` and `Pilot Mode` are optional. The only accepted pilot mode for the
+public Runner handler is `dry-run`. GitHub issue text may provide only the
+opaque `Private Source Pack ID`, optional `Run ID`, and optional `Pilot Mode`.
+Any task body, path, filename, Drive reference, room name, label, dimension,
+area, quantity, raw row, secret, token value outside the opaque ids, screenshot,
+address, customer identifier, or private artifact content is rejected and not
+echoed back.
+
+It may only:
+
+1. Resolve the private Aufmass route through the fixed private project id.
+2. Read `automation_registry.private.json` from the registered private
+   workspace root.
+3. Resolve the source-pack run and
+   `hermes_aufmass_private_pilot_v0` route from that private registry.
+4. Accept only an approved private runtime route and a Google workspace status
+   of `configured`.
+5. Optionally read a private aggregate summary JSON through a registry-relative,
+   traversal-free path inside the private workspace.
+6. Report only aggregate public-safe status fields.
+
+The handler does not start Hermes, start a gateway, call Google services, call
+Telegram, invoke OAuth, run the private pilot module, read drawings, publish
+branches, or dispatch the real pilot from public issue text. If the private
+registry entry is missing, the private route is not approved, or readiness
+cannot be verified through the approved private route, it reports `BLOCKED`
+with aggregate fields only.
+
+The public GitHub report fields are limited to `status`,
+`maintenance_task_id`, `private_source_pack_id`, optional `run_id`,
+`hermes_dispatch_status`, `google_workspace_status`,
+`created_private_table_count`, `source_manifest_row_count`,
+`room_review_row_count`, `openings_review_row_count`, `qa_issue_count`,
+`export_summary_row_count`, `current_phase`, `blocker_count`, and
+`next_operator_action`. It must not print private paths, Drive links or ids,
+filenames, drawing names, source labels, room names, layers, dimensions, areas,
+quantities, raw JSON, CSV contents, command output, secrets, screenshots,
+addresses, customer identifiers, registry values, or issue-body text.
+
 `summarize_aufmass_private_review` summarizes generated private review tables
 without printing private row contents:
 

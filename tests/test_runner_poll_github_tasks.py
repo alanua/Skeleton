@@ -6996,6 +6996,32 @@ def _write_aufmass_private_registry(workspace: Path) -> tuple[Path, Path, Path]:
     return manifest, artifact_map, output_root
 
 
+def _write_hermes_aufmass_private_dispatch_registry(
+    workspace: Path,
+    *,
+    summary: dict[str, object] | None = None,
+    google_workspace_status: str = "configured",
+) -> Path:
+    _manifest, _artifact_map, output_root = _write_aufmass_private_registry(workspace)
+    summary_path = output_root / "hermes_aufmass_private_pilot_public_summary.json"
+    if summary is not None:
+        summary_path.write_text(json.dumps(summary), encoding="utf-8")
+    registry_path = workspace / runner.AUFMASS_PRIVATE_AUTOMATION_REGISTRY
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    registry["source_packs"]["pack_token"]["runs"]["run_token"][
+        runner.HERMES_AUFMASS_PRIVATE_PILOT_ROUTE
+    ] = {
+        "approved_private_runtime_route": True,
+        "google_workspace_status": google_workspace_status,
+        "hermes_dispatch_status": "dry_run_ready",
+        "public_aggregate_summary": (
+            "runs/runA/hermes_aufmass_private_pilot_public_summary.json"
+        ),
+    }
+    registry_path.write_text(json.dumps(registry), encoding="utf-8")
+    return summary_path
+
+
 def test_aufmass_private_review_tasks_are_allowlisted() -> None:
     assert runner.RUN_AUFMASS_PRIVATE_DXF_REVIEW == "run_aufmass_private_dxf_review"
     assert runner.SUMMARIZE_AUFMASS_PRIVATE_REVIEW == "summarize_aufmass_private_review"
@@ -7011,6 +7037,158 @@ def test_aufmass_private_review_tasks_are_allowlisted() -> None:
         runner.BUILD_AUFMASS_PRIVATE_AREA_SCHEDULE
         in runner.RUNTIME_MAINTENANCE_TASK_IDS
     )
+
+
+def test_dispatch_hermes_aufmass_private_pilot_is_allowlisted() -> None:
+    assert (
+        runner.DISPATCH_HERMES_AUFMASS_PRIVATE_PILOT
+        == "dispatch_hermes_aufmass_private_pilot_v0"
+    )
+    assert (
+        runner.DISPATCH_HERMES_AUFMASS_PRIVATE_PILOT
+        in runner.RUNTIME_MAINTENANCE_TASK_IDS
+    )
+
+
+def test_dispatch_hermes_aufmass_private_pilot_rejects_private_issue_text() -> None:
+    body = _maintenance_issue(
+        runner.DISPATCH_HERMES_AUFMASS_PRIVATE_PILOT,
+        "cat /private/customer/source_pack_manifest.json\nRoom Label: Secret Office",
+        metadata=(
+            "Private Source Pack ID: pack_token\n"
+            "Run ID: run_token\n"
+            "Pilot Mode: dry-run"
+        ),
+    )["body"]
+
+    with mock.patch.object(runner, "run_command") as run:
+        report = runner.dispatch_hermes_aufmass_private_pilot(str(body))
+
+    assert report.startswith("BLOCKED:")
+    assert "private_source_pack_id=pack_token" in report
+    assert "current_phase=issue_text_rejected" in report
+    assert "next_operator_action=remove_private_issue_content" in report
+    assert "/private/customer" not in report
+    assert "Secret Office" not in report
+    assert "source_pack_manifest.json" not in report
+    run.assert_not_called()
+
+
+def test_dispatch_hermes_aufmass_private_pilot_missing_route_blocks_aggregate_only(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "private"
+    workspace.mkdir()
+    _write_aufmass_private_registry(workspace)
+    body = _maintenance_issue(
+        runner.DISPATCH_HERMES_AUFMASS_PRIVATE_PILOT,
+        metadata="Private Source Pack ID: pack_token\nRun ID: run_token",
+    )["body"]
+
+    with mock.patch.object(
+        runner,
+        "_aufmass_private_registered_paths",
+        return_value=(workspace / "checkout", workspace, None),
+    ), mock.patch.object(runner, "run_command") as run:
+        report = runner.dispatch_hermes_aufmass_private_pilot(str(body))
+
+    assert report.startswith("BLOCKED:")
+    assert "status=blocked" in report
+    assert (
+        "maintenance_task_id=dispatch_hermes_aufmass_private_pilot_v0"
+        in report
+    )
+    assert "private_source_pack_id=pack_token" in report
+    assert "run_id=run_token" in report
+    assert "hermes_dispatch_status=missing" in report
+    assert "google_workspace_status=missing" in report
+    assert "created_private_table_count=0" in report
+    assert "current_phase=private_runtime_route" in report
+    assert "blocker_count=1" in report
+    assert str(workspace) not in report
+    assert "artifact_map.json" not in report
+    assert "source_pack_manifest.json" not in report
+    run.assert_not_called()
+
+
+def test_dispatch_hermes_aufmass_private_pilot_reports_only_allowed_aggregate_fields(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "private"
+    workspace.mkdir()
+    _write_hermes_aufmass_private_dispatch_registry(
+        workspace,
+        summary={
+            "schema": runner.HERMES_AUFMASS_PRIVATE_PILOT_SUMMARY_SCHEMA,
+            "hermes_dispatch_status": "dry_run_ready",
+            "created_private_table_count": 6,
+            "source_manifest_row_count": 4,
+            "room_review_row_count": 8,
+            "openings_review_row_count": 2,
+            "qa_issue_count": 1,
+            "export_summary_row_count": 3,
+            "current_phase": "ready_for_operator_review",
+            "blocker_count": 0,
+            "next_operator_action": "review_private_outputs",
+            "private_room_name": "Secret Office",
+            "private_quantity": 42.5,
+            "private_path": "/private/customer/source.dxf",
+        },
+    )
+    body = _maintenance_issue(
+        runner.DISPATCH_HERMES_AUFMASS_PRIVATE_PILOT,
+        metadata=(
+            "Private Source Pack ID: pack_token\n"
+            "Run ID: run_token\n"
+            "Pilot Mode: dry-run"
+        ),
+    )["body"]
+
+    with mock.patch.object(
+        runner,
+        "_aufmass_private_registered_paths",
+        return_value=(workspace / "checkout", workspace, None),
+    ), mock.patch.object(runner, "run_command") as run:
+        report = runner.dispatch_hermes_aufmass_private_pilot(str(body))
+
+    lines = report.splitlines()
+    report_keys = {
+        line.split("=", 1)[0] for line in lines[1:] if "=" in line
+    }
+    assert report.startswith("DONE:")
+    assert report_keys == {
+        "status",
+        "maintenance_task_id",
+        "private_source_pack_id",
+        "run_id",
+        "hermes_dispatch_status",
+        "google_workspace_status",
+        "created_private_table_count",
+        "source_manifest_row_count",
+        "room_review_row_count",
+        "openings_review_row_count",
+        "qa_issue_count",
+        "export_summary_row_count",
+        "current_phase",
+        "blocker_count",
+        "next_operator_action",
+    }
+    assert "status=done" in report
+    assert "hermes_dispatch_status=dry_run_ready" in report
+    assert "google_workspace_status=configured" in report
+    assert "created_private_table_count=6" in report
+    assert "source_manifest_row_count=4" in report
+    assert "room_review_row_count=8" in report
+    assert "openings_review_row_count=2" in report
+    assert "qa_issue_count=1" in report
+    assert "export_summary_row_count=3" in report
+    assert "current_phase=ready_for_operator_review" in report
+    assert "next_operator_action=review_private_outputs" in report
+    assert str(workspace) not in report
+    assert "Secret Office" not in report
+    assert "42.5" not in report
+    assert "source.dxf" not in report
+    run.assert_not_called()
 
 
 @pytest.mark.parametrize(
