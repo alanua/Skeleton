@@ -34,7 +34,7 @@
     },
     "snapshot_status": {"const": "created"},
     "read_back_status": {"const": "verified"},
-    "rollback_status": {"enum": ["not_required", "completed"]},
-    "authoritative": {"type": "boolean"}
+    "rollback_status": {"const": "not_required"},
+    "authoritative": {"const": true}
   }
 }

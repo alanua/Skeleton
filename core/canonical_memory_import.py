@@ -83,7 +83,7 @@ def import_approved_operator_preference_manifest(
                     "existing canonical version differs from approved manifest",
                     rollback_status="pending",
                 )
-            receipt = _receipt(
+            duplicate_receipt = _receipt(
                 idempotency_classification="DUPLICATE_EXISTING",
                 canonical_revision=int(existing["canonical_revision"]),
                 snapshot_status="created",
@@ -91,9 +91,8 @@ def import_approved_operator_preference_manifest(
                 rollback_status="not_required",
                 authoritative=bool(existing["authoritative"]),
             )
-            store.insert_canonical_import_receipt(receipt)
             store.commit_canonical_import_transaction()
-            return receipt
+            return duplicate_receipt
 
         if all_existing:
             raise CanonicalMemoryImportError(
@@ -116,7 +115,7 @@ def import_approved_operator_preference_manifest(
         )
         read_back = exact_lookup(FAST_AUTONOMOUS_EXECUTION_KEY)
         _verify_gateway_read_back(read_back, normalized_manifest, canonical_revision)
-        receipt = _receipt(
+        verified_receipt = _receipt(
             idempotency_classification="NEW_IMPORT",
             canonical_revision=canonical_revision,
             snapshot_status="created",
@@ -124,9 +123,9 @@ def import_approved_operator_preference_manifest(
             rollback_status="not_required",
             authoritative=True,
         )
-        store.insert_canonical_import_receipt(receipt)
+        store.insert_canonical_import_receipt(verified_receipt)
         store.commit_canonical_import_transaction()
-        return receipt
+        return verified_receipt
     except CanonicalMemoryImportError as exc:
         if rollback_status != "not_started" or exc.rollback_status == "pending":
             rollback_status = _rollback(store)
