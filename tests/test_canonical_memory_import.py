@@ -4,6 +4,7 @@ import json
 from copy import deepcopy
 from pathlib import Path
 
+import jsonschema
 import pytest
 
 from core.canonical_memory import (
@@ -19,6 +20,7 @@ from core.skeleton_memory import SkeletonMemory
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_PATH = ROOT / "fixtures" / "canonical_memory" / "operator_preferences_fast_autonomous_execution_v1.json"
+RECEIPT_SCHEMA_PATH = ROOT / "schemas" / "canonical_memory_import_receipt.schema.json"
 
 
 def load_manifest() -> dict[str, object]:
@@ -42,6 +44,13 @@ def import_manifest(memory: SkeletonMemory, manifest: dict[str, object] | None =
     return gateway(memory).execute(request({"manifest": manifest or load_manifest()}))["payload"]
 
 
+def import_receipts(memory: SkeletonMemory) -> list[dict[str, object]]:
+    rows = memory.connection.execute(
+        "SELECT receipt_json FROM canonical_import_receipts ORDER BY created_at, id"
+    ).fetchall()
+    return [json.loads(row["receipt_json"]) for row in rows]
+
+
 def test_exact_approved_manifest_imports_and_reads_back_authoritative() -> None:
     memory = SkeletonMemory()
     memory.init_schema()
@@ -57,11 +66,25 @@ def test_exact_approved_manifest_imports_and_reads_back_authoritative() -> None:
     assert receipt["status"] == "IMPORTED"
     assert receipt["idempotency_classification"] == "NEW_IMPORT"
     assert receipt["canonical_revision"] == 1
+    assert receipt["snapshot_status"] == "created"
+    assert receipt["read_back_status"] == "verified"
+    assert receipt["rollback_status"] == "not_required"
     assert receipt["authoritative"] is True
     assert exact["authoritative"] is True
     assert exact["canonical_revision"] == receipt["canonical_revision"]
     assert exact["integrity_hash"] == manifest["integrity_hash"]
     assert json.loads(exact["normalized_manifest_json"]) == manifest
+    assert import_receipts(memory) == [receipt]
+
+
+def test_persisted_import_receipt_matches_schema_contract() -> None:
+    memory = SkeletonMemory()
+    receipt = import_manifest(memory)
+    persisted = import_receipts(memory)
+    schema = json.loads(RECEIPT_SCHEMA_PATH.read_text(encoding="utf-8"))
+
+    assert persisted == [receipt]
+    jsonschema.Draft202012Validator(schema).validate(persisted[0])
 
 
 def test_duplicate_exact_import_is_idempotent() -> None:
@@ -73,6 +96,7 @@ def test_duplicate_exact_import_is_idempotent() -> None:
 
     assert first["canonical_revision"] == second["canonical_revision"]
     assert second["idempotency_classification"] == "DUPLICATE_EXISTING"
+    assert import_receipts(memory) == [first]
     rows = memory.list_canonical_records_for_key(
         namespace=CANONICAL_OPERATOR_PREFERENCES_NAMESPACE,
         scope=CANONICAL_OPERATOR_PREFERENCES_SCOPE,
@@ -205,6 +229,26 @@ def test_simulated_write_failure_rolls_back_prior_state() -> None:
         scope=CANONICAL_OPERATOR_PREFERENCES_SCOPE,
         key=FAST_AUTONOMOUS_EXECUTION_KEY,
     ) == []
+    assert import_receipts(memory) == []
+
+
+def test_simulated_receipt_write_failure_rolls_back_prior_state() -> None:
+    class ReceiptWriteFailMemory(SkeletonMemory):
+        def insert_canonical_import_receipt(self, receipt: dict[str, object]) -> None:  # type: ignore[override]
+            raise RuntimeError("receipt write failed")
+
+    memory = ReceiptWriteFailMemory()
+
+    with pytest.raises(MemoryGatewayPolicyError) as excinfo:
+        import_manifest(memory)
+
+    assert excinfo.value.reason_code == "CANONICAL_IMPORT_FAILED"
+    assert memory.list_canonical_records_for_key(
+        namespace=CANONICAL_OPERATOR_PREFERENCES_NAMESPACE,
+        scope=CANONICAL_OPERATOR_PREFERENCES_SCOPE,
+        key=FAST_AUTONOMOUS_EXECUTION_KEY,
+    ) == []
+    assert import_receipts(memory) == []
 
 
 def test_read_back_mismatch_rolls_back_prior_state() -> None:
@@ -227,6 +271,7 @@ def test_read_back_mismatch_rolls_back_prior_state() -> None:
         scope=CANONICAL_OPERATOR_PREFERENCES_SCOPE,
         key=FAST_AUTONOMOUS_EXECUTION_KEY,
     ) == []
+    assert import_receipts(memory) == []
 
 
 def test_receipt_contains_no_private_or_manifest_body_values() -> None:
