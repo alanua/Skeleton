@@ -8539,13 +8539,33 @@ def _hermes_memory_gateway_smoke_report_lines() -> list[str]:
 
 
 def _hermes_memory_gateway_smoke_failure(task_id: str, token: str) -> str:
-    return _maintenance_report(
+    return _hermes_memory_gateway_smoke_report(
         "BLOCKED",
         task_id,
         [
             *_hermes_memory_gateway_smoke_report_lines(),
             f"status_token={token}",
             f"reason={token}",
+            "hermes_memory_smoke_status=blocked",
+        ],
+        "not_met",
+    )
+
+
+def _hermes_memory_gateway_smoke_report(
+    status: str, task_id: str, status_lines: list[str], success_criteria: str
+) -> str:
+    report = _maintenance_report(status, task_id, status_lines, success_criteria)
+    if report.count("hermes_memory_smoke_status=") == 1:
+        return report
+    return _maintenance_report(
+        "BLOCKED",
+        task_id,
+        [
+            f"hermes_gateway_contract={MEMORY_GATEWAY_CONTRACT_VERSION}",
+            f"hermes_memory_operation_count={len(HERMES_MEMORY_GATEWAY_SMOKE_OPERATIONS)}",
+            "status_token=hermes_memory_smoke_status_count_mismatch",
+            "reason=hermes_memory_smoke_status_count_mismatch",
             "hermes_memory_smoke_status=blocked",
         ],
         "not_met",
@@ -8598,7 +8618,10 @@ def _hermes_memory_gateway_smoke_validate_isolation(
         return "hermes_isolation_result_schema_mismatch"
     if result.get("status") != "BLOCKED":
         return "hermes_isolation_status_mismatch"
-    if result.get("decision") != {"allowed": False, "reason": expected_reason}:
+    decision = result.get("decision")
+    if not isinstance(decision, dict) or decision.get("allowed") is not False:
+        return "hermes_isolation_decision_mismatch"
+    if decision.get("reason") != expected_reason:
         if expected_reason == "PROJECT_NOT_AUTHORIZED":
             return "hermes_cross_project_reason_mismatch"
         return "hermes_cross_namespace_reason_mismatch"
@@ -8878,7 +8901,7 @@ def hermes_memory_gateway_smoke() -> str:
         if token is not None:
             return _hermes_memory_gateway_smoke_failure(task_id, token)
 
-        return _maintenance_report(
+        return _hermes_memory_gateway_smoke_report(
             "DONE",
             task_id,
             [
@@ -8888,7 +8911,7 @@ def hermes_memory_gateway_smoke() -> str:
             "met",
         )
     except Exception:
-        return _maintenance_report(
+        return _hermes_memory_gateway_smoke_report(
             "BLOCKED",
             task_id,
             [
