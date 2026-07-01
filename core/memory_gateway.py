@@ -124,7 +124,14 @@ class MemoryGateway:
             },
         )
 
-    def search_semantic(self, *, namespace: str, query: str, project_id: object = None) -> dict[str, object]:
+    def search_semantic(
+        self,
+        *,
+        namespace: str,
+        query: str,
+        project_id: object = None,
+        current_canonical_revision: int | None = None,
+    ) -> dict[str, object]:
         namespace = self._authorize_namespace(namespace)
         project_id = self._scope_project_id(namespace, project_id)
         _safe_lookup_key(query)
@@ -139,6 +146,7 @@ class MemoryGateway:
                     namespace=namespace,
                     project_id=project_id,
                     query=query,
+                    current_canonical_revision=current_canonical_revision,
                 )
             except MemPalaceAdapterError as exc:
                 raise MemoryGatewayPolicyError(exc.reason_code, str(exc)) from exc
@@ -220,7 +228,13 @@ class MemoryGateway:
             results.append(rendered)
         return self._response(namespace=namespace, command_suffix="graph.query_code", payload={"results": results})
 
-    def get_memory_index_freshness(self, *, namespace: str, project_id: object = None) -> dict[str, object]:
+    def get_memory_index_freshness(
+        self,
+        *,
+        namespace: str,
+        project_id: object = None,
+        current_canonical_revision: int | None = None,
+    ) -> dict[str, object]:
         namespace = self._authorize_namespace(namespace)
         project_id = self._scope_project_id(namespace, project_id)
         if _is_mempalace_synthetic_scope(namespace, project_id):
@@ -233,6 +247,7 @@ class MemoryGateway:
                 freshness = self._mempalace_adapter.get_index_freshness(
                     namespace=namespace,
                     project_id=project_id,
+                    current_canonical_revision=current_canonical_revision,
                 )
             except MemPalaceAdapterError as exc:
                 raise MemoryGatewayPolicyError(exc.reason_code, str(exc)) from exc
@@ -397,6 +412,13 @@ class MemoryGateway:
         mempalace_freshness = freshness.get("mempalace", {})
         graph_freshness = freshness.get("graphify", {})
         if has_semantic:
+            if _is_mempalace_synthetic_scope(namespace, project_id):
+                mempalace_freshness = self._current_mempalace_freshness(namespace, project_id)
+                if _has_stale_semantic_reference(provenance_refs, mempalace_freshness):
+                    raise MemoryGatewayPolicyError(
+                        STALE_INDEX_RESULT_NOT_PATCH_ELIGIBLE,
+                        "stale synthetic semantic index cannot support a patch proposal",
+                    )
             if isinstance(mempalace_freshness, Mapping) and mempalace_freshness.get("stale"):
                 raise MemoryGatewayPolicyError(
                     STALE_INDEX_RESULT_NOT_PATCH_ELIGIBLE,
@@ -430,6 +452,17 @@ class MemoryGateway:
                 "exact confirmation revision does not match current canonical revision",
             )
         self._validate_canonical_exact_confirmation(namespace, project_id, proposal)
+
+    def _current_mempalace_freshness(self, namespace: str, project_id: str) -> Mapping[str, object]:
+        if self._mempalace_adapter is None:
+            raise MemoryGatewayPolicyError(
+                "MEMPALACE_ADAPTER_REQUIRED",
+                "synthetic MemPalace route requires explicit adapter injection",
+            )
+        try:
+            return self._mempalace_adapter.get_index_freshness(namespace=namespace, project_id=project_id)
+        except MemPalaceAdapterError as exc:
+            raise MemoryGatewayPolicyError(exc.reason_code, str(exc)) from exc
 
     def _validate_canonical_exact_confirmation(
         self, namespace: str, project_id: str, proposal: Mapping[str, Any]
@@ -575,6 +608,21 @@ def _has_stale_index_reference(provenance_refs: list[object]) -> bool:
         indexed_revision = ref.get("indexed_canonical_revision")
         current_revision = ref.get("current_canonical_revision")
         if indexed_revision is not None and current_revision is not None and indexed_revision != current_revision:
+            return True
+    return False
+
+
+def _has_stale_semantic_reference(provenance_refs: list[object], freshness: Mapping[str, object]) -> bool:
+    current_revision = freshness.get("current_canonical_revision")
+    if not isinstance(current_revision, int) or isinstance(current_revision, bool):
+        return True
+    for ref in provenance_refs:
+        if not isinstance(ref, Mapping) or ref.get("kind") != "semantic_only":
+            continue
+        indexed_revision = ref.get("indexed_canonical_revision")
+        if not isinstance(indexed_revision, int) or isinstance(indexed_revision, bool):
+            return True
+        if indexed_revision != current_revision:
             return True
     return False
 

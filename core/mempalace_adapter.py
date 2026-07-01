@@ -62,7 +62,7 @@ class MemPalaceAdapter:
         self._authorize_scope(namespace=namespace, project_id=project_id)
         terms = set(query_terms(query))
         limit = _bounded_limit(limit)
-        current_revision = current_canonical_revision or self._projection.current_canonical_revision
+        current_revision = _current_revision(current_canonical_revision, self._projection.current_canonical_revision)
 
         scored = []
         for document in self._projection.documents:
@@ -116,7 +116,7 @@ class MemPalaceAdapter:
         indexed_revision = max(
             document.canonical_revision for document in self._projection.documents if not document.deleted
         )
-        current_revision = current_canonical_revision or self._projection.current_canonical_revision
+        current_revision = _current_revision(current_canonical_revision, self._projection.current_canonical_revision)
         return {
             "indexed_canonical_revision": indexed_revision,
             "current_canonical_revision": current_revision,
@@ -157,6 +157,17 @@ class MemPalaceAdapter:
 def _bounded_limit(value: object) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 1 or value > 10:
         raise MemPalaceAdapterError("INVALID_LIMIT", "limit must be an integer from 1 to 10")
+    return value
+
+
+def _current_revision(value: object, fallback: int) -> int:
+    if value is None:
+        return fallback
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise MemPalaceAdapterError(
+            "INVALID_CURRENT_CANONICAL_REVISION",
+            "current revision must be a positive integer",
+        )
     return value
 
 

@@ -12,7 +12,12 @@ from core.mempalace_adapter import MemPalaceAdapter
 from core.mempalace_projection import MEMPALACE_SYNTHETIC_NAMESPACE, MEMPALACE_SYNTHETIC_PROJECT_ID, load_projection
 from core.memory_gateway import MEMORY_GATEWAY_REQUEST_SCHEMA, MemoryGateway, capability_token
 from core.memory_gateway_policy import STALE_INDEX_RESULT_NOT_PATCH_ELIGIBLE, MemoryGatewayPolicyError
-from core.memory_patch_proposal import PATCH_PROPOSAL_SCHEMA, canonical_dedupe_key, canonical_idempotency_key
+from core.memory_patch_proposal import (
+    PATCH_PROPOSAL_SCHEMA,
+    MemoryPatchProposalRegistry,
+    canonical_dedupe_key,
+    canonical_idempotency_key,
+)
 from scripts import mempalace_synthetic_benchmark
 from scripts.mempalace_synthetic_benchmark import run_benchmark
 
@@ -34,12 +39,14 @@ def gateway() -> MemoryGateway:
     )
 
 
-def gateway_request(query: str) -> dict[str, object]:
+def gateway_request(query: str, **payload_overrides: object) -> dict[str, object]:
+    payload = {"project_id": MEMPALACE_SYNTHETIC_PROJECT_ID, "query": query}
+    payload.update(payload_overrides)
     return {
         "schema": MEMORY_GATEWAY_REQUEST_SCHEMA,
         "namespace": MEMPALACE_SYNTHETIC_NAMESPACE,
         "command": f"{MEMPALACE_SYNTHETIC_NAMESPACE}.memory.search_semantic",
-        "payload": {"project_id": MEMPALACE_SYNTHETIC_PROJECT_ID, "query": query},
+        "payload": payload,
     }
 
 
@@ -125,13 +132,13 @@ def test_gateway_marks_all_synthetic_results_non_authoritative() -> None:
 
 
 def test_stale_mempalace_proposal_rejected_without_audit_event() -> None:
-    gw = gateway()
-    result = MemPalaceAdapter(projection()).search_semantic(
-        namespace=MEMPALACE_SYNTHETIC_NAMESPACE,
-        project_id=MEMPALACE_SYNTHETIC_PROJECT_ID,
-        query="door attribution",
-        current_canonical_revision=4,
-    )["results"][0]
+    patch_registry = MemoryPatchProposalRegistry()
+    gw = MemoryGateway(
+        capability_token(namespaces=(MEMPALACE_SYNTHETIC_NAMESPACE,)),
+        mempalace_adapter=MemPalaceAdapter(projection()),
+        patch_registry=patch_registry,
+    )
+    result = gw.execute(gateway_request("door attribution", current_canonical_revision=4))["payload"]["results"][0]
     candidate = proposal_from_result(result)
 
     with pytest.raises(MemoryGatewayPolicyError) as excinfo:
@@ -142,6 +149,7 @@ def test_stale_mempalace_proposal_rejected_without_audit_event() -> None:
         )
 
     assert excinfo.value.reason_code == STALE_INDEX_RESULT_NOT_PATCH_ELIGIBLE
+    assert patch_registry.lookup_by_idempotency_key(candidate["idempotency_key"]) is None
     audit = gw.get_audit_log(
         namespace=MEMPALACE_SYNTHETIC_NAMESPACE,
         project_id=MEMPALACE_SYNTHETIC_PROJECT_ID,
