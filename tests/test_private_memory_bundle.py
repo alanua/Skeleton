@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import stat
 from pathlib import Path
 
@@ -9,7 +10,8 @@ import pytest
 
 from core.mempalace_adapter import LocalMemPalaceIndex
 from core.graphify_adapter import LocalGraphifyIndex
-from core.private_memory_bundle import PRIVATE_MEMORY_IMPORT_RECEIPT_NAMESPACE
+import core.private_memory_bundle as bundle_module
+from core.private_memory_bundle import PRIVATE_MEMORY_IMPORT_RECEIPT_NAMESPACE, PrivateMemoryBundleError
 from core.private_memory_history import bytes_hash, content_hash
 from core.private_memory_stack import PrivateMemoryStack, PrivateMemoryStackError
 
@@ -77,7 +79,7 @@ def test_mid_batch_failure_restores_facts_history_revision_and_indexes(
         )
         raise RuntimeError("synthetic mid batch failure")
 
-    monkeypatch.setattr(stack.store, "bulk_put_facts", partial_then_fail)
+    monkeypatch.setattr(stack, "_put_import_facts_with_provenance_unlocked", partial_then_fail)
 
     with pytest.raises(PrivateMemoryStackError):
         stack.import_bundle(
@@ -152,6 +154,59 @@ def test_duplicate_same_hash_is_idempotent_and_different_hash_blocks(tmp_path: P
     assert blocked.exists()
 
 
+def test_import_preserves_per_record_provenance(tmp_path: Path) -> None:
+    stack = PrivateMemoryStack(tmp_path / "pm")
+    stack.init(import_manifest=False)
+    inbox = _inbox(tmp_path)
+    bundle = _bundle("bundle-provenance")
+    records = bundle["records"]
+    assert isinstance(records, list)
+    records[0]["actor"] = "operator-a"
+    records[0]["reason"] = "reason-a"
+    records[0]["approval"] = "approval-a"
+    records[1]["actor"] = "operator-b"
+    records[1]["reason"] = "reason-b"
+    records[1]["approval"] = "approval-b"
+    bundle_path = _write_bundle(inbox, bundle)
+
+    stack.import_bundle(
+        bundle_path.name,
+        expected_sha256=bytes_hash(bundle_path.read_bytes()),
+        env={"SKELETON_PRIVATE_MEMORY_INBOX": str(inbox)},
+    )
+
+    with sqlite3.connect(tmp_path / "pm" / "canonical.sqlite") as connection:
+        rows = connection.execute(
+            """
+            SELECT namespace, fact_id, actor_ref, reason_code, approval_ref
+            FROM private_memory_events
+            WHERE namespace = 'skeleton.notes'
+            ORDER BY fact_id
+            """
+        ).fetchall()
+    assert rows == [
+        ("skeleton.notes", "alpha", "operator-a", "reason-a", "approval-a"),
+        ("skeleton.notes", "beta", "operator-b", "reason-b", "approval-b"),
+    ]
+
+
+def test_import_create_backup_uses_unlocked_backup_path(tmp_path: Path) -> None:
+    stack = PrivateMemoryStack(tmp_path / "pm")
+    stack.init(import_manifest=False)
+    inbox = _inbox(tmp_path)
+    bundle_path = _write_bundle(inbox, _bundle("bundle-backup"))
+
+    receipt = stack.import_bundle(
+        bundle_path.name,
+        expected_sha256=bytes_hash(bundle_path.read_bytes()),
+        create_backup=True,
+        env={"SKELETON_PRIVATE_MEMORY_INBOX": str(inbox)},
+    )
+
+    assert receipt["backup"]["status"] == "DONE"
+    assert (tmp_path / "pm" / "backups" / f"bundle-{receipt['receipt_id'][:24]}.sqlite").is_file()
+
+
 @pytest.mark.parametrize(
     ("name", "make_file", "expected_sha"),
     [
@@ -179,6 +234,77 @@ def test_inbox_boundary_blocks_before_parsing_or_mutation(
     assert stack.status()["canonical_sqlite"]["canonical_revision"] == before
     if path.exists() and not path.is_symlink():
         assert path.exists()
+
+
+def test_matching_digest_symlink_is_rejected_before_parse_or_mutation(tmp_path: Path) -> None:
+    stack = PrivateMemoryStack(tmp_path / "pm")
+    stack.init(import_manifest=False)
+    inbox = _inbox(tmp_path)
+    target = _write_bundle(inbox, _bundle("bundle-symlink"), name="target.json")
+    link = inbox / "matching-link.json"
+    os.symlink(target, link)
+    before = stack.status()["canonical_sqlite"]["canonical_revision"]
+
+    with pytest.raises(PrivateMemoryBundleError):
+        stack.import_bundle(
+            link.name,
+            expected_sha256=bytes_hash(target.read_bytes()),
+            env={"SKELETON_PRIVATE_MEMORY_INBOX": str(inbox)},
+        )
+
+    assert stack.status()["canonical_sqlite"]["canonical_revision"] == before
+    assert link.is_symlink()
+
+
+def test_replacement_race_after_open_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    stack = PrivateMemoryStack(tmp_path / "pm")
+    stack.init(import_manifest=False)
+    inbox = _inbox(tmp_path)
+    bundle_path = _write_bundle(inbox, _bundle("bundle-race"), name="race.json")
+    replacement = _write_bundle(inbox, _bundle("bundle-race-replacement"), name="race-replacement.json")
+    expected_sha = bytes_hash(bundle_path.read_bytes())
+    original_read = bundle_module.os.read
+    replaced = False
+
+    def replace_after_open(fd: int, size: int) -> bytes:
+        nonlocal replaced
+        chunk = original_read(fd, size)
+        if chunk and not replaced:
+            os.replace(replacement, bundle_path)
+            replaced = True
+        return chunk
+
+    monkeypatch.setattr(bundle_module.os, "read", replace_after_open)
+    before = stack.status()["canonical_sqlite"]["canonical_revision"]
+
+    with pytest.raises(PrivateMemoryBundleError):
+        stack.import_bundle(
+            bundle_path.name,
+            expected_sha256=expected_sha,
+            env={"SKELETON_PRIVATE_MEMORY_INBOX": str(inbox)},
+        )
+
+    assert replaced is True
+    assert stack.status()["canonical_sqlite"]["canonical_revision"] == before
+
+
+def test_hard_linked_bundle_is_rejected_before_parse_or_mutation(tmp_path: Path) -> None:
+    stack = PrivateMemoryStack(tmp_path / "pm")
+    stack.init(import_manifest=False)
+    inbox = _inbox(tmp_path)
+    target = _write_bundle(inbox, _bundle("bundle-hardlink"), name="hard-target.json")
+    linked = inbox / "hard-linked.json"
+    os.link(target, linked)
+    before = stack.status()["canonical_sqlite"]["canonical_revision"]
+
+    with pytest.raises(PrivateMemoryBundleError):
+        stack.import_bundle(
+            linked.name,
+            expected_sha256=bytes_hash(linked.read_bytes()),
+            env={"SKELETON_PRIVATE_MEMORY_INBOX": str(inbox)},
+        )
+
+    assert stack.status()["canonical_sqlite"]["canonical_revision"] == before
 
 
 def _bundle(bundle_id: str) -> dict[str, object]:
