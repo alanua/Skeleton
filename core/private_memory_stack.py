@@ -17,8 +17,16 @@ from core.memory_gateway import MEMORY_GATEWAY_REQUEST_SCHEMA, MemoryGateway, ca
 from core.mempalace_adapter import LocalMemPalaceIndex
 from core.private_memory import CanonicalPrivateMemoryStore
 from core.private_memory_backup import create_snapshot
+from core.private_memory_bundle import (
+    PRIVATE_MEMORY_IMPORT_RECEIPT_NAMESPACE,
+    cleanup_pre_operation_snapshot,
+    make_pre_operation_snapshot,
+    move_processed_bundle,
+    prepare_private_memory_import_bundle,
+)
 from core.private_memory_history import (
     canonical_json,
+    content_hash,
     current_revision,
     enable_wal_if_supported,
     ensure_history_schema,
@@ -207,6 +215,81 @@ class PrivateMemoryStack:
             "aggregate_counts": manifest["aggregate_counts"],
         }
 
+    def import_bundle(
+        self,
+        basename: str,
+        *,
+        expected_sha256: str,
+        create_backup: bool = False,
+        env: Mapping[str, str] | None = None,
+    ) -> dict[str, object]:
+        self._ensure_private_root()
+        self._initialize_canonical_database()
+        prepared = prepare_private_memory_import_bundle(
+            private_root=self.paths.root,
+            basename=basename,
+            expected_sha256=expected_sha256,
+            env=env,
+        )
+        transaction = f"bundle-{prepared.receipt_id[:32]}"
+        with _exclusive_lock(self.paths.lock):
+            before = self._database_logical_backup()
+            snapshot_temp: Path | None = None
+            try:
+                existing_receipt = self.store.get_active_fact(
+                    namespace=PRIVATE_MEMORY_IMPORT_RECEIPT_NAMESPACE,
+                    fact_id=prepared.bundle_id,
+                )
+                if existing_receipt is not None:
+                    existing_hash = existing_receipt.get("bundle_hash") if isinstance(existing_receipt, Mapping) else None
+                    if existing_hash == prepared.bundle_hash:
+                        moved_name = move_processed_bundle(prepared.source_path, receipt_id=prepared.receipt_id)
+                        return self._bundle_receipt_report(
+                            prepared=prepared,
+                            status="DONE",
+                            idempotency_classification="DUPLICATE_IDENTICAL",
+                            processed_receipt_name=moved_name,
+                        )
+                    raise PrivateMemoryStackError("private memory bundle id already imported with different hash")
+                snapshot, snapshot_temp = make_pre_operation_snapshot(
+                    self.paths.db,
+                    self.paths.root,
+                    create_snapshot,
+                )
+                facts = [
+                    {"namespace": fact["namespace"], "fact_id": fact["fact_id"], "value": fact["value"]}
+                    for fact in prepared.facts
+                ]
+                facts.append(prepared.receipt_fact)
+                events = self.store.bulk_put_facts(
+                    facts,
+                    actor_ref="operator",
+                    reason_code="operator-approved-bundle-import",
+                    approval_ref="local-operator",
+                    transaction_ref=transaction,
+                    pre_operation_snapshot=snapshot,
+                )
+                self._rebuild_unlocked()
+                self._verify_import_readback(prepared)
+                backup_report = self.backup(snapshot_id=f"bundle-{prepared.receipt_id[:24]}") if create_backup else None
+                moved_name = move_processed_bundle(prepared.source_path, receipt_id=prepared.receipt_id)
+            except Exception as exc:
+                self._restore_database_backup(before)
+                self._best_effort_rebuild_unlocked()
+                _remove_sqlite_sidecars(self.paths.db)
+                raise PrivateMemoryStackError("private memory bundle import rolled back") from exc
+            finally:
+                cleanup_pre_operation_snapshot(snapshot_temp)
+                _remove_backup_file(before)
+        return self._bundle_receipt_report(
+            prepared=prepared,
+            status="DONE",
+            idempotency_classification="NEW_IMPORT",
+            canonical_revision=int(events[-1]["canonical_revision"]),
+            backup=backup_report,
+            processed_receipt_name=moved_name,
+        )
+
     def status(self) -> dict[str, object]:
         try:
             with closing(_connect_ro(self.paths.db)) as connection:
@@ -386,6 +469,46 @@ class PrivateMemoryStack:
     def _index_states(self) -> dict[str, object]:
         status = self.status()
         return {"mempalace": status["mempalace"], "graphify": status["graphify"]}
+
+    def _verify_import_readback(self, prepared: Any) -> None:
+        for fact in prepared.facts:
+            exact = self.get(namespace=fact["namespace"], fact_id=fact["fact_id"])
+            if exact["value_hash"] != fact["value_hash"]:
+                raise PrivateMemoryStackError("import read-back value hash mismatch")
+        receipt = self.get(namespace=PRIVATE_MEMORY_IMPORT_RECEIPT_NAMESPACE, fact_id=prepared.bundle_id)
+        if receipt["value_hash"] != content_hash(prepared.receipt_fact["value"]):
+            raise PrivateMemoryStackError("import receipt read-back hash mismatch")
+
+    def _bundle_receipt_report(
+        self,
+        *,
+        prepared: Any,
+        status: str,
+        idempotency_classification: str,
+        processed_receipt_name: str,
+        canonical_revision: int | None = None,
+        backup: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        stack_status = self.status()
+        return {
+            "schema": "skeleton.private_memory_bundle_import_report.v1",
+            "status": status,
+            "idempotency_classification": idempotency_classification,
+            "bundle_id": prepared.bundle_id,
+            "bundle_hash": prepared.bundle_hash,
+            "file_sha256": prepared.file_sha256,
+            "receipt_id": prepared.receipt_id,
+            "record_count": len(prepared.facts),
+            "canonical_revision": canonical_revision
+            if canonical_revision is not None
+            else int(stack_status["canonical_sqlite"]["canonical_revision"]),
+            "imported_canonical_refs": [
+                f"{fact['namespace']}:{fact['fact_id']}" for fact in prepared.facts
+            ],
+            "processed_receipt_name": processed_receipt_name,
+            "backup": backup,
+            "indexes": self._index_states(),
+        }
 
 
 def _paths(private_root: str | Path | None) -> PrivateMemoryStackPaths:

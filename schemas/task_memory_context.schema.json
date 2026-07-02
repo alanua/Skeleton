@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.skeleton.local/task_memory_context.schema.json",
+  "title": "Skeleton Task Memory Context Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "status",
+    "profile",
+    "project_id",
+    "task_route",
+    "canonical_revision",
+    "selected_canonical_refs",
+    "selected_records",
+    "counts",
+    "limits",
+    "truncated",
+    "context_hash"
+  ],
+  "properties": {
+    "schema": {"const": "skeleton.task_memory_context.v1"},
+    "status": {"enum": ["DONE", "UNAVAILABLE"]},
+    "profile": {"enum": ["public_control", "private_runtime", "none"]},
+    "project_id": {"type": "string"},
+    "task_route": {"type": "string"},
+    "canonical_revision": {"type": "integer", "minimum": 0},
+    "selected_canonical_refs": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}:[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"}
+    },
+    "selected_records": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["canonical_ref", "canonical_revision", "value_hash"],
+        "properties": {
+          "canonical_ref": {"type": "string"},
+          "canonical_revision": {"type": "integer", "minimum": 0},
+          "value_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+          "public_text": {"type": "string", "maxLength": 6000}
+        }
+      }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selected", "candidate_refs", "rendered_chars"],
+      "properties": {
+        "selected": {"type": "integer", "minimum": 0, "maximum": 10},
+        "candidate_refs": {"type": "integer", "minimum": 0},
+        "rendered_chars": {"type": "integer", "minimum": 0, "maximum": 6000}
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["records", "max_chars"],
+      "properties": {
+        "records": {"type": "integer", "minimum": 0, "maximum": 10},
+        "max_chars": {"type": "integer", "minimum": 0, "maximum": 6000}
+      }
+    },
+    "truncated": {"type": "boolean"},
+    "context_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  }
+}
