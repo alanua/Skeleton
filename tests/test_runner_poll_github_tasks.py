@@ -1692,6 +1692,7 @@ def test_telegram_approved_merge_issue_bypasses_codex_and_posts_merge_report() -
             approved_head_sha=HEAD_SHA,
             callback_digest=CALLBACK_DIGEST,
         ),
+        retry_decision=mock.ANY,
     )
     run_codex.assert_not_called()
 
@@ -2530,6 +2531,119 @@ def test_maintenance_task_bypasses_codex() -> None:
         mock.call(145, runner.LABEL_READY, runner.LABEL_RUNNING),
         mock.call(145, runner.LABEL_RUNNING, runner.LABEL_DONE),
     ]
+
+
+def test_duplicate_blocker_blocks_before_executor_invocation() -> None:
+    body = "```task\nDo it\n```\n"
+    condition = runner.retry_condition_for_issue(
+        body,
+        runner.ROUTE_CODE_GENERATION,
+        None,
+        "executor_invocation",
+    )
+    first = runner.append_retry_fields(
+        "BLOCKED: Codex output reported a blocked deliverable.",
+        runner.evaluate_retry_policy(condition, []),
+    )
+    prior = runner.parse_prior_blocked_reports([first])
+    second = runner.append_retry_fields(
+        "BLOCKED: Codex output reported a blocked deliverable.",
+        runner.evaluate_retry_policy(condition, prior),
+    )
+    issue = {
+        "number": 246,
+        "title": "Duplicate blocker",
+        "body": body,
+        "comments": [{"body": first}, {"body": second}],
+    }
+
+    with mock.patch.object(runner, "set_issue_label") as set_label, mock.patch.object(
+        runner, "post_issue_comment"
+    ) as post, mock.patch.object(runner, "notify_task_finished") as notify, mock.patch.object(
+        runner, "prepare_issue_branch"
+    ) as prepare, mock.patch.object(
+        runner, "run_codex_task"
+    ) as run_codex:
+        runner.process_issue(issue)
+
+    prepare.assert_not_called()
+    run_codex.assert_not_called()
+    set_label.assert_called_once_with(246, runner.LABEL_READY, runner.LABEL_BLOCKED)
+    report = post.call_args.args[1]
+    assert "NEEDS_OPERATOR: Runner retry policy blocked repeated execution." in report
+    assert "reason=repeated_blocker" in report
+    assert "next_required_action=DIAGNOSE" in report
+    notify.assert_called_once_with(246, "NEEDS_OPERATOR", mock.ANY)
+
+
+def test_runtime_maintenance_always_routes_runtime_only_and_never_invokes_codex() -> None:
+    issue = _maintenance_issue(runner.CHECK_PROJECT_CHECKOUT)
+    report = (
+        "BLOCKED: Runner host maintenance task did not complete.\n"
+        "maintenance_task_id=check_project_checkout\n"
+        "reason=checkout_missing\n"
+        "success_criteria=not_met"
+    )
+
+    with mock.patch.object(
+        runner, "ensure_clean_worktree", return_value=(True, "")
+    ), mock.patch.object(runner, "dispatch_runtime_maintenance_task", return_value=report), mock.patch.object(
+        runner, "post_issue_comment"
+    ) as post, mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "run_codex_task"
+    ) as run_codex:
+        runner.process_issue(issue)
+
+    run_codex.assert_not_called()
+    assert "route=runtime_only" in post.call_args.args[1]
+
+
+def test_publish_existing_worktree_routes_publish_only_and_never_invokes_codex() -> None:
+    issue = _maintenance_issue(runner.PUBLISH_EXISTING_ISSUE_WORKTREE)
+    report = (
+        "NEEDS_OPERATOR: Runner host maintenance task needs operator action.\n"
+        "maintenance_task_id=publish_existing_issue_worktree\n"
+        "reason=missing_operator_approval\n"
+        "success_criteria=not_met"
+    )
+
+    with mock.patch.object(
+        runner, "ensure_clean_worktree", return_value=(True, "")
+    ), mock.patch.object(runner, "dispatch_runtime_maintenance_task", return_value=report), mock.patch.object(
+        runner, "post_issue_comment"
+    ) as post, mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "run_codex_task"
+    ) as run_codex:
+        runner.process_issue(issue)
+
+    run_codex.assert_not_called()
+    assert "route=publish_only" in post.call_args.args[1]
+
+
+def test_code_task_with_empty_expected_output_fails_closed_before_codex() -> None:
+    issue = {
+        "number": 247,
+        "title": "Missing expected output",
+        "body": "Expected Output: TBD\n\n```task\nDo it\n```",
+    }
+
+    with mock.patch.object(runner, "block_issue") as block, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(runner, "run_codex_task") as run_codex:
+        runner.process_issue(issue)
+
+    assert "missing a non-empty measurable expected_output" in block.call_args.args[1]
+    assert block.call_args.kwargs["retry_decision"].retry_attempt == 1
+    set_label.assert_not_called()
+    run_codex.assert_not_called()
 
 
 def test_maintenance_task_blocks_missing_closing_task_fence_before_execution() -> None:

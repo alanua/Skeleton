@@ -48,6 +48,19 @@ from core.memory_patch_proposal import (
 )
 from core.private_memory import healthcheck_private_memory, write_public_heartbeat
 from core.project_tree import get_project, get_project_by_repo, load_project_tree
+from core.runner_retry_policy import (
+    BLOCK_REPEATED_REASON,
+    NEEDS_OPERATOR,
+    ROUTE_CODE_GENERATION,
+    ROUTE_PUBLISH_ONLY,
+    ROUTE_RUNTIME_ONLY,
+    RetryCondition,
+    RetryDecision,
+    append_retry_fields,
+    evaluate_retry_policy,
+    extract_retry_override,
+    parse_prior_blocked_reports,
+)
 from core.skeleton_memory import SkeletonMemory
 from core.telegram_approval_buttons import build_pr_ready_card_payload
 
@@ -157,6 +170,14 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR,
         QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES,
         HOME_EDGE_01_READ_ONLY_DIAGNOSTIC,
+    )
+)
+PUBLISH_ONLY_MAINTENANCE_TASK_IDS = frozenset(
+    (
+        INSPECT_ISSUE_WORKTREE_FOR_PUBLISH,
+        PUBLISH_ISSUE_WORKTREE_PR,
+        PUBLISH_EXISTING_ISSUE_WORKTREE,
+        PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR,
     )
 )
 AUFMASS_PRIVATE_PROJECT_ID = "aufmass_private"
@@ -1500,6 +1521,68 @@ def _body_field(body: str, field: str) -> str | None:
     return match.group("value") if match else None
 
 
+def _body_csv_field(body: str, field: str) -> tuple[str, ...]:
+    value = _body_field(body, field)
+    if value is None:
+        return ()
+    return tuple(part.strip() for part in value.split(",") if part.strip())
+
+
+def _expected_output_value(body: str) -> str | None:
+    for field in ("Expected Output", "expected_output"):
+        value = _body_field(body, field)
+        if value is not None:
+            return value
+    match = re.search(
+        r"(?ims)^\s*expected_output:\s*\n(?P<value>(?:^[ \t]+[-*]?\s*\S.*\n?)+)",
+        body or "",
+    )
+    if match is not None:
+        return " ".join(line.strip(" -*\t") for line in match.group("value").splitlines())
+    return None
+
+
+def code_task_expected_output_block_reason(body: str) -> str | None:
+    expected_output = _expected_output_value(body)
+    if expected_output is None:
+        return None
+    normalized = expected_output.strip().lower()
+    if not normalized or normalized in {"none", "n/a", "na", "tbd", "todo"}:
+        return "code_task_expected_output_missing"
+    return None
+
+
+def runner_task_route(
+    *,
+    maintenance_mode: bool,
+    maintenance_task_id: str | None,
+    merge_mode: bool,
+) -> str:
+    if maintenance_mode:
+        if maintenance_task_id in PUBLISH_ONLY_MAINTENANCE_TASK_IDS:
+            return ROUTE_PUBLISH_ONLY
+        return ROUTE_RUNTIME_ONLY
+    if merge_mode:
+        return ROUTE_RUNTIME_ONLY
+    return ROUTE_CODE_GENERATION
+
+
+def retry_condition_for_issue(
+    body: str,
+    route: str,
+    maintenance_task_id: str | None,
+    blocker_reason: str | None = None,
+) -> RetryCondition:
+    return RetryCondition(
+        route=route,
+        maintenance_task_id=maintenance_task_id,
+        allowed_files=_body_csv_field(body, "Allowed Files"),
+        expected_output=_expected_output_value(body),
+        dependency_state=_body_field(body, "Dependency State"),
+        blocker_reason=blocker_reason,
+    )
+
+
 def has_runner_task_body(body: str) -> bool:
     maintenance_mode, _task_id = extract_runtime_maintenance_task_id(body)
     merge_mode, _request, _reason = extract_telegram_approved_pr_merge_request(body)
@@ -1589,6 +1672,53 @@ def post_issue_comment(issue_number: int, body: str) -> None:
     )
     if code != 0:
         raise RuntimeError(f"gh issue comment failed:\n{output}")
+
+
+def get_issue_comments(issue: dict[str, Any]) -> list[dict[str, Any]]:
+    comments = issue.get("comments")
+    if isinstance(comments, list):
+        return [comment for comment in comments if isinstance(comment, dict)]
+    if not (os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")):
+        return []
+    issue_number = int(issue["number"])
+    code, output = run_command(
+        [
+            "gh",
+            "issue",
+            "view",
+            str(issue_number),
+            "--repo",
+            REPO,
+            "--json",
+            "comments",
+        ]
+    )
+    if code != 0:
+        return []
+    try:
+        parsed = json.loads(output or "{}")
+    except json.JSONDecodeError:
+        return []
+    parsed_comments = parsed.get("comments") if isinstance(parsed, dict) else None
+    if not isinstance(parsed_comments, list):
+        return []
+    return [comment for comment in parsed_comments if isinstance(comment, dict)]
+
+
+def repeated_blocker_report(decision: RetryDecision) -> str:
+    next_action = decision.next_required_action or "DIAGNOSE"
+    return (
+        "NEEDS_OPERATOR: Runner retry policy blocked repeated execution.\n\n"
+        "status=NEEDS_OPERATOR\n"
+        f"route={decision.route}\n"
+        f"retry_decision={decision.retry_decision}\n"
+        f"retry_attempt={decision.retry_attempt}\n"
+        f"blocker_signature={decision.blocker_signature}\n"
+        f"changed_condition={str(decision.changed_condition).lower()}\n"
+        f"override_used={str(decision.override_used).lower()}\n"
+        f"next_required_action={next_action}\n"
+        "reason=repeated_blocker"
+    )
 
 
 def set_issue_label(issue_number: int, remove: str, add: str) -> None:
@@ -2664,8 +2794,11 @@ def block_issue(
     remove_label: str = LABEL_READY,
     runner_task: RunnerTask | None = None,
     result_status: str = "BLOCKED",
+    retry_decision: RetryDecision | None = None,
 ) -> None:
     report = report_runner_lane(f"BLOCKED: {message}", runner_task)
+    if retry_decision is not None:
+        report = append_retry_fields(report, retry_decision)
     warning = record_runner_executor_result(
         issue_number,
         runner_task.target_project if runner_task is not None else "skeleton",
@@ -9381,9 +9514,12 @@ def process_telegram_approved_pr_merge_issue(
     issue_number: int,
     request: TelegramApprovedPrMergeRequest,
     memory_warning: str | None = None,
+    retry_decision: RetryDecision | None = None,
 ) -> None:
     report = execute_telegram_approved_pr_merge(request)
     status = "DONE" if report.startswith("DONE:") else "BLOCKED"
+    if status != "DONE" and retry_decision is not None:
+        report = append_retry_fields(report, retry_decision)
     warning = record_runner_executor_result(
         issue_number,
         "skeleton",
@@ -9408,9 +9544,12 @@ def process_runtime_maintenance_issue(
     workdir: str,
     body: str = "",
     memory_warning: str | None = None,
+    retry_decision: RetryDecision | None = None,
 ) -> None:
     report = dispatch_runtime_maintenance_task(task_id, workdir, body)
     status = maintenance_report_status(report)
+    if status != "DONE" and retry_decision is not None:
+        report = append_retry_fields(report, retry_decision)
     warning = record_runner_executor_result(
         issue_number,
         "skeleton",
@@ -9468,6 +9607,11 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                 merge_reason or "Telegram approved merge request is malformed.",
             )
             return
+        route = runner_task_route(
+            maintenance_mode=maintenance_mode,
+            maintenance_task_id=maintenance_task_id,
+            merge_mode=merge_mode,
+        )
 
         if maintenance_mode:
             task_content = ""
@@ -9488,6 +9632,54 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             else:
                 task_content = runner_task.content
 
+        retry_block_reason = "executor_invocation"
+        if route == ROUTE_CODE_GENERATION:
+            expected_output_reason = code_task_expected_output_block_reason(issue_body)
+            if expected_output_reason is not None:
+                retry_condition = retry_condition_for_issue(
+                    issue_body,
+                    route,
+                    maintenance_task_id,
+                    expected_output_reason,
+                )
+                retry_decision = evaluate_retry_policy(
+                    retry_condition,
+                    parse_prior_blocked_reports(get_issue_comments(issue)),
+                    extract_retry_override(issue_body),
+                )
+                block_issue(
+                    issue_number,
+                    "Code-generation task is missing a non-empty measurable expected_output.",
+                    runner_task=runner_task,
+                    retry_decision=retry_decision,
+                )
+                return
+        retry_condition = retry_condition_for_issue(
+            issue_body,
+            route,
+            maintenance_task_id,
+            retry_block_reason,
+        )
+        retry_decision = evaluate_retry_policy(
+            retry_condition,
+            parse_prior_blocked_reports(get_issue_comments(issue)),
+            extract_retry_override(issue_body),
+        )
+        if retry_decision.retry_decision in {BLOCK_REPEATED_REASON, NEEDS_OPERATOR}:
+            report = repeated_blocker_report(retry_decision)
+            warning = record_runner_executor_result(
+                issue_number,
+                runner_task.target_project if runner_task is not None else "skeleton",
+                "NEEDS_OPERATOR",
+                "NEEDS_OPERATOR",
+                None,
+                report,
+            )
+            post_issue_comment(issue_number, append_memory_warning(report, warning))
+            set_issue_label(issue_number, LABEL_READY, LABEL_BLOCKED)
+            notify_task_finished(issue_number, "NEEDS_OPERATOR", report)
+            return
+
         if runner_task is not None:
             execution_block_reason = project_execution_block_reason(runner_task)
             if execution_block_reason is not None:
@@ -9495,6 +9687,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                     issue_number,
                     execution_block_reason,
                     runner_task=runner_task,
+                    retry_decision=retry_decision,
                 )
                 return
             if runner_task.target_repository != QUEUE_REPOSITORY:
@@ -9506,6 +9699,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                         issue_number,
                         checkout_block_reason,
                         runner_task=runner_task,
+                        retry_decision=retry_decision,
                     )
                     return
 
@@ -9518,6 +9712,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                     issue_number,
                     "Runner worktree is not clean before starting.\n\n"
                     f"git status --short:\n```\n{status_output.strip()}\n```",
+                    retry_decision=retry_decision,
                 )
                 return
 
@@ -9538,19 +9733,26 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                     coordinator_workdir,
                     issue_body,
                     pickup_memory_warning,
+                    retry_decision,
                 )
             else:
                 process_runtime_maintenance_issue(
-                    issue_number, maintenance_task_id, coordinator_workdir, issue_body
+                    issue_number,
+                    maintenance_task_id,
+                    coordinator_workdir,
+                    issue_body,
+                    retry_decision=retry_decision,
                 )
             return
         if merge_mode and merge_request is not None:
             if pickup_memory_warning:
                 process_telegram_approved_pr_merge_issue(
-                    issue_number, merge_request, pickup_memory_warning
+                    issue_number, merge_request, pickup_memory_warning, retry_decision
                 )
             else:
-                process_telegram_approved_pr_merge_issue(issue_number, merge_request)
+                process_telegram_approved_pr_merge_issue(
+                    issue_number, merge_request, retry_decision=retry_decision
+                )
             return
 
         target_repository = (
@@ -9576,6 +9778,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                 + issue_workspace_review_note(worktree_path),
                 remove_label=LABEL_RUNNING,
                 runner_task=runner_task,
+                retry_decision=retry_decision,
             )
             return
         issue_workdir = str(worktree_path)
@@ -9593,6 +9796,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                 + issue_workspace_review_note(issue_workdir),
                 remove_label=LABEL_RUNNING,
                 runner_task=runner_task,
+                retry_decision=retry_decision,
             )
             return
         if codex_result.status == "BLOCKED":
@@ -9604,6 +9808,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                 ),
                 runner_task,
             )
+            report = append_retry_fields(report, retry_decision)
             warning = record_runner_executor_result(
                 issue_number,
                 runner_task.target_project if runner_task is not None else "skeleton",
@@ -9643,6 +9848,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
         status = runner_report_status(report)
         if status == "BLOCKED":
             report = blocked_final_report(report)
+            report = append_retry_fields(report, retry_decision)
         warning = record_runner_executor_result(
             issue_number,
             runner_task.target_project if runner_task is not None else "skeleton",
