@@ -7,11 +7,16 @@ import hashlib
 import json
 import os
 import shutil
+import sys
 import tempfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 try:
     import fcntl
@@ -20,6 +25,7 @@ except ImportError:  # pragma: no cover
 
 from core.aufmass_engine import AufmassInput, Opening, Point, RoomInput, calculate_aufmass
 from core.aufmass_exporter import aufmass_result_to_json_dict, aufmass_result_to_rows
+from core.aufmass_memory_bridge import AufmassMemoryBridge
 from core.private_memory import CanonicalPrivateMemoryStore
 from core.private_memory_backup import create_snapshot, restore_snapshot_to_isolated_target, snapshot_file_path
 from core.private_memory_history import content_hash
@@ -176,6 +182,43 @@ def memory_health(root: Path) -> dict[str, Any]:
 def memory_put(args: argparse.Namespace, root: Path) -> dict[str, Any]:
     namespace = safe_token(args.namespace, "namespace")
     fact_id = safe_token(args.fact_id, "fact_id")
+    if namespace == "aufmass":
+        try:
+            value = json.loads(args.value_json)
+        except json.JSONDecodeError as exc:
+            raise LocalOpsError("invalid value JSON") from exc
+        bridge = AufmassMemoryBridge()
+        existing = None
+        try:
+            existing = bridge.stack.get(namespace=namespace, fact_id=fact_id)
+        except Exception:
+            existing = None
+        if existing is not None:
+            if existing["value"] != value:
+                raise LocalOpsError("aufmass fact already exists with different data")
+            return done(
+                "memory.put",
+                idempotent=True,
+                canonical_revision=existing["canonical_revision"],
+                value_hash=existing["value_hash"],
+                private_memory_stack=True,
+            )
+        mutation = bridge.stack.put(
+            namespace=namespace,
+            fact_id=fact_id,
+            value=value,
+            actor_ref=safe_token(args.actor, "actor"),
+            reason_code=safe_token(args.reason, "reason"),
+            approval_ref=safe_token(args.approval, "approval"),
+            transaction_ref=safe_token(args.transaction, "transaction"),
+        )
+        return done(
+            "memory.put",
+            idempotent=False,
+            canonical_revision=mutation["canonical_revision"],
+            value_hash=content_hash(value),
+            private_memory_stack=True,
+        )
     if namespace.startswith("system."):
         raise LocalOpsError("system namespace is reserved")
     try:
@@ -198,6 +241,17 @@ def memory_put(args: argparse.Namespace, root: Path) -> dict[str, Any]:
 
 
 def memory_get(args: argparse.Namespace, root: Path) -> dict[str, Any]:
+    if safe_token(args.namespace, "namespace") == "aufmass":
+        try:
+            exact = AufmassMemoryBridge().stack.get(namespace="aufmass", fact_id=safe_token(args.fact_id, "fact_id"))
+        except Exception:
+            exact = None
+        if exact is not None:
+            result = done("memory.get", found=True, canonical_revision=exact["canonical_revision"], private_memory_stack=True)
+            result["value_hash"] = exact["value_hash"]
+            if args.show_value:
+                result["value"] = exact["value"]
+            return result
     with memory_lock(root):
         memory = store(root)
         value = memory.get_active_fact(namespace=safe_token(args.namespace, "namespace"), fact_id=safe_token(args.fact_id, "fact_id"))
@@ -421,6 +475,9 @@ def aufmass_validate(args: argparse.Namespace) -> dict[str, Any]:
 def aufmass_calculate(args: argparse.Namespace, root: Path) -> dict[str, Any]:
     packet = read_json(args.input)
     calculation, blocked, normalized = validate_aufmass(packet)
+    memory_context = None
+    if args.use_memory:
+        memory_context = AufmassMemoryBridge().context(project_ref=calculation.project_id, query=args.memory_query)
     raw_result = calculate_aufmass(calculation)
     raw = aufmass_result_to_json_dict(raw_result)
     rows = review_rows(aufmass_result_to_rows(raw_result))
@@ -437,12 +494,66 @@ def aufmass_calculate(args: argparse.Namespace, root: Path) -> dict[str, Any]:
     write_json(audit_json, audit)
     audit["output_hashes"]["aufmass_audit.json"] = sha256_file(audit_json)
     memory_revision = None
+    memory_idempotent = False
+    memory_compare = None
     if args.write_memory:
         if not all((args.actor, args.reason, args.approval, args.transaction)):
             raise LocalOpsError("memory metadata is required")
-        memory_args = argparse.Namespace(namespace="aufmass", fact_id=f"calculation.{calculation.project_id}", value_json=json.dumps({"schema": "skeleton.aufmass.calculation_record.v1", "project_ref": calculation.project_id, "status": audit["status"], "input_hash": audit["input_hash"], "output_hashes": audit["output_hashes"], "accepted_room_count": audit["accepted_room_count"], "blocked_room_count": audit["blocked_room_count"]}), actor=args.actor, reason=args.reason, approval=args.approval, transaction=args.transaction)
-        memory_revision = memory_put(memory_args, root)["canonical_revision"]
-    return done("aufmass.calculate", calculation_status=audit["status"], accepted_room_count=audit["accepted_room_count"], blocked_room_count=audit["blocked_room_count"], input_hash=audit["input_hash"], output_hashes=audit["output_hashes"], memory_written=memory_revision is not None, memory_revision=memory_revision)
+        memory_result = AufmassMemoryBridge().write_calculation(
+            project_ref=calculation.project_id,
+            normalized_input=normalized,
+            review=review,
+            audit=audit,
+            raw_result=raw,
+            actor_ref=args.actor,
+            reason_code=args.reason,
+            approval_ref=args.approval,
+            transaction_ref=args.transaction,
+        )
+        memory_revision = memory_result["canonical_revision"]
+        memory_idempotent = bool(memory_result["idempotent"])
+        memory_compare = memory_result["compare"]
+    elif args.use_memory:
+        memory_compare = AufmassMemoryBridge().compare(project_ref=calculation.project_id, current_record={"input_hash": audit["input_hash"], "per_room_results": review["rooms"], "warnings_blockers": blocked})
+    return done("aufmass.calculate", calculation_status=audit["status"], accepted_room_count=audit["accepted_room_count"], blocked_room_count=audit["blocked_room_count"], input_hash=audit["input_hash"], output_hashes=audit["output_hashes"], memory_context=memory_context, memory_written=memory_revision is not None, memory_revision=memory_revision, memory_idempotent=memory_idempotent, memory_compare=memory_compare)
+
+
+def aufmass_memory_context(args: argparse.Namespace) -> dict[str, Any]:
+    return done("aufmass.memory-context", **AufmassMemoryBridge().context(project_ref=args.project_ref, query=args.query, limit=args.limit))
+
+
+def aufmass_history(args: argparse.Namespace) -> dict[str, Any]:
+    return done("aufmass.history", **AufmassMemoryBridge().history(project_ref=args.project_ref, limit=args.limit))
+
+
+def aufmass_compare(args: argparse.Namespace) -> dict[str, Any]:
+    if args.input:
+        packet = read_json(args.input)
+        calculation, blocked, normalized = validate_aufmass(packet)
+        raw_result = calculate_aufmass(calculation)
+        rows = review_rows(aufmass_result_to_rows(raw_result))
+        review = {"rooms": [row for row in rows if row["row_type"] == "room"], "blocked_rooms": blocked}
+        current = {"input_hash": content_hash(normalized), "per_room_results": review["rooms"], "warnings_blockers": blocked}
+        return done("aufmass.compare", **AufmassMemoryBridge().compare(project_ref=calculation.project_id, current_record=current))
+    return done("aufmass.compare", **AufmassMemoryBridge().compare(project_ref=args.project_ref, input_hash=args.input_hash))
+
+
+def aufmass_review_decision(args: argparse.Namespace) -> dict[str, Any]:
+    return done(
+        "aufmass.review-decision",
+        **AufmassMemoryBridge().write_review_decision(
+            project_ref=args.project_ref,
+            decision_ref=args.decision_ref,
+            decision_status=args.decision_status,
+            note=args.note,
+            input_hash=args.input_hash,
+            room_id=args.room_id,
+            actor_ref=args.actor,
+            reason_code=args.reason,
+            approval_ref=args.approval,
+            transaction_ref=args.transaction,
+        ),
+    )
 
 
 def add_target(parser: argparse.ArgumentParser) -> None:
@@ -475,15 +586,21 @@ def build_parser() -> argparse.ArgumentParser:
     aufmass = domains.add_parser("aufmass").add_subparsers(dest="command", required=True)
     example = aufmass.add_parser("example"); example.add_argument("--output", required=True)
     validate = aufmass.add_parser("validate"); validate.add_argument("--input", required=True)
-    calculate = aufmass.add_parser("calculate"); calculate.add_argument("--input", required=True); calculate.add_argument("--output-dir", required=True); calculate.add_argument("--write-memory", action="store_true"); calculate.add_argument("--actor"); calculate.add_argument("--reason"); calculate.add_argument("--approval"); calculate.add_argument("--transaction")
+    calculate = aufmass.add_parser("calculate"); calculate.add_argument("--input", required=True); calculate.add_argument("--output-dir", required=True); calculate.add_argument("--use-memory", action="store_true"); calculate.add_argument("--memory-query"); calculate.add_argument("--write-memory", action="store_true"); calculate.add_argument("--actor"); calculate.add_argument("--reason"); calculate.add_argument("--approval"); calculate.add_argument("--transaction")
+    context = aufmass.add_parser("memory-context"); context.add_argument("--project-ref", required=True); context.add_argument("--query"); context.add_argument("--limit", type=int, default=5)
+    history_cmd = aufmass.add_parser("history"); history_cmd.add_argument("--project-ref", required=True); history_cmd.add_argument("--limit", type=int, default=10)
+    compare = aufmass.add_parser("compare"); compare.add_argument("--project-ref"); compare.add_argument("--input-hash"); compare.add_argument("--input")
+    decision = aufmass.add_parser("review-decision"); decision.add_argument("--project-ref", required=True); decision.add_argument("--decision-ref", required=True); decision.add_argument("--decision-status", required=True); decision.add_argument("--note", required=True); decision.add_argument("--input-hash"); decision.add_argument("--room-id"); add_mutation(decision)
     return parser
 
 
 def dispatch(args: argparse.Namespace) -> dict[str, Any]:
-    root = private_root(args.private_root)
+    root = private_root(args.private_root) if args.domain == "memory" or args.private_root else Path(".")
     if args.domain == "memory":
         return {"init": memory_init, "health": memory_health, "put": memory_put, "get": memory_get, "history": memory_history, "delete": memory_delete, "import": memory_import, "backup": memory_backup, "verify-backup": memory_verify, "restore": memory_restore}[args.command](*(([args, root]) if args.command not in {"init", "health", "backup"} else ([root])))
-    return {"example": aufmass_example, "validate": aufmass_validate, "calculate": aufmass_calculate}[args.command](*(([args, root]) if args.command == "calculate" else ([args])))
+    if args.domain == "aufmass" and args.command == "compare" and not args.input and not (args.project_ref and args.input_hash):
+        raise LocalOpsError("compare requires --input or --project-ref with --input-hash")
+    return {"example": aufmass_example, "validate": aufmass_validate, "calculate": aufmass_calculate, "memory-context": aufmass_memory_context, "history": aufmass_history, "compare": aufmass_compare, "review-decision": aufmass_review_decision}[args.command](*(([args, root]) if args.command == "calculate" else ([args])))
 
 
 def main() -> int:

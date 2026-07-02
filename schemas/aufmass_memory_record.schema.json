@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.aufmass.memory_record.v1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["schema", "project_ref", "record_type", "searchable_text", "relationships"],
+  "properties": {
+    "schema": {"const": "skeleton.aufmass.memory_record.v1"},
+    "project_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},
+    "record_type": {
+      "enum": [
+        "project_profile",
+        "source_evidence_ref",
+        "normalized_input",
+        "calculation",
+        "room_result",
+        "warning_blocker",
+        "review_status",
+        "output_hashes"
+      ]
+    },
+    "status": {
+      "enum": ["confirmed", "estimated_review", "accepted_input", "blocked", "operator_approved", "READY_FOR_OPERATOR_REVIEW", "PARTIAL_WITH_BLOCKERS"]
+    },
+    "review_status": {
+      "enum": ["confirmed", "estimated_review", "accepted_input", "blocked", "operator_approved", "READY_FOR_OPERATOR_REVIEW", "PARTIAL_WITH_BLOCKERS"]
+    },
+    "input_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "idempotency_key": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "normalized_input": {"type": "object"},
+    "calculation_summary": {"type": "object"},
+    "per_room_results": {"type": "array"},
+    "warnings_blockers": {"type": "array"},
+    "output_hashes": {"type": "object"},
+    "operator_decisions": {"type": "array"},
+    "searchable_text": {"type": "string", "minLength": 1, "maxLength": 4000},
+    "tags": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$"}
+    },
+    "relationships": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "target"],
+        "properties": {
+          "kind": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$"},
+          "target": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"}
+        }
+      }
+    }
+  }
+}

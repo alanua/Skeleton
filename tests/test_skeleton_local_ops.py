@@ -1,19 +1,22 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CLI = ROOT / "scripts" / "skeleton_local.py"
+CLI = ROOT / "scripts" / "skeleton_local_ops.py"
 
 
 def run_cli(private_root: Path, *args: str, expected: int = 0) -> dict[str, object]:
+    env = {**os.environ, "SKELETON_PRIVATE_MEMORY_ROOT": str(private_root / "private-memory-stack")}
     result = subprocess.run(
         [sys.executable, str(CLI), "--private-root", str(private_root), *args],
         cwd=ROOT,
+        env=env,
         text=True,
         capture_output=True,
         check=False,
@@ -179,9 +182,9 @@ def test_aufmass_calculation_and_memory_record_is_repeatable(tmp_path: Path) -> 
         private_root,
         "memory", "get",
         "--namespace", "aufmass",
-        "--fact-id", "calculation.project-001",
+        "--fact-id", f"calculation.project-001.{first['input_hash'][:24]}",
         "--show-value",
     )
     assert memory_record["value"]["status"] == "PARTIAL_WITH_BLOCKERS"
-    assert memory_record["value"]["accepted_room_count"] == 1
-    assert memory_record["value"]["blocked_room_count"] == 1
+    assert memory_record["value"]["calculation_summary"]["accepted_room_count"] == 1
+    assert memory_record["value"]["calculation_summary"]["blocked_room_count"] == 1
