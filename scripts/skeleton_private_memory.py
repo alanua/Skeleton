@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.private_memory_stack import PrivateMemoryStack, PrivateMemoryStackError, sanitize_cli_report
+from core.task_memory_context import TaskMemoryContextError, build_task_memory_context
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -49,6 +50,21 @@ def main(argv: list[str] | None = None) -> int:
     backup = sub.add_parser("backup", help="Create a local-private SQLite backup under the private root.")
     backup.add_argument("--snapshot-id")
 
+    import_bundle = sub.add_parser("import-bundle", help="Import an operator-approved local-private inbox bundle.")
+    import_bundle.add_argument("basename")
+    import_bundle.add_argument("--expected-sha256", required=True)
+    import_bundle.add_argument("--create-backup", action="store_true")
+
+    task_context = sub.add_parser("task-context", help="Build a public-safe task memory context receipt.")
+    task_context.add_argument("--project-id", required=True)
+    task_context.add_argument("--task-route", required=True)
+    task_context.add_argument("--profile", required=True, choices=["public_control", "private_runtime", "none"])
+    task_context.add_argument("--query", required=True)
+    task_context.add_argument("--namespace", action="append", dest="namespaces")
+    task_context.add_argument("--required", action="store_true")
+    task_context.add_argument("--limit", type=int, default=10)
+    task_context.add_argument("--max-chars", type=int, default=6000)
+
     sub.add_parser("status", help="Print aggregate READY/STALE/BLOCKED status without raw private content.")
 
     delete = sub.add_parser("delete", help=argparse.SUPPRESS)
@@ -82,6 +98,24 @@ def main(argv: list[str] | None = None) -> int:
             payload = stack.rebuild()
         elif args.command == "backup":
             payload = stack.backup(snapshot_id=args.snapshot_id)
+        elif args.command == "import-bundle":
+            payload = stack.import_bundle(
+                args.basename,
+                expected_sha256=args.expected_sha256,
+                create_backup=args.create_backup,
+            )
+        elif args.command == "task-context":
+            payload = build_task_memory_context(
+                stack,
+                project_id=args.project_id,
+                task_route=args.task_route,
+                profile=args.profile,
+                query=args.query,
+                namespaces=args.namespaces,
+                required=args.required,
+                limit=args.limit,
+                max_chars=args.max_chars,
+            ).public_receipt()
         elif args.command == "status":
             payload = stack.status()
         elif args.command == "delete":
@@ -94,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             parser.error("unsupported command")
-    except (PrivateMemoryStackError, ValueError, json.JSONDecodeError) as exc:
+    except (PrivateMemoryStackError, TaskMemoryContextError, ValueError, json.JSONDecodeError) as exc:
         print(json.dumps({"status": "BLOCKED", "error_class": type(exc).__name__}, sort_keys=True), file=sys.stderr)
         return 1
     print(json.dumps(sanitize_cli_report(payload), indent=2, sort_keys=True))

@@ -217,6 +217,8 @@ def test_cli_help_and_installer_syntax() -> None:
         text=True,
     )
     assert "init" in help_result.stdout
+    assert "import-bundle" in help_result.stdout
+    assert "task-context" in help_result.stdout
 
     subprocess.run(["bash", "-n", "scripts/install_skeleton_private_memory.sh"], cwd=ROOT, check=True)
 
