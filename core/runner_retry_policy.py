@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import re
@@ -78,6 +78,7 @@ class PriorBlockedReport:
     blocker_signature: str
     retry_attempt: int
     route: str | None = None
+    condition_signature: str | None = None
     override_token_hash: str | None = None
 
 
@@ -99,6 +100,7 @@ class RetryDecision:
     retry_attempt: int
     blocker_signature: str
     route: str
+    condition_signature: str = ""
     changed_condition: bool = False
     override_used: bool = False
     next_required_action: str | None = None
@@ -113,6 +115,8 @@ class RetryDecision:
             "changed_condition": str(self.changed_condition).lower(),
             "override_used": str(self.override_used).lower(),
         }
+        if self.condition_signature:
+            fields["condition_signature"] = self.condition_signature
         if self.next_required_action is not None:
             fields["next_required_action"] = self.next_required_action
         return fields
@@ -173,7 +177,7 @@ def _safe_status_fields(fields: Mapping[str, str] | None) -> dict[str, str]:
     return safe
 
 
-def blocker_signature(condition: RetryCondition) -> str:
+def stable_condition_signature(condition: RetryCondition) -> str:
     route = normalize_route(condition.route)
     payload = {
         "route": route,
@@ -183,6 +187,14 @@ def blocker_signature(condition: RetryCondition) -> str:
             _bounded_value(condition.expected_output).encode("utf-8")
         ).hexdigest()[:16],
         "dependency_state": _bounded_value(condition.dependency_state),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:16]
+
+
+def blocker_signature(condition: RetryCondition) -> str:
+    payload = {
+        "condition_signature": stable_condition_signature(condition),
         "blocker_reason": bounded_public_reason(condition.blocker_reason),
         "status_fields": _safe_status_fields(condition.status_fields),
     }
@@ -190,30 +202,46 @@ def blocker_signature(condition: RetryCondition) -> str:
     return hashlib.sha256(encoded).hexdigest()[:16]
 
 
-def parse_prior_blocked_reports(comments: Iterable[Mapping[str, object] | str]) -> list[PriorBlockedReport]:
+def parse_prior_blocked_reports(
+    comments: Iterable[Mapping[str, object] | str],
+) -> list[PriorBlockedReport]:
     reports: list[PriorBlockedReport] = []
     for comment in comments:
-        if isinstance(comment, Mapping) and not _is_runner_authored_comment(comment):
-            continue
         body = comment if isinstance(comment, str) else comment.get("body")
         if not isinstance(body, str):
             continue
         if "BLOCKED" not in body and "NEEDS_OPERATOR" not in body:
             continue
+
         fields = _parse_public_fields(body)
         signature = fields.get("blocker_signature")
+        route = fields.get("route")
+        retry_decision = fields.get("retry_decision")
+        condition_signature = fields.get("condition_signature")
+
         if not signature or not re.fullmatch(r"[0-9a-f]{8,32}", signature):
             continue
+        if route not in TASK_ROUTES:
+            continue
+        if retry_decision not in TERMINAL_RETRY_DECISIONS:
+            continue
+        if condition_signature is not None and not re.fullmatch(
+            r"[0-9a-f]{8,32}", condition_signature
+        ):
+            continue
+
         attempt_text = fields.get("retry_attempt") or "1"
         try:
             attempt = max(1, int(attempt_text))
         except ValueError:
             attempt = 1
+
         reports.append(
             PriorBlockedReport(
                 blocker_signature=signature,
                 retry_attempt=attempt,
-                route=fields.get("route"),
+                route=route,
+                condition_signature=condition_signature,
                 override_token_hash=fields.get("override_token_hash"),
             )
         )
@@ -301,20 +329,11 @@ def evaluate_retry_policy(
     override: RetryOverride | None = None,
 ) -> RetryDecision:
     route = normalize_route(condition.route)
-    signature = blocker_signature(condition)
-    prior_report_list = list(prior_reports)
-    relevant = [report for report in prior_report_list if report.route in (None, route)]
-    route_mismatches = [
-        report for report in prior_report_list if report.route not in (None, route)
+    condition_signature = stable_condition_signature(condition)
+    candidate_signature = blocker_signature(condition)
+    relevant = [
+        report for report in prior_reports if report.route in (None, route)
     ]
-    if route_mismatches and len(relevant) < len(prior_report_list):
-        return RetryDecision(
-            retry_decision=ALLOW_CHANGED_CONDITION,
-            retry_attempt=1,
-            blocker_signature=signature,
-            route=route,
-            changed_condition=True,
-        )
 
     used_override_hashes = {
         report.override_token_hash for report in relevant if report.override_token_hash
@@ -324,15 +343,17 @@ def evaluate_retry_policy(
             return RetryDecision(
                 retry_decision=NEEDS_OPERATOR,
                 retry_attempt=max((r.retry_attempt for r in relevant), default=0) + 1,
-                blocker_signature=signature,
+                blocker_signature=candidate_signature,
                 route=route,
+                condition_signature=condition_signature,
                 next_required_action="DIAGNOSE",
             )
         return RetryDecision(
             retry_decision=ALLOW_ONE_TIME_OVERRIDE,
             retry_attempt=max((r.retry_attempt for r in relevant), default=0) + 1,
-            blocker_signature=signature,
+            blocker_signature=candidate_signature,
             route=route,
+            condition_signature=condition_signature,
             override_used=True,
             override_token_hash=override.token_hash,
         )
@@ -341,41 +362,57 @@ def evaluate_retry_policy(
         return RetryDecision(
             retry_decision=ALLOW_FIRST_ATTEMPT,
             retry_attempt=1,
-            blocker_signature=signature,
+            blocker_signature=candidate_signature,
             route=route,
+            condition_signature=condition_signature,
         )
 
-    same_signature = [report for report in relevant if report.blocker_signature == signature]
-    if not same_signature:
+    same_condition = [
+        report
+        for report in relevant
+        if report.condition_signature == condition_signature
+    ]
+    if not same_condition:
         return RetryDecision(
             retry_decision=ALLOW_CHANGED_CONDITION,
             retry_attempt=1,
-            blocker_signature=signature,
+            blocker_signature=candidate_signature,
             route=route,
+            condition_signature=condition_signature,
             changed_condition=True,
         )
 
-    attempt = max(report.retry_attempt for report in same_signature) + 1
-    latest_two = relevant[-2:]
+    attempt = max(report.retry_attempt for report in same_condition) + 1
+    latest_two = same_condition[-2:]
     if (
-        len(latest_two) >= 2
-        and latest_two[0].blocker_signature == signature
-        and latest_two[1].blocker_signature == signature
+        len(latest_two) == 2
+        and latest_two[0].blocker_signature == latest_two[1].blocker_signature
     ):
         return RetryDecision(
             retry_decision=BLOCK_REPEATED_REASON,
             retry_attempt=attempt,
-            blocker_signature=signature,
+            blocker_signature=latest_two[-1].blocker_signature,
             route=route,
+            condition_signature=condition_signature,
             next_required_action=_next_required_action(route),
+        )
+
+    if len(same_condition) >= 2:
+        return RetryDecision(
+            retry_decision=ALLOW_CHANGED_CONDITION,
+            retry_attempt=attempt,
+            blocker_signature=candidate_signature,
+            route=route,
+            condition_signature=condition_signature,
+            changed_condition=True,
         )
 
     return RetryDecision(
         retry_decision=ALLOW_FIRST_ATTEMPT,
         retry_attempt=attempt,
-        blocker_signature=signature,
+        blocker_signature=candidate_signature,
         route=route,
-        changed_condition=False,
+        condition_signature=condition_signature,
     )
 
 
@@ -387,9 +424,36 @@ def _next_required_action(route: str) -> str:
     return "DIAGNOSE"
 
 
+def _report_blocker_reason(report: str) -> str:
+    patterns = (
+        r"(?mi)^reason=(?P<reason>[A-Za-z0-9_.:-]+)\s*$",
+        r"(?mi)^Blocked marker:\s*(?P<reason>[^\n]+)$",
+        r"(?mi)^Reason:\s*(?P<reason>[^\n]+)$",
+        r"(?mi)^(?:BLOCKED|NEEDS_OPERATOR):\s*(?P<reason>[^\n]+)$",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, report or "")
+        if match is not None:
+            return bounded_public_reason(match.group("reason"))
+    return "unspecified_blocker"
+
+
+def _report_blocker_signature(report: str, decision: RetryDecision) -> str:
+    payload = {
+        "condition_signature": decision.condition_signature or "legacy_condition",
+        "blocker_reason": _report_blocker_reason(report),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:16]
+
+
 def append_retry_fields(report: str, decision: RetryDecision) -> str:
+    effective = replace(
+        decision,
+        blocker_signature=_report_blocker_signature(report, decision),
+    )
     lines = [report.rstrip(), ""]
-    lines.extend(f"{key}={value}" for key, value in decision.public_fields().items())
-    if decision.override_used and decision.override_token_hash:
-        lines.append(f"override_token_hash={decision.override_token_hash}")
+    lines.extend(f"{key}={value}" for key, value in effective.public_fields().items())
+    if effective.override_used and effective.override_token_hash:
+        lines.append(f"override_token_hash={effective.override_token_hash}")
     return "\n".join(lines).rstrip()

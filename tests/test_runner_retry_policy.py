@@ -34,6 +34,7 @@ def _blocked_comment(condition: RetryCondition, attempt: int = 1, extra: str = "
         retry_attempt=attempt,
         blocker_signature=decision.blocker_signature,
         route=decision.route,
+        condition_signature=decision.condition_signature,
     )
     return append_retry_fields("BLOCKED: synthetic blocker", decision) + extra
 
@@ -147,3 +148,72 @@ def test_signature_redacts_or_ignores_paths_secrets_and_volatile_output() -> Non
     )
 
     assert blocker_signature(base) == blocker_signature(same_stable)
+
+
+
+def test_actual_blocker_reason_controls_recorded_signature() -> None:
+    condition = _condition()
+    decision = evaluate_retry_policy(condition, [])
+
+    first = parse_prior_blocked_reports(
+        [append_retry_fields("BLOCKED: codex_nonzero_exit", decision)]
+    )[0]
+    second = parse_prior_blocked_reports(
+        [append_retry_fields("BLOCKED: maintenance_failure", decision)]
+    )[0]
+
+    assert first.condition_signature == second.condition_signature
+    assert first.blocker_signature != second.blocker_signature
+
+
+def test_two_identical_actual_reasons_block_before_third_execution() -> None:
+    condition = _condition()
+
+    first_decision = evaluate_retry_policy(condition, [])
+    first_report = append_retry_fields("BLOCKED: codex_nonzero_exit", first_decision)
+
+    second_decision = evaluate_retry_policy(
+        condition, parse_prior_blocked_reports([first_report])
+    )
+    second_report = append_retry_fields("BLOCKED: codex_nonzero_exit", second_decision)
+
+    third_decision = evaluate_retry_policy(
+        condition, parse_prior_blocked_reports([first_report, second_report])
+    )
+
+    assert third_decision.retry_decision == BLOCK_REPEATED_REASON
+    assert third_decision.retry_attempt == 3
+
+
+def test_different_actual_reasons_allow_changed_condition_retry() -> None:
+    condition = _condition()
+
+    first_decision = evaluate_retry_policy(condition, [])
+    first_report = append_retry_fields("BLOCKED: codex_nonzero_exit", first_decision)
+
+    second_decision = evaluate_retry_policy(
+        condition, parse_prior_blocked_reports([first_report])
+    )
+    second_report = append_retry_fields("BLOCKED: maintenance_failure", second_decision)
+
+    third_decision = evaluate_retry_policy(
+        condition, parse_prior_blocked_reports([first_report, second_report])
+    )
+
+    assert third_decision.retry_decision == ALLOW_CHANGED_CONDITION
+    assert third_decision.changed_condition is True
+
+
+def test_machine_retry_fields_are_parsed_for_operator_posted_comments() -> None:
+    condition = _condition()
+    report = append_retry_fields(
+        "BLOCKED: synthetic_operator_visible_failure",
+        evaluate_retry_policy(condition, []),
+    )
+
+    parsed = parse_prior_blocked_reports(
+        [{"author": {"login": "alanua"}, "body": report}]
+    )
+
+    assert len(parsed) == 1
+    assert parsed[0].condition_signature is not None

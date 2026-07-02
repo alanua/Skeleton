@@ -10758,3 +10758,42 @@ def test_hermes_memory_gateway_smoke_isolation_reason_must_be_exact(
     assert report_lines[-2] == "hermes_memory_smoke_status=blocked"
     assert f"status_token={expected_token}" in report
     assert "error_class=none" not in report
+
+
+
+def test_block_issue_uses_actual_bounded_failure_reason_for_retry_signature() -> None:
+    body = "Expected Output: draft PR\nAllowed Files:\n- core/example.py"
+    condition = runner.retry_condition_for_issue(
+        body,
+        runner.ROUTE_CODE_GENERATION,
+        None,
+    )
+    decision = runner.evaluate_retry_policy(condition, [])
+    comments: list[str] = []
+
+    with mock.patch.object(
+        runner,
+        "post_issue_comment",
+        side_effect=lambda _number, comment: comments.append(comment),
+    ), mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ):
+        runner.block_issue(
+            1450,
+            "Codex task failed:\nReason: codex_nonzero_exit",
+            retry_decision=decision,
+        )
+        runner.block_issue(
+            1450,
+            "Runner error:\nReason: RuntimeError",
+            retry_decision=decision,
+        )
+
+    reports = runner.parse_prior_blocked_reports(comments)
+    assert len(reports) == 2
+    assert reports[0].condition_signature == reports[1].condition_signature
+    assert reports[0].blocker_signature != reports[1].blocker_signature

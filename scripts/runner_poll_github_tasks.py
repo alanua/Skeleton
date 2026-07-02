@@ -9724,6 +9724,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
     issue_workdir: str | None = None
     claimed = False
     runner_task: RunnerTask | None = None
+    retry_decision: RetryDecision | None = None
     try:
         issue_body = issue.get("body") or ""
         fence_reason = task_fence_block_reason(issue_body)
@@ -10047,7 +10048,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             remove_label = LABEL_RUNNING if claimed else LABEL_READY
             block_issue(
                 issue_number,
-                f"Runner error:\n```\n{exc}\n```"
+                f"Runner error:\nReason: {type(exc).__name__}\n```\n{exc}\n```"
                 + (
                     issue_workspace_review_note(issue_workdir)
                     if issue_workdir is not None
@@ -10056,6 +10057,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                 remove_label=remove_label,
                 runner_task=runner_task,
                 result_status="ERROR",
+                retry_decision=retry_decision,
             )
         except Exception:
             return

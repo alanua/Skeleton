@@ -58,3 +58,14 @@ token is rejected and returns `NEEDS_OPERATOR`.
 Material condition changes reset the guard by producing a different signature:
 route, maintenance task id, allowed-file set, expected output, explicit
 dependency state, or blocker reason. Cosmetic issue-body edits do not reset it.
+
+
+## Actual blocker binding
+
+The stable condition signature represents the task route and bounded static
+execution scope. The blocker signature is bound when a failure report is
+created, using the actual bounded failure reason or final blocked marker.
+
+Two consecutive reports with the same condition signature and blocker signature
+stop the next execution before Codex or maintenance dispatch. A different actual
+blocker reason is treated as a changed condition.

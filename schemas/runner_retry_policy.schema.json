@@ -17,11 +17,18 @@
   "properties": {
     "status": {
       "type": "string",
-      "enum": ["BLOCKED", "NEEDS_OPERATOR"]
+      "enum": [
+        "BLOCKED",
+        "NEEDS_OPERATOR"
+      ]
     },
     "route": {
       "type": "string",
-      "enum": ["code_generation", "publish_only", "runtime_only"]
+      "enum": [
+        "code_generation",
+        "publish_only",
+        "runtime_only"
+      ]
     },
     "retry_decision": {
       "type": "string",
@@ -50,11 +57,19 @@
     },
     "next_required_action": {
       "type": "string",
-      "enum": ["DIAGNOSE", "PUBLISH_ONLY", "RUNTIME_ONLY"]
+      "enum": [
+        "DIAGNOSE",
+        "PUBLISH_ONLY",
+        "RUNTIME_ONLY"
+      ]
     },
     "override_token_hash": {
       "type": "string",
       "pattern": "^[0-9a-f]{16}$"
+    },
+    "condition_signature": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8,32}$"
     }
   }
 }
