@@ -12,6 +12,7 @@ from core.private_memory_stack import PrivateMemoryStack, PrivateMemoryStackErro
 TASK_MEMORY_CONTEXT_SCHEMA = "skeleton.task_memory_context.v1"
 TASK_MEMORY_CONTEXT_RESULT_SCHEMA = "skeleton.task_memory_context.private_result.v1"
 TASK_MEMORY_CONTEXT_PROFILES = frozenset({"public_control", "private_runtime", "none"})
+TASK_MEMORY_CONTEXT_NAMESPACES = frozenset({"skeleton.context"})
 MAX_CONTEXT_RECORDS = 10
 MAX_CONTEXT_CHARS = 6000
 
@@ -62,6 +63,7 @@ def build_task_memory_context(
     if profile not in TASK_MEMORY_CONTEXT_PROFILES:
         raise TaskMemoryContextError("unsupported task context profile")
     namespace_filter = _validate_namespaces(namespaces)
+    allowed_namespaces = namespace_filter or TASK_MEMORY_CONTEXT_NAMESPACES
     bounded_limit = max(0, min(int(limit), MAX_CONTEXT_RECORDS))
     bounded_chars = max(0, min(int(max_chars), MAX_CONTEXT_CHARS))
     if profile == "none" or bounded_limit == 0:
@@ -82,7 +84,7 @@ def build_task_memory_context(
             truncated = True
             break
         namespace, fact_id = canonical_ref.split(":", 1)
-        if namespace_filter and namespace not in namespace_filter:
+        if namespace not in allowed_namespaces:
             continue
         exact = stack.get(namespace=namespace, fact_id=fact_id)
         value = exact["value"]
@@ -93,6 +95,9 @@ def build_task_memory_context(
         if remaining <= 0:
             truncated = True
             break
+        if profile == "private_runtime" and len(rendered) > remaining:
+            truncated = True
+            continue
         if len(rendered) > remaining:
             rendered = rendered[:remaining]
             truncated = True
@@ -205,7 +210,11 @@ def _render_value_for_profile(profile: str, value: Any) -> str | None:
 def _validate_namespaces(namespaces: Sequence[str] | None) -> set[str]:
     if not namespaces:
         return set()
-    return {safe_token(namespace, "namespace") for namespace in namespaces}
+    validated = {safe_token(namespace, "namespace") for namespace in namespaces}
+    unsupported = validated - TASK_MEMORY_CONTEXT_NAMESPACES
+    if unsupported:
+        raise TaskMemoryContextError("unsupported task context namespace")
+    return validated
 
 
 def _empty_result(

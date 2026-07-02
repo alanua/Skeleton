@@ -67,6 +67,45 @@ def test_private_runtime_values_never_enter_public_receipt(tmp_path: Path) -> No
     assert "selected_canonical_refs" in result.public_receipt()
 
 
+def test_private_runtime_max_chars_applies_to_actual_values(tmp_path: Path) -> None:
+    stack = PrivateMemoryStack(tmp_path)
+    stack.init(import_manifest=False)
+    stack.put(
+        namespace="skeleton.context",
+        fact_id="oversized",
+        value={"summary": "runtime only alpha value exceeds the small runtime budget", "tags": ["oversize"]},
+    )
+
+    result = build_task_memory_context(
+        stack,
+        project_id="skeleton",
+        task_route="runner",
+        profile="private_runtime",
+        query="oversize",
+        required=True,
+        max_chars=5,
+    )
+
+    assert result.private_values == []
+    assert result.public_receipt()["counts"]["selected"] == 0
+    assert result.public_receipt()["truncated"] is True
+
+
+def test_unsupported_context_namespace_is_rejected(tmp_path: Path) -> None:
+    stack = _context_stack(tmp_path)
+
+    with pytest.raises(TaskMemoryContextError):
+        build_task_memory_context(
+            stack,
+            project_id="skeleton",
+            task_route="runner",
+            profile="private_runtime",
+            query="alpha",
+            namespaces=["skeleton.notes"],
+            required=True,
+        )
+
+
 def test_required_blocks_on_non_ready_stack_and_optional_returns_unavailable(tmp_path: Path) -> None:
     stack = _context_stack(tmp_path)
     (tmp_path / "mempalace.index.json").unlink()

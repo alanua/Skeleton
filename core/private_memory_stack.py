@@ -25,6 +25,7 @@ from core.private_memory_bundle import (
     prepare_private_memory_import_bundle,
 )
 from core.private_memory_history import (
+    bytes_hash,
     canonical_json,
     content_hash,
     current_revision,
@@ -202,6 +203,10 @@ class PrivateMemoryStack:
         return self.status()
 
     def backup(self, *, snapshot_id: str | None = None) -> dict[str, object]:
+        with _exclusive_lock(self.paths.lock):
+            return self._backup_unlocked(snapshot_id=snapshot_id)
+
+    def _backup_unlocked(self, *, snapshot_id: str | None = None) -> dict[str, object]:
         self._require_ready(allow_stale=True)
         self.paths.backups.mkdir(parents=True, exist_ok=True)
         _chmod_dir(self.paths.backups)
@@ -243,7 +248,11 @@ class PrivateMemoryStack:
                 if existing_receipt is not None:
                     existing_hash = existing_receipt.get("bundle_hash") if isinstance(existing_receipt, Mapping) else None
                     if existing_hash == prepared.bundle_hash:
-                        moved_name = move_processed_bundle(prepared.source_path, receipt_id=prepared.receipt_id)
+                        moved_name = move_processed_bundle(
+                            prepared.source_path,
+                            receipt_id=prepared.receipt_id,
+                            expected_stat=prepared.source_stat,
+                        )
                         return self._bundle_receipt_report(
                             prepared=prepared,
                             status="DONE",
@@ -256,23 +265,23 @@ class PrivateMemoryStack:
                     self.paths.root,
                     create_snapshot,
                 )
-                facts = [
-                    {"namespace": fact["namespace"], "fact_id": fact["fact_id"], "value": fact["value"]}
-                    for fact in prepared.facts
-                ]
-                facts.append(prepared.receipt_fact)
-                events = self.store.bulk_put_facts(
-                    facts,
-                    actor_ref="operator",
-                    reason_code="operator-approved-bundle-import",
-                    approval_ref="local-operator",
+                _verify_pre_operation_snapshot_for_import(self.paths.db, snapshot)
+                events = self._put_import_facts_with_provenance_unlocked(
+                    prepared,
                     transaction_ref=transaction,
-                    pre_operation_snapshot=snapshot,
                 )
                 self._rebuild_unlocked()
                 self._verify_import_readback(prepared)
-                backup_report = self.backup(snapshot_id=f"bundle-{prepared.receipt_id[:24]}") if create_backup else None
-                moved_name = move_processed_bundle(prepared.source_path, receipt_id=prepared.receipt_id)
+                backup_report = (
+                    self._backup_unlocked(snapshot_id=f"bundle-{prepared.receipt_id[:24]}")
+                    if create_backup
+                    else None
+                )
+                moved_name = move_processed_bundle(
+                    prepared.source_path,
+                    receipt_id=prepared.receipt_id,
+                    expected_stat=prepared.source_stat,
+                )
             except Exception as exc:
                 self._restore_database_backup(before)
                 self._best_effort_rebuild_unlocked()
@@ -479,6 +488,40 @@ class PrivateMemoryStack:
         if receipt["value_hash"] != content_hash(prepared.receipt_fact["value"]):
             raise PrivateMemoryStackError("import receipt read-back hash mismatch")
 
+    def _put_import_facts_with_provenance_unlocked(
+        self,
+        prepared: Any,
+        *,
+        transaction_ref: str,
+    ) -> list[dict[str, object]]:
+        events: list[dict[str, object]] = []
+        for fact in prepared.facts:
+            events.append(
+                self.store.put_fact(
+                    namespace=fact["namespace"],
+                    fact_id=fact["fact_id"],
+                    value=fact["value"],
+                    actor_ref=fact["actor"],
+                    reason_code=fact["reason"],
+                    approval_ref=fact["approval"],
+                    transaction_ref=transaction_ref,
+                    event_type="supersede",
+                )
+            )
+        events.append(
+            self.store.put_fact(
+                namespace=prepared.receipt_fact["namespace"],
+                fact_id=prepared.receipt_fact["fact_id"],
+                value=prepared.receipt_fact["value"],
+                actor_ref="operator",
+                reason_code="operator-approved-bundle-import",
+                approval_ref="local-operator",
+                transaction_ref=transaction_ref,
+                event_type="supersede",
+            )
+        )
+        return events
+
     def _bundle_receipt_report(
         self,
         *,
@@ -541,6 +584,25 @@ def _connect_rw(path: Path) -> sqlite3.Connection:
 
 def _canonical_ref(namespace: str, fact_id: str) -> str:
     return f"{safe_token(namespace, 'namespace')}:{safe_token(fact_id, 'fact_id')}"
+
+
+def _verify_pre_operation_snapshot_for_import(db_path: Path, snapshot: Mapping[str, object]) -> None:
+    manifest = snapshot.get("manifest")
+    snapshot_path = snapshot.get("snapshot_path")
+    if not isinstance(manifest, Mapping) or not isinstance(snapshot_path, Path):
+        raise PrivateMemoryStackError("invalid pre-operation snapshot")
+    if not snapshot_path.is_file():
+        raise PrivateMemoryStackError("pre-operation snapshot unavailable")
+    expected_hash = manifest.get("content_hash")
+    if not isinstance(expected_hash, str) or bytes_hash(snapshot_path.read_bytes()) != expected_hash:
+        raise PrivateMemoryStackError("pre-operation snapshot hash mismatch")
+    with closing(_connect_ro(db_path)) as current, closing(_connect_ro(snapshot_path)) as before:
+        verify_existing_integrity_or_raise(current)
+        verify_existing_integrity_or_raise(before)
+        if current_revision(current) != manifest.get("canonical_revision"):
+            raise PrivateMemoryStackError("pre-operation snapshot revision mismatch")
+        if current_revision(before) != manifest.get("canonical_revision"):
+            raise PrivateMemoryStackError("pre-operation snapshot revision mismatch")
 
 
 def _active_count(connection: sqlite3.Connection) -> int:

@@ -32,6 +32,8 @@ class PrivateMemoryBundleError(ValueError):
 class PreparedPrivateMemoryBundle:
     source_path: Path
     inbox_root: Path
+    source_stat: os.stat_result
+    raw_bytes: bytes
     bundle: dict[str, Any]
     bundle_id: str
     file_sha256: str
@@ -48,18 +50,23 @@ def prepare_private_memory_import_bundle(
     expected_sha256: str,
     env: Mapping[str, str] | None = None,
 ) -> PreparedPrivateMemoryBundle:
-    source_path, inbox_root = resolve_inbox_bundle(
+    source_path, inbox_root, source_stat, raw = resolve_inbox_bundle(
         private_root=private_root,
         basename=basename,
         expected_sha256=expected_sha256,
         env=env,
     )
-    raw = source_path.read_bytes()
     try:
         bundle = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise PrivateMemoryBundleError("invalid bundle JSON") from exc
-    return validate_import_bundle(bundle, source_path=source_path, inbox_root=inbox_root)
+    return validate_import_bundle(
+        bundle,
+        source_path=source_path,
+        inbox_root=inbox_root,
+        source_stat=source_stat,
+        raw_bytes=raw,
+    )
 
 
 def resolve_inbox_bundle(
@@ -68,7 +75,7 @@ def resolve_inbox_bundle(
     basename: str,
     expected_sha256: str,
     env: Mapping[str, str] | None = None,
-) -> tuple[Path, Path]:
+) -> tuple[Path, Path, os.stat_result, bytes]:
     if not isinstance(basename, str) or not _SAFE_BASENAME_RE.fullmatch(basename):
         raise PrivateMemoryBundleError("bundle name must be a safe basename")
     if "/" in basename or "\\" in basename or basename in {".", ".."} or ".." in basename:
@@ -78,33 +85,72 @@ def resolve_inbox_bundle(
 
     env_map = env if env is not None else os.environ
     inbox_root = Path(env_map.get(PRIVATE_MEMORY_INBOX_ENV, private_root / "inbox")).expanduser().resolve()
-    source_path = (inbox_root / basename).resolve()
-    if not source_path.is_relative_to(inbox_root):
-        raise PrivateMemoryBundleError("bundle must stay inside inbox")
+    source_path = inbox_root / basename
     _require_private_parent(inbox_root)
 
+    dir_fd: int | None = None
+    fd: int | None = None
     try:
-        link_stat = source_path.lstat()
+        dir_fd = os.open(inbox_root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        fd = os.open(basename, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=dir_fd)
+        opened_stat = os.fstat(fd)
     except FileNotFoundError as exc:
         raise PrivateMemoryBundleError("bundle unavailable") from exc
-    if stat.S_ISLNK(link_stat.st_mode):
-        raise PrivateMemoryBundleError("bundle must not be a symlink")
-    if not stat.S_ISREG(link_stat.st_mode):
-        raise PrivateMemoryBundleError("bundle must be a regular file")
-    if getattr(link_stat, "st_nlink", 1) != 1:
-        raise PrivateMemoryBundleError("bundle must not have hard-link surprises")
-    if stat.S_IMODE(link_stat.st_mode) & 0o177:
-        raise PrivateMemoryBundleError("bundle file mode is too broad")
-    if link_stat.st_size > MAX_BUNDLE_BYTES:
-        raise PrivateMemoryBundleError("bundle exceeds maximum size")
+    except OSError as exc:
+        if exc.errno in {getattr(os, "ELOOP", 40), 40}:
+            raise PrivateMemoryBundleError("bundle must not be a symlink") from exc
+        raise PrivateMemoryBundleError("bundle unavailable") from exc
+    try:
+        if not stat.S_ISREG(opened_stat.st_mode):
+            raise PrivateMemoryBundleError("bundle must be a regular file")
+        if getattr(opened_stat, "st_nlink", 1) != 1:
+            raise PrivateMemoryBundleError("bundle must not have hard-link surprises")
+        if stat.S_IMODE(opened_stat.st_mode) & 0o177:
+            raise PrivateMemoryBundleError("bundle file mode is too broad")
+        if opened_stat.st_size > MAX_BUNDLE_BYTES:
+            raise PrivateMemoryBundleError("bundle exceeds maximum size")
+        raw = _read_opened_bytes(fd, opened_stat.st_size)
+        link_stat = source_path.lstat()
+        if stat.S_ISLNK(link_stat.st_mode):
+            raise PrivateMemoryBundleError("bundle must not be a symlink")
+        if not stat.S_ISREG(link_stat.st_mode):
+            raise PrivateMemoryBundleError("bundle must be a regular file")
+        if _stat_identity(link_stat) != _stat_identity(opened_stat):
+            raise PrivateMemoryBundleError("bundle path changed during validation")
+        if bytes_hash(raw).lower() != expected_sha256.lower():
+            raise PrivateMemoryBundleError("bundle sha256 mismatch")
+        return source_path, inbox_root, opened_stat, raw
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if dir_fd is not None:
+            os.close(dir_fd)
 
-    canonical_stat = source_path.stat()
-    if (canonical_stat.st_dev, canonical_stat.st_ino) != (link_stat.st_dev, link_stat.st_ino):
-        raise PrivateMemoryBundleError("bundle path changed during validation")
-    digest = bytes_hash(source_path.read_bytes())
-    if digest.lower() != expected_sha256.lower():
-        raise PrivateMemoryBundleError("bundle sha256 mismatch")
-    return source_path, inbox_root
+
+def _read_opened_bytes(fd: int, expected_size: int) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = os.read(fd, 1024 * 1024)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > MAX_BUNDLE_BYTES:
+            raise PrivateMemoryBundleError("bundle exceeds maximum size")
+    if total != expected_size:
+        raise PrivateMemoryBundleError("bundle changed during read")
+    return b"".join(chunks)
+
+
+def _stat_identity(file_stat: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        int(file_stat.st_dev),
+        int(file_stat.st_ino),
+        int(file_stat.st_size),
+        int(getattr(file_stat, "st_mtime_ns", int(file_stat.st_mtime * 1_000_000_000))),
+        int(getattr(file_stat, "st_ctime_ns", int(file_stat.st_ctime * 1_000_000_000))),
+    )
 
 
 def validate_import_bundle(
@@ -112,6 +158,8 @@ def validate_import_bundle(
     *,
     source_path: Path,
     inbox_root: Path,
+    source_stat: os.stat_result | None = None,
+    raw_bytes: bytes | None = None,
 ) -> PreparedPrivateMemoryBundle:
     if not isinstance(bundle, dict):
         raise PrivateMemoryBundleError("bundle must be an object")
@@ -183,7 +231,7 @@ def validate_import_bundle(
         )
 
     bundle_hash = content_hash(bundle)
-    file_sha256 = bytes_hash(source_path.read_bytes())
+    file_sha256 = bytes_hash(raw_bytes if raw_bytes is not None else source_path.read_bytes())
     receipt_id = content_hash({"bundle_hash": bundle_hash, "bundle_id": bundle_id})
     receipt_value = {
         "schema": PRIVATE_MEMORY_IMPORT_RECEIPT_SCHEMA,
@@ -205,6 +253,8 @@ def validate_import_bundle(
     return PreparedPrivateMemoryBundle(
         source_path=source_path,
         inbox_root=inbox_root,
+        source_stat=source_stat if source_stat is not None else source_path.lstat(),
+        raw_bytes=raw_bytes if raw_bytes is not None else source_path.read_bytes(),
         bundle=dict(bundle),
         bundle_id=bundle_id,
         file_sha256=file_sha256,
@@ -215,7 +265,9 @@ def validate_import_bundle(
     )
 
 
-def move_processed_bundle(source_path: Path, *, receipt_id: str) -> str:
+def move_processed_bundle(source_path: Path, *, receipt_id: str, expected_stat: os.stat_result | None = None) -> str:
+    if expected_stat is not None and _stat_identity(source_path.lstat()) != _stat_identity(expected_stat):
+        raise PrivateMemoryBundleError("bundle path changed before processing")
     processed = source_path.parent / "processed"
     processed.mkdir(mode=0o700, parents=True, exist_ok=True)
     processed.chmod(0o700)
