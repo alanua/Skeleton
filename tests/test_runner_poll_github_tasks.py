@@ -403,7 +403,7 @@ RESULT: NEEDS_OPERATOR
 
     result = runner.classify_codex_task_result(output, 0)
 
-    assert result == runner.CodexTaskResult("BLOCKED", "BLOCKED")
+    assert result == runner.CodexTaskResult("BLOCKED", "NEEDS_OPERATOR")
 
 
 def test_codex_task_result_blocks_failure_final_report() -> None:
@@ -824,7 +824,11 @@ def test_cleanup_issue_worktree_refuses_path_outside_configured_root(
 def test_process_issue_runs_codex_in_prepared_issue_worktree(tmp_path: Path) -> None:
     coordinator = tmp_path / "coordinator"
     issue_path = tmp_path / "worktrees" / "issue-139"
-    issue = {"number": 139, "title": "Worktree stage", "body": "```task\nDo it\n```"}
+    issue = {
+        "number": 139,
+        "title": "Worktree stage",
+        "body": "Expected Output: done\n\n```task\nDo it\n```",
+    }
 
     with mock.patch.object(runner, "set_issue_label"), mock.patch.object(
         runner, "prepare_issue_worktree", return_value=(0, "ready", issue_path)
@@ -1022,7 +1026,7 @@ def test_process_issue_blocks_non_allowlisted_runner_lane_before_claim() -> None
     issue = {
         "number": 141,
         "title": "Lane metadata",
-        "body": "Runner Lane: deploy\n\n```task\nDo it\n```",
+        "body": "Runner Lane: deploy\nExpected Output: done\n\n```task\nDo it\n```",
     }
 
     with mock.patch.object(runner, "block_issue") as block, mock.patch.object(
@@ -1056,7 +1060,7 @@ def test_process_issue_blocks_non_allowlisted_target_repository_before_claim() -
     issue = {
         "number": 142,
         "title": "Target repository metadata",
-        "body": "Target Repository: alanua/unknown\n\n```task\nDo it\n```",
+        "body": "Target Repository: alanua/unknown\nExpected Output: done\n\n```task\nDo it\n```",
     }
 
     with mock.patch.object(runner, "block_issue") as block, mock.patch.object(
@@ -1075,7 +1079,7 @@ def test_process_issue_blocks_unknown_target_project_before_claim() -> None:
     issue = {
         "number": 144,
         "title": "Target project metadata",
-        "body": "Target Project: unknown\n\n```task\nDo it\n```",
+        "body": "Target Project: unknown\nExpected Output: done\n\n```task\nDo it\n```",
     }
 
     with mock.patch.object(runner, "block_issue") as block, mock.patch.object(
@@ -1137,7 +1141,7 @@ def test_process_issue_runs_target_project_bauclock_in_local_worktree(
     issue = {
         "number": 146,
         "title": "Target project bauclock",
-        "body": "Target Project: bauclock\n\n```task\nDo it\n```",
+        "body": "Target Project: bauclock\nExpected Output: done\n\n```task\nDo it\n```",
     }
 
     with mock.patch.object(
@@ -1189,7 +1193,7 @@ def test_process_issue_runs_target_project_lavalamp_when_project_tree_enables_wo
     issue = {
         "number": 147,
         "title": "Target project lavalamp",
-        "body": "Target Project: lavalamp\n\n```task\nDo it\n```",
+        "body": "Target Project: lavalamp\nExpected Output: done\n\n```task\nDo it\n```",
     }
 
     with mock.patch.object(
@@ -1229,7 +1233,7 @@ def test_process_issue_blocks_target_project_lavalamp_when_project_tree_disables
     issue = {
         "number": 147,
         "title": "Target project lavalamp",
-        "body": "Target Project: lavalamp\n\n```task\nDo it\n```",
+        "body": "Target Project: lavalamp\nExpected Output: done\n\n```task\nDo it\n```",
     }
     project_tree = _project_tree_with_lavalamp_checkout(
         _safe_checkout_path("lavalamp-disabled"),
@@ -1265,7 +1269,7 @@ def test_process_issue_blocks_missing_target_checkout_before_codex() -> None:
     issue = {
         "number": 151,
         "title": "Missing target checkout",
-        "body": "Target Repository: alanua/Lavalamp\n\n```task\nDo it\n```",
+        "body": "Target Repository: alanua/Lavalamp\nExpected Output: done\n\n```task\nDo it\n```",
     }
     project_tree = _project_tree_with_lavalamp_checkout(checkout_path, worktree_root)
 
@@ -1298,7 +1302,7 @@ def test_process_issue_blocks_non_git_target_checkout_before_codex() -> None:
     issue = {
         "number": 152,
         "title": "Non-git target checkout",
-        "body": "Target Repository: alanua/Lavalamp\n\n```task\nDo it\n```",
+        "body": "Target Repository: alanua/Lavalamp\nExpected Output: done\n\n```task\nDo it\n```",
     }
     project_tree = _project_tree_with_lavalamp_checkout(checkout_path, worktree_root)
 
@@ -1332,7 +1336,7 @@ def test_process_issue_blocks_unsafe_target_worktree_root_before_claim() -> None
     issue = {
         "number": 153,
         "title": "Unsafe target worktree root",
-        "body": "Target Repository: alanua/Lavalamp\n\n```task\nDo it\n```",
+        "body": "Target Repository: alanua/Lavalamp\nExpected Output: done\n\n```task\nDo it\n```",
     }
     project_tree = _project_tree_with_lavalamp_checkout(
         checkout_path,
@@ -1365,7 +1369,7 @@ def test_process_issue_blocks_unsafe_target_checkout_path_before_claim() -> None
     issue = {
         "number": 154,
         "title": "Unsafe target checkout path",
-        "body": "Target Repository: alanua/Lavalamp\n\n```task\nDo it\n```",
+        "body": "Target Repository: alanua/Lavalamp\nExpected Output: done\n\n```task\nDo it\n```",
     }
     project_tree = _project_tree_with_lavalamp_checkout(
         unsafe_checkout,
@@ -1400,7 +1404,7 @@ def test_process_issue_runs_target_project_skeleton_normally(tmp_path: Path) -> 
     issue = {
         "number": 148,
         "title": "Target project skeleton",
-        "body": "Target Project: skeleton\n\n```task\nDo it\n```",
+        "body": "Target Project: skeleton\nExpected Output: done\n\n```task\nDo it\n```",
     }
 
     with mock.patch.object(
@@ -1443,7 +1447,7 @@ def test_process_issue_runs_target_repository_lavalamp_in_registered_worktree(
     issue = {
         "number": 143,
         "title": "Target repository routing",
-        "body": "Target Repository: alanua/Lavalamp\n\n```task\nDo it\n```",
+        "body": "Target Repository: alanua/Lavalamp\nExpected Output: done\n\n```task\nDo it\n```",
     }
 
     with mock.patch.object(
@@ -1480,7 +1484,7 @@ def test_process_issue_blocks_runner_disabled_project_before_codex() -> None:
     issue = {
         "number": 149,
         "title": "Disabled target project",
-        "body": "Target Project: disabled_public\n\n```task\nDo it\n```",
+        "body": "Target Project: disabled_public\nExpected Output: done\n\n```task\nDo it\n```",
     }
     project_tree = _project_tree_with(
         "disabled_public",
@@ -1513,7 +1517,7 @@ def test_process_issue_runs_non_skeleton_codex_worktree_mode_locally(
     issue = {
         "number": 150,
         "title": "Non-skeleton codex worktree",
-        "body": "Target Project: codex_other\n\n```task\nDo it\n```",
+        "body": "Target Project: codex_other\nExpected Output: done\n\n```task\nDo it\n```",
     }
     project_tree = _project_tree_with(
         "codex_other",
@@ -1561,7 +1565,7 @@ def test_process_issue_blocks_live_cross_repo_mode_before_codex() -> None:
     issue = {
         "number": 151,
         "title": "Live cross repo",
-        "body": "Target Project: live_other\n\n```task\nDo it\n```",
+        "body": "Target Project: live_other\nExpected Output: done\n\n```task\nDo it\n```",
     }
     project_tree = _project_tree_with(
         "live_other",
@@ -1692,6 +1696,7 @@ def test_telegram_approved_merge_issue_bypasses_codex_and_posts_merge_report() -
             approved_head_sha=HEAD_SHA,
             callback_digest=CALLBACK_DIGEST,
         ),
+        retry_decision=mock.ANY,
     )
     run_codex.assert_not_called()
 
@@ -2086,7 +2091,7 @@ def test_done_pr_card_success_sends_reply_markup() -> None:
 def test_done_pr_card_uses_target_repository_from_issue_body() -> None:
     issue = {
         "number": 129,
-        "body": "Target Repository: alanua/bauclock\n\n```task\nDo it\n```",
+        "body": "Target Repository: alanua/bauclock\nExpected Output: done\n\n```task\nDo it\n```",
         "state": "open",
         "closed": False,
         "labels": [{"name": runner.LABEL_DONE}],
@@ -2530,6 +2535,207 @@ def test_maintenance_task_bypasses_codex() -> None:
         mock.call(145, runner.LABEL_READY, runner.LABEL_RUNNING),
         mock.call(145, runner.LABEL_RUNNING, runner.LABEL_DONE),
     ]
+
+
+def test_duplicate_blocker_blocks_before_executor_invocation() -> None:
+    body = "Expected Output: done\n\n```task\nDo it\n```\n"
+    condition = runner.retry_condition_for_issue(
+        body,
+        runner.ROUTE_CODE_GENERATION,
+        None,
+        "executor_invocation",
+    )
+    first = runner.append_retry_fields(
+        "BLOCKED: Codex output reported a blocked deliverable.",
+        runner.evaluate_retry_policy(condition, []),
+    )
+    prior = runner.parse_prior_blocked_reports([first])
+    second = runner.append_retry_fields(
+        "BLOCKED: Codex output reported a blocked deliverable.",
+        runner.evaluate_retry_policy(condition, prior),
+    )
+    issue = {
+        "number": 246,
+        "title": "Duplicate blocker",
+        "body": body,
+        "comments": [{"author": {"login": "alanua"}, "body": first}, {"author": {"login": "alanua"}, "body": second}],
+    }
+
+    with mock.patch.object(runner, "set_issue_label") as set_label, mock.patch.object(
+        runner, "post_issue_comment"
+    ) as post, mock.patch.object(runner, "notify_task_finished") as notify, mock.patch.object(
+        runner, "prepare_issue_branch"
+    ) as prepare, mock.patch.object(
+        runner, "run_codex_task"
+    ) as run_codex:
+        runner.process_issue(issue)
+
+    prepare.assert_not_called()
+    run_codex.assert_not_called()
+    set_label.assert_called_once_with(246, runner.LABEL_READY, runner.LABEL_BLOCKED)
+    report = post.call_args.args[1]
+    assert "NEEDS_OPERATOR: Runner retry policy blocked repeated execution." in report
+    assert "reason=repeated_blocker" in report
+    assert "next_required_action=DIAGNOSE" in report
+    notify.assert_called_once_with(246, "NEEDS_OPERATOR", mock.ANY)
+
+
+def test_runtime_maintenance_always_routes_runtime_only_and_never_invokes_codex() -> None:
+    issue = _maintenance_issue(runner.CHECK_PROJECT_CHECKOUT)
+    report = (
+        "BLOCKED: Runner host maintenance task did not complete.\n"
+        "maintenance_task_id=check_project_checkout\n"
+        "reason=checkout_missing\n"
+        "success_criteria=not_met"
+    )
+
+    with mock.patch.object(
+        runner, "ensure_clean_worktree", return_value=(True, "")
+    ), mock.patch.object(runner, "dispatch_runtime_maintenance_task", return_value=report), mock.patch.object(
+        runner, "post_issue_comment"
+    ) as post, mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "run_codex_task"
+    ) as run_codex:
+        runner.process_issue(issue)
+
+    run_codex.assert_not_called()
+    assert "route=runtime_only" in post.call_args.args[1]
+
+
+def test_publish_existing_worktree_routes_publish_only_and_never_invokes_codex() -> None:
+    issue = _maintenance_issue(runner.PUBLISH_EXISTING_ISSUE_WORKTREE)
+    report = (
+        "NEEDS_OPERATOR: Runner host maintenance task needs operator action.\n"
+        "maintenance_task_id=publish_existing_issue_worktree\n"
+        "reason=missing_operator_approval\n"
+        "success_criteria=not_met"
+    )
+
+    with mock.patch.object(
+        runner, "ensure_clean_worktree", return_value=(True, "")
+    ), mock.patch.object(runner, "dispatch_runtime_maintenance_task", return_value=report), mock.patch.object(
+        runner, "post_issue_comment"
+    ) as post, mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "run_codex_task"
+    ) as run_codex:
+        runner.process_issue(issue)
+
+    run_codex.assert_not_called()
+    assert "route=publish_only" in post.call_args.args[1]
+
+
+def test_code_task_with_empty_expected_output_fails_closed_before_codex() -> None:
+    issue = {
+        "number": 247,
+        "title": "Missing expected output",
+        "body": "Expected Output: TBD\n\n```task\nDo it\n```",
+    }
+
+    with mock.patch.object(runner, "block_issue") as block, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(runner, "run_codex_task") as run_codex:
+        runner.process_issue(issue)
+
+    assert "placeholder_expected_output" in block.call_args.args[1]
+    assert block.call_args.kwargs["retry_decision"].retry_attempt == 1
+    set_label.assert_not_called()
+    run_codex.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("body_prefix", "reason"),
+    (
+        ("", "missing_expected_output"),
+        ("Expected Output: {expected_output}\n\n", "placeholder_expected_output"),
+        ("Expected Output:\n\n", "empty_expected_output"),
+    ),
+)
+def test_code_task_rejects_missing_empty_or_placeholder_expected_output_before_codex(
+    body_prefix: str, reason: str
+) -> None:
+    issue = {
+        "number": 248,
+        "title": "Expected output guard",
+        "body": f"Selected Project: skeleton\n{body_prefix}```task\nDo it\n```",
+    }
+
+    with mock.patch.object(runner, "block_issue") as block, mock.patch.object(
+        runner, "prepare_issue_branch"
+    ) as prepare, mock.patch.object(runner, "run_codex_task") as run_codex:
+        runner.process_issue(issue)
+
+    assert reason in block.call_args.args[1]
+    prepare.assert_not_called()
+    run_codex.assert_not_called()
+
+
+def test_code_task_accepts_fenced_yaml_expected_output_before_codex(
+    tmp_path: Path,
+) -> None:
+    coordinator = tmp_path / "coordinator"
+    issue_path = tmp_path / "worktrees" / "issue-249"
+    issue = {
+        "number": 249,
+        "title": "Yaml expected output",
+        "body": "```yaml\nexpected_output:\n- report test totals\n```\n\n```task\nDo it\n```",
+    }
+
+    with mock.patch.object(runner, "set_issue_label"), mock.patch.object(
+        runner, "prepare_issue_branch", return_value=(0, "ready", issue_path)
+    ) as prepare, mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, "codex output")
+    ) as run_codex, mock.patch.object(
+        runner, "finalize_success", return_value="DONE report"
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "cleanup_issue_worktree", return_value=(0, "")
+    ):
+        runner.process_issue(issue, workdir=str(coordinator))
+
+    prepare.assert_called_once_with(249, str(coordinator))
+    run_codex.assert_called_once()
+
+
+def test_unverifiable_prior_runner_history_needs_operator_before_codex() -> None:
+    issue = {
+        "number": 250,
+        "title": "Unverifiable comments",
+        "body": "Expected Output: done\n\n```task\nDo it\n```",
+        "comments": 2,
+    }
+
+    with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
+        runner, "post_issue_comment"
+    ) as post, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(
+        runner, "notify_task_finished"
+    ) as notify, mock.patch.object(
+        runner, "prepare_issue_branch"
+    ) as prepare, mock.patch.object(
+        runner, "run_codex_task"
+    ) as run_codex:
+        runner.process_issue(issue)
+
+    report = post.call_args.args[1]
+    assert "prior_runner_history_unverifiable" in report
+    set_label.assert_called_once_with(250, runner.LABEL_READY, runner.LABEL_BLOCKED)
+    notify.assert_called_once_with(250, "NEEDS_OPERATOR", report)
+    prepare.assert_not_called()
+    run_codex.assert_not_called()
 
 
 def test_maintenance_task_blocks_missing_closing_task_fence_before_execution() -> None:
@@ -4840,6 +5046,7 @@ def test_publish_existing_issue_worktree_valid_override_publishes_when_remote_ab
     assert report.startswith("DONE:")
     assert "existing_pr_lookup=existing_pr_lookup_unavailable" in report
     assert "reason=publish_override_valid" in report
+    assert "publish_override_hash=" in report
     assert "step=verify_remote_branch_absent status=done" in report
     assert "draft_pr_url=" in report
     assert not any(".codex/session.json" in command for command in commands)
@@ -4855,6 +5062,64 @@ def test_publish_existing_issue_worktree_valid_override_publishes_when_remote_ab
         command[:2] != ["gh", "pr"] or "merge" not in command
         for command in commands
     )
+
+
+def test_publish_existing_issue_worktree_valid_override_records_hash_on_failure(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path)
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            existing_pr_code=1,
+            remote_branch_exists=True,
+        ),
+    ):
+        report = runner.publish_existing_issue_worktree(
+            _publish_existing_issue_worktree_body(
+                publish_override=_valid_publish_existing_override()
+            )
+        )
+
+    assert report.startswith("NEEDS_OPERATOR:")
+    assert "reason=remote_branch_conflict" in report
+    assert "publish_override_hash=" in report
+    assert "approved_override_hash=" in report
+
+
+def test_publish_issue_worktree_pr_accepts_fenced_yaml_allowed_files(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path)
+    body = _maintenance_issue(
+        runner.PUBLISH_ISSUE_WORKTREE_PR,
+        metadata=(
+            f"Repository: {runner.REPO}\n"
+            "Source Issue: 123\n"
+            "Expected Branch: runner/issue-123\n"
+            "```yaml\n"
+            "allowed_files:\n"
+            "- scripts/runner_poll_github_tasks.py\n"
+            "```\n"
+        ),
+    )
+
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(worktree_path=worktree_path),
+    ) as run:
+        report = runner.publish_issue_worktree_pr(str(body["body"]))
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert ["git", "add", "--", "scripts/runner_poll_github_tasks.py"] in commands
 
 
 @pytest.mark.parametrize(
@@ -10493,3 +10758,56 @@ def test_hermes_memory_gateway_smoke_isolation_reason_must_be_exact(
     assert report_lines[-2] == "hermes_memory_smoke_status=blocked"
     assert f"status_token={expected_token}" in report
     assert "error_class=none" not in report
+
+
+
+def test_block_issue_uses_actual_bounded_failure_reason_for_retry_signature() -> None:
+    body = "Expected Output: draft PR\nAllowed Files:\n- core/example.py"
+    condition = runner.retry_condition_for_issue(
+        body,
+        runner.ROUTE_CODE_GENERATION,
+        None,
+    )
+    decision = runner.evaluate_retry_policy(condition, [])
+    comments: list[str] = []
+
+    with mock.patch.object(
+        runner,
+        "post_issue_comment",
+        side_effect=lambda _number, comment: comments.append(comment),
+    ), mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ):
+        runner.block_issue(
+            1450,
+            "Codex task failed:\nReason: codex_nonzero_exit",
+            retry_decision=decision,
+        )
+        runner.block_issue(
+            1450,
+            "Runner error:\nReason: RuntimeError",
+            retry_decision=decision,
+        )
+
+    reports = runner.parse_prior_blocked_reports(comments)
+    assert len(reports) == 2
+    assert reports[0].condition_signature == reports[1].condition_signature
+    assert reports[0].blocker_signature != reports[1].blocker_signature
+
+
+
+def test_trusted_runner_comment_authors_include_owner_and_configured_actor() -> None:
+    with mock.patch.dict(
+        os.environ,
+        {runner.RUNNER_GITHUB_ACTOR_ENV: "Skeleton-Runner-Service"},
+        clear=False,
+    ):
+        actors = runner.trusted_runner_comment_authors()
+
+    assert "alanua" in actors
+    assert "github-actions[bot]" in actors
+    assert "skeleton-runner-service" in actors
