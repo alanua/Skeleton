@@ -22,6 +22,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -48,6 +50,7 @@ from core.memory_patch_proposal import (
 )
 from core.private_memory import healthcheck_private_memory, write_public_heartbeat
 from core.project_tree import get_project, get_project_by_repo, load_project_tree
+from core.runner_retry_policy import expected_output_validation, one_time_override_hash
 from core.skeleton_memory import SkeletonMemory
 from core.telegram_approval_buttons import build_pr_ready_card_payload
 
@@ -238,9 +241,11 @@ _BLOCKED_OUTPUT_MARKER_RES = tuple(
     else re.compile(rf"(?<!\w){re.escape(marker)}(?!\w)", re.IGNORECASE)
     for marker in _BLOCKED_OUTPUT_MARKERS
 )
-_FINAL_STATUS_LINE_RE = re.compile(r"^\s*(DONE|BLOCKED)\b:?", re.IGNORECASE)
+_FINAL_STATUS_LINE_RE = re.compile(
+    r"^\s*(DONE|BLOCKED|NEEDS_OPERATOR)\b:?", re.IGNORECASE
+)
 _FINAL_STATUS_DELIVERY_LINE_RE = re.compile(
-    r"^\s*(DONE|BLOCKED)\s*:", re.IGNORECASE
+    r"^\s*(DONE|BLOCKED|NEEDS_OPERATOR)\s*:", re.IGNORECASE
 )
 _FINAL_RESULT_LINE_RE = re.compile(
     r"^\s*RESULT:\s*(?P<result>DONE|BLOCKED|NEEDS_OPERATOR)\b", re.IGNORECASE
@@ -299,6 +304,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "allowed_files_count",
         "allowed_untracked_files",
         "allowed_untracked_files_count",
+        "approved_override_hash",
         "approval_status",
         "approved_head_sha",
         "artifact_count",
@@ -401,6 +407,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "pr_title",
         "pr_url",
         "private_memory_db_configured",
+        "publish_override_hash",
         "private_memory_db_openable",
         "private_memory_heartbeat_ok",
         "private_memory_integrity_ok",
@@ -1082,7 +1089,7 @@ def _final_result_status(output: str) -> str | None:
         if match is None:
             continue
         result = match.group("result").upper()
-        return "DONE" if result == "DONE" else "BLOCKED"
+        return result
     return None
 
 
@@ -1100,7 +1107,9 @@ def classify_codex_task_result(output: str, exit_code: int) -> CodexTaskResult:
 
     status = _first_final_status(output)
     if status is not None:
-        return CodexTaskResult(status, status if status == "BLOCKED" else None)
+        if status == "DONE":
+            return CodexTaskResult("DONE")
+        return CodexTaskResult("BLOCKED", blocked_output_marker(output) or status)
 
     marker = blocked_output_marker(output)
     if marker is not None:
@@ -1498,6 +1507,88 @@ def _body_field(body: str, field: str) -> str | None:
         re.MULTILINE,
     )
     return match.group("value") if match else None
+
+
+def _metadata_before_task(body: str) -> str:
+    return (body or "").split("```task", 1)[0]
+
+
+def _metadata_yaml_documents(metadata: str) -> list[dict[str, Any]]:
+    documents: list[dict[str, Any]] = []
+    lines = (metadata or "").splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        fence_match = re.fullmatch(r"\s*```\s*(?:yaml|yml)?\s*", line)
+        if fence_match is None:
+            index += 1
+            continue
+        yaml_lines: list[str] = []
+        index += 1
+        while index < len(lines) and _FENCE_CLOSE_LINE_RE.match(lines[index]) is None:
+            yaml_lines.append(lines[index])
+            index += 1
+        if index < len(lines):
+            index += 1
+        try:
+            parsed = yaml.safe_load("\n".join(yaml_lines)) if yaml_lines else None
+        except yaml.YAMLError:
+            continue
+        if isinstance(parsed, dict):
+            documents.append(parsed)
+    return documents
+
+
+def _metadata_yaml_value(metadata: str, key: str) -> object:
+    for document in _metadata_yaml_documents(metadata):
+        if key in document:
+            return document[key]
+    return None
+
+
+def _body_field_or_yaml_value(body: str, field: str, key: str) -> object:
+    metadata = _metadata_before_task(body)
+    field_value = _body_field(metadata, field)
+    if field_value is None:
+        field_value = _body_field(metadata, key)
+    if field_value is not None:
+        return field_value
+    return _metadata_yaml_value(metadata, key)
+
+
+def _metadata_has_field(metadata: str, field: str) -> bool:
+    return (
+        re.search(rf"^\s*{re.escape(field)}\s*:", metadata or "", re.MULTILINE)
+        is not None
+    )
+
+
+def _requires_expected_output(metadata: str) -> bool:
+    if _metadata_has_field(metadata, "Expected Output") or _metadata_has_field(
+        metadata, "expected_output"
+    ):
+        return True
+    if _metadata_yaml_value(metadata, "expected_output") is not None:
+        return True
+    return any(
+        _metadata_has_field(metadata, field)
+        for field in (
+            "Selected Project",
+            "Selected Repository",
+            "required_changes",
+            "allowed_files",
+            "risk",
+        )
+    )
+
+
+def expected_output_block_reason(body: str) -> str | None:
+    metadata = _metadata_before_task(body)
+    value = _body_field_or_yaml_value(body, "Expected Output", "expected_output")
+    if value is None and not _requires_expected_output(metadata):
+        return None
+    validation = expected_output_validation(value)
+    return validation.reason if not validation.accepted else None
 
 
 def has_runner_task_body(body: str) -> bool:
@@ -7385,12 +7476,31 @@ def _safe_issue_publish_file_path(path: str) -> bool:
 
 
 def _issue_publish_allowed_files(metadata: str) -> tuple[frozenset[str], str | None]:
+    yaml_allowed_files = _metadata_yaml_value(metadata, "allowed_files")
+    if yaml_allowed_files is not None:
+        if not isinstance(yaml_allowed_files, list):
+            return frozenset(), "invalid_allowed_files"
+        allowed_files_from_yaml: list[str] = []
+        for allowed_path in yaml_allowed_files:
+            if not isinstance(allowed_path, str) or not _safe_issue_publish_file_path(
+                allowed_path
+            ):
+                return frozenset(), "invalid_allowed_files"
+            allowed_files_from_yaml.append(allowed_path)
+        if not allowed_files_from_yaml:
+            return frozenset(), "missing_allowed_files"
+        if len(set(allowed_files_from_yaml)) != len(allowed_files_from_yaml):
+            return frozenset(), "invalid_allowed_files"
+        return frozenset(allowed_files_from_yaml), None
+
     lines = (metadata or "").splitlines()
     for index, line in enumerate(lines):
-        if re.fullmatch(r"\s*Allowed Files:\s*", line):
+        if re.fullmatch(r"\s*(?:Allowed Files|allowed_files):\s*", line):
             allowed_files: list[str] = []
             for item in lines[index + 1 :]:
                 if re.fullmatch(r"\s*[A-Za-z][A-Za-z ]+:\s*.*", item):
+                    break
+                if re.fullmatch(r"\s*```\s*(?:yaml|yml)?\s*", item):
                     break
                 match = re.fullmatch(r"\s*-\s+(?P<path>\S(?:.*\S)?)\s*", item)
                 if match is None:
@@ -7926,18 +8036,18 @@ def _issue_worktree_publish_existing_pr_url(
     )
 
 
-def _issue_worktree_publish_override_reason(
+def _issue_worktree_publish_override_result(
     metadata: str, request: IssueWorktreePublishInspectionRequest
-) -> str:
+) -> tuple[str, str | None]:
     raw_override = _body_field(metadata, "Publish Override")
     if raw_override is None:
-        return "publish_override_missing"
+        return "publish_override_missing", None
     try:
         override = json.loads(raw_override)
     except json.JSONDecodeError:
-        return "publish_override_malformed"
+        return "publish_override_malformed", None
     if not isinstance(override, dict):
-        return "publish_override_malformed"
+        return "publish_override_malformed", None
     expected_keys = {
         "action",
         "target_repository",
@@ -7948,7 +8058,7 @@ def _issue_worktree_publish_override_reason(
         "draft_pr",
     }
     if set(override) != expected_keys:
-        return "publish_override_malformed"
+        return "publish_override_malformed", None
     allowed_files = override.get("allowed_files")
     if (
         override.get("action") != PUBLISH_EXISTING_ISSUE_WORKTREE
@@ -7963,8 +8073,8 @@ def _issue_worktree_publish_override_reason(
         or len(set(allowed_files)) != len(allowed_files)
         or set(allowed_files) != set(request.allowed_files)
     ):
-        return "publish_override_scope_mismatch"
-    return "publish_override_valid"
+        return "publish_override_scope_mismatch", None
+    return "publish_override_valid", one_time_override_hash(override)
 
 
 def _issue_worktree_publish_remote_branch_absent(
@@ -8225,7 +8335,9 @@ def _issue_worktree_publish_validated_report(
                 ],
                 "not_met",
             )
-        override_reason = _issue_worktree_publish_override_reason(metadata, request)
+        override_reason, override_hash = _issue_worktree_publish_override_result(
+            metadata, request
+        )
         if override_reason != "publish_override_valid":
             return _maintenance_report(
                 failure_status,
@@ -8240,6 +8352,8 @@ def _issue_worktree_publish_validated_report(
         status_lines.append(
             "step=publish_override status=done reason=publish_override_valid"
         )
+        assert override_hash is not None
+        status_lines.append(f"publish_override_hash={override_hash}")
         if not _issue_worktree_publish_remote_branch_absent(request, worktree_path):
             return _maintenance_report(
                 failure_status,
@@ -8248,6 +8362,7 @@ def _issue_worktree_publish_validated_report(
                     *status_lines,
                     "step=verify_remote_branch_absent status=failed "
                     "reason=remote_branch_conflict",
+                    f"approved_override_hash={override_hash}",
                 ],
                 "not_met",
             )
@@ -9508,6 +9623,14 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                         runner_task=runner_task,
                     )
                     return
+            expected_output_reason = expected_output_block_reason(issue_body)
+            if expected_output_reason is not None:
+                block_issue(
+                    issue_number,
+                    f"{expected_output_reason}: expected_output is required before code execution.",
+                    runner_task=runner_task,
+                )
+                return
 
         apply_runner_lane_label(issue_number, runner_task)
 

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://alanua.github.io/Skeleton/schemas/runner_retry_policy.schema.json",
+  "title": "Runner retry policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["expected_output"],
+  "properties": {
+    "expected_output": {
+      "oneOf": [
+        {"type": "string", "minLength": 1},
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        }
+      ]
+    },
+    "allowed_files": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._/@+-]*$"
+      },
+      "uniqueItems": true
+    },
+    "one_time_override_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{16}$"
+    }
+  }
+}

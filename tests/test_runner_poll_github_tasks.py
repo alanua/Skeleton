@@ -403,7 +403,7 @@ RESULT: NEEDS_OPERATOR
 
     result = runner.classify_codex_task_result(output, 0)
 
-    assert result == runner.CodexTaskResult("BLOCKED", "BLOCKED")
+    assert result == runner.CodexTaskResult("BLOCKED", "NEEDS_OPERATOR")
 
 
 def test_codex_task_result_blocks_failure_final_report() -> None:
@@ -824,7 +824,11 @@ def test_cleanup_issue_worktree_refuses_path_outside_configured_root(
 def test_process_issue_runs_codex_in_prepared_issue_worktree(tmp_path: Path) -> None:
     coordinator = tmp_path / "coordinator"
     issue_path = tmp_path / "worktrees" / "issue-139"
-    issue = {"number": 139, "title": "Worktree stage", "body": "```task\nDo it\n```"}
+    issue = {
+        "number": 139,
+        "title": "Worktree stage",
+        "body": "Expected Output: done\n\n```task\nDo it\n```",
+    }
 
     with mock.patch.object(runner, "set_issue_label"), mock.patch.object(
         runner, "prepare_issue_worktree", return_value=(0, "ready", issue_path)
@@ -850,6 +854,65 @@ def test_process_issue_runs_codex_in_prepared_issue_worktree(tmp_path: Path) -> 
         "Do it", str(issue_path), runner.RunnerTask(content="Do it")
     )
     finalize.assert_called_once_with(issue, str(issue_path), "codex output")
+
+
+@pytest.mark.parametrize(
+    ("body_prefix", "reason"),
+    (
+        ("", "missing_expected_output"),
+        ("Expected Output: {expected_output}\n\n", "placeholder_expected_output"),
+        ("Expected Output:\n\n", "missing_expected_output"),
+    ),
+)
+def test_process_issue_rejects_missing_empty_or_placeholder_expected_output_before_codex(
+    body_prefix: str, reason: str
+) -> None:
+    issue = {
+        "number": 140,
+        "title": "Expected output gate",
+        "body": f"Selected Project: skeleton\n{body_prefix}```task\nDo it\n```",
+    }
+
+    with mock.patch.object(runner, "block_issue") as block, mock.patch.object(
+        runner, "prepare_issue_branch"
+    ) as prepare, mock.patch.object(runner, "run_codex_task") as run_codex:
+        runner.process_issue(issue)
+
+    assert reason in block.call_args.args[1]
+    prepare.assert_not_called()
+    run_codex.assert_not_called()
+
+
+def test_process_issue_accepts_fenced_yaml_expected_output_before_codex(
+    tmp_path: Path,
+) -> None:
+    coordinator = tmp_path / "coordinator"
+    issue_path = tmp_path / "worktrees" / "issue-141"
+    issue = {
+        "number": 141,
+        "title": "Yaml expected output",
+        "body": "```yaml\nexpected_output:\n- report test totals\n```\n\n```task\nDo it\n```",
+    }
+
+    with mock.patch.object(runner, "set_issue_label"), mock.patch.object(
+        runner, "prepare_issue_branch", return_value=(0, "ready", issue_path)
+    ) as prepare, mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, "codex output")
+    ) as run_codex, mock.patch.object(
+        runner, "finalize_success", return_value="DONE report"
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "cleanup_issue_worktree", return_value=(0, "")
+    ):
+        runner.process_issue(issue, workdir=str(coordinator))
+
+    prepare.assert_called_once_with(141, str(coordinator))
+    run_codex.assert_called_once()
 
 
 def test_poll_once_processes_issues_single_lane() -> None:
@@ -1137,7 +1200,7 @@ def test_process_issue_runs_target_project_bauclock_in_local_worktree(
     issue = {
         "number": 146,
         "title": "Target project bauclock",
-        "body": "Target Project: bauclock\n\n```task\nDo it\n```",
+        "body": "Target Project: bauclock\nExpected Output: done\n\n```task\nDo it\n```",
     }
 
     with mock.patch.object(
@@ -1189,7 +1252,7 @@ def test_process_issue_runs_target_project_lavalamp_when_project_tree_enables_wo
     issue = {
         "number": 147,
         "title": "Target project lavalamp",
-        "body": "Target Project: lavalamp\n\n```task\nDo it\n```",
+        "body": "Target Project: lavalamp\nExpected Output: done\n\n```task\nDo it\n```",
     }
 
     with mock.patch.object(
@@ -1400,7 +1463,7 @@ def test_process_issue_runs_target_project_skeleton_normally(tmp_path: Path) -> 
     issue = {
         "number": 148,
         "title": "Target project skeleton",
-        "body": "Target Project: skeleton\n\n```task\nDo it\n```",
+        "body": "Target Project: skeleton\nExpected Output: done\n\n```task\nDo it\n```",
     }
 
     with mock.patch.object(
@@ -1443,7 +1506,7 @@ def test_process_issue_runs_target_repository_lavalamp_in_registered_worktree(
     issue = {
         "number": 143,
         "title": "Target repository routing",
-        "body": "Target Repository: alanua/Lavalamp\n\n```task\nDo it\n```",
+        "body": "Target Repository: alanua/Lavalamp\nExpected Output: done\n\n```task\nDo it\n```",
     }
 
     with mock.patch.object(
@@ -1513,7 +1576,7 @@ def test_process_issue_runs_non_skeleton_codex_worktree_mode_locally(
     issue = {
         "number": 150,
         "title": "Non-skeleton codex worktree",
-        "body": "Target Project: codex_other\n\n```task\nDo it\n```",
+        "body": "Target Project: codex_other\nExpected Output: done\n\n```task\nDo it\n```",
     }
     project_tree = _project_tree_with(
         "codex_other",
@@ -4840,6 +4903,7 @@ def test_publish_existing_issue_worktree_valid_override_publishes_when_remote_ab
     assert report.startswith("DONE:")
     assert "existing_pr_lookup=existing_pr_lookup_unavailable" in report
     assert "reason=publish_override_valid" in report
+    assert "publish_override_hash=" in report
     assert "step=verify_remote_branch_absent status=done" in report
     assert "draft_pr_url=" in report
     assert not any(".codex/session.json" in command for command in commands)
@@ -4855,6 +4919,64 @@ def test_publish_existing_issue_worktree_valid_override_publishes_when_remote_ab
         command[:2] != ["gh", "pr"] or "merge" not in command
         for command in commands
     )
+
+
+def test_publish_existing_issue_worktree_valid_override_records_hash_on_failure(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path)
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            existing_pr_code=1,
+            remote_branch_exists=True,
+        ),
+    ):
+        report = runner.publish_existing_issue_worktree(
+            _publish_existing_issue_worktree_body(
+                publish_override=_valid_publish_existing_override()
+            )
+        )
+
+    assert report.startswith("NEEDS_OPERATOR:")
+    assert "reason=remote_branch_conflict" in report
+    assert "publish_override_hash=" in report
+    assert "approved_override_hash=" in report
+
+
+def test_publish_issue_worktree_pr_accepts_fenced_yaml_allowed_files(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path)
+    body = _maintenance_issue(
+        runner.PUBLISH_ISSUE_WORKTREE_PR,
+        metadata=(
+            f"Repository: {runner.REPO}\n"
+            "Source Issue: 123\n"
+            "Expected Branch: runner/issue-123\n"
+            "```yaml\n"
+            "allowed_files:\n"
+            "- scripts/runner_poll_github_tasks.py\n"
+            "```\n"
+        ),
+    )
+
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(worktree_path=worktree_path),
+    ) as run:
+        report = runner.publish_issue_worktree_pr(str(body["body"]))
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert ["git", "add", "--", "scripts/runner_poll_github_tasks.py"] in commands
 
 
 @pytest.mark.parametrize(
