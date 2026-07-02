@@ -74,6 +74,6 @@ blocker reason is treated as a changed condition.
 ## Trusted retry-history authors
 
 GitHub comment objects contribute retry history only when their author is the
-repository owner, the explicitly configured Runner actor, or an allowlisted bot
+repository owner, the explicitly configured Runner actor, or an explicitly allowlisted bot
 identity. Missing and untrusted authors are rejected fail-closed. Raw string
 reports remain accepted only for internal unit-test fixtures.

@@ -75,7 +75,10 @@ RUNNER_GITHUB_ACTOR_ENV = "SKELETON_RUNNER_GITHUB_ACTOR"
 
 
 def trusted_runner_comment_authors() -> frozenset[str]:
-    actors = {QUEUE_REPOSITORY.split("/", 1)[0].lower()}
+    actors = {
+        QUEUE_REPOSITORY.split("/", 1)[0].lower(),
+        "github-actions[bot]",
+    }
     configured = os.environ.get(RUNNER_GITHUB_ACTOR_ENV, "").strip().lower()
     if configured:
         actors.add(configured)

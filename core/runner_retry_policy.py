@@ -273,12 +273,7 @@ def _is_runner_authored_comment(
         for value in trusted_author_logins
         if str(value).strip()
     }
-    return (
-        login in trusted
-        or "runner" in login
-        or "github-actions" in login
-        or login.endswith("[bot]")
-    )
+    return login in trusted
 
 
 def _parse_public_fields(body: str) -> dict[str, str]:

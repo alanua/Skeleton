@@ -10809,4 +10809,5 @@ def test_trusted_runner_comment_authors_include_owner_and_configured_actor() -> 
         actors = runner.trusted_runner_comment_authors()
 
     assert "alanua" in actors
+    assert "github-actions[bot]" in actors
     assert "skeleton-runner-service" in actors

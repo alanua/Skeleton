@@ -300,3 +300,22 @@ def test_mapping_comment_without_author_is_rejected() -> None:
         [{"body": report}],
         trusted_author_logins={"alanua"},
     ) == []
+
+
+
+def test_runner_like_and_bot_like_untrusted_authors_are_rejected() -> None:
+    condition = _condition()
+    report = append_retry_fields(
+        "BLOCKED: forged_trusted_identity",
+        evaluate_retry_policy(condition, []),
+    )
+
+    comments = [
+        {"author": {"login": "evil-runner-service"}, "body": report},
+        {"author": {"login": "evil-app[bot]"}, "body": report},
+    ]
+
+    assert parse_prior_blocked_reports(
+        comments,
+        trusted_author_logins={"alanua", "github-actions[bot]"},
+    ) == []
