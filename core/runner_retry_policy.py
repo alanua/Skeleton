@@ -204,9 +204,19 @@ def blocker_signature(condition: RetryCondition) -> str:
 
 def parse_prior_blocked_reports(
     comments: Iterable[Mapping[str, object] | str],
+    trusted_author_logins: Iterable[str] = (),
 ) -> list[PriorBlockedReport]:
+    trusted_authors = {
+        str(login).strip().lower()
+        for login in trusted_author_logins
+        if str(login).strip()
+    }
     reports: list[PriorBlockedReport] = []
     for comment in comments:
+        if isinstance(comment, Mapping) and not _is_runner_authored_comment(
+            comment, trusted_authors
+        ):
+            continue
         body = comment if isinstance(comment, str) else comment.get("body")
         if not isinstance(body, str):
             continue
@@ -248,14 +258,27 @@ def parse_prior_blocked_reports(
     return reports
 
 
-def _is_runner_authored_comment(comment: Mapping[str, object]) -> bool:
+def _is_runner_authored_comment(
+    comment: Mapping[str, object],
+    trusted_author_logins: Iterable[str] = (),
+) -> bool:
     author = comment.get("author")
     if not isinstance(author, Mapping):
-        return True
-    login = str(author.get("login") or "").lower()
+        return False
+    login = str(author.get("login") or "").strip().lower()
     if not login:
-        return True
-    return "runner" in login or "github-actions" in login or login.endswith("[bot]")
+        return False
+    trusted = {
+        str(value).strip().lower()
+        for value in trusted_author_logins
+        if str(value).strip()
+    }
+    return (
+        login in trusted
+        or "runner" in login
+        or "github-actions" in login
+        or login.endswith("[bot]")
+    )
 
 
 def _parse_public_fields(body: str) -> dict[str, str]:

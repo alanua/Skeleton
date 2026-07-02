@@ -69,3 +69,11 @@ created, using the actual bounded failure reason or final blocked marker.
 Two consecutive reports with the same condition signature and blocker signature
 stop the next execution before Codex or maintenance dispatch. A different actual
 blocker reason is treated as a changed condition.
+
+
+## Trusted retry-history authors
+
+GitHub comment objects contribute retry history only when their author is the
+repository owner, the explicitly configured Runner actor, or an allowlisted bot
+identity. Missing and untrusted authors are rejected fail-closed. Raw string
+reports remain accepted only for internal unit-test fixtures.

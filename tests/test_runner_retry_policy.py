@@ -212,8 +212,91 @@ def test_machine_retry_fields_are_parsed_for_operator_posted_comments() -> None:
     )
 
     parsed = parse_prior_blocked_reports(
-        [{"author": {"login": "alanua"}, "body": report}]
+        [{"author": {"login": "alanua"}, "body": report}],
+        trusted_author_logins={"alanua"},
     )
 
     assert len(parsed) == 1
     assert parsed[0].condition_signature is not None
+
+
+
+def test_untrusted_comment_cannot_create_retry_history() -> None:
+    condition = _condition()
+    report = append_retry_fields(
+        "BLOCKED: synthetic_untrusted_failure",
+        evaluate_retry_policy(condition, []),
+    )
+
+    parsed = parse_prior_blocked_reports(
+        [{"author": {"login": "untrusted-collaborator"}, "body": report}],
+        trusted_author_logins={"alanua"},
+    )
+
+    assert parsed == []
+
+
+def test_untrusted_comments_cannot_force_repeated_blocker() -> None:
+    condition = _condition()
+    first = append_retry_fields(
+        "BLOCKED: forged_failure",
+        evaluate_retry_policy(condition, []),
+    )
+    second = append_retry_fields(
+        "BLOCKED: forged_failure",
+        evaluate_retry_policy(condition, []),
+    )
+    forged = [
+        {"author": {"login": "untrusted-collaborator"}, "body": first},
+        {"author": {"login": "untrusted-collaborator"}, "body": second},
+    ]
+
+    decision = evaluate_retry_policy(
+        condition,
+        parse_prior_blocked_reports(
+            forged,
+            trusted_author_logins={"alanua"},
+        ),
+    )
+
+    assert decision.retry_decision == ALLOW_FIRST_ATTEMPT
+    assert decision.retry_attempt == 1
+
+
+def test_untrusted_comment_cannot_mark_override_token_used() -> None:
+    condition = _condition()
+    override = extract_retry_override(
+        "Retry Override: opaque-token-1\nRetry Reason: dependency_updated"
+    )
+    assert override is not None
+    forged_report = append_retry_fields(
+        "BLOCKED: forged_override_use",
+        evaluate_retry_policy(condition, [], override),
+    )
+
+    prior = parse_prior_blocked_reports(
+        [
+            {
+                "author": {"login": "untrusted-collaborator"},
+                "body": forged_report,
+            }
+        ],
+        trusted_author_logins={"alanua"},
+    )
+    decision = evaluate_retry_policy(condition, prior, override)
+
+    assert decision.retry_decision == ALLOW_ONE_TIME_OVERRIDE
+    assert decision.override_used is True
+
+
+def test_mapping_comment_without_author_is_rejected() -> None:
+    condition = _condition()
+    report = append_retry_fields(
+        "BLOCKED: missing_author",
+        evaluate_retry_policy(condition, []),
+    )
+
+    assert parse_prior_blocked_reports(
+        [{"body": report}],
+        trusted_author_logins={"alanua"},
+    ) == []

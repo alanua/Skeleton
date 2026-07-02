@@ -71,6 +71,17 @@ from core.telegram_approval_buttons import build_pr_ready_card_payload
 
 QUEUE_REPOSITORY = "alanua/Skeleton"
 REPO = QUEUE_REPOSITORY
+RUNNER_GITHUB_ACTOR_ENV = "SKELETON_RUNNER_GITHUB_ACTOR"
+
+
+def trusted_runner_comment_authors() -> frozenset[str]:
+    actors = {QUEUE_REPOSITORY.split("/", 1)[0].lower()}
+    configured = os.environ.get(RUNNER_GITHUB_ACTOR_ENV, "").strip().lower()
+    if configured:
+        actors.add(configured)
+    return frozenset(actors)
+
+
 LABEL_READY = "runner:ready"
 LABEL_RUNNING = "runner:running"
 LABEL_DONE = "runner:done"
@@ -9807,7 +9818,9 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                     return
                 retry_decision = evaluate_retry_policy(
                     retry_condition,
-                    parse_prior_blocked_reports(prior_comments),
+                    parse_prior_blocked_reports(
+                        prior_comments, trusted_runner_comment_authors()
+                    ),
                     extract_retry_override(issue_body),
                 )
                 block_issue(
@@ -9838,7 +9851,9 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             return
         retry_decision = evaluate_retry_policy(
             retry_condition,
-            parse_prior_blocked_reports(prior_comments),
+            parse_prior_blocked_reports(
+                        prior_comments, trusted_runner_comment_authors()
+                    ),
             extract_retry_override(issue_body),
         )
         if retry_decision.retry_decision in {BLOCK_REPEATED_REASON, NEEDS_OPERATOR}:

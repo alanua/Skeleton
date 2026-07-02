@@ -2558,7 +2558,7 @@ def test_duplicate_blocker_blocks_before_executor_invocation() -> None:
         "number": 246,
         "title": "Duplicate blocker",
         "body": body,
-        "comments": [{"body": first}, {"body": second}],
+        "comments": [{"author": {"login": "alanua"}, "body": first}, {"author": {"login": "alanua"}, "body": second}],
     }
 
     with mock.patch.object(runner, "set_issue_label") as set_label, mock.patch.object(
@@ -10797,3 +10797,16 @@ def test_block_issue_uses_actual_bounded_failure_reason_for_retry_signature() ->
     assert len(reports) == 2
     assert reports[0].condition_signature == reports[1].condition_signature
     assert reports[0].blocker_signature != reports[1].blocker_signature
+
+
+
+def test_trusted_runner_comment_authors_include_owner_and_configured_actor() -> None:
+    with mock.patch.dict(
+        os.environ,
+        {runner.RUNNER_GITHUB_ACTOR_ENV: "Skeleton-Runner-Service"},
+        clear=False,
+    ):
+        actors = runner.trusted_runner_comment_authors()
+
+    assert "alanua" in actors
+    assert "skeleton-runner-service" in actors
