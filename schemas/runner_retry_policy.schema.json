@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://alanua.github.io/skeleton/schemas/runner_retry_policy.schema.json",
+  "title": "Runner Retry Policy Public Result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "route",
+    "retry_decision",
+    "retry_attempt",
+    "blocker_signature",
+    "changed_condition",
+    "override_used",
+    "next_required_action"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["BLOCKED", "NEEDS_OPERATOR"]
+    },
+    "route": {
+      "type": "string",
+      "enum": ["code_generation", "publish_only", "runtime_only"]
+    },
+    "retry_decision": {
+      "type": "string",
+      "enum": [
+        "ALLOW_FIRST_ATTEMPT",
+        "ALLOW_CHANGED_CONDITION",
+        "ALLOW_ONE_TIME_OVERRIDE",
+        "BLOCK_REPEATED_REASON",
+        "BLOCK_ROUTE_MISMATCH",
+        "NEEDS_OPERATOR"
+      ]
+    },
+    "retry_attempt": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "blocker_signature": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8,32}$"
+    },
+    "changed_condition": {
+      "type": "boolean"
+    },
+    "override_used": {
+      "type": "boolean"
+    },
+    "next_required_action": {
+      "type": "string",
+      "enum": ["DIAGNOSE", "PUBLISH_ONLY", "RUNTIME_ONLY"]
+    },
+    "override_token_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{16}$"
+    }
+  }
+}

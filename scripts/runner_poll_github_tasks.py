@@ -22,6 +22,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -48,6 +50,21 @@ from core.memory_patch_proposal import (
 )
 from core.private_memory import healthcheck_private_memory, write_public_heartbeat
 from core.project_tree import get_project, get_project_by_repo, load_project_tree
+from core.runner_retry_policy import (
+    BLOCK_REPEATED_REASON,
+    NEEDS_OPERATOR,
+    ROUTE_CODE_GENERATION,
+    ROUTE_PUBLISH_ONLY,
+    ROUTE_RUNTIME_ONLY,
+    RetryCondition,
+    RetryDecision,
+    append_retry_fields,
+    evaluate_retry_policy,
+    expected_output_validation,
+    extract_retry_override,
+    one_time_override_hash,
+    parse_prior_blocked_reports,
+)
 from core.skeleton_memory import SkeletonMemory
 from core.telegram_approval_buttons import build_pr_ready_card_payload
 
@@ -159,6 +176,14 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         HOME_EDGE_01_READ_ONLY_DIAGNOSTIC,
     )
 )
+PUBLISH_ONLY_MAINTENANCE_TASK_IDS = frozenset(
+    (
+        INSPECT_ISSUE_WORKTREE_FOR_PUBLISH,
+        PUBLISH_ISSUE_WORKTREE_PR,
+        PUBLISH_EXISTING_ISSUE_WORKTREE,
+        PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR,
+    )
+)
 AUFMASS_PRIVATE_PROJECT_ID = "aufmass_private"
 AUFMASS_PRIVATE_REGISTERED_REPO = "private/aufmass"
 AUFMASS_PRIVATE_SOURCE_PACK_MANIFEST = "source_pack_manifest.json"
@@ -238,9 +263,11 @@ _BLOCKED_OUTPUT_MARKER_RES = tuple(
     else re.compile(rf"(?<!\w){re.escape(marker)}(?!\w)", re.IGNORECASE)
     for marker in _BLOCKED_OUTPUT_MARKERS
 )
-_FINAL_STATUS_LINE_RE = re.compile(r"^\s*(DONE|BLOCKED)\b:?", re.IGNORECASE)
+_FINAL_STATUS_LINE_RE = re.compile(
+    r"^\s*(DONE|BLOCKED|NEEDS_OPERATOR)\b:?", re.IGNORECASE
+)
 _FINAL_STATUS_DELIVERY_LINE_RE = re.compile(
-    r"^\s*(DONE|BLOCKED)\s*:", re.IGNORECASE
+    r"^\s*(DONE|BLOCKED|NEEDS_OPERATOR)\s*:", re.IGNORECASE
 )
 _FINAL_RESULT_LINE_RE = re.compile(
     r"^\s*RESULT:\s*(?P<result>DONE|BLOCKED|NEEDS_OPERATOR)\b", re.IGNORECASE
@@ -299,6 +326,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "allowed_files_count",
         "allowed_untracked_files",
         "allowed_untracked_files_count",
+        "approved_override_hash",
         "approval_status",
         "approved_head_sha",
         "artifact_count",
@@ -400,6 +428,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "pr_state",
         "pr_title",
         "pr_url",
+        "publish_override_hash",
         "private_memory_db_configured",
         "private_memory_db_openable",
         "private_memory_heartbeat_ok",
@@ -1082,7 +1111,7 @@ def _final_result_status(output: str) -> str | None:
         if match is None:
             continue
         result = match.group("result").upper()
-        return "DONE" if result == "DONE" else "BLOCKED"
+        return result
     return None
 
 
@@ -1100,7 +1129,9 @@ def classify_codex_task_result(output: str, exit_code: int) -> CodexTaskResult:
 
     status = _first_final_status(output)
     if status is not None:
-        return CodexTaskResult(status, status if status == "BLOCKED" else None)
+        if status == "DONE":
+            return CodexTaskResult("DONE")
+        return CodexTaskResult("BLOCKED", blocked_output_marker(output) or status)
 
     marker = blocked_output_marker(output)
     if marker is not None:
@@ -1500,6 +1531,164 @@ def _body_field(body: str, field: str) -> str | None:
     return match.group("value") if match else None
 
 
+def _metadata_before_task(body: str) -> str:
+    return (body or "").split("```task", 1)[0]
+
+
+def _metadata_yaml_documents(metadata: str) -> list[dict[str, Any]]:
+    documents: list[dict[str, Any]] = []
+    lines = (metadata or "").splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if re.fullmatch(r"\s*```\s*(?:yaml|yml)?\s*", line) is None:
+            index += 1
+            continue
+        yaml_lines: list[str] = []
+        index += 1
+        while index < len(lines) and _FENCE_CLOSE_LINE_RE.match(lines[index]) is None:
+            yaml_lines.append(lines[index])
+            index += 1
+        if index < len(lines):
+            index += 1
+        try:
+            parsed = yaml.safe_load("\n".join(yaml_lines)) if yaml_lines else None
+        except yaml.YAMLError:
+            continue
+        if isinstance(parsed, dict):
+            documents.append(parsed)
+    return documents
+
+
+def _metadata_yaml_value(metadata: str, key: str) -> object:
+    for document in _metadata_yaml_documents(metadata):
+        if key in document:
+            return document[key]
+    return None
+
+
+def _metadata_multiline_value(metadata: str, field: str) -> object:
+    lines = (metadata or "").splitlines()
+    for index, line in enumerate(lines):
+        if re.fullmatch(rf"\s*{re.escape(field)}:\s*", line) is None:
+            continue
+        values: list[str] = []
+        for item in lines[index + 1 :]:
+            if re.fullmatch(r"\s*```\s*(?:yaml|yml)?\s*", item):
+                break
+            if re.fullmatch(r"\s*[A-Za-z][A-Za-z0-9 _-]{0,80}:\s*.*", item):
+                break
+            if not item.strip():
+                break
+            bullet = re.fullmatch(r"\s*-\s+(?P<value>\S(?:.*\S)?)\s*", item)
+            if bullet is not None:
+                values.append(bullet.group("value"))
+                continue
+            values.append(item.strip())
+        if values:
+            return values
+        return ""
+    return None
+
+
+def _body_field_or_yaml_value(body: str, field: str, key: str) -> object:
+    metadata = _metadata_before_task(body)
+    field_value = _body_field(metadata, field)
+    if field_value is None:
+        field_value = _body_field(metadata, key)
+    if field_value is not None:
+        return field_value
+    multiline_value = _metadata_multiline_value(metadata, field)
+    if multiline_value is None and field != key:
+        multiline_value = _metadata_multiline_value(metadata, key)
+    if multiline_value is not None:
+        return multiline_value
+    return _metadata_yaml_value(metadata, key)
+
+
+def _metadata_has_field(metadata: str, field: str) -> bool:
+    return (
+        re.search(rf"^\s*{re.escape(field)}\s*:", metadata or "", re.MULTILINE)
+        is not None
+    )
+
+
+def _requires_expected_output(metadata: str) -> bool:
+    if _metadata_has_field(metadata, "Expected Output") or _metadata_has_field(
+        metadata, "expected_output"
+    ):
+        return True
+    if _metadata_yaml_value(metadata, "expected_output") is not None:
+        return True
+    return any(
+        _metadata_has_field(metadata, field)
+        for field in (
+            "Selected Project",
+            "Selected Repository",
+            "Target Project",
+            "Target Repository",
+            "required_changes",
+            "allowed_files",
+            "risk",
+        )
+    )
+
+
+def _body_csv_field(body: str, field: str) -> tuple[str, ...]:
+    value = _body_field_or_yaml_value(body, field, field.strip().lower().replace(" ", "_"))
+    if value is None:
+        return ()
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return tuple(item.strip() for item in value if item.strip())
+    if not isinstance(value, str):
+        return ()
+    return tuple(part.strip() for part in value.split(",") if part.strip())
+
+
+def _expected_output_value(body: str) -> object:
+    return _body_field_or_yaml_value(body, "Expected Output", "expected_output")
+
+
+def code_task_expected_output_block_reason(body: str) -> str | None:
+    metadata = _metadata_before_task(body)
+    expected_output = _expected_output_value(body)
+    if expected_output is None and not _requires_expected_output(metadata):
+        return None
+    validation = expected_output_validation(expected_output)
+    return validation.reason if not validation.accepted else None
+
+
+def runner_task_route(
+    *,
+    maintenance_mode: bool,
+    maintenance_task_id: str | None,
+    merge_mode: bool,
+) -> str:
+    if maintenance_mode:
+        if maintenance_task_id in PUBLISH_ONLY_MAINTENANCE_TASK_IDS:
+            return ROUTE_PUBLISH_ONLY
+        return ROUTE_RUNTIME_ONLY
+    if merge_mode:
+        return ROUTE_RUNTIME_ONLY
+    return ROUTE_CODE_GENERATION
+
+
+def retry_condition_for_issue(
+    body: str,
+    route: str,
+    maintenance_task_id: str | None,
+    blocker_reason: str | None = None,
+) -> RetryCondition:
+    return RetryCondition(
+        route=route,
+        maintenance_task_id=maintenance_task_id,
+        allowed_files=_body_csv_field(body, "Allowed Files"),
+        expected_output=json.dumps(_expected_output_value(body), sort_keys=True),
+        dependency_state=_body_field(body, "Dependency State"),
+        blocker_reason=blocker_reason,
+    )
+
+
 def has_runner_task_body(body: str) -> bool:
     maintenance_mode, _task_id = extract_runtime_maintenance_task_id(body)
     merge_mode, _request, _reason = extract_telegram_approved_pr_merge_request(body)
@@ -1589,6 +1778,70 @@ def post_issue_comment(issue_number: int, body: str) -> None:
     )
     if code != 0:
         raise RuntimeError(f"gh issue comment failed:\n{output}")
+
+
+def get_issue_comments(issue: dict[str, Any]) -> list[dict[str, Any]] | None:
+    comments = issue.get("comments")
+    if isinstance(comments, list):
+        return [comment for comment in comments if isinstance(comment, dict)]
+    if not (os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")):
+        if isinstance(comments, int) and comments > 0:
+            return None
+        return []
+    issue_number = int(issue["number"])
+    code, output = run_command(
+        [
+            "gh",
+            "issue",
+            "view",
+            str(issue_number),
+            "--repo",
+            REPO,
+            "--json",
+            "comments",
+        ]
+    )
+    if code != 0:
+        return None
+    try:
+        parsed = json.loads(output or "{}")
+    except json.JSONDecodeError:
+        return None
+    parsed_comments = parsed.get("comments") if isinstance(parsed, dict) else None
+    if not isinstance(parsed_comments, list):
+        return None
+    return [comment for comment in parsed_comments if isinstance(comment, dict)]
+
+
+def repeated_blocker_report(decision: RetryDecision) -> str:
+    next_action = decision.next_required_action or "DIAGNOSE"
+    return (
+        "NEEDS_OPERATOR: Runner retry policy blocked repeated execution.\n\n"
+        "status=NEEDS_OPERATOR\n"
+        f"route={decision.route}\n"
+        f"retry_decision={decision.retry_decision}\n"
+        f"retry_attempt={decision.retry_attempt}\n"
+        f"blocker_signature={decision.blocker_signature}\n"
+        f"changed_condition={str(decision.changed_condition).lower()}\n"
+        f"override_used={str(decision.override_used).lower()}\n"
+        f"next_required_action={next_action}\n"
+        "reason=repeated_blocker"
+    )
+
+
+def unverifiable_retry_history_report(decision: RetryDecision) -> str:
+    return (
+        "NEEDS_OPERATOR: Runner retry policy could not verify prior Runner history.\n\n"
+        "status=NEEDS_OPERATOR\n"
+        f"route={decision.route}\n"
+        f"retry_decision={NEEDS_OPERATOR}\n"
+        f"retry_attempt={decision.retry_attempt}\n"
+        f"blocker_signature={decision.blocker_signature}\n"
+        f"changed_condition={str(decision.changed_condition).lower()}\n"
+        f"override_used={str(decision.override_used).lower()}\n"
+        "next_required_action=DIAGNOSE\n"
+        "reason=prior_runner_history_unverifiable"
+    )
 
 
 def set_issue_label(issue_number: int, remove: str, add: str) -> None:
@@ -2664,8 +2917,11 @@ def block_issue(
     remove_label: str = LABEL_READY,
     runner_task: RunnerTask | None = None,
     result_status: str = "BLOCKED",
+    retry_decision: RetryDecision | None = None,
 ) -> None:
     report = report_runner_lane(f"BLOCKED: {message}", runner_task)
+    if retry_decision is not None:
+        report = append_retry_fields(report, retry_decision)
     warning = record_runner_executor_result(
         issue_number,
         runner_task.target_project if runner_task is not None else "skeleton",
@@ -7385,12 +7641,31 @@ def _safe_issue_publish_file_path(path: str) -> bool:
 
 
 def _issue_publish_allowed_files(metadata: str) -> tuple[frozenset[str], str | None]:
+    yaml_allowed_files = _metadata_yaml_value(metadata, "allowed_files")
+    if yaml_allowed_files is not None:
+        if not isinstance(yaml_allowed_files, list):
+            return frozenset(), "invalid_allowed_files"
+        allowed_files_from_yaml: list[str] = []
+        for allowed_path in yaml_allowed_files:
+            if not isinstance(allowed_path, str) or not _safe_issue_publish_file_path(
+                allowed_path
+            ):
+                return frozenset(), "invalid_allowed_files"
+            allowed_files_from_yaml.append(allowed_path)
+        if not allowed_files_from_yaml:
+            return frozenset(), "missing_allowed_files"
+        if len(set(allowed_files_from_yaml)) != len(allowed_files_from_yaml):
+            return frozenset(), "invalid_allowed_files"
+        return frozenset(allowed_files_from_yaml), None
+
     lines = (metadata or "").splitlines()
     for index, line in enumerate(lines):
-        if re.fullmatch(r"\s*Allowed Files:\s*", line):
+        if re.fullmatch(r"\s*(?:Allowed Files|allowed_files):\s*", line):
             allowed_files: list[str] = []
             for item in lines[index + 1 :]:
                 if re.fullmatch(r"\s*[A-Za-z][A-Za-z ]+:\s*.*", item):
+                    break
+                if re.fullmatch(r"\s*```\s*(?:yaml|yml)?\s*", item):
                     break
                 match = re.fullmatch(r"\s*-\s+(?P<path>\S(?:.*\S)?)\s*", item)
                 if match is None:
@@ -7926,18 +8201,18 @@ def _issue_worktree_publish_existing_pr_url(
     )
 
 
-def _issue_worktree_publish_override_reason(
+def _issue_worktree_publish_override_result(
     metadata: str, request: IssueWorktreePublishInspectionRequest
-) -> str:
+) -> tuple[str, str | None]:
     raw_override = _body_field(metadata, "Publish Override")
     if raw_override is None:
-        return "publish_override_missing"
+        return "publish_override_missing", None
     try:
         override = json.loads(raw_override)
     except json.JSONDecodeError:
-        return "publish_override_malformed"
+        return "publish_override_malformed", None
     if not isinstance(override, dict):
-        return "publish_override_malformed"
+        return "publish_override_malformed", None
     expected_keys = {
         "action",
         "target_repository",
@@ -7948,7 +8223,7 @@ def _issue_worktree_publish_override_reason(
         "draft_pr",
     }
     if set(override) != expected_keys:
-        return "publish_override_malformed"
+        return "publish_override_malformed", None
     allowed_files = override.get("allowed_files")
     if (
         override.get("action") != PUBLISH_EXISTING_ISSUE_WORKTREE
@@ -7963,8 +8238,8 @@ def _issue_worktree_publish_override_reason(
         or len(set(allowed_files)) != len(allowed_files)
         or set(allowed_files) != set(request.allowed_files)
     ):
-        return "publish_override_scope_mismatch"
-    return "publish_override_valid"
+        return "publish_override_scope_mismatch", None
+    return "publish_override_valid", one_time_override_hash(override)
 
 
 def _issue_worktree_publish_remote_branch_absent(
@@ -8225,7 +8500,9 @@ def _issue_worktree_publish_validated_report(
                 ],
                 "not_met",
             )
-        override_reason = _issue_worktree_publish_override_reason(metadata, request)
+        override_reason, override_hash = _issue_worktree_publish_override_result(
+            metadata, request
+        )
         if override_reason != "publish_override_valid":
             return _maintenance_report(
                 failure_status,
@@ -8240,6 +8517,8 @@ def _issue_worktree_publish_validated_report(
         status_lines.append(
             "step=publish_override status=done reason=publish_override_valid"
         )
+        assert override_hash is not None
+        status_lines.append(f"publish_override_hash={override_hash}")
         if not _issue_worktree_publish_remote_branch_absent(request, worktree_path):
             return _maintenance_report(
                 failure_status,
@@ -8248,6 +8527,7 @@ def _issue_worktree_publish_validated_report(
                     *status_lines,
                     "step=verify_remote_branch_absent status=failed "
                     "reason=remote_branch_conflict",
+                    f"approved_override_hash={override_hash}",
                 ],
                 "not_met",
             )
@@ -9381,9 +9661,12 @@ def process_telegram_approved_pr_merge_issue(
     issue_number: int,
     request: TelegramApprovedPrMergeRequest,
     memory_warning: str | None = None,
+    retry_decision: RetryDecision | None = None,
 ) -> None:
     report = execute_telegram_approved_pr_merge(request)
     status = "DONE" if report.startswith("DONE:") else "BLOCKED"
+    if status != "DONE" and retry_decision is not None:
+        report = append_retry_fields(report, retry_decision)
     warning = record_runner_executor_result(
         issue_number,
         "skeleton",
@@ -9408,9 +9691,12 @@ def process_runtime_maintenance_issue(
     workdir: str,
     body: str = "",
     memory_warning: str | None = None,
+    retry_decision: RetryDecision | None = None,
 ) -> None:
     report = dispatch_runtime_maintenance_task(task_id, workdir, body)
     status = maintenance_report_status(report)
+    if status != "DONE" and retry_decision is not None:
+        report = append_retry_fields(report, retry_decision)
     warning = record_runner_executor_result(
         issue_number,
         "skeleton",
@@ -9468,6 +9754,11 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                 merge_reason or "Telegram approved merge request is malformed.",
             )
             return
+        route = runner_task_route(
+            maintenance_mode=maintenance_mode,
+            maintenance_task_id=maintenance_task_id,
+            merge_mode=merge_mode,
+        )
 
         if maintenance_mode:
             task_content = ""
@@ -9488,6 +9779,82 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             else:
                 task_content = runner_task.content
 
+        prior_comments = get_issue_comments(issue)
+        retry_block_reason = "executor_invocation"
+        if route == ROUTE_CODE_GENERATION:
+            expected_output_reason = code_task_expected_output_block_reason(issue_body)
+            if expected_output_reason is not None:
+                retry_condition = retry_condition_for_issue(
+                    issue_body,
+                    route,
+                    maintenance_task_id,
+                    expected_output_reason,
+                )
+                if prior_comments is None:
+                    first_decision = evaluate_retry_policy(retry_condition, [])
+                    retry_decision = RetryDecision(
+                        retry_decision=NEEDS_OPERATOR,
+                        retry_attempt=1,
+                        blocker_signature=first_decision.blocker_signature,
+                        route=route,
+                        next_required_action="DIAGNOSE",
+                    )
+                    report = unverifiable_retry_history_report(retry_decision)
+                    post_issue_comment(issue_number, report)
+                    set_issue_label(issue_number, LABEL_READY, LABEL_BLOCKED)
+                    notify_task_finished(issue_number, "NEEDS_OPERATOR", report)
+                    return
+                retry_decision = evaluate_retry_policy(
+                    retry_condition,
+                    parse_prior_blocked_reports(prior_comments),
+                    extract_retry_override(issue_body),
+                )
+                block_issue(
+                    issue_number,
+                    f"{expected_output_reason}: expected_output is required before code execution.",
+                    runner_task=runner_task,
+                    retry_decision=retry_decision,
+                )
+                return
+        retry_condition = retry_condition_for_issue(
+            issue_body,
+            route,
+            maintenance_task_id,
+            retry_block_reason,
+        )
+        if prior_comments is None:
+            retry_decision = RetryDecision(
+                retry_decision=NEEDS_OPERATOR,
+                retry_attempt=1,
+                blocker_signature=evaluate_retry_policy(retry_condition, []).blocker_signature,
+                route=route,
+                next_required_action="DIAGNOSE",
+            )
+            report = unverifiable_retry_history_report(retry_decision)
+            post_issue_comment(issue_number, report)
+            set_issue_label(issue_number, LABEL_READY, LABEL_BLOCKED)
+            notify_task_finished(issue_number, "NEEDS_OPERATOR", report)
+            return
+        retry_decision = evaluate_retry_policy(
+            retry_condition,
+            parse_prior_blocked_reports(prior_comments),
+            extract_retry_override(issue_body),
+        )
+        if retry_decision.retry_decision in {BLOCK_REPEATED_REASON, NEEDS_OPERATOR}:
+            report = repeated_blocker_report(retry_decision)
+            warning = record_runner_executor_result(
+                issue_number,
+                runner_task.target_project if runner_task is not None else "skeleton",
+                "NEEDS_OPERATOR",
+                "NEEDS_OPERATOR",
+                None,
+                report,
+            )
+            post_issue_comment(issue_number, append_memory_warning(report, warning))
+            set_issue_label(issue_number, LABEL_READY, LABEL_BLOCKED)
+            notify_task_finished(issue_number, "NEEDS_OPERATOR", report)
+            return
+
         if runner_task is not None:
             execution_block_reason = project_execution_block_reason(runner_task)
             if execution_block_reason is not None:
@@ -9495,6 +9862,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                     issue_number,
                     execution_block_reason,
                     runner_task=runner_task,
+                    retry_decision=retry_decision,
                 )
                 return
             if runner_task.target_repository != QUEUE_REPOSITORY:
@@ -9506,6 +9874,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                         issue_number,
                         checkout_block_reason,
                         runner_task=runner_task,
+                        retry_decision=retry_decision,
                     )
                     return
 
@@ -9518,6 +9887,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                     issue_number,
                     "Runner worktree is not clean before starting.\n\n"
                     f"git status --short:\n```\n{status_output.strip()}\n```",
+                    retry_decision=retry_decision,
                 )
                 return
 
@@ -9538,19 +9908,26 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                     coordinator_workdir,
                     issue_body,
                     pickup_memory_warning,
+                    retry_decision,
                 )
             else:
                 process_runtime_maintenance_issue(
-                    issue_number, maintenance_task_id, coordinator_workdir, issue_body
+                    issue_number,
+                    maintenance_task_id,
+                    coordinator_workdir,
+                    issue_body,
+                    retry_decision=retry_decision,
                 )
             return
         if merge_mode and merge_request is not None:
             if pickup_memory_warning:
                 process_telegram_approved_pr_merge_issue(
-                    issue_number, merge_request, pickup_memory_warning
+                    issue_number, merge_request, pickup_memory_warning, retry_decision
                 )
             else:
-                process_telegram_approved_pr_merge_issue(issue_number, merge_request)
+                process_telegram_approved_pr_merge_issue(
+                    issue_number, merge_request, retry_decision=retry_decision
+                )
             return
 
         target_repository = (
@@ -9576,6 +9953,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                 + issue_workspace_review_note(worktree_path),
                 remove_label=LABEL_RUNNING,
                 runner_task=runner_task,
+                retry_decision=retry_decision,
             )
             return
         issue_workdir = str(worktree_path)
@@ -9593,6 +9971,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                 + issue_workspace_review_note(issue_workdir),
                 remove_label=LABEL_RUNNING,
                 runner_task=runner_task,
+                retry_decision=retry_decision,
             )
             return
         if codex_result.status == "BLOCKED":
@@ -9604,6 +9983,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                 ),
                 runner_task,
             )
+            report = append_retry_fields(report, retry_decision)
             warning = record_runner_executor_result(
                 issue_number,
                 runner_task.target_project if runner_task is not None else "skeleton",
@@ -9643,6 +10023,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
         status = runner_report_status(report)
         if status == "BLOCKED":
             report = blocked_final_report(report)
+            report = append_retry_fields(report, retry_decision)
         warning = record_runner_executor_result(
             issue_number,
             runner_task.target_project if runner_task is not None else "skeleton",
