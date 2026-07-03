@@ -48,24 +48,26 @@ class LoopRunnerAdapterError(ValueError):
 
 
 def run_loop_task_packet(
-    task_packet: Mapping[str, Any],
+    task_packet: object,
     *,
     engine: LoopEngine,
 ) -> dict[str, object]:
     """Validate one bounded Runner packet and return a public-safe loop receipt."""
 
-    action = _public_value(task_packet, "action")
-    task_id = _public_value(task_packet, "task_id")
-    run_id = _public_value(task_packet, "run_id")
-    event_value = _public_value(task_packet, "event")
+    action: object = None
+    task_id: object = None
+    run_id: object = None
+    event_value: object = None
 
     try:
         if not isinstance(engine, LoopEngine):
             raise LoopRunnerAdapterError("INVALID_LOOP_ENGINE")
+
         normalized = _validate_packet(task_packet)
         action = normalized["action"]
         task_id = normalized["task_id"]
         run_id = normalized["run_id"]
+        event_value = normalized.get("event")
 
         if action == "create":
             run = engine.create(
@@ -138,30 +140,33 @@ def run_loop_task_packet(
         )
 
 
-def _validate_packet(task_packet: Mapping[str, Any]) -> dict[str, Any]:
+def _validate_packet(task_packet: object) -> dict[str, Any]:
     if not isinstance(task_packet, Mapping):
         raise LoopRunnerAdapterError("INVALID_LOOP_TASK_PACKET")
 
     action = task_packet.get("action")
-    allowed_fields = _COMMON_FIELDS | (_STEP_FIELDS if action == "step" else frozenset())
-    if set(task_packet) - allowed_fields:
-        raise LoopRunnerAdapterError("INVALID_LOOP_TASK_PACKET")
-    if set(_COMMON_FIELDS) - set(task_packet):
-        raise LoopRunnerAdapterError("INVALID_LOOP_TASK_PACKET")
-    if task_packet.get("schema") != LOOP_RUNNER_PACKET_SCHEMA:
-        raise LoopRunnerAdapterError("INVALID_LOOP_TASK_PACKET")
     if action not in LOOP_RUNNER_ACTIONS:
         raise LoopRunnerAdapterError("INVALID_LOOP_TASK_PACKET")
 
-    task_id = _safe_token(task_packet.get("task_id"))
-    run_id = _safe_token(task_packet.get("run_id"))
-    recorded_at = _non_negative_int(task_packet.get("recorded_at"))
+    allowed_fields = _COMMON_FIELDS | (_STEP_FIELDS if action == "step" else frozenset())
+    required_fields = _COMMON_FIELDS | (
+        frozenset({"event", "expected_version"}) if action == "step" else frozenset()
+    )
+    fields = set(task_packet)
+    if fields - allowed_fields or required_fields - fields:
+        raise LoopRunnerAdapterError("INVALID_LOOP_TASK_PACKET")
+    if task_packet.get("schema") != LOOP_RUNNER_PACKET_SCHEMA:
+        raise LoopRunnerAdapterError("INVALID_LOOP_TASK_PACKET")
 
     for field in ("public_safe", "no_secrets", "no_runtime_mutation"):
         if task_packet.get(field) is not True:
             raise LoopRunnerAdapterError("INVALID_LOOP_TASK_PACKET")
     if task_packet.get("authority_boundary") != _EXPECTED_AUTHORITY_BOUNDARY:
         raise LoopRunnerAdapterError("INVALID_AUTHORITY_BOUNDARY")
+
+    task_id = _safe_token(task_packet.get("task_id"))
+    run_id = _safe_token(task_packet.get("run_id"))
+    recorded_at = _non_negative_int(task_packet.get("recorded_at"))
 
     normalized: dict[str, Any] = {
         "action": action,
@@ -172,10 +177,6 @@ def _validate_packet(task_packet: Mapping[str, Any]) -> dict[str, Any]:
     if action == "create":
         return normalized
 
-    if not _STEP_FIELDS.issuperset(set(task_packet) - _COMMON_FIELDS):
-        raise LoopRunnerAdapterError("INVALID_LOOP_TASK_PACKET")
-    if "event" not in task_packet or "expected_version" not in task_packet:
-        raise LoopRunnerAdapterError("INVALID_LOOP_TASK_PACKET")
     event = task_packet.get("event")
     if not isinstance(event, str):
         raise LoopRunnerAdapterError("INVALID_LOOP_TASK_PACKET")
@@ -183,6 +184,7 @@ def _validate_packet(task_packet: Mapping[str, Any]) -> dict[str, Any]:
         LoopEvent(event)
     except ValueError as exc:
         raise LoopRunnerAdapterError("INVALID_LOOP_TASK_PACKET") from exc
+
     normalized["event"] = event
     normalized["expected_version"] = _non_negative_int(task_packet.get("expected_version"))
     if "now" in task_packet:
@@ -267,12 +269,6 @@ def _non_negative_int(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise LoopRunnerAdapterError("INVALID_LOOP_TASK_PACKET")
     return value
-
-
-def _public_value(packet: object, field: str) -> object:
-    if isinstance(packet, Mapping):
-        return packet.get(field)
-    return None
 
 
 def _public_identifier(value: object) -> str | None:
