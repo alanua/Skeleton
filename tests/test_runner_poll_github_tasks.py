@@ -10811,3 +10811,181 @@ def test_trusted_runner_comment_authors_include_owner_and_configured_actor() -> 
     assert "alanua" in actors
     assert "github-actions[bot]" in actors
     assert "skeleton-runner-service" in actors
+
+
+def _loop_engine_issue_body(packet: object) -> str:
+    return "\n".join(
+        (
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {runner.LOOP_ENGINE_PACKET}",
+            "```task",
+            json.dumps(packet, sort_keys=True),
+            "```",
+        )
+    )
+
+
+def _loop_engine_packet(action: str, **updates: object) -> dict[str, object]:
+    packet: dict[str, object] = {
+        "schema": "skeleton.loop_runner_packet.v1",
+        "action": action,
+        "task_id": "issue-1468",
+        "run_id": "run-1468",
+        "recorded_at": 1,
+        "public_safe": True,
+        "no_secrets": True,
+        "no_runtime_mutation": True,
+        "authority_boundary": {
+            "operational_state_write": True,
+            "external_side_effects_allowed": False,
+            "runtime_mutation_allowed": False,
+        },
+    }
+    if action == "step":
+        packet.update({"event": "PREPARED", "expected_version": 0})
+    packet.update(updates)
+    return packet
+
+
+def test_loop_engine_packet_missing_db_env_fails_closed() -> None:
+    body = _loop_engine_issue_body(_loop_engine_packet("create"))
+
+    with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
+        runner, "LoopStateStore"
+    ) as store:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.LOOP_ENGINE_PACKET, str(runner.ROOT), body
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=loop_state_db_missing" in report
+    assert "success_criteria=not_met" in report
+    store.assert_not_called()
+
+
+@pytest.mark.parametrize("configured_path", ("relative.sqlite", "../unsafe.sqlite"))
+def test_loop_engine_packet_relative_or_unsafe_db_path_fails_closed(
+    configured_path: str,
+) -> None:
+    body = _loop_engine_issue_body(_loop_engine_packet("create"))
+
+    with mock.patch.dict(
+        os.environ, {runner.LOOP_STATE_DB_ENV: configured_path}, clear=False
+    ), mock.patch.object(runner, "LoopStateStore") as store:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.LOOP_ENGINE_PACKET, str(runner.ROOT), body
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "success_criteria=not_met" in report
+    assert "reason=loop_state_db_" in report
+    store.assert_not_called()
+
+
+def test_loop_engine_packet_create_and_step_persist_without_model_route(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "loop-state.sqlite"
+    create_body = _loop_engine_issue_body(_loop_engine_packet("create"))
+    step_body = _loop_engine_issue_body(
+        _loop_engine_packet("step", recorded_at=2, now=2, budget_delta=1)
+    )
+
+    with mock.patch.dict(
+        os.environ, {runner.LOOP_STATE_DB_ENV: str(db_path)}, clear=False
+    ), mock.patch.object(runner, "run_codex_task") as codex:
+        created = runner.dispatch_runtime_maintenance_task(
+            runner.LOOP_ENGINE_PACKET, str(runner.ROOT), create_body
+        )
+        stepped = runner.dispatch_runtime_maintenance_task(
+            runner.LOOP_ENGINE_PACKET, str(runner.ROOT), step_body
+        )
+
+    assert created.startswith("DONE:")
+    assert "status=CREATED" in created
+    assert "loop_state=CREATED" in created
+    assert "version=0" in created
+    assert "external_side_effects_executed=false" in created
+    assert stepped.startswith("DONE:")
+    assert "status=READY" in stepped
+    assert "loop_state=READY" in stepped
+    assert "event=PREPARED" in stepped
+    assert "version=1" in stepped
+    codex.assert_not_called()
+
+
+def test_loop_engine_packet_stale_version_fails_closed(tmp_path: Path) -> None:
+    db_path = tmp_path / "loop-state.sqlite"
+    create_body = _loop_engine_issue_body(_loop_engine_packet("create"))
+    first_step = _loop_engine_issue_body(
+        _loop_engine_packet("step", recorded_at=2)
+    )
+    stale_step = _loop_engine_issue_body(
+        _loop_engine_packet(
+            "step",
+            event="STARTED",
+            expected_version=0,
+            recorded_at=3,
+        )
+    )
+
+    with mock.patch.dict(
+        os.environ, {runner.LOOP_STATE_DB_ENV: str(db_path)}, clear=False
+    ):
+        runner.dispatch_runtime_maintenance_task(
+            runner.LOOP_ENGINE_PACKET, str(runner.ROOT), create_body
+        )
+        runner.dispatch_runtime_maintenance_task(
+            runner.LOOP_ENGINE_PACKET, str(runner.ROOT), first_step
+        )
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.LOOP_ENGINE_PACKET, str(runner.ROOT), stale_step
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=LOOP_STATE_CONFLICT" in report
+    assert "accepted=false" in report
+    assert "success_criteria=not_met" in report
+
+
+def test_loop_engine_packet_invalid_packet_fails_closed(tmp_path: Path) -> None:
+    db_path = tmp_path / "loop-state.sqlite"
+    body = _loop_engine_issue_body({"schema": "wrong"})
+
+    with mock.patch.dict(
+        os.environ, {runner.LOOP_STATE_DB_ENV: str(db_path)}, clear=False
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.LOOP_ENGINE_PACKET, str(runner.ROOT), body
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=INVALID_LOOP_TASK_PACKET" in report
+    assert "accepted=false" in report
+    assert "external_side_effects_executed=false" in report
+
+
+def test_loop_receipt_status_keys_are_sanitized_and_private_keys_rejected() -> None:
+    accepted = runner._sanitize_maintenance_status_line(
+        "schema=skeleton.loop_runner_result.v1 status=READY action=step "
+        "task_id=issue-1468 run_id=run-1468 version=1 loop_state=READY "
+        "event=PREPARED accepted=true decision=CONTINUE "
+        f"context_hash={'a' * 64} public_safe=true "
+        "external_side_effects_executed=false"
+    )
+
+    assert accepted is not None
+    assert runner._sanitize_maintenance_status_line("private_path=/tmp/private") is None
+    assert runner._sanitize_maintenance_status_line("unexpected_loop_key=value") is None
+
+
+def test_unrelated_runtime_maintenance_dispatch_is_unchanged() -> None:
+    with mock.patch.object(
+        runner, "check_skeleton_freshness", return_value="DONE: unchanged"
+    ) as check:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.CHECK_SKELETON_FRESHNESS, str(runner.ROOT)
+        )
+
+    assert report == "DONE: unchanged"
+    check.assert_called_once_with()
