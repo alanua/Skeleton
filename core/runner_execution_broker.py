@@ -6,8 +6,9 @@ import subprocess
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Mapping, Protocol
 
+from core.runner_evidence import ExecutionEvidence
 from core.task_envelope import TaskEnvelope
 
 
@@ -40,7 +41,10 @@ class RunnerExecutionBroker:
     def execute(self, envelope: TaskEnvelope) -> dict[str, Any]:
         executor = self._executors.get(envelope.executor_class)
         if executor is None:
-            raise RunnerExecutionError("EXECUTOR_NOT_REGISTERED", envelope.executor_class)
+            raise RunnerExecutionError(
+                "EXECUTOR_NOT_REGISTERED",
+                envelope.executor_class,
+            )
 
         steps = envelope.steps or ({},)
         results: list[StepResult] = []
@@ -50,8 +54,27 @@ class RunnerExecutionBroker:
             if result.status != "DONE":
                 break
 
-        assertions = _evaluate_assertions(envelope.expected_assertions, results)
-        status = "DONE" if results and all(item.status == "DONE" for item in results) and all(item["passed"] for item in assertions) else "BLOCKED"
+        assertions = _evaluate_assertions(
+            envelope.expected_assertions,
+            results,
+        )
+        status = (
+            "DONE"
+            if results
+            and all(item.status == "DONE" for item in results)
+            and all(item["passed"] for item in assertions)
+            else "BLOCKED"
+        )
+        evidence = ExecutionEvidence(
+            task_id=envelope.task_id,
+            envelope_hash=envelope.canonical_hash,
+            status=status,
+            executor_class=envelope.executor_class,
+            risk_class=envelope.risk_class,
+            privacy_class=envelope.privacy_class,
+            step_results=tuple(item.__dict__ for item in results),
+            assertions=tuple(assertions),
+        )
         return {
             "schema": "skeleton.runner.execution_result.v1",
             "task_id": envelope.task_id,
@@ -62,15 +85,30 @@ class RunnerExecutionBroker:
             "status": status,
             "step_results": [item.__dict__ for item in results],
             "assertions": assertions,
+            "private_evidence": evidence.full_payload(),
+            "public_receipt": evidence.public_receipt(),
         }
 
 
-def local_process_executor(envelope: TaskEnvelope, step: Mapping[str, Any]) -> StepResult:
+def local_process_executor(
+    envelope: TaskEnvelope,
+    step: Mapping[str, Any],
+) -> StepResult:
     argv = step.get("argv")
-    if not isinstance(argv, list) or not argv or not all(isinstance(item, str) and item for item in argv):
-        raise RunnerExecutionError("INVALID_ARGV", "local.process requires a non-empty argv array")
+    if (
+        not isinstance(argv, list)
+        or not argv
+        or not all(isinstance(item, str) and item for item in argv)
+    ):
+        raise RunnerExecutionError(
+            "INVALID_ARGV",
+            "local.process requires a non-empty argv array",
+        )
     if envelope.shell:
-        raise RunnerExecutionError("SHELL_NOT_SUPPORTED_BY_ARGV_EXECUTOR", "use an explicit shell executor policy")
+        raise RunnerExecutionError(
+            "SHELL_NOT_SUPPORTED_BY_ARGV_EXECUTOR",
+            "use an explicit shell executor policy",
+        )
 
     cwd = step.get("cwd", envelope.cwd)
     if cwd is not None and not isinstance(cwd, str):
@@ -98,21 +136,45 @@ def local_process_executor(envelope: TaskEnvelope, step: Mapping[str, Any]) -> S
     )
 
 
-def network_http_executor(envelope: TaskEnvelope, step: Mapping[str, Any]) -> StepResult:
+def network_http_executor(
+    envelope: TaskEnvelope,
+    step: Mapping[str, Any],
+) -> StepResult:
     method = str(step.get("method", "GET")).upper()
     url = step.get("url")
     if not isinstance(url, str) or not url.startswith(("http://", "https://")):
-        raise RunnerExecutionError("INVALID_URL", "network.http requires an http or https URL")
+        raise RunnerExecutionError(
+            "INVALID_URL",
+            "network.http requires an http or https URL",
+        )
     headers = step.get("headers", {})
-    if not isinstance(headers, Mapping) or not all(isinstance(key, str) and isinstance(value, str) for key, value in headers.items()):
-        raise RunnerExecutionError("INVALID_HEADERS", "headers must be string pairs")
+    if not isinstance(headers, Mapping) or not all(
+        isinstance(key, str) and isinstance(value, str)
+        for key, value in headers.items()
+    ):
+        raise RunnerExecutionError(
+            "INVALID_HEADERS",
+            "headers must be string pairs",
+        )
     body = step.get("body")
     data = None
     if body is not None:
-        data = body.encode("utf-8") if isinstance(body, str) else json.dumps(body, sort_keys=True).encode("utf-8")
+        data = (
+            body.encode("utf-8")
+            if isinstance(body, str)
+            else json.dumps(body, sort_keys=True).encode("utf-8")
+        )
 
-    request = urllib.request.Request(url, data=data, method=method, headers=dict(headers))
-    with urllib.request.urlopen(request, timeout=envelope.timeout_seconds) as response:
+    request = urllib.request.Request(
+        url,
+        data=data,
+        method=method,
+        headers=dict(headers),
+    )
+    with urllib.request.urlopen(
+        request,
+        timeout=envelope.timeout_seconds,
+    ) as response:
         raw = response.read()
         content_type = response.headers.get("Content-Type", "")
         output: Any = raw.decode("utf-8", errors="replace")
@@ -127,13 +189,22 @@ def network_http_executor(envelope: TaskEnvelope, step: Mapping[str, Any]) -> St
 
 
 def composite_executor_factory(broker: RunnerExecutionBroker) -> Executor:
-    def execute(envelope: TaskEnvelope, step: Mapping[str, Any]) -> StepResult:
+    def execute(
+        envelope: TaskEnvelope,
+        step: Mapping[str, Any],
+    ) -> StepResult:
         executor_class = step.get("executor_class")
         if not isinstance(executor_class, str):
-            raise RunnerExecutionError("INVALID_COMPOSITE_STEP", "composite step requires executor_class")
+            raise RunnerExecutionError(
+                "INVALID_COMPOSITE_STEP",
+                "composite step requires executor_class",
+            )
         executor = broker._executors.get(executor_class)
         if executor is None or executor_class == "composite":
-            raise RunnerExecutionError("EXECUTOR_NOT_REGISTERED", executor_class)
+            raise RunnerExecutionError(
+                "EXECUTOR_NOT_REGISTERED",
+                executor_class,
+            )
         nested = dict(step)
         nested.pop("executor_class", None)
         return executor(envelope, nested)
@@ -141,11 +212,35 @@ def composite_executor_factory(broker: RunnerExecutionBroker) -> Executor:
     return execute
 
 
-def default_broker() -> RunnerExecutionBroker:
-    broker = RunnerExecutionBroker({
-        "local.process": local_process_executor,
-        "network.http": network_http_executor,
-    })
+def default_broker(context: object | None = None) -> RunnerExecutionBroker:
+    from core.runner_executors import (
+        ExecutionContext,
+        filesystem_executor,
+        python_entrypoint_executor,
+        remote_ssh_executor,
+        repository_executor,
+    )
+
+    active_context = (
+        context
+        if isinstance(context, ExecutionContext)
+        else ExecutionContext(
+            targets={},
+            entrypoints={},
+            roots={},
+            environment=dict(os.environ),
+        )
+    )
+    broker = RunnerExecutionBroker(
+        {
+            "local.process": local_process_executor,
+            "remote.ssh": remote_ssh_executor(active_context),
+            "network.http": network_http_executor,
+            "python.entrypoint": python_entrypoint_executor(active_context),
+            "filesystem": filesystem_executor(active_context),
+            "repository": repository_executor(active_context),
+        }
+    )
     broker._executors["composite"] = composite_executor_factory(broker)
     return broker
 
@@ -154,17 +249,29 @@ def _resolved_environment(refs: tuple[str, ...]) -> dict[str, str]:
     environment = dict(os.environ)
     for name in refs:
         if name not in os.environ:
-            raise RunnerExecutionError("ENVIRONMENT_REFERENCE_MISSING", name)
+            raise RunnerExecutionError(
+                "ENVIRONMENT_REFERENCE_MISSING",
+                name,
+            )
     return environment
 
 
-def _evaluate_assertions(assertions: tuple[Mapping[str, Any], ...], results: list[StepResult]) -> list[dict[str, Any]]:
+def _evaluate_assertions(
+    assertions: tuple[Mapping[str, Any], ...],
+    results: list[StepResult],
+) -> list[dict[str, Any]]:
     evaluated: list[dict[str, Any]] = []
     for assertion in assertions:
         kind = assertion.get("kind")
         index = assertion.get("step", len(results) - 1)
         if not isinstance(index, int) or index < 0 or index >= len(results):
-            evaluated.append({"kind": kind, "passed": False, "reason": "step_out_of_range"})
+            evaluated.append(
+                {
+                    "kind": kind,
+                    "passed": False,
+                    "reason": "step_out_of_range",
+                }
+            )
             continue
         result = results[index]
         if kind == "exit_code_eq":
@@ -174,7 +281,10 @@ def _evaluate_assertions(assertions: tuple[Mapping[str, Any], ...], results: lis
         elif kind == "output_contains":
             passed = str(assertion.get("value", "")) in str(result.output)
         elif kind == "json_path_eq":
-            passed = _json_path(result.output, assertion.get("path")) == assertion.get("value")
+            passed = (
+                _json_path(result.output, assertion.get("path"))
+                == assertion.get("value")
+            )
         else:
             passed = False
         evaluated.append({"kind": kind, "passed": passed})
