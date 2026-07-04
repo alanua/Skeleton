@@ -21,6 +21,7 @@ from core.mempalace_projection import (
     query_terms,
 )
 from core.private_memory_history import bytes_hash, canonical_json, utc_now
+from core.private_memory_terms import PrivateMemoryTermsError, private_terms
 
 
 MEMPALACE_RESULT_SCHEMA = "skeleton.mempalace_result.v1"
@@ -55,6 +56,10 @@ class LocalMemPalaceIndex:
             value = fact["value"]
             text = _flatten_text(value)
             canonical_ref = str(fact["canonical_ref"])
+            try:
+                tokens = private_terms(text)
+            except PrivateMemoryTermsError:
+                tokens = ()
             documents.append(
                 {
                     "item_id": _item_id(canonical_ref),
@@ -68,7 +73,7 @@ class LocalMemPalaceIndex:
                         "source_kind": "canonical_sqlite",
                         "value_hash": str(fact["value_hash"]),
                     },
-                    "tokens": sorted(set(projection_terms(text))),
+                    "tokens": sorted(set(tokens)),
                     "text": text,
                 }
             )
@@ -106,11 +111,10 @@ class LocalMemPalaceIndex:
             return {"state": "BLOCKED", "indexed_canonical_revision": 0, "item_count": 0, "authoritative": False}
 
     def search(self, *, query: str, limit: int = 5) -> dict[str, object]:
-        if not isinstance(query, str) or not query.strip() or len(query) > 4096:
-            raise MemPalaceAdapterError("INVALID_QUERY", "query must be a bounded non-empty string")
-        terms = set(projection_terms(query))
-        if not terms:
-            raise MemPalaceAdapterError("INVALID_QUERY", "query has no searchable terms")
+        try:
+            terms = set(private_terms(query, max_chars=4096))
+        except PrivateMemoryTermsError as exc:
+            raise MemPalaceAdapterError("INVALID_QUERY", str(exc)) from exc
         limit = _bounded_limit(limit)
         scored = []
         for document in self._index["documents"]:
