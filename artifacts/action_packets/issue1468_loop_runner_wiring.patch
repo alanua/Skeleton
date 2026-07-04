@@ -1,0 +1,443 @@
+--- a/scripts/runner_poll_github_tasks.py
++++ b/scripts/runner_poll_github_tasks.py
+@@ -37,6 +37,10 @@
+ )
+ from core.hermes_memory_adapter import HERMES_MEMORY_RESULT_SCHEMA
+ from core.hermes_worker import run_hermes_memory_task_packet
++from core.loop_controller import LoopPolicy
++from core.loop_engine import LoopEngine
++from core.loop_runner_adapter import run_loop_task_packet
++from core.loop_state_store import LoopStateStore
+ from core.memory_gateway import (
+     MEMORY_GATEWAY_CONTRACT_VERSION,
+     MEMORY_GATEWAY_RESPONSE_SCHEMA,
+@@ -139,6 +143,8 @@
+ PREFLIGHT_PR_REFRESH = "preflight_pr_refresh"
+ HERMES_WORKER_PREFLIGHT = "hermes_worker_preflight"
+ HERMES_MEMORY_GATEWAY_SMOKE = "hermes_memory_gateway_smoke"
++LOOP_ENGINE_PACKET = "loop_engine_packet"
++LOOP_STATE_DB_ENV = "SKELETON_LOOP_STATE_DB"
+ MEMPALACE_SYNTHETIC_RUNTIME_SMOKE = "mempalace_synthetic_runtime_smoke"
+ PRIVATE_MEMORY_HEALTHCHECK = "private_memory_healthcheck"
+ HERMES_PRIVATE_MEMORY_BRIDGE_CHECK = "hermes_private_memory_bridge_check"
+@@ -171,6 +177,7 @@
+         PREFLIGHT_PR_REFRESH,
+         HERMES_WORKER_PREFLIGHT,
+         HERMES_MEMORY_GATEWAY_SMOKE,
++        LOOP_ENGINE_PACKET,
+         MEMPALACE_SYNTHETIC_RUNTIME_SMOKE,
+         PRIVATE_MEMORY_HEALTHCHECK,
+         HERMES_PRIVATE_MEMORY_BRIDGE_CHECK,
+@@ -335,6 +342,7 @@
+ )
+ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
+     {
++        "accepted",
+         "action",
+         "ahead_by",
+         "allowed_files_count",
+@@ -362,6 +370,7 @@
+         "checkout_head_sha",
+         "checkout_path",
+         "checkout_sync_state",
++        "context_hash",
+         "command_unavailable_reason",
+         "compare_ahead_by",
+         "compare_behind_by",
+@@ -371,6 +380,7 @@
+         "current_branch",
+         "decision_records_skipped",
+         "decision_records_written",
++        "decision",
+         "diagnostic_count",
+         "disk_bytes",
+         "draft",
+@@ -378,6 +388,8 @@
+         "draft_pr_url",
+         "dxf_source_count",
+         "error_class",
++        "event",
++        "external_side_effects_executed",
+         "existing_pr_lookup",
+         "existing_pr_url",
+         "expected_branch",
+@@ -458,6 +470,7 @@
+         "project_id",
+         "project_state_existing",
+         "project_state_written",
++        "public_safe",
+         "protected_worktrees_count",
+         "public_safe_report_ok",
+         "quality_score",
+@@ -500,6 +513,7 @@
+         "source_pack_warning_count",
+         "source_token_count",
+         "sourcepack_note",
++        "schema",
+         "status",
+         "status_token",
+         "status_count_approved",
+@@ -508,11 +522,13 @@
+         "success_criteria",
+         "synthetic_corpus_status",
+         "live_private_ingestion",
++        "loop_state",
+         "synthetic_graph_edge_count",
+         "synthetic_graph_node_count",
+         "synthetic_smoke_timeout_seconds",
+         "system",
+         "target_project",
++        "task_id",
+         "target_project_route",
+         "target_repository",
+         "test_summary",
+@@ -525,6 +541,7 @@
+         "unexpected_untracked_files_count",
+         "validated_publish_files",
+         "validated_publish_files_count",
++        "version",
+         "validation_profile",
+         "validation_state",
+         "wall_area_row_count",
+@@ -2968,6 +2985,147 @@
+     )
+ 
+ 
++def _loop_state_db_path() -> tuple[Path | None, str | None]:
++    raw_path = os.environ.get(LOOP_STATE_DB_ENV, "").strip()
++    if not raw_path:
++        return None, "loop_state_db_missing"
++
++    path = Path(raw_path).expanduser()
++    if not path.is_absolute():
++        return None, "loop_state_db_not_absolute"
++    if ".." in path.parts or _path_has_symlink_component(path):
++        return None, "loop_state_db_unsafe"
++
++    resolved = path.resolve(strict=False)
++    if resolved == ROOT or _path_is_relative_to(resolved, ROOT):
++        return None, "loop_state_db_unsafe"
++
++    parent = resolved.parent
++    try:
++        parent_stat = parent.stat()
++    except OSError:
++        return None, "loop_state_db_parent_unavailable"
++    if (
++        not stat.S_ISDIR(parent_stat.st_mode)
++        or parent_stat.st_uid != os.getuid()
++        or not os.access(parent, os.W_OK | os.X_OK)
++    ):
++        return None, "loop_state_db_not_writable"
++
++    if resolved.exists():
++        try:
++            file_stat = resolved.stat()
++        except OSError:
++            return None, "loop_state_db_not_writable"
++        if (
++            not stat.S_ISREG(file_stat.st_mode)
++            or file_stat.st_uid != os.getuid()
++            or not os.access(resolved, os.R_OK | os.W_OK)
++        ):
++            return None, "loop_state_db_not_writable"
++    return resolved, None
++
++
++def _loop_task_packet_from_body(body: str) -> object:
++    task_block = extract_task_block(body)
++    if task_block is None:
++        return {}
++    try:
++        return json.loads(task_block)
++    except json.JSONDecodeError:
++        return {}
++
++
++def _loop_receipt_status_line(key: str, value: object) -> str:
++    if value is None:
++        rendered = "none"
++    elif isinstance(value, bool):
++        rendered = str(value).lower()
++    elif isinstance(value, int) and not isinstance(value, bool):
++        rendered = str(value)
++    elif isinstance(value, str):
++        rendered = value
++    else:
++        rendered = "invalid"
++    return f"{key}={rendered}"
++
++
++def _loop_receipt_report(receipt: object) -> str:
++    task_id = LOOP_ENGINE_PACKET
++    expected_keys = (
++        "schema",
++        "status",
++        "action",
++        "task_id",
++        "run_id",
++        "version",
++        "loop_state",
++        "event",
++        "accepted",
++        "decision",
++        "reason",
++        "context_hash",
++        "public_safe",
++        "external_side_effects_executed",
++    )
++    if not isinstance(receipt, dict) or set(receipt) != set(expected_keys):
++        return _maintenance_report(
++            "BLOCKED", task_id, ["reason=loop_receipt_schema_mismatch"], "not_met"
++        )
++
++    status_lines = [
++        _loop_receipt_status_line(key, receipt.get(key)) for key in expected_keys
++    ]
++    accepted = receipt.get("accepted") is True
++    decision = receipt.get("decision")
++    loop_state = receipt.get("loop_state")
++    receipt_status = receipt.get("status")
++    if not accepted or decision == "REJECT" or receipt_status == "BLOCKED":
++        report_status = "BLOCKED"
++    elif decision in {"ESCALATE", "REVIEW"} or loop_state in {
++        "NEEDS_OPERATOR",
++        "HUMAN_REVIEW",
++    }:
++        report_status = "NEEDS_OPERATOR"
++    elif loop_state in {"BLOCKED", "CANCELLED"}:
++        report_status = "BLOCKED"
++    else:
++        report_status = "DONE"
++    return _maintenance_report(
++        report_status,
++        task_id,
++        status_lines,
++        "met" if report_status == "DONE" else "not_met",
++    )
++
++
++def loop_engine_packet(body: str) -> str:
++    task_id = LOOP_ENGINE_PACKET
++    db_path, reason = _loop_state_db_path()
++    if reason is not None or db_path is None:
++        return _maintenance_report(
++            "BLOCKED",
++            task_id,
++            [f"reason={reason or 'loop_state_db_unavailable'}"],
++            "not_met",
++        )
++
++    packet = _loop_task_packet_from_body(body)
++    try:
++        store = LoopStateStore(db_path)
++        store.initialize()
++        engine = LoopEngine(store, LoopPolicy())
++        receipt = run_loop_task_packet(packet, engine=engine)
++    except Exception:
++        return _maintenance_report(
++            "BLOCKED",
++            task_id,
++            ["reason=loop_engine_packet_failed"],
++            "not_met",
++        )
++    return _loop_receipt_report(receipt)
++
++
+ def _sanitize_maintenance_status_lines(status_lines: list[str]) -> list[str]:
+     sanitized: list[str] = []
+     for line in status_lines:
+@@ -9490,6 +9648,8 @@
+             return hermes_worker_preflight()
+         if task_id == HERMES_MEMORY_GATEWAY_SMOKE:
+             return hermes_memory_gateway_smoke()
++        if task_id == LOOP_ENGINE_PACKET:
++            return loop_engine_packet(body)
+         if task_id == MEMPALACE_SYNTHETIC_RUNTIME_SMOKE:
+             return mempalace_synthetic_runtime_smoke(body)
+         if task_id == PRIVATE_MEMORY_HEALTHCHECK:
+
+--- a/tests/test_runner_poll_github_tasks.py
++++ b/tests/test_runner_poll_github_tasks.py
+@@ -10813,3 +10813,181 @@
+     assert "alanua" in actors
+     assert "github-actions[bot]" in actors
+     assert "skeleton-runner-service" in actors
++
++
++def _loop_engine_issue_body(packet: object) -> str:
++    return "\n".join(
++        (
++            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
++            f"Maintenance Task ID: {runner.LOOP_ENGINE_PACKET}",
++            "```task",
++            json.dumps(packet, sort_keys=True),
++            "```",
++        )
++    )
++
++
++def _loop_engine_packet(action: str, **updates: object) -> dict[str, object]:
++    packet: dict[str, object] = {
++        "schema": "skeleton.loop_runner_packet.v1",
++        "action": action,
++        "task_id": "issue-1468",
++        "run_id": "run-1468",
++        "recorded_at": 1,
++        "public_safe": True,
++        "no_secrets": True,
++        "no_runtime_mutation": True,
++        "authority_boundary": {
++            "operational_state_write": True,
++            "external_side_effects_allowed": False,
++            "runtime_mutation_allowed": False,
++        },
++    }
++    if action == "step":
++        packet.update({"event": "PREPARED", "expected_version": 0})
++    packet.update(updates)
++    return packet
++
++
++def test_loop_engine_packet_missing_db_env_fails_closed() -> None:
++    body = _loop_engine_issue_body(_loop_engine_packet("create"))
++
++    with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
++        runner, "LoopStateStore"
++    ) as store:
++        report = runner.dispatch_runtime_maintenance_task(
++            runner.LOOP_ENGINE_PACKET, str(runner.ROOT), body
++        )
++
++    assert report.startswith("BLOCKED:")
++    assert "reason=loop_state_db_missing" in report
++    assert "success_criteria=not_met" in report
++    store.assert_not_called()
++
++
++@pytest.mark.parametrize("configured_path", ("relative.sqlite", "../unsafe.sqlite"))
++def test_loop_engine_packet_relative_or_unsafe_db_path_fails_closed(
++    configured_path: str,
++) -> None:
++    body = _loop_engine_issue_body(_loop_engine_packet("create"))
++
++    with mock.patch.dict(
++        os.environ, {runner.LOOP_STATE_DB_ENV: configured_path}, clear=False
++    ), mock.patch.object(runner, "LoopStateStore") as store:
++        report = runner.dispatch_runtime_maintenance_task(
++            runner.LOOP_ENGINE_PACKET, str(runner.ROOT), body
++        )
++
++    assert report.startswith("BLOCKED:")
++    assert "success_criteria=not_met" in report
++    assert "reason=loop_state_db_" in report
++    store.assert_not_called()
++
++
++def test_loop_engine_packet_create_and_step_persist_without_model_route(
++    tmp_path: Path,
++) -> None:
++    db_path = tmp_path / "loop-state.sqlite"
++    create_body = _loop_engine_issue_body(_loop_engine_packet("create"))
++    step_body = _loop_engine_issue_body(
++        _loop_engine_packet("step", recorded_at=2, now=2, budget_delta=1)
++    )
++
++    with mock.patch.dict(
++        os.environ, {runner.LOOP_STATE_DB_ENV: str(db_path)}, clear=False
++    ), mock.patch.object(runner, "run_codex_task") as codex:
++        created = runner.dispatch_runtime_maintenance_task(
++            runner.LOOP_ENGINE_PACKET, str(runner.ROOT), create_body
++        )
++        stepped = runner.dispatch_runtime_maintenance_task(
++            runner.LOOP_ENGINE_PACKET, str(runner.ROOT), step_body
++        )
++
++    assert created.startswith("DONE:")
++    assert "status=CREATED" in created
++    assert "loop_state=CREATED" in created
++    assert "version=0" in created
++    assert "external_side_effects_executed=false" in created
++    assert stepped.startswith("DONE:")
++    assert "status=READY" in stepped
++    assert "loop_state=READY" in stepped
++    assert "event=PREPARED" in stepped
++    assert "version=1" in stepped
++    codex.assert_not_called()
++
++
++def test_loop_engine_packet_stale_version_fails_closed(tmp_path: Path) -> None:
++    db_path = tmp_path / "loop-state.sqlite"
++    create_body = _loop_engine_issue_body(_loop_engine_packet("create"))
++    first_step = _loop_engine_issue_body(
++        _loop_engine_packet("step", recorded_at=2)
++    )
++    stale_step = _loop_engine_issue_body(
++        _loop_engine_packet(
++            "step",
++            event="STARTED",
++            expected_version=0,
++            recorded_at=3,
++        )
++    )
++
++    with mock.patch.dict(
++        os.environ, {runner.LOOP_STATE_DB_ENV: str(db_path)}, clear=False
++    ):
++        runner.dispatch_runtime_maintenance_task(
++            runner.LOOP_ENGINE_PACKET, str(runner.ROOT), create_body
++        )
++        runner.dispatch_runtime_maintenance_task(
++            runner.LOOP_ENGINE_PACKET, str(runner.ROOT), first_step
++        )
++        report = runner.dispatch_runtime_maintenance_task(
++            runner.LOOP_ENGINE_PACKET, str(runner.ROOT), stale_step
++        )
++
++    assert report.startswith("BLOCKED:")
++    assert "reason=LOOP_STATE_CONFLICT" in report
++    assert "accepted=false" in report
++    assert "success_criteria=not_met" in report
++
++
++def test_loop_engine_packet_invalid_packet_fails_closed(tmp_path: Path) -> None:
++    db_path = tmp_path / "loop-state.sqlite"
++    body = _loop_engine_issue_body({"schema": "wrong"})
++
++    with mock.patch.dict(
++        os.environ, {runner.LOOP_STATE_DB_ENV: str(db_path)}, clear=False
++    ):
++        report = runner.dispatch_runtime_maintenance_task(
++            runner.LOOP_ENGINE_PACKET, str(runner.ROOT), body
++        )
++
++    assert report.startswith("BLOCKED:")
++    assert "reason=INVALID_LOOP_TASK_PACKET" in report
++    assert "accepted=false" in report
++    assert "external_side_effects_executed=false" in report
++
++
++def test_loop_receipt_status_keys_are_sanitized_and_private_keys_rejected() -> None:
++    accepted = runner._sanitize_maintenance_status_line(
++        "schema=skeleton.loop_runner_result.v1 status=READY action=step "
++        "task_id=issue-1468 run_id=run-1468 version=1 loop_state=READY "
++        "event=PREPARED accepted=true decision=CONTINUE "
++        f"context_hash={'a' * 64} public_safe=true "
++        "external_side_effects_executed=false"
++    )
++
++    assert accepted is not None
++    assert runner._sanitize_maintenance_status_line("private_path=/tmp/private") is None
++    assert runner._sanitize_maintenance_status_line("unexpected_loop_key=value") is None
++
++
++def test_unrelated_runtime_maintenance_dispatch_is_unchanged() -> None:
++    with mock.patch.object(
++        runner, "check_skeleton_freshness", return_value="DONE: unchanged"
++    ) as check:
++        report = runner.dispatch_runtime_maintenance_task(
++            runner.CHECK_SKELETON_FRESHNESS, str(runner.ROOT)
++        )
++
++    assert report == "DONE: unchanged"
++    check.assert_called_once_with()
