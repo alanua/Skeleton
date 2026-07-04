@@ -25,6 +25,8 @@
     "risk_class": {"enum": ["green", "yellow", "red"]},
     "privacy_class": {"enum": ["public", "private", "secret"]},
     "step_count": {"type": "integer", "minimum": 0},
-    "assertion_count": {"type": "integer", "minimum": 0}
+    "assertion_count": {"type": "integer", "minimum": 0},
+    "rollback_status": {"enum": ["DONE", "BLOCKED"]},
+    "rollback_step_count": {"type": "integer", "minimum": 0}
   }
 }
