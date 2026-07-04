@@ -21,7 +21,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: python -m pip install --disable-pip-version-check ".[dev]"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          pytest pyyaml jsonschema
       - run: >-
           python -m pytest -q
           tests/test_governed_runtime.py
@@ -39,5 +41,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: python -m pip install --disable-pip-version-check ".[dev]"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          pytest pyyaml jsonschema
       - run: python -m pytest -q
