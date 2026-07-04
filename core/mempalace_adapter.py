@@ -106,10 +106,11 @@ class LocalMemPalaceIndex:
             return {"state": "BLOCKED", "indexed_canonical_revision": 0, "item_count": 0, "authoritative": False}
 
     def search(self, *, query: str, limit: int = 5) -> dict[str, object]:
-        try:
-            terms = set(query_terms(query))
-        except MemPalaceProjectionError as exc:
-            raise MemPalaceAdapterError(exc.reason_code, str(exc)) from exc
+        if not isinstance(query, str) or not query.strip() or len(query) > 4096:
+            raise MemPalaceAdapterError("INVALID_QUERY", "query must be a bounded non-empty string")
+        terms = set(projection_terms(query))
+        if not terms:
+            raise MemPalaceAdapterError("INVALID_QUERY", "query has no searchable terms")
         limit = _bounded_limit(limit)
         scored = []
         for document in self._index["documents"]:
