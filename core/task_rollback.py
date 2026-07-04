@@ -36,7 +36,10 @@ def execute_rollback(
         executor_class="composite",
         steps=tuple(steps),
         expected_assertions=(),
-        rollback_policy={"mode": "none"},
+        rollback_policy={
+            "mode": "irreversible",
+            "reason": "rollback phase does not recurse",
+        },
         idempotency_key=f"{envelope.idempotency_key}:rollback",
     )
     enforce_task_risk(rollback_envelope)
