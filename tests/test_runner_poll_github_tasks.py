@@ -5139,6 +5139,50 @@ def test_maintenance_report_status_ignores_done_diagnostic_assignment() -> None:
     assert runner.maintenance_report_status(report) == "BLOCKED"
 
 
+def test_home_edge_read_only_diagnostic_reports_aggregate_only() -> None:
+    artifact = {
+        "node": {"node_id": "home-edge-01"},
+        "summary": {
+            "gateway": {"status": "ready"},
+            "route": {"status": "unchanged"},
+            "tailscale": {"status": "healthy"},
+            "modem": {
+                "status": "identified",
+                "observed": {
+                    "state": "locked",
+                    "connection_mode": "ModemManager_NCM",
+                },
+            },
+            "connected_devices": {
+                "observed": {"state": "observed", "count": 7},
+            },
+            "gateway_presence": {"status": "present"},
+            "connectivity_hardware": {"status": "present"},
+        },
+        "private_runtime": {
+            "details": {
+                "network": {
+                    "connected_devices": {
+                        "records": [{"address": "192.0.2.50"}],
+                    },
+                },
+            },
+        },
+    }
+    with mock.patch(
+        "core.home_edge.diagnostics.run_audited_home_edge_command",
+        return_value=artifact,
+    ):
+        report = runner.home_edge_01_read_only_diagnostic()
+
+    assert "maintenance_task_id=home_edge_01_read_only_diagnostic" in report
+    assert "connected_device_count=7" in report
+    assert "gateway_presence=present" in report
+    assert "connectivity_hardware=present" in report
+    assert "192.0.2.50" not in report
+    assert "private_runtime" not in report
+
+
 def test_maintenance_report_status_accepts_single_last_line_status() -> None:
     report = (
         "maintenance_task_id=sync_telegram_callback_poller_runtime\n"

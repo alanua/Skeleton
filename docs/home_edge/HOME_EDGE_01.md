@@ -14,6 +14,9 @@ Controller: private
 The default route is registered only in the private runtime profile. Runtime evidence must
 verify it; repository registration is not treated as a live observation. GitHub reports may
 show only aggregate route status such as `unchanged`, `review_required` or `unverified`.
+Connected-device diagnostics follow the same boundary: public reports may show only a
+connected-device count and gateway or connectivity-hardware presence. Neighbor and
+interface records stay in the private runtime diagnostic artifact.
 
 ## Universal scope
 

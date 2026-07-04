@@ -178,8 +178,18 @@ def run_home_edge_diagnostic(
     )
     if artifact_target is not None:
         artifact_target.parent.mkdir(parents=True, exist_ok=True)
+        persisted_report = _private_runtime_artifact(report, remote)
+        if _path_is_relative_to(
+            artifact_target.resolve(strict=False), ROOT.resolve(strict=False)
+        ):
+            persisted_report = report
         artifact_target.write_text(
-            json.dumps(report, indent=2, sort_keys=True) + "\n",
+            json.dumps(
+                persisted_report,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
             encoding="utf-8",
         )
     return report
@@ -333,6 +343,9 @@ def build_diagnostic_artifact(
             "tailscale": summarize_tailscale(profile, remote),
             "modem": summarize_modem(remote),
             "network": summarize_network(remote),
+            "connected_devices": summarize_connected_devices(remote),
+            "gateway_presence": summarize_gateway_presence(remote),
+            "connectivity_hardware": summarize_connectivity_hardware(remote),
             "hardware": summarize_hardware(remote),
             "capability_inventory": summarize_capabilities(profile, remote),
             "next_prepared_action": prepared_runtime_bootstrap(),
@@ -383,6 +396,85 @@ def summarize_network(remote: dict[str, Any] | None) -> dict[str, Any]:
         "status": "observed" if isinstance(remote, dict) else "unverified",
         "route": "aggregate_only",
         "tailscale": "aggregate_only",
+        "connected_devices": "aggregate_only",
+        "gateway_presence": "aggregate_only",
+        "connectivity_hardware": "aggregate_only",
+    }
+
+
+def summarize_connected_devices(remote: dict[str, Any] | None) -> dict[str, Any]:
+    devices = (
+        _dig(remote, "network", "connected_devices")
+        if isinstance(remote, dict)
+        else None
+    )
+    if not isinstance(devices, dict):
+        return {
+            "status": "unverified",
+            "evidence": "unverified",
+            "observed": {"state": "unverified"},
+        }
+    count = devices.get("count")
+    return {
+        "status": "observed",
+        "evidence": "observed",
+        "observed": {
+            "state": "observed",
+            "count": count if isinstance(count, int) else 0,
+        },
+    }
+
+
+def summarize_gateway_presence(remote: dict[str, Any] | None) -> dict[str, Any]:
+    gateway = (
+        _dig(remote, "network", "gateway_presence")
+        if isinstance(remote, dict)
+        else None
+    )
+    if not isinstance(gateway, dict):
+        return {
+            "status": "unverified",
+            "evidence": "unverified",
+            "observed": {"state": "unverified"},
+        }
+    present = bool(gateway.get("present"))
+    return {
+        "status": "present" if present else "not_present",
+        "evidence": "observed",
+        "observed": {
+            "state": "observed",
+            "present": present,
+            "neighbor_state": str(gateway.get("neighbor_state") or "unknown"),
+        },
+    }
+
+
+def summarize_connectivity_hardware(remote: dict[str, Any] | None) -> dict[str, Any]:
+    hardware = (
+        _dig(remote, "hardware", "connectivity")
+        if isinstance(remote, dict)
+        else None
+    )
+    if not isinstance(hardware, dict):
+        return {
+            "status": "unverified",
+            "evidence": "unverified",
+            "observed": {"state": "unverified"},
+        }
+    present = bool(hardware.get("present"))
+    interface_count = hardware.get("interface_count")
+    return {
+        "status": "present" if present else "not_present",
+        "evidence": "observed",
+        "observed": {
+            "state": "observed",
+            "present": present,
+            "interface_count": interface_count if isinstance(interface_count, int) else 0,
+            "default_route_interface_present": bool(
+                hardware.get("default_route_interface_present")
+            ),
+            "usb_modem_present": bool(hardware.get("usb_modem_present")),
+        },
     }
 
 
@@ -496,14 +588,32 @@ def compact_status(artifact: dict[str, Any]) -> dict[str, str]:
     modem = summary.get("modem", {}) if isinstance(summary, dict) else {}
     route = summary.get("route", {}) if isinstance(summary, dict) else {}
     tailscale = summary.get("tailscale", {}) if isinstance(summary, dict) else {}
+    connected_devices = (
+        summary.get("connected_devices", {}) if isinstance(summary, dict) else {}
+    )
+    gateway_presence = (
+        summary.get("gateway_presence", {}) if isinstance(summary, dict) else {}
+    )
+    connectivity_hardware = (
+        summary.get("connectivity_hardware", {}) if isinstance(summary, dict) else {}
+    )
     modem_observed = modem.get("observed") if isinstance(modem, dict) else None
     observed = modem_observed if isinstance(modem_observed, dict) else {}
+    device_observed = (
+        connected_devices.get("observed") if isinstance(connected_devices, dict) else None
+    )
+    device_data = device_observed if isinstance(device_observed, dict) else {}
     return {
         "node": str(artifact.get("node", {}).get("node_id", PUBLIC_NODE_ID)),
         "gateway_status": str(gateway.get("status", "unverified")),
         "route_status": str(route.get("status", "unverified")),
         "tailscale_status": str(tailscale.get("status", "unverified")),
         "modem_status": str(modem.get("status", "unverified")),
+        "connected_device_count": str(device_data.get("count", "unverified")),
+        "gateway_presence": str(gateway_presence.get("status", "unverified")),
+        "connectivity_hardware": str(
+            connectivity_hardware.get("status", "unverified")
+        ),
         "modem_lock_state": str(observed.get("state", "unverified")).replace(" ", "_"),
         "connection_mode": str(observed.get("connection_mode", "unverified")),
     }
@@ -576,6 +686,19 @@ def _public_runtime(remote: dict[str, Any] | None) -> dict[str, Any] | None:
             str(key): _domain_status(value) for key, value in sorted(remote.items())
         },
     }
+
+
+def _private_runtime_artifact(
+    public_artifact: dict[str, Any], remote: dict[str, Any] | None
+) -> dict[str, Any]:
+    artifact = dict(public_artifact)
+    if isinstance(remote, dict):
+        artifact["private_runtime"] = {
+            "schema": "skeleton.home_edge.private_runtime.v1",
+            "privacy": "private_runtime_artifact_only",
+            "details": _redact(remote),
+        }
+    return artifact
 
 
 def _dig(data: dict[str, Any] | None, *keys: str) -> Any:
@@ -651,6 +774,104 @@ def default_route():
     text = run(["ip", "route", "show", "default"])["stdout"]
     match = re.search(r"default via (?P<gateway>\S+) dev (?P<dev>\S+)", text)
     return {"dev": match.group("dev") if match else None, "gateway": match.group("gateway") if match else None}
+
+
+def connected_devices(default_gateway=None):
+    rows = first_json(["ip", "-j", "neigh", "show"])
+    records = []
+    if isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            records.append({
+                "address": row.get("dst"),
+                "interface": row.get("dev"),
+                "hardware_address": row.get("lladdr"),
+                "state": row.get("state"),
+            })
+    else:
+        text = run(["ip", "neigh", "show"])["stdout"]
+        for line in text.splitlines():
+            parts = line.split()
+            if not parts:
+                continue
+            record = {
+                "address": parts[0],
+                "interface": None,
+                "hardware_address": None,
+                "state": None,
+            }
+            if "dev" in parts:
+                dev_index = parts.index("dev") + 1
+                if dev_index < len(parts):
+                    record["interface"] = parts[dev_index]
+            if "lladdr" in parts:
+                lladdr_index = parts.index("lladdr") + 1
+                if lladdr_index < len(parts):
+                    record["hardware_address"] = parts[lladdr_index]
+            if parts[-1].isupper():
+                record["state"] = parts[-1]
+            records.append(record)
+    state_counts = {}
+    gateway_record = None
+    for record in records:
+        state = str(record.get("state") or "unknown")
+        state_counts[state] = state_counts.get(state, 0) + 1
+        if default_gateway and record.get("address") == default_gateway:
+            gateway_record = record
+    return {
+        "count": len(records),
+        "state_counts": state_counts,
+        "gateway_record": gateway_record,
+        "records": records,
+    }
+
+
+def connectivity_hardware(default_dev=None, usb_modem_present=False):
+    interfaces = []
+    for path in sorted(glob.glob("/sys/class/net/*")):
+        name = os.path.basename(path)
+        if name == "lo":
+            continue
+        try:
+            real_path = os.path.realpath(path)
+            with open(os.path.join(path, "operstate"), encoding="utf-8") as handle:
+                operstate = handle.read().strip()
+            with open(os.path.join(path, "address"), encoding="utf-8") as handle:
+                mac = handle.read().strip()
+        except Exception:
+            real_path = path
+            operstate = "unknown"
+            mac = None
+        interfaces.append({
+            "interface": name,
+            "operstate": operstate,
+            "hardware_address": mac,
+            "wireless": os.path.isdir(os.path.join(path, "wireless")),
+            "usb_backed": "/usb" in real_path,
+            "virtual": real_path.startswith("/sys/devices/virtual/"),
+            "default_route_interface": name == default_dev,
+        })
+    return {
+        "present": bool(interfaces or usb_modem_present),
+        "interface_count": len(interfaces),
+        "default_route_interface_present": any(
+            item["default_route_interface"] for item in interfaces
+        ),
+        "usb_modem_present": bool(usb_modem_present),
+        "records": interfaces,
+    }
+
+
+def gateway_presence(route, devices):
+    gateway = route.get("gateway") if isinstance(route, dict) else None
+    gateway_record = devices.get("gateway_record") if isinstance(devices, dict) else None
+    state = gateway_record.get("state") if isinstance(gateway_record, dict) else None
+    return {
+        "present": bool(gateway),
+        "neighbor_observed": isinstance(gateway_record, dict),
+        "neighbor_state": state,
+    }
 
 
 def tailscale_status():
@@ -735,6 +956,11 @@ def modem_inventory():
 tools = tool_inventory()
 browser = browser_inventory()
 hardware = hardware_inventory()
+route = default_route()
+devices = connected_devices(route.get("gateway"))
+hardware["connectivity"] = connectivity_hardware(
+    route.get("dev"), hardware["huawei_e3372"]["present"]
+)
 disk = shutil.disk_usage("/")
 containers = {"available": tools["docker"]["present"], "running_count": None}
 if containers["available"]:
@@ -748,7 +974,12 @@ report = {
         "memory": run(["sh", "-c", "grep -E '^(MemTotal|MemAvailable|SwapTotal|SwapFree):' /proc/meminfo"])["stdout"].splitlines(),
         "root_disk": {"total_bytes": disk.total, "used_bytes": disk.used, "free_bytes": disk.free},
     },
-    "network": {"default_route": default_route(), "route_to_controller": False},
+    "network": {
+        "default_route": route,
+        "route_to_controller": False,
+        "connected_devices": devices,
+        "gateway_presence": gateway_presence(route, devices),
+    },
     "tailscale": tailscale_status(),
     "tools": tools,
     "services": service_inventory(),

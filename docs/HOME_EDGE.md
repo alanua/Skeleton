@@ -31,7 +31,9 @@ Runtime diagnostic artifacts are private by default. The CLI runs without persis
 an artifact path is explicitly supplied. Every profile source other than
 `synthetic_template` is rejected if the artifact path resolves to the repository root or any
 descendant, even when local profile or environment override values match the public template.
-The public checkout may only contain synthetic templates and aggregate statuses.
+The public checkout may only contain synthetic templates and aggregate statuses. Detailed
+neighbor and connectivity-interface records are written only to the private runtime artifact
+when an ignored/private artifact path is supplied.
 
 ## Audited actions
 
@@ -63,7 +65,8 @@ successful remote probe are `observed`. Values that could not be probed are `unv
 Registered values are never copied into observed fields. Hostnames, controller identity, SSH
 users, Tailscale or LAN addresses, gateway or interface values, paths, credentials,
 subscriber identifiers and raw host inventory remain local/private and are not reported to
-GitHub.
+GitHub. Public Home Edge diagnostic output may include only aggregate connected-device
+counts plus gateway and connectivity-hardware presence states.
 
 ## Two-stage deployment
 

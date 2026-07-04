@@ -33,9 +33,62 @@ class FakeTransport:
 def sample_remote(*, modem_present: bool = True) -> dict:
     return {
         "system": {"hostname": "home-edge-01", "kernel": "test"},
-        "network": {"default_route": {"dev": "test-lan0", "gateway": "192.0.2.254"}},
+        "network": {
+            "default_route": {"dev": "test-lan0", "gateway": "192.0.2.254"},
+            "connected_devices": {
+                "count": 2,
+                "state_counts": {"REACHABLE": 1, "STALE": 1},
+                "gateway_record": {
+                    "address": "192.0.2.254",
+                    "interface": "test-lan0",
+                    "hardware_address": "00:11:22:33:44:55",
+                    "state": "REACHABLE",
+                },
+                "records": [
+                    {
+                        "address": "192.0.2.254",
+                        "interface": "test-lan0",
+                        "hardware_address": "00:11:22:33:44:55",
+                        "state": "REACHABLE",
+                    },
+                    {
+                        "address": "192.0.2.10",
+                        "interface": "test-lan0",
+                        "hardware_address": "00:11:22:33:44:66",
+                        "state": "STALE",
+                    },
+                ],
+            },
+            "gateway_presence": {
+                "present": True,
+                "neighbor_observed": True,
+                "neighbor_state": "REACHABLE",
+            },
+        },
         "tailscale": {"self_ips": ["100.64.10.74"], "json_available": True},
-        "hardware": {"huawei_e3372": {"present": modem_present, "usb_id": "12d1:1506" if modem_present else None}},
+        "hardware": {
+            "huawei_e3372": {
+                "present": modem_present,
+                "usb_id": "12d1:1506" if modem_present else None,
+            },
+            "connectivity": {
+                "present": True,
+                "interface_count": 1,
+                "default_route_interface_present": True,
+                "usb_modem_present": modem_present,
+                "records": [
+                    {
+                        "interface": "test-lan0",
+                        "operstate": "up",
+                        "hardware_address": "00:11:22:33:44:55",
+                        "wireless": False,
+                        "usb_backed": False,
+                        "virtual": False,
+                        "default_route_interface": True,
+                    }
+                ],
+            },
+        },
         "modemmanager": {
             "modem": {"model": "E3372", "state": "locked", "sim_present": True},
             "ports": {"net": "test-net0", "serial": ["port-a", "port-b"], "control": "control-a"},
@@ -65,9 +118,20 @@ def test_observed_diagnostic_writes_private_artifact(tmp_path: Path) -> None:
     assert artifact["summary"]["route"]["status"] == "unchanged"
     assert artifact["summary"]["tailscale"]["status"] == "healthy"
     assert artifact["summary"]["modem"]["status"] == "identified"
+    assert artifact["summary"]["connected_devices"]["observed"]["count"] == 2
+    assert artifact["summary"]["gateway_presence"]["status"] == "present"
+    assert artifact["summary"]["connectivity_hardware"]["status"] == "present"
     assert artifact["node"]["target_user"] == "private"
     assert artifact["summary"]["gateway"]["target"]["value"] == "private_home_edge"
-    assert json.loads(artifact_path.read_text(encoding="utf-8"))["schema"] == "skeleton.home_edge.diagnostic.v2"
+    written = json.loads(artifact_path.read_text(encoding="utf-8"))
+    assert written["schema"] == "skeleton.home_edge.diagnostic.v2"
+    assert written["private_runtime"]["details"]["network"]["connected_devices"]["count"] == 2
+    assert (
+        written["private_runtime"]["details"]["hardware"]["connectivity"]["records"][0][
+            "interface"
+        ]
+        == "[redacted]"
+    )
 
 
 def test_default_run_has_no_persistence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -87,6 +151,9 @@ def test_unavailable_runtime_has_no_profile_fallback(tmp_path: Path) -> None:
     assert artifact["summary"]["route"]["observed"] == {"state": "unverified"}
     assert artifact["summary"]["tailscale"]["observed"] == {"state": "unverified"}
     assert artifact["summary"]["modem"]["observed"] is None
+    assert artifact["summary"]["connected_devices"]["observed"] == {"state": "unverified"}
+    assert artifact["summary"]["gateway_presence"]["status"] == "unverified"
+    assert artifact["summary"]["connectivity_hardware"]["status"] == "unverified"
 
 
 def test_modem_absence_is_optional_observed_capability() -> None:
@@ -196,6 +263,8 @@ def test_public_artifact_excludes_raw_runtime_inventory(tmp_path: Path) -> None:
     assert "192.0.2.254" not in payload
     assert "test-lan0" not in payload
     assert "test-net0" not in payload
+    assert "00:11:22:33:44:55" not in payload
+    assert "private_runtime" not in payload
 
 
 def test_operator_report_and_compact_status_are_stable() -> None:
@@ -208,6 +277,9 @@ def test_operator_report_and_compact_status_are_stable() -> None:
     assert compact["route_status"] == "unchanged"
     assert compact["tailscale_status"] == "healthy"
     assert compact["modem_status"] == "identified"
+    assert compact["connected_device_count"] == "2"
+    assert compact["gateway_presence"] == "present"
+    assert compact["connectivity_hardware"] == "present"
     assert compact["modem_lock_state"] == "locked"
 
 
