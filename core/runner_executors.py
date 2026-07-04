@@ -210,6 +210,6 @@ def _safe_path(root: Path, relative: object) -> Path:
     except ValueError as exc:
         raise RunnerExecutionError(
             "PATH_OUTSIDE_REGISTERED_ROOT",
-            relative,
+            "path is outside registered root",
         ) from exc
     return candidate
