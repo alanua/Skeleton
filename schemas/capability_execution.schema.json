@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Skeleton Runner Execution Result",
+  "type": "object",
+  "required": [
+    "schema",
+    "task_id",
+    "envelope_hash",
+    "executor_class",
+    "status",
+    "step_results",
+    "assertions",
+    "public_receipt"
+  ],
+  "properties": {
+    "schema": {"const": "skeleton.runner.execution_result.v1"},
+    "task_id": {"type": "string"},
+    "envelope_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "executor_class": {"type": "string"},
+    "status": {"enum": ["DONE", "BLOCKED"]},
+    "step_results": {"type": "array"},
+    "assertions": {"type": "array"},
+    "public_receipt": {"type": "object"}
+  }
+}
