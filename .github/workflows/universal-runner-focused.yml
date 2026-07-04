@@ -30,6 +30,7 @@ jobs:
           tests/test_task_rollback.py
           tests/test_runtime_context_loader.py
           tests/test_task_envelope_queue.py
+          tests/test_runner_poll_universal_tasks.py
           tests/test_isolated_process_executor.py
           tests/test_task_risk_policy.py
           tests/test_task_reference.py
