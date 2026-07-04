@@ -110,8 +110,11 @@ def parse_task_envelope(data: Mapping[str, Any]) -> TaskEnvelope:
     second_stage_approved = approval_data.get("second_stage_approved") is True
     approval = Approval(operator_approved, approval_id, second_stage_approved)
 
-    if risk_class in {"yellow", "red"} and not operator_approved:
-        raise TaskEnvelopeError("operator approval is required")
+    if risk_class in {"yellow", "red"}:
+        if not operator_approved:
+            raise TaskEnvelopeError("operator approval is required")
+        if approval_id is None:
+            raise TaskEnvelopeError("approval_id is required for mutating tasks")
     if risk_class == "red" and not second_stage_approved:
         raise TaskEnvelopeError("second-stage approval is required")
 
