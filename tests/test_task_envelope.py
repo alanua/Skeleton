@@ -37,6 +37,7 @@ def test_parse_operator_approved_envelope() -> None:
     assert parsed.executor_class == "network.http"
     assert parsed.risk_class == "yellow"
     assert parsed.approval.operator_approved is True
+    assert parsed.approval.approval_id == "approval-001"
     assert len(parsed.canonical_hash) == 64
 
 
@@ -50,6 +51,19 @@ def test_yellow_requires_operator_approval() -> None:
     )
 
     with pytest.raises(TaskEnvelopeError, match="operator approval"):
+        parse_task_envelope(candidate)
+
+
+def test_yellow_requires_exact_approval_reference() -> None:
+    candidate = envelope(
+        approval={
+            "operator_approved": True,
+            "approval_id": None,
+            "second_stage_approved": False,
+        }
+    )
+
+    with pytest.raises(TaskEnvelopeError, match="approval_id"):
         parse_task_envelope(candidate)
 
 
