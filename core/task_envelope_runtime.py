@@ -10,6 +10,7 @@ from typing import Any, Iterator, Mapping
 from core.runner_execution_broker import default_broker
 from core.runner_executors import ExecutionContext
 from core.task_envelope import TaskEnvelope, parse_task_envelope
+from core.task_risk_policy import enforce_task_risk
 
 
 class TaskEnvelopeRuntimeError(RuntimeError):
@@ -33,11 +34,12 @@ def execute_task_envelope_file(
     if not isinstance(raw, Mapping):
         raise TaskEnvelopeRuntimeError("envelope JSON must be an object")
     envelope = parse_task_envelope(raw)
+    enforce_task_risk(envelope)
     active_context = context or ExecutionContext(
         targets={},
         entrypoints={},
         roots={},
-        environment=dict(os.environ),
+        environment={},
     )
 
     if idempotency_dir is None:
