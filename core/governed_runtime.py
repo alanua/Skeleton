@@ -4,11 +4,11 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
+from core.governed_task_executor import execute_governed_task
 from core.private_json_store import write_private_json
 from core.runner_executors import ExecutionContext
 from core.runtime_key_lock import runtime_key_lock
 from core.runtime_receipt_cache import RuntimeReceiptCache
-from core.secure_task_execution import execute_governed_task
 from core.task_envelope import parse_task_envelope
 
 
