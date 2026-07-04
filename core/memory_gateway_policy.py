@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from copy import deepcopy
 from typing import Any, Mapping
@@ -39,20 +40,13 @@ GRAPH_RESULT_NOT_CANON_CONFIRMED = "GRAPH_RESULT_NOT_CANON_CONFIRMED"
 STALE_INDEX_RESULT_NOT_PATCH_ELIGIBLE = "STALE_INDEX_RESULT_NOT_PATCH_ELIGIBLE"
 EXACT_CONFIRMATION_REVISION_MISMATCH = "EXACT_CONFIRMATION_REVISION_MISMATCH"
 
+MAX_PUBLIC_PAYLOAD_DEPTH = 32
+MAX_PUBLIC_PAYLOAD_NODES = 10_000
+MAX_PUBLIC_PAYLOAD_KEYS = 5_000
+MAX_PUBLIC_STRING_BYTES = 1_048_576
+MAX_PUBLIC_KEY_BYTES = 4_096
+
 _SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
-_FORBIDDEN_PUBLIC_MARKERS = (
-    "file:",
-    "/home/",
-    "/tmp/",
-    "\\users\\",
-    ".sqlite",
-    ".db",
-    "secret",
-    "token",
-    "password",
-    "credential",
-    "private-value",
-)
 
 
 class MemoryGatewayPolicyError(ValueError):
@@ -95,8 +89,16 @@ def validate_namespace(namespace: object, *, allowed_namespaces: frozenset[str])
 
 
 def validate_public_payload(value: Any) -> Any:
+    """Validate bounded JSON structure without inspecting words or topics.
+
+    Memory content is never rejected because of lexical markers, path-like text,
+    file extensions, or subject matter. Public safety must be enforced by the
+    producing operation's explicit response schema and authorization boundary.
+    """
+
     sanitized = deepcopy(value)
-    _reject_unsafe_public_value(sanitized, "payload")
+    counters = {"nodes": 0, "keys": 0, "string_bytes": 0}
+    _validate_bounded_json(sanitized, path="payload", depth=0, counters=counters)
     return sanitized
 
 
@@ -112,35 +114,49 @@ def sanitized_reason_code(reason_code: object) -> str:
     return reason_code
 
 
-def _reject_unsafe_public_value(value: Any, path: str) -> None:
+def _validate_bounded_json(
+    value: Any,
+    *,
+    path: str,
+    depth: int,
+    counters: dict[str, int],
+) -> None:
+    if depth > MAX_PUBLIC_PAYLOAD_DEPTH:
+        raise MemoryGatewayPolicyError("PUBLIC_PAYLOAD_LIMIT_EXCEEDED", f"{path} exceeds maximum depth")
+
+    counters["nodes"] += 1
+    if counters["nodes"] > MAX_PUBLIC_PAYLOAD_NODES:
+        raise MemoryGatewayPolicyError("PUBLIC_PAYLOAD_LIMIT_EXCEEDED", "payload exceeds maximum node count")
+
     if isinstance(value, Mapping):
+        counters["keys"] += len(value)
+        if counters["keys"] > MAX_PUBLIC_PAYLOAD_KEYS:
+            raise MemoryGatewayPolicyError("PUBLIC_PAYLOAD_LIMIT_EXCEEDED", "payload exceeds maximum key count")
         for key, child in value.items():
-            if not isinstance(key, str) or not _SAFE_TOKEN_RE.fullmatch(key):
-                raise MemoryGatewayPolicyError("UNSAFE_PUBLIC_PAYLOAD", f"{path} contains unsafe key")
-            if key.lower() in {
-                "content",
-                "raw_content",
-                "raw_path",
-                "local_path",
-                "path",
-                "secret",
-                "token",
-                "password",
-                "credential",
-                "storage_api",
-            }:
-                raise MemoryGatewayPolicyError("UNSAFE_PUBLIC_PAYLOAD", f"{path} contains unsafe field")
-            _reject_unsafe_public_value(child, f"{path}.{key}")
+            if not isinstance(key, str):
+                raise MemoryGatewayPolicyError("UNSAFE_PUBLIC_PAYLOAD", f"{path} contains non-string key")
+            if len(key.encode("utf-8")) > MAX_PUBLIC_KEY_BYTES:
+                raise MemoryGatewayPolicyError("PUBLIC_PAYLOAD_LIMIT_EXCEEDED", f"{path} contains oversized key")
+            _validate_bounded_json(child, path=f"{path}[{key!r}]", depth=depth + 1, counters=counters)
         return
+
     if isinstance(value, list):
         for index, child in enumerate(value):
-            _reject_unsafe_public_value(child, f"{path}[{index}]")
+            _validate_bounded_json(child, path=f"{path}[{index}]", depth=depth + 1, counters=counters)
         return
-    if value is None or isinstance(value, (bool, int, float)):
+
+    if value is None or isinstance(value, (bool, int)):
         return
+
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise MemoryGatewayPolicyError("UNSAFE_PUBLIC_PAYLOAD", f"{path} contains non-finite number")
+        return
+
     if isinstance(value, str):
-        lowered = value.lower()
-        if any(marker in lowered for marker in _FORBIDDEN_PUBLIC_MARKERS):
-            raise MemoryGatewayPolicyError("UNSAFE_PUBLIC_PAYLOAD", f"{path} contains private-looking value")
+        counters["string_bytes"] += len(value.encode("utf-8"))
+        if counters["string_bytes"] > MAX_PUBLIC_STRING_BYTES:
+            raise MemoryGatewayPolicyError("PUBLIC_PAYLOAD_LIMIT_EXCEEDED", "payload exceeds maximum string bytes")
         return
+
     raise MemoryGatewayPolicyError("UNSAFE_PUBLIC_PAYLOAD", f"{path} is not JSON-safe")
