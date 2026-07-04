@@ -37,6 +37,10 @@ from core.hermes_private_memory import (
 )
 from core.hermes_memory_adapter import HERMES_MEMORY_RESULT_SCHEMA
 from core.hermes_worker import run_hermes_memory_task_packet
+from core.loop_controller import LoopPolicy
+from core.loop_engine import LoopEngine
+from core.loop_runner_adapter import run_loop_task_packet
+from core.loop_state_store import LoopStateStore
 from core.memory_gateway import (
     MEMORY_GATEWAY_CONTRACT_VERSION,
     MEMORY_GATEWAY_RESPONSE_SCHEMA,
@@ -139,6 +143,8 @@ VALIDATE_PR_BRANCH = "validate_pr_branch"
 PREFLIGHT_PR_REFRESH = "preflight_pr_refresh"
 HERMES_WORKER_PREFLIGHT = "hermes_worker_preflight"
 HERMES_MEMORY_GATEWAY_SMOKE = "hermes_memory_gateway_smoke"
+LOOP_ENGINE_PACKET = "loop_engine_packet"
+LOOP_STATE_DB_ENV = "SKELETON_LOOP_STATE_DB"
 MEMPALACE_SYNTHETIC_RUNTIME_SMOKE = "mempalace_synthetic_runtime_smoke"
 PRIVATE_MEMORY_HEALTHCHECK = "private_memory_healthcheck"
 HERMES_PRIVATE_MEMORY_BRIDGE_CHECK = "hermes_private_memory_bridge_check"
@@ -171,6 +177,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         PREFLIGHT_PR_REFRESH,
         HERMES_WORKER_PREFLIGHT,
         HERMES_MEMORY_GATEWAY_SMOKE,
+        LOOP_ENGINE_PACKET,
         MEMPALACE_SYNTHETIC_RUNTIME_SMOKE,
         PRIVATE_MEMORY_HEALTHCHECK,
         HERMES_PRIVATE_MEMORY_BRIDGE_CHECK,
@@ -335,6 +342,7 @@ _MAINTENANCE_FORBIDDEN_STATUS_KEYS = frozenset(
 )
 _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
     {
+        "accepted",
         "action",
         "ahead_by",
         "allowed_files_count",
@@ -362,6 +370,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "checkout_head_sha",
         "checkout_path",
         "checkout_sync_state",
+        "context_hash",
         "command_unavailable_reason",
         "compare_ahead_by",
         "compare_behind_by",
@@ -371,6 +380,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "current_branch",
         "decision_records_skipped",
         "decision_records_written",
+        "decision",
         "diagnostic_count",
         "disk_bytes",
         "draft",
@@ -378,6 +388,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "draft_pr_url",
         "dxf_source_count",
         "error_class",
+        "event",
+        "external_side_effects_executed",
         "existing_pr_lookup",
         "existing_pr_url",
         "expected_branch",
@@ -458,6 +470,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "project_id",
         "project_state_existing",
         "project_state_written",
+        "public_safe",
         "protected_worktrees_count",
         "public_safe_report_ok",
         "quality_score",
@@ -500,6 +513,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "source_pack_warning_count",
         "source_token_count",
         "sourcepack_note",
+        "schema",
         "status",
         "status_token",
         "status_count_approved",
@@ -508,11 +522,13 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "success_criteria",
         "synthetic_corpus_status",
         "live_private_ingestion",
+        "loop_state",
         "synthetic_graph_edge_count",
         "synthetic_graph_node_count",
         "synthetic_smoke_timeout_seconds",
         "system",
         "target_project",
+        "task_id",
         "target_project_route",
         "target_repository",
         "test_summary",
@@ -525,6 +541,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "unexpected_untracked_files_count",
         "validated_publish_files",
         "validated_publish_files_count",
+        "version",
         "validation_profile",
         "validation_state",
         "wall_area_row_count",
@@ -2966,6 +2983,147 @@ def _maintenance_report(
             f"success_criteria={success_criteria}",
         )
     )
+
+
+def _loop_state_db_path() -> tuple[Path | None, str | None]:
+    raw_path = os.environ.get(LOOP_STATE_DB_ENV, "").strip()
+    if not raw_path:
+        return None, "loop_state_db_missing"
+
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        return None, "loop_state_db_not_absolute"
+    if ".." in path.parts or _path_has_symlink_component(path):
+        return None, "loop_state_db_unsafe"
+
+    resolved = path.resolve(strict=False)
+    if resolved == ROOT or _path_is_relative_to(resolved, ROOT):
+        return None, "loop_state_db_unsafe"
+
+    parent = resolved.parent
+    try:
+        parent_stat = parent.stat()
+    except OSError:
+        return None, "loop_state_db_parent_unavailable"
+    if (
+        not stat.S_ISDIR(parent_stat.st_mode)
+        or parent_stat.st_uid != os.getuid()
+        or not os.access(parent, os.W_OK | os.X_OK)
+    ):
+        return None, "loop_state_db_not_writable"
+
+    if resolved.exists():
+        try:
+            file_stat = resolved.stat()
+        except OSError:
+            return None, "loop_state_db_not_writable"
+        if (
+            not stat.S_ISREG(file_stat.st_mode)
+            or file_stat.st_uid != os.getuid()
+            or not os.access(resolved, os.R_OK | os.W_OK)
+        ):
+            return None, "loop_state_db_not_writable"
+    return resolved, None
+
+
+def _loop_task_packet_from_body(body: str) -> object:
+    task_block = extract_task_block(body)
+    if task_block is None:
+        return {}
+    try:
+        return json.loads(task_block)
+    except json.JSONDecodeError:
+        return {}
+
+
+def _loop_receipt_status_line(key: str, value: object) -> str:
+    if value is None:
+        rendered = "none"
+    elif isinstance(value, bool):
+        rendered = str(value).lower()
+    elif isinstance(value, int) and not isinstance(value, bool):
+        rendered = str(value)
+    elif isinstance(value, str):
+        rendered = value
+    else:
+        rendered = "invalid"
+    return f"{key}={rendered}"
+
+
+def _loop_receipt_report(receipt: object) -> str:
+    task_id = LOOP_ENGINE_PACKET
+    expected_keys = (
+        "schema",
+        "status",
+        "action",
+        "task_id",
+        "run_id",
+        "version",
+        "loop_state",
+        "event",
+        "accepted",
+        "decision",
+        "reason",
+        "context_hash",
+        "public_safe",
+        "external_side_effects_executed",
+    )
+    if not isinstance(receipt, dict) or set(receipt) != set(expected_keys):
+        return _maintenance_report(
+            "BLOCKED", task_id, ["reason=loop_receipt_schema_mismatch"], "not_met"
+        )
+
+    status_lines = [
+        _loop_receipt_status_line(key, receipt.get(key)) for key in expected_keys
+    ]
+    accepted = receipt.get("accepted") is True
+    decision = receipt.get("decision")
+    loop_state = receipt.get("loop_state")
+    receipt_status = receipt.get("status")
+    if not accepted or decision == "REJECT" or receipt_status == "BLOCKED":
+        report_status = "BLOCKED"
+    elif decision in {"ESCALATE", "REVIEW"} or loop_state in {
+        "NEEDS_OPERATOR",
+        "HUMAN_REVIEW",
+    }:
+        report_status = "NEEDS_OPERATOR"
+    elif loop_state in {"BLOCKED", "CANCELLED"}:
+        report_status = "BLOCKED"
+    else:
+        report_status = "DONE"
+    return _maintenance_report(
+        report_status,
+        task_id,
+        status_lines,
+        "met" if report_status == "DONE" else "not_met",
+    )
+
+
+def loop_engine_packet(body: str) -> str:
+    task_id = LOOP_ENGINE_PACKET
+    db_path, reason = _loop_state_db_path()
+    if reason is not None or db_path is None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [f"reason={reason or 'loop_state_db_unavailable'}"],
+            "not_met",
+        )
+
+    packet = _loop_task_packet_from_body(body)
+    try:
+        store = LoopStateStore(db_path)
+        store.initialize()
+        engine = LoopEngine(store, LoopPolicy())
+        receipt = run_loop_task_packet(packet, engine=engine)
+    except Exception:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            ["reason=loop_engine_packet_failed"],
+            "not_met",
+        )
+    return _loop_receipt_report(receipt)
 
 
 def _sanitize_maintenance_status_lines(status_lines: list[str]) -> list[str]:
@@ -9490,6 +9648,8 @@ def dispatch_runtime_maintenance_task(
             return hermes_worker_preflight()
         if task_id == HERMES_MEMORY_GATEWAY_SMOKE:
             return hermes_memory_gateway_smoke()
+        if task_id == LOOP_ENGINE_PACKET:
+            return loop_engine_packet(body)
         if task_id == MEMPALACE_SYNTHETIC_RUNTIME_SMOKE:
             return mempalace_synthetic_runtime_smoke(body)
         if task_id == PRIVATE_MEMORY_HEALTHCHECK:
