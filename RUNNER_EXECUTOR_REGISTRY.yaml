@@ -1,0 +1,22 @@
+version: "1.0.0"
+executor_classes:
+  local.process:
+    status: available
+  remote.ssh:
+    status: available
+  network.http:
+    status: available
+  python.entrypoint:
+    status: available
+  filesystem:
+    status: available
+  repository:
+    status: available
+  composite:
+    status: available
+risk_policy:
+  green: automatic
+  yellow: operator_approval
+  red: second_stage_approval
+privacy_policy:
+  public_output: aggregate_receipt_only
