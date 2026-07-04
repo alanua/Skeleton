@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
+
+from core.private_json_store import write_private_json
 
 
 class RuntimeReceiptCacheError(ValueError):
@@ -33,3 +35,6 @@ class RuntimeReceiptCache:
         if not isinstance(value, dict):
             raise RuntimeReceiptCacheError("cache JSON must be an object")
         return value
+
+    def write(self, key: str, value: Mapping[str, Any]) -> Path:
+        return write_private_json(self.root, f"{key}.json", value)
