@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Skeleton Universal TaskEnvelope Poller every 60 seconds
+Requires=skeleton-universal-runner-poll.service
+
+[Timer]
+OnBootSec=45
+OnUnitActiveSec=60
+
+[Install]
+WantedBy=timers.target
