@@ -30,26 +30,43 @@ ROOT_REGISTRY_ENV = "SKELETON_RUNNER_ROOT_REGISTRY"
 _SAFE_REASON_RE = re.compile(r"^[A-Z0-9_]{1,80}$")
 
 
-def poll_once(workdir: str | None = None) -> int:
+def poll_once(
+    workdir: str | None = None,
+    *,
+    include_legacy: bool = True,
+) -> int:
     issues = legacy_runner.get_ready_issues()
+    processed = 0
     for issue in issues:
-        hydrated = _read_issue_with_author(int(issue["number"]))
+        issue_number = int(issue["number"])
         try:
+            hydrated = _read_issue_with_author(issue_number)
             request = parse_queue_request(
                 hydrated,
                 trusted_authors=legacy_runner.trusted_runner_comment_authors(),
             )
         except TaskEnvelopeQueueError as exc:
             legacy_runner.block_issue(
-                int(issue["number"]),
+                issue_number,
                 f"Universal queue request rejected: {type(exc).__name__}",
             )
+            processed += 1
+            continue
+        except Exception as exc:
+            legacy_runner.block_issue(
+                issue_number,
+                f"Universal queue metadata failed: {type(exc).__name__}",
+            )
+            processed += 1
             continue
         if request is None:
-            legacy_runner.process_issue(issue, workdir=workdir)
+            if include_legacy:
+                legacy_runner.process_issue(issue, workdir=workdir)
+                processed += 1
             continue
         _process_envelope_request(request)
-    return len(issues)
+        processed += 1
+    return processed
 
 
 def _read_issue_with_author(issue_number: int) -> dict[str, Any]:
@@ -161,8 +178,10 @@ def _receipt_report(receipt: dict[str, Any], *, status: str) -> str:
         "status",
         "step_count",
         "assertion_count",
+        "rollback_status",
+        "rollback_step_count",
     )
-    public = {key: receipt.get(key) for key in allowed}
+    public = {key: receipt.get(key) for key in allowed if key in receipt}
     return (
         f"{status}: Universal Runner TaskEnvelope completed.\n"
         "```json\n"
@@ -186,13 +205,20 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Poll universal Runner tasks.")
     parser.add_argument("--loop", action="store_true")
     parser.add_argument("--workdir", default=None)
+    parser.add_argument("--envelopes-only", action="store_true")
     args = parser.parse_args()
     if args.loop:
         while True:
-            poll_once(workdir=args.workdir)
+            poll_once(
+                workdir=args.workdir,
+                include_legacy=not args.envelopes_only,
+            )
             time.sleep(legacy_runner.POLL_INTERVAL)
     else:
-        poll_once(workdir=args.workdir)
+        poll_once(
+            workdir=args.workdir,
+            include_legacy=not args.envelopes_only,
+        )
 
 
 if __name__ == "__main__":
