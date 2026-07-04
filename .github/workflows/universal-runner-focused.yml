@@ -1,17 +1,13 @@
-name: Universal Runner focused validation
+name: Universal Runner validation
 
 on:
   pull_request:
     paths:
       - "core/**"
-      - "scripts/runner_poll_universal_tasks.py"
-      - "tests/test_governed_runtime.py"
-      - "tests/test_task_rollback.py"
-      - "tests/test_runtime_context_loader.py"
-      - "tests/test_task_envelope_queue.py"
-      - "tests/test_isolated_process_executor.py"
-      - "tests/test_task_risk_policy.py"
-      - "tests/test_task_reference.py"
+      - "scripts/**"
+      - "schemas/**"
+      - "tests/**"
+      - "pyproject.toml"
   workflow_dispatch:
 
 permissions:
@@ -25,7 +21,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: python -m pip install --disable-pip-version-check pytest pyyaml
+      - run: python -m pip install --disable-pip-version-check ".[dev]"
       - run: >-
           python -m pytest -q
           tests/test_governed_runtime.py
@@ -35,3 +31,13 @@ jobs:
           tests/test_isolated_process_executor.py
           tests/test_task_risk_policy.py
           tests/test_task_reference.py
+
+  full-pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install --disable-pip-version-check ".[dev]"
+      - run: python -m pytest -q
