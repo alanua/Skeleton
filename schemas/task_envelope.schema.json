@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://skeleton.local/schemas/task_envelope.schema.json",
+  "title": "Skeleton Runner TaskEnvelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "task_id",
+    "executor_class",
+    "steps",
+    "timeout_seconds",
+    "environment_refs",
+    "expected_assertions",
+    "rollback_policy",
+    "privacy_class",
+    "risk_class",
+    "approval",
+    "idempotency_key",
+    "evidence_policy"
+  ],
+  "properties": {
+    "schema": {
+      "const": "skeleton.runner.task_envelope.v1"
+    },
+    "task_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+    },
+    "executor_class": {
+      "enum": [
+        "local.process",
+        "remote.ssh",
+        "network.http",
+        "python.entrypoint",
+        "filesystem",
+        "repository",
+        "composite"
+      ]
+    },
+    "target": {
+      "type": ["string", "null"]
+    },
+    "steps": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object"
+      }
+    },
+    "cwd": {
+      "type": ["string", "null"],
+      "maxLength": 1024
+    },
+    "timeout_seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 86400
+    },
+    "input": {},
+    "environment_refs": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+      }
+    },
+    "expected_assertions": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object"
+      }
+    },
+    "rollback_policy": {
+      "type": "object"
+    },
+    "privacy_class": {
+      "enum": ["public", "private", "secret"]
+    },
+    "risk_class": {
+      "enum": ["green", "yellow", "red"]
+    },
+    "approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operator_approved",
+        "approval_id",
+        "second_stage_approved"
+      ],
+      "properties": {
+        "operator_approved": {
+          "type": "boolean"
+        },
+        "approval_id": {
+          "type": ["string", "null"]
+        },
+        "second_stage_approved": {
+          "type": "boolean"
+        }
+      }
+    },
+    "idempotency_key": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+    },
+    "evidence_policy": {
+      "type": "object"
+    },
+    "shell": {
+      "type": "boolean",
+      "default": false
+    }
+  }
+}
