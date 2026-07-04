@@ -1,10 +1,22 @@
 from __future__ import annotations
 
-from core.runner_execution_broker import RunnerExecutionBroker, StepResult
+import json
+from pathlib import Path
+
+from core.runner_execution_broker import (
+    RunnerExecutionBroker,
+    StepResult,
+    default_broker,
+)
+from core.runner_executors import ExecutionContext
 from core.task_envelope import parse_task_envelope
 
 
-def make_envelope(executor_class: str, *, steps: list[dict[str, object]] | None = None) -> object:
+def make_envelope(
+    executor_class: str,
+    *,
+    steps: list[dict[str, object]] | None = None,
+) -> object:
     return parse_task_envelope(
         {
             "schema": "skeleton.runner.task_envelope.v1",
@@ -40,7 +52,7 @@ def test_generic_executor_dispatches_without_action_handler() -> None:
             executor_class="network.http",
             status="DONE",
             status_code=200,
-            output={"state": "ok"},
+            output={"state": "ok", "local_note": "operator-only-value"},
         )
 
     broker = RunnerExecutionBroker({"network.http": executor})
@@ -48,7 +60,15 @@ def test_generic_executor_dispatches_without_action_handler() -> None:
 
     assert result["status"] == "DONE"
     assert seen == [{"value": "ok"}]
-    assert result["assertions"] == [{"kind": "json_path_eq", "passed": True}]
+    assert result["assertions"] == [
+        {"kind": "json_path_eq", "passed": True}
+    ]
+    public = json.dumps(result["public_receipt"], sort_keys=True)
+    assert "operator-only-value" not in public
+    assert result["private_evidence"]["step_results"][0]["output"] == {
+        "state": "ok",
+        "local_note": "operator-only-value",
+    }
 
 
 def test_failed_assertion_blocks_result() -> None:
@@ -72,15 +92,44 @@ def test_executor_failure_stops_following_steps() -> None:
     def executor(_envelope: object, _step: dict[str, object]) -> StepResult:
         nonlocal calls
         calls += 1
-        return StepResult(executor_class="local.process", status="BLOCKED", exit_code=1)
+        return StepResult(
+            executor_class="local.process",
+            status="BLOCKED",
+            exit_code=1,
+        )
 
     broker = RunnerExecutionBroker({"local.process": executor})
     result = broker.execute(
         make_envelope(
             "local.process",
-            steps=[{"argv": ["false"]}, {"argv": ["echo", "must-not-run"]}],
+            steps=[
+                {"argv": ["false"]},
+                {"argv": ["echo", "must-not-run"]},
+            ],
         )
     )
 
     assert calls == 1
     assert result["status"] == "BLOCKED"
+
+
+def test_default_broker_registers_all_generic_executor_classes(
+    tmp_path: Path,
+) -> None:
+    context = ExecutionContext(
+        targets={},
+        entrypoints={},
+        roots={"test": tmp_path},
+        environment={},
+    )
+    broker = default_broker(context)
+
+    assert set(broker._executors) == {
+        "local.process",
+        "remote.ssh",
+        "network.http",
+        "python.entrypoint",
+        "filesystem",
+        "repository",
+        "composite",
+    }
