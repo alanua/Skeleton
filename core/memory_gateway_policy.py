@@ -32,7 +32,7 @@ _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _ID_FIELDS = frozenset({"namespace", "project_id", "lookup_key", "fact_id"})
 _PUBLIC_FIELDS = frozenset(
     "schema status state event_type event_ref event_class conflict_ref override_ref "
-    "namespace project_id object_id entity_scope fact_type normalized_target canonical_ref "
+    "namespace project_id lookup_key fact_id object_id entity_scope fact_type normalized_target canonical_ref "
     "canonical_revision created_revision imported_at canonical_namespace scope key version "
     "integrity_hash integrity_check preparation_status authority authoritative "
     "authoritative_scope authority_classification source_kind source_evidence_hash "
@@ -47,7 +47,8 @@ _PUBLIC_FIELDS = frozenset(
     "aggregate_counts active_fact_count event_count tombstone_count wal_enabled item_count "
     "relationship_count confirmation_required privacy_classification provenance repo "
     "issue_number comment_id supersession supersedes record preference_summary "
-    "operating_rules id category statement record_type".split()
+    "operating_rules id category statement record_type canonical_write_performed "
+    "operator_approval_required value_hash".split()
 )
 
 
