@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Skeleton Runner Public Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "task_id",
+    "envelope_hash",
+    "evidence_hash",
+    "status",
+    "executor_class",
+    "risk_class",
+    "privacy_class",
+    "step_count",
+    "assertion_count"
+  ],
+  "properties": {
+    "schema": {"const": "skeleton.runner.public_receipt.v1"},
+    "task_id": {"type": "string"},
+    "envelope_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "evidence_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "status": {"enum": ["DONE", "BLOCKED"]},
+    "executor_class": {"type": "string"},
+    "risk_class": {"enum": ["green", "yellow", "red"]},
+    "privacy_class": {"enum": ["public", "private", "secret"]},
+    "step_count": {"type": "integer", "minimum": 0},
+    "assertion_count": {"type": "integer", "minimum": 0}
+  }
+}
