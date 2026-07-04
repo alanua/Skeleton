@@ -22,6 +22,19 @@ def enforce_task_risk(envelope: TaskEnvelope) -> None:
         raise TaskRiskPolicyError(
             f"executor operation requires risk_class {required} or higher"
         )
+    mode = envelope.rollback_policy.get("mode", "none")
+    if mode not in {"none", "steps", "irreversible"}:
+        raise TaskRiskPolicyError("rollback mode is unsupported")
+    if envelope.risk_class == "red" and mode == "none":
+        raise TaskRiskPolicyError(
+            "red tasks require rollback steps or irreversibility"
+        )
+    if envelope.risk_class == "red" and mode == "irreversible":
+        reason = envelope.rollback_policy.get("reason")
+        if not isinstance(reason, str) or not reason.strip() or len(reason) > 512:
+            raise TaskRiskPolicyError(
+                "irreversible red tasks require a bounded reason"
+            )
 
 
 def minimum_risk(
