@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Mapping
+from typing import Any, Mapping, Protocol
 from uuid import uuid4
 
 
@@ -43,8 +43,8 @@ class RegistryNode:
     capabilities: tuple[Capability, ...] = ()
     portable_role: bool = False
 
-    def supports(self, capability_name: str) -> bool:
-        return any(capability.name == capability_name for capability in self.capabilities)
+    def capability(self, capability_name: str) -> Capability | None:
+        return next((item for item in self.capabilities if item.name == capability_name), None)
 
 
 @dataclass(frozen=True)
@@ -69,10 +69,11 @@ class DeviceRegistry:
     devices: tuple[RegistryDevice, ...] = ()
     services: tuple[RegistryService, ...] = ()
 
-    def resolve_node_for_capability(self, capability_name: str) -> RegistryNode | None:
+    def resolve(self, capability_name: str) -> tuple[RegistryNode, Capability] | None:
         for node in self.nodes:
-            if node.supports(capability_name):
-                return node
+            capability = node.capability(capability_name)
+            if capability is not None:
+                return node, capability
         return None
 
 
@@ -92,6 +93,7 @@ class AuditEvent:
     task_id: str
     target: str
     capability: str
+    domain: CapabilityDomain | None
     decision: PolicyDecision
     status: str
     message: str
@@ -99,22 +101,80 @@ class AuditEvent:
 
 class HomeEdgePolicy:
     def decide(self, task: HomeEdgeTask) -> PolicyDecision:
+        if not task.dry_run:
+            return PolicyDecision.NEED_APPROVAL
         if task.risk == RiskLevel.GREEN:
             return PolicyDecision.ALLOW
-        if task.risk == RiskLevel.YELLOW:
-            return PolicyDecision.NEED_APPROVAL
         return PolicyDecision.NEED_APPROVAL
 
 
-class DryRunExecutor:
+class HomeEdgeExecutor(Protocol):
+    domain: CapabilityDomain
+
+    def run(self, task: HomeEdgeTask, node: RegistryNode) -> dict[str, Any]: ...
+
+
+@dataclass(frozen=True)
+class DomainDryRunExecutor:
+    domain: CapabilityDomain
+
     def run(self, task: HomeEdgeTask, node: RegistryNode) -> dict[str, Any]:
         return {
             "status": "dry_run",
             "task_id": task.task_id,
             "node_id": node.node_id,
+            "domain": self.domain.value,
             "capability": task.capability,
             "target": task.target,
         }
+
+
+class ConnectivityExecutor(DomainDryRunExecutor):
+    def __init__(self) -> None:
+        super().__init__(CapabilityDomain.CONNECTIVITY)
+
+
+class DeviceControlExecutor(DomainDryRunExecutor):
+    def __init__(self) -> None:
+        super().__init__(CapabilityDomain.DEVICE_CONTROL)
+
+
+class NetworkAdminExecutor(DomainDryRunExecutor):
+    def __init__(self) -> None:
+        super().__init__(CapabilityDomain.NETWORK_ADMIN)
+
+
+class ServiceHubExecutor(DomainDryRunExecutor):
+    def __init__(self) -> None:
+        super().__init__(CapabilityDomain.SERVICE_HUB)
+
+
+class HumanInterfaceExecutor(DomainDryRunExecutor):
+    def __init__(self) -> None:
+        super().__init__(CapabilityDomain.HUMAN_INTERFACE)
+
+
+class ProvisioningRecoveryExecutor(DomainDryRunExecutor):
+    def __init__(self) -> None:
+        super().__init__(CapabilityDomain.PROVISIONING_RECOVERY)
+
+
+class MediaPresenceExecutor(DomainDryRunExecutor):
+    def __init__(self) -> None:
+        super().__init__(CapabilityDomain.MEDIA_PRESENCE)
+
+
+def default_executors() -> dict[CapabilityDomain, HomeEdgeExecutor]:
+    executors: tuple[HomeEdgeExecutor, ...] = (
+        ConnectivityExecutor(),
+        DeviceControlExecutor(),
+        NetworkAdminExecutor(),
+        ServiceHubExecutor(),
+        HumanInterfaceExecutor(),
+        ProvisioningRecoveryExecutor(),
+        MediaPresenceExecutor(),
+    )
+    return {executor.domain: executor for executor in executors}
 
 
 class HomeEdgeRouter:
@@ -122,11 +182,11 @@ class HomeEdgeRouter:
         self,
         registry: DeviceRegistry,
         policy: HomeEdgePolicy | None = None,
-        executor: DryRunExecutor | None = None,
+        executors: Mapping[CapabilityDomain, HomeEdgeExecutor] | None = None,
     ) -> None:
         self.registry = registry
         self.policy = policy or HomeEdgePolicy()
-        self.executor = executor or DryRunExecutor()
+        self.executors = dict(executors or default_executors())
 
     def route(self, task: HomeEdgeTask) -> tuple[dict[str, Any] | None, AuditEvent]:
         decision = self.policy.decide(task)
@@ -135,27 +195,43 @@ class HomeEdgeRouter:
                 task_id=task.task_id,
                 target=task.target,
                 capability=task.capability,
+                domain=None,
                 decision=decision,
                 status="blocked",
                 message="task requires approval before execution",
             )
 
-        node = self.registry.resolve_node_for_capability(task.capability)
-        if node is None:
+        resolved = self.registry.resolve(task.capability)
+        if resolved is None:
             return None, AuditEvent(
                 task_id=task.task_id,
                 target=task.target,
                 capability=task.capability,
+                domain=None,
                 decision=decision,
                 status="blocked",
                 message="no node with requested capability",
             )
 
-        result = self.executor.run(task, node)
+        node, capability = resolved
+        executor = self.executors.get(capability.domain)
+        if executor is None:
+            return None, AuditEvent(
+                task_id=task.task_id,
+                target=task.target,
+                capability=task.capability,
+                domain=capability.domain,
+                decision=PolicyDecision.DENY,
+                status="blocked",
+                message="no executor for capability domain",
+            )
+
+        result = executor.run(task, node)
         return result, AuditEvent(
             task_id=task.task_id,
             target=task.target,
             capability=task.capability,
+            domain=capability.domain,
             decision=decision,
             status="ok",
             message="dry-run routed through capability registry",
@@ -171,15 +247,19 @@ def home_edge_v1_bootstrap_registry() -> DeviceRegistry:
                 current_host="home-edge-01",
                 portable_role=True,
                 capabilities=(
+                    Capability("connectivity.health", CapabilityDomain.CONNECTIVITY),
                     Capability("ha.service_call", CapabilityDomain.DEVICE_CONTROL),
-                    Capability("media.play", CapabilityDomain.MEDIA_PRESENCE),
                     Capability("network.observe", CapabilityDomain.NETWORK_ADMIN),
                     Capability("service.file_status", CapabilityDomain.SERVICE_HUB),
                     Capability("ui.display", CapabilityDomain.HUMAN_INTERFACE),
                     Capability("device.provision_dry_run", CapabilityDomain.PROVISIONING_RECOVERY),
-                    Capability("connectivity.health", CapabilityDomain.CONNECTIVITY),
+                    Capability("media.play", CapabilityDomain.MEDIA_PRESENCE),
                 ),
             ),
+        ),
+        devices=(
+            RegistryDevice("display-client", "human_interface", capabilities=(Capability("ui.display", CapabilityDomain.HUMAN_INTERFACE),)),
+            RegistryDevice("smart-light", "home_automation", capabilities=(Capability("ha.service_call", CapabilityDomain.DEVICE_CONTROL),)),
         ),
         services=(
             RegistryService("home_assistant", "home_automation", "home-edge-role", (Capability("ha.service_call", CapabilityDomain.DEVICE_CONTROL),)),
