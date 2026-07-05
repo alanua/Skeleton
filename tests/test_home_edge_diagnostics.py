@@ -7,6 +7,7 @@ import pytest
 
 from core.home_edge.diagnostics import (
     HomeEdgeDiagnosticError,
+    LAN_INVENTORY_FIXED_PORTS,
     ProbeResult,
     SYNTHETIC_TEMPLATE_ARTIFACT_PATH,
     build_diagnostic_artifact,
@@ -14,6 +15,7 @@ from core.home_edge.diagnostics import (
     compact_status,
     run_audited_home_edge_command,
     run_home_edge_diagnostic,
+    run_home_edge_lan_inventory,
 )
 from core.home_edge.profile import load_home_edge_profile, synthetic_profile_mapping
 
@@ -64,7 +66,7 @@ def test_observed_diagnostic_writes_private_artifact(tmp_path: Path) -> None:
     assert artifact["evidence"]["runtime"]["state"] == "observed"
     assert artifact["summary"]["route"]["status"] == "unchanged"
     assert artifact["summary"]["tailscale"]["status"] == "healthy"
-    assert artifact["summary"]["modem"]["status"] == "identified"
+    assert artifact["summary"]["modem"]["status"] == "optional_attached"
     assert artifact["node"]["target_user"] == "private"
     assert artifact["summary"]["gateway"]["target"]["value"] == "private_home_edge"
     assert json.loads(artifact_path.read_text(encoding="utf-8"))["schema"] == "skeleton.home_edge.diagnostic.v2"
@@ -93,7 +95,10 @@ def test_modem_absence_is_optional_observed_capability() -> None:
     artifact = build_diagnostic_artifact(load_home_edge_profile(), sample_remote(modem_present=False))
 
     assert artifact["summary"]["status"] == "observed"
-    assert artifact["summary"]["modem"]["status"] == "not_present"
+    assert artifact["summary"]["modem"]["status"] == "optional_not_attached"
+    assert artifact["summary"]["modem"]["registered_expectation"]["health_requirement"] is False
+    assert artifact["summary"]["modem"]["registered_expectation"]["internet_path"] == "default_gateway"
+    assert artifact["summary"]["modem"]["registered_expectation"]["gateway_modem_internals"] == "not_observed_by_home_edge"
     assert artifact["summary"]["gateway"]["status"] == "ready"
 
 
@@ -207,7 +212,7 @@ def test_operator_report_and_compact_status_are_stable() -> None:
     assert "gateway=ready" in report
     assert compact["route_status"] == "unchanged"
     assert compact["tailscale_status"] == "healthy"
-    assert compact["modem_status"] == "identified"
+    assert compact["modem_status"] == "optional_attached"
     assert compact["modem_lock_state"] == "locked"
 
 
@@ -224,3 +229,65 @@ def _private_profile_path(tmp_path: Path) -> Path:
     data["ssh"]["target_user"] = "runtime-user"
     data["primary_network"] = {"interface": "test-lan0", "gateway": "192.0.2.254"}
     return _write_profile(tmp_path, data)
+
+def sample_lan_inventory() -> dict:
+    return {
+        "aggregate": {
+            "device_count": 3,
+            "responsive_count": 2,
+            "service_category_counts": {
+                category: (1 if category in {"web", "home_automation"} else 0)
+                for category in LAN_INVENTORY_FIXED_PORTS
+            },
+            "gateway_presence": "present",
+            "risk_flags": [],
+        },
+        "details": {
+            "network": "192.168.50.0/24",
+            "interface": "lan0",
+            "gateway": "192.168.50.1",
+            "records": [
+                {
+                    "address": "192.168.50.10",
+                    "mac": "00:11:22:33:44:55",
+                    "responsive": True,
+                }
+            ],
+        },
+    }
+
+
+def test_lan_inventory_public_result_is_aggregate_only(tmp_path: Path) -> None:
+    private_path = tmp_path / "lan-inventory.private.json"
+    result = run_home_edge_lan_inventory(
+        artifact_path=private_path,
+        transport=FakeTransport(sample_lan_inventory()),
+    )
+
+    assert result["status"] == "observed"
+    assert result["aggregate"]["device_count"] == 3
+    public_payload = json.dumps(result, sort_keys=True)
+    assert "192.168.50.10" not in public_payload
+    assert "00:11:22:33:44:55" not in public_payload
+    private_payload = json.loads(private_path.read_text(encoding="utf-8"))
+    assert private_payload["privacy"] == "local_private"
+    assert "192.168.50.10" in json.dumps(private_payload)
+
+
+def test_lan_inventory_requires_private_artifact_outside_repo() -> None:
+    with pytest.raises(HomeEdgeDiagnosticError, match="outside the public repository"):
+        run_home_edge_lan_inventory(
+            artifact_path=Path("docs/home_edge/lan-inventory.json"),
+            transport=FakeTransport(sample_lan_inventory()),
+        )
+
+
+def test_lan_inventory_unavailable_returns_public_safe_aggregate(tmp_path: Path) -> None:
+    result = run_home_edge_lan_inventory(
+        artifact_path=tmp_path / "lan-inventory.private.json",
+        transport=FakeTransport(None),
+    )
+
+    assert result["status"] == "unverified"
+    assert result["aggregate"]["device_count"] == 0
+    assert result["aggregate"]["gateway_presence"] == "unverified"

@@ -164,6 +164,7 @@ QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES = (
     "quarantine_stale_clean_skeleton_worktrees"
 )
 HOME_EDGE_01_READ_ONLY_DIAGNOSTIC = "home_edge_01_read_only_diagnostic"
+HOME_EDGE_01_LAN_INVENTORY_READ_ONLY = "home_edge_01_lan_inventory_read_only"
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
         SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
@@ -195,6 +196,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR,
         QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES,
         HOME_EDGE_01_READ_ONLY_DIAGNOSTIC,
+        HOME_EDGE_01_LAN_INVENTORY_READ_ONLY,
     )
 )
 PUBLISH_ONLY_MAINTENANCE_TASK_IDS = frozenset(
@@ -382,6 +384,16 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "decision_records_written",
         "decision",
         "diagnostic_count",
+        "device_count",
+        "responsive_count",
+        "gateway_presence",
+        "gateway_status",
+        "service_category_counts",
+        "risk_flags",
+        "usb_modem_health_requirement",
+        "internet_path_expectation",
+        "gateway_modem_internals",
+        "private_details",
         "disk_bytes",
         "draft",
         "draft_pr",
@@ -8917,29 +8929,76 @@ def home_edge_01_read_only_diagnostic() -> str:
         / "home-edge-01-diagnostic.latest.json",
     )
     compact = compact_status(artifact)
+    summary = artifact.get("summary") if isinstance(artifact, dict) else None
+    gateway = summary.get("gateway") if isinstance(summary, dict) else None
+    modem = summary.get("modem") if isinstance(summary, dict) else None
+    registered = modem.get("registered_expectation") if isinstance(modem, dict) else None
     status_lines = [
-        "inventory_schema=home_edge_diagnostic_v1",
-        "report_mode=read_only",
+        "inventory_schema=home_edge_diagnostic_v2",
+        "report_mode=read_only_lightweight",
         f"node_id={compact['node']}",
+        f"gateway_status={gateway.get('status', 'unverified') if isinstance(gateway, dict) else 'unverified'}",
         f"route_status={compact['route_status']}",
         f"tailscale_status={compact['tailscale_status']}",
         f"modem_status={compact['modem_status']}",
-        f"modem_lock_state={compact['modem_lock_state']}",
-        f"connection_mode={compact['connection_mode']}",
-        "huawei_diag_profile=ignored",
-        "next_operator_action=private_sim_unlock_o2_apn_signal_test",
+        "usb_modem_health_requirement=false",
+        f"internet_path_expectation={registered.get('internet_path', 'default_gateway') if isinstance(registered, dict) else 'default_gateway'}",
+        f"gateway_modem_internals={registered.get('gateway_modem_internals', 'not_observed_by_home_edge') if isinstance(registered, dict) else 'not_observed_by_home_edge'}",
+        "next_operator_action=none_for_healthy_transport",
         "diagnostic_count=1",
     ]
     success = (
-        compact["route_status"] == "unchanged"
+        isinstance(gateway, dict)
+        and gateway.get("status") == "ready"
+        and compact["route_status"] == "unchanged"
         and compact["tailscale_status"] == "healthy"
-        and compact["modem_status"] == "identified"
     )
     return _maintenance_report(
         "DONE" if success else "NEEDS_OPERATOR",
         task_id,
         status_lines,
         "met" if success else "not_met",
+    )
+
+
+def home_edge_01_lan_inventory_read_only() -> str:
+    task_id = HOME_EDGE_01_LAN_INVENTORY_READ_ONLY
+    from core.home_edge.diagnostics import run_audited_home_edge_command
+
+    result = run_audited_home_edge_command(
+        "lan_inventory",
+        artifact_path=Path(tempfile.gettempdir())
+        / "skeleton-home-edge"
+        / "home-edge-01-lan-inventory.private.json",
+    )
+    aggregate = result.get("aggregate") if isinstance(result, dict) else None
+    data = aggregate if isinstance(aggregate, dict) else {}
+    category_counts = data.get("service_category_counts")
+    categories = category_counts if isinstance(category_counts, dict) else {}
+    risk_flags = data.get("risk_flags")
+    risks = risk_flags if isinstance(risk_flags, list) else ["invalid_aggregate"]
+    category_value = ",".join(
+        f"{key}:{categories[key]}" for key in sorted(categories)
+    ) or "none"
+    risk_value = ",".join(sorted(str(item) for item in risks)) or "none"
+    status_lines = [
+        "inventory_schema=home_edge_lan_inventory_v1",
+        "report_mode=explicit_read_only",
+        f"node_id={result.get('node_id', 'home-edge-01') if isinstance(result, dict) else 'home-edge-01'}",
+        f"device_count={data.get('device_count', 0)}",
+        f"responsive_count={data.get('responsive_count', 0)}",
+        f"gateway_presence={data.get('gateway_presence', 'unverified')}",
+        f"service_category_counts={category_value}",
+        f"risk_flags={risk_value}",
+        "private_details=private_runtime_artifact_only",
+        "diagnostic_count=1",
+    ]
+    observed = isinstance(result, dict) and result.get("status") == "observed"
+    return _maintenance_report(
+        "DONE" if observed else "NEEDS_OPERATOR",
+        task_id,
+        status_lines,
+        "met" if observed else "not_met",
     )
 
 
@@ -9684,6 +9743,8 @@ def dispatch_runtime_maintenance_task(
             return quarantine_stale_clean_skeleton_worktrees(body)
         if task_id == HOME_EDGE_01_READ_ONLY_DIAGNOSTIC:
             return home_edge_01_read_only_diagnostic()
+        if task_id == HOME_EDGE_01_LAN_INVENTORY_READ_ONLY:
+            return home_edge_01_lan_inventory_read_only()
         return check_project_checkout(body)
     except Exception:
         return _maintenance_report(

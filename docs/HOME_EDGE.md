@@ -72,3 +72,23 @@ Stage A merges the repository transport, evidence, action-registry, tests and do
 Stage B is a separately approved secure runtime bootstrap that configures dedicated Runner authentication, pins the host identity, installs the fixed service environment, validates one read-only probe from the real Runner service context and records only redacted observed evidence.
 
 No runtime credentials or subscriber identifiers belong in GitHub artifacts.
+
+## Explicit LAN inventory
+
+The normal Home Edge diagnostic stays lightweight and does not sweep the local network. A
+separate audited action, `lan_inventory`, is available only through the explicit maintenance
+task `home_edge_01_lan_inventory_read_only`.
+
+The action derives the target from the observed primary private IPv4 route, refuses networks
+larger than `/24`, performs at most one ICMP check per address when `ping` is available, and
+uses only a fixed code-defined set of TCP connect checks. It performs no authentication,
+banner collection, vulnerability testing, configuration change, package installation or
+issue-controlled command/port execution.
+
+Detailed IP, MAC and per-host service records remain in the configured private runtime
+artifact. GitHub output contains aggregate counts, service-category counts, gateway presence
+and bounded risk flags only.
+
+An attached USB modem is optional and is never part of the Home Edge health criterion. The
+registered internet-path expectation is the default gateway with integrated connectivity
+hardware; gateway modem internals are not claimed as observed by Home Edge.
