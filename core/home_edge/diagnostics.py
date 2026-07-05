@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
@@ -19,6 +20,16 @@ SYNTHETIC_TEMPLATE_ARTIFACT_PATH = Path(
 )
 PRIVATE_ARTIFACT_ENV = "SKELETON_HOME_EDGE_01_DIAGNOSTIC_ARTIFACT"
 PROBE_TIMEOUT_SECONDS = 90
+LAN_INVENTORY_TIMEOUT_SECONDS = 300
+LAN_INVENTORY_MAX_ADDRESSES = 256
+LAN_INVENTORY_ARTIFACT_ENV = "SKELETON_HOME_EDGE_01_LAN_INVENTORY_ARTIFACT"
+LAN_INVENTORY_FIXED_PORTS: dict[str, tuple[int, ...]] = {
+    "remote_admin": (22,),
+    "web": (80, 443, 8080, 8443),
+    "file_services": (139, 445, 2049),
+    "home_automation": (1883, 8883, 8123),
+    "media": (8096, 9000, 32400),
+}
 SENSITIVE_KEY_RE = re.compile(
     r"(pin|password|secret|token|credential|private[_-]?key|imei|imsi|iccid|phone|"
     r"subscriber|imsi|iccid|hostname|host|user|address|ip|gateway|interface|path)",
@@ -32,6 +43,7 @@ AUDITED_COMMANDS = frozenset(
         "prepare_runtime_bootstrap",
         "diagnostic",
         "identity",
+        "lan_inventory",
         "system_inventory",
         "network_inventory",
         "service_inventory",
@@ -185,6 +197,161 @@ def run_home_edge_diagnostic(
     return report
 
 
+def run_home_edge_lan_inventory(
+    *,
+    profile: HomeEdgeProfile | None = None,
+    artifact_path: str | Path | None = None,
+    timeout_seconds: int = LAN_INVENTORY_TIMEOUT_SECONDS,
+    transport: ProbeTransport | None = None,
+) -> dict[str, Any]:
+    node = profile or load_home_edge_profile()
+    target = _runtime_lan_inventory_artifact_path(artifact_path)
+    _validate_private_runtime_artifact_target(target)
+    active_transport = transport or OpenSSHTransport(node)
+    attempt = active_transport.run_probe(
+        LAN_INVENTORY_REMOTE_PROBE,
+        timeout_seconds=timeout_seconds,
+    )
+    if not attempt.observed:
+        return {
+            "schema": "skeleton.home_edge.lan_inventory.public.v1",
+            "node_id": PUBLIC_NODE_ID,
+            "action_id": "lan_inventory",
+            "status": "unverified",
+            "evidence": attempt.public_evidence(),
+            "aggregate": {
+                "device_count": 0,
+                "responsive_count": 0,
+                "service_category_counts": {},
+                "gateway_presence": "unverified",
+                "risk_flags": [attempt.reason or "runtime_unavailable"],
+            },
+        }
+    try:
+        decoded = json.loads(attempt.stdout)
+    except json.JSONDecodeError as exc:
+        raise HomeEdgeDiagnosticError("LAN inventory did not return JSON") from exc
+    if not isinstance(decoded, dict):
+        raise HomeEdgeDiagnosticError("LAN inventory JSON must be an object")
+    aggregate = _validate_lan_inventory_aggregate(decoded.get("aggregate"))
+    private_report = {
+        "schema": "skeleton.home_edge.lan_inventory.private.v1",
+        "generated_at": datetime.now(UTC).isoformat(),
+        "node_id": PUBLIC_NODE_ID,
+        "privacy": "local_private",
+        "details": decoded,
+    }
+    _write_private_runtime_json(target, private_report)
+    return {
+        "schema": "skeleton.home_edge.lan_inventory.public.v1",
+        "node_id": PUBLIC_NODE_ID,
+        "action_id": "lan_inventory",
+        "status": "observed" if not aggregate["risk_flags"] else "review_required",
+        "evidence": attempt.public_evidence(),
+        "aggregate": aggregate,
+    }
+
+
+def _runtime_lan_inventory_artifact_path(
+    artifact_path: str | Path | None,
+) -> Path:
+    value = artifact_path
+    if value is None:
+        env_value = os.environ.get(LAN_INVENTORY_ARTIFACT_ENV, "").strip()
+        if env_value:
+            value = env_value
+    if value is None:
+        raise HomeEdgeDiagnosticError(
+            "LAN inventory requires an explicit private runtime artifact path"
+        )
+    return Path(value).expanduser()
+
+
+def _validate_private_runtime_artifact_target(artifact_path: Path) -> None:
+    resolved = artifact_path.resolve(strict=False)
+    root = ROOT.resolve(strict=False)
+    if resolved == root or _path_is_relative_to(resolved, root):
+        raise HomeEdgeDiagnosticError(
+            "LAN inventory artifact target must be outside the public repository"
+        )
+
+
+def _write_private_runtime_json(target: Path, payload: dict[str, Any]) -> None:
+    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    rendered = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    if os.name != "posix":
+        target.write_text(rendered, encoding="utf-8")
+        return
+
+    target.parent.chmod(0o700)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(target, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = -1
+            handle.write(rendered)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    target.chmod(0o600)
+
+
+def _validate_lan_inventory_aggregate(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise HomeEdgeDiagnosticError("LAN inventory aggregate is missing")
+    expected = {
+        "device_count",
+        "responsive_count",
+        "service_category_counts",
+        "gateway_presence",
+        "risk_flags",
+    }
+    if set(value) != expected:
+        raise HomeEdgeDiagnosticError("LAN inventory aggregate schema mismatch")
+    device_count = value.get("device_count")
+    responsive_count = value.get("responsive_count")
+    category_counts = value.get("service_category_counts")
+    gateway_presence = value.get("gateway_presence")
+    risk_flags = value.get("risk_flags")
+    if (
+        not isinstance(device_count, int)
+        or isinstance(device_count, bool)
+        or device_count < 0
+        or device_count > LAN_INVENTORY_MAX_ADDRESSES
+        or not isinstance(responsive_count, int)
+        or isinstance(responsive_count, bool)
+        or responsive_count < 0
+        or responsive_count > device_count
+        or not isinstance(category_counts, dict)
+        or not all(
+            isinstance(key, str)
+            and key in LAN_INVENTORY_FIXED_PORTS
+            and isinstance(count, int)
+            and not isinstance(count, bool)
+            and 0 <= count <= device_count
+            for key, count in category_counts.items()
+        )
+        or gateway_presence not in {"present", "not_observed", "unverified"}
+        or not isinstance(risk_flags, list)
+        or not all(
+            isinstance(flag, str)
+            and 1 <= len(flag) <= 80
+            and re.fullmatch(r"[a-z0-9_]+", flag) is not None
+            for flag in risk_flags
+        )
+    ):
+        raise HomeEdgeDiagnosticError("LAN inventory aggregate values are invalid")
+    return {
+        "device_count": device_count,
+        "responsive_count": responsive_count,
+        "service_category_counts": dict(sorted(category_counts.items())),
+        "gateway_presence": gateway_presence,
+        "risk_flags": sorted(set(risk_flags)),
+    }
+
+
 def run_audited_home_edge_command(
     command: str,
     *,
@@ -196,6 +363,12 @@ def run_audited_home_edge_command(
         raise HomeEdgeRemoteError(f"home-edge action is not allowlisted: {command}")
     node = profile or load_home_edge_profile()
 
+    if command == "lan_inventory":
+        return run_home_edge_lan_inventory(
+            profile=node,
+            artifact_path=artifact_path,
+            transport=transport,
+        )
     if command == "gateway_capabilities":
         return gateway_contract()
     if command == "prepare_runtime_bootstrap":
@@ -398,7 +571,14 @@ def summarize_hardware(remote: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def summarize_modem(remote: dict[str, Any] | None) -> dict[str, Any]:
-    registered = {"state": "registered", "role": "optional_external_or_attached_usb_modem"}
+    registered = {
+        "state": "registered",
+        "internet_path": "default_gateway",
+        "gateway_connectivity_hardware": "integrated_modem_expected",
+        "gateway_modem_internals": "not_observed_by_home_edge",
+        "attached_usb_modem": "optional",
+        "health_requirement": False,
+    }
     if not isinstance(remote, dict):
         return {
             "status": "unverified",
@@ -410,7 +590,7 @@ def summarize_modem(remote: dict[str, Any] | None) -> dict[str, Any]:
     present = bool(isinstance(usb, dict) and usb.get("present"))
     if not present:
         return {
-            "status": "not_present",
+            "status": "optional_not_attached",
             "evidence": "observed",
             "registered_expectation": registered,
             "observed": {"state": "observed", "present": False},
@@ -420,7 +600,7 @@ def summarize_modem(remote: dict[str, Any] | None) -> dict[str, Any]:
     modem_data = modem if isinstance(modem, dict) else {}
     port_data = ports if isinstance(ports, dict) else {}
     return {
-        "status": "identified",
+        "status": "optional_attached",
         "evidence": "observed",
         "registered_expectation": registered,
         "observed": {
@@ -773,10 +953,272 @@ print(json.dumps(redact(report), sort_keys=True, separators=(",", ":")))
 '''
 
 
+LAN_INVENTORY_REMOTE_PROBE = r'''
+from __future__ import annotations
+
+import concurrent.futures
+import ipaddress
+import json
+import shutil
+import socket
+import subprocess
+
+MAX_ADDRESSES = 256
+PING_WORKERS = 16
+CONNECT_WORKERS = 16
+PRIVATE_RANGES = tuple(
+    ipaddress.ip_network(value)
+    for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+)
+SERVICE_PORTS = {
+    "remote_admin": (22,),
+    "web": (80, 443, 8080, 8443),
+    "file_services": (139, 445, 2049),
+    "home_automation": (1883, 8883, 8123),
+    "media": (8096, 9000, 32400),
+}
+
+
+def run(cmd, timeout=10):
+    try:
+        completed = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        return completed.returncode, completed.stdout.strip()
+    except Exception:
+        return None, ""
+
+
+def first_json(cmd):
+    code, output = run(cmd)
+    if code != 0:
+        return None
+    try:
+        return json.loads(output)
+    except Exception:
+        return None
+
+
+def route_metric(route):
+    metric = route.get("metric", 0)
+    return metric if isinstance(metric, int) and not isinstance(metric, bool) else 2**31
+
+
+def observed_network():
+    routes = first_json(["ip", "-j", "route", "show", "default"])
+    candidates = [
+        route
+        for route in routes
+        if isinstance(route, dict)
+        and isinstance(route.get("dev"), str)
+        and route.get("dev")
+    ] if isinstance(routes, list) else []
+    if not candidates:
+        raise ValueError("default_route_unavailable")
+    route = min(candidates, key=route_metric)
+    interface = route["dev"]
+    gateway = route.get("gateway")
+    route_source = route.get("prefsrc") or route.get("src")
+
+    addresses = first_json(["ip", "-j", "addr", "show", "dev", interface])
+    if not isinstance(addresses, list):
+        raise ValueError("primary_address_unavailable")
+
+    address_candidates = []
+    for entry in addresses:
+        for info in entry.get("addr_info", []) if isinstance(entry, dict) else []:
+            if not isinstance(info, dict) or info.get("family") != "inet":
+                continue
+            local = info.get("local")
+            prefixlen = info.get("prefixlen")
+            if not isinstance(local, str) or not isinstance(prefixlen, int):
+                continue
+            try:
+                interface_address = ipaddress.ip_interface(f"{local}/{prefixlen}")
+            except ValueError:
+                continue
+            network = interface_address.network
+            if network.version == 4 and any(
+                network.subnet_of(private_range) for private_range in PRIVATE_RANGES
+            ):
+                address_candidates.append((local, network))
+
+    if not address_candidates:
+        raise ValueError("primary_ipv4_unavailable")
+
+    selected = None
+    if route_source:
+        matching = [
+            candidate for candidate in address_candidates if candidate[0] == route_source
+        ]
+        if len(matching) != 1:
+            raise ValueError("primary_route_source_unavailable")
+        selected = matching[0]
+    elif isinstance(gateway, str):
+        try:
+            parsed_gateway = ipaddress.ip_address(gateway)
+        except ValueError as exc:
+            raise ValueError("gateway_invalid") from exc
+        matching = [
+            candidate
+            for candidate in address_candidates
+            if parsed_gateway.version == 4 and parsed_gateway in candidate[1]
+        ]
+        if len(matching) != 1:
+            raise ValueError("primary_ipv4_ambiguous")
+        selected = matching[0]
+    elif len(address_candidates) == 1:
+        selected = address_candidates[0]
+    else:
+        raise ValueError("primary_ipv4_ambiguous")
+
+    local, network = selected
+    if network.num_addresses > MAX_ADDRESSES:
+        raise ValueError("network_larger_than_24")
+
+    gateway_address = None
+    if gateway is not None:
+        if not isinstance(gateway, str):
+            raise ValueError("gateway_invalid")
+        try:
+            parsed_gateway = ipaddress.ip_address(gateway)
+        except ValueError as exc:
+            raise ValueError("gateway_invalid") from exc
+        if parsed_gateway.version != 4 or parsed_gateway not in network:
+            raise ValueError("gateway_outside_primary_network")
+        gateway_address = str(parsed_gateway)
+
+    return interface, local, gateway_address, network
+
+
+def neighbor_records(interface, network):
+    rows = first_json(["ip", "-j", "neigh", "show", "dev", interface])
+    records = {}
+    if isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            address = row.get("dst")
+            try:
+                parsed = ipaddress.ip_address(address)
+            except Exception:
+                continue
+            if parsed.version != 4 or parsed not in network:
+                continue
+            records[str(parsed)] = {
+                "mac": row.get("lladdr"),
+                "neighbor_state": row.get("state"),
+            }
+    return records
+
+
+def ping(address):
+    if shutil.which("ping") is None:
+        return False
+    code, _output = run(["ping", "-n", "-c", "1", "-W", "1", address], timeout=2)
+    return code == 0
+
+
+def open_categories(address):
+    found = []
+    for category, ports in SERVICE_PORTS.items():
+        for port in ports:
+            try:
+                with socket.create_connection((address, port), timeout=0.2):
+                    found.append(category)
+                    break
+            except OSError:
+                continue
+    return sorted(set(found))
+
+
+def main():
+    risk_flags = []
+    try:
+        interface, local, gateway, network = observed_network()
+    except ValueError as exc:
+        print(json.dumps({
+            "aggregate": {
+                "device_count": 0,
+                "responsive_count": 0,
+                "service_category_counts": {},
+                "gateway_presence": "unverified",
+                "risk_flags": [str(exc)],
+            },
+            "details": {"records": []},
+        }, sort_keys=True, separators=(",", ":")))
+        return
+    candidates = [str(address) for address in network.hosts() if str(address) != local]
+    neighbors = neighbor_records(interface, network)
+    ping_available = shutil.which("ping") is not None
+    if not ping_available:
+        risk_flags.append("icmp_unavailable")
+    responsive = set()
+    if ping_available:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=PING_WORKERS) as pool:
+            for address, ok in zip(candidates, pool.map(ping, candidates)):
+                if ok:
+                    responsive.add(address)
+    scan_targets = sorted(set(neighbors) | responsive | ({gateway} if gateway else set()))
+    services = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=CONNECT_WORKERS) as pool:
+        for address, categories in zip(scan_targets, pool.map(open_categories, scan_targets)):
+            services[address] = categories
+    active = sorted(
+        set(neighbors)
+        | responsive
+        | {address for address, categories in services.items() if categories}
+    )
+    records = []
+    category_counts = {category: 0 for category in SERVICE_PORTS}
+    for address in active:
+        neighbor = neighbors.get(address, {})
+        categories = services.get(address, [])
+        for category in categories:
+            category_counts[category] += 1
+        records.append({
+            "address": address,
+            "mac": neighbor.get("mac"),
+            "neighbor_state": neighbor.get("neighbor_state"),
+            "responsive": address in responsive,
+            "service_categories": categories,
+            "gateway": address == gateway,
+        })
+    gateway_present = bool(
+        gateway and (gateway in neighbors or gateway in responsive or services.get(gateway))
+    )
+    print(json.dumps({
+        "aggregate": {
+            "device_count": len(active),
+            "responsive_count": len(responsive),
+            "service_category_counts": category_counts,
+            "gateway_presence": "present" if gateway_present else "not_observed",
+            "risk_flags": sorted(set(risk_flags)),
+        },
+        "details": {
+            "network": str(network),
+            "interface": interface,
+            "gateway": gateway,
+            "records": records,
+        },
+    }, sort_keys=True, separators=(",", ":")))
+
+
+main()
+'''
+
+
 __all__ = [
     "AUDITED_COMMANDS",
     "DEFAULT_ARTIFACT_PATH",
     "PRIVATE_ARTIFACT_ENV",
+    "LAN_INVENTORY_ARTIFACT_ENV",
+    "LAN_INVENTORY_FIXED_PORTS",
     "HomeEdgeDiagnosticError",
     "HomeEdgeRemoteError",
     "OpenSSHTransport",
@@ -790,4 +1232,5 @@ __all__ = [
     "prepared_runtime_bootstrap",
     "run_audited_home_edge_command",
     "run_home_edge_diagnostic",
+    "run_home_edge_lan_inventory",
 ]

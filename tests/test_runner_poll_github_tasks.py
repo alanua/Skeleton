@@ -10989,3 +10989,77 @@ def test_unrelated_runtime_maintenance_dispatch_is_unchanged() -> None:
 
     assert report == "DONE: unchanged"
     check.assert_called_once_with()
+
+def test_home_edge_lightweight_diagnostic_does_not_require_usb_modem() -> None:
+    artifact = {
+        "node": {"node_id": "home-edge-01"},
+        "summary": {
+            "gateway": {"status": "ready"},
+            "route": {"status": "unchanged"},
+            "tailscale": {"status": "healthy"},
+            "modem": {
+                "status": "optional_not_attached",
+                "registered_expectation": {
+                    "internet_path": "default_gateway",
+                    "gateway_modem_internals": "not_observed_by_home_edge",
+                },
+                "observed": {"state": "observed", "present": False},
+            },
+        },
+    }
+    with mock.patch(
+        "core.home_edge.diagnostics.run_audited_home_edge_command",
+        return_value=artifact,
+    ):
+        report = runner.home_edge_01_read_only_diagnostic()
+
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert "usb_modem_health_requirement=false" in report
+    assert "internet_path_expectation=default_gateway" in report
+    assert "gateway_modem_internals=not_observed_by_home_edge" in report
+
+
+def test_home_edge_lan_inventory_reports_aggregate_only() -> None:
+    result = {
+        "node_id": "home-edge-01",
+        "status": "observed",
+        "aggregate": {
+            "device_count": 7,
+            "responsive_count": 5,
+            "service_category_counts": {"web": 2, "home_automation": 1},
+            "gateway_presence": "present",
+            "risk_flags": [],
+        },
+        "details": {
+            "records": [{"address": "192.168.50.10"}],
+        },
+    }
+    with mock.patch(
+        "core.home_edge.diagnostics.run_audited_home_edge_command",
+        return_value=result,
+    ):
+        report = runner.home_edge_01_lan_inventory_read_only()
+
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert "maintenance_task_id=home_edge_01_lan_inventory_read_only" in report
+    assert "device_count=7" in report
+    assert "responsive_count=5" in report
+    assert "gateway_presence=present" in report
+    assert "service_category_counts=home_automation:1,web:2" in report
+    assert "192.168.50.10" not in report
+    assert "records" not in report
+
+
+def test_home_edge_lan_inventory_task_is_explicitly_dispatched() -> None:
+    with mock.patch.object(
+        runner,
+        "home_edge_01_lan_inventory_read_only",
+        return_value="DONE: test",
+    ) as action:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HOME_EDGE_01_LAN_INVENTORY_READ_ONLY,
+            str(Path.cwd()),
+        )
+
+    assert report == "DONE: test"
+    action.assert_called_once_with()

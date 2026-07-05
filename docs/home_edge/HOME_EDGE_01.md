@@ -33,3 +33,13 @@ Runtime execution must write diagnostics to an ignored/private artifact path out
 public checkout, or run without persistence. The public template remains synthetic and is
 not updated by local profile or environment override runs, even when those runtime values
 match the synthetic template identity.
+
+## Network inventory boundary
+
+`home-edge-01` uses the default gateway as its registered internet path. Any modem integrated
+into that gateway is an expectation, not an observed Home Edge internal. An attached USB modem
+is optional and does not determine node health.
+
+Local-network inventory is not periodic. It runs only through the explicit read-only
+`home_edge_01_lan_inventory_read_only` maintenance task. Detailed device records are private;
+public reports are aggregate only.
