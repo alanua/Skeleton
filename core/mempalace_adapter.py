@@ -110,7 +110,7 @@ class LocalMemPalaceIndex:
 
     def search(self, *, query: str, limit: int = 5) -> dict[str, object]:
         try:
-            terms = set(private_terms(query, max_chars=4096))
+            terms = set(private_terms(query, max_chars=128))
         except PrivateMemoryTermsError as exc:
             raise MemPalaceAdapterError("INVALID_QUERY", str(exc)) from exc
         limit = _bounded_limit(limit)
@@ -186,7 +186,7 @@ class MemPalaceAdapter:
     ) -> dict[str, object]:
         self._authorize_scope(namespace=namespace, project_id=project_id)
         try:
-            terms = set(private_terms(query, max_chars=4096))
+            terms = set(private_terms(query, max_chars=128))
         except PrivateMemoryTermsError as exc:
             raise MemPalaceAdapterError("INVALID_QUERY", str(exc)) from exc
         limit = _bounded_limit(limit)
