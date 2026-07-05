@@ -285,12 +285,29 @@ class RunnerProcessIsolator:
                     finally:
                         if process is not None and process.poll() is None:
                             try:
-                                _signal_process_group(
-                                    process.pid,
-                                    signal.SIGKILL,
+                                sigkill_sent = (
+                                    _signal_process_group(
+                                        process.pid,
+                                        signal.SIGKILL,
+                                    )
+                                    or sigkill_sent
                                 )
                             finally:
                                 process.wait()
+
+                        if process is not None:
+                            residual_term, residual_kill = (
+                                _cleanup_residual_process_group(
+                                    process.pid,
+                                    self._termination_grace_seconds,
+                                )
+                            )
+                            sigterm_sent = (
+                                sigterm_sent or residual_term
+                            )
+                            sigkill_sent = (
+                                sigkill_sent or residual_kill
+                            )
 
                     stdout = _read_bounded_output(
                         stdout_file,
@@ -800,6 +817,51 @@ def _signal_process_group(
         ) from exc
 
     return True
+
+
+def _process_group_exists(pid: int) -> bool:
+    try:
+        os.killpg(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError as exc:
+        raise RunnerProcessIsolationError(
+            "PROCESS_GROUP_CLEANUP_FAILED",
+            "isolated process group state could not be checked",
+        ) from exc
+
+    return True
+
+
+def _cleanup_residual_process_group(
+    pid: int,
+    grace_seconds: float,
+) -> tuple[bool, bool]:
+    if not _process_group_exists(pid):
+        return False, False
+
+    sigterm_sent = _signal_process_group(
+        pid,
+        signal.SIGTERM,
+    )
+
+    deadline = time.monotonic() + grace_seconds
+
+    while (
+        _process_group_exists(pid)
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.02)
+
+    if not _process_group_exists(pid):
+        return sigterm_sent, False
+
+    sigkill_sent = _signal_process_group(
+        pid,
+        signal.SIGKILL,
+    )
+
+    return sigterm_sent, sigkill_sent
 
 
 def _read_bounded_output(

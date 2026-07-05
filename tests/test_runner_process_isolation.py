@@ -5,6 +5,7 @@ import os
 import shutil
 import signal
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -296,3 +297,53 @@ print(json.dumps({
     assert payload["core"] == 0
     assert payload["nofile"] <= 64
     assert payload["nproc"] <= 16
+
+
+
+def test_completed_parent_cannot_leave_descendant_running(
+    tmp_path: Path,
+) -> None:
+    runner = isolator(grace=0.1)
+    marker = tmp_path / "descendant-leaked"
+
+    child_script = """
+import pathlib
+import sys
+import time
+
+time.sleep(0.5)
+pathlib.Path(sys.argv[1]).write_text("leaked", encoding="utf-8")
+"""
+
+    parent_script = """
+import subprocess
+import sys
+
+subprocess.Popen(
+    (
+        sys.executable,
+        "-c",
+        sys.argv[2],
+        sys.argv[1],
+    )
+)
+"""
+
+    result = runner.run(
+        task_kind="code_edit",
+        argv=(
+            str(PYTHON),
+            "-c",
+            parent_script,
+            str(marker),
+            child_script,
+        ),
+        worktree_root=ROOT,
+        timeout_seconds=5,
+    )
+
+    assert result.returncode == 0
+    assert result.sigterm_sent or result.sigkill_sent
+
+    time.sleep(0.8)
+    assert not marker.exists()
