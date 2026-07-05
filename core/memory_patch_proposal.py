@@ -1,6 +1,7 @@
 from core.memory_patch_common import (
     PATCH_PROPOSAL_EVENT_SCHEMA,
     PATCH_PROPOSAL_SCHEMA,
+    REQUIRED_FIELDS,
     MemoryPatchProposalError,
     MemoryPatchProposalIdempotencyError,
     MemoryPatchProposalValidationError,
@@ -12,9 +13,12 @@ from core.memory_patch_common import (
 )
 from core.memory_patch_registry import MemoryPatchProposalRegistry
 
+REQUIRED_PATCHPROPOSAL_FIELDS = REQUIRED_FIELDS
+
 __all__ = [
     "PATCH_PROPOSAL_EVENT_SCHEMA",
     "PATCH_PROPOSAL_SCHEMA",
+    "REQUIRED_PATCHPROPOSAL_FIELDS",
     "MemoryPatchProposalError",
     "MemoryPatchProposalIdempotencyError",
     "MemoryPatchProposalRegistry",
