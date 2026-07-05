@@ -357,9 +357,12 @@ def test_freshness_fields_are_mandatory_and_deterministic() -> None:
 
 def test_direct_storage_api_object_cannot_escape_gateway_schema() -> None:
     with pytest.raises(MemoryGatewayPolicyError) as excinfo:
-        gateway("aufmass").lookup_exact(namespace="aufmass", key="/tmp/private.db")
+        gateway("aufmass").lookup_exact(
+            namespace="aufmass",
+            key="/tmp/private.db",
+        )
 
-    assert excinfo.value.reason_code == "UNSAFE_PUBLIC_PAYLOAD"
+    assert excinfo.value.reason_code == "INVALID_LOOKUP_KEY"
 
 
 def test_no_private_looking_strings_or_paths_in_public_reports() -> None:
@@ -399,9 +402,9 @@ def test_canonical_manifest_preparation_readback_is_non_authoritative() -> None:
     assert payload["source_kind"] == "canonical_memory_manifest"
     assert payload["integrity_check"] == "verified"
     assert payload["integrity_hash"] == canonical_manifest_integrity_hash(manifest)
-    assert payload["manifest"] == manifest
-    readback_rules = payload["manifest"]["record"]["operating_rules"]
-    assert {rule["category"] for rule in readback_rules} == APPROVED_OPERATOR_RULE_CATEGORIES
+    assert "manifest" not in payload
+    assert "value" not in payload
+    assert "normalized_manifest_json" not in payload
 
     with pytest.raises(MemoryGatewayPolicyError) as excinfo:
         gw.lookup_exact(namespace="skeleton", key="fast_autonomous_execution_v1")
@@ -433,6 +436,28 @@ def test_canonical_manifest_import_command_reads_back_authoritative() -> None:
     assert exact["canonical_revision"] == payload["canonical_revision"]
     assert exact["integrity_hash"] == canonical_manifest_integrity_hash(manifest)
 
+
+
+def test_gateway_public_receipts_do_not_expose_raw_values_or_manifests() -> None:
+    manifest = json.loads(
+        (ROOT / "fixtures" / "canonical_memory" / "operator_preferences_fast_autonomous_execution_v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    memory = SkeletonMemory()
+    gw = MemoryGateway(capability_token(namespaces=("skeleton",)), skeleton_memory=memory)
+
+    prepared = gw.execute(request("skeleton", "memory.prepare_canonical_manifest", {"manifest": manifest}))["payload"]
+    imported = gw.execute(request("skeleton", "memory.import_canonical_manifest", {"manifest": manifest}))["payload"]
+    exact = gw.lookup_exact(namespace="skeleton", project_id="skeleton", key="fast_autonomous_execution_v1")["payload"]
+
+    serialized = json.dumps([prepared, imported, exact], sort_keys=True)
+    assert "manifest" not in prepared
+    assert "normalized_manifest_json" not in exact
+    assert "value" not in exact
+    assert "operating_rules" not in serialized
+    assert imported["authoritative"] is True
+    assert exact["authoritative"] is True
 
 def test_canonical_manifest_preparation_rejects_invalid_manifest() -> None:
     manifest = json.loads(

@@ -7,9 +7,6 @@ from typing import Any, Mapping
 from core.memory_patch_proposal import (
     PATCH_PROPOSAL_EVENT_SCHEMA,
     MemoryPatchProposalValidationError,
-    _reject_private_markers,
-    _safe_token,
-    _source_hash,
     stable_hash,
 )
 
@@ -281,8 +278,6 @@ def _validate_override_payload(
         normalized[key] = _safe_token(normalized[key], key)
     if "approval_ref" in normalized:
         normalized["approval_ref"] = _safe_token(normalized["approval_ref"], "approval_ref")
-    _reject_private_markers(normalized["canonical_value"], "canonical_value")
-    _reject_private_markers(normalized["override_value"], "override_value")
     _exact_evidence_hash(normalized["evidence_refs"])
     return normalized
 
@@ -314,3 +309,25 @@ def _public_event(event: Mapping[str, object]) -> dict[str, object]:
     public_event = deepcopy(dict(event))
     public_event.pop("_payload", None)
     return public_event
+
+
+def _safe_token(value: object, field: str) -> str:
+    import re
+
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", value):
+        raise MemoryOverrideError("INVALID_OVERRIDE", f"{field} must be a safe token")
+    return value
+
+
+def _positive_int(value: object, field: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise MemoryOverrideError("INVALID_OVERRIDE", f"{field} must be a positive integer")
+    return value
+
+
+def _source_hash(value: object) -> str:
+    import hashlib
+    import json
+
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()

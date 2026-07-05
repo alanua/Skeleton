@@ -97,7 +97,10 @@ def test_mid_batch_failure_restores_facts_history_revision_and_indexes(
         stack.get(namespace="skeleton.notes", fact_id="partial")
 
 
-def test_index_rebuild_failure_restores_pre_operation_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_index_rebuild_failure_preserves_canonical_import_and_reports_degraded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     stack = PrivateMemoryStack(tmp_path / "pm")
     stack.init(import_manifest=False)
     before = stack.status()["canonical_sqlite"]["canonical_revision"]
@@ -109,15 +112,21 @@ def test_index_rebuild_failure_restores_pre_operation_state(tmp_path: Path, monk
 
     monkeypatch.setattr(LocalGraphifyIndex, "rebuild_from_facts", fail_rebuild)
 
-    with pytest.raises(PrivateMemoryStackError):
-        stack.import_bundle(
-            bundle_path.name,
-            expected_sha256=bytes_hash(bundle_path.read_bytes()),
-            env={"SKELETON_PRIVATE_MEMORY_INBOX": str(inbox)},
-        )
+    receipt = stack.import_bundle(
+        bundle_path.name,
+        expected_sha256=bytes_hash(bundle_path.read_bytes()),
+        env={"SKELETON_PRIVATE_MEMORY_INBOX": str(inbox)},
+    )
 
-    assert stack.status()["canonical_sqlite"]["canonical_revision"] == before
-    assert bundle_path.exists()
+    assert receipt["status"] == "DEGRADED"
+    assert receipt["canonical_sqlite"] == "DONE"
+    assert receipt["canonical_revision"] > before
+    assert receipt["index_rebuild_error_class"] == "RuntimeError"
+    assert "graphify" in receipt["degraded_indexes"]
+    assert not bundle_path.exists()
+    assert stack.get(namespace="skeleton.notes", fact_id="alpha")["value_hash"] == content_hash(
+        {"summary": "alpha ventilation", "tags": ["ops"]}
+    )
 
 
 def test_duplicate_same_hash_is_idempotent_and_different_hash_blocks(tmp_path: Path) -> None:

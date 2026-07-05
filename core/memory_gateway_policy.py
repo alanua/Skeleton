@@ -30,7 +30,7 @@ STALE_INDEX_RESULT_NOT_PATCH_ELIGIBLE = "STALE_INDEX_RESULT_NOT_PATCH_ELIGIBLE"
 EXACT_CONFIRMATION_REVISION_MISMATCH = "EXACT_CONFIRMATION_REVISION_MISMATCH"
 
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
-_ID_FIELDS = frozenset({"namespace", "project_id", "lookup_key", "fact_id"})
+_ID_FIELDS = frozenset({"namespace", "project_id", "lookup_key", "fact_id", "namespace_token", "scope_token", "key_token"})
 _PROVENANCE_FIELDS = frozenset(
     {
         "ref",
@@ -107,6 +107,9 @@ _RESULT_FIELDS = frozenset(
         "stale",
         "score",
         "confirmation_required",
+        "related_refs",
+        "source_snapshot_id",
+        "bounded_text",
     }
 )
 _EXACT_FIELDS = frozenset(
@@ -201,8 +204,59 @@ _MANIFEST_IMPORT_FIELDS = frozenset(
         "authoritative",
         "authority_classification",
         "source_kind",
+        "schema",
+        "status",
+        "namespace_token",
+        "scope_token",
+        "key_token",
     }
 )
+
+
+_QUERY_REPORT_FIELDS = frozenset(
+    {
+        "schema",
+        "status",
+        "query_ref",
+        "query_kind",
+        "public_safe",
+        "synthetic_only",
+        "aggregate_counts",
+        "error_class",
+        "next_operator_action",
+    }
+)
+
+_PUBLIC_FIELDS = frozenset(
+    """
+    schema status state event_type event_ref event_class conflict_ref override_ref
+    namespace project_id lookup_key fact_id namespace_token scope_token key_token
+    object_id entity_scope fact_type normalized_target canonical_ref
+    canonical_revision created_revision imported_at canonical_namespace scope key version
+    integrity_hash integrity_check preparation_status authority authoritative
+    authoritative_scope authority_classification source_kind source_evidence_hash
+    provenance_refs ref kind evidence_hash source_attribution source_ref source_path
+    target_ref result_ref result_refs related_refs canonical_ref_hint
+    canonical_revision_hint freshness mempalace graphify canonical_sqlite
+    indexed_canonical_revision current_canonical_revision indexed_repo_commit
+    current_repo_commit source_snapshot_id indexed_at stale index_namespace score
+    results conflicts events actor_ref reason_code approval_ref approval_tier
+    confirmed_via_exact_ref confirmed_canonical_revision existing_canonical_ref
+    existing_event_ref dedupe_key idempotency_key idempotency_classification
+    proposal_event record_count bundle_id bundle_hash receipt_id file_sha256
+    aggregate_counts active_fact_count event_count tombstone_count wal_enabled
+    item_count relationship_count confirmation_required privacy_classification
+    provenance repo issue_number comment_id supersession supersedes record
+    preference_summary operating_rules id category statement record_type
+    canonical_write_performed operator_approval_required value_hash
+    snapshot_status read_back_status rollback_status relationship_kind query_kind
+    graphify_runtime_version graph_schema_version query_report query_ref public_safe
+    synthetic_only node_count edge_count stale_count blocked_count
+    missing_provenance_count error_class next_operator_action bounded_text
+ operation decision allowed reason gateway command contract_version payload conflict_count freshness_checked proposal_status classification
+    """.split()
+)
+
 
 
 class MemoryGatewayPolicyError(ValueError):
@@ -256,9 +310,25 @@ def build_command_receipt(command_suffix: str, payload: Mapping[str, Any]) -> di
 
 def validate_public_payload(value: Any) -> Any:
     try:
-        return validate_memory_value(value)
+        bounded = validate_memory_value(value)
     except MemoryValueError as exc:
         raise MemoryGatewayPolicyError(exc.reason_code, str(exc)) from exc
+    return _project_public_payload(bounded)
+
+
+def _project_public_payload(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        result: dict[str, Any] = {}
+        for key, child in value.items():
+            if key not in _PUBLIC_FIELDS:
+                continue
+            if key in _ID_FIELDS and child is not None:
+                _safe_id(child, "UNSAFE_PUBLIC_PAYLOAD", key)
+            result[key] = _project_public_payload(child)
+        return result
+    if isinstance(value, list):
+        return [_project_public_payload(child) for child in value]
+    return value
 
 
 def sanitized_actor_ref(actor_ref: object) -> str:
@@ -304,6 +374,8 @@ def _typed_child(key: str, child: object) -> object:
         return [_typed_mapping(item, _EVENT_FIELDS) for item in _as_list(child)]
     if key == "proposal_event":
         return _typed_mapping(child, _EVENT_FIELDS)
+    if key == "query_report":
+        return _typed_mapping(child, _QUERY_REPORT_FIELDS)
     if key == "aggregate_counts":
         return _typed_mapping(
             child,

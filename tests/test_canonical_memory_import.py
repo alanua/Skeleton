@@ -73,7 +73,7 @@ def test_exact_approved_manifest_imports_and_reads_back_authoritative() -> None:
     assert exact["authoritative"] is True
     assert exact["canonical_revision"] == receipt["canonical_revision"]
     assert exact["integrity_hash"] == manifest["integrity_hash"]
-    assert json.loads(exact["normalized_manifest_json"]) == manifest
+    assert "normalized_manifest_json" not in exact
     assert import_receipts(memory) == [receipt]
 
 
