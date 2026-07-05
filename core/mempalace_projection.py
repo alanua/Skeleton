@@ -17,22 +17,6 @@ BOUNDED_EXCERPT_CHARS = 180
 _SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _SAFE_TEXT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .,:;_()#-]{0,511}$")
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
-_FORBIDDEN_PRIVATE_MARKERS = (
-    "aufmass",
-    "bauclock",
-    "legal",
-    "contact",
-    "home",
-    "address",
-    "phone",
-    "email",
-    "secret",
-    "password",
-    "credential",
-    "private",
-    "/",
-    "\\",
-)
 _DOCUMENT_KEYS = frozenset(
     {
         "item_id",
@@ -164,7 +148,6 @@ def build_index_manifest(projection: MemPalaceProjection) -> dict[str, object]:
 def query_terms(query: str) -> tuple[str, ...]:
     if not isinstance(query, str) or not query.strip() or len(query) > 128:
         raise MemPalaceProjectionError("INVALID_QUERY", "query must be a bounded string")
-    _reject_private_markers(query, "query")
     terms = tuple(sorted(set(_tokens(query))))
     if not terms:
         raise MemPalaceProjectionError("INVALID_QUERY", "query has no searchable terms")
@@ -236,14 +219,12 @@ def _reject_extra_keys(data: Mapping[str, Any], allowed: frozenset[str] | set[st
 def _safe_token(value: object, name: str) -> str:
     if not isinstance(value, str) or not _SAFE_TOKEN_RE.fullmatch(value):
         raise MemPalaceProjectionError("INVALID_TOKEN", f"{name} must be a safe token")
-    _reject_private_markers(value, name)
     return value
 
 
 def _safe_text(value: object, name: str, *, max_length: int) -> str:
     if not isinstance(value, str) or not value or len(value) > max_length or not _SAFE_TEXT_RE.fullmatch(value):
         raise MemPalaceProjectionError("INVALID_TEXT", f"{name} must be bounded public-safe text")
-    _reject_private_markers(value, name)
     return value
 
 
@@ -257,12 +238,6 @@ def _positive_int(value: object, name: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 1:
         raise MemPalaceProjectionError("INVALID_INTEGER", f"{name} must be a positive integer")
     return value
-
-
-def _reject_private_markers(value: str, name: str) -> None:
-    lowered = value.lower()
-    if any(marker in lowered for marker in _FORBIDDEN_PRIVATE_MARKERS):
-        raise MemPalaceProjectionError("PRIVATE_LIKE_VALUE_REJECTED", f"{name} contains private-like value")
 
 
 def _tokens(value: str) -> list[str]:
