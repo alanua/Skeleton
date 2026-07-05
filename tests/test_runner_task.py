@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import FrozenInstanceError
 import json
 import math
+import re
 from pathlib import Path
 
 import pytest
@@ -183,3 +184,39 @@ def test_schema_matches_python_contract() -> None:
         schema["properties"]["requested_capabilities"]["items"]["enum"]
     ) == REQUESTED_CAPABILITIES
     assert set(schema["properties"]["privacy_boundary"]["enum"]) == PRIVACY_BOUNDARIES
+
+
+def test_allowed_files_accept_repository_dot_directories() -> None:
+    mapping = valid_task()
+    mapping["allowed_files"] = [".github/workflows/check.yml"]
+
+    task = RunnerTask.from_mapping(mapping)
+
+    assert task.allowed_files == (".github/workflows/check.yml",)
+
+
+def test_payload_non_string_keys_fail_closed() -> None:
+    mapping = valid_task()
+    payload: dict[object, object] = {"valid": 1, 2: "invalid"}
+    mapping["payload"] = payload
+
+    assert reason(mapping) == "INVALID_ROUTE_PAYLOAD_KEY"
+
+
+def test_schema_branch_and_path_patterns_match_python_rules() -> None:
+    schema = json.loads(
+        (ROOT / "schemas" / "runner_task.schema.json").read_text(encoding="utf-8")
+    )
+    branch_pattern = re.compile(schema["properties"]["branch"]["pattern"])
+    path_pattern = re.compile(
+        schema["properties"]["allowed_files"]["items"]["pattern"]
+    )
+
+    assert branch_pattern.fullmatch("runner/issue-1510")
+    assert path_pattern.fullmatch(".github/workflows/check.yml")
+
+    for branch in ("segment..name", "release.lock", "part/./name", "part/"):
+        assert branch_pattern.fullmatch(branch) is None
+
+    for path in ("segment/../file.py", "segment//file.py", "segment/", "."):
+        assert path_pattern.fullmatch(path) is None

@@ -52,7 +52,7 @@ _SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$")
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _PAYLOAD_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
-_SAFE_PATH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@+-]{0,511}$")
+_SAFE_PATH_RE = re.compile(r"^[A-Za-z0-9._-][A-Za-z0-9._/@+-]{0,511}$")
 
 _REQUIRED_FIELDS = frozenset(
     {
@@ -353,18 +353,23 @@ def _freeze_json(value: object, *, path: str, depth: int) -> Any:
                 "ROUTE_PAYLOAD_TOO_LARGE",
                 f"{path} contains too many fields",
             )
-        normalized: dict[str, Any] = {}
-        for key in sorted(value):
-            if not isinstance(key, str) or not _PAYLOAD_KEY_RE.fullmatch(key):
-                raise RunnerTaskValidationError(
-                    "INVALID_ROUTE_PAYLOAD_KEY",
-                    f"{path} contains an invalid key",
-                )
-            normalized[key] = _freeze_json(
+        keys = list(value)
+        if any(
+            not isinstance(key, str) or not _PAYLOAD_KEY_RE.fullmatch(key)
+            for key in keys
+        ):
+            raise RunnerTaskValidationError(
+                "INVALID_ROUTE_PAYLOAD_KEY",
+                f"{path} contains an invalid key",
+            )
+        normalized = {
+            key: _freeze_json(
                 value[key],
                 path=f"{path}.{key}",
                 depth=depth + 1,
             )
+            for key in sorted(keys)
+        }
         return MappingProxyType(normalized)
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         if len(value) > _MAX_PAYLOAD_ITEMS:
@@ -432,7 +437,7 @@ def _repository_path(value: object) -> str:
             "allowed file must be a bounded repository-relative path",
         )
     if (
-        value.startswith(("/", "."))
+        value.startswith("/")
         or value.endswith("/")
         or "\\" in value
         or "//" in value
