@@ -241,11 +241,7 @@ def run_home_edge_lan_inventory(
         "privacy": "local_private",
         "details": decoded,
     }
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(
-        json.dumps(private_report, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    _write_private_runtime_json(target, private_report)
     return {
         "schema": "skeleton.home_edge.lan_inventory.public.v1",
         "node_id": PUBLIC_NODE_ID,
@@ -278,6 +274,28 @@ def _validate_private_runtime_artifact_target(artifact_path: Path) -> None:
         raise HomeEdgeDiagnosticError(
             "LAN inventory artifact target must be outside the public repository"
         )
+
+
+def _write_private_runtime_json(target: Path, payload: dict[str, Any]) -> None:
+    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    rendered = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    if os.name != "posix":
+        target.write_text(rendered, encoding="utf-8")
+        return
+
+    target.parent.chmod(0o700)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(target, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = -1
+            handle.write(rendered)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    target.chmod(0o600)
 
 
 def _validate_lan_inventory_aggregate(value: Any) -> dict[str, Any]:
@@ -986,46 +1004,99 @@ def first_json(cmd):
         return None
 
 
+def route_metric(route):
+    metric = route.get("metric", 0)
+    return metric if isinstance(metric, int) and not isinstance(metric, bool) else 2**31
+
+
 def observed_network():
     routes = first_json(["ip", "-j", "route", "show", "default"])
-    if not isinstance(routes, list) or not routes or not isinstance(routes[0], dict):
+    candidates = [
+        route
+        for route in routes
+        if isinstance(route, dict)
+        and isinstance(route.get("dev"), str)
+        and route.get("dev")
+    ] if isinstance(routes, list) else []
+    if not candidates:
         raise ValueError("default_route_unavailable")
-    route = routes[0]
-    interface = route.get("dev")
+    route = min(candidates, key=route_metric)
+    interface = route["dev"]
     gateway = route.get("gateway")
-    if not isinstance(interface, str) or not interface:
-        raise ValueError("primary_interface_unavailable")
+    route_source = route.get("prefsrc") or route.get("src")
+
     addresses = first_json(["ip", "-j", "addr", "show", "dev", interface])
     if not isinstance(addresses, list):
         raise ValueError("primary_address_unavailable")
-    selected = None
+
+    address_candidates = []
     for entry in addresses:
         for info in entry.get("addr_info", []) if isinstance(entry, dict) else []:
-            if isinstance(info, dict) and info.get("family") == "inet":
-                selected = info
-                break
-        if selected is not None:
-            break
-    if not isinstance(selected, dict):
+            if not isinstance(info, dict) or info.get("family") != "inet":
+                continue
+            local = info.get("local")
+            prefixlen = info.get("prefixlen")
+            if not isinstance(local, str) or not isinstance(prefixlen, int):
+                continue
+            try:
+                interface_address = ipaddress.ip_interface(f"{local}/{prefixlen}")
+            except ValueError:
+                continue
+            network = interface_address.network
+            if network.version == 4 and any(
+                network.subnet_of(private_range) for private_range in PRIVATE_RANGES
+            ):
+                address_candidates.append((local, network))
+
+    if not address_candidates:
         raise ValueError("primary_ipv4_unavailable")
-    local = selected.get("local")
-    prefixlen = selected.get("prefixlen")
-    if not isinstance(local, str) or not isinstance(prefixlen, int):
-        raise ValueError("primary_ipv4_invalid")
-    network = ipaddress.ip_interface(f"{local}/{prefixlen}").network
-    if network.version != 4 or not any(network.subnet_of(item) for item in PRIVATE_RANGES):
-        raise ValueError("network_not_private_ipv4")
+
+    selected = None
+    if route_source:
+        matching = [
+            candidate for candidate in address_candidates if candidate[0] == route_source
+        ]
+        if len(matching) != 1:
+            raise ValueError("primary_route_source_unavailable")
+        selected = matching[0]
+    elif isinstance(gateway, str):
+        try:
+            parsed_gateway = ipaddress.ip_address(gateway)
+        except ValueError as exc:
+            raise ValueError("gateway_invalid") from exc
+        matching = [
+            candidate
+            for candidate in address_candidates
+            if parsed_gateway.version == 4 and parsed_gateway in candidate[1]
+        ]
+        if len(matching) != 1:
+            raise ValueError("primary_ipv4_ambiguous")
+        selected = matching[0]
+    elif len(address_candidates) == 1:
+        selected = address_candidates[0]
+    else:
+        raise ValueError("primary_ipv4_ambiguous")
+
+    local, network = selected
     if network.num_addresses > MAX_ADDRESSES:
         raise ValueError("network_larger_than_24")
+
     gateway_address = None
-    if isinstance(gateway, str):
-        parsed_gateway = ipaddress.ip_address(gateway)
-        if parsed_gateway.version == 4 and parsed_gateway in network:
-            gateway_address = gateway
+    if gateway is not None:
+        if not isinstance(gateway, str):
+            raise ValueError("gateway_invalid")
+        try:
+            parsed_gateway = ipaddress.ip_address(gateway)
+        except ValueError as exc:
+            raise ValueError("gateway_invalid") from exc
+        if parsed_gateway.version != 4 or parsed_gateway not in network:
+            raise ValueError("gateway_outside_primary_network")
+        gateway_address = str(parsed_gateway)
+
     return interface, local, gateway_address, network
 
 
-def neighbor_records(interface):
+def neighbor_records(interface, network):
     rows = first_json(["ip", "-j", "neigh", "show", "dev", interface])
     records = {}
     if isinstance(rows, list):
@@ -1037,7 +1108,7 @@ def neighbor_records(interface):
                 parsed = ipaddress.ip_address(address)
             except Exception:
                 continue
-            if parsed.version != 4:
+            if parsed.version != 4 or parsed not in network:
                 continue
             records[str(parsed)] = {
                 "mac": row.get("lladdr"),
@@ -1083,7 +1154,7 @@ def main():
         }, sort_keys=True, separators=(",", ":")))
         return
     candidates = [str(address) for address in network.hosts() if str(address) != local]
-    neighbors = neighbor_records(interface)
+    neighbors = neighbor_records(interface, network)
     ping_available = shutil.which("ping") is not None
     if not ping_available:
         risk_flags.append("icmp_unavailable")

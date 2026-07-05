@@ -79,15 +79,16 @@ The normal Home Edge diagnostic stays lightweight and does not sweep the local n
 separate audited action, `lan_inventory`, is available only through the explicit maintenance
 task `home_edge_01_lan_inventory_read_only`.
 
-The action derives the target from the observed primary private IPv4 route, refuses networks
-larger than `/24`, performs at most one ICMP check per address when `ping` is available, and
-uses only a fixed code-defined set of TCP connect checks. It performs no authentication,
+The action derives the target from the observed default-route source address on the primary
+private IPv4 interface, refuses networks larger than `/24`, and filters neighbor-table entries
+to that same network. It performs at most one ICMP check per address when `ping` is available
+and uses only a fixed code-defined set of TCP connect checks. It performs no authentication,
 banner collection, vulnerability testing, configuration change, package installation or
 issue-controlled command/port execution.
 
 Detailed IP, MAC and per-host service records remain in the configured private runtime
-artifact. GitHub output contains aggregate counts, service-category counts, gateway presence
-and bounded risk flags only.
+artifact, written with owner-only permissions on POSIX hosts. GitHub output contains aggregate
+counts, service-category counts, gateway presence and bounded risk flags only.
 
 An attached USB modem is optional and is never part of the Home Edge health criterion. The
 registered internet-path expectation is the default gateway with integrated connectivity

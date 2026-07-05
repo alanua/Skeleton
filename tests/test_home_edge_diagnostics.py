@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -8,6 +10,7 @@ import pytest
 from core.home_edge.diagnostics import (
     HomeEdgeDiagnosticError,
     LAN_INVENTORY_FIXED_PORTS,
+    LAN_INVENTORY_REMOTE_PROBE,
     ProbeResult,
     SYNTHETIC_TEMPLATE_ARTIFACT_PATH,
     build_diagnostic_artifact,
@@ -272,6 +275,9 @@ def test_lan_inventory_public_result_is_aggregate_only(tmp_path: Path) -> None:
     private_payload = json.loads(private_path.read_text(encoding="utf-8"))
     assert private_payload["privacy"] == "local_private"
     assert "192.168.50.10" in json.dumps(private_payload)
+    if os.name == "posix":
+        assert stat.S_IMODE(private_path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(private_path.parent.stat().st_mode) == 0o700
 
 
 def test_lan_inventory_requires_private_artifact_outside_repo() -> None:
@@ -291,3 +297,119 @@ def test_lan_inventory_unavailable_returns_public_safe_aggregate(tmp_path: Path)
     assert result["status"] == "unverified"
     assert result["aggregate"]["device_count"] == 0
     assert result["aggregate"]["gateway_presence"] == "unverified"
+
+def _lan_probe_namespace() -> dict:
+    source = LAN_INVENTORY_REMOTE_PROBE.rsplit("\nmain()", 1)[0]
+    namespace: dict = {}
+    exec(compile(source, "<lan_inventory_probe>", "exec"), namespace)
+    return namespace
+
+
+def test_lan_probe_uses_route_source_and_filters_neighbors_to_primary_network() -> None:
+    namespace = _lan_probe_namespace()
+
+    def fake_first_json(command: list[str]):
+        if command == ["ip", "-j", "route", "show", "default"]:
+            return [
+                {
+                    "dev": "lan0",
+                    "gateway": "192.168.50.1",
+                    "prefsrc": "192.168.50.20",
+                    "metric": 100,
+                }
+            ]
+        if command == ["ip", "-j", "addr", "show", "dev", "lan0"]:
+            return [
+                {
+                    "addr_info": [
+                        {"family": "inet", "local": "192.168.10.20", "prefixlen": 24},
+                        {"family": "inet", "local": "192.168.50.20", "prefixlen": 24},
+                    ]
+                }
+            ]
+        if command == ["ip", "-j", "neigh", "show", "dev", "lan0"]:
+            return [
+                {
+                    "dst": "192.168.50.10",
+                    "lladdr": "00:11:22:33:44:55",
+                    "state": ["REACHABLE"],
+                },
+                {
+                    "dst": "192.168.10.10",
+                    "lladdr": "00:11:22:33:44:66",
+                    "state": ["STALE"],
+                },
+            ]
+        raise AssertionError(command)
+
+    namespace["first_json"] = fake_first_json
+    interface, local, gateway, network = namespace["observed_network"]()
+    neighbors = namespace["neighbor_records"](interface, network)
+
+    assert str(network) == "192.168.50.0/24"
+    assert local == "192.168.50.20"
+    assert gateway == "192.168.50.1"
+    assert set(neighbors) == {"192.168.50.10"}
+
+
+def test_lan_probe_fails_closed_for_network_larger_than_24() -> None:
+    namespace = _lan_probe_namespace()
+
+    def fake_first_json(command: list[str]):
+        if command == ["ip", "-j", "route", "show", "default"]:
+            return [
+                {
+                    "dev": "lan0",
+                    "gateway": "192.168.50.1",
+                    "prefsrc": "192.168.50.20",
+                }
+            ]
+        if command == ["ip", "-j", "addr", "show", "dev", "lan0"]:
+            return [
+                {
+                    "addr_info": [
+                        {"family": "inet", "local": "192.168.50.20", "prefixlen": 23}
+                    ]
+                }
+            ]
+        raise AssertionError(command)
+
+    namespace["first_json"] = fake_first_json
+    with pytest.raises(ValueError, match="network_larger_than_24"):
+        namespace["observed_network"]()
+
+
+def test_lan_probe_sends_at_most_one_icmp_probe_per_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    namespace = _lan_probe_namespace()
+    network = namespace["ipaddress"].ip_network("192.168.50.0/29")
+    calls: list[str] = []
+
+    namespace["observed_network"] = lambda: (
+        "lan0",
+        "192.168.50.1",
+        "192.168.50.2",
+        network,
+    )
+    namespace["neighbor_records"] = lambda interface, selected_network: {}
+    namespace["ping"] = lambda address: calls.append(address) or address.endswith(".2")
+    namespace["open_categories"] = lambda address: []
+    monkeypatch.setattr(namespace["shutil"], "which", lambda name: "/bin/ping")
+
+    namespace["main"]()
+    capsys.readouterr()
+
+    expected = [
+        str(address)
+        for address in network.hosts()
+        if str(address) != "192.168.50.1"
+    ]
+    assert sorted(calls) == sorted(expected)
+    assert len(calls) == len(set(calls))
+
+
+def test_lan_probe_port_set_is_fixed_and_code_defined() -> None:
+    namespace = _lan_probe_namespace()
+    assert namespace["SERVICE_PORTS"] == LAN_INVENTORY_FIXED_PORTS
