@@ -521,7 +521,15 @@ class RunnerLeaseStore:
 
             def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
                 try:
-                    store._connection.execute("ROLLBACK" if exc_type else "COMMIT")
+                    commit_expired_lease = (
+                        isinstance(exc, RunnerLeaseStoreError)
+                        and exc.reason_code == "LEASE_EXPIRED"
+                    )
+                    store._connection.execute(
+                        "COMMIT"
+                        if exc_type is None or commit_expired_lease
+                        else "ROLLBACK"
+                    )
                 finally:
                     store._lock.release()
 

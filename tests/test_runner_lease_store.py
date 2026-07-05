@@ -93,6 +93,8 @@ def test_expired_update_and_bad_metadata_fail_closed(tmp_path):
         with pytest.raises(RunnerLeaseStoreError) as expired:
             store.set_running_pid("task-1521", "lease-1", 42, now=111.0)
         reason(expired, "LEASE_EXPIRED")
+        assert store.get_latest("task-1521").status == "abandoned"
+
         with pytest.raises(RunnerLeaseStoreError) as pid:
             store.set_running_pid("task-1521", "lease-1", 0, now=101.0)
         reason(pid, "INVALID_PID")
