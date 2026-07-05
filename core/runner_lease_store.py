@@ -120,6 +120,23 @@ class RunnerLeaseStore:
         with self._transaction():
             latest = self._latest_row(key)
             if latest is not None:
+                persisted_identity = (
+                    latest["task_reference"],
+                    latest["repo"],
+                    latest["branch"],
+                    latest["base_sha"],
+                )
+                requested_identity = (
+                    reference,
+                    normalized_repo,
+                    normalized_branch,
+                    normalized_sha,
+                )
+                if persisted_identity != requested_identity:
+                    raise RunnerLeaseStoreError(
+                        "IDEMPOTENCY_METADATA_MISMATCH",
+                        "idempotency key belongs to different task metadata",
+                    )
                 if latest["status"] == "completed":
                     raise RunnerLeaseStoreError(
                         "COMPLETED_REPLAY_BLOCKED",
@@ -497,6 +514,8 @@ class RunnerLeaseStore:
                     store._connection.execute("BEGIN IMMEDIATE")
                     store._verify_schema()
                 except Exception:
+                    if store._connection.in_transaction:
+                        store._connection.execute("ROLLBACK")
                     store._lock.release()
                     raise
 
@@ -516,7 +535,13 @@ class RunnerLeaseStore:
 def _record(row: sqlite3.Row) -> RunnerLeaseRecord:
     checkpoint = None
     if row["checkpoint_json"] is not None:
-        decoded = json.loads(row["checkpoint_json"])
+        try:
+            decoded = json.loads(row["checkpoint_json"])
+        except (TypeError, ValueError) as exc:
+            raise RunnerLeaseStoreError(
+                "CHECKPOINT_CORRUPT",
+                "stored checkpoint is not valid JSON",
+            ) from exc
         if not isinstance(decoded, dict):
             raise RunnerLeaseStoreError("CHECKPOINT_CORRUPT", "stored checkpoint is not an object")
         checkpoint = decoded

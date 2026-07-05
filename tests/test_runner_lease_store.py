@@ -139,3 +139,23 @@ def test_schema_mismatch_and_closed_store_fail_closed(tmp_path):
     with pytest.raises(RunnerLeaseStoreError) as schema:
         RunnerLeaseStore(db)
     reason(schema, "SCHEMA_VERSION_MISMATCH")
+
+
+
+def test_idempotency_key_cannot_change_task_identity(tmp_path):
+    with RunnerLeaseStore(tmp_path / "leases.db") as store:
+        take(store)
+
+        with pytest.raises(RunnerLeaseStoreError) as error:
+            store.acquire(
+                idempotency_key="task-1521",
+                task_reference="#9999",
+                repo="alanua/Skeleton",
+                branch="runner/other",
+                base_sha=SHA,
+                lease_seconds=30.0,
+                now=200.0,
+                lease_token="lease-2",
+            )
+
+        reason(error, "IDEMPOTENCY_METADATA_MISMATCH")
