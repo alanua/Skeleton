@@ -41,6 +41,15 @@ from core.loop_controller import LoopPolicy
 from core.loop_engine import LoopEngine
 from core.loop_runner_adapter import run_loop_task_packet
 from core.loop_state_store import LoopStateStore
+from core.runner_loop_control_executor import (
+    LOOP_ENGINE_PACKET,
+    LOOP_STATE_DB_ENV,
+    execute_loop_engine_packet as _execute_loop_engine_packet,
+    loop_receipt_report as _executor_loop_receipt_report,
+    loop_receipt_status_line as _executor_loop_receipt_status_line,
+    loop_state_db_path as _executor_loop_state_db_path,
+    loop_task_packet_from_body as _executor_loop_task_packet_from_body,
+)
 from core.memory_gateway import (
     MEMORY_GATEWAY_CONTRACT_VERSION,
     MEMORY_GATEWAY_RESPONSE_SCHEMA,
@@ -143,8 +152,6 @@ VALIDATE_PR_BRANCH = "validate_pr_branch"
 PREFLIGHT_PR_REFRESH = "preflight_pr_refresh"
 HERMES_WORKER_PREFLIGHT = "hermes_worker_preflight"
 HERMES_MEMORY_GATEWAY_SMOKE = "hermes_memory_gateway_smoke"
-LOOP_ENGINE_PACKET = "loop_engine_packet"
-LOOP_STATE_DB_ENV = "SKELETON_LOOP_STATE_DB"
 MEMPALACE_SYNTHETIC_RUNTIME_SMOKE = "mempalace_synthetic_runtime_smoke"
 PRIVATE_MEMORY_HEALTHCHECK = "private_memory_healthcheck"
 HERMES_PRIVATE_MEMORY_BRIDGE_CHECK = "hermes_private_memory_bridge_check"
@@ -2998,144 +3005,47 @@ def _maintenance_report(
 
 
 def _loop_state_db_path() -> tuple[Path | None, str | None]:
-    raw_path = os.environ.get(LOOP_STATE_DB_ENV, "").strip()
-    if not raw_path:
-        return None, "loop_state_db_missing"
-
-    path = Path(raw_path).expanduser()
-    if not path.is_absolute():
-        return None, "loop_state_db_not_absolute"
-    if ".." in path.parts or _path_has_symlink_component(path):
-        return None, "loop_state_db_unsafe"
-
-    resolved = path.resolve(strict=False)
-    if resolved == ROOT or _path_is_relative_to(resolved, ROOT):
-        return None, "loop_state_db_unsafe"
-
-    parent = resolved.parent
-    try:
-        parent_stat = parent.stat()
-    except OSError:
-        return None, "loop_state_db_parent_unavailable"
-    if (
-        not stat.S_ISDIR(parent_stat.st_mode)
-        or parent_stat.st_uid != os.getuid()
-        or not os.access(parent, os.W_OK | os.X_OK)
-    ):
-        return None, "loop_state_db_not_writable"
-
-    if resolved.exists():
-        try:
-            file_stat = resolved.stat()
-        except OSError:
-            return None, "loop_state_db_not_writable"
-        if (
-            not stat.S_ISREG(file_stat.st_mode)
-            or file_stat.st_uid != os.getuid()
-            or not os.access(resolved, os.R_OK | os.W_OK)
-        ):
-            return None, "loop_state_db_not_writable"
-    return resolved, None
+    return _executor_loop_state_db_path(
+        environment=os.environ,
+        env_var_name=LOOP_STATE_DB_ENV,
+        root=ROOT,
+        path_has_symlink_component=_path_has_symlink_component,
+        path_is_relative_to=_path_is_relative_to,
+    )
 
 
 def _loop_task_packet_from_body(body: str) -> object:
-    task_block = extract_task_block(body)
-    if task_block is None:
-        return {}
-    try:
-        return json.loads(task_block)
-    except json.JSONDecodeError:
-        return {}
+    return _executor_loop_task_packet_from_body(
+        body,
+        extract_task_block=extract_task_block,
+    )
 
 
 def _loop_receipt_status_line(key: str, value: object) -> str:
-    if value is None:
-        rendered = "none"
-    elif isinstance(value, bool):
-        rendered = str(value).lower()
-    elif isinstance(value, int) and not isinstance(value, bool):
-        rendered = str(value)
-    elif isinstance(value, str):
-        rendered = value
-    else:
-        rendered = "invalid"
-    return f"{key}={rendered}"
+    return _executor_loop_receipt_status_line(key, value)
 
 
 def _loop_receipt_report(receipt: object) -> str:
-    task_id = LOOP_ENGINE_PACKET
-    expected_keys = (
-        "schema",
-        "status",
-        "action",
-        "task_id",
-        "run_id",
-        "version",
-        "loop_state",
-        "event",
-        "accepted",
-        "decision",
-        "reason",
-        "context_hash",
-        "public_safe",
-        "external_side_effects_executed",
-    )
-    if not isinstance(receipt, dict) or set(receipt) != set(expected_keys):
-        return _maintenance_report(
-            "BLOCKED", task_id, ["reason=loop_receipt_schema_mismatch"], "not_met"
-        )
-
-    status_lines = [
-        _loop_receipt_status_line(key, receipt.get(key)) for key in expected_keys
-    ]
-    accepted = receipt.get("accepted") is True
-    decision = receipt.get("decision")
-    loop_state = receipt.get("loop_state")
-    receipt_status = receipt.get("status")
-    if not accepted or decision == "REJECT" or receipt_status == "BLOCKED":
-        report_status = "BLOCKED"
-    elif decision in {"ESCALATE", "REVIEW"} or loop_state in {
-        "NEEDS_OPERATOR",
-        "HUMAN_REVIEW",
-    }:
-        report_status = "NEEDS_OPERATOR"
-    elif loop_state in {"BLOCKED", "CANCELLED"}:
-        report_status = "BLOCKED"
-    else:
-        report_status = "DONE"
-    return _maintenance_report(
-        report_status,
-        task_id,
-        status_lines,
-        "met" if report_status == "DONE" else "not_met",
+    return _executor_loop_receipt_report(
+        receipt,
+        task_id=LOOP_ENGINE_PACKET,
+        maintenance_report=_maintenance_report,
     )
 
 
 def loop_engine_packet(body: str) -> str:
-    task_id = LOOP_ENGINE_PACKET
-    db_path, reason = _loop_state_db_path()
-    if reason is not None or db_path is None:
-        return _maintenance_report(
-            "BLOCKED",
-            task_id,
-            [f"reason={reason or 'loop_state_db_unavailable'}"],
-            "not_met",
-        )
-
-    packet = _loop_task_packet_from_body(body)
-    try:
-        store = LoopStateStore(db_path)
-        store.initialize()
-        engine = LoopEngine(store, LoopPolicy())
-        receipt = run_loop_task_packet(packet, engine=engine)
-    except Exception:
-        return _maintenance_report(
-            "BLOCKED",
-            task_id,
-            ["reason=loop_engine_packet_failed"],
-            "not_met",
-        )
-    return _loop_receipt_report(receipt)
+    return _execute_loop_engine_packet(
+        body,
+        task_id=LOOP_ENGINE_PACKET,
+        state_db_path=_loop_state_db_path,
+        task_packet_from_body=_loop_task_packet_from_body,
+        receipt_report=_loop_receipt_report,
+        maintenance_report=_maintenance_report,
+        store_factory=LoopStateStore,
+        engine_factory=LoopEngine,
+        policy_factory=LoopPolicy,
+        packet_runner=run_loop_task_packet,
+    )
 
 
 def _sanitize_maintenance_status_lines(status_lines: list[str]) -> list[str]:
