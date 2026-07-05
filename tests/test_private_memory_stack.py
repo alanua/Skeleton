@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from core.canonical_memory import FAST_AUTONOMOUS_EXECUTION_KEY
-from core.graphify_adapter import GraphifyAdapterError
+from core.graphify_adapter import GraphifyAdapterError, LocalGraphifyIndex
 from core.mempalace_adapter import LocalMemPalaceIndex
 from core.private_memory_stack import PrivateMemoryStack, PrivateMemoryStackError
 
@@ -67,6 +67,7 @@ def test_put_rebuilds_indexes_and_exact_get_reads_sqlite(tmp_path: Path) -> None
     relations = stack.relations(query="runbook", limit=3)
 
     assert mutation["status"] == "DONE"
+    assert mutation["canonical_sqlite"] == "DONE"
     assert exact["value"]["summary"] == "alpha beta ventilation"
     assert exact["authority_classification"] == "canonical_sqlite"
     assert semantic["authoritative"] is False
@@ -126,7 +127,7 @@ def test_backup_is_local_aggregate_report(tmp_path: Path) -> None:
     assert (tmp_path / "backups" / "snapshot-test.sqlite").is_file()
 
 
-def test_rollback_restores_canonical_database_when_index_rebuild_fails(
+def test_put_preserves_canonical_database_when_index_rebuild_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     stack = PrivateMemoryStack(tmp_path)
@@ -138,11 +139,15 @@ def test_rollback_restores_canonical_database_when_index_rebuild_fails(
 
     monkeypatch.setattr(LocalMemPalaceIndex, "rebuild_from_facts", fail_rebuild)
 
-    with pytest.raises(Exception):
-        stack.put(namespace="skeleton.notes", fact_id="willrollback", value={"summary": "rollback"})
+    mutation = stack.put(namespace="skeleton.notes", fact_id="willstay", value={"summary": "committed"})
 
-    assert not (tmp_path / "canonical.sqlite-wal").exists()
-    assert not (tmp_path / "canonical.sqlite-shm").exists()
+    assert mutation["status"] == "DEGRADED"
+    assert mutation["canonical_sqlite"] == "DONE"
+    assert mutation["canonical_revision"] > before
+    assert mutation["index_rebuild_error_class"] == "RuntimeError"
+    assert "mempalace" in mutation["degraded_indexes"]
+    exact = stack.get(namespace="skeleton.notes", fact_id="willstay")
+    assert exact["value"]["summary"] == "committed"
     with sqlite3.connect(tmp_path / "canonical.sqlite") as connection:
         revision = connection.execute(
             "SELECT current_revision FROM private_memory_canonical_revision WHERE id = 1"
@@ -150,8 +155,36 @@ def test_rollback_restores_canonical_database_when_index_rebuild_fails(
         row = connection.execute(
             "SELECT COUNT(*) FROM private_memory_facts WHERE namespace = 'skeleton.notes'"
         ).fetchone()[0]
-    assert revision == before
-    assert row == 0
+    assert revision > before
+    assert row == 1
+
+
+def test_delete_preserves_canonical_tombstone_when_graphify_rebuild_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stack = PrivateMemoryStack(tmp_path)
+    stack.init()
+    stack.put(namespace="skeleton.notes", fact_id="delete1", value={"summary": "delete me"})
+    before = stack.status()["canonical_sqlite"]["canonical_revision"]
+
+    def fail_rebuild(*args: object, **kwargs: object) -> dict[str, object]:
+        raise RuntimeError("synthetic graphify failure")
+
+    monkeypatch.setattr(LocalGraphifyIndex, "rebuild_from_facts", fail_rebuild)
+
+    mutation = stack.delete(namespace="skeleton.notes", fact_id="delete1")
+
+    assert mutation["status"] == "DEGRADED"
+    assert mutation["canonical_sqlite"] == "DONE"
+    assert mutation["canonical_revision"] > before
+    assert "graphify" in mutation["degraded_indexes"]
+    with pytest.raises(PrivateMemoryStackError):
+        stack.get(namespace="skeleton.notes", fact_id="delete1")
+    with sqlite3.connect(tmp_path / "canonical.sqlite") as connection:
+        tombstoned = connection.execute(
+            "SELECT tombstoned_at FROM private_memory_facts WHERE namespace = 'skeleton.notes' AND fact_id = 'delete1'"
+        ).fetchone()[0]
+    assert tombstoned is not None
 
 
 def test_corrupted_local_indexes_block_status(tmp_path: Path) -> None:

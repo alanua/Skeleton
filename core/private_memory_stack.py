@@ -103,21 +103,20 @@ class PrivateMemoryStack:
                     approval_ref=approval_ref,
                     transaction_ref=transaction,
                 )
-                self._rebuild_unlocked()
             except Exception as exc:
                 self._restore_database_backup(before)
                 self._best_effort_rebuild_unlocked()
                 _remove_sqlite_sidecars(self.paths.db)
-                raise PrivateMemoryStackError("canonical mutation rolled back after derived index rebuild failure") from exc
+                raise PrivateMemoryStackError("canonical mutation failed and was rolled back") from exc
             finally:
                 _remove_backup_file(before)
-        return {
-            "schema": PRIVATE_MEMORY_STACK_MUTATION_SCHEMA,
-            "status": "DONE",
-            "canonical_revision": event["canonical_revision"],
-            "canonical_ref": _canonical_ref(namespace, fact_id),
-            "indexes": self._index_states(),
-        }
+            rebuild_error = self._try_rebuild_after_canonical_success_unlocked()
+            return self._mutation_report(
+                namespace=namespace,
+                fact_id=fact_id,
+                canonical_revision=int(event["canonical_revision"]),
+                rebuild_error_class=rebuild_error,
+            )
 
     def delete(
         self,
@@ -141,21 +140,20 @@ class PrivateMemoryStack:
                     approval_ref=approval_ref,
                     transaction_ref=transaction,
                 )
-                self._rebuild_unlocked()
             except Exception as exc:
                 self._restore_database_backup(before)
                 self._best_effort_rebuild_unlocked()
                 _remove_sqlite_sidecars(self.paths.db)
-                raise PrivateMemoryStackError("canonical delete rolled back after derived index rebuild failure") from exc
+                raise PrivateMemoryStackError("canonical delete failed and was rolled back") from exc
             finally:
                 _remove_backup_file(before)
-        return {
-            "schema": PRIVATE_MEMORY_STACK_MUTATION_SCHEMA,
-            "status": "DONE",
-            "canonical_revision": event["canonical_revision"],
-            "canonical_ref": _canonical_ref(namespace, fact_id),
-            "indexes": self._index_states(),
-        }
+            rebuild_error = self._try_rebuild_after_canonical_success_unlocked()
+            return self._mutation_report(
+                namespace=namespace,
+                fact_id=fact_id,
+                canonical_revision=int(event["canonical_revision"]),
+                rebuild_error_class=rebuild_error,
+            )
 
     def get(self, *, namespace: str, fact_id: str) -> dict[str, object]:
         namespace = safe_token(namespace, "namespace")
@@ -206,8 +204,14 @@ class PrivateMemoryStack:
         with _exclusive_lock(self.paths.lock):
             return self._backup_unlocked(snapshot_id=snapshot_id)
 
-    def _backup_unlocked(self, *, snapshot_id: str | None = None) -> dict[str, object]:
-        self._require_ready(allow_stale=True)
+    def _backup_unlocked(
+        self,
+        *,
+        snapshot_id: str | None = None,
+        require_ready: bool = True,
+    ) -> dict[str, object]:
+        if require_ready:
+            self._require_ready(allow_stale=True)
         self.paths.backups.mkdir(parents=True, exist_ok=True)
         _chmod_dir(self.paths.backups)
         manifest = create_snapshot(self.paths.db, self.paths.backups, snapshot_id=snapshot_id)
@@ -270,18 +274,7 @@ class PrivateMemoryStack:
                     prepared,
                     transaction_ref=transaction,
                 )
-                self._rebuild_unlocked()
                 self._verify_import_readback(prepared)
-                backup_report = (
-                    self._backup_unlocked(snapshot_id=f"bundle-{prepared.receipt_id[:24]}")
-                    if create_backup
-                    else None
-                )
-                moved_name = move_processed_bundle(
-                    prepared.source_path,
-                    receipt_id=prepared.receipt_id,
-                    expected_stat=prepared.source_stat,
-                )
             except Exception as exc:
                 self._restore_database_backup(before)
                 self._best_effort_rebuild_unlocked()
@@ -290,13 +283,28 @@ class PrivateMemoryStack:
             finally:
                 cleanup_pre_operation_snapshot(snapshot_temp)
                 _remove_backup_file(before)
+            rebuild_error = self._try_rebuild_after_canonical_success_unlocked()
+            backup_report = (
+                self._backup_unlocked(
+                    snapshot_id=f"bundle-{prepared.receipt_id[:24]}",
+                    require_ready=False,
+                )
+                if create_backup
+                else None
+            )
+            moved_name = move_processed_bundle(
+                prepared.source_path,
+                receipt_id=prepared.receipt_id,
+                expected_stat=prepared.source_stat,
+            )
         return self._bundle_receipt_report(
             prepared=prepared,
-            status="DONE",
+            status="DONE" if rebuild_error is None else "DEGRADED",
             idempotency_classification="NEW_IMPORT",
             canonical_revision=int(events[-1]["canonical_revision"]),
             backup=backup_report,
             processed_receipt_name=moved_name,
+            rebuild_error_class=rebuild_error,
         )
 
     def status(self) -> dict[str, object]:
@@ -457,6 +465,13 @@ class PrivateMemoryStack:
         _remove_sqlite_sidecars(self.paths.db)
         _chmod_file(self.paths.db)
 
+    def _try_rebuild_after_canonical_success_unlocked(self) -> str | None:
+        try:
+            self._rebuild_unlocked()
+        except Exception as exc:  # noqa: BLE001 - index rebuild is non-authoritative.
+            return type(exc).__name__
+        return None
+
     def _best_effort_rebuild_unlocked(self) -> None:
         try:
             self._rebuild_unlocked()
@@ -478,6 +493,31 @@ class PrivateMemoryStack:
     def _index_states(self) -> dict[str, object]:
         status = self.status()
         return {"mempalace": status["mempalace"], "graphify": status["graphify"]}
+
+    def _mutation_report(
+        self,
+        *,
+        namespace: str,
+        fact_id: str,
+        canonical_revision: int,
+        rebuild_error_class: str | None,
+    ) -> dict[str, object]:
+        indexes = self._index_states()
+        degraded_indexes = [
+            name for name, state in indexes.items() if isinstance(state, Mapping) and state.get("state") != "READY"
+        ]
+        report: dict[str, object] = {
+            "schema": PRIVATE_MEMORY_STACK_MUTATION_SCHEMA,
+            "status": "DONE" if rebuild_error_class is None and not degraded_indexes else "DEGRADED",
+            "canonical_sqlite": "DONE",
+            "canonical_revision": canonical_revision,
+            "canonical_ref": _canonical_ref(namespace, fact_id),
+            "indexes": indexes,
+            "degraded_indexes": degraded_indexes,
+        }
+        if rebuild_error_class is not None:
+            report["index_rebuild_error_class"] = rebuild_error_class
+        return report
 
     def _verify_import_readback(self, prepared: Any) -> None:
         for fact in prepared.facts:
@@ -531,9 +571,14 @@ class PrivateMemoryStack:
         processed_receipt_name: str,
         canonical_revision: int | None = None,
         backup: Mapping[str, object] | None = None,
+        rebuild_error_class: str | None = None,
     ) -> dict[str, object]:
         stack_status = self.status()
-        return {
+        indexes = self._index_states()
+        degraded_indexes = [
+            name for name, state in indexes.items() if isinstance(state, Mapping) and state.get("state") != "READY"
+        ]
+        report: dict[str, object] = {
             "schema": "skeleton.private_memory_bundle_import_report.v1",
             "status": status,
             "idempotency_classification": idempotency_classification,
@@ -542,6 +587,7 @@ class PrivateMemoryStack:
             "file_sha256": prepared.file_sha256,
             "receipt_id": prepared.receipt_id,
             "record_count": len(prepared.facts),
+            "canonical_sqlite": "DONE",
             "canonical_revision": canonical_revision
             if canonical_revision is not None
             else int(stack_status["canonical_sqlite"]["canonical_revision"]),
@@ -550,8 +596,12 @@ class PrivateMemoryStack:
             ],
             "processed_receipt_name": processed_receipt_name,
             "backup": backup,
-            "indexes": self._index_states(),
+            "indexes": indexes,
+            "degraded_indexes": degraded_indexes,
         }
+        if rebuild_error_class is not None:
+            report["index_rebuild_error_class"] = rebuild_error_class
+        return report
 
 
 def _paths(private_root: str | Path | None) -> PrivateMemoryStackPaths:

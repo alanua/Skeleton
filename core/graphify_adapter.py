@@ -38,19 +38,6 @@ _COMMIT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{6,127}$")
 _ISO_UTC_RE = re.compile(r"^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 _HASH_RE = re.compile(r"^[A-Fa-f0-9]{64}$")
 _PUBLIC_TEXT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .,:;_()#-]{0,179}$")
-_FORBIDDEN_MARKERS = (
-    "\\",
-    "file:",
-    "/home/",
-    "/tmp/",
-    ".sqlite",
-    ".db",
-    "secret",
-    "token",
-    "password",
-    "credential",
-    "private-value",
-)
 _REPORT_KIND_BY_QUERY_KIND = {
     "module_relationship": "relationship_overview",
     "schema_relationship": "relationship_overview",
@@ -519,14 +506,12 @@ def _bounded_limit(value: object) -> int:
 def _safe_token(value: object, field: str) -> str:
     if not isinstance(value, str) or not _SAFE_TOKEN_RE.fullmatch(value):
         raise GraphifyAdapterError("GRAPHIFY_FIXTURE_MALFORMED", f"{field} must be a safe token")
-    _reject_private_markers(value, field)
     return value
 
 
 def _node_id(value: object) -> str:
     if not isinstance(value, str) or not _SAFE_NODE_ID_RE.fullmatch(value):
         raise GraphifyAdapterError("GRAPHIFY_FIXTURE_MALFORMED", "Graphify node id must be bounded")
-    _reject_private_markers(value, "node id")
     return value
 
 
@@ -535,7 +520,6 @@ def _repo_source_path(value: object, field: str) -> str:
         raise GraphifyAdapterError("GRAPHIFY_PRIVATE_VALUE_REJECTED", f"{field} must be a repository-relative path")
     if value.startswith("/") or value.startswith(".") or "/../" in f"/{value}/" or "//" in value:
         raise GraphifyAdapterError("GRAPHIFY_PRIVATE_VALUE_REJECTED", f"{field} must be repository-relative")
-    _reject_private_markers(value, field)
     return value
 
 
@@ -555,7 +539,6 @@ def _runtime_version(value: object) -> str:
 def _commit(value: object, field: str) -> str:
     if not isinstance(value, str) or not _COMMIT_RE.fullmatch(value):
         raise GraphifyAdapterError("GRAPHIFY_FIXTURE_MALFORMED", f"{field} must be a safe commit token")
-    _reject_private_markers(value, field)
     return value
 
 
@@ -568,7 +551,6 @@ def _timestamp(value: object, field: str) -> str:
 def _public_text(value: object, field: str) -> str:
     if not isinstance(value, str) or not _PUBLIC_TEXT_RE.fullmatch(value):
         raise GraphifyAdapterError("GRAPHIFY_FIXTURE_MALFORMED", f"{field} must be bounded public text")
-    _reject_private_markers(value, field)
     return value
 
 
@@ -576,12 +558,6 @@ def _evidence_hash(value: object) -> str:
     if not isinstance(value, str) or not _HASH_RE.fullmatch(value):
         raise GraphifyAdapterError("GRAPHIFY_MISSING_PROVENANCE", "evidence hash is required")
     return value
-
-
-def _reject_private_markers(value: str, field: str) -> None:
-    lowered = value.lower()
-    if any(marker in lowered for marker in _FORBIDDEN_MARKERS):
-        raise GraphifyAdapterError("GRAPHIFY_PRIVATE_VALUE_REJECTED", f"{field} contains private-looking value")
 
 
 def _fixture_to_dict(fixture: GraphifySyntheticFixture) -> dict[str, object]:

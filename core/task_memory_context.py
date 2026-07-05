@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import json
-import re
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 from core.private_memory_history import canonical_json, content_hash, safe_token
-from core.private_memory_stack import PrivateMemoryStack, PrivateMemoryStackError
+from core.private_memory_stack import PrivateMemoryStack
 
 
 TASK_MEMORY_CONTEXT_SCHEMA = "skeleton.task_memory_context.v1"
@@ -15,21 +13,30 @@ TASK_MEMORY_CONTEXT_PROFILES = frozenset({"public_control", "private_runtime", "
 TASK_MEMORY_CONTEXT_NAMESPACES = frozenset({"skeleton.context"})
 MAX_CONTEXT_RECORDS = 10
 MAX_CONTEXT_CHARS = 6000
+MAX_PUBLIC_CONTROL_TEXT_CHARS = 1200
 
-_PUBLIC_SAFE_TEXT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .,:;_()#@+-]{0,1200}$")
-_SECRET_MARKERS = (
-    "secret",
-    "token",
-    "password",
-    "credential",
-    "private key",
-    "api_key",
-    "ssh-rsa",
-    "bearer ",
-    "/home/",
-    "/tmp/",
-    ".sqlite",
+_PUBLIC_RECEIPT_FIELDS = frozenset(
+    {
+        "schema",
+        "status",
+        "profile",
+        "project_id",
+        "task_route",
+        "canonical_revision",
+        "selected_canonical_refs",
+        "selected_records",
+        "counts",
+        "limits",
+        "truncated",
+        "context_hash",
+    }
 )
+_PUBLIC_RECORD_REQUIRED_FIELDS = frozenset(
+    {"canonical_ref", "canonical_revision", "value_hash"}
+)
+_PUBLIC_RECORD_ALLOWED_FIELDS = _PUBLIC_RECORD_REQUIRED_FIELDS | frozenset({"public_text"})
+_PUBLIC_COUNT_FIELDS = frozenset({"selected", "candidate_refs", "rendered_chars"})
+_PUBLIC_LIMIT_FIELDS = frozenset({"records", "max_chars"})
 
 
 class TaskMemoryContextError(ValueError):
@@ -149,7 +156,7 @@ def build_task_memory_context(
             "truncated": truncated,
         }
     )
-    _assert_public_receipt_safe(receipt)
+    _assert_public_receipt_shape(receipt)
     return TaskMemoryContextResult(
         schema=TASK_MEMORY_CONTEXT_RESULT_SCHEMA,
         receipt=receipt,
@@ -192,18 +199,13 @@ def _derived_candidate_refs(stack: PrivateMemoryStack, *, query: str, limit: int
 def _render_value_for_profile(profile: str, value: Any) -> str | None:
     if profile == "private_runtime":
         return canonical_json(value)
-    if profile != "public_control":
-        return None
-    if not isinstance(value, Mapping):
+    if profile != "public_control" or not isinstance(value, Mapping):
         return None
     if value.get("egress_classification") != "PUBLIC_SAFE_CONTROL":
         return None
     text = value.get("text")
-    if not isinstance(text, str) or not _PUBLIC_SAFE_TEXT_RE.fullmatch(text):
+    if not isinstance(text, str) or not text or len(text) > MAX_PUBLIC_CONTROL_TEXT_CHARS:
         return None
-    lowered = text.lower()
-    if any(marker in lowered for marker in _SECRET_MARKERS):
-        raise TaskMemoryContextError("public_control selected secret-like value")
     return text
 
 
@@ -239,6 +241,7 @@ def _empty_result(
         "truncated": False,
     }
     receipt["context_hash"] = content_hash(receipt)
+    _assert_public_receipt_shape(receipt)
     return TaskMemoryContextResult(
         schema=TASK_MEMORY_CONTEXT_RESULT_SCHEMA,
         receipt=receipt,
@@ -246,8 +249,49 @@ def _empty_result(
     )
 
 
-def _assert_public_receipt_safe(receipt: Mapping[str, Any]) -> None:
-    serialized = json.dumps(receipt, sort_keys=True)
-    lowered = serialized.lower()
-    if any(marker in lowered for marker in ("/home/", "/tmp/", ".sqlite", "password", "credential", "api_key")):
-        raise PrivateMemoryStackError("task context public receipt failed privacy validation")
+def _assert_public_receipt_shape(receipt: Mapping[str, Any]) -> None:
+    if set(receipt) != _PUBLIC_RECEIPT_FIELDS:
+        raise TaskMemoryContextError("invalid task context public receipt fields")
+    if receipt.get("schema") != TASK_MEMORY_CONTEXT_SCHEMA:
+        raise TaskMemoryContextError("invalid task context public receipt schema")
+    if receipt.get("profile") not in TASK_MEMORY_CONTEXT_PROFILES:
+        raise TaskMemoryContextError("invalid task context public receipt profile")
+    safe_token(receipt.get("project_id"), "project_id")
+    safe_token(receipt.get("task_route"), "task_route")
+    if not isinstance(receipt.get("canonical_revision"), int):
+        raise TaskMemoryContextError("invalid task context canonical revision")
+    records = receipt.get("selected_records")
+    if not isinstance(records, list):
+        raise TaskMemoryContextError("invalid task context selected records")
+    for record in records:
+        if not isinstance(record, Mapping):
+            raise TaskMemoryContextError("invalid task context selected record")
+        fields = set(record)
+        if fields - _PUBLIC_RECORD_ALLOWED_FIELDS or _PUBLIC_RECORD_REQUIRED_FIELDS - fields:
+            raise TaskMemoryContextError("invalid task context selected record fields")
+        canonical_ref = record.get("canonical_ref")
+        if not isinstance(canonical_ref, str) or ":" not in canonical_ref:
+            raise TaskMemoryContextError("invalid task context canonical ref")
+        namespace, fact_id = canonical_ref.split(":", 1)
+        safe_token(namespace, "namespace")
+        safe_token(fact_id, "fact_id")
+        if not isinstance(record.get("canonical_revision"), int):
+            raise TaskMemoryContextError("invalid task context record revision")
+        if not isinstance(record.get("value_hash"), str):
+            raise TaskMemoryContextError("invalid task context value hash")
+        if "public_text" in record and not isinstance(record.get("public_text"), str):
+            raise TaskMemoryContextError("invalid task context public text")
+    counts = receipt.get("counts")
+    limits = receipt.get("limits")
+    if not isinstance(counts, Mapping) or set(counts) != _PUBLIC_COUNT_FIELDS:
+        raise TaskMemoryContextError("invalid task context counts")
+    if not isinstance(limits, Mapping) or set(limits) != _PUBLIC_LIMIT_FIELDS:
+        raise TaskMemoryContextError("invalid task context limits")
+    if not all(isinstance(value, int) and not isinstance(value, bool) and value >= 0 for value in counts.values()):
+        raise TaskMemoryContextError("invalid task context count value")
+    if not all(isinstance(value, int) and not isinstance(value, bool) and value >= 0 for value in limits.values()):
+        raise TaskMemoryContextError("invalid task context limit value")
+    if not isinstance(receipt.get("truncated"), bool):
+        raise TaskMemoryContextError("invalid task context truncation flag")
+    if not isinstance(receipt.get("context_hash"), str):
+        raise TaskMemoryContextError("invalid task context hash")

@@ -155,14 +155,20 @@ def test_missing_or_malformed_keys_fail_closed() -> None:
         MemoryPatchProposalRegistry().propose(malformed)
 
 
-def test_no_private_looking_value_leaks_to_public_reports() -> None:
-    candidate = proposal(proposed_value={"state": "secret-token"})
+def test_free_form_value_is_accepted_but_not_returned_in_public_event() -> None:
+    candidate = proposal(
+        proposed_value={
+            "note": "operator text with arbitrary vocabulary",
+            "location": "/var/lib/example/data.sqlite",
+            "url": "https://example.invalid/resource",
+            "nested": ["alpha", {"beta": True}],
+        }
+    )
 
-    with pytest.raises(MemoryPatchProposalValidationError):
-        MemoryPatchProposalRegistry().propose(candidate)
+    result = MemoryPatchProposalRegistry().propose(candidate)
+    serialized = json.dumps(result, sort_keys=True)
 
-    result = MemoryPatchProposalRegistry().propose(proposal())
-    serialized = json.dumps(result, sort_keys=True).lower()
-    assert "secret" not in serialized
-    assert "token" not in serialized
-    assert "/" not in serialized
+    assert result["status"] == "ACCEPTED"
+    assert "proposed_value" not in result
+    assert candidate["proposed_value"]["note"] not in serialized
+    assert result["value_hash"] == stable_hash(candidate["proposed_value"])

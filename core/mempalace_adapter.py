@@ -17,10 +17,9 @@ from core.mempalace_projection import (
     bounded_excerpt,
     build_index_manifest,
     load_projection,
-    projection_terms,
-    query_terms,
 )
 from core.private_memory_history import bytes_hash, canonical_json, utc_now
+from core.private_memory_terms import PrivateMemoryTermsError, private_terms
 
 
 MEMPALACE_RESULT_SCHEMA = "skeleton.mempalace_result.v1"
@@ -55,6 +54,10 @@ class LocalMemPalaceIndex:
             value = fact["value"]
             text = _flatten_text(value)
             canonical_ref = str(fact["canonical_ref"])
+            try:
+                tokens = private_terms(text)
+            except PrivateMemoryTermsError:
+                tokens = ()
             documents.append(
                 {
                     "item_id": _item_id(canonical_ref),
@@ -68,7 +71,7 @@ class LocalMemPalaceIndex:
                         "source_kind": "canonical_sqlite",
                         "value_hash": str(fact["value_hash"]),
                     },
-                    "tokens": sorted(set(projection_terms(text))),
+                    "tokens": list(tokens),
                     "text": text,
                 }
             )
@@ -107,9 +110,9 @@ class LocalMemPalaceIndex:
 
     def search(self, *, query: str, limit: int = 5) -> dict[str, object]:
         try:
-            terms = set(query_terms(query))
-        except MemPalaceProjectionError as exc:
-            raise MemPalaceAdapterError(exc.reason_code, str(exc)) from exc
+            terms = set(private_terms(query, max_chars=128))
+        except PrivateMemoryTermsError as exc:
+            raise MemPalaceAdapterError("INVALID_QUERY", str(exc)) from exc
         limit = _bounded_limit(limit)
         scored = []
         for document in self._index["documents"]:
@@ -182,7 +185,10 @@ class MemPalaceAdapter:
         current_canonical_revision: int | None = None,
     ) -> dict[str, object]:
         self._authorize_scope(namespace=namespace, project_id=project_id)
-        terms = set(query_terms(query))
+        try:
+            terms = set(private_terms(query, max_chars=128))
+        except PrivateMemoryTermsError as exc:
+            raise MemPalaceAdapterError("INVALID_QUERY", str(exc)) from exc
         limit = _bounded_limit(limit)
         current_revision = current_canonical_revision or self._projection.current_canonical_revision
 
@@ -190,7 +196,10 @@ class MemPalaceAdapter:
         for document in self._projection.documents:
             if document.deleted:
                 continue
-            haystack = set(projection_terms(" ".join((document.title, document.bounded_text, *document.tags))))
+            try:
+                haystack = set(private_terms(" ".join((document.title, document.bounded_text, *document.tags))))
+            except PrivateMemoryTermsError:
+                haystack = set()
             matches = terms & haystack
             if not matches:
                 continue

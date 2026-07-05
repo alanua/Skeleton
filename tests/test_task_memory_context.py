@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from core.task_memory_context import TaskMemoryContextError, build_task_memory_context
 from core.private_memory_stack import PrivateMemoryStack
+from core.task_memory_context import TaskMemoryContextError, build_task_memory_context
 
 
 def test_context_results_require_exact_canonical_confirmation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -28,7 +28,7 @@ def test_context_results_require_exact_canonical_confirmation(tmp_path: Path, mo
         )
 
 
-def test_public_control_includes_only_egress_approved_safe_records(tmp_path: Path) -> None:
+def test_public_control_includes_only_explicitly_classified_records(tmp_path: Path) -> None:
     stack = _context_stack(tmp_path)
 
     result = build_task_memory_context(
@@ -161,24 +161,53 @@ def test_deterministic_limits_truncation_and_context_hash(tmp_path: Path) -> Non
     assert first["context_hash"] == second["context_hash"]
 
 
-def test_public_control_rejects_secret_like_egress_payload(tmp_path: Path) -> None:
+def test_public_control_does_not_filter_words_paths_or_unicode(tmp_path: Path) -> None:
+    stack = PrivateMemoryStack(tmp_path)
+    stack.init(import_manifest=False)
+    public_text = "password token /home/example/data.sqlite — дозволений текст"
+    stack.put(
+        namespace="skeleton.context",
+        fact_id="public-arbitrary-text",
+        value={
+            "egress_classification": "PUBLIC_SAFE_CONTROL",
+            "text": public_text,
+            "tags": ["marker"],
+        },
+    )
+
+    result = build_task_memory_context(
+        stack,
+        project_id="skeleton",
+        task_route="runner",
+        profile="public_control",
+        query="marker",
+        required=True,
+    )
+
+    assert result.public_receipt()["selected_records"][0]["public_text"] == public_text
+    assert result.private_values == []
+
+
+def test_unclassified_text_never_enters_public_control_receipt(tmp_path: Path) -> None:
     stack = PrivateMemoryStack(tmp_path)
     stack.init(import_manifest=False)
     stack.put(
         namespace="skeleton.context",
-        fact_id="bad",
-        value={"egress_classification": "PUBLIC_SAFE_CONTROL", "text": "password marker", "tags": ["marker"]},
+        fact_id="unclassified",
+        value={"text": "alpha unclassified", "tags": ["unclassified"]},
     )
 
-    with pytest.raises(TaskMemoryContextError):
-        build_task_memory_context(
-            stack,
-            project_id="skeleton",
-            task_route="runner",
-            profile="public_control",
-            query="marker",
-            required=True,
-        )
+    result = build_task_memory_context(
+        stack,
+        project_id="skeleton",
+        task_route="runner",
+        profile="public_control",
+        query="unclassified",
+        required=True,
+    )
+
+    assert result.public_receipt()["counts"]["selected"] == 0
+    assert result.public_receipt()["selected_records"] == []
 
 
 def _context_stack(tmp_path: Path) -> PrivateMemoryStack:

@@ -33,6 +33,7 @@ from core.memory_gateway_policy import (
     sanitized_reason_code,
     split_command,
     validate_namespace,
+    build_command_receipt,
     validate_public_payload,
 )
 from core.memory_override import MemoryOverrideRegistry
@@ -47,6 +48,7 @@ MEMORY_GATEWAY_CONTRACT_VERSION = "1.0.0"
 GRAPHIFY_SYNTHETIC_NAMESPACE = "skeleton"
 GRAPHIFY_SYNTHETIC_PROJECT_ID = "graphify_synthetic"
 _SAFE_PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+_PRIVATE_EXACT_AUTHORIZATION = object()
 
 
 @dataclass(frozen=True)
@@ -124,27 +126,55 @@ class MemoryGateway:
             )
         return handlers[suffix](namespace=namespace, **payload)
 
-    def lookup_exact(self, *, namespace: str, key: str, project_id: object = None) -> dict[str, object]:
+    def lookup_exact(
+        self,
+        *,
+        namespace: str,
+        key: str,
+        project_id: object = None,
+        _authorization: object = None,
+    ) -> dict[str, object]:
         namespace = self._authorize_namespace(namespace)
         project_id = self._scope_project_id(namespace, project_id)
-        key = _safe_lookup_key(key)
+        key = _safe_exact_key(key)
         try:
             record = self._canonical[(namespace, project_id)][key]
         except KeyError as exc:
-            record = self._lookup_sqlite_canonical_exact(namespace=namespace, project_id=project_id, key=key)
+            record = self._lookup_sqlite_canonical_exact(
+                namespace=namespace,
+                project_id=project_id,
+                key=key,
+            )
             if record is None:
-                raise MemoryGatewayPolicyError("CANONICAL_FACT_NOT_FOUND", "canonical fact not found") from exc
+                raise MemoryGatewayPolicyError(
+                    "CANONICAL_FACT_NOT_FOUND",
+                    "canonical fact not found",
+                ) from exc
+
+        payload = {
+            **deepcopy(record),
+            "namespace": namespace,
+            "project_id": project_id,
+            "authoritative": True,
+            "authority_classification": "canonical_exact",
+            "source_kind": "canonical_sqlite",
+        }
+
+        if _authorization is _PRIVATE_EXACT_AUTHORIZATION:
+            response = {
+                "schema": MEMORY_GATEWAY_RESPONSE_SCHEMA,
+                "contract_version": MEMORY_GATEWAY_CONTRACT_VERSION,
+                "namespace": namespace,
+                "command": command_name(namespace, "memory.lookup_exact"),
+                "payload": payload,
+            }
+            json.dumps(response, allow_nan=False, sort_keys=True)
+            return response
+
         return self._response(
             namespace=namespace,
             command_suffix="memory.lookup_exact",
-            payload={
-                **deepcopy(record),
-                "namespace": namespace,
-                "project_id": project_id,
-                "authoritative": True,
-                "authority_classification": "canonical_exact",
-                "source_kind": "canonical_sqlite",
-            },
+            payload=payload,
         )
 
     def search_semantic(self, *, namespace: str, query: str, project_id: object = None) -> dict[str, object]:
@@ -433,6 +463,7 @@ class MemoryGateway:
                     namespace="skeleton",
                     project_id="skeleton",
                     key=key,
+                    _authorization=_PRIVATE_EXACT_AUTHORIZATION,
                 ),
             )
         except CanonicalMemoryImportError as exc:
@@ -637,7 +668,7 @@ class MemoryGateway:
             "contract_version": MEMORY_GATEWAY_CONTRACT_VERSION,
             "namespace": namespace,
             "command": command_name(namespace, command_suffix),
-            "payload": validate_public_payload(payload),
+            "payload": build_command_receipt(command_suffix, payload),
         }
         json.dumps(response, allow_nan=False, sort_keys=True)
         return response
@@ -843,9 +874,20 @@ def _freshness_seed() -> dict[tuple[str, str], dict[str, dict[str, object]]]:
 
 
 def _safe_lookup_key(value: object) -> str:
-    if not isinstance(value, str) or not value or len(value) > 128:
-        raise MemoryGatewayPolicyError("INVALID_LOOKUP_KEY", "lookup key must be a bounded string")
-    validate_public_payload({"lookup_key": value})
+    if not isinstance(value, str) or not value.strip() or len(value) > 128:
+        raise MemoryGatewayPolicyError(
+            "INVALID_LOOKUP_KEY",
+            "query must be a bounded string",
+        )
+    return value
+
+
+def _safe_exact_key(value: object) -> str:
+    if not isinstance(value, str) or not _SAFE_PROJECT_ID_RE.fullmatch(value):
+        raise MemoryGatewayPolicyError(
+            "INVALID_LOOKUP_KEY",
+            "lookup key must be a bounded identifier",
+        )
     return value
 
 
