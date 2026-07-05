@@ -92,7 +92,7 @@ def context(
     capabilities: tuple[str, ...] | None = None,
     kinds: tuple[str, ...] = tuple(sorted(TASK_KINDS)),
     approvals: tuple[str, ...] = (APPROVAL,),
-    protected_approvals: tuple[str, ...] = (),
+    protected_approvals: tuple[str, ...] = (APPROVAL,),
     patch: dict[str, object] | None = None,
     action: ActionGateRequest | None = None,
     head_sha: str | None = None,
@@ -216,7 +216,11 @@ def test_private_memory_read_accepts_local_boundary() -> None:
 def test_protected_target_requires_protected_approval() -> None:
     protected_file = "core/action_gate.py"
     selected = task(files=(protected_file,))
-    runtime = context(selected, patch=plan((protected_file,)))
+    runtime = context(
+        selected,
+        protected_approvals=(),
+        patch=plan((protected_file,)),
+    )
     blocked = RunnerGate().evaluate(selected, runtime)
     assert "PROTECTED_RESOURCE_APPROVAL_MISSING" in blocked.reason_codes
     allowed = RunnerGate().evaluate(
@@ -306,3 +310,57 @@ def test_invalid_inputs_and_incomplete_configuration_fail_closed() -> None:
     route_privacy.pop("diagnostic")
     with pytest.raises(ValueError):
         RunnerGate(route_privacy_boundaries=route_privacy)
+
+
+
+def test_runner_core_prefix_is_protected() -> None:
+    gate = RunnerGate()
+
+    assert gate.is_protected_path("core/runner_task.py")
+    assert gate.is_protected_path("core/runner_executor.py")
+    assert gate.is_protected_path("core/runner_executor_registry.py")
+    assert gate.is_protected_path("core/runner_gate.py")
+    assert gate.is_protected_path("core/runner_lease_store.py")
+
+
+def test_malformed_current_head_sha_fails_closed() -> None:
+    selected = publish_task()
+    runtime = replace(
+        context(selected, action=publish_action(), head_sha=HEAD_SHA),
+        current_head_sha=123,
+    )
+
+    decision = RunnerGate().evaluate(selected, runtime)
+
+    assert decision.reason_codes == ("INVALID_GATE_CONTEXT",)
+
+
+@pytest.mark.parametrize(
+    ("action", "expected_code"),
+    [
+        (
+            replace(publish_action(), expected_head_sha=123),
+            "ACTION_HEAD_SHA_INVALID",
+        ),
+        (
+            replace(
+                publish_action(),
+                expected_files=("core/runner_gate.py", 123),
+            ),
+            "ACTION_FILES_INVALID",
+        ),
+    ],
+)
+def test_malformed_action_fields_fail_closed(
+    action: ActionGateRequest,
+    expected_code: str,
+) -> None:
+    selected = publish_task()
+
+    decision = RunnerGate().evaluate(
+        selected,
+        context(selected, action=action, head_sha=HEAD_SHA),
+    )
+
+    assert "ACTION_GATE_BLOCKED" in decision.reason_codes
+    assert expected_code in decision.reason_codes

@@ -40,6 +40,7 @@ PROTECTED_PATHS: Final = (
     "Runner_core",
     "adapter_boundaries",
 )
+PROTECTED_PATH_PREFIXES: Final = ("core/runner_",)
 
 ROUTE_REQUIRED_CAPABILITIES: Final = {
     "code_edit": frozenset(
@@ -322,6 +323,8 @@ class RunnerGate:
         return any(
             path == protected or path.startswith(protected + "/")
             for protected in self._protected_paths
+        ) or any(
+            path.startswith(prefix) for prefix in PROTECTED_PATH_PREFIXES
         )
 
 
@@ -348,12 +351,29 @@ def _validated_context(
         return None
     if not all(
         isinstance(value, str) and value
-        for value in (context.repo, context.branch, context.base_sha)
+        for value in (context.repo, context.branch)
     ):
         _add(
             reasons,
             "INVALID_GATE_CONTEXT",
-            "context repo, branch, and base_sha must be non-empty strings",
+            "context repo and branch must be non-empty strings",
+        )
+        return None
+    if not _is_full_sha(context.base_sha):
+        _add(
+            reasons,
+            "INVALID_GATE_CONTEXT",
+            "context base_sha must be a full 40-character Git SHA",
+        )
+        return None
+    if (
+        context.current_head_sha is not None
+        and not _is_full_sha(context.current_head_sha)
+    ):
+        _add(
+            reasons,
+            "INVALID_GATE_CONTEXT",
+            "current_head_sha must be a full 40-character Git SHA",
         )
         return None
     return context
@@ -418,6 +438,34 @@ def _safe_path(value: object) -> bool:
     )
 
 
+def _is_full_sha(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 40
+        and all(character in "0123456789abcdefABCDEF" for character in value)
+    )
+
+
+def _validated_action_files(
+    values: object,
+    reasons: list[tuple[str, str]],
+) -> tuple[str, ...] | None:
+    if (
+        not isinstance(values, tuple)
+        or not values
+        or any(not isinstance(value, str) for value in values)
+        or len(set(values)) != len(values)
+        or any(not _safe_path(value) for value in values)
+    ):
+        _add(
+            reasons,
+            "ACTION_FILES_INVALID",
+            "ActionGateRequest expected_files must contain unique safe paths",
+        )
+        return None
+    return values
+
+
 def _validate_action_parity(
     task: RunnerTask,
     context: RunnerGateContext,
@@ -433,8 +481,11 @@ def _validate_action_parity(
             "ACTION_REPOSITORY_MISMATCH",
             "ActionGateRequest repository does not match RunnerTask",
         )
-    if target_files is not None and tuple(sorted(request.expected_files)) != tuple(
-        sorted(target_files)
+    action_files = _validated_action_files(request.expected_files, reasons)
+    if (
+        target_files is not None
+        and action_files is not None
+        and tuple(sorted(action_files)) != tuple(sorted(target_files))
     ):
         _add(
             reasons,
@@ -446,6 +497,12 @@ def _validate_action_parity(
             reasons,
             "CURRENT_HEAD_SHA_REQUIRED",
             "publish tasks require the current PR head SHA",
+        )
+    elif not _is_full_sha(request.expected_head_sha):
+        _add(
+            reasons,
+            "ACTION_HEAD_SHA_INVALID",
+            "ActionGateRequest expected_head_sha must be a full Git SHA",
         )
     elif request.expected_head_sha.lower() != context.current_head_sha.lower():
         _add(
