@@ -204,8 +204,14 @@ class PrivateMemoryStack:
         with _exclusive_lock(self.paths.lock):
             return self._backup_unlocked(snapshot_id=snapshot_id)
 
-    def _backup_unlocked(self, *, snapshot_id: str | None = None) -> dict[str, object]:
-        self._require_ready(allow_stale=True)
+    def _backup_unlocked(
+        self,
+        *,
+        snapshot_id: str | None = None,
+        require_ready: bool = True,
+    ) -> dict[str, object]:
+        if require_ready:
+            self._require_ready(allow_stale=True)
         self.paths.backups.mkdir(parents=True, exist_ok=True)
         _chmod_dir(self.paths.backups)
         manifest = create_snapshot(self.paths.db, self.paths.backups, snapshot_id=snapshot_id)
@@ -279,7 +285,10 @@ class PrivateMemoryStack:
                 _remove_backup_file(before)
             rebuild_error = self._try_rebuild_after_canonical_success_unlocked()
             backup_report = (
-                self._backup_unlocked(snapshot_id=f"bundle-{prepared.receipt_id[:24]}")
+                self._backup_unlocked(
+                    snapshot_id=f"bundle-{prepared.receipt_id[:24]}",
+                    require_ready=False,
+                )
                 if create_backup
                 else None
             )

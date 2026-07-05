@@ -129,6 +129,41 @@ def test_index_rebuild_failure_preserves_canonical_import_and_reports_degraded(
     )
 
 
+
+def test_import_create_backup_survives_degraded_index_rebuild(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stack = PrivateMemoryStack(tmp_path / "pm")
+    stack.init(import_manifest=False)
+    inbox = _inbox(tmp_path)
+    bundle_path = _write_bundle(inbox, _bundle("bundle-degraded-backup"))
+
+    def fail_rebuild(*args: object, **kwargs: object) -> dict[str, object]:
+        raise RuntimeError("synthetic graphify failure")
+
+    monkeypatch.setattr(LocalGraphifyIndex, "rebuild_from_facts", fail_rebuild)
+
+    receipt = stack.import_bundle(
+        bundle_path.name,
+        expected_sha256=bytes_hash(bundle_path.read_bytes()),
+        create_backup=True,
+        env={"SKELETON_PRIVATE_MEMORY_INBOX": str(inbox)},
+    )
+
+    assert receipt["status"] == "DEGRADED"
+    assert receipt["canonical_sqlite"] == "DONE"
+    assert receipt["backup"]["status"] == "DONE"
+    assert receipt["index_rebuild_error_class"] == "RuntimeError"
+    assert not bundle_path.exists()
+    assert (
+        tmp_path
+        / "pm"
+        / "backups"
+        / f"bundle-{receipt['receipt_id'][:24]}.sqlite"
+    ).is_file()
+
+
 def test_duplicate_same_hash_is_idempotent_and_different_hash_blocks(tmp_path: Path) -> None:
     stack = PrivateMemoryStack(tmp_path / "pm")
     stack.init(import_manifest=False)
