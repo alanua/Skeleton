@@ -11063,3 +11063,86 @@ def test_home_edge_lan_inventory_task_is_explicitly_dispatched() -> None:
 
     assert report == "DONE: test"
     action.assert_called_once_with()
+
+
+
+def test_validation_command_environment_strips_skeleton_runtime_values() -> None:
+    environment = {
+        "HOME": "/home/agent",
+        "PATH": "/usr/bin",
+        "LANG": "C.UTF-8",
+        "SKELETON_HOME_EDGE_01_HOSTNAME": "live-home-edge",
+        "SKELETON_RUNNER_MEMORY_DB": "/private/runner.sqlite",
+    }
+
+    filtered = runner._validation_command_environment(environment)
+
+    assert filtered == {
+        "HOME": "/home/agent",
+        "PATH": "/usr/bin",
+        "LANG": "C.UTF-8",
+    }
+    assert environment["SKELETON_HOME_EDGE_01_HOSTNAME"] == "live-home-edge"
+    assert environment["SKELETON_RUNNER_MEMORY_DB"] == "/private/runner.sqlite"
+
+
+def test_run_validation_profile_command_sanitizes_and_resets_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv(
+        "SKELETON_HOME_EDGE_01_HOSTNAME",
+        "live-home-edge",
+    )
+    monkeypatch.setenv(
+        "SKELETON_RUNNER_MEMORY_DB",
+        "/private/runner.sqlite",
+    )
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("HOME", "/home/agent")
+
+    completed = runner.subprocess.CompletedProcess(
+        args=["python3"],
+        returncode=0,
+        stdout="ok\n",
+        stderr="",
+    )
+
+    with mock.patch.object(
+        runner.subprocess,
+        "run",
+        return_value=completed,
+    ) as subprocess_run:
+        code, output = runner._run_validation_profile_command(
+            ["python3", "-m", "pytest", "-q"],
+            cwd=tmp_path,
+        )
+        runner.run_command(
+            ["python3", "--version"],
+            cwd=tmp_path,
+        )
+
+    assert code == 0
+    assert output == "ok\n"
+    assert subprocess_run.call_count == 2
+
+    validation_kwargs = subprocess_run.call_args_list[0].kwargs
+    normal_kwargs = subprocess_run.call_args_list[1].kwargs
+    validation_environment = validation_kwargs["env"]
+
+    assert validation_environment["PATH"] == "/usr/bin"
+    assert validation_environment["HOME"] == "/home/agent"
+    assert not any(
+        key.startswith("SKELETON_")
+        for key in validation_environment
+    )
+    assert "env" not in normal_kwargs
+
+    assert (
+        os.environ["SKELETON_HOME_EDGE_01_HOSTNAME"]
+        == "live-home-edge"
+    )
+    assert (
+        os.environ["SKELETON_RUNNER_MEMORY_DB"]
+        == "/private/runner.sqlite"
+    )

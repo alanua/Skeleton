@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
+from contextvars import ContextVar
 import csv
 from dataclasses import dataclass
 import hashlib
@@ -750,21 +752,55 @@ def cleanup_runtime_artifacts(workdir: str | Path) -> None:
             artifact.unlink()
 
 
+_RUN_COMMAND_ENV_OVERRIDE: ContextVar[Mapping[str, str] | None] = ContextVar(
+    "_RUN_COMMAND_ENV_OVERRIDE",
+    default=None,
+)
+
+
 def run_command(
     args: list[str],
     cwd: str | Path | None = None,
     *,
     timeout: int | None = None,
 ) -> tuple[int, str]:
-    result = subprocess.run(
-        args,
-        cwd=str(cwd) if cwd is not None else None,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    run_kwargs: dict[str, Any] = {
+        "cwd": str(cwd) if cwd is not None else None,
+        "check": False,
+        "capture_output": True,
+        "text": True,
+        "timeout": timeout,
+    }
+    environment = _RUN_COMMAND_ENV_OVERRIDE.get()
+    if environment is not None:
+        run_kwargs["env"] = dict(environment)
+
+    result = subprocess.run(args, **run_kwargs)
     return result.returncode, result.stdout + result.stderr
+
+
+def _validation_command_environment(
+    environment: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    source = os.environ if environment is None else environment
+    return {
+        key: value
+        for key, value in source.items()
+        if not key.startswith("SKELETON_")
+    }
+
+
+def _run_validation_profile_command(
+    args: list[str],
+    cwd: str | Path,
+) -> tuple[int, str]:
+    token = _RUN_COMMAND_ENV_OVERRIDE.set(
+        _validation_command_environment()
+    )
+    try:
+        return run_command(args, cwd=cwd)
+    finally:
+        _RUN_COMMAND_ENV_OVERRIDE.reset(token)
 
 
 def worktree_root() -> Path:
@@ -7455,7 +7491,9 @@ def validate_pr_branch(body: str) -> str:
     status_lines.append("step=verify_validation_head status=done")
 
     for index, command in enumerate(PR_BRANCH_VALIDATION_PROFILES[request.profile], 1):
-        code, output = run_command(list(command), cwd=validation_path)
+        code, output = _run_validation_profile_command(
+            list(command), cwd=validation_path
+        )
         if code != 0:
             return _maintenance_report(
                 "BLOCKED",
