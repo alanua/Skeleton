@@ -78,6 +78,7 @@ from core.memory_patch_proposal import (
 )
 from core.private_memory import healthcheck_private_memory, write_public_heartbeat
 from core.project_tree import get_project, get_project_by_repo, load_project_tree
+from core.runner_child_environment import sanitize_codegen_child_environment
 from core.runner_retry_policy import (
     BLOCK_REPEATED_REASON,
     NEEDS_OPERATOR,
@@ -796,11 +797,7 @@ def _validation_command_environment(
     environment: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     source = os.environ if environment is None else environment
-    return {
-        key: value
-        for key, value in source.items()
-        if not key.startswith("SKELETON_")
-    }
+    return sanitize_codegen_child_environment(source)
 
 
 def _run_validation_profile_command(
@@ -1855,10 +1852,16 @@ def run_codex_task(
     ) as task_file:
         task_file.write(task_content)
         task_file.flush()
-        return run_command(
-            codex_exec_command(task_content, workdir, task),
-            cwd=workdir,
+        token = _RUN_COMMAND_ENV_OVERRIDE.set(
+            sanitize_codegen_child_environment(os.environ)
         )
+        try:
+            return run_command(
+                codex_exec_command(task_content, workdir, task),
+                cwd=workdir,
+            )
+        finally:
+            _RUN_COMMAND_ENV_OVERRIDE.reset(token)
 
 
 def post_issue_comment(issue_number: int, body: str) -> None:

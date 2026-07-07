@@ -10502,6 +10502,36 @@ def test_codex_exec_command_rejects_invalid_model_before_run_command(monkeypatch
     run_command.assert_not_called()
 
 
+def test_run_codex_task_sanitizes_home_edge_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("SKELETON_HOME_EDGE_01_HOSTNAME", "live-home-edge")
+    monkeypatch.setenv("SKELETON_RUNNER_MEMORY_DB", "/private/runner.sqlite")
+    monkeypatch.setenv("PATH", "/usr/bin")
+
+    completed = runner.subprocess.CompletedProcess(
+        args=["codex"],
+        returncode=0,
+        stdout="done\n",
+        stderr="",
+    )
+
+    with mock.patch.object(
+        runner.subprocess,
+        "run",
+        return_value=completed,
+    ) as subprocess_run:
+        code, output = runner.run_codex_task("Task body", str(tmp_path), None)
+
+    assert code == 0
+    assert output == "done\n"
+    child_environment = subprocess_run.call_args.kwargs["env"]
+    assert "SKELETON_HOME_EDGE_01_HOSTNAME" not in child_environment
+    assert child_environment["SKELETON_RUNNER_MEMORY_DB"] == "/private/runner.sqlite"
+    assert os.environ["SKELETON_HOME_EDGE_01_HOSTNAME"] == "live-home-edge"
+
+
 
 def test_maintenance_report_sanitizer_rejects_raw_blocks_paths_and_prose() -> None:
     report = runner._maintenance_report(
@@ -11066,7 +11096,7 @@ def test_home_edge_lan_inventory_task_is_explicitly_dispatched() -> None:
 
 
 
-def test_validation_command_environment_strips_skeleton_runtime_values() -> None:
+def test_validation_command_environment_strips_only_home_edge_runtime_values() -> None:
     environment = {
         "HOME": "/home/agent",
         "PATH": "/usr/bin",
@@ -11081,6 +11111,7 @@ def test_validation_command_environment_strips_skeleton_runtime_values() -> None
         "HOME": "/home/agent",
         "PATH": "/usr/bin",
         "LANG": "C.UTF-8",
+        "SKELETON_RUNNER_MEMORY_DB": "/private/runner.sqlite",
     }
     assert environment["SKELETON_HOME_EDGE_01_HOSTNAME"] == "live-home-edge"
     assert environment["SKELETON_RUNNER_MEMORY_DB"] == "/private/runner.sqlite"
@@ -11132,10 +11163,8 @@ def test_run_validation_profile_command_sanitizes_and_resets_environment(
 
     assert validation_environment["PATH"] == "/usr/bin"
     assert validation_environment["HOME"] == "/home/agent"
-    assert not any(
-        key.startswith("SKELETON_")
-        for key in validation_environment
-    )
+    assert "SKELETON_HOME_EDGE_01_HOSTNAME" not in validation_environment
+    assert validation_environment["SKELETON_RUNNER_MEMORY_DB"] == "/private/runner.sqlite"
     assert "env" not in normal_kwargs
 
     assert (
