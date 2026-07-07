@@ -1,0 +1,250 @@
+schema: skeleton.rule_enforcement_registry.v1
+version: 0.3.0
+status: stage0_inventory_only
+program: Skeleton Rules Rebuild
+stage: stage0_current_main
+boundary:
+  runtime_behavior_changed: false
+  merge_enabled: false
+  canon_promotion_enabled: false
+  private_data_allowed: false
+  skeleton_jeeves_boundary: preserved
+issue_refs:
+  - '#1088'
+  - '#1350'
+  - '#1455'
+  - '#1496'
+  - '#1497'
+  - '#1544'
+  - '#1546'
+source_coverage:
+  - source_file: BOOT_MANIFEST.yaml
+    classification: covered
+    notes: Confirmed boot order and control routes.
+  - source_file: SOURCE_REGISTRY.yaml
+    classification: contradictory
+    notes: Current intent and durable GitHub state need separate authority domains.
+  - source_file: COMMANDS.yaml
+    classification: contradictory
+    notes: Active command semantics are still marked as a draft candidate.
+  - source_file: OPERATOR_RULES.yaml
+    classification: duplicated
+    notes: Registry-only entries overlap with command and runtime gates.
+  - source_file: MEMORY_ROUTING.yaml
+    classification: covered
+    notes: Public and private routing boundaries are inventoried.
+  - source_file: projects/skeleton/PROJECT_OPERATING_STANDARD.md
+    classification: contradictory
+    notes: Blanket approval language conflicts with newer bounded continuation policy.
+  - source_file: core/action_gate.py
+    classification: needs_review
+    notes: Narrow merge-only approval contract is not the full approval model.
+  - source_file: core/gate_engine.py
+    classification: covered
+    notes: PatchPlan and durable-write preflight are inventoried.
+  - source_file: core/runner_gate.py
+    classification: covered
+    notes: Typed scope, capability, privacy and protected-resource checks.
+  - source_file: core/runner_task.py
+    classification: covered
+    notes: Typed Runner task envelope.
+  - source_file: core/runner_retry_policy.py
+    classification: covered
+    notes: Bounded retry and repeated-blocker policy.
+  - source_file: scripts/runner_poll_github_tasks.py
+    classification: needs_review
+    notes: Protected orchestrator still contains route-specific policy.
+  - source_file: policies/RULE_ENFORCEMENT_REGISTRY.yaml
+    classification: covered
+    notes: This Stage 0 inventory.
+  - source_file: schemas/rule_enforcement_registry.schema.json
+    classification: covered
+    notes: Strict schema for this inventory.
+rules:
+  - rule_id: github_main_durable_state_authority
+    title: GitHub main controls durable repository and queue state
+    source_type: file
+    source_ref: projects/skeleton/PROJECT_OPERATING_STANDARD.md
+    source_locator: section 2
+    owner_component: skeleton_control_plane
+    scope: source.authority.durable_state
+    lifecycle: needs_review
+    policy_severity: block
+    enforcement_state: documentation_only
+    gate_entrypoint: ''
+    reason_tokens: []
+    approval_binding: none
+    test_evidence: []
+    privacy_boundary: public_only
+    supersedes: []
+    superseded_by: []
+    notes: Current messages control intent and approval, not silent durable-state rewrites.
+  - rule_id: plus_continues_current_scope_only
+    title: Plus continues only an already approved same-scope step
+    source_type: file
+    source_ref: COMMANDS.yaml
+    source_locator: commands.+
+    owner_component: command_router
+    scope: command.plus.continuation
+    lifecycle: active
+    policy_severity: block
+    enforcement_state: route_validation
+    gate_entrypoint: command_router.continue_approved_step
+    reason_tokens: [SCOPE_EXPANSION_BLOCKED]
+    approval_binding: exact_route_scope_risk
+    test_evidence: []
+    privacy_boundary: not_applicable
+    supersedes: []
+    superseded_by: []
+    notes: Plus does not authorize a new route or risk class.
+  - rule_id: fixuy_is_scoped_persistence_approval
+    title: Fixuy authorizes only classification and persistence of the stated item
+    source_type: file
+    source_ref: COMMANDS.yaml
+    source_locator: commands.зафіксуй and commands.фіксуй
+    owner_component: memory_router
+    scope: command.persistence.fixuy
+    lifecycle: needs_review
+    policy_severity: require_approval
+    enforcement_state: route_validation
+    gate_entrypoint: memory_router.classify_and_route
+    reason_tokens: [PERSISTENCE_SCOPE_MISMATCH]
+    approval_binding: exact_memory_classification
+    test_evidence: []
+    privacy_boundary: public_summary_private_detail
+    supersedes: []
+    superseded_by: []
+    notes: Must be reconciled with blanket extra-plus wording.
+  - rule_id: batch_requires_same_route_scope_risk_gate
+    title: Batch processing requires homogeneous approved work
+    source_type: file
+    source_ref: COMMANDS.yaml
+    source_locator: commands.пакетно
+    owner_component: command_router
+    scope: command.batch.homogeneous
+    lifecycle: active
+    policy_severity: block
+    enforcement_state: route_validation
+    gate_entrypoint: command_router.batch_continue
+    reason_tokens: [BATCH_SCOPE_MISMATCH]
+    approval_binding: exact_route_scope_risk
+    test_evidence: []
+    privacy_boundary: not_applicable
+    supersedes: []
+    superseded_by: []
+    notes: Split and stop when route, scope, risk, privacy or gate differs.
+  - rule_id: patch_plan_before_durable_write
+    title: Durable writes require a valid PatchPlan
+    source_type: file
+    source_ref: core/gate_engine.py
+    source_locator: GateEngine.check_patch_plan
+    owner_component: gate_engine
+    scope: write.durable.patch_plan
+    lifecycle: active
+    policy_severity: block
+    enforcement_state: runtime_gate
+    gate_entrypoint: core.gate_engine.GateEngine.check_patch_plan
+    reason_tokens: [BLOCKED_NO_PLAN, BLOCKED_INVALID_SCHEMA, BLOCKED_READ_MISSING]
+    approval_binding: exact_task_and_base
+    test_evidence: []
+    privacy_boundary: not_applicable
+    supersedes: []
+    superseded_by: []
+    notes: Existing approved continuation routes need explicit reconciliation.
+  - rule_id: protected_resource_requires_explicit_approval
+    title: Protected resources require exact protected-resource approval
+    source_type: file
+    source_ref: core/runner_gate.py
+    source_locator: RunnerGate.evaluate
+    owner_component: runner_gate
+    scope: runner.protected_resource
+    lifecycle: active
+    policy_severity: require_approval
+    enforcement_state: runtime_gate
+    gate_entrypoint: core.runner_gate.RunnerGate.evaluate
+    reason_tokens: [PROTECTED_RESOURCE_APPROVAL_MISSING]
+    approval_binding: exact_protected_resource
+    test_evidence: []
+    privacy_boundary: public_only
+    supersedes: []
+    superseded_by: []
+    notes: Protected path lists are duplicated and need one authority.
+  - rule_id: runner_privacy_boundary_matches_route
+    title: Runner privacy boundary must match the route
+    source_type: file
+    source_ref: core/runner_gate.py
+    source_locator: ROUTE_PRIVACY_BOUNDARIES
+    owner_component: runner_gate
+    scope: runner.route.privacy
+    lifecycle: active
+    policy_severity: block
+    enforcement_state: runtime_gate
+    gate_entrypoint: core.runner_gate.RunnerGate.evaluate
+    reason_tokens: [PRIVACY_BOUNDARY_MISMATCH]
+    approval_binding: exact_private_boundary
+    test_evidence: []
+    privacy_boundary: public_summary_private_detail
+    supersedes: []
+    superseded_by: []
+    notes: Private payloads must not enter public repository routes.
+  - rule_id: repeated_identical_blocker_stops_retry
+    title: Repeated identical blockers stop before another executor run
+    source_type: file
+    source_ref: core/runner_retry_policy.py
+    source_locator: retry decision contract
+    owner_component: runner_retry_policy
+    scope: runner.retry.identical_blocker
+    lifecycle: active
+    policy_severity: block
+    enforcement_state: runtime_gate
+    gate_entrypoint: core.runner_retry_policy.evaluate_retry
+    reason_tokens: [NEEDS_OPERATOR]
+    approval_binding: exact_task_and_base
+    test_evidence: []
+    privacy_boundary: public_only
+    supersedes: []
+    superseded_by: []
+    notes: A scheduled time alone is not evidence that an external blocker changed.
+  - rule_id: memory_gateway_is_private_write_boundary
+    title: Canonical private writes pass through MemoryGateway only
+    source_type: issue
+    source_ref: '#1544'
+    source_locator: operator decision
+    owner_component: memory_gateway
+    scope: memory.private.write_boundary
+    lifecycle: planned
+    policy_severity: block
+    enforcement_state: none
+    gate_entrypoint: ''
+    reason_tokens: []
+    approval_binding: exact_memory_classification
+    test_evidence: []
+    privacy_boundary: private_only
+    supersedes: []
+    superseded_by: []
+    notes: Direct canonical database writes remain outside the approved route.
+  - rule_id: disposition_is_not_execution_authority
+    title: A Disposition is a proposal and not execution authority
+    source_type: issue
+    source_ref: '#1546'
+    source_locator: Disposition contract
+    owner_component: disposition_engine
+    scope: disposition.execution_authority
+    lifecycle: planned
+    policy_severity: block
+    enforcement_state: none
+    gate_entrypoint: ''
+    reason_tokens: []
+    approval_binding: exact_route_scope_risk
+    test_evidence: []
+    privacy_boundary: public_summary_private_detail
+    supersedes: []
+    superseded_by: []
+    notes: Actions and canonical writes still use existing gates.
+next_stages:
+  - stage: stage1_high_risk_gates
+    goal: Unify protected actions, approvals and stable reason tokens.
+  - stage: stage2_execution_preflight
+    goal: Bind tasks, providers, privacy and executor evidence to policy versions.
+  - stage: stage3_memory_queue_policy
+    goal: Enforce memory authority, queue lifecycle and recovery rules.
