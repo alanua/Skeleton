@@ -49,12 +49,17 @@ def test_lease_expired_accepts_only_leased_states(state: str) -> None:
 @pytest.mark.parametrize(
     ("changes", "reason"),
     [
+        ({"schema": "wrong"}, "INVALID_LOOP_RECOVERY_SCHEMA"),
         ({"action": "scan_and_resume"}, "INVALID_LOOP_RECOVERY_ACTION"),
+        ({"action": {}}, "INVALID_LOOP_RECOVERY_ACTION"),
         ({"expected_version": -1}, "INVALID_LOOP_RECOVERY_VERSION"),
+        ({"expected_version": True}, "INVALID_LOOP_RECOVERY_VERSION"),
         ({"expected_state": "RUNNING"}, "LOOP_RECOVERY_STATE_MISMATCH"),
         ({"policy_profile": "unregistered"}, "LOOP_POLICY_PROFILE_NOT_REGISTERED"),
         ({"approval_reference": ""}, "INVALID_LOOP_RECOVERY_TOKEN"),
         ({"public_safe": False}, "INVALID_LOOP_RECOVERY_BOUNDARY"),
+        ({"no_secrets": False}, "INVALID_LOOP_RECOVERY_BOUNDARY"),
+        ({"no_runtime_mutation": False}, "INVALID_LOOP_RECOVERY_BOUNDARY"),
     ],
 )
 def test_invalid_packets_fail_closed(
