@@ -107,12 +107,11 @@ class LoopRecoveryPacket:
             )
 
         action = value["action"]
-        if action not in LOOP_RECOVERY_ACTIONS:
+        if not isinstance(action, str) or action not in LOOP_RECOVERY_ACTIONS:
             raise LoopRecoveryPacketError(
                 "INVALID_LOOP_RECOVERY_ACTION",
                 "unsupported Loop recovery action",
             )
-        assert isinstance(action, str)
 
         expected_version = value["expected_version"]
         if (
