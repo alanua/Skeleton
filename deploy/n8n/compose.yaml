@@ -1,0 +1,57 @@
+services:
+  n8n:
+    image: n8nio/n8n:1.97.1@sha256:4c466c8d7a0f21fb498fb019b6f8d6f2dc9c90524859aa0f5d1b3feec8e8d30d
+    restart: unless-stopped
+    user: "1000:1000"
+    ports:
+      - "127.0.0.1:${N8N_EDITOR_PORT:-5678}:5678"
+    environment:
+      DB_TYPE: sqlite
+      DB_SQLITE_DATABASE: /home/node/.n8n/database.sqlite
+      DB_SQLITE_POOL_SIZE: "2"
+      GENERIC_TIMEZONE: Europe/Berlin
+      TZ: Europe/Berlin
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?set a private 32+ character descriptor in your uncommitted env file}
+      N8N_HOST: ${N8N_HOST:-127.0.0.1}
+      N8N_PORT: "5678"
+      N8N_PROTOCOL: http
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
+      N8N_TEMPLATES_ENABLED: "false"
+      N8N_PERSONALIZATION_ENABLED: "false"
+      EXTERNAL_FRONTEND_HOOKS_URLS: ""
+      N8N_COMMUNITY_PACKAGES_ENABLED: "false"
+      N8N_REINSTALL_MISSING_PACKAGES: "false"
+      N8N_SKIP_WEBHOOK_DEREGISTRATION_SHUTDOWN: "false"
+      EXECUTIONS_DATA_SAVE_ON_SUCCESS: none
+      EXECUTIONS_DATA_SAVE_ON_ERROR: all
+      EXECUTIONS_DATA_SAVE_ON_PROGRESS: "false"
+      EXECUTIONS_DATA_SAVE_MANUAL_EXECUTIONS: "false"
+      EXECUTIONS_DATA_PRUNE: "true"
+      EXECUTIONS_DATA_MAX_AGE: "168"
+      EXECUTIONS_DATA_PRUNE_MAX_COUNT: "10000"
+    volumes:
+      - type: bind
+        source: ${N8N_DATA_DIR:?set an owner-only host directory for n8n data}
+        target: /home/node/.n8n
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget --quiet --tries=1 --spider http://127.0.0.1:5678/healthz || exit 1
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    mem_limit: 768m
+    cpus: "1.00"
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: "1.00"
+          memory: 768M
