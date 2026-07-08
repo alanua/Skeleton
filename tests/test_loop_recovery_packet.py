@@ -22,7 +22,7 @@ def valid_packet(**changes: object) -> dict[str, object]:
         "recovery_reason": "explicit_recovery",
         "public_safe": True,
         "no_secrets": True,
-        "no_runtime_mutation": True,
+        "no_external_side_effects": True,
     }
     value.update(changes)
     return value
@@ -59,7 +59,7 @@ def test_lease_expired_accepts_only_leased_states(state: str) -> None:
         ({"approval_reference": ""}, "INVALID_LOOP_RECOVERY_TOKEN"),
         ({"public_safe": False}, "INVALID_LOOP_RECOVERY_BOUNDARY"),
         ({"no_secrets": False}, "INVALID_LOOP_RECOVERY_BOUNDARY"),
-        ({"no_runtime_mutation": False}, "INVALID_LOOP_RECOVERY_BOUNDARY"),
+        ({"no_external_side_effects": False}, "INVALID_LOOP_RECOVERY_BOUNDARY"),
     ],
 )
 def test_invalid_packets_fail_closed(
@@ -81,6 +81,15 @@ def test_lease_expired_rejects_unleased_state() -> None:
 def test_unknown_limit_field_is_rejected() -> None:
     value = valid_packet()
     value["max_iterations"] = 999
+    with pytest.raises(LoopRecoveryPacketError) as exc_info:
+        LoopRecoveryPacket.from_mapping(value)
+    assert exc_info.value.reason_code == "UNKNOWN_LOOP_RECOVERY_FIELD"
+
+
+def test_legacy_no_runtime_mutation_field_is_rejected() -> None:
+    value = valid_packet()
+    del value["no_external_side_effects"]
+    value["no_runtime_mutation"] = True
     with pytest.raises(LoopRecoveryPacketError) as exc_info:
         LoopRecoveryPacket.from_mapping(value)
     assert exc_info.value.reason_code == "UNKNOWN_LOOP_RECOVERY_FIELD"
