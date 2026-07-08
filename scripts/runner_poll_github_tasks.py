@@ -78,7 +78,6 @@ from core.memory_patch_proposal import (
 )
 from core.private_memory import healthcheck_private_memory, write_public_heartbeat
 from core.project_tree import get_project, get_project_by_repo, load_project_tree
-from core.runner_child_environment import sanitize_codegen_child_environment
 from core.runner_retry_policy import (
     BLOCK_REPEATED_REASON,
     NEEDS_OPERATOR,
@@ -188,6 +187,7 @@ QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES = (
 )
 HOME_EDGE_01_READ_ONLY_DIAGNOSTIC = "home_edge_01_read_only_diagnostic"
 HOME_EDGE_01_LAN_INVENTORY_READ_ONLY = "home_edge_01_lan_inventory_read_only"
+HOME_EDGE_01_VIDEO_VISUAL_CAPTURE_TICK = "home_edge_01_video_visual_capture_tick"
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
         SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
@@ -220,6 +220,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES,
         HOME_EDGE_01_READ_ONLY_DIAGNOSTIC,
         HOME_EDGE_01_LAN_INVENTORY_READ_ONLY,
+        HOME_EDGE_01_VIDEO_VISUAL_CAPTURE_TICK,
     )
 )
 PUBLISH_ONLY_MAINTENANCE_TASK_IDS = frozenset(
@@ -369,6 +370,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
     {
         "accepted",
         "action",
+        "action_id",
         "ahead_by",
         "allowed_files_count",
         "allowed_untracked_files",
@@ -402,6 +404,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "compare_state",
         "compare_status",
         "canonical_write_enabled",
+        "capture_mode",
+        "capture_status",
         "current_branch",
         "decision_records_skipped",
         "decision_records_written",
@@ -417,6 +421,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "internet_path_expectation",
         "gateway_modem_internals",
         "private_details",
+        "private_manifest",
+        "private_media",
         "disk_bytes",
         "draft",
         "draft_pr",
@@ -434,6 +440,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "file_on_main",
         "final_clean_state",
         "files_on_main_count",
+        "frame_count",
         "gated_heartbeat_status",
         "gated_note_status",
         "git_worktree_list_registers_path",
@@ -450,6 +457,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "hermes_memory_operation_count",
         "hermes_memory_smoke_status",
         "host_id_sha256_12",
+        "human_review_required",
         "input_row_count",
         "input_table_count",
         "installed_skill_platform_count",
@@ -513,6 +521,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "pull_request",
         "python_version",
         "reason",
+        "reason_codes",
+        "receipt_schema",
         "recovery_artifact_status",
         "recovery_ref_status",
         "recovery_restore_status",
@@ -524,6 +534,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "report_mode",
         "report_private_paths",
         "report_quantities",
+        "retryable",
         "review_table_count",
         "runtime_smoke_check_count",
         "runtime_smoke_decision",
@@ -564,6 +575,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "system",
         "target_project",
         "task_id",
+        "task_ref",
         "target_project_route",
         "target_repository",
         "test_summary",
@@ -797,7 +809,11 @@ def _validation_command_environment(
     environment: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     source = os.environ if environment is None else environment
-    return sanitize_codegen_child_environment(source)
+    return {
+        key: value
+        for key, value in source.items()
+        if not key.startswith("SKELETON_")
+    }
 
 
 def _run_validation_profile_command(
@@ -1852,16 +1868,10 @@ def run_codex_task(
     ) as task_file:
         task_file.write(task_content)
         task_file.flush()
-        token = _RUN_COMMAND_ENV_OVERRIDE.set(
-            sanitize_codegen_child_environment(os.environ)
+        return run_command(
+            codex_exec_command(task_content, workdir, task),
+            cwd=workdir,
         )
-        try:
-            return run_command(
-                codex_exec_command(task_content, workdir, task),
-                cwd=workdir,
-            )
-        finally:
-            _RUN_COMMAND_ENV_OVERRIDE.reset(token)
 
 
 def post_issue_comment(issue_number: int, body: str) -> None:
@@ -8966,6 +8976,71 @@ def home_edge_01_lan_inventory_read_only() -> str:
     )
 
 
+def home_edge_01_video_visual_capture_tick() -> str:
+    task_id = HOME_EDGE_01_VIDEO_VISUAL_CAPTURE_TICK
+    receipt = _run_home_edge_remote_visual_capture_tick()
+    reason_codes = receipt.get("reason_codes") if isinstance(receipt, dict) else None
+    reasons = reason_codes if isinstance(reason_codes, list) else ["invalid_receipt"]
+    reason_value = ",".join(sorted(str(item) for item in reasons)) or "none"
+    status = receipt.get("status") if isinstance(receipt, dict) else "FAILED_TERMINAL"
+    status_lines = [
+        "receipt_schema=home_edge_visual_capture_receipt_v1",
+        "report_mode=single_private_queue_tick",
+        f"action_id={receipt.get('action_id', 'unknown') if isinstance(receipt, dict) else 'unknown'}",
+        f"task_ref={receipt.get('task_ref', 'unknown') if isinstance(receipt, dict) else 'unknown'}",
+        f"capture_status={status}",
+        f"frame_count={receipt.get('frame_count', 0) if isinstance(receipt, dict) else 0}",
+        f"capture_mode={receipt.get('capture_mode', 'background') if isinstance(receipt, dict) else 'background'}",
+        f"reason_codes={reason_value}",
+        f"retryable={str(bool(receipt.get('retryable')) if isinstance(receipt, dict) else False).lower()}",
+        f"human_review_required={str(bool(receipt.get('human_review_required')) if isinstance(receipt, dict) else False).lower()}",
+        "private_manifest=private_artifact_only",
+        "private_media=private_artifact_only",
+        "diagnostic_count=1",
+    ]
+    done = status in {
+        "CAPTURED",
+        "VERIFIED",
+        "HUMAN_REVIEW_PENDING",
+        "QUEUED",
+        "INTERACTION_REQUIRED",
+        "NEEDS_RECAPTURE",
+    }
+    return _maintenance_report(
+        "DONE" if done else "NEEDS_OPERATOR",
+        task_id,
+        status_lines,
+        "met" if done else "not_met",
+    )
+
+
+def _run_home_edge_remote_visual_capture_tick() -> dict[str, Any]:
+    command = [
+        sys.executable,
+        str(ROOT / "scripts" / "home_edge_remote.py"),
+        "video_visual_capture",
+    ]
+    completed = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=600,
+        check=False,
+        shell=False,
+        cwd=str(ROOT),
+    )
+    if completed.returncode != 0:
+        raise RuntimeError("home_edge_visual_capture_remote_action_failed")
+    try:
+        decoded = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("home_edge_visual_capture_remote_action_non_json") from exc
+    from core.home_edge.diagnostics import _validate_visual_capture_public_receipt
+
+    return _validate_visual_capture_public_receipt(decoded)
+
+
 HERMES_MEMORY_GATEWAY_SMOKE_NAMESPACE = "aufmass"
 HERMES_MEMORY_GATEWAY_SMOKE_PROJECT_ID = "project-a"
 HERMES_MEMORY_GATEWAY_SMOKE_LOOKUP_KEY = "primary_fact"
@@ -9557,6 +9632,8 @@ def dispatch_runtime_maintenance_task(
             return home_edge_01_read_only_diagnostic()
         if task_id == HOME_EDGE_01_LAN_INVENTORY_READ_ONLY:
             return home_edge_01_lan_inventory_read_only()
+        if task_id == HOME_EDGE_01_VIDEO_VISUAL_CAPTURE_TICK:
+            return home_edge_01_video_visual_capture_tick()
         return check_project_checkout(body)
     except Exception:
         return _maintenance_report(

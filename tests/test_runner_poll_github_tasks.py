@@ -10502,36 +10502,6 @@ def test_codex_exec_command_rejects_invalid_model_before_run_command(monkeypatch
     run_command.assert_not_called()
 
 
-def test_run_codex_task_sanitizes_home_edge_environment(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    monkeypatch.setenv("SKELETON_HOME_EDGE_01_HOSTNAME", "live-home-edge")
-    monkeypatch.setenv("SKELETON_RUNNER_MEMORY_DB", "/private/runner.sqlite")
-    monkeypatch.setenv("PATH", "/usr/bin")
-
-    completed = runner.subprocess.CompletedProcess(
-        args=["codex"],
-        returncode=0,
-        stdout="done\n",
-        stderr="",
-    )
-
-    with mock.patch.object(
-        runner.subprocess,
-        "run",
-        return_value=completed,
-    ) as subprocess_run:
-        code, output = runner.run_codex_task("Task body", str(tmp_path), None)
-
-    assert code == 0
-    assert output == "done\n"
-    child_environment = subprocess_run.call_args.kwargs["env"]
-    assert "SKELETON_HOME_EDGE_01_HOSTNAME" not in child_environment
-    assert child_environment["SKELETON_RUNNER_MEMORY_DB"] == "/private/runner.sqlite"
-    assert os.environ["SKELETON_HOME_EDGE_01_HOSTNAME"] == "live-home-edge"
-
-
 
 def test_maintenance_report_sanitizer_rejects_raw_blocks_paths_and_prose() -> None:
     report = runner._maintenance_report(
@@ -11095,8 +11065,103 @@ def test_home_edge_lan_inventory_task_is_explicitly_dispatched() -> None:
     action.assert_called_once_with()
 
 
+def test_home_edge_visual_capture_tick_reports_sanitized_receipt_only() -> None:
+    receipt = {
+        "schema": "skeleton.home_edge.visual_capture.receipt.v1",
+        "action_id": "capture-001",
+        "task_ref": "task-001",
+        "status": "INTERACTION_REQUIRED",
+        "frame_count": 0,
+        "manifest_hash": "a" * 64,
+        "capture_mode": "background",
+        "reason_codes": ["cookie_prompt_required"],
+        "retryable": True,
+        "human_review_required": False,
+        "stale": False,
+    }
+    completed = mock.Mock(returncode=0, stdout=json.dumps(receipt), stderr="")
+    with mock.patch.object(runner.subprocess, "run", return_value=completed) as run:
+        report = runner.home_edge_01_video_visual_capture_tick()
 
-def test_validation_command_environment_strips_only_home_edge_runtime_values() -> None:
+    argv = run.call_args.args[0]
+    assert argv == [
+        runner.sys.executable,
+        str(runner.ROOT / "scripts" / "home_edge_remote.py"),
+        "video_visual_capture",
+    ]
+    assert run.call_args.kwargs["shell"] is False
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert "maintenance_task_id=home_edge_01_video_visual_capture_tick" in report
+    assert "capture_status=INTERACTION_REQUIRED" in report
+    assert "reason_codes=cookie_prompt_required" in report
+    assert "private_manifest=private_artifact_only" in report
+    assert "youtube" not in report
+    assert "manifest.private.json" not in report
+    assert "aaaaaaaa" not in report
+
+
+def test_home_edge_visual_capture_tick_rejects_leaking_remote_receipt() -> None:
+    receipt = {
+        "schema": "skeleton.home_edge.visual_capture.receipt.v1",
+        "action_id": "https://youtube",
+        "task_ref": "task-001",
+        "status": "VERIFIED",
+        "frame_count": 1,
+        "manifest_hash": "a" * 64,
+        "capture_mode": "background",
+        "reason_codes": [],
+        "retryable": False,
+        "human_review_required": False,
+        "stale": False,
+    }
+    completed = mock.Mock(returncode=0, stdout=json.dumps(receipt), stderr="")
+
+    with mock.patch.object(runner.subprocess, "run", return_value=completed):
+        with pytest.raises(Exception, match="leaked private data"):
+            runner.home_edge_01_video_visual_capture_tick()
+
+
+@pytest.mark.parametrize("status", ["HUMAN_REVIEW_PENDING", "VERIFIED"])
+def test_home_edge_visual_capture_terminal_statuses_are_not_failures(status: str) -> None:
+    receipt = {
+        "schema": "skeleton.home_edge.visual_capture.receipt.v1",
+        "action_id": "capture-001",
+        "task_ref": "task-001",
+        "status": status,
+        "frame_count": 1,
+        "manifest_hash": "a" * 64,
+        "capture_mode": "background",
+        "reason_codes": [],
+        "retryable": False,
+        "human_review_required": status == "HUMAN_REVIEW_PENDING",
+        "stale": False,
+    }
+    completed = mock.Mock(returncode=0, stdout=json.dumps(receipt), stderr="")
+
+    with mock.patch.object(runner.subprocess, "run", return_value=completed):
+        report = runner.home_edge_01_video_visual_capture_tick()
+
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert f"capture_status={status}" in report
+
+
+def test_home_edge_visual_capture_task_is_explicitly_dispatched() -> None:
+    with mock.patch.object(
+        runner,
+        "home_edge_01_video_visual_capture_tick",
+        return_value="DONE: test",
+    ) as action:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HOME_EDGE_01_VIDEO_VISUAL_CAPTURE_TICK,
+            str(Path.cwd()),
+        )
+
+    assert report == "DONE: test"
+    action.assert_called_once_with()
+
+
+
+def test_validation_command_environment_strips_skeleton_runtime_values() -> None:
     environment = {
         "HOME": "/home/agent",
         "PATH": "/usr/bin",
@@ -11111,7 +11176,6 @@ def test_validation_command_environment_strips_only_home_edge_runtime_values() -
         "HOME": "/home/agent",
         "PATH": "/usr/bin",
         "LANG": "C.UTF-8",
-        "SKELETON_RUNNER_MEMORY_DB": "/private/runner.sqlite",
     }
     assert environment["SKELETON_HOME_EDGE_01_HOSTNAME"] == "live-home-edge"
     assert environment["SKELETON_RUNNER_MEMORY_DB"] == "/private/runner.sqlite"
@@ -11163,8 +11227,10 @@ def test_run_validation_profile_command_sanitizes_and_resets_environment(
 
     assert validation_environment["PATH"] == "/usr/bin"
     assert validation_environment["HOME"] == "/home/agent"
-    assert "SKELETON_HOME_EDGE_01_HOSTNAME" not in validation_environment
-    assert validation_environment["SKELETON_RUNNER_MEMORY_DB"] == "/private/runner.sqlite"
+    assert not any(
+        key.startswith("SKELETON_")
+        for key in validation_environment
+    )
     assert "env" not in normal_kwargs
 
     assert (
