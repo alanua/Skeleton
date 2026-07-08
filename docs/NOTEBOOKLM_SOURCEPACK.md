@@ -133,6 +133,32 @@ Next actions:
 - Add Codex runtime preflight before starting further Codex tasks.
 - Add Hermes quota-aware review rules before using Hermes for queue audits.
 
+### dios
+
+- Means: Drawing Intelligence Operating System for construction and technical drawings
+- Repo: `alanua/DIOS`
+- Entrypoint: `projects/dios/PROJECT_MANIFEST.yaml`
+- State file: `projects/dios/STATE.yaml`
+- Status: `ARCHITECTURE_FREEZE`
+- State role: `handoff_not_canon_truth`
+- Last verified: `2026-07-08`
+- Evidence source: alanua/DIOS README, issue 2, draft architecture PR 3, and Skeleton issue 1602
+
+Summary:
+
+- DIOS is a public-safe pre-alpha code project for structured analysis of construction and technical drawings.
+- Skeleton remains the shared control and execution core; DIOS owns drawing-intelligence domain functions, schemas, validation and reviewable domain outputs.
+- Aufmass is a DIOS child module, while its current public-safe implementation route remains in alanua/Skeleton until a separately reviewed migration is approved.
+- The production Aufmass rebuild is frozen until the DIOS architecture is reviewed and explicitly unfrozen.
+- The SketchUp Workstation Agent and RBZ bridge architecture is experimental and documentation-only; no Windows, Tailscale, SketchUp or production runtime is registered by this manifest.
+
+Next actions:
+
+- Review the draft DIOS architecture before implementation or production routing changes.
+- Keep the existing Aufmass implementation route unchanged during architecture freeze.
+- Route future DIOS implementation work to alanua/DIOS through the registered project entry.
+- Require separate operator approval before any production Aufmass rebuild, live workstation integration or runtime deployment.
+
 ### jeeves
 
 - Means: separate future assistant product and runtime
