@@ -23,7 +23,13 @@ docker compose -f deploy/control_board/compose.yaml up --build
 
 The Compose port binding is localhost-only: `127.0.0.1:8080:8080`. The deployment has one application container with an HTTP health check against `/healthz`.
 
-The container image is pinned to the reviewed base image `python:3.12.13-slim-bookworm@sha256:6f4378f2f3d2f0897d4f02f0eaf6f71f8c0d1c2f68b5c3dd4c9f9654f0f0b1bb` so rebuilds do not silently move to a different base image.
+The container image is pinned to:
+
+```text
+python:3.12.13-slim-bookworm@sha256:8a7e7cc04fd3e2bd787f7f24e22d5d119aa590d429b50c95dfe12b3abe52f48b
+```
+
+That multi-platform digest was verified against the official `docker-library/repo-info` record `repos/python/remote/3.12.13-slim-bookworm.md` at commit `790c4e06530b08748dab58701b2f18e280d837ff`. The image copies only `core/control_board` and the synthetic Control Board fixture; it does not install or copy the rest of Skeleton.
 
 The service runs as the dedicated `controlboard` user, drops all Linux capabilities, enables `no-new-privileges`, uses a read-only filesystem, and only mounts a bounded `/tmp` tmpfs. Compose also sets bounded CPU, memory, and process limits.
 
@@ -51,9 +57,9 @@ No public hostname, DuckDNS, reverse proxy, Funnel, or Tailscale mutation is par
 Focused checks:
 
 ```bash
-pytest tests/test_control_board_contracts.py tests/test_control_board_ui.py tests/test_control_board_deployment.py
+pytest tests/test_control_board_dependency_contract.py tests/test_control_board_contracts.py tests/test_control_board_ui.py tests/test_control_board_deployment.py
 python -m py_compile core/control_board/__init__.py core/control_board/app.py core/control_board/contracts.py core/control_board/projections.py
 git diff --check
 ```
 
-For full pytest, remove `SKELETON_HOME_EDGE_01_*` variables from the child environment before invocation.
+For full pytest, install the `dev` optional dependency group in an isolated environment and remove every `SKELETON_HOME_EDGE_01_*` variable from the child environment before invocation.
