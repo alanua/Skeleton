@@ -1,19 +1,26 @@
-FROM python:3.12.13-slim-bookworm@sha256:6f4378f2f3d2f0897d4f02f0eaf6f71f8c0d1c2f68b5c3dd4c9f9654f0f0b1bb
+# Base-image digest verified against docker-library/repo-info
+# commit 790c4e06530b08748dab58701b2f18e280d837ff.
+FROM python:3.12.13-slim-bookworm@sha256:8a7e7cc04fd3e2bd787f7f24e22d5d119aa590d429b50c95dfe12b3abe52f48b
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app
 
 WORKDIR /app
 
-COPY pyproject.toml /app/pyproject.toml
-COPY core /app/core
+COPY core/control_board /app/core/control_board
 COPY fixtures/control_board /app/fixtures/control_board
 
-RUN python -m pip install --no-cache-dir \
-    . \
+RUN python -m pip install --no-cache-dir --disable-pip-version-check \
     "fastapi==0.116.1" \
     "jinja2==3.1.6" \
-    "uvicorn[standard]==0.35.0" \
+    "uvicorn==0.35.0" \
+  && python -m py_compile \
+    /app/core/control_board/__init__.py \
+    /app/core/control_board/app.py \
+    /app/core/control_board/contracts.py \
+    /app/core/control_board/projections.py \
+  && python -c "from core.control_board.app import app; assert app.docs_url is None" \
   && groupadd --system --gid 10001 controlboard \
   && useradd --system --uid 10001 --gid controlboard --home-dir /nonexistent --shell /usr/sbin/nologin controlboard \
   && chown -R controlboard:controlboard /app
