@@ -29,7 +29,7 @@ _REQUIRED_FIELDS: Final = frozenset(
         "recovery_reason",
         "public_safe",
         "no_secrets",
-        "no_runtime_mutation",
+        "no_external_side_effects",
     }
 )
 _SAFE_TOKEN_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
@@ -59,6 +59,13 @@ class LoopRecoveryPacketError(ValueError):
 
 @dataclass(frozen=True)
 class LoopRecoveryPacket:
+    """Validated instruction for one bounded Loop state transition.
+
+    Applying the packet may mutate Loop operational state. It must not itself
+    authorize model, shell, network, memory, deployment, or other external side
+    effects.
+    """
+
     schema: str
     action: str
     task_id: str
@@ -71,7 +78,7 @@ class LoopRecoveryPacket:
     recovery_reason: str
     public_safe: bool
     no_secrets: bool
-    no_runtime_mutation: bool
+    no_external_side_effects: bool
 
     @classmethod
     def from_mapping(cls, value: object) -> "LoopRecoveryPacket":
@@ -143,7 +150,11 @@ class LoopRecoveryPacket:
                 "recovery action is not valid for expected_state",
             )
 
-        for boundary_field in ("public_safe", "no_secrets", "no_runtime_mutation"):
+        for boundary_field in (
+            "public_safe",
+            "no_secrets",
+            "no_external_side_effects",
+        ):
             if value[boundary_field] is not True:
                 raise LoopRecoveryPacketError(
                     "INVALID_LOOP_RECOVERY_BOUNDARY",
@@ -177,7 +188,7 @@ class LoopRecoveryPacket:
             recovery_reason=recovery_reason,
             public_safe=True,
             no_secrets=True,
-            no_runtime_mutation=True,
+            no_external_side_effects=True,
         )
 
     @property
@@ -198,7 +209,7 @@ class LoopRecoveryPacket:
             "recovery_reason": self.recovery_reason,
             "public_safe": self.public_safe,
             "no_secrets": self.no_secrets,
-            "no_runtime_mutation": self.no_runtime_mutation,
+            "no_external_side_effects": self.no_external_side_effects,
         }
 
 
