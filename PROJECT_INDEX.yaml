@@ -7,6 +7,11 @@ projects:
     entrypoint: projects/skeleton/PROJECT_MANIFEST.yaml
     means: Skeleton Core project
 
+  dios:
+    repo: alanua/DIOS
+    entrypoint: projects/dios/PROJECT_MANIFEST.yaml
+    means: Drawing Intelligence Operating System for construction and technical drawings
+
   jeeves:
     repo: alanua/jeeves
     entrypoint: projects/jeeves/PROJECT_MANIFEST.yaml

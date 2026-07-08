@@ -1,0 +1,18 @@
+schema: skeleton.project_manifest.v1
+project_id: dios
+name: DIOS
+status: ARCHITECTURE_FREEZE
+entrypoint: projects/dios/PROJECT_MANIFEST.yaml
+state_file: projects/dios/STATE.yaml
+read_order:
+  - projects/dios/PROJECT_MANIFEST.yaml
+  - projects/dios/STATE.yaml
+source_repo: alanua/DIOS
+privacy_class: public_safe_code_project
+domain: construction/drawing-intelligence
+meaning: Drawing Intelligence Operating System for structured analysis of construction and technical drawings
+means: Drawing Intelligence Operating System for structured analysis of construction and technical drawings
+control_core: alanua/Skeleton
+domain_owner: alanua/DIOS
+route_note: Skeleton remains the shared control and execution core; DIOS owns drawing-intelligence domain functions. Real drawings, customer data, quantities, paths and outputs remain local or privately routed.
+architecture_gate: Production Aufmass rebuild remains frozen until the DIOS architecture is reviewed and explicitly unfrozen.

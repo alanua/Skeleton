@@ -11,4 +11,7 @@ source_repo: alanua/Skeleton
 privacy_class: mixed_public_private
 meaning: Construction Takeoff / Aufmass from drawings
 means: Construction Takeoff / Aufmass from drawings
-route_note: Public-safe methods may live in Skeleton; real drawings and quantities stay private.
+parent_project_id: dios
+project_role: child_module
+implementation_route: alanua/Skeleton
+route_note: Aufmass is a DIOS child module. Its current public-safe implementation route remains in Skeleton; real drawings and quantities stay private, and no production rebuild or routing change is authorized during the DIOS architecture freeze.
