@@ -7,28 +7,19 @@ COMPOSE_FILE="${SCRIPT_DIR}/compose.yaml"
 ENV_FILE="${ENV_FILE:-${SCRIPT_DIR}/.env}"
 DRY_RUN=0
 IMAGE_PIN="n8nio/n8n:2.29.7@sha256:e0264b531fb97c68ece58a650173bd981f1663947281013f4a46749c15a8abc5"
+NODES_EXCLUDE='["n8n-nodes-base.code","n8n-nodes-base.executeCommand","n8n-nodes-base.ssh","n8n-nodes-base.localFileTrigger","n8n-nodes-base.readWriteFile","n8n-nodes-base.readBinaryFile","n8n-nodes-base.readBinaryFiles","n8n-nodes-base.writeBinaryFile"]'
 
-usage() {
-  printf 'usage: %s [--dry-run] [--env-file PATH]\n' "$0"
-}
-
+usage() { printf 'usage: %s [--dry-run] [--env-file PATH]\n' "$0"; }
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --dry-run) DRY_RUN=1; shift ;;
-    --env-file)
-      [ "$#" -ge 2 ] || { usage >&2; exit 64; }
-      ENV_FILE="$2"
-      shift 2
-      ;;
+    --env-file) [ "$#" -ge 2 ] || { usage >&2; exit 64; }; ENV_FILE="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; exit 64 ;;
   esac
 done
 
-fail() {
-  printf 'error: %s\n' "$*" >&2
-  exit 1
-}
+fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 is_allowed_key() {
   case "$1" in
@@ -39,20 +30,19 @@ is_allowed_key() {
 
 assert_owner_only_file() {
   local path="$1" mode
-  [ -f "$path" ] || fail "missing env file: $path"
+  [ -f "$path" ] && [ ! -L "$path" ] || fail "missing or unsafe env file: $path"
   mode="$(stat -c '%a' "$path")"
   [ $((8#$mode & 077)) -eq 0 ] || fail "$path must be owner-only, found mode $mode"
 }
 
 load_env() {
   local line key value lineno=0
+  declare -A seen=()
   assert_owner_only_file "$ENV_FILE"
   while IFS= read -r line || [ -n "$line" ]; do
     lineno=$((lineno + 1))
     line="${line%$'\r'}"
-    case "$line" in
-      ''|'#'*) continue ;;
-    esac
+    case "$line" in ''|'#'*) continue ;; esac
     case "$line" in
       *[[:space:]]*) fail "env file line $lineno must be exact KEY=VALUE without shell syntax" ;;
       *=*) ;;
@@ -61,28 +51,24 @@ load_env() {
     key="${line%%=*}"
     value="${line#*=}"
     is_allowed_key "$key" || fail "unexpected env key: $key"
-    case "$key" in
-      ''|*[!A-Z0-9_]*) fail "invalid env key on line $lineno" ;;
-    esac
+    case "$key" in ''|*[!A-Z0-9_]*) fail "invalid env key on line $lineno" ;; esac
+    [ -z "${seen[$key]:-}" ] || fail "duplicate env key: $key"
+    seen[$key]=1
     printf -v "$key" '%s' "$value"
     export "$key"
   done < "$ENV_FILE"
 }
 
 require_value() {
-  local name="$1" value
-  value="${!name:-}"
+  local name="$1" value="${!1:-}"
   [ -n "$value" ] || fail "$name is required"
 }
 
 reject_descriptor() {
-  local name="$1" value
-  value="${!name:-}"
+  local name="$1" value="${!1:-}"
   require_value "$name"
   case "$value" in
-    *REPLACE*|*PLACEHOLDER*|*DESCRIPTOR*|*example*|*changeme*|*CHANGE_ME*)
-      fail "$name still contains a descriptor"
-      ;;
+    *REPLACE*|*PLACEHOLDER*|*DESCRIPTOR*|*example*|*changeme*|*CHANGE_ME*) fail "$name still contains a descriptor" ;;
   esac
 }
 
@@ -90,15 +76,12 @@ canonical_path() {
   local name="$1" value parent base parent_real
   value="${!name:-}"
   require_value "$name"
-  case "$value" in
-    /*) ;;
-    *) fail "$name must be an absolute path" ;;
-  esac
+  case "$value" in /*) ;; *) fail "$name must be an absolute path" ;; esac
   case "$value" in
     /|/tmp|/var|/srv|/home|/home/*/.ssh|*Skeleton*|*skeleton*private*|*private*memory*|*private[_-]memory*)
-      fail "$name is too broad or references forbidden private-memory scope: $value"
-      ;;
+      fail "$name is too broad or references forbidden private-memory scope: $value" ;;
   esac
+  [ ! -L "$value" ] || fail "$name must not be a symlink: $value"
   if [ -e "$value" ]; then
     readlink -f "$value"
   else
@@ -112,11 +95,8 @@ canonical_path() {
 
 assert_owner_only_dir() {
   local name="$1" path="$2" mode uid gid
-  if [ "$DRY_RUN" -eq 1 ] && [ ! -e "$path" ]; then
-    return 0
-  fi
-  [ -d "$path" ] || fail "$name directory does not exist: $path"
-  [ ! -L "$path" ] || fail "$name must not be a symlink: $path"
+  if [ "$DRY_RUN" -eq 1 ] && [ ! -e "$path" ]; then return 0; fi
+  [ -d "$path" ] && [ ! -L "$path" ] || fail "$name must be a regular directory: $path"
   mode="$(stat -c '%a' "$path")"
   uid="$(stat -c '%u' "$path")"
   gid="$(stat -c '%g' "$path")"
@@ -125,12 +105,14 @@ assert_owner_only_dir() {
 }
 
 assert_non_overlap() {
-  local a="$1" b="$2" an bn
-  an="${a%/}"
-  bn="${b%/}"
+  local an="${1%/}" bn="${2%/}"
   [ "$an" != "$bn" ] || fail "N8N_DATA_DIR and N8N_BACKUP_DIR must differ"
   case "$bn/" in "$an"/*) fail "N8N_BACKUP_DIR must not be inside N8N_DATA_DIR" ;; esac
   case "$an/" in "$bn"/*) fail "N8N_DATA_DIR must not be inside N8N_BACKUP_DIR" ;; esac
+}
+
+require_compose_line() {
+  grep -Fq -- "$1" "$COMPOSE_FILE" || fail "$2"
 }
 
 load_env
@@ -142,13 +124,29 @@ assert_non_overlap "$DATA_REAL" "$BACKUP_REAL"
 assert_owner_only_dir N8N_DATA_DIR "$DATA_REAL"
 assert_owner_only_dir N8N_BACKUP_DIR "$BACKUP_REAL"
 
-grep -Fq "image: ${IMAGE_PIN}" "$COMPOSE_FILE" || fail "compose image is not the reviewed version and digest pin"
-grep -Fq 'DB_SQLITE_DATABASE: /home/node/.n8n/database.sqlite' "$COMPOSE_FILE" || fail "compose must use n8n database.sqlite"
-grep -Fq 'DB_SQLITE_POOL_SIZE: "2"' "$COMPOSE_FILE" || fail "DB_SQLITE_POOL_SIZE must be explicit and nonzero"
-grep -Fq '127.0.0.1:${N8N_EDITOR_PORT:-5678}:5678' "$COMPOSE_FILE" || fail "editor bind must default to loopback"
-grep -Fq 'read_only: true' "$COMPOSE_FILE" || fail "container root filesystem must be read-only"
-grep -Fq 'no-new-privileges:true' "$COMPOSE_FILE" || fail "container must set no-new-privileges"
-grep -Fq -- '- ALL' "$COMPOSE_FILE" || fail "container must drop all capabilities"
+require_compose_line "image: ${IMAGE_PIN}" "compose image is not the reviewed version and digest pin"
+require_compose_line 'DB_SQLITE_DATABASE: /home/node/.n8n/database.sqlite' "compose must use n8n database.sqlite"
+require_compose_line 'DB_SQLITE_POOL_SIZE: "2"' "DB_SQLITE_POOL_SIZE must be explicit and nonzero"
+require_compose_line '127.0.0.1:${N8N_EDITOR_PORT:-5678}:5678' "editor bind must default to loopback"
+require_compose_line 'read_only: true' "container root filesystem must be read-only"
+require_compose_line 'no-new-privileges:true' "container must set no-new-privileges"
+require_compose_line '- ALL' "container must drop all capabilities"
+require_compose_line 'N8N_RUNNERS_MODE: internal' "task runner must use explicit internal mode"
+require_compose_line 'N8N_RUNNERS_INSECURE_MODE: "false"' "task runner insecure mode must be disabled"
+require_compose_line 'N8N_RUNNERS_BROKER_LISTEN_ADDRESS: 127.0.0.1' "task runner broker must remain loopback-only"
+require_compose_line 'N8N_RUNNERS_MAX_CONCURRENCY: "1"' "task runner concurrency must be bounded"
+require_compose_line 'N8N_RUNNERS_TASK_TIMEOUT: "60"' "task runner timeout must be bounded"
+require_compose_line 'N8N_BLOCK_ENV_ACCESS_IN_NODE: "true"' "workflow environment access must be blocked"
+require_compose_line 'N8N_BLOCK_FILE_ACCESS_TO_N8N_FILES: "true"' "n8n-owned file access must be blocked"
+require_compose_line 'N8N_RESTRICT_FILE_ACCESS_TO: /home/node/.n8n-files-disabled' "workflow file access must target an unavailable path"
+require_compose_line 'N8N_PYTHON_ENABLED: "false"' "Python execution must be disabled"
+require_compose_line "NODES_EXCLUDE: '$NODES_EXCLUDE'" "dangerous node exclusions must match the verified n8n 2.29.7 identifiers"
+require_compose_line 'N8N_COMMUNITY_PACKAGES_ENABLED: "false"' "community packages must be disabled"
+
+! grep -Fq 'N8N_RUNNERS_ENABLED' "$COMPOSE_FILE" || fail "deprecated N8N_RUNNERS_ENABLED must not be used on n8n 2.29.7"
+! grep -Fq 'N8N_RUNNERS_MODE: external' "$COMPOSE_FILE" || fail "external task runner mode is forbidden"
+! grep -Fq 'N8N_RUNNERS_AUTH_TOKEN' "$COMPOSE_FILE" || fail "external task runner credentials are forbidden"
+! grep -Fq '/var/run/docker.sock' "$COMPOSE_FILE" || fail "Docker socket mount is forbidden"
 
 if command -v docker >/dev/null 2>&1 && [ "$DRY_RUN" -eq 0 ]; then
   docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" config >/dev/null
