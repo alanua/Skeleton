@@ -187,6 +187,7 @@ QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES = (
 )
 HOME_EDGE_01_READ_ONLY_DIAGNOSTIC = "home_edge_01_read_only_diagnostic"
 HOME_EDGE_01_LAN_INVENTORY_READ_ONLY = "home_edge_01_lan_inventory_read_only"
+HOME_EDGE_01_VIDEO_VISUAL_CAPTURE_TICK = "home_edge_01_video_visual_capture_tick"
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
         SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
@@ -219,6 +220,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES,
         HOME_EDGE_01_READ_ONLY_DIAGNOSTIC,
         HOME_EDGE_01_LAN_INVENTORY_READ_ONLY,
+        HOME_EDGE_01_VIDEO_VISUAL_CAPTURE_TICK,
     )
 )
 PUBLISH_ONLY_MAINTENANCE_TASK_IDS = frozenset(
@@ -368,6 +370,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
     {
         "accepted",
         "action",
+        "action_id",
         "ahead_by",
         "allowed_files_count",
         "allowed_untracked_files",
@@ -401,6 +404,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "compare_state",
         "compare_status",
         "canonical_write_enabled",
+        "capture_mode",
+        "capture_status",
         "current_branch",
         "decision_records_skipped",
         "decision_records_written",
@@ -416,6 +421,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "internet_path_expectation",
         "gateway_modem_internals",
         "private_details",
+        "private_manifest",
+        "private_media",
         "disk_bytes",
         "draft",
         "draft_pr",
@@ -433,6 +440,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "file_on_main",
         "final_clean_state",
         "files_on_main_count",
+        "frame_count",
         "gated_heartbeat_status",
         "gated_note_status",
         "git_worktree_list_registers_path",
@@ -449,6 +457,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "hermes_memory_operation_count",
         "hermes_memory_smoke_status",
         "host_id_sha256_12",
+        "human_review_required",
         "input_row_count",
         "input_table_count",
         "installed_skill_platform_count",
@@ -512,6 +521,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "pull_request",
         "python_version",
         "reason",
+        "reason_codes",
+        "receipt_schema",
         "recovery_artifact_status",
         "recovery_ref_status",
         "recovery_restore_status",
@@ -523,6 +534,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "report_mode",
         "report_private_paths",
         "report_quantities",
+        "retryable",
         "review_table_count",
         "runtime_smoke_check_count",
         "runtime_smoke_decision",
@@ -563,6 +575,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "system",
         "target_project",
         "task_id",
+        "task_ref",
         "target_project_route",
         "target_repository",
         "test_summary",
@@ -8963,6 +8976,39 @@ def home_edge_01_lan_inventory_read_only() -> str:
     )
 
 
+def home_edge_01_video_visual_capture_tick() -> str:
+    task_id = HOME_EDGE_01_VIDEO_VISUAL_CAPTURE_TICK
+    from core.home_edge.diagnostics import run_audited_home_edge_command
+
+    receipt = run_audited_home_edge_command("video_visual_capture", artifact_path=None)
+    reason_codes = receipt.get("reason_codes") if isinstance(receipt, dict) else None
+    reasons = reason_codes if isinstance(reason_codes, list) else ["invalid_receipt"]
+    reason_value = ",".join(sorted(str(item) for item in reasons)) or "none"
+    status = receipt.get("status") if isinstance(receipt, dict) else "FAILED_TERMINAL"
+    status_lines = [
+        "receipt_schema=home_edge_visual_capture_receipt_v1",
+        "report_mode=single_private_queue_tick",
+        f"action_id={receipt.get('action_id', 'unknown') if isinstance(receipt, dict) else 'unknown'}",
+        f"task_ref={receipt.get('task_ref', 'unknown') if isinstance(receipt, dict) else 'unknown'}",
+        f"capture_status={status}",
+        f"frame_count={receipt.get('frame_count', 0) if isinstance(receipt, dict) else 0}",
+        f"capture_mode={receipt.get('capture_mode', 'background') if isinstance(receipt, dict) else 'background'}",
+        f"reason_codes={reason_value}",
+        f"retryable={str(bool(receipt.get('retryable')) if isinstance(receipt, dict) else False).lower()}",
+        f"human_review_required={str(bool(receipt.get('human_review_required')) if isinstance(receipt, dict) else False).lower()}",
+        "private_manifest=private_artifact_only",
+        "private_media=private_artifact_only",
+        "diagnostic_count=1",
+    ]
+    done = status in {"CAPTURED", "QUEUED", "INTERACTION_REQUIRED", "NEEDS_RECAPTURE"}
+    return _maintenance_report(
+        "DONE" if done else "NEEDS_OPERATOR",
+        task_id,
+        status_lines,
+        "met" if done else "not_met",
+    )
+
+
 HERMES_MEMORY_GATEWAY_SMOKE_NAMESPACE = "aufmass"
 HERMES_MEMORY_GATEWAY_SMOKE_PROJECT_ID = "project-a"
 HERMES_MEMORY_GATEWAY_SMOKE_LOOKUP_KEY = "primary_fact"
@@ -9554,6 +9600,8 @@ def dispatch_runtime_maintenance_task(
             return home_edge_01_read_only_diagnostic()
         if task_id == HOME_EDGE_01_LAN_INVENTORY_READ_ONLY:
             return home_edge_01_lan_inventory_read_only()
+        if task_id == HOME_EDGE_01_VIDEO_VISUAL_CAPTURE_TICK:
+            return home_edge_01_video_visual_capture_tick()
         return check_project_checkout(body)
     except Exception:
         return _maintenance_report(

@@ -20,6 +20,7 @@ from core.home_edge.diagnostics import (
     run_home_edge_diagnostic,
     run_home_edge_lan_inventory,
 )
+from core.home_edge import profile as home_edge_profile
 from core.home_edge.profile import load_home_edge_profile, synthetic_profile_mapping
 
 
@@ -150,6 +151,8 @@ def test_local_profile_rejects_repository_artifact_path_even_with_template_ident
 def test_environment_override_rejects_repository_artifact_path_even_with_template_value(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.delenv("SKELETON_HOME_EDGE_01_PROFILE", raising=False)
+    monkeypatch.setattr(home_edge_profile, "DEFAULT_PROFILE_PATH", Path("missing-home-edge-profile.json"))
     monkeypatch.setenv("SKELETON_HOME_EDGE_01_HOSTNAME", "synthetic-home-edge")
     profile = load_home_edge_profile()
 
@@ -163,7 +166,9 @@ def test_environment_override_rejects_repository_artifact_path_even_with_templat
         )
 
 
-def test_synthetic_template_rejects_other_repository_artifact_path() -> None:
+def test_synthetic_template_rejects_other_repository_artifact_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SKELETON_HOME_EDGE_01_PROFILE", raising=False)
+    monkeypatch.setattr(home_edge_profile, "DEFAULT_PROFILE_PATH", Path("missing-home-edge-profile.json"))
     with pytest.raises(HomeEdgeDiagnosticError, match="synthetic diagnostic template"):
         run_home_edge_diagnostic(
             artifact_path=Path("docs/home_edge/archive/home-edge-01-diagnostic.latest.json"),

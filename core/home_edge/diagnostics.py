@@ -54,6 +54,7 @@ AUDITED_COMMANDS = frozenset(
         "home_automation_inventory",
         "modem_diagnostic",
         "tool_inventory",
+        "video_visual_capture",
     )
 )
 
@@ -373,6 +374,10 @@ def run_audited_home_edge_command(
         return gateway_contract()
     if command == "prepare_runtime_bootstrap":
         return prepared_runtime_bootstrap()
+    if command == "video_visual_capture":
+        from .visual_capture import process_one_visual_capture_job
+
+        return process_one_visual_capture_job()
 
     artifact = run_home_edge_diagnostic(
         profile=node,

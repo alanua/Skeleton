@@ -11065,6 +11065,51 @@ def test_home_edge_lan_inventory_task_is_explicitly_dispatched() -> None:
     action.assert_called_once_with()
 
 
+def test_home_edge_visual_capture_tick_reports_sanitized_receipt_only() -> None:
+    receipt = {
+        "schema": "skeleton.home_edge.visual_capture.receipt.v1",
+        "action_id": "capture-001",
+        "task_ref": "task-001",
+        "status": "INTERACTION_REQUIRED",
+        "frame_count": 0,
+        "manifest_hash": "a" * 64,
+        "capture_mode": "background",
+        "reason_codes": ["cookie_prompt_required"],
+        "retryable": True,
+        "human_review_required": False,
+        "stale": False,
+    }
+    with mock.patch(
+        "core.home_edge.diagnostics.run_audited_home_edge_command",
+        return_value=receipt,
+    ):
+        report = runner.home_edge_01_video_visual_capture_tick()
+
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert "maintenance_task_id=home_edge_01_video_visual_capture_tick" in report
+    assert "capture_status=INTERACTION_REQUIRED" in report
+    assert "reason_codes=cookie_prompt_required" in report
+    assert "private_manifest=private_artifact_only" in report
+    assert "youtube" not in report
+    assert "manifest.private.json" not in report
+    assert "aaaaaaaa" not in report
+
+
+def test_home_edge_visual_capture_task_is_explicitly_dispatched() -> None:
+    with mock.patch.object(
+        runner,
+        "home_edge_01_video_visual_capture_tick",
+        return_value="DONE: test",
+    ) as action:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HOME_EDGE_01_VIDEO_VISUAL_CAPTURE_TICK,
+            str(Path.cwd()),
+        )
+
+    assert report == "DONE: test"
+    action.assert_called_once_with()
+
+
 
 def test_validation_command_environment_strips_skeleton_runtime_values() -> None:
     environment = {
