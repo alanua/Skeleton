@@ -19,7 +19,9 @@ from core.home_edge.diagnostics import (
     run_audited_home_edge_command,
     run_home_edge_diagnostic,
     run_home_edge_lan_inventory,
+    run_home_edge_visual_capture,
 )
+from core.home_edge import profile as home_edge_profile
 from core.home_edge.profile import load_home_edge_profile, synthetic_profile_mapping
 
 
@@ -150,6 +152,8 @@ def test_local_profile_rejects_repository_artifact_path_even_with_template_ident
 def test_environment_override_rejects_repository_artifact_path_even_with_template_value(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.delenv("SKELETON_HOME_EDGE_01_PROFILE", raising=False)
+    monkeypatch.setattr(home_edge_profile, "DEFAULT_PROFILE_PATH", Path("missing-home-edge-profile.json"))
     monkeypatch.setenv("SKELETON_HOME_EDGE_01_HOSTNAME", "synthetic-home-edge")
     profile = load_home_edge_profile()
 
@@ -163,7 +167,9 @@ def test_environment_override_rejects_repository_artifact_path_even_with_templat
         )
 
 
-def test_synthetic_template_rejects_other_repository_artifact_path() -> None:
+def test_synthetic_template_rejects_other_repository_artifact_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SKELETON_HOME_EDGE_01_PROFILE", raising=False)
+    monkeypatch.setattr(home_edge_profile, "DEFAULT_PROFILE_PATH", Path("missing-home-edge-profile.json"))
     with pytest.raises(HomeEdgeDiagnosticError, match="synthetic diagnostic template"):
         run_home_edge_diagnostic(
             artifact_path=Path("docs/home_edge/archive/home-edge-01-diagnostic.latest.json"),
@@ -297,6 +303,48 @@ def test_lan_inventory_unavailable_returns_public_safe_aggregate(tmp_path: Path)
     assert result["status"] == "unverified"
     assert result["aggregate"]["device_count"] == 0
     assert result["aggregate"]["gateway_presence"] == "unverified"
+
+
+def _visual_capture_receipt(**updates: object) -> dict:
+    receipt = {
+        "schema": "skeleton.home_edge.visual_capture.receipt.v1",
+        "action_id": "capture-001",
+        "task_ref": "task-001",
+        "status": "VERIFIED",
+        "frame_count": 1,
+        "manifest_hash": "a" * 64,
+        "capture_mode": "background",
+        "reason_codes": [],
+        "retryable": False,
+        "human_review_required": False,
+        "stale": False,
+    }
+    receipt.update(updates)
+    return receipt
+
+
+def test_visual_capture_runs_through_remote_transport_only() -> None:
+    transport = FakeTransport(_visual_capture_receipt())
+
+    result = run_audited_home_edge_command(
+        "video_visual_capture",
+        transport=transport,
+    )
+
+    assert result["status"] == "VERIFIED"
+    assert transport.payload == _visual_capture_receipt()
+
+
+def test_visual_capture_rejects_malformed_or_leaking_remote_receipts() -> None:
+    with pytest.raises(HomeEdgeDiagnosticError, match="schema mismatch"):
+        run_home_edge_visual_capture(transport=FakeTransport({"status": "VERIFIED"}))
+
+    with pytest.raises(HomeEdgeDiagnosticError, match="leaked private data"):
+        run_home_edge_visual_capture(
+            transport=FakeTransport(
+                _visual_capture_receipt(reason_codes=["ok"], action_id="https://youtube")
+            )
+        )
 
 def _lan_probe_namespace() -> dict:
     source = LAN_INVENTORY_REMOTE_PROBE.rsplit("\nmain()", 1)[0]

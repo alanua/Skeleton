@@ -20,6 +20,7 @@ SYNTHETIC_TEMPLATE_ARTIFACT_PATH = Path(
 )
 PRIVATE_ARTIFACT_ENV = "SKELETON_HOME_EDGE_01_DIAGNOSTIC_ARTIFACT"
 PROBE_TIMEOUT_SECONDS = 90
+VISUAL_CAPTURE_TIMEOUT_SECONDS = 300
 LAN_INVENTORY_TIMEOUT_SECONDS = 300
 LAN_INVENTORY_MAX_ADDRESSES = 256
 LAN_INVENTORY_ARTIFACT_ENV = "SKELETON_HOME_EDGE_01_LAN_INVENTORY_ARTIFACT"
@@ -54,6 +55,7 @@ AUDITED_COMMANDS = frozenset(
         "home_automation_inventory",
         "modem_diagnostic",
         "tool_inventory",
+        "video_visual_capture",
     )
 )
 
@@ -373,6 +375,11 @@ def run_audited_home_edge_command(
         return gateway_contract()
     if command == "prepare_runtime_bootstrap":
         return prepared_runtime_bootstrap()
+    if command == "video_visual_capture":
+        return run_home_edge_visual_capture(
+            profile=node,
+            transport=transport,
+        )
 
     artifact = run_home_edge_diagnostic(
         profile=node,
@@ -431,6 +438,111 @@ def gateway_contract() -> dict[str, Any]:
         "command_source": "fixed_typed_allowlist",
         "actions": sorted(AUDITED_COMMANDS),
         "risk_lanes": ["read_only", "approved_mutation", "destructive_manual"],
+    }
+
+
+def run_home_edge_visual_capture(
+    *,
+    profile: HomeEdgeProfile | None = None,
+    transport: ProbeTransport | None = None,
+    timeout_seconds: int = VISUAL_CAPTURE_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    node = profile or load_home_edge_profile()
+    active_transport = transport or OpenSSHTransport(node)
+    attempt = active_transport.run_probe(
+        VISUAL_CAPTURE_REMOTE_PROBE,
+        timeout_seconds=timeout_seconds,
+    )
+    if not attempt.observed:
+        return _validate_visual_capture_public_receipt(
+            {
+                "schema": "skeleton.home_edge.visual_capture.receipt.v1",
+                "action_id": "home_edge_visual_capture_tick",
+                "task_ref": "none",
+                "status": "FAILED_RETRYABLE",
+                "frame_count": 0,
+                "manifest_hash": None,
+                "capture_mode": "background",
+                "reason_codes": [attempt.reason or "remote_runtime_unavailable"],
+                "retryable": True,
+                "human_review_required": False,
+                "stale": False,
+            }
+        )
+    try:
+        decoded = json.loads(attempt.stdout)
+    except json.JSONDecodeError as exc:
+        raise HomeEdgeDiagnosticError("visual capture did not return JSON") from exc
+    return _validate_visual_capture_public_receipt(decoded)
+
+
+def _validate_visual_capture_public_receipt(value: Any) -> dict[str, Any]:
+    from .visual_capture import RECEIPT_SCHEMA, TERMINAL_STATUSES
+
+    if not isinstance(value, dict):
+        raise HomeEdgeDiagnosticError("visual capture receipt JSON must be an object")
+    expected = {
+        "schema",
+        "action_id",
+        "task_ref",
+        "status",
+        "frame_count",
+        "manifest_hash",
+        "capture_mode",
+        "reason_codes",
+        "retryable",
+        "human_review_required",
+        "stale",
+    }
+    if set(value) != expected:
+        raise HomeEdgeDiagnosticError("visual capture receipt schema mismatch")
+    status = value.get("status")
+    allowed_statuses = set(TERMINAL_STATUSES) | {"QUEUED"}
+    reasons = value.get("reason_codes")
+    manifest_hash = value.get("manifest_hash")
+    if (
+        value.get("schema") != RECEIPT_SCHEMA
+        or not isinstance(value.get("action_id"), str)
+        or not isinstance(value.get("task_ref"), str)
+        or status not in allowed_statuses
+        or not isinstance(value.get("frame_count"), int)
+        or isinstance(value.get("frame_count"), bool)
+        or value.get("frame_count") < 0
+        or value.get("capture_mode") not in {"background", "visible_kiosk"}
+        or not isinstance(reasons, list)
+        or not all(
+            isinstance(reason, str)
+            and re.fullmatch(r"[a-z0-9_]{1,80}", reason) is not None
+            for reason in reasons
+        )
+        or not isinstance(value.get("retryable"), bool)
+        or not isinstance(value.get("human_review_required"), bool)
+        or not isinstance(value.get("stale"), bool)
+        or (
+            manifest_hash is not None
+            and (
+                not isinstance(manifest_hash, str)
+                or re.fullmatch(r"[0-9a-f]{64}", manifest_hash) is None
+            )
+        )
+    ):
+        raise HomeEdgeDiagnosticError("visual capture receipt values are invalid")
+    rendered = json.dumps(value, sort_keys=True)
+    blocked = ("youtube", "http://", "https://", "/", "\\", "profile", "stdout", "stderr")
+    if any(marker in rendered.lower() for marker in blocked):
+        raise HomeEdgeDiagnosticError("visual capture receipt leaked private data")
+    return {
+        "schema": RECEIPT_SCHEMA,
+        "action_id": value["action_id"],
+        "task_ref": value["task_ref"],
+        "status": status,
+        "frame_count": value["frame_count"],
+        "manifest_hash": manifest_hash,
+        "capture_mode": value["capture_mode"],
+        "reason_codes": sorted(set(reasons)),
+        "retryable": value["retryable"],
+        "human_review_required": value["human_review_required"],
+        "stale": value["stale"],
     }
 
 
@@ -953,6 +1065,66 @@ print(json.dumps(redact(report), sort_keys=True, separators=(",", ":")))
 '''
 
 
+VISUAL_CAPTURE_REMOTE_PROBE = r'''
+from __future__ import annotations
+
+import json
+import re
+import sys
+
+from core.home_edge.visual_capture import RECEIPT_SCHEMA, TERMINAL_STATUSES, process_one_visual_capture_job
+
+EXPECTED = {
+    "schema",
+    "action_id",
+    "task_ref",
+    "status",
+    "frame_count",
+    "manifest_hash",
+    "capture_mode",
+    "reason_codes",
+    "retryable",
+    "human_review_required",
+    "stale",
+}
+
+
+def validate(value):
+    if not isinstance(value, dict) or set(value) != EXPECTED:
+        raise ValueError("visual_capture_receipt_schema_mismatch")
+    reasons = value.get("reason_codes")
+    manifest_hash = value.get("manifest_hash")
+    if (
+        value.get("schema") != RECEIPT_SCHEMA
+        or value.get("status") not in (set(TERMINAL_STATUSES) | {"QUEUED"})
+        or not isinstance(value.get("action_id"), str)
+        or not isinstance(value.get("task_ref"), str)
+        or not isinstance(value.get("frame_count"), int)
+        or isinstance(value.get("frame_count"), bool)
+        or value.get("frame_count") < 0
+        or value.get("capture_mode") not in {"background", "visible_kiosk"}
+        or not isinstance(reasons, list)
+        or not all(isinstance(reason, str) and re.fullmatch(r"[a-z0-9_]{1,80}", reason) for reason in reasons)
+        or not isinstance(value.get("retryable"), bool)
+        or not isinstance(value.get("human_review_required"), bool)
+        or not isinstance(value.get("stale"), bool)
+        or (manifest_hash is not None and (not isinstance(manifest_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", manifest_hash)))
+    ):
+        raise ValueError("visual_capture_receipt_values_invalid")
+    rendered = json.dumps(value, sort_keys=True)
+    if any(marker in rendered.lower() for marker in ("youtube", "http://", "https://", "/", "\\", "profile", "stdout", "stderr")):
+        raise ValueError("visual_capture_receipt_leaked_private_data")
+    return value
+
+
+try:
+    print(json.dumps(validate(process_one_visual_capture_job()), sort_keys=True, separators=(",", ":")))
+except Exception as exc:
+    print(json.dumps({"status": "blocked", "reason": type(exc).__name__}, sort_keys=True), file=sys.stderr)
+    raise
+'''
+
+
 LAN_INVENTORY_REMOTE_PROBE = r'''
 from __future__ import annotations
 
@@ -1233,4 +1405,5 @@ __all__ = [
     "run_audited_home_edge_command",
     "run_home_edge_diagnostic",
     "run_home_edge_lan_inventory",
+    "run_home_edge_visual_capture",
 ]

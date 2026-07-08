@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/alanua/Skeleton/schemas/home_edge_visual_capture_receipt.schema.json",
+  "title": "Home Edge Visual Capture Public Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "action_id",
+    "task_ref",
+    "status",
+    "frame_count",
+    "manifest_hash",
+    "capture_mode",
+    "reason_codes",
+    "retryable",
+    "human_review_required",
+    "stale"
+  ],
+  "properties": {
+    "schema": {"const": "skeleton.home_edge.visual_capture.receipt.v1"},
+    "action_id": {"type": "string", "minLength": 1, "maxLength": 80},
+    "task_ref": {"type": "string", "minLength": 1, "maxLength": 80},
+    "status": {
+      "enum": [
+        "QUEUED",
+        "CAPTURED",
+        "CAPTURING",
+        "CLAIMED",
+        "HUMAN_REVIEW_PENDING",
+        "FAILED_RETRYABLE",
+        "FAILED_TERMINAL",
+        "INTERACTION_REQUIRED",
+        "NEEDS_RECAPTURE",
+        "NOT_VISIBLE",
+        "OPENING_MEDIA",
+        "SEEKING",
+        "VERIFIED"
+      ]
+    },
+    "frame_count": {"type": "integer", "minimum": 0, "maximum": 7},
+    "manifest_hash": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "capture_mode": {"enum": ["background", "visible_kiosk"]},
+    "reason_codes": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^[a-z0-9_]{1,80}$"}
+    },
+    "retryable": {"type": "boolean"},
+    "human_review_required": {"type": "boolean"},
+    "stale": {"type": "boolean"}
+  }
+}

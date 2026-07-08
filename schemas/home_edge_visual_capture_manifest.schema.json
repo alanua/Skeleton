@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/alanua/Skeleton/schemas/home_edge_visual_capture_manifest.schema.json",
+  "title": "Home Edge Visual Capture Private Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "created_at",
+    "action_id",
+    "task_ref",
+    "status",
+    "provider",
+    "normalized_url",
+    "capture_mode",
+    "requested_time_seconds",
+    "offsets_seconds",
+    "frames",
+    "frame_count",
+    "contact_sheet",
+    "reason_codes",
+    "retryable",
+    "human_review_required",
+    "evidence_state"
+  ],
+  "properties": {
+    "schema": {"const": "skeleton.home_edge.visual_capture.manifest.v1"},
+    "created_at": {"type": "string"},
+    "action_id": {"type": "string"},
+    "task_ref": {"type": "string"},
+    "status": {
+      "enum": [
+        "CAPTURED",
+        "CAPTURING",
+        "CLAIMED",
+        "HUMAN_REVIEW_PENDING",
+        "FAILED_RETRYABLE",
+        "FAILED_TERMINAL",
+        "INTERACTION_REQUIRED",
+        "NEEDS_RECAPTURE",
+        "NOT_VISIBLE",
+        "OPENING_MEDIA",
+        "QUEUED",
+        "SEEKING",
+        "VERIFIED"
+      ]
+    },
+    "provider": {"const": "youtube"},
+    "normalized_url": {"type": "string"},
+    "capture_mode": {"enum": ["background", "visible_kiosk"]},
+    "requested_time_seconds": {"type": "number"},
+    "offsets_seconds": {
+      "type": "array",
+      "items": {"type": "integer"}
+    },
+    "frames": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "index",
+          "offset_seconds",
+          "requested_time_seconds",
+          "observed_time_seconds",
+          "drift_seconds",
+          "width",
+          "height",
+          "sha256",
+          "private_artifact",
+          "reason_codes"
+        ],
+        "properties": {
+          "index": {"type": "integer", "minimum": 0},
+          "offset_seconds": {"type": "integer"},
+          "requested_time_seconds": {"type": "number"},
+          "observed_time_seconds": {"type": "number"},
+          "drift_seconds": {"type": "number", "minimum": 0},
+          "width": {"type": "integer", "minimum": 1},
+          "height": {"type": "integer", "minimum": 1},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "private_artifact": {"type": "string"},
+          "reason_codes": {
+            "type": "array",
+            "items": {"type": "string", "pattern": "^[a-z0-9_]{1,80}$"}
+          }
+        }
+      }
+    },
+    "frame_count": {"type": "integer", "minimum": 0, "maximum": 7},
+    "contact_sheet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["private_artifact", "sha256"],
+      "properties": {
+        "private_artifact": {"type": ["string", "null"]},
+        "sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "reason_codes": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^[a-z0-9_]{1,80}$"}
+    },
+    "retryable": {"type": "boolean"},
+    "human_review_required": {"type": "boolean"},
+    "evidence_state": {"const": "private_manifest_only"}
+  }
+}

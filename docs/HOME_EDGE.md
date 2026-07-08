@@ -46,12 +46,19 @@ python3 scripts/home_edge_remote.py media_inventory
 python3 scripts/home_edge_remote.py browser_diagnostic
 python3 scripts/home_edge_remote.py hardware_inventory
 python3 scripts/home_edge_remote.py home_automation_inventory
+python3 scripts/home_edge_remote.py video_visual_capture
 ```
 
 The existing baseline runtime maintenance id remains:
 
 ```text
 home_edge_01_read_only_diagnostic
+```
+
+The visual capture queue tick is also a typed action:
+
+```text
+home_edge_01_video_visual_capture_tick
 ```
 
 Additional house tasks are added as reviewed action adapters rather than raw shell supplied by a GitHub issue.
@@ -93,3 +100,20 @@ counts, service-category counts, gateway presence and bounded risk flags only.
 An attached USB modem is optional and is never part of the Home Edge health criterion. The
 registered internet-path expectation is the default gateway with integrated connectivity
 hardware; gateway modem internals are not claimed as observed by Home Edge.
+
+## Visual Capture Boundary
+
+`video_visual_capture` is a private Home Edge execution capability. Skeleton owns the job
+contract, queue tick, policy checks, audit metadata and public-safe receipt. Home Edge owns
+browser and media execution through fixed private runtime configuration.
+
+Job input may identify only the provider, normal YouTube watch URL, requested timestamp,
+bounded offsets, capture mode and public action/task references. It may not provide shell
+commands, selectors, executable paths, output paths, browser profile paths, hosts, users or
+ports.
+
+Screenshot frames, clips, contact sheets and the private manifest are written only under the
+private artifact root. Public output is limited to the versioned receipt fields documented in
+`docs/HOME_EDGE_VISUAL_CAPTURE.md`. Canonical memory may later store only reviewed
+manifests, hashes and evidence state. Graphify and MemPalace remain derived indexes and are
+not authority for capture evidence.
