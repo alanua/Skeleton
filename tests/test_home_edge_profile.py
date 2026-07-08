@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -8,7 +9,13 @@ import pytest
 from core.home_edge.profile import load_home_edge_profile, synthetic_profile_mapping
 
 
-def test_home_edge_profile_registers_universal_fixed_node() -> None:
+def test_home_edge_profile_registers_universal_fixed_node(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in tuple(os.environ):
+        if name.startswith("SKELETON_HOME_EDGE_01_"):
+            monkeypatch.delenv(name, raising=False)
+
     profile = load_home_edge_profile()
 
     assert profile.node_id == "home-edge-01"
