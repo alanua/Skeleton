@@ -2688,32 +2688,51 @@ def _existing_pr_publish_state(
 def _existing_pr_publish_commands(
     *,
     worktree_path: Path,
+    source_issue: int = 1640,
     branch: str = "runner/issue-1640",
     remote_url: str = "https://github.com/alanua/Skeleton.git",
+    pr_number: int = 1638,
+    expected_pr_head_sha: str = HEAD_SHA,
+    expected_pr_head_branch: str = "runner/issue-1638",
     pre_pr_state: dict[str, object] | None = None,
     post_pr_state: dict[str, object] | None = None,
     changed_files: tuple[str, ...] = ("scripts/runner_poll_github_tasks.py",),
     untracked_files: tuple[str, ...] = (),
     validated_publish_files: tuple[str, ...] | None = None,
     ancestor_code: int = 0,
+    staged_diff_check_code: int = 0,
     diff_check_code: int = 0,
-    add_code: int = 0,
-    commit_code: int = 0,
-    post_commit_head: str = "b" * 40,
+    validation_add_code: int = 0,
+    source_index_code: int = 0,
+    source_read_tree_code: int = 0,
+    overlay_read_tree_code: int = 0,
+    hash_object_code: int = 0,
+    overlay_update_code: int = 0,
+    write_tree_code: int = 0,
+    commit_tree_code: int = 0,
+    constructed_head: str = "b" * 40,
+    constructed_parent: str = HEAD_SHA,
+    constructed_files: tuple[str, ...] | None = None,
+    parent_verify_code: int = 0,
+    diff_tree_code: int = 0,
     push_code: int = 0,
     pr_view_code: int = 0,
 ) -> object:
     pr_view_count = 0
+    cached_diff_check_count = 0
     expected_publish_files = (
         changed_files if validated_publish_files is None else validated_publish_files
     )
     pre_state = pre_pr_state or _existing_pr_publish_state()
-    post_state = post_pr_state or _existing_pr_publish_state(head_sha=post_commit_head)
+    post_state = post_pr_state or _existing_pr_publish_state(head_sha=constructed_head)
+    expected_constructed_files = (
+        expected_publish_files if constructed_files is None else constructed_files
+    )
 
     def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
-        nonlocal pr_view_count
+        nonlocal pr_view_count, cached_diff_check_count
         assert Path(cwd or "") == worktree_path
-        if command[:4] == ["gh", "pr", "view", "1638"]:
+        if command[:4] == ["gh", "pr", "view", str(pr_number)]:
             pr_view_count += 1
             if pr_view_code != 0:
                 return pr_view_code, "pr view failed output must not leak"
@@ -2722,31 +2741,67 @@ def _existing_pr_publish_commands(
             return 0, f"{branch}\n"
         if command == ["git", "remote", "get-url", "origin"]:
             return 0, f"{remote_url}\n"
-        if command == ["git", "merge-base", "--is-ancestor", HEAD_SHA, "HEAD"]:
+        if command == ["git", "merge-base", "--is-ancestor", expected_pr_head_sha, "HEAD"]:
             return ancestor_code, ""
         if command == ["git", "diff", "--name-only", "HEAD", "--"]:
             return 0, "\n".join(changed_files) + ("\n" if changed_files else "")
         if command == ["git", "ls-files", "--others", "--exclude-standard"]:
             return 0, "\n".join(untracked_files) + ("\n" if untracked_files else "")
-        if command == ["git", "diff", "--check", "--", *expected_publish_files]:
-            return diff_check_code, "diff check failed output must not leak"
-        if command == ["git", "add", "--", *expected_publish_files]:
-            return add_code, "add failed output must not leak"
+        if command == ["git", "rev-parse", "--git-path", "index"]:
+            return source_index_code, f"{worktree_path / 'missing-source.index'}\n"
+        if command == ["git", "read-tree", "HEAD"]:
+            return source_read_tree_code, "source read-tree failed output must not leak"
         if command == [
             "git",
-            "commit",
-            "-m",
-            "Publish issue #1640 worktree to existing PR",
+            "diff",
+            "--cached",
+            "--check",
+            "HEAD",
+            "--",
+            *expected_publish_files,
         ]:
-            return commit_code, "commit failed output must not leak"
-        if command == ["git", "rev-parse", "HEAD"]:
-            return 0, f"{post_commit_head}\n"
+            cached_diff_check_count += 1
+            code = staged_diff_check_code if cached_diff_check_count == 1 else diff_check_code
+            return code, "diff check failed output must not leak"
+        if command == ["git", "add", "--", *expected_publish_files]:
+            return validation_add_code, "validation add failed output must not leak"
+        if command == ["git", "read-tree", expected_pr_head_sha]:
+            return overlay_read_tree_code, "overlay read-tree failed output must not leak"
+        if command == ["git", "hash-object", "-w", "--", *expected_publish_files[:1]]:
+            return hash_object_code, f"{'d' * 40}\n"
+        if command[:4] == ["git", "hash-object", "-w", "--"]:
+            return hash_object_code, f"{'d' * 40}\n"
+        if command[:4] == ["git", "update-index", "--add", "--cacheinfo"]:
+            return overlay_update_code, "update-index failed output must not leak"
+        if command == ["git", "write-tree"]:
+            return write_tree_code, f"{'e' * 40}\n"
+        if command == [
+            "git",
+            "commit-tree",
+            "e" * 40,
+            "-p",
+            expected_pr_head_sha,
+            "-m",
+            f"Publish issue #{source_issue} worktree to existing PR",
+        ]:
+            return commit_tree_code, f"{constructed_head}\n"
+        if command == ["git", "rev-parse", f"{constructed_head}^"]:
+            return parent_verify_code, f"{constructed_parent}\n"
+        if command == [
+            "git",
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            constructed_head,
+        ]:
+            return diff_tree_code, "\n".join(expected_constructed_files) + "\n"
         if command == [
             "git",
             "push",
             "origin",
-            f"--force-with-lease=runner/issue-1638:{HEAD_SHA}",
-            "HEAD:refs/heads/runner/issue-1638",
+            f"--force-with-lease={expected_pr_head_branch}:{expected_pr_head_sha}",
+            f"{constructed_head}:refs/heads/{expected_pr_head_branch}",
         ]:
             return push_code, "push failed output must not leak"
         return 2, f"unexpected command: {command!r}"
@@ -2758,6 +2813,15 @@ def _prepare_issue_publish_worktree(root: Path, issue_number: int = 123) -> Path
     worktree_path = root / f"issue-{issue_number}"
     worktree_path.mkdir(parents=True)
     (worktree_path / ".git").write_text("gitdir: /tmp/git-dir\n", encoding="utf-8")
+    for relative_path in (
+        "scripts/runner_poll_github_tasks.py",
+        "tests/test_runner_poll_github_tasks.py",
+        "docs/RUNNER_MAINTENANCE_TASKS.md",
+        "README.md",
+    ):
+        path = worktree_path / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{relative_path}\n", encoding="utf-8")
     return worktree_path
 
 
@@ -5594,7 +5658,7 @@ def test_publish_issue_worktree_to_existing_pr_updates_existing_draft_pr_only(
                 "scripts/runner_poll_github_tasks.py",
                 "tests/test_runner_poll_github_tasks.py",
             ),
-            post_commit_head=post_head,
+            constructed_head=post_head,
         ),
     ) as run:
         report = runner.publish_issue_worktree_to_existing_pr(
@@ -5612,6 +5676,7 @@ def test_publish_issue_worktree_to_existing_pr_updates_existing_draft_pr_only(
     assert "maintenance_task_id=publish_issue_worktree_to_existing_pr" in report
     assert "pull_request=1638" in report
     assert f"expected_pr_head_sha={HEAD_SHA}" in report
+    assert f"constructed_head_sha={post_head}" in report
     assert f"pushed_head_sha={post_head}" in report
     assert "post_push_pr_changed_files_count=2" in report
     assert "new_pr_changed_files_count=1" in report
@@ -5625,11 +5690,21 @@ def test_publish_issue_worktree_to_existing_pr_updates_existing_draft_pr_only(
     ] in commands
     assert [
         "git",
+        "commit-tree",
+        "e" * 40,
+        "-p",
+        HEAD_SHA,
+        "-m",
+        "Publish issue #1640 worktree to existing PR",
+    ] in commands
+    assert [
+        "git",
         "push",
         "origin",
         f"--force-with-lease=runner/issue-1638:{HEAD_SHA}",
-        "HEAD:refs/heads/runner/issue-1638",
+        f"{post_head}:refs/heads/runner/issue-1638",
     ] in commands
+    assert all(command[:2] != ["git", "commit"] for command in commands)
     assert all(command[:3] != ["gh", "pr", "create"] for command in commands)
     assert all(command[:3] != ["gh", "pr", "merge"] for command in commands)
     assert not any(".codex/session.json" in command for command in commands)
@@ -5730,8 +5805,8 @@ def test_publish_issue_worktree_to_existing_pr_wrong_metadata_or_pr_blocks_befor
             "changed_files_outside_allowlist",
         ),
         ({"changed_files": ("../unsafe",)}, "changed_tracked_file_path_unsafe"),
-        ({"diff_check_code": 1}, "diff_check_failed"),
-        ({"commit_code": 1}, "commit_failed"),
+        ({"staged_diff_check_code": 1}, "diff_check_failed"),
+        ({"commit_tree_code": 1}, "commit_tree_failed"),
         ({"push_code": 1}, "push_failed"),
     ),
 )
@@ -5765,9 +5840,201 @@ def test_publish_issue_worktree_to_existing_pr_source_checks_block_safely(
         "diff_check_failed",
     }:
         assert all(command[:2] != ["git", "add"] for command in commands)
+        assert all(command[:3] != ["git", "hash-object", "-w"] for command in commands)
     if reason != "push_failed":
         assert all(command[:2] != ["git", "push"] for command in commands)
+        assert "pushed_head_sha=" not in report
     assert all(command[:3] != ["gh", "pr", "create"] for command in commands)
+
+
+def test_publish_issue_worktree_to_existing_pr_allowed_untracked_whitespace_blocks_before_hash(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path, issue_number=1640)
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_existing_pr_publish_commands(
+            worktree_path=worktree_path,
+            changed_files=(),
+            untracked_files=("tests/test_runner_poll_github_tasks.py",),
+            validated_publish_files=("tests/test_runner_poll_github_tasks.py",),
+            diff_check_code=1,
+        ),
+    ) as run:
+        report = runner.publish_issue_worktree_to_existing_pr(
+            _publish_issue_worktree_to_existing_pr_body(
+                allowed_files=("tests/test_runner_poll_github_tasks.py",)
+            )
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("BLOCKED:")
+    assert "reason=diff_check_failed" in report
+    assert all(command[:3] != ["git", "hash-object", "-w"] for command in commands)
+    assert all(command[:2] != ["git", "push"] for command in commands)
+
+
+def test_publish_issue_worktree_to_existing_pr_allowlisted_symlink_blocks_before_hash(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path, issue_number=1640)
+    source_file = worktree_path / "scripts/runner_poll_github_tasks.py"
+    source_file.unlink()
+    source_file.symlink_to(tmp_path / "outside.py")
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_existing_pr_publish_commands(worktree_path=worktree_path),
+    ) as run:
+        report = runner.publish_issue_worktree_to_existing_pr(
+            _publish_issue_worktree_to_existing_pr_body()
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("BLOCKED:")
+    assert "reason=source_file_not_regular" in report
+    assert all(command[:3] != ["git", "hash-object", "-w"] for command in commands)
+    assert all(command[:2] != ["git", "push"] for command in commands)
+
+
+@pytest.mark.parametrize("source_state", ("missing", "directory"))
+def test_publish_issue_worktree_to_existing_pr_missing_or_non_regular_blocks_before_hash(
+    tmp_path: Path, source_state: str
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path, issue_number=1640)
+    source_file = worktree_path / "scripts/runner_poll_github_tasks.py"
+    source_file.unlink()
+    if source_state == "directory":
+        source_file.mkdir()
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_existing_pr_publish_commands(worktree_path=worktree_path),
+    ) as run:
+        report = runner.publish_issue_worktree_to_existing_pr(
+            _publish_issue_worktree_to_existing_pr_body()
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("BLOCKED:")
+    assert "reason=source_file_not_regular" in report
+    assert all(command[:3] != ["git", "hash-object", "-w"] for command in commands)
+    assert all(command[:2] != ["git", "push"] for command in commands)
+
+
+@pytest.mark.parametrize(
+    ("command_kwargs", "reason"),
+    (
+        (
+            {"constructed_parent": "c" * 40},
+            "constructed_parent_verification_failed",
+        ),
+        (
+            {"constructed_files": ("docs/unexpected.md",)},
+            "constructed_diff_verification_failed",
+        ),
+        ({"push_code": 1}, "push_failed"),
+    ),
+)
+def test_publish_issue_worktree_to_existing_pr_pre_push_failures_do_not_emit_pushed_sha(
+    tmp_path: Path, command_kwargs: dict[str, object], reason: str
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path, issue_number=1640)
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_existing_pr_publish_commands(
+            worktree_path=worktree_path,
+            **command_kwargs,
+        ),
+    ):
+        report = runner.publish_issue_worktree_to_existing_pr(
+            _publish_issue_worktree_to_existing_pr_body()
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert f"reason={reason}" in report
+    assert "constructed_head_sha=" in report
+    assert "pushed_head_sha=" not in report
+
+
+def test_publish_issue_worktree_to_existing_pr_accepts_both_registered_packets(
+    tmp_path: Path,
+) -> None:
+    home_worktree = _prepare_issue_publish_worktree(tmp_path, issue_number=1640)
+    docs_worktree = _prepare_issue_publish_worktree(tmp_path, issue_number=1668)
+    docs_head = "c" * 40
+    home_run = _existing_pr_publish_commands(worktree_path=home_worktree)
+    docs_run = _existing_pr_publish_commands(
+        worktree_path=docs_worktree,
+        source_issue=1668,
+        branch="runner/issue-1668",
+        pr_number=1670,
+        expected_pr_head_branch="runner/issue-1670",
+        pre_pr_state=_existing_pr_publish_state(
+            number=1670,
+            head_ref="runner/issue-1670",
+            url="https://github.com/alanua/Skeleton/pull/1670",
+            files=("docs/RUNNER_MAINTENANCE_TASKS.md",),
+        ),
+        post_pr_state=_existing_pr_publish_state(
+            number=1670,
+            head_ref="runner/issue-1670",
+            head_sha=docs_head,
+            url="https://github.com/alanua/Skeleton/pull/1670",
+            files=("docs/RUNNER_MAINTENANCE_TASKS.md",),
+        ),
+        changed_files=("docs/RUNNER_MAINTENANCE_TASKS.md",),
+        constructed_head=docs_head,
+    )
+
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        if Path(cwd or "") == docs_worktree:
+            return docs_run(command, cwd)
+        return home_run(command, cwd)
+
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(runner, "run_command", side_effect=run):
+        home_report = runner.publish_issue_worktree_to_existing_pr(
+            _publish_issue_worktree_to_existing_pr_body()
+        )
+        docs_report = runner.publish_issue_worktree_to_existing_pr(
+            _publish_issue_worktree_to_existing_pr_body(
+                source_issue=1668,
+                expected_source_branch="runner/issue-1668",
+                pr_number=1670,
+                expected_pr_head_branch="runner/issue-1670",
+                allowed_files=("docs/RUNNER_MAINTENANCE_TASKS.md",),
+            )
+        )
+
+    assert home_report.startswith("DONE:")
+    assert f"constructed_head_sha={'b' * 40}" in home_report
+    assert docs_report.startswith("DONE:")
+    assert f"constructed_head_sha={docs_head}" in docs_report
+
+
+def test_publish_issue_worktree_to_existing_pr_rejects_unregistered_packet() -> None:
+    report = runner.publish_issue_worktree_to_existing_pr(
+        _publish_issue_worktree_to_existing_pr_body(
+            source_issue=1641,
+            expected_source_branch="runner/issue-1641",
+            pr_number=1638,
+        )
+    )
+
+    assert report.startswith("NEEDS_OPERATOR:")
+    assert "reason=unregistered_existing_pr_publish_packet" in report
 
 
 @pytest.mark.parametrize(
@@ -5804,7 +6071,7 @@ def test_publish_issue_worktree_to_existing_pr_post_push_verification_blocks(
         side_effect=_existing_pr_publish_commands(
             worktree_path=worktree_path,
             post_pr_state=post_state,
-            post_commit_head="b" * 40,
+            constructed_head="b" * 40,
         ),
     ):
         report = runner.publish_issue_worktree_to_existing_pr(

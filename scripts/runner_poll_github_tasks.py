@@ -426,6 +426,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "compare_behind_by",
         "compare_state",
         "compare_status",
+        "constructed_head_sha",
         "canonical_write_enabled",
         "current_branch",
         "decision_records_skipped",
@@ -8075,6 +8076,28 @@ _EXISTING_PR_PUBLISH_ALLOWED_METADATA_FIELDS = frozenset(
     )
 )
 
+_EXISTING_PR_PUBLISH_REGISTERED_PACKETS = {
+    "home_edge_1640_to_pr_1638": {
+        "source_issue": 1640,
+        "expected_source_branch": "runner/issue-1640",
+        "pr_number": 1638,
+        "expected_pr_head_branch": "runner/issue-1638",
+        "allowed_files": frozenset(
+            (
+                "scripts/runner_poll_github_tasks.py",
+                "tests/test_runner_poll_github_tasks.py",
+            )
+        ),
+    },
+    "docs_1668_to_pr_1670": {
+        "source_issue": 1668,
+        "expected_source_branch": "runner/issue-1668",
+        "pr_number": 1670,
+        "expected_pr_head_branch": "runner/issue-1670",
+        "allowed_files": frozenset(("docs/RUNNER_MAINTENANCE_TASKS.md",)),
+    },
+}
+
 
 def _metadata_field_names(metadata: str) -> frozenset[str]:
     names: set[str] = set()
@@ -8127,6 +8150,20 @@ def _existing_pr_publish_metadata(
         return None, "missing_operator_approval"
     if allowed_files_reason is not None:
         return None, allowed_files_reason
+    registered_packet = None
+    for packet in _EXISTING_PR_PUBLISH_REGISTERED_PACKETS.values():
+        if (
+            packet["source_issue"] == source_issue_number
+            and packet["expected_source_branch"] == expected_source_branch
+            and packet["pr_number"] == int(pr_number)
+            and packet["expected_pr_head_branch"] == expected_pr_head_branch
+        ):
+            registered_packet = packet
+            break
+    if registered_packet is None:
+        return None, "unregistered_existing_pr_publish_packet"
+    if not allowed_files or not allowed_files <= registered_packet["allowed_files"]:
+        return None, "allowed_files_outside_registered_packet"
     return (
         IssueWorktreeExistingPrPublishRequest(
             repository=repository,
@@ -9101,6 +9138,184 @@ def _existing_pr_publish_post_push_block_reason(
     return None
 
 
+def _existing_pr_publish_run_with_index(
+    index_path: Path, args: list[str], worktree_path: Path
+) -> tuple[int, str]:
+    environment = dict(os.environ)
+    environment["GIT_INDEX_FILE"] = str(index_path)
+    token = _RUN_COMMAND_ENV_OVERRIDE.set(environment)
+    try:
+        return run_command(args, cwd=worktree_path)
+    finally:
+        _RUN_COMMAND_ENV_OVERRIDE.reset(token)
+
+
+def _existing_pr_publish_valid_source_file(
+    worktree_path: Path, relative_path: str
+) -> bool:
+    if not _safe_issue_publish_file_path(relative_path):
+        return False
+    root = worktree_path.resolve(strict=False)
+    candidate = worktree_path / relative_path
+    try:
+        resolved = candidate.resolve(strict=False)
+        resolved.relative_to(root)
+    except ValueError:
+        return False
+    current = worktree_path
+    for part in Path(relative_path).parts:
+        current = current / part
+        try:
+            file_stat = current.lstat()
+        except OSError:
+            return False
+        if stat.S_ISLNK(file_stat.st_mode):
+            return False
+    return stat.S_ISREG(file_stat.st_mode)
+
+
+def _existing_pr_publish_prepare_source_index(
+    worktree_path: Path, index_path: Path
+) -> tuple[bool, str | None]:
+    code, output = run_command(["git", "rev-parse", "--git-path", "index"], cwd=worktree_path)
+    if code != 0:
+        return False, "source_index_unavailable"
+    source_index_text = output.strip()
+    if source_index_text:
+        source_index_path = Path(source_index_text)
+        if not source_index_path.is_absolute():
+            source_index_path = worktree_path / source_index_path
+        if source_index_path.is_file():
+            shutil.copyfile(source_index_path, index_path)
+            return True, None
+    code, _output = _existing_pr_publish_run_with_index(
+        index_path, ["git", "read-tree", "HEAD"], worktree_path
+    )
+    if code != 0:
+        return False, "source_index_unavailable"
+    return True, None
+
+
+def _existing_pr_publish_validate_diff_check(
+    worktree_path: Path, validated_publish_files: list[str], temp_dir: Path
+) -> str | None:
+    validation_index = temp_dir / "source-validation.index"
+    ok, reason = _existing_pr_publish_prepare_source_index(worktree_path, validation_index)
+    if not ok:
+        return reason
+    code, _output = _existing_pr_publish_run_with_index(
+        validation_index,
+        ["git", "diff", "--cached", "--check", "HEAD", "--", *validated_publish_files],
+        worktree_path,
+    )
+    if code != 0:
+        return "diff_check_failed"
+    code, _output = _existing_pr_publish_run_with_index(
+        validation_index, ["git", "add", "--", *validated_publish_files], worktree_path
+    )
+    if code != 0:
+        return "validation_index_update_failed"
+    code, _output = _existing_pr_publish_run_with_index(
+        validation_index,
+        ["git", "diff", "--cached", "--check", "HEAD", "--", *validated_publish_files],
+        worktree_path,
+    )
+    if code != 0:
+        return "diff_check_failed"
+    return None
+
+
+def _existing_pr_publish_construct_overlay_commit(
+    request: IssueWorktreeExistingPrPublishRequest,
+    worktree_path: Path,
+    validated_publish_files: list[str],
+    temp_dir: Path,
+) -> tuple[str | None, str | None]:
+    overlay_index = temp_dir / "overlay.index"
+    code, _output = _existing_pr_publish_run_with_index(
+        overlay_index, ["git", "read-tree", request.expected_pr_head_sha], worktree_path
+    )
+    if code != 0:
+        return None, "overlay_index_init_failed"
+    for relative_path in validated_publish_files:
+        code, output = run_command(["git", "hash-object", "-w", "--", relative_path], cwd=worktree_path)
+        if code != 0:
+            return None, "hash_object_failed"
+        blob_lines = _git_status_path_lines(output)
+        blob_sha = blob_lines[0].lower() if blob_lines else ""
+        if _HEAD_SHA_RE.fullmatch(blob_sha) is None:
+            return None, "hash_object_failed"
+        code, _output = _existing_pr_publish_run_with_index(
+            overlay_index,
+            ["git", "update-index", "--add", "--cacheinfo", f"100644,{blob_sha},{relative_path}"],
+            worktree_path,
+        )
+        if code != 0:
+            return None, "overlay_index_update_failed"
+    code, output = _existing_pr_publish_run_with_index(
+        overlay_index, ["git", "write-tree"], worktree_path
+    )
+    if code != 0:
+        return None, "write_tree_failed"
+    tree_lines = _git_status_path_lines(output)
+    tree_sha = tree_lines[0].lower() if tree_lines else ""
+    if _HEAD_SHA_RE.fullmatch(tree_sha) is None:
+        return None, "write_tree_failed"
+    code, output = run_command(
+        [
+            "git",
+            "commit-tree",
+            tree_sha,
+            "-p",
+            request.expected_pr_head_sha,
+            "-m",
+            f"Publish issue #{request.source_issue} worktree to existing PR",
+        ],
+        cwd=worktree_path,
+    )
+    if code != 0:
+        return None, "commit_tree_failed"
+    commit_lines = _git_status_path_lines(output)
+    constructed_head_sha = commit_lines[0].lower() if commit_lines else ""
+    if (
+        _HEAD_SHA_RE.fullmatch(constructed_head_sha) is None
+        or constructed_head_sha == request.expected_pr_head_sha
+    ):
+        return None, "constructed_head_invalid_or_unchanged"
+    return constructed_head_sha, None
+
+
+def _existing_pr_publish_verify_constructed_commit(
+    request: IssueWorktreeExistingPrPublishRequest,
+    worktree_path: Path,
+    constructed_head_sha: str,
+    validated_publish_files: list[str],
+) -> str | None:
+    code, output = run_command(
+        ["git", "rev-parse", f"{constructed_head_sha}^"], cwd=worktree_path
+    )
+    if code != 0:
+        return "constructed_parent_verification_failed"
+    parent_lines = _git_status_path_lines(output)
+    parent_sha = parent_lines[0].lower() if parent_lines else ""
+    if parent_sha != request.expected_pr_head_sha:
+        return "constructed_parent_verification_failed"
+    code, output = run_command(
+        ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", constructed_head_sha],
+        cwd=worktree_path,
+    )
+    if code != 0:
+        return "constructed_diff_verification_failed"
+    constructed_files = _git_status_path_lines(output)
+    if not constructed_files:
+        return "constructed_diff_verification_failed"
+    if set(constructed_files) != set(validated_publish_files):
+        return "constructed_diff_verification_failed"
+    if not set(constructed_files) <= set(request.allowed_files):
+        return "constructed_diff_verification_failed"
+    return None
+
+
 def publish_issue_worktree_to_existing_pr(body: str) -> str:
     task_id = PUBLISH_ISSUE_WORKTREE_TO_EXISTING_PR
     request, reason = _existing_pr_publish_metadata(body)
@@ -9238,17 +9453,22 @@ def publish_issue_worktree_to_existing_pr(body: str) -> str:
             "not_met",
         )
     untracked_files = _git_status_path_lines(output)
+    publishable_untracked_files = [
+        path for path in untracked_files if not _is_ignored_issue_publish_untracked_path(path)
+    ]
+    if not all(_safe_issue_publish_file_path(path) for path in publishable_untracked_files):
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=untracked_file_path_unsafe"], "not_met"
+        )
     unexpected_untracked_files = [
         path
-        for path in untracked_files
-        if not _is_ignored_issue_publish_untracked_path(path)
-        and path not in request.allowed_files
+        for path in publishable_untracked_files
+        if path not in request.allowed_files
     ]
     allowed_untracked_files = [
         path
-        for path in untracked_files
-        if not _is_ignored_issue_publish_untracked_path(path)
-        and path in request.allowed_files
+        for path in publishable_untracked_files
+        if path in request.allowed_files
     ]
     if unexpected_untracked_files:
         return _maintenance_report(
@@ -9266,6 +9486,16 @@ def publish_issue_worktree_to_existing_pr(body: str) -> str:
         return _maintenance_report(
             "BLOCKED", task_id, [*status_lines, "reason=no_publishable_changes"], "not_met"
         )
+    if not all(
+        _existing_pr_publish_valid_source_file(worktree_path, path)
+        for path in validated_publish_files
+    ):
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=source_file_not_regular"],
+            "not_met",
+        )
     status_lines.extend(
         (
             f"changed_tracked_files_count={len(changed_tracked_files)}",
@@ -9274,59 +9504,47 @@ def publish_issue_worktree_to_existing_pr(body: str) -> str:
         )
     )
 
-    code, _output = run_command(
-        ["git", "diff", "--check", "--", *validated_publish_files],
-        cwd=worktree_path,
-    )
-    if code != 0:
-        return _maintenance_report(
-            "BLOCKED", task_id, [*status_lines, "reason=diff_check_failed"], "not_met"
+    with tempfile.TemporaryDirectory(prefix="runner-existing-pr-index-") as temp_dir_name:
+        temp_dir = Path(temp_dir_name)
+        reason = _existing_pr_publish_validate_diff_check(
+            worktree_path, validated_publish_files, temp_dir
         )
-    code, _output = run_command(
-        ["git", "add", "--", *validated_publish_files], cwd=worktree_path
-    )
-    if code != 0:
-        return _maintenance_report(
-            "BLOCKED", task_id, [*status_lines, "reason=staging_failed"], "not_met"
+        if reason is not None:
+            return _maintenance_report(
+                "BLOCKED", task_id, [*status_lines, f"reason={reason}"], "not_met"
+            )
+        constructed_head_sha, reason = _existing_pr_publish_construct_overlay_commit(
+            request, worktree_path, validated_publish_files, temp_dir
         )
-    code, _output = run_command(
-        ["git", "commit", "-m", f"Publish issue #{request.source_issue} worktree to existing PR"],
-        cwd=worktree_path,
-    )
-    if code != 0:
-        return _maintenance_report(
-            "BLOCKED", task_id, [*status_lines, "reason=commit_failed"], "not_met"
+        if reason is not None:
+            return _maintenance_report(
+                "BLOCKED", task_id, [*status_lines, f"reason={reason}"], "not_met"
+            )
+        assert constructed_head_sha is not None
+        status_lines.append(f"constructed_head_sha={constructed_head_sha}")
+        reason = _existing_pr_publish_verify_constructed_commit(
+            request, worktree_path, constructed_head_sha, validated_publish_files
         )
-    code, output = run_command(["git", "rev-parse", "HEAD"], cwd=worktree_path)
-    if code != 0:
-        return _maintenance_report(
-            "BLOCKED", task_id, [*status_lines, "step=read_post_commit_head status=failed"], "not_met"
-        )
-    pushed_head_lines = _git_status_path_lines(output)
-    pushed_head_sha = pushed_head_lines[0].lower() if pushed_head_lines else ""
-    if _HEAD_SHA_RE.fullmatch(pushed_head_sha) is None or pushed_head_sha == request.expected_pr_head_sha:
-        return _maintenance_report(
-            "BLOCKED",
-            task_id,
-            [*status_lines, "reason=post_commit_head_invalid_or_unchanged"],
-            "not_met",
-        )
-    status_lines.append(f"pushed_head_sha={pushed_head_sha}")
+        if reason is not None:
+            return _maintenance_report(
+                "BLOCKED", task_id, [*status_lines, f"reason={reason}"], "not_met"
+            )
 
-    code, _output = run_command(
-        [
-            "git",
-            "push",
-            "origin",
-            f"--force-with-lease={request.expected_pr_head_branch}:{request.expected_pr_head_sha}",
-            f"HEAD:refs/heads/{request.expected_pr_head_branch}",
-        ],
-        cwd=worktree_path,
-    )
-    if code != 0:
-        return _maintenance_report(
-            "BLOCKED", task_id, [*status_lines, "reason=push_failed"], "not_met"
+        code, _output = run_command(
+            [
+                "git",
+                "push",
+                "origin",
+                f"--force-with-lease={request.expected_pr_head_branch}:{request.expected_pr_head_sha}",
+                f"{constructed_head_sha}:refs/heads/{request.expected_pr_head_branch}",
+            ],
+            cwd=worktree_path,
         )
+        if code != 0:
+            return _maintenance_report(
+                "BLOCKED", task_id, [*status_lines, "reason=push_failed"], "not_met"
+            )
+        status_lines.append(f"pushed_head_sha={constructed_head_sha}")
 
     try:
         post_push_pr_state = _existing_pr_publish_pr_state(request, worktree_path)
@@ -9338,7 +9556,7 @@ def publish_issue_worktree_to_existing_pr(body: str) -> str:
             "not_met",
         )
     post_reason = _existing_pr_publish_post_push_block_reason(
-        request, post_push_pr_state, pushed_head_sha
+        request, post_push_pr_state, constructed_head_sha
     )
     if post_reason is not None:
         return _maintenance_report(
