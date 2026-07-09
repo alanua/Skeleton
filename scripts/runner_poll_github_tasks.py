@@ -194,6 +194,7 @@ PUBLISH_ISSUE_WORKTREE_PR = "publish_issue_worktree_pr"
 PUBLISH_EXISTING_ISSUE_WORKTREE = "publish_existing_issue_worktree"
 PUBLISH_ISSUE_WORKTREE_TO_EXISTING_PR = "publish_issue_worktree_to_existing_pr"
 PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR = "publish_target_project_issue_worktree_pr"
+PUBLISH_CONTAINER_VALIDATION_WORKTREE = "publish_container_validation_worktree"
 QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES = (
     "quarantine_stale_clean_skeleton_worktrees"
 )
@@ -229,6 +230,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         PUBLISH_EXISTING_ISSUE_WORKTREE,
         PUBLISH_ISSUE_WORKTREE_TO_EXISTING_PR,
         PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR,
+        PUBLISH_CONTAINER_VALIDATION_WORKTREE,
         QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES,
         HOME_EDGE_01_READ_ONLY_DIAGNOSTIC,
         HOME_EDGE_01_LAN_INVENTORY_READ_ONLY,
@@ -241,7 +243,17 @@ PUBLISH_ONLY_MAINTENANCE_TASK_IDS = frozenset(
         PUBLISH_EXISTING_ISSUE_WORKTREE,
         PUBLISH_ISSUE_WORKTREE_TO_EXISTING_PR,
         PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR,
+        PUBLISH_CONTAINER_VALIDATION_WORKTREE,
     )
+)
+CONTAINER_VALIDATION_SOURCE_ISSUE = 1667
+CONTAINER_VALIDATION_BRANCH = "runner/issue-1667"
+CONTAINER_VALIDATION_BASE_BRANCH = "main"
+CONTAINER_VALIDATION_WORKTREE_ID = "issue-1667"
+CONTAINER_VALIDATION_PUBLISH_FILES = (
+    ".github/workflows/container-package-validation.yml",
+    "docs/CONTAINER_PACKAGE_VALIDATION.md",
+    "tests/test_container_package_validation_workflow.py",
 )
 AUFMASS_PRIVATE_PROJECT_ID = "aufmass_private"
 AUFMASS_PRIVATE_REGISTERED_REPO = "private/aufmass"
@@ -750,6 +762,17 @@ class IssueWorktreeExistingPrPublishRequest:
     expected_pr_head_sha: str
     expected_pr_head_branch: str
     allowed_files: frozenset[str]
+
+
+@dataclass(frozen=True)
+class ContainerValidationWorktreePublishRequest:
+    repository: str
+    source_issue: int
+    expected_source_branch: str
+    base_branch: str
+    output_branch: str
+    draft_pr: bool
+    operator_approval: str
 
 
 @dataclass(frozen=True)
@@ -7820,6 +7843,7 @@ def _safe_issue_publish_file_path(path: str) -> bool:
     return (
         path == path.strip()
         and path != ""
+        and not path.startswith(".github/workflows/")
         and not relative_path.is_absolute()
         and ".." not in relative_path.parts
         and _SAFE_CHANGED_FILE_RE.fullmatch(path) is not None
@@ -8546,6 +8570,437 @@ def _issue_worktree_publish_pr_url(
     if _PUBLIC_GITHUB_PR_URL_RE.fullmatch(pr_url) is None:
         return None, "create_pr_failed"
     return pr_url, None
+
+
+_CONTAINER_VALIDATION_PUBLISH_ALLOWED_METADATA_FIELDS = frozenset(
+    (
+        "Mode",
+        "Maintenance Task ID",
+        "Repository",
+        "Source Issue",
+        "Expected Source Branch",
+        "Base Branch",
+        "Output Branch",
+        "Draft PR",
+        "Operator Approval",
+    )
+)
+
+
+def _container_validation_publish_metadata(
+    body: str,
+) -> tuple[ContainerValidationWorktreePublishRequest | None, str | None]:
+    metadata = _metadata_before_task(body)
+    fields = _metadata_field_names(metadata)
+    if not fields <= _CONTAINER_VALIDATION_PUBLISH_ALLOWED_METADATA_FIELDS:
+        return None, "unsupported_metadata_field"
+
+    mode = _body_field(metadata, "Mode")
+    maintenance_task_id = _body_field(metadata, "Maintenance Task ID")
+    repository = _body_field(metadata, "Repository")
+    source_issue = _body_field(metadata, "Source Issue")
+    expected_source_branch = _body_field(metadata, "Expected Source Branch")
+    base_branch = _body_field(metadata, "Base Branch")
+    output_branch = _body_field(metadata, "Output Branch")
+    draft_pr, draft_pr_reason = _issue_publish_bool_field(metadata, "Draft PR")
+    operator_approval = _body_field(metadata, "Operator Approval")
+
+    if mode != RUNTIME_MAINTENANCE_MODE:
+        return None, "invalid_mode"
+    if maintenance_task_id != PUBLISH_CONTAINER_VALIDATION_WORKTREE:
+        return None, "unsupported_maintenance_task_id"
+    if repository != REPO:
+        return None, "unsupported_repository"
+    if source_issue != str(CONTAINER_VALIDATION_SOURCE_ISSUE):
+        return None, "unsupported_source_issue"
+    if expected_source_branch != CONTAINER_VALIDATION_BRANCH:
+        return None, "unsupported_expected_source_branch"
+    if base_branch != CONTAINER_VALIDATION_BASE_BRANCH:
+        return None, "unsupported_base_branch"
+    if output_branch != CONTAINER_VALIDATION_BRANCH:
+        return None, "unsupported_output_branch"
+    if draft_pr_reason is not None:
+        return None, draft_pr_reason
+    if draft_pr is not True:
+        return None, "draft_pr_required"
+    if operator_approval != PUBLISH_CONTAINER_VALIDATION_WORKTREE:
+        return None, "missing_operator_approval"
+
+    return (
+        ContainerValidationWorktreePublishRequest(
+            repository=repository,
+            source_issue=CONTAINER_VALIDATION_SOURCE_ISSUE,
+            expected_source_branch=CONTAINER_VALIDATION_BRANCH,
+            base_branch=CONTAINER_VALIDATION_BASE_BRANCH,
+            output_branch=CONTAINER_VALIDATION_BRANCH,
+            draft_pr=True,
+            operator_approval=operator_approval,
+        ),
+        None,
+    )
+
+
+def _container_validation_registered_project() -> dict[str, Any]:
+    project_tree = load_runner_project_tree()
+    projects = project_tree.get("projects") if isinstance(project_tree, dict) else None
+    project = projects.get("skeleton") if isinstance(projects, dict) else None
+    if not isinstance(project, dict):
+        raise ValueError("registered Skeleton project is missing")
+    if project.get("repo") != REPO or project.get("public") is not True:
+        raise ValueError("registered Skeleton project metadata mismatch")
+    if not isinstance(project.get("worktree_root"), str):
+        raise ValueError("registered Skeleton worktree root is missing")
+    return project
+
+
+def _container_validation_worktree_path() -> Path:
+    project = _container_validation_registered_project()
+    return Path(project["worktree_root"]) / CONTAINER_VALIDATION_WORKTREE_ID
+
+
+def _ensure_safe_container_validation_worktree_path(path: Path) -> Path:
+    project = _container_validation_registered_project()
+    root = Path(project["worktree_root"]).resolve(strict=False)
+    candidate = path.resolve(strict=False)
+    if candidate.name != CONTAINER_VALIDATION_WORKTREE_ID:
+        raise ValueError("container validation worktree id mismatch")
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("container validation worktree outside registered root") from exc
+    return candidate
+
+
+def _safe_container_validation_status_path(path: str) -> bool:
+    relative_path = Path(path)
+    return (
+        path == path.strip()
+        and path != ""
+        and not relative_path.is_absolute()
+        and ".." not in relative_path.parts
+        and "\\" not in path
+    )
+
+
+def _container_validation_existing_prs(
+    request: ContainerValidationWorktreePublishRequest, worktree_path: Path
+) -> list[dict[str, Any]]:
+    code, output = run_command(
+        [
+            "gh",
+            "pr",
+            "list",
+            "--repo",
+            request.repository,
+            "--head",
+            request.output_branch,
+            "--state",
+            "open",
+            "--json",
+            (
+                "number,state,isDraft,baseRefName,headRefName,headRefOid,"
+                "headRepository,headRepositoryOwner,url"
+            ),
+        ],
+        cwd=worktree_path,
+    )
+    if code != 0:
+        raise RuntimeError("gh pr list failed")
+    parsed = json.loads(output or "[]")
+    if not isinstance(parsed, list) or not all(
+        isinstance(item, dict) for item in parsed
+    ):
+        raise RuntimeError("gh pr list returned malformed JSON")
+    return parsed
+
+
+def _container_validation_pr_block_reason(
+    request: ContainerValidationWorktreePublishRequest,
+    pr_state: dict[str, Any],
+    pushed_head_sha: str,
+) -> str | None:
+    if str(pr_state.get("state") or "").upper() != "OPEN":
+        return "existing_pr_not_open"
+    if pr_state.get("isDraft") is not True:
+        return "existing_pr_not_draft"
+    if pr_state.get("baseRefName") != request.base_branch:
+        return "existing_pr_base_mismatch"
+    if _head_repository_name_with_owner(pr_state) != request.repository:
+        return "existing_pr_head_repository_mismatch"
+    if pr_state.get("headRefName") != request.output_branch:
+        return "existing_pr_head_branch_mismatch"
+    if str(pr_state.get("headRefOid") or "").lower() != pushed_head_sha:
+        return "existing_pr_head_sha_mismatch"
+    if _existing_pr_publish_pr_url(pr_state) is None:
+        return "existing_pr_url_unavailable"
+    return None
+
+
+def _container_validation_create_pr_url(
+    request: ContainerValidationWorktreePublishRequest, worktree_path: Path
+) -> tuple[str | None, str | None]:
+    code, output = run_command(
+        [
+            "gh",
+            "pr",
+            "create",
+            "--repo",
+            request.repository,
+            "--base",
+            request.base_branch,
+            "--head",
+            request.output_branch,
+            "--title",
+            "Publish container package validation workflow",
+            "--body",
+            "Automated Runner publish task for retained issue #1667.",
+            "--draft",
+        ],
+        cwd=worktree_path,
+    )
+    if code != 0:
+        return None, "create_pr_failed"
+    pr_url = output.strip()
+    if _PUBLIC_GITHUB_PR_URL_RE.fullmatch(pr_url) is None:
+        return None, "create_pr_failed"
+    return pr_url, None
+
+
+def publish_container_validation_worktree(body: str) -> str:
+    task_id = PUBLISH_CONTAINER_VALIDATION_WORKTREE
+    request, reason = _container_validation_publish_metadata(body)
+    if reason is not None:
+        return _maintenance_report("NEEDS_OPERATOR", task_id, [f"reason={reason}"], "not_met")
+    assert request is not None
+
+    status_lines = [
+        f"repository={request.repository}",
+        f"source_issue={request.source_issue}",
+        f"expected_source_branch={request.expected_source_branch}",
+        f"base_branch={request.base_branch}",
+        f"expected_branch={request.output_branch}",
+        f"draft_pr={str(request.draft_pr).lower()}",
+        f"allowed_files_count={len(CONTAINER_VALIDATION_PUBLISH_FILES)}",
+    ]
+    try:
+        worktree_path = _ensure_safe_container_validation_worktree_path(
+            _container_validation_worktree_path()
+        )
+    except (KeyError, ValueError):
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=issue_worktree_path_unsafe"],
+            "not_met",
+        )
+
+    status_lines.append(f"issue_worktree_id={CONTAINER_VALIDATION_WORKTREE_ID}")
+    if not worktree_path.exists():
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=issue_worktree_missing"], "not_met"
+        )
+    if not (worktree_path / ".git").exists():
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=issue_worktree_git_missing"], "not_met"
+        )
+    missing_files = [
+        path for path in CONTAINER_VALIDATION_PUBLISH_FILES if not (worktree_path / path).exists()
+    ]
+    if missing_files:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, f"missing_file={missing_files[0]}", "reason=static_file_missing"],
+            "not_met",
+        )
+
+    code, output = run_command(["git", "branch", "--show-current"], cwd=worktree_path)
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "step=read_current_branch status=failed"], "not_met"
+        )
+    current_branch_lines = _git_status_path_lines(output)
+    current_branch = current_branch_lines[0] if current_branch_lines else ""
+    status_lines.extend(("step=read_current_branch status=done", f"current_branch={current_branch}"))
+    if current_branch != request.expected_source_branch:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=source_branch_mismatch"], "not_met"
+        )
+
+    code, output = run_command(["git", "remote", "get-url", "origin"], cwd=worktree_path)
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "step=read_origin_remote status=failed"], "not_met"
+        )
+    if not _remote_url_matches_project_repo(output, request.repository):
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=origin_remote_mismatch"], "not_met"
+        )
+
+    code, output = run_command(["git", "diff", "--name-only", "HEAD", "--"], cwd=worktree_path)
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "step=read_changed_tracked_files status=failed"], "not_met"
+        )
+    changed_tracked_files = _git_status_path_lines(output)
+    if not all(_safe_container_validation_status_path(path) for path in changed_tracked_files):
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=changed_tracked_file_path_unsafe"], "not_met"
+        )
+
+    code, output = run_command(
+        ["git", "ls-files", "--others", "--exclude-standard"], cwd=worktree_path
+    )
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "step=read_untracked_files status=failed"], "not_met"
+        )
+    untracked_files = _git_status_path_lines(output)
+    if not all(_safe_container_validation_status_path(path) for path in untracked_files):
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=untracked_file_path_unsafe"], "not_met"
+        )
+    static_files = set(CONTAINER_VALIDATION_PUBLISH_FILES)
+    unexpected_tracked_files = [
+        path for path in changed_tracked_files if path not in static_files
+    ]
+    unexpected_untracked_files = [
+        path
+        for path in untracked_files
+        if not _is_ignored_issue_publish_untracked_path(path)
+        and path not in static_files
+    ]
+    if unexpected_tracked_files:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=changed_files_outside_static_set"], "not_met"
+        )
+    if unexpected_untracked_files:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=unexpected_untracked_files"], "not_met"
+        )
+    allowed_untracked_files = [
+        path
+        for path in untracked_files
+        if not _is_ignored_issue_publish_untracked_path(path)
+        and path in static_files
+    ]
+    validated_publish_files = [*changed_tracked_files, *allowed_untracked_files]
+    status_lines.extend(
+        (
+            f"changed_tracked_files_count={len(changed_tracked_files)}",
+            f"allowed_untracked_files_count={len(allowed_untracked_files)}",
+            f"validated_publish_files_count={len(validated_publish_files)}",
+        )
+    )
+
+    code, _output = run_command(
+        [
+            "git",
+            "diff",
+            "--quiet",
+            f"{request.base_branch}...HEAD",
+            "--",
+            *CONTAINER_VALIDATION_PUBLISH_FILES,
+        ],
+        cwd=worktree_path,
+    )
+    if code == 0 and not allowed_untracked_files:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=no_publishable_changes"], "not_met"
+        )
+    if code not in {0, 1}:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "step=read_branch_diff status=failed"], "not_met"
+        )
+
+    code, _output = run_command(
+        ["git", "diff", "--check", "--", *CONTAINER_VALIDATION_PUBLISH_FILES],
+        cwd=worktree_path,
+    )
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=diff_check_failed"], "not_met"
+        )
+    code, _output = run_command(
+        ["git", "add", "--", *CONTAINER_VALIDATION_PUBLISH_FILES], cwd=worktree_path
+    )
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=staging_failed"], "not_met"
+        )
+    code, _output = run_command(
+        ["git", "commit", "-m", "Publish container package validation workflow"],
+        cwd=worktree_path,
+    )
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=commit_failed"], "not_met"
+        )
+    code, output = run_command(["git", "rev-parse", "HEAD"], cwd=worktree_path)
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "step=read_post_commit_head status=failed"], "not_met"
+        )
+    pushed_head_lines = _git_status_path_lines(output)
+    pushed_head_sha = pushed_head_lines[0].lower() if pushed_head_lines else ""
+    if _HEAD_SHA_RE.fullmatch(pushed_head_sha) is None:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=post_commit_head_invalid"], "not_met"
+        )
+    status_lines.append(f"pushed_head_sha={pushed_head_sha}")
+
+    push_ref = f"refs/heads/{request.output_branch}:refs/heads/{request.output_branch}"
+    code, _output = run_command(["git", "push", "origin", push_ref], cwd=worktree_path)
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=push_failed"], "not_met"
+        )
+
+    try:
+        existing_prs = _container_validation_existing_prs(request, worktree_path)
+    except (RuntimeError, json.JSONDecodeError):
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "step=read_existing_pr status=failed"], "not_met"
+        )
+    if len(existing_prs) > 1:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=multiple_existing_prs"], "not_met"
+        )
+    if len(existing_prs) == 1:
+        pr_state = existing_prs[0]
+        pr_reason = _container_validation_pr_block_reason(
+            request, pr_state, pushed_head_sha
+        )
+        if pr_reason is not None:
+            return _maintenance_report(
+                "BLOCKED", task_id, [*status_lines, f"reason={pr_reason}"], "not_met"
+            )
+        pr_url = _existing_pr_publish_pr_url(pr_state)
+        assert pr_url is not None
+        status_lines.extend(
+            (
+                "step=read_existing_pr status=done",
+                f"post_push_pr_changed_files_count={len(CONTAINER_VALIDATION_PUBLISH_FILES)}",
+                f"pr_url={pr_url}",
+            )
+        )
+        return _maintenance_report("DONE", task_id, status_lines, "met")
+
+    pr_url, pr_reason = _container_validation_create_pr_url(request, worktree_path)
+    if pr_reason is not None:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, f"step=create_draft_pr status=failed reason={pr_reason}"], "not_met"
+        )
+    assert pr_url is not None
+    status_lines.extend(
+        (
+            "step=read_existing_pr status=done",
+            "step=create_draft_pr status=done",
+            f"post_push_pr_changed_files_count={len(CONTAINER_VALIDATION_PUBLISH_FILES)}",
+            f"pr_url={pr_url}",
+        )
+    )
+    return _maintenance_report("DONE", task_id, status_lines, "met")
 
 
 def _existing_pr_publish_pr_state(
@@ -9732,6 +10187,8 @@ def dispatch_runtime_maintenance_task(
             return publish_issue_worktree_to_existing_pr(body)
         if task_id == PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR:
             return publish_target_project_issue_worktree_pr(body)
+        if task_id == PUBLISH_CONTAINER_VALIDATION_WORKTREE:
+            return publish_container_validation_worktree(body)
         if task_id == QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES:
             return quarantine_stale_clean_skeleton_worktrees(body)
         if task_id == HOME_EDGE_01_READ_ONLY_DIAGNOSTIC:

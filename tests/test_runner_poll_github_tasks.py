@@ -2343,6 +2343,169 @@ def _publish_issue_worktree_to_existing_pr_body(
     return str(body["body"])
 
 
+def _publish_container_validation_worktree_body(
+    *,
+    repository: str = runner.REPO,
+    source_issue: int | str = 1667,
+    expected_source_branch: str = "runner/issue-1667",
+    base_branch: str = "main",
+    output_branch: str = "runner/issue-1667",
+    draft_pr: str = "true",
+    operator_approval: str = runner.PUBLISH_CONTAINER_VALIDATION_WORKTREE,
+    extra_metadata: tuple[str, ...] = (),
+    task_body: str = "",
+) -> str:
+    metadata = [
+        f"Repository: {repository}",
+        f"Source Issue: {source_issue}",
+        f"Expected Source Branch: {expected_source_branch}",
+        f"Base Branch: {base_branch}",
+        f"Output Branch: {output_branch}",
+        f"Draft PR: {draft_pr}",
+        f"Operator Approval: {operator_approval}",
+        *extra_metadata,
+    ]
+    body = _maintenance_issue(
+        runner.PUBLISH_CONTAINER_VALIDATION_WORKTREE,
+        task_body=task_body,
+        metadata="\n".join(metadata),
+    )
+    return str(body["body"])
+
+
+def _project_tree_with_skeleton_worktree_root(worktree_root: Path) -> dict[str, object]:
+    project_tree = json.loads(json.dumps(runner.load_runner_project_tree()))
+    project_tree["projects"]["skeleton"]["worktree_root"] = str(worktree_root)
+    return project_tree
+
+
+def _prepare_container_validation_worktree(root: Path) -> Path:
+    worktree_path = root / runner.CONTAINER_VALIDATION_WORKTREE_ID
+    worktree_path.mkdir(parents=True)
+    (worktree_path / ".git").write_text("gitdir: /tmp/git-dir\n", encoding="utf-8")
+    for relative_path in runner.CONTAINER_VALIDATION_PUBLISH_FILES:
+        path = worktree_path / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{relative_path}\n", encoding="utf-8")
+    return worktree_path
+
+
+def _container_validation_pr_state(
+    *,
+    state: str = "OPEN",
+    is_draft: bool = True,
+    base_ref: str = "main",
+    head_ref: str = "runner/issue-1667",
+    head_sha: str = "c" * 40,
+    head_repository: str = runner.REPO,
+    url: str = "https://github.com/alanua/Skeleton/pull/1667",
+) -> dict[str, object]:
+    owner, name = head_repository.split("/", 1)
+    return {
+        "number": 1667,
+        "state": state,
+        "isDraft": is_draft,
+        "baseRefName": base_ref,
+        "headRefName": head_ref,
+        "headRefOid": head_sha,
+        "headRepository": {
+            "nameWithOwner": head_repository,
+            "owner": {"login": owner},
+            "name": name,
+        },
+        "headRepositoryOwner": {"login": owner},
+        "url": url,
+    }
+
+
+def _container_validation_publish_commands(
+    *,
+    worktree_path: Path,
+    branch: str = "runner/issue-1667",
+    remote_url: str = "https://github.com/alanua/Skeleton.git",
+    changed_files: tuple[str, ...] = runner.CONTAINER_VALIDATION_PUBLISH_FILES,
+    untracked_files: tuple[str, ...] = (),
+    base_diff_code: int = 1,
+    diff_check_code: int = 0,
+    add_code: int = 0,
+    commit_code: int = 0,
+    post_commit_head: str = "c" * 40,
+    push_code: int = 0,
+    existing_prs: list[dict[str, object]] | None = None,
+    pr_list_code: int = 0,
+    pr_create_code: int = 0,
+    pr_create_url: str = PR_URL,
+) -> object:
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        assert Path(cwd or "") == worktree_path
+        if command == ["git", "branch", "--show-current"]:
+            return 0, f"{branch}\n"
+        if command == ["git", "remote", "get-url", "origin"]:
+            return 0, f"{remote_url}\n"
+        if command == ["git", "diff", "--name-only", "HEAD", "--"]:
+            return 0, "\n".join(changed_files) + ("\n" if changed_files else "")
+        if command == ["git", "ls-files", "--others", "--exclude-standard"]:
+            return 0, "\n".join(untracked_files) + ("\n" if untracked_files else "")
+        if command == [
+            "git",
+            "diff",
+            "--quiet",
+            "main...HEAD",
+            "--",
+            *runner.CONTAINER_VALIDATION_PUBLISH_FILES,
+        ]:
+            return base_diff_code, "branch diff output must not leak"
+        if command == [
+            "git",
+            "diff",
+            "--check",
+            "--",
+            *runner.CONTAINER_VALIDATION_PUBLISH_FILES,
+        ]:
+            return diff_check_code, "diff check output must not leak"
+        if command == ["git", "add", "--", *runner.CONTAINER_VALIDATION_PUBLISH_FILES]:
+            return add_code, "add failed output must not leak"
+        if command == [
+            "git",
+            "commit",
+            "-m",
+            "Publish container package validation workflow",
+        ]:
+            return commit_code, "commit failed output must not leak"
+        if command == ["git", "rev-parse", "HEAD"]:
+            return 0, f"{post_commit_head}\n"
+        if command == [
+            "git",
+            "push",
+            "origin",
+            "refs/heads/runner/issue-1667:refs/heads/runner/issue-1667",
+        ]:
+            return push_code, "push failed output must not leak"
+        if command[:7] == [
+            "gh",
+            "pr",
+            "list",
+            "--repo",
+            runner.REPO,
+            "--head",
+            "runner/issue-1667",
+        ]:
+            return pr_list_code, json.dumps(existing_prs or [])
+        if command[:7] == [
+            "gh",
+            "pr",
+            "create",
+            "--repo",
+            runner.REPO,
+            "--base",
+            "main",
+        ]:
+            return pr_create_code, f"{pr_create_url}\n"
+        return 2, f"unexpected command: {command!r}"
+
+    return run
+
+
 def _valid_publish_existing_override(
     *,
     target_repository: str = runner.REPO,
@@ -5662,6 +5825,366 @@ def test_publish_issue_worktree_to_existing_pr_rejects_unapproved_or_extra_metad
 
     assert report.startswith("NEEDS_OPERATOR:")
     assert "reason=unsupported_metadata_field" in report
+
+
+def test_publish_container_validation_worktree_publishes_fixed_static_packet(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_container_validation_worktree(tmp_path)
+    pushed_head = "c" * 40
+    with mock.patch.object(
+        runner,
+        "load_runner_project_tree",
+        return_value=_project_tree_with_skeleton_worktree_root(tmp_path),
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_container_validation_publish_commands(
+            worktree_path=worktree_path,
+            untracked_files=(".codex/session.json",),
+            post_commit_head=pushed_head,
+        ),
+    ) as run:
+        report = runner.publish_container_validation_worktree(
+            _publish_container_validation_worktree_body()
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert runner.PUBLISH_CONTAINER_VALIDATION_WORKTREE in runner.RUNTIME_MAINTENANCE_TASK_IDS
+    assert runner.PUBLISH_CONTAINER_VALIDATION_WORKTREE in runner.PUBLISH_ONLY_MAINTENANCE_TASK_IDS
+    assert report.startswith("DONE:")
+    assert "maintenance_task_id=publish_container_validation_worktree" in report
+    assert "repository=alanua/Skeleton" in report
+    assert "source_issue=1667" in report
+    assert "expected_source_branch=runner/issue-1667" in report
+    assert "expected_branch=runner/issue-1667" in report
+    assert f"pushed_head_sha={pushed_head}" in report
+    assert f"pr_url={PR_URL}" in report
+    assert "validated_publish_files_count=3" in report
+    assert ["git", "diff", "--check", "--", *runner.CONTAINER_VALIDATION_PUBLISH_FILES] in commands
+    assert ["git", "add", "--", *runner.CONTAINER_VALIDATION_PUBLISH_FILES] in commands
+    assert [
+        "git",
+        "push",
+        "origin",
+        "refs/heads/runner/issue-1667:refs/heads/runner/issue-1667",
+    ] in commands
+    assert [
+        "gh",
+        "pr",
+        "create",
+        "--repo",
+        runner.REPO,
+        "--base",
+        "main",
+        "--head",
+        "runner/issue-1667",
+        "--title",
+        "Publish container package validation workflow",
+        "--body",
+        "Automated Runner publish task for retained issue #1667.",
+        "--draft",
+    ] in commands
+    assert not any(".codex/session.json" in command for command in commands)
+    assert all("--force" not in command for command in commands)
+    assert all(command[:3] != ["gh", "pr", "merge"] for command in commands)
+    assert all(command[:3] != ["gh", "workflow", "run"] for command in commands)
+
+
+@pytest.mark.parametrize(
+    ("body_kwargs", "reason"),
+    (
+        ({"repository": "alanua/Other"}, "unsupported_repository"),
+        ({"source_issue": 1668}, "unsupported_source_issue"),
+        (
+            {"expected_source_branch": "runner/issue-999"},
+            "unsupported_expected_source_branch",
+        ),
+        ({"base_branch": "develop"}, "unsupported_base_branch"),
+        ({"output_branch": "runner/issue-999"}, "unsupported_output_branch"),
+        ({"draft_pr": "false"}, "draft_pr_required"),
+        ({"operator_approval": "approved"}, "missing_operator_approval"),
+        (
+            {"extra_metadata": ("Allowed Files:", "- README.md")},
+            "unsupported_metadata_field",
+        ),
+        (
+            {"extra_metadata": ("PR Title: arbitrary",)},
+            "unsupported_metadata_field",
+        ),
+        (
+            {"extra_metadata": ("Worktree Path: /tmp/issue-1667",)},
+            "unsupported_metadata_field",
+        ),
+        (
+            {"extra_metadata": ("Remote: git@github.com:evil/repo.git",)},
+            "unsupported_metadata_field",
+        ),
+        (
+            {"extra_metadata": ("Refspec: HEAD:refs/heads/main",)},
+            "unsupported_metadata_field",
+        ),
+    ),
+)
+def test_publish_container_validation_worktree_metadata_fails_before_staging(
+    tmp_path: Path, body_kwargs: dict[str, object], reason: str
+) -> None:
+    _prepare_container_validation_worktree(tmp_path)
+    with mock.patch.object(
+        runner,
+        "load_runner_project_tree",
+        return_value=_project_tree_with_skeleton_worktree_root(tmp_path),
+    ), mock.patch.object(runner, "run_command") as run:
+        report = runner.publish_container_validation_worktree(
+            _publish_container_validation_worktree_body(**body_kwargs)
+        )
+
+    assert report.startswith("NEEDS_OPERATOR:")
+    assert f"reason={reason}" in report
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("bad_line", "reason"),
+    (
+        ("Mode: CODEX_TASK", "invalid_mode"),
+        ("Maintenance Task ID: publish_existing_issue_worktree", "unsupported_maintenance_task_id"),
+    ),
+)
+def test_publish_container_validation_worktree_requires_exact_route_identity(
+    tmp_path: Path, bad_line: str, reason: str
+) -> None:
+    _prepare_container_validation_worktree(tmp_path)
+    body = _publish_container_validation_worktree_body()
+    if bad_line.startswith("Mode:"):
+        body = body.replace("Mode: RUNTIME_MAINTENANCE_TASK", bad_line)
+    else:
+        body = body.replace(
+            "Maintenance Task ID: publish_container_validation_worktree", bad_line
+        )
+    with mock.patch.object(
+        runner,
+        "load_runner_project_tree",
+        return_value=_project_tree_with_skeleton_worktree_root(tmp_path),
+    ), mock.patch.object(runner, "run_command") as run:
+        report = runner.publish_container_validation_worktree(body)
+
+    assert report.startswith("NEEDS_OPERATOR:")
+    assert f"reason={reason}" in report
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("command_kwargs", "reason"),
+    (
+        (
+            {
+                "changed_files": (
+                    ".github/workflows/container-package-validation.yml",
+                    ".github/workflows/other.yml",
+                )
+            },
+            "changed_files_outside_static_set",
+        ),
+        (
+            {
+                "changed_files": (
+                    ".github/workflows/container-package-validation.yml",
+                    ".github/CODEOWNERS",
+                )
+            },
+            "changed_files_outside_static_set",
+        ),
+        (
+            {
+                "changed_files": (
+                    ".github/workflows/container-package-validation.yml",
+                    "README.md",
+                )
+            },
+            "changed_files_outside_static_set",
+        ),
+        (
+            {
+                "untracked_files": (
+                    ".codex/session.json",
+                    "docs/unexpected.md",
+                )
+            },
+            "unexpected_untracked_files",
+        ),
+        ({"changed_files": ("../unsafe",)}, "changed_tracked_file_path_unsafe"),
+        ({"base_diff_code": 0, "changed_files": ()}, "no_publishable_changes"),
+        ({"diff_check_code": 1}, "diff_check_failed"),
+        ({"push_code": 1}, "push_failed"),
+    ),
+)
+def test_publish_container_validation_worktree_source_checks_fail_closed(
+    tmp_path: Path, command_kwargs: dict[str, object], reason: str
+) -> None:
+    worktree_path = _prepare_container_validation_worktree(tmp_path)
+    with mock.patch.object(
+        runner,
+        "load_runner_project_tree",
+        return_value=_project_tree_with_skeleton_worktree_root(tmp_path),
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_container_validation_publish_commands(
+            worktree_path=worktree_path,
+            **command_kwargs,
+        ),
+    ) as run:
+        report = runner.publish_container_validation_worktree(
+            _publish_container_validation_worktree_body(
+                task_body=(
+                    "git push origin main\n"
+                    "gh workflow run container-package-validation.yml\n"
+                    "gh pr merge 1\n"
+                    "apt install docker\n"
+                    "systemctl restart anything"
+                )
+            )
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("BLOCKED:")
+    assert f"reason={reason}" in report
+    if reason not in {"push_failed"}:
+        assert all(command[:2] != ["git", "push"] for command in commands)
+    if reason in {
+        "changed_files_outside_static_set",
+        "unexpected_untracked_files",
+        "changed_tracked_file_path_unsafe",
+        "no_publishable_changes",
+        "diff_check_failed",
+    }:
+        assert all(command[:2] != ["git", "add"] for command in commands)
+    assert all(command[:3] != ["gh", "pr", "merge"] for command in commands)
+    assert all(command[:3] != ["gh", "workflow", "run"] for command in commands)
+    assert all(command[0] not in {"apt", "systemctl", "sudo"} for command in commands)
+
+
+def test_publish_container_validation_worktree_missing_static_file_fails(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_container_validation_worktree(tmp_path)
+    (worktree_path / "docs/CONTAINER_PACKAGE_VALIDATION.md").unlink()
+    with mock.patch.object(
+        runner,
+        "load_runner_project_tree",
+        return_value=_project_tree_with_skeleton_worktree_root(tmp_path),
+    ), mock.patch.object(runner, "run_command") as run:
+        report = runner.publish_container_validation_worktree(
+            _publish_container_validation_worktree_body()
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=static_file_missing" in report
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("existing_prs", "reason"),
+    (
+        (
+            [_container_validation_pr_state(is_draft=False, head_sha="c" * 40)],
+            "existing_pr_not_draft",
+        ),
+        (
+            [_container_validation_pr_state(base_ref="develop", head_sha="c" * 40)],
+            "existing_pr_base_mismatch",
+        ),
+        (
+            [_container_validation_pr_state(head_repository="alanua/Other", head_sha="c" * 40)],
+            "existing_pr_head_repository_mismatch",
+        ),
+        (
+            [_container_validation_pr_state(head_ref="runner/issue-999", head_sha="c" * 40)],
+            "existing_pr_head_branch_mismatch",
+        ),
+        (
+            [_container_validation_pr_state(head_sha="d" * 40)],
+            "existing_pr_head_sha_mismatch",
+        ),
+        (
+            [
+                _container_validation_pr_state(head_sha="c" * 40),
+                _container_validation_pr_state(head_sha="c" * 40, url="https://github.com/alanua/Skeleton/pull/1668"),
+            ],
+            "multiple_existing_prs",
+        ),
+    ),
+)
+def test_publish_container_validation_worktree_rejects_bad_existing_pr(
+    tmp_path: Path, existing_prs: list[dict[str, object]], reason: str
+) -> None:
+    worktree_path = _prepare_container_validation_worktree(tmp_path)
+    with mock.patch.object(
+        runner,
+        "load_runner_project_tree",
+        return_value=_project_tree_with_skeleton_worktree_root(tmp_path),
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_container_validation_publish_commands(
+            worktree_path=worktree_path,
+            existing_prs=existing_prs,
+        ),
+    ) as run:
+        report = runner.publish_container_validation_worktree(
+            _publish_container_validation_worktree_body()
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("BLOCKED:")
+    assert f"reason={reason}" in report
+    assert all(command[:3] != ["gh", "pr", "create"] for command in commands)
+
+
+def test_publish_container_validation_worktree_reuses_matching_existing_draft_pr(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_container_validation_worktree(tmp_path)
+    pushed_head = "c" * 40
+    pr_url = "https://github.com/alanua/Skeleton/pull/1667"
+    with mock.patch.object(
+        runner,
+        "load_runner_project_tree",
+        return_value=_project_tree_with_skeleton_worktree_root(tmp_path),
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_container_validation_publish_commands(
+            worktree_path=worktree_path,
+            existing_prs=[
+                _container_validation_pr_state(
+                    head_sha=pushed_head,
+                    url=pr_url,
+                )
+            ],
+            post_commit_head=pushed_head,
+        ),
+    ) as run:
+        report = runner.publish_container_validation_worktree(
+            _publish_container_validation_worktree_body()
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert f"pr_url={pr_url}" in report
+    assert all(command[:3] != ["gh", "pr", "create"] for command in commands)
+
+
+def test_publish_existing_issue_worktree_still_rejects_workflow_allowed_file() -> None:
+    report = runner.publish_existing_issue_worktree(
+        _publish_existing_issue_worktree_body(
+            allowed_files=(".github/workflows/container-package-validation.yml",)
+        )
+    )
+
+    assert report.startswith("NEEDS_OPERATOR:")
+    assert "reason=invalid_allowed_files" in report
 
 
 def test_publish_existing_issue_worktree_requires_draft_pr_true() -> None:
