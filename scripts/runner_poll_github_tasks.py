@@ -16,8 +16,10 @@ import stat
 import subprocess
 import sys
 import sysconfig
+import socket
 import tempfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
@@ -317,6 +319,18 @@ TELEGRAM_CALLBACK_POLLER_RUNTIME_FILES = (
 )
 
 _HEAD_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+_REGISTERED_OVERLAY_PUBLIC_REST_REPO = "alanua/Skeleton"
+_REGISTERED_OVERLAY_PUBLIC_REST_HOST = "api.github.com"
+_REGISTERED_OVERLAY_PUBLIC_REST_TIMEOUT_SECONDS = 8
+_REGISTERED_OVERLAY_PUBLIC_REST_PR_BYTES = 262_144
+_REGISTERED_OVERLAY_PUBLIC_REST_FILES_BYTES = 262_144
+_REGISTERED_OVERLAY_PUBLIC_REST_FILE_PAGE_CAP = 10
+_REGISTERED_OVERLAY_PUBLIC_REST_FILE_COUNT_CAP = 1_000
+_REGISTERED_OVERLAY_PUBLIC_REST_HEADERS = {
+    "Accept": "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    "User-Agent": "skeleton-runner-registered-overlay",
+}
 _CALLBACK_DIGEST_RE = re.compile(r"^[0-9a-f]{12}$")
 _BLOCKED_OUTPUT_MARKERS = (
     "BLOCKED",
@@ -520,7 +534,9 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "pilot_summary_schema",
         "ports_disabled",
         "ports_enabled",
+        "post_push_pr_metadata_source",
         "pr_number",
+        "pr_metadata_source",
         "pr_state",
         "pr_title",
         "pr_url",
@@ -9269,6 +9285,250 @@ def _registered_worktree_overlay_pr_state(
     return parsed
 
 
+def _registered_worktree_overlay_pr_state_shape_valid(
+    pr_state: dict[str, Any], *, strict_values: bool = False
+) -> bool:
+    if not isinstance(pr_state.get("number"), int):
+        return False
+    if str(pr_state.get("state") or "").upper() not in {"OPEN", "CLOSED", "MERGED"}:
+        return False
+    if not isinstance(pr_state.get("isDraft"), bool):
+        return False
+    for field in ("baseRefName", "baseRefOid", "headRefName", "headRefOid", "url"):
+        if not isinstance(pr_state.get(field), str):
+            return False
+    if strict_values:
+        if _HEAD_SHA_RE.fullmatch(pr_state["baseRefOid"]) is None:
+            return False
+        if _HEAD_SHA_RE.fullmatch(pr_state["headRefOid"]) is None:
+            return False
+    if _head_repository_name_with_owner(pr_state) is None:
+        return False
+    if strict_values and _existing_pr_publish_pr_url(pr_state) is None:
+        return False
+    files = pr_state.get("files")
+    if not isinstance(files, list):
+        return False
+    for file_info in files:
+        if not isinstance(file_info, dict):
+            return False
+        path = file_info.get("path")
+        if not isinstance(path, str):
+            path = file_info.get("filename")
+        if not isinstance(path, str):
+            return False
+        if strict_values and not _safe_issue_publish_file_path(path):
+            return False
+    return True
+
+
+class _RegisteredOverlayNoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> None:
+        return None
+
+
+def _registered_worktree_overlay_rest_allowed(packet: RegisteredWorktreeOverlayPacket) -> bool:
+    if packet.packet_id not in REGISTERED_WORKTREE_OVERLAY_PACKETS:
+        return False
+    if REGISTERED_WORKTREE_OVERLAY_PACKETS[packet.packet_id] != packet:
+        return False
+    if REPO != _REGISTERED_OVERLAY_PUBLIC_REST_REPO:
+        return False
+    project_tree = load_runner_project_tree()
+    projects = project_tree.get("projects") if isinstance(project_tree, dict) else None
+    project = projects.get("skeleton") if isinstance(projects, dict) else None
+    return isinstance(project, dict) and project.get("repo") == REPO and project.get("public") is True
+
+
+def _registered_worktree_overlay_rest_path(pr_number: int, *, page: int | None = None) -> str:
+    path = f"/repos/{_REGISTERED_OVERLAY_PUBLIC_REST_REPO}/pulls/{pr_number}"
+    if page is not None:
+        path = f"{path}/files?per_page=100&page={page}"
+    return path
+
+
+def _registered_worktree_overlay_rest_url_allowed(url: str, pr_number: int) -> bool:
+    parsed = urllib.parse.urlparse(url)
+    path_prefix = _registered_worktree_overlay_rest_path(pr_number)
+    files_prefix = f"{path_prefix}/files"
+    if parsed.scheme != "https" or parsed.hostname != _REGISTERED_OVERLAY_PUBLIC_REST_HOST:
+        return False
+    if parsed.path == path_prefix and parsed.query == "":
+        return True
+    if parsed.path != files_prefix:
+        return False
+    query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+    return set(query) == {"per_page", "page"} and query["per_page"] == ["100"] and len(query["page"]) == 1 and re.fullmatch(r"[1-9]\d*", query["page"][0]) is not None
+
+
+def _registered_worktree_overlay_fetch_public_rest_json(
+    path: str, pr_number: int, byte_cap: int
+) -> tuple[object, Mapping[str, str]]:
+    url = f"https://{_REGISTERED_OVERLAY_PUBLIC_REST_HOST}{path}"
+    if not _registered_worktree_overlay_rest_url_allowed(url, pr_number):
+        raise RuntimeError("registered overlay REST path outside boundary")
+    request = urllib.request.Request(url, headers=_REGISTERED_OVERLAY_PUBLIC_REST_HEADERS)
+    opener = urllib.request.build_opener(_RegisteredOverlayNoRedirectHandler)
+    try:
+        with opener.open(
+            request, timeout=_REGISTERED_OVERLAY_PUBLIC_REST_TIMEOUT_SECONDS
+        ) as response:
+            final_url = response.geturl()
+            if not _registered_worktree_overlay_rest_url_allowed(final_url, pr_number):
+                raise RuntimeError("registered overlay REST final URL outside boundary")
+            status = getattr(response, "status", response.getcode())
+            if not isinstance(status, int) or status < 200 or status >= 300:
+                raise RuntimeError("registered overlay REST non-2xx response")
+            data = response.read(byte_cap + 1)
+            if len(data) > byte_cap:
+                raise RuntimeError("registered overlay REST response too large")
+            try:
+                parsed = json.loads(data.decode("utf-8") or "null")
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise RuntimeError("registered overlay REST malformed JSON") from exc
+            return parsed, response.headers
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, socket.timeout) as exc:
+        raise RuntimeError("registered overlay REST request failed") from exc
+
+
+def _registered_worktree_overlay_rest_repository_name(repository: object) -> str | None:
+    if not isinstance(repository, dict):
+        return None
+    full_name = repository.get("full_name")
+    if isinstance(full_name, str) and full_name:
+        return full_name
+    owner = repository.get("owner")
+    name = repository.get("name")
+    login = owner.get("login") if isinstance(owner, dict) else None
+    if isinstance(login, str) and isinstance(name, str) and login and name:
+        return f"{login}/{name}"
+    return None
+
+
+def _registered_worktree_overlay_files_from_rest(pr_number: int) -> list[dict[str, str]]:
+    files: list[dict[str, str]] = []
+    seen_paths: set[str] = set()
+    for page in range(1, _REGISTERED_OVERLAY_PUBLIC_REST_FILE_PAGE_CAP + 1):
+        payload, headers = _registered_worktree_overlay_fetch_public_rest_json(
+            _registered_worktree_overlay_rest_path(pr_number, page=page),
+            pr_number,
+            _REGISTERED_OVERLAY_PUBLIC_REST_FILES_BYTES,
+        )
+        if not isinstance(payload, list):
+            raise RuntimeError("registered overlay REST files response malformed")
+        for item in payload:
+            if not isinstance(item, dict):
+                raise RuntimeError("registered overlay REST file item malformed")
+            filename = item.get("filename")
+            if not isinstance(filename, str) or not _safe_issue_publish_file_path(filename):
+                raise RuntimeError("registered overlay REST file path malformed")
+            if filename in seen_paths:
+                raise RuntimeError("registered overlay REST duplicate file path")
+            seen_paths.add(filename)
+            files.append({"path": filename})
+            if len(files) > _REGISTERED_OVERLAY_PUBLIC_REST_FILE_COUNT_CAP:
+                raise RuntimeError("registered overlay REST file count exceeded")
+        link = headers.get("Link", "")
+        if len(payload) < 100:
+            if 'rel="next"' in link:
+                raise RuntimeError("registered overlay REST inconsistent pagination")
+            return files
+        if 'rel="next"' not in link:
+            raise RuntimeError("registered overlay REST missing pagination data")
+    raise RuntimeError("registered overlay REST pagination exceeded")
+
+
+def _registered_worktree_overlay_public_rest_pr_state(
+    request: IssueWorktreeExistingPrPublishRequest,
+    packet: RegisteredWorktreeOverlayPacket,
+) -> dict[str, Any]:
+    if not _registered_worktree_overlay_rest_allowed(packet):
+        raise RuntimeError("registered overlay REST fallback not allowed")
+    if request.repository != _REGISTERED_OVERLAY_PUBLIC_REST_REPO:
+        raise RuntimeError("registered overlay REST repository mismatch")
+    if request.pr_number != packet.pr_number:
+        raise RuntimeError("registered overlay REST PR number mismatch")
+    pr_payload, _headers = _registered_worktree_overlay_fetch_public_rest_json(
+        _registered_worktree_overlay_rest_path(request.pr_number),
+        request.pr_number,
+        _REGISTERED_OVERLAY_PUBLIC_REST_PR_BYTES,
+    )
+    if not isinstance(pr_payload, dict):
+        raise RuntimeError("registered overlay REST PR response malformed")
+    base = pr_payload.get("base")
+    head = pr_payload.get("head")
+    if not isinstance(base, dict) or not isinstance(head, dict):
+        raise RuntimeError("registered overlay REST PR response missing refs")
+    head_repo = head.get("repo")
+    head_repo_name = _registered_worktree_overlay_rest_repository_name(head_repo)
+    base_sha = base.get("sha")
+    head_sha = head.get("sha")
+    base_ref = base.get("ref")
+    head_ref = head.get("ref")
+    html_url = pr_payload.get("html_url")
+    state = pr_payload.get("state")
+    number = pr_payload.get("number")
+    draft = pr_payload.get("draft")
+    if number != request.pr_number:
+        raise RuntimeError("registered overlay REST PR number mismatch")
+    if state not in {"open", "closed"}:
+        raise RuntimeError("registered overlay REST PR state malformed")
+    if not isinstance(draft, bool):
+        raise RuntimeError("registered overlay REST PR draft malformed")
+    if not isinstance(base_ref, str) or not isinstance(head_ref, str):
+        raise RuntimeError("registered overlay REST PR branch malformed")
+    if not isinstance(base_sha, str) or _HEAD_SHA_RE.fullmatch(base_sha) is None:
+        raise RuntimeError("registered overlay REST base SHA malformed")
+    if not isinstance(head_sha, str) or _HEAD_SHA_RE.fullmatch(head_sha) is None:
+        raise RuntimeError("registered overlay REST head SHA malformed")
+    if head_repo_name != request.repository:
+        raise RuntimeError("registered overlay REST head repository mismatch")
+    if not isinstance(html_url, str) or _PUBLIC_GITHUB_PR_URL_RE.fullmatch(html_url) is None:
+        raise RuntimeError("registered overlay REST PR URL malformed")
+    files = _registered_worktree_overlay_files_from_rest(request.pr_number)
+    owner, name = request.repository.split("/", 1)
+    pr_state = {
+        "number": number,
+        "state": state.upper(),
+        "isDraft": draft,
+        "baseRefName": base_ref,
+        "baseRefOid": base_sha.lower(),
+        "headRefName": head_ref,
+        "headRefOid": head_sha.lower(),
+        "headRepository": {
+            "nameWithOwner": request.repository,
+            "owner": {"login": owner},
+            "name": name,
+        },
+        "headRepositoryOwner": {"login": owner},
+        "url": html_url,
+        "files": files,
+    }
+    if not _registered_worktree_overlay_pr_state_shape_valid(pr_state, strict_values=True):
+        raise RuntimeError("registered overlay REST normalized shape invalid")
+    return pr_state
+
+
+def _registered_worktree_overlay_pr_state_with_fallback(
+    request: IssueWorktreeExistingPrPublishRequest,
+    packet: RegisteredWorktreeOverlayPacket,
+    worktree_path: Path,
+) -> tuple[dict[str, Any], str]:
+    try:
+        pr_state = _registered_worktree_overlay_pr_state(request, worktree_path)
+    except (RuntimeError, json.JSONDecodeError):
+        return (
+            _registered_worktree_overlay_public_rest_pr_state(request, packet),
+            "public_rest",
+        )
+    if _registered_worktree_overlay_pr_state_shape_valid(pr_state):
+        return pr_state, "gh"
+    return (
+        _registered_worktree_overlay_public_rest_pr_state(request, packet),
+        "public_rest",
+    )
+
+
 def _registered_worktree_overlay_base_ref_oid(pr_state: dict[str, Any]) -> str | None:
     base_ref_oid = str(pr_state.get("baseRefOid") or "").lower()
     if _HEAD_SHA_RE.fullmatch(base_ref_oid) is None:
@@ -9579,7 +9839,9 @@ def overlay_registered_worktree_to_existing_pr(body: str) -> str:
         allowed_files=allowed_files,
     )
     try:
-        pr_state = _registered_worktree_overlay_pr_state(existing_request, source_path)
+        pr_state, pr_metadata_source = _registered_worktree_overlay_pr_state_with_fallback(
+            existing_request, packet, source_path
+        )
     except (RuntimeError, json.JSONDecodeError):
         return _maintenance_report(
             "BLOCKED", task_id, [*status_lines, "step=read_pr_metadata status=failed"], "not_met"
@@ -9596,6 +9858,7 @@ def overlay_registered_worktree_to_existing_pr(body: str) -> str:
     status_lines.extend(
         (
             "step=read_pr_metadata status=done",
+            f"pr_metadata_source={pr_metadata_source}",
             f"pre_push_pr_file_count={len(pre_push_pr_files)}",
             f"base_ref_oid={base_ref_oid}",
             f"pr_url={pr_url}",
@@ -9748,7 +10011,11 @@ def overlay_registered_worktree_to_existing_pr(body: str) -> str:
         return _maintenance_report("BLOCKED", task_id, [*status_lines, "reason=push_failed"], "not_met")
 
     try:
-        post_push_pr_state = _registered_worktree_overlay_pr_state(existing_request, source_path)
+        post_push_pr_state, post_push_pr_metadata_source = (
+            _registered_worktree_overlay_pr_state_with_fallback(
+                existing_request, packet, source_path
+            )
+        )
     except (RuntimeError, json.JSONDecodeError):
         return _maintenance_report(
             "BLOCKED", task_id, [*status_lines, "step=post_push_read_pr_metadata status=failed"], "not_met"
@@ -9766,6 +10033,7 @@ def overlay_registered_worktree_to_existing_pr(body: str) -> str:
         (
             "step=push_expected_pr_branch status=done",
             "step=post_push_read_pr_metadata status=done",
+            f"post_push_pr_metadata_source={post_push_pr_metadata_source}",
             f"pushed_head_sha={new_commit_sha}",
             f"post_push_pr_changed_files_count={len(post_push_pr_files)}",
             f"new_pr_changed_files_count={len(newly_introduced_files)}",
