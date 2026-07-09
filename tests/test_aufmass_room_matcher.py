@@ -65,6 +65,114 @@ def test_missing_labels_need_review() -> None:
     assert match.area_label_id is None
 
 
+def test_contour_without_assigned_labels_does_not_borrow_from_sibling_contour() -> None:
+    fixture = _dict_fixture()
+    fixture["texts"] = [{"layer": "ROOM_NAMES", "text": "Office 101", "insert": {"x": 1, "y": 1, "z": 0}}]
+    fixture["mtexts"] = [{"layer": "AREAS", "text": "NGF: 12.00 m2", "insert": {"x": 3, "y": 1, "z": 0}}]
+
+    first_match, second_match = match_dxf_rooms(fixture).matches
+
+    assert first_match.status == "candidate"
+    assert first_match.room_label_text == "Office 101"
+    assert first_match.area_label_text == "NGF: 12.00 m2"
+    assert second_match.status == "needs_review"
+    assert second_match.room_label_id is None
+    assert second_match.area_label_id is None
+    assert second_match.room_label_text is None
+    assert second_match.area_label_text is None
+
+
+def test_outside_label_links_only_to_unique_nearest_contour_within_bounded_tolerance() -> None:
+    fixture = _dict_fixture()
+    fixture["texts"] = [
+        {"layer": "ROOM_NAMES", "text": "Near Office", "insert": {"x": 4.25, "y": 1, "z": 0}},
+        {"layer": "ROOM_NAMES", "text": "Too Far", "insert": {"x": 7, "y": 1, "z": 0}},
+    ]
+    fixture["mtexts"] = []
+
+    first_match, second_match = match_dxf_rooms(fixture).matches
+
+    assert first_match.room_label_text == "Near Office"
+    assert first_match.status == "candidate"
+    assert "No parseable area label" in " ".join(first_match.review_notes)
+    assert second_match.room_label_id is None
+    assert second_match.status == "needs_review"
+    assert "Too Far" not in (second_match.room_label_text or "")
+
+
+def test_outside_label_tied_between_contours_is_left_unassigned_with_review_context() -> None:
+    fixture = _dict_fixture()
+    fixture["polylines"][2]["points"] = [  # type: ignore[index]
+        {"x": 5, "y": 0, "z": 0},
+        {"x": 7, "y": 0, "z": 0},
+        {"x": 7, "y": 2, "z": 0},
+        {"x": 5, "y": 2, "z": 0},
+    ]
+    fixture["texts"] = [{"layer": "ROOM_NAMES", "text": "Shared", "insert": {"x": 4.5, "y": 1, "z": 0}}]
+    fixture["mtexts"] = []
+
+    first_match, second_match = match_dxf_rooms(fixture).matches
+
+    assert first_match.room_label_id is None
+    assert second_match.room_label_id is None
+    assert first_match.status == "needs_review"
+    assert second_match.status == "needs_review"
+    assert "equally near multiple contours" in " ".join(first_match.review_notes)
+    assert first_match.review_notes == second_match.review_notes
+
+
+def test_label_inside_overlapping_contours_is_ambiguous_and_unassigned() -> None:
+    fixture = _dict_fixture()
+    fixture["polylines"][2]["points"] = [  # type: ignore[index]
+        {"x": 2, "y": 1, "z": 0},
+        {"x": 5, "y": 1, "z": 0},
+        {"x": 5, "y": 4, "z": 0},
+        {"x": 2, "y": 4, "z": 0},
+    ]
+    fixture["texts"] = [{"layer": "ROOM_NAMES", "text": "Overlap", "insert": {"x": 3, "y": 2, "z": 0}}]
+    fixture["mtexts"] = []
+
+    first_match, second_match = match_dxf_rooms(fixture).matches
+
+    assert first_match.room_label_id is None
+    assert second_match.room_label_id is None
+    assert "overlaps multiple contours" in " ".join(first_match.review_notes)
+    assert first_match.review_notes == second_match.review_notes
+
+
+def test_duplicate_exact_label_text_is_distinct_from_parsed_room_identifier_duplication() -> None:
+    fixture = _dict_fixture()
+    fixture["texts"] = [
+        {"layer": "ROOM_NAMES", "text": "Office 101", "insert": {"x": 1, "y": 1, "z": 0}},
+        {"layer": "ROOM_NAMES", "text": "office   101", "insert": {"x": 11, "y": 1, "z": 0}},
+    ]
+    fixture["mtexts"] = [
+        {"layer": "AREAS", "text": "NGF: 12.00 m2", "insert": {"x": 3, "y": 1, "z": 0}},
+        {"layer": "AREAS", "text": "NGF 4.00 m2", "insert": {"x": 11.5, "y": 1, "z": 0}},
+    ]
+
+    first_match, second_match = match_dxf_rooms(fixture).matches
+
+    assert first_match.status == "needs_review"
+    assert second_match.status == "needs_review"
+    assert "Duplicate exact label text" in " ".join(first_match.review_notes)
+    assert "Duplicate parsed room identifier" not in " ".join(first_match.review_notes)
+
+
+def test_duplicate_parsed_room_identifier_requires_explicit_room_identifier_syntax() -> None:
+    fixture = _dict_fixture()
+    fixture["texts"] = [
+        {"layer": "ROOM_NAMES", "text": "Room 101", "insert": {"x": 1, "y": 1, "z": 0}},
+        {"layer": "ROOM_NAMES", "text": "Rm 101", "insert": {"x": 11, "y": 1, "z": 0}},
+    ]
+
+    first_match, second_match = match_dxf_rooms(fixture).matches
+
+    assert first_match.status == "needs_review"
+    assert second_match.status == "needs_review"
+    assert "Duplicate parsed room identifier '101'" in " ".join(first_match.review_notes)
+
+
 def test_accepts_dxf_adapter_dataclasses_without_requiring_ezdxf() -> None:
     result = match_dxf_rooms(
         DxfExtractResult(

@@ -8,6 +8,8 @@ from typing import Any, Optional
 
 AREA_MISMATCH_ABSOLUTE_TOLERANCE = 0.05
 AREA_MISMATCH_RELATIVE_TOLERANCE = 0.02
+LABEL_ASSOCIATION_OUTSIDE_TOLERANCE = 0.5
+LABEL_ASSOCIATION_DISTANCE_EPSILON = 1e-9
 
 
 @dataclass(frozen=True)
@@ -69,13 +71,20 @@ class RoomMatchResult:
     summary: dict[str, object]
 
 
+@dataclass(frozen=True)
+class _LabelAssociation:
+    labels_by_contour_id: dict[str, list[RoomLabelCandidate]]
+    review_notes_by_contour_id: dict[str, list[str]]
+
+
 def match_dxf_rooms(dxf_result: Any) -> RoomMatchResult:
     """Match closed DXF polylines to nearby text labels from extracted data."""
     units = _optional_string(_get(dxf_result, "units"))
     insunits = _optional_int(_get(dxf_result, "insunits"))
     labels = _label_candidates(dxf_result)
     contours = _contour_candidates(dxf_result)
-    matches = [_match_contour(contour, labels) for contour in contours]
+    association = _associate_labels_to_contours(contours, labels)
+    matches = [_match_contour(contour, labels, association) for contour in contours]
     status_counts: dict[str, int] = {}
     for match in matches:
         status_counts[match.status] = status_counts.get(match.status, 0) + 1
@@ -167,13 +176,78 @@ def _label_candidates(dxf_result: Any) -> list[RoomLabelCandidate]:
     return labels
 
 
-def _match_contour(contour: RoomContourCandidate, labels: list[RoomLabelCandidate]) -> RoomMatchCandidate:
+def _associate_labels_to_contours(
+    contours: list[RoomContourCandidate], labels: list[RoomLabelCandidate]
+) -> _LabelAssociation:
+    labels_by_contour_id = {contour.contour_id: [] for contour in contours}
+    review_notes_by_contour_id = {contour.contour_id: [] for contour in contours}
+
+    for label in labels:
+        containing = [
+            contour
+            for contour in contours
+            if _point_in_polygon(label.insert, contour.points)
+        ]
+        if len(containing) == 1:
+            labels_by_contour_id[containing[0].contour_id].append(label)
+            continue
+        if len(containing) > 1:
+            contour_ids = [contour.contour_id for contour in containing]
+            _append_label_context(
+                review_notes_by_contour_id,
+                contour_ids,
+                f"Label {label.label_id} overlaps multiple contours and was left unassigned: {', '.join(contour_ids)}.",
+            )
+            continue
+
+        distances = sorted(
+            ((contour, _distance_to_polygon(label.insert, contour.points)) for contour in contours),
+            key=lambda item: (item[1], item[0].contour_id),
+        )
+        if not distances:
+            continue
+        nearest_distance = distances[0][1]
+        nearest = [
+            contour
+            for contour, distance in distances
+            if abs(distance - nearest_distance) <= LABEL_ASSOCIATION_DISTANCE_EPSILON
+        ]
+        if nearest_distance > LABEL_ASSOCIATION_OUTSIDE_TOLERANCE:
+            continue
+        if len(nearest) == 1:
+            labels_by_contour_id[nearest[0].contour_id].append(label)
+            continue
+        contour_ids = [contour.contour_id for contour in nearest]
+        _append_label_context(
+            review_notes_by_contour_id,
+            contour_ids,
+            (
+                f"Label {label.label_id} is equally near multiple contours within "
+                f"{LABEL_ASSOCIATION_OUTSIDE_TOLERANCE:g} units and was left unassigned: {', '.join(contour_ids)}."
+            ),
+        )
+
+    _add_duplicate_label_review_notes(labels_by_contour_id, review_notes_by_contour_id)
+    return _LabelAssociation(
+        labels_by_contour_id=labels_by_contour_id,
+        review_notes_by_contour_id=review_notes_by_contour_id,
+    )
+
+
+def _match_contour(
+    contour: RoomContourCandidate, labels: list[RoomLabelCandidate], association: _LabelAssociation
+) -> RoomMatchCandidate:
+    assigned_labels = association.labels_by_contour_id.get(contour.contour_id, [])
     ranked = sorted(
         ((label, _distance_to_polygon(label.insert, contour.points)) for label in labels),
         key=lambda item: (item[1], item[0].label_id),
     )
-    area_ranked = [item for item in ranked if item[0].parsed_area is not None]
-    room_ranked = [item for item in ranked if item[0].parsed_area is None]
+    assigned_ranked = sorted(
+        ((label, _distance_to_polygon(label.insert, contour.points)) for label in assigned_labels),
+        key=lambda item: (item[1], item[0].label_id),
+    )
+    area_ranked = [item for item in assigned_ranked if item[0].parsed_area is not None]
+    room_ranked = [item for item in assigned_ranked if item[0].parsed_area is None]
 
     area_label = area_ranked[0][0] if area_ranked else None
     room_label = room_ranked[0][0] if room_ranked else None
@@ -184,12 +258,15 @@ def _match_contour(contour: RoomContourCandidate, labels: list[RoomLabelCandidat
     area_delta = None if parsed_area is None else contour.area - parsed_area
     status = "candidate"
     confidence = 0.75
-    review_notes: list[str] = []
+    review_notes: list[str] = list(association.review_notes_by_contour_id.get(contour.contour_id, []))
 
     if room_label is None:
         status = "needs_review"
         confidence = 0.45
         review_notes.append("No non-area room label was linked to this closed polyline.")
+    elif review_notes:
+        status = "needs_review"
+        confidence = 0.45
     if parsed_area is None:
         if status == "candidate":
             confidence = 0.65
@@ -219,6 +296,59 @@ def _match_contour(contour: RoomContourCandidate, labels: list[RoomLabelCandidat
 def _area_mismatch(calculated: float, parsed: float) -> bool:
     tolerance = max(AREA_MISMATCH_ABSOLUTE_TOLERANCE, abs(calculated) * AREA_MISMATCH_RELATIVE_TOLERANCE)
     return abs(calculated - parsed) > tolerance
+
+
+def _append_label_context(notes_by_contour_id: dict[str, list[str]], contour_ids: list[str], note: str) -> None:
+    for contour_id in contour_ids:
+        notes_by_contour_id.setdefault(contour_id, []).append(note)
+
+
+def _add_duplicate_label_review_notes(
+    labels_by_contour_id: dict[str, list[RoomLabelCandidate]], notes_by_contour_id: dict[str, list[str]]
+) -> None:
+    exact_text_occurrences: dict[str, list[tuple[str, RoomLabelCandidate]]] = {}
+    room_identifier_occurrences: dict[str, list[tuple[str, RoomLabelCandidate]]] = {}
+    for contour_id, labels in labels_by_contour_id.items():
+        for label in labels:
+            normalized_text = _normalized_label_text(label.text)
+            if normalized_text:
+                exact_text_occurrences.setdefault(normalized_text, []).append((contour_id, label))
+            room_identifier = _parse_room_identifier(label.text)
+            if room_identifier is not None:
+                room_identifier_occurrences.setdefault(room_identifier, []).append((contour_id, label))
+
+    for normalized_text, occurrences in sorted(exact_text_occurrences.items()):
+        if len(occurrences) < 2:
+            continue
+        label_ids = sorted(label.label_id for _contour_id, label in occurrences)
+        note = f"Duplicate exact label text appears in labels: {', '.join(label_ids)}."
+        for contour_id in sorted({contour_id for contour_id, _label in occurrences}):
+            notes_by_contour_id.setdefault(contour_id, []).append(note)
+
+    for room_identifier, occurrences in sorted(room_identifier_occurrences.items()):
+        if len(occurrences) < 2:
+            continue
+        label_ids = sorted(label.label_id for _contour_id, label in occurrences)
+        note = f"Duplicate parsed room identifier {room_identifier!r} appears in labels: {', '.join(label_ids)}."
+        for contour_id in sorted({contour_id for contour_id, _label in occurrences}):
+            notes_by_contour_id.setdefault(contour_id, []).append(note)
+
+
+def _normalized_label_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text.strip()).casefold()
+
+
+def _parse_room_identifier(text: str) -> Optional[str]:
+    if parse_area_label(text) is not None:
+        return None
+    match = re.fullmatch(
+        r"\s*(?:room|rm\.?|raum|zimmer)\s*[:#-]?\s*(?P<identifier>[A-Za-z]?\d+[A-Za-z]?)\s*",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    return match.group("identifier").casefold()
 
 
 def _has_non_area_text(text: str) -> bool:
