@@ -1,0 +1,48 @@
+{
+  "schema": "skeleton.control_board.snapshot.v1",
+  "generated_at": "2026-07-07T09:00:00Z",
+  "title": "Skeleton Control Board",
+  "subtitle": "Synthetic public-safe operating snapshot for read-only local review. No live services, private data, or mutation adapters are represented.",
+  "metrics": [
+    {"label": "Open work", "value": "12", "tone": "running"},
+    {"label": "Needs review", "value": "3", "tone": "review"},
+    {"label": "Blocked", "value": "1", "tone": "blocked"},
+    {"label": "Healthy checks", "value": "8/8", "tone": "ok"}
+  ],
+  "today": [
+    {"title": "Review synthetic control board fixture", "detail": "Confirm the public-safe snapshot matches the MVP sections and field-length bounds.", "status": "review", "owner": "Runner"},
+    {"title": "Prepare local validation evidence", "detail": "Run schema parity, read-only route, responsive markup, and deployment configuration checks.", "status": "running", "owner": "Codex"},
+    {"title": "Document Tailscale Serve handoff", "detail": "Capture operator-only notes without changing Tailscale state or exposing a public hostname.", "status": "queued", "owner": "Operator"}
+  ],
+  "kanban": [
+    {"title": "Snapshot contracts", "detail": "Typed Python contracts mirror the JSON Schema for the synthetic fixture.", "lane": "Ready", "status": "done"},
+    {"title": "Server-rendered dashboard", "detail": "FastAPI and Jinja2 render a responsive read-only board from local fixture data.", "lane": "Doing", "status": "running"},
+    {"title": "Deployment notes", "detail": "Compose binds to localhost only and includes a single application container health check.", "lane": "Review", "status": "review"},
+    {"title": "Mutation adapters", "detail": "No write routes or live integration adapters are included in this MVP.", "lane": "Review", "status": "ok"}
+  ],
+  "projects": [
+    {"name": "Skeleton", "summary": "Control board MVP for public-safe local visibility.", "status": "running", "updated": "2026-07-07"},
+    {"name": "Aufmass", "summary": "Listed as synthetic project context only; no private workspace access.", "status": "watch", "updated": "synthetic"},
+    {"name": "Hermes", "summary": "Queue status represented with fabricated sample data.", "status": "queued", "updated": "synthetic"}
+  ],
+  "approvals": [
+    {"request": "Draft PR after validation evidence is collected.", "source": "Issue 1578 synthetic task", "status": "review"},
+    {"request": "Runtime deployment remains operator-owned and out of scope.", "source": "Deployment boundary", "status": "blocked"}
+  ],
+  "workflows": [
+    {"name": "Control board build", "stage": "Implementation", "status": "running", "next_step": "Run focused and full tests in a sanitized child environment."},
+    {"name": "Evidence capture", "stage": "Validation", "status": "queued", "next_step": "Attach exact command outcomes to the draft PR notes."},
+    {"name": "Serve handoff", "stage": "Documentation", "status": "watch", "next_step": "Operator may run Tailscale Serve manually after local review."}
+  ],
+  "evidence": [
+    {"label": "Schema parity", "reference": "tests/test_control_board_contracts.py validates fixture against schema and contract model.", "status": "queued"},
+    {"label": "UI safety", "reference": "tests/test_control_board_ui.py checks escaping, sections, static assets, and mobile viewport metadata.", "status": "queued"},
+    {"label": "Deployment boundary", "reference": "tests/test_control_board_deployment.py checks localhost-only Compose and single app health check.", "status": "queued"}
+  ],
+  "health": [
+    {"component": "Synthetic fixture", "status": "ok", "detail": "Uses fabricated public-safe data only."},
+    {"component": "Backend", "status": "ok", "detail": "FastAPI app exposes read-only GET routes."},
+    {"component": "Static assets", "status": "ok", "detail": "CSS and JavaScript are local package files."},
+    {"component": "Live integrations", "status": "blocked", "detail": "No GitHub, Runner, MemoryGateway, n8n, Calendar, Gmail, or network adapters are connected."}
+  ]
+}
