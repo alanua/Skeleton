@@ -2,6 +2,9 @@
 
 `home-edge-01` is the synthetic public name for the private local execution edge.
 
+The current public-safe module inventory and next implementation order are in
+[`HOME_EDGE_MODULES.md`](HOME_EDGE_MODULES.md).
+
 The gate is universal by capability, not by accepting arbitrary shell text. Every remote operation is represented by a reviewed, typed action adapter with one of these risk lanes:
 
 - `read_only`
