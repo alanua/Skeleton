@@ -25,7 +25,8 @@ Scope logs are limited to aggregate package-presence and package-scope booleans.
 The n8n path validates:
 
 - shell syntax for package shell scripts
-- focused n8n tests
+- focused n8n tests after installing the explicit bounded Python test set `PyYAML>=6.0.0,<7.0.0` and `pytest>=8.0.0,<9.0.0`
+- UID/GID `1000:1000` ownership behavior by running the focused tests through a stripped-environment command with an isolated network namespace and a disposable test home
 - exact image digest pinning from `docker compose config --images`
 - `docker compose config --quiet`
 - loopback-only disposable startup
@@ -37,7 +38,7 @@ The n8n path validates:
 
 The Control Board path validates:
 
-- an isolated virtual environment with `pip install -e '.[dev]'`
+- an isolated virtual environment populated from the repository's declared runtime dependencies and `dev` optional dependency contract without editable installation or package auto-discovery
 - focused Control Board contract, UI, and deployment tests
 - zero Control Board skips
 - exact Dockerfile base-image digest pinning

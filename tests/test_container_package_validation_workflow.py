@@ -132,9 +132,16 @@ def test_n8n_required_validation_steps_are_present() -> None:
     text = workflow_text()
 
     required = [
+        "python3 -m venv \"$RUNNER_TEMP/n8n-test-venv\"",
+        "\"$RUNNER_TEMP/n8n-test-venv/bin/python3\" -m pip install 'PyYAML>=6.0.0,<7.0.0' 'pytest>=8.0.0,<9.0.0'",
         "bash -n \"$script\"",
         "find tests -type f -name '*n8n*.py'",
-        "python3 -m pytest \"${focused_tests[@]}\"",
+        "sudo env -i",
+        "HOME=\"$uid_gid_test_home\"",
+        "PYTHONPATH=\"$GITHUB_WORKSPACE\"",
+        "SKELETON_N8N_UID_GID_TEST_ROOT=\"$uid_gid_test_home\"",
+        "unshare --net --setgid 1000 --setuid 1000 --",
+        "python3 -m pytest -p no:cacheprovider \"${focused_tests[@]}\"",
         "docker compose -f \"$compose_file\" config --quiet",
         "docker compose -f \"$compose_file\" config --images",
         "@sha256:[0-9a-f]{64}",
@@ -149,12 +156,28 @@ def test_n8n_required_validation_steps_are_present() -> None:
         assert snippet in text
 
 
+def test_n8n_focused_tests_have_bounded_dependencies_and_uid_gid_environment() -> None:
+    text = workflow_text()
+
+    assert "No module named pytest" not in text
+    assert "pytest>=8.0.0,<9.0.0" in text
+    assert "PyYAML>=6.0.0,<7.0.0" in text
+    assert "sudo --preserve-env" not in text
+    assert "env -i" in text
+    assert "--net" in text
+    assert "--setgid 1000 --setuid 1000" in text
+    assert "SKELETON_N8N_UID_GID_TEST_ROOT" in text
+
+
 def test_control_board_required_validation_steps_are_present() -> None:
     text = workflow_text()
 
     required = [
         "python3 -m venv \"$RUNNER_TEMP/control-board-venv\"",
-        "python3 -m pip install -e '.[dev]'",
+        "pyproject = tomllib.loads(pathlib.Path(\"pyproject.toml\").read_text())",
+        "pyproject[\"project\"].get(\"dependencies\", [])",
+        "pyproject[\"project\"][\"optional-dependencies\"][\"dev\"]",
+        "python3 -m pip install -r \"$dependency_file\"",
         "find tests -type f \\( -name '*control_board*.py' -o -name '*controlboard*.py' \\)",
         "python3 -m pytest \"${focused_tests[@]}\" -rs",
         "control_board_skips_detected",
@@ -165,6 +188,17 @@ def test_control_board_required_validation_steps_are_present() -> None:
     ]
     for snippet in required:
         assert snippet in text
+
+
+def test_control_board_dev_dependencies_install_without_editable_package_discovery() -> None:
+    text = workflow_text()
+
+    assert "pip install -e" not in text
+    assert "'.[dev]'" not in text
+    assert "tomllib" in text
+    assert "dependency_file=\"$(mktemp)\"" in text
+    assert "python3 -m pip install -r \"$dependency_file\"" in text
+    assert "control_board_skips_detected" in text
 
 
 def test_loopback_and_docker_safety_checks_are_present_for_both_packages() -> None:
