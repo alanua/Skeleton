@@ -1,0 +1,386 @@
+name: Container Package Validation
+
+on:
+  pull_request:
+    paths:
+      - "deploy/n8n/**"
+      - "deploy/control_board/**"
+      - "docs/CONTAINER_PACKAGE_VALIDATION.md"
+      - "tests/test_container_package_validation_workflow.py"
+      - ".github/workflows/container-package-validation.yml"
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: "Exact 40-character commit SHA from this repository to validate"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: container-package-validation-${{ github.event_name }}-${{ github.event.pull_request.number || inputs.commit_sha || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  detect-changes:
+    name: Detect package scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      n8n: ${{ steps.scope.outputs.n8n }}
+      control_board: ${{ steps.scope.outputs.control_board }}
+    steps:
+      - name: Validate manual commit SHA
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          COMMIT_SHA: ${{ inputs.commit_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$COMMIT_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "manual dispatch requires an exact 40-character commit SHA" >&2
+            exit 1
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Confirm manual SHA belongs to this repository
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          COMMIT_SHA: ${{ inputs.commit_sha }}
+        run: |
+          set -euo pipefail
+          git cat-file -e "${COMMIT_SHA}^{commit}"
+          checked_out="$(git rev-parse HEAD)"
+          if [[ "$checked_out" != "$COMMIT_SHA" ]]; then
+            echo "checked out commit does not match requested SHA" >&2
+            exit 1
+          fi
+
+      - name: Determine package scope
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          n8n=false
+          control_board=false
+          n8n_changed=false
+          control_board_changed=false
+          maintenance_changed=false
+          n8n_present=false
+          control_board_present=false
+
+          if [[ -d deploy/n8n ]]; then
+            n8n_present=true
+          fi
+          if [[ -d deploy/control_board ]]; then
+            control_board_present=true
+          fi
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ "$n8n_present" == "false" && "$control_board_present" == "false" ]]; then
+              echo "no registered container packages exist at requested commit" >&2
+              exit 1
+            fi
+            n8n=$n8n_present
+            control_board=$control_board_present
+          else
+            changed_files="$(mktemp)"
+            git diff --name-only "$BASE_SHA" "$HEAD_SHA" > "$changed_files"
+            if grep -Eq '^(docs/CONTAINER_PACKAGE_VALIDATION.md|tests/test_container_package_validation_workflow.py|\.github/workflows/container-package-validation\.yml)$' "$changed_files"; then
+              maintenance_changed=true
+            fi
+            if grep -Eq '^deploy/n8n/' "$changed_files"; then
+              n8n_changed=true
+              n8n=true
+            fi
+            if grep -Eq '^deploy/control_board/' "$changed_files"; then
+              control_board_changed=true
+              control_board=true
+            fi
+            rm -f "$changed_files"
+
+            if [[ "$maintenance_changed" == "true" && "$n8n_changed" == "false" && "$n8n_present" == "true" ]]; then
+              n8n=true
+            fi
+            if [[ "$maintenance_changed" == "true" && "$control_board_changed" == "false" && "$control_board_present" == "true" ]]; then
+              control_board=true
+            fi
+          fi
+
+          {
+            echo "n8n=$n8n"
+            echo "control_board=$control_board"
+          } >> "$GITHUB_OUTPUT"
+          echo "package_presence n8n=$n8n_present control_board=$control_board_present"
+          echo "package_scope n8n=$n8n control_board=$control_board"
+
+  validate-n8n:
+    name: Validate n8n package
+    needs: detect-changes
+    if: needs.detect-changes.outputs.n8n == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PACKAGE_DIR: deploy/n8n
+      COMPOSE_PROJECT_NAME: skeleton_n8n_validation_${{ github.run_id }}_${{ github.run_attempt }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.sha }}
+          persist-credentials: false
+
+      - name: Validate n8n shell syntax and focused tests
+        run: |
+          set -euo pipefail
+          test -d "$PACKAGE_DIR"
+
+          shell_count=0
+          while IFS= read -r -d '' script; do
+            bash -n "$script"
+            shell_count=$((shell_count + 1))
+          done < <(find "$PACKAGE_DIR" -type f -name '*.sh' -print0)
+
+          mapfile -t focused_tests < <({ find tests -type f -name '*n8n*.py'; find "$PACKAGE_DIR" -type f -name 'test_*.py'; } 2>/dev/null | sort -u)
+          if [[ "${#focused_tests[@]}" -eq 0 ]]; then
+            echo "n8n focused tests were not found" >&2
+            exit 1
+          fi
+          python3 -m pytest "${focused_tests[@]}"
+          echo "n8n_shell_files=$shell_count n8n_focused_test_files=${#focused_tests[@]}"
+
+      - name: Inspect pinned n8n image digests and compose config
+        run: |
+          set -euo pipefail
+          compose_file="$(find "$PACKAGE_DIR" -maxdepth 2 -type f \( -name 'compose.yml' -o -name 'compose.yaml' -o -name 'docker-compose.yml' -o -name 'docker-compose.yaml' \) | sort | head -n 1)"
+          if [[ -z "$compose_file" ]]; then
+            echo "n8n compose file was not found" >&2
+            exit 1
+          fi
+
+          docker compose -f "$compose_file" config --quiet
+          mapfile -t images < <(docker compose -f "$compose_file" config --images | sort -u)
+          if [[ "${#images[@]}" -eq 0 ]]; then
+            echo "n8n compose config produced no images" >&2
+            exit 1
+          fi
+          for image in "${images[@]}"; do
+            if [[ ! "$image" =~ @sha256:[0-9a-f]{64}$ ]]; then
+              echo "n8n image is not pinned to an exact digest" >&2
+              exit 1
+            fi
+            echo "n8n_image_digest ${image#*@}"
+          done
+
+      - name: Start n8n on loopback and verify restart persistence
+        run: |
+          set -euo pipefail
+          compose_file="$(find "$PACKAGE_DIR" -maxdepth 2 -type f \( -name 'compose.yml' -o -name 'compose.yaml' -o -name 'docker-compose.yml' -o -name 'docker-compose.yaml' \) | sort | head -n 1)"
+          tmp_config="$(mktemp)"
+          cleanup() {
+            docker compose -f "$compose_file" down --volumes --remove-orphans >/dev/null 2>&1 || true
+            docker network prune --force --filter "label=com.docker.compose.project=$COMPOSE_PROJECT_NAME" >/dev/null 2>&1 || true
+            rm -f "$tmp_config"
+          }
+          trap cleanup EXIT
+
+          docker compose -f "$compose_file" config > "$tmp_config"
+          python3 - "$tmp_config" <<'PY'
+          import pathlib
+          import sys
+          import yaml
+
+          config = yaml.safe_load(pathlib.Path(sys.argv[1]).read_text()) or {}
+          services = config.get("services") or {}
+          for name, service in services.items():
+              if service.get("privileged"):
+                  raise SystemExit(f"{name} uses privileged mode")
+              if service.get("network_mode") == "host":
+                  raise SystemExit(f"{name} uses host networking")
+              for port in service.get("ports") or []:
+                  host_ip = str(port.get("host_ip") or "")
+                  if host_ip not in {"127.0.0.1", "::1"}:
+                      raise SystemExit(f"{name} exposes a non-loopback port")
+              for volume in service.get("volumes") or []:
+                  source = str(volume.get("source") or "")
+                  target = str(volume.get("target") or "")
+                  if source == "/var/run/docker.sock" or target == "/var/run/docker.sock":
+                      raise SystemExit(f"{name} mounts the Docker socket")
+                  if source in {"/", "/etc", "/home", "/root", "/var"}:
+                      raise SystemExit(f"{name} uses a broad host mount")
+          PY
+
+          docker compose -f "$compose_file" up -d --remove-orphans
+          deadline=$((SECONDS + 120))
+          healthy=0
+          while (( SECONDS < deadline )); do
+            status="$(docker compose -f "$compose_file" ps --all --format json | python3 -c 'import json,sys; raw=sys.stdin.read().strip(); records=[] if not raw else (json.loads(raw) if raw.startswith("[") else [json.loads(line) for line in raw.splitlines() if line.strip()]); total=len(records); running=sum(1 for record in records if record.get("State") == "running"); bad_health=sum(1 for record in records if record.get("Health", "") not in {"", "healthy"}); health_values=" ".join(sorted({record.get("Health", "") for record in records if record.get("Health", "")})) or "none"; print(f"{total} {running} {bad_health} {health_values}")')"
+            read -r total running bad_health health <<< "$status"
+            if [[ "$total" != "0" && "$running" == "$total" && "$bad_health" == "0" ]]; then
+              healthy=1
+              break
+            fi
+            sleep 5
+          done
+          if [[ "$healthy" != "1" ]]; then
+            echo "n8n_health_state failed" >&2
+            exit 1
+          fi
+          echo "n8n_health_state running services=$running health=${health:-none}"
+
+          docker compose -f "$compose_file" restart
+          deadline=$((SECONDS + 120))
+          healthy=0
+          while (( SECONDS < deadline )); do
+            status="$(docker compose -f "$compose_file" ps --all --format json | python3 -c 'import json,sys; raw=sys.stdin.read().strip(); records=[] if not raw else (json.loads(raw) if raw.startswith("[") else [json.loads(line) for line in raw.splitlines() if line.strip()]); total=len(records); running=sum(1 for record in records if record.get("State") == "running"); bad_health=sum(1 for record in records if record.get("Health", "") not in {"", "healthy"}); health_values=" ".join(sorted({record.get("Health", "") for record in records if record.get("Health", "")})) or "none"; print(f"{total} {running} {bad_health} {health_values}")')"
+            read -r total running bad_health health <<< "$status"
+            if [[ "$total" != "0" && "$running" == "$total" && "$bad_health" == "0" ]]; then
+              healthy=1
+              break
+            fi
+            sleep 5
+          done
+          if [[ "$healthy" != "1" ]]; then
+            echo "n8n_restart_persistence failed" >&2
+            exit 1
+          fi
+          echo "n8n_restart_persistence running services=$running health=${health:-none}"
+
+  validate-control-board:
+    name: Validate Control Board package
+    needs: detect-changes
+    if: needs.detect-changes.outputs.control_board == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      PACKAGE_DIR: deploy/control_board
+      COMPOSE_PROJECT_NAME: skeleton_control_board_validation_${{ github.run_id }}_${{ github.run_attempt }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.sha }}
+          persist-credentials: false
+
+      - name: Install isolated dev environment and run focused tests
+        run: |
+          set -euo pipefail
+          test -d "$PACKAGE_DIR"
+          python3 -m venv "$RUNNER_TEMP/control-board-venv"
+          source "$RUNNER_TEMP/control-board-venv/bin/activate"
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -e '.[dev]'
+          pytest_log="$(mktemp)"
+          cleanup_log() { rm -f "$pytest_log"; }
+          trap cleanup_log EXIT
+          mapfile -t focused_tests < <({ find tests -type f \( -name '*control_board*.py' -o -name '*controlboard*.py' \); find "$PACKAGE_DIR" -type f -name 'test_*.py'; } 2>/dev/null | sort -u)
+          if [[ "${#focused_tests[@]}" -eq 0 ]]; then
+            echo "control board focused tests were not found" >&2
+            exit 1
+          fi
+          python3 -m pytest "${focused_tests[@]}" -rs | tee "$pytest_log"
+          if grep -Eq '[0-9]+ skipped' "$pytest_log"; then
+            echo "control_board_skips_detected" >&2
+            exit 1
+          fi
+          total_line="$(grep -E '=+ .* in [0-9.]+s =+$' "$pytest_log" | tail -n 1 || true)"
+          echo "control_board_test_totals ${total_line:-unknown}"
+
+      - name: Inspect exact base-image digests, build, and compose config
+        run: |
+          set -euo pipefail
+          compose_file="$(find "$PACKAGE_DIR" -maxdepth 2 -type f \( -name 'compose.yml' -o -name 'compose.yaml' -o -name 'docker-compose.yml' -o -name 'docker-compose.yaml' \) | sort | head -n 1)"
+          if [[ -z "$compose_file" ]]; then
+            echo "control board compose file was not found" >&2
+            exit 1
+          fi
+
+          mapfile -t dockerfiles < <(find "$PACKAGE_DIR" -type f \( -name 'Dockerfile' -o -name 'Dockerfile.*' \) | sort)
+          if [[ "${#dockerfiles[@]}" -eq 0 ]]; then
+            echo "control board Dockerfile was not found" >&2
+            exit 1
+          fi
+          for dockerfile in "${dockerfiles[@]}"; do
+            while IFS= read -r from_line; do
+              image="${from_line#FROM }"
+              image="${image%% AS *}"
+              image="${image%% as *}"
+              if [[ ! "$image" =~ @sha256:[0-9a-f]{64}$ ]]; then
+                echo "control board base image is not pinned to an exact digest" >&2
+                exit 1
+              fi
+              echo "control_board_base_image_digest ${image#*@}"
+            done < <(grep -E '^FROM ' "$dockerfile")
+          done
+
+          docker compose -f "$compose_file" config --quiet
+          docker compose -f "$compose_file" build
+
+      - name: Start Control Board on loopback and verify health
+        run: |
+          set -euo pipefail
+          compose_file="$(find "$PACKAGE_DIR" -maxdepth 2 -type f \( -name 'compose.yml' -o -name 'compose.yaml' -o -name 'docker-compose.yml' -o -name 'docker-compose.yaml' \) | sort | head -n 1)"
+          tmp_config="$(mktemp)"
+          cleanup() {
+            docker compose -f "$compose_file" down --volumes --remove-orphans >/dev/null 2>&1 || true
+            docker network prune --force --filter "label=com.docker.compose.project=$COMPOSE_PROJECT_NAME" >/dev/null 2>&1 || true
+            rm -f "$tmp_config"
+          }
+          trap cleanup EXIT
+
+          docker compose -f "$compose_file" config > "$tmp_config"
+          python3 - "$tmp_config" <<'PY'
+          import pathlib
+          import sys
+          import yaml
+
+          config = yaml.safe_load(pathlib.Path(sys.argv[1]).read_text()) or {}
+          services = config.get("services") or {}
+          for name, service in services.items():
+              if service.get("privileged"):
+                  raise SystemExit(f"{name} uses privileged mode")
+              if service.get("network_mode") == "host":
+                  raise SystemExit(f"{name} uses host networking")
+              for port in service.get("ports") or []:
+                  host_ip = str(port.get("host_ip") or "")
+                  if host_ip not in {"127.0.0.1", "::1"}:
+                      raise SystemExit(f"{name} exposes a non-loopback port")
+              for volume in service.get("volumes") or []:
+                  source = str(volume.get("source") or "")
+                  target = str(volume.get("target") or "")
+                  if source == "/var/run/docker.sock" or target == "/var/run/docker.sock":
+                      raise SystemExit(f"{name} mounts the Docker socket")
+                  if source in {"/", "/etc", "/home", "/root", "/var"}:
+                      raise SystemExit(f"{name} uses a broad host mount")
+          PY
+
+          docker compose -f "$compose_file" up -d --remove-orphans
+          deadline=$((SECONDS + 120))
+          healthy=0
+          while (( SECONDS < deadline )); do
+            status="$(docker compose -f "$compose_file" ps --all --format json | python3 -c 'import json,sys; raw=sys.stdin.read().strip(); records=[] if not raw else (json.loads(raw) if raw.startswith("[") else [json.loads(line) for line in raw.splitlines() if line.strip()]); total=len(records); running=sum(1 for record in records if record.get("State") == "running"); bad_health=sum(1 for record in records if record.get("Health", "") not in {"", "healthy"}); health_values=" ".join(sorted({record.get("Health", "") for record in records if record.get("Health", "")})) or "none"; print(f"{total} {running} {bad_health} {health_values}")')"
+            read -r total running bad_health health <<< "$status"
+            if [[ "$total" != "0" && "$running" == "$total" && "$bad_health" == "0" ]]; then
+              healthy=1
+              break
+            fi
+            sleep 5
+          done
+          if [[ "$healthy" != "1" ]]; then
+            echo "control_board_health_state failed" >&2
+            exit 1
+          fi
+          echo "control_board_health_state running services=$running health=${health:-none}"
