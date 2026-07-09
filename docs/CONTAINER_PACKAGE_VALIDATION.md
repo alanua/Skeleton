@@ -16,36 +16,42 @@ Pull requests run only the package jobs implied by changed paths. A pull request
 
 The workflow uses `permissions: contents: read` only and does not use `pull_request_target`. It does not read repository, environment, or organization secrets. It does not write caches or upload artifacts. Runtime values are synthetic and disposable.
 
-Validation is limited to GitHub-hosted Docker and Docker Compose. Compose services are rejected when they request privileged mode, host networking, the Docker socket, broad host mounts, or non-loopback port bindings. All compose runs use per-run project names and unconditional cleanup with `docker compose down --volumes --remove-orphans`, compose network pruning for the per-run project label, and temporary file deletion.
+Validation is limited to GitHub-hosted Docker and Docker Compose. Compose services are rejected when they request privileged mode, host networking, the Docker socket, broad host mounts, or non-loopback port bindings. All Compose runs use per-run project names and unconditional cleanup with `docker compose down --volumes --remove-orphans`, project-labelled network pruning, and temporary file deletion.
 
-Scope logs are limited to aggregate package-presence and package-scope booleans. Validation logs are limited to aggregate status, pinned image digests, health state, and test totals. The workflow does not print environment files, compose configuration, secrets, or package runtime configuration.
+Scope logs are limited to aggregate package-presence and package-scope booleans. Validation logs are limited to aggregate status, pinned image digests, health state, and test totals. The workflow does not print environment files, Compose configuration, secrets, or package runtime configuration.
 
 ## n8n Validation
 
 The n8n path validates:
 
 - shell syntax for package shell scripts
-- focused n8n tests after installing the explicit bounded Python test set `PyYAML>=6.0.0,<7.0.0` and `pytest>=8.0.0,<9.0.0`
-- UID/GID `1000:1000` ownership behavior by running the focused tests through a stripped-environment command with an isolated network namespace and a disposable test home
+- focused n8n tests after installing the bounded Python set `PyYAML>=6.0.0,<7.0.0` and `pytest>=8.0.0,<9.0.0`
+- UID/GID `1000:1000` ownership behavior through a stripped environment and a portable UID/GID drop using `setpriv`, without the GitHub-hosted-runner-incompatible network namespace operation
+- a disposable test home and temporary directory owned by UID/GID `1000:1000`
+- a synthetic owner-only Compose environment containing only disposable paths and a generated validation key
 - exact image digest pinning from `docker compose config --images`
 - `docker compose config --quiet`
 - loopback-only disposable startup
 - bounded health wait requiring every service to be running and every non-empty Compose health value to be `healthy`
 - restart persistence
-- unconditional cleanup of containers, networks, volumes, and temporary files
+- unconditional cleanup of containers, networks, volumes, synthetic environment files, and temporary directories
+
+The workflow never supplies a production key, workflow, credential, Docker socket, host-network mode, or broad host mount.
 
 ## Control Board Validation
 
 The Control Board path validates:
 
-- an isolated virtual environment populated from the repository's declared runtime dependencies and `dev` optional dependency contract without editable installation or package auto-discovery
-- focused Control Board contract, UI, and deployment tests
+- an isolated virtual environment populated from an explicit pinned dependency set matching the repository dependency contract
+- focused Control Board dependency-contract, data-contract, UI, and deployment tests
 - zero Control Board skips
 - exact Dockerfile base-image digest pinning
 - Docker Compose build
 - `docker compose config --quiet`
 - loopback-only disposable health requiring every service to be running and every non-empty Compose health value to be `healthy`
 - unconditional cleanup of containers, networks, volumes, and temporary files
+
+The explicit install avoids editable installation and flat-layout package auto-discovery while retaining `PYTHONPATH` only for the checked-out public repository under test.
 
 ## Local Contract Checks
 
