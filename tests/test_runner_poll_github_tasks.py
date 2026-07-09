@@ -2813,6 +2813,109 @@ def _overlay_pr_state(
     return pr_state
 
 
+def _overlay_rest_pr_payload(packet_id: str, *, head_sha: str | None = None) -> dict[str, object]:
+    packet = runner.REGISTERED_WORKTREE_OVERLAY_PACKETS[packet_id]
+    return {
+        "number": packet.pr_number,
+        "state": "open",
+        "draft": True,
+        "html_url": f"https://github.com/alanua/Skeleton/pull/{packet.pr_number}",
+        "base": {"ref": "main", "sha": "a" * 40},
+        "head": {
+            "ref": packet.target_branch,
+            "sha": head_sha or packet.target_head_sha,
+            "repo": {
+                "full_name": runner.REPO,
+                "name": "Skeleton",
+                "owner": {"login": "alanua"},
+            },
+        },
+    }
+
+
+def _overlay_rest_file_payload(files: tuple[str, ...]) -> list[dict[str, object]]:
+    return [{"filename": path} for path in files]
+
+
+class _OverlayRestResponse:
+    def __init__(
+        self,
+        payload: object,
+        url: str,
+        *,
+        status: int = 200,
+        headers: dict[str, str] | None = None,
+        raw: bytes | None = None,
+    ) -> None:
+        self.payload = payload
+        self.url = url
+        self.status = status
+        self.headers = headers or {}
+        self.raw = raw
+
+    def __enter__(self) -> "_OverlayRestResponse":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def geturl(self) -> str:
+        return self.url
+
+    def getcode(self) -> int:
+        return self.status
+
+    def read(self, _size: int = -1) -> bytes:
+        if self.raw is not None:
+            return self.raw
+        return json.dumps(self.payload).encode("utf-8")
+
+
+class _OverlayRestOpener:
+    def __init__(
+        self, responses: dict[str, _OverlayRestResponse | list[_OverlayRestResponse]]
+    ) -> None:
+        self.responses = responses
+        self.requests: list[object] = []
+        self.timeouts: list[object] = []
+
+    def open(self, request: object, *, timeout: object) -> _OverlayRestResponse:
+        self.requests.append(request)
+        self.timeouts.append(timeout)
+        url = request.full_url
+        response_or_responses = self.responses[url]
+        if isinstance(response_or_responses, list):
+            response = response_or_responses.pop(0)
+        else:
+            response = response_or_responses
+        return _OverlayRestResponse(
+            response.payload,
+            response.url,
+            status=response.status,
+            headers=response.headers,
+            raw=response.raw,
+        )
+
+
+def _overlay_rest_opener(
+    packet_id: str,
+    *,
+    files: tuple[str, ...] = ("scripts/runner_poll_github_tasks.py",),
+    head_sha: str | None = None,
+    responses: dict[str, _OverlayRestResponse] | None = None,
+) -> _OverlayRestOpener:
+    packet = runner.REGISTERED_WORKTREE_OVERLAY_PACKETS[packet_id]
+    pr_url = f"https://api.github.com/repos/alanua/Skeleton/pulls/{packet.pr_number}"
+    files_url = f"{pr_url}/files?per_page=100&page=1"
+    return _OverlayRestOpener(
+        responses
+        or {
+            pr_url: _OverlayRestResponse(_overlay_rest_pr_payload(packet_id, head_sha=head_sha), pr_url),
+            files_url: _OverlayRestResponse(_overlay_rest_file_payload(files), files_url),
+        }
+    )
+
+
 def _overlay_registered_worktree_commands(
     *,
     worktree_path: Path,
@@ -6408,6 +6511,453 @@ def test_overlay_registered_worktree_rejects_unregistered_inputs_before_commands
     assert report.startswith("NEEDS_OPERATOR:")
     assert f"reason={reason}" in report
     run.assert_not_called()
+
+
+def test_overlay_registered_worktree_gh_success_does_not_invoke_public_rest(
+    tmp_path: Path,
+) -> None:
+    packet_id = "home_edge_1640_to_pr_1638"
+    worktree_path = _prepare_overlay_source_worktree(tmp_path, packet_id)
+    with mock.patch.object(
+        runner,
+        "load_runner_project_tree",
+        return_value=_project_tree_with_skeleton_worktree_root(tmp_path),
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_overlay_registered_worktree_commands(
+            worktree_path=worktree_path,
+            packet_id=packet_id,
+        ),
+    ), mock.patch.object(runner.urllib.request, "build_opener") as build_opener:
+        report = runner.overlay_registered_worktree_to_existing_pr(
+            _overlay_registered_worktree_body(packet_id=packet_id)
+        )
+
+    assert report.startswith("DONE:")
+    assert "pr_metadata_source=gh" in report
+    assert "post_push_pr_metadata_source=gh" in report
+    build_opener.assert_not_called()
+
+
+def test_overlay_registered_worktree_gh_failure_uses_fixed_public_rest_endpoints(
+    tmp_path: Path,
+) -> None:
+    packet_id = "home_edge_1640_to_pr_1638"
+    packet = runner.REGISTERED_WORKTREE_OVERLAY_PACKETS[packet_id]
+    worktree_path = _prepare_overlay_source_worktree(tmp_path, packet_id)
+    pr_url = f"https://api.github.com/repos/alanua/Skeleton/pulls/{packet.pr_number}"
+    files_url = f"{pr_url}/files?per_page=100&page=1"
+    opener = _OverlayRestOpener(
+        {
+            pr_url: [
+                _OverlayRestResponse(_overlay_rest_pr_payload(packet_id), pr_url),
+                _OverlayRestResponse(
+                    _overlay_rest_pr_payload(packet_id, head_sha="d" * 40), pr_url
+                ),
+            ],
+            files_url: [
+                _OverlayRestResponse(
+                    _overlay_rest_file_payload(("scripts/runner_poll_github_tasks.py",)),
+                    files_url,
+                ),
+                _OverlayRestResponse(
+                    _overlay_rest_file_payload(
+                        (
+                            "scripts/runner_poll_github_tasks.py",
+                            packet.allowed_files[0],
+                        )
+                    ),
+                    files_url,
+                ),
+            ],
+        }
+    )
+    with mock.patch.object(
+        runner,
+        "load_runner_project_tree",
+        return_value=_project_tree_with_skeleton_worktree_root(tmp_path),
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_overlay_registered_worktree_commands(
+            worktree_path=worktree_path,
+            packet_id=packet_id,
+            pr_view_code=1,
+        ),
+    ), mock.patch.object(
+        runner.urllib.request, "build_opener", return_value=opener
+    ):
+        report = runner.overlay_registered_worktree_to_existing_pr(
+            _overlay_registered_worktree_body(packet_id=packet_id)
+        )
+
+    assert report.startswith("DONE:")
+    assert "pr_metadata_source=public_rest" in report
+    assert "post_push_pr_metadata_source=public_rest" in report
+    assert [request.full_url for request in opener.requests[:2]] == [
+        f"https://api.github.com/repos/alanua/Skeleton/pulls/{packet.pr_number}",
+        f"https://api.github.com/repos/alanua/Skeleton/pulls/{packet.pr_number}/files?per_page=100&page=1",
+    ]
+    for request in opener.requests:
+        parsed = urllib.parse.urlparse(request.full_url)
+        assert parsed.scheme == "https"
+        assert parsed.hostname == "api.github.com"
+        assert parsed.path.startswith(f"/repos/alanua/Skeleton/pulls/{packet.pr_number}")
+        assert request.headers == {
+            "Accept": "application/vnd.github+json",
+            "X-github-api-version": "2022-11-28",
+            "User-agent": "skeleton-runner-registered-overlay",
+        }
+        assert "Authorization" not in request.headers
+        assert "Cookie" not in request.headers
+    assert set(opener.timeouts) == {runner._REGISTERED_OVERLAY_PUBLIC_REST_TIMEOUT_SECONDS}
+
+
+def test_overlay_registered_worktree_invalid_gh_json_falls_back_but_fail_closed_gh_state_does_not(
+    tmp_path: Path,
+) -> None:
+    packet_id = "home_edge_1640_to_pr_1638"
+    worktree_path = _prepare_overlay_source_worktree(tmp_path, packet_id)
+    fallback_state = _overlay_pr_state(packet_id)
+    with mock.patch.object(
+        runner,
+        "_registered_worktree_overlay_pr_state",
+        side_effect=json.JSONDecodeError("bad", "}", 0),
+    ), mock.patch.object(
+        runner,
+        "_registered_worktree_overlay_public_rest_pr_state",
+        return_value=fallback_state,
+    ) as public_rest:
+        state, source = runner._registered_worktree_overlay_pr_state_with_fallback(
+            runner.IssueWorktreeExistingPrPublishRequest(
+                repository=runner.REPO,
+                source_issue=1640,
+                expected_source_branch="runner/issue-1640",
+                pr_number=1638,
+                expected_pr_head_sha=runner.REGISTERED_WORKTREE_OVERLAY_PACKETS[packet_id].target_head_sha,
+                expected_pr_head_branch=runner.REGISTERED_WORKTREE_OVERLAY_PACKETS[packet_id].target_branch,
+                allowed_files=frozenset(),
+            ),
+            runner.REGISTERED_WORKTREE_OVERLAY_PACKETS[packet_id],
+            worktree_path,
+        )
+    assert state == fallback_state
+    assert source == "public_rest"
+    public_rest.assert_called_once()
+
+    bad_but_complete_state = _overlay_pr_state(packet_id, head_sha="c" * 40)
+    with mock.patch.object(
+        runner,
+        "load_runner_project_tree",
+        return_value=_project_tree_with_skeleton_worktree_root(tmp_path),
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_overlay_registered_worktree_commands(
+            worktree_path=worktree_path,
+            packet_id=packet_id,
+            pre_pr_state=bad_but_complete_state,
+        ),
+    ), mock.patch.object(runner.urllib.request, "build_opener") as build_opener:
+        report = runner.overlay_registered_worktree_to_existing_pr(
+            _overlay_registered_worktree_body(packet_id=packet_id)
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=pr_head_sha_mismatch" in report
+    build_opener.assert_not_called()
+
+
+@pytest.mark.parametrize("packet_id", tuple(runner.REGISTERED_WORKTREE_OVERLAY_PACKETS))
+def test_overlay_registered_public_rest_normalizes_both_registered_packets(
+    tmp_path: Path, packet_id: str
+) -> None:
+    packet = runner.REGISTERED_WORKTREE_OVERLAY_PACKETS[packet_id]
+    opener = _overlay_rest_opener(packet_id, files=packet.allowed_files[:1])
+    request = runner.IssueWorktreeExistingPrPublishRequest(
+        repository=runner.REPO,
+        source_issue=packet.source_issue,
+        expected_source_branch=packet.source_branch,
+        pr_number=packet.pr_number,
+        expected_pr_head_sha=packet.target_head_sha,
+        expected_pr_head_branch=packet.target_branch,
+        allowed_files=frozenset(packet.allowed_files),
+    )
+    with mock.patch.object(
+        runner,
+        "load_runner_project_tree",
+        return_value=_project_tree_with_skeleton_worktree_root(tmp_path),
+    ), mock.patch.object(runner.urllib.request, "build_opener", return_value=opener):
+        state = runner._registered_worktree_overlay_public_rest_pr_state(request, packet)
+
+    assert state == _overlay_pr_state(packet_id, files=packet.allowed_files[:1])
+    assert runner._existing_pr_publish_block_reason(request, state) is None
+    assert runner._registered_worktree_overlay_base_ref_oid(state) == "a" * 40
+    assert runner._existing_pr_publish_file_paths(state) == frozenset(packet.allowed_files[:1])
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    (
+        lambda packet: runner.RegisteredWorktreeOverlayPacket(
+            packet.packet_id,
+            packet.source_issue,
+            packet.source_branch,
+            999,
+            packet.target_branch,
+            packet.target_head_sha,
+            packet.allowed_files,
+        ),
+        lambda packet: runner.RegisteredWorktreeOverlayPacket(
+            "unknown",
+            packet.source_issue,
+            packet.source_branch,
+            packet.pr_number,
+            packet.target_branch,
+            packet.target_head_sha,
+            packet.allowed_files,
+        ),
+    ),
+)
+def test_overlay_registered_public_rest_rejects_unregistered_packet_or_pr(
+    tmp_path: Path, mutate: object
+) -> None:
+    packet = runner.REGISTERED_WORKTREE_OVERLAY_PACKETS["home_edge_1640_to_pr_1638"]
+    bad_packet = mutate(packet)
+    request = runner.IssueWorktreeExistingPrPublishRequest(
+        repository=runner.REPO,
+        source_issue=bad_packet.source_issue,
+        expected_source_branch=bad_packet.source_branch,
+        pr_number=bad_packet.pr_number,
+        expected_pr_head_sha=bad_packet.target_head_sha,
+        expected_pr_head_branch=bad_packet.target_branch,
+        allowed_files=frozenset(bad_packet.allowed_files),
+    )
+    with mock.patch.object(
+        runner,
+        "load_runner_project_tree",
+        return_value=_project_tree_with_skeleton_worktree_root(tmp_path),
+    ), mock.patch.object(runner.urllib.request, "build_opener") as build_opener:
+        with pytest.raises(RuntimeError):
+            runner._registered_worktree_overlay_public_rest_pr_state(request, bad_packet)
+
+    build_opener.assert_not_called()
+
+
+def test_overlay_registered_public_rest_rejects_private_project_tree_before_request(
+    tmp_path: Path,
+) -> None:
+    packet = runner.REGISTERED_WORKTREE_OVERLAY_PACKETS["home_edge_1640_to_pr_1638"]
+    project_tree = _project_tree_with_skeleton_worktree_root(tmp_path)
+    project_tree["projects"]["skeleton"]["public"] = False
+    request = runner.IssueWorktreeExistingPrPublishRequest(
+        repository=runner.REPO,
+        source_issue=packet.source_issue,
+        expected_source_branch=packet.source_branch,
+        pr_number=packet.pr_number,
+        expected_pr_head_sha=packet.target_head_sha,
+        expected_pr_head_branch=packet.target_branch,
+        allowed_files=frozenset(packet.allowed_files),
+    )
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(runner.urllib.request, "build_opener") as build_opener:
+        with pytest.raises(RuntimeError):
+            runner._registered_worktree_overlay_public_rest_pr_state(request, packet)
+
+    build_opener.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("responses", "reason_fragment"),
+    (
+        (
+            {
+                "pr_status_500": _OverlayRestResponse(
+                    {}, "https://api.github.com/repos/alanua/Skeleton/pulls/1638", status=500
+                )
+            },
+            "non-2xx",
+        ),
+        (
+            {
+                "pr_redirect": _OverlayRestResponse(
+                    {},
+                    "https://evil.example/repos/alanua/Skeleton/pulls/1638",
+                )
+            },
+            "final URL",
+        ),
+        (
+            {
+                "pr_malformed": _OverlayRestResponse(
+                    {}, "https://api.github.com/repos/alanua/Skeleton/pulls/1638", raw=b"{"
+                )
+            },
+            "malformed JSON",
+        ),
+        (
+            {
+                "pr_oversized": _OverlayRestResponse(
+                    {},
+                    "https://api.github.com/repos/alanua/Skeleton/pulls/1638",
+                    raw=b"[" * (runner._REGISTERED_OVERLAY_PUBLIC_REST_PR_BYTES + 1),
+                )
+            },
+            "too large",
+        ),
+    ),
+)
+def test_overlay_registered_public_rest_pr_request_failures_close(
+    tmp_path: Path, responses: dict[str, _OverlayRestResponse], reason_fragment: str
+) -> None:
+    packet = runner.REGISTERED_WORKTREE_OVERLAY_PACKETS["home_edge_1640_to_pr_1638"]
+    pr_url = f"https://api.github.com/repos/alanua/Skeleton/pulls/{packet.pr_number}"
+    opener = _overlay_rest_opener("home_edge_1640_to_pr_1638")
+    opener.responses[pr_url] = next(iter(responses.values()))
+    request = runner.IssueWorktreeExistingPrPublishRequest(
+        repository=runner.REPO,
+        source_issue=packet.source_issue,
+        expected_source_branch=packet.source_branch,
+        pr_number=packet.pr_number,
+        expected_pr_head_sha=packet.target_head_sha,
+        expected_pr_head_branch=packet.target_branch,
+        allowed_files=frozenset(packet.allowed_files),
+    )
+    with mock.patch.object(
+        runner,
+        "load_runner_project_tree",
+        return_value=_project_tree_with_skeleton_worktree_root(tmp_path),
+    ), mock.patch.object(runner.urllib.request, "build_opener", return_value=opener):
+        with pytest.raises(RuntimeError, match=reason_fragment):
+            runner._registered_worktree_overlay_public_rest_pr_state(request, packet)
+
+
+@pytest.mark.parametrize(
+    ("payload_update", "file_payload", "reason_fragment"),
+    (
+        ({"head": {"ref": "runner/issue-1630", "sha": "bad", "repo": {"full_name": runner.REPO}}}, None, "head SHA"),
+        ({"head": {"ref": "runner/issue-1630", "sha": "1" * 40, "repo": {"full_name": "alanua/Other"}}}, None, "head repository"),
+        ({"html_url": "https://example.com/alanua/Skeleton/pull/1638"}, None, "URL"),
+        ({}, [{"filename": "../unsafe"}], "file path"),
+        ({}, [{"filename": "a.txt"}, {"filename": "a.txt"}], "duplicate"),
+    ),
+)
+def test_overlay_registered_public_rest_rejects_malformed_or_inconsistent_payloads(
+    tmp_path: Path,
+    payload_update: dict[str, object],
+    file_payload: list[dict[str, object]] | None,
+    reason_fragment: str,
+) -> None:
+    packet_id = "home_edge_1640_to_pr_1638"
+    packet = runner.REGISTERED_WORKTREE_OVERLAY_PACKETS[packet_id]
+    pr_payload = _overlay_rest_pr_payload(packet_id)
+    pr_payload.update(payload_update)
+    pr_url = f"https://api.github.com/repos/alanua/Skeleton/pulls/{packet.pr_number}"
+    files_url = f"{pr_url}/files?per_page=100&page=1"
+    opener = _OverlayRestOpener(
+        {
+            pr_url: _OverlayRestResponse(pr_payload, pr_url),
+            files_url: _OverlayRestResponse(
+                file_payload if file_payload is not None else _overlay_rest_file_payload(("scripts/runner_poll_github_tasks.py",)),
+                files_url,
+            ),
+        }
+    )
+    request = runner.IssueWorktreeExistingPrPublishRequest(
+        repository=runner.REPO,
+        source_issue=packet.source_issue,
+        expected_source_branch=packet.source_branch,
+        pr_number=packet.pr_number,
+        expected_pr_head_sha=packet.target_head_sha,
+        expected_pr_head_branch=packet.target_branch,
+        allowed_files=frozenset(packet.allowed_files),
+    )
+    with mock.patch.object(
+        runner,
+        "load_runner_project_tree",
+        return_value=_project_tree_with_skeleton_worktree_root(tmp_path),
+    ), mock.patch.object(runner.urllib.request, "build_opener", return_value=opener):
+        with pytest.raises(RuntimeError, match=reason_fragment):
+            runner._registered_worktree_overlay_public_rest_pr_state(request, packet)
+
+
+def test_overlay_registered_public_rest_rejects_excessive_or_inconsistent_pagination(
+    tmp_path: Path,
+) -> None:
+    packet = runner.REGISTERED_WORKTREE_OVERLAY_PACKETS["home_edge_1640_to_pr_1638"]
+    pr_url = f"https://api.github.com/repos/alanua/Skeleton/pulls/{packet.pr_number}"
+    responses = {
+        pr_url: _OverlayRestResponse(
+            _overlay_rest_pr_payload("home_edge_1640_to_pr_1638"), pr_url
+        )
+    }
+    for page in range(1, runner._REGISTERED_OVERLAY_PUBLIC_REST_FILE_PAGE_CAP + 1):
+        files_url = f"{pr_url}/files?per_page=100&page={page}"
+        responses[files_url] = _OverlayRestResponse(
+            [{"filename": f"file-{page}-{index}.txt"} for index in range(100)],
+            files_url,
+            headers={"Link": f"<{pr_url}/files?per_page=100&page={page + 1}>; rel=\"next\""},
+        )
+    opener = _OverlayRestOpener(responses)
+    request = runner.IssueWorktreeExistingPrPublishRequest(
+        repository=runner.REPO,
+        source_issue=packet.source_issue,
+        expected_source_branch=packet.source_branch,
+        pr_number=packet.pr_number,
+        expected_pr_head_sha=packet.target_head_sha,
+        expected_pr_head_branch=packet.target_branch,
+        allowed_files=frozenset(packet.allowed_files),
+    )
+    with mock.patch.object(
+        runner,
+        "load_runner_project_tree",
+        return_value=_project_tree_with_skeleton_worktree_root(tmp_path),
+    ), mock.patch.object(runner.urllib.request, "build_opener", return_value=opener):
+        with pytest.raises(RuntimeError, match="pagination exceeded"):
+            runner._registered_worktree_overlay_public_rest_pr_state(request, packet)
+
+
+def test_overlay_registered_post_push_public_rest_rereads_and_rejects_stale_metadata(
+    tmp_path: Path,
+) -> None:
+    packet_id = "home_edge_1640_to_pr_1638"
+    packet = runner.REGISTERED_WORKTREE_OVERLAY_PACKETS[packet_id]
+    worktree_path = _prepare_overlay_source_worktree(tmp_path, packet_id)
+    pr_url = f"https://api.github.com/repos/alanua/Skeleton/pulls/{packet.pr_number}"
+    files_url = f"{pr_url}/files?per_page=100&page=1"
+    opener = _OverlayRestOpener(
+        {
+            pr_url: _OverlayRestResponse(_overlay_rest_pr_payload(packet_id), pr_url),
+            files_url: _OverlayRestResponse(
+                _overlay_rest_file_payload(("scripts/runner_poll_github_tasks.py",)),
+                files_url,
+            ),
+        }
+    )
+    with mock.patch.object(
+        runner,
+        "load_runner_project_tree",
+        return_value=_project_tree_with_skeleton_worktree_root(tmp_path),
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_overlay_registered_worktree_commands(
+            worktree_path=worktree_path,
+            packet_id=packet_id,
+            pr_view_code=1,
+        ),
+    ), mock.patch.object(runner.urllib.request, "build_opener", return_value=opener):
+        report = runner.overlay_registered_worktree_to_existing_pr(
+            _overlay_registered_worktree_body(packet_id=packet_id)
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=post_push_pr_head_sha_mismatch" in report
+    assert "constructed_head_sha=" in report
+    assert "pushed_head_sha=" not in report
+    assert [request.full_url for request in opener.requests].count(pr_url) == 2
 
 
 @pytest.mark.parametrize(
