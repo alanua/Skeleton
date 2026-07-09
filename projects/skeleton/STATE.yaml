@@ -1,29 +1,37 @@
 schema: skeleton.project_state.v1
 project_id: skeleton
-status: DRAFT_HANDOFF
+status: ACTIVE_RUNNER_QUEUE_REFRESH
 state_role: handoff_not_canon_truth
-last_verified: '2026-06-19'
+last_verified: '2026-07-09'
 evidence_source: >
-  Skeleton main after PR #863, the completed source audit from issue #1028,
-  and private operator diagnostics on Runner/Codex/Hermes. Private quota details
-  remain outside the public repository.
+  Public-safe GitHub connector state for alanua/Skeleton issues and pull
+  requests during issue #1668. GitHub remains authoritative for issue labels,
+  pull request state, runner state, and merge history; this STATE.yaml file is
+  only a handoff summary. Private Aufmass/customer data, paths, quantities,
+  source references, secrets and runtime artifacts are intentionally excluded.
 summary:
   - Skeleton v2 lives in alanua/Skeleton.
-  - GitHub issue queue, Runner, and Telegram notification route are operational.
-  - Safe task issue publishing exists through scripts/publish_task_issue.py after PR 862.
-  - Truncated task fence detection blocks malformed Runner task bodies after PR 860.
-  - Hermes queue-audit packet docs/schema landed after PR 858.
-  - BauClock PR 52 status is recorded after PR 863.
-  - "Issue #1028 completed the post-#1027 source audit and confirmed the current merged repairs and stale control issues."
-  - At the 2026-06-19 verification point, no open runner:ready or runner:running items remained; normal future queue changes can create new ready or running items.
-  - "Issues #895 and #867 remain stale review/operator-gated control records, not executable Runner instructions."
-  - Runner/Codex execution requires an explicit runtime preflight for execution user, authentication, supported model, and quota availability.
-  - Codex must run from the Runner user context, not from root.
-  - The current ChatGPT-account Codex setup requires a supported model configuration; unsupported Codex model defaults must fail closed before task execution.
-  - Hermes must be quota-aware and bounded before further automation.
-  - Gemini remains a future read-only reviewer/auditor candidate.
-  - Antigravity remains a future lab-only worker candidate, not a production Runner executor.
+  - GitHub issues, pull requests, labels and merge state are the task-state authority.
+  - STATE.yaml is a handoff summary only and must not override GitHub queue state.
+  - "Issue #1668 is the running public-safe queue/status and NotebookLM sourcepack refresh."
+  - "PR #1659 merged the public-safe Aufmass room-to-contour matcher hardening on 2026-07-09."
+  - "PR #1661 merged the Home Edge v1 module inventory and ordering on 2026-07-09."
+  - "PR #1660 merged the code-task finalizer validation-environment sanitizer on 2026-07-09."
+  - "PR #1654 merged the Loop policy registry rebuild on 2026-07-09."
+  - "PR #1647 merged Universal Runner Slice 6C on 2026-07-09."
+  - "Issue #1665 is the completed retained Loop recovery implementation source; issue #1669 is the ready publish-only route for that retained worktree."
+  - "Issue #1666 is ready and must land before issue #1640 can update existing Home Edge draft PR #1638 without creating a duplicate PR."
+  - "PR #1638 remains an open Home Edge draft review target; issue #1640 is the approved protected repair task for that PR."
+  - "Issue #1667 is ready to rebuild the read-only container-package validation workflow."
+  - "PR #1632 and PR #1635 remain open draft validation-blocked package PRs until the container-validation workflow and exact-head validation are available."
+  - "Issue #1645 is superseded by issue #1668 and must not be reused as current queue text."
+  - Queue status terms are RUNNING, READY, BLOCKED_VALIDATION, DRAFT_REVIEW, SUPERSEDED and BACKLOG.
+  - NotebookLM is advisory; docs/NOTEBOOKLM_SOURCEPACK.md is generated deterministically from repository sources.
+  - No issue or PR should be closed or merged by this state refresh task.
 next_actions:
-  - Sync the live Runner checkout to main after approved Skeleton changes.
-  - Add Codex runtime preflight before starting further Codex tasks.
-  - Add Hermes quota-aware review rules before using Hermes for queue audits.
+  - "Finish issue #1668 with exactly the allowed public-safe docs/state/sourcepack scope."
+  - "Publish the retained Loop recovery worktree from issue #1665 through ready issue #1669."
+  - "Run issue #1666 to add the bounded existing-PR recovery route."
+  - "Use issue #1640 to update existing Home Edge draft PR #1638 only after issue #1666 lands."
+  - "Run issue #1667 to rebuild the read-only container-validation workflow."
+  - "Revalidate PR #1632 and PR #1635 only after the container-validation workflow exists."

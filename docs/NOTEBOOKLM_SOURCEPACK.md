@@ -103,35 +103,41 @@ Boot output required fields:
 - Repo: `alanua/Skeleton`
 - Entrypoint: `projects/skeleton/PROJECT_MANIFEST.yaml`
 - State file: `projects/skeleton/STATE.yaml`
-- Status: `DRAFT_HANDOFF`
+- Status: `ACTIVE_RUNNER_QUEUE_REFRESH`
 - State role: `handoff_not_canon_truth`
-- Last verified: `2026-06-19`
-- Evidence source: Skeleton main after PR #863, the completed source audit from issue #1028, and private operator diagnostics on Runner/Codex/Hermes. Private quota details remain outside the public repository.
+- Last verified: `2026-07-09`
+- Evidence source: Public-safe GitHub connector state for alanua/Skeleton issues and pull requests during issue #1668. GitHub remains authoritative for issue labels, pull request state, runner state, and merge history; this STATE.yaml file is only a handoff summary. Private Aufmass/customer data, paths, quantities, source references, secrets and runtime artifacts are intentionally excluded.
 
 
 Summary:
 
 - Skeleton v2 lives in alanua/Skeleton.
-- GitHub issue queue, Runner, and Telegram notification route are operational.
-- Safe task issue publishing exists through scripts/publish_task_issue.py after PR 862.
-- Truncated task fence detection blocks malformed Runner task bodies after PR 860.
-- Hermes queue-audit packet docs/schema landed after PR 858.
-- BauClock PR 52 status is recorded after PR 863.
-- Issue #1028 completed the post-#1027 source audit and confirmed the current merged repairs and stale control issues.
-- At the 2026-06-19 verification point, no open runner:ready or runner:running items remained; normal future queue changes can create new ready or running items.
-- Issues #895 and #867 remain stale review/operator-gated control records, not executable Runner instructions.
-- Runner/Codex execution requires an explicit runtime preflight for execution user, authentication, supported model, and quota availability.
-- Codex must run from the Runner user context, not from root.
-- The current ChatGPT-account Codex setup requires a supported model configuration; unsupported Codex model defaults must fail closed before task execution.
-- Hermes must be quota-aware and bounded before further automation.
-- Gemini remains a future read-only reviewer/auditor candidate.
-- Antigravity remains a future lab-only worker candidate, not a production Runner executor.
+- GitHub issues, pull requests, labels and merge state are the task-state authority.
+- STATE.yaml is a handoff summary only and must not override GitHub queue state.
+- Issue #1668 is the running public-safe queue/status and NotebookLM sourcepack refresh.
+- PR #1659 merged the public-safe Aufmass room-to-contour matcher hardening on 2026-07-09.
+- PR #1661 merged the Home Edge v1 module inventory and ordering on 2026-07-09.
+- PR #1660 merged the code-task finalizer validation-environment sanitizer on 2026-07-09.
+- PR #1654 merged the Loop policy registry rebuild on 2026-07-09.
+- PR #1647 merged Universal Runner Slice 6C on 2026-07-09.
+- Issue #1665 is the completed retained Loop recovery implementation source; issue #1669 is the ready publish-only route for that retained worktree.
+- Issue #1666 is ready and must land before issue #1640 can update existing Home Edge draft PR #1638 without creating a duplicate PR.
+- PR #1638 remains an open Home Edge draft review target; issue #1640 is the approved protected repair task for that PR.
+- Issue #1667 is ready to rebuild the read-only container-package validation workflow.
+- PR #1632 and PR #1635 remain open draft validation-blocked package PRs until the container-validation workflow and exact-head validation are available.
+- Issue #1645 is superseded by issue #1668 and must not be reused as current queue text.
+- Queue status terms are RUNNING, READY, BLOCKED_VALIDATION, DRAFT_REVIEW, SUPERSEDED and BACKLOG.
+- NotebookLM is advisory; docs/NOTEBOOKLM_SOURCEPACK.md is generated deterministically from repository sources.
+- No issue or PR should be closed or merged by this state refresh task.
 
 Next actions:
 
-- Sync the live Runner checkout to main after approved Skeleton changes.
-- Add Codex runtime preflight before starting further Codex tasks.
-- Add Hermes quota-aware review rules before using Hermes for queue audits.
+- Finish issue #1668 with exactly the allowed public-safe docs/state/sourcepack scope.
+- Publish the retained Loop recovery worktree from issue #1665 through ready issue #1669.
+- Run issue #1666 to add the bounded existing-PR recovery route.
+- Use issue #1640 to update existing Home Edge draft PR #1638 only after issue #1666 lands.
+- Run issue #1667 to rebuild the read-only container-validation workflow.
+- Revalidate PR #1632 and PR #1635 only after the container-validation workflow exists.
 
 ### dios
 
@@ -378,27 +384,82 @@ The current runner queue status is mirrored below from `docs/RUNNER_QUEUE_STATUS
 ```markdown
 # Runner Queue Status
 
-Status: GitHub issue queue is working.
+Status authority: GitHub issues, pull requests, labels, and merge state are
+authoritative. This file is a public-safe operator mirror only. If this file and
+GitHub disagree, re-check GitHub before acting.
 
-Parser repair smoke status: 2026-06-12 docs-only Runner task completed normally.
+Last public-safe refresh: 2026-07-09 from GitHub connector state for
+`alanua/Skeleton`.
 
-Source audit status: 2026-06-19 issue #1028 completed the post-#1027 source
-audit. The audit preserved the current merged Runner repairs, classified stale
-control references, and did not approve new project execution.
+Privacy boundary: this document records only repository-safe issue and pull
+request metadata. It excludes private Aufmass/customer data, local paths,
+quantities, source documents, secrets, runtime artifacts, and connector-private
+outputs.
 
-Queue result at the verified point: no open `runner:ready` or `runner:running`
-items remained. This is a point-in-time result and normal future queue changes
-can create new ready or running items.
+## Current Queue Snapshot
 
-Stale control classification: issues #895 and #867 remain
-stale/review/operator-gated records. They are not executable Runner
-instructions.
+| Status | Item | Public-safe summary | Current action |
+| --- | --- | --- | --- |
+| `RUNNING` | Issue #1668 | Refresh queue/status documentation and deterministic NotebookLM sourcepack after the recovery merge batch. | Complete this docs/state/sourcepack task only; close or merge nothing from this task. |
+| `READY` | Issue #1669 | Publish the retained Loop recovery worktree produced by issue #1665. | Publish-only maintenance route for the completed two-file Loop recovery worktree. |
+| `READY` | Issue #1666 | Add the bounded retained-worktree update route for existing draft PRs. | Required before updating Home Edge PR #1638 through issue #1640. |
+| `READY` | Issue #1667 | Rebuild the read-only container-package validation workflow on current main. | Queued validation-only workflow task for public-safe package PRs. |
+| `BLOCKED_VALIDATION` | PR #1632 | Draft n8n SQLite package PR. | Hold for the container-validation workflow from issue #1667 and exact-head validation; no deploy or merge. |
+| `BLOCKED_VALIDATION` | PR #1635 | Draft Control Board replacement PR. | Hold for the container-validation workflow from issue #1667 and exact-head validation; no deploy or merge. |
+| `DRAFT_REVIEW` | PR #1638 / issue #1640 | Home Edge visual-capture repair remains an open draft PR with a protected update task. | Wait until issue #1666 provides the existing-PR recovery route, then update PR #1638 only through issue #1640. |
+| `SUPERSEDED` | Issue #1645 | Earlier retained queue/status worktree is superseded by issue #1668. | Retain as history; do not reuse stale text blindly. |
+| `SUPERSEDED` | Issue #1643 / PR #1560 | Stale Loop recovery path is replaced by issue #1665 after successful replacement. | Retain as reviewed historical context only. |
+| `BACKLOG` | Long-lived open planning/control issues | Items such as future DIOS, memory, Home Edge, and security cleanup work remain outside the immediate Runner chain. | Do not promote to executable Runner work without a fresh approved issue. |
 
-This document records the current operating status and runtime checklist for the
-Skeleton GitHub task queue Runner after the successful Telegram notification
-smoke test.
+## Completed Merge Batch
 
-## Validated flow
+The following pull requests are recorded as closed and merged on 2026-07-09:
+
+| PR | Title | Source issue/branch | Merged at |
+| --- | --- | --- | --- |
+| #1659 | Harden Aufmass room-to-contour matching on current main | Issue #1616 / `runner/issue-1616` | 2026-07-09T05:57:48Z |
+| #1661 | Inventory and order Home Edge v1 modules on current main | Issue #1650 / `runner/issue-1650` | 2026-07-09T05:58:05Z |
+| #1660 | Sanitize code-task finalizer validation environment | Issue #1634 / `runner/issue-1634` | 2026-07-09T05:59:16Z |
+| #1654 | Rebuild Loop policy registry on current main | Issue #1642 / `runner/issue-1642` | 2026-07-09T05:59:52Z |
+| #1647 | Complete Universal Runner Slice 6C on current main | Issue #1626 / `runner/issue-1626` | 2026-07-09T06:01:31Z |
+
+Public-safe completion note: the Aufmass matcher entry records only the merged
+repository-safe matcher work. It intentionally omits customer data, drawing
+source references, quantities, private paths, and local artifacts.
+
+## Active Chain
+
+1. `RUNNING`: issue #1668 refreshes the queue/status docs, Skeleton handoff
+   summary, and generated NotebookLM sourcepack.
+2. `READY`: issue #1669 publishes the retained completed work from issue #1665
+   into a draft PR. Issue #1665 itself is the Loop recovery implementation
+   source and is not the publication route.
+3. `READY`: issue #1666 adds the bounded route for updating an existing open
+   same-repository draft PR without creating a duplicate PR.
+4. `DRAFT_REVIEW`: issue #1640 then updates only existing Home Edge PR #1638
+   after #1666 exists and the exact protected-route preconditions are met.
+5. `READY`: issue #1667 rebuilds the read-only container-validation workflow.
+6. `BLOCKED_VALIDATION`: PRs #1632 and #1635 remain draft validation-blocked
+   until #1667 lands and exact-head validation completes.
+
+No issue or pull request should be closed, merged, marked ready, or otherwise
+mutated by this queue-status refresh task.
+
+## Status Definitions
+
+- `RUNNING`: GitHub currently labels the issue as active Runner work.
+- `READY`: GitHub currently labels the issue as ready for Runner pickup or
+  publish-only maintenance pickup.
+- `BLOCKED_VALIDATION`: an open draft PR is waiting on a required validation
+  capability or exact-head validation before review can proceed.
+- `DRAFT_REVIEW`: an open draft PR exists and is waiting for targeted review or
+  an approved repair route.
+- `SUPERSEDED`: an issue or PR is retained as history but replaced by a newer
+  approved route.
+- `BACKLOG`: public-safe planning or control material with no current Runner
+  execution authorization.
+
+## Validated Runner Flow
 
 1. Operator approves a bounded task.
 2. ChatGPT creates a GitHub issue with the `runner:ready` label.
@@ -432,14 +493,14 @@ one when an issue body contains `Runner Lane:` metadata and repeats that lane
 in its final `DONE` or `BLOCKED` issue report. The lifecycle labels still drive
 pickup and completion; lane labels do not route or parallelize Runner work.
 
-## Operator rule
+## Operator Rule
 
 Do not touch the repo while an issue is `runner:running`.
 
 Do not run `git checkout`, `git pull`, `git reset`, `pytest`, cleanup with `rm`,
 or `systemctl restart` while a task is running.
 
-## Post-merge runtime sync checklist
+## Post-Merge Runtime Sync Checklist
 
 1. Stop the timer and service before syncing runtime files manually.
 2. Update the repo as the `agent` user, not as `root`.
@@ -452,32 +513,7 @@ or `systemctl restart` while a task is running.
 9. Verify the service still has the expected `EnvironmentFile` line.
 10. Verify the timer is active.
 
-## Telegram notification status
-
-- Telegram configuration lives only in the local Runner environment file.
-- Do not put credentials in the repo, issues, or comments.
-- Smoke test issue #31 confirmed the `DONE` notification.
-- 2026-05-22: Worktree prompt fix merged; Telegram approve -> Runner merge pilot ready.
-- Pilot-ready: Telegram approve can request the bounded Runner merge path.
-- Signed pilot: callback HMAC config is active for Telegram approve.
-- Telegram PR card approve writes the signed head-bound approval record Runner
-  verifies before its bounded squash merge path; routine approval does not need
-  an operator GitHub comment or merge retry.
-
-## Cross-repo merge status
-
-- 2026-06-07: BauClock PR 52 in `alanua/bauclock` was validated by Skeleton
-  issue 823 and manually merged at
-  `66c72948acc252ef8310d3c686ab73f840b64cd8`. No deploy was performed, and
-  the production DB was not touched.
-
-## Smoke test procedure
-
-1. Create a no-op Runner issue.
-2. Expect a Telegram message with the repository, issue number, and status.
-3. Verify the GitHub issue comment and final label.
-
-## Recovery notes
+## Recovery Notes
 
 - Codex delivery status is taken from the final report heading or explicit
   `RESULT: DONE` / `RESULT: NEEDS_OPERATOR` contract line, not from ordinary
@@ -487,6 +523,8 @@ or `systemctl restart` while a task is running.
   `Maintenance Task ID: publish_existing_issue_worktree` with explicit
   `Target Repository`, `Source Issue`, `Base Branch`, `Output Branch`,
   `Draft PR: true`, and `Allowed Files` metadata.
+- To update an existing draft PR from a retained worktree, use only the bounded
+  route added by the approved existing-PR recovery task after it is merged.
 - If an issue is stuck at `runner:running`, check `systemctl status` and
   `journalctl` for the Runner service.
 - If a stale notification points to a closed issue or pull request, recreate the
@@ -497,8 +535,8 @@ or `systemctl restart` while a task is running.
   creating more tasks.
 - If an issue is blocked due to no commits, check whether the repo was touched
   while the Runner was active.
-- If local `main` diverges after a squash merge, create a backup branch and reset
-  `main` to `origin/main`.
+- If local `main` diverges after a squash merge, create a backup branch and
+  reset `main` to `origin/main`.
 ```
 
 ## Runner Setup Reference
