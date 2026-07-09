@@ -100,9 +100,32 @@ def test_changed_path_detection_runs_only_relevant_packages() -> None:
     text = workflow_text()
     assert 'grep -Eq \'^deploy/n8n/\'' in text
     assert 'grep -Eq \'^deploy/control_board/\'' in text
+    assert 'n8n_changed=true' in text
+    assert 'control_board_changed=true' in text
+    assert 'maintenance_changed=true' in text
     assert 'n8n=true' in text
     assert 'control_board=true' in text
     assert 'if [[ "$EVENT_NAME" == "workflow_dispatch" ]]' in text
+
+
+def test_package_presence_gates_maintenance_and_manual_dispatch_scope() -> None:
+    text = workflow_text()
+
+    assert 'if [[ -d deploy/n8n ]]; then' in text
+    assert 'if [[ -d deploy/control_board ]]; then' in text
+    assert 'n8n=$n8n_present' in text
+    assert 'control_board=$control_board_present' in text
+    assert 'no registered container packages exist at requested commit' in text
+    assert (
+        '[[ "$maintenance_changed" == "true" && "$n8n_changed" == "false" '
+        '&& "$n8n_present" == "true" ]]'
+    ) in text
+    assert (
+        '[[ "$maintenance_changed" == "true" && "$control_board_changed" == "false" '
+        '&& "$control_board_present" == "true" ]]'
+    ) in text
+    assert 'echo "package_presence n8n=$n8n_present control_board=$control_board_present"' in text
+    assert 'echo "package_scope n8n=$n8n control_board=$control_board"' in text
 
 
 def test_n8n_required_validation_steps_are_present() -> None:
@@ -119,6 +142,7 @@ def test_n8n_required_validation_steps_are_present() -> None:
         "deadline=$((SECONDS + 120))",
         "n8n_health_state",
         "docker compose -f \"$compose_file\" restart",
+        "deadline=$((SECONDS + 120))",
         "n8n_restart_persistence",
     ]
     for snippet in required:
@@ -153,12 +177,25 @@ def test_loopback_and_docker_safety_checks_are_present_for_both_packages() -> No
     assert text.count('source in {"/", "/etc", "/home", "/root", "/var"}') == 2
 
 
+def test_compose_health_waits_require_all_services_running_and_healthy() -> None:
+    text = workflow_text()
+
+    assert text.count('docker compose -f "$compose_file" ps --all --format json') == 3
+    assert text.count('bad_health=sum(1 for record in records if record.get("Health", "") not in {"", "healthy"})') == 3
+    assert text.count('running=sum(1 for record in records if record.get("State") == "running")') == 3
+    assert text.count('[[ "$total" != "0" && "$running" == "$total" && "$bad_health" == "0" ]]') == 3
+    assert "sleep 10" not in text
+    assert 'after_restart="$(docker compose' not in text
+
+
 def test_logs_are_limited_to_aggregate_status_digests_health_and_totals() -> None:
     text = workflow_text()
 
     assert "cat \"$tmp_config\"" not in text
     assert "docker compose -f \"$compose_file\" logs" not in text
     assert "printenv" not in text
+    assert 'echo "package_presence n8n=$n8n_present control_board=$control_board_present"' in text
+    assert 'echo "package_scope n8n=$n8n control_board=$control_board"' in text
     assert re.search(r"echo \"n8n_image_digest", text)
     assert re.search(r"echo \"control_board_base_image_digest", text)
     assert re.search(r"echo \"n8n_health_state", text)
@@ -176,6 +213,10 @@ def test_documentation_matches_validation_boundary() -> None:
         "does not write caches or upload artifacts",
         "Manual dispatch accepts one input, `commit_sha`",
         "exact 40-character SHA",
+        "package-presence and package-scope booleans",
+        "every registered package present at the requested commit",
+        "fails closed if the changed package directory is unexpectedly absent",
+        "every non-empty Compose health value to be `healthy`",
         "loopback-only",
         "unconditional cleanup",
         "zero Control Board skips",

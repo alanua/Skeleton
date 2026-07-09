@@ -76,30 +76,55 @@ jobs:
           set -euo pipefail
           n8n=false
           control_board=false
+          n8n_changed=false
+          control_board_changed=false
+          maintenance_changed=false
+          n8n_present=false
+          control_board_present=false
+
+          if [[ -d deploy/n8n ]]; then
+            n8n_present=true
+          fi
+          if [[ -d deploy/control_board ]]; then
+            control_board_present=true
+          fi
 
           if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
-            n8n=true
-            control_board=true
+            if [[ "$n8n_present" == "false" && "$control_board_present" == "false" ]]; then
+              echo "no registered container packages exist at requested commit" >&2
+              exit 1
+            fi
+            n8n=$n8n_present
+            control_board=$control_board_present
           else
             changed_files="$(mktemp)"
             git diff --name-only "$BASE_SHA" "$HEAD_SHA" > "$changed_files"
             if grep -Eq '^(docs/CONTAINER_PACKAGE_VALIDATION.md|tests/test_container_package_validation_workflow.py|\.github/workflows/container-package-validation\.yml)$' "$changed_files"; then
-              n8n=true
-              control_board=true
+              maintenance_changed=true
             fi
             if grep -Eq '^deploy/n8n/' "$changed_files"; then
+              n8n_changed=true
               n8n=true
             fi
             if grep -Eq '^deploy/control_board/' "$changed_files"; then
+              control_board_changed=true
               control_board=true
             fi
             rm -f "$changed_files"
+
+            if [[ "$maintenance_changed" == "true" && "$n8n_changed" == "false" && "$n8n_present" == "true" ]]; then
+              n8n=true
+            fi
+            if [[ "$maintenance_changed" == "true" && "$control_board_changed" == "false" && "$control_board_present" == "true" ]]; then
+              control_board=true
+            fi
           fi
 
           {
             echo "n8n=$n8n"
             echo "control_board=$control_board"
           } >> "$GITHUB_OUTPUT"
+          echo "package_presence n8n=$n8n_present control_board=$control_board_present"
           echo "package_scope n8n=$n8n control_board=$control_board"
 
   validate-n8n:
@@ -202,10 +227,9 @@ jobs:
           deadline=$((SECONDS + 120))
           healthy=0
           while (( SECONDS < deadline )); do
-            running="$(docker compose -f "$compose_file" ps --services --filter status=running | wc -l | tr -d ' ')"
-            unhealthy="$(docker compose -f "$compose_file" ps --services --filter status=exited | wc -l | tr -d ' ')"
-            health="$(docker compose -f "$compose_file" ps --format json | python3 -c 'import json,sys; print(" ".join(sorted({json.loads(line).get("Health", "") for line in sys.stdin if line.strip()})))')"
-            if [[ "$unhealthy" == "0" && "$running" != "0" ]]; then
+            status="$(docker compose -f "$compose_file" ps --all --format json | python3 -c 'import json,sys; raw=sys.stdin.read().strip(); records=[] if not raw else (json.loads(raw) if raw.startswith("[") else [json.loads(line) for line in raw.splitlines() if line.strip()]); total=len(records); running=sum(1 for record in records if record.get("State") == "running"); bad_health=sum(1 for record in records if record.get("Health", "") not in {"", "healthy"}); health_values=" ".join(sorted({record.get("Health", "") for record in records if record.get("Health", "")})) or "none"; print(f"{total} {running} {bad_health} {health_values}")')"
+            read -r total running bad_health health <<< "$status"
+            if [[ "$total" != "0" && "$running" == "$total" && "$bad_health" == "0" ]]; then
               healthy=1
               break
             fi
@@ -218,13 +242,22 @@ jobs:
           echo "n8n_health_state running services=$running health=${health:-none}"
 
           docker compose -f "$compose_file" restart
-          sleep 10
-          after_restart="$(docker compose -f "$compose_file" ps --services --filter status=running | wc -l | tr -d ' ')"
-          if [[ "$after_restart" == "0" ]]; then
+          deadline=$((SECONDS + 120))
+          healthy=0
+          while (( SECONDS < deadline )); do
+            status="$(docker compose -f "$compose_file" ps --all --format json | python3 -c 'import json,sys; raw=sys.stdin.read().strip(); records=[] if not raw else (json.loads(raw) if raw.startswith("[") else [json.loads(line) for line in raw.splitlines() if line.strip()]); total=len(records); running=sum(1 for record in records if record.get("State") == "running"); bad_health=sum(1 for record in records if record.get("Health", "") not in {"", "healthy"}); health_values=" ".join(sorted({record.get("Health", "") for record in records if record.get("Health", "")})) or "none"; print(f"{total} {running} {bad_health} {health_values}")')"
+            read -r total running bad_health health <<< "$status"
+            if [[ "$total" != "0" && "$running" == "$total" && "$bad_health" == "0" ]]; then
+              healthy=1
+              break
+            fi
+            sleep 5
+          done
+          if [[ "$healthy" != "1" ]]; then
             echo "n8n_restart_persistence failed" >&2
             exit 1
           fi
-          echo "n8n_restart_persistence running_services=$after_restart"
+          echo "n8n_restart_persistence running services=$running health=${health:-none}"
 
   validate-control-board:
     name: Validate Control Board package
@@ -338,10 +371,9 @@ jobs:
           deadline=$((SECONDS + 120))
           healthy=0
           while (( SECONDS < deadline )); do
-            running="$(docker compose -f "$compose_file" ps --services --filter status=running | wc -l | tr -d ' ')"
-            exited="$(docker compose -f "$compose_file" ps --services --filter status=exited | wc -l | tr -d ' ')"
-            health="$(docker compose -f "$compose_file" ps --format json | python3 -c 'import json,sys; print(" ".join(sorted({json.loads(line).get("Health", "") for line in sys.stdin if line.strip()})))')"
-            if [[ "$exited" == "0" && "$running" != "0" ]]; then
+            status="$(docker compose -f "$compose_file" ps --all --format json | python3 -c 'import json,sys; raw=sys.stdin.read().strip(); records=[] if not raw else (json.loads(raw) if raw.startswith("[") else [json.loads(line) for line in raw.splitlines() if line.strip()]); total=len(records); running=sum(1 for record in records if record.get("State") == "running"); bad_health=sum(1 for record in records if record.get("Health", "") not in {"", "healthy"}); health_values=" ".join(sorted({record.get("Health", "") for record in records if record.get("Health", "")})) or "none"; print(f"{total} {running} {bad_health} {health_values}")')"
+            read -r total running bad_health health <<< "$status"
+            if [[ "$total" != "0" && "$running" == "$total" && "$bad_health" == "0" ]]; then
               healthy=1
               break
             fi
