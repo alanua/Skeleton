@@ -143,13 +143,13 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.sha }}
           persist-credentials: false
 
-      - name: Install bounded n8n test dependencies and validate shell syntax/focused tests
+      - name: Install bounded n8n test dependencies and run focused tests as UID/GID 1000
         run: |
           set -euo pipefail
           test -d "$PACKAGE_DIR"
           python3 -m venv "$RUNNER_TEMP/n8n-test-venv"
-          "$RUNNER_TEMP/n8n-test-venv/bin/python3" -m pip install --upgrade pip
-          "$RUNNER_TEMP/n8n-test-venv/bin/python3" -m pip install 'PyYAML>=6.0.0,<7.0.0' 'pytest>=8.0.0,<9.0.0'
+          n8n_python="$RUNNER_TEMP/n8n-test-venv/bin/python3"
+          "$n8n_python" -m pip install --disable-pip-version-check 'PyYAML>=6.0.0,<7.0.0' 'pytest>=8.0.0,<9.0.0'
 
           shell_count=0
           while IFS= read -r -d '' script; do
@@ -162,17 +162,44 @@ jobs:
             echo "n8n focused tests were not found" >&2
             exit 1
           fi
+
           uid_gid_test_home="$RUNNER_TEMP/n8n-uid-gid-1000-home"
-          mkdir -p "$uid_gid_test_home"
-          sudo chown 1000:1000 "$uid_gid_test_home"
+          uid_gid_test_tmp="$uid_gid_test_home/tmp"
+          sudo install -d -m 700 -o 1000 -g 1000 "$uid_gid_test_home" "$uid_gid_test_tmp"
           sudo env -i \
             HOME="$uid_gid_test_home" \
+            TMPDIR="$uid_gid_test_tmp" \
             PATH="$RUNNER_TEMP/n8n-test-venv/bin:/usr/bin:/bin" \
             PYTHONPATH="$GITHUB_WORKSPACE" \
+            PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
             SKELETON_N8N_UID_GID_TEST_ROOT="$uid_gid_test_home" \
-            unshare --net --setgid 1000 --setuid 1000 -- \
+            setpriv --reuid=1000 --regid=1000 --clear-groups -- \
             python3 -m pytest -p no:cacheprovider "${focused_tests[@]}"
           echo "n8n_shell_files=$shell_count n8n_focused_test_files=${#focused_tests[@]}"
+
+      - name: Prepare synthetic n8n Compose environment
+        run: |
+          set -euo pipefail
+          env_file="$RUNNER_TEMP/n8n-validation.env"
+          data_dir="$RUNNER_TEMP/n8n-data"
+          backup_dir="$RUNNER_TEMP/n8n-backups"
+          sudo install -d -m 700 -o 1000 -g 1000 "$data_dir" "$backup_dir"
+          umask 077
+          cat > "$env_file" <<EOF
+          COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME
+          N8N_COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME
+          N8N_EDITOR_PORT=5678
+          N8N_HOST=127.0.0.1
+          N8N_DATA_DIR=$data_dir
+          N8N_BACKUP_DIR=$backup_dir
+          N8N_ENCRYPTION_KEY=synthetic_validation_key_32_chars_minimum
+          EOF
+          chmod 600 "$env_file"
+          {
+            echo "N8N_VALIDATION_ENV_FILE=$env_file"
+            echo "N8N_VALIDATION_DATA_DIR=$data_dir"
+            echo "N8N_VALIDATION_BACKUP_DIR=$backup_dir"
+          } >> "$GITHUB_ENV"
 
       - name: Inspect pinned n8n image digests and compose config
         run: |
@@ -183,8 +210,8 @@ jobs:
             exit 1
           fi
 
-          docker compose -f "$compose_file" config --quiet
-          mapfile -t images < <(docker compose -f "$compose_file" config --images | sort -u)
+          docker compose --env-file "$N8N_VALIDATION_ENV_FILE" -f "$compose_file" config --quiet
+          mapfile -t images < <(docker compose --env-file "$N8N_VALIDATION_ENV_FILE" -f "$compose_file" config --images | sort -u)
           if [[ "${#images[@]}" -eq 0 ]]; then
             echo "n8n compose config produced no images" >&2
             exit 1
@@ -203,13 +230,14 @@ jobs:
           compose_file="$(find "$PACKAGE_DIR" -maxdepth 2 -type f \( -name 'compose.yml' -o -name 'compose.yaml' -o -name 'docker-compose.yml' -o -name 'docker-compose.yaml' \) | sort | head -n 1)"
           tmp_config="$(mktemp)"
           cleanup() {
-            docker compose -f "$compose_file" down --volumes --remove-orphans >/dev/null 2>&1 || true
+            docker compose --env-file "$N8N_VALIDATION_ENV_FILE" -f "$compose_file" down --volumes --remove-orphans >/dev/null 2>&1 || true
             docker network prune --force --filter "label=com.docker.compose.project=$COMPOSE_PROJECT_NAME" >/dev/null 2>&1 || true
-            rm -f "$tmp_config"
+            rm -f "$tmp_config" "$N8N_VALIDATION_ENV_FILE"
+            sudo rm -rf "$N8N_VALIDATION_DATA_DIR" "$N8N_VALIDATION_BACKUP_DIR"
           }
           trap cleanup EXIT
 
-          docker compose -f "$compose_file" config > "$tmp_config"
+          docker compose --env-file "$N8N_VALIDATION_ENV_FILE" -f "$compose_file" config > "$tmp_config"
           python3 - "$tmp_config" <<'PY'
           import pathlib
           import sys
@@ -235,11 +263,11 @@ jobs:
                       raise SystemExit(f"{name} uses a broad host mount")
           PY
 
-          docker compose -f "$compose_file" up -d --remove-orphans
+          docker compose --env-file "$N8N_VALIDATION_ENV_FILE" -f "$compose_file" up -d --remove-orphans
           deadline=$((SECONDS + 120))
           healthy=0
           while (( SECONDS < deadline )); do
-            status="$(docker compose -f "$compose_file" ps --all --format json | python3 -c 'import json,sys; raw=sys.stdin.read().strip(); records=[] if not raw else (json.loads(raw) if raw.startswith("[") else [json.loads(line) for line in raw.splitlines() if line.strip()]); total=len(records); running=sum(1 for record in records if record.get("State") == "running"); bad_health=sum(1 for record in records if record.get("Health", "") not in {"", "healthy"}); health_values=" ".join(sorted({record.get("Health", "") for record in records if record.get("Health", "")})) or "none"; print(f"{total} {running} {bad_health} {health_values}")')"
+            status="$(docker compose --env-file "$N8N_VALIDATION_ENV_FILE" -f "$compose_file" ps --all --format json | python3 -c 'import json,sys; raw=sys.stdin.read().strip(); records=[] if not raw else (json.loads(raw) if raw.startswith("[") else [json.loads(line) for line in raw.splitlines() if line.strip()]); total=len(records); running=sum(1 for record in records if record.get("State") == "running"); bad_health=sum(1 for record in records if record.get("Health", "") not in {"", "healthy"}); health_values=" ".join(sorted({record.get("Health", "") for record in records if record.get("Health", "")})) or "none"; print(f"{total} {running} {bad_health} {health_values}")')"
             read -r total running bad_health health <<< "$status"
             if [[ "$total" != "0" && "$running" == "$total" && "$bad_health" == "0" ]]; then
               healthy=1
@@ -253,11 +281,11 @@ jobs:
           fi
           echo "n8n_health_state running services=$running health=${health:-none}"
 
-          docker compose -f "$compose_file" restart
+          docker compose --env-file "$N8N_VALIDATION_ENV_FILE" -f "$compose_file" restart
           deadline=$((SECONDS + 120))
           healthy=0
           while (( SECONDS < deadline )); do
-            status="$(docker compose -f "$compose_file" ps --all --format json | python3 -c 'import json,sys; raw=sys.stdin.read().strip(); records=[] if not raw else (json.loads(raw) if raw.startswith("[") else [json.loads(line) for line in raw.splitlines() if line.strip()]); total=len(records); running=sum(1 for record in records if record.get("State") == "running"); bad_health=sum(1 for record in records if record.get("Health", "") not in {"", "healthy"}); health_values=" ".join(sorted({record.get("Health", "") for record in records if record.get("Health", "")})) or "none"; print(f"{total} {running} {bad_health} {health_values}")')"
+            status="$(docker compose --env-file "$N8N_VALIDATION_ENV_FILE" -f "$compose_file" ps --all --format json | python3 -c 'import json,sys; raw=sys.stdin.read().strip(); records=[] if not raw else (json.loads(raw) if raw.startswith("[") else [json.loads(line) for line in raw.splitlines() if line.strip()]); total=len(records); running=sum(1 for record in records if record.get("State") == "running"); bad_health=sum(1 for record in records if record.get("Health", "") not in {"", "healthy"}); health_values=" ".join(sorted({record.get("Health", "") for record in records if record.get("Health", "")})) or "none"; print(f"{total} {running} {bad_health} {health_values}")')"
             read -r total running bad_health health <<< "$status"
             if [[ "$total" != "0" && "$running" == "$total" && "$bad_health" == "0" ]]; then
               healthy=1
@@ -287,37 +315,32 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.sha }}
           persist-credentials: false
 
-      - name: Install isolated dev environment and run focused tests
+      - name: Install explicit Control Board dependencies and run focused tests
         run: |
           set -euo pipefail
           test -d "$PACKAGE_DIR"
           python3 -m venv "$RUNNER_TEMP/control-board-venv"
-          source "$RUNNER_TEMP/control-board-venv/bin/activate"
-          python3 -m pip install --upgrade pip
-          dependency_file="$(mktemp)"
-          cleanup_dependencies() { rm -f "$dependency_file"; }
-          trap cleanup_dependencies EXIT
-          python3 - <<'PY' > "$dependency_file"
-          import pathlib
-          import tomllib
+          control_board_python="$RUNNER_TEMP/control-board-venv/bin/python3"
+          "$control_board_python" -m pip install --disable-pip-version-check \
+            'PyYAML>=6.0.0,<7.0.0' \
+            'pytest>=8.0.0,<9.0.0' \
+            'jsonschema>=4.22.0,<5.0.0' \
+            'fastapi==0.116.1' \
+            'jinja2==3.1.6' \
+            'uvicorn==0.35.0' \
+            'httpx==0.28.1'
 
-          pyproject = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
-          for dependency in pyproject["project"].get("dependencies", []):
-              print(dependency)
-          for dependency in pyproject["project"]["optional-dependencies"]["dev"]:
-              print(dependency)
-          PY
-          python3 -m pip install -r "$dependency_file"
-          pytest_log="$(mktemp)"
-          cleanup_log() { rm -f "$pytest_log" "$dependency_file"; }
-          trap cleanup_log EXIT
           mapfile -t focused_tests < <({ find tests -type f \( -name '*control_board*.py' -o -name '*controlboard*.py' \); find "$PACKAGE_DIR" -type f -name 'test_*.py'; } 2>/dev/null | sort -u)
           if [[ "${#focused_tests[@]}" -eq 0 ]]; then
             echo "control board focused tests were not found" >&2
             exit 1
           fi
-          python3 -m pytest "${focused_tests[@]}" -rs | tee "$pytest_log"
-          if grep -Eq '[0-9]+ skipped' "$pytest_log"; then
+          pytest_log="$(mktemp)"
+          cleanup_log() { rm -f "$pytest_log"; }
+          trap cleanup_log EXIT
+          PYTHONPATH="$GITHUB_WORKSPACE" PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+            "$control_board_python" -m pytest -p no:cacheprovider "${focused_tests[@]}" -rs | tee "$pytest_log"
+          if grep -Eq '[1-9][0-9]* skipped' "$pytest_log"; then
             echo "control_board_skips_detected" >&2
             exit 1
           fi
