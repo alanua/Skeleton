@@ -193,6 +193,7 @@ INSPECT_ISSUE_WORKTREE_FOR_PUBLISH = "inspect_issue_worktree_for_publish"
 PUBLISH_ISSUE_WORKTREE_PR = "publish_issue_worktree_pr"
 PUBLISH_EXISTING_ISSUE_WORKTREE = "publish_existing_issue_worktree"
 PUBLISH_ISSUE_WORKTREE_TO_EXISTING_PR = "publish_issue_worktree_to_existing_pr"
+OVERLAY_REGISTERED_WORKTREE_TO_EXISTING_PR = "overlay_registered_worktree_to_existing_pr"
 PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR = "publish_target_project_issue_worktree_pr"
 PUBLISH_CONTAINER_VALIDATION_WORKTREE = "publish_container_validation_worktree"
 QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES = (
@@ -229,6 +230,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         PUBLISH_ISSUE_WORKTREE_PR,
         PUBLISH_EXISTING_ISSUE_WORKTREE,
         PUBLISH_ISSUE_WORKTREE_TO_EXISTING_PR,
+        OVERLAY_REGISTERED_WORKTREE_TO_EXISTING_PR,
         PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR,
         PUBLISH_CONTAINER_VALIDATION_WORKTREE,
         QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES,
@@ -242,6 +244,7 @@ PUBLISH_ONLY_MAINTENANCE_TASK_IDS = frozenset(
         PUBLISH_ISSUE_WORKTREE_PR,
         PUBLISH_EXISTING_ISSUE_WORKTREE,
         PUBLISH_ISSUE_WORKTREE_TO_EXISTING_PR,
+        OVERLAY_REGISTERED_WORKTREE_TO_EXISTING_PR,
         PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR,
         PUBLISH_CONTAINER_VALIDATION_WORKTREE,
     )
@@ -403,6 +406,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "approved_head_sha",
         "artifact_count",
         "base_branch",
+        "base_ref_oid",
         "base_ref",
         "base_sha",
         "behind_by",
@@ -427,6 +431,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "compare_state",
         "compare_status",
         "canonical_write_enabled",
+        "constructed_head_sha",
         "current_branch",
         "decision_records_skipped",
         "decision_records_written",
@@ -457,6 +462,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "expected_pr_head_branch",
         "expected_pr_head_sha",
         "expected_source_branch",
+        "expected_target_branch",
+        "expected_target_head_sha",
         "exit_code",
         "explicit_recovery_route",
         "file_on_main",
@@ -534,6 +541,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "project_state_existing",
         "project_state_written",
         "pre_push_pr_changed_files_count",
+        "pre_push_pr_file_count",
         "public_safe",
         "protected_worktrees_count",
         "pushed_head_sha",
@@ -541,6 +549,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "quality_score",
         "quality_threshold",
         "pull_request",
+        "recovery_packet",
         "python_version",
         "reason",
         "recovery_artifact_status",
@@ -602,6 +611,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "tool_git",
         "tool_python3",
         "tracked_files_match_allowlist",
+        "target_branch",
+        "target_head_sha",
         "unexpected_untracked_files",
         "unexpected_untracked_files_count",
         "new_pr_changed_files_count",
@@ -762,6 +773,29 @@ class IssueWorktreeExistingPrPublishRequest:
     expected_pr_head_sha: str
     expected_pr_head_branch: str
     allowed_files: frozenset[str]
+
+
+@dataclass(frozen=True)
+class RegisteredWorktreeOverlayPacket:
+    packet_id: str
+    source_issue: int
+    source_branch: str
+    pr_number: int
+    target_branch: str
+    target_head_sha: str
+    allowed_files: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class RegisteredWorktreeOverlayRequest:
+    packet: RegisteredWorktreeOverlayPacket
+    operator_approval: str
+
+
+@dataclass(frozen=True)
+class RegisteredWorktreeOverlaySourceSpec:
+    path: str
+    blob_sha: str | None = None
 
 
 @dataclass(frozen=True)
@@ -8076,6 +8110,44 @@ _EXISTING_PR_PUBLISH_ALLOWED_METADATA_FIELDS = frozenset(
 )
 
 
+REGISTERED_WORKTREE_OVERLAY_PACKETS: dict[str, RegisteredWorktreeOverlayPacket] = {
+    "home_edge_1640_to_pr_1638": RegisteredWorktreeOverlayPacket(
+        packet_id="home_edge_1640_to_pr_1638",
+        source_issue=1640,
+        source_branch="runner/issue-1640",
+        pr_number=1638,
+        target_branch="runner/issue-1630",
+        target_head_sha="1f6c0463682f7c36a8b3f3e44182571d8323ee19",
+        allowed_files=(
+            "core/home_edge/visual_capture.py",
+            "scripts/runner_poll_github_tasks.py",
+            "tests/test_home_edge_visual_capture.py",
+            "tests/test_runner_poll_github_tasks.py",
+            "tests/test_home_edge_profile.py",
+        ),
+    ),
+    "docs_1668_to_pr_1670": RegisteredWorktreeOverlayPacket(
+        packet_id="docs_1668_to_pr_1670",
+        source_issue=1668,
+        source_branch="runner/issue-1668",
+        pr_number=1670,
+        target_branch="runner/issue-1668",
+        target_head_sha="6efc9e389c50b59a46866ed041a914aa404a40b0",
+        allowed_files=(
+            "docs/NOTEBOOKLM_SOURCEPACK.md",
+            "docs/OPEN_WORK_TRIAGE.md",
+            "docs/RUNNER_QUEUE_STATUS.md",
+            "projects/skeleton/STATE.yaml",
+        ),
+    ),
+}
+
+
+_REGISTERED_WORKTREE_OVERLAY_ALLOWED_METADATA_FIELDS = frozenset(
+    ("Mode", "Maintenance Task ID", "Recovery Packet", "Operator Approval")
+)
+
+
 def _metadata_field_names(metadata: str) -> frozenset[str]:
     names: set[str] = set()
     for line in (metadata or "").splitlines():
@@ -9099,6 +9171,607 @@ def _existing_pr_publish_post_push_block_reason(
     if _existing_pr_publish_pr_url(pr_state) is None:
         return "post_push_pr_url_unavailable"
     return None
+
+
+def _registered_worktree_overlay_metadata(
+    body: str,
+) -> tuple[RegisteredWorktreeOverlayRequest | None, str | None]:
+    metadata = _metadata_before_task(body)
+    fields = _metadata_field_names(metadata)
+    if fields != _REGISTERED_WORKTREE_OVERLAY_ALLOWED_METADATA_FIELDS:
+        return None, "unsupported_metadata_field"
+    if _body_field(metadata, "Mode") != RUNTIME_MAINTENANCE_MODE:
+        return None, "invalid_mode"
+    if _body_field(metadata, "Maintenance Task ID") != OVERLAY_REGISTERED_WORKTREE_TO_EXISTING_PR:
+        return None, "unsupported_maintenance_task_id"
+    packet_id = _body_field(metadata, "Recovery Packet")
+    packet = REGISTERED_WORKTREE_OVERLAY_PACKETS.get(packet_id or "")
+    if packet is None:
+        return None, "unknown_recovery_packet"
+    operator_approval = _body_field(metadata, "Operator Approval")
+    if operator_approval != OVERLAY_REGISTERED_WORKTREE_TO_EXISTING_PR:
+        return None, "missing_operator_approval"
+    return RegisteredWorktreeOverlayRequest(packet=packet, operator_approval=operator_approval), None
+
+
+def _registered_skeleton_worktree_root() -> Path:
+    project_tree = load_runner_project_tree()
+    projects = project_tree.get("projects") if isinstance(project_tree, dict) else None
+    project = projects.get("skeleton") if isinstance(projects, dict) else None
+    if not isinstance(project, dict):
+        raise ValueError("registered Skeleton project is missing")
+    if project.get("repo") != REPO or project.get("public") is not True:
+        raise ValueError("registered Skeleton project metadata mismatch")
+    if not isinstance(project.get("worktree_root"), str):
+        raise ValueError("registered Skeleton worktree root is missing")
+    return Path(project["worktree_root"])
+
+
+def _registered_worktree_overlay_source_path(
+    packet: RegisteredWorktreeOverlayPacket,
+) -> Path:
+    root = _registered_skeleton_worktree_root().resolve(strict=False)
+    candidate = (root / f"issue-{packet.source_issue}").resolve(strict=False)
+    if candidate == root or candidate.name != f"issue-{packet.source_issue}":
+        raise ValueError("registered source worktree path mismatch")
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("registered source worktree outside root") from exc
+    return candidate
+
+
+def _git_with_temporary_index(command: list[str], cwd: Path, index_path: Path) -> tuple[int, str]:
+    environment = dict(os.environ)
+    environment["GIT_INDEX_FILE"] = str(index_path)
+    token = _RUN_COMMAND_ENV_OVERRIDE.set(environment)
+    try:
+        return run_command(command, cwd=cwd)
+    finally:
+        _RUN_COMMAND_ENV_OVERRIDE.reset(token)
+
+
+def _git_changed_files_between(
+    base_sha: str, head_sha: str, cwd: Path
+) -> tuple[int, frozenset[str]]:
+    code, output = run_command(
+        ["git", "diff", "--name-only", base_sha, head_sha, "--"], cwd=cwd
+    )
+    if code != 0:
+        return code, frozenset()
+    return 0, frozenset(_git_status_path_lines(output))
+
+
+def _registered_worktree_overlay_pr_state(
+    request: IssueWorktreeExistingPrPublishRequest, worktree_path: Path
+) -> dict[str, Any]:
+    code, output = run_command(
+        [
+            "gh",
+            "pr",
+            "view",
+            str(request.pr_number),
+            "--repo",
+            request.repository,
+            "--json",
+            (
+                "number,state,isDraft,baseRefName,baseRefOid,headRefName,headRefOid,"
+                "headRepository,headRepositoryOwner,url,files"
+            ),
+        ],
+        cwd=worktree_path,
+    )
+    if code != 0:
+        raise RuntimeError("gh pr view failed")
+    parsed = json.loads(output or "{}")
+    if not isinstance(parsed, dict):
+        raise RuntimeError("gh pr view returned non-object JSON")
+    return parsed
+
+
+def _registered_worktree_overlay_base_ref_oid(pr_state: dict[str, Any]) -> str | None:
+    base_ref_oid = str(pr_state.get("baseRefOid") or "").lower()
+    if _HEAD_SHA_RE.fullmatch(base_ref_oid) is None:
+        return None
+    return base_ref_oid
+
+
+def _registered_worktree_overlay_post_push_block_reason(
+    request: IssueWorktreeExistingPrPublishRequest,
+    before_state: dict[str, Any],
+    after_state: dict[str, Any],
+    pushed_head_sha: str,
+) -> str | None:
+    reason = _existing_pr_publish_post_push_block_reason(
+        request, after_state, pushed_head_sha
+    )
+    if reason is not None:
+        return reason
+    stable_fields = ("number", "state", "isDraft", "baseRefName", "baseRefOid", "headRefName")
+    for field in stable_fields:
+        if after_state.get(field) != before_state.get(field):
+            return f"post_push_pr_{field}_changed"
+    if _head_repository_name_with_owner(after_state) != _head_repository_name_with_owner(before_state):
+        return "post_push_pr_head_repository_changed"
+    if _registered_worktree_overlay_base_ref_oid(after_state) is None:
+        return "post_push_pr_base_ref_oid_invalid"
+    return None
+
+
+def _registered_worktree_overlay_safe_source_file(
+    packet: RegisteredWorktreeOverlayPacket,
+    source_path: Path,
+    relative_path: str,
+) -> bool:
+    if relative_path not in packet.allowed_files:
+        return False
+    if not _safe_issue_publish_file_path(relative_path):
+        return False
+    source_root = source_path.resolve(strict=False)
+    candidate = source_path / relative_path
+    resolved_candidate = candidate.resolve(strict=False)
+    try:
+        resolved_candidate.relative_to(source_root)
+    except ValueError:
+        return False
+    current = source_path
+    for part in Path(relative_path).parts[:-1]:
+        current = current / part
+        try:
+            if stat.S_ISLNK(current.lstat().st_mode):
+                return False
+        except OSError:
+            return False
+    try:
+        file_stat = candidate.lstat()
+    except OSError:
+        return False
+    file_mode = file_stat.st_mode
+    return (
+        stat.S_ISREG(file_mode)
+        and not stat.S_ISLNK(file_mode)
+        and file_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH) == 0
+    )
+
+
+def _registered_worktree_overlay_untracked_diff_check(
+    source_path: Path, relative_path: str
+) -> bool:
+    code, output = run_command(
+        [
+            "git",
+            "diff",
+            "--check",
+            "--no-index",
+            "--",
+            os.devnull,
+            relative_path,
+        ],
+        cwd=source_path,
+    )
+    return code in {0, 1} and not output.strip()
+
+
+def _registered_worktree_overlay_index_blob(
+    source_path: Path, relative_path: str
+) -> str | None:
+    code, output = run_command(["git", "ls-files", "--stage", "--", relative_path], cwd=source_path)
+    if code != 0:
+        return None
+    lines = _git_status_path_lines(output)
+    if len(lines) != 1:
+        return None
+    parts = lines[0].split()
+    if len(parts) < 4 or parts[0] != "100644" or parts[2] != "0":
+        return None
+    blob_sha = parts[1].lower()
+    if _HEAD_SHA_RE.fullmatch(blob_sha) is None:
+        return None
+    return blob_sha
+
+
+def _registered_worktree_overlay_source_specs(
+    packet: RegisteredWorktreeOverlayPacket,
+    source_path: Path,
+    changed_tracked_files: tuple[str, ...],
+    allowed_untracked_files: tuple[str, ...],
+) -> tuple[tuple[RegisteredWorktreeOverlaySourceSpec, ...] | None, str | None]:
+    specs: list[RegisteredWorktreeOverlaySourceSpec] = []
+    for relative_path in changed_tracked_files:
+        code, _output = run_command(["git", "diff", "--quiet", "--", relative_path], cwd=source_path)
+        if code == 0:
+            blob_sha = _registered_worktree_overlay_index_blob(source_path, relative_path)
+            if blob_sha is None:
+                return None, "unsafe_source_file"
+            specs.append(RegisteredWorktreeOverlaySourceSpec(relative_path, blob_sha))
+        elif code == 1:
+            if not _registered_worktree_overlay_safe_source_file(
+                packet, source_path, relative_path
+            ):
+                return None, "unsafe_source_file"
+            specs.append(RegisteredWorktreeOverlaySourceSpec(relative_path))
+        else:
+            return None, "source_diff_status_failed"
+    for relative_path in allowed_untracked_files:
+        if not _registered_worktree_overlay_safe_source_file(
+            packet, source_path, relative_path
+        ):
+            return None, "unsafe_source_file"
+        if not _registered_worktree_overlay_untracked_diff_check(
+            source_path, relative_path
+        ):
+            return None, "untracked_diff_check_failed"
+        specs.append(RegisteredWorktreeOverlaySourceSpec(relative_path))
+    return tuple(specs), None
+
+
+def _registered_worktree_overlay_validate_tracked_whitespace(
+    source_path: Path,
+    specs: tuple[RegisteredWorktreeOverlaySourceSpec, ...],
+) -> str | None:
+    tracked_specs = tuple(spec for spec in specs if spec.path)
+    if not tracked_specs:
+        return None
+    temp_index = tempfile.NamedTemporaryFile(prefix="runner-overlay-validate-index-", delete=False)
+    temp_index_path = Path(temp_index.name)
+    temp_index.close()
+    try:
+        temp_index_path.unlink(missing_ok=True)
+        code, _output = _git_with_temporary_index(
+            ["git", "read-tree", "HEAD"],
+            source_path,
+            temp_index_path,
+        )
+        if code != 0:
+            return "temporary_index_failed"
+        for spec in tracked_specs:
+            if spec.blob_sha is None:
+                code, _output = _git_with_temporary_index(
+                    ["git", "update-index", "--add", "--", spec.path],
+                    source_path,
+                    temp_index_path,
+                )
+            else:
+                code, _output = _git_with_temporary_index(
+                    [
+                        "git",
+                        "update-index",
+                        "--add",
+                        "--cacheinfo",
+                        "100644",
+                        spec.blob_sha,
+                        spec.path,
+                    ],
+                    source_path,
+                    temp_index_path,
+                )
+            if code != 0:
+                return "temporary_index_failed"
+        code, _output = _git_with_temporary_index(
+            ["git", "diff", "--check", "--cached", "HEAD", "--", *(spec.path for spec in tracked_specs)],
+            source_path,
+            temp_index_path,
+        )
+        if code != 0:
+            return "diff_check_failed"
+        return None
+    finally:
+        temp_index_path.unlink(missing_ok=True)
+
+
+def _overlay_registered_worktree_commit(
+    packet: RegisteredWorktreeOverlayPacket,
+    source_path: Path,
+    specs: tuple[RegisteredWorktreeOverlaySourceSpec, ...],
+) -> tuple[str | None, str | None]:
+    temp_index = tempfile.NamedTemporaryFile(prefix="runner-overlay-index-", delete=False)
+    temp_index_path = Path(temp_index.name)
+    temp_index.close()
+    try:
+        temp_index_path.unlink(missing_ok=True)
+        code, _output = _git_with_temporary_index(
+            ["git", "read-tree", packet.target_head_sha],
+            source_path,
+            temp_index_path,
+        )
+        if code != 0:
+            return None, "temporary_index_failed"
+        for spec in specs:
+            if spec.blob_sha is None:
+                code, output = run_command(
+                    [
+                        "git",
+                        "hash-object",
+                        "-w",
+                        f"--path={spec.path}",
+                        str(source_path / spec.path),
+                    ],
+                    cwd=source_path,
+                )
+                if code != 0:
+                    return None, "temporary_index_failed"
+                blob_lines = _git_status_path_lines(output)
+                blob_sha = blob_lines[0].lower() if blob_lines else ""
+                if _HEAD_SHA_RE.fullmatch(blob_sha) is None:
+                    return None, "temporary_index_failed"
+            else:
+                blob_sha = spec.blob_sha
+            code, _output = _git_with_temporary_index(
+                ["git", "update-index", "--add", "--cacheinfo", "100644", blob_sha, spec.path],
+                source_path,
+                temp_index_path,
+            )
+            if code != 0:
+                return None, "temporary_index_failed"
+        code, output = _git_with_temporary_index(
+            ["git", "write-tree"], source_path, temp_index_path
+        )
+        if code != 0:
+            return None, "temporary_index_failed"
+        tree_lines = _git_status_path_lines(output)
+        tree_sha = tree_lines[0].lower() if tree_lines else ""
+        if _HEAD_SHA_RE.fullmatch(tree_sha) is None:
+            return None, "tree_verification_failed"
+        code, output = run_command(
+            [
+                "git",
+                "commit-tree",
+                tree_sha,
+                "-p",
+                packet.target_head_sha,
+                "-m",
+                f"Overlay registered worktree packet {packet.packet_id}",
+            ],
+            cwd=source_path,
+        )
+        if code != 0:
+            return None, "commit_failed"
+        commit_lines = _git_status_path_lines(output)
+        commit_sha = commit_lines[0].lower() if commit_lines else ""
+        if _HEAD_SHA_RE.fullmatch(commit_sha) is None:
+            return None, "commit_verification_failed"
+        return commit_sha, None
+    finally:
+        temp_index_path.unlink(missing_ok=True)
+
+
+def overlay_registered_worktree_to_existing_pr(body: str) -> str:
+    task_id = OVERLAY_REGISTERED_WORKTREE_TO_EXISTING_PR
+    request, reason = _registered_worktree_overlay_metadata(body)
+    if reason is not None:
+        return _maintenance_report("NEEDS_OPERATOR", task_id, [f"reason={reason}"], "not_met")
+    assert request is not None
+    packet = request.packet
+    allowed_files = frozenset(packet.allowed_files)
+    status_lines = [
+        f"repository={REPO}",
+        f"recovery_packet={packet.packet_id}",
+        f"source_issue={packet.source_issue}",
+        f"expected_source_branch={packet.source_branch}",
+        f"pull_request={packet.pr_number}",
+        f"expected_target_branch={packet.target_branch}",
+        f"expected_target_head_sha={packet.target_head_sha}",
+        f"allowed_files_count={len(packet.allowed_files)}",
+    ]
+
+    try:
+        source_path = _registered_worktree_overlay_source_path(packet)
+    except (KeyError, ValueError):
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=issue_worktree_path_unsafe"], "not_met"
+        )
+    if not source_path.exists():
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=issue_worktree_missing"], "not_met"
+        )
+    if not (source_path / ".git").exists():
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=issue_worktree_git_missing"], "not_met"
+        )
+
+    existing_request = IssueWorktreeExistingPrPublishRequest(
+        repository=REPO,
+        source_issue=packet.source_issue,
+        expected_source_branch=packet.source_branch,
+        pr_number=packet.pr_number,
+        expected_pr_head_sha=packet.target_head_sha,
+        expected_pr_head_branch=packet.target_branch,
+        allowed_files=allowed_files,
+    )
+    try:
+        pr_state = _registered_worktree_overlay_pr_state(existing_request, source_path)
+    except (RuntimeError, json.JSONDecodeError):
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "step=read_pr_metadata status=failed"], "not_met"
+        )
+    pr_reason = _existing_pr_publish_block_reason(existing_request, pr_state)
+    pre_push_pr_files = _existing_pr_publish_file_paths(pr_state)
+    if pr_reason is not None:
+        return _maintenance_report("BLOCKED", task_id, [*status_lines, f"reason={pr_reason}"], "not_met")
+    base_ref_oid = _registered_worktree_overlay_base_ref_oid(pr_state)
+    if base_ref_oid is None:
+        return _maintenance_report("BLOCKED", task_id, [*status_lines, "reason=base_ref_oid_invalid"], "not_met")
+    pr_url = _existing_pr_publish_pr_url(pr_state)
+    assert pr_url is not None
+    status_lines.extend(
+        (
+            "step=read_pr_metadata status=done",
+            f"pre_push_pr_file_count={len(pre_push_pr_files)}",
+            f"base_ref_oid={base_ref_oid}",
+            f"pr_url={pr_url}",
+        )
+    )
+
+    code, output = run_command(["git", "branch", "--show-current"], cwd=source_path)
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "step=read_current_branch status=failed"], "not_met"
+        )
+    current_branch_lines = _git_status_path_lines(output)
+    current_branch = current_branch_lines[0] if current_branch_lines else ""
+    status_lines.append(f"current_branch={current_branch}")
+    if current_branch != packet.source_branch:
+        return _maintenance_report("BLOCKED", task_id, [*status_lines, "reason=source_branch_mismatch"], "not_met")
+
+    code, output = run_command(["git", "remote", "get-url", "origin"], cwd=source_path)
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "step=read_origin_remote status=failed"], "not_met"
+        )
+    if not _remote_url_matches_project_repo(output, REPO):
+        return _maintenance_report("BLOCKED", task_id, [*status_lines, "reason=origin_remote_mismatch"], "not_met")
+
+    code, output = run_command(["git", "diff", "--name-only", "HEAD", "--"], cwd=source_path)
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "step=read_changed_tracked_files status=failed"], "not_met"
+        )
+    changed_tracked_files = _git_status_path_lines(output)
+    if not all(_safe_issue_publish_file_path(path) for path in changed_tracked_files):
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=changed_tracked_file_path_unsafe"], "not_met"
+        )
+    code, output = run_command(["git", "ls-files", "--others", "--exclude-standard"], cwd=source_path)
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "step=read_untracked_files status=failed"], "not_met"
+        )
+    untracked_files = _git_status_path_lines(output)
+    if not all(_safe_issue_publish_file_path(path) or _is_ignored_issue_publish_untracked_path(path) for path in untracked_files):
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=untracked_file_path_unsafe"], "not_met"
+        )
+    unexpected_untracked_files = [
+        path for path in untracked_files if not _is_ignored_issue_publish_untracked_path(path) and path not in allowed_files
+    ]
+    allowed_untracked_files = [
+        path for path in untracked_files if not _is_ignored_issue_publish_untracked_path(path) and path in allowed_files
+    ]
+    if unexpected_untracked_files:
+        return _maintenance_report("BLOCKED", task_id, [*status_lines, "reason=unexpected_untracked_files"], "not_met")
+    validated_files = tuple(dict.fromkeys([*changed_tracked_files, *allowed_untracked_files]))
+    if not set(validated_files) <= allowed_files:
+        return _maintenance_report("BLOCKED", task_id, [*status_lines, "reason=changed_files_outside_allowlist"], "not_met")
+    if not validated_files:
+        return _maintenance_report("BLOCKED", task_id, [*status_lines, "reason=no_publishable_changes"], "not_met")
+    status_lines.extend(
+        (
+            f"changed_tracked_files_count={len(changed_tracked_files)}",
+            f"allowed_untracked_files_count={len(allowed_untracked_files)}",
+            f"validated_publish_files_count={len(validated_files)}",
+        )
+    )
+
+    specs, source_file_reason = _registered_worktree_overlay_source_specs(
+        packet,
+        source_path,
+        tuple(changed_tracked_files),
+        tuple(allowed_untracked_files),
+    )
+    if source_file_reason is not None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, f"reason={source_file_reason}"],
+            "not_met",
+        )
+    assert specs is not None
+    whitespace_reason = _registered_worktree_overlay_validate_tracked_whitespace(
+        source_path, specs
+    )
+    if whitespace_reason is not None:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, f"reason={whitespace_reason}"], "not_met"
+        )
+
+    code, _output = run_command(["git", "cat-file", "-e", f"{base_ref_oid}^{{commit}}"], cwd=source_path)
+    if code != 0:
+        code, _output = run_command(
+            ["git", "fetch", "origin", "main:refs/remotes/origin/main"],
+            cwd=source_path,
+        )
+        if code != 0:
+            return _maintenance_report("BLOCKED", task_id, [*status_lines, "reason=base_object_unavailable"], "not_met")
+        code, output = run_command(["git", "rev-parse", "refs/remotes/origin/main"], cwd=source_path)
+        fetched_lines = _git_status_path_lines(output) if code == 0 else []
+        fetched_sha = fetched_lines[0].lower() if fetched_lines else ""
+        if fetched_sha != base_ref_oid:
+            return _maintenance_report("BLOCKED", task_id, [*status_lines, "reason=fetched_base_sha_mismatch"], "not_met")
+
+    code, _output = run_command(["git", "cat-file", "-e", f"{packet.target_head_sha}^{{commit}}"], cwd=source_path)
+    if code != 0:
+        code, _output = run_command(
+            ["git", "fetch", "origin", f"{packet.target_branch}:refs/remotes/origin/{packet.target_branch}"],
+            cwd=source_path,
+        )
+        if code != 0:
+            return _maintenance_report("BLOCKED", task_id, [*status_lines, "reason=target_object_unavailable"], "not_met")
+        code, output = run_command(["git", "rev-parse", f"refs/remotes/origin/{packet.target_branch}"], cwd=source_path)
+        fetched_lines = _git_status_path_lines(output) if code == 0 else []
+        fetched_sha = fetched_lines[0].lower() if fetched_lines else ""
+        if fetched_sha != packet.target_head_sha:
+            return _maintenance_report("BLOCKED", task_id, [*status_lines, "reason=fetched_target_sha_mismatch"], "not_met")
+
+    new_commit_sha, commit_reason = _overlay_registered_worktree_commit(packet, source_path, specs)
+    if commit_reason is not None:
+        return _maintenance_report("BLOCKED", task_id, [*status_lines, f"reason={commit_reason}"], "not_met")
+    assert new_commit_sha is not None
+    status_lines.append(f"constructed_head_sha={new_commit_sha}")
+
+    code, output = run_command(["git", "rev-parse", f"{new_commit_sha}^"], cwd=source_path)
+    parent_lines = _git_status_path_lines(output) if code == 0 else []
+    parent_sha = parent_lines[0].lower() if parent_lines else ""
+    if parent_sha != packet.target_head_sha:
+        return _maintenance_report("BLOCKED", task_id, [*status_lines, "reason=commit_parent_verification_failed"], "not_met")
+    code, diff_files = _git_changed_files_between(packet.target_head_sha, new_commit_sha, source_path)
+    if code != 0:
+        return _maintenance_report("BLOCKED", task_id, [*status_lines, "reason=commit_diff_verification_failed"], "not_met")
+    if not diff_files <= allowed_files:
+        return _maintenance_report("BLOCKED", task_id, [*status_lines, "reason=commit_diff_outside_allowlist"], "not_met")
+    code, pr_diff_files = _git_changed_files_between(base_ref_oid, new_commit_sha, source_path)
+    if code != 0:
+        return _maintenance_report("BLOCKED", task_id, [*status_lines, "reason=pr_diff_verification_failed"], "not_met")
+    if not pre_push_pr_files <= pr_diff_files:
+        return _maintenance_report("BLOCKED", task_id, [*status_lines, "reason=pre_existing_pr_files_missing"], "not_met")
+
+    code, _output = run_command(
+        [
+            "git",
+            "push",
+            "origin",
+            f"--force-with-lease={packet.target_branch}:{packet.target_head_sha}",
+            f"{new_commit_sha}:refs/heads/{packet.target_branch}",
+        ],
+        cwd=source_path,
+    )
+    if code != 0:
+        return _maintenance_report("BLOCKED", task_id, [*status_lines, "reason=push_failed"], "not_met")
+
+    try:
+        post_push_pr_state = _registered_worktree_overlay_pr_state(existing_request, source_path)
+    except (RuntimeError, json.JSONDecodeError):
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "step=post_push_read_pr_metadata status=failed"], "not_met"
+        )
+    post_reason = _registered_worktree_overlay_post_push_block_reason(existing_request, pr_state, post_push_pr_state, new_commit_sha)
+    if post_reason is not None:
+        return _maintenance_report("BLOCKED", task_id, [*status_lines, f"reason={post_reason}"], "not_met")
+    post_push_pr_files = _existing_pr_publish_file_paths(post_push_pr_state)
+    if not pre_push_pr_files <= post_push_pr_files:
+        return _maintenance_report("BLOCKED", task_id, [*status_lines, "reason=pre_existing_pr_files_missing"], "not_met")
+    newly_introduced_files = post_push_pr_files - pre_push_pr_files
+    if not newly_introduced_files <= allowed_files:
+        return _maintenance_report("BLOCKED", task_id, [*status_lines, "reason=new_pr_files_outside_allowlist"], "not_met")
+    status_lines.extend(
+        (
+            "step=push_expected_pr_branch status=done",
+            "step=post_push_read_pr_metadata status=done",
+            f"pushed_head_sha={new_commit_sha}",
+            f"post_push_pr_changed_files_count={len(post_push_pr_files)}",
+            f"new_pr_changed_files_count={len(newly_introduced_files)}",
+        )
+    )
+    return _maintenance_report("DONE", task_id, status_lines, "met")
 
 
 def publish_issue_worktree_to_existing_pr(body: str) -> str:
@@ -10185,6 +10858,8 @@ def dispatch_runtime_maintenance_task(
             return publish_existing_issue_worktree(body)
         if task_id == PUBLISH_ISSUE_WORKTREE_TO_EXISTING_PR:
             return publish_issue_worktree_to_existing_pr(body)
+        if task_id == OVERLAY_REGISTERED_WORKTREE_TO_EXISTING_PR:
+            return overlay_registered_worktree_to_existing_pr(body)
         if task_id == PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR:
             return publish_target_project_issue_worktree_pr(body)
         if task_id == PUBLISH_CONTAINER_VALIDATION_WORKTREE:
