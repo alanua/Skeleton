@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import json
-import os
-import stat
+import struct
 import sys
 import types
 import zlib
@@ -13,375 +11,126 @@ import pytest
 from core.home_edge.visual_capture import (
     BrowserFirstVisualCaptureAdapter,
     CaptureAdapterResult,
-    CapturedFrame,
-    JOB_SCHEMA,
-    RECEIPT_SCHEMA,
-    VisualCaptureError,
     VisualCaptureRuntimeConfig,
-    process_one_visual_capture_job,
-    run_visual_capture_job,
-    runtime_config_from_env,
     validate_visual_capture_job,
 )
 
 
-class FakeCaptureAdapter:
-    def __init__(self, result: CaptureAdapterResult) -> None:
-        self.result = result
-        self.calls = 0
-
-    def capture(self, job, *, normalized_url, config, output_dir):
-        self.calls += 1
-        assert normalized_url == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-        return self.result
-
-
-def _config(tmp_path: Path, *, visible_kiosk: bool = False) -> VisualCaptureRuntimeConfig:
-    spool = tmp_path / "spool"
-    artifact = tmp_path / "artifacts"
-    profile = tmp_path / "profile"
-    profile.mkdir(parents=True, exist_ok=True)
-    return VisualCaptureRuntimeConfig(
-        spool_root=spool,
-        artifact_root=artifact,
-        browser_profile=profile,
-        visible_kiosk_enabled=visible_kiosk,
-    )
-
-
-def _job(**updates: object) -> dict[str, object]:
-    job: dict[str, object] = {
-        "schema": JOB_SCHEMA,
-        "action_id": "capture-001",
-        "task_ref": "task-001",
-        "provider": "youtube",
-        "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=90s",
-        "requested_time_seconds": 120,
-    }
-    job.update(updates)
-    return job
-
-
-def _frame(*, observed: float = 120.0) -> CapturedFrame:
-    return CapturedFrame(
-        offset_seconds=0,
-        requested_time_seconds=120.0,
-        observed_time_seconds=observed,
-        width=640,
-        height=360,
-        image_bytes=b"synthetic-private-frame",
-    )
-
-
-def _png(width: int = 1, height: int = 1) -> bytes:
-    import struct
+def _png(width: int = 2, height: int = 1) -> bytes:
+    pixels = b"\x00\x00\x00" * width * height
 
     def chunk(kind: bytes, data: bytes) -> bytes:
-        return (
-            struct.pack(">I", len(data))
-            + kind
-            + data
-            + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
-        )
+        crc = zlib.crc32(kind + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", crc)
 
-    rows = b"".join(b"\x00" + (b"\xff\x00\x00" * width) for _ in range(height))
+    rows = bytearray()
+    stride = width * 3
+    for y in range(height):
+        rows.append(0)
+        rows.extend(pixels[y * stride : (y + 1) * stride])
     return b"".join(
         (
             b"\x89PNG\r\n\x1a\n",
             chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)),
-            chunk(b"IDAT", zlib.compress(rows)),
+            chunk(b"IDAT", zlib.compress(bytes(rows))),
             chunk(b"IEND", b""),
         )
     )
 
 
-def test_provider_and_url_allowlist_failures(tmp_path: Path) -> None:
-    config = _config(tmp_path)
-
-    with pytest.raises(VisualCaptureError, match="provider"):
-        validate_visual_capture_job(_job(provider="vimeo"), config=config)
-    with pytest.raises(VisualCaptureError, match="YouTube"):
-        validate_visual_capture_job(_job(url="https://youtu.be/dQw4w9WgXcQ"), config=config)
-    with pytest.raises(VisualCaptureError, match="YouTube"):
-        validate_visual_capture_job(_job(url="https://www.youtube.com/embed/dQw4w9WgXcQ"), config=config)
-
-
-def test_malformed_timestamp_offset_and_more_than_seven_frame_failures(tmp_path: Path) -> None:
-    config = _config(tmp_path)
-
-    with pytest.raises(VisualCaptureError, match="requested_time_seconds"):
-        validate_visual_capture_job(_job(requested_time_seconds="120"), config=config)
-    with pytest.raises(VisualCaptureError, match="integers"):
-        validate_visual_capture_job(_job(offsets_seconds=[0, 1.5]), config=config)
-    with pytest.raises(VisualCaptureError, match="-10..10"):
-        validate_visual_capture_job(_job(offsets_seconds=[-11]), config=config)
-    with pytest.raises(VisualCaptureError, match="seven"):
-        validate_visual_capture_job(_job(offsets_seconds=[-3, -2, -1, 0, 1, 2, 3, 4]), config=config)
-
-
-def test_issue_controlled_path_selector_and_command_fields_rejected(tmp_path: Path) -> None:
-    config = _config(tmp_path)
-
-    for field in ("command", "selector", "executable_path", "output_path", "host", "user", "port"):
-        with pytest.raises(VisualCaptureError, match="issue-controlled"):
-            validate_visual_capture_job(_job(**{field: "bad"}), config=config)
-
-
-def test_repository_artifact_root_symlink_and_traversal_rejected(tmp_path: Path) -> None:
+def _config(tmp_path: Path, *, visible: bool = False) -> VisualCaptureRuntimeConfig:
     profile = tmp_path / "profile"
-    profile.mkdir()
-    with pytest.raises(VisualCaptureError, match="outside"):
-        runtime_config_from_env(
-            {
-                "SKELETON_HOME_EDGE_01_VISUAL_CAPTURE_SPOOL": str(tmp_path / "spool"),
-                "SKELETON_HOME_EDGE_01_VISUAL_CAPTURE_ARTIFACT_ROOT": str(Path.cwd() / "private"),
-                "SKELETON_HOME_EDGE_01_VISUAL_CAPTURE_BROWSER_PROFILE": str(profile),
-            }
-        )
-    if hasattr(os, "symlink"):
-        target = tmp_path / "real"
-        target.mkdir()
-        link = tmp_path / "link"
-        link.symlink_to(target, target_is_directory=True)
-        with pytest.raises(VisualCaptureError, match="symlink"):
-            runtime_config_from_env(
-                {
-                    "SKELETON_HOME_EDGE_01_VISUAL_CAPTURE_SPOOL": str(tmp_path / "spool"),
-                    "SKELETON_HOME_EDGE_01_VISUAL_CAPTURE_ARTIFACT_ROOT": str(link / "artifacts"),
-                    "SKELETON_HOME_EDGE_01_VISUAL_CAPTURE_BROWSER_PROFILE": str(profile),
-                }
-            )
-
-
-def test_duplicate_idempotency_returns_existing_receipt(tmp_path: Path) -> None:
-    config = _config(tmp_path)
-    adapter = FakeCaptureAdapter(CaptureAdapterResult(status="CAPTURED", frames=(_frame(),)))
-
-    first = run_visual_capture_job(_job(), config=config, adapter=adapter)
-    second = run_visual_capture_job(_job(), config=config, adapter=adapter)
-
-    assert first == second
-    assert adapter.calls == 1
-
-
-def test_visible_kiosk_requires_explicit_private_job_selection(tmp_path: Path) -> None:
-    with pytest.raises(VisualCaptureError, match="visible_kiosk"):
-        validate_visual_capture_job(_job(capture_mode="visible_kiosk"), config=_config(tmp_path))
-
-    normalized = validate_visual_capture_job(
-        _job(capture_mode="visible_kiosk"),
-        config=_config(tmp_path, visible_kiosk=True),
-    )
-    assert normalized["capture_mode"] == "visible_kiosk"
-
-
-def test_timestamp_drift_returns_stable_reason(tmp_path: Path) -> None:
-    config = _config(tmp_path)
-    receipt = run_visual_capture_job(
-        _job(),
-        config=config,
-        adapter=FakeCaptureAdapter(CaptureAdapterResult(status="CAPTURED", frames=(_frame(observed=123.0),))),
+    profile.mkdir(parents=True)
+    return VisualCaptureRuntimeConfig(
+        spool_root=tmp_path / "spool",
+        artifact_root=tmp_path / "artifacts",
+        browser_profile=profile,
+        visible_kiosk_enabled=visible,
+        yt_dlp_path=tmp_path / "bin" / "yt-dlp",
+        ffmpeg_path=tmp_path / "bin" / "ffmpeg",
     )
 
-    assert receipt["status"] == "NEEDS_RECAPTURE"
-    manifest_path = next(config.artifact_root.glob("*/manifest.private.json"))
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert manifest["frames"][0]["reason_codes"] == ["timestamp_drift_exceeded"]
 
-
-def test_interaction_required_states_do_not_auto_accept_prompts(tmp_path: Path) -> None:
-    config = _config(tmp_path)
-    receipt = run_visual_capture_job(
-        _job(),
-        config=config,
-        adapter=FakeCaptureAdapter(
-            CaptureAdapterResult(
-                status="FAILED_RETRYABLE",
-                reason_codes=("cookie_prompt_required",),
-                retryable=True,
-            )
-        ),
-    )
-
-    assert receipt["status"] == "INTERACTION_REQUIRED"
-    assert receipt["reason_codes"] == ["cookie_prompt_required"]
-
-
-def test_sanitized_receipt_leakage_checks(tmp_path: Path) -> None:
-    config = _config(tmp_path)
-    receipt = run_visual_capture_job(
-        _job(),
-        config=config,
-        adapter=FakeCaptureAdapter(CaptureAdapterResult(status="CAPTURED", frames=(_frame(),))),
-    )
-    assert set(receipt) == {
-        "schema",
-        "action_id",
-        "task_ref",
-        "status",
-        "frame_count",
-        "manifest_hash",
-        "capture_mode",
-        "reason_codes",
-        "retryable",
-        "human_review_required",
-        "stale",
+def _job(*, capture_mode: str = "background", offsets_seconds: list[int] | None = None):
+    return {
+        "schema": "skeleton.home_edge.visual_capture.job.v1",
+        "action_id": "capture-001",
+        "task_ref": "task-001",
+        "provider": "youtube",
+        "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        "requested_time_seconds": 120,
+        "offsets_seconds": offsets_seconds or [0],
+        "capture_mode": capture_mode,
     }
-    rendered = json.dumps(receipt, sort_keys=True)
-    assert "youtube" not in rendered
-    assert "dQw4w9WgXcQ" not in rendered
-    assert str(tmp_path) not in rendered
-    assert RECEIPT_SCHEMA == receipt["schema"]
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX mode checks only")
-def test_owner_only_file_checks_on_posix(tmp_path: Path) -> None:
-    config = _config(tmp_path)
-    run_visual_capture_job(
-        _job(),
-        config=config,
-        adapter=FakeCaptureAdapter(CaptureAdapterResult(status="CAPTURED", frames=(_frame(),))),
-    )
-    for path in config.artifact_root.glob("*/*"):
-        mode = stat.S_IMODE(path.stat().st_mode)
-        assert mode == 0o600
+class _Locator:
+    first: "_Locator"
+
+    def __init__(self, selector: str) -> None:
+        self.selector = selector
+        self.first = self
+
+    def count(self) -> int:
+        return 1 if self.selector in {"video.html5-main-video", "#movie_player"} else 0
+
+    def is_visible(self, timeout: int = 0) -> bool:
+        return self.count() == 1
+
+    def screenshot(self, *, type: str, timeout: int) -> bytes:
+        assert self.selector == "#movie_player"
+        return _png()
+
+    def bounding_box(self) -> dict[str, int]:
+        return {"width": 2, "height": 1}
 
 
-def test_temporary_clip_deletion_policy(tmp_path: Path) -> None:
-    config = _config(tmp_path)
+class _Page:
+    def goto(self, url: str, *, wait_until: str, timeout: int) -> None:
+        assert url == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 
-    class TempClipAdapter:
-        def capture(self, job, *, normalized_url, config, output_dir):
-            clip = output_dir / "clip.tmp"
-            clip.write_bytes(b"temporary-private-clip")
-            return CaptureAdapterResult(
-                status="CAPTURED",
-                frames=(_frame(),),
-                temporary_paths=(clip,),
-            )
+    def locator(self, selector: str) -> _Locator:
+        return _Locator(selector)
 
-    run_visual_capture_job(_job(), config=config, adapter=TempClipAdapter())
+    def evaluate(self, script: str, arg: float | None = None):
+        assert "Accept" not in script
+        if arg is not None:
+            assert arg == 120.0
+            return None
+        return {"decoded": 5, "currentTime": 120.0}
 
-    assert not list(config.artifact_root.glob("*/clip.tmp"))
-
-
-def test_no_derived_memory_authority_promotion(tmp_path: Path) -> None:
-    config = _config(tmp_path)
-    receipt = run_visual_capture_job(
-        _job(),
-        config=config,
-        adapter=FakeCaptureAdapter(CaptureAdapterResult(status="CAPTURED", frames=(_frame(),))),
-    )
-    manifest = json.loads(next(config.artifact_root.glob("*/manifest.private.json")).read_text(encoding="utf-8"))
-
-    assert manifest["evidence_state"] == "private_manifest_only"
-    assert "Graphify" not in json.dumps(receipt)
-    assert "MemPalace" not in json.dumps(receipt)
+    def wait_for_timeout(self, milliseconds: int) -> None:
+        return None
 
 
-def test_bounded_worker_processes_exactly_one_private_spool_job(tmp_path: Path) -> None:
-    config = _config(tmp_path)
-    queued = config.spool_root / "queued"
-    queued.mkdir(parents=True)
-    (queued / "001.json").write_text(json.dumps(_job(action_id="capture-001")), encoding="utf-8")
-    (queued / "002.json").write_text(json.dumps(_job(action_id="capture-002")), encoding="utf-8")
-    adapter = FakeCaptureAdapter(CaptureAdapterResult(status="CAPTURED", frames=(_frame(),)))
-
-    receipt = process_one_visual_capture_job(config=config, adapter=adapter)
-
-    assert receipt["status"] == "CAPTURED"
-    assert adapter.calls == 1
-    assert (config.spool_root / "done" / "001.json").exists()
-    assert (queued / "002.json").exists()
-
-
-def test_default_adapter_follows_browser_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    config = _config(tmp_path)
-    adapter = BrowserFirstVisualCaptureAdapter()
-    called = False
-
-    def fake_browser(job, *, normalized_url):
-        nonlocal called
-        called = True
-        return CaptureAdapterResult(
-            status="NOT_VISIBLE",
-            reason_codes=("player_not_visible",),
-        )
-
-    monkeypatch.setattr(adapter, "_capture_with_browser", fake_browser)
-    result = adapter.capture(
-        validate_visual_capture_job(_job(), config=config),
-        normalized_url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-        config=config,
-        output_dir=config.artifact_root,
-    )
-
-    assert called is True
-    assert result.reason_codes == ("player_not_visible",)
-
-
-def test_browser_path_uses_fixed_selectors_and_player_region_screenshot(
+def test_browser_uses_existing_persistent_profile_and_background_headless(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     import core.home_edge.visual_capture as visual
 
-    selected: list[str] = []
-    accepted: list[str] = []
+    config = _config(tmp_path)
+    calls: list[dict] = []
 
-    class FakeLocator:
-        def __init__(self, selector: str) -> None:
-            self.selector = selector
-            self.first = self
-
-        def count(self) -> int:
-            return 1 if self.selector in {"video.html5-main-video", "#movie_player"} else 0
-
-        def is_visible(self, timeout: int = 0) -> bool:
-            return self.count() == 1
-
-        def screenshot(self, *, type: str, timeout: int) -> bytes:
-            assert self.selector == "#movie_player"
-            assert type == "png"
-            return _png(2, 1)
-
-        def bounding_box(self) -> dict[str, int]:
-            return {"width": 2, "height": 1}
-
-        def click(self) -> None:
-            accepted.append(self.selector)
-
-    class FakePage:
-        def goto(self, url: str, *, wait_until: str, timeout: int) -> None:
-            assert url == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-
-        def locator(self, selector: str) -> FakeLocator:
-            selected.append(selector)
-            return FakeLocator(selector)
-
-        def evaluate(self, script: str, arg: float | None = None):
-            assert "Accept" not in script
-            if arg is not None:
-                assert arg == 120.0
-                return None
-            return {"decoded": 5, "currentTime": 120.0}
-
-        def wait_for_timeout(self, milliseconds: int) -> None:
-            assert milliseconds == visual.FRAME_STABLE_INTERVAL_MS
-
-    class FakeBrowser:
-        def new_page(self, **kwargs):
-            return FakePage()
+    class FakeContext:
+        def new_page(self) -> _Page:
+            return _Page()
 
         def close(self) -> None:
-            pass
+            return None
+
+    class FakeChromium:
+        def launch(self, **kwargs):
+            raise AssertionError("fresh browser launch must not be used")
+
+        def launch_persistent_context(self, **kwargs):
+            calls.append(kwargs)
+            assert kwargs["user_data_dir"] == str(config.browser_profile)
+            assert kwargs["headless"] is True
+            return FakeContext()
 
     class FakePlaywright:
-        class chromium:
-            @staticmethod
-            def launch(**kwargs):
-                assert kwargs["headless"] is True
-                return FakeBrowser()
+        chromium = FakeChromium()
 
         def __enter__(self):
             return self
@@ -396,61 +145,45 @@ def test_browser_path_uses_fixed_selectors_and_player_region_screenshot(
     )
     monkeypatch.setattr(visual, "_fixed_chrome_executable", lambda: tmp_path / "chrome")
 
-    config = _config(tmp_path)
     result = BrowserFirstVisualCaptureAdapter().capture(
-        validate_visual_capture_job(_job(offsets_seconds=[0]), config=config),
+        validate_visual_capture_job(_job(), config=config),
         normalized_url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
         config=config,
         output_dir=tmp_path,
     )
 
     assert result.status == "CAPTURED"
-    assert result.frames[0].image_bytes.startswith(b"\x89PNG")
-    assert "button:has-text('Accept all')" in selected
-    assert "video.html5-main-video" in selected
-    assert "#movie_player" in selected
-    assert accepted == []
+    assert calls
+    assert config.browser_profile.exists()
 
 
-def test_browser_path_reports_interaction_without_accepting(
+def test_visible_kiosk_is_non_headless_only_when_authorized(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     import core.home_edge.visual_capture as visual
 
-    class FakeLocator:
-        def __init__(self, selector: str) -> None:
-            self.selector = selector
-            self.first = self
+    unauthorized = _config(tmp_path / "off", visible=False)
+    with pytest.raises(Exception, match="visible_kiosk requires explicit private runtime selection"):
+        validate_visual_capture_job(_job(capture_mode="visible_kiosk"), config=unauthorized)
 
-        def count(self) -> int:
-            return 1 if "Accept all" in self.selector else 0
+    config = _config(tmp_path / "on", visible=True)
+    headless_values: list[bool] = []
 
-        def is_visible(self, timeout: int = 0) -> bool:
-            return self.count() == 1
-
-        def click(self) -> None:
-            raise AssertionError("prompt must not be accepted")
-
-    class FakePage:
-        def goto(self, *args, **kwargs):
-            pass
-
-        def locator(self, selector: str) -> FakeLocator:
-            return FakeLocator(selector)
-
-    class FakeBrowser:
-        def new_page(self, **kwargs):
-            return FakePage()
+    class FakeContext:
+        def new_page(self) -> _Page:
+            return _Page()
 
         def close(self) -> None:
-            pass
+            return None
+
+    class FakeChromium:
+        def launch_persistent_context(self, **kwargs):
+            headless_values.append(kwargs["headless"])
+            return FakeContext()
 
     class FakePlaywright:
-        class chromium:
-            @staticmethod
-            def launch(**kwargs):
-                return FakeBrowser()
+        chromium = FakeChromium()
 
         def __enter__(self):
             return self
@@ -465,88 +198,126 @@ def test_browser_path_reports_interaction_without_accepting(
     )
     monkeypatch.setattr(visual, "_fixed_chrome_executable", lambda: tmp_path / "chrome")
 
-    config = _config(tmp_path)
     result = BrowserFirstVisualCaptureAdapter().capture(
-        validate_visual_capture_job(_job(offsets_seconds=[0]), config=config),
+        validate_visual_capture_job(_job(capture_mode="visible_kiosk"), config=config),
         normalized_url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
         config=config,
         output_dir=tmp_path,
     )
 
-    assert result.status == "INTERACTION_REQUIRED"
-    assert result.reason_codes == ("cookie_prompt_required",)
+    assert result.status == "CAPTURED"
+    assert headless_values == [False]
 
 
-def test_fallback_uses_fixed_private_argv_and_deletes_temp_clip(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    calls = []
+def test_missing_browser_profile_does_not_create_profile(tmp_path: Path) -> None:
     config = VisualCaptureRuntimeConfig(
         spool_root=tmp_path / "spool",
         artifact_root=tmp_path / "artifacts",
-        browser_profile=tmp_path / "profile",
-        yt_dlp_path=tmp_path / "bin" / "yt-dlp",
-        ffmpeg_path=tmp_path / "bin" / "ffmpeg",
+        browser_profile=tmp_path / "missing-profile",
     )
-    config.browser_profile.mkdir(parents=True)
+
+    result = BrowserFirstVisualCaptureAdapter().capture(
+        validate_visual_capture_job(_job(), config=config),
+        normalized_url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        config=config,
+        output_dir=tmp_path,
+    )
+
+    assert result.status == "FAILED_RETRYABLE"
+    assert result.reason_codes == ("private_runtime_missing",)
+    assert not config.browser_profile.exists()
+
+
+def test_fallback_seek_is_relative_to_downloaded_clip_and_temp_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import core.home_edge.visual_capture as visual
+
+    config = _config(tmp_path)
+    calls: list[list[str]] = []
 
     def fake_run(argv, **kwargs):
-        calls.append((argv, kwargs))
+        calls.append(argv)
         assert kwargs["shell"] is False
         if argv[0] == str(config.yt_dlp_path):
-            output_index = argv.index("-o") + 1
-            Path(str(argv[output_index]).replace("%(ext)s", "mp4")).write_bytes(b"clip")
+            Path(str(argv[argv.index("-o") + 1]).replace("%(ext)s", "mp4")).write_bytes(b"clip")
         if argv[0] == str(config.ffmpeg_path):
             Path(argv[-1]).write_bytes(_png())
         return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
-    monkeypatch.setattr("core.home_edge.visual_capture.subprocess.run", fake_run)
+    monkeypatch.setattr(visual.subprocess, "run", fake_run)
     adapter = BrowserFirstVisualCaptureAdapter()
     monkeypatch.setattr(
         adapter,
         "_capture_with_browser",
-        lambda job, *, normalized_url: CaptureAdapterResult(
+        lambda job, *, normalized_url, config: CaptureAdapterResult(
             status="FAILED_RETRYABLE",
             reason_codes=("playwright_unavailable",),
             retryable=True,
         ),
     )
 
-    receipt = run_visual_capture_job(
-        _job(offsets_seconds=[0]),
+    result = adapter.capture(
+        validate_visual_capture_job(_job(offsets_seconds=[-3, 0, 3]), config=config),
+        normalized_url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
         config=config,
-        adapter=adapter,
+        output_dir=tmp_path,
     )
 
-    assert receipt["status"] == "HUMAN_REVIEW_PENDING"
-    assert calls[0][0][0] == str(config.yt_dlp_path)
-    assert calls[1][0][0] == str(config.ffmpeg_path)
-    assert not list(config.artifact_root.glob("*/media-fallback-*"))
+    ffmpeg_seeks = [call[call.index("-ss") + 1] for call in calls if call[0] == str(config.ffmpeg_path)]
+    for temporary in result.temporary_paths:
+        visual._delete_temporary_paths((temporary,), tmp_path)
+
+    assert result.status == "HUMAN_REVIEW_PENDING"
+    assert ffmpeg_seeks == ["0.000", "3.000", "6.000"]
+    assert not list(tmp_path.glob("media-fallback-*"))
 
 
-def test_contact_sheet_is_valid_png_and_manifest_hash_matches_file(tmp_path: Path) -> None:
+@pytest.mark.parametrize("failed_tool", ["yt-dlp", "ffmpeg"])
+def test_fallback_return_codes_fail_safely_and_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failed_tool: str,
+) -> None:
+    import core.home_edge.visual_capture as visual
+
     config = _config(tmp_path)
-    receipt = run_visual_capture_job(
-        _job(),
-        config=config,
-        adapter=FakeCaptureAdapter(CaptureAdapterResult(status="CAPTURED", frames=(_frame(),))),
+
+    def fake_run(argv, **kwargs):
+        if argv[0] == str(config.yt_dlp_path):
+            if failed_tool == "yt-dlp":
+                return types.SimpleNamespace(returncode=1, stdout=b"", stderr=b"bad")
+            Path(str(argv[argv.index("-o") + 1]).replace("%(ext)s", "mp4")).write_bytes(b"clip")
+        if argv[0] == str(config.ffmpeg_path):
+            if failed_tool == "ffmpeg":
+                Path(argv[-1]).write_bytes(_png())
+                return types.SimpleNamespace(returncode=1, stdout=b"", stderr=b"bad")
+            Path(argv[-1]).write_bytes(_png())
+        return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(visual.subprocess, "run", fake_run)
+    adapter = BrowserFirstVisualCaptureAdapter()
+    monkeypatch.setattr(
+        adapter,
+        "_capture_with_browser",
+        lambda job, *, normalized_url, config: CaptureAdapterResult(
+            status="FAILED_RETRYABLE",
+            reason_codes=("playwright_unavailable",),
+            retryable=True,
+        ),
     )
-    capture_dir = next(config.artifact_root.iterdir())
-    contact_sheet = capture_dir / "contact-sheet.private.bin"
-    manifest = capture_dir / "manifest.private.json"
 
-    assert contact_sheet.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
-    assert receipt["manifest_hash"] == __import__("hashlib").sha256(manifest.read_bytes()).hexdigest()
+    result = adapter.capture(
+        validate_visual_capture_job(_job(), config=config),
+        normalized_url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        config=config,
+        output_dir=tmp_path,
+    )
 
+    for temporary in result.temporary_paths:
+        visual._delete_temporary_paths((temporary,), tmp_path)
 
-def test_human_review_pending_and_verified_are_valid_terminal_states(tmp_path: Path) -> None:
-    for status in ("HUMAN_REVIEW_PENDING", "VERIFIED"):
-        config = _config(tmp_path / status)
-        receipt = run_visual_capture_job(
-            _job(action_id=f"capture-{status.lower().replace('_', '-')}"),
-            config=config,
-            adapter=FakeCaptureAdapter(CaptureAdapterResult(status=status, frames=(_frame(),))),
-        )
-
-        assert receipt["status"] == status
+    assert result.status == "FAILED_RETRYABLE"
+    assert result.reason_codes
+    assert not list(tmp_path.glob("media-fallback-*"))

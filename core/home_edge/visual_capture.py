@@ -193,6 +193,7 @@ class BrowserFirstVisualCaptureAdapter:
         browser_result = self._capture_with_browser(
             job,
             normalized_url=normalized_url,
+            config=config,
         )
         if browser_result.status != "FAILED_RETRYABLE" or browser_result.frames:
             return browser_result
@@ -226,6 +227,7 @@ class BrowserFirstVisualCaptureAdapter:
         job: dict[str, Any],
         *,
         normalized_url: str,
+        config: VisualCaptureRuntimeConfig,
     ) -> CaptureAdapterResult:
         chrome = _fixed_chrome_executable()
         if chrome is None:
@@ -245,18 +247,19 @@ class BrowserFirstVisualCaptureAdapter:
             )
 
         frames: list[CapturedFrame] = []
+        headless = job["capture_mode"] != "visible_kiosk"
         try:
             with sync_playwright() as playwright:
-                browser = playwright.chromium.launch(
+                context = playwright.chromium.launch_persistent_context(
+                    user_data_dir=str(config.browser_profile),
                     executable_path=str(chrome),
-                    headless=True,
+                    headless=headless,
                     args=("--no-first-run", "--disable-background-networking"),
+                    viewport={"width": 1280, "height": 720},
+                    device_scale_factor=1,
                 )
                 try:
-                    page = browser.new_page(
-                        viewport={"width": 1280, "height": 720},
-                        device_scale_factor=1,
-                    )
+                    page = context.new_page()
                     page.goto(
                         normalized_url,
                         wait_until="domcontentloaded",
@@ -296,7 +299,7 @@ class BrowserFirstVisualCaptureAdapter:
                             )
                         )
                 finally:
-                    browser.close()
+                    context.close()
         except PlaywrightTimeoutError:
             return CaptureAdapterResult(
                 status="FAILED_RETRYABLE",
@@ -355,7 +358,7 @@ class BrowserFirstVisualCaptureAdapter:
                 str(clip_template),
                 normalized_url,
             ]
-            subprocess.run(
+            ytdlp = subprocess.run(
                 ytdlp_cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -363,8 +366,15 @@ class BrowserFirstVisualCaptureAdapter:
                 timeout=SUBPROCESS_TIMEOUT_SECONDS,
                 shell=False,
             )
+            if ytdlp.returncode != 0:
+                return CaptureAdapterResult(
+                    status="FAILED_RETRYABLE",
+                    reason_codes=("fallback_download_failed",),
+                    retryable=True,
+                    temporary_paths=(temp_dir,),
+                )
             clip = _single_child_file(temp_dir)
-            if clip is None:
+            if clip is None or not clip.exists() or clip.stat().st_size <= 0:
                 return CaptureAdapterResult(
                     status="FAILED_RETRYABLE",
                     reason_codes=("fallback_download_failed",),
@@ -373,14 +383,17 @@ class BrowserFirstVisualCaptureAdapter:
                 )
             for index, offset in enumerate(job["offsets_seconds"]):
                 target = max(0.0, job["requested_time_seconds"] + offset)
+                seek_seconds = max(0.0, target - first_time)
                 image_path = temp_dir / f"frame-{index:02d}.png"
+                if image_path.exists():
+                    image_path.unlink()
                 ffmpeg_cmd = [
                     str(config.ffmpeg_path),
                     "-hide_banner",
                     "-loglevel",
                     "error",
                     "-ss",
-                    f"{target:.3f}",
+                    f"{seek_seconds:.3f}",
                     "-i",
                     str(clip),
                     "-frames:v",
@@ -388,7 +401,7 @@ class BrowserFirstVisualCaptureAdapter:
                     "-y",
                     str(image_path),
                 ]
-                subprocess.run(
+                ffmpeg = subprocess.run(
                     ffmpeg_cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -396,8 +409,17 @@ class BrowserFirstVisualCaptureAdapter:
                     timeout=SUBPROCESS_TIMEOUT_SECONDS,
                     shell=False,
                 )
-                if not image_path.exists():
-                    continue
+                if (
+                    ffmpeg.returncode != 0
+                    or not image_path.exists()
+                    or image_path.stat().st_size <= 0
+                ):
+                    return CaptureAdapterResult(
+                        status="FAILED_RETRYABLE",
+                        reason_codes=("fallback_frame_extract_failed",),
+                        retryable=True,
+                        temporary_paths=(temp_dir,),
+                    )
                 payload = image_path.read_bytes()
                 width, height = _image_dimensions(payload)
                 frames.append(
@@ -518,12 +540,8 @@ def validate_visual_capture_job(
     if forbidden:
         raise VisualCaptureError(f"job contains issue-controlled private fields: {forbidden[0]}")
     required = {"schema", "action_id", "task_ref", "provider", "url", "requested_time_seconds"}
-    if set(job) - {
-        *required,
-        "offsets_seconds",
-        "capture_mode",
-        "human_review_required",
-    }:
+    allowed = required | {"offsets_seconds", "capture_mode", "human_review_required"}
+    if set(job) - allowed:
         raise VisualCaptureError("visual capture job contains unknown fields")
     if job.get("schema") != JOB_SCHEMA:
         raise VisualCaptureError("unsupported visual capture job schema")
@@ -538,13 +556,12 @@ def validate_visual_capture_job(
         raise VisualCaptureError("capture_mode is invalid")
     if capture_mode == "visible_kiosk" and not config.visible_kiosk_enabled:
         raise VisualCaptureError("visible_kiosk requires explicit private runtime selection")
-    normalized_url = _normalize_youtube_watch_url(job.get("url"))
     return {
         "schema": JOB_SCHEMA,
         "action_id": action_id,
         "task_ref": task_ref,
         "provider": "youtube",
-        "normalized_url": normalized_url,
+        "normalized_url": _normalize_youtube_watch_url(job.get("url")),
         "requested_time_seconds": requested_time,
         "offsets_seconds": offsets,
         "capture_mode": capture_mode,
@@ -568,8 +585,7 @@ def _normalize_youtube_watch_url(value: Any) -> str:
         or re.fullmatch(r"[A-Za-z0-9_-]{11}", video_ids[0] or "") is None
     ):
         raise VisualCaptureError("YouTube watch URL must contain one valid video id")
-    clean_query = urlencode({"v": video_ids[0]})
-    return urlunparse(("https", "www.youtube.com", "/watch", "", clean_query, ""))
+    return urlunparse(("https", "www.youtube.com", "/watch", "", urlencode({"v": video_ids[0]}), ""))
 
 
 def _validate_offsets(value: Any) -> tuple[int, ...]:
@@ -601,10 +617,7 @@ def _build_manifest(
     if result.status not in TERMINAL_STATUSES:
         raise VisualCaptureError("adapter returned invalid visual capture status")
     reason_codes = _stable_reason_codes(result.reason_codes)
-    if reason_codes and any(code in INTERACTION_REASON_CODES for code in reason_codes):
-        status = "INTERACTION_REQUIRED"
-    else:
-        status = result.status
+    status = "INTERACTION_REQUIRED" if any(code in INTERACTION_REASON_CODES for code in reason_codes) else result.status
     frames = []
     contact_sheet_hash = None
     contact_sheet_path = capture_dir / CONTACT_SHEET_NAME
@@ -713,9 +726,7 @@ def _claim_one_job(spool_root: Path) -> Path | None:
     jobs = sorted(path for path in incoming.glob("*.json") if path.is_file() and not path.is_symlink())
     if not jobs:
         return None
-    source = _ensure_child_path(jobs[0], incoming)
-    target = claimed / source.name
-    return _move_job(source, target)
+    return _move_job(_ensure_child_path(jobs[0], incoming), claimed / jobs[0].name)
 
 
 def _read_job(job_path: Path) -> dict[str, Any]:
@@ -918,12 +929,10 @@ def _stdlib_contact_sheet_png(frames: tuple[CapturedFrame, ...]) -> bytes:
     if not frames:
         raise VisualCaptureError("contact sheet requires at least one frame")
     width = max(1, len(frames))
-    height = 1
     pixels = bytearray()
     for frame in frames:
-        digest = hashlib.sha256(frame.image_bytes).digest()
-        pixels.extend(digest[:3])
-    return _rgb_png(width, height, bytes(pixels))
+        pixels.extend(hashlib.sha256(frame.image_bytes).digest()[:3])
+    return _rgb_png(width, 1, bytes(pixels))
 
 
 def _rgb_png(width: int, height: int, pixels: bytes) -> bytes:
@@ -1071,6 +1080,7 @@ def _path_is_relative_to(path: Path, root: Path) -> bool:
 
 
 __all__ = [
+    "BrowserFirstVisualCaptureAdapter",
     "CaptureAdapterResult",
     "CapturedFrame",
     "DEFAULT_OFFSETS_SECONDS",

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -9,12 +8,25 @@ import pytest
 from core.home_edge.profile import load_home_edge_profile, synthetic_profile_mapping
 
 
+HOME_EDGE_PROFILE_ENV = (
+    "SKELETON_HOME_EDGE_01_PROFILE",
+    "SKELETON_HOME_EDGE_01_HOSTNAME",
+    "SKELETON_HOME_EDGE_01_TAILSCALE_IP",
+    "SKELETON_HOME_EDGE_01_CONTROLLER_HOST",
+    "SKELETON_HOME_EDGE_01_CONTROLLER_TAILSCALE_IP",
+    "SKELETON_HOME_EDGE_01_TARGET_USER",
+)
+
+
+def _clear_home_edge_profile_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in HOME_EDGE_PROFILE_ENV:
+        monkeypatch.delenv(key, raising=False)
+
+
 def test_home_edge_profile_registers_universal_fixed_node(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    for name in tuple(os.environ):
-        if name.startswith("SKELETON_HOME_EDGE_01_"):
-            monkeypatch.delenv(name, raising=False)
+    _clear_home_edge_profile_env(monkeypatch)
 
     profile = load_home_edge_profile()
 
@@ -32,7 +44,11 @@ def test_home_edge_profile_registers_universal_fixed_node(
     assert profile.is_template_identity
 
 
-def test_profile_rejects_changed_target_identity(tmp_path: Path) -> None:
+def test_profile_rejects_changed_target_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _clear_home_edge_profile_env(monkeypatch)
     data = synthetic_profile_mapping()
     data["ssh"]["transport"] = "raw_shell"
     path = tmp_path / "profile.json"
@@ -42,7 +58,11 @@ def test_profile_rejects_changed_target_identity(tmp_path: Path) -> None:
         load_home_edge_profile(path)
 
 
-def test_local_profile_file_loads_runtime_identity(tmp_path: Path) -> None:
+def test_local_profile_file_loads_runtime_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _clear_home_edge_profile_env(monkeypatch)
     data = synthetic_profile_mapping()
     data["hostname"] = "runtime-host"
     data["tailscale_ip"] = "100.64.10.74"

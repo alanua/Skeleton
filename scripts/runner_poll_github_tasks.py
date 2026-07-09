@@ -78,6 +78,7 @@ from core.memory_patch_proposal import (
 )
 from core.private_memory import healthcheck_private_memory, write_public_heartbeat
 from core.project_tree import get_project, get_project_by_repo, load_project_tree
+from core.runner_child_environment import sanitize_codegen_child_environment
 from core.runner_retry_policy import (
     BLOCK_REPEATED_REASON,
     NEEDS_OPERATOR,
@@ -370,7 +371,6 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
     {
         "accepted",
         "action",
-        "action_id",
         "ahead_by",
         "allowed_files_count",
         "allowed_untracked_files",
@@ -393,6 +393,9 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "changed_files_count",
         "changed_tracked_files",
         "changed_tracked_files_count",
+        "capture_mode",
+        "capture_schema",
+        "capture_status",
         "check",
         "checkout_head_sha",
         "checkout_path",
@@ -404,8 +407,6 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "compare_state",
         "compare_status",
         "canonical_write_enabled",
-        "capture_mode",
-        "capture_status",
         "current_branch",
         "decision_records_skipped",
         "decision_records_written",
@@ -420,9 +421,10 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "usb_modem_health_requirement",
         "internet_path_expectation",
         "gateway_modem_internals",
+        "human_review_required",
         "private_details",
+        "private_contact_sheet",
         "private_manifest",
-        "private_media",
         "disk_bytes",
         "draft",
         "draft_pr",
@@ -440,7 +442,6 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "file_on_main",
         "final_clean_state",
         "files_on_main_count",
-        "frame_count",
         "gated_heartbeat_status",
         "gated_note_status",
         "git_worktree_list_registers_path",
@@ -457,7 +458,6 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "hermes_memory_operation_count",
         "hermes_memory_smoke_status",
         "host_id_sha256_12",
-        "human_review_required",
         "input_row_count",
         "input_table_count",
         "installed_skill_platform_count",
@@ -522,7 +522,6 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "python_version",
         "reason",
         "reason_codes",
-        "receipt_schema",
         "recovery_artifact_status",
         "recovery_ref_status",
         "recovery_restore_status",
@@ -530,11 +529,11 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "recovery_snapshot_status",
         "reset_status",
         "removed_worktrees_count",
+        "retryable",
         "report_drawings",
         "report_mode",
         "report_private_paths",
         "report_quantities",
-        "retryable",
         "review_table_count",
         "runtime_smoke_check_count",
         "runtime_smoke_decision",
@@ -575,7 +574,6 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "system",
         "target_project",
         "task_id",
-        "task_ref",
         "target_project_route",
         "target_repository",
         "test_summary",
@@ -809,11 +807,7 @@ def _validation_command_environment(
     environment: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     source = os.environ if environment is None else environment
-    return {
-        key: value
-        for key, value in source.items()
-        if not key.startswith("SKELETON_")
-    }
+    return sanitize_codegen_child_environment(source)
 
 
 def _run_validation_profile_command(
@@ -1868,10 +1862,16 @@ def run_codex_task(
     ) as task_file:
         task_file.write(task_content)
         task_file.flush()
-        return run_command(
-            codex_exec_command(task_content, workdir, task),
-            cwd=workdir,
+        token = _RUN_COMMAND_ENV_OVERRIDE.set(
+            sanitize_codegen_child_environment(os.environ)
         )
+        try:
+            return run_command(
+                codex_exec_command(task_content, workdir, task),
+                cwd=workdir,
+            )
+        finally:
+            _RUN_COMMAND_ENV_OVERRIDE.reset(token)
 
 
 def post_issue_comment(issue_number: int, body: str) -> None:
@@ -8976,45 +8976,77 @@ def home_edge_01_lan_inventory_read_only() -> str:
     )
 
 
+def _validate_visual_capture_public_receipt(value: Any) -> dict[str, Any]:
+    from core.home_edge.visual_capture import RECEIPT_SCHEMA, TERMINAL_STATUSES
+
+    if not isinstance(value, dict):
+        raise ValueError("visual capture receipt JSON must be an object")
+    expected = {
+        "schema",
+        "action_id",
+        "task_ref",
+        "status",
+        "frame_count",
+        "manifest_hash",
+        "capture_mode",
+        "reason_codes",
+        "retryable",
+        "human_review_required",
+        "stale",
+    }
+    if set(value) != expected:
+        raise ValueError("visual capture receipt schema mismatch")
+    status = value.get("status")
+    reasons = value.get("reason_codes")
+    manifest_hash = value.get("manifest_hash")
+    if (
+        value.get("schema") != RECEIPT_SCHEMA
+        or not isinstance(value.get("action_id"), str)
+        or not isinstance(value.get("task_ref"), str)
+        or status not in (set(TERMINAL_STATUSES) | {"QUEUED"})
+        or not isinstance(value.get("frame_count"), int)
+        or isinstance(value.get("frame_count"), bool)
+        or value.get("frame_count") < 0
+        or value.get("capture_mode") not in {"background", "visible_kiosk"}
+        or not isinstance(reasons, list)
+        or not all(
+            isinstance(reason, str)
+            and re.fullmatch(r"[a-z0-9_]{1,80}", reason) is not None
+            for reason in reasons
+        )
+        or not isinstance(value.get("retryable"), bool)
+        or not isinstance(value.get("human_review_required"), bool)
+        or not isinstance(value.get("stale"), bool)
+        or (
+            manifest_hash is not None
+            and (
+                not isinstance(manifest_hash, str)
+                or re.fullmatch(r"[0-9a-f]{64}", manifest_hash) is None
+            )
+        )
+    ):
+        raise ValueError("visual capture receipt values are invalid")
+    rendered = json.dumps(value, sort_keys=True)
+    blocked = ("youtube", "http://", "https://", "/", "\\", "profile", "stdout", "stderr")
+    if any(marker in rendered.lower() for marker in blocked):
+        raise ValueError("visual capture receipt leaked private data")
+    return {
+        "schema": RECEIPT_SCHEMA,
+        "action_id": value["action_id"],
+        "task_ref": value["task_ref"],
+        "status": status,
+        "frame_count": value["frame_count"],
+        "manifest_hash": manifest_hash,
+        "capture_mode": value["capture_mode"],
+        "reason_codes": sorted(set(reasons)),
+        "retryable": value["retryable"],
+        "human_review_required": value["human_review_required"],
+        "stale": value["stale"],
+    }
+
+
 def home_edge_01_video_visual_capture_tick() -> str:
     task_id = HOME_EDGE_01_VIDEO_VISUAL_CAPTURE_TICK
-    receipt = _run_home_edge_remote_visual_capture_tick()
-    reason_codes = receipt.get("reason_codes") if isinstance(receipt, dict) else None
-    reasons = reason_codes if isinstance(reason_codes, list) else ["invalid_receipt"]
-    reason_value = ",".join(sorted(str(item) for item in reasons)) or "none"
-    status = receipt.get("status") if isinstance(receipt, dict) else "FAILED_TERMINAL"
-    status_lines = [
-        "receipt_schema=home_edge_visual_capture_receipt_v1",
-        "report_mode=single_private_queue_tick",
-        f"action_id={receipt.get('action_id', 'unknown') if isinstance(receipt, dict) else 'unknown'}",
-        f"task_ref={receipt.get('task_ref', 'unknown') if isinstance(receipt, dict) else 'unknown'}",
-        f"capture_status={status}",
-        f"frame_count={receipt.get('frame_count', 0) if isinstance(receipt, dict) else 0}",
-        f"capture_mode={receipt.get('capture_mode', 'background') if isinstance(receipt, dict) else 'background'}",
-        f"reason_codes={reason_value}",
-        f"retryable={str(bool(receipt.get('retryable')) if isinstance(receipt, dict) else False).lower()}",
-        f"human_review_required={str(bool(receipt.get('human_review_required')) if isinstance(receipt, dict) else False).lower()}",
-        "private_manifest=private_artifact_only",
-        "private_media=private_artifact_only",
-        "diagnostic_count=1",
-    ]
-    done = status in {
-        "CAPTURED",
-        "VERIFIED",
-        "HUMAN_REVIEW_PENDING",
-        "QUEUED",
-        "INTERACTION_REQUIRED",
-        "NEEDS_RECAPTURE",
-    }
-    return _maintenance_report(
-        "DONE" if done else "NEEDS_OPERATOR",
-        task_id,
-        status_lines,
-        "met" if done else "not_met",
-    )
-
-
-def _run_home_edge_remote_visual_capture_tick() -> dict[str, Any]:
     command = [
         sys.executable,
         str(ROOT / "scripts" / "home_edge_remote.py"),
@@ -9022,23 +9054,56 @@ def _run_home_edge_remote_visual_capture_tick() -> dict[str, Any]:
     ]
     completed = subprocess.run(
         command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
-        timeout=600,
         check=False,
         shell=False,
-        cwd=str(ROOT),
     )
     if completed.returncode != 0:
-        raise RuntimeError("home_edge_visual_capture_remote_action_failed")
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                "capture_schema=home_edge_visual_capture_receipt_v1",
+                "capture_status=remote_action_failed",
+                "reason_codes=remote_action_failed",
+                "private_manifest=private_artifact_only",
+            ],
+            "not_met",
+        )
     try:
         decoded = json.loads(completed.stdout)
     except json.JSONDecodeError as exc:
-        raise RuntimeError("home_edge_visual_capture_remote_action_non_json") from exc
-    from core.home_edge.diagnostics import _validate_visual_capture_public_receipt
+        raise RuntimeError("visual capture remote action returned invalid JSON") from exc
 
-    return _validate_visual_capture_public_receipt(decoded)
+    receipt = _validate_visual_capture_public_receipt(decoded)
+    reasons = receipt.get("reason_codes")
+    reason_codes = reasons if isinstance(reasons, list) else []
+    reason_value = ",".join(sorted(str(item) for item in reason_codes)) or "none"
+    status = str(receipt.get("status", "FAILED_RETRYABLE"))
+    done = status in {
+        "CAPTURED",
+        "HUMAN_REVIEW_PENDING",
+        "INTERACTION_REQUIRED",
+        "VERIFIED",
+        "QUEUED",
+    }
+    return _maintenance_report(
+        "DONE" if done else "NEEDS_OPERATOR",
+        task_id,
+        [
+            "capture_schema=home_edge_visual_capture_receipt_v1",
+            f"capture_status={status}",
+            f"capture_mode={receipt.get('capture_mode', 'background')}",
+            f"frame_count={receipt.get('frame_count', 0)}",
+            f"reason_codes={reason_value}",
+            f"retryable={str(bool(receipt.get('retryable'))).lower()}",
+            f"human_review_required={str(bool(receipt.get('human_review_required'))).lower()}",
+            "private_manifest=private_artifact_only",
+            "private_contact_sheet=private_artifact_only",
+        ],
+        "met" if done else "not_met",
+    )
 
 
 HERMES_MEMORY_GATEWAY_SMOKE_NAMESPACE = "aufmass"
