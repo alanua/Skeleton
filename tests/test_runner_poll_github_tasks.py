@@ -11175,3 +11175,183 @@ def test_run_validation_profile_command_sanitizes_and_resets_environment(
         os.environ["SKELETON_RUNNER_MEMORY_DB"]
         == "/private/runner.sqlite"
     )
+
+
+def test_run_validation_profile_command_resets_environment_after_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("SKELETON_HOME_EDGE_01_HOSTNAME", "live-home-edge")
+    completed = runner.subprocess.CompletedProcess(
+        args=["python3"],
+        returncode=0,
+        stdout="ok\n",
+        stderr="",
+    )
+
+    with mock.patch.object(
+        runner.subprocess,
+        "run",
+        side_effect=(RuntimeError("launch failed"), completed),
+    ) as subprocess_run:
+        with pytest.raises(RuntimeError, match="launch failed"):
+            runner._run_validation_profile_command(
+                ["python3", "-m", "pytest", "-q"],
+                cwd=tmp_path,
+            )
+        code, output = runner.run_command(["git", "status", "--short"], cwd=tmp_path)
+
+    assert code == 0
+    assert output == "ok\n"
+    assert "env" in subprocess_run.call_args_list[0].kwargs
+    assert "env" not in subprocess_run.call_args_list[1].kwargs
+
+
+def test_finalize_success_validation_subprocesses_use_sanitized_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SKELETON_HOME_EDGE_01_HOSTNAME", "live-home-edge")
+    monkeypatch.setenv("SKELETON_HOME_EDGE_01_TAILSCALE_IP", "100.64.0.1")
+    monkeypatch.setenv("SKELETON_HOME_EDGE_01_CONTROLLER_HOST", "controller")
+    monkeypatch.setenv("SKELETON_HOME_EDGE_TEST_FIXTURE", "public-fixture")
+    monkeypatch.setenv("SKELETON_RUNNER_MEMORY_DB", "/private/runner.sqlite")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "telegram-token")
+    monkeypatch.setenv("GITHUB_TOKEN", "github-token")
+    monkeypatch.setenv("GH_TOKEN", "gh-token")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("HOME", "/home/agent")
+    monkeypatch.setenv("LANG", "C.UTF-8")
+
+    issue = {"number": 123, "title": "Sanitize validation"}
+    changed = ["scripts/runner_poll_github_tasks.py"]
+    captured_calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def run(
+        args: list[str],
+        **kwargs: object,
+    ) -> runner.subprocess.CompletedProcess[str]:
+        captured_calls.append((args, kwargs))
+        if args == ["git", "diff", "--check"]:
+            return runner.subprocess.CompletedProcess(args, 0, "", "")
+        if args == ["python3", "-m", "pytest", "-q"]:
+            child_environment = kwargs["env"]
+            assert isinstance(child_environment, dict)
+            assert not any(
+                key.startswith("SKELETON_HOME_EDGE_01_")
+                for key in child_environment
+            )
+            assert child_environment["SKELETON_HOME_EDGE_TEST_FIXTURE"] == "public-fixture"
+            assert child_environment["SKELETON_RUNNER_MEMORY_DB"] == "/private/runner.sqlite"
+            assert child_environment["TELEGRAM_BOT_TOKEN"] == "telegram-token"
+            assert child_environment["GITHUB_TOKEN"] == "github-token"
+            assert child_environment["GH_TOKEN"] == "gh-token"
+            assert child_environment["PATH"] == "/usr/bin"
+            assert child_environment["HOME"] == "/home/agent"
+            assert child_environment["LANG"] == "C.UTF-8"
+            return runner.subprocess.CompletedProcess(args, 0, "99 passed\n", "")
+        if args == ["git", "add", *changed]:
+            return runner.subprocess.CompletedProcess(args, 0, "", "")
+        if args == ["git", "diff", "--cached", "--check"]:
+            return runner.subprocess.CompletedProcess(args, 0, "", "")
+        if args == ["git", "commit", "-m", "runner: issue #123 task"]:
+            return runner.subprocess.CompletedProcess(args, 0, "", "")
+        if args == [
+            "git",
+            "push",
+            "--force-with-lease",
+            "-u",
+            "origin",
+            "runner/issue-123",
+        ]:
+            return runner.subprocess.CompletedProcess(args, 0, "", "")
+        if args == ["git", "rev-parse", "HEAD"]:
+            return runner.subprocess.CompletedProcess(args, 0, f"{HEAD_SHA}\n", "")
+        if args[:3] == ["gh", "pr", "create"]:
+            return runner.subprocess.CompletedProcess(args, 0, f"{PR_URL}\n", "")
+        raise AssertionError(f"unexpected command: {args!r}")
+
+    with mock.patch.object(
+        runner, "changed_files", side_effect=(changed, changed)
+    ), mock.patch.object(runner, "cleanup_runtime_artifacts"), mock.patch.object(
+        runner.subprocess, "run", side_effect=run
+    ):
+        report = runner.finalize_success(issue, "/tmp/worktree", "codex output")
+
+    assert "99 passed" in report
+    validation_calls = captured_calls[:2]
+    publication_calls = captured_calls[2:]
+    assert [args for args, _kwargs in validation_calls] == [
+        ["git", "diff", "--check"],
+        ["python3", "-m", "pytest", "-q"],
+    ]
+    assert all("env" in kwargs for _args, kwargs in validation_calls)
+    assert all("env" not in kwargs for _args, kwargs in publication_calls)
+    assert os.environ["SKELETON_HOME_EDGE_01_HOSTNAME"] == "live-home-edge"
+
+
+def test_finalize_success_resets_validation_override_before_publish_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SKELETON_HOME_EDGE_01_HOSTNAME", "live-home-edge")
+    changed = ["scripts/runner_poll_github_tasks.py"]
+
+    with mock.patch.object(
+        runner, "changed_files", return_value=changed
+    ), mock.patch.object(runner, "cleanup_runtime_artifacts"), mock.patch.object(
+        runner.subprocess,
+        "run",
+        side_effect=RuntimeError("pytest launch failed"),
+    ):
+        with pytest.raises(RuntimeError, match="pytest launch failed"):
+            runner.finalize_success(
+                {"number": 123, "title": "Sanitize validation"},
+                "/tmp/worktree",
+                "codex output",
+            )
+
+    completed = runner.subprocess.CompletedProcess(
+        args=["gh"],
+        returncode=0,
+        stdout="ok\n",
+        stderr="",
+    )
+    with mock.patch.object(
+        runner.subprocess,
+        "run",
+        return_value=completed,
+    ) as subprocess_run:
+        code, output = runner.run_command(["gh", "auth", "status"], cwd="/tmp/worktree")
+
+    assert code == 0
+    assert output == "ok\n"
+    assert "env" not in subprocess_run.call_args.kwargs
+
+
+def test_local_target_finalization_validation_helper_uses_sanitized_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("SKELETON_HOME_EDGE_01_HOSTNAME", "live-home-edge")
+    monkeypatch.setenv("SKELETON_RUNNER_MEMORY_DB", "/private/runner.sqlite")
+    completed = runner.subprocess.CompletedProcess(
+        args=["python3"],
+        returncode=0,
+        stdout="ok\n",
+        stderr="",
+    )
+
+    with mock.patch.object(
+        runner.subprocess,
+        "run",
+        return_value=completed,
+    ) as subprocess_run:
+        code, output = runner._run_finalization_validation_command(
+            ["python3", "-m", "pytest", "-q"],
+            cwd=tmp_path,
+        )
+
+    assert code == 0
+    assert output == "ok\n"
+    child_environment = subprocess_run.call_args.kwargs["env"]
+    assert "SKELETON_HOME_EDGE_01_HOSTNAME" not in child_environment
+    assert child_environment["SKELETON_RUNNER_MEMORY_DB"] == "/private/runner.sqlite"

@@ -813,6 +813,13 @@ def _run_validation_profile_command(
         _RUN_COMMAND_ENV_OVERRIDE.reset(token)
 
 
+def _run_finalization_validation_command(
+    args: list[str],
+    cwd: str | Path,
+) -> tuple[int, str]:
+    return _run_validation_profile_command(args, cwd=cwd)
+
+
 def worktree_root() -> Path:
     configured_root = os.environ.get("SKELETON_WORKTREE_ROOT")
     if configured_root:
@@ -2876,7 +2883,7 @@ def finalize_success(issue: dict[str, Any], workdir: str, codex_output: str) -> 
         ["git", "diff", "--check"],
         ["python3", "-m", "pytest", "-q"],
     ):
-        code, output = run_command(command, cwd=workdir)
+        code, output = _run_finalization_validation_command(command, cwd=workdir)
         checks.append((" ".join(command), output))
         if code != 0:
             raise RuntimeError(f"{' '.join(command)} failed:\n{output}")
