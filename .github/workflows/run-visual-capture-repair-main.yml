@@ -1,5 +1,6 @@
 name: Temporary visual capture branch repair
 
+# second push intentionally triggers the already-installed workflow
 on:
   push:
     branches:
