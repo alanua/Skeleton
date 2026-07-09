@@ -2343,6 +2343,24 @@ def _publish_issue_worktree_to_existing_pr_body(
     return str(body["body"])
 
 
+def _overlay_registered_worktree_body(
+    *,
+    packet_id: str = "home_edge_1640_to_pr_1638",
+    operator_approval: str = runner.OVERLAY_REGISTERED_WORKTREE_TO_EXISTING_PR,
+    extra_metadata: tuple[str, ...] = (),
+) -> str:
+    metadata = [
+        f"Recovery Packet: {packet_id}",
+        f"Operator Approval: {operator_approval}",
+        *extra_metadata,
+    ]
+    body = _maintenance_issue(
+        runner.OVERLAY_REGISTERED_WORKTREE_TO_EXISTING_PR,
+        metadata="\n".join(metadata),
+    )
+    return str(body["body"])
+
+
 def _publish_container_validation_worktree_body(
     *,
     repository: str = runner.REPO,
@@ -2749,6 +2767,146 @@ def _existing_pr_publish_commands(
             "HEAD:refs/heads/runner/issue-1638",
         ]:
             return push_code, "push failed output must not leak"
+        return 2, f"unexpected command: {command!r}"
+
+    return run
+
+
+def _prepare_overlay_source_worktree(root: Path, packet_id: str) -> Path:
+    packet = runner.REGISTERED_WORKTREE_OVERLAY_PACKETS[packet_id]
+    worktree_path = root / f"issue-{packet.source_issue}"
+    worktree_path.mkdir(parents=True)
+    (worktree_path / ".git").write_text("gitdir: /tmp/git-dir\n", encoding="utf-8")
+    for relative_path in packet.allowed_files:
+        path = worktree_path / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{packet_id}:{relative_path}\n", encoding="utf-8")
+    return worktree_path
+
+
+def _overlay_pr_state(
+    packet_id: str,
+    *,
+    head_sha: str | None = None,
+    files: tuple[str, ...] = ("scripts/runner_poll_github_tasks.py",),
+    number: int | None = None,
+    state: str = "OPEN",
+    is_draft: bool = True,
+    base_ref: str = "main",
+    head_ref: str | None = None,
+    head_repository: str = runner.REPO,
+) -> dict[str, object]:
+    packet = runner.REGISTERED_WORKTREE_OVERLAY_PACKETS[packet_id]
+    return _existing_pr_publish_state(
+        number=number if number is not None else packet.pr_number,
+        state=state,
+        is_draft=is_draft,
+        base_ref=base_ref,
+        head_ref=head_ref or packet.target_branch,
+        head_sha=head_sha or packet.target_head_sha,
+        head_repository=head_repository,
+        url=f"https://github.com/alanua/Skeleton/pull/{packet.pr_number}",
+        files=files,
+    )
+
+
+def _overlay_registered_worktree_commands(
+    *,
+    worktree_path: Path,
+    packet_id: str = "home_edge_1640_to_pr_1638",
+    branch: str | None = None,
+    remote_url: str = "https://github.com/alanua/Skeleton.git",
+    changed_files: tuple[str, ...] | None = None,
+    untracked_files: tuple[str, ...] = (),
+    diff_check_code: int = 0,
+    cat_file_code: int = 0,
+    fetch_code: int = 0,
+    fetched_sha: str | None = None,
+    read_tree_code: int = 0,
+    write_tree_code: int = 0,
+    commit_tree_code: int = 0,
+    new_commit_sha: str = "d" * 40,
+    parent_sha: str | None = None,
+    commit_diff_files: tuple[str, ...] | None = None,
+    pr_diff_files: tuple[str, ...] | None = None,
+    push_code: int = 0,
+    pre_pr_state: dict[str, object] | None = None,
+    post_pr_state: dict[str, object] | None = None,
+    pr_view_code: int = 0,
+) -> object:
+    packet = runner.REGISTERED_WORKTREE_OVERLAY_PACKETS[packet_id]
+    pr_view_count = 0
+    source_changed_files = changed_files if changed_files is not None else (packet.allowed_files[0],)
+    before_state = pre_pr_state or _overlay_pr_state(packet_id)
+    pre_file_paths = tuple(
+        item["path"] for item in before_state["files"] if isinstance(item, dict)
+    )
+    after_state = post_pr_state or _overlay_pr_state(
+        packet_id,
+        head_sha=new_commit_sha,
+        files=tuple(sorted(set(pre_file_paths) | set(source_changed_files))),
+    )
+    blob_shas = iter([f"{index + 1:040x}" for index in range(100)])
+
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        nonlocal pr_view_count
+        assert Path(cwd or "") == worktree_path
+        if command[:4] == ["gh", "pr", "view", str(packet.pr_number)]:
+            pr_view_count += 1
+            if pr_view_code != 0:
+                return pr_view_code, "pr view output must not leak"
+            return 0, json.dumps(before_state if pr_view_count == 1 else after_state)
+        if command == ["git", "branch", "--show-current"]:
+            return 0, f"{branch or packet.source_branch}\n"
+        if command == ["git", "remote", "get-url", "origin"]:
+            return 0, f"{remote_url}\n"
+        if command == ["git", "diff", "--name-only", "HEAD", "--"]:
+            return 0, "\n".join(source_changed_files) + "\n"
+        if command == ["git", "ls-files", "--others", "--exclude-standard"]:
+            return 0, "\n".join(untracked_files) + ("\n" if untracked_files else "")
+        if command == ["git", "diff", "--check", "--", *source_changed_files]:
+            return diff_check_code, "diff check output must not leak"
+        if command == ["git", "cat-file", "-e", f"{packet.target_head_sha}^{{commit}}"]:
+            return cat_file_code, ""
+        if command == [
+            "git",
+            "fetch",
+            "origin",
+            f"{packet.target_branch}:refs/remotes/origin/{packet.target_branch}",
+        ]:
+            return fetch_code, "fetch output must not leak"
+        if command == ["git", "rev-parse", f"refs/remotes/origin/{packet.target_branch}"]:
+            return 0, f"{fetched_sha or packet.target_head_sha}\n"
+        if command == ["git", "read-tree", packet.target_head_sha]:
+            return read_tree_code, "read tree output must not leak"
+        if command[:3] == ["git", "hash-object", "-w"]:
+            return 0, f"{next(blob_shas)}\n"
+        if command[:2] == ["git", "update-index"]:
+            return 0, ""
+        if command == ["git", "write-tree"]:
+            return write_tree_code, f"{'e' * 40}\n"
+        if command[:2] == ["git", "commit-tree"]:
+            return commit_tree_code, f"{new_commit_sha}\n"
+        if command == ["git", "rev-parse", f"{new_commit_sha}^"]:
+            return 0, f"{parent_sha or packet.target_head_sha}\n"
+        if command == ["git", "diff", "--name-only", packet.target_head_sha, new_commit_sha, "--"]:
+            files = commit_diff_files or source_changed_files
+            return 0, "\n".join(files) + "\n"
+        if command == ["git", "diff", "--name-only", "main", new_commit_sha, "--"]:
+            files = (
+                pr_diff_files
+                if pr_diff_files is not None
+                else tuple(sorted(set(pre_file_paths) | set(source_changed_files)))
+            )
+            return 0, "\n".join(files) + "\n"
+        if command == [
+            "git",
+            "push",
+            "origin",
+            f"--force-with-lease={packet.target_branch}:{packet.target_head_sha}",
+            f"{new_commit_sha}:refs/heads/{packet.target_branch}",
+        ]:
+            return push_code, "push output must not leak"
         return 2, f"unexpected command: {command!r}"
 
     return run
@@ -5825,6 +5983,310 @@ def test_publish_issue_worktree_to_existing_pr_rejects_unapproved_or_extra_metad
 
     assert report.startswith("NEEDS_OPERATOR:")
     assert "reason=unsupported_metadata_field" in report
+
+
+@pytest.mark.parametrize(
+    "packet_id",
+    ("home_edge_1640_to_pr_1638", "docs_1668_to_pr_1670"),
+)
+def test_overlay_registered_worktree_builds_one_parented_commit_for_static_packets(
+    tmp_path: Path, packet_id: str
+) -> None:
+    packet = runner.REGISTERED_WORKTREE_OVERLAY_PACKETS[packet_id]
+    worktree_path = _prepare_overlay_source_worktree(tmp_path, packet_id)
+    source_head_marker = (worktree_path / ".git").read_bytes()
+    new_commit = "d" * 40
+    changed_files = packet.allowed_files[:2]
+
+    with mock.patch.object(
+        runner,
+        "load_runner_project_tree",
+        return_value=_project_tree_with_skeleton_worktree_root(tmp_path),
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_overlay_registered_worktree_commands(
+            worktree_path=worktree_path,
+            packet_id=packet_id,
+            changed_files=changed_files,
+            untracked_files=(".codex/session.json",),
+            new_commit_sha=new_commit,
+        ),
+    ) as run:
+        report = runner.overlay_registered_worktree_to_existing_pr(
+            _overlay_registered_worktree_body(packet_id=packet_id)
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert runner.OVERLAY_REGISTERED_WORKTREE_TO_EXISTING_PR in runner.RUNTIME_MAINTENANCE_TASK_IDS
+    assert runner.OVERLAY_REGISTERED_WORKTREE_TO_EXISTING_PR in runner.PUBLISH_ONLY_MAINTENANCE_TASK_IDS
+    assert report.startswith("DONE:")
+    assert f"maintenance_task_id={runner.OVERLAY_REGISTERED_WORKTREE_TO_EXISTING_PR}" in report
+    assert f"recovery_packet={packet_id}" in report
+    assert f"pull_request={packet.pr_number}" in report
+    assert f"expected_target_branch={packet.target_branch}" in report
+    assert f"expected_target_head_sha={packet.target_head_sha}" in report
+    assert f"pushed_head_sha={new_commit}" in report
+    assert f"pr_url=https://github.com/alanua/Skeleton/pull/{packet.pr_number}" in report
+    assert "validated_publish_files_count=2" in report
+    assert ["git", "diff", "--check", "--", *changed_files] in commands
+    assert ["git", "read-tree", packet.target_head_sha] in commands
+    assert any(command[:2] == ["git", "commit-tree"] and command[3:5] == ["-p", packet.target_head_sha] for command in commands)
+    assert ["git", "rev-parse", f"{new_commit}^"] in commands
+    assert [
+        "git",
+        "push",
+        "origin",
+        f"--force-with-lease={packet.target_branch}:{packet.target_head_sha}",
+        f"{new_commit}:refs/heads/{packet.target_branch}",
+    ] in commands
+    assert all(command[:2] != ["git", "add"] for command in commands)
+    assert all(command[:2] != ["git", "commit"] for command in commands)
+    assert all(command[:3] != ["gh", "pr", "create"] for command in commands)
+    assert all(command[:3] != ["gh", "pr", "merge"] for command in commands)
+    assert all(command[:3] != ["gh", "workflow", "run"] for command in commands)
+    assert not any("merge-base" in command for command in commands)
+    assert (worktree_path / ".git").read_bytes() == source_head_marker
+
+
+def test_overlay_registered_worktree_fetches_exact_branch_when_target_object_missing(
+    tmp_path: Path,
+) -> None:
+    packet_id = "home_edge_1640_to_pr_1638"
+    packet = runner.REGISTERED_WORKTREE_OVERLAY_PACKETS[packet_id]
+    worktree_path = _prepare_overlay_source_worktree(tmp_path, packet_id)
+    with mock.patch.object(
+        runner,
+        "load_runner_project_tree",
+        return_value=_project_tree_with_skeleton_worktree_root(tmp_path),
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_overlay_registered_worktree_commands(
+            worktree_path=worktree_path,
+            packet_id=packet_id,
+            cat_file_code=1,
+        ),
+    ) as run:
+        report = runner.overlay_registered_worktree_to_existing_pr(
+            _overlay_registered_worktree_body(packet_id=packet_id)
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert [
+        "git",
+        "fetch",
+        "origin",
+        f"{packet.target_branch}:refs/remotes/origin/{packet.target_branch}",
+    ] in commands
+
+
+@pytest.mark.parametrize(
+    ("body", "reason"),
+    (
+        (_overlay_registered_worktree_body(packet_id="unknown"), "unknown_recovery_packet"),
+        (
+            _overlay_registered_worktree_body(operator_approval="approved"),
+            "missing_operator_approval",
+        ),
+        (
+            _overlay_registered_worktree_body(extra_metadata=("Repository: alanua/Skeleton",)),
+            "unsupported_metadata_field",
+        ),
+    ),
+)
+def test_overlay_registered_worktree_rejects_unregistered_inputs_before_commands(
+    body: str, reason: str
+) -> None:
+    with mock.patch.object(runner, "run_command") as run:
+        report = runner.overlay_registered_worktree_to_existing_pr(body)
+
+    assert report.startswith("NEEDS_OPERATOR:")
+    assert f"reason={reason}" in report
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("pre_state", "reason"),
+    (
+        (_overlay_pr_state("home_edge_1640_to_pr_1638", number=999), "pr_number_mismatch"),
+        (_overlay_pr_state("home_edge_1640_to_pr_1638", state="CLOSED"), "pr_not_open"),
+        (_overlay_pr_state("home_edge_1640_to_pr_1638", is_draft=False), "pr_not_draft"),
+        (_overlay_pr_state("home_edge_1640_to_pr_1638", base_ref="develop"), "pr_base_mismatch"),
+        (
+            _overlay_pr_state("home_edge_1640_to_pr_1638", head_repository="alanua/Other"),
+            "pr_head_repository_mismatch",
+        ),
+        (_overlay_pr_state("home_edge_1640_to_pr_1638", head_ref="runner/issue-999"), "pr_head_branch_mismatch"),
+        (_overlay_pr_state("home_edge_1640_to_pr_1638", head_sha="c" * 40), "pr_head_sha_mismatch"),
+    ),
+)
+def test_overlay_registered_worktree_wrong_pr_state_blocks_before_write(
+    tmp_path: Path, pre_state: dict[str, object], reason: str
+) -> None:
+    packet_id = "home_edge_1640_to_pr_1638"
+    worktree_path = _prepare_overlay_source_worktree(tmp_path, packet_id)
+    with mock.patch.object(
+        runner,
+        "load_runner_project_tree",
+        return_value=_project_tree_with_skeleton_worktree_root(tmp_path),
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_overlay_registered_worktree_commands(
+            worktree_path=worktree_path,
+            packet_id=packet_id,
+            pre_pr_state=pre_state,
+        ),
+    ) as run:
+        report = runner.overlay_registered_worktree_to_existing_pr(
+            _overlay_registered_worktree_body(packet_id=packet_id)
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("BLOCKED:")
+    assert f"reason={reason}" in report
+    assert all(command[:2] != ["git", "read-tree"] for command in commands)
+    assert all(command[:2] != ["git", "push"] for command in commands)
+
+
+@pytest.mark.parametrize(
+    ("command_kwargs", "reason"),
+    (
+        ({"branch": "runner/issue-999"}, "source_branch_mismatch"),
+        ({"remote_url": "https://github.com/alanua/Other.git"}, "origin_remote_mismatch"),
+        ({"changed_files": ("docs/unexpected.md",)}, "changed_files_outside_allowlist"),
+        ({"changed_files": ("../unsafe",)}, "changed_tracked_file_path_unsafe"),
+        ({"untracked_files": ("docs/unexpected.md",)}, "unexpected_untracked_files"),
+        ({"untracked_files": ("../unsafe",)}, "untracked_file_path_unsafe"),
+        ({"changed_files": ()}, "no_publishable_changes"),
+        ({"diff_check_code": 1}, "diff_check_failed"),
+        ({"cat_file_code": 1, "fetch_code": 1}, "target_object_unavailable"),
+        ({"cat_file_code": 1, "fetched_sha": "c" * 40}, "fetched_target_sha_mismatch"),
+        ({"read_tree_code": 1}, "temporary_index_failed"),
+        ({"write_tree_code": 1}, "temporary_index_failed"),
+        ({"commit_tree_code": 1}, "commit_failed"),
+        ({"parent_sha": "c" * 40}, "commit_parent_verification_failed"),
+        ({"commit_diff_files": ("docs/unexpected.md",)}, "commit_diff_outside_allowlist"),
+        ({"pr_diff_files": ()}, "pre_existing_pr_files_missing"),
+        ({"push_code": 1}, "push_failed"),
+    ),
+)
+def test_overlay_registered_worktree_fail_closed_source_and_plumbing_checks(
+    tmp_path: Path, command_kwargs: dict[str, object], reason: str
+) -> None:
+    packet_id = "home_edge_1640_to_pr_1638"
+    worktree_path = _prepare_overlay_source_worktree(tmp_path, packet_id)
+    with mock.patch.object(
+        runner,
+        "load_runner_project_tree",
+        return_value=_project_tree_with_skeleton_worktree_root(tmp_path),
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_overlay_registered_worktree_commands(
+            worktree_path=worktree_path,
+            packet_id=packet_id,
+            **command_kwargs,
+        ),
+    ) as run:
+        report = runner.overlay_registered_worktree_to_existing_pr(
+            _overlay_registered_worktree_body(packet_id=packet_id)
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("BLOCKED:")
+    assert f"reason={reason}" in report
+    if reason not in {"push_failed"}:
+        assert all(command[:2] != ["git", "push"] for command in commands)
+    assert all(command[:3] != ["gh", "pr", "create"] for command in commands)
+    assert all(command[:3] != ["gh", "pr", "merge"] for command in commands)
+
+
+@pytest.mark.parametrize(
+    ("post_state", "reason"),
+    (
+        (
+            _overlay_pr_state("home_edge_1640_to_pr_1638", number=999, head_sha="d" * 40),
+            "post_push_pr_number_mismatch",
+        ),
+        (
+            _overlay_pr_state("home_edge_1640_to_pr_1638", state="CLOSED", head_sha="d" * 40),
+            "post_push_pr_not_open",
+        ),
+        (
+            _overlay_pr_state("home_edge_1640_to_pr_1638", head_ref="runner/issue-999", head_sha="d" * 40),
+            "post_push_pr_head_branch_mismatch",
+        ),
+        (_overlay_pr_state("home_edge_1640_to_pr_1638", head_sha="e" * 40), "post_push_pr_head_sha_mismatch"),
+        (_overlay_pr_state("home_edge_1640_to_pr_1638", head_sha="d" * 40, files=()), "pre_existing_pr_files_missing"),
+        (
+            _overlay_pr_state(
+                "home_edge_1640_to_pr_1638",
+                head_sha="d" * 40,
+                files=("scripts/runner_poll_github_tasks.py", "docs/unexpected.md"),
+            ),
+            "new_pr_files_outside_allowlist",
+        ),
+    ),
+)
+def test_overlay_registered_worktree_post_push_verification_blocks(
+    tmp_path: Path, post_state: dict[str, object], reason: str
+) -> None:
+    packet_id = "home_edge_1640_to_pr_1638"
+    worktree_path = _prepare_overlay_source_worktree(tmp_path, packet_id)
+    with mock.patch.object(
+        runner,
+        "load_runner_project_tree",
+        return_value=_project_tree_with_skeleton_worktree_root(tmp_path),
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_overlay_registered_worktree_commands(
+            worktree_path=worktree_path,
+            packet_id=packet_id,
+            post_pr_state=post_state,
+        ),
+    ):
+        report = runner.overlay_registered_worktree_to_existing_pr(
+            _overlay_registered_worktree_body(packet_id=packet_id)
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert f"reason={reason}" in report
+
+
+def test_overlay_registered_worktree_route_is_publish_only_and_normal_route_unchanged() -> None:
+    assert set(runner.REGISTERED_WORKTREE_OVERLAY_PACKETS) == {
+        "home_edge_1640_to_pr_1638",
+        "docs_1668_to_pr_1670",
+    }
+    issue = _maintenance_issue(runner.OVERLAY_REGISTERED_WORKTREE_TO_EXISTING_PR)
+    report = (
+        "NEEDS_OPERATOR: Runner host maintenance task needs operator action.\n"
+        f"maintenance_task_id={runner.OVERLAY_REGISTERED_WORKTREE_TO_EXISTING_PR}\n"
+        "reason=unknown_recovery_packet\n"
+        "success_criteria=not_met"
+    )
+
+    with mock.patch.object(
+        runner, "ensure_clean_worktree", return_value=(True, "")
+    ), mock.patch.object(
+        runner, "dispatch_runtime_maintenance_task", return_value=report
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ) as post, mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "run_codex_task"
+    ) as run_codex:
+        runner.process_issue(issue)
+
+    run_codex.assert_not_called()
+    assert "route=publish_only" in post.call_args.args[1]
 
 
 def test_publish_container_validation_worktree_publishes_fixed_static_packet(
