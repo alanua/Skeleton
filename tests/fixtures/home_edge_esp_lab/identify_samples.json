@@ -1,0 +1,20 @@
+{
+  "esp32": {
+    "read_mac": "esptool.py v4.9\nChip is ESP32-D0WD-V3 (revision v3.1)\nMAC: aa:bb:cc:dd:ee:ff\n",
+    "flash_id": "Manufacturer: 20\nDevice: 4016\nDetected flash size: 4MB\n"
+  },
+  "esp32-c3": {
+    "read_mac": "Chip is ESP32-C3 (revision v0.4)\nMAC: 112233445566\n",
+    "flash_id": "Manufacturer: c8\nDevice: 4017\nDetected flash size: 8MB\n"
+  },
+  "esp32-s3": {
+    "read_mac": "Chip is ESP32-S3 (revision v0.2)\nMAC: 22:33:44:55:66:77\n",
+    "flash_id": "Manufacturer: ef\nDevice: 4018\nDetected flash size: 16MB\n"
+  },
+  "esp8266-limited": {
+    "read_mac": "Chip is ESP8266EX\nMAC: 334455667788\n",
+    "flash_id": "Manufacturer: e0\nDevice: 4014\nDetected flash size: 1MB\n"
+  },
+  "malformed": "not an esptool identity response",
+  "oversized": "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+}

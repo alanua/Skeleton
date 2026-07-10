@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/alanua/Skeleton/schemas/home_edge_esp_lab_job.schema.json",
+  "title": "Home Edge ESP Lab Job",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "control_plane_id",
+    "node_id",
+    "endpoint_kind",
+    "adapter_kind",
+    "operation",
+    "device_ref",
+    "timeout_seconds",
+    "idempotency_key",
+    "execution_mode",
+    "private_salt"
+  ],
+  "properties": {
+    "schema": {
+      "const": "skeleton.home_edge.esp_lab.v1.job"
+    },
+    "control_plane_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$"
+    },
+    "node_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$"
+    },
+    "endpoint_kind": {
+      "enum": [
+        "home_edge_local_linux",
+        "windows_workstation_connector"
+      ]
+    },
+    "adapter_kind": {
+      "enum": [
+        "linux_tty",
+        "windows_com"
+      ]
+    },
+    "operation": {
+      "enum": [
+        "discover_serial_candidates",
+        "identify_chip",
+        "inspect_flash_identity",
+        "observe_serial_bounded"
+      ]
+    },
+    "device_ref": {
+      "type": "string",
+      "minLength": 4,
+      "maxLength": 64
+    },
+    "timeout_seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 30
+    },
+    "idempotency_key": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$"
+    },
+    "execution_mode": {
+      "enum": [
+        "plan",
+        "read_only"
+      ]
+    },
+    "private_salt": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 256
+    },
+    "baud": {
+      "enum": [
+        9600,
+        115200,
+        460800,
+        921600
+      ]
+    },
+    "max_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 16384
+    },
+    "expected_family": {
+      "enum": [
+        "esp32",
+        "esp32-c3",
+        "esp32-c5",
+        "esp32-c6",
+        "esp32-h2",
+        "esp32-p4",
+        "esp32-s2",
+        "esp32-s3",
+        "esp8266-limited"
+      ]
+    }
+  }
+}

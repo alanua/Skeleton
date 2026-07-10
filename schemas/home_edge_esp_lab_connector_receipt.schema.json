@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/alanua/Skeleton/schemas/home_edge_esp_lab_connector_receipt.schema.json",
+  "title": "Home Edge ESP Lab Connector Receipt Envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "observation",
+    "receipt"
+  ],
+  "properties": {
+    "observation": {
+      "type": "object"
+    },
+    "receipt": {
+      "type": "object"
+    }
+  }
+}

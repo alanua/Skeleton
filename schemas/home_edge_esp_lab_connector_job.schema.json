@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/alanua/Skeleton/schemas/home_edge_esp_lab_connector_job.schema.json",
+  "title": "Home Edge ESP Lab Connector Job",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "control_plane_id",
+    "node_id",
+    "endpoint_kind",
+    "adapter_kind",
+    "operation",
+    "device_ref",
+    "timeout_seconds",
+    "idempotency_key",
+    "execution_mode",
+    "private_salt"
+  ],
+  "properties": {
+    "schema": {
+      "const": "skeleton.home_edge.esp_lab.connector.v1.job"
+    },
+    "control_plane_id": {
+      "type": "string"
+    },
+    "node_id": {
+      "type": "string"
+    },
+    "endpoint_kind": {
+      "const": "windows_workstation_connector"
+    },
+    "adapter_kind": {
+      "const": "windows_com"
+    },
+    "operation": {
+      "type": "string"
+    },
+    "device_ref": {
+      "type": "string"
+    },
+    "timeout_seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 30
+    },
+    "idempotency_key": {
+      "type": "string"
+    },
+    "execution_mode": {
+      "enum": [
+        "plan",
+        "read_only"
+      ]
+    },
+    "private_salt": {
+      "type": "string"
+    },
+    "baud": {
+      "type": "integer"
+    },
+    "max_bytes": {
+      "type": "integer"
+    },
+    "expected_family": {
+      "type": "string"
+    }
+  }
+}
