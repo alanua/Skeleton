@@ -57,6 +57,13 @@ from core.runner_diagnostic_executor import (
     reject_mempalace_runtime_smoke_issue_input as _executor_reject_mempalace_runtime_smoke_issue_input,
     validate_mempalace_benchmark_report as _executor_validate_mempalace_benchmark_report,
 )
+from core.runner_shadow_integration import (
+    MAINTENANCE_TASK_KIND_BY_ID as SHADOW_MAINTENANCE_TASK_KIND_BY_ID,
+    RunnerShadowReceipt,
+    RunnerShadowCompatibilityBindings,
+    blocked_shadow_receipt,
+    evaluate_shadow_from_normalized_metadata,
+)
 from core.runner_loop_control_executor import (
     LOOP_ENGINE_PACKET,
     LOOP_STATE_DB_ENV,
@@ -113,6 +120,8 @@ from core.telegram_approval_buttons import build_pr_ready_card_payload
 QUEUE_REPOSITORY = "alanua/Skeleton"
 REPO = QUEUE_REPOSITORY
 RUNNER_GITHUB_ACTOR_ENV = "SKELETON_RUNNER_GITHUB_ACTOR"
+RUNNER_SHADOW_MODE_ENV = "SKELETON_RUNNER_SHADOW_MODE"
+LAST_RUNNER_SHADOW_RECEIPT: dict[str, object] | None = None
 
 
 def trusted_runner_comment_authors() -> frozenset[str]:
@@ -1878,6 +1887,223 @@ def runner_task_route(
     if merge_mode:
         return ROUTE_RUNTIME_ONLY
     return ROUTE_CODE_GENERATION
+
+
+def runner_shadow_mode_enabled() -> bool:
+    configured = os.environ.get(RUNNER_SHADOW_MODE_ENV)
+    if configured is None:
+        return False
+    return configured.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def protected_runner_shadow_compatibility_bindings() -> RunnerShadowCompatibilityBindings:
+    return RunnerShadowCompatibilityBindings(
+        legacy_routes=frozenset(
+            {
+                ROUTE_CODE_GENERATION,
+                ROUTE_RUNTIME_ONLY,
+                ROUTE_PUBLISH_ONLY,
+            }
+        ),
+        route_task_kind_by_route={
+            ROUTE_CODE_GENERATION: "code_edit",
+            ROUTE_PUBLISH_ONLY: "publish",
+        },
+        maintenance_task_kind_by_id={
+            task_id: SHADOW_MAINTENANCE_TASK_KIND_BY_ID[task_id]
+            for task_id in sorted(RUNTIME_MAINTENANCE_TASK_IDS)
+            if task_id in SHADOW_MAINTENANCE_TASK_KIND_BY_ID
+        },
+        publish_maintenance_task_ids=frozenset(PUBLISH_ONLY_MAINTENANCE_TASK_IDS),
+    )
+
+
+def _shadow_task_block_mapping(body: str) -> Mapping[str, Any]:
+    task_block = extract_task_block(body)
+    if task_block is None:
+        return {}
+    try:
+        parsed = yaml.safe_load(task_block)
+    except yaml.YAMLError:
+        return {}
+    return parsed if isinstance(parsed, Mapping) else {}
+
+
+def _shadow_field(
+    body: str,
+    task_fields: Mapping[str, Any],
+    public_field: str,
+    typed_key: str,
+) -> object:
+    if typed_key in task_fields:
+        return task_fields[typed_key]
+    return _body_field_or_yaml_value(body, public_field, typed_key)
+
+
+def _shadow_int(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.isdecimal():
+        return int(value)
+    return None
+
+
+def _shadow_csv_or_sequence(value: object) -> tuple[str, ...]:
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return tuple(item.strip() for item in value if item.strip())
+    if isinstance(value, tuple) and all(isinstance(item, str) for item in value):
+        return tuple(item.strip() for item in value if item.strip())
+    if isinstance(value, str):
+        return tuple(part.strip() for part in value.split(",") if part.strip())
+    return ()
+
+
+def _shadow_validation_commands(value: object) -> tuple[tuple[str, ...], ...]:
+    if not isinstance(value, list):
+        return ()
+    commands: list[tuple[str, ...]] = []
+    for command in value:
+        if not isinstance(command, list) or not all(
+            isinstance(part, str) for part in command
+        ):
+            return ()
+        commands.append(tuple(command))
+    return tuple(commands)
+
+
+def normalized_runner_shadow_metadata(
+    *,
+    issue_number: int,
+    issue_body: str,
+    route: str,
+    maintenance_task_id: str | None,
+    runner_task: RunnerTask | None,
+    merge_request: TelegramApprovedPrMergeRequest | None,
+    trusted_approval_references: tuple[str, ...] = (),
+    trusted_protected_approval_references: tuple[str, ...] = (),
+) -> dict[str, object]:
+    task_fields = _shadow_task_block_mapping(issue_body)
+    base_sha = _shadow_field(issue_body, task_fields, "Base SHA", "base_sha")
+    allowed_files = _shadow_csv_or_sequence(
+        _shadow_field(issue_body, task_fields, "Allowed Files", "allowed_files")
+    )
+    approval_reference = _shadow_field(
+        issue_body,
+        task_fields,
+        "Approval Reference",
+        "approval_reference",
+    )
+    idempotency_key = _shadow_field(
+        issue_body,
+        task_fields,
+        "Idempotency Key",
+        "idempotency_key",
+    )
+    validation_timeout = _shadow_int(
+        _shadow_field(
+            issue_body,
+            task_fields,
+            "Validation Timeout Seconds",
+            "validation_timeout_seconds",
+        )
+    )
+    privacy_boundary = _shadow_field(
+        issue_body,
+        task_fields,
+        "Privacy Boundary",
+        "privacy_boundary",
+    )
+
+    current_head_sha: str | None = None
+    pr_number: int | None = None
+    publish_mode: str | None = None
+    if merge_request is not None:
+        current_head_sha = merge_request.approved_head_sha
+        pr_number = merge_request.pr_number
+        publish_mode = "signed_merge"
+
+    return {
+        "issue_number": issue_number,
+        "legacy_route": route,
+        "maintenance_task_id": maintenance_task_id,
+        "repo": _body_field(issue_body, "Repository") or REPO,
+        "branch": _body_field(issue_body, "Branch") or f"runner/issue-{issue_number}",
+        "base_sha": base_sha,
+        "allowed_files": allowed_files,
+        "privacy_boundary": privacy_boundary,
+        "approval_reference": approval_reference,
+        "trusted_approval_references": trusted_approval_references,
+        "trusted_protected_approval_references": trusted_protected_approval_references,
+        "idempotency_key": idempotency_key,
+        "validation_timeout_seconds": validation_timeout,
+        "requested_capabilities": _shadow_csv_or_sequence(
+            _shadow_field(
+                issue_body,
+                task_fields,
+                "Requested Capabilities",
+                "requested_capabilities",
+            )
+        ),
+        "forbidden_actions": _shadow_csv_or_sequence(
+            _shadow_field(issue_body, task_fields, "Forbidden Actions", "forbidden_actions")
+        ),
+        "validation_commands": _shadow_validation_commands(
+            _shadow_field(
+                issue_body,
+                task_fields,
+                "Validation Commands",
+                "validation_commands",
+            )
+        ),
+        "expected_output": _shadow_csv_or_sequence(
+            _shadow_field(issue_body, task_fields, "Expected Output", "expected_output")
+        ),
+        "runner_lane": runner_task.lane.name if runner_task is not None else None,
+        "publish_mode": publish_mode,
+        "pr_number": pr_number,
+        "current_head_sha": current_head_sha,
+    }
+
+
+def evaluate_runner_shadow_hook(
+    *,
+    issue_number: int,
+    issue_body: str,
+    route: str,
+    maintenance_task_id: str | None,
+    runner_task: RunnerTask | None,
+    merge_request: TelegramApprovedPrMergeRequest | None,
+    trusted_approval_references: tuple[str, ...] = (),
+    trusted_protected_approval_references: tuple[str, ...] = (),
+) -> RunnerShadowReceipt | None:
+    global LAST_RUNNER_SHADOW_RECEIPT
+    if not runner_shadow_mode_enabled():
+        LAST_RUNNER_SHADOW_RECEIPT = {
+            "schema": "skeleton.runner_shadow_receipt.v1",
+            "shadow_status": "not_applicable",
+            "semantic_route": None,
+            "reason_codes": ["SHADOW_MODE_DISABLED"],
+            "task_envelope_hash": None,
+        }
+        return None
+    try:
+        receipt = evaluate_shadow_from_normalized_metadata(
+            normalized_runner_shadow_metadata(
+                issue_number=issue_number,
+                issue_body=issue_body,
+                route=route,
+                maintenance_task_id=maintenance_task_id,
+                runner_task=runner_task,
+                merge_request=merge_request,
+                trusted_approval_references=trusted_approval_references,
+                trusted_protected_approval_references=trusted_protected_approval_references,
+            ),
+            protected_runner_shadow_compatibility_bindings(),
+        )
+    except Exception:
+        receipt = blocked_shadow_receipt("SHADOW_EVALUATOR_EXCEPTION")
+    LAST_RUNNER_SHADOW_RECEIPT = receipt.to_public_mapping()
+    return receipt
 
 
 def retry_condition_for_issue(
@@ -11407,6 +11633,15 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                     return
             else:
                 task_content = runner_task.content
+
+        evaluate_runner_shadow_hook(
+            issue_number=issue_number,
+            issue_body=issue_body,
+            route=route,
+            maintenance_task_id=maintenance_task_id,
+            runner_task=runner_task,
+            merge_request=merge_request,
+        )
 
         prior_comments = get_issue_comments(issue)
         retry_block_reason = "executor_invocation"
