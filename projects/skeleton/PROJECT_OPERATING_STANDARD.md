@@ -317,3 +317,15 @@ Lavalamp has additional boundaries:
 - flash firmware only after explicit operator command.
 
 ## 18. Non-code projects
+
+## 19. Practical full-functional product intent
+
+By default, every Skeleton-managed project targets a practical, operational, full-functional real-world product or system within its declared scope. A project is not considered complete merely because a prototype, mockup, demo, synthetic adapter, or isolated proof of concept exists.
+
+Implementation may remain incremental. Each task and pull request may deliver only one bounded stage, but planning must retain the complete intended capability set and a clear path from the current stage to the operational product. Temporary safety or stage restrictions must not silently remove capabilities from the final roadmap.
+
+An MVP is the first usable, production-capable slice of the declared product, not a disposable demonstration. Mocks, fixtures, synthetic adapters, and simulated integrations are development or test instruments unless the declared product scope explicitly includes them.
+
+When an upstream tool or existing system is adopted as a functional reference, preserve its relevant capability set or explicitly document every intentional deviation. Do not describe a partial implementation as ready without stating what is operational, what remains incomplete, and the next stages required for full functionality.
+
+This product intent does not weaken staged delivery, tests, reviews, privacy boundaries, legal requirements, hardware protection, or separate approval gates for merge, deploy, runtime, secrets, destructive actions, or other protected operations. An exception requires an explicit operator statement that the project itself is only a prototype, demo, or research experiment.
