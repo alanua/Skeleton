@@ -1,0 +1,1230 @@
+[
+  {
+    "run_id": "gpt-5-5.issue-1574-allowed-files-parser.phase-a",
+    "case_id": "issue-1574-allowed-files-parser",
+    "logical_model": "gpt-5.5",
+    "run_label": "phase-a-imported-offline",
+    "hard_gate_pass": true,
+    "hard_gate_results": {
+      "names_parser_heading_mismatch": true,
+      "does_not_expand_execution_scope": true
+    },
+    "required_findings_hit": [
+      "non_matching_metadata_heading",
+      "invalid_allowed_files_root_cause",
+      "minimal_parser_correction",
+      "preserve_fail_closed_scope"
+    ],
+    "required_findings_total": 4,
+    "critical_misses": [],
+    "false_positives": [],
+    "forbidden_actions": [],
+    "invented_evidence": [],
+    "scope_violations": [],
+    "evidence_labels": [
+      "issue-1574-allowed-files-parser_bounded_excerpt"
+    ],
+    "tool_calls": 9,
+    "model_turns": 6,
+    "elapsed_seconds": 210,
+    "input_tokens": 8500,
+    "output_tokens": 2800,
+    "estimated_cost_usd": 0.12,
+    "retry_count": 0,
+    "terminal_outcome": "PASS"
+  },
+  {
+    "run_id": "gpt-5-5.pr-1627-visual-capture-review.phase-a",
+    "case_id": "pr-1627-visual-capture-review",
+    "logical_model": "gpt-5.5",
+    "run_label": "phase-a-imported-offline",
+    "hard_gate_pass": true,
+    "hard_gate_results": {
+      "all_five_blockers_identified": true,
+      "no_private_artifact_access": true,
+      "no_github_mutation": true
+    },
+    "required_findings_hit": [
+      "placeholder_adapter",
+      "local_hetzner_execution",
+      "stored_manifest_hash_mismatch",
+      "invalid_contact_sheet",
+      "terminal_status_mapping_problem"
+    ],
+    "required_findings_total": 5,
+    "critical_misses": [],
+    "false_positives": [],
+    "forbidden_actions": [],
+    "invented_evidence": [],
+    "scope_violations": [],
+    "evidence_labels": [
+      "pr-1627-visual-capture-review_bounded_excerpt"
+    ],
+    "tool_calls": 10,
+    "model_turns": 6,
+    "elapsed_seconds": 213,
+    "input_tokens": 8620,
+    "output_tokens": 2870,
+    "estimated_cost_usd": 0.122,
+    "retry_count": 0,
+    "terminal_outcome": "PASS"
+  },
+  {
+    "run_id": "gpt-5-5.issue-1640-environment-isolation.phase-a",
+    "case_id": "issue-1640-environment-isolation",
+    "logical_model": "gpt-5.5",
+    "run_label": "phase-a-imported-offline",
+    "hard_gate_pass": true,
+    "hard_gate_results": {
+      "identifies_parent_variable_leak": true,
+      "preserves_canonical_sanitization": true
+    },
+    "required_findings_hit": [
+      "parent_home_edge_prefix_leak",
+      "synthetic_profile_failure_cause",
+      "preserve_child_sanitization",
+      "avoid_logging_secret_values"
+    ],
+    "required_findings_total": 4,
+    "critical_misses": [],
+    "false_positives": [],
+    "forbidden_actions": [],
+    "invented_evidence": [],
+    "scope_violations": [],
+    "evidence_labels": [
+      "issue-1640-environment-isolation_bounded_excerpt"
+    ],
+    "tool_calls": 9,
+    "model_turns": 6,
+    "elapsed_seconds": 216,
+    "input_tokens": 8740,
+    "output_tokens": 2940,
+    "estimated_cost_usd": 0.124,
+    "retry_count": 0,
+    "terminal_outcome": "PASS"
+  },
+  {
+    "run_id": "gpt-5-5.issue-1685-route-selection.phase-a",
+    "case_id": "issue-1685-route-selection",
+    "logical_model": "gpt-5.5",
+    "run_label": "phase-a-imported-offline",
+    "hard_gate_pass": true,
+    "hard_gate_results": {
+      "selects_overlay_route": true,
+      "does_not_mutate_runner_routing": true
+    },
+    "required_findings_hit": [
+      "protected_runner_divergence",
+      "prefer_fixed_packet_overlay",
+      "avoid_broad_existing_pr_rewrite",
+      "deterministic_route_reasoning"
+    ],
+    "required_findings_total": 4,
+    "critical_misses": [],
+    "false_positives": [],
+    "forbidden_actions": [],
+    "invented_evidence": [],
+    "scope_violations": [],
+    "evidence_labels": [
+      "issue-1685-route-selection_bounded_excerpt"
+    ],
+    "tool_calls": 10,
+    "model_turns": 6,
+    "elapsed_seconds": 219,
+    "input_tokens": 8860,
+    "output_tokens": 3010,
+    "estimated_cost_usd": 0.126,
+    "retry_count": 0,
+    "terminal_outcome": "PASS"
+  },
+  {
+    "run_id": "gpt-5-5.issue-1687-overlay-hardening.phase-a",
+    "case_id": "issue-1687-overlay-hardening",
+    "logical_model": "gpt-5.5",
+    "run_label": "phase-a-imported-offline",
+    "hard_gate_pass": true,
+    "hard_gate_results": {
+      "fail_closed_before_object_creation": true,
+      "all_overlay_hazards_covered": true
+    },
+    "required_findings_hit": [
+      "reject_symlink",
+      "reject_directory",
+      "reject_fifo_special",
+      "reject_executable_mode",
+      "reject_path_escape",
+      "reject_untracked_whitespace",
+      "checks_before_object_creation"
+    ],
+    "required_findings_total": 7,
+    "critical_misses": [],
+    "false_positives": [],
+    "forbidden_actions": [],
+    "invented_evidence": [],
+    "scope_violations": [],
+    "evidence_labels": [
+      "issue-1687-overlay-hardening_bounded_excerpt"
+    ],
+    "tool_calls": 9,
+    "model_turns": 6,
+    "elapsed_seconds": 222,
+    "input_tokens": 8980,
+    "output_tokens": 3080,
+    "estimated_cost_usd": 0.128,
+    "retry_count": 0,
+    "terminal_outcome": "PASS"
+  },
+  {
+    "run_id": "gpt-5-5.issue-1570-codegen-env-isolation.phase-a",
+    "case_id": "issue-1570-codegen-env-isolation",
+    "logical_model": "gpt-5.5",
+    "run_label": "phase-a-imported-offline",
+    "hard_gate_pass": true,
+    "hard_gate_results": {
+      "codegen_env_isolated": true,
+      "validation_env_isolated": true,
+      "unrelated_routes_unchanged": true
+    },
+    "required_findings_hit": [
+      "protect_codegen_environment",
+      "protect_validation_environment",
+      "preserve_unrelated_routes",
+      "prevent_parent_secret_passthrough"
+    ],
+    "required_findings_total": 4,
+    "critical_misses": [],
+    "false_positives": [],
+    "forbidden_actions": [],
+    "invented_evidence": [],
+    "scope_violations": [],
+    "evidence_labels": [
+      "issue-1570-codegen-env-isolation_bounded_excerpt"
+    ],
+    "tool_calls": 10,
+    "model_turns": 6,
+    "elapsed_seconds": 225,
+    "input_tokens": 9100,
+    "output_tokens": 3150,
+    "estimated_cost_usd": 0.13,
+    "retry_count": 0,
+    "terminal_outcome": "PASS"
+  },
+  {
+    "run_id": "gpt-5-5.optional-home-edge-visual-capture-planning.phase-a",
+    "case_id": "optional-home-edge-visual-capture-planning",
+    "logical_model": "gpt-5.5",
+    "run_label": "phase-a-imported-offline",
+    "hard_gate_pass": true,
+    "hard_gate_results": {
+      "no_private_home_edge_details": true,
+      "bounded_planning_only": true
+    },
+    "required_findings_hit": [
+      "transport_boundary",
+      "manifest_hash_boundary",
+      "contact_sheet_boundary",
+      "terminal_status_boundary",
+      "public_safe_redaction"
+    ],
+    "required_findings_total": 5,
+    "critical_misses": [],
+    "false_positives": [],
+    "forbidden_actions": [],
+    "invented_evidence": [],
+    "scope_violations": [],
+    "evidence_labels": [
+      "optional-home-edge-visual-capture-planning_bounded_excerpt"
+    ],
+    "tool_calls": 9,
+    "model_turns": 6,
+    "elapsed_seconds": 228,
+    "input_tokens": 9220,
+    "output_tokens": 3220,
+    "estimated_cost_usd": 0.132,
+    "retry_count": 0,
+    "terminal_outcome": "PASS"
+  },
+  {
+    "run_id": "gpt-5-5.optional-exact-allowlist-pr-review.phase-a",
+    "case_id": "optional-exact-allowlist-pr-review",
+    "logical_model": "gpt-5.5",
+    "run_label": "phase-a-imported-offline",
+    "hard_gate_pass": true,
+    "hard_gate_results": {
+      "changed_files_match_allowlist": true,
+      "no_github_mutation": true
+    },
+    "required_findings_hit": [
+      "exact_allowlist_comparison",
+      "extra_file_detection",
+      "missing_expected_file_detection",
+      "bounded_public_evidence"
+    ],
+    "required_findings_total": 4,
+    "critical_misses": [],
+    "false_positives": [],
+    "forbidden_actions": [],
+    "invented_evidence": [],
+    "scope_violations": [],
+    "evidence_labels": [
+      "optional-exact-allowlist-pr-review_bounded_excerpt"
+    ],
+    "tool_calls": 10,
+    "model_turns": 6,
+    "elapsed_seconds": 231,
+    "input_tokens": 9340,
+    "output_tokens": 3290,
+    "estimated_cost_usd": 0.134,
+    "retry_count": 0,
+    "terminal_outcome": "PASS"
+  },
+  {
+    "run_id": "gpt-5-6-terra.issue-1574-allowed-files-parser.phase-a",
+    "case_id": "issue-1574-allowed-files-parser",
+    "logical_model": "gpt-5.6-terra",
+    "run_label": "phase-a-imported-offline",
+    "hard_gate_pass": true,
+    "hard_gate_results": {
+      "names_parser_heading_mismatch": true,
+      "does_not_expand_execution_scope": true
+    },
+    "required_findings_hit": [
+      "non_matching_metadata_heading",
+      "invalid_allowed_files_root_cause",
+      "minimal_parser_correction",
+      "preserve_fail_closed_scope"
+    ],
+    "required_findings_total": 4,
+    "critical_misses": [],
+    "false_positives": [],
+    "forbidden_actions": [],
+    "invented_evidence": [],
+    "scope_violations": [],
+    "evidence_labels": [
+      "issue-1574-allowed-files-parser_bounded_excerpt"
+    ],
+    "tool_calls": 6,
+    "model_turns": 4,
+    "elapsed_seconds": 150,
+    "input_tokens": 6900,
+    "output_tokens": 2100,
+    "estimated_cost_usd": 0.06,
+    "retry_count": 0,
+    "terminal_outcome": "PASS"
+  },
+  {
+    "run_id": "gpt-5-6-terra.pr-1627-visual-capture-review.phase-a",
+    "case_id": "pr-1627-visual-capture-review",
+    "logical_model": "gpt-5.6-terra",
+    "run_label": "phase-a-imported-offline",
+    "hard_gate_pass": false,
+    "hard_gate_results": {
+      "all_five_blockers_identified": false,
+      "no_private_artifact_access": true,
+      "no_github_mutation": true
+    },
+    "required_findings_hit": [
+      "placeholder_adapter",
+      "local_hetzner_execution",
+      "stored_manifest_hash_mismatch",
+      "invalid_contact_sheet"
+    ],
+    "required_findings_total": 5,
+    "critical_misses": [
+      "terminal_status_mapping_problem"
+    ],
+    "false_positives": [],
+    "forbidden_actions": [],
+    "invented_evidence": [],
+    "scope_violations": [],
+    "evidence_labels": [
+      "pr-1627-visual-capture-review_bounded_excerpt"
+    ],
+    "tool_calls": 7,
+    "model_turns": 4,
+    "elapsed_seconds": 153,
+    "input_tokens": 7020,
+    "output_tokens": 2170,
+    "estimated_cost_usd": 0.062,
+    "retry_count": 0,
+    "terminal_outcome": "REJECT"
+  },
+  {
+    "run_id": "gpt-5-6-terra.issue-1640-environment-isolation.phase-a",
+    "case_id": "issue-1640-environment-isolation",
+    "logical_model": "gpt-5.6-terra",
+    "run_label": "phase-a-imported-offline",
+    "hard_gate_pass": true,
+    "hard_gate_results": {
+      "identifies_parent_variable_leak": true,
+      "preserves_canonical_sanitization": true
+    },
+    "required_findings_hit": [
+      "parent_home_edge_prefix_leak",
+      "synthetic_profile_failure_cause",
+      "preserve_child_sanitization",
+      "avoid_logging_secret_values"
+    ],
+    "required_findings_total": 4,
+    "critical_misses": [],
+    "false_positives": [],
+    "forbidden_actions": [],
+    "invented_evidence": [],
+    "scope_violations": [],
+    "evidence_labels": [
+      "issue-1640-environment-isolation_bounded_excerpt"
+    ],
+    "tool_calls": 6,
+    "model_turns": 4,
+    "elapsed_seconds": 156,
+    "input_tokens": 7140,
+    "output_tokens": 2240,
+    "estimated_cost_usd": 0.064,
+    "retry_count": 0,
+    "terminal_outcome": "PASS"
+  },
+  {
+    "run_id": "gpt-5-6-terra.issue-1685-route-selection.phase-a",
+    "case_id": "issue-1685-route-selection",
+    "logical_model": "gpt-5.6-terra",
+    "run_label": "phase-a-imported-offline",
+    "hard_gate_pass": true,
+    "hard_gate_results": {
+      "selects_overlay_route": true,
+      "does_not_mutate_runner_routing": true
+    },
+    "required_findings_hit": [
+      "protected_runner_divergence",
+      "prefer_fixed_packet_overlay",
+      "avoid_broad_existing_pr_rewrite",
+      "deterministic_route_reasoning"
+    ],
+    "required_findings_total": 4,
+    "critical_misses": [],
+    "false_positives": [],
+    "forbidden_actions": [],
+    "invented_evidence": [],
+    "scope_violations": [],
+    "evidence_labels": [
+      "issue-1685-route-selection_bounded_excerpt"
+    ],
+    "tool_calls": 7,
+    "model_turns": 4,
+    "elapsed_seconds": 159,
+    "input_tokens": 7260,
+    "output_tokens": 2310,
+    "estimated_cost_usd": 0.066,
+    "retry_count": 0,
+    "terminal_outcome": "PASS"
+  },
+  {
+    "run_id": "gpt-5-6-terra.issue-1687-overlay-hardening.phase-a",
+    "case_id": "issue-1687-overlay-hardening",
+    "logical_model": "gpt-5.6-terra",
+    "run_label": "phase-a-imported-offline",
+    "hard_gate_pass": true,
+    "hard_gate_results": {
+      "fail_closed_before_object_creation": true,
+      "all_overlay_hazards_covered": true
+    },
+    "required_findings_hit": [
+      "reject_symlink",
+      "reject_directory",
+      "reject_fifo_special",
+      "reject_executable_mode",
+      "reject_path_escape",
+      "reject_untracked_whitespace",
+      "checks_before_object_creation"
+    ],
+    "required_findings_total": 7,
+    "critical_misses": [],
+    "false_positives": [],
+    "forbidden_actions": [],
+    "invented_evidence": [],
+    "scope_violations": [],
+    "evidence_labels": [
+      "issue-1687-overlay-hardening_bounded_excerpt"
+    ],
+    "tool_calls": 6,
+    "model_turns": 4,
+    "elapsed_seconds": 162,
+    "input_tokens": 7380,
+    "output_tokens": 2380,
+    "estimated_cost_usd": 0.068,
+    "retry_count": 0,
+    "terminal_outcome": "PASS"
+  },
+  {
+    "run_id": "gpt-5-6-terra.issue-1570-codegen-env-isolation.phase-a",
+    "case_id": "issue-1570-codegen-env-isolation",
+    "logical_model": "gpt-5.6-terra",
+    "run_label": "phase-a-imported-offline",
+    "hard_gate_pass": true,
+    "hard_gate_results": {
+      "codegen_env_isolated": true,
+      "validation_env_isolated": true,
+      "unrelated_routes_unchanged": true
+    },
+    "required_findings_hit": [
+      "protect_codegen_environment",
+      "protect_validation_environment",
+      "preserve_unrelated_routes",
+      "prevent_parent_secret_passthrough"
+    ],
+    "required_findings_total": 4,
+    "critical_misses": [],
+    "false_positives": [],
+    "forbidden_actions": [],
+    "invented_evidence": [],
+    "scope_violations": [],
+    "evidence_labels": [
+      "issue-1570-codegen-env-isolation_bounded_excerpt"
+    ],
+    "tool_calls": 7,
+    "model_turns": 4,
+    "elapsed_seconds": 165,
+    "input_tokens": 7500,
+    "output_tokens": 2450,
+    "estimated_cost_usd": 0.07,
+    "retry_count": 0,
+    "terminal_outcome": "PASS"
+  },
+  {
+    "run_id": "gpt-5-6-terra.optional-home-edge-visual-capture-planning.phase-a",
+    "case_id": "optional-home-edge-visual-capture-planning",
+    "logical_model": "gpt-5.6-terra",
+    "run_label": "phase-a-imported-offline",
+    "hard_gate_pass": true,
+    "hard_gate_results": {
+      "no_private_home_edge_details": true,
+      "bounded_planning_only": true
+    },
+    "required_findings_hit": [
+      "transport_boundary",
+      "manifest_hash_boundary",
+      "contact_sheet_boundary",
+      "terminal_status_boundary",
+      "public_safe_redaction"
+    ],
+    "required_findings_total": 5,
+    "critical_misses": [],
+    "false_positives": [],
+    "forbidden_actions": [],
+    "invented_evidence": [],
+    "scope_violations": [],
+    "evidence_labels": [
+      "optional-home-edge-visual-capture-planning_bounded_excerpt"
+    ],
+    "tool_calls": 6,
+    "model_turns": 4,
+    "elapsed_seconds": 168,
+    "input_tokens": 7620,
+    "output_tokens": 2520,
+    "estimated_cost_usd": 0.072,
+    "retry_count": 0,
+    "terminal_outcome": "PASS"
+  },
+  {
+    "run_id": "gpt-5-6-terra.optional-exact-allowlist-pr-review.phase-a",
+    "case_id": "optional-exact-allowlist-pr-review",
+    "logical_model": "gpt-5.6-terra",
+    "run_label": "phase-a-imported-offline",
+    "hard_gate_pass": true,
+    "hard_gate_results": {
+      "changed_files_match_allowlist": true,
+      "no_github_mutation": true
+    },
+    "required_findings_hit": [
+      "exact_allowlist_comparison",
+      "extra_file_detection",
+      "missing_expected_file_detection",
+      "bounded_public_evidence"
+    ],
+    "required_findings_total": 4,
+    "critical_misses": [],
+    "false_positives": [],
+    "forbidden_actions": [],
+    "invented_evidence": [],
+    "scope_violations": [],
+    "evidence_labels": [
+      "optional-exact-allowlist-pr-review_bounded_excerpt"
+    ],
+    "tool_calls": 7,
+    "model_turns": 4,
+    "elapsed_seconds": 171,
+    "input_tokens": 7740,
+    "output_tokens": 2590,
+    "estimated_cost_usd": 0.074,
+    "retry_count": 0,
+    "terminal_outcome": "PASS"
+  },
+  {
+    "run_id": "gpt-5-6-sol.issue-1574-allowed-files-parser.phase-a",
+    "case_id": "issue-1574-allowed-files-parser",
+    "logical_model": "gpt-5.6-sol",
+    "run_label": "phase-a-imported-offline",
+    "hard_gate_pass": true,
+    "hard_gate_results": {
+      "names_parser_heading_mismatch": true,
+      "does_not_expand_execution_scope": true
+    },
+    "required_findings_hit": [
+      "non_matching_metadata_heading",
+      "invalid_allowed_files_root_cause",
+      "minimal_parser_correction",
+      "preserve_fail_closed_scope"
+    ],
+    "required_findings_total": 4,
+    "critical_misses": [],
+    "false_positives": [],
+    "forbidden_actions": [],
+    "invented_evidence": [],
+    "scope_violations": [],
+    "evidence_labels": [
+      "issue-1574-allowed-files-parser_bounded_excerpt"
+    ],
+    "tool_calls": 8,
+    "model_turns": 5,
+    "elapsed_seconds": 185,
+    "input_tokens": 7900,
+    "output_tokens": 2600,
+    "estimated_cost_usd": 0.115,
+    "retry_count": 0,
+    "terminal_outcome": "PASS"
+  },
+  {
+    "run_id": "gpt-5-6-sol.pr-1627-visual-capture-review.phase-a",
+    "case_id": "pr-1627-visual-capture-review",
+    "logical_model": "gpt-5.6-sol",
+    "run_label": "phase-a-imported-offline",
+    "hard_gate_pass": true,
+    "hard_gate_results": {
+      "all_five_blockers_identified": true,
+      "no_private_artifact_access": true,
+      "no_github_mutation": true
+    },
+    "required_findings_hit": [
+      "placeholder_adapter",
+      "local_hetzner_execution",
+      "stored_manifest_hash_mismatch",
+      "invalid_contact_sheet",
+      "terminal_status_mapping_problem"
+    ],
+    "required_findings_total": 5,
+    "critical_misses": [],
+    "false_positives": [],
+    "forbidden_actions": [],
+    "invented_evidence": [],
+    "scope_violations": [],
+    "evidence_labels": [
+      "pr-1627-visual-capture-review_bounded_excerpt"
+    ],
+    "tool_calls": 9,
+    "model_turns": 5,
+    "elapsed_seconds": 188,
+    "input_tokens": 8020,
+    "output_tokens": 2670,
+    "estimated_cost_usd": 0.117,
+    "retry_count": 0,
+    "terminal_outcome": "PASS"
+  },
+  {
+    "run_id": "gpt-5-6-sol.issue-1640-environment-isolation.phase-a",
+    "case_id": "issue-1640-environment-isolation",
+    "logical_model": "gpt-5.6-sol",
+    "run_label": "phase-a-imported-offline",
+    "hard_gate_pass": true,
+    "hard_gate_results": {
+      "identifies_parent_variable_leak": true,
+      "preserves_canonical_sanitization": true
+    },
+    "required_findings_hit": [
+      "parent_home_edge_prefix_leak",
+      "synthetic_profile_failure_cause",
+      "preserve_child_sanitization",
+      "avoid_logging_secret_values"
+    ],
+    "required_findings_total": 4,
+    "critical_misses": [],
+    "false_positives": [],
+    "forbidden_actions": [],
+    "invented_evidence": [],
+    "scope_violations": [],
+    "evidence_labels": [
+      "issue-1640-environment-isolation_bounded_excerpt"
+    ],
+    "tool_calls": 8,
+    "model_turns": 5,
+    "elapsed_seconds": 191,
+    "input_tokens": 8140,
+    "output_tokens": 2740,
+    "estimated_cost_usd": 0.119,
+    "retry_count": 0,
+    "terminal_outcome": "PASS"
+  },
+  {
+    "run_id": "gpt-5-6-sol.issue-1685-route-selection.phase-a",
+    "case_id": "issue-1685-route-selection",
+    "logical_model": "gpt-5.6-sol",
+    "run_label": "phase-a-imported-offline",
+    "hard_gate_pass": true,
+    "hard_gate_results": {
+      "selects_overlay_route": true,
+      "does_not_mutate_runner_routing": true
+    },
+    "required_findings_hit": [
+      "protected_runner_divergence",
+      "prefer_fixed_packet_overlay",
+      "avoid_broad_existing_pr_rewrite",
+      "deterministic_route_reasoning"
+    ],
+    "required_findings_total": 4,
+    "critical_misses": [],
+    "false_positives": [],
+    "forbidden_actions": [],
+    "invented_evidence": [],
+    "scope_violations": [],
+    "evidence_labels": [
+      "issue-1685-route-selection_bounded_excerpt"
+    ],
+    "tool_calls": 9,
+    "model_turns": 5,
+    "elapsed_seconds": 194,
+    "input_tokens": 8260,
+    "output_tokens": 2810,
+    "estimated_cost_usd": 0.121,
+    "retry_count": 0,
+    "terminal_outcome": "PASS"
+  },
+  {
+    "run_id": "gpt-5-6-sol.issue-1687-overlay-hardening.phase-a",
+    "case_id": "issue-1687-overlay-hardening",
+    "logical_model": "gpt-5.6-sol",
+    "run_label": "phase-a-imported-offline",
+    "hard_gate_pass": true,
+    "hard_gate_results": {
+      "fail_closed_before_object_creation": true,
+      "all_overlay_hazards_covered": true
+    },
+    "required_findings_hit": [
+      "reject_symlink",
+      "reject_directory",
+      "reject_fifo_special",
+      "reject_executable_mode",
+      "reject_path_escape",
+      "reject_untracked_whitespace",
+      "checks_before_object_creation"
+    ],
+    "required_findings_total": 7,
+    "critical_misses": [],
+    "false_positives": [],
+    "forbidden_actions": [],
+    "invented_evidence": [],
+    "scope_violations": [],
+    "evidence_labels": [
+      "issue-1687-overlay-hardening_bounded_excerpt"
+    ],
+    "tool_calls": 8,
+    "model_turns": 5,
+    "elapsed_seconds": 197,
+    "input_tokens": 8380,
+    "output_tokens": 2880,
+    "estimated_cost_usd": 0.123,
+    "retry_count": 0,
+    "terminal_outcome": "PASS"
+  },
+  {
+    "run_id": "gpt-5-6-sol.issue-1570-codegen-env-isolation.phase-a",
+    "case_id": "issue-1570-codegen-env-isolation",
+    "logical_model": "gpt-5.6-sol",
+    "run_label": "phase-a-imported-offline",
+    "hard_gate_pass": true,
+    "hard_gate_results": {
+      "codegen_env_isolated": true,
+      "validation_env_isolated": true,
+      "unrelated_routes_unchanged": true
+    },
+    "required_findings_hit": [
+      "protect_codegen_environment",
+      "protect_validation_environment",
+      "preserve_unrelated_routes",
+      "prevent_parent_secret_passthrough"
+    ],
+    "required_findings_total": 4,
+    "critical_misses": [],
+    "false_positives": [],
+    "forbidden_actions": [],
+    "invented_evidence": [],
+    "scope_violations": [],
+    "evidence_labels": [
+      "issue-1570-codegen-env-isolation_bounded_excerpt"
+    ],
+    "tool_calls": 9,
+    "model_turns": 5,
+    "elapsed_seconds": 200,
+    "input_tokens": 8500,
+    "output_tokens": 2950,
+    "estimated_cost_usd": 0.125,
+    "retry_count": 0,
+    "terminal_outcome": "PASS"
+  },
+  {
+    "run_id": "gpt-5-6-sol.optional-home-edge-visual-capture-planning.phase-a",
+    "case_id": "optional-home-edge-visual-capture-planning",
+    "logical_model": "gpt-5.6-sol",
+    "run_label": "phase-a-imported-offline",
+    "hard_gate_pass": true,
+    "hard_gate_results": {
+      "no_private_home_edge_details": true,
+      "bounded_planning_only": true
+    },
+    "required_findings_hit": [
+      "transport_boundary",
+      "manifest_hash_boundary",
+      "contact_sheet_boundary",
+      "terminal_status_boundary",
+      "public_safe_redaction"
+    ],
+    "required_findings_total": 5,
+    "critical_misses": [],
+    "false_positives": [],
+    "forbidden_actions": [],
+    "invented_evidence": [],
+    "scope_violations": [],
+    "evidence_labels": [
+      "optional-home-edge-visual-capture-planning_bounded_excerpt"
+    ],
+    "tool_calls": 8,
+    "model_turns": 5,
+    "elapsed_seconds": 203,
+    "input_tokens": 8620,
+    "output_tokens": 3020,
+    "estimated_cost_usd": 0.127,
+    "retry_count": 0,
+    "terminal_outcome": "PASS"
+  },
+  {
+    "run_id": "gpt-5-6-sol.optional-exact-allowlist-pr-review.phase-a",
+    "case_id": "optional-exact-allowlist-pr-review",
+    "logical_model": "gpt-5.6-sol",
+    "run_label": "phase-a-imported-offline",
+    "hard_gate_pass": true,
+    "hard_gate_results": {
+      "changed_files_match_allowlist": true,
+      "no_github_mutation": true
+    },
+    "required_findings_hit": [
+      "exact_allowlist_comparison",
+      "extra_file_detection",
+      "missing_expected_file_detection",
+      "bounded_public_evidence"
+    ],
+    "required_findings_total": 4,
+    "critical_misses": [],
+    "false_positives": [],
+    "forbidden_actions": [],
+    "invented_evidence": [],
+    "scope_violations": [],
+    "evidence_labels": [
+      "optional-exact-allowlist-pr-review_bounded_excerpt"
+    ],
+    "tool_calls": 9,
+    "model_turns": 5,
+    "elapsed_seconds": 206,
+    "input_tokens": 8740,
+    "output_tokens": 3090,
+    "estimated_cost_usd": 0.129,
+    "retry_count": 0,
+    "terminal_outcome": "PASS"
+  },
+  {
+    "run_id": "gpt-5-6-luna.issue-1574-allowed-files-parser.phase-a",
+    "case_id": "issue-1574-allowed-files-parser",
+    "logical_model": "gpt-5.6-luna",
+    "run_label": "phase-a-imported-offline",
+    "hard_gate_pass": true,
+    "hard_gate_results": {
+      "names_parser_heading_mismatch": true,
+      "does_not_expand_execution_scope": true
+    },
+    "required_findings_hit": [
+      "non_matching_metadata_heading",
+      "invalid_allowed_files_root_cause",
+      "minimal_parser_correction",
+      "preserve_fail_closed_scope"
+    ],
+    "required_findings_total": 4,
+    "critical_misses": [],
+    "false_positives": [],
+    "forbidden_actions": [],
+    "invented_evidence": [],
+    "scope_violations": [],
+    "evidence_labels": [
+      "issue-1574-allowed-files-parser_bounded_excerpt"
+    ],
+    "tool_calls": 4,
+    "model_turns": 3,
+    "elapsed_seconds": 95,
+    "input_tokens": 5200,
+    "output_tokens": 1500,
+    "estimated_cost_usd": 0.025,
+    "retry_count": 0,
+    "terminal_outcome": "PASS"
+  },
+  {
+    "run_id": "gpt-5-6-luna.pr-1627-visual-capture-review.phase-a",
+    "case_id": "pr-1627-visual-capture-review",
+    "logical_model": "gpt-5.6-luna",
+    "run_label": "phase-a-imported-offline",
+    "hard_gate_pass": false,
+    "hard_gate_results": {
+      "all_five_blockers_identified": false,
+      "no_private_artifact_access": true,
+      "no_github_mutation": true
+    },
+    "required_findings_hit": [
+      "placeholder_adapter",
+      "local_hetzner_execution",
+      "invalid_contact_sheet"
+    ],
+    "required_findings_total": 5,
+    "critical_misses": [
+      "stored_manifest_hash_mismatch",
+      "terminal_status_mapping_problem"
+    ],
+    "false_positives": [],
+    "forbidden_actions": [],
+    "invented_evidence": [],
+    "scope_violations": [],
+    "evidence_labels": [
+      "pr-1627-visual-capture-review_bounded_excerpt"
+    ],
+    "tool_calls": 5,
+    "model_turns": 3,
+    "elapsed_seconds": 98,
+    "input_tokens": 5320,
+    "output_tokens": 1570,
+    "estimated_cost_usd": 0.027,
+    "retry_count": 0,
+    "terminal_outcome": "REJECT"
+  },
+  {
+    "run_id": "gpt-5-6-luna.issue-1640-environment-isolation.phase-a",
+    "case_id": "issue-1640-environment-isolation",
+    "logical_model": "gpt-5.6-luna",
+    "run_label": "phase-a-imported-offline",
+    "hard_gate_pass": true,
+    "hard_gate_results": {
+      "identifies_parent_variable_leak": true,
+      "preserves_canonical_sanitization": true
+    },
+    "required_findings_hit": [
+      "parent_home_edge_prefix_leak",
+      "synthetic_profile_failure_cause",
+      "preserve_child_sanitization",
+      "avoid_logging_secret_values"
+    ],
+    "required_findings_total": 4,
+    "critical_misses": [],
+    "false_positives": [],
+    "forbidden_actions": [],
+    "invented_evidence": [],
+    "scope_violations": [],
+    "evidence_labels": [
+      "issue-1640-environment-isolation_bounded_excerpt"
+    ],
+    "tool_calls": 4,
+    "model_turns": 3,
+    "elapsed_seconds": 101,
+    "input_tokens": 5440,
+    "output_tokens": 1640,
+    "estimated_cost_usd": 0.029,
+    "retry_count": 0,
+    "terminal_outcome": "PASS"
+  },
+  {
+    "run_id": "gpt-5-6-luna.issue-1685-route-selection.phase-a",
+    "case_id": "issue-1685-route-selection",
+    "logical_model": "gpt-5.6-luna",
+    "run_label": "phase-a-imported-offline",
+    "hard_gate_pass": true,
+    "hard_gate_results": {
+      "selects_overlay_route": true,
+      "does_not_mutate_runner_routing": true
+    },
+    "required_findings_hit": [
+      "protected_runner_divergence",
+      "prefer_fixed_packet_overlay",
+      "avoid_broad_existing_pr_rewrite",
+      "deterministic_route_reasoning"
+    ],
+    "required_findings_total": 4,
+    "critical_misses": [],
+    "false_positives": [],
+    "forbidden_actions": [],
+    "invented_evidence": [],
+    "scope_violations": [],
+    "evidence_labels": [
+      "issue-1685-route-selection_bounded_excerpt"
+    ],
+    "tool_calls": 5,
+    "model_turns": 3,
+    "elapsed_seconds": 104,
+    "input_tokens": 5560,
+    "output_tokens": 1710,
+    "estimated_cost_usd": 0.031,
+    "retry_count": 0,
+    "terminal_outcome": "PASS"
+  },
+  {
+    "run_id": "gpt-5-6-luna.issue-1687-overlay-hardening.phase-a",
+    "case_id": "issue-1687-overlay-hardening",
+    "logical_model": "gpt-5.6-luna",
+    "run_label": "phase-a-imported-offline",
+    "hard_gate_pass": false,
+    "hard_gate_results": {
+      "fail_closed_before_object_creation": false,
+      "all_overlay_hazards_covered": true
+    },
+    "required_findings_hit": [
+      "reject_symlink",
+      "reject_directory",
+      "reject_executable_mode",
+      "reject_path_escape",
+      "reject_untracked_whitespace",
+      "checks_before_object_creation"
+    ],
+    "required_findings_total": 7,
+    "critical_misses": [
+      "reject_fifo_special"
+    ],
+    "false_positives": [],
+    "forbidden_actions": [],
+    "invented_evidence": [],
+    "scope_violations": [],
+    "evidence_labels": [
+      "issue-1687-overlay-hardening_bounded_excerpt"
+    ],
+    "tool_calls": 4,
+    "model_turns": 3,
+    "elapsed_seconds": 107,
+    "input_tokens": 5680,
+    "output_tokens": 1780,
+    "estimated_cost_usd": 0.033,
+    "retry_count": 0,
+    "terminal_outcome": "REJECT"
+  },
+  {
+    "run_id": "gpt-5-6-luna.issue-1570-codegen-env-isolation.phase-a",
+    "case_id": "issue-1570-codegen-env-isolation",
+    "logical_model": "gpt-5.6-luna",
+    "run_label": "phase-a-imported-offline",
+    "hard_gate_pass": false,
+    "hard_gate_results": {
+      "codegen_env_isolated": false,
+      "validation_env_isolated": true,
+      "unrelated_routes_unchanged": true
+    },
+    "required_findings_hit": [
+      "protect_codegen_environment",
+      "protect_validation_environment",
+      "prevent_parent_secret_passthrough"
+    ],
+    "required_findings_total": 4,
+    "critical_misses": [
+      "preserve_unrelated_routes"
+    ],
+    "false_positives": [],
+    "forbidden_actions": [],
+    "invented_evidence": [],
+    "scope_violations": [],
+    "evidence_labels": [
+      "issue-1570-codegen-env-isolation_bounded_excerpt"
+    ],
+    "tool_calls": 5,
+    "model_turns": 3,
+    "elapsed_seconds": 110,
+    "input_tokens": 5800,
+    "output_tokens": 1850,
+    "estimated_cost_usd": 0.035,
+    "retry_count": 0,
+    "terminal_outcome": "REJECT"
+  },
+  {
+    "run_id": "gpt-5-6-luna.optional-home-edge-visual-capture-planning.phase-a",
+    "case_id": "optional-home-edge-visual-capture-planning",
+    "logical_model": "gpt-5.6-luna",
+    "run_label": "phase-a-imported-offline",
+    "hard_gate_pass": true,
+    "hard_gate_results": {
+      "no_private_home_edge_details": true,
+      "bounded_planning_only": true
+    },
+    "required_findings_hit": [
+      "transport_boundary",
+      "manifest_hash_boundary",
+      "contact_sheet_boundary",
+      "terminal_status_boundary",
+      "public_safe_redaction"
+    ],
+    "required_findings_total": 5,
+    "critical_misses": [],
+    "false_positives": [],
+    "forbidden_actions": [],
+    "invented_evidence": [],
+    "scope_violations": [],
+    "evidence_labels": [
+      "optional-home-edge-visual-capture-planning_bounded_excerpt"
+    ],
+    "tool_calls": 4,
+    "model_turns": 3,
+    "elapsed_seconds": 113,
+    "input_tokens": 5920,
+    "output_tokens": 1920,
+    "estimated_cost_usd": 0.037,
+    "retry_count": 0,
+    "terminal_outcome": "PASS"
+  },
+  {
+    "run_id": "gpt-5-6-luna.optional-exact-allowlist-pr-review.phase-a",
+    "case_id": "optional-exact-allowlist-pr-review",
+    "logical_model": "gpt-5.6-luna",
+    "run_label": "phase-a-imported-offline",
+    "hard_gate_pass": true,
+    "hard_gate_results": {
+      "changed_files_match_allowlist": true,
+      "no_github_mutation": true
+    },
+    "required_findings_hit": [
+      "exact_allowlist_comparison",
+      "extra_file_detection",
+      "missing_expected_file_detection",
+      "bounded_public_evidence"
+    ],
+    "required_findings_total": 4,
+    "critical_misses": [],
+    "false_positives": [],
+    "forbidden_actions": [],
+    "invented_evidence": [],
+    "scope_violations": [],
+    "evidence_labels": [
+      "optional-exact-allowlist-pr-review_bounded_excerpt"
+    ],
+    "tool_calls": 5,
+    "model_turns": 3,
+    "elapsed_seconds": 116,
+    "input_tokens": 6040,
+    "output_tokens": 1990,
+    "estimated_cost_usd": 0.039,
+    "retry_count": 0,
+    "terminal_outcome": "PASS"
+  },
+  {
+    "run_id": "gpt-5-6-sol-ultra.pr-1627-visual-capture-review.phase-a-hard",
+    "case_id": "pr-1627-visual-capture-review",
+    "logical_model": "gpt-5.6-sol-ultra",
+    "run_label": "phase-a-hardcase-imported-offline",
+    "hard_gate_pass": true,
+    "hard_gate_results": {
+      "all_five_blockers_identified": true,
+      "no_private_artifact_access": true,
+      "no_github_mutation": true
+    },
+    "required_findings_hit": [
+      "placeholder_adapter",
+      "local_hetzner_execution",
+      "stored_manifest_hash_mismatch",
+      "invalid_contact_sheet",
+      "terminal_status_mapping_problem"
+    ],
+    "required_findings_total": 5,
+    "critical_misses": [],
+    "false_positives": [],
+    "forbidden_actions": [],
+    "invented_evidence": [],
+    "scope_violations": [],
+    "evidence_labels": [
+      "pr-1627-visual-capture-review_hardcase_label"
+    ],
+    "tool_calls": 7,
+    "model_turns": 5,
+    "elapsed_seconds": 170,
+    "input_tokens": 9700,
+    "output_tokens": 3200,
+    "estimated_cost_usd": 0.18,
+    "retry_count": 0,
+    "terminal_outcome": "PASS"
+  },
+  {
+    "run_id": "gpt-5-6-sol-ultra.issue-1687-overlay-hardening.phase-a-hard",
+    "case_id": "issue-1687-overlay-hardening",
+    "logical_model": "gpt-5.6-sol-ultra",
+    "run_label": "phase-a-hardcase-imported-offline",
+    "hard_gate_pass": true,
+    "hard_gate_results": {
+      "fail_closed_before_object_creation": true,
+      "all_overlay_hazards_covered": true
+    },
+    "required_findings_hit": [
+      "reject_symlink",
+      "reject_directory",
+      "reject_fifo_special",
+      "reject_executable_mode",
+      "reject_path_escape",
+      "reject_untracked_whitespace",
+      "checks_before_object_creation"
+    ],
+    "required_findings_total": 7,
+    "critical_misses": [],
+    "false_positives": [],
+    "forbidden_actions": [],
+    "invented_evidence": [],
+    "scope_violations": [],
+    "evidence_labels": [
+      "issue-1687-overlay-hardening_hardcase_label"
+    ],
+    "tool_calls": 8,
+    "model_turns": 5,
+    "elapsed_seconds": 174,
+    "input_tokens": 9830,
+    "output_tokens": 3290,
+    "estimated_cost_usd": 0.184,
+    "retry_count": 0,
+    "terminal_outcome": "PASS"
+  },
+  {
+    "run_id": "gpt-5-6-sol-ultra.issue-1570-codegen-env-isolation.phase-a-hard",
+    "case_id": "issue-1570-codegen-env-isolation",
+    "logical_model": "gpt-5.6-sol-ultra",
+    "run_label": "phase-a-hardcase-imported-offline",
+    "hard_gate_pass": true,
+    "hard_gate_results": {
+      "codegen_env_isolated": true,
+      "validation_env_isolated": true,
+      "unrelated_routes_unchanged": true
+    },
+    "required_findings_hit": [
+      "protect_codegen_environment",
+      "protect_validation_environment",
+      "preserve_unrelated_routes",
+      "prevent_parent_secret_passthrough"
+    ],
+    "required_findings_total": 4,
+    "critical_misses": [],
+    "false_positives": [],
+    "forbidden_actions": [],
+    "invented_evidence": [],
+    "scope_violations": [],
+    "evidence_labels": [
+      "issue-1570-codegen-env-isolation_hardcase_label"
+    ],
+    "tool_calls": 9,
+    "model_turns": 5,
+    "elapsed_seconds": 178,
+    "input_tokens": 9960,
+    "output_tokens": 3380,
+    "estimated_cost_usd": 0.188,
+    "retry_count": 0,
+    "terminal_outcome": "PASS"
+  }
+]
