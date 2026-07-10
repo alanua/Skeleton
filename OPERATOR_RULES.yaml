@@ -169,3 +169,16 @@ rules:
       - MEMORY_ROUTING.yaml
     plain_language: If a write or action tool is blocked or unclear, stop and report the blocker instead of trying write-workarounds.
     check: blocked_write_or_action_tool_does_not_trigger_workaround_write
+
+  - id: projects_target_practical_full_functionality
+    severity: rewrite
+    scope:
+      - architecture
+      - project_planning
+      - runner_task
+      - pull_request_review
+      - status_response
+    source_refs:
+      - projects/skeleton/PROJECT_OPERATING_STANDARD.md:practical_full_functional_product_intent
+    plain_language: Treat every project as a practical real-world full-functional product by default. Intermediate prototypes and MVP slices must be labelled as stages and must not replace the declared final capability target.
+    check: project_plan_preserves_declared_full_functional_target_and_labels_intermediate_stages
