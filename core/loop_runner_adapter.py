@@ -5,8 +5,16 @@ import sqlite3
 from collections.abc import Mapping
 from typing import Any
 
-from core.loop_controller import LoopDecision, LoopEvent, LoopState
+from core.loop_controller import LoopDecision, LoopEvent, LoopState, advance_loop
 from core.loop_engine import LoopEngine, LoopStepResult
+from core.loop_recovery_packet import (
+    LoopRecoveryApprovalError,
+    LoopRecoveryPacket,
+    LoopRecoveryPacketError,
+    TrustedLoopRecoveryApproval,
+    loop_recovery_packet_hash,
+)
+from core.loop_policy_registry import resolve_loop_policy_profile
 from core.loop_state_store import (
     LoopStateConflictError,
     LoopStateCorruptionError,
@@ -51,6 +59,7 @@ def run_loop_task_packet(
     task_packet: object,
     *,
     engine: LoopEngine,
+    trusted_recovery_approvals: tuple[Mapping[str, object], ...] = (),
 ) -> dict[str, object]:
     """Validate one bounded Runner packet and return a public-safe loop receipt."""
 
@@ -62,6 +71,12 @@ def run_loop_task_packet(
     try:
         if not isinstance(engine, LoopEngine):
             raise LoopRunnerAdapterError("INVALID_LOOP_ENGINE")
+        if _looks_like_recovery_packet(task_packet):
+            return _run_recovery_packet(
+                task_packet,
+                engine=engine,
+                trusted_recovery_approvals=trusted_recovery_approvals,
+            )
 
         normalized = _validate_packet(task_packet)
         action = normalized["action"]
@@ -138,6 +153,123 @@ def run_loop_task_packet(
             run_id=run_id,
             event=event_value,
         )
+
+
+def _looks_like_recovery_packet(task_packet: object) -> bool:
+    return (
+        isinstance(task_packet, Mapping)
+        and task_packet.get("schema") == "skeleton.loop_recovery_packet.v1"
+    )
+
+
+def _run_recovery_packet(
+    task_packet: object,
+    *,
+    engine: LoopEngine,
+    trusted_recovery_approvals: tuple[Mapping[str, object], ...],
+) -> dict[str, object]:
+    action: object = None
+    task_id: object = None
+    run_id: object = None
+    try:
+        packet = LoopRecoveryPacket.from_mapping(task_packet)
+        action = packet.action
+        task_id = packet.task_id
+        run_id = packet.run_id
+        if resolve_loop_policy_profile(packet.policy_profile) != engine.policy:
+            raise LoopRunnerAdapterError("LOOP_RECOVERY_POLICY_MISMATCH")
+        approval = _matching_recovery_approval(packet, trusted_recovery_approvals)
+        if approval is None:
+            raise LoopRunnerAdapterError("LOOP_RECOVERY_APPROVAL_REQUIRED")
+        if engine.store.has_recovery_replay(packet.idempotency_key):
+            raise LoopRunnerAdapterError("LOOP_RECOVERY_REPLAYED")
+        current = engine.store.load_run(packet.run_id)
+        if current.task_id != packet.task_id:
+            raise LoopRunnerAdapterError("LOOP_TASK_ID_MISMATCH")
+        if current.version != packet.expected_version:
+            raise LoopStateConflictError("loop recovery expected version conflict")
+        if current.context.state is not packet.expected_state:
+            raise LoopStateConflictError("loop recovery expected state mismatch")
+        result = advance_loop(current.context, packet.event, engine.policy)
+        if result.accepted is not True:
+            raise LoopRunnerAdapterError("LOOP_RECOVERY_TRANSITION_REJECTED")
+        stored = engine.store.append_recovery_result(
+            run_id=packet.run_id,
+            expected_version=packet.expected_version,
+            result=result,
+            recorded_at=packet.expected_version + 1,
+            idempotency_key=packet.idempotency_key,
+            action=packet.action,
+            expected_state=packet.expected_state.value,
+            policy_profile=packet.policy_profile,
+            approval_reference=packet.approval_reference,
+            packet_hash=approval.packet_hash,
+        )
+        return _receipt_for_run(
+            action=packet.action,
+            run=stored,
+            event=packet.event,
+            accepted=True,
+            decision=result.decision,
+            reason=result.reason,
+        )
+    except LoopRecoveryPacketError as exc:
+        return _blocked_receipt(
+            reason=exc.reason_code,
+            action=action,
+            task_id=task_id,
+            run_id=run_id,
+            event=None,
+        )
+    except LoopRecoveryApprovalError as exc:
+        return _blocked_receipt(
+            reason=exc.reason_code,
+            action=action,
+            task_id=task_id,
+            run_id=run_id,
+            event=None,
+        )
+    except LoopRunnerAdapterError as exc:
+        return _blocked_receipt(
+            reason=exc.reason_code,
+            action=action,
+            task_id=task_id,
+            run_id=run_id,
+            event=None,
+        )
+    except LoopStateConflictError as exc:
+        reason = (
+            "LOOP_RECOVERY_REPLAYED"
+            if "replay conflict" in str(exc)
+            else "LOOP_STATE_CONFLICT"
+        )
+        return _blocked_receipt(
+            reason=reason,
+            action=action,
+            task_id=task_id,
+            run_id=run_id,
+            event=None,
+        )
+    except (LoopStateCorruptionError, LoopStateStoreError, sqlite3.Error):
+        return _blocked_receipt(
+            reason="LOOP_STATE_STORE_BLOCKED",
+            action=action,
+            task_id=task_id,
+            run_id=run_id,
+            event=None,
+        )
+
+
+def _matching_recovery_approval(
+    packet: LoopRecoveryPacket,
+    trusted_recovery_approvals: tuple[Mapping[str, object], ...],
+) -> TrustedLoopRecoveryApproval | None:
+    expected_hash = loop_recovery_packet_hash(packet)
+    for candidate in trusted_recovery_approvals:
+        approval = TrustedLoopRecoveryApproval.from_mapping(candidate)
+        if approval.packet_hash == expected_hash and approval.matches_packet(packet):
+            return approval
+    return None
 
 
 def _validate_packet(task_packet: object) -> dict[str, Any]:

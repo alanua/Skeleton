@@ -168,6 +168,7 @@ def execute_loop_engine_packet(
     engine_factory: Callable[[Any, Any], Any],
     policy_factory: Callable[[], Any],
     packet_runner: Callable[..., object],
+    trusted_recovery_approvals: tuple[Mapping[str, object], ...] = (),
 ) -> str:
     db_path, reason = state_db_path()
     if reason is not None or db_path is None:
@@ -184,7 +185,11 @@ def execute_loop_engine_packet(
         store = store_factory(db_path)
         store.initialize()
         engine = engine_factory(store, policy_factory())
-        receipt = packet_runner(packet, engine=engine)
+        receipt = packet_runner(
+            packet,
+            engine=engine,
+            trusted_recovery_approvals=trusted_recovery_approvals,
+        )
     except Exception:
         return maintenance_report(
             "BLOCKED",

@@ -118,6 +118,66 @@ def test_checkpoint_and_resume_survive_reload(tmp_path: Path) -> None:
     ]
 
 
+def test_recovery_replay_claim_and_transition_share_sqlite_commit(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "loop-state.sqlite"
+    store = LoopStateStore(path)
+    store.initialize()
+    running = _running_context()
+    store.create_run(
+        run_id="run-recovery",
+        task_id="task-recovery",
+        context=running,
+        recorded_at=1,
+    )
+    checkpoint = advance_loop(running, LoopEvent.CHECKPOINT, LoopPolicy())
+    checkpointed = store.append_result(
+        run_id="run-recovery",
+        expected_version=0,
+        result=checkpoint,
+        recorded_at=2,
+    )
+    resume = advance_loop(checkpointed.context, LoopEvent.STARTED, LoopPolicy())
+
+    recovered = store.append_recovery_result(
+        run_id="run-recovery",
+        expected_version=1,
+        result=resume,
+        recorded_at=3,
+        idempotency_key="recovery-key-1",
+        action="resume_checkpointed",
+        expected_state=LoopState.CHECKPOINTED.value,
+        policy_profile="default_bounded",
+        approval_reference="approval-recovery-1",
+        packet_hash="a" * 64,
+    )
+
+    with sqlite3.connect(path) as connection:
+        replay_rows = connection.execute(
+            "SELECT run_id, version, idempotency_key FROM loop_recovery_replay"
+        ).fetchall()
+
+    assert recovered.version == 2
+    assert recovered.context.state is LoopState.RUNNING
+    assert replay_rows == [("run-recovery", 2, "recovery-key-1")]
+    assert store.has_recovery_replay("recovery-key-1") is True
+
+    with pytest.raises(LoopStateConflictError, match="replay conflict"):
+        store.append_recovery_result(
+            run_id="run-recovery",
+            expected_version=1,
+            result=resume,
+            recorded_at=4,
+            idempotency_key="recovery-key-1",
+            action="resume_checkpointed",
+            expected_state=LoopState.CHECKPOINTED.value,
+            policy_profile="default_bounded",
+            approval_reference="approval-recovery-1",
+            packet_hash="a" * 64,
+        )
+
+
 def test_stale_writer_is_rejected(tmp_path: Path) -> None:
     store = _store(tmp_path)
     current = LoopContext()

@@ -173,9 +173,10 @@ def test_execute_loop_packet_uses_injected_route_dependencies() -> None:
         store_factory=Store,
         engine_factory=Engine,
         policy_factory=lambda: "policy",
-        packet_runner=lambda packet, *, engine: {
+        packet_runner=lambda packet, *, engine, trusted_recovery_approvals: {
             "ok": packet == {"body": "packet body"}
             and engine is not None
+            and trusted_recovery_approvals == ()
         },
     )
 
@@ -198,7 +199,7 @@ def test_execute_loop_packet_failure_remains_fail_closed() -> None:
             ),
             engine_factory=lambda _store, _policy: object(),
             policy_factory=object,
-            packet_runner=lambda _packet, *, engine: engine,
+            packet_runner=lambda _packet, *, engine, trusted_recovery_approvals: engine,
         )
     )
 
@@ -243,9 +244,10 @@ def test_poller_wrapper_preserves_existing_monkeypatch_surface(
     monkeypatch.setattr(
         runner,
         "run_loop_task_packet",
-        lambda packet, *, engine: {
+        lambda packet, *, engine, trusted_recovery_approvals: {
             "result": packet == {"packet": True}
             and engine == "engine"
+            and trusted_recovery_approvals == ()
         },
     )
 

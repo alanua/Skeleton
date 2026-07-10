@@ -4,6 +4,13 @@ from pathlib import Path
 
 from core.loop_controller import LoopEvent, LoopPolicy, LoopState
 from core.loop_engine import LoopEngine
+from core.loop_policy_registry import DEFAULT_LOOP_POLICY_PROFILE
+from core.loop_recovery_packet import (
+    LOOP_RECOVERY_APPROVAL_SCHEMA,
+    LOOP_RECOVERY_PACKET_SCHEMA,
+    LoopRecoveryPacket,
+    loop_recovery_packet_hash,
+)
 from core.loop_runner_adapter import (
     LOOP_RUNNER_PACKET_SCHEMA,
     LOOP_RUNNER_RESULT_SCHEMA,
@@ -46,6 +53,48 @@ def _packet(action: str, **overrides: object) -> dict[str, object]:
         )
     packet.update(overrides)
     return packet
+
+
+def _recovery_packet(**overrides: object) -> dict[str, object]:
+    packet: dict[str, object] = {
+        "schema": LOOP_RECOVERY_PACKET_SCHEMA,
+        "action": "resume_checkpointed",
+        "task_id": "issue-1465",
+        "run_id": "run-1465",
+        "expected_version": 3,
+        "expected_state": LoopState.CHECKPOINTED.value,
+        "policy_profile": DEFAULT_LOOP_POLICY_PROFILE,
+        "approval_reference": "approval-1465",
+        "idempotency_key": "recovery-1465",
+        "recovery_reason": "operator_resume",
+        "public_safe": True,
+        "no_secrets": True,
+        "no_external_side_effects": True,
+    }
+    packet.update(overrides)
+    return packet
+
+
+def _recovery_approval(packet: dict[str, object], **overrides: object) -> dict[str, object]:
+    validated = LoopRecoveryPacket.from_mapping(packet)
+    approval: dict[str, object] = {
+        "schema": LOOP_RECOVERY_APPROVAL_SCHEMA,
+        "source": "github_issue_comment",
+        "operator": "alanua",
+        "action": validated.action,
+        "task_id": validated.task_id,
+        "run_id": validated.run_id,
+        "expected_version": validated.expected_version,
+        "expected_state": validated.expected_state.value,
+        "policy_profile": validated.policy_profile,
+        "approval_reference": validated.approval_reference,
+        "idempotency_key": validated.idempotency_key,
+        "packet_hash": loop_recovery_packet_hash(validated),
+        "state_transition": "accepted",
+        "public_safe": True,
+    }
+    approval.update(overrides)
+    return approval
 
 
 def test_create_packet_returns_public_safe_receipt(tmp_path: Path) -> None:
@@ -203,3 +252,68 @@ def test_invalid_engine_and_step_shape_fail_closed(tmp_path: Path) -> None:
 
     assert invalid_engine["reason"] == "INVALID_LOOP_ENGINE"
     assert missing_version_receipt["reason"] == "INVALID_LOOP_TASK_PACKET"
+
+
+def test_recovery_packet_requires_external_matching_operator_approval(
+    tmp_path: Path,
+) -> None:
+    engine, _store = _engine(tmp_path)
+    run_loop_task_packet(_packet("create"), engine=engine)
+    run_loop_task_packet(_packet("step", recorded_at=2), engine=engine)
+    run_loop_task_packet(
+        _packet("step", event=LoopEvent.STARTED.value, expected_version=1, recorded_at=3),
+        engine=engine,
+    )
+    run_loop_task_packet(
+        _packet("step", event=LoopEvent.CHECKPOINT.value, expected_version=2, recorded_at=4),
+        engine=engine,
+    )
+    packet = _recovery_packet()
+
+    missing = run_loop_task_packet(packet, engine=engine)
+    mismatched = run_loop_task_packet(
+        packet,
+        engine=engine,
+        trusted_recovery_approvals=(
+            _recovery_approval(packet, expected_state=LoopState.RUNNING.value),
+        ),
+    )
+
+    assert missing["reason"] == "LOOP_RECOVERY_APPROVAL_REQUIRED"
+    assert mismatched["reason"] == "LOOP_RECOVERY_APPROVAL_REQUIRED"
+
+
+def test_recovery_replay_returns_stable_reason_after_atomic_transition(
+    tmp_path: Path,
+) -> None:
+    engine, store = _engine(tmp_path)
+    run_loop_task_packet(_packet("create"), engine=engine)
+    run_loop_task_packet(_packet("step", recorded_at=2), engine=engine)
+    run_loop_task_packet(
+        _packet("step", event=LoopEvent.STARTED.value, expected_version=1, recorded_at=3),
+        engine=engine,
+    )
+    run_loop_task_packet(
+        _packet("step", event=LoopEvent.CHECKPOINT.value, expected_version=2, recorded_at=4),
+        engine=engine,
+    )
+    packet = _recovery_packet()
+    approval = _recovery_approval(packet)
+
+    recovered = run_loop_task_packet(
+        packet,
+        engine=engine,
+        trusted_recovery_approvals=(approval,),
+    )
+    replay = run_loop_task_packet(
+        packet,
+        engine=engine,
+        trusted_recovery_approvals=(approval,),
+    )
+
+    assert recovered["accepted"] is True
+    assert recovered["loop_state"] == LoopState.RUNNING.value
+    assert recovered["reason"] == "LOOP_RESUMED"
+    assert store.load_run("run-1465").version == 4
+    assert replay["reason"] == "LOOP_RECOVERY_REPLAYED"
+    assert store.load_run("run-1465").version == 4

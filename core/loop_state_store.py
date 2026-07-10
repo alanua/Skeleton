@@ -11,7 +11,7 @@ from pathlib import Path
 from core.loop_controller import LoopContext, LoopDecision, LoopEvent, LoopResult, LoopState
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _SAFE_REASON_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 
@@ -63,7 +63,7 @@ class LoopStateStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as connection:
             version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            if version not in {0, SCHEMA_VERSION}:
+            if version not in {0, 1, SCHEMA_VERSION}:
                 raise LoopStateCorruptionError("unsupported loop state schema version")
             connection.executescript(
                 """
@@ -95,9 +95,23 @@ class LoopStateStore:
 
                 CREATE INDEX IF NOT EXISTS idx_loop_events_run_version
                     ON loop_events(run_id, version);
+
+                CREATE TABLE IF NOT EXISTS loop_recovery_replay (
+                    idempotency_key TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    version INTEGER NOT NULL CHECK(version > 0),
+                    action TEXT NOT NULL,
+                    expected_state TEXT NOT NULL,
+                    policy_profile TEXT NOT NULL,
+                    approval_reference TEXT NOT NULL,
+                    packet_hash TEXT NOT NULL,
+                    recorded_at INTEGER NOT NULL CHECK(recorded_at >= 0),
+                    FOREIGN KEY(run_id, version) REFERENCES loop_events(run_id, version)
+                        ON DELETE RESTRICT
+                ) WITHOUT ROWID;
                 """
             )
-            if version == 0:
+            if version != SCHEMA_VERSION:
                 connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             connection.commit()
 
@@ -258,6 +272,178 @@ class LoopStateStore:
                 raise LoopStateCorruptionError("loop event read-back mismatch")
             connection.commit()
             return current_run
+
+    def append_recovery_result(
+        self,
+        *,
+        run_id: str,
+        expected_version: int,
+        result: LoopResult,
+        recorded_at: int,
+        idempotency_key: str,
+        action: str,
+        expected_state: str,
+        policy_profile: str,
+        approval_reference: str,
+        packet_hash: str,
+    ) -> StoredLoopRun:
+        run_id = _safe_token(run_id, "run_id")
+        idempotency_key = _safe_token(idempotency_key, "idempotency_key")
+        action = _safe_token(action, "action")
+        expected_state = _safe_token(expected_state, "expected_state")
+        policy_profile = _safe_token(policy_profile, "policy_profile")
+        approval_reference = _safe_token(approval_reference, "approval_reference")
+        if not isinstance(packet_hash, str) or not re.fullmatch(r"[a-f0-9]{64}", packet_hash):
+            raise ValueError("packet_hash must be a SHA-256 hex digest")
+        _non_negative_int(expected_version, "expected_version")
+        _non_negative_int(recorded_at, "recorded_at")
+        _validate_result(result)
+        if result.accepted is not True:
+            raise ValueError("recovery replay claim requires an accepted transition")
+        if result.previous.state.value != expected_state:
+            raise LoopStateConflictError("loop recovery expected state mismatch")
+        previous_json, previous_hash = _encode_context(result.previous)
+        current_json, current_hash = _encode_context(result.current)
+
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            replay_row = connection.execute(
+                """
+                SELECT * FROM loop_recovery_replay
+                WHERE idempotency_key = ?
+                """,
+                (idempotency_key,),
+            ).fetchone()
+            if replay_row is not None:
+                connection.rollback()
+                raise LoopStateConflictError("loop recovery replay conflict")
+
+            row = connection.execute(
+                "SELECT * FROM loop_runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                raise LoopStateStoreError("loop run not found")
+            stored = _run_from_row(row)
+            if stored.version != expected_version:
+                connection.rollback()
+                raise LoopStateConflictError("loop run version conflict")
+            if stored.context != result.previous or stored.context_hash != previous_hash:
+                connection.rollback()
+                raise LoopStateConflictError("loop result previous context mismatch")
+
+            next_version = expected_version + 1
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO loop_events(
+                        run_id, version, event, accepted, decision, reason,
+                        previous_context_json, previous_context_hash,
+                        current_context_json, current_context_hash, recorded_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        next_version,
+                        result.event.value,
+                        int(result.accepted),
+                        result.decision.value,
+                        result.reason,
+                        previous_json,
+                        previous_hash,
+                        current_json,
+                        current_hash,
+                        recorded_at,
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO loop_recovery_replay(
+                        idempotency_key, run_id, version, action, expected_state,
+                        policy_profile, approval_reference, packet_hash, recorded_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        idempotency_key,
+                        run_id,
+                        next_version,
+                        action,
+                        expected_state,
+                        policy_profile,
+                        approval_reference,
+                        packet_hash,
+                        recorded_at,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise LoopStateConflictError("loop recovery replay conflict") from exc
+
+            updated = connection.execute(
+                """
+                UPDATE loop_runs
+                SET version = ?, context_json = ?, context_hash = ?, updated_at = ?
+                WHERE run_id = ? AND version = ?
+                """,
+                (
+                    next_version,
+                    current_json,
+                    current_hash,
+                    recorded_at,
+                    run_id,
+                    expected_version,
+                ),
+            )
+            if updated.rowcount != 1:
+                connection.rollback()
+                raise LoopStateConflictError("loop run version conflict")
+
+            run_row = connection.execute(
+                "SELECT * FROM loop_runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            event_row = connection.execute(
+                "SELECT * FROM loop_events WHERE run_id = ? AND version = ?",
+                (run_id, next_version),
+            ).fetchone()
+            replay_row = connection.execute(
+                """
+                SELECT * FROM loop_recovery_replay
+                WHERE idempotency_key = ? AND run_id = ? AND version = ?
+                """,
+                (idempotency_key, run_id, next_version),
+            ).fetchone()
+            current_run = _run_from_row(run_row)
+            current_event = _event_from_row(event_row)
+            if replay_row is None:
+                connection.rollback()
+                raise LoopStateCorruptionError("loop recovery replay read-back missing")
+            if current_run.context != result.current or current_run.context_hash != current_hash:
+                connection.rollback()
+                raise LoopStateCorruptionError("loop run update read-back mismatch")
+            if (
+                current_event.previous != result.previous
+                or current_event.current != result.current
+                or current_event.event is not result.event
+                or current_event.decision is not result.decision
+                or current_event.accepted is not True
+                or current_event.reason != result.reason
+            ):
+                connection.rollback()
+                raise LoopStateCorruptionError("loop event read-back mismatch")
+            connection.commit()
+            return current_run
+
+    def has_recovery_replay(self, idempotency_key: str) -> bool:
+        idempotency_key = _safe_token(idempotency_key, "idempotency_key")
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM loop_recovery_replay
+                WHERE idempotency_key = ?
+                """,
+                (idempotency_key,),
+            ).fetchone()
+        return row is not None
 
     def list_events(self, run_id: str) -> list[StoredLoopEvent]:
         run_id = _safe_token(run_id, "run_id")
