@@ -856,6 +856,419 @@ def test_process_issue_runs_codex_in_prepared_issue_worktree(tmp_path: Path) -> 
     finalize.assert_called_once_with(issue, str(issue_path), "codex output")
 
 
+def _shadow_code_issue_body() -> str:
+    return "\n".join(
+        (
+            f"Base SHA: {'b' * 40}",
+            "Allowed Files:",
+            "- tests/test_runner_poll_github_tasks.py",
+            "Approval Reference: operator-approval-1683",
+            "Idempotency Key: issue-1683-poller-shadow",
+            "Validation Timeout Seconds: 900",
+            "Privacy Boundary: PUBLIC_SAFE_REPOSITORY_ONLY",
+            "Expected Output: draft PR",
+            "",
+            "```task",
+            "Do it without leaking PRIVATE_TOKEN=/home/operator/private",
+            "```",
+        )
+    )
+
+
+def _shadow_maintenance_issue_body() -> str:
+    return "\n".join(
+        (
+            f"Base SHA: {'b' * 40}",
+            "Allowed Files: scripts/runner_poll_github_tasks.py",
+            "Approval Reference: operator-approval-1683",
+            "Idempotency Key: issue-1683-maintenance-shadow",
+            "Validation Timeout Seconds: 900",
+            "Privacy Boundary: PUBLIC_SAFE_REPOSITORY_ONLY",
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {runner.CHECK_SKELETON_FRESHNESS}",
+        )
+    )
+
+
+def _run_code_generation_process_issue_for_shadow(
+    tmp_path: Path,
+    *,
+    shadow_mode: str,
+    evaluator_exception: bool = False,
+) -> dict[str, object]:
+    coordinator = tmp_path / "coordinator"
+    issue_path = tmp_path / "worktrees" / "issue-1683"
+    issue = {
+        "number": 1683,
+        "title": "Shadow parity",
+        "body": _shadow_code_issue_body(),
+        "comments": [],
+    }
+    final_report = "DONE: Codex completed successfully with no file changes."
+    evaluator_patch = (
+        mock.patch.object(
+            runner,
+            "evaluate_shadow_from_normalized_metadata",
+            side_effect=RuntimeError("shadow failed"),
+        )
+        if evaluator_exception
+        else mock.patch.object(
+            runner,
+            "evaluate_shadow_from_normalized_metadata",
+            wraps=runner.evaluate_shadow_from_normalized_metadata,
+        )
+    )
+
+    with mock.patch.dict(
+        os.environ, {runner.RUNNER_SHADOW_MODE_ENV: shadow_mode}, clear=False
+    ), evaluator_patch, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(
+        runner, "prepare_issue_worktree", return_value=(0, "ready", issue_path)
+    ), mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, "codex output")
+    ) as run_codex, mock.patch.object(
+        runner, "finalize_success", return_value=final_report
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ) as post_comment, mock.patch.object(
+        runner, "notify_task_finished"
+    ) as notify, mock.patch.object(
+        runner, "cleanup_issue_worktree", return_value=(0, "")
+    ), mock.patch.object(
+        runner, "record_runner_task_picked_up", return_value=None
+    ), mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ):
+        runner.process_issue(issue, workdir=str(coordinator))
+
+    return {
+        "set_label": set_label.call_args_list,
+        "post_comment": post_comment.call_args_list,
+        "notify": notify.call_args_list,
+        "run_codex": run_codex.call_args_list,
+        "shadow_receipt": runner.LAST_RUNNER_SHADOW_RECEIPT,
+    }
+
+
+def _run_maintenance_process_issue_for_shadow(
+    tmp_path: Path,
+    *,
+    shadow_mode: str,
+    evaluator_exception: bool = False,
+) -> dict[str, object]:
+    coordinator = tmp_path / "coordinator"
+    issue = {
+        "number": 1684,
+        "title": "Maintenance shadow parity",
+        "body": _shadow_maintenance_issue_body(),
+        "comments": [],
+    }
+    evaluator_patch = (
+        mock.patch.object(
+            runner,
+            "evaluate_shadow_from_normalized_metadata",
+            side_effect=RuntimeError("shadow failed"),
+        )
+        if evaluator_exception
+        else mock.patch.object(
+            runner,
+            "evaluate_shadow_from_normalized_metadata",
+            wraps=runner.evaluate_shadow_from_normalized_metadata,
+        )
+    )
+
+    with mock.patch.dict(
+        os.environ, {runner.RUNNER_SHADOW_MODE_ENV: shadow_mode}, clear=False
+    ), evaluator_patch, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(
+        runner, "ensure_clean_worktree", return_value=(True, "")
+    ), mock.patch.object(
+        runner,
+        "dispatch_runtime_maintenance_task",
+        return_value=f"DONE: {runner.CHECK_SKELETON_FRESHNESS}",
+    ) as dispatch, mock.patch.object(
+        runner, "post_issue_comment"
+    ) as post_comment, mock.patch.object(
+        runner, "notify_task_finished"
+    ) as notify, mock.patch.object(
+        runner, "record_runner_task_picked_up", return_value=None
+    ), mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ):
+        runner.process_issue(issue, workdir=str(coordinator))
+
+    return {
+        "set_label": set_label.call_args_list,
+        "post_comment": post_comment.call_args_list,
+        "notify": notify.call_args_list,
+        "dispatch": dispatch.call_args_list,
+        "shadow_receipt": runner.LAST_RUNNER_SHADOW_RECEIPT,
+    }
+
+
+@pytest.mark.parametrize(
+    ("configured", "enabled"),
+    (
+        ("1", True),
+        ("true", True),
+        ("TRUE", True),
+        ("yes", True),
+        ("on", True),
+        ("0", False),
+        ("false", False),
+        ("no", False),
+        ("off", False),
+        ("", False),
+        ("   ", False),
+        ("enabled", False),
+        ("maybe", False),
+        ("2", False),
+    ),
+)
+def test_shadow_mode_env_uses_explicit_truthy_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+    configured: str,
+    enabled: bool,
+) -> None:
+    monkeypatch.setenv(runner.RUNNER_SHADOW_MODE_ENV, configured)
+
+    assert runner.runner_shadow_mode_enabled() is enabled
+
+
+def test_shadow_evaluator_exception_leaves_legacy_code_generation_dispatch_byte_for_byte(
+    tmp_path: Path,
+) -> None:
+    normal = _run_code_generation_process_issue_for_shadow(tmp_path, shadow_mode="0")
+    exception = _run_code_generation_process_issue_for_shadow(
+        tmp_path, shadow_mode="1", evaluator_exception=True
+    )
+
+    assert exception["set_label"] == normal["set_label"]
+    assert exception["post_comment"] == normal["post_comment"]
+    assert exception["notify"] == normal["notify"]
+    assert exception["run_codex"] == normal["run_codex"]
+    assert exception["shadow_receipt"] == {
+        "schema": "skeleton.runner_shadow_receipt.v1",
+        "shadow_status": "blocked",
+        "semantic_route": None,
+        "reason_codes": ["SHADOW_EVALUATOR_EXCEPTION"],
+        "task_envelope_hash": None,
+    }
+
+
+def test_shadow_evaluator_exception_leaves_legacy_maintenance_dispatch_byte_for_byte(
+    tmp_path: Path,
+) -> None:
+    normal = _run_maintenance_process_issue_for_shadow(tmp_path, shadow_mode="0")
+    exception = _run_maintenance_process_issue_for_shadow(
+        tmp_path, shadow_mode="1", evaluator_exception=True
+    )
+
+    assert exception["set_label"] == normal["set_label"]
+    assert exception["post_comment"] == normal["post_comment"]
+    assert exception["notify"] == normal["notify"]
+    assert exception["dispatch"] == normal["dispatch"]
+
+
+def test_shadow_mode_enabled_and_disabled_preserve_legacy_maintenance_behavior(
+    tmp_path: Path,
+) -> None:
+    disabled = _run_maintenance_process_issue_for_shadow(tmp_path, shadow_mode="0")
+    enabled = _run_maintenance_process_issue_for_shadow(tmp_path, shadow_mode="1")
+
+    assert enabled["set_label"] == disabled["set_label"]
+    assert enabled["post_comment"] == disabled["post_comment"]
+    assert enabled["notify"] == disabled["notify"]
+    assert enabled["dispatch"] == disabled["dispatch"]
+    receipt = enabled["shadow_receipt"]
+    assert isinstance(receipt, dict)
+    assert set(receipt) == {
+        "schema",
+        "shadow_status",
+        "semantic_route",
+        "reason_codes",
+        "task_envelope_hash",
+    }
+
+
+@pytest.mark.parametrize(
+    "environment",
+    (
+        {},
+        {runner.RUNNER_SHADOW_MODE_ENV: ""},
+        {runner.RUNNER_SHADOW_MODE_ENV: "   "},
+        {runner.RUNNER_SHADOW_MODE_ENV: "maybe"},
+    ),
+)
+def test_absent_blank_and_unknown_shadow_env_skip_work_and_keep_legacy_dispatch(
+    tmp_path: Path,
+    environment: dict[str, str],
+) -> None:
+    coordinator = tmp_path / "coordinator"
+    issue = {
+        "number": 1684,
+        "title": "Maintenance shadow disabled by default",
+        "body": _shadow_maintenance_issue_body(),
+        "comments": [],
+    }
+
+    with mock.patch.dict(os.environ, environment, clear=True), mock.patch.object(
+        runner,
+        "normalized_runner_shadow_metadata",
+        side_effect=AssertionError("shadow normalization must not run"),
+    ) as normalize, mock.patch.object(
+        runner,
+        "evaluate_shadow_from_normalized_metadata",
+        side_effect=AssertionError("shadow evaluator must not run"),
+    ) as evaluate, mock.patch(
+        "core.runner_shadow_integration.build_shadow_executor_registry",
+        side_effect=AssertionError("shadow registry must not be built"),
+    ) as registry, mock.patch(
+        "core.runner_shadow_integration.RunnerGate",
+        side_effect=AssertionError("RunnerGate must not be evaluated"),
+    ) as runner_gate, mock.patch(
+        "core.runner_gate.validate_action_request",
+        side_effect=AssertionError("ActionGate must not be evaluated"),
+    ) as action_gate, mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "ensure_clean_worktree", return_value=(True, "")
+    ), mock.patch.object(
+        runner,
+        "dispatch_runtime_maintenance_task",
+        return_value=f"DONE: {runner.CHECK_SKELETON_FRESHNESS}",
+    ) as dispatch, mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "record_runner_task_picked_up", return_value=None
+    ), mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ):
+        runner.process_issue(issue, workdir=str(coordinator))
+
+    assert runner.runner_shadow_mode_enabled() is False
+    normalize.assert_not_called()
+    evaluate.assert_not_called()
+    registry.assert_not_called()
+    runner_gate.assert_not_called()
+    action_gate.assert_not_called()
+    dispatch.assert_called_once_with(
+        runner.CHECK_SKELETON_FRESHNESS,
+        str(coordinator),
+        _shadow_maintenance_issue_body(),
+    )
+    assert runner.LAST_RUNNER_SHADOW_RECEIPT == {
+        "schema": "skeleton.runner_shadow_receipt.v1",
+        "shadow_status": "not_applicable",
+        "semantic_route": None,
+        "reason_codes": ["SHADOW_MODE_DISABLED"],
+        "task_envelope_hash": None,
+    }
+
+
+@pytest.mark.parametrize(
+    "body",
+    (
+        "\n".join(
+            (
+                "Expected Output: draft PR",
+                "",
+                "```task",
+                "base_sha: " + "b" * 40,
+                "allowed_files:",
+                "  - tests/test_runner_poll_github_tasks.py",
+                "approval_reference: operator-approval-1683",
+                "idempotency_key: typed-envelope-1683",
+                "validation_timeout_seconds: 900",
+                "```",
+            )
+        ),
+        "\n".join(
+            (
+                "Expected Output: draft PR",
+                "",
+                "```task",
+                "base_sha: " + "b" * 40,
+                "allowed_files:",
+                "  - tests/test_runner_poll_github_tasks.py",
+                "approval_reference: operator-approval-1683",
+                "idempotency_key: typed-envelope-1683",
+                "validation_timeout_seconds: 900",
+                "privacy_boundary: ''",
+                "```",
+            )
+        ),
+    ),
+)
+def test_missing_or_blank_shadow_privacy_boundary_blocks_without_default(
+    body: str,
+) -> None:
+    with mock.patch.dict(
+        os.environ, {runner.RUNNER_SHADOW_MODE_ENV: "1"}, clear=False
+    ):
+        receipt = runner.evaluate_runner_shadow_hook(
+            issue_number=1683,
+            issue_body=body,
+            route=runner.ROUTE_CODE_GENERATION,
+            maintenance_task_id=None,
+            runner_task=runner.RunnerTask(content=runner.extract_task_block(body) or ""),
+            merge_request=None,
+            trusted_approval_references=("operator-approval-1683",),
+        )
+
+    assert receipt is not None
+    public = receipt.to_public_mapping()
+    assert public["shadow_status"] == "blocked"
+    assert public["semantic_route"] == "code_edit"
+    assert public["reason_codes"] == ["INVALID_PRIVACY_BOUNDARY"]
+
+
+def test_typed_task_block_fields_feed_shadow_hash_without_receipt_leakage() -> None:
+    body = "\n".join(
+        (
+            "Expected Output: draft PR",
+            "",
+            "```task",
+            "base_sha: " + "b" * 40,
+            "allowed_files:",
+            "  - tests/test_runner_poll_github_tasks.py",
+            "approval_reference: operator-approval-1683",
+            "idempotency_key: typed-envelope-1683",
+            "validation_timeout_seconds: 900",
+            "privacy_boundary: PUBLIC_SAFE_REPOSITORY_ONLY",
+            "private_note: PRIVATE_TOKEN=/home/operator/private",
+            "```",
+        )
+    )
+
+    with mock.patch.dict(
+        os.environ, {runner.RUNNER_SHADOW_MODE_ENV: "1"}, clear=False
+    ):
+        receipt = runner.evaluate_runner_shadow_hook(
+            issue_number=1683,
+            issue_body=body,
+            route=runner.ROUTE_CODE_GENERATION,
+            maintenance_task_id=None,
+            runner_task=runner.RunnerTask(content=runner.extract_task_block(body) or ""),
+            merge_request=None,
+            trusted_approval_references=("operator-approval-1683",),
+        )
+
+    assert receipt is not None
+    public = receipt.to_public_mapping()
+    assert public["shadow_status"] == "allowed"
+    assert public["semantic_route"] == "code_edit"
+    assert public["task_envelope_hash"] is not None
+    assert "PRIVATE_TOKEN" not in repr(public)
+    assert "/home/operator" not in repr(public)
+
+
 def test_poll_once_processes_issues_single_lane() -> None:
     issues = [{"number": 139}, {"number": 140}]
     with mock.patch.object(
