@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from contextvars import ContextVar
 import csv
 from dataclasses import dataclass
@@ -42,6 +42,7 @@ from core.hermes_private_memory import (
 from core.hermes_worker import run_hermes_memory_task_packet
 from core.loop_controller import LoopPolicy
 from core.loop_engine import LoopEngine
+from core.loop_recovery_packet import LOOP_RECOVERY_PACKET_SCHEMA
 from core.loop_runner_adapter import run_loop_task_packet
 from core.loop_state_store import LoopStateStore
 from core.runner_diagnostic_executor import (
@@ -133,6 +134,56 @@ def trusted_runner_comment_authors() -> frozenset[str]:
     if configured:
         actors.add(configured)
     return frozenset(actors)
+
+
+def _normalized_github_login(value: object) -> str | None:
+    login = str(value or "").strip().lower()
+    return login or None
+
+
+def trusted_loop_recovery_operator_authors() -> frozenset[str]:
+    owner = _normalized_github_login(QUEUE_REPOSITORY.split("/", 1)[0])
+    return frozenset((owner,)) if owner is not None else frozenset()
+
+
+def _normalized_comment_author(comment: Mapping[str, object] | None) -> str | None:
+    if not isinstance(comment, Mapping):
+        return None
+    for key in ("author", "user"):
+        author = comment.get(key)
+        if isinstance(author, Mapping):
+            login = _normalized_github_login(author.get("login"))
+            if login is not None:
+                return login
+    return None
+
+
+def loop_recovery_operator_author_block_reason(
+    *,
+    approval_operator: object,
+    comment: Mapping[str, object] | None,
+    trusted_operator_authors: Iterable[str] | None = None,
+) -> str | None:
+    operator = _normalized_github_login(approval_operator)
+    if operator is None:
+        return "missing_approval_operator"
+    comment_author = _normalized_comment_author(comment)
+    if comment_author is None:
+        return "missing_comment_author"
+    trusted_authors = {
+        login
+        for value in (
+            trusted_operator_authors
+            if trusted_operator_authors is not None
+            else trusted_loop_recovery_operator_authors()
+        )
+        if (login := _normalized_github_login(value)) is not None
+    }
+    if comment_author not in trusted_authors:
+        return "untrusted_loop_recovery_operator_author"
+    if operator != comment_author:
+        return "approval_operator_comment_author_mismatch"
+    return None
 
 
 LABEL_READY = "runner:ready"
@@ -3407,6 +3458,21 @@ def _loop_task_packet_from_body(body: str) -> object:
     return _executor_loop_task_packet_from_body(
         body,
         extract_task_block=extract_task_block,
+    )
+
+
+def _loop_recovery_operator_author_block_reason(
+    body: str, issue: Mapping[str, object]
+) -> str | None:
+    packet = _loop_task_packet_from_body(body)
+    if not isinstance(packet, Mapping):
+        return None
+    if packet.get("schema") != LOOP_RECOVERY_PACKET_SCHEMA:
+        return None
+    metadata = _metadata_before_task(body)
+    return loop_recovery_operator_author_block_reason(
+        approval_operator=_body_field(metadata, "Approval Operator"),
+        comment=issue,
     )
 
 
@@ -11546,8 +11612,21 @@ def process_runtime_maintenance_issue(
     body: str = "",
     memory_warning: str | None = None,
     retry_decision: RetryDecision | None = None,
+    issue: Mapping[str, object] | None = None,
 ) -> None:
-    report = dispatch_runtime_maintenance_task(task_id, workdir, body)
+    if task_id == LOOP_ENGINE_PACKET and issue is not None:
+        author_reason = _loop_recovery_operator_author_block_reason(body, issue)
+        if author_reason is not None:
+            report = _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [f"reason={author_reason}"],
+                "not_met",
+            )
+        else:
+            report = dispatch_runtime_maintenance_task(task_id, workdir, body)
+    else:
+        report = dispatch_runtime_maintenance_task(task_id, workdir, body)
     status = maintenance_report_status(report)
     if status != "DONE" and retry_decision is not None:
         report = append_retry_fields(report, retry_decision)
@@ -11777,6 +11856,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                     issue_body,
                     pickup_memory_warning,
                     retry_decision,
+                    issue,
                 )
             else:
                 process_runtime_maintenance_issue(
@@ -11785,6 +11865,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                     coordinator_workdir,
                     issue_body,
                     retry_decision=retry_decision,
+                    issue=issue,
                 )
             return
         if merge_mode and merge_request is not None:

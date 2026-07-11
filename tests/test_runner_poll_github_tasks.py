@@ -13495,11 +13495,73 @@ def test_trusted_runner_comment_authors_include_owner_and_configured_actor() -> 
     assert "skeleton-runner-service" in actors
 
 
-def _loop_engine_issue_body(packet: object) -> str:
+def test_loop_recovery_operator_authors_are_owner_only() -> None:
+    with mock.patch.dict(
+        os.environ,
+        {runner.RUNNER_GITHUB_ACTOR_ENV: "Skeleton-Runner-Service"},
+        clear=False,
+    ):
+        authors = runner.trusted_loop_recovery_operator_authors()
+
+    assert authors == frozenset({"alanua"})
+    assert "github-actions[bot]" not in authors
+    assert "skeleton-runner-service" not in authors
+
+
+@pytest.mark.parametrize(
+    ("approval_operator", "comment", "reason"),
+    (
+        (
+            "alanua",
+            {"author": {"login": "github-actions[bot]"}},
+            "untrusted_loop_recovery_operator_author",
+        ),
+        (
+            "alanua",
+            {"author": {"login": "Skeleton-Runner-Service"}},
+            "untrusted_loop_recovery_operator_author",
+        ),
+        (
+            "alanua",
+            {"author": {"login": "trusted-contributor"}},
+            "untrusted_loop_recovery_operator_author",
+        ),
+        (
+            "other-operator",
+            {"author": {"login": "alanua"}},
+            "approval_operator_comment_author_mismatch",
+        ),
+    ),
+)
+def test_loop_recovery_operator_author_rejects_non_owner_and_mismatch(
+    approval_operator: str, comment: dict[str, object], reason: str
+) -> None:
+    with mock.patch.dict(
+        os.environ,
+        {runner.RUNNER_GITHUB_ACTOR_ENV: "Skeleton-Runner-Service"},
+        clear=False,
+    ):
+        assert (
+            runner.loop_recovery_operator_author_block_reason(
+                approval_operator=approval_operator,
+                comment=comment,
+            )
+            == reason
+        )
+
+
+def _loop_engine_issue_body(
+    packet: object, *, approval_operator: str | None = None
+) -> str:
+    metadata = [
+        f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+        f"Maintenance Task ID: {runner.LOOP_ENGINE_PACKET}",
+    ]
+    if approval_operator is not None:
+        metadata.append(f"Approval Operator: {approval_operator}")
     return "\n".join(
         (
-            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
-            f"Maintenance Task ID: {runner.LOOP_ENGINE_PACKET}",
+            *metadata,
             "```task",
             json.dumps(packet, sort_keys=True),
             "```",
@@ -13527,6 +13589,58 @@ def _loop_engine_packet(action: str, **updates: object) -> dict[str, object]:
         packet.update({"event": "PREPARED", "expected_version": 0})
     packet.update(updates)
     return packet
+
+
+def _loop_recovery_packet(**updates: object) -> dict[str, object]:
+    packet: dict[str, object] = {
+        "schema": runner.LOOP_RECOVERY_PACKET_SCHEMA,
+        "action": "resume_checkpointed",
+        "task_id": "issue-1468",
+        "run_id": "run-1468",
+        "expected_version": 1,
+        "expected_state": "CHECKPOINTED",
+        "policy_profile": "default",
+        "approval_reference": "owner-approval-1468",
+        "idempotency_key": "loop-recovery-1468",
+        "recovery_reason": "operator_recovery",
+        "public_safe": True,
+        "no_secrets": True,
+        "no_external_side_effects": True,
+    }
+    packet.update(updates)
+    return packet
+
+
+def test_loop_recovery_operator_author_mismatch_blocks_before_dispatch() -> None:
+    body = _loop_engine_issue_body(
+        _loop_recovery_packet(),
+        approval_operator="other-operator",
+    )
+    issue = {"author": {"login": "alanua"}}
+
+    with mock.patch.object(
+        runner, "dispatch_runtime_maintenance_task"
+    ) as dispatch, mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ) as post, mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ):
+        runner.process_runtime_maintenance_issue(
+            1468,
+            runner.LOOP_ENGINE_PACKET,
+            str(runner.ROOT),
+            body,
+            issue=issue,
+        )
+
+    dispatch.assert_not_called()
+    report = post.call_args.args[1]
+    assert report.startswith("BLOCKED:")
+    assert "reason=approval_operator_comment_author_mismatch" in report
 
 
 def test_loop_engine_packet_missing_db_env_fails_closed() -> None:
