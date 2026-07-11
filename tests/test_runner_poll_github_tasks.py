@@ -1011,40 +1011,40 @@ def _run_maintenance_process_issue_for_shadow(
 
 
 @pytest.mark.parametrize(
-    ("configured", "enabled"),
+    ("configured", "mode", "reason", "enabled"),
     (
-        ("1", True),
-        ("true", True),
-        ("TRUE", True),
-        ("yes", True),
-        ("on", True),
-        ("0", False),
-        ("false", False),
-        ("no", False),
-        ("off", False),
-        ("", False),
-        ("   ", False),
-        ("enabled", False),
-        ("maybe", False),
-        ("2", False),
+        ("off", "off", None, False),
+        ("shadow", "shadow", None, True),
+        ("SHADOW", "shadow", None, True),
+        ("enforce", "enforce", None, True),
+        ("", "off", None, False),
+        ("   ", "off", None, False),
+        ("1", None, "INVALID_RUNNER_SHADOW_MODE", False),
+        ("true", None, "INVALID_RUNNER_SHADOW_MODE", False),
+        ("0", None, "INVALID_RUNNER_SHADOW_MODE", False),
+        ("false", None, "INVALID_RUNNER_SHADOW_MODE", False),
+        ("maybe", None, "INVALID_RUNNER_SHADOW_MODE", False),
     ),
 )
-def test_shadow_mode_env_uses_explicit_truthy_allowlist(
+def test_runner_shadow_mode_accepts_only_literal_modes(
     monkeypatch: pytest.MonkeyPatch,
     configured: str,
+    mode: str | None,
+    reason: str | None,
     enabled: bool,
 ) -> None:
     monkeypatch.setenv(runner.RUNNER_SHADOW_MODE_ENV, configured)
 
+    assert runner.runner_shadow_mode() == (mode, reason)
     assert runner.runner_shadow_mode_enabled() is enabled
 
 
 def test_shadow_evaluator_exception_leaves_legacy_code_generation_dispatch_byte_for_byte(
     tmp_path: Path,
 ) -> None:
-    normal = _run_code_generation_process_issue_for_shadow(tmp_path, shadow_mode="0")
+    normal = _run_code_generation_process_issue_for_shadow(tmp_path, shadow_mode="off")
     exception = _run_code_generation_process_issue_for_shadow(
-        tmp_path, shadow_mode="1", evaluator_exception=True
+        tmp_path, shadow_mode="shadow", evaluator_exception=True
     )
 
     assert exception["set_label"] == normal["set_label"]
@@ -1063,9 +1063,9 @@ def test_shadow_evaluator_exception_leaves_legacy_code_generation_dispatch_byte_
 def test_shadow_evaluator_exception_leaves_legacy_maintenance_dispatch_byte_for_byte(
     tmp_path: Path,
 ) -> None:
-    normal = _run_maintenance_process_issue_for_shadow(tmp_path, shadow_mode="0")
+    normal = _run_maintenance_process_issue_for_shadow(tmp_path, shadow_mode="off")
     exception = _run_maintenance_process_issue_for_shadow(
-        tmp_path, shadow_mode="1", evaluator_exception=True
+        tmp_path, shadow_mode="shadow", evaluator_exception=True
     )
 
     assert exception["set_label"] == normal["set_label"]
@@ -1077,8 +1077,8 @@ def test_shadow_evaluator_exception_leaves_legacy_maintenance_dispatch_byte_for_
 def test_shadow_mode_enabled_and_disabled_preserve_legacy_maintenance_behavior(
     tmp_path: Path,
 ) -> None:
-    disabled = _run_maintenance_process_issue_for_shadow(tmp_path, shadow_mode="0")
-    enabled = _run_maintenance_process_issue_for_shadow(tmp_path, shadow_mode="1")
+    disabled = _run_maintenance_process_issue_for_shadow(tmp_path, shadow_mode="off")
+    enabled = _run_maintenance_process_issue_for_shadow(tmp_path, shadow_mode="shadow")
 
     assert enabled["set_label"] == disabled["set_label"]
     assert enabled["post_comment"] == disabled["post_comment"]
@@ -1101,10 +1101,10 @@ def test_shadow_mode_enabled_and_disabled_preserve_legacy_maintenance_behavior(
         {},
         {runner.RUNNER_SHADOW_MODE_ENV: ""},
         {runner.RUNNER_SHADOW_MODE_ENV: "   "},
-        {runner.RUNNER_SHADOW_MODE_ENV: "maybe"},
+        {runner.RUNNER_SHADOW_MODE_ENV: "off"},
     ),
 )
-def test_absent_blank_and_unknown_shadow_env_skip_work_and_keep_legacy_dispatch(
+def test_absent_blank_and_off_shadow_env_skip_work_and_keep_legacy_dispatch(
     tmp_path: Path,
     environment: dict[str, str],
 ) -> None:
@@ -1162,6 +1162,7 @@ def test_absent_blank_and_unknown_shadow_env_skip_work_and_keep_legacy_dispatch(
         runner.CHECK_SKELETON_FRESHNESS,
         str(coordinator),
         _shadow_maintenance_issue_body(),
+        trusted_loop_recovery_approvals=(),
     )
     assert runner.LAST_RUNNER_SHADOW_RECEIPT == {
         "schema": "skeleton.runner_shadow_receipt.v1",
@@ -1170,6 +1171,149 @@ def test_absent_blank_and_unknown_shadow_env_skip_work_and_keep_legacy_dispatch(
         "reason_codes": ["SHADOW_MODE_DISABLED"],
         "task_envelope_hash": None,
     }
+
+
+@pytest.mark.parametrize("configured", ("1", "true", "maybe", "2", "disabled"))
+def test_invalid_runner_shadow_mode_fails_closed_before_dispatch(
+    tmp_path: Path,
+    configured: str,
+) -> None:
+    coordinator = tmp_path / "coordinator"
+    issue = {
+        "number": 1684,
+        "title": "Maintenance invalid runner mode",
+        "body": _shadow_maintenance_issue_body(),
+        "comments": [],
+    }
+
+    with mock.patch.dict(
+        os.environ, {runner.RUNNER_SHADOW_MODE_ENV: configured}, clear=True
+    ), mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(
+        runner, "dispatch_runtime_maintenance_task"
+    ) as dispatch, mock.patch.object(
+        runner, "post_issue_comment"
+    ) as post, mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ):
+        runner.process_issue(issue, workdir=str(coordinator))
+
+    dispatch.assert_not_called()
+    set_label.assert_called_once_with(1684, runner.LABEL_READY, runner.LABEL_BLOCKED)
+    assert "Invalid Runner shadow mode" in post.call_args.args[1]
+    assert runner.LAST_RUNNER_SHADOW_RECEIPT == {
+        "schema": "skeleton.runner_shadow_receipt.v1",
+        "shadow_status": "blocked",
+        "semantic_route": None,
+        "reason_codes": ["INVALID_RUNNER_SHADOW_MODE"],
+        "task_envelope_hash": None,
+    }
+
+
+def _allowed_shadow_receipt() -> runner.RunnerShadowReceipt:
+    return runner.RunnerShadowReceipt(
+        schema="skeleton.runner_shadow_receipt.v1",
+        shadow_status="allowed",
+        semantic_route="repository_maintenance",
+        reason_codes=(),
+        task_envelope_hash="a" * 64,
+    )
+
+
+def test_enforce_mode_allows_code_generation_after_one_typed_gate(
+    tmp_path: Path,
+) -> None:
+    coordinator = tmp_path / "coordinator"
+    issue_path = tmp_path / "worktrees" / "issue-1683"
+    issue = {
+        "number": 1683,
+        "title": "Enforce code path",
+        "body": _shadow_code_issue_body(),
+        "comments": [],
+    }
+
+    with mock.patch.dict(
+        os.environ, {runner.RUNNER_SHADOW_MODE_ENV: "enforce"}, clear=False
+    ), mock.patch.object(
+        runner, "evaluate_runner_shadow_hook", return_value=_allowed_shadow_receipt()
+    ) as gate, mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "prepare_issue_branch", return_value=(0, "ready", issue_path)
+    ), mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, "codex output")
+    ) as run_codex, mock.patch.object(
+        runner, "finalize_success", return_value="DONE report"
+    ), mock.patch.object(
+        runner, "cleanup_issue_worktree", return_value=(0, "")
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "record_runner_task_picked_up", return_value=None
+    ), mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ):
+        runner.process_issue(issue, workdir=str(coordinator))
+
+    gate.assert_called_once()
+    run_codex.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "task_id",
+    (
+        runner.CHECK_SKELETON_FRESHNESS,
+        runner.LOOP_ENGINE_PACKET,
+        runner.PUBLISH_EXISTING_ISSUE_WORKTREE,
+    ),
+)
+def test_enforce_mode_allows_runtime_loop_and_publish_after_one_typed_gate(
+    tmp_path: Path,
+    task_id: str,
+) -> None:
+    coordinator = tmp_path / "coordinator"
+    issue = _maintenance_issue(task_id, "{}" if task_id == runner.LOOP_ENGINE_PACKET else "")
+    report = (
+        "DONE: Runner host maintenance task completed.\n"
+        f"maintenance_task_id={task_id}\n"
+        "success_criteria=met"
+    )
+
+    with mock.patch.dict(
+        os.environ, {runner.RUNNER_SHADOW_MODE_ENV: "enforce"}, clear=False
+    ), mock.patch.object(
+        runner, "evaluate_runner_shadow_hook", return_value=_allowed_shadow_receipt()
+    ) as gate, mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "ensure_clean_worktree", return_value=(True, "")
+    ), mock.patch.object(
+        runner, "dispatch_runtime_maintenance_task", return_value=report
+    ) as dispatch, mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "record_runner_task_picked_up", return_value=None
+    ), mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ):
+        runner.process_issue(issue, workdir=str(coordinator))
+
+    gate.assert_called_once()
+    dispatch.assert_called_once_with(
+        task_id,
+        str(coordinator),
+        str(issue["body"]),
+        trusted_loop_recovery_approvals=(),
+    )
 
 
 @pytest.mark.parametrize(
@@ -1210,7 +1354,7 @@ def test_missing_or_blank_shadow_privacy_boundary_blocks_without_default(
     body: str,
 ) -> None:
     with mock.patch.dict(
-        os.environ, {runner.RUNNER_SHADOW_MODE_ENV: "1"}, clear=False
+        os.environ, {runner.RUNNER_SHADOW_MODE_ENV: "shadow"}, clear=False
     ):
         receipt = runner.evaluate_runner_shadow_hook(
             issue_number=1683,
@@ -1248,7 +1392,7 @@ def test_typed_task_block_fields_feed_shadow_hash_without_receipt_leakage() -> N
     )
 
     with mock.patch.dict(
-        os.environ, {runner.RUNNER_SHADOW_MODE_ENV: "1"}, clear=False
+        os.environ, {runner.RUNNER_SHADOW_MODE_ENV: "shadow"}, clear=False
     ):
         receipt = runner.evaluate_runner_shadow_hook(
             issue_number=1683,
@@ -13493,6 +13637,48 @@ def test_trusted_runner_comment_authors_include_owner_and_configured_actor() -> 
     assert "alanua" in actors
     assert "github-actions[bot]" in actors
     assert "skeleton-runner-service" in actors
+
+
+def test_loop_recovery_approvals_only_trust_owner_comment_author() -> None:
+    approval = {
+        "schema": "skeleton.loop_recovery_approval.v1",
+        "source": "github_issue_comment",
+        "operator": "drive-by",
+        "action": "resume_checkpointed",
+        "task_id": "issue-1721",
+        "run_id": "run-1721",
+        "expected_version": 3,
+        "expected_state": "CHECKPOINTED",
+        "policy_profile": "default_bounded",
+        "approval_reference": "approval-1721",
+        "idempotency_key": "recovery-1721",
+        "packet_hash": "a" * 64,
+        "state_transition": "accepted",
+        "public_safe": True,
+    }
+    with mock.patch.dict(
+        os.environ,
+        {runner.RUNNER_GITHUB_ACTOR_ENV: "Skeleton-Runner-Service"},
+        clear=False,
+    ):
+        assert "github-actions[bot]" in runner.trusted_runner_comment_authors()
+        assert "skeleton-runner-service" in runner.trusted_runner_comment_authors()
+        comments = [
+            {"author": {"login": "drive-by"}, "body": json.dumps(approval)},
+            {"author": {"login": "github-actions[bot]"}, "body": json.dumps(approval)},
+            {
+                "author": {"login": "Skeleton-Runner-Service"},
+                "body": json.dumps(approval),
+            },
+            {
+                "author": {"login": "alanua"},
+                "body": json.dumps({**approval, "operator": "alanua"}),
+            },
+        ]
+
+        trusted = runner._trusted_loop_recovery_approvals(comments)
+
+    assert trusted == ({**approval, "operator": "alanua"},)
 
 
 def _loop_engine_issue_body(packet: object) -> str:

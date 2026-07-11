@@ -122,6 +122,7 @@ REPO = QUEUE_REPOSITORY
 RUNNER_GITHUB_ACTOR_ENV = "SKELETON_RUNNER_GITHUB_ACTOR"
 RUNNER_SHADOW_MODE_ENV = "SKELETON_RUNNER_SHADOW_MODE"
 LAST_RUNNER_SHADOW_RECEIPT: dict[str, object] | None = None
+RUNNER_GATE_MODES = frozenset({"off", "shadow", "enforce"})
 
 
 def trusted_runner_comment_authors() -> frozenset[str]:
@@ -133,6 +134,16 @@ def trusted_runner_comment_authors() -> frozenset[str]:
     if configured:
         actors.add(configured)
     return frozenset(actors)
+
+
+def runner_shadow_mode() -> tuple[str | None, str | None]:
+    configured = os.environ.get(RUNNER_SHADOW_MODE_ENV)
+    if configured is None or not configured.strip():
+        return "off", None
+    normalized = configured.strip().lower()
+    if normalized not in RUNNER_GATE_MODES:
+        return None, "INVALID_RUNNER_SHADOW_MODE"
+    return normalized, None
 
 
 LABEL_READY = "runner:ready"
@@ -1890,10 +1901,8 @@ def runner_task_route(
 
 
 def runner_shadow_mode_enabled() -> bool:
-    configured = os.environ.get(RUNNER_SHADOW_MODE_ENV)
-    if configured is None:
-        return False
-    return configured.strip().lower() in {"1", "true", "yes", "on"}
+    mode, reason = runner_shadow_mode()
+    return reason is None and mode in {"shadow", "enforce"}
 
 
 def protected_runner_shadow_compatibility_bindings() -> RunnerShadowCompatibilityBindings:
@@ -2077,7 +2086,12 @@ def evaluate_runner_shadow_hook(
     trusted_protected_approval_references: tuple[str, ...] = (),
 ) -> RunnerShadowReceipt | None:
     global LAST_RUNNER_SHADOW_RECEIPT
-    if not runner_shadow_mode_enabled():
+    mode, mode_reason = runner_shadow_mode()
+    if mode_reason is not None:
+        receipt = blocked_shadow_receipt(mode_reason)
+        LAST_RUNNER_SHADOW_RECEIPT = receipt.to_public_mapping()
+        return receipt
+    if mode == "off":
         LAST_RUNNER_SHADOW_RECEIPT = {
             "schema": "skeleton.runner_shadow_receipt.v1",
             "shadow_status": "not_applicable",
@@ -2104,6 +2118,18 @@ def evaluate_runner_shadow_hook(
         receipt = blocked_shadow_receipt("SHADOW_EVALUATOR_EXCEPTION")
     LAST_RUNNER_SHADOW_RECEIPT = receipt.to_public_mapping()
     return receipt
+
+
+def runner_enforce_block_reason(receipt: RunnerShadowReceipt | None) -> str | None:
+    mode, mode_reason = runner_shadow_mode()
+    if mode_reason is not None:
+        return "Invalid Runner shadow mode; allowed values are off, shadow, enforce."
+    if mode != "enforce":
+        return None
+    if receipt is None or receipt.shadow_status != "allowed":
+        reasons = ", ".join(receipt.reason_codes) if receipt is not None else "missing_receipt"
+        return f"Runner enforce gate blocked dispatch: {reasons}."
+    return None
 
 
 def retry_condition_for_issue(
@@ -2250,6 +2276,50 @@ def get_issue_comments(issue: dict[str, Any]) -> list[dict[str, Any]] | None:
     if not isinstance(parsed_comments, list):
         return None
     return [comment for comment in parsed_comments if isinstance(comment, dict)]
+
+
+def _comment_author_login(comment: Mapping[str, Any]) -> str | None:
+    for key in ("author", "user"):
+        author = comment.get(key)
+        if isinstance(author, Mapping):
+            login = author.get("login")
+            if isinstance(login, str) and login.strip():
+                return login.strip().lower()
+    return None
+
+
+def _json_objects_from_text(text: str) -> tuple[object, ...]:
+    decoder = json.JSONDecoder()
+    results: list[object] = []
+    for index, character in enumerate(text):
+        if character != "{":
+            continue
+        try:
+            value, _end = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        results.append(value)
+    return tuple(results)
+
+
+def _trusted_loop_recovery_approvals(
+    comments: list[dict[str, Any]],
+) -> tuple[Mapping[str, object], ...]:
+    repository_owner = QUEUE_REPOSITORY.split("/", 1)[0].lower()
+    approvals: list[Mapping[str, object]] = []
+    for comment in comments:
+        if _comment_author_login(comment) != repository_owner:
+            continue
+        body = comment.get("body")
+        if not isinstance(body, str):
+            continue
+        for candidate in _json_objects_from_text(body):
+            if (
+                isinstance(candidate, Mapping)
+                and candidate.get("schema") == "skeleton.loop_recovery_approval.v1"
+            ):
+                approvals.append(candidate)
+    return tuple(approvals)
 
 
 def repeated_blocker_report(decision: RetryDecision) -> str:
@@ -3423,18 +3493,29 @@ def _loop_receipt_report(receipt: object) -> str:
 
 
 def loop_engine_packet(body: str) -> str:
-    return _execute_loop_engine_packet(
-        body,
-        task_id=LOOP_ENGINE_PACKET,
-        state_db_path=_loop_state_db_path,
-        task_packet_from_body=_loop_task_packet_from_body,
-        receipt_report=_loop_receipt_report,
-        maintenance_report=_maintenance_report,
-        store_factory=LoopStateStore,
-        engine_factory=LoopEngine,
-        policy_factory=LoopPolicy,
-        packet_runner=run_loop_task_packet,
-    )
+    return loop_engine_packet_with_approvals(body, ())
+
+
+def loop_engine_packet_with_approvals(
+    body: str,
+    trusted_recovery_approvals: tuple[Mapping[str, object], ...],
+) -> str:
+    executor_kwargs: dict[str, object] = {
+        "task_id": LOOP_ENGINE_PACKET,
+        "state_db_path": _loop_state_db_path,
+        "task_packet_from_body": _loop_task_packet_from_body,
+        "receipt_report": _loop_receipt_report,
+        "maintenance_report": _maintenance_report,
+        "store_factory": LoopStateStore,
+        "engine_factory": LoopEngine,
+        "policy_factory": LoopPolicy,
+        "packet_runner": run_loop_task_packet,
+    }
+    if "trusted_recovery_approvals" in getattr(
+        _execute_loop_engine_packet, "__code__"
+    ).co_varnames:
+        executor_kwargs["trusted_recovery_approvals"] = trusted_recovery_approvals
+    return _execute_loop_engine_packet(body, **executor_kwargs)
 
 
 def _sanitize_maintenance_status_lines(status_lines: list[str]) -> list[str]:
@@ -11290,7 +11371,10 @@ def mempalace_synthetic_runtime_smoke(body: str) -> str:
 
 
 def dispatch_runtime_maintenance_task(
-    task_id: str, workdir: str, body: str = ""
+    task_id: str,
+    workdir: str,
+    body: str = "",
+    trusted_loop_recovery_approvals: tuple[Mapping[str, object], ...] = (),
 ) -> str:
     if task_id not in RUNTIME_MAINTENANCE_TASK_IDS:
         return _maintenance_report(
@@ -11321,7 +11405,9 @@ def dispatch_runtime_maintenance_task(
         if task_id == HERMES_MEMORY_GATEWAY_SMOKE:
             return hermes_memory_gateway_smoke()
         if task_id == LOOP_ENGINE_PACKET:
-            return loop_engine_packet(body)
+            return loop_engine_packet_with_approvals(
+                body, trusted_loop_recovery_approvals
+            )
         if task_id == MEMPALACE_SYNTHETIC_RUNTIME_SMOKE:
             return mempalace_synthetic_runtime_smoke(body)
         if task_id == PRIVATE_MEMORY_HEALTHCHECK:
@@ -11546,8 +11632,14 @@ def process_runtime_maintenance_issue(
     body: str = "",
     memory_warning: str | None = None,
     retry_decision: RetryDecision | None = None,
+    trusted_loop_recovery_approvals: tuple[Mapping[str, object], ...] = (),
 ) -> None:
-    report = dispatch_runtime_maintenance_task(task_id, workdir, body)
+    report = dispatch_runtime_maintenance_task(
+        task_id,
+        workdir,
+        body,
+        trusted_loop_recovery_approvals=trusted_loop_recovery_approvals,
+    )
     status = maintenance_report_status(report)
     if status != "DONE" and retry_decision is not None:
         report = append_retry_fields(report, retry_decision)
@@ -11634,7 +11726,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             else:
                 task_content = runner_task.content
 
-        evaluate_runner_shadow_hook(
+        runner_gate_receipt = evaluate_runner_shadow_hook(
             issue_number=issue_number,
             issue_body=issue_body,
             route=route,
@@ -11642,6 +11734,10 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             runner_task=runner_task,
             merge_request=merge_request,
         )
+        runner_gate_block = runner_enforce_block_reason(runner_gate_receipt)
+        if runner_gate_block is not None:
+            block_issue(issue_number, runner_gate_block, runner_task=runner_task)
+            return
 
         prior_comments = get_issue_comments(issue)
         retry_block_reason = "executor_invocation"
@@ -11769,6 +11865,9 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
         )
 
         if maintenance_mode and maintenance_task_id is not None:
+            trusted_loop_recovery_approvals = _trusted_loop_recovery_approvals(
+                prior_comments
+            )
             if pickup_memory_warning:
                 process_runtime_maintenance_issue(
                     issue_number,
@@ -11777,6 +11876,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                     issue_body,
                     pickup_memory_warning,
                     retry_decision,
+                    trusted_loop_recovery_approvals,
                 )
             else:
                 process_runtime_maintenance_issue(
@@ -11785,6 +11885,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                     coordinator_workdir,
                     issue_body,
                     retry_decision=retry_decision,
+                    trusted_loop_recovery_approvals=trusted_loop_recovery_approvals,
                 )
             return
         if merge_mode and merge_request is not None:
