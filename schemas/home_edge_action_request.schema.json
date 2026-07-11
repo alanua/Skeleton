@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://skeleton.local/schemas/home_edge_action_request.schema.json",
+  "title": "Home Edge direct action request",
+  "type": "object",
+  "required": [
+    "node_id",
+    "action_id",
+    "request_id",
+    "timestamp",
+    "nonce",
+    "idempotency_key"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "node_id": {
+      "const": "home-edge-01"
+    },
+    "action_id": {
+      "enum": [
+        "home_edge.diagnostic",
+        "home_edge.health",
+        "media.get_volume",
+        "media.mute",
+        "media.playback_status",
+        "media.set_volume",
+        "media.unmute",
+        "tv.get_mode",
+        "tv.set_mode"
+      ]
+    },
+    "request_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{7,127}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "nonce": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{16,96}$"
+    },
+    "idempotency_key": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{7,127}$"
+    },
+    "parameters": {
+      "type": "object"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "action_id": {
+            "const": "media.set_volume"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "type": "object",
+            "required": ["level", "target"],
+            "additionalProperties": false,
+            "properties": {
+              "level": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100
+              },
+              "target": {
+                "enum": ["host", "android_tv", "both"]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action_id": {
+            "enum": ["media.mute", "media.unmute"]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "type": "object",
+            "required": ["target"],
+            "additionalProperties": false,
+            "properties": {
+              "target": {
+                "enum": ["host", "android_tv", "both"]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action_id": {
+            "const": "tv.set_mode"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "type": "object",
+            "required": ["mode"],
+            "additionalProperties": false,
+            "properties": {
+              "mode": {
+                "enum": ["chrome", "waydroid", "vlc", "kiosk", "off"]
+              },
+              "confirm_off": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

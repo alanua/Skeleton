@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://skeleton.local/schemas/home_edge_action_receipt.schema.json",
+  "title": "Home Edge direct action receipt",
+  "type": "object",
+  "required": [
+    "schema",
+    "node_id",
+    "action_id",
+    "request_id",
+    "timestamp",
+    "nonce",
+    "idempotency_key",
+    "executed_at",
+    "status",
+    "verified",
+    "duration_ms",
+    "result",
+    "errors"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "schema": {
+      "const": "skeleton.home_edge.action_receipt.v1"
+    },
+    "node_id": {
+      "const": "home-edge-01"
+    },
+    "action_id": {
+      "type": "string"
+    },
+    "request_id": {
+      "type": "string"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "nonce": {
+      "type": "string"
+    },
+    "idempotency_key": {
+      "type": "string"
+    },
+    "executed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "status": {
+      "enum": ["observed", "unverified", "unsupported", "partial_failure"]
+    },
+    "verified": {
+      "type": "boolean"
+    },
+    "duration_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 5000
+    },
+    "result": {},
+    "errors": {
+      "type": "array"
+    },
+    "idempotent_replay": {
+      "type": "boolean"
+    }
+  }
+}

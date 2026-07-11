@@ -21,6 +21,15 @@ The node is intended for system administration, networking, routers, home automa
 
 Universal does not mean unrestricted shell. Each capability is exposed as a typed action with a reviewed implementation and risk classification.
 
+## Direct routine controls
+
+Stage 1 direct controls are documented in
+[`../HOME_EDGE_DIRECT_CONTROL.md`](../HOME_EDGE_DIRECT_CONTROL.md). Routine media and TV
+mode actions use the existing strict SSH route and typed audited action model, then return a
+sanitized receipt in the same interaction. Normal runtime execution does not create a
+GitHub issue, Runner poll, Codex session, branch or PR after the reviewed gateway has been
+deployed.
+
 ## Modem role
 
 A USB modem is optional. The gateway remains valid when no modem is physically attached to the media PC. Modem observations are reported only when a live probe sees the device.

@@ -168,6 +168,7 @@ def synthetic_profile_mapping() -> dict[str, Any]:
             "media_operations",
             "usb_hardware_inventory",
             "home_automation",
+            "direct_routine_controls",
         ],
         "safety_boundaries": [
             "read_only_diagnostics_default",
