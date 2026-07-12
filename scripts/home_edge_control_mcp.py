@@ -19,10 +19,11 @@ from core.home_edge.executor_gateway import EXEC_HMAC_SECRET_ENV, execute_home_e
 MEDIA_CONTROL_TOOL = "home_media_control"
 MEDIA_STATUS_TOOL = "home_media_status"
 MODE_KEYS = {
-    "chrome": "1",
-    "android_tv": "2",
-    "vlc": "3",
-    "kiosk": "4",
+    "android_tv": "1",
+    "chrome": "2",
+    "kiosk": "3",
+    "vlc": "4",
+    "games": "5",
     "off": "0",
 }
 ALLOWED_CONTROL_KEYS = {"mode", "volume_percent", "idempotency_key"}
@@ -52,8 +53,8 @@ def handle_message(message: dict[str, Any]) -> dict[str, Any] | None:
                     "serverInfo": {"name": "skeleton-home-media-control", "version": "0.1.0"},
                     "instructions": (
                         "Use home_media_status for read-only inspection. Use home_media_control only when "
-                        "the user explicitly asks to change the media mode or volume. Modes are chrome, "
-                        "android_tv, vlc, kiosk, and off. Do not infer arbitrary shell commands."
+                        "the user explicitly asks to change the media mode or volume. Modes are android_tv, "
+                        "chrome, kiosk, vlc, games, and off. Do not infer arbitrary shell commands."
                     ),
                 },
             }
@@ -268,6 +269,22 @@ def get_volume():
 def process_hint():
     completed = run(["/usr/bin/ps", "-u", str(os.getuid()), "-o", "comm=,args="], timeout=5)
     text = completed.stdout.lower()
+    game_markers = (
+        "retroarch",
+        "emulationstation",
+        "es-de",
+        "pegasus-fe",
+        "pegasus-frontend",
+        "lutris",
+        "steam",
+        "heroic",
+        "attract",
+        "retrofe",
+        "gamehub",
+        "scummvm",
+    )
+    if any(marker in text for marker in game_markers):
+        return "games"
     if "waydroid show-full-ui" in text:
         return "android_tv"
     if re.search(r"(^|\\n)\\s*vlc\\s", text):
@@ -357,9 +374,9 @@ def _control_tool_description() -> dict[str, Any]:
         "name": MEDIA_CONTROL_TOOL,
         "description": (
             "Change the Home Edge TV/media mode and/or default audio volume. Use only when the user "
-            "explicitly requests a change. Modes: chrome (Super+Alt+1), android_tv (Super+Alt+2), "
-            "vlc (Super+Alt+3), kiosk (Super+Alt+4), off (Super+Alt+0). At least one of mode or "
-            "volume_percent is required. This tool cannot run arbitrary commands."
+            "explicitly requests a change. Modes: android_tv (Super+Alt+1), chrome (Super+Alt+2), "
+            "kiosk (Super+Alt+3), vlc (Super+Alt+4), games (Super+Alt+5), off (Super+Alt+0). At least "
+            "one of mode or volume_percent is required. This tool cannot run arbitrary commands."
         ),
         "annotations": {
             "title": "Control home media",
