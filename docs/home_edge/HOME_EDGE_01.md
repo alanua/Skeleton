@@ -19,7 +19,9 @@ show only aggregate route status such as `unchanged`, `review_required` or `unve
 
 The node is intended for system administration, networking, routers, home automation, containers, services, files and backups, browser and desktop recovery, media work, USB hardware, ESP/WLED tooling, monitoring and logs.
 
-Universal does not mean unrestricted shell. Each capability is exposed as a typed action with a reviewed implementation and risk classification.
+Universal does not mean unrestricted public shell. Private operator-approved work uses one
+`home_edge_exec` request contract with explicit `argv` by default or bounded script mode
+when requested.
 
 ## Modem role
 
@@ -33,6 +35,26 @@ Runtime execution must write diagnostics to an ignored/private artifact path out
 public checkout, or run without persistence. The public template remains synthetic and is
 not updated by local profile or environment override runs, even when those runtime values
 match the synthetic template identity.
+
+The executor deployment route is intentionally one-shot: strict OpenSSH invokes
+the exact `/usr/local/bin/home_edge_exec --server` command for a single signed
+JSON request. That public wrapper can only delegate to `sudo -n --
+/usr/local/sbin/home_edge_exec_root --server`; the root wrapper loads the
+root-private env, clears unsafe inherited environment, emits one receipt and
+exits. The repository does not define an always-running executor daemon or a
+restartable systemd loop. Runtime activation must provision the HMAC secret,
+persistent nonce/idempotency state path, audit path, cancel directory and real
+desktop account before enabling any live command.
+
+The supported installer is `scripts/install_home_edge_executor.sh`. It validates
+the real desktop account, installs `/usr/local/bin/home_edge_exec` and
+`/usr/local/sbin/home_edge_exec_root`, writes a mode-`0600` private env file,
+creates mode-`0700` private state directories, and writes a mode-`0440` sudoers
+rule for only the configured strict SSH target user and only
+`/usr/local/sbin/home_edge_exec_root --server`. It does not enable a restartable
+service or public listener. Runtime deployment still requires a private HMAC
+secret, strict SSH identity and known-hosts files, the real desktop username,
+sudo policy for account switching, and filesystem permissions on the node.
 
 ## Network inventory boundary
 
