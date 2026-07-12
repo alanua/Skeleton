@@ -1081,15 +1081,15 @@ _SAFE_REF_COMPONENT_RE = re.compile(r"[A-Za-z0-9._-]+")
 
 
 def _normalize_issue_worktree_source_ref(raw_ref: str) -> tuple[str | None, str | None]:
-    ref = raw_ref.strip()
-    if _FULL_SHA_RE.fullmatch(ref):
-        return ref.lower(), None
-    if not ref:
+    if not raw_ref:
         return None, "empty_ref"
-    if ref != raw_ref or any(
+    if raw_ref != raw_ref.strip() or any(
         ord(character) < 32 or ord(character) == 127 for character in raw_ref
     ):
         return None, "unsafe_ref"
+    ref = raw_ref
+    if _FULL_SHA_RE.fullmatch(ref):
+        return ref.lower(), None
     if ref[0] in {"-", "/"} or ref[-1] in {"/", "."}:
         return None, "unsafe_ref"
     if (
@@ -1118,6 +1118,7 @@ def _normalize_issue_worktree_source_ref(raw_ref: str) -> tuple[str | None, str 
         return None, "malformed_ref"
     if any(
         not _SAFE_REF_COMPONENT_RE.fullmatch(component)
+        or component.startswith(".")
         or component.endswith(".lock")
         or component.endswith(".")
         for component in components
@@ -1132,7 +1133,11 @@ def _issue_worktree_required_ref(
     if spec.explicit_ref is not None:
         return _normalize_issue_worktree_source_ref(spec.explicit_ref)
     if spec.expected_head_sha is not None:
-        expected = spec.expected_head_sha.strip()
+        expected = spec.expected_head_sha
+        if expected != expected.strip() or any(
+            ord(character) < 32 or ord(character) == 127 for character in expected
+        ):
+            return None, "invalid_expected_head_sha"
         if _FULL_SHA_RE.fullmatch(expected):
             return expected.lower(), None
         return None, "invalid_expected_head_sha"
@@ -1979,8 +1984,8 @@ def _body_field_or_yaml_value(body: str, field: str, key: str) -> object:
 def _metadata_yaml_string_value(metadata: str, keys: tuple[str, ...]) -> str | None:
     for key in keys:
         value = _metadata_yaml_value(metadata, key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
+        if isinstance(value, str) and value != "":
+            return value
     return None
 
 
@@ -1992,11 +1997,35 @@ def _metadata_string_field(metadata: str, fields: tuple[str, ...]) -> str | None
     return None
 
 
+def _task_block_yaml_mapping(body: str) -> Mapping[str, Any]:
+    task_block = extract_task_block(body)
+    if task_block is None:
+        return {}
+    try:
+        parsed = yaml.safe_load(task_block)
+    except yaml.YAMLError:
+        return {}
+    return parsed if isinstance(parsed, Mapping) else {}
+
+
+def _mapping_string_value(mapping: Mapping[str, Any], keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        value = mapping.get(key)
+        if isinstance(value, str) and value != "":
+            return value
+    return None
+
+
 def issue_worktree_source_spec_from_body(body: str) -> IssueWorktreeSourceSpec:
     metadata = _metadata_before_task(body)
-    explicit_ref = _metadata_yaml_string_value(
-        metadata, ("source_ref", "head_ref", "expected_head_ref")
+    task_fields = _task_block_yaml_mapping(body)
+    explicit_ref = _mapping_string_value(
+        task_fields, ("source_ref", "head_ref", "expected_head_ref")
     )
+    if explicit_ref is None:
+        explicit_ref = _metadata_yaml_string_value(
+            metadata, ("source_ref", "head_ref", "expected_head_ref")
+        )
     if explicit_ref is None:
         explicit_ref = _metadata_string_field(
             metadata,
@@ -2009,13 +2038,16 @@ def issue_worktree_source_spec_from_body(body: str) -> IssueWorktreeSourceSpec:
                 "Expected Head Ref",
             ),
         )
-    expected_head_sha = _metadata_yaml_string_value(metadata, ("expected_head_sha",))
+    expected_head_sha = _mapping_string_value(task_fields, ("expected_head_sha",))
+    if expected_head_sha is None:
+        expected_head_sha = _metadata_yaml_string_value(metadata, ("expected_head_sha",))
     if expected_head_sha is None:
         expected_head_sha = _metadata_string_field(
             metadata, ("expected_head_sha", "Expected Head SHA")
         )
     base_ref = (
-        _metadata_yaml_string_value(metadata, ("base", "base_ref", "base_branch"))
+        _mapping_string_value(task_fields, ("base", "base_ref", "base_branch"))
+        or _metadata_yaml_string_value(metadata, ("base", "base_ref", "base_branch"))
         or _metadata_string_field(
             metadata,
             ("base", "base_ref", "base_branch", "Base", "Base Ref", "Base Branch"),

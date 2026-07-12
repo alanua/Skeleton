@@ -814,11 +814,32 @@ def test_issue_worktree_source_spec_ignores_output_branch_fields() -> None:
     )
 
 
-def test_issue_worktree_fenced_explicit_source_overrides_prefence_alias() -> None:
+def test_issue_worktree_task_fenced_explicit_source_overrides_prefence_alias() -> None:
     body = "\n".join(
         (
             "Source Ref: stale-source",
             "Head Ref: stale-head",
+            "expected_head_sha: " + "b" * 40,
+            "",
+            "```task",
+            "source_ref: exact-source",
+            "expected_head_sha: " + HEAD_SHA,
+            "base_ref: release",
+            "```",
+        )
+    )
+
+    assert runner.issue_worktree_source_spec_from_body(body) == runner.IssueWorktreeSourceSpec(
+        explicit_ref="exact-source",
+        expected_head_sha=HEAD_SHA,
+        base_ref="release",
+    )
+
+
+def test_issue_worktree_prefence_yaml_source_remains_fallback() -> None:
+    body = "\n".join(
+        (
+            "Source Ref: stale-source",
             "",
             "```yaml",
             "source_ref: exact-source",
@@ -834,6 +855,65 @@ def test_issue_worktree_fenced_explicit_source_overrides_prefence_alias() -> Non
     assert runner.issue_worktree_source_spec_from_body(body) == runner.IssueWorktreeSourceSpec(
         explicit_ref="exact-source",
         base_ref="release",
+    )
+
+
+def test_issue_worktree_task_fenced_expected_sha_selects_exact_source() -> None:
+    body = "\n".join(
+        (
+            "Base Branch: release",
+            "",
+            "```task",
+            "expected_head_sha: " + HEAD_SHA,
+            "```",
+        )
+    )
+
+    assert runner.issue_worktree_source_spec_from_body(body) == runner.IssueWorktreeSourceSpec(
+        expected_head_sha=HEAD_SHA,
+        base_ref="release",
+    )
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    (
+        ("base", "release"),
+        ("base_ref", "refs/heads/release"),
+        ("base_branch", "release-lower"),
+    ),
+)
+def test_issue_worktree_task_fenced_base_aliases_override_prefence_base(
+    key: str, value: str
+) -> None:
+    body = "\n".join(
+        (
+            "Base Branch: stale-release",
+            "",
+            "```task",
+            f"{key}: {value}",
+            "```",
+        )
+    )
+
+    assert runner.issue_worktree_source_spec_from_body(body).base_ref == value
+
+
+def test_issue_worktree_task_fenced_output_branch_remains_output_only() -> None:
+    body = "\n".join(
+        (
+            "```task",
+            "branch: attacker",
+            '"Source Branch": also-attacker',
+            '"Head Branch": still-attacker',
+            "expected_head_sha: " + HEAD_SHA,
+            "```",
+        )
+    )
+
+    assert runner.issue_worktree_source_spec_from_body(body) == runner.IssueWorktreeSourceSpec(
+        expected_head_sha=HEAD_SHA,
+        base_ref="origin/main",
     )
 
 
@@ -885,11 +965,17 @@ def test_issue_worktree_safe_ref_normalization_accepts_allowed_sources(
     (
         "",
         " feature",
+        "feature ",
+        "feature\x1fnext",
         "feature\nnext",
         "-feature",
         "/feature",
         "feature/",
         "feature.",
+        ".hidden",
+        "feature/.hidden",
+        "refs/heads/.hidden",
+        "origin/feature/.hidden",
         "feature.lock",
         "feature//next",
         "feature..next",
@@ -1080,6 +1166,46 @@ def test_prepare_issue_worktree_unsafe_source_blocks_before_revparse_or_checkout
 
     assert code != 0
     assert "required_source=unsafe_ref" in output
+    commands = [call.args[0] for call in run_command.call_args_list]
+    assert not any(command[:2] == ["git", "rev-parse"] for command in commands)
+    assert not any(command[:2] == ["git", "checkout"] for command in commands)
+
+
+@pytest.mark.parametrize(
+    ("task_line", "reason"),
+    (
+        ('source_ref: " feature "', "unsafe_ref"),
+        ('source_ref: "feature\\u001fnext"', "unsafe_ref"),
+        (f'expected_head_sha: " {HEAD_SHA} "', "invalid_expected_head_sha"),
+        (f'expected_head_sha: "{HEAD_SHA}\\u001f"', "invalid_expected_head_sha"),
+    ),
+)
+def test_prepare_issue_worktree_quoted_unsafe_source_metadata_blocks_before_git(
+    tmp_path: Path, task_line: str, reason: str
+) -> None:
+    worktree_root = tmp_path / "worktrees"
+    coordinator = tmp_path / "coordinator"
+    coordinator.mkdir()
+    body = "\n".join(("```task", task_line, "```"))
+    spec = runner.issue_worktree_source_spec_from_body(body)
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(worktree_root)}, clear=True
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=(
+            (0, "https://github.com/alanua/Skeleton.git"),
+            (0, "fetched"),
+            (0, "cloned"),
+            (0, ""),
+            (0, "fetched clone"),
+        ),
+    ) as run_command:
+        code, output, _path = runner.prepare_issue_worktree(1764, coordinator, spec)
+
+    assert code != 0
+    assert f"required_source={reason}" in output
     commands = [call.args[0] for call in run_command.call_args_list]
     assert not any(command[:2] == ["git", "rev-parse"] for command in commands)
     assert not any(command[:2] == ["git", "checkout"] for command in commands)
