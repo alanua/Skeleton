@@ -7,9 +7,19 @@ read_order:
   - projects/travel/PROJECT_MANIFEST.yaml
   - projects/travel/STATE.yaml
   - projects/travel/README.md
+  - external:alanua/Travel/PROJECT_MANIFEST.yaml
+  - external:alanua/Travel/MODULES.yaml
 source_repo: alanua/Travel
 privacy_class: public_safe_code_only
-means: worldwide travel opportunity, multimodal logistics, provider adapters, and journey monitoring project
+means: worldwide travel opportunity, multimodal logistics, reusable provider adapters, monitoring and booking-ready proposal project
+source_architecture:
+  - alanua/Skeleton#1750
+  - alanua/Skeleton#1748
+  - alanua/Skeleton#1747
+  - alanua/Skeleton#1749
+  - alanua/Skeleton#1545
+  - alanua/Skeleton#1761
+  - alanua/Travel#1
 boundaries:
   public_repo_allows:
     - generic_code
@@ -18,6 +28,7 @@ boundaries:
     - public_provider_metadata
     - licences
     - synthetic_fixtures
+    - public_safe_tests
   private_memory_only:
     - personal_travel_history
     - preferences
@@ -26,11 +37,25 @@ boundaries:
     - rankings
     - route_candidates
     - private_price_history
+    - raw_tracks
     - document_status
     - bookings_and_tickets
+    - private_decisions
+  private_artifact_store_only:
+    - scans
+    - pdfs
+    - tickets
+    - booking_confirmations
+    - private_source_snapshots
   secret_store_only:
     - api_keys
     - credentials
     - tokens
     - cookies
     - document_numbers
+rules:
+  - travel_is_a_domain_composition_not_a_duplicate_shared_platform
+  - travel_module_inventory_is_owned_by_alanua_travel
+  - private_canon_requires_memorygateway_write_and_readback
+  - secrets_are_typed_references_only
+  - no_external_mutation_without_explicit_approval
