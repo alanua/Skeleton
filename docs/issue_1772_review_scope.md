@@ -1,0 +1,1 @@
+Review scope is limited to the controller launcher, standard stdio MCP registration, rollback-safe installer, public-safe protocol probe, validation script and tests. The merged universal executor remains unchanged.
