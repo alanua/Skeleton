@@ -1,0 +1,1 @@
+Private addresses, commands, device identifiers, runtime paths, authentication material and raw receipts remain on the trusted controller and Home Edge. GitHub stores only code, tests, aggregate status, latency and sanitized receipt hashes.
