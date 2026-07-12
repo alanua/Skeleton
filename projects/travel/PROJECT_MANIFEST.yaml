@@ -1,0 +1,36 @@
+schema: skeleton.project_manifest.v1
+project_id: travel
+name: Travel Opportunity Planner and Logistics
+status: ACTIVE_BOOTSTRAP
+entrypoint: projects/travel/PROJECT_MANIFEST.yaml
+read_order:
+  - projects/travel/PROJECT_MANIFEST.yaml
+  - projects/travel/STATE.yaml
+  - projects/travel/README.md
+source_repo: alanua/Travel
+privacy_class: public_safe_code_only
+means: worldwide travel opportunity, multimodal logistics, provider adapters, and journey monitoring project
+boundaries:
+  public_repo_allows:
+    - generic_code
+    - architecture
+    - contracts
+    - public_provider_metadata
+    - licences
+    - synthetic_fixtures
+  private_memory_only:
+    - personal_travel_history
+    - preferences
+    - budgets
+    - watchlists
+    - rankings
+    - route_candidates
+    - private_price_history
+    - document_status
+    - bookings_and_tickets
+  secret_store_only:
+    - api_keys
+    - credentials
+    - tokens
+    - cookies
+    - document_numbers
