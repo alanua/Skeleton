@@ -51,3 +51,8 @@ projects:
     repo: alanua/jeeves
     entrypoint: projects/van/PROJECT_MANIFEST.yaml
     means: van conversion project
+
+  travel:
+    repo: alanua/Travel
+    entrypoint: projects/travel/PROJECT_MANIFEST.yaml
+    means: worldwide travel opportunity, multimodal logistics, provider adapters, and journey monitoring project
