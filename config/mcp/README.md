@@ -1,0 +1,1 @@
+`skeleton-home-edge-exec.json` is a standard stdio MCP registration fragment. It contains only the installed launcher path; private Home Edge runtime values remain in `/etc/skeleton` on the trusted controller.
