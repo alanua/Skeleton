@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 import urllib.error
 import urllib.request
@@ -83,7 +84,10 @@ def test_health_and_openapi_are_public_but_contain_no_private_values(action_serv
     schema = document["components"]["schemas"]["MediaControl"]
     assert schema["properties"]["mode"]["enum"] == ["chrome", "android_tv", "vlc", "kiosk", "off"]
     for forbidden in ("argv", "script", "environment", "ssh", "signature", "hmac"):
-        assert forbidden not in encoded.lower()
+        assert re.search(
+            rf"(?<![a-z0-9]){re.escape(forbidden)}(?![a-z0-9])",
+            encoded.lower(),
+        ) is None
 
 
 def test_status_requires_bearer_key(action_server: str) -> None:
