@@ -1,16 +1,20 @@
 schema: skeleton.project_state.v1
 project_id: travel
-status: LINKED_REPOSITORY_BOOTSTRAP
+status: PUBLIC_SAFE_MODULE_BASELINE_DOCUMENTED
 state_role: handoff_not_canon_truth
 last_verified: '2026-07-12'
-evidence_source: alanua/Travel repository initialization and Skeleton project-tree linkage
+evidence_source: alanua/Travel MODULES.yaml, public-safe architecture documents, and linked Skeleton issues
 summary:
   - Travel is a separate public-safe implementation repository linked from Skeleton.
-  - The repository currently contains architecture, adapter, contract, registry, and privacy-boundary baselines.
-  - Provider adapters will be added on demand for real planning needs and retained after validation.
-  - Personal travel data, private observations, bookings, tickets, documents, and secrets are excluded from public GitHub.
+  - The complete public-safe module inventory is recorded in alanua/Travel/MODULES.yaml.
+  - The inventory covers annual opportunity mapping, weekend radar, Offer Intelligence, multimodal access and routing, reusable transport adapters, stays, packages, activities, total cost, scoring, price-history policy, documents, risk, personalization projection, monitoring, trip packs and booking-record semantics.
+  - Travel composes shared Skeleton capabilities and does not duplicate calendar, scheduler, parser, evidence, maps, finance, memory, secrets, notifications, Runner or Loop.
+  - Provider adapters are created on demand for real planning needs, validated on bounded routes and retained for reuse.
+  - Personal travel data, private observations, bookings, tickets, documents, raw tracks and secrets are excluded from public GitHub.
+  - No live provider adapter, private runtime bridge or booking authority is currently implemented by this baseline.
 next_actions:
-  - Define machine-readable shared transport contracts.
-  - Add the first reviewed provider registry entries.
-  - Implement the initial German transport adapters and generic GTFS family.
-  - Connect runtime use only through approved Skeleton routes and secret references.
+  - Implement public-safe core contracts and synthetic fixtures.
+  - Complete the bounded Offer Intelligence fixture slice from Skeleton issues 1747 and 1749.
+  - Implement the first reviewed national-rail and regional-transport adapters through provider-neutral contracts.
+  - Add provider registry entries only after source, licence and capability review.
+  - Connect private runtime use only through approved MemoryGateway, artifact, scheduler, notification and secret-reference routes.
