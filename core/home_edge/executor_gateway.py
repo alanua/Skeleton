@@ -70,8 +70,6 @@ class OpenSSHExecTransport:
             "-i",
             identity,
             f"{self.profile.target_user}@{self.profile.tailscale_ip}",
-            "sudo",
-            "-n",
             "/usr/local/bin/home_edge_exec",
             "--server",
         ]

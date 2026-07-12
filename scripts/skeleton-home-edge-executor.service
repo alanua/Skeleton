@@ -5,9 +5,11 @@ Documentation=docs/HOME_EDGE_EXECUTOR.md
 # This file is intentionally not an installable long-running service. The
 # supported execution route is:
 #
-#   ssh -o BatchMode=yes -o StrictHostKeyChecking=yes ... sudo -n /usr/local/bin/home_edge_exec --server
+#   ssh -o BatchMode=yes -o StrictHostKeyChecking=yes ... /usr/local/bin/home_edge_exec --server
 #
-# `sudo -n /usr/local/bin/home_edge_exec --server` reads exactly one signed JSON request from stdin,
-# executes it, writes one JSON receipt to stdout, and exits. Running that
-# one-shot stdin protocol under a simple restartable service would create
-# a broken restart loop with no request input.
+# `/usr/local/bin/home_edge_exec --server` delegates only to
+# `sudo -n -- /usr/local/sbin/home_edge_exec_root --server`. The root wrapper
+# reads exactly one signed JSON request from stdin, executes it, writes one JSON
+# receipt to stdout, and exits. Running that one-shot stdin protocol under a
+# simple restartable service would create a broken restart loop with no request
+# input.

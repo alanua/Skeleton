@@ -6,10 +6,12 @@ receipt model.
 
 The supported controller route is the existing strict OpenSSH over the private
 Tailscale profile. The controller submits JSON through the exact node-side
-command `sudo -n /usr/local/bin/home_edge_exec --server`. The node reads one
-request from stdin, executes either shell-free `argv` or explicit bounded script
-mode, returns one receipt on stdout, and exits. There is no always-running
-executor service.
+command `/usr/local/bin/home_edge_exec --server`. That public wrapper invokes
+only `sudo -n -- /usr/local/sbin/home_edge_exec_root --server`; the root wrapper
+loads the root-private environment, clears unsafe inherited environment, reads
+one request from stdin, executes either shell-free `argv` or explicit bounded
+script mode, returns one receipt on stdout, and exits. There is no
+always-running executor service.
 
 Execution lanes:
 
@@ -27,8 +29,11 @@ Execution lanes:
 
 Request security fails closed. The node requires `SKELETON_HOME_EDGE_EXEC_HMAC_SECRET`;
 every executable request must include `timestamp`, `nonce` and a valid
-`sha256=` HMAC signature computed after all request fields are finalized.
-Unsigned, stale and bad-signature requests are rejected before process launch.
+`sha256=` HMAC signature computed after all authenticated request fields are
+finalized. The presentation-only `public` field is excluded from the canonical
+signature payload so controller, MCP and node verification use the same command
+representation while still allowing public receipt redaction. Unsigned, stale
+and bad-signature requests are rejected before process launch.
 
 Nonce and idempotency state is persisted in the configured node state file
 (`SKELETON_HOME_EDGE_EXEC_IDEMPOTENCY_CACHE` for compatibility). The state file
@@ -72,20 +77,25 @@ unless `--replace-secret-stdin` is explicitly supplied.
 The installer creates:
 
 - `/usr/local/bin/home_edge_exec`, the stable strict-OpenSSH command target.
+- `/usr/local/sbin/home_edge_exec_root`, the root-only one-shot wrapper invoked
+  only by sudo.
 - `/usr/local/lib/skeleton-home-edge-executor`, the Python files needed by
   `home_edge_exec --server`.
 - `/etc/skeleton/home_edge_executor.env`, mode `0600`, containing only private
   node runtime configuration.
 - `/etc/sudoers.d/skeleton-home-edge-executor`, mode `0440`, granting only the
   configured strict SSH target user `NOPASSWD` access to
-  `/usr/local/bin/home_edge_exec --server`.
+  `/usr/local/sbin/home_edge_exec_root --server`.
 - `/var/lib/skeleton/home_edge_exec` and `/var/log/skeleton/home_edge_exec`,
   mode `0700`, for nonce/idempotency state, cancel files and audit output.
 
-The installed wrapper supports only `home_edge_exec --server`. It loads the
-private env file, exports the real desktop account and state/audit paths, reads
-exactly one signed JSON request from stdin, writes one JSON receipt, and exits.
-It does not install or enable a systemd unit.
+The public wrapper supports only `home_edge_exec --server` and cannot read the
+private env file. It invokes only `sudo -n --
+/usr/local/sbin/home_edge_exec_root --server`. The root wrapper accepts exactly
+`--server`, loads `/etc/skeleton/home_edge_executor.env`, clears unsafe inherited
+environment, sets the installed Python path, reads exactly one signed JSON
+request from stdin, writes one JSON receipt, and exits. It does not install or
+enable a systemd unit.
 
 Rollback is explicit: `scripts/install_home_edge_executor.sh --uninstall`
 removes the wrapper, sudoers rule and installed Python files while preserving
@@ -104,5 +114,11 @@ python3 scripts/home_edge_exec_mcp.py
 All controller CLI examples require `SKELETON_HOME_EDGE_EXEC_HMAC_SECRET` in the
 controller environment. The CLI signs only after timestamps, nonce and request
 fields are finalized, and exits blocked when the secret is missing.
+
+MCP callers do not provide or receive HMAC secrets or signatures. The MCP server
+loads `SKELETON_HOME_EDGE_EXEC_HMAC_SECRET` from its private environment,
+generates timestamp and nonce internally after caller arguments are final, signs
+the request, and fails closed with a public-safe error if the private secret is
+not configured.
 
 This repository task does not deploy the service or perform live Home Edge actions.

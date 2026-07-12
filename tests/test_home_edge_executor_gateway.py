@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from core.home_edge.executor import HomeEdgeExecRequest, HomeEdgeExecReceipt, PUBLIC_ERROR_MESSAGE, receipt_from_mapping, sign_request
-from core.home_edge.executor_gateway import LocalExecTransport, OpenSSHExecTransport, execute_home_edge_request
+from core.home_edge.executor_gateway import EXEC_HMAC_SECRET_ENV, LocalExecTransport, OpenSSHExecTransport, execute_home_edge_request
 from core.home_edge.profile import load_home_edge_profile
 from scripts import home_edge_exec
 from scripts.home_edge_exec_mcp import TOOL_NAME, handle_message
@@ -92,6 +92,28 @@ def test_gateway_uses_injected_transport_without_github_or_runner_polling() -> N
 
     assert receipt.status == "ok"
     assert receipt.stdout.strip() == "transport"
+
+
+def test_controller_cli_without_request_id_sends_exact_final_signed_mapping(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_execute(outbound):
+        captured.update(outbound)
+        return execute_home_edge_request(outbound, transport=LocalExecTransport())
+
+    monkeypatch.setattr(home_edge_exec, "execute_home_edge_request", fake_execute)
+    code = home_edge_exec.main(["--lane", "read_only", "--timeout-seconds", "5", "--", sys.executable, "-c", "print('cli-ok')"])
+
+    stdout = capsys.readouterr().out
+    assert code == 0
+    assert json.loads(stdout)["stdout"].strip() == "cli-ok"
+    assert isinstance(captured["request_id"], str)
+    assert captured["request_id"]
+    assert isinstance(captured["timestamp"], str)
+    assert isinstance(captured["nonce"], str)
+    assert captured["signature"] == sign_request(HomeEdgeExecRequest.from_mapping(captured), SECRET)
 
 
 def test_public_transport_failure_returns_only_generic_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -191,7 +213,8 @@ def test_openssh_transport_uses_exact_sudo_wrapper_without_shell(monkeypatch: py
 
     command = captured["command"]
     assert isinstance(command, list)
-    assert command[-4:] == ["sudo", "-n", "/usr/local/bin/home_edge_exec", "--server"]
+    assert command[-2:] == ["/usr/local/bin/home_edge_exec", "--server"]
+    assert "sudo" not in command
     assert "BatchMode=yes" in command
     assert "StrictHostKeyChecking=yes" in command
     assert "-i" in command
@@ -281,8 +304,40 @@ def test_mcp_server_exposes_one_standards_tool(monkeypatch) -> None:
     )
 
     assert listed["result"]["tools"][0]["name"] == "home_edge_exec"
+    schema_text = json.dumps(listed["result"]["tools"][0]["inputSchema"], sort_keys=True)
+    assert "signature" not in schema_text
+    assert "secret" not in schema_text
+    assert "timestamp" not in schema_text
+    assert "nonce" not in schema_text
     assert captured["argv"] == ["true"]
+    assert captured["signature"] == sign_request(HomeEdgeExecRequest.from_mapping(captured), SECRET)
+    assert captured["request_id"].startswith("home-edge-exec-")
+    assert captured["nonce"].startswith("home-edge-exec-")
     assert called["result"]["isError"] is False
+
+
+def test_mcp_missing_private_secret_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(EXEC_HMAC_SECRET_ENV, raising=False)
+    response = handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/call",
+            "params": {
+                "name": TOOL_NAME,
+                "arguments": {
+                    "node_id": "home-edge-01",
+                    "execution_lane": "read_only",
+                    "argv": ["true"],
+                    "timeout_seconds": 5,
+                    "public": True,
+                },
+            },
+        }
+    )
+
+    assert response["error"]["message"] == PUBLIC_ERROR_MESSAGE
+    assert "secret" not in json.dumps(response).lower()
 
 
 def test_mcp_public_error_is_generic(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -371,17 +426,22 @@ def test_installer_secret_modes_idempotency_wrapper_sudoers_and_no_service_enabl
     audit_dir = install_root / "var/log/skeleton/home_edge_exec"
     sudoers = install_root / "etc/sudoers.d/skeleton-home-edge-executor"
     wrapper = install_root / "usr/local/bin/home_edge_exec"
+    root_wrapper = install_root / "usr/local/sbin/home_edge_exec_root"
     assert oct(stat.S_IMODE(env_file.stat().st_mode)) == "0o600"
     assert oct(stat.S_IMODE(state_dir.stat().st_mode)) == "0o700"
     assert oct(stat.S_IMODE(audit_dir.stat().st_mode)) == "0o700"
     assert oct(stat.S_IMODE(sudoers.stat().st_mode)) == "0o440"
     assert oct(stat.S_IMODE(wrapper.stat().st_mode)) == "0o755"
+    assert oct(stat.S_IMODE(root_wrapper.stat().st_mode)) == "0o555"
     assert "test-hmac-value" in env_file.read_text(encoding="utf-8")
     assert wrapper.exists()
+    assert root_wrapper.exists()
     sudoers_text = sudoers.read_text(encoding="utf-8")
-    assert sudoers_text.strip().endswith("ALL=(root) NOPASSWD: /usr/local/bin/home_edge_exec --server")
+    assert sudoers_text.strip().endswith("ALL=(root) NOPASSWD: /usr/local/sbin/home_edge_exec_root --server")
     assert "ALL=(ALL)" not in sudoers_text
     assert "ALL : ALL" not in sudoers_text
+    assert "SETENV" not in sudoers_text
+    assert "*" not in sudoers_text
     assert "/bin/sh" not in sudoers_text
     assert "/bin/bash" not in sudoers_text
 
@@ -396,8 +456,14 @@ def test_installer_secret_modes_idempotency_wrapper_sudoers_and_no_service_enabl
     assert "test-hmac-value" in env_file.read_text(encoding="utf-8")
 
     wrapper_text = wrapper.read_text(encoding="utf-8")
-    assert "home_edge_exec.py\" --server" in wrapper_text
-    assert "/etc/skeleton/home_edge_executor.env" in wrapper_text
+    assert "sudo -n --" in wrapper_text
+    assert "/usr/local/sbin/home_edge_exec_root" in wrapper_text
+    assert "/etc/skeleton/home_edge_executor.env" not in wrapper_text
+    root_wrapper_text = root_wrapper.read_text(encoding="utf-8")
+    assert "server_script=\"$python_root/scripts/home_edge_exec.py\"" in root_wrapper_text
+    assert "/usr/bin/env python3 \"$server_script\" --server" in root_wrapper_text
+    assert "/etc/skeleton/home_edge_executor.env" in root_wrapper_text
+    assert "env -i" in root_wrapper_text
     assert "systemctl enable" not in installer.read_text(encoding="utf-8")
     assert "Restart=" not in installer.read_text(encoding="utf-8")
     assert 'SKELETON_HOME_EDGE_EXEC_HMAC_SECRET="$' not in Path("docs/HOME_EDGE_EXECUTOR.md").read_text(encoding="utf-8")
@@ -414,7 +480,7 @@ def test_installer_secret_modes_idempotency_wrapper_sudoers_and_no_service_enabl
     }
     payload["signature"] = sign_request(HomeEdgeExecRequest.from_mapping(payload), "test-hmac-value")
     ran = subprocess.run(
-        [str(wrapper), "--server"],
+        [str(root_wrapper), "--server"],
         input=json.dumps(payload),
         text=True,
         stdout=subprocess.PIPE,
@@ -426,9 +492,52 @@ def test_installer_secret_modes_idempotency_wrapper_sudoers_and_no_service_enabl
     assert receipt["status"] == "ok"
     assert receipt["stdout"].strip() == "wrapper-ok"
 
+    public_extra = subprocess.run(
+        [str(wrapper), "--server", "extra"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert public_extra.returncode == 2
+    assert "supports only --server" in public_extra.stderr
+
+    root_extra = subprocess.run(
+        [str(root_wrapper), "--server", "extra"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert root_extra.returncode == 2
+    assert "supports only --server" in root_extra.stderr
+
+    injected_payload = {
+        "timestamp": datetime.now(UTC).isoformat(),
+        "nonce": "wrapper-inject",
+        "run_as": "desktop-user",
+        "request_id": "wrapper-inject",
+        "node_id": "home-edge-01",
+        "execution_lane": "read_only",
+        "argv": [sys.executable, "-c", "import os; print(os.environ.get('PYTHONPATH', 'missing'))"],
+        "timeout_seconds": 5,
+    }
+    injected_payload["signature"] = sign_request(HomeEdgeExecRequest.from_mapping(injected_payload), "test-hmac-value")
+    injected = subprocess.run(
+        [str(root_wrapper), "--server"],
+        input=json.dumps(injected_payload),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={**os.environ, "PYTHONPATH": "/tmp/unsafe", "SKELETON_HOME_EDGE_EXEC_HMAC_SECRET": "wrong"},
+        check=False,
+    )
+    assert injected.returncode == 0, injected.stderr
+    assert json.loads(injected.stdout)["stdout"].strip() == "missing"
+
     env_file.chmod(0)
     denied = subprocess.run(
-        [str(wrapper), "--server"],
+        [str(root_wrapper), "--server"],
         input=json.dumps(payload),
         text=True,
         stdout=subprocess.PIPE,
@@ -448,6 +557,7 @@ def test_installer_secret_modes_idempotency_wrapper_sudoers_and_no_service_enabl
     )
     assert uninstall.returncode == 0, uninstall.stderr
     assert not wrapper.exists()
+    assert not root_wrapper.exists()
     assert not sudoers.exists()
     assert list((install_root / "etc/skeleton").glob("home_edge_executor.env.bak.*"))
 

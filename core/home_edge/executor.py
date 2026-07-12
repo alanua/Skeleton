@@ -194,7 +194,9 @@ class HomeEdgeExecRequest:
         return data
 
     def canonical_for_signature(self) -> dict[str, Any]:
-        return self.to_mapping(include_signature=False)
+        payload = self.to_mapping(include_signature=False)
+        payload.pop("public", None)
+        return payload
 
     def command_argv(self, *, current_user: ExecutionUser) -> list[str]:
         command = list(self.argv) if self.mode is ExecMode.ARGV else _script_argv(self.script_interpreter, self.script or "")

@@ -2,15 +2,19 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.home_edge.executor import PUBLIC_ERROR_MESSAGE
+from core.home_edge.executor import HomeEdgeExecRequest, PUBLIC_ERROR_MESSAGE, sign_request
+from core.home_edge.executor_gateway import EXEC_HMAC_SECRET_ENV
 from core.home_edge.executor_gateway import execute_home_edge_request
 
 
@@ -54,7 +58,7 @@ def handle_message(message: dict[str, Any]) -> dict[str, Any] | None:
             if not isinstance(args, dict):
                 raise ValueError("tool arguments must be an object")
             public_requested = bool(args.get("public", False))
-            receipt = execute_home_edge_request(args).to_mapping()
+            receipt = execute_home_edge_request(_finalize_signed_request(args)).to_mapping()
             return {
                 "jsonrpc": "2.0",
                 "id": msg_id,
@@ -65,17 +69,39 @@ def handle_message(message: dict[str, Any]) -> dict[str, Any] | None:
             }
         raise ValueError(f"unsupported method: {method}")
     except Exception as exc:  # noqa: BLE001 - MCP errors are structured JSON-RPC errors.
-        message_text = PUBLIC_ERROR_MESSAGE if public_requested else f"{type(exc).__name__}: {exc}"
+        message_text = PUBLIC_ERROR_MESSAGE if public_requested else _public_safe_error(exc)
         return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": -32000, "message": message_text}}
+
+
+def _finalize_signed_request(args: dict[str, Any]) -> dict[str, Any]:
+    if "signature" in args or "secret" in args or "hmac_secret" in args:
+        raise ValueError("MCP callers must not provide signing material")
+    secret = os.environ.get(EXEC_HMAC_SECRET_ENV, "").strip()
+    if not secret:
+        raise ValueError("private MCP signing secret is not configured")
+    data = dict(args)
+    data["request_id"] = data.get("request_id") or f"home-edge-exec-{uuid4()}"
+    data["timestamp"] = datetime.now(UTC).isoformat()
+    data["nonce"] = f"home-edge-exec-{uuid4()}"
+    request = HomeEdgeExecRequest.from_mapping({key: value for key, value in data.items() if value is not None})
+    outbound = request.to_mapping(include_signature=False)
+    outbound["signature"] = sign_request(request, secret)
+    return outbound
+
+
+def _public_safe_error(exc: Exception) -> str:
+    if str(exc) == PUBLIC_ERROR_MESSAGE:
+        return PUBLIC_ERROR_MESSAGE
+    return f"{type(exc).__name__}: {exc}"
 
 
 def _tool_description() -> dict[str, Any]:
     return {
         "name": TOOL_NAME,
-        "description": "Execute one signed, operator-approved universal Home Edge argv or bounded script request.",
+        "description": "Execute one operator-approved universal Home Edge argv or bounded script request.",
         "inputSchema": {
             "type": "object",
-            "required": ["node_id", "execution_lane", "timeout_seconds", "timestamp", "nonce", "signature"],
+            "required": ["node_id", "execution_lane", "timeout_seconds"],
             "properties": {
                 "request_id": {"type": "string"},
                 "node_id": {"const": "home-edge-01"},
@@ -92,9 +118,6 @@ def _tool_description() -> dict[str, Any]:
                 "mode": {"enum": ["argv", "script"]},
                 "script": {"type": "string"},
                 "script_interpreter": {"enum": ["bash", "python3"]},
-                "timestamp": {"type": "string"},
-                "nonce": {"type": "string"},
-                "signature": {"type": "string"},
                 "public": {"type": "boolean"},
             },
         },

@@ -202,8 +202,7 @@ def test_unsigned_stale_bad_signature_and_replayed_requests_reject_before_launch
 
     public_changed = signed_request(nonce="public-changed", idempotency_key="public-changed", public=False)
     public_changed["public"] = True
-    with pytest.raises(HomeEdgeExecError, match="signature mismatch"):
-        exec_engine.execute(public_changed)
+    assert exec_engine.execute(public_changed).status == "ok"
 
     fresh = signed_request(argv=[sys.executable, "-c", "print('once')"])
     first = exec_engine.execute(fresh)
@@ -212,7 +211,7 @@ def test_unsigned_stale_bad_signature_and_replayed_requests_reject_before_launch
     exec_engine.execute(replayed_without_idempotency)
     with pytest.raises(HomeEdgeExecError, match="nonce was already used"):
         exec_engine.execute(replayed_without_idempotency)
-    assert launches == 2
+    assert launches == 3
 
 
 def test_idempotent_replay_requires_same_payload_digest(tmp_path: Path) -> None:

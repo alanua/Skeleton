@@ -9,7 +9,7 @@ Usage:
   install_home_edge_executor.sh --uninstall [--root DIR]
 
 Installs the one-shot Home Edge executor for strict OpenSSH command:
-  sudo -n /usr/local/bin/home_edge_exec --server
+  /usr/local/bin/home_edge_exec --server
 
 The HMAC secret is accepted only from stdin when --replace-secret-stdin is set,
 or from an existing private SKELETON_HOME_EDGE_EXEC_HMAC_SECRET environment
@@ -66,6 +66,7 @@ done
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 prefix="${ROOT%/}"
 bin_dir="${prefix}/usr/local/bin"
+sbin_dir="${prefix}/usr/local/sbin"
 lib_dir="${prefix}/usr/local/lib/skeleton-home-edge-executor"
 env_dir="${prefix}/etc/skeleton"
 sudoers_dir="${prefix}/etc/sudoers.d"
@@ -75,6 +76,7 @@ cancel_dir="${state_dir}/cancel"
 env_file="${env_dir}/home_edge_executor.env"
 sudoers_file="${sudoers_dir}/skeleton-home-edge-executor"
 wrapper="${bin_dir}/home_edge_exec"
+root_wrapper="${sbin_dir}/home_edge_exec_root"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 
@@ -164,9 +166,11 @@ install_private_env() {
 }
 
 install_wrapper() {
-  mkdir -p "$bin_dir"
-  chown_root_if_possible "$bin_dir"
+  mkdir -p "$bin_dir" "$sbin_dir"
+  chown_root_if_possible "$bin_dir" "$sbin_dir"
   backup_path "$wrapper"
+  backup_path "$root_wrapper"
+  rm -f "$wrapper" "$root_wrapper"
   cat > "$wrapper" <<WRAPPER
 #!/usr/bin/env bash
 set -euo pipefail
@@ -174,20 +178,45 @@ if [[ "\${1:-}" != "--server" || "\$#" -ne 1 ]]; then
   echo "home_edge_exec supports only --server on the node" >&2
   exit 2
 fi
+exec sudo -n -- "$(runtime_path "/usr/local/sbin/home_edge_exec_root")" --server
+WRAPPER
+  cat > "$root_wrapper" <<ROOT_WRAPPER
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${1:-}" != "--server" || "\$#" -ne 1 ]]; then
+  echo "home_edge_exec_root supports only --server" >&2
+  exit 2
+fi
 env_file="$(runtime_path "/etc/skeleton/home_edge_executor.env")"
-  if [[ ! -r "\$env_file" ]]; then
-    echo "home_edge_exec private environment is missing" >&2
+python_root="$(runtime_path "/usr/local/lib/skeleton-home-edge-executor")"
+server_script="\$python_root/scripts/home_edge_exec.py"
+if [[ ! -r "\$env_file" ]]; then
+  echo "home_edge_exec private environment is missing" >&2
+  exit 2
+fi
+if [[ ! -r "\$server_script" ]]; then
+  echo "home_edge_exec server is missing" >&2
   exit 2
 fi
 set -a
 # shellcheck disable=SC1090
 . "\$env_file"
 set +a
-export PYTHONPATH="$(runtime_path "/usr/local/lib/skeleton-home-edge-executor")\${PYTHONPATH:+:\$PYTHONPATH}"
-exec /usr/bin/env python3 "$(runtime_path "/usr/local/lib/skeleton-home-edge-executor/scripts/home_edge_exec.py")" --server
-WRAPPER
+exec env -i \\
+  PATH="/usr/sbin:/usr/bin:/sbin:/bin" \\
+  LANG="\${LANG:-C.UTF-8}" \\
+  LC_ALL="\${LC_ALL:-}" \\
+  SKELETON_HOME_EDGE_EXEC_HMAC_SECRET="\${SKELETON_HOME_EDGE_EXEC_HMAC_SECRET:?}" \\
+  SKELETON_HOME_EDGE_DESKTOP_USER="\${SKELETON_HOME_EDGE_DESKTOP_USER:?}" \\
+  SKELETON_HOME_EDGE_EXEC_AUDIT_LOG="\${SKELETON_HOME_EDGE_EXEC_AUDIT_LOG:?}" \\
+  SKELETON_HOME_EDGE_EXEC_IDEMPOTENCY_CACHE="\${SKELETON_HOME_EDGE_EXEC_IDEMPOTENCY_CACHE:?}" \\
+  SKELETON_HOME_EDGE_EXEC_CANCEL_DIR="\${SKELETON_HOME_EDGE_EXEC_CANCEL_DIR:?}" \\
+  PYTHONPATH="\$python_root" \\
+  /usr/bin/env python3 "\$server_script" --server
+ROOT_WRAPPER
   chmod 0755 "$wrapper"
-  chown_root_if_possible "$wrapper"
+  chmod 0555 "$root_wrapper"
+  chown_root_if_possible "$wrapper" "$root_wrapper"
 }
 
 install_python_files() {
@@ -215,7 +244,7 @@ install_sudoers_rule() {
   umask 077
   {
     printf '# Managed by skeleton Home Edge executor installer.\n'
-    printf '%s ALL=(root) NOPASSWD: /usr/local/bin/home_edge_exec --server\n' "$SSH_TARGET_USER"
+    printf '%s ALL=(root) NOPASSWD: /usr/local/sbin/home_edge_exec_root --server\n' "$SSH_TARGET_USER"
   } > "$sudoers_file"
   chmod 0440 "$sudoers_file"
   chown_root_if_possible "$sudoers_file"
@@ -249,6 +278,7 @@ install_state_dirs() {
 uninstall_executor() {
   backup_path "$env_file"
   rm -f "$wrapper"
+  rm -f "$root_wrapper"
   rm -f "$sudoers_file"
   rm -rf "$lib_dir"
   if [[ -f "$env_file" ]]; then

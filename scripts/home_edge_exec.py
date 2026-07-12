@@ -94,8 +94,9 @@ def _request_from_args(args: argparse.Namespace) -> dict:
     if not secret:
         raise ValueError(f"missing required HMAC secret in {args.sign_secret_env}")
     request = HomeEdgeExecRequest.from_mapping({key: value for key, value in data.items() if value is not None})
-    data["signature"] = sign_request(request, secret)
-    return {key: value for key, value in data.items() if value is not None}
+    outbound = request.to_mapping(include_signature=False)
+    outbound["signature"] = sign_request(request, secret)
+    return outbound
 
 
 def _argv_requests_public(argv: list[str]) -> bool:
