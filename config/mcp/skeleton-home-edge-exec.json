@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "home-edge-exec": {
+      "command": "/usr/local/bin/skeleton-home-edge-exec-mcp",
+      "args": []
+    }
+  }
+}
