@@ -1,0 +1,1 @@
+Acceptance requires: controller install succeeds; MCP initialize and tools/list succeed; signed read-only call returns `status=ok`; measured latency is recorded; the actual Jeeves/Skeleton tool host lists `home_edge_exec`; only then may the bounded volume and LavaLamp routine smoke run.
