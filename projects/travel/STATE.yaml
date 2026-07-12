@@ -1,0 +1,16 @@
+schema: skeleton.project_state.v1
+project_id: travel
+status: LINKED_REPOSITORY_BOOTSTRAP
+state_role: handoff_not_canon_truth
+last_verified: '2026-07-12'
+evidence_source: alanua/Travel repository initialization and Skeleton project-tree linkage
+summary:
+  - Travel is a separate public-safe implementation repository linked from Skeleton.
+  - The repository currently contains architecture, adapter, contract, registry, and privacy-boundary baselines.
+  - Provider adapters will be added on demand for real planning needs and retained after validation.
+  - Personal travel data, private observations, bookings, tickets, documents, and secrets are excluded from public GitHub.
+next_actions:
+  - Define machine-readable shared transport contracts.
+  - Add the first reviewed provider registry entries.
+  - Implement the initial German transport adapters and generic GTFS family.
+  - Connect runtime use only through approved Skeleton routes and secret references.
