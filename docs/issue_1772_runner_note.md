@@ -1,1 +1,0 @@
-Issue #1772 was implemented directly after the Codex usage-limit blocker. The branch intentionally adds only the controller-side stdio MCP launcher, installer, public-safe probe, registration template, validation script and tests. It does not modify the universal executor from PR #1739.
