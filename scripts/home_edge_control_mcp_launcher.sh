@@ -21,4 +21,4 @@ source "$CONTROLLER_ENV"
 set +a
 
 cd "$REPO_ROOT"
-exec /usr/bin/python3 "$SERVER"
+exec env PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 "$SERVER"
