@@ -302,7 +302,7 @@ PR_BRANCH_VALIDATION_PROFILES = {
             "scripts/runner_poll_github_tasks.py",
             "tests/test_runner_poll_github_tasks.py",
         ),
-        ("git", "diff", "--check", "origin/main...HEAD"),
+        ("git", "diff", "--check", "{validated_base_sha}...HEAD"),
     ),
     "knowledge_intake": (
         ("python3", "-m", "pytest", "-q", "tests/test_knowledge_intake.py"),
@@ -788,6 +788,7 @@ class PrBranchValidationRequest:
     repository: str
     pr_number: int
     expected_head_sha: str | None
+    expected_base_sha: str
     profile: str
 
 
@@ -897,12 +898,12 @@ def truncate_comment(body: str) -> str:
     return body[: MAX_COMMENT_LENGTH - len(suffix)] + suffix
 
 
-def cleanup_runtime_artifacts(workdir: str | Path) -> None:
+def cleanup_runtime_artifacts(workdir: str | Path, *, strict: bool = False) -> None:
     root = Path(workdir)
     for relative_path in RUNTIME_ARTIFACTS:
         artifact = root / relative_path
         if artifact.is_dir():
-            shutil.rmtree(artifact, ignore_errors=True)
+            shutil.rmtree(artifact, ignore_errors=not strict)
         elif artifact.exists():
             artifact.unlink(missing_ok=True)
 
@@ -7327,6 +7328,7 @@ def _pr_branch_validation_metadata(
     repository = repository or _body_field(metadata, "Repository") or REPO
     pr_number = _body_field(metadata, "Pull Request")
     expected_head_sha = _body_field(metadata, "Expected Head SHA")
+    expected_base_sha = _body_field(metadata, "Expected Base SHA")
     profile = _body_field(metadata, "Validation Profile") or "full_pytest"
     if repository not in ALLOWED_TARGET_REPOSITORIES:
         return None, "unsupported_repository"
@@ -7337,6 +7339,10 @@ def _pr_branch_validation_metadata(
         and _HEAD_SHA_RE.fullmatch(expected_head_sha) is None
     ):
         return None, "invalid_expected_head_sha"
+    if expected_base_sha is None:
+        return None, "missing_expected_base_sha"
+    if _HEAD_SHA_RE.fullmatch(expected_base_sha) is None:
+        return None, "invalid_expected_base_sha"
     if profile not in PR_BRANCH_VALIDATION_PROFILES:
         return None, "unsupported_validation_profile"
     return (
@@ -7348,6 +7354,7 @@ def _pr_branch_validation_metadata(
                 if isinstance(expected_head_sha, str)
                 else None
             ),
+            expected_base_sha=expected_base_sha.lower(),
             profile=profile,
         ),
         None,
@@ -7364,7 +7371,7 @@ def _get_pr_branch_validation_state(repository: str, pr_number: int) -> dict[str
             "--repo",
             repository,
             "--json",
-            "number,state,baseRefName,headRefName,headRefOid",
+            "number,state,baseRefName,baseRefOid,headRefName,headRefOid",
         ]
     )
     if code != 0:
@@ -7652,6 +7659,11 @@ def _pr_branch_validation_block_reason(
         return "pr_not_open"
     if pr_state.get("baseRefName") != "main":
         return "pr_base_not_main"
+    base_sha = str(pr_state.get("baseRefOid") or "").lower()
+    if _HEAD_SHA_RE.fullmatch(base_sha) is None:
+        return "pr_base_sha_invalid"
+    if base_sha != request.expected_base_sha:
+        return "expected_base_sha_mismatch"
     head_sha = str(pr_state.get("headRefOid") or "").lower()
     if _HEAD_SHA_RE.fullmatch(head_sha) is None:
         return "pr_head_sha_invalid"
@@ -7705,10 +7717,11 @@ def _bounded_validation_command_output(output: str) -> str:
     sanitized = _sanitize_validation_command_output(output)
     if not sanitized:
         return "(no output)"
-    if len(sanitized) <= VALIDATION_FAILED_OUTPUT_LIMIT:
-        return sanitized
-    marker = f"\n{VALIDATION_FAILED_OUTPUT_TRUNCATED_MARKER}"
-    return sanitized[: VALIDATION_FAILED_OUTPUT_LIMIT - len(marker)].rstrip() + marker
+    tail = "\n".join(sanitized.splitlines()[-80:])
+    if len(tail) <= VALIDATION_FAILED_OUTPUT_LIMIT:
+        return tail
+    marker = f"{VALIDATION_FAILED_OUTPUT_TRUNCATED_MARKER}\n"
+    return marker + tail[-(VALIDATION_FAILED_OUTPUT_LIMIT - len(marker)) :].lstrip()
 
 
 _PYTEST_TOTALS_RE = re.compile(
@@ -7797,7 +7810,7 @@ def _validation_command_receipt_lines(
         f"validation_command_text={_validation_command_text(command)}",
         f"exit_code={exit_code}",
         f"status={status}",
-        f"validation_output_tail={_validation_receipt_value(_bounded_validation_command_output(output))}",
+        f"validation_output_tail={_validation_receipt_value(_bounded_validation_command_output(output), limit=VALIDATION_FAILED_OUTPUT_LIMIT)}",
     ]
     totals = _validation_pytest_totals(output)
     if totals is not None:
@@ -7842,20 +7855,30 @@ def _validation_read_command_value(command: list[str], cwd: Path) -> str:
     return _validation_receipt_value(output.strip(), limit=180)
 
 
-def _validation_changed_files(base_sha: str, cwd: Path) -> list[str]:
+def _validation_changed_files(base_sha: str, cwd: Path) -> tuple[list[str], str | None]:
     code, output = run_command(["git", "diff", "--name-only", base_sha, "HEAD", "--"], cwd=cwd)
     if code != 0:
-        return []
+        return [], "changed_file_discovery_failed"
     files: list[str] = []
     for line in output.splitlines():
         safe_file = _safe_changed_file(line)
         if safe_file is not None:
             files.append(safe_file)
-    return sorted(dict.fromkeys(files))
+    return sorted(dict.fromkeys(files)), None
+
+
+def _cleanup_validation_runtime_artifacts(cwd: Path) -> str | None:
+    try:
+        cleanup_runtime_artifacts(cwd, strict=True)
+    except OSError:
+        return "runtime_artifact_cleanup_failed"
+    return None
 
 
 def _validation_worktree_status(cwd: Path) -> tuple[bool, str]:
-    cleanup_runtime_artifacts(cwd)
+    cleanup_reason = _cleanup_validation_runtime_artifacts(cwd)
+    if cleanup_reason is not None:
+        return False, cleanup_reason
     code, output = run_command(["git", "status", "--short"], cwd=cwd)
     if code != 0:
         return False, "status_failed"
@@ -7864,21 +7887,128 @@ def _validation_worktree_status(cwd: Path) -> tuple[bool, str]:
     return True, "clean"
 
 
-def _validation_real_writable_git_worktree(cwd: Path) -> str:
-    code, output = run_command(["git", "rev-parse", "--is-inside-work-tree"], cwd=cwd)
+def _validation_write_probe(directory: Path, name: str) -> bool:
+    probe = directory / name
+    created = False
+    try:
+        with open(probe, "xb"):
+            created = True
+        probe.unlink()
+        return True
+    except OSError:
+        if created:
+            try:
+                probe.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return False
+
+
+def _validation_git_path(command: list[str], cwd: Path) -> Path | None:
+    code, output = run_command(command, cwd=cwd)
+    if code != 0:
+        return None
+    path_text = output.strip()
+    if not path_text:
+        return None
+    path = Path(path_text)
+    if not path.is_absolute():
+        path = cwd / path
+    try:
+        return path.resolve()
+    except OSError:
+        return None
+
+
+def _path_is_bounded(path: Path, bounds: tuple[Path, ...]) -> bool:
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    for bound in bounds:
+        try:
+            resolved.relative_to(bound)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _validation_git_worktree_check(
+    validation_path: Path, checkout_path: Path
+) -> tuple[bool, list[str], str | None]:
+    code, output = run_command(
+        ["git", "rev-parse", "--is-inside-work-tree"], cwd=validation_path
+    )
     is_worktree = code == 0 and output.strip().lower() == "true"
-    return str(is_worktree and cwd.is_dir() and os.access(cwd, os.W_OK)).lower()
+    lines = [f"validation_real_writable_git_worktree={str(False).lower()}"]
+    if not is_worktree:
+        return False, lines, "validation_not_real_git_worktree"
+    try:
+        checkout_bound = checkout_path.resolve()
+        validation_bound = validation_path.resolve()
+    except OSError:
+        return False, lines, "validation_path_unresolvable"
+    git_dir = _validation_git_path(
+        ["git", "rev-parse", "--path-format=absolute", "--git-dir"], validation_path
+    )
+    common_dir = _validation_git_path(
+        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        validation_path,
+    )
+    index_path = _validation_git_path(
+        ["git", "rev-parse", "--path-format=absolute", "--git-path", "index"],
+        validation_path,
+    )
+    if git_dir is None or common_dir is None or index_path is None:
+        return False, lines, "validation_git_metadata_unresolved"
+    bounds = (validation_bound, checkout_bound)
+    bounded_paths = (git_dir, common_dir, index_path.parent)
+    if not all(_path_is_bounded(path, bounds) for path in bounded_paths):
+        return False, lines, "validation_git_metadata_outside_bounds"
+    if not validation_path.is_dir() or not _validation_write_probe(
+        validation_path, ".runner-validation-worktree-write-probe"
+    ):
+        return False, lines, "validation_worktree_unwritable"
+    for probe_dir, probe_name in (
+        (git_dir, "runner-validation-gitdir-write-probe"),
+        (index_path.parent, "runner-validation-index-write-probe"),
+    ):
+        if not probe_dir.is_dir() or not _validation_write_probe(probe_dir, probe_name):
+            return False, lines, "validation_git_metadata_unwritable"
+    lines = [
+        f"validation_real_writable_git_worktree={str(True).lower()}",
+        f"validation_git_dir={_validation_receipt_value(str(git_dir), limit=180)}",
+        f"validation_git_common_dir={_validation_receipt_value(str(common_dir), limit=180)}",
+    ]
+    return True, lines, None
 
 
-def _validation_checkout_metadata_lines(validation_path: Path, base_ref: str) -> list[str]:
-    base_sha = _validation_read_command_value(
-        ["git", "rev-parse", f"origin/{base_ref}^{{commit}}"], validation_path
+def _validation_profile_commands(
+    profile: str, validated_base_sha: str
+) -> tuple[tuple[str, ...], ...]:
+    commands: list[tuple[str, ...]] = []
+    for command in PR_BRANCH_VALIDATION_PROFILES[profile]:
+        commands.append(
+            tuple(
+                part.replace("{validated_base_sha}", validated_base_sha)
+                for part in command
+            )
+        )
+    return tuple(commands)
+
+
+def _validation_checkout_metadata_lines(
+    validation_path: Path, base_ref: str, base_sha: str
+) -> tuple[list[str], str | None]:
+    changed_files, changed_files_reason = _validation_changed_files(
+        base_sha, validation_path
     )
-    changed_files = (
-        _validation_changed_files(base_sha, validation_path)
-        if _HEAD_SHA_RE.fullmatch(base_sha) is not None
-        else []
-    )
+    if changed_files_reason is not None:
+        return [
+            f"validation_base_ref={_validation_receipt_value(base_ref, limit=80)}",
+            f"validation_base_sha={base_sha}",
+        ], changed_files_reason
     return [
         f"validation_checkout_head_sha={_validation_read_command_value(['git', 'rev-parse', 'HEAD'], validation_path)}",
         f"validation_base_ref={_validation_receipt_value(base_ref, limit=80)}",
@@ -7887,8 +8017,7 @@ def _validation_checkout_metadata_lines(validation_path: Path, base_ref: str) ->
         *(f"validation_changed_file={path}" for path in changed_files),
         f"python_version={_validation_receipt_value('.'.join(str(part) for part in sys.version_info[:3]), limit=40)}",
         f"validation_pytest_version={_validation_read_command_value(['python3', '-m', 'pytest', '--version'], validation_path)}",
-        f"validation_real_writable_git_worktree={_validation_real_writable_git_worktree(validation_path)}",
-    ]
+    ], None
 
 
 def validate_pr_branch(body: str) -> str:
@@ -7942,6 +8071,10 @@ def validate_pr_branch(body: str) -> str:
     if head_ref:
         status_lines.append(f"head_ref={head_ref}")
     status_lines.append(f"head_sha={head_sha}")
+    base_ref = str(pr_state.get("baseRefName") or "main")
+    base_sha = str(pr_state["baseRefOid"]).lower()
+    status_lines.append(f"expected_base_sha={request.expected_base_sha}")
+    status_lines.append(f"pr_base_sha={base_sha}")
     try:
         validation_path = _ensure_safe_validation_worktree_path(
             request.repository,
@@ -8038,22 +8171,47 @@ def validate_pr_branch(body: str) -> str:
         )
     status_lines.append("step=verify_validation_head status=done")
 
-    status_lines.extend(
-        _validation_checkout_metadata_lines(
-            validation_path, str(pr_state.get("baseRefName") or "main")
-        )
+    git_ok, git_lines, git_reason = _validation_git_worktree_check(
+        validation_path, checkout_path
     )
-    clean, initial_status = _validation_worktree_status(validation_path)
-    status_lines.append(f"validation_initial_status={initial_status}")
-    if not clean:
+    status_lines.extend(git_lines)
+    if not git_ok:
         return _maintenance_report(
             "BLOCKED",
             task_id,
-            [*status_lines, "reason=validation_worktree_not_clean"],
+            [*status_lines, f"reason={git_reason or 'validation_git_worktree_unusable'}"],
             "not_met",
         )
 
-    for index, command in enumerate(PR_BRANCH_VALIDATION_PROFILES[request.profile], 1):
+    metadata_lines, metadata_reason = _validation_checkout_metadata_lines(
+        validation_path, base_ref, base_sha
+    )
+    status_lines.extend(metadata_lines)
+    if metadata_reason is not None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, f"reason={metadata_reason}"],
+            "not_met",
+        )
+    clean, initial_status = _validation_worktree_status(validation_path)
+    status_lines.append(f"validation_initial_status={initial_status}")
+    if not clean:
+        reason = (
+            initial_status
+            if initial_status == "runtime_artifact_cleanup_failed"
+            else "validation_worktree_not_clean"
+        )
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, f"reason={reason}"],
+            "not_met",
+        )
+
+    for index, command in enumerate(
+        _validation_profile_commands(request.profile, base_sha), 1
+    ):
         code, output = _run_validation_profile_command(
             list(command), cwd=validation_path
         )
@@ -8076,10 +8234,15 @@ def validate_pr_branch(body: str) -> str:
     clean, final_status = _validation_worktree_status(validation_path)
     status_lines.append(f"validation_final_status={final_status}")
     if not clean:
+        reason = (
+            final_status
+            if final_status == "runtime_artifact_cleanup_failed"
+            else "validation_worktree_not_clean_after_commands"
+        )
         return _maintenance_report(
             "BLOCKED",
             task_id,
-            [*status_lines, "reason=validation_worktree_not_clean_after_commands"],
+            [*status_lines, f"reason={reason}"],
             "not_met",
         )
     return _maintenance_report("DONE", task_id, status_lines, "met")
