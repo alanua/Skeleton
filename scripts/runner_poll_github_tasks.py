@@ -340,6 +340,7 @@ TELEGRAM_CALLBACK_POLLER_RUNTIME_FILES = (
 )
 
 _HEAD_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+_SAFE_SOURCE_BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,240}$")
 _REGISTERED_OVERLAY_PUBLIC_REST_REPO = "alanua/Skeleton"
 _REGISTERED_OVERLAY_PUBLIC_REST_HOST = "api.github.com"
 _REGISTERED_OVERLAY_PUBLIC_REST_TIMEOUT_SECONDS = 8
@@ -758,6 +759,7 @@ class RunnerTask:
     has_target_project_metadata: bool = False
     target_repository: str = QUEUE_REPOSITORY
     has_target_repository_metadata: bool = False
+    source_spec: "IssueWorktreeSourceSpec" | None = None
 
 
 @dataclass(frozen=True)
@@ -816,6 +818,13 @@ class IssueWorktreePublishInspectionRequest:
     target_project: str = "skeleton"
     worktree_root: Path | None = None
     target_project_route: bool = False
+
+
+@dataclass(frozen=True)
+class IssueWorktreeSourceSpec:
+    source_ref: str | None = None
+    expected_head_sha: str | None = None
+    base_ref: str = "origin/main"
 
 
 @dataclass(frozen=True)
@@ -1102,15 +1111,72 @@ def format_command_output(command: list[str], output: str) -> str:
     return f"$ {' '.join(command)}\n{output}"
 
 
+def _resolve_issue_worktree_source_commit(
+    cwd: str | Path, source_spec: IssueWorktreeSourceSpec
+) -> tuple[str | None, str | None]:
+    effective_ref = source_spec.source_ref or source_spec.base_ref or "origin/main"
+    if _HEAD_SHA_RE.fullmatch(effective_ref) is not None:
+        verify_arg = f"{effective_ref.lower()}^{{commit}}"
+    else:
+        verify_arg = f"{effective_ref}^{{commit}}"
+    code, output = run_command(["git", "rev-parse", "--verify", verify_arg], cwd=cwd)
+    resolved = output.strip().lower()
+    if code != 0 or _HEAD_SHA_RE.fullmatch(resolved) is None:
+        return None, "source_ref_resolution_failed"
+    return resolved, None
+
+
+def _normalize_issue_worktree_source_spec(
+    source_spec: IssueWorktreeSourceSpec,
+) -> tuple[IssueWorktreeSourceSpec | None, str | None]:
+    source_ref = source_spec.source_ref
+    base_ref = source_spec.base_ref
+    expected_head_sha = source_spec.expected_head_sha
+    if source_ref is not None:
+        source_ref, reason = _canonical_issue_worktree_ref(source_ref)
+        if reason is not None:
+            return None, reason
+    base_ref, reason = _canonical_issue_worktree_ref(base_ref or "origin/main")
+    if reason is not None:
+        return None, reason.replace("source", "base")
+    if base_ref is None or _HEAD_SHA_RE.fullmatch(base_ref) is not None:
+        return None, "invalid_base_ref"
+    if expected_head_sha is not None:
+        if _HEAD_SHA_RE.fullmatch(expected_head_sha) is None:
+            return None, "invalid_expected_head_sha"
+        expected_head_sha = expected_head_sha.lower()
+    return IssueWorktreeSourceSpec(source_ref, expected_head_sha, base_ref), None
+
+
+def _issue_worktree_expected_head_block_reason(
+    source_spec: IssueWorktreeSourceSpec, resolved_sha: str
+) -> str | None:
+    if (
+        source_spec.expected_head_sha is not None
+        and source_spec.expected_head_sha != resolved_sha
+    ):
+        return "expected_head_sha_mismatch"
+    return None
+
+
+def _issue_worktree_source_block_message(reason: str | None) -> str:
+    safe_reason = reason or "source_ref_resolution_failed"
+    return f"Issue worktree source selection blocked: reason={safe_reason}"
+
+
 def prepare_issue_worktree(
-    issue_number: int, coordinator_workdir: str | Path
+    issue_number: int,
+    coordinator_workdir: str | Path,
+    source_spec: IssueWorktreeSourceSpec | None = None,
 ) -> tuple[int, str, Path]:
     path = ensure_safe_worktree_path(issue_worktree_path(issue_number))
-    return prepare_git_issue_worktree(issue_number, coordinator_workdir, path)
+    return prepare_git_issue_worktree(issue_number, coordinator_workdir, path, source_spec)
 
 
 def prepare_target_repository_issue_worktree(
-    target_repository: str, issue_number: int
+    target_repository: str,
+    issue_number: int,
+    source_spec: IssueWorktreeSourceSpec | None = None,
 ) -> tuple[int, str, Path]:
     try:
         path = ensure_safe_target_repository_worktree_path(
@@ -1123,16 +1189,32 @@ def prepare_target_repository_issue_worktree(
     checkout_block_reason = verify_target_repository_checkout(target_repository)
     if checkout_block_reason is not None:
         return 1, checkout_block_reason, path
-    return prepare_git_issue_worktree(issue_number, checkout_path, path)
+    return prepare_git_issue_worktree(issue_number, checkout_path, path, source_spec)
 
 
 def prepare_git_issue_worktree(
-    issue_number: int, coordinator_workdir: str | Path, path: Path
+    issue_number: int,
+    coordinator_workdir: str | Path,
+    path: Path,
+    source_spec: IssueWorktreeSourceSpec | None = None,
 ) -> tuple[int, str, Path]:
     branch = issue_branch(issue_number)
+    source_spec, source_reason = _normalize_issue_worktree_source_spec(
+        source_spec or IssueWorktreeSourceSpec()
+    )
+    if source_spec is None:
+        return 1, _issue_worktree_source_block_message(source_reason), path
     outputs: list[str] = []
 
     if path.exists():
+        try:
+            cleanup_runtime_artifacts(path, strict=True)
+        except OSError:
+            return (
+                1,
+                "Existing issue worktree runtime artifact cleanup failed.",
+                path,
+            )
         checks = (
             (["git", "status", "--short"], "dirty"),
             (["git", "branch", "--show-current"], "branch"),
@@ -1162,6 +1244,28 @@ def prepare_git_issue_worktree(
                     + "\n".join(outputs),
                     path,
                 )
+        fetch_code, fetch_output = run_command(["git", "fetch", "origin"], cwd=path)
+        outputs.append(format_command_output(["git", "fetch", "origin"], fetch_output))
+        if fetch_code != 0:
+            return fetch_code, "\n".join(outputs), path
+        resolved_sha, resolve_reason = _resolve_issue_worktree_source_commit(
+            path, source_spec
+        )
+        if resolve_reason is not None or resolved_sha is None:
+            return 1, _issue_worktree_source_block_message(resolve_reason), path
+        expected_reason = _issue_worktree_expected_head_block_reason(
+            source_spec, resolved_sha
+        )
+        if expected_reason is not None:
+            return 1, _issue_worktree_source_block_message(expected_reason), path
+        code, output = run_command(["git", "rev-parse", "HEAD^{commit}"], cwd=path)
+        outputs.append(format_command_output(["git", "rev-parse", "HEAD^{commit}"], output))
+        if code != 0 or output.strip().lower() != resolved_sha:
+            return (
+                1,
+                "Existing issue worktree HEAD does not match the resolved source commit.",
+                path,
+            )
         return 0, "\n".join(outputs), path
 
     try:
@@ -1178,44 +1282,75 @@ def prepare_git_issue_worktree(
     if not origin_url:
         return 1, "Coordinator origin URL is empty.", path
 
-    commands = (
-        (["git", "fetch", "origin"], coordinator_workdir),
-        (
-            [
-                "git",
-                "clone",
-                "--local",
-                "--no-hardlinks",
-                "--no-checkout",
-                str(Path(coordinator_workdir).resolve()),
-                str(path),
-            ],
-            coordinator_workdir,
-        ),
-        (["git", "fetch", "origin"], path),
-        (["git", "checkout", "-B", branch, "origin/main"], path),
+    fetch_command = ["git", "fetch", "origin"]
+    code, output = run_command(fetch_command, cwd=coordinator_workdir)
+    outputs.append(format_command_output(fetch_command, output))
+    if code != 0:
+        return code, "\n".join(outputs), path
+    resolved_sha, resolve_reason = _resolve_issue_worktree_source_commit(
+        coordinator_workdir, source_spec
     )
-    for command, cwd in commands:
-        code, output = run_command(command, cwd=cwd)
-        outputs.append(format_command_output(command, output))
-        if code != 0:
-            return code, "\n".join(outputs), path
-        if command[1] == "clone":
-            config_code, config_output = run_command(
-                ["git", "remote", "set-url", "origin", origin_url], cwd=path
-            )
-            outputs.append(
-                "$ git remote set-url origin <coordinator-origin>\n" + config_output
-            )
-            if config_code != 0:
-                return config_code, "\n".join(outputs), path
+    if resolve_reason is not None or resolved_sha is None:
+        return 1, _issue_worktree_source_block_message(resolve_reason), path
+    expected_reason = _issue_worktree_expected_head_block_reason(
+        source_spec, resolved_sha
+    )
+    if expected_reason is not None:
+        return 1, _issue_worktree_source_block_message(expected_reason), path
+
+    clone_command = [
+        "git",
+        "clone",
+        "--local",
+        "--no-hardlinks",
+        "--no-checkout",
+        str(Path(coordinator_workdir).resolve()),
+        str(path),
+    ]
+    code, output = run_command(clone_command, cwd=coordinator_workdir)
+    outputs.append(format_command_output(clone_command, output))
+    if code != 0:
+        return code, "\n".join(outputs), path
+
+    config_code, config_output = run_command(
+        ["git", "remote", "set-url", "origin", origin_url], cwd=path
+    )
+    outputs.append("$ git remote set-url origin <coordinator-origin>\n" + config_output)
+    if config_code != 0:
+        return config_code, "\n".join(outputs), path
+
+    clone_fetch_command = ["git", "fetch", "origin"]
+    code, output = run_command(clone_fetch_command, cwd=path)
+    outputs.append(format_command_output(clone_fetch_command, output))
+    if code != 0:
+        return code, "\n".join(outputs), path
+
+    checkout_command = ["git", "checkout", "-B", branch, resolved_sha]
+    code, output = run_command(checkout_command, cwd=path)
+    outputs.append(format_command_output(checkout_command, output))
+    if code != 0:
+        return code, "\n".join(outputs), path
+
+    verify_command = ["git", "rev-parse", "HEAD^{commit}"]
+    code, output = run_command(verify_command, cwd=path)
+    outputs.append(format_command_output(verify_command, output))
+    if code != 0 or output.strip().lower() != resolved_sha:
+        return (
+            1,
+            "New issue worktree HEAD does not match the resolved source commit.",
+            path,
+        )
     return 0, "\n".join(outputs), path
 
 
 def prepare_issue_branch(
-    issue_number: int, coordinator_workdir: str | Path
+    issue_number: int,
+    coordinator_workdir: str | Path,
+    source_spec: IssueWorktreeSourceSpec | None = None,
 ) -> tuple[int, str, Path]:
-    return prepare_issue_worktree(issue_number, coordinator_workdir)
+    if source_spec is None:
+        return prepare_issue_worktree(issue_number, coordinator_workdir)
+    return prepare_issue_worktree(issue_number, coordinator_workdir, source_spec)
 
 
 def cleanup_git_issue_worktree(path: Path, coordinator_workdir: str | Path) -> tuple[int, str]:
@@ -1642,6 +1777,141 @@ def extract_target_repository(body: str) -> tuple[str | None, str | None]:
     return target_repository, reason
 
 
+def _field_key(field: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", field.lower()).strip("_")
+
+
+_ISSUE_WORKTREE_SOURCE_FIELDS = {
+    "source_ref": ("Source Ref", "Source", "Source Branch"),
+    "base_ref": ("Base Ref", "Base", "Base Branch"),
+    "expected_head_sha": ("Expected Head SHA", "Expected Source SHA", "Head SHA"),
+}
+_ISSUE_WORKTREE_SOURCE_FIELD_KEYS = {
+    key: tuple(_field_key(field) for field in fields)
+    for key, fields in _ISSUE_WORKTREE_SOURCE_FIELDS.items()
+}
+
+
+def _branch_ref_is_safe(branch: str) -> bool:
+    return (
+        _SAFE_SOURCE_BRANCH_RE.fullmatch(branch) is not None
+        and ".." not in branch
+        and "@{" not in branch
+        and "//" not in branch
+        and not branch.endswith(("/", "."))
+        and all(
+            part not in {"", ".", ".."} and not part.endswith(".")
+            for part in branch.split("/")
+        )
+    )
+
+
+def _canonical_issue_worktree_ref(value: str) -> tuple[str | None, str | None]:
+    ref = value.strip()
+    if not ref:
+        return None, "empty_source_ref"
+    if _HEAD_SHA_RE.fullmatch(ref) is not None:
+        return ref.lower(), None
+    if re.fullmatch(r"[0-9a-fA-F]{7,39}", ref):
+        return None, "ambiguous_source_ref"
+    branch = ref
+    if ref.startswith("origin/"):
+        branch = ref.removeprefix("origin/")
+    elif ref.startswith("refs/heads/"):
+        branch = ref.removeprefix("refs/heads/")
+    elif ref.startswith("refs/remotes/origin/"):
+        branch = ref.removeprefix("refs/remotes/origin/")
+    elif ref.startswith("refs/") or ref.startswith("remotes/"):
+        return None, "unsafe_source_ref"
+    if not _branch_ref_is_safe(branch):
+        return None, "unsafe_source_ref"
+    return f"origin/{branch}", None
+
+
+def _issue_worktree_fenced_source_values(
+    task_content: str,
+) -> tuple[dict[str, object], set[str]]:
+    values: dict[str, object] = {}
+    present: set[str] = set()
+    try:
+        parsed = yaml.safe_load(task_content) if task_content.strip() else None
+    except yaml.YAMLError:
+        parsed = None
+    if isinstance(parsed, dict):
+        normalized = {_field_key(str(key)): value for key, value in parsed.items()}
+        for target, keys in _ISSUE_WORKTREE_SOURCE_FIELD_KEYS.items():
+            for key in keys:
+                if key in normalized:
+                    values[target] = normalized[key]
+                    present.add(target)
+                    break
+    for target, fields in _ISSUE_WORKTREE_SOURCE_FIELDS.items():
+        for field in fields:
+            value = _body_field(task_content, field)
+            if value is not None:
+                values[target] = value
+                present.add(target)
+                break
+    return values, present
+
+
+def _issue_worktree_metadata_source_values(metadata: str) -> dict[str, object]:
+    values: dict[str, object] = {}
+    for target, fields in _ISSUE_WORKTREE_SOURCE_FIELDS.items():
+        for field in fields:
+            value = _body_field(metadata, field)
+            if value is not None:
+                values[target] = value
+                break
+    return values
+
+
+def extract_issue_worktree_source_spec(
+    body: str, task_content: str
+) -> tuple[IssueWorktreeSourceSpec | None, str | None]:
+    metadata = _metadata_before_task(body)
+    fenced_values, fenced_present = _issue_worktree_fenced_source_values(task_content)
+    metadata_values = _issue_worktree_metadata_source_values(metadata)
+    values = {
+        key: fenced_values[key] if key in fenced_present else metadata_values.get(key)
+        for key in _ISSUE_WORKTREE_SOURCE_FIELDS
+    }
+    for key, value in values.items():
+        if value is not None and not isinstance(value, str):
+            return None, f"invalid_{key}"
+
+    source_ref = values.get("source_ref")
+    base_ref = values.get("base_ref")
+    expected_head_sha = values.get("expected_head_sha")
+    canonical_source: str | None = None
+    canonical_base = "origin/main"
+    if isinstance(source_ref, str):
+        canonical_source, reason = _canonical_issue_worktree_ref(source_ref)
+        if reason is not None:
+            return None, reason
+    if isinstance(base_ref, str):
+        canonical_base, reason = _canonical_issue_worktree_ref(base_ref)
+        if reason is not None:
+            return None, reason.replace("source", "base")
+        if _HEAD_SHA_RE.fullmatch(canonical_base) is not None:
+            return None, "invalid_base_ref"
+    if isinstance(expected_head_sha, str):
+        if _HEAD_SHA_RE.fullmatch(expected_head_sha) is None:
+            return None, "invalid_expected_head_sha"
+        expected_head_sha = expected_head_sha.lower()
+    else:
+        expected_head_sha = None
+
+    return (
+        IssueWorktreeSourceSpec(
+            source_ref=canonical_source,
+            expected_head_sha=expected_head_sha,
+            base_ref=canonical_base,
+        ),
+        None,
+    )
+
+
 def extract_runner_task(body: str) -> tuple[RunnerTask | None, str | None]:
     fence_reason = task_fence_block_reason(body)
     if fence_reason is not None:
@@ -1658,6 +1928,11 @@ def extract_runner_task(body: str) -> tuple[RunnerTask | None, str | None]:
     )
     if target_project is None or target_repository is None:
         return None, target_reason
+    source_spec, source_reason = extract_issue_worktree_source_spec(body, content)
+    if source_spec is None:
+        return None, source_reason
+    if source_spec == IssueWorktreeSourceSpec():
+        source_spec = None
     return RunnerTask(
         content=content,
         lane=lane,
@@ -1673,6 +1948,7 @@ def extract_runner_task(body: str) -> tuple[RunnerTask | None, str | None]:
         has_target_repository_metadata=(
             _target_repository_metadata_field(metadata)[0] is not None
         ),
+        source_spec=source_spec,
     ), None
 
 
@@ -12186,17 +12462,35 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             runner_task.target_repository if runner_task is not None else QUEUE_REPOSITORY
         )
         local_target_worktree = target_repository != QUEUE_REPOSITORY
+        source_spec = runner_task.source_spec if runner_task is not None else None
         if local_target_worktree:
-            worktree_code, worktree_output, worktree_path = (
-                prepare_target_repository_issue_worktree(
-                    target_repository,
-                    issue_number,
+            if source_spec is None:
+                worktree_code, worktree_output, worktree_path = (
+                    prepare_target_repository_issue_worktree(
+                        target_repository,
+                        issue_number,
+                    )
                 )
-            )
+            else:
+                worktree_code, worktree_output, worktree_path = (
+                    prepare_target_repository_issue_worktree(
+                        target_repository,
+                        issue_number,
+                        source_spec,
+                    )
+                )
         else:
-            worktree_code, worktree_output, worktree_path = prepare_issue_branch(
-                issue_number, coordinator_workdir
-            )
+            if source_spec is None:
+                worktree_code, worktree_output, worktree_path = prepare_issue_branch(
+                    issue_number,
+                    coordinator_workdir,
+                )
+            else:
+                worktree_code, worktree_output, worktree_path = prepare_issue_branch(
+                    issue_number,
+                    coordinator_workdir,
+                    source_spec,
+                )
         if worktree_code != 0:
             block_issue(
                 issue_number,
