@@ -1080,6 +1080,21 @@ _FULL_SHA_RE = re.compile(r"[0-9a-fA-F]{40}")
 _SAFE_REF_COMPONENT_RE = re.compile(r"[A-Za-z0-9._-]+")
 
 
+def _normalize_issue_worktree_expected_head_sha(
+    expected_head_sha: str,
+) -> tuple[str | None, str | None]:
+    if not expected_head_sha:
+        return None, "invalid_expected_head_sha"
+    if expected_head_sha != expected_head_sha.strip() or any(
+        ord(character) < 32 or ord(character) == 127
+        for character in expected_head_sha
+    ):
+        return None, "invalid_expected_head_sha"
+    if _FULL_SHA_RE.fullmatch(expected_head_sha) is None:
+        return None, "invalid_expected_head_sha"
+    return expected_head_sha.lower(), None
+
+
 def _normalize_issue_worktree_source_ref(raw_ref: str) -> tuple[str | None, str | None]:
     if not raw_ref:
         return None, "empty_ref"
@@ -1133,14 +1148,7 @@ def _issue_worktree_required_ref(
     if spec.explicit_ref is not None:
         return _normalize_issue_worktree_source_ref(spec.explicit_ref)
     if spec.expected_head_sha is not None:
-        expected = spec.expected_head_sha
-        if expected != expected.strip() or any(
-            ord(character) < 32 or ord(character) == 127 for character in expected
-        ):
-            return None, "invalid_expected_head_sha"
-        if _FULL_SHA_RE.fullmatch(expected):
-            return expected.lower(), None
-        return None, "invalid_expected_head_sha"
+        return _normalize_issue_worktree_expected_head_sha(spec.expected_head_sha)
     return _normalize_issue_worktree_source_ref(spec.base_ref)
 
 
@@ -1150,12 +1158,13 @@ def _resolve_issue_worktree_required_commit(
     required_ref, reason = _issue_worktree_required_ref(spec)
     if required_ref is None:
         return None, reason or "invalid_source_ref"
-    if (
-        spec.explicit_ref is not None
-        and spec.expected_head_sha is not None
-        and _FULL_SHA_RE.fullmatch(spec.expected_head_sha.strip()) is None
-    ):
-        return None, "invalid_expected_head_sha"
+    expected_head_sha = None
+    if spec.expected_head_sha is not None:
+        expected_head_sha, reason = _normalize_issue_worktree_expected_head_sha(
+            spec.expected_head_sha
+        )
+        if expected_head_sha is None:
+            return None, reason or "invalid_expected_head_sha"
     code, output = run_command(
         ["git", "rev-parse", "--verify", f"{required_ref}^{{commit}}"], cwd=cwd
     )
@@ -1165,11 +1174,8 @@ def _resolve_issue_worktree_required_commit(
     if _FULL_SHA_RE.fullmatch(resolved_commit) is None:
         return None, "source_ref_unresolved"
     resolved_commit = resolved_commit.lower()
-    if spec.explicit_ref is not None and spec.expected_head_sha is not None:
-        expected = spec.expected_head_sha.strip().lower()
-        if _FULL_SHA_RE.fullmatch(expected) is None:
-            return None, "invalid_expected_head_sha"
-        if resolved_commit != expected:
+    if spec.explicit_ref is not None and expected_head_sha is not None:
+        if resolved_commit != expected_head_sha:
             return None, "expected_head_sha_mismatch"
     return resolved_commit, f"source_ref={required_ref}"
 

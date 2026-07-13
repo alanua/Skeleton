@@ -1141,6 +1141,47 @@ def test_prepare_issue_worktree_explicit_source_mismatched_expected_sha_blocks_b
     assert not any(command[:2] == ["git", "checkout"] for command in commands)
 
 
+@pytest.mark.parametrize(
+    "expected_head_sha",
+    (
+        f" {HEAD_SHA}",
+        f"{HEAD_SHA} ",
+        f"{HEAD_SHA}\x1f",
+    ),
+)
+def test_prepare_issue_worktree_explicit_source_invalid_expected_sha_blocks_before_git(
+    tmp_path: Path, expected_head_sha: str
+) -> None:
+    worktree_root = tmp_path / "worktrees"
+    coordinator = tmp_path / "coordinator"
+    coordinator.mkdir()
+    spec = runner.IssueWorktreeSourceSpec(
+        explicit_ref="feature",
+        expected_head_sha=expected_head_sha,
+    )
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(worktree_root)}, clear=True
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=(
+            (0, "https://github.com/alanua/Skeleton.git"),
+            (0, "fetched"),
+            (0, "cloned"),
+            (0, ""),
+            (0, "fetched clone"),
+        ),
+    ) as run_command:
+        code, output, _path = runner.prepare_issue_worktree(1764, coordinator, spec)
+
+    assert code != 0
+    assert "required_source=invalid_expected_head_sha" in output
+    commands = [call.args[0] for call in run_command.call_args_list]
+    assert not any(command[:2] == ["git", "rev-parse"] for command in commands)
+    assert not any(command[:2] == ["git", "checkout"] for command in commands)
+
+
 def test_prepare_issue_worktree_unsafe_source_blocks_before_revparse_or_checkout(
     tmp_path: Path,
 ) -> None:
