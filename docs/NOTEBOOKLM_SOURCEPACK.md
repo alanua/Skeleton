@@ -371,6 +371,35 @@ Next actions:
 - Add reviewed project route after migration audit.
 - Use project manifests to separate design planning from unrelated Skeleton/Jeeves work.
 
+### travel
+
+- Means: worldwide travel opportunity, multimodal logistics, provider adapters, and journey monitoring project
+- Repo: `alanua/Travel`
+- Entrypoint: `projects/travel/PROJECT_MANIFEST.yaml`
+- State file: `projects/travel/STATE.yaml`
+- Status: `PUBLIC_SAFE_MODULE_BASELINE_DOCUMENTED`
+- State role: `handoff_not_canon_truth`
+- Last verified: `2026-07-12`
+- Evidence source: alanua/Travel MODULES.yaml, public-safe architecture documents, and linked Skeleton issues
+
+Summary:
+
+- Travel is a separate public-safe implementation repository linked from Skeleton.
+- The complete public-safe module inventory is recorded in alanua/Travel/MODULES.yaml.
+- The inventory covers annual opportunity mapping, weekend radar, Offer Intelligence, multimodal access and routing, reusable transport adapters, stays, packages, activities, total cost, scoring, price-history policy, documents, risk, personalization projection, monitoring, trip packs and booking-record semantics.
+- Travel composes shared Skeleton capabilities and does not duplicate calendar, scheduler, parser, evidence, maps, finance, memory, secrets, notifications, Runner or Loop.
+- Provider adapters are created on demand for real planning needs, validated on bounded routes and retained for reuse.
+- Personal travel data, private observations, bookings, tickets, documents, raw tracks and secrets are excluded from public GitHub.
+- No live provider adapter, private runtime bridge or booking authority is currently implemented by this baseline.
+
+Next actions:
+
+- Implement public-safe core contracts and synthetic fixtures.
+- Complete the bounded Offer Intelligence fixture slice from Skeleton issues 1747 and 1749.
+- Implement the first reviewed national-rail and regional-transport adapters through provider-neutral contracts.
+- Add provider registry entries only after source, licence and capability review.
+- Connect private runtime use only through approved MemoryGateway, artifact, scheduler, notification and secret-reference routes.
+
 ## Runner Queue Status
 
 The current runner queue status is mirrored below from `docs/RUNNER_QUEUE_STATUS.md`.
