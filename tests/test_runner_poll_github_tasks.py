@@ -9272,11 +9272,15 @@ def test_maintenance_report_sanitizer_drops_failed_command() -> None:
         [
             "step=validation_profile_command_1 status=failed exit_code=1",
             "failed_command=python3 -m pytest -q tests/test_knowledge_intake.py",
+            "validation_command_text=python3_-m_pytest_-q_tests/test_knowledge_intake.py",
+            "validation_output_tail=AssertionError:_safe_summary",
         ],
         "not_met",
     )
 
     assert "failed_command=" not in report
+    assert "validation_command_text=python3_-m_pytest_-q_tests/test_knowledge_intake.py" in report
+    assert "validation_output_tail=AssertionError:_safe_summary" in report
     assert "step=validation_profile_command_1 status=failed exit_code=1" in report
 
 
@@ -9497,6 +9501,24 @@ def _validate_pr_issue_body(
     if task_body:
         lines.extend(("", "```task", task_body, "```"))
     return "\n".join(lines)
+
+
+def _validation_metadata_command(
+    command: list[str], cwd: str | Path | None, validation_path: Path
+) -> tuple[int, str] | None:
+    if cwd != validation_path:
+        return None
+    if command == ["git", "rev-parse", "origin/main^{commit}"]:
+        return 0, f"{'b' * 40}\n"
+    if command == ["git", "diff", "--name-only", "b" * 40, "HEAD", "--"]:
+        return 0, "scripts/runner_poll_github_tasks.py\n"
+    if command == ["python3", "-m", "pytest", "--version"]:
+        return 0, "pytest 8.0.0\n"
+    if command == ["git", "rev-parse", "--is-inside-work-tree"]:
+        return 0, "true\n"
+    if command == ["git", "status", "--short"]:
+        return 0, ""
+    return None
 
 
 def _preflight_pr_issue_body(
@@ -12301,6 +12323,9 @@ def test_validate_pr_branch_uses_exact_pr_head_selection(tmp_path: Path) -> None
     def run_validation_command(
         command: list[str], cwd: str | Path | None = None
     ) -> tuple[int, str]:
+        metadata_result = _validation_metadata_command(command, cwd, validation_path)
+        if metadata_result is not None:
+            return metadata_result
         if command == [
             "gh",
             "pr",
@@ -12363,6 +12388,9 @@ def test_validate_pr_branch_knowledge_intake_profile_runs_allowlisted_tests(
     def run_validation_command(
         command: list[str], cwd: str | Path | None = None
     ) -> tuple[int, str]:
+        metadata_result = _validation_metadata_command(command, cwd, validation_path)
+        if metadata_result is not None:
+            return metadata_result
         if command[:3] == ["gh", "pr", "view"]:
             return 0, json.dumps(_pr_validation_state())
         if command[:3] == ["git", "fetch", "origin"]:
@@ -12391,13 +12419,80 @@ def test_validate_pr_branch_knowledge_intake_profile_runs_allowlisted_tests(
             _validate_pr_issue_body(profile="knowledge_intake")
         )
 
-    commands = [call.args[0] for call in run.call_args_list]
-    assert report.startswith("DONE:")
-    assert commands[-2:] == [
+    profile_commands = [
         ["python3", "-m", "pytest", "-q", "tests/test_knowledge_intake.py"],
         ["python3", "-m", "pytest", "-q"],
     ]
+    commands = [
+        call.args[0] for call in run.call_args_list if call.args[0] in profile_commands
+    ]
+    assert report.startswith("DONE:")
+    assert commands == profile_commands
     assert "failed_output_start" not in report
+
+
+def test_validate_pr_branch_runner_exact_base_profile_runs_commands_in_order(
+    tmp_path: Path,
+) -> None:
+    validation_path = tmp_path / "validate-pr-branch" / "pr-123"
+    profile_commands = [
+        ["python3", "-m", "pytest", "-q", "tests/test_runner_poll_github_tasks.py"],
+        ["python3", "-m", "pytest", "-q"],
+        [
+            "python3",
+            "-m",
+            "py_compile",
+            "scripts/runner_poll_github_tasks.py",
+            "tests/test_runner_poll_github_tasks.py",
+        ],
+        ["git", "diff", "--check", "origin/main...HEAD"],
+    ]
+
+    def run_validation_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        metadata_result = _validation_metadata_command(command, cwd, validation_path)
+        if metadata_result is not None:
+            return metadata_result
+        if command[:3] == ["gh", "pr", "view"]:
+            return 0, json.dumps(_pr_validation_state())
+        if command[:3] == ["git", "fetch", "origin"]:
+            return 0, ""
+        if command[:2] == ["git", "rev-parse"] and cwd == runner.ROOT:
+            return 0, f"{HEAD_SHA}\n"
+        if command[:3] == ["git", "worktree", "add"]:
+            return 0, ""
+        if command == ["git", "rev-parse", "HEAD"] and cwd == validation_path:
+            return 0, f"{HEAD_SHA}\n"
+        if command in profile_commands and cwd == validation_path:
+            return 0, "649 passed\n" if command[:3] == ["python3", "-m", "pytest"] else ""
+        return 2, "unexpected command"
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(tmp_path)}, clear=True
+    ), mock.patch.object(Path, "exists", autospec=True, return_value=False), mock.patch.object(
+        Path, "mkdir", autospec=True
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run_validation_command
+    ) as run:
+        report = runner.validate_pr_branch(
+            _validate_pr_issue_body(profile="runner_exact_base")
+        )
+
+    commands = [
+        call.args[0]
+        for call in run.call_args_list
+        if call.args[0] in profile_commands
+    ]
+    assert report.startswith("DONE:")
+    assert commands == profile_commands
+    assert "validation_checkout_head_sha=" + HEAD_SHA in report
+    assert "validation_base_ref=main" in report
+    assert "validation_base_sha=" + ("b" * 40) in report
+    assert "validation_initial_status=clean" in report
+    assert "validation_final_status=clean" in report
+    assert "validation_pytest_totals=649_passed" in report
+    assert "validation_command_text=git_diff_--check_origin/main.dot.dot.HEAD" in report
 
 
 def test_validate_pr_branch_bauclock_time_ledger_profile_uses_target_checkout(
@@ -12414,6 +12509,9 @@ def test_validate_pr_branch_bauclock_time_ledger_profile_uses_target_checkout(
     def run_validation_command(
         command: list[str], cwd: str | Path | None = None
     ) -> tuple[int, str]:
+        metadata_result = _validation_metadata_command(command, cwd, validation_path)
+        if metadata_result is not None:
+            return metadata_result
         if command == [
             "gh",
             "pr",
@@ -12534,6 +12632,9 @@ def test_validate_pr_branch_failed_knowledge_intake_command_reports_output(
     def run_validation_command(
         command: list[str], cwd: str | Path | None = None
     ) -> tuple[int, str]:
+        metadata_result = _validation_metadata_command(command, cwd, validation_path)
+        if metadata_result is not None:
+            return metadata_result
         if command[:3] == ["gh", "pr", "view"]:
             return 0, json.dumps(_pr_validation_state())
         if command[:3] == ["git", "fetch", "origin"]:
@@ -12565,11 +12666,24 @@ def test_validate_pr_branch_failed_knowledge_intake_command_reports_output(
 
     assert report.startswith("BLOCKED:")
     assert "step=validation_profile_command_1 status=failed exit_code=1" in report
+    assert (
+        "validation_command_text=python3_-m_pytest_-q_tests/test_knowledge_intake.py"
+        in report
+    )
+    assert "validation_output_tail=" in report
+    assert "validation_failing_node=tests/test_knowledge_intake.py::test_rejects_unknown_entry" in report
+    assert (
+        "validation_error_summary=AssertionError:_expected_unknown_entry_to_be_rejected"
+        in report
+    )
+    assert "validation_pytest_totals=1_failed,4_passed" in report
+    assert "validation_failure_phase=call" in report
+    assert "validation_final_status=clean" in report
     assert "failed_command=" not in report
     assert "failed_output_start" not in report
     assert "AssertionError: expected unknown entry to be rejected" not in report
     assert "SKELETON_TG_CALLBACK_HMAC_SECRET=should-not-leak" not in report
-    assert "[redacted environment variable]" not in report
+    assert "should-not-leak" not in report
     assert "failed_output_end" not in report
 
 
@@ -12581,6 +12695,9 @@ def test_validate_pr_branch_reports_missing_dependency_module_names(
     def run_validation_command(
         command: list[str], cwd: str | Path | None = None
     ) -> tuple[int, str]:
+        metadata_result = _validation_metadata_command(command, cwd, validation_path)
+        if metadata_result is not None:
+            return metadata_result
         if command[:3] == ["gh", "pr", "view"]:
             return 0, json.dumps(_pr_validation_state())
         if command[:3] == ["git", "fetch", "origin"]:
@@ -12610,6 +12727,105 @@ def test_validate_pr_branch_reports_missing_dependency_module_names(
     assert "missing_dependency_module=aiogram" in report
 
 
+def test_validate_pr_branch_collection_failure_without_node_reports_phase_and_tail(
+    tmp_path: Path,
+) -> None:
+    validation_path = tmp_path / "validate-pr-branch" / "pr-123"
+    output = "\n".join(
+        (
+            "ERROR collecting tests/test_runner_poll_github_tasks.py",
+            "ImportError: cannot import name runner",
+            "no tests collected, 1 error in 0.12s",
+        )
+    )
+
+    def run_validation_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        metadata_result = _validation_metadata_command(command, cwd, validation_path)
+        if metadata_result is not None:
+            return metadata_result
+        if command[:3] == ["gh", "pr", "view"]:
+            return 0, json.dumps(_pr_validation_state())
+        if command[:3] == ["git", "fetch", "origin"]:
+            return 0, ""
+        if command[:2] == ["git", "rev-parse"] and cwd == runner.ROOT:
+            return 0, f"{HEAD_SHA}\n"
+        if command[:3] == ["git", "worktree", "add"]:
+            return 0, ""
+        if command == ["git", "rev-parse", "HEAD"] and cwd == validation_path:
+            return 0, f"{HEAD_SHA}\n"
+        if command == ["python3", "-m", "pytest", "-q"] and cwd == validation_path:
+            return 2, output
+        return 2, "unexpected command"
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(tmp_path)}, clear=True
+    ), mock.patch.object(Path, "exists", autospec=True, return_value=False), mock.patch.object(
+        Path, "mkdir", autospec=True
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run_validation_command
+    ):
+        report = runner.validate_pr_branch(_validate_pr_issue_body())
+
+    assert report.startswith("BLOCKED:")
+    assert "validation_failure_phase=collection" in report
+    assert "validation_output_tail=" in report
+    assert "ERROR_collecting_tests/test_runner_poll_github_tasks.py" in report
+    assert "validation_error_summary=ImportError:_cannot_import_name_runner" in report
+    assert "validation_failing_node=" not in report
+
+
+def test_validate_pr_branch_redacts_secret_values_and_external_paths(
+    tmp_path: Path,
+) -> None:
+    validation_path = tmp_path / "validate-pr-branch" / "pr-123"
+    output = "\n".join(
+        (
+            "PermissionError: [Errno 13] Permission denied: '/home/operator/private.env'",
+            "API_TOKEN=secret-value",
+            "See https://user:secret@example.invalid/path",
+        )
+    )
+
+    def run_validation_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        metadata_result = _validation_metadata_command(command, cwd, validation_path)
+        if metadata_result is not None:
+            return metadata_result
+        if command[:3] == ["gh", "pr", "view"]:
+            return 0, json.dumps(_pr_validation_state())
+        if command[:3] == ["git", "fetch", "origin"]:
+            return 0, ""
+        if command[:2] == ["git", "rev-parse"] and cwd == runner.ROOT:
+            return 0, f"{HEAD_SHA}\n"
+        if command[:3] == ["git", "worktree", "add"]:
+            return 0, ""
+        if command == ["git", "rev-parse", "HEAD"] and cwd == validation_path:
+            return 0, f"{HEAD_SHA}\n"
+        if command == ["python3", "-m", "pytest", "-q"] and cwd == validation_path:
+            return 1, output
+        return 2, "unexpected command"
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(tmp_path)}, clear=True
+    ), mock.patch.object(Path, "exists", autospec=True, return_value=False), mock.patch.object(
+        Path, "mkdir", autospec=True
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run_validation_command
+    ):
+        report = runner.validate_pr_branch(_validate_pr_issue_body())
+
+    assert report.startswith("BLOCKED:")
+    assert "validation_failure_phase=permissions" in report
+    assert "redacted_path" in report
+    assert "redacted_url" in report
+    assert "/home/operator" not in report
+    assert "secret-value" not in report
+    assert "user:secret@example.invalid" not in report
+
+
 def test_validate_pr_branch_failed_command_output_is_truncated(
     tmp_path: Path,
 ) -> None:
@@ -12619,6 +12835,9 @@ def test_validate_pr_branch_failed_command_output_is_truncated(
     def run_validation_command(
         command: list[str], cwd: str | Path | None = None
     ) -> tuple[int, str]:
+        metadata_result = _validation_metadata_command(command, cwd, validation_path)
+        if metadata_result is not None:
+            return metadata_result
         if command[:3] == ["gh", "pr", "view"]:
             return 0, json.dumps(_pr_validation_state())
         if command[:3] == ["git", "fetch", "origin"]:
@@ -12644,8 +12863,8 @@ def test_validate_pr_branch_failed_command_output_is_truncated(
 
     assert report.startswith("BLOCKED:")
     assert "step=validation_profile_command_1 status=failed exit_code=1" in report
-    assert "pytest failure line" not in report
-    assert runner.VALIDATION_FAILED_OUTPUT_TRUNCATED_MARKER not in report
+    assert "validation_output_tail=" in report
+    assert "Runner_validation_output_truncated_to_4000_characters." in report
     assert "failed_output_start" not in report
     assert "failed_output_end" not in report
 
@@ -12673,6 +12892,9 @@ def test_validate_pr_branch_issue_body_does_not_execute_arbitrary_commands(
     def run_validation_command(
         command: list[str], cwd: str | Path | None = None
     ) -> tuple[int, str]:
+        metadata_result = _validation_metadata_command(command, cwd, validation_path)
+        if metadata_result is not None:
+            return metadata_result
         if command[:3] == ["gh", "pr", "view"]:
             return 0, json.dumps(_pr_validation_state())
         if command[:3] == ["git", "fetch", "origin"]:
@@ -12921,6 +13143,9 @@ def test_validate_pr_branch_removes_existing_validation_worktree_only(
     def run_validation_command(
         command: list[str], cwd: str | Path | None = None
     ) -> tuple[int, str]:
+        metadata_result = _validation_metadata_command(command, cwd, validation_path)
+        if metadata_result is not None:
+            return metadata_result
         if command[:3] == ["gh", "pr", "view"]:
             return 0, json.dumps(_pr_validation_state())
         if command[:4] == ["git", "worktree", "remove", "--force"]:

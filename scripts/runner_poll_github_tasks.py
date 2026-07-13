@@ -292,6 +292,18 @@ RUNNER_ALLOWED_TARGET_PATH_BASES = (
 PR_BRANCH_VALIDATION_WORKTREE_DIR = "validate-pr-branch"
 PR_BRANCH_VALIDATION_PROFILES = {
     "full_pytest": (("python3", "-m", "pytest", "-q"),),
+    "runner_exact_base": (
+        ("python3", "-m", "pytest", "-q", "tests/test_runner_poll_github_tasks.py"),
+        ("python3", "-m", "pytest", "-q"),
+        (
+            "python3",
+            "-m",
+            "py_compile",
+            "scripts/runner_poll_github_tasks.py",
+            "tests/test_runner_poll_github_tasks.py",
+        ),
+        ("git", "diff", "--check", "origin/main...HEAD"),
+    ),
     "knowledge_intake": (
         ("python3", "-m", "pytest", "-q", "tests/test_knowledge_intake.py"),
         ("python3", "-m", "pytest", "-q"),
@@ -644,9 +656,25 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "post_push_pr_changed_files_count",
         "validated_publish_files",
         "validated_publish_files_count",
+        "validation_base_ref",
+        "validation_base_sha",
+        "validation_changed_file",
+        "validation_changed_files_count",
+        "validation_checkout_head_sha",
+        "validation_command_index",
+        "validation_command_text",
+        "validation_error_summary",
+        "validation_failure_phase",
+        "validation_final_status",
+        "validation_failing_node",
+        "validation_initial_status",
+        "validation_output_tail",
         "version",
         "validation_profile",
         "validation_state",
+        "validation_pytest_totals",
+        "validation_pytest_version",
+        "validation_real_writable_git_worktree",
         "wall_area_row_count",
         "warning_count",
         "worktree",
@@ -876,7 +904,7 @@ def cleanup_runtime_artifacts(workdir: str | Path) -> None:
         if artifact.is_dir():
             shutil.rmtree(artifact, ignore_errors=True)
         elif artifact.exists():
-            artifact.unlink()
+            artifact.unlink(missing_ok=True)
 
 
 _RUN_COMMAND_ENV_OVERRIDE: ContextVar[Mapping[str, str] | None] = ContextVar(
@@ -7635,6 +7663,8 @@ def _pr_branch_validation_block_reason(
 def _sanitize_validation_command_output(output: str) -> str:
     sanitized = _ANSI_ESCAPE_RE.sub("", output or "")
     sanitized = sanitized.replace("\r\n", "\n").replace("\r", "\n")
+    sanitized = re.sub(r"https?://[^\s]+", "[redacted_url]", sanitized)
+    sanitized = re.sub(r"(?<![\w./-])/(?:[^\s:/]+/)+[^\s:]+", "[redacted_path]", sanitized)
     sanitized = "".join(
         character
         if character == "\n" or character == "\t" or 32 <= ord(character) < 127
@@ -7652,6 +7682,25 @@ def _sanitize_validation_command_output(output: str) -> str:
     return "\n".join(safe_lines).strip()
 
 
+def _validation_receipt_value(value: str, *, limit: int = 900) -> str:
+    sanitized = _sanitize_validation_command_output(value)
+    if not sanitized:
+        return "none"
+    sanitized = sanitized[-limit:]
+    sanitized = sanitized.replace("[redacted environment variable]", "redacted_env")
+    sanitized = sanitized.replace("[redacted_path]", "redacted_path")
+    sanitized = sanitized.replace("[redacted_url]", "redacted_url")
+    sanitized = re.sub(r"\s+", "_", sanitized.strip())
+    sanitized = re.sub(r"[^A-Za-z0-9._:+,@/\[\]{}()#-]+", "_", sanitized).strip("_")
+    while ".." in sanitized:
+        sanitized = sanitized.replace("..", ".dot.")
+    return sanitized[:limit] or "none"
+
+
+def _validation_command_text(command: tuple[str, ...]) -> str:
+    return _validation_receipt_value(shlex.join(command), limit=300)
+
+
 def _bounded_validation_command_output(output: str) -> str:
     sanitized = _sanitize_validation_command_output(output)
     if not sanitized:
@@ -7662,22 +7711,112 @@ def _bounded_validation_command_output(output: str) -> str:
     return sanitized[: VALIDATION_FAILED_OUTPUT_LIMIT - len(marker)].rstrip() + marker
 
 
+_PYTEST_TOTALS_RE = re.compile(
+    r"(?P<totals>\d+\s+"
+    r"(?:failed|passed|skipped|xfailed|xpassed|error|errors|warnings|deselected)"
+    r"(?:,\s*\d+\s+"
+    r"(?:failed|passed|skipped|xfailed|xpassed|error|errors|warnings|deselected))*)"
+)
+_PYTEST_NODE_RE = re.compile(
+    r"(?m)^(?P<node>[A-Za-z0-9_./-]+\.py::[^\s]+)\s+(?:FAILED|ERROR|XPASS|XFAIL)"
+)
+_PYTEST_SHORT_NODE_RE = re.compile(
+    r"(?m)^_{2,}\s+(?P<node>[A-Za-z0-9_./-]+\.py::[^_\n]+?)\s+_{2,}\s*$"
+)
+_VALIDATION_ERROR_SUMMARY_RE = re.compile(
+    r"(?m)^\s*(?:E\s+)?(?P<summary>"
+    r"(?:AssertionError|Error|RuntimeError|TypeError|ValueError|ImportError|"
+    r"ModuleNotFoundError|PermissionError|FileNotFoundError|subprocess\.[A-Za-z]+)"
+    r"[: ].*)$"
+)
+
+
+def _validation_pytest_totals(output: str) -> str | None:
+    matches = list(_PYTEST_TOTALS_RE.finditer(output or ""))
+    if not matches:
+        return None
+    return _validation_receipt_value(matches[-1].group("totals"), limit=160).replace(
+        ",_", ","
+    )
+
+
+def _validation_failing_nodes(output: str) -> list[str]:
+    nodes: list[str] = []
+    for pattern in (_PYTEST_NODE_RE, _PYTEST_SHORT_NODE_RE):
+        for match in pattern.finditer(output or ""):
+            node = match.group("node").strip()
+            if node and node not in nodes:
+                nodes.append(node)
+    return nodes[:5]
+
+
+def _validation_error_summary(output: str) -> str:
+    for pattern in (_VALIDATION_ERROR_SUMMARY_RE,):
+        for match in pattern.finditer(output or ""):
+            summary = match.group("summary").strip()
+            if summary:
+                return _validation_receipt_value(summary, limit=300)
+    for line in reversed((output or "").splitlines()):
+        stripped = line.strip()
+        if stripped:
+            return _validation_receipt_value(stripped, limit=300)
+    return "none"
+
+
+def _validation_failure_phase(command: tuple[str, ...], output: str, exit_code: int) -> str:
+    lowered = output.lower()
+    if command[:2] == ("git", "diff") or "not a git repository" in lowered:
+        return "git_metadata"
+    if exit_code in (126, 127) or "no such file or directory" in lowered:
+        return "process_start"
+    if "permission denied" in lowered:
+        return "permissions"
+    if "error collecting" in lowered or "collected 0 items" in lowered:
+        return "collection"
+    if "modulenotfounderror" in lowered or "importerror" in lowered:
+        return "missing_dependency"
+    if "setup" in lowered and "failed" in lowered:
+        return "setup"
+    if "teardown" in lowered and "failed" in lowered:
+        return "teardown"
+    if "assertionerror" in lowered or " failed" in lowered:
+        return "call"
+    return "process"
+
+
+def _validation_command_receipt_lines(
+    index: int, command: tuple[str, ...], exit_code: int, output: str
+) -> list[str]:
+    status = "passed" if exit_code == 0 else "failed"
+    lines = [
+        (
+            f"step=validation_profile_command_{index} status={status} "
+            f"exit_code={exit_code}"
+        ),
+        f"validation_command_index={index}",
+        f"validation_command_text={_validation_command_text(command)}",
+        f"exit_code={exit_code}",
+        f"status={status}",
+        f"validation_output_tail={_validation_receipt_value(_bounded_validation_command_output(output))}",
+    ]
+    totals = _validation_pytest_totals(output)
+    if totals is not None:
+        lines.append(f"validation_pytest_totals={totals}")
+    if exit_code != 0:
+        lines.extend(_missing_dependency_module_lines(output))
+        lines.append(
+            f"validation_failure_phase={_validation_failure_phase(command, output, exit_code)}"
+        )
+        for node in _validation_failing_nodes(output):
+            lines.append(f"validation_failing_node={_validation_receipt_value(node, limit=260)}")
+        lines.append(f"validation_error_summary={_validation_error_summary(output)}")
+    return lines
+
+
 def _validation_command_failure_lines(
     index: int, command: tuple[str, ...], exit_code: int, output: str
 ) -> list[str]:
-    lines = [
-        f"step=validation_profile_command_{index} status=failed exit_code={exit_code}",
-        f"failed_command={shlex.join(command)}",
-    ]
-    lines.extend(_missing_dependency_module_lines(output))
-    lines.extend(
-        (
-            "failed_output_start",
-            _bounded_validation_command_output(output),
-            "failed_output_end",
-        )
-    )
-    return lines
+    return _validation_command_receipt_lines(index, command, exit_code, output)
 
 
 _MISSING_DEPENDENCY_MODULE_RES = (
@@ -7694,6 +7833,62 @@ def _missing_dependency_module_lines(output: str) -> list[str]:
             if module and module not in modules:
                 modules.append(module)
     return [f"missing_dependency_module={module}" for module in modules]
+
+
+def _validation_read_command_value(command: list[str], cwd: Path) -> str:
+    code, output = run_command(command, cwd=cwd)
+    if code != 0:
+        return "unavailable"
+    return _validation_receipt_value(output.strip(), limit=180)
+
+
+def _validation_changed_files(base_sha: str, cwd: Path) -> list[str]:
+    code, output = run_command(["git", "diff", "--name-only", base_sha, "HEAD", "--"], cwd=cwd)
+    if code != 0:
+        return []
+    files: list[str] = []
+    for line in output.splitlines():
+        safe_file = _safe_changed_file(line)
+        if safe_file is not None:
+            files.append(safe_file)
+    return sorted(dict.fromkeys(files))
+
+
+def _validation_worktree_status(cwd: Path) -> tuple[bool, str]:
+    cleanup_runtime_artifacts(cwd)
+    code, output = run_command(["git", "status", "--short"], cwd=cwd)
+    if code != 0:
+        return False, "status_failed"
+    if output.strip():
+        return False, "dirty"
+    return True, "clean"
+
+
+def _validation_real_writable_git_worktree(cwd: Path) -> str:
+    code, output = run_command(["git", "rev-parse", "--is-inside-work-tree"], cwd=cwd)
+    is_worktree = code == 0 and output.strip().lower() == "true"
+    return str(is_worktree and cwd.is_dir() and os.access(cwd, os.W_OK)).lower()
+
+
+def _validation_checkout_metadata_lines(validation_path: Path, base_ref: str) -> list[str]:
+    base_sha = _validation_read_command_value(
+        ["git", "rev-parse", f"origin/{base_ref}^{{commit}}"], validation_path
+    )
+    changed_files = (
+        _validation_changed_files(base_sha, validation_path)
+        if _HEAD_SHA_RE.fullmatch(base_sha) is not None
+        else []
+    )
+    return [
+        f"validation_checkout_head_sha={_validation_read_command_value(['git', 'rev-parse', 'HEAD'], validation_path)}",
+        f"validation_base_ref={_validation_receipt_value(base_ref, limit=80)}",
+        f"validation_base_sha={base_sha}",
+        f"validation_changed_files_count={len(changed_files)}",
+        *(f"validation_changed_file={path}" for path in changed_files),
+        f"python_version={_validation_receipt_value('.'.join(str(part) for part in sys.version_info[:3]), limit=40)}",
+        f"validation_pytest_version={_validation_read_command_value(['python3', '-m', 'pytest', '--version'], validation_path)}",
+        f"validation_real_writable_git_worktree={_validation_real_writable_git_worktree(validation_path)}",
+    ]
 
 
 def validate_pr_branch(body: str) -> str:
@@ -7843,24 +8038,50 @@ def validate_pr_branch(body: str) -> str:
         )
     status_lines.append("step=verify_validation_head status=done")
 
+    status_lines.extend(
+        _validation_checkout_metadata_lines(
+            validation_path, str(pr_state.get("baseRefName") or "main")
+        )
+    )
+    clean, initial_status = _validation_worktree_status(validation_path)
+    status_lines.append(f"validation_initial_status={initial_status}")
+    if not clean:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=validation_worktree_not_clean"],
+            "not_met",
+        )
+
     for index, command in enumerate(PR_BRANCH_VALIDATION_PROFILES[request.profile], 1):
         code, output = _run_validation_profile_command(
             list(command), cwd=validation_path
         )
+        status_lines.extend(
+            _validation_command_receipt_lines(index, command, code, output)
+        )
         if code != 0:
+            clean, final_status = _validation_worktree_status(validation_path)
+            del clean
             return _maintenance_report(
                 "BLOCKED",
                 task_id,
                 [
                     *status_lines,
-                    *_validation_command_failure_lines(
-                        index, command, code, output
-                    ),
+                    f"validation_final_status={final_status}",
                 ],
                 "not_met",
             )
-        status_lines.append(f"step=validation_profile_command_{index} status=done")
 
+    clean, final_status = _validation_worktree_status(validation_path)
+    status_lines.append(f"validation_final_status={final_status}")
+    if not clean:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=validation_worktree_not_clean_after_commands"],
+            "not_met",
+        )
     return _maintenance_report("DONE", task_id, status_lines, "met")
 
 
