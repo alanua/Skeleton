@@ -744,6 +744,7 @@ def test_prepare_issue_worktree_clones_workspace_with_writable_gitdir(
             (0, ""),
             (0, "fetched clone"),
             (0, "checked out"),
+            (0, "a" * 40),
         ),
     ) as run_command:
         code, output, path = runner.prepare_issue_worktree(139, coordinator)
@@ -782,6 +783,177 @@ def test_prepare_issue_worktree_clones_workspace_with_writable_gitdir(
         mock.call(
             ["git", "checkout", "-B", "runner/issue-139", "origin/main"], cwd=path
         ),
+        mock.call(["git", "rev-parse", "HEAD"], cwd=path),
+    ]
+
+
+def _issue_source_body(metadata: str = "", task_body: str = "Do it") -> str:
+    parts = [metadata.strip()] if metadata.strip() else []
+    parts.append(f"```task\n{task_body}\n```")
+    return "\n\n".join(parts)
+
+
+def test_issue_worktree_task_source_fields_override_direct_metadata() -> None:
+    source, reason = runner._issue_worktree_source_from_body(
+        _issue_source_body(
+            "\n".join(
+                (
+                    "Source Ref: origin/direct",
+                    f"Expected Head SHA: {'b' * 40}",
+                    "Base Ref: direct-base",
+                )
+            ),
+            "\n".join(
+                (
+                    "source_ref: origin/task",
+                    f"expected_head_sha: {HEAD_SHA}",
+                    "base_ref: task-base",
+                )
+            ),
+        )
+    )
+
+    assert reason is None
+    assert source == runner.GitIssueWorktreeSource("origin/task", HEAD_SHA)
+
+
+def test_issue_worktree_task_hyphenated_source_aliases_work() -> None:
+    source, reason = runner._issue_worktree_source_from_body(
+        _issue_source_body(
+            task_body="\n".join(
+                (
+                    "source-ref: feature/exact",
+                    f"expected-head-sha: {HEAD_SHA}",
+                    "base-ref: release/next",
+                )
+            )
+        )
+    )
+
+    assert reason is None
+    assert source == runner.GitIssueWorktreeSource("feature/exact", HEAD_SHA)
+
+
+@pytest.mark.parametrize(
+    ("task_body", "reason"),
+    (
+        ("source_ref:", "invalid_source_ref"),
+        ("source_ref: []", "invalid_source_ref"),
+        ("source_ref: true", "invalid_source_ref"),
+        ("source_ref: 12", "invalid_source_ref"),
+        ("source_ref: ''", "invalid_source_ref"),
+        ("source_ref: origin/main;rm", "invalid_source_ref"),
+        ("expected_head_sha:", "invalid_expected_head_sha"),
+        ("expected_head_sha: []", "invalid_expected_head_sha"),
+        ("expected_head_sha: true", "invalid_expected_head_sha"),
+        ("expected_head_sha: ''", "invalid_expected_head_sha"),
+        ("expected_head_sha: abc", "invalid_expected_head_sha"),
+        ("base_ref:", "invalid_base_ref"),
+        ("base_ref: []", "invalid_base_ref"),
+        ("base_ref: true", "invalid_base_ref"),
+        ("base_ref: ''", "invalid_base_ref"),
+        ("base_ref: ../main", "invalid_base_ref"),
+    ),
+)
+def test_issue_worktree_present_invalid_task_source_values_block_without_fallback(
+    task_body: str, reason: str
+) -> None:
+    source, actual_reason = runner._issue_worktree_source_from_body(
+        _issue_source_body(
+            f"Source Ref: origin/direct\nExpected Head SHA: {HEAD_SHA}\nBase Ref: main",
+            task_body,
+        )
+    )
+
+    assert source is None
+    assert actual_reason == reason
+
+
+def test_issue_worktree_absent_task_source_keys_fall_back_to_direct_metadata() -> None:
+    source, reason = runner._issue_worktree_source_from_body(
+        _issue_source_body(
+            f"Source Ref: origin/direct\nExpected Head SHA: {HEAD_SHA}",
+            "allowed_files:\n  - scripts/runner_poll_github_tasks.py",
+        )
+    )
+
+    assert reason is None
+    assert source == runner.GitIssueWorktreeSource("origin/direct", HEAD_SHA)
+
+
+def test_issue_worktree_pretask_yaml_does_not_masquerade_as_task_source_metadata() -> None:
+    source, reason = runner._issue_worktree_source_from_body(
+        "\n".join(
+            (
+                "```yaml",
+                "source_ref: origin/yaml",
+                f"expected_head_sha: {HEAD_SHA}",
+                "```",
+                "",
+                "```task",
+                "Do it",
+                "```",
+            )
+        )
+    )
+
+    assert reason is None
+    assert source == runner.GitIssueWorktreeSource("origin/main")
+
+
+def test_issue_worktree_generic_base_metadata_is_ignored() -> None:
+    source, reason = runner._issue_worktree_source_from_body(
+        _issue_source_body(f"Base: main@{HEAD_SHA}", "Do it")
+    )
+
+    assert reason is None
+    assert source == runner.GitIssueWorktreeSource("origin/main")
+
+
+def test_issue_worktree_plain_text_task_keeps_default_main() -> None:
+    source, reason = runner._issue_worktree_source_from_body(
+        _issue_source_body(task_body="Please make the requested edit.")
+    )
+
+    assert reason is None
+    assert source == runner.GitIssueWorktreeSource("origin/main")
+
+
+def test_prepare_issue_worktree_uses_task_source_and_checks_expected_head(
+    tmp_path: Path,
+) -> None:
+    worktree_root = tmp_path / "worktrees"
+    coordinator = tmp_path / "coordinator"
+    coordinator.mkdir()
+    body = _issue_source_body(
+        "Source Ref: origin/direct",
+        f"source_ref: origin/task\nexpected_head_sha: {HEAD_SHA}",
+    )
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(worktree_root)}, clear=True
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=(
+            (0, "https://github.com/alanua/Skeleton.git"),
+            (0, "fetched"),
+            (0, "cloned"),
+            (0, ""),
+            (0, "fetched clone"),
+            (0, "checked out"),
+            (0, f"{HEAD_SHA}\n"),
+        ),
+    ) as run_command:
+        code, output, path = runner.prepare_issue_worktree(139, coordinator, body)
+
+    assert code == 0
+    assert "git checkout -B runner/issue-139 origin/task" in output
+    assert run_command.call_args_list[-2:] == [
+        mock.call(
+            ["git", "checkout", "-B", "runner/issue-139", "origin/task"], cwd=path
+        ),
+        mock.call(["git", "rev-parse", "HEAD"], cwd=path),
     ]
 
 
@@ -849,7 +1021,7 @@ def test_process_issue_runs_codex_in_prepared_issue_worktree(tmp_path: Path) -> 
     ):
         runner.process_issue(issue, workdir=str(coordinator))
 
-    prepare.assert_called_once_with(139, str(coordinator))
+    prepare.assert_called_once_with(139, str(coordinator), issue["body"])
     run_codex.assert_called_once_with(
         "Do it", str(issue_path), runner.RunnerTask(content="Do it")
     )
@@ -1591,7 +1763,7 @@ def test_process_issue_runs_target_project_bauclock_in_local_worktree(
         target_repository="alanua/bauclock",
     )
     prepare_branch.assert_not_called()
-    prepare_target.assert_called_once_with("alanua/bauclock", 146)
+    prepare_target.assert_called_once_with("alanua/bauclock", 146, issue["body"])
     run_codex.assert_called_once_with("Do it", str(issue_path), expected_task)
     finalize_success.assert_not_called()
     finalize_local.assert_called_once_with(str(issue_path), "codex output", expected_task)
@@ -1638,7 +1810,7 @@ def test_process_issue_runs_target_project_lavalamp_when_project_tree_enables_wo
         has_target_project_metadata=True,
         target_repository="alanua/Lavalamp",
     )
-    prepare_target.assert_called_once_with("alanua/Lavalamp", 147)
+    prepare_target.assert_called_once_with("alanua/Lavalamp", 147, issue["body"])
     run_codex.assert_called_once_with("Do it", str(issue_path), expected_task)
 
 
@@ -1839,7 +2011,7 @@ def test_process_issue_runs_target_project_skeleton_normally(tmp_path: Path) -> 
     ):
         runner.process_issue(issue, workdir=str(coordinator))
 
-    prepare.assert_called_once_with(148, str(coordinator))
+    prepare.assert_called_once_with(148, str(coordinator), issue["body"])
     run_codex.assert_called_once_with(
         "Do it",
         str(issue_path),
@@ -1889,7 +2061,7 @@ def test_process_issue_runs_target_repository_lavalamp_in_registered_worktree(
         runner.process_issue(issue)
 
     prepare_branch.assert_not_called()
-    prepare_target.assert_called_once_with("alanua/Lavalamp", 143)
+    prepare_target.assert_called_once_with("alanua/Lavalamp", 143, issue["body"])
     run_codex.assert_called_once()
 
 
@@ -1969,7 +2141,7 @@ def test_process_issue_runs_non_skeleton_codex_worktree_mode_locally(
         runner.process_issue(issue)
 
     prepare_branch.assert_not_called()
-    prepare_target.assert_called_once_with("alanua/CodexOther", 150)
+    prepare_target.assert_called_once_with("alanua/CodexOther", 150, issue["body"])
     run_codex.assert_called_once()
     finalize_local.assert_called_once()
 
@@ -3717,7 +3889,7 @@ def test_code_task_accepts_fenced_yaml_expected_output_before_codex(
     ):
         runner.process_issue(issue, workdir=str(coordinator))
 
-    prepare.assert_called_once_with(249, str(coordinator))
+    prepare.assert_called_once_with(249, str(coordinator), issue["body"])
     run_codex.assert_called_once()
 
 

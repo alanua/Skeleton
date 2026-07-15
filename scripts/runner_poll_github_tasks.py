@@ -340,6 +340,7 @@ TELEGRAM_CALLBACK_POLLER_RUNTIME_FILES = (
 )
 
 _HEAD_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+_ISSUE_WORKTREE_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
 _REGISTERED_OVERLAY_PUBLIC_REST_REPO = "alanua/Skeleton"
 _REGISTERED_OVERLAY_PUBLIC_REST_HOST = "api.github.com"
 _REGISTERED_OVERLAY_PUBLIC_REST_TIMEOUT_SECONDS = 8
@@ -778,6 +779,12 @@ class RegisteredProjectCheckout:
 
 
 @dataclass(frozen=True)
+class GitIssueWorktreeSource:
+    source_ref: str
+    expected_head_sha: str | None = None
+
+
+@dataclass(frozen=True)
 class RunnerMemoryConfig:
     db_path: Path
     ledger_path: Path
@@ -1103,14 +1110,14 @@ def format_command_output(command: list[str], output: str) -> str:
 
 
 def prepare_issue_worktree(
-    issue_number: int, coordinator_workdir: str | Path
+    issue_number: int, coordinator_workdir: str | Path, body: str | None = None
 ) -> tuple[int, str, Path]:
     path = ensure_safe_worktree_path(issue_worktree_path(issue_number))
-    return prepare_git_issue_worktree(issue_number, coordinator_workdir, path)
+    return prepare_git_issue_worktree(issue_number, coordinator_workdir, path, body)
 
 
 def prepare_target_repository_issue_worktree(
-    target_repository: str, issue_number: int
+    target_repository: str, issue_number: int, body: str | None = None
 ) -> tuple[int, str, Path]:
     try:
         path = ensure_safe_target_repository_worktree_path(
@@ -1123,16 +1130,171 @@ def prepare_target_repository_issue_worktree(
     checkout_block_reason = verify_target_repository_checkout(target_repository)
     if checkout_block_reason is not None:
         return 1, checkout_block_reason, path
-    return prepare_git_issue_worktree(issue_number, checkout_path, path)
+    return prepare_git_issue_worktree(issue_number, checkout_path, path, body)
+
+
+_SOURCE_VALUE_ABSENT = object()
+
+
+def _first_present_mapping_value(
+    mapping: Mapping[str, Any], aliases: tuple[str, ...]
+) -> object:
+    for alias in aliases:
+        if alias in mapping:
+            return mapping[alias]
+    return _SOURCE_VALUE_ABSENT
+
+
+def _valid_issue_worktree_ref(value: str) -> bool:
+    if _ISSUE_WORKTREE_REF_RE.fullmatch(value) is None:
+        return False
+    if (
+        value.startswith("/")
+        or value.endswith("/")
+        or value.endswith(".")
+        or value.endswith(".lock")
+        or "//" in value
+        or ".." in value
+        or "@{" in value
+    ):
+        return False
+    return all(not part.startswith(".") for part in value.split("/"))
+
+
+def _origin_ref_for_base(base_ref: str) -> str:
+    return base_ref if base_ref.startswith("origin/") else f"origin/{base_ref}"
+
+
+def _issue_worktree_source_string(value: object, reason: str) -> tuple[str | None, str | None]:
+    if not isinstance(value, str):
+        return None, reason
+    value = value.strip()
+    if not value or not _valid_issue_worktree_ref(value):
+        return None, reason
+    return value, None
+
+
+def _issue_worktree_source_sha(value: object) -> tuple[str | None, str | None]:
+    if not isinstance(value, str):
+        return None, "invalid_expected_head_sha"
+    value = value.strip()
+    if _HEAD_SHA_RE.fullmatch(value) is None:
+        return None, "invalid_expected_head_sha"
+    return value.lower(), None
+
+
+def _task_block_source_fields(body: str | None) -> Mapping[str, Any] | None:
+    task_block = extract_task_block(body or "")
+    if task_block is None:
+        return {}
+    try:
+        parsed = yaml.safe_load(task_block)
+    except yaml.YAMLError:
+        return None
+    return parsed if isinstance(parsed, Mapping) else {}
+
+
+def _issue_worktree_source_from_body(
+    body: str | None,
+) -> tuple[GitIssueWorktreeSource | None, str | None]:
+    task_fields = _task_block_source_fields(body)
+    if task_fields is None:
+        return None, "invalid_task_source_metadata"
+
+    task_source_ref = _first_present_mapping_value(
+        task_fields, ("source_ref", "source-ref")
+    )
+    task_expected_head_sha = _first_present_mapping_value(
+        task_fields, ("expected_head_sha", "expected-head-sha")
+    )
+    task_base_ref = _first_present_mapping_value(
+        task_fields, ("base_ref", "base-ref", "base_branch")
+    )
+
+    source_ref: str | None = None
+    expected_head_sha: str | None = None
+    base_ref: str | None = None
+
+    if task_source_ref is not _SOURCE_VALUE_ABSENT:
+        source_ref, reason = _issue_worktree_source_string(
+            task_source_ref, "invalid_source_ref"
+        )
+        if reason is not None:
+            return None, reason
+    if task_expected_head_sha is not _SOURCE_VALUE_ABSENT:
+        expected_head_sha, reason = _issue_worktree_source_sha(task_expected_head_sha)
+        if reason is not None:
+            return None, reason
+    if task_base_ref is not _SOURCE_VALUE_ABSENT:
+        base_ref, reason = _issue_worktree_source_string(task_base_ref, "invalid_base_ref")
+        if reason is not None:
+            return None, reason
+
+    metadata = _metadata_before_task(body or "")
+    if task_source_ref is _SOURCE_VALUE_ABSENT:
+        direct_source_ref = _body_field(metadata, "Source Ref")
+        if direct_source_ref is not None:
+            source_ref, reason = _issue_worktree_source_string(
+                direct_source_ref, "invalid_source_ref"
+            )
+            if reason is not None:
+                return None, reason
+    if task_expected_head_sha is _SOURCE_VALUE_ABSENT:
+        direct_expected_head_sha = _body_field(metadata, "Expected Head SHA")
+        if direct_expected_head_sha is not None:
+            expected_head_sha, reason = _issue_worktree_source_sha(
+                direct_expected_head_sha
+            )
+            if reason is not None:
+                return None, reason
+    if task_base_ref is _SOURCE_VALUE_ABSENT:
+        direct_base_ref = _body_field(metadata, "Base Ref") or _body_field(
+            metadata, "Base Branch"
+        )
+        if direct_base_ref is not None:
+            base_ref, reason = _issue_worktree_source_string(
+                direct_base_ref, "invalid_base_ref"
+            )
+            if reason is not None:
+                return None, reason
+
+    if source_ref is None:
+        source_ref = _origin_ref_for_base(base_ref or "main")
+    return GitIssueWorktreeSource(source_ref, expected_head_sha), None
+
+
+def _verify_issue_worktree_head(
+    path: Path, expected_head_sha: str | None, outputs: list[str]
+) -> tuple[int, str | None]:
+    code, output = run_command(["git", "rev-parse", "HEAD"], cwd=path)
+    outputs.append(format_command_output(["git", "rev-parse", "HEAD"], output))
+    if code != 0:
+        return code, "reason=head_read_failed"
+    head_sha = output.strip().lower()
+    if _HEAD_SHA_RE.fullmatch(head_sha) is None:
+        return 1, "reason=head_read_failed"
+    if expected_head_sha is not None and head_sha != expected_head_sha:
+        return 1, "reason=expected_head_sha_mismatch"
+    return 0, None
 
 
 def prepare_git_issue_worktree(
-    issue_number: int, coordinator_workdir: str | Path, path: Path
+    issue_number: int,
+    coordinator_workdir: str | Path,
+    path: Path,
+    body: str | None = None,
 ) -> tuple[int, str, Path]:
     branch = issue_branch(issue_number)
     outputs: list[str] = []
+    source, source_reason = _issue_worktree_source_from_body(body)
+    if source_reason is not None or source is None:
+        return 1, f"reason={source_reason or 'invalid_source_metadata'}", path
 
     if path.exists():
+        try:
+            cleanup_runtime_artifacts(path)
+        except OSError:
+            return 1, "reason=runtime_artifact_cleanup_failed", path
         checks = (
             (["git", "status", "--short"], "dirty"),
             (["git", "branch", "--show-current"], "branch"),
@@ -1162,6 +1324,11 @@ def prepare_git_issue_worktree(
                     + "\n".join(outputs),
                     path,
                 )
+        code, reason = _verify_issue_worktree_head(
+            path, source.expected_head_sha, outputs
+        )
+        if code != 0:
+            return code, "\n".join([*outputs, reason or "reason=head_check_failed"]), path
         return 0, "\n".join(outputs), path
 
     try:
@@ -1193,7 +1360,7 @@ def prepare_git_issue_worktree(
             coordinator_workdir,
         ),
         (["git", "fetch", "origin"], path),
-        (["git", "checkout", "-B", branch, "origin/main"], path),
+        (["git", "checkout", "-B", branch, source.source_ref], path),
     )
     for command, cwd in commands:
         code, output = run_command(command, cwd=cwd)
@@ -1209,13 +1376,16 @@ def prepare_git_issue_worktree(
             )
             if config_code != 0:
                 return config_code, "\n".join(outputs), path
+    code, reason = _verify_issue_worktree_head(path, source.expected_head_sha, outputs)
+    if code != 0:
+        return code, "\n".join([*outputs, reason or "reason=head_check_failed"]), path
     return 0, "\n".join(outputs), path
 
 
 def prepare_issue_branch(
-    issue_number: int, coordinator_workdir: str | Path
+    issue_number: int, coordinator_workdir: str | Path, body: str | None = None
 ) -> tuple[int, str, Path]:
-    return prepare_issue_worktree(issue_number, coordinator_workdir)
+    return prepare_issue_worktree(issue_number, coordinator_workdir, body)
 
 
 def cleanup_git_issue_worktree(path: Path, coordinator_workdir: str | Path) -> tuple[int, str]:
@@ -12191,11 +12361,12 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                 prepare_target_repository_issue_worktree(
                     target_repository,
                     issue_number,
+                    issue_body,
                 )
             )
         else:
             worktree_code, worktree_output, worktree_path = prepare_issue_branch(
-                issue_number, coordinator_workdir
+                issue_number, coordinator_workdir, issue_body
             )
         if worktree_code != 0:
             block_issue(
