@@ -740,22 +740,28 @@ def test_prepare_issue_worktree_clones_workspace_with_writable_gitdir(
         side_effect=(
             (0, "https://github.com/alanua/Skeleton.git"),
             (0, "fetched"),
+            (0, f"{HEAD_SHA}\n"),
             (0, "cloned"),
             (0, ""),
             (0, "fetched clone"),
+            (0, f"{HEAD_SHA.upper()}\n"),
             (0, "checked out"),
+            (0, f"{HEAD_SHA}\n"),
         ),
     ) as run_command:
         code, output, path = runner.prepare_issue_worktree(139, coordinator)
 
     assert code == 0
-    assert "git clone --local --no-hardlinks --no-checkout" in output
-    assert "git remote set-url origin <coordinator-origin>" in output
-    assert "git checkout -B runner/issue-139 origin/main" in output
+    assert "step=clone_worktree status=done" in output
+    assert "step=checkout_worktree status=done" in output
     assert path == (worktree_root / "issue-139").resolve()
     assert run_command.call_args_list == [
         mock.call(["git", "remote", "get-url", "origin"], cwd=coordinator),
         mock.call(["git", "fetch", "origin"], cwd=coordinator),
+        mock.call(
+            ["git", "rev-parse", "--verify", "origin/main^{commit}"],
+            cwd=coordinator,
+        ),
         mock.call(
             [
                 "git",
@@ -780,7 +786,13 @@ def test_prepare_issue_worktree_clones_workspace_with_writable_gitdir(
         ),
         mock.call(["git", "fetch", "origin"], cwd=path),
         mock.call(
-            ["git", "checkout", "-B", "runner/issue-139", "origin/main"], cwd=path
+            ["git", "rev-parse", "--verify", "origin/main^{commit}"], cwd=path
+        ),
+        mock.call(
+            ["git", "checkout", "-B", "runner/issue-139", HEAD_SHA], cwd=path
+        ),
+        mock.call(
+            ["git", "rev-parse", "HEAD^{commit}"], cwd=path
         ),
     ]
 
@@ -789,18 +801,430 @@ def test_stale_dirty_worktree_blocks_instead_of_deleting(tmp_path: Path) -> None
     worktree_path = tmp_path / "worktrees" / "issue-139"
     worktree_path.mkdir(parents=True)
 
+    def run_dirty_worktree_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        assert cwd == worktree_path.resolve()
+        if command == ["git", "fetch", "origin"]:
+            return 0, ""
+        if command == ["git", "rev-parse", "--verify", "origin/main^{commit}"]:
+            return 0, f"{HEAD_SHA}\n"
+        if command == ["git", "status", "--short"]:
+            return 0, " M scripts/runner_poll_github_tasks.py"
+        return 2, "unexpected command"
+
     with mock.patch.dict(
         os.environ, {"SKELETON_WORKTREE_ROOT": str(tmp_path / "worktrees")}, clear=True
     ), mock.patch.object(
-        runner, "run_command", return_value=(0, " M scripts/runner_poll_github_tasks.py")
+        runner, "run_command", side_effect=run_dirty_worktree_command
     ) as run_command:
         code, output, path = runner.prepare_issue_worktree(139, tmp_path / "coordinator")
 
     assert code != 0
     assert path == worktree_path.resolve()
-    assert "dirty" in output
-    assert "cleanup" in output
-    run_command.assert_called_once_with(["git", "status", "--short"], cwd=path)
+    assert output == "reason=worktree_dirty"
+    assert run_command.call_args_list == [
+        mock.call(["git", "fetch", "origin"], cwd=path),
+        mock.call(["git", "rev-parse", "--verify", "origin/main^{commit}"], cwd=path),
+        mock.call(["git", "status", "--short"], cwd=path),
+    ]
+
+
+def _source_issue_body(task_content: str, metadata: str = "") -> str:
+    prefix = f"{metadata}\n\n" if metadata else ""
+    return f"{prefix}```task\n{task_content}\n```"
+
+
+def test_task_source_metadata_overrides_conflicting_direct_fields() -> None:
+    spec, reason = runner.source_spec_from_issue_body(
+        _source_issue_body(
+            "\n".join(
+                (
+                    "source_ref: refs/heads/task-source",
+                    f"expected_head_sha: {HEAD_SHA}",
+                    "base_ref: refs/remotes/origin/task-base",
+                )
+            ),
+            metadata="\n".join(
+                (
+                    "Source Ref: origin/direct-source",
+                    f"Expected Head SHA: {'b' * 40}",
+                    "Base Ref: origin/direct-base",
+                )
+            ),
+        )
+    )
+
+    assert reason is None
+    assert spec == runner.ProtectedSourceSpec(
+        source_ref="origin/task-source",
+        expected_head_sha=HEAD_SHA,
+        base_ref="origin/task-base",
+    )
+
+
+def test_task_source_metadata_hyphenated_aliases_and_precedence() -> None:
+    spec, reason = runner.source_spec_from_issue_body(
+        _source_issue_body(
+            "\n".join(
+                (
+                    "source_ref: origin/first-source",
+                    "source-ref: origin/second-source",
+                    f"expected_head_sha: {HEAD_SHA}",
+                    f"expected-head-sha: {'b' * 40}",
+                    "base_ref: origin/first-base",
+                    "base-ref: origin/second-base",
+                    "base_branch: origin/third-base",
+                )
+            )
+        )
+    )
+
+    assert reason is None
+    assert spec == runner.ProtectedSourceSpec(
+        source_ref="origin/first-source",
+        expected_head_sha=HEAD_SHA,
+        base_ref="origin/first-base",
+    )
+
+
+@pytest.mark.parametrize(
+    "field,value,reason",
+    [
+        ("source_ref", "null", "reason=invalid_source_ref"),
+        ("source_ref", "[]", "reason=invalid_source_ref"),
+        ("source_ref", "true", "reason=invalid_source_ref"),
+        ("source_ref", "''", "reason=invalid_source_ref"),
+        ("source_ref", "' origin/main '", "reason=invalid_source_ref"),
+        ("expected_head_sha", "null", "reason=invalid_expected_head_sha"),
+        ("expected_head_sha", "true", "reason=invalid_expected_head_sha"),
+        ("base_ref", "null", "reason=invalid_source_ref"),
+    ],
+)
+def test_present_invalid_task_source_values_block_without_fallback(
+    field: str, value: str, reason: str
+) -> None:
+    spec, actual_reason = runner.source_spec_from_issue_body(
+        _source_issue_body(
+            f"{field}: {value}",
+            metadata="\n".join(
+                (
+                    "Source Ref: origin/direct-source",
+                    f"Expected Head SHA: {HEAD_SHA}",
+                    "Base Ref: origin/direct-base",
+                )
+            ),
+        )
+    )
+
+    assert spec is None
+    assert actual_reason == reason
+
+
+def test_absent_task_source_keys_fall_back_to_direct_metadata() -> None:
+    spec, reason = runner.source_spec_from_issue_body(
+        _source_issue_body(
+            "allowed_files:\n- scripts/runner_poll_github_tasks.py",
+            metadata="\n".join(
+                (
+                    "Source Ref: refs/heads/direct-source",
+                    f"Expected Head SHA: {HEAD_SHA.upper()}",
+                    "Base Branch: refs/remotes/origin/direct-base",
+                )
+            ),
+        )
+    )
+
+    assert reason is None
+    assert spec == runner.ProtectedSourceSpec(
+        source_ref="origin/direct-source",
+        expected_head_sha=HEAD_SHA,
+        base_ref="origin/direct-base",
+    )
+
+
+@pytest.mark.parametrize(
+    "metadata,reason",
+    [
+        ("Source Ref:  origin/main", "reason=invalid_source_ref"),
+        ("Source Ref:\torigin/main ", "reason=invalid_source_ref"),
+        ("Source Ref: origin/main ", "reason=invalid_source_ref"),
+        (f"Expected Head SHA:  {HEAD_SHA}", "reason=invalid_expected_head_sha"),
+        (f"Expected Head SHA: {HEAD_SHA} ", "reason=invalid_expected_head_sha"),
+        ("Base Ref:  origin/main", "reason=invalid_source_ref"),
+        ("Base Ref: origin/main ", "reason=invalid_source_ref"),
+        ("Base Branch:  origin/main", "reason=invalid_source_ref"),
+        ("Base Branch: origin/main ", "reason=invalid_source_ref"),
+    ],
+)
+def test_direct_protected_source_values_preserve_whitespace_and_block(
+    metadata: str, reason: str
+) -> None:
+    spec, actual_reason = runner.source_spec_from_issue_body(
+        _source_issue_body("plain task", metadata=metadata)
+    )
+
+    assert spec is None
+    assert actual_reason == reason
+
+
+def test_unrelated_pre_task_yaml_and_generic_base_are_ignored() -> None:
+    spec, reason = runner.source_spec_from_issue_body(
+        "\n".join(
+            (
+                "```yaml",
+                "source_ref: origin/not-source",
+                f"expected_head_sha: {'b' * 40}",
+                "```",
+                f"Base: main@{'c' * 40}",
+                "",
+                "```task",
+                "plain text task",
+                "```",
+            )
+        )
+    )
+
+    assert reason is None
+    assert spec == runner.ProtectedSourceSpec()
+
+
+def test_invalid_task_yaml_intended_as_source_metadata_is_bounded() -> None:
+    spec, reason = runner.source_spec_from_issue_body(
+        _source_issue_body("source_ref: [origin/main")
+    )
+
+    assert spec is None
+    assert reason == "reason=invalid_task_source_metadata"
+
+
+@pytest.mark.parametrize(
+    ("raw", "normalized"),
+    [
+        ("origin/main", "origin/main"),
+        ("origin/feature.branch-1", "origin/feature.branch-1"),
+        ("origin/_repair", "origin/_repair"),
+        ("refs/heads/_repair", "origin/_repair"),
+        ("refs/heads/team/_repair", "origin/team/_repair"),
+        ("refs/heads/runner/issue-1", "origin/runner/issue-1"),
+        ("refs/remotes/origin/release/v1", "origin/release/v1"),
+        (HEAD_SHA.upper(), HEAD_SHA),
+    ],
+)
+def test_protected_source_ref_grammar_accepts_exact_safe_forms(
+    raw: str, normalized: str
+) -> None:
+    assert runner._normalize_protected_source_ref(raw) == (normalized, None)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "main",
+        "refs/heads",
+        "refs/heads/",
+        "upstream/main",
+        " origin/main",
+        "origin/main ",
+        "origin/",
+        "origin/.hidden",
+        "origin/team/.hidden",
+        "origin/a..b",
+        "origin/a.lock",
+        "origin/a@{1}",
+        "origin/a b",
+        "origin/a:b",
+        "origin/a?",
+        "origin/a~",
+        "origin/a^",
+        "origin/a\\b",
+        "origin/a/",
+        "origin/a.",
+        "refs/tags/v1",
+        "refs/remotes/upstream/main",
+        "origin/" + "a" * 201,
+        "origin/mañana",
+        "origin/main\x7f",
+        "origin/main\x80",
+    ],
+)
+def test_protected_source_ref_grammar_rejects_unsafe_forms(raw: str) -> None:
+    normalized, reason = runner._normalize_protected_source_ref(raw)
+
+    assert normalized is None
+    assert reason == "reason=invalid_source_ref"
+
+
+def test_prepare_worktree_resolves_sha_expected_pin_and_checks_out_exact_commit(
+    tmp_path: Path,
+) -> None:
+    worktree_root = tmp_path / "worktrees"
+    coordinator = tmp_path / "coordinator"
+    coordinator.mkdir()
+    issue_path = (worktree_root / "issue-140").resolve()
+    spec = runner.ProtectedSourceSpec(expected_head_sha=HEAD_SHA.upper())
+
+    def run_prepare_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        if command == ["git", "remote", "get-url", "origin"]:
+            return 0, "https://github.com/alanua/Skeleton.git"
+        if command == ["git", "fetch", "origin"]:
+            return 0, ""
+        if command == ["git", "rev-parse", "--verify", "origin/main^{commit}"]:
+            return 0, f"{HEAD_SHA.upper()}\n"
+        if command[:2] == ["git", "clone"]:
+            return 0, ""
+        if command[:4] == ["git", "remote", "set-url", "origin"]:
+            return 0, ""
+        if command == ["git", "checkout", "-B", "runner/issue-140", HEAD_SHA]:
+            return 0, ""
+        if command == ["git", "rev-parse", "HEAD^{commit}"] and cwd == issue_path:
+            return 0, f"{HEAD_SHA}\n"
+        return 2, "unexpected command"
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(worktree_root)}, clear=True
+    ), mock.patch.object(runner, "run_command", side_effect=run_prepare_command) as run:
+        code, output, path = runner.prepare_issue_worktree(140, coordinator, spec)
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert code == 0
+    assert path == issue_path
+    assert "step=checkout_worktree status=done" in output
+    assert ["git", "checkout", "-B", "runner/issue-140", HEAD_SHA] in commands
+
+
+def test_prepare_worktree_expected_sha_mismatch_blocks_before_clone(
+    tmp_path: Path,
+) -> None:
+    worktree_root = tmp_path / "worktrees"
+    coordinator = tmp_path / "coordinator"
+    coordinator.mkdir()
+    spec = runner.ProtectedSourceSpec(expected_head_sha="b" * 40)
+
+    def run_prepare_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        if command == ["git", "remote", "get-url", "origin"]:
+            return 0, "https://github.com/alanua/Skeleton.git"
+        if command == ["git", "fetch", "origin"]:
+            return 0, ""
+        if command == ["git", "rev-parse", "--verify", "origin/main^{commit}"]:
+            return 0, f"{HEAD_SHA}\n"
+        if command[:2] == ["git", "clone"]:
+            return 0, "clone must not run"
+        return 2, "unexpected command"
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(worktree_root)}, clear=True
+    ), mock.patch.object(runner, "run_command", side_effect=run_prepare_command) as run:
+        code, output, _path = runner.prepare_issue_worktree(141, coordinator, spec)
+
+    assert code != 0
+    assert output == "reason=expected_head_sha_mismatch"
+    assert not any(call.args[0][:2] == ["git", "clone"] for call in run.call_args_list)
+
+
+def test_prepare_worktree_missing_or_non_commit_source_blocks_before_clone(
+    tmp_path: Path,
+) -> None:
+    worktree_root = tmp_path / "worktrees"
+    coordinator = tmp_path / "coordinator"
+    coordinator.mkdir()
+    spec = runner.ProtectedSourceSpec(source_ref=HEAD_SHA)
+
+    def run_prepare_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        if command == ["git", "remote", "get-url", "origin"]:
+            return 0, "https://github.com/alanua/Skeleton.git"
+        if command == ["git", "fetch", "origin"]:
+            return 0, ""
+        if command == ["git", "rev-parse", "--verify", f"{HEAD_SHA}^{{commit}}"]:
+            return 128, "fatal output must not leak"
+        if command[:2] == ["git", "clone"]:
+            return 0, "clone must not run"
+        return 2, "unexpected command"
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(worktree_root)}, clear=True
+    ), mock.patch.object(runner, "run_command", side_effect=run_prepare_command) as run:
+        code, output, _path = runner.prepare_issue_worktree(142, coordinator, spec)
+
+    assert code != 0
+    assert output == "reason=source_resolution_failed"
+    assert "fatal output" not in output
+    assert not any(call.args[0][:2] == ["git", "clone"] for call in run.call_args_list)
+
+
+def test_reused_worktree_requires_branch_and_exact_head_after_cleanup(
+    tmp_path: Path,
+) -> None:
+    worktree_path = tmp_path / "worktrees" / "issue-143"
+    worktree_path.mkdir(parents=True)
+
+    def run_reuse_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        assert cwd == worktree_path.resolve()
+        if command == ["git", "fetch", "origin"]:
+            return 0, ""
+        if command == ["git", "rev-parse", "--verify", "origin/main^{commit}"]:
+            return 0, f"{HEAD_SHA}\n"
+        if command == ["git", "status", "--short"]:
+            return 0, ""
+        if command == ["git", "branch", "--show-current"]:
+            return 0, "runner/issue-143\n"
+        if command == ["git", "rev-parse", "HEAD^{commit}"]:
+            return 0, f"{'b' * 40}\n"
+        return 2, "unexpected command"
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(tmp_path / "worktrees")}, clear=True
+    ), mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ) as cleanup, mock.patch.object(
+        runner, "run_command", side_effect=run_reuse_command
+    ):
+        code, output, _path = runner.prepare_issue_worktree(143, tmp_path / "coordinator")
+
+    assert code != 0
+    assert output == "reason=worktree_head_mismatch"
+    cleanup.assert_called_once_with(worktree_path.resolve(), strict=True)
+
+
+def test_process_issue_preparation_reason_does_not_append_workspace_path(
+    tmp_path: Path,
+) -> None:
+    issue = {
+        "number": 146,
+        "title": "Invalid source",
+        "body": _source_issue_body(
+            "source_ref: null",
+            metadata="Expected Output: bounded failure",
+        ),
+        "comments": [],
+    }
+
+    with mock.patch.object(runner, "set_issue_label"), mock.patch.object(
+        runner, "post_issue_comment"
+    ) as post, mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "prepare_issue_worktree"
+    ) as prepare, mock.patch.object(
+        runner, "record_runner_task_picked_up", return_value=None
+    ), mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ):
+        runner.process_issue(issue, workdir=str(tmp_path / "coordinator"))
+
+    report = post.call_args.args[1]
+    assert "reason=invalid_source_ref" in report
+    assert "Issue worktree:" not in report
+    assert str(tmp_path) not in report
+    prepare.assert_not_called()
 
 
 def test_cleanup_issue_worktree_refuses_path_outside_configured_root(
@@ -849,7 +1273,7 @@ def test_process_issue_runs_codex_in_prepared_issue_worktree(tmp_path: Path) -> 
     ):
         runner.process_issue(issue, workdir=str(coordinator))
 
-    prepare.assert_called_once_with(139, str(coordinator))
+    prepare.assert_called_once_with(139, str(coordinator), runner.ProtectedSourceSpec())
     run_codex.assert_called_once_with(
         "Do it", str(issue_path), runner.RunnerTask(content="Do it")
     )
@@ -1591,7 +2015,9 @@ def test_process_issue_runs_target_project_bauclock_in_local_worktree(
         target_repository="alanua/bauclock",
     )
     prepare_branch.assert_not_called()
-    prepare_target.assert_called_once_with("alanua/bauclock", 146)
+    prepare_target.assert_called_once_with(
+        "alanua/bauclock", 146, runner.ProtectedSourceSpec()
+    )
     run_codex.assert_called_once_with("Do it", str(issue_path), expected_task)
     finalize_success.assert_not_called()
     finalize_local.assert_called_once_with(str(issue_path), "codex output", expected_task)
@@ -1638,7 +2064,9 @@ def test_process_issue_runs_target_project_lavalamp_when_project_tree_enables_wo
         has_target_project_metadata=True,
         target_repository="alanua/Lavalamp",
     )
-    prepare_target.assert_called_once_with("alanua/Lavalamp", 147)
+    prepare_target.assert_called_once_with(
+        "alanua/Lavalamp", 147, runner.ProtectedSourceSpec()
+    )
     run_codex.assert_called_once_with("Do it", str(issue_path), expected_task)
 
 
@@ -1839,7 +2267,7 @@ def test_process_issue_runs_target_project_skeleton_normally(tmp_path: Path) -> 
     ):
         runner.process_issue(issue, workdir=str(coordinator))
 
-    prepare.assert_called_once_with(148, str(coordinator))
+    prepare.assert_called_once_with(148, str(coordinator), runner.ProtectedSourceSpec())
     run_codex.assert_called_once_with(
         "Do it",
         str(issue_path),
@@ -1889,7 +2317,9 @@ def test_process_issue_runs_target_repository_lavalamp_in_registered_worktree(
         runner.process_issue(issue)
 
     prepare_branch.assert_not_called()
-    prepare_target.assert_called_once_with("alanua/Lavalamp", 143)
+    prepare_target.assert_called_once_with(
+        "alanua/Lavalamp", 143, runner.ProtectedSourceSpec()
+    )
     run_codex.assert_called_once()
 
 
@@ -1969,7 +2399,9 @@ def test_process_issue_runs_non_skeleton_codex_worktree_mode_locally(
         runner.process_issue(issue)
 
     prepare_branch.assert_not_called()
-    prepare_target.assert_called_once_with("alanua/CodexOther", 150)
+    prepare_target.assert_called_once_with(
+        "alanua/CodexOther", 150, runner.ProtectedSourceSpec()
+    )
     run_codex.assert_called_once()
     finalize_local.assert_called_once()
 
@@ -3717,7 +4149,7 @@ def test_code_task_accepts_fenced_yaml_expected_output_before_codex(
     ):
         runner.process_issue(issue, workdir=str(coordinator))
 
-    prepare.assert_called_once_with(249, str(coordinator))
+    prepare.assert_called_once_with(249, str(coordinator), runner.ProtectedSourceSpec())
     run_codex.assert_called_once()
 
 
