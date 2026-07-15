@@ -785,6 +785,282 @@ def test_prepare_issue_worktree_clones_workspace_with_writable_gitdir(
     ]
 
 
+def _protected_source_issue_body(task_body: str) -> str:
+    return "\n".join(("Expected Output: done", "", "```task", task_body, "```"))
+
+
+def test_prepare_issue_worktree_protected_source_new_path_uses_bounded_resolution(
+    tmp_path: Path,
+) -> None:
+    worktree_root = tmp_path / "worktrees"
+    coordinator = tmp_path / "coordinator"
+    coordinator.mkdir()
+    resolved_sha = "a" * 40
+    body = _protected_source_issue_body(
+        "source_ref: origin/_repair\n"
+        f"expected_head_sha: {resolved_sha}\n"
+        "required_changes:\n"
+        "- fix it\n"
+    )
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(worktree_root)}, clear=True
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=(
+            (0, "https://github.com/alanua/Skeleton.git"),
+            (0, "fetched"),
+            (0, f"{resolved_sha}\n"),
+            (0, "cloned"),
+            (0, ""),
+            (0, "fetched clone"),
+            (0, f"{resolved_sha}\n"),
+            (0, "checked out"),
+            (0, f"{resolved_sha}\n"),
+        ),
+    ) as run_command:
+        code, output, path = runner.prepare_issue_worktree(139, coordinator, body)
+
+    assert code == 0
+    assert output == "reason=protected_source_ready"
+    assert path == (worktree_root / "issue-139").resolve()
+    assert run_command.call_args_list == [
+        mock.call(["git", "remote", "get-url", "origin"], cwd=coordinator),
+        mock.call(
+            ["git", "fetch", "origin"],
+            cwd=coordinator,
+            timeout=runner._PROTECTED_SOURCE_FETCH_TIMEOUT_SECONDS,
+        ),
+        mock.call(
+            [
+                "git",
+                "rev-parse",
+                "--verify",
+                "refs/remotes/origin/_repair^{commit}",
+            ],
+            cwd=coordinator,
+            timeout=runner._PROTECTED_SOURCE_REV_PARSE_TIMEOUT_SECONDS,
+        ),
+        mock.call(
+            [
+                "git",
+                "clone",
+                "--local",
+                "--no-hardlinks",
+                "--no-checkout",
+                str(coordinator.resolve()),
+                str(path),
+            ],
+            cwd=coordinator,
+        ),
+        mock.call(
+            [
+                "git",
+                "remote",
+                "set-url",
+                "origin",
+                "https://github.com/alanua/Skeleton.git",
+            ],
+            cwd=path,
+        ),
+        mock.call(
+            ["git", "fetch", "origin"],
+            cwd=path,
+            timeout=runner._PROTECTED_SOURCE_FETCH_TIMEOUT_SECONDS,
+        ),
+        mock.call(
+            [
+                "git",
+                "rev-parse",
+                "--verify",
+                "refs/remotes/origin/_repair^{commit}",
+            ],
+            cwd=path,
+            timeout=runner._PROTECTED_SOURCE_REV_PARSE_TIMEOUT_SECONDS,
+        ),
+        mock.call(["git", "checkout", "-B", "runner/issue-139", resolved_sha], cwd=path),
+        mock.call(
+            ["git", "rev-parse", "--verify", "HEAD^{commit}"],
+            cwd=path,
+            timeout=runner._PROTECTED_SOURCE_REV_PARSE_TIMEOUT_SECONDS,
+        ),
+    ]
+
+
+def test_prepare_issue_worktree_protected_source_reuse_uses_bounded_resolution(
+    tmp_path: Path,
+) -> None:
+    worktree_path = tmp_path / "worktrees" / "issue-139"
+    worktree_path.mkdir(parents=True)
+    resolved_sha = "b" * 40
+    body = _protected_source_issue_body(
+        "source_ref: refs/heads/team/_repair\n"
+        f"expected_head_sha: {resolved_sha}\n"
+    )
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(tmp_path / "worktrees")}, clear=True
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=(
+            (0, ""),
+            (0, "runner/issue-139\n"),
+            (0, "fetched"),
+            (0, f"{resolved_sha}\n"),
+            (0, f"{resolved_sha}\n"),
+        ),
+    ) as run_command:
+        code, output, path = runner.prepare_issue_worktree(
+            139, tmp_path / "coordinator", body
+        )
+
+    assert code == 0
+    assert output == "reason=protected_source_ready"
+    assert path == worktree_path.resolve()
+    assert run_command.call_args_list == [
+        mock.call(["git", "status", "--short"], cwd=path),
+        mock.call(["git", "branch", "--show-current"], cwd=path),
+        mock.call(
+            ["git", "fetch", "origin"],
+            cwd=path,
+            timeout=runner._PROTECTED_SOURCE_FETCH_TIMEOUT_SECONDS,
+        ),
+        mock.call(
+            [
+                "git",
+                "rev-parse",
+                "--verify",
+                "refs/remotes/origin/team/_repair^{commit}",
+            ],
+            cwd=path,
+            timeout=runner._PROTECTED_SOURCE_REV_PARSE_TIMEOUT_SECONDS,
+        ),
+        mock.call(
+            ["git", "rev-parse", "--verify", "HEAD^{commit}"],
+            cwd=path,
+            timeout=runner._PROTECTED_SOURCE_REV_PARSE_TIMEOUT_SECONDS,
+        ),
+    ]
+
+
+def test_prepare_issue_worktree_protected_source_failure_is_reason_only(
+    tmp_path: Path,
+) -> None:
+    worktree_root = tmp_path / "worktrees"
+    coordinator = tmp_path / "coordinator"
+    coordinator.mkdir()
+    body = _protected_source_issue_body("source_ref: origin/_repair\n")
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(worktree_root)}, clear=True
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=(
+            (0, "https://token@example.test/private.git"),
+            (0, "fatal raw fetch output /tmp/private https://secret.test"),
+            (128, "fatal raw rev output origin/_repair /tmp/private"),
+        ),
+    ):
+        code, output, _path = runner.prepare_issue_worktree(139, coordinator, body)
+
+    assert code == 1
+    assert output == "reason=source_ref_resolution_failed"
+    assert "fatal" not in output
+    assert "origin/_repair" not in output
+    assert str(tmp_path) not in output
+    assert "https://" not in output
+
+
+def test_prepare_issue_worktree_invalid_task_yaml_real_source_key_blocks(
+    tmp_path: Path,
+) -> None:
+    body = _protected_source_issue_body("source_ref: [unterminated\n")
+
+    with mock.patch.object(runner, "run_command") as run_command:
+        code, output, _path = runner.prepare_issue_worktree(
+            139, tmp_path / "coordinator", body
+        )
+
+    assert code == 1
+    assert output == "reason=invalid_task_source_metadata"
+    run_command.assert_not_called()
+
+
+def test_prepare_issue_worktree_plain_prose_source_ref_uses_default_origin_main_behavior(
+    tmp_path: Path,
+) -> None:
+    worktree_root = tmp_path / "worktrees"
+    coordinator = tmp_path / "coordinator"
+    coordinator.mkdir()
+    body = _protected_source_issue_body(
+        "Please mention source_ref in a sentence, but do not set metadata."
+    )
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(worktree_root)}, clear=True
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=(
+            (0, "https://github.com/alanua/Skeleton.git"),
+            (0, "fetched"),
+            (0, "cloned"),
+            (0, ""),
+            (0, "fetched clone"),
+            (0, "checked out"),
+        ),
+    ) as run_command:
+        code, output, _path = runner.prepare_issue_worktree(139, coordinator, body)
+
+    assert code == 0
+    assert "git checkout -B runner/issue-139 origin/main" in output
+    commands = [call.args[0] for call in run_command.call_args_list]
+    assert ["git", "rev-parse", "--verify", "refs/remotes/origin/main^{commit}"] not in commands
+
+
+def test_prepare_issue_worktree_direct_protected_metadata_whitespace_rejected(
+    tmp_path: Path,
+) -> None:
+    body = "Source Ref:  origin/main\n\n```task\nDo it\n```"
+
+    with mock.patch.object(runner, "run_command") as run_command:
+        code, output, _path = runner.prepare_issue_worktree(
+            139, tmp_path / "coordinator", body
+        )
+
+    assert code == 1
+    assert output == "reason=invalid_task_source_metadata"
+    run_command.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "source_ref",
+    (
+        "refs/heads/.repair",
+        "origin/repair.",
+        "origin/team//repair",
+        "origin/team/../repair",
+        "origin/repair.lock",
+        "origin/repair@{1}",
+        "origin/repair space",
+        "origin/répáiř",
+        "refs/tags/repair",
+        "main",
+        "origin/" + "a" * 201,
+    ),
+)
+def test_protected_source_branch_grammar_rejects_unsafe_refs(source_ref: str) -> None:
+    source, reason = runner.protected_issue_source_from_body(
+        _protected_source_issue_body(f"source_ref: {source_ref}\n")
+    )
+
+    assert source is None
+    assert reason == "invalid_task_source_metadata"
+
+
 def test_stale_dirty_worktree_blocks_instead_of_deleting(tmp_path: Path) -> None:
     worktree_path = tmp_path / "worktrees" / "issue-139"
     worktree_path.mkdir(parents=True)
