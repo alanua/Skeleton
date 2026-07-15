@@ -785,6 +785,265 @@ def test_prepare_issue_worktree_clones_workspace_with_writable_gitdir(
     ]
 
 
+def test_explicit_source_ref_canonicalizes_only_established_forms() -> None:
+    expected = "refs/remotes/origin/runner/_issue-1836"
+    assert runner.canonical_explicit_source_ref("origin/runner/_issue-1836") == expected
+    assert (
+        runner.canonical_explicit_source_ref("refs/heads/runner/_issue-1836")
+        == expected
+    )
+    assert (
+        runner.canonical_explicit_source_ref("refs/remotes/origin/runner/_issue-1836")
+        == expected
+    )
+    assert runner.canonical_explicit_source_ref("A" * 40) == "a" * 40
+
+    rejected = (
+        "runner/_issue-1836",
+        "origin/origin/runner/_issue-1836",
+        "upstream/runner/_issue-1836",
+        "refs/remotes/upstream/runner/_issue-1836",
+        "refs/heads/runner/../main",
+        "refs/heads/runner/.hidden",
+        "refs/heads/runner/name.",
+        "refs/heads/runner/name.lock",
+        "refs/heads/runner/name@{1}",
+        "refs/heads/runner/name with space",
+        "refs/heads/runner/unicodé",
+    )
+    for ref in rejected:
+        assert runner.canonical_explicit_source_ref(ref) is None
+
+
+def test_base_branch_is_only_bare_branch_exact_ref_form() -> None:
+    assert (
+        runner.canonical_base_branch_ref("runner/_issue-1836")
+        == "refs/remotes/origin/runner/_issue-1836"
+    )
+    assert runner.canonical_base_branch_ref("origin/runner/_issue-1836") is None
+
+    metadata = "\n".join(
+        (
+            "Base Branch: runner/_issue-1836",
+            "Base: unrelated",
+        )
+    )
+    assert runner._runner_task_exact_refs(metadata) == (
+        None,
+        "refs/remotes/origin/runner/_issue-1836",
+        None,
+    )
+    assert runner._runner_task_exact_refs("Base Ref: runner/_issue-1836") == (
+        None,
+        None,
+        "Base Ref is malformed.",
+    )
+
+
+def test_exact_ref_first_present_alias_rejects_blank_before_yaml_fallback() -> None:
+    metadata = "\n".join(
+        (
+            "Source Ref:   ",
+            "```yaml",
+            "source_ref: refs/heads/runner/_issue-1836",
+            "```",
+        )
+    )
+    assert runner._runner_task_exact_refs(metadata) == (
+        None,
+        None,
+        "Explicit Source Ref is malformed.",
+    )
+
+
+def test_malformed_task_yaml_with_protected_exact_ref_key_blocks() -> None:
+    task, reason = runner.extract_runner_task(
+        "\n".join(
+            (
+                "Expected Output: done",
+                "",
+                "```task",
+                "source_ref: [",
+                "```",
+            )
+        )
+    )
+
+    assert task is None
+    assert reason == "Task exact-source metadata is malformed."
+
+
+def test_prepare_issue_worktree_supports_full_sha_source_ref(tmp_path: Path) -> None:
+    worktree_root = tmp_path / "worktrees"
+    coordinator = tmp_path / "coordinator"
+    coordinator.mkdir()
+    source_sha = "A" * 40
+    canonical_sha = "a" * 40
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(worktree_root)}, clear=True
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=(
+            (0, "https://github.com/alanua/Skeleton.git"),
+            (0, f"{canonical_sha}\n"),
+            (0, "fetched"),
+            (0, "cloned"),
+            (0, ""),
+            (0, "fetched clone"),
+            (0, "checked out"),
+            (0, f"{canonical_sha}\n"),
+        ),
+    ) as run_command:
+        code, output, path = runner.prepare_issue_worktree(
+            1836,
+            coordinator,
+            source_ref=runner.canonical_explicit_source_ref(source_sha),
+        )
+
+    assert code == 0
+    assert f"git checkout -B runner/issue-1836 {canonical_sha}" in output
+    assert run_command.call_args_list[1] == mock.call(
+        ["git", "rev-parse", f"{canonical_sha}^{{commit}}"], cwd=coordinator
+    )
+    assert run_command.call_args_list[-1] == mock.call(["git", "rev-parse", "HEAD"], cwd=path)
+
+
+def test_prepare_issue_worktree_fetches_canonical_source_branch_before_clone(
+    tmp_path: Path,
+) -> None:
+    worktree_root = tmp_path / "worktrees"
+    coordinator = tmp_path / "coordinator"
+    coordinator.mkdir()
+    source_sha = "b" * 40
+    source_ref = runner.canonical_explicit_source_ref("refs/heads/runner/_issue-1836")
+    assert source_ref == "refs/remotes/origin/runner/_issue-1836"
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(worktree_root)}, clear=True
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=(
+            (0, "https://github.com/alanua/Skeleton.git"),
+            (0, "fetched source"),
+            (0, f"{source_sha}\n"),
+            (0, "fetched"),
+            (0, "cloned"),
+            (0, ""),
+            (0, "fetched clone"),
+            (0, "checked out"),
+            (0, f"{source_sha}\n"),
+        ),
+    ) as run_command:
+        code, _output, path = runner.prepare_issue_worktree(
+            1836,
+            coordinator,
+            source_ref=source_ref,
+        )
+
+    assert code == 0
+    assert run_command.call_args_list[1] == mock.call(
+        [
+            "git",
+            "fetch",
+            "origin",
+            "runner/_issue-1836:refs/remotes/origin/runner/_issue-1836",
+        ],
+        cwd=coordinator,
+    )
+    assert run_command.call_args_list[7] == mock.call(
+        ["git", "checkout", "-B", "runner/issue-1836", source_sha], cwd=path
+    )
+
+
+def test_prepare_issue_worktree_base_branch_canonicalizes_once_without_double_origin(
+    tmp_path: Path,
+) -> None:
+    worktree_root = tmp_path / "worktrees"
+    coordinator = tmp_path / "coordinator"
+    coordinator.mkdir()
+    base_ref = runner.canonical_base_branch_ref("runner/_issue-1836")
+    assert base_ref == "refs/remotes/origin/runner/_issue-1836"
+    head_sha = "c" * 40
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(worktree_root)}, clear=True
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=(
+            (0, "https://github.com/alanua/Skeleton.git"),
+            (0, "fetched base"),
+            (0, f"{head_sha}\n"),
+            (0, "fetched"),
+            (0, "cloned"),
+            (0, ""),
+            (0, "fetched clone"),
+            (0, "checked out"),
+            (0, f"{head_sha}\n"),
+        ),
+    ) as run_command:
+        code, _output, path = runner.prepare_issue_worktree(
+            1836,
+            coordinator,
+            base_ref=base_ref,
+        )
+
+    assert code == 0
+    assert run_command.call_args_list[1] == mock.call(
+        [
+            "git",
+            "fetch",
+            "origin",
+            "runner/_issue-1836:refs/remotes/origin/runner/_issue-1836",
+        ],
+        cwd=coordinator,
+    )
+    assert run_command.call_args_list[7] == mock.call(
+        ["git", "checkout", "-B", "runner/issue-1836", head_sha],
+        cwd=path,
+    )
+    assert "origin/origin" not in str(run_command.call_args_list)
+
+
+def test_protected_prepare_failure_returns_stable_reason_without_private_output(
+    tmp_path: Path,
+) -> None:
+    worktree_root = tmp_path / "worktrees"
+    coordinator = tmp_path / "coordinator"
+    coordinator.mkdir()
+    leaked = (
+        "fatal: https://token@example.invalid/repo.git "
+        f"{tmp_path}/private checkout command"
+    )
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(worktree_root)}, clear=True
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=(
+            (0, "https://github.com/alanua/Skeleton.git"),
+            (1, leaked),
+        ),
+    ):
+        code, output, path = runner.prepare_issue_worktree(
+            1836,
+            coordinator,
+            source_ref="d" * 40,
+        )
+
+    assert code == 1
+    assert output == "reason=source_resolution_failed"
+    assert str(path).endswith("issue-1836")
+    assert leaked not in output
+    assert "https://" not in output
+    assert str(tmp_path) not in output
+    assert "git " not in output
+
+
 def test_stale_dirty_worktree_blocks_instead_of_deleting(tmp_path: Path) -> None:
     worktree_path = tmp_path / "worktrees" / "issue-139"
     worktree_path.mkdir(parents=True)

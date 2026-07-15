@@ -758,6 +758,8 @@ class RunnerTask:
     has_target_project_metadata: bool = False
     target_repository: str = QUEUE_REPOSITORY
     has_target_repository_metadata: bool = False
+    source_ref: str | None = None
+    base_ref: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1102,15 +1104,209 @@ def format_command_output(command: list[str], output: str) -> str:
     return f"$ {' '.join(command)}\n{output}"
 
 
+_EXPLICIT_SOURCE_REF_DIRECT_FIELDS = ("Source Ref", "source_ref")
+_EXPLICIT_BASE_REF_DIRECT_FIELDS = ("Base Ref", "base_ref", "base-ref")
+_BASE_BRANCH_DIRECT_FIELDS = ("Base Branch",)
+_TASK_EXACT_REF_KEYS = frozenset(("source_ref", "base_ref", "base-ref"))
+_EXACT_REF_BRANCH_COMPONENT_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,78}[A-Za-z0-9_-]?")
+
+
+def _exact_ref_direct_field(metadata: str, fields: tuple[str, ...]) -> tuple[bool, str | None]:
+    for field in fields:
+        match = re.search(
+            rf"^\s*{re.escape(field)}:\s*(?P<value>.*)$",
+            metadata or "",
+            re.MULTILINE,
+        )
+        if match is None:
+            continue
+        value = match.group("value")
+        if value != value.strip() or not value:
+            return True, None
+        return True, value
+    return False, None
+
+
+def _exact_ref_yaml_value(metadata: str, keys: tuple[str, ...]) -> tuple[bool, object]:
+    for document in _metadata_yaml_documents(metadata):
+        for key in keys:
+            if key in document:
+                return True, document[key]
+    return False, None
+
+
+def _exact_ref_first_present_value(
+    metadata: str,
+    direct_fields: tuple[str, ...],
+    yaml_keys: tuple[str, ...],
+) -> tuple[bool, str | None]:
+    present, value = _exact_ref_direct_field(metadata, direct_fields)
+    if present:
+        return True, value
+    present, yaml_value = _exact_ref_yaml_value(metadata, yaml_keys)
+    if present:
+        return True, yaml_value if isinstance(yaml_value, str) else None
+    return False, None
+
+
+def _exact_ref_branch_valid(branch: str) -> bool:
+    if (
+        not branch
+        or len(branch) > 240
+        or branch != branch.strip()
+        or branch.startswith(("-", "/", "."))
+        or branch.endswith(("/", "."))
+        or "//" in branch
+        or ".." in branch
+        or "@{" in branch
+        or "\\" in branch
+        or any(ord(character) < 33 or ord(character) > 126 for character in branch)
+    ):
+        return False
+    components = branch.split("/")
+    if not components or components[0] == "origin":
+        return False
+    for component in components:
+        lowered = component.lower()
+        if (
+            not component
+            or component in {".", ".."}
+            or component.startswith(".")
+            or component.endswith(".")
+            or lowered.endswith(".lock")
+            or _EXACT_REF_BRANCH_COMPONENT_RE.fullmatch(component) is None
+        ):
+            return False
+    return True
+
+
+def canonical_explicit_source_ref(ref: str) -> str | None:
+    if not isinstance(ref, str):
+        return None
+    if _HEAD_SHA_RE.fullmatch(ref) is not None:
+        return ref.lower()
+    prefixes = (
+        ("origin/", "origin/"),
+        ("refs/heads/", "refs/heads/"),
+        ("refs/remotes/origin/", "refs/remotes/origin/"),
+    )
+    for prefix, _label in prefixes:
+        if not ref.startswith(prefix):
+            continue
+        branch = ref[len(prefix) :]
+        if not _exact_ref_branch_valid(branch):
+            return None
+        return f"refs/remotes/origin/{branch}"
+    return None
+
+
+def canonical_base_branch_ref(branch: str) -> str | None:
+    if not isinstance(branch, str) or not _exact_ref_branch_valid(branch):
+        return None
+    return f"refs/remotes/origin/{branch}"
+
+
+def _task_block_exact_ref_values(
+    body: str,
+) -> tuple[Mapping[str, Any], str | None]:
+    task_block = extract_task_block(body)
+    if task_block is None:
+        return {}, None
+    if not any(
+        re.search(rf"^\s*{re.escape(key)}\s*:", task_block, re.MULTILINE)
+        for key in _TASK_EXACT_REF_KEYS
+    ):
+        return {}, None
+    try:
+        parsed = yaml.safe_load(task_block)
+    except yaml.YAMLError:
+        return {}, "Task exact-source metadata is malformed."
+    if not isinstance(parsed, Mapping):
+        return {}, "Task exact-source metadata is malformed."
+    return parsed, None
+
+
+def _runner_task_exact_refs(
+    metadata: str, task_fields: Mapping[str, Any] | None = None
+) -> tuple[str | None, str | None, str | None]:
+    source_present, raw_source_ref = _exact_ref_first_present_value(
+        metadata,
+        _EXPLICIT_SOURCE_REF_DIRECT_FIELDS,
+        ("source_ref",),
+    )
+    if (
+        not source_present
+        and task_fields is not None
+        and "source_ref" in task_fields
+    ):
+        source_present = True
+        raw_source_ref = (
+            task_fields["source_ref"] if isinstance(task_fields["source_ref"], str) else None
+        )
+    source_ref: str | None = None
+    if source_present:
+        source_ref = canonical_explicit_source_ref(raw_source_ref or "")
+        if source_ref is None:
+            return None, None, "Explicit Source Ref is malformed."
+
+    base_ref_present, raw_base_ref = _exact_ref_first_present_value(
+        metadata,
+        _EXPLICIT_BASE_REF_DIRECT_FIELDS,
+        ("base_ref", "base-ref"),
+    )
+    base_branch_present, raw_base_branch = _exact_ref_first_present_value(
+        metadata,
+        _BASE_BRANCH_DIRECT_FIELDS,
+        ("base_branch",),
+    )
+    if not base_ref_present and task_fields is not None:
+        for key in ("base_ref", "base-ref"):
+            if key not in task_fields:
+                continue
+            base_ref_present = True
+            raw_base_ref = task_fields[key] if isinstance(task_fields[key], str) else None
+            break
+    if base_ref_present and base_branch_present:
+        return None, None, "Use either Base Ref or Base Branch, not both."
+    base_ref: str | None = None
+    if base_ref_present:
+        base_ref = canonical_explicit_source_ref(raw_base_ref or "")
+        if base_ref is None:
+            return None, None, "Base Ref is malformed."
+    elif base_branch_present:
+        base_ref = canonical_base_branch_ref(raw_base_branch or "")
+        if base_ref is None:
+            return None, None, "Base Branch is malformed."
+    return source_ref, base_ref, None
+
+
+def _protected_worktree_failure(reason: str, path: Path) -> tuple[int, str, Path]:
+    return 1, f"reason={reason}", path
+
+
 def prepare_issue_worktree(
-    issue_number: int, coordinator_workdir: str | Path
+    issue_number: int,
+    coordinator_workdir: str | Path,
+    *,
+    source_ref: str | None = None,
+    base_ref: str | None = None,
 ) -> tuple[int, str, Path]:
     path = ensure_safe_worktree_path(issue_worktree_path(issue_number))
-    return prepare_git_issue_worktree(issue_number, coordinator_workdir, path)
+    return prepare_git_issue_worktree(
+        issue_number,
+        coordinator_workdir,
+        path,
+        source_ref=source_ref,
+        base_ref=base_ref,
+    )
 
 
 def prepare_target_repository_issue_worktree(
-    target_repository: str, issue_number: int
+    target_repository: str,
+    issue_number: int,
+    *,
+    source_ref: str | None = None,
+    base_ref: str | None = None,
 ) -> tuple[int, str, Path]:
     try:
         path = ensure_safe_target_repository_worktree_path(
@@ -1119,64 +1315,133 @@ def prepare_target_repository_issue_worktree(
         )
         checkout_path = target_repository_checkout_path(target_repository)
     except ValueError as exc:
+        if source_ref is not None or base_ref is not None:
+            return _protected_worktree_failure("target_path_invalid", Path("."))
         return 1, str(exc), Path(".")
     checkout_block_reason = verify_target_repository_checkout(target_repository)
     if checkout_block_reason is not None:
+        if source_ref is not None or base_ref is not None:
+            return _protected_worktree_failure("target_checkout_unavailable", path)
         return 1, checkout_block_reason, path
-    return prepare_git_issue_worktree(issue_number, checkout_path, path)
+    return prepare_git_issue_worktree(
+        issue_number,
+        checkout_path,
+        path,
+        source_ref=source_ref,
+        base_ref=base_ref,
+    )
 
 
 def prepare_git_issue_worktree(
-    issue_number: int, coordinator_workdir: str | Path, path: Path
+    issue_number: int,
+    coordinator_workdir: str | Path,
+    path: Path,
+    *,
+    source_ref: str | None = None,
+    base_ref: str | None = None,
 ) -> tuple[int, str, Path]:
     branch = issue_branch(issue_number)
     outputs: list[str] = []
+    protected = source_ref is not None or base_ref is not None
+    effective_ref = source_ref or base_ref or "origin/main"
 
     if path.exists():
-        checks = (
-            (["git", "status", "--short"], "dirty"),
-            (["git", "branch", "--show-current"], "branch"),
-        )
-        for command, check_name in checks:
-            code, output = run_command(command, cwd=path)
-            outputs.append(format_command_output(command, output))
-            if code != 0:
-                return (
-                    code,
-                    "Existing issue worktree needs cleanup before reuse.\n\n"
-                    + "\n".join(outputs),
-                    path,
-                )
-            if check_name == "dirty" and output.strip():
-                return (
-                    1,
-                    "Existing issue worktree is dirty; cleanup is required before reuse.\n\n"
-                    + "\n".join(outputs),
-                    path,
-                )
-            if check_name == "branch" and output.strip() != branch:
-                return (
-                    1,
-                    "Existing issue worktree is on the wrong branch; cleanup is "
-                    f"required before reuse. Expected {branch!r}.\n\n"
-                    + "\n".join(outputs),
-                    path,
-                )
-        return 0, "\n".join(outputs), path
+        if protected:
+            cleanup_code, _cleanup_output = cleanup_git_issue_worktree(
+                path, coordinator_workdir
+            )
+            if cleanup_code != 0:
+                return _protected_worktree_failure("strict_cleanup_failed", path)
+            if path.exists():
+                return _protected_worktree_failure("strict_cleanup_incomplete", path)
+        else:
+            checks = (
+                (["git", "status", "--short"], "dirty"),
+                (["git", "branch", "--show-current"], "branch"),
+            )
+            for command, check_name in checks:
+                code, output = run_command(command, cwd=path)
+                outputs.append(format_command_output(command, output))
+                if code != 0:
+                    return (
+                        code,
+                        "Existing issue worktree needs cleanup before reuse.\n\n"
+                        + "\n".join(outputs),
+                        path,
+                    )
+                if check_name == "dirty" and output.strip():
+                    return (
+                        1,
+                        "Existing issue worktree is dirty; cleanup is required before reuse.\n\n"
+                        + "\n".join(outputs),
+                        path,
+                    )
+                if check_name == "branch" and output.strip() != branch:
+                    return (
+                        1,
+                        "Existing issue worktree is on the wrong branch; cleanup is "
+                        f"required before reuse. Expected {branch!r}.\n\n"
+                        + "\n".join(outputs),
+                        path,
+                    )
+            return 0, "\n".join(outputs), path
 
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
+        if protected:
+            return _protected_worktree_failure("worktree_root_create_failed", path)
         return 1, f"Unable to create worktree root {path.parent}:\n{exc}", path
 
     remote_code, remote_output = run_command(
         ["git", "remote", "get-url", "origin"], cwd=coordinator_workdir
     )
     if remote_code != 0:
+        if protected:
+            return _protected_worktree_failure("coordinator_origin_read_failed", path)
         return 1, "Unable to read coordinator origin URL.", path
     origin_url = remote_output.strip()
     if not origin_url:
+        if protected:
+            return _protected_worktree_failure("coordinator_origin_empty", path)
         return 1, "Coordinator origin URL is empty.", path
+
+    ref_to_resolve = source_ref or base_ref
+    if (
+        protected
+        and ref_to_resolve is not None
+        and _HEAD_SHA_RE.fullmatch(ref_to_resolve) is not None
+    ):
+        code, output = run_command(
+            ["git", "rev-parse", f"{ref_to_resolve}^{{commit}}"], cwd=coordinator_workdir
+        )
+        resolved_lines = _git_status_path_lines(output) if code == 0 else []
+        if (
+            code != 0
+            or not resolved_lines
+            or resolved_lines[0].lower() != ref_to_resolve
+        ):
+            return _protected_worktree_failure("source_resolution_failed", path)
+
+    if (
+        protected
+        and ref_to_resolve is not None
+        and _HEAD_SHA_RE.fullmatch(ref_to_resolve) is None
+    ):
+        branch_name = ref_to_resolve.removeprefix("refs/remotes/origin/")
+        fetch_command = ["git", "fetch", "origin", f"{branch_name}:{ref_to_resolve}"]
+        code, _output = run_command(fetch_command, cwd=coordinator_workdir)
+        if code != 0:
+            return _protected_worktree_failure("coordinator_fetch_failed", path)
+        code, output = run_command(["git", "rev-parse", ref_to_resolve], cwd=coordinator_workdir)
+        resolved_lines = _git_status_path_lines(output) if code == 0 else []
+        if code != 0 or not resolved_lines or _HEAD_SHA_RE.fullmatch(resolved_lines[0]) is None:
+            return _protected_worktree_failure("source_resolution_failed", path)
+        effective_ref = resolved_lines[0].lower()
+        if source_ref is not None:
+            source_ref = effective_ref
+        else:
+            base_ref = effective_ref
 
     commands = (
         (["git", "fetch", "origin"], coordinator_workdir),
@@ -1193,12 +1458,20 @@ def prepare_git_issue_worktree(
             coordinator_workdir,
         ),
         (["git", "fetch", "origin"], path),
-        (["git", "checkout", "-B", branch, "origin/main"], path),
+        (["git", "checkout", "-B", branch, effective_ref], path),
     )
     for command, cwd in commands:
         code, output = run_command(command, cwd=cwd)
         outputs.append(format_command_output(command, output))
         if code != 0:
+            if protected:
+                if command[1] == "fetch":
+                    return _protected_worktree_failure("fetch_failed", path)
+                if command[1] == "clone":
+                    return _protected_worktree_failure("clone_failed", path)
+                if command[1] == "checkout":
+                    return _protected_worktree_failure("checkout_failed", path)
+                return _protected_worktree_failure("git_command_failed", path)
             return code, "\n".join(outputs), path
         if command[1] == "clone":
             config_code, config_output = run_command(
@@ -1208,14 +1481,50 @@ def prepare_git_issue_worktree(
                 "$ git remote set-url origin <coordinator-origin>\n" + config_output
             )
             if config_code != 0:
+                if protected:
+                    return _protected_worktree_failure("remote_config_failed", path)
                 return config_code, "\n".join(outputs), path
+        if protected and command[1] == "fetch" and cwd == path and base_ref is not None:
+            if _HEAD_SHA_RE.fullmatch(base_ref) is None:
+                branch_name = base_ref.removeprefix("refs/remotes/origin/")
+                code, _output = run_command(
+                    ["git", "fetch", "origin", f"{branch_name}:{base_ref}"], cwd=path
+                )
+                if code != 0:
+                    return _protected_worktree_failure("fetch_failed", path)
+        if protected and command[1] == "checkout":
+            code, output = run_command(["git", "rev-parse", "HEAD"], cwd=path)
+            head_lines = _git_status_path_lines(output) if code == 0 else []
+            if code != 0 or not head_lines or _HEAD_SHA_RE.fullmatch(head_lines[0]) is None:
+                return _protected_worktree_failure("head_read_failed", path)
+            if _HEAD_SHA_RE.fullmatch(effective_ref) is not None:
+                expected_head = effective_ref
+            else:
+                code, output = run_command(["git", "rev-parse", effective_ref], cwd=path)
+                ref_lines = _git_status_path_lines(output) if code == 0 else []
+                if code != 0 or not ref_lines or _HEAD_SHA_RE.fullmatch(ref_lines[0]) is None:
+                    return _protected_worktree_failure("source_resolution_failed", path)
+                expected_head = ref_lines[0].lower()
+            if head_lines[0].lower() != expected_head:
+                return _protected_worktree_failure("head_mismatch", path)
     return 0, "\n".join(outputs), path
 
 
 def prepare_issue_branch(
-    issue_number: int, coordinator_workdir: str | Path
+    issue_number: int,
+    coordinator_workdir: str | Path,
+    *,
+    source_ref: str | None = None,
+    base_ref: str | None = None,
 ) -> tuple[int, str, Path]:
-    return prepare_issue_worktree(issue_number, coordinator_workdir)
+    if source_ref is None and base_ref is None:
+        return prepare_issue_worktree(issue_number, coordinator_workdir)
+    return prepare_issue_worktree(
+        issue_number,
+        coordinator_workdir,
+        source_ref=source_ref,
+        base_ref=base_ref,
+    )
 
 
 def cleanup_git_issue_worktree(path: Path, coordinator_workdir: str | Path) -> tuple[int, str]:
@@ -1658,6 +1967,14 @@ def extract_runner_task(body: str) -> tuple[RunnerTask | None, str | None]:
     )
     if target_project is None or target_repository is None:
         return None, target_reason
+    task_exact_fields, task_exact_reason = _task_block_exact_ref_values(body)
+    if task_exact_reason is not None:
+        return None, task_exact_reason
+    source_ref, base_ref, exact_ref_reason = _runner_task_exact_refs(
+        metadata, task_exact_fields
+    )
+    if exact_ref_reason is not None:
+        return None, exact_ref_reason
     return RunnerTask(
         content=content,
         lane=lane,
@@ -1673,6 +1990,8 @@ def extract_runner_task(body: str) -> tuple[RunnerTask | None, str | None]:
         has_target_repository_metadata=(
             _target_repository_metadata_field(metadata)[0] is not None
         ),
+        source_ref=source_ref,
+        base_ref=base_ref,
     ), None
 
 
@@ -12186,12 +12505,33 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             runner_task.target_repository if runner_task is not None else QUEUE_REPOSITORY
         )
         local_target_worktree = target_repository != QUEUE_REPOSITORY
+        exact_source_worktree = (
+            runner_task is not None
+            and (runner_task.source_ref is not None or runner_task.base_ref is not None)
+        )
         if local_target_worktree:
-            worktree_code, worktree_output, worktree_path = (
-                prepare_target_repository_issue_worktree(
-                    target_repository,
-                    issue_number,
+            if exact_source_worktree:
+                worktree_code, worktree_output, worktree_path = (
+                    prepare_target_repository_issue_worktree(
+                        target_repository,
+                        issue_number,
+                        source_ref=runner_task.source_ref if runner_task is not None else None,
+                        base_ref=runner_task.base_ref if runner_task is not None else None,
+                    )
                 )
+            else:
+                worktree_code, worktree_output, worktree_path = (
+                    prepare_target_repository_issue_worktree(
+                        target_repository,
+                        issue_number,
+                    )
+                )
+        elif exact_source_worktree:
+            worktree_code, worktree_output, worktree_path = prepare_issue_branch(
+                issue_number,
+                coordinator_workdir,
+                source_ref=runner_task.source_ref if runner_task is not None else None,
+                base_ref=runner_task.base_ref if runner_task is not None else None,
             )
         else:
             worktree_code, worktree_output, worktree_path = prepare_issue_branch(
