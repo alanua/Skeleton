@@ -2166,12 +2166,24 @@ def build_codex_task_prompt(
             f"Selected Project: {task.target_project}\n"
             f"Selected Repository: {task.target_repository}\n\n"
         )
+    publication_contract = (
+        "Publication contract:\n"
+        "- Do not run git add, git commit, git push, gh, or create a PR.\n"
+        "- Git metadata may be read-only inside the Codex sandbox; this is "
+        "expected and is not a blocker.\n"
+        "- Edit only allowed files and run the requested validation.\n"
+        "- On successful edits and validation, return RESULT: DONE and leave "
+        "changes in the issue workspace for the parent Runner.\n"
+        "- Report BLOCKED only for an actual inability to edit or validate the "
+        "requested deliverable, never for commit, push, or PR inability.\n\n"
+    )
     return (
         "Runner assigned this task to the issue worktree at:\n"
         f"{workdir}\n\n"
         "Edit files only inside that issue worktree. Do not create or use a separate "
         "clone, checkout, or worktree for task output.\n\n"
         f"{selected_project_context}"
+        f"{publication_contract}"
         f"{task_content}"
     )
 

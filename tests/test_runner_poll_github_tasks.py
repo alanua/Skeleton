@@ -1393,6 +1393,26 @@ def test_codex_task_prompt_includes_selected_project_context() -> None:
     assert "Selected Repository: alanua/bauclock" in prompt
 
 
+def test_codex_task_prompt_contains_parent_publication_contract() -> None:
+    prompt = runner.build_codex_task_prompt("Patch and validate.", "/tmp/worktree")
+
+    assert "Publication contract:" in prompt
+    assert "Do not run git add, git commit, git push, gh, or create a PR." in prompt
+    assert (
+        "Git metadata may be read-only inside the Codex sandbox; this is "
+        "expected and is not a blocker."
+    ) in prompt
+    assert "Edit only allowed files and run the requested validation." in prompt
+    assert (
+        "On successful edits and validation, return RESULT: DONE and leave "
+        "changes in the issue workspace for the parent Runner."
+    ) in prompt
+    assert (
+        "Report BLOCKED only for an actual inability to edit or validate the "
+        "requested deliverable, never for commit, push, or PR inability."
+    ) in prompt
+
+
 def test_runner_task_accepts_matching_target_project_and_repository() -> None:
     task, reason = runner.extract_runner_task(
         "Target Project: lavalamp\n"
