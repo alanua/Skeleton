@@ -2620,6 +2620,117 @@ def _maintenance_issue(
     return {"number": 145, "title": "Runner maintenance", "body": "\n".join(lines)}
 
 
+def _protected_exact_source_repair_body(
+    *,
+    target_repository: str = runner.REPO,
+    source_issue: int | str = 1840,
+    output_branch: str = "runner/issue-1840",
+    source_ref: str = "runner/issue-1840",
+    expected_source_sha: str = HEAD_SHA,
+    task_body: str = "",
+    extra_metadata: tuple[str, ...] = (),
+) -> str:
+    metadata = [
+        f"Target Repository: {target_repository}",
+        f"Source Issue: {source_issue}",
+        f"Output Branch: {output_branch}",
+        f"Source Ref: {source_ref}",
+        f"Expected Source SHA: {expected_source_sha}",
+        *extra_metadata,
+    ]
+    body = _maintenance_issue(
+        runner.REPAIR_PROTECTED_EXACT_SOURCE_WORKTREE,
+        task_body=task_body,
+        metadata="\n".join(metadata),
+    )
+    return str(body["body"])
+
+
+def _protected_exact_source_repair_commands(
+    *,
+    checkout_path: Path,
+    worktree_path: Path,
+    source_ref: str = "runner/issue-1840",
+    expected_source_sha: str = HEAD_SHA,
+    existing: bool = False,
+    existing_branch: str = "runner/issue-1840",
+    existing_head: str = HEAD_SHA,
+    existing_status: str = "",
+    fetch_code: int = 0,
+    resolved_sha: str = HEAD_SHA,
+    add_code: int = 0,
+    remove_code: int = 0,
+) -> object:
+    if existing:
+        worktree_path.mkdir(parents=True, exist_ok=True)
+        (worktree_path / ".git").write_text("gitdir: /tmp/git-dir\n", encoding="utf-8")
+
+    def run(
+        command: list[str],
+        cwd: str | Path | None = None,
+        *,
+        timeout: int | None = None,
+    ) -> tuple[int, str]:
+        if command == [
+            "git",
+            "fetch",
+            "origin",
+            f"{source_ref}:refs/remotes/origin/{source_ref}",
+        ]:
+            assert Path(cwd or "") == checkout_path
+            assert timeout == runner.PROTECTED_SOURCE_FETCH_TIMEOUT_SECONDS
+            return fetch_code, "fetch output must not leak"
+        if command == [
+            "git",
+            "rev-parse",
+            f"refs/remotes/origin/{source_ref}^{{commit}}",
+        ]:
+            assert Path(cwd or "") == checkout_path
+            assert timeout == runner.PROTECTED_SOURCE_GIT_READ_TIMEOUT_SECONDS
+            return 0, f"{resolved_sha}\n"
+        if command == ["git", "cat-file", "-e", f"{expected_source_sha}^{{commit}}"]:
+            assert Path(cwd or "") == checkout_path
+            assert timeout == runner.PROTECTED_SOURCE_GIT_READ_TIMEOUT_SECONDS
+            return 0, ""
+        if command == ["git", "status", "--porcelain"]:
+            assert Path(cwd or "") == worktree_path
+            assert timeout == runner.PROTECTED_SOURCE_GIT_READ_TIMEOUT_SECONDS
+            return 0, existing_status
+        if command == ["git", "branch", "--show-current"]:
+            assert timeout == runner.PROTECTED_SOURCE_GIT_READ_TIMEOUT_SECONDS
+            if Path(cwd or "") == worktree_path and existing:
+                return 0, f"{existing_branch}\n"
+            if Path(cwd or "") == worktree_path:
+                return 0, "runner/issue-1840\n"
+        if command == ["git", "rev-parse", "HEAD"]:
+            assert Path(cwd or "") == worktree_path
+            assert timeout == runner.PROTECTED_SOURCE_GIT_READ_TIMEOUT_SECONDS
+            return 0, f"{existing_head if existing else expected_source_sha}\n"
+        if command == ["git", "worktree", "remove", "--force", str(worktree_path)]:
+            assert Path(cwd or "") == checkout_path
+            assert timeout == runner.PROTECTED_SOURCE_GIT_READ_TIMEOUT_SECONDS
+            if remove_code == 0:
+                runner.shutil.rmtree(worktree_path)
+            return remove_code, "remove output must not leak"
+        if command == [
+            "git",
+            "worktree",
+            "add",
+            "-B",
+            "runner/issue-1840",
+            str(worktree_path),
+            expected_source_sha,
+        ]:
+            assert Path(cwd or "") == checkout_path
+            assert timeout == runner.PROTECTED_SOURCE_GIT_READ_TIMEOUT_SECONDS
+            worktree_path.mkdir(parents=True, exist_ok=True)
+            (worktree_path / ".git").write_text("gitdir: /tmp/git-dir\n", encoding="utf-8")
+            return add_code, "add output must not leak"
+        return 2, f"unexpected command: {command!r}"
+
+    return run
+
+
 def _successful_maintenance_command(
     command: list[str], cwd: str | None = None
 ) -> tuple[int, str]:
@@ -8412,6 +8523,221 @@ def test_quarantine_stale_clean_skeleton_worktrees_is_allowlisted() -> None:
         runner.QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES
         in runner.RUNTIME_MAINTENANCE_TASK_IDS
     )
+
+
+def test_repair_protected_exact_source_worktree_fetches_with_120_second_timeout(
+    tmp_path: Path,
+) -> None:
+    checkout_path = tmp_path / "checkout"
+    checkout_path.mkdir()
+    worktree_path = tmp_path / "issue-1840"
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner, "target_repository_checkout_path", return_value=checkout_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_protected_exact_source_repair_commands(
+            checkout_path=checkout_path,
+            worktree_path=worktree_path,
+        ),
+    ) as run:
+        report = runner.repair_protected_exact_source_worktree(
+            _protected_exact_source_repair_body()
+        )
+
+    assert report.startswith("DONE:")
+    assert "step=resolve_source status=done" in report
+    assert "step=verify_head status=done" in report
+    assert any(
+        call.args[0][:3] == ["git", "fetch", "origin"]
+        and call.kwargs["timeout"] == runner.PROTECTED_SOURCE_FETCH_TIMEOUT_SECONDS
+        for call in run.call_args_list
+    )
+    assert all(
+        call.kwargs.get("timeout") in {runner.PROTECTED_SOURCE_FETCH_TIMEOUT_SECONDS, runner.PROTECTED_SOURCE_GIT_READ_TIMEOUT_SECONDS}
+        for call in run.call_args_list
+    )
+
+
+def test_repair_protected_exact_source_worktree_full_sha_skips_fetch_and_bounds_reads(
+    tmp_path: Path,
+) -> None:
+    checkout_path = tmp_path / "checkout"
+    checkout_path.mkdir()
+    worktree_path = tmp_path / "issue-1840"
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner, "target_repository_checkout_path", return_value=checkout_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_protected_exact_source_repair_commands(
+            checkout_path=checkout_path,
+            worktree_path=worktree_path,
+            source_ref=HEAD_SHA,
+            expected_source_sha=HEAD_SHA,
+        ),
+    ) as run:
+        report = runner.repair_protected_exact_source_worktree(
+            _protected_exact_source_repair_body(source_ref=HEAD_SHA)
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert all(command[:2] != ["git", "fetch"] for command in commands)
+    assert ["git", "cat-file", "-e", f"{HEAD_SHA}^{{commit}}"] in commands
+    assert all(
+        call.kwargs.get("timeout") == runner.PROTECTED_SOURCE_GIT_READ_TIMEOUT_SECONDS
+        for call in run.call_args_list
+    )
+
+
+def test_repair_protected_exact_source_worktree_reused_checks_are_bounded_and_exact(
+    tmp_path: Path,
+) -> None:
+    checkout_path = tmp_path / "checkout"
+    checkout_path.mkdir()
+    worktree_path = tmp_path / "issue-1840"
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner, "target_repository_checkout_path", return_value=checkout_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_protected_exact_source_repair_commands(
+            checkout_path=checkout_path,
+            worktree_path=worktree_path,
+            existing=True,
+        ),
+    ) as run:
+        report = runner.repair_protected_exact_source_worktree(
+            _protected_exact_source_repair_body()
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert "step=verify_existing_head status=done" in report
+    assert ["git", "status", "--porcelain"] in commands
+    assert ["git", "branch", "--show-current"] in commands
+    assert ["git", "rev-parse", "HEAD"] in commands
+    assert all(
+        call.kwargs.get("timeout") == runner.PROTECTED_SOURCE_GIT_READ_TIMEOUT_SECONDS
+        for call in run.call_args_list
+        if tuple(call.args[0]) in {
+            ("git", "status", "--porcelain"),
+            ("git", "branch", "--show-current"),
+            ("git", "rev-parse", "HEAD"),
+        }
+    )
+    assert all(command[:3] != ["git", "worktree", "remove"] for command in commands)
+    assert all(command[:3] != ["git", "worktree", "add"] for command in commands)
+
+
+def test_repair_protected_exact_source_worktree_task_metadata_takes_precedence(
+    tmp_path: Path,
+) -> None:
+    checkout_path = tmp_path / "checkout"
+    checkout_path.mkdir()
+    worktree_path = tmp_path / "issue-1840"
+    task_body = "\n".join(
+        (
+            "Source Issue: 1840",
+            "Output Branch: runner/issue-1840",
+            "Source Ref: refs/heads/_protected/source",
+            f"Expected Source SHA: {HEAD_SHA}",
+        )
+    )
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner, "target_repository_checkout_path", return_value=checkout_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_protected_exact_source_repair_commands(
+            checkout_path=checkout_path,
+            worktree_path=worktree_path,
+            source_ref="_protected/source",
+        ),
+    ) as run:
+        report = runner.repair_protected_exact_source_worktree(
+            _protected_exact_source_repair_body(
+                source_issue=999,
+                output_branch="runner/issue-999",
+                source_ref="runner/issue-999",
+                task_body=task_body,
+            )
+        )
+
+    assert report.startswith("DONE:")
+    assert "source_issue=1840" in report
+    assert "source_ref=_protected/source" in report
+    assert any(
+        call.args[0]
+        == [
+            "git",
+            "fetch",
+            "origin",
+            "_protected/source:refs/remotes/origin/_protected/source",
+        ]
+        for call in run.call_args_list
+    )
+
+
+def test_repair_protected_exact_source_worktree_rejects_raw_whitespace_reason_only() -> None:
+    body = _maintenance_issue(
+        runner.REPAIR_PROTECTED_EXACT_SOURCE_WORKTREE,
+        metadata="\n".join(
+            (
+                "Target Repository: alanua/Skeleton",
+                "Source Issue: 1840",
+                "Output Branch: runner/issue-1840",
+                "Source Ref:  runner/issue-1840",
+                f"Expected Source SHA: {HEAD_SHA}",
+            )
+        ),
+    )
+    report = runner.repair_protected_exact_source_worktree(
+        str(body["body"])
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=invalid_source_ref" in report
+    assert "runner/issue-1840" not in report
+    assert "fetch output" not in report
+
+
+def test_repair_protected_exact_source_worktree_mismatched_expected_sha_blocks_before_add(
+    tmp_path: Path,
+) -> None:
+    checkout_path = tmp_path / "checkout"
+    checkout_path.mkdir()
+    worktree_path = tmp_path / "issue-1840"
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner, "target_repository_checkout_path", return_value=checkout_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_protected_exact_source_repair_commands(
+            checkout_path=checkout_path,
+            worktree_path=worktree_path,
+            resolved_sha="c" * 40,
+        ),
+    ) as run:
+        report = runner.repair_protected_exact_source_worktree(
+            _protected_exact_source_repair_body()
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("BLOCKED:")
+    assert "reason=expected_source_sha_mismatch" in report
+    assert all(command[:3] != ["git", "worktree", "add"] for command in commands)
 
 
 def test_quarantine_stale_clean_skeleton_worktrees_removes_only_clean_matching_worktrees(

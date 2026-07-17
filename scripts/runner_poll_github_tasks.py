@@ -207,6 +207,7 @@ PUBLISH_ISSUE_WORKTREE_TO_EXISTING_PR = "publish_issue_worktree_to_existing_pr"
 OVERLAY_REGISTERED_WORKTREE_TO_EXISTING_PR = "overlay_registered_worktree_to_existing_pr"
 PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR = "publish_target_project_issue_worktree_pr"
 PUBLISH_CONTAINER_VALIDATION_WORKTREE = "publish_container_validation_worktree"
+REPAIR_PROTECTED_EXACT_SOURCE_WORKTREE = "repair_protected_exact_source_worktree"
 QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES = (
     "quarantine_stale_clean_skeleton_worktrees"
 )
@@ -244,6 +245,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         OVERLAY_REGISTERED_WORKTREE_TO_EXISTING_PR,
         PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR,
         PUBLISH_CONTAINER_VALIDATION_WORKTREE,
+        REPAIR_PROTECTED_EXACT_SOURCE_WORKTREE,
         QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES,
         HOME_EDGE_01_READ_ONLY_DIAGNOSTIC,
         HOME_EDGE_01_LAN_INVENTORY_READ_ONLY,
@@ -328,6 +330,8 @@ QUARANTINE_REMOVE_FAILED_OUTPUT_LIMIT = 1200
 QUARANTINE_REMOVE_FAILED_OUTPUT_TRUNCATED_MARKER = (
     "[Runner quarantine remove output truncated to 1200 characters.]"
 )
+PROTECTED_SOURCE_FETCH_TIMEOUT_SECONDS = 120
+PROTECTED_SOURCE_GIT_READ_TIMEOUT_SECONDS = 30
 TELEGRAM_APPROVED_PR_MERGE_MODE = "TELEGRAM_APPROVED_PR_MERGE"
 TELEGRAM_APPROVED_PR_MERGE_ACTION = "squash"
 TELEGRAM_CALLBACK_POLLER_SERVICE = "skeleton-telegram-callback-poll.service"
@@ -497,6 +501,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "expected_pr_head_branch",
         "expected_pr_head_sha",
         "expected_source_branch",
+        "expected_source_sha",
         "expected_target_branch",
         "expected_target_head_sha",
         "exit_code",
@@ -551,6 +556,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "open_issues_count",
         "open_pull_requests_count",
         "orient_status",
+        "output_branch",
         "pilot_mode",
         "pilot_summary_schema",
         "ports_disabled",
@@ -619,6 +625,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "skipped_worktrees_count",
         "source_issue",
         "source_issue_number",
+        "source_ref",
         "source_pack_error_count",
         "source_pack_id",
         "source_pack_warning_count",
@@ -816,6 +823,15 @@ class IssueWorktreePublishInspectionRequest:
     target_project: str = "skeleton"
     worktree_root: Path | None = None
     target_project_route: bool = False
+
+
+@dataclass(frozen=True)
+class ProtectedExactSourceWorktreeRepairRequest:
+    target_repository: str
+    source_issue: int
+    output_branch: str
+    source_ref: str
+    expected_source_sha: str
 
 
 @dataclass(frozen=True)
@@ -8855,6 +8871,352 @@ def _ensure_safe_issue_publish_worktree_path(path: str | Path) -> Path:
     return candidate
 
 
+_PROTECTED_EXACT_SOURCE_REPAIR_ALLOWED_METADATA_FIELDS = frozenset(
+    (
+        "Mode",
+        "Maintenance Task ID",
+        "Target Repository",
+        "Selected Repository",
+        "Repository",
+        "Source Issue",
+        "Issue",
+        "Output Branch",
+        "Expected Branch",
+        "Expected Source Branch",
+        "Source Branch",
+        "Source Ref",
+        "Source Reference",
+        "Expected Source SHA",
+        "Expected Source Head SHA",
+        "Expected Head SHA",
+        "Source SHA",
+        "Operator Approval",
+    )
+)
+
+
+def _first_task_fenced_block(body: str) -> str:
+    match = re.search(
+        r"```task[ \t]*\n(?P<task>.*?)(?:\n```|$)",
+        body or "",
+        re.DOTALL,
+    )
+    return match.group("task") if match is not None else ""
+
+
+def _protected_exact_raw_field(
+    text: str, aliases: frozenset[str]
+) -> tuple[str | None, str | None, str | None]:
+    for line in (text or "").splitlines():
+        match = re.fullmatch(
+            r"\s*(?P<name>[A-Za-z][A-Za-z ]+):(?P<space> ?)(?P<value>.*)",
+            line,
+        )
+        if match is None:
+            continue
+        name = match.group("name")
+        if name not in aliases:
+            continue
+        value = match.group("value")
+        if value != value.strip() or not value:
+            return name, None, f"invalid_{name.lower().replace(' ', '_')}"
+        return name, value, None
+    return None, None, None
+
+
+def _protected_exact_source_field(
+    task_text: str,
+    metadata: str,
+    aliases: tuple[str, ...],
+) -> tuple[str | None, str | None]:
+    alias_set = frozenset(aliases)
+    for text in (task_text, metadata):
+        _name, value, reason = _protected_exact_raw_field(text, alias_set)
+        if reason is not None:
+            return None, reason
+        if value is not None:
+            return value, None
+    return None, None
+
+
+def _safe_protected_exact_source_ref(ref: str) -> bool:
+    return (
+        bool(ref)
+        and ref == ref.strip()
+        and not ref.startswith(("/", "-"))
+        and not ref.endswith("/")
+        and ".." not in ref
+        and "//" not in ref
+        and re.fullmatch(r"[A-Za-z0-9._/-]+", ref) is not None
+    )
+
+
+def _canonical_protected_exact_source_ref(ref: str) -> str:
+    if ref.startswith("refs/heads/"):
+        return ref.removeprefix("refs/heads/")
+    if ref.startswith("origin/"):
+        return ref.removeprefix("origin/")
+    return ref
+
+
+def _protected_exact_source_repair_metadata(
+    body: str,
+) -> tuple[ProtectedExactSourceWorktreeRepairRequest | None, str | None]:
+    metadata = _metadata_before_task(body)
+    fields = _metadata_field_names(metadata)
+    if not fields <= _PROTECTED_EXACT_SOURCE_REPAIR_ALLOWED_METADATA_FIELDS:
+        return None, "unsupported_metadata_field"
+
+    task_text = _first_task_fenced_block(body)
+    target_repository, reason = _protected_exact_source_field(
+        task_text, metadata, ("Target Repository", "Selected Repository", "Repository")
+    )
+    if reason is not None:
+        return None, reason
+    target_repository = target_repository or REPO
+    if target_repository not in ALLOWED_TARGET_REPOSITORIES:
+        return None, "unsupported_repository"
+
+    source_issue, reason = _protected_exact_source_field(
+        task_text, metadata, ("Source Issue", "Issue")
+    )
+    if reason is not None:
+        return None, reason
+    if not isinstance(source_issue, str) or re.fullmatch(r"[1-9]\d*", source_issue) is None:
+        return None, "missing_or_invalid_source_issue"
+    source_issue_number = int(source_issue)
+    required_branch = issue_branch(source_issue_number)
+
+    output_branch, reason = _protected_exact_source_field(
+        task_text,
+        metadata,
+        ("Output Branch", "Expected Branch", "Expected Source Branch", "Source Branch"),
+    )
+    if reason is not None:
+        return None, reason
+    output_branch = output_branch or required_branch
+    if output_branch != required_branch:
+        return None, "source_issue_branch_mismatch"
+    if not _safe_issue_publish_branch_name(output_branch):
+        return None, "missing_or_invalid_output_branch"
+
+    source_ref, reason = _protected_exact_source_field(
+        task_text,
+        metadata,
+        ("Source Ref", "Source Reference", "Expected Source Branch", "Source Branch"),
+    )
+    if reason is not None:
+        return None, reason
+    source_ref = source_ref or output_branch
+    source_ref = _canonical_protected_exact_source_ref(source_ref)
+    if _HEAD_SHA_RE.fullmatch(source_ref) is None and not _safe_protected_exact_source_ref(
+        source_ref
+    ):
+        return None, "missing_or_invalid_source_ref"
+
+    expected_source_sha, reason = _protected_exact_source_field(
+        task_text,
+        metadata,
+        (
+            "Expected Source SHA",
+            "Expected Source Head SHA",
+            "Expected Head SHA",
+            "Source SHA",
+        ),
+    )
+    if reason is not None:
+        return None, reason
+    if (
+        not isinstance(expected_source_sha, str)
+        or _HEAD_SHA_RE.fullmatch(expected_source_sha) is None
+    ):
+        return None, "missing_or_invalid_expected_source_sha"
+
+    return (
+        ProtectedExactSourceWorktreeRepairRequest(
+            target_repository=target_repository,
+            source_issue=source_issue_number,
+            output_branch=output_branch,
+            source_ref=source_ref.lower()
+            if _HEAD_SHA_RE.fullmatch(source_ref) is not None
+            else source_ref,
+            expected_source_sha=expected_source_sha.lower(),
+        ),
+        None,
+    )
+
+
+def _protected_exact_source_worktree_path(
+    request: ProtectedExactSourceWorktreeRepairRequest,
+) -> Path:
+    return ensure_safe_target_repository_worktree_path(
+        request.target_repository,
+        target_repository_issue_worktree_path(
+            request.target_repository, request.source_issue
+        ),
+    )
+
+
+def _protected_exact_source_resolve(
+    request: ProtectedExactSourceWorktreeRepairRequest, checkout_path: Path
+) -> str | None:
+    if _HEAD_SHA_RE.fullmatch(request.source_ref) is not None:
+        code, _output = run_command(
+            ["git", "cat-file", "-e", f"{request.expected_source_sha}^{{commit}}"],
+            cwd=checkout_path,
+            timeout=PROTECTED_SOURCE_GIT_READ_TIMEOUT_SECONDS,
+        )
+        return None if code == 0 and request.source_ref == request.expected_source_sha else "expected_source_sha_mismatch"
+
+    code, _output = run_command(
+        [
+            "git",
+            "fetch",
+            "origin",
+            f"{request.source_ref}:refs/remotes/origin/{request.source_ref}",
+        ],
+        cwd=checkout_path,
+        timeout=PROTECTED_SOURCE_FETCH_TIMEOUT_SECONDS,
+    )
+    if code != 0:
+        return "source_fetch_failed"
+    code, output = run_command(
+        ["git", "rev-parse", f"refs/remotes/origin/{request.source_ref}^{{commit}}"],
+        cwd=checkout_path,
+        timeout=PROTECTED_SOURCE_GIT_READ_TIMEOUT_SECONDS,
+    )
+    resolved_lines = _git_status_path_lines(output) if code == 0 else []
+    resolved_sha = resolved_lines[0].lower() if resolved_lines else ""
+    if resolved_sha != request.expected_source_sha:
+        return "expected_source_sha_mismatch"
+    return None
+
+
+def repair_protected_exact_source_worktree(body: str) -> str:
+    task_id = REPAIR_PROTECTED_EXACT_SOURCE_WORKTREE
+    request, reason = _protected_exact_source_repair_metadata(body)
+    if reason is not None:
+        return _maintenance_report("BLOCKED", task_id, [f"reason={reason}"], "not_met")
+    assert request is not None
+    status_lines = [
+        f"target_repository={request.target_repository}",
+        f"source_issue={request.source_issue}",
+        f"output_branch={request.output_branch}",
+        f"source_ref={request.source_ref}",
+        f"expected_source_sha={request.expected_source_sha}",
+    ]
+    try:
+        checkout_path = target_repository_checkout_path(request.target_repository)
+        worktree_path = _protected_exact_source_worktree_path(request)
+    except ValueError:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=target_repository_route_invalid"], "not_met"
+        )
+    if worktree_path.name != f"issue-{request.source_issue}":
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=issue_worktree_path_mismatch"], "not_met"
+        )
+
+    resolve_reason = _protected_exact_source_resolve(request, checkout_path)
+    if resolve_reason is not None:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, f"reason={resolve_reason}"], "not_met"
+        )
+    status_lines.append("step=resolve_source status=done")
+
+    if worktree_path.exists():
+        existing_branch = ""
+        existing_head = ""
+        for command, step in (
+            (["git", "status", "--porcelain"], "read_existing_status"),
+            (["git", "branch", "--show-current"], "read_existing_branch"),
+            (["git", "rev-parse", "HEAD"], "read_existing_head"),
+        ):
+            code, output = run_command(
+                command,
+                cwd=worktree_path,
+                timeout=PROTECTED_SOURCE_GIT_READ_TIMEOUT_SECONDS,
+            )
+            if code != 0:
+                return _maintenance_report(
+                    "BLOCKED", task_id, [*status_lines, f"step={step} status=failed"], "not_met"
+                )
+            if command[1] == "status" and output.strip():
+                return _maintenance_report(
+                    "BLOCKED", task_id, [*status_lines, "reason=reused_worktree_dirty"], "not_met"
+                )
+            if command[1] == "branch":
+                existing_branch = output.strip()
+            if command[1] == "rev-parse":
+                existing_head = output.strip().lower()
+        if (
+            existing_branch == request.output_branch
+            and existing_head == request.expected_source_sha
+        ):
+            status_lines.extend(
+                (
+                    f"current_branch={request.output_branch}",
+                    "step=verify_existing_head status=done",
+                )
+            )
+            return _maintenance_report("DONE", task_id, status_lines, "met")
+        code, _output = run_command(
+            ["git", "worktree", "remove", "--force", str(worktree_path)],
+            cwd=checkout_path,
+            timeout=PROTECTED_SOURCE_GIT_READ_TIMEOUT_SECONDS,
+        )
+        if code != 0:
+            return _maintenance_report(
+                "BLOCKED", task_id, [*status_lines, "reason=reused_worktree_cleanup_failed"], "not_met"
+            )
+        status_lines.append("step=cleanup_reused_worktree status=done")
+
+    try:
+        worktree_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=worktree_root_unavailable"], "not_met"
+        )
+    code, _output = run_command(
+        [
+            "git",
+            "worktree",
+            "add",
+            "-B",
+            request.output_branch,
+            str(worktree_path),
+            request.expected_source_sha,
+        ],
+        cwd=checkout_path,
+        timeout=PROTECTED_SOURCE_GIT_READ_TIMEOUT_SECONDS,
+    )
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=worktree_add_failed"], "not_met"
+        )
+    for command, expected, reason_token in (
+        (["git", "branch", "--show-current"], request.output_branch, "source_branch_mismatch"),
+        (["git", "rev-parse", "HEAD"], request.expected_source_sha, "head_sha_mismatch"),
+    ):
+        code, output = run_command(
+            command,
+            cwd=worktree_path,
+            timeout=PROTECTED_SOURCE_GIT_READ_TIMEOUT_SECONDS,
+        )
+        actual = output.strip().lower() if command[1] == "rev-parse" else output.strip()
+        if code != 0 or actual != expected:
+            return _maintenance_report(
+                "BLOCKED", task_id, [*status_lines, f"reason={reason_token}"], "not_met"
+            )
+    status_lines.extend(
+        (
+            "step=add_worktree status=done",
+            "step=verify_head status=done",
+        )
+    )
+    return _maintenance_report("DONE", task_id, status_lines, "met")
+
+
 def _target_project_issue_worktree_path(
     request: IssueWorktreePublishInspectionRequest,
 ) -> Path:
@@ -11742,6 +12104,8 @@ def dispatch_runtime_maintenance_task(
             return publish_target_project_issue_worktree_pr(body)
         if task_id == PUBLISH_CONTAINER_VALIDATION_WORKTREE:
             return publish_container_validation_worktree(body)
+        if task_id == REPAIR_PROTECTED_EXACT_SOURCE_WORKTREE:
+            return repair_protected_exact_source_worktree(body)
         if task_id == QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES:
             return quarantine_stale_clean_skeleton_worktrees(body)
         if task_id == HOME_EDGE_01_READ_ONLY_DIAGNOSTIC:
