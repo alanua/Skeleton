@@ -1,9 +1,7 @@
 name: Stage encrypted Milan bootstrap files
 
 on:
-  push:
-    branches:
-      - ops/hetzner-page-publisher-bootstrap
+  pull_request:
     paths:
       - '.github/workflows/hetzner-page-publisher-bootstrap.yml'
 
@@ -18,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ops/hetzner-page-publisher-bootstrap
+          ref: ${{ github.event.pull_request.head.ref }}
       - name: Download and verify encrypted loader only
         shell: bash
         run: |
@@ -46,4 +44,4 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add runtime_bootstrap/milan-2026
           git commit -m 'Stage encrypted Milan loader for bounded deployment'
-          git push origin HEAD:ops/hetzner-page-publisher-bootstrap
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
