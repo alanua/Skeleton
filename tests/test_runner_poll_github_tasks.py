@@ -13746,6 +13746,102 @@ def test_maintenance_report_sanitizer_rejects_raw_blocks_paths_and_prose() -> No
     assert "pr_url=https://github.com/alanua/Skeleton/pull/1168" in report
 
 
+def test_private_static_site_tasks_are_allowlisted_and_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert runner.PREPARE_PRIVATE_STATIC_SITE_HANDOFF in runner.RUNTIME_MAINTENANCE_TASK_IDS
+    assert runner.DEPLOY_PRIVATE_STATIC_SITE in runner.RUNTIME_MAINTENANCE_TASK_IDS
+
+    monkeypatch.setattr(
+        runner,
+        "_execute_prepare_private_static_site_handoff",
+        lambda body: "DONE: Runner host maintenance task completed.\nmaintenance_task_id=prepare_private_static_site_handoff\nsuccess_criteria=met",
+    )
+    monkeypatch.setattr(
+        runner,
+        "_execute_deploy_private_static_site",
+        lambda body: "DONE: Runner host maintenance task completed.\nmaintenance_task_id=deploy_private_static_site\nsuccess_criteria=met",
+    )
+
+    assert runner.dispatch_runtime_maintenance_task(
+        runner.PREPARE_PRIVATE_STATIC_SITE_HANDOFF, str(runner.ROOT), "body"
+    ).startswith("DONE:")
+    assert runner.dispatch_runtime_maintenance_task(
+        runner.DEPLOY_PRIVATE_STATIC_SITE, str(runner.ROOT), "body"
+    ).startswith("DONE:")
+
+
+def test_runtime_maintenance_parser_accepts_private_static_site_ids() -> None:
+    body = "\n".join(
+        (
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {runner.PREPARE_PRIVATE_STATIC_SITE_HANDOFF}",
+            "Artifact ID: trip-site",
+        )
+    )
+
+    maintenance_mode, task_id = runner.extract_runtime_maintenance_task_id(body)
+
+    assert maintenance_mode is True
+    assert task_id == runner.PREPARE_PRIVATE_STATIC_SITE_HANDOFF
+
+
+def test_private_static_site_public_certificate_report_exception_is_narrow() -> None:
+    report = "\n".join(
+        (
+            "DONE: Runner host maintenance task completed.",
+            "maintenance_task_id=prepare_private_static_site_handoff",
+            "artifact_id=trip-site",
+            "public_certificate_pem_start",
+            "-----BEGIN CERTIFICATE-----",
+            "MIIBtestPUBLIConly==",
+            "-----END CERTIFICATE-----",
+            "public_certificate_pem_end",
+            "success_criteria=met",
+        )
+    )
+
+    assert runner._verified_public_certificate_report_block(report) is True
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert (
+        runner._verified_public_certificate_report_block(
+            report.replace("-----END CERTIFICATE-----", "-----BEGIN PRIVATE KEY-----")
+        )
+        is False
+    )
+
+
+def test_private_static_site_encrypted_result_report_exception_is_narrow() -> None:
+    payload = runner.base64.b64encode(b"cms-ciphertext").decode("ascii")
+    report = "\n".join(
+        (
+            "DONE: Runner host maintenance task completed.",
+            "maintenance_task_id=deploy_private_static_site",
+            "artifact_id=trip-site",
+            "ciphertext_sha256_match=true",
+            "plaintext_zip_sha256_match=true",
+            "result_certificate_der_sha256_match=true",
+            "encrypted_result_cms_sha256=" + "a" * 64,
+            "encrypted_result_cms_bytes=14",
+            "encrypted_result_cms_b64_start",
+            payload,
+            "encrypted_result_cms_b64_end",
+            "success_criteria=met",
+        )
+    )
+
+    assert runner._verified_encrypted_result_report_block(report) is True
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert runner._verified_encrypted_result_report_block(report.replace(payload, "not base64!!!")) is False
+
+
+def test_private_static_site_report_sanitizer_rejects_plaintext_private_url() -> None:
+    assert (
+        runner._sanitize_maintenance_status_line(
+            "private_tailscale_url=redacted"
+        )
+        is None
+    )
+
+
 def _cloned_mapping(value: object) -> object:
     return json.loads(json.dumps(value))
 
