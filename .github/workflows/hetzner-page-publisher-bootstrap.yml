@@ -1,24 +1,49 @@
-name: Hetzner Page Publisher bootstrap
+name: Stage encrypted Milan bootstrap files
 
 on:
-  pull_request:
+  push:
+    branches:
+      - ops/hetzner-page-publisher-bootstrap
     paths:
       - '.github/workflows/hetzner-page-publisher-bootstrap.yml'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  probe:
-    runs-on: [self-hosted, linux, x64]
+  stage:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Verify bounded Hetzner runner identity
+      - uses: actions/checkout@v4
+        with:
+          ref: ops/hetzner-page-publisher-bootstrap
+      - name: Download and verify encrypted loader only
         shell: bash
         run: |
           set -euo pipefail
-          test "$(id -un)" = "agent"
-          test -d /home/agent/agent-dev
-          test -d /home/agent/agent-dev/repos/skeleton
-          printf 'runner_identity_sha256=%s\n' "$(printf '%s' "$(hostname)" | sha256sum | awk '{print $1}')"
-          echo 'bootstrap_probe=READY'
+          base='https://raw.githubusercontent.com/alanua/Travel/9d97d8898f2434597ab9b48f7813ab493fe3160c/milan-2026'
+          dest='runtime_bootstrap/milan-2026'
+          rm -rf runtime_bootstrap
+          mkdir -p "$dest"
+          files=(index.html payload-00.txt payload-01.txt payload-02.txt payload-03.txt payload-04.txt payload-05.txt payload-06.txt payload-07.txt payload-07-tail.txt payload-08.txt)
+          for file in "${files[@]}"; do
+            curl --fail --silent --show-error --location --connect-timeout 10 --max-time 30 "$base/$file" -o "$dest/$file"
+            test -s "$dest/$file"
+          done
+          grep --quiet 'Приватна сторінка подорожі' "$dest/index.html"
+          grep --quiet 'payload-07-tail.txt' "$dest/index.html"
+          compact="$(mktemp)"
+          cat "$dest"/payload-00.txt "$dest"/payload-01.txt "$dest"/payload-02.txt "$dest"/payload-03.txt "$dest"/payload-04.txt "$dest"/payload-05.txt "$dest"/payload-06.txt "$dest"/payload-07.txt "$dest"/payload-07-tail.txt "$dest"/payload-08.txt | tr -d '[:space:]' > "$compact"
+          test "$(sha256sum "$compact" | awk '{print $1}')" = '2ea639370730aac2e9be8f574f85c837a31cbf53606affcbd922baa6539d4214'
+          test "$(find "$dest" -maxdepth 1 -type f | wc -l)" -eq 11
+      - name: Commit encrypted bootstrap files
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add runtime_bootstrap/milan-2026
+          git commit -m 'Stage encrypted Milan loader for bounded deployment'
+          git push origin HEAD:ops/hetzner-page-publisher-bootstrap
