@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 from collections.abc import Mapping
 from contextvars import ContextVar
 import csv
@@ -74,6 +76,13 @@ from core.runner_loop_control_executor import (
     loop_task_packet_from_body as _executor_loop_task_packet_from_body,
 )
 from core.private_memory import healthcheck_private_memory, write_public_heartbeat
+from core.private_static_site_runtime import (
+    DEPLOY_TASK_ID as DEPLOY_PRIVATE_STATIC_SITE,
+    PRIVATE_KEY_MARKERS,
+    PREPARE_TASK_ID as PREPARE_PRIVATE_STATIC_SITE_HANDOFF,
+    deploy_private_static_site as _execute_deploy_private_static_site,
+    prepare_private_static_site_handoff as _execute_prepare_private_static_site_handoff,
+)
 from core.project_tree import get_project, get_project_by_repo, load_project_tree
 from core.runner_child_environment import sanitize_codegen_child_environment
 from core.runner_retry_policy import (
@@ -247,6 +256,8 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES,
         HOME_EDGE_01_READ_ONLY_DIAGNOSTIC,
         HOME_EDGE_01_LAN_INVENTORY_READ_ONLY,
+        PREPARE_PRIVATE_STATIC_SITE_HANDOFF,
+        DEPLOY_PRIVATE_STATIC_SITE,
     )
 )
 PUBLISH_ONLY_MAINTENANCE_TASK_IDS = frozenset(
@@ -440,6 +451,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "approval_status",
         "approved_head_sha",
         "artifact_count",
+        "artifact_id",
         "base_branch",
         "base_ref_oid",
         "base_ref",
@@ -460,6 +472,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "checkout_path",
         "checkout_sync_state",
         "context_hash",
+        "certificate_sha256_fingerprint",
         "command_unavailable_reason",
         "compare_ahead_by",
         "compare_behind_by",
@@ -499,6 +512,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "expected_source_branch",
         "expected_target_branch",
         "expected_target_head_sha",
+        "expires_at",
         "exit_code",
         "explicit_recovery_route",
         "file_on_main",
@@ -520,6 +534,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "hermes_memory_operation_count",
         "hermes_memory_smoke_status",
         "host_id_sha256_12",
+        "handoff_ref",
         "input_row_count",
         "input_table_count",
         "installed_skill_platform_count",
@@ -544,6 +559,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "mode",
         "model_credentials_removed_from_smoke",
         "mutation_mode",
+        "durable_handoff_status",
         "network_disabled",
         "network_provider_enabled",
         "next_action",
@@ -627,6 +643,15 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "schema",
         "status",
         "status_token",
+        "ciphertext_sha256_match",
+        "plaintext_zip_sha256_match",
+        "result_certificate_der_sha256_match",
+        "asset_count",
+        "encrypted_result_cms_bytes",
+        "encrypted_result_cms_sha256",
+        "serve_private",
+        "verification_status",
+        "cleanup_status",
         "status_count_approved",
         "status_count_needs_review",
         "step",
@@ -3524,6 +3549,34 @@ def _sanitize_maintenance_status_line(line: str) -> str | None:
             return None
         normalized.append(f"{key}={value}")
     return " ".join(normalized)
+
+
+def _verified_public_certificate_report_block(report: str) -> bool:
+    match = re.search(
+        r"(?ms)^public_certificate_pem_start\n(?P<cert>-----BEGIN CERTIFICATE-----\n[A-Za-z0-9+/=\r\n]+-----END CERTIFICATE-----)\npublic_certificate_pem_end$",
+        report or "",
+    )
+    if match is None:
+        return False
+    cert = match.group("cert")
+    return not any(marker in cert for marker in PRIVATE_KEY_MARKERS)
+
+
+def _verified_encrypted_result_report_block(report: str) -> bool:
+    match = re.search(
+        r"(?ms)^encrypted_result_cms_b64_start\n(?P<payload>[A-Za-z0-9+/=\r\n]+)\nencrypted_result_cms_b64_end$",
+        report or "",
+    )
+    if match is None:
+        return False
+    compact = "".join(match.group("payload").split())
+    if len(compact) < 16 or len(compact) > 4 * 1024 * 1024:
+        return False
+    try:
+        decoded = base64.b64decode(compact.encode("ascii"), validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    return len(decoded) > 0
 
 
 _HOST_INVENTORY_VALUE_RE = re.compile(r"[^A-Za-z0-9._:+-]+")
@@ -11760,6 +11813,10 @@ def dispatch_runtime_maintenance_task(
             return home_edge_01_read_only_diagnostic()
         if task_id == HOME_EDGE_01_LAN_INVENTORY_READ_ONLY:
             return home_edge_01_lan_inventory_read_only()
+        if task_id == PREPARE_PRIVATE_STATIC_SITE_HANDOFF:
+            return _execute_prepare_private_static_site_handoff(body)
+        if task_id == DEPLOY_PRIVATE_STATIC_SITE:
+            return _execute_deploy_private_static_site(body)
         return check_project_checkout(body)
     except Exception:
         return _maintenance_report(
