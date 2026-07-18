@@ -18,6 +18,96 @@ Missing or unknown maintenance task ids are reported as `BLOCKED`.
 
 ## Current allowlist
 
+`prepare_private_static_site_handoff` prepares a durable encrypted handoff for a
+private static web package. It requires exact operator approval and an artifact
+id:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: prepare_private_static_site_handoff
+Operator Approval: prepare_private_static_site_handoff_v1
+Artifact ID: trip-site
+```
+
+`Artifact ID` must match `^[a-z0-9][a-z0-9-]{2,63}$`. The task executes only in
+the parent Runner maintenance handler, never in a Codex worktree. It uses the
+Runner-private root `/home/agent/.local/share/skeleton/private-static-sites` by
+default. An environment override is accepted only when its resolved path remains
+under `/home/agent/.local/share/skeleton`.
+
+The task creates `<root>/handoffs/<artifact-id>/` with `0700` permissions,
+generates a fresh RSA-4096 private key and one-day self-signed X.509
+certificate with bounded OpenSSL argv commands, sets key mode `0600` and
+certificate mode `0644`, and refuses to overwrite an existing live handoff. It
+proves the certificate/key pair by encrypting and decrypting a synthetic probe
+in a fresh subprocess and then removing probe files.
+
+The public report contains only the artifact id, opaque handoff reference,
+certificate SHA-256 fingerprint, expiry token, `DURABLE_HANDOFF_READY`, and a
+validated public certificate block. The certificate block is allowed only after
+OpenSSL parsing and rejection of private-key PEM markers. The report must never
+include the private key, private filesystem paths, environment values, host
+addresses, unrelated configuration, or probe plaintext.
+
+`deploy_private_static_site` receives, decrypts, validates, and publishes the
+private static site package for one prepared artifact. It requires:
+
+````text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: deploy_private_static_site
+Operator Approval: deploy_private_static_site_v1
+Artifact ID: trip-site
+URL Path: /travel/trip-site
+Encrypted Payload SHA-256: <64 lowercase hex chars>
+Plaintext ZIP SHA-256: <64 lowercase hex chars>
+```encrypted-payload-base64
+<CMS EnvelopedData DER encoded as base64>
+```
+````
+
+`URL Path` must match `^/travel/[a-z0-9][a-z0-9-]{2,63}$`. The issue text is
+ciphertext transport only; it is not arbitrary shell input, not a filesystem
+path source, and not a place to provide hostnames, ports, executables, or
+commands. The Runner strict-decodes the bounded base64 payload, caps ciphertext
+at 2 MiB, verifies the encrypted payload hash before decrypting, decrypts CMS
+EnvelopedData DER with the matching local handoff certificate/private key, and
+verifies the plaintext ZIP hash exactly.
+
+Before extraction, the ZIP is validated with these limits: at most 5 MiB
+uncompressed, at most 64 entries, no absolute paths, traversal, duplicates,
+symlinks, devices, executable bits, nested archives, or disallowed extensions.
+One top-level directory is accepted. Static web files only are allowed:
+`.html`, `.css`, `.js`, `.json`, `.webmanifest`, `.png`, `.jpg`, `.jpeg`,
+`.webp`, `.svg`, `.ico`, `.txt`, and `.md`. `index.html` is required, and
+HTML/JS containing obvious private-key PEM markers is rejected.
+
+After validation, the Runner atomically publishes only to
+`<root>/sites/<artifact-id>/current/`, makes deployed files readable by the local
+Tailscale daemon, inspects current `tailscale serve status`, and configures only
+the requested path with the bounded noninteractive equivalent of:
+
+```text
+tailscale serve --bg --yes --https=443 --set-path=/travel/trip-site <absolute-site-directory>
+```
+
+It never calls Funnel, never resets Serve, never opens firewall/public ports,
+and never replaces unrelated Serve paths. `sudo -n` may be used only if required;
+interactive consent blocks the task. On failure after a Serve mutation, the
+Runner removes/restores only the requested URL path and preserves unrelated
+routes.
+
+The Runner derives only this node's MagicDNS HTTPS name from bounded Tailscale
+JSON/status output, verifies the final private HTTPS URL, verifies `index.html`,
+verifies every local relative asset referenced by the page with HTTP 200, and
+requires a non-empty HTML title. Three arbitrary URL fragments are checked as
+client-side fragments that require no server route.
+
+On success the Runner removes ciphertext, decrypted ZIP, private key, and
+certificate, retaining only deployed site files plus minimal non-secret
+deployment metadata. The final report contains only artifact id, private
+Tailscale URL, hash-match booleans, asset count, Serve-private boolean,
+verification status, cleanup status, and `DONE`.
+
 `sync_telegram_callback_poller_runtime` may only:
 
 1. Stop `skeleton-telegram-callback-poll.timer` and
