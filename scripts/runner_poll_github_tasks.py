@@ -260,6 +260,53 @@ PUBLISH_ONLY_MAINTENANCE_TASK_IDS = frozenset(
         PUBLISH_CONTAINER_VALIDATION_WORKTREE,
     )
 )
+ROUTE_APPROVAL_KIND_GENERIC = "generic"
+ROUTE_APPROVAL_KIND_PROTECTED = "protected"
+ROUTE_APPROVAL_KIND_RECOVERY = "recovery"
+TRUSTED_GENERIC_APPROVAL_REFERENCES = frozenset(
+    (
+        "GENERIC_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715",
+    )
+)
+TRUSTED_PROTECTED_APPROVAL_REFERENCES = frozenset(
+    (
+        "EXPLICIT_PROTECTED_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715",
+    )
+)
+TRUSTED_RECOVERY_APPROVAL_REFERENCES = frozenset(
+    (
+        "EXPLICIT_RECOVERY_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715",
+    )
+)
+TRUSTED_APPROVAL_COMMENT_IDS_BY_REFERENCE = {
+    "GENERIC_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715": "5002100944",
+    "EXPLICIT_PROTECTED_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715": "5002100945",
+    "EXPLICIT_RECOVERY_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715": "5002100946",
+}
+RECOVERY_ONLY_MAINTENANCE_TASK_IDS = frozenset(
+    (
+        OVERLAY_REGISTERED_WORKTREE_TO_EXISTING_PR,
+    )
+)
+PROTECTED_MAINTENANCE_TASK_IDS = frozenset(
+    (
+        SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
+        ENSURE_TELEGRAM_CALLBACK_LOCAL_CONFIG,
+        RUNTIME_SYNC_MAIN,
+        RECOVER_SKELETON_CHECKOUT,
+        ENSURE_PROJECT_CHECKOUT,
+        PREFLIGHT_PR_REFRESH,
+        LOOP_ENGINE_PACKET,
+        BACKFILL_SKELETON_MEMORY_RECENT,
+        INSTALL_GRAPHIFY_RUNTIME,
+        PREPARE_AUFMASS_PRIVATE_RUNTIME,
+        RUN_AUFMASS_PRIVATE_DXF_REVIEW,
+        SUMMARIZE_AUFMASS_PRIVATE_REVIEW,
+        BUILD_AUFMASS_PRIVATE_SHORTLIST,
+        BUILD_AUFMASS_PRIVATE_AREA_SCHEDULE,
+        QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES,
+    )
+)
 CONTAINER_VALIDATION_SOURCE_ISSUE = 1667
 CONTAINER_VALIDATION_BRANCH = "runner/issue-1667"
 CONTAINER_VALIDATION_BASE_BRANCH = "main"
@@ -766,6 +813,21 @@ class TelegramApprovedPrMergeRequest:
     approved_head_sha: str
     callback_digest: str
     action: str = TELEGRAM_APPROVED_PR_MERGE_ACTION
+
+
+@dataclass(frozen=True)
+class RouteAuthority:
+    generic_references: frozenset[str]
+    protected_references: frozenset[str]
+    recovery_references: frozenset[str]
+
+
+@dataclass(frozen=True)
+class RouteAuthorityDecision:
+    allowed: bool
+    reason: str | None = None
+    required_kind: str | None = None
+    required_reference: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1916,6 +1978,216 @@ def runner_task_route(
     if merge_mode:
         return ROUTE_RUNTIME_ONLY
     return ROUTE_CODE_GENERATION
+
+
+def _comment_author_login(comment: Mapping[str, Any]) -> str | None:
+    author = comment.get("author")
+    if isinstance(author, Mapping):
+        login = author.get("login")
+        if isinstance(login, str):
+            return login
+    user = comment.get("user")
+    if isinstance(user, Mapping):
+        login = user.get("login")
+        if isinstance(login, str):
+            return login
+    login = comment.get("author")
+    return login if isinstance(login, str) else None
+
+
+def _comment_id_text(comment: Mapping[str, Any]) -> str | None:
+    for key in ("id", "databaseId", "database_id", "comment_id"):
+        value = comment.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return str(value)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _normalized_login(value: str | None) -> str | None:
+    normalized = (value or "").strip().lower()
+    return normalized or None
+
+
+def _approval_issue_number(value: str | None) -> int | None:
+    text = (value or "").strip()
+    if text.startswith("#"):
+        text = text[1:]
+    if not text.isdecimal():
+        return None
+    return int(text)
+
+
+def _approval_comment_is_public_safe(body: str) -> bool:
+    try:
+        validate_public_safe_payload({"approval_comment_body": body})
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _trusted_comment_route_authority(
+    issue_number: int,
+    comments: list[dict[str, Any]],
+) -> RouteAuthority:
+    generic: set[str] = set()
+    protected: set[str] = set()
+    recovery: set[str] = set()
+    trusted_by_kind = {
+        ROUTE_APPROVAL_KIND_GENERIC: TRUSTED_GENERIC_APPROVAL_REFERENCES,
+        ROUTE_APPROVAL_KIND_PROTECTED: TRUSTED_PROTECTED_APPROVAL_REFERENCES,
+        ROUTE_APPROVAL_KIND_RECOVERY: TRUSTED_RECOVERY_APPROVAL_REFERENCES,
+    }
+    output_by_kind = {
+        ROUTE_APPROVAL_KIND_GENERIC: generic,
+        ROUTE_APPROVAL_KIND_PROTECTED: protected,
+        ROUTE_APPROVAL_KIND_RECOVERY: recovery,
+    }
+    for comment in comments:
+        body = comment.get("body")
+        if not isinstance(body, str) or not _approval_comment_is_public_safe(body):
+            continue
+        fields = {
+            name: _body_field(body, name)
+            for name in (
+                "Repository",
+                "Issue",
+                "Issue Number",
+                "Comment ID",
+                "Verified Author",
+                "Verified Operator",
+                "Owner",
+                "Public Safe Body",
+                "Approval Kind",
+                "Kind",
+                "Approval Reference",
+                "Operator Approval",
+            )
+        }
+        author = _normalized_login(_comment_author_login(comment))
+        verified_author = _normalized_login(fields["Verified Author"])
+        verified_operator = _normalized_login(fields["Verified Operator"])
+        owner = _normalized_login(fields["Owner"] or QUEUE_REPOSITORY.split("/", 1)[0])
+        kind = (fields["Approval Kind"] or fields["Kind"] or "").strip().lower()
+        reference = fields["Approval Reference"] or fields["Operator Approval"]
+        expected_comment_id = (
+            TRUSTED_APPROVAL_COMMENT_IDS_BY_REFERENCE.get(reference or "")
+            if isinstance(reference, str)
+            else None
+        )
+        comment_id = _comment_id_text(comment)
+        comment_body_id = fields["Comment ID"]
+        comment_issue = _approval_issue_number(fields["Issue"] or fields["Issue Number"])
+        if fields["Repository"] != REPO:
+            continue
+        if comment_issue != issue_number:
+            continue
+        if comment_id is None or comment_body_id != comment_id:
+            continue
+        if expected_comment_id is None or comment_id != expected_comment_id:
+            continue
+        if author is None or owner != "alanua":
+            continue
+        if author != verified_author or verified_author != verified_operator:
+            continue
+        if fields["Public Safe Body"] != "true":
+            continue
+        if reference not in trusted_by_kind.get(kind, frozenset()):
+            continue
+        output_by_kind[kind].add(reference)
+    return RouteAuthority(
+        generic_references=frozenset(generic),
+        protected_references=frozenset(protected),
+        recovery_references=frozenset(recovery),
+    )
+
+
+def _issue_approval_reference(body: str) -> str | None:
+    reference = _body_field(body, "Approval Reference")
+    if reference:
+        return reference
+    legacy_reference = _body_field(body, "Operator Approval")
+    return legacy_reference if legacy_reference else None
+
+
+def _route_authority_decision(
+    *,
+    body: str,
+    route: str,
+    maintenance_task_id: str | None,
+    authority: RouteAuthority,
+) -> RouteAuthorityDecision:
+    reference = _issue_approval_reference(body)
+    if maintenance_task_id in RECOVERY_ONLY_MAINTENANCE_TASK_IDS:
+        if not reference:
+            return RouteAuthorityDecision(
+                False, "missing_recovery_approval_reference", ROUTE_APPROVAL_KIND_RECOVERY
+            )
+        return RouteAuthorityDecision(
+            reference in authority.recovery_references,
+            None if reference in authority.recovery_references else "untrusted_recovery_approval_reference",
+            ROUTE_APPROVAL_KIND_RECOVERY,
+            reference,
+        )
+    if (
+        route == ROUTE_PUBLISH_ONLY
+        and maintenance_task_id != INSPECT_ISSUE_WORKTREE_FOR_PUBLISH
+    ) or maintenance_task_id in PROTECTED_MAINTENANCE_TASK_IDS:
+        if not reference:
+            return RouteAuthorityDecision(
+                False, "missing_protected_approval_reference", ROUTE_APPROVAL_KIND_PROTECTED
+            )
+        return RouteAuthorityDecision(
+            reference in authority.protected_references,
+            None if reference in authority.protected_references else "untrusted_protected_approval_reference",
+            ROUTE_APPROVAL_KIND_PROTECTED,
+            reference,
+        )
+    if route == ROUTE_CODE_GENERATION and reference:
+        allowed = (
+            reference in authority.generic_references
+            or reference in authority.protected_references
+        )
+        return RouteAuthorityDecision(
+            allowed,
+            None if allowed else "untrusted_generic_approval_reference",
+            ROUTE_APPROVAL_KIND_GENERIC,
+            reference,
+        )
+    return RouteAuthorityDecision(True)
+
+
+def route_authority_decision_for_issue(
+    *,
+    issue_number: int,
+    body: str,
+    route: str,
+    maintenance_task_id: str | None,
+    comments: list[dict[str, Any]] | None,
+) -> RouteAuthorityDecision:
+    requires_authority = (
+        (
+            route == ROUTE_PUBLISH_ONLY
+            and maintenance_task_id != INSPECT_ISSUE_WORKTREE_FOR_PUBLISH
+        )
+        or maintenance_task_id in PROTECTED_MAINTENANCE_TASK_IDS
+        or maintenance_task_id in RECOVERY_ONLY_MAINTENANCE_TASK_IDS
+        or (route == ROUTE_CODE_GENERATION and _issue_approval_reference(body) is not None)
+    )
+    if not requires_authority:
+        return RouteAuthorityDecision(True)
+    if comments is None:
+        return RouteAuthorityDecision(False, "approval_comments_unavailable")
+    if not comments:
+        return RouteAuthorityDecision(False, "approval_comments_missing")
+    authority = _trusted_comment_route_authority(issue_number, comments)
+    return _route_authority_decision(
+        body=body,
+        route=route,
+        maintenance_task_id=maintenance_task_id,
+        authority=authority,
+    )
 
 
 def runner_shadow_mode_enabled() -> bool:
@@ -8742,6 +9014,7 @@ _EXISTING_PR_PUBLISH_ALLOWED_METADATA_FIELDS = frozenset(
         "Pull Request",
         "Expected PR Head SHA",
         "Expected PR Head Branch",
+        "Approval Reference",
         "Operator Approval",
         "Allowed Files",
     )
@@ -8782,7 +9055,13 @@ REGISTERED_WORKTREE_OVERLAY_PACKETS: dict[str, RegisteredWorktreeOverlayPacket] 
 
 
 _REGISTERED_WORKTREE_OVERLAY_ALLOWED_METADATA_FIELDS = frozenset(
-    ("Mode", "Maintenance Task ID", "Recovery Packet", "Operator Approval")
+    (
+        "Mode",
+        "Maintenance Task ID",
+        "Recovery Packet",
+        "Approval Reference",
+        "Operator Approval",
+    )
 )
 
 
@@ -9292,6 +9571,7 @@ _CONTAINER_VALIDATION_PUBLISH_ALLOWED_METADATA_FIELDS = frozenset(
         "Base Branch",
         "Output Branch",
         "Draft PR",
+        "Approval Reference",
         "Operator Approval",
     )
 )
@@ -9816,7 +10096,13 @@ def _registered_worktree_overlay_metadata(
 ) -> tuple[RegisteredWorktreeOverlayRequest | None, str | None]:
     metadata = _metadata_before_task(body)
     fields = _metadata_field_names(metadata)
-    if fields != _REGISTERED_WORKTREE_OVERLAY_ALLOWED_METADATA_FIELDS:
+    required_fields = _REGISTERED_WORKTREE_OVERLAY_ALLOWED_METADATA_FIELDS - {
+        "Approval Reference"
+    }
+    if (
+        not required_fields <= fields
+        or not fields <= _REGISTERED_WORKTREE_OVERLAY_ALLOWED_METADATA_FIELDS
+    ):
         return None, "unsupported_metadata_field"
     if _body_field(metadata, "Mode") != RUNTIME_MAINTENANCE_MODE:
         return None, "invalid_mode"
@@ -12040,6 +12326,20 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
         )
 
         prior_comments = get_issue_comments(issue)
+        authority_decision = route_authority_decision_for_issue(
+            issue_number=issue_number,
+            body=issue_body,
+            route=route,
+            maintenance_task_id=maintenance_task_id,
+            comments=prior_comments,
+        )
+        if not authority_decision.allowed:
+            reason = authority_decision.reason or "approval_authority_denied"
+            block_issue(
+                issue_number,
+                f"Route approval authority check failed: {reason}.",
+            )
+            return
         retry_block_reason = "executor_invocation"
         if route == ROUTE_CODE_GENERATION:
             expected_output_reason = code_task_expected_output_block_reason(issue_body)
