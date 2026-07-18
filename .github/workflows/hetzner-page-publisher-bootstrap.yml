@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   probe:
-    runs-on: [self-hosted, linux, x64, hetzner-agent-runner-1]
+    runs-on: [self-hosted, linux, x64]
     timeout-minutes: 5
     steps:
       - name: Verify bounded Hetzner runner identity
