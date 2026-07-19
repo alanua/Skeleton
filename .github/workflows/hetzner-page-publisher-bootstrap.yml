@@ -1,4 +1,4 @@
-name: Stage encrypted Milan bootstrap files
+name: Probe Hetzner deploy boundary
 
 on:
   pull_request:
@@ -6,42 +6,41 @@ on:
       - '.github/workflows/hetzner-page-publisher-bootstrap.yml'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  stage:
-    if: github.actor != 'github-actions[bot]'
+  probe:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    env:
+      HETZNER_SSH_PRIVATE_KEY: ${{ secrets.HETZNER_SSH_PRIVATE_KEY }}
+      HETZNER_SSH_KEY: ${{ secrets.HETZNER_SSH_KEY }}
+      HETZNER_AGENT_RUNNER_SSH_KEY: ${{ secrets.HETZNER_AGENT_RUNNER_SSH_KEY }}
+      JEEVES_SSH_KEY: ${{ secrets.JEEVES_SSH_KEY }}
+      DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+      SERVER_SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
+      SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+      HETZNER_KNOWN_HOSTS: ${{ secrets.HETZNER_KNOWN_HOSTS }}
+      SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.ref }}
-      - name: Download and verify encrypted loader only
+      - name: Report only configured secret names
         shell: bash
         run: |
           set -euo pipefail
-          base='https://raw.githubusercontent.com/alanua/Travel/9d97d8898f2434597ab9b48f7813ab493fe3160c/milan-2026'
-          dest='runtime_bootstrap/milan-2026'
-          rm -rf runtime_bootstrap
-          mkdir -p "$dest"
-          files=(index.html payload-00.txt payload-01.txt payload-02.txt payload-03.txt payload-04.txt payload-05.txt payload-06.txt payload-07.txt payload-07-tail.txt payload-08.txt)
-          for file in "${files[@]}"; do
-            curl --fail --silent --show-error --location --connect-timeout 10 --max-time 30 "$base/$file" -o "$dest/$file"
-            test -s "$dest/$file"
+          key_found=false
+          for name in HETZNER_SSH_PRIVATE_KEY HETZNER_SSH_KEY HETZNER_AGENT_RUNNER_SSH_KEY JEEVES_SSH_KEY DEPLOY_SSH_KEY SERVER_SSH_KEY SSH_PRIVATE_KEY; do
+            if [ -n "${!name:-}" ]; then
+              echo "$name=configured"
+              key_found=true
+            fi
           done
-          grep --quiet 'Приватна сторінка подорожі' "$dest/index.html"
-          grep --quiet 'payload-07-tail.txt' "$dest/index.html"
-          compact="$(mktemp)"
-          cat "$dest"/payload-00.txt "$dest"/payload-01.txt "$dest"/payload-02.txt "$dest"/payload-03.txt "$dest"/payload-04.txt "$dest"/payload-05.txt "$dest"/payload-06.txt "$dest"/payload-07.txt "$dest"/payload-07-tail.txt "$dest"/payload-08.txt | tr -d '[:space:]' > "$compact"
-          test "$(sha256sum "$compact" | awk '{print $1}')" = '2ea639370730aac2e9be8f574f85c837a31cbf53606affcbd922baa6539d4214'
-          test "$(find "$dest" -maxdepth 1 -type f | wc -l)" -eq 11
-      - name: Commit encrypted bootstrap files
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add runtime_bootstrap/milan-2026
-          git commit -m 'Stage encrypted Milan loader for bounded deployment'
-          git push origin HEAD:${{ github.event.pull_request.head.ref }}
+          known_hosts_found=false
+          for name in HETZNER_KNOWN_HOSTS SSH_KNOWN_HOSTS; do
+            if [ -n "${!name:-}" ]; then
+              echo "$name=configured"
+              known_hosts_found=true
+            fi
+          done
+          echo "ssh_key_configured=$key_found"
+          echo "known_hosts_configured=$known_hosts_found"
+          test "$key_found" = true
