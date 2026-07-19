@@ -3569,6 +3569,112 @@ def test_maintenance_task_bypasses_codex() -> None:
     ]
 
 
+def test_process_issue_dirty_clean_worktree_does_not_block_recover_skeleton_checkout() -> None:
+    issue = _maintenance_issue(runner.RECOVER_SKELETON_CHECKOUT)
+    issue["comments"] = []
+    report = (
+        "DONE: Runner host maintenance task completed.\n"
+        "maintenance_task_id=recover_skeleton_checkout\n"
+        "success_criteria=met"
+    )
+
+    with mock.patch.object(
+        runner,
+        "ensure_clean_worktree",
+        side_effect=AssertionError("preflight blocked recovery"),
+    ) as ensure_clean, mock.patch.object(
+        runner, "dispatch_runtime_maintenance_task", return_value=report
+    ) as dispatch, mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "record_runner_task_picked_up", return_value=None
+    ), mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ):
+        runner.process_issue(issue, workdir=str(runner.ROOT))
+
+    ensure_clean.assert_not_called()
+    dispatch.assert_called_once_with(
+        runner.RECOVER_SKELETON_CHECKOUT, str(runner.ROOT), issue["body"]
+    )
+
+
+def test_process_issue_dirty_clean_worktree_blocks_prepare_private_static_site_handoff() -> None:
+    issue = _maintenance_issue(runner.PREPARE_PRIVATE_STATIC_SITE_HANDOFF)
+    issue["comments"] = []
+
+    with mock.patch.object(
+        runner,
+        "ensure_clean_worktree",
+        return_value=(False, " M scripts/runner_poll_github_tasks.py\n"),
+    ) as ensure_clean, mock.patch.object(
+        runner, "block_issue"
+    ) as block, mock.patch.object(
+        runner, "dispatch_runtime_maintenance_task"
+    ) as dispatch:
+        runner.process_issue(issue, workdir=str(runner.ROOT))
+
+    ensure_clean.assert_called_once_with(str(runner.ROOT))
+    dispatch.assert_not_called()
+    assert "Runner worktree is not clean before starting." in block.call_args.args[1]
+
+
+def test_process_issue_dirty_clean_worktree_blocks_unrelated_maintenance_task() -> None:
+    issue = _maintenance_issue(runner.CHECK_SKELETON_FRESHNESS)
+    issue["comments"] = []
+
+    with mock.patch.object(
+        runner,
+        "ensure_clean_worktree",
+        return_value=(False, "?? local-note.txt\n"),
+    ) as ensure_clean, mock.patch.object(
+        runner, "block_issue"
+    ) as block, mock.patch.object(
+        runner, "dispatch_runtime_maintenance_task"
+    ) as dispatch:
+        runner.process_issue(issue, workdir=str(runner.ROOT))
+
+    ensure_clean.assert_called_once_with(str(runner.ROOT))
+    dispatch.assert_not_called()
+    assert "Runner worktree is not clean before starting." in block.call_args.args[1]
+
+
+def test_process_issue_clean_worktree_still_dispatches_maintenance_task() -> None:
+    issue = _maintenance_issue(runner.CHECK_SKELETON_FRESHNESS)
+    issue["comments"] = []
+    report = (
+        "DONE: Runner host maintenance task completed.\n"
+        "maintenance_task_id=check_skeleton_freshness\n"
+        "success_criteria=met"
+    )
+
+    with mock.patch.object(
+        runner, "ensure_clean_worktree", return_value=(True, "")
+    ) as ensure_clean, mock.patch.object(
+        runner, "dispatch_runtime_maintenance_task", return_value=report
+    ) as dispatch, mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "record_runner_task_picked_up", return_value=None
+    ), mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ):
+        runner.process_issue(issue, workdir=str(runner.ROOT))
+
+    ensure_clean.assert_called_once_with(str(runner.ROOT))
+    dispatch.assert_called_once_with(
+        runner.CHECK_SKELETON_FRESHNESS, str(runner.ROOT), issue["body"]
+    )
+
+
 def test_duplicate_blocker_blocks_before_executor_invocation() -> None:
     body = "Expected Output: done\n\n```task\nDo it\n```\n"
     condition = runner.retry_condition_for_issue(

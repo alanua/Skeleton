@@ -12201,7 +12201,10 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
 
         apply_runner_lane_label(issue_number, runner_task)
 
-        if maintenance_mode:
+        if (
+            maintenance_mode
+            and maintenance_task_id != RECOVER_SKELETON_CHECKOUT
+        ):
             clean, status_output = ensure_clean_worktree(coordinator_workdir)
             if not clean:
                 block_issue(
