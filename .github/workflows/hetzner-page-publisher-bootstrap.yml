@@ -1,4 +1,4 @@
-name: Probe Hetzner deploy boundary
+name: Probe Tailscale deploy boundary
 
 on:
   pull_request:
@@ -13,34 +13,29 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
-      HETZNER_SSH_PRIVATE_KEY: ${{ secrets.HETZNER_SSH_PRIVATE_KEY }}
-      HETZNER_SSH_KEY: ${{ secrets.HETZNER_SSH_KEY }}
-      HETZNER_AGENT_RUNNER_SSH_KEY: ${{ secrets.HETZNER_AGENT_RUNNER_SSH_KEY }}
-      JEEVES_SSH_KEY: ${{ secrets.JEEVES_SSH_KEY }}
-      DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-      SERVER_SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
-      SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-      HETZNER_KNOWN_HOSTS: ${{ secrets.HETZNER_KNOWN_HOSTS }}
-      SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+      TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+      TS_OAUTH_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
+      TAILSCALE_OAUTH_CLIENT_ID: ${{ secrets.TAILSCALE_OAUTH_CLIENT_ID }}
+      TAILSCALE_OAUTH_CLIENT_SECRET: ${{ secrets.TAILSCALE_OAUTH_CLIENT_SECRET }}
+      TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
+      TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
     steps:
       - name: Report only configured secret names
         shell: bash
         run: |
           set -euo pipefail
-          key_found=false
-          for name in HETZNER_SSH_PRIVATE_KEY HETZNER_SSH_KEY HETZNER_AGENT_RUNNER_SSH_KEY JEEVES_SSH_KEY DEPLOY_SSH_KEY SERVER_SSH_KEY SSH_PRIVATE_KEY; do
-            if [ -n "${!name:-}" ]; then
-              echo "$name=configured"
-              key_found=true
-            fi
+          oauth_id=false
+          oauth_secret=false
+          authkey=false
+          for name in TS_OAUTH_CLIENT_ID TAILSCALE_OAUTH_CLIENT_ID; do
+            if [ -n "${!name:-}" ]; then echo "$name=configured"; oauth_id=true; fi
           done
-          known_hosts_found=false
-          for name in HETZNER_KNOWN_HOSTS SSH_KNOWN_HOSTS; do
-            if [ -n "${!name:-}" ]; then
-              echo "$name=configured"
-              known_hosts_found=true
-            fi
+          for name in TS_OAUTH_SECRET TAILSCALE_OAUTH_CLIENT_SECRET; do
+            if [ -n "${!name:-}" ]; then echo "$name=configured"; oauth_secret=true; fi
           done
-          echo "ssh_key_configured=$key_found"
-          echo "known_hosts_configured=$known_hosts_found"
-          test "$key_found" = true
+          for name in TS_AUTHKEY TAILSCALE_AUTHKEY; do
+            if [ -n "${!name:-}" ]; then echo "$name=configured"; authkey=true; fi
+          done
+          echo "tailscale_oauth_configured=$([ "$oauth_id" = true ] && [ "$oauth_secret" = true ] && echo true || echo false)"
+          echo "tailscale_authkey_configured=$authkey"
+          if [ "$authkey" != true ] && { [ "$oauth_id" != true ] || [ "$oauth_secret" != true ]; }; then exit 1; fi
