@@ -1,4 +1,4 @@
-name: Probe Tailscale deploy boundary
+name: Probe Hetzner SSH deploy boundary
 
 on:
   pull_request:
@@ -13,29 +13,43 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
-      TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-      TS_OAUTH_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
-      TAILSCALE_OAUTH_CLIENT_ID: ${{ secrets.TAILSCALE_OAUTH_CLIENT_ID }}
-      TAILSCALE_OAUTH_CLIENT_SECRET: ${{ secrets.TAILSCALE_OAUTH_CLIENT_SECRET }}
-      TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
-      TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+      HETZNER_HOST: ${{ secrets.HETZNER_HOST }}
+      HETZNER_SERVER: ${{ secrets.HETZNER_SERVER }}
+      SERVER_HOST: ${{ secrets.SERVER_HOST }}
+      SSH_HOST: ${{ secrets.SSH_HOST }}
+      HETZNER_USER: ${{ secrets.HETZNER_USER }}
+      SERVER_USER: ${{ secrets.SERVER_USER }}
+      SSH_USER: ${{ secrets.SSH_USER }}
+      HETZNER_SSH_KEY: ${{ secrets.HETZNER_SSH_KEY }}
+      HETZNER_SSH_PRIVATE_KEY: ${{ secrets.HETZNER_SSH_PRIVATE_KEY }}
+      SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+      SERVER_SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
+      DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+      HETZNER_SSH_PORT: ${{ secrets.HETZNER_SSH_PORT }}
+      SSH_PORT: ${{ secrets.SSH_PORT }}
     steps:
       - name: Report only configured secret names
         shell: bash
         run: |
           set -euo pipefail
-          oauth_id=false
-          oauth_secret=false
-          authkey=false
-          for name in TS_OAUTH_CLIENT_ID TAILSCALE_OAUTH_CLIENT_ID; do
-            if [ -n "${!name:-}" ]; then echo "$name=configured"; oauth_id=true; fi
+          host=false
+          user=false
+          key=false
+          port=false
+          for name in HETZNER_HOST HETZNER_SERVER SERVER_HOST SSH_HOST; do
+            if [ -n "${!name:-}" ]; then echo "$name=configured"; host=true; fi
           done
-          for name in TS_OAUTH_SECRET TAILSCALE_OAUTH_CLIENT_SECRET; do
-            if [ -n "${!name:-}" ]; then echo "$name=configured"; oauth_secret=true; fi
+          for name in HETZNER_USER SERVER_USER SSH_USER; do
+            if [ -n "${!name:-}" ]; then echo "$name=configured"; user=true; fi
           done
-          for name in TS_AUTHKEY TAILSCALE_AUTHKEY; do
-            if [ -n "${!name:-}" ]; then echo "$name=configured"; authkey=true; fi
+          for name in HETZNER_SSH_KEY HETZNER_SSH_PRIVATE_KEY SSH_PRIVATE_KEY SERVER_SSH_KEY DEPLOY_SSH_KEY; do
+            if [ -n "${!name:-}" ]; then echo "$name=configured"; key=true; fi
           done
-          echo "tailscale_oauth_configured=$([ "$oauth_id" = true ] && [ "$oauth_secret" = true ] && echo true || echo false)"
-          echo "tailscale_authkey_configured=$authkey"
-          if [ "$authkey" != true ] && { [ "$oauth_id" != true ] || [ "$oauth_secret" != true ]; }; then exit 1; fi
+          for name in HETZNER_SSH_PORT SSH_PORT; do
+            if [ -n "${!name:-}" ]; then echo "$name=configured"; port=true; fi
+          done
+          echo "ssh_host_configured=$host"
+          echo "ssh_user_configured=$user"
+          echo "ssh_key_configured=$key"
+          echo "ssh_port_configured=$port"
+          if [ "$host" != true ] || [ "$key" != true ]; then exit 1; fi
