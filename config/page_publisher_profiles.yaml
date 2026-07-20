@@ -4,7 +4,34 @@ profiles:
     namespace_prefix: /travel
     visibility: tailnet_private
     backend: tailscale_serve_static_v1
+    requires_encryption: false
+    supports_owned_updates: true
     page_id_pattern: '^[a-z0-9][a-z0-9-]{2,63}$'
     max_inline_ciphertext_bytes: 43008
     max_uncompressed_bytes: 8388608
     max_entries: 160
+  filesystem_static_v1:
+    owner_project: '*'
+    namespace_prefix: /pages
+    visibility: local
+    backend: filesystem_static_v1
+    requires_encryption: false
+    supports_owned_updates: true
+    publication_root_env: SKELETON_PAGE_FILESYSTEM_ROOT
+    page_id_pattern: '^[a-z0-9][a-z0-9-]{2,63}$'
+    max_inline_ciphertext_bytes: 0
+    max_uncompressed_bytes: 33554432
+    max_entries: 500
+  github_pages_encrypted_v1:
+    owner_project: '*'
+    namespace_prefix: /
+    visibility: private_link
+    backend: github_pages_encrypted_v1
+    requires_encryption: true
+    supports_owned_updates: true
+    publication_root_env: SKELETON_GITHUB_PAGES_REPO
+    public_base_url_env: SKELETON_GITHUB_PAGES_BASE_URL
+    page_id_pattern: '^[a-z0-9][a-z0-9-]{2,63}$'
+    max_inline_ciphertext_bytes: 0
+    max_uncompressed_bytes: 16777216
+    max_entries: 300
