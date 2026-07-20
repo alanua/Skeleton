@@ -1,0 +1,56 @@
+name: Page Publisher runtime probe
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/page-publisher-runtime-probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: [self-hosted, hetzner-agent-runner-1]
+    timeout-minutes: 7
+    steps:
+      - name: Checkout public-safe code
+        uses: actions/checkout@v4
+
+      - name: Probe runtime without exposing private values
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          emit_bool() {
+            local name="$1"
+            shift
+            if "$@" >/dev/null 2>&1; then
+              echo "${name}=true"
+              echo "- ${name}: true" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "${name}=false"
+              echo "- ${name}: false" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          }
+
+          echo '## Page Publisher runtime probe' >> "$GITHUB_STEP_SUMMARY"
+          echo '- runner_online: true' >> "$GITHUB_STEP_SUMMARY"
+          echo 'runner_online=true'
+
+          emit_bool python3_available command -v python3
+          emit_bool openssl_available command -v openssl
+          emit_bool git_available command -v git
+          emit_bool tailscale_cli_available command -v tailscale
+          emit_bool tailscale_status_available bash -c 'command -v tailscale >/dev/null && tailscale status --json >/dev/null 2>&1'
+          emit_bool skeleton_pipeline_importable python3 -c 'from core.page_pipeline import publish_manifest'
+          emit_bool skeleton_private_root_present test -d "$HOME/.local/share/skeleton"
+          emit_bool travel_private_root_present test -d "$HOME/.local/share/travel"
+          emit_bool page_pipeline_state_present test -d "$HOME/.local/share/skeleton/page-pipeline/state"
+          emit_bool page_publisher_state_present test -d "$HOME/.local/share/skeleton/page-publisher"
+          emit_bool travel_calendar_outbox_present test -d "$HOME/.local/share/travel/calendar-outbox"
+          emit_bool travel_checkout_present bash -c 'find "$HOME" -maxdepth 6 -type d -name Travel -print -quit 2>/dev/null | grep -q .'
+          emit_bool milan_private_manifest_present bash -c 'find "$HOME/.local/share" -maxdepth 8 -type f \( -iname "milan-2026.yaml" -o -iname "milan-2026.yml" -o -iname "milan-2026.json" \) -print -quit 2>/dev/null | grep -q .'
+          emit_bool milan_publisher_state_present bash -c 'find "$HOME/.local/share/skeleton" -maxdepth 10 -type f \( -name "milan-2026.json" -o -name "deployment.json" \) -print -quit 2>/dev/null | grep -q .'
+
+          echo 'probe_completed=true'
+          echo '- probe_completed: true' >> "$GITHUB_STEP_SUMMARY"
