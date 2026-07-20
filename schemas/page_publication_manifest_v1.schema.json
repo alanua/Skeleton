@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://alanua.github.io/Skeleton/schemas/page_publication_manifest_v1.schema.json",
+  "title": "Skeleton Page Publication Manifest V1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema_version",
+    "owner_module",
+    "publication_profile_id",
+    "page_id",
+    "template_id",
+    "content_ref",
+    "asset_manifest_ref",
+    "publication_mode"
+  ],
+  "properties": {
+    "schema_version": {"enum": [1, "1", "1.0"]},
+    "owner_module": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{1,63}$"},
+    "publication_profile_id": {"type": "string", "minLength": 3, "maxLength": 96},
+    "page_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,63}$"},
+    "template_id": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{2,95}$"},
+    "content_ref": {"type": "string", "minLength": 1},
+    "asset_manifest_ref": {"type": "string", "minLength": 1},
+    "publication_mode": {"enum": ["create", "update_owned"]},
+    "operator_approval": {"enum": ["publish_page_v1", "publish_page_adopt_v1"]},
+    "renderer_entrypoint": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_.]*:[A-Za-z_][A-Za-z0-9_]*$"},
+    "content_assets_ref": {"type": "string"},
+    "locale": {"type": "string"},
+    "selected_variant": {"type": "string"},
+    "stable_url": {"type": "string"},
+    "evidence_metadata": {"type": "object"},
+    "expires_at": {"type": "string"},
+    "backend_options": {"type": "object"},
+    "downstream_actions": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {"type": "string"},
+          {
+            "type": "object",
+            "required": ["action_id"],
+            "properties": {
+              "action_id": {"type": "string"},
+              "config": {"type": "object"}
+            },
+            "additionalProperties": false
+          }
+        ]
+      }
+    }
+  }
+}
