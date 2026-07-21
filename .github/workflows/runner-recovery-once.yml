@@ -1,0 +1,63 @@
+name: Runner recovery once
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/runner-recovery-once.yml
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    runs-on: [self-hosted, hetzner-agent-runner-1]
+    timeout-minutes: 15
+    steps:
+      - name: Recover canonical Skeleton checkout and poller
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+
+          REPO=/home/agent/agent-dev/repos/Skeleton
+          RECOVERY_ROOT=/home/agent/agent-dev/private-recovery
+          STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+          BUNDLE="$RECOVERY_ROOT/skeleton-runner-$STAMP"
+
+          test "$(id -un)" = agent
+          test -d "$REPO/.git"
+          mkdir -p "$BUNDLE"
+          chmod 700 "$RECOVERY_ROOT" "$BUNDLE"
+          cd "$REPO"
+
+          git status --porcelain=v1 > "$BUNDLE/status.txt"
+          git diff --binary > "$BUNDLE/tracked-working-tree.patch"
+          git diff --cached --binary > "$BUNDLE/index.patch"
+          git rev-parse HEAD > "$BUNDLE/original-head.txt"
+          git branch --show-current > "$BUNDLE/original-branch.txt" || true
+          git remote -v > "$BUNDLE/remotes.txt"
+
+          mapfile -d '' UNTRACKED < <(git ls-files --others --exclude-standard -z)
+          if ((${#UNTRACKED[@]})); then
+            tar --null -T <(printf '%s\0' "${UNTRACKED[@]}") -czf "$BUNDLE/untracked-files.tar.gz"
+          fi
+          tar -C "$RECOVERY_ROOT" -czf "$RECOVERY_ROOT/skeleton-runner-$STAMP.tar.gz" "skeleton-runner-$STAMP"
+          chmod 600 "$RECOVERY_ROOT/skeleton-runner-$STAMP.tar.gz"
+
+          sudo systemctl stop skeleton-runner-poll.service || true
+          git fetch --prune origin main
+          git reset --hard origin/main
+          git clean -ffd
+          test -z "$(git status --porcelain)"
+          python3 -m py_compile scripts/runner_poll_github_tasks.py
+
+          sudo systemctl daemon-reload
+          sudo systemctl start skeleton-runner-poll.service
+          sudo systemctl --no-pager --full status skeleton-runner-poll.service || true
+          sudo journalctl -u skeleton-runner-poll.service -n 120 --no-pager
+
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+          test -z "$(git status --porcelain)"
+          echo "RECOVERY_BUNDLE=$RECOVERY_ROOT/skeleton-runner-$STAMP.tar.gz"
+          echo "HEAD=$(git rev-parse HEAD)"
