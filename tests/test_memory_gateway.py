@@ -6,12 +6,14 @@ from pathlib import Path
 import pytest
 import yaml
 
+from core.memory_gateway_storage import PRIVATE_MEMORY_GATEWAY_MUTATION_SCHEMA, PrivateMemoryGatewayStorage
 from core.memory_gateway import (
     MEMORY_GATEWAY_REQUEST_SCHEMA,
     MemoryGateway,
     allowed_command_names,
     capability_token,
 )
+from core.private_memory_stack import PrivateMemoryStack
 from core.skeleton_memory import SkeletonMemory
 from core.canonical_memory_manifest import (
     APPROVED_OPERATOR_RULE_CATEGORIES,
@@ -504,7 +506,148 @@ def test_required_namespaces_and_allowlisted_commands_are_registered() -> None:
             f"{namespace}.memory.get_index_freshness",
             f"{namespace}.memory.prepare_canonical_manifest",
             f"{namespace}.memory.import_canonical_manifest",
+            f"{namespace}.memory.private_mutate",
             f"{namespace}.graph.query_code",
             f"{namespace}.graph.get_index_freshness",
             f"{namespace}.memory.propose_patch",
         }
+
+
+def test_private_memory_gateway_put_is_idempotent_and_exact_readback_is_authoritative(tmp_path: Path) -> None:
+    stack = PrivateMemoryStack(tmp_path)
+    stack.init(import_manifest=False)
+    gw = MemoryGateway(
+        capability_token(namespaces=("skeleton",), public_mode=False),
+        private_memory_storage=PrivateMemoryGatewayStorage(stack),
+    )
+    before = stack.status()["canonical_sqlite"]["canonical_revision"]
+    mutation = {
+        "schema": PRIVATE_MEMORY_GATEWAY_MUTATION_SCHEMA,
+        "project_id": "skeleton",
+        "operation": "put",
+        "fact_namespace": "skeleton.notes",
+        "fact_id": "gateway_note",
+        "value": {"summary": "gateway exact readback"},
+        "actor_ref": "operator",
+        "reason_code": "operator-put",
+        "approval_ref": "local-operator",
+        "expected_revision": before,
+        "idempotency_key": "idem_gateway_note",
+    }
+
+    first = gw.execute(request("skeleton", "memory.private_mutate", mutation))["payload"]
+    revision_after_first = stack.status()["canonical_sqlite"]["canonical_revision"]
+    second = gw.execute(request("skeleton", "memory.private_mutate", mutation))["payload"]
+    exact = stack.get(namespace="skeleton.notes", fact_id="gateway_note")
+
+    assert first["operation"] == "put"
+    assert first["idempotency_classification"] == "NEW_MUTATION"
+    assert first["canonical_revision"] == before + 1
+    assert second["idempotency_classification"] == "DUPLICATE_IDENTICAL"
+    assert stack.status()["canonical_sqlite"]["canonical_revision"] == revision_after_first
+    assert exact["authoritative"] is True
+    assert exact["canonical_revision"] == first["canonical_revision"]
+    assert exact["value"]["summary"] == "gateway exact readback"
+    serialized = json.dumps([first, second], sort_keys=True)
+    assert "gateway exact readback" not in serialized
+    assert str(tmp_path) not in serialized
+    assert ".sqlite" not in serialized
+
+
+def test_private_memory_gateway_rejects_mismatched_idempotency_reuse(tmp_path: Path) -> None:
+    stack = PrivateMemoryStack(tmp_path)
+    stack.init(import_manifest=False)
+    gw = MemoryGateway(
+        capability_token(namespaces=("skeleton",), public_mode=False),
+        private_memory_storage=PrivateMemoryGatewayStorage(stack),
+    )
+    mutation = {
+        "schema": PRIVATE_MEMORY_GATEWAY_MUTATION_SCHEMA,
+        "project_id": "skeleton",
+        "operation": "put",
+        "fact_namespace": "skeleton.notes",
+        "fact_id": "idem_note",
+        "value": {"summary": "first"},
+        "idempotency_key": "idem_reuse",
+    }
+    gw.execute(request("skeleton", "memory.private_mutate", mutation))
+
+    with pytest.raises(MemoryGatewayPolicyError) as excinfo:
+        gw.execute(
+            request(
+                "skeleton",
+                "memory.private_mutate",
+                {**mutation, "value": {"summary": "different"}},
+            )
+        )
+
+    assert excinfo.value.reason_code == "MemoryGatewayStorageError"
+
+
+def test_private_memory_gateway_crash_retry_does_not_advance_revision_twice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stack = PrivateMemoryStack(tmp_path)
+    stack.init(import_manifest=False)
+    adapter = PrivateMemoryGatewayStorage(stack)
+    gw = MemoryGateway(
+        capability_token(namespaces=("skeleton",), public_mode=False),
+        private_memory_storage=adapter,
+    )
+    mutation = {
+        "schema": PRIVATE_MEMORY_GATEWAY_MUTATION_SCHEMA,
+        "project_id": "skeleton",
+        "operation": "put",
+        "fact_namespace": "skeleton.notes",
+        "fact_id": "crash_note",
+        "value": {"summary": "committed before receipt"},
+        "idempotency_key": "idem_crash_note",
+    }
+    before = stack.status()["canonical_sqlite"]["canonical_revision"]
+    original_record_done = adapter._record_done
+
+    def crash_after_commit(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("synthetic receipt write crash")
+
+    monkeypatch.setattr(adapter, "_record_done", crash_after_commit)
+    with pytest.raises(MemoryGatewayPolicyError):
+        gw.execute(request("skeleton", "memory.private_mutate", mutation))
+    after_crash = stack.status()["canonical_sqlite"]["canonical_revision"]
+    monkeypatch.setattr(adapter, "_record_done", original_record_done)
+
+    recovered = gw.execute(request("skeleton", "memory.private_mutate", mutation))["payload"]
+
+    assert after_crash == before + 1
+    assert stack.status()["canonical_sqlite"]["canonical_revision"] == after_crash
+    assert recovered["idempotency_classification"] == "DUPLICATE_IDENTICAL"
+    assert recovered["canonical_revision"] == after_crash
+    assert stack.get(namespace="skeleton.notes", fact_id="crash_note")["value"]["summary"] == "committed before receipt"
+
+
+def test_private_memory_gateway_rejects_public_mode_and_wrong_project(tmp_path: Path) -> None:
+    stack = PrivateMemoryStack(tmp_path)
+    public_gateway = MemoryGateway(
+        capability_token(namespaces=("skeleton",), public_mode=True),
+        private_memory_storage=PrivateMemoryGatewayStorage(stack),
+    )
+    mutation = {
+        "schema": PRIVATE_MEMORY_GATEWAY_MUTATION_SCHEMA,
+        "project_id": "skeleton",
+        "operation": "delete",
+        "fact_namespace": "skeleton.notes",
+        "fact_id": "blocked",
+    }
+
+    with pytest.raises(MemoryGatewayPolicyError) as public_exc:
+        public_gateway.execute(request("skeleton", "memory.private_mutate", mutation))
+    assert public_exc.value.reason_code == "PRIVATE_MEMORY_MUTATION_PUBLIC_MODE_FORBIDDEN"
+
+    private_gateway = MemoryGateway(
+        capability_token(namespaces=("skeleton",), public_mode=False),
+        private_memory_storage=PrivateMemoryGatewayStorage(stack),
+    )
+    with pytest.raises(MemoryGatewayPolicyError) as project_exc:
+        private_gateway.execute(
+            request("skeleton", "memory.private_mutate", {**mutation, "project_id": "other"})
+        )
+    assert project_exc.value.reason_code == "MemoryGatewayStorageError"

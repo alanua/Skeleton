@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.private_memory_gateway_mutation.schema.json",
+  "title": "Private Memory Gateway Mutation",
+  "type": "object",
+  "required": ["schema", "project_id", "operation"],
+  "additionalProperties": true,
+  "properties": {
+    "schema": {"const": "skeleton.private_memory_gateway.mutation.v1"},
+    "project_id": {"const": "skeleton"},
+    "operation": {"enum": ["put", "delete", "import_bundle"]},
+    "fact_namespace": {"type": "string"},
+    "fact_id": {"type": "string"},
+    "value": true,
+    "basename": {"type": "string"},
+    "expected_sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+    "create_backup": {"type": "boolean"},
+    "actor_ref": {"type": "string"},
+    "reason_code": {"type": "string"},
+    "approval_ref": {"type": "string"},
+    "expected_revision": {"type": "integer", "minimum": 0},
+    "idempotency_key": {"type": "string"},
+    "source_hash": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"}
+  }
+}

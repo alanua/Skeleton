@@ -31,7 +31,7 @@ skeleton-memory backup --snapshot-id snapshot-001
 skeleton-memory status
 ```
 
-`get` is exact and authoritative because it reads canonical SQLite directly. `search` and `relations` are non-authoritative derived results and include canonical refs and revisions for exact confirmation.
+`put`, `delete`, and `import-bundle` enter the private `MemoryGateway` compatibility boundary before they reach the stack. The gateway request preserves operator approval, actor, reason, project scope, expected revision, idempotency key, source hash, and bundle hash metadata where applicable. `get` is exact and authoritative because it reads canonical SQLite directly. `search` and `relations` are non-authoritative derived results and include canonical refs and revisions for exact confirmation.
 
 ## Storage
 
@@ -51,7 +51,7 @@ Canonical facts and history are preserved. Initialization validates a non-empty 
 
 After every successful canonical put or delete, both derived indexes are rebuilt from the same active SQLite facts before success is reported. The canonical mutation and both derived index rebuilds run under one inter-process exclusive lock so concurrent writers cannot observe a half-rebuilt stack.
 
-If an index rebuild fails, the canonical database is restored from a logical SQLite backup made through SQLite's backup API instead of raw database bytes. Rollback removes stale `-wal` and `-shm` sidecars before reporting the mutation as blocked.
+If an index rebuild fails after a canonical mutation is committed, canonical SQLite remains the sole authority and the CLI reports a degraded receipt with the affected derived index names. Retry uses the gateway idempotency record and canonical transaction reference, so a crash after canonical commit cannot write a second mutation or advance the revision twice. Rollback for pre-commit canonical failures uses a logical SQLite backup made through SQLite's backup API instead of raw database bytes and removes stale `-wal` and `-shm` sidecars before reporting the mutation as blocked.
 
 Graphify and MemPalace never write canonical SQLite directly.
 

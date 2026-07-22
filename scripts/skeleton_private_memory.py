@@ -11,6 +11,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from core.memory_gateway import MEMORY_GATEWAY_REQUEST_SCHEMA, MemoryGateway, capability_token
+from core.memory_gateway_storage import PRIVATE_MEMORY_GATEWAY_MUTATION_SCHEMA, PrivateMemoryGatewayStorage
 from core.private_memory_stack import PrivateMemoryStack, PrivateMemoryStackError, sanitize_cli_report
 from core.task_memory_context import TaskMemoryContextError, build_task_memory_context
 
@@ -32,6 +34,9 @@ def main(argv: list[str] | None = None) -> int:
     put.add_argument("--actor", default="operator")
     put.add_argument("--reason", default="operator-put")
     put.add_argument("--approval", default="local-operator")
+    put.add_argument("--expected-revision", type=int)
+    put.add_argument("--idempotency-key")
+    put.add_argument("--source-hash")
 
     get = sub.add_parser("get", help="Read one exact canonical fact directly from SQLite.")
     get.add_argument("namespace")
@@ -54,6 +59,9 @@ def main(argv: list[str] | None = None) -> int:
     import_bundle.add_argument("basename")
     import_bundle.add_argument("--expected-sha256", required=True)
     import_bundle.add_argument("--create-backup", action="store_true")
+    import_bundle.add_argument("--expected-revision", type=int)
+    import_bundle.add_argument("--idempotency-key")
+    import_bundle.add_argument("--source-hash")
 
     task_context = sub.add_parser("task-context", help="Build a public-safe task memory context receipt.")
     task_context.add_argument("--project-id", required=True)
@@ -73,6 +81,9 @@ def main(argv: list[str] | None = None) -> int:
     delete.add_argument("--actor", default="operator")
     delete.add_argument("--reason", default="operator-delete")
     delete.add_argument("--approval", default="local-operator")
+    delete.add_argument("--expected-revision", type=int)
+    delete.add_argument("--idempotency-key")
+    delete.add_argument("--source-hash")
 
     args = parser.parse_args(argv)
     stack = PrivateMemoryStack(args.root)
@@ -80,13 +91,20 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "init":
             payload = stack.init()
         elif args.command == "put":
-            payload = stack.put(
-                namespace=args.namespace,
-                fact_id=args.fact_id,
-                value=_loads_json(args.json),
-                actor_ref=args.actor,
-                reason_code=args.reason,
-                approval_ref=args.approval,
+            payload = _execute_gateway_mutation(
+                stack,
+                {
+                    "operation": "put",
+                    "fact_namespace": args.namespace,
+                    "fact_id": args.fact_id,
+                    "value": _loads_json(args.json),
+                    "actor_ref": args.actor,
+                    "reason_code": args.reason,
+                    "approval_ref": args.approval,
+                    "expected_revision": args.expected_revision,
+                    "idempotency_key": args.idempotency_key,
+                    "source_hash": args.source_hash,
+                },
             )
         elif args.command == "get":
             payload = stack.get(namespace=args.namespace, fact_id=args.fact_id)
@@ -99,10 +117,17 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "backup":
             payload = stack.backup(snapshot_id=args.snapshot_id)
         elif args.command == "import-bundle":
-            payload = stack.import_bundle(
-                args.basename,
-                expected_sha256=args.expected_sha256,
-                create_backup=args.create_backup,
+            payload = _execute_gateway_mutation(
+                stack,
+                {
+                    "operation": "import_bundle",
+                    "basename": args.basename,
+                    "expected_sha256": args.expected_sha256,
+                    "create_backup": args.create_backup,
+                    "expected_revision": args.expected_revision,
+                    "idempotency_key": args.idempotency_key,
+                    "source_hash": args.source_hash,
+                },
             )
         elif args.command == "task-context":
             payload = build_task_memory_context(
@@ -119,12 +144,19 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "status":
             payload = stack.status()
         elif args.command == "delete":
-            payload = stack.delete(
-                namespace=args.namespace,
-                fact_id=args.fact_id,
-                actor_ref=args.actor,
-                reason_code=args.reason,
-                approval_ref=args.approval,
+            payload = _execute_gateway_mutation(
+                stack,
+                {
+                    "operation": "delete",
+                    "fact_namespace": args.namespace,
+                    "fact_id": args.fact_id,
+                    "actor_ref": args.actor,
+                    "reason_code": args.reason,
+                    "approval_ref": args.approval,
+                    "expected_revision": args.expected_revision,
+                    "idempotency_key": args.idempotency_key,
+                    "source_hash": args.source_hash,
+                },
             )
         else:
             parser.error("unsupported command")
@@ -137,6 +169,27 @@ def main(argv: list[str] | None = None) -> int:
 
 def _loads_json(value: str) -> Any:
     return json.loads(value)
+
+
+def _execute_gateway_mutation(stack: PrivateMemoryStack, payload: dict[str, object]) -> dict[str, object]:
+    mutation_payload = {
+        "schema": PRIVATE_MEMORY_GATEWAY_MUTATION_SCHEMA,
+        "project_id": "skeleton",
+        **{key: value for key, value in payload.items() if value is not None},
+    }
+    gateway = MemoryGateway(
+        capability_token(namespaces=("skeleton",), public_mode=False),
+        private_memory_storage=PrivateMemoryGatewayStorage(stack),
+    )
+    response = gateway.execute(
+        {
+            "schema": MEMORY_GATEWAY_REQUEST_SCHEMA,
+            "namespace": "skeleton",
+            "command": "skeleton.memory.private_mutate",
+            "payload": mutation_payload,
+        }
+    )
+    return dict(response["payload"])
 
 
 if __name__ == "__main__":

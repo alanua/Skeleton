@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import ast
 import multiprocessing as mp
 import sqlite3
 import stat
@@ -254,6 +255,73 @@ def test_cli_help_and_installer_syntax() -> None:
     assert "task-context" in help_result.stdout
 
     subprocess.run(["bash", "-n", "scripts/install_skeleton_private_memory.sh"], cwd=ROOT, check=True)
+
+
+def test_cli_mutations_route_through_memory_gateway(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import scripts.skeleton_private_memory as cli
+
+    calls: list[dict[str, object]] = []
+
+    class RecordingGateway:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def execute(self, request_payload: dict[str, object]) -> dict[str, object]:
+            calls.append(request_payload)
+            payload = request_payload["payload"]
+            assert isinstance(payload, dict)
+            return {
+                "payload": {
+                    "schema": "skeleton.private_memory_gateway.mutation_receipt.v1",
+                    "status": "DONE",
+                    "operation": payload["operation"],
+                    "project_id": "skeleton",
+                    "idempotency_classification": "NEW_MUTATION",
+                    "canonical_revision": 1,
+                }
+            }
+
+    monkeypatch.setattr(cli, "MemoryGateway", RecordingGateway)
+
+    assert cli.main(["--root", str(tmp_path), "put", "skeleton.notes", "note1", "--json", '{"summary":"x"}']) == 0
+    assert cli.main(["--root", str(tmp_path), "delete", "skeleton.notes", "note1"]) == 0
+    assert (
+        cli.main(
+            [
+                "--root",
+                str(tmp_path),
+                "import-bundle",
+                "approved.json",
+                "--expected-sha256",
+                "a" * 64,
+            ]
+        )
+        == 0
+    )
+
+    assert [call["command"] for call in calls] == [
+        "skeleton.memory.private_mutate",
+        "skeleton.memory.private_mutate",
+        "skeleton.memory.private_mutate",
+    ]
+    assert [call["payload"]["operation"] for call in calls] == ["put", "delete", "import_bundle"]
+    assert all(call["namespace"] == "skeleton" for call in calls)
+
+
+def test_cli_mutation_commands_do_not_call_private_stack_mutators_directly() -> None:
+    tree = ast.parse((ROOT / "scripts" / "skeleton_private_memory.py").read_text(encoding="utf-8"))
+    forbidden = {"put", "delete", "import_bundle"}
+    direct_calls = [
+        node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in forbidden
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "stack"
+    ]
+
+    assert direct_calls == []
 
 
 def _put_fact_in_process(root: Path, queue: mp.Queue[str]) -> None:
