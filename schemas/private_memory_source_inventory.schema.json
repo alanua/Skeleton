@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.skeleton.local/private_memory_source_inventory.schema.json",
+  "title": "Skeleton Private Memory Source Inventory",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "inventory_id",
+    "generated_at",
+    "privacy_boundary",
+    "project_ref",
+    "domain_ref",
+    "sources",
+    "inventory_hash"
+  ],
+  "properties": {
+    "schema": {"const": "skeleton.private_memory_source_inventory.v1"},
+    "inventory_id": {"$ref": "#/$defs/safe_ref"},
+    "generated_at": {"$ref": "#/$defs/date_time"},
+    "privacy_boundary": {"const": "PUBLIC_SAFE_METADATA_ONLY"},
+    "project_ref": {"$ref": "#/$defs/safe_ref"},
+    "domain_ref": {"$ref": "#/$defs/safe_ref"},
+    "sources": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/source"}
+    },
+    "inventory_hash": {"$ref": "#/$defs/hash"}
+  },
+  "$defs": {
+    "safe_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+      "not": {"pattern": "://|/|\\\\|\\.\\.|\\s"}
+    },
+    "date_time": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "date_range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "until"],
+      "properties": {
+        "from": {"anyOf": [{"$ref": "#/$defs/date_time"}, {"type": "null"}]},
+        "until": {"anyOf": [{"$ref": "#/$defs/date_time"}, {"type": "null"}]}
+      }
+    },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["authority_class", "authority_ref", "approval_ref"],
+      "properties": {
+        "authority_class": {
+          "enum": [
+            "OPERATOR_CONFIRMED",
+            "APPROVED_CANON",
+            "SOURCE_FACT",
+            "OPERATIONAL",
+            "DERIVED",
+            "PROVISIONAL"
+          ]
+        },
+        "authority_ref": {"$ref": "#/$defs/safe_ref"},
+        "approval_ref": {"$ref": "#/$defs/safe_ref"}
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stable_source_id",
+        "source_class",
+        "project_ref",
+        "domain_ref",
+        "date_range",
+        "privacy_class",
+        "integrity_hash",
+        "retention_class",
+        "extraction_class",
+        "authority"
+      ],
+      "properties": {
+        "stable_source_id": {"$ref": "#/$defs/safe_ref"},
+        "source_class": {
+          "enum": [
+            "chat_export",
+            "document_store",
+            "repository_issue",
+            "email_archive",
+            "task_log",
+            "operator_note_archive",
+            "external_system_export"
+          ]
+        },
+        "project_ref": {"$ref": "#/$defs/safe_ref"},
+        "domain_ref": {"$ref": "#/$defs/safe_ref"},
+        "date_range": {"$ref": "#/$defs/date_range"},
+        "privacy_class": {
+          "enum": [
+            "public_safe_metadata",
+            "local_private",
+            "restricted_operator_private",
+            "confidential"
+          ]
+        },
+        "integrity_hash": {"$ref": "#/$defs/hash"},
+        "retention_class": {"$ref": "#/$defs/safe_ref"},
+        "extraction_class": {"$ref": "#/$defs/safe_ref"},
+        "authority": {"$ref": "#/$defs/authority"}
+      }
+    }
+  }
+}
