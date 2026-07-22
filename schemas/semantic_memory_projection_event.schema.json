@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.semantic_memory_projection_event.schema.json",
+  "title": "Semantic Memory Projection Event",
+  "type": "object",
+  "required": [
+    "schema",
+    "project_id",
+    "dataset_id",
+    "canonical_revision",
+    "canonical_ref",
+    "content_hash",
+    "bounded_text",
+    "provenance"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "skeleton.semantic_memory_projection_event.v1"},
+    "project_id": {"$ref": "#/$defs/safe_id"},
+    "dataset_id": {"$ref": "#/$defs/safe_id"},
+    "canonical_revision": {"type": "integer", "minimum": 1},
+    "canonical_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:/#-]{0,191}$"},
+    "content_hash": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+    "bounded_text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9 .,:;_()/#-]{0,511}$"
+    },
+    "provenance": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 8,
+      "additionalProperties": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:/#-]{0,191}$"}
+    }
+  },
+  "$defs": {
+    "safe_id": {
+      "type": "string",
+      "not": {"enum": ["*", "all", "ALL"]},
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+    }
+  }
+}

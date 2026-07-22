@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.semantic_memory_projection_receipt.schema.json",
+  "title": "Semantic Memory Projection Receipt",
+  "type": "object",
+  "required": [
+    "schema",
+    "status",
+    "project_id",
+    "dataset_id",
+    "reason_code",
+    "counts",
+    "canonical_revisions",
+    "content_hashes"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "skeleton.semantic_memory_projection_receipt.v1"},
+    "status": {"enum": ["OK", "BLOCKED", "STALE", "UNAVAILABLE"]},
+    "project_id": {"$ref": "#/$defs/safe_id"},
+    "dataset_id": {"$ref": "#/$defs/safe_id"},
+    "reason_code": {
+      "type": ["string", "null"],
+      "enum": [
+        null,
+        "MEMORY_UNAVAILABLE",
+        "PROJECT_ID_AMBIGUOUS",
+        "PROJECTION_STALE",
+        "CROSS_PROJECT_RECALL_FORBIDDEN",
+        "COGNEE_DEPENDENCY_UNAVAILABLE",
+        "INVALID_PROJECTION_EVENT",
+        "INVALID_RECALL_REQUEST",
+        "CONTENT_HASH_MISMATCH",
+        "DATASET_ID_AMBIGUOUS"
+      ]
+    },
+    "counts": {
+      "type": "object",
+      "required": ["projected", "recalled", "deleted"],
+      "additionalProperties": false,
+      "properties": {
+        "projected": {"type": "integer", "minimum": 0},
+        "recalled": {"type": "integer", "minimum": 0},
+        "deleted": {"type": "integer", "minimum": 0}
+      }
+    },
+    "canonical_revisions": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {"type": "integer", "minimum": 1}
+    },
+    "content_hashes": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"}
+    }
+  },
+  "$defs": {
+    "safe_id": {
+      "type": "string",
+      "not": {"enum": ["*", "all", "ALL"]},
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+    }
+  }
+}

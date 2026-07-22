@@ -16,6 +16,9 @@ dev = [
   "uvicorn==0.35.0",
   "httpx==0.28.1",
 ]
+cognee = [
+  "cognee==1.4.0",
+]
 aufmass-geometry = [
   "numpy==2.4.6",
   "ezdxf==1.4.4",

@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.semantic_memory_recall_response.schema.json",
+  "title": "Semantic Memory Recall Response",
+  "type": "object",
+  "required": ["schema", "status", "project_id", "dataset_id", "canonical_revision", "stale", "results"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "skeleton.semantic_memory_recall_response.v1"},
+    "status": {"enum": ["OK", "STALE"]},
+    "project_id": {"$ref": "#/$defs/safe_id"},
+    "dataset_id": {"$ref": "#/$defs/safe_id"},
+    "canonical_revision": {"type": "integer", "minimum": 1},
+    "stale": {"type": "boolean"},
+    "results": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {"$ref": "#/$defs/result"}
+    },
+    "receipt": {
+      "type": "object",
+      "required": [
+        "schema",
+        "status",
+        "project_id",
+        "dataset_id",
+        "reason_code",
+        "counts",
+        "canonical_revisions",
+        "content_hashes"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "skeleton.semantic_memory_projection_receipt.v1"},
+        "status": {"enum": ["OK", "BLOCKED", "STALE", "UNAVAILABLE"]},
+        "project_id": {"$ref": "#/$defs/safe_id"},
+        "dataset_id": {"$ref": "#/$defs/safe_id"},
+        "reason_code": {
+          "type": ["string", "null"],
+          "enum": [
+            null,
+            "MEMORY_UNAVAILABLE",
+            "PROJECT_ID_AMBIGUOUS",
+            "DATASET_ID_AMBIGUOUS",
+            "PROJECTION_STALE",
+            "CROSS_PROJECT_RECALL_FORBIDDEN",
+            "COGNEE_DEPENDENCY_UNAVAILABLE",
+            "INVALID_PROJECTION_EVENT",
+            "INVALID_RECALL_REQUEST",
+            "CONTENT_HASH_MISMATCH"
+          ]
+        },
+        "counts": {
+          "type": "object",
+          "required": ["projected", "recalled", "deleted"],
+          "additionalProperties": false,
+          "properties": {
+            "projected": {"type": "integer", "minimum": 0},
+            "recalled": {"type": "integer", "minimum": 0},
+            "deleted": {"type": "integer", "minimum": 0}
+          }
+        },
+        "canonical_revisions": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {"type": "integer", "minimum": 1}
+        },
+        "content_hashes": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "safe_id": {
+      "type": "string",
+      "not": {"enum": ["*", "all", "ALL"]},
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+    },
+    "result": {
+      "type": "object",
+      "required": [
+        "project_id",
+        "dataset_id",
+        "canonical_revision",
+        "canonical_ref",
+        "content_hash",
+        "score",
+        "bounded_text",
+        "provenance"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "project_id": {"$ref": "#/$defs/safe_id"},
+        "dataset_id": {"$ref": "#/$defs/safe_id"},
+        "canonical_revision": {"type": "integer", "minimum": 1},
+        "canonical_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:/#-]{0,191}$"},
+        "content_hash": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+        "score": {"type": "number", "minimum": 0, "maximum": 1},
+        "bounded_text": {"type": "string", "minLength": 1, "maxLength": 512},
+        "provenance": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 8,
+          "additionalProperties": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:/#-]{0,191}$"}
+        }
+      }
+    }
+  }
+}
