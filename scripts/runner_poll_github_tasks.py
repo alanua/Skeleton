@@ -76,6 +76,11 @@ from core.runner_loop_control_executor import (
     loop_task_packet_from_body as _executor_loop_task_packet_from_body,
 )
 from core.private_memory import healthcheck_private_memory, write_public_heartbeat
+from core.runner_private_memory_source_inventory import (
+    CANDIDATE_CATEGORIES as PRIVATE_MEMORY_INVENTORY_CATEGORIES,
+    TASK_ID as PRIVATE_MEMORY_PHASE_A_INVENTORY,
+    execute_private_memory_phase_a_inventory,
+)
 from core.private_static_site_runtime import (
     DEPLOY_TASK_ID as DEPLOY_PRIVATE_STATIC_SITE,
     PRIVATE_KEY_MARKERS,
@@ -238,6 +243,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         MEMPALACE_SYNTHETIC_RUNTIME_SMOKE,
         PRIVATE_MEMORY_HEALTHCHECK,
         HERMES_PRIVATE_MEMORY_BRIDGE_CHECK,
+        PRIVATE_MEMORY_PHASE_A_INVENTORY,
         INSTALL_GRAPHIFY_RUNTIME,
         PREPARE_AUFMASS_PRIVATE_RUNTIME,
         RUN_AUFMASS_PRIVATE_DXF_REVIEW,
@@ -461,6 +467,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "branch",
         "build_ms",
         "canon_note",
+        "candidate_count",
+        "chat_export_candidate_count",
         "changed_file",
         "changed_file_count",
         "changed_files",
@@ -474,6 +482,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "context_hash",
         "certificate_sha256_fingerprint",
         "command_unavailable_reason",
+        "content_files_read",
         "compare_ahead_by",
         "compare_behind_by",
         "compare_state",
@@ -484,8 +493,10 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "decision_records_skipped",
         "decision_records_written",
         "decision",
+        "degraded",
         "diagnostic_count",
         "device_count",
+        "document_candidate_count",
         "responsive_count",
         "gateway_presence",
         "gateway_status",
@@ -502,6 +513,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "dxf_source_count",
         "error_class",
         "event",
+        "excluded_infrastructure_cache_name_count",
+        "excluded_secret_like_count",
         "external_side_effects_executed",
         "existing_pr_lookup",
         "existing_pr_url",
@@ -548,12 +561,14 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "machine",
         "maintenance_task_id",
         "managed_version_marker_count",
+        "manifest_candidate_count",
         "model_credentials_used",
         "merge_action",
         "mergeable",
         "mergeable_state",
         "memory_events_existing",
         "memory_events_written",
+        "memory_database_candidate_count",
         "missing_file",
         "missing_dependency_module",
         "mode",
@@ -567,6 +582,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "open_issues_count",
         "open_pull_requests_count",
         "orient_status",
+        "other_candidate_count",
         "pilot_mode",
         "pilot_summary_schema",
         "ports_disabled",
@@ -586,6 +602,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "private_memory_status",
         "private_memory_writable_when_requested",
         "private_memory_write_requested",
+        "private_report_sha256",
+        "project_handoff_candidate_count",
         "private_workspace",
         "profile_backup_item_count",
         "profile_backup_private",
@@ -617,9 +635,12 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "report_private_paths",
         "report_quantities",
         "review_table_count",
+        "root_readable_count",
+        "root_unreadable_count",
         "runtime_smoke_check_count",
         "runtime_smoke_decision",
         "runtime_smoke_stable_reason",
+        "runtime_private_action",
         "ram_bytes",
         "repository",
         "rollback_status",
@@ -628,6 +649,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "run_id",
         "runner_root_exists",
         "runner_status",
+        "scanned_entry_count",
+        "selected_root_count",
         "selected_source_count",
         "services_disabled",
         "services_enabled",
@@ -659,6 +682,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "synthetic_corpus_status",
         "live_private_ingestion",
         "loop_state",
+        "symlink_count",
+        "symlink_traversal",
         "synthetic_graph_edge_count",
         "synthetic_graph_node_count",
         "synthetic_smoke_timeout_seconds",
@@ -673,6 +698,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "tool_git",
         "tool_python3",
         "tracked_files_match_allowlist",
+        "truncated_root_count",
+        "truncation_evidence",
         "target_branch",
         "target_head_sha",
         "unexpected_untracked_files",
@@ -3821,6 +3848,59 @@ def private_memory_healthcheck(body: str = "") -> str:
         return _maintenance_report("DONE", task_id, status_lines, "met")
     status_lines.append("reason=private_memory_healthcheck_not_ready")
     return _maintenance_report("BLOCKED", task_id, status_lines, "not_met")
+
+
+def private_memory_phase_a_inventory(body: str = "") -> str:
+    result = execute_private_memory_phase_a_inventory(
+        body,
+        env=os.environ,
+        extract_task_block=extract_task_block,
+    )
+    payload: dict[str, object] = {}
+    for line in result.lines:
+        if line.count("=") != 1:
+            return _maintenance_report(
+                "BLOCKED",
+                PRIVATE_MEMORY_PHASE_A_INVENTORY,
+                ["reason=invalid_inventory_receipt"],
+                "not_met",
+            )
+        key, value = line.split("=", 1)
+        if key.endswith("_count"):
+            try:
+                payload[key] = int(value)
+            except ValueError:
+                return _maintenance_report(
+                    "BLOCKED",
+                    PRIVATE_MEMORY_PHASE_A_INVENTORY,
+                    ["reason=invalid_inventory_receipt"],
+                    "not_met",
+                )
+        elif value in {"true", "false"}:
+            payload[key] = value == "true"
+        else:
+            payload[key] = value
+    for category in PRIVATE_MEMORY_INVENTORY_CATEGORIES:
+        payload.setdefault(f"{category}_count", 0)
+    guard_payload = {
+        ("excluded_sensitive_like_count" if key == "excluded_secret_like_count" else key): value
+        for key, value in payload.items()
+    }
+    try:
+        validate_public_safe_payload(guard_payload)
+    except (TypeError, ValueError):
+        return _maintenance_report(
+            "BLOCKED",
+            PRIVATE_MEMORY_PHASE_A_INVENTORY,
+            ["reason=inventory_public_payload_not_safe"],
+            "not_met",
+        )
+    return _maintenance_report(
+        result.status,
+        PRIVATE_MEMORY_PHASE_A_INVENTORY,
+        result.lines,
+        result.success_criteria,
+    )
 
 
 def _hermes_bridge_step_status(report: object) -> str:
@@ -11777,6 +11857,8 @@ def dispatch_runtime_maintenance_task(
             return private_memory_healthcheck(body)
         if task_id == HERMES_PRIVATE_MEMORY_BRIDGE_CHECK:
             return hermes_private_memory_bridge_check()
+        if task_id == PRIVATE_MEMORY_PHASE_A_INVENTORY:
+            return private_memory_phase_a_inventory(body)
         if task_id == INSTALL_GRAPHIFY_RUNTIME:
             return install_graphify_runtime(body)
         if task_id == PREPARE_AUFMASS_PRIVATE_RUNTIME:
