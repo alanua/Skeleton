@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.semantic_memory_recall_request.schema.json",
+  "title": "Semantic Memory Recall Request",
+  "type": "object",
+  "required": ["schema", "project_id", "dataset_id", "query", "current_canonical_revision"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "skeleton.semantic_memory.recall_request.v1"},
+    "project_id": {"$ref": "#/$defs/scope_id"},
+    "dataset_id": {"$ref": "#/$defs/scope_id"},
+    "query": {"type": "string", "minLength": 1, "maxLength": 512},
+    "current_canonical_revision": {"type": "integer", "minimum": 0},
+    "limit": {"type": "integer", "minimum": 1, "maximum": 8}
+  },
+  "$defs": {
+    "scope_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {"enum": ["*", "all", "ALL", "_", "-"]}
+    }
+  }
+}

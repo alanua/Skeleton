@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.semantic_memory_projection_event.schema.json",
+  "title": "Semantic Memory Projection Event",
+  "type": "object",
+  "required": [
+    "schema",
+    "project_id",
+    "dataset_id",
+    "canonical_revision",
+    "canonical_ref",
+    "content_hash",
+    "projection_text_hash",
+    "bounded_text",
+    "provenance"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "skeleton.semantic_memory.projection_event.v1"},
+    "project_id": {"$ref": "#/$defs/scope_id"},
+    "dataset_id": {"$ref": "#/$defs/scope_id"},
+    "canonical_revision": {"type": "integer", "minimum": 1},
+    "canonical_ref": {"type": "string", "minLength": 1, "maxLength": 256},
+    "content_hash": {"$ref": "#/$defs/hash"},
+    "projection_text_hash": {"$ref": "#/$defs/hash"},
+    "bounded_text": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "provenance": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    }
+  },
+  "$defs": {
+    "scope_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {"enum": ["*", "all", "ALL", "_", "-"]}
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^[A-Fa-f0-9]{64}$"
+    }
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.semantic_memory_recall_response.schema.json",
+  "title": "Semantic Memory Recall Response",
+  "type": "object",
+  "required": [
+    "schema",
+    "status",
+    "project_id",
+    "dataset_id",
+    "current_canonical_revision",
+    "indexed_canonical_revision",
+    "authoritative",
+    "results"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "skeleton.semantic_memory.recall_response.v1"},
+    "status": {"enum": ["OK"]},
+    "project_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "dataset_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "current_canonical_revision": {"type": "integer", "minimum": 0},
+    "indexed_canonical_revision": {"type": "integer", "minimum": 0},
+    "authoritative": {"const": false},
+    "results": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {"$ref": "#/$defs/result"}
+    }
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+    "result": {
+      "type": "object",
+      "required": [
+        "canonical_ref",
+        "canonical_revision",
+        "content_hash",
+        "projection_text_hash",
+        "score",
+        "metadata"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "canonical_ref": {"type": "string", "minLength": 1, "maxLength": 256},
+        "canonical_revision": {"type": "integer", "minimum": 1},
+        "content_hash": {"$ref": "#/$defs/hash"},
+        "projection_text_hash": {"$ref": "#/$defs/hash"},
+        "score": {"type": "number"},
+        "metadata": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    }
+  }
+}
