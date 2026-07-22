@@ -2640,6 +2640,38 @@ def _maintenance_issue(
     return {"number": 145, "title": "Runner maintenance", "body": "\n".join(lines)}
 
 
+def _approval_comment(
+    *,
+    issue_number: int = 145,
+    kind: str = runner.ROUTE_APPROVAL_KIND_PROTECTED,
+    reference: str = "EXPLICIT_PROTECTED_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715",
+    comment_id: str = "5002100945",
+    author: str = "alanua",
+    verified_author: str = "alanua",
+    verified_operator: str = "alanua",
+    repository: str = runner.REPO,
+    public_safe_body: str = "true",
+) -> dict[str, object]:
+    return {
+        "id": comment_id,
+        "author": {"login": author},
+        "body": "\n".join(
+            (
+                "Runner approval record",
+                f"Repository: {repository}",
+                f"Issue: #{issue_number}",
+                f"Comment ID: {comment_id}",
+                f"Owner: alanua",
+                f"Approval Kind: {kind}",
+                f"Approval Reference: {reference}",
+                f"Verified Author: {verified_author}",
+                f"Verified Operator: {verified_operator}",
+                f"Public Safe Body: {public_safe_body}",
+            )
+        ),
+    }
+
+
 def _successful_maintenance_command(
     command: list[str], cwd: str | None = None
 ) -> tuple[int, str]:
@@ -3554,11 +3586,17 @@ def test_maintenance_task_bypasses_codex() -> None:
     ) as prepare_worktree, mock.patch.object(
         runner, "run_codex_task"
     ) as run_codex:
-        runner.process_issue(
-            _maintenance_issue(
-                runner.SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME, "Task: use Codex"
+            runner.process_issue(
+                _maintenance_issue(
+                    runner.SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
+                    "Task: use Codex",
+                    metadata=(
+                        "Approval Reference: "
+                        "EXPLICIT_PROTECTED_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715"
+                    ),
+                )
+                | {"comments": [_approval_comment()]}
             )
-        )
 
     dispatch.assert_called_once()
     prepare_worktree.assert_not_called()
@@ -3745,7 +3783,14 @@ def test_runtime_maintenance_always_routes_runtime_only_and_never_invokes_codex(
 
 
 def test_publish_existing_worktree_routes_publish_only_and_never_invokes_codex() -> None:
-    issue = _maintenance_issue(runner.PUBLISH_EXISTING_ISSUE_WORKTREE)
+    issue = _maintenance_issue(
+        runner.PUBLISH_EXISTING_ISSUE_WORKTREE,
+        metadata=(
+            "Approval Reference: "
+            "EXPLICIT_PROTECTED_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715"
+        ),
+    )
+    issue["comments"] = [_approval_comment()]
     report = (
         "NEEDS_OPERATOR: Runner host maintenance task needs operator action.\n"
         "maintenance_task_id=publish_existing_issue_worktree\n"
@@ -6517,7 +6562,14 @@ def test_publish_issue_worktree_to_existing_pr_updates_existing_draft_pr_only(
 
 
 def test_publish_issue_worktree_to_existing_pr_routes_publish_only() -> None:
-    issue = _maintenance_issue(runner.PUBLISH_ISSUE_WORKTREE_TO_EXISTING_PR)
+    issue = _maintenance_issue(
+        runner.PUBLISH_ISSUE_WORKTREE_TO_EXISTING_PR,
+        metadata=(
+            "Approval Reference: "
+            "EXPLICIT_PROTECTED_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715"
+        ),
+    )
+    issue["comments"] = [_approval_comment()]
     report = (
         "NEEDS_OPERATOR: Runner host maintenance task needs operator action.\n"
         "maintenance_task_id=publish_issue_worktree_to_existing_pr\n"
@@ -6542,6 +6594,201 @@ def test_publish_issue_worktree_to_existing_pr_routes_publish_only() -> None:
 
     run_codex.assert_not_called()
     assert "route=publish_only" in post.call_args.args[1]
+
+
+def test_process_publish_rejects_generic_approval_before_dispatch() -> None:
+    issue = _maintenance_issue(
+        runner.PUBLISH_ISSUE_WORKTREE_TO_EXISTING_PR,
+        metadata=(
+            "Approval Reference: "
+            "GENERIC_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715"
+        ),
+    )
+    issue["comments"] = [
+        _approval_comment(
+            kind=runner.ROUTE_APPROVAL_KIND_GENERIC,
+            reference="GENERIC_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715",
+            comment_id="5002100944",
+        )
+    ]
+
+    with mock.patch.object(runner, "block_issue") as block, mock.patch.object(
+        runner, "ensure_clean_worktree"
+    ) as clean, mock.patch.object(
+        runner, "dispatch_runtime_maintenance_task"
+    ) as dispatch, mock.patch.object(
+        runner, "run_codex_task"
+    ) as codex:
+        runner.process_issue(issue)
+
+    assert "untrusted_protected_approval_reference" in block.call_args.args[1]
+    clean.assert_not_called()
+    dispatch.assert_not_called()
+    codex.assert_not_called()
+
+
+def test_process_protected_durable_write_rejects_generic_approval_before_dispatch() -> None:
+    issue = _maintenance_issue(
+        runner.LOOP_ENGINE_PACKET,
+        task_body=json.dumps({"action": "create"}),
+        metadata=(
+            "Approval Reference: "
+            "GENERIC_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715"
+        ),
+    )
+    issue["comments"] = [
+        _approval_comment(
+            kind=runner.ROUTE_APPROVAL_KIND_GENERIC,
+            reference="GENERIC_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715",
+            comment_id="5002100944",
+        )
+    ]
+
+    with mock.patch.object(runner, "block_issue") as block, mock.patch.object(
+        runner, "ensure_clean_worktree"
+    ) as clean, mock.patch.object(
+        runner, "dispatch_runtime_maintenance_task"
+    ) as dispatch:
+        runner.process_issue(issue)
+
+    assert "untrusted_protected_approval_reference" in block.call_args.args[1]
+    clean.assert_not_called()
+    dispatch.assert_not_called()
+
+
+def test_process_publish_accepts_explicit_protected_approval_for_matching_route() -> None:
+    issue = _maintenance_issue(
+        runner.PUBLISH_ISSUE_WORKTREE_TO_EXISTING_PR,
+        metadata=(
+            "Approval Reference: "
+            "EXPLICIT_PROTECTED_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715"
+        ),
+    )
+    issue["comments"] = [_approval_comment()]
+    report = (
+        "NEEDS_OPERATOR: Runner host maintenance task needs operator action.\n"
+        "maintenance_task_id=publish_issue_worktree_to_existing_pr\n"
+        "reason=missing_operator_approval\n"
+        "success_criteria=not_met"
+    )
+
+    with mock.patch.object(
+        runner, "ensure_clean_worktree", return_value=(True, "")
+    ), mock.patch.object(
+        runner, "dispatch_runtime_maintenance_task", return_value=report
+    ) as dispatch, mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "run_codex_task"
+    ) as codex:
+        runner.process_issue(issue)
+
+    dispatch.assert_called_once()
+    codex.assert_not_called()
+
+
+def test_process_recovery_accepts_recovery_only_approval_for_designated_route() -> None:
+    issue = _maintenance_issue(
+        runner.OVERLAY_REGISTERED_WORKTREE_TO_EXISTING_PR,
+        metadata=(
+            "Recovery Packet: home_edge_1640_to_pr_1638\n"
+            "Approval Reference: "
+            "EXPLICIT_RECOVERY_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715\n"
+            f"Operator Approval: {runner.OVERLAY_REGISTERED_WORKTREE_TO_EXISTING_PR}"
+        ),
+    )
+    issue["comments"] = [
+        _approval_comment(
+            kind=runner.ROUTE_APPROVAL_KIND_RECOVERY,
+            reference="EXPLICIT_RECOVERY_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715",
+            comment_id="5002100946",
+        )
+    ]
+    report = (
+        "DONE: Runner host maintenance task completed.\n"
+        "maintenance_task_id=overlay_registered_worktree_to_existing_pr\n"
+        "success_criteria=met"
+    )
+
+    with mock.patch.object(
+        runner, "ensure_clean_worktree", return_value=(True, "")
+    ), mock.patch.object(
+        runner, "dispatch_runtime_maintenance_task", return_value=report
+    ) as dispatch, mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "run_codex_task"
+    ) as codex:
+        runner.process_issue(issue)
+
+    dispatch.assert_called_once()
+    codex.assert_not_called()
+
+
+def test_process_recovery_only_approval_cannot_authorize_protected_route() -> None:
+    issue = _maintenance_issue(
+        runner.PUBLISH_ISSUE_WORKTREE_TO_EXISTING_PR,
+        metadata=(
+            "Approval Reference: "
+            "EXPLICIT_RECOVERY_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715"
+        ),
+    )
+    issue["comments"] = [
+        _approval_comment(
+            kind=runner.ROUTE_APPROVAL_KIND_RECOVERY,
+            reference="EXPLICIT_RECOVERY_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715",
+            comment_id="5002100946",
+        )
+    ]
+
+    with mock.patch.object(runner, "block_issue") as block, mock.patch.object(
+        runner, "ensure_clean_worktree"
+    ) as clean, mock.patch.object(
+        runner, "dispatch_runtime_maintenance_task"
+    ) as dispatch:
+        runner.process_issue(issue)
+
+    assert "untrusted_protected_approval_reference" in block.call_args.args[1]
+    clean.assert_not_called()
+    dispatch.assert_not_called()
+
+
+@pytest.mark.parametrize("comments", ([], None))
+def test_process_body_only_approval_blocks_before_side_effects(
+    comments: list[dict[str, object]] | None,
+) -> None:
+    issue = _maintenance_issue(
+        runner.PUBLISH_ISSUE_WORKTREE_TO_EXISTING_PR,
+        metadata=(
+            "Approval Reference: "
+            "EXPLICIT_PROTECTED_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715"
+        ),
+    )
+    if comments is None:
+        issue["comments"] = 1
+    else:
+        issue["comments"] = comments
+
+    with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
+        runner, "block_issue"
+    ) as block, mock.patch.object(
+        runner, "ensure_clean_worktree"
+    ) as clean, mock.patch.object(
+        runner, "dispatch_runtime_maintenance_task"
+    ) as dispatch:
+        runner.process_issue(issue)
+
+    assert "approval_comments_" in block.call_args.args[1]
+    clean.assert_not_called()
+    dispatch.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -7701,7 +7948,20 @@ def test_overlay_registered_worktree_route_is_publish_only_and_normal_route_unch
         "home_edge_1640_to_pr_1638",
         "docs_1668_to_pr_1670",
     }
-    issue = _maintenance_issue(runner.OVERLAY_REGISTERED_WORKTREE_TO_EXISTING_PR)
+    issue = _maintenance_issue(
+        runner.OVERLAY_REGISTERED_WORKTREE_TO_EXISTING_PR,
+        metadata=(
+            "Approval Reference: "
+            "EXPLICIT_RECOVERY_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715"
+        ),
+    )
+    issue["comments"] = [
+        _approval_comment(
+            kind=runner.ROUTE_APPROVAL_KIND_RECOVERY,
+            reference="EXPLICIT_RECOVERY_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715",
+            comment_id="5002100946",
+        )
+    ]
     report = (
         "NEEDS_OPERATOR: Runner host maintenance task needs operator action.\n"
         f"maintenance_task_id={runner.OVERLAY_REGISTERED_WORKTREE_TO_EXISTING_PR}\n"
@@ -12195,10 +12455,15 @@ def test_ensure_project_checkout_task_never_runs_forbidden_commands_or_codex() -
         "git fetch\n"
         "git checkout main\n"
         "git push\n"
-        "gh pr create\n"
-        "codex exec unsafe",
-        metadata="Target Project: checkout_test",
+            "gh pr create\n"
+            "codex exec unsafe",
+        metadata=(
+            "Target Project: checkout_test\n"
+            "Approval Reference: "
+            "EXPLICIT_PROTECTED_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715"
+        ),
     )
+    issue["comments"] = [_approval_comment()]
     checkout_path = _safe_checkout_path("prepared-checkout-task")
     project_tree = _project_tree_for_checkout("checkout_test", checkout_path)
     exists = {checkout_path: False, checkout_path / ".git": False}
