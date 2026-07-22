@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.semantic_memory_projection_receipt.schema.json",
+  "title": "Semantic Memory Projection Receipt",
+  "type": "object",
+  "required": [
+    "schema",
+    "status",
+    "aggregate_counts",
+    "canonical_revisions",
+    "hashes",
+    "reason_codes",
+    "authoritative"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "skeleton.semantic_memory.projection_receipt.v1"},
+    "status": {"enum": ["PROJECTED", "FORGOTTEN"]},
+    "aggregate_counts": {
+      "type": "object",
+      "required": ["event_count", "result_count"],
+      "additionalProperties": false,
+      "properties": {
+        "event_count": {"type": "integer", "minimum": 0},
+        "result_count": {"type": "integer", "minimum": 0}
+      }
+    },
+    "canonical_revisions": {
+      "type": "object",
+      "required": ["indexed_canonical_revision", "current_canonical_revision"],
+      "additionalProperties": false,
+      "properties": {
+        "indexed_canonical_revision": {"type": "integer", "minimum": 0},
+        "current_canonical_revision": {"type": "integer", "minimum": 0}
+      }
+    },
+    "hashes": {
+      "type": "object",
+      "required": ["content_hashes", "projection_text_hashes"],
+      "additionalProperties": false,
+      "properties": {
+        "content_hashes": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/hash"}
+        },
+        "projection_text_hashes": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/hash"}
+        }
+      }
+    },
+    "reason_codes": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1, "maxLength": 128}
+    },
+    "authoritative": {"const": false}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"}
+  }
+}
