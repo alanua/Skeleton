@@ -2668,7 +2668,7 @@ def _private_memory_config(tmp_path: Path, db_path: Path | None = None) -> Path:
 def _assert_private_memory_runner_report_is_public_safe(
     report: str, tmp_path: Path
 ) -> None:
-    lowered = report.lower()
+    lowered = report.lower().replace("excluded_secret_like_count", "")
     assert str(tmp_path) not in report
     assert "synthetic_config.json" not in report
     assert "memory.sqlite" not in report
@@ -4347,6 +4347,43 @@ def test_private_memory_healthcheck_blocks_connector_privacy_violation() -> None
     assert report.startswith("BLOCKED:")
     assert "reason=privacy_violation" in report
     assert "file:unsafe-value" not in report
+
+
+def test_private_memory_phase_a_inventory_dispatch_reports_public_aggregate_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    private_root = tmp_path / "private"
+    source_root = tmp_path / "source"
+    private_root.mkdir()
+    source_root.mkdir()
+    candidate = source_root / "candidate-private-name.md"
+    candidate.write_text("PRIVATE_CONTENT_MARKER", encoding="utf-8")
+    monkeypatch.setenv("SKELETON_PRIVATE_MEMORY_ROOT", str(private_root))
+    monkeypatch.setenv("SKELETON_RUNNER_MEMORY_DIR", str(source_root))
+    body = _maintenance_issue(
+        runner.PRIVATE_MEMORY_PHASE_A_INVENTORY,
+        "aliases:\n  - runner_memory_root",
+    )["body"]
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.PRIVATE_MEMORY_PHASE_A_INVENTORY, str(runner.ROOT), str(body)
+    )
+
+    assert report.startswith("DONE:")
+    assert "maintenance_task_id=private_memory_phase_a_inventory" in report
+    assert "task_id=private_memory_phase_a_inventory" in report
+    assert "schema=skeleton.private_memory_source_inventory.v1" in report
+    assert "candidate_count=1" in report
+    assert "document_candidate_count=1" in report
+    assert "private_report_sha256=" in report
+    assert "content_files_read=false" in report
+    assert "symlink_traversal=false" in report
+    assert "runtime_private_action=false" in report
+    assert "public_safe_report_ok=true" in report
+    assert str(tmp_path) not in report
+    assert candidate.name not in report
+    assert "PRIVATE_CONTENT_MARKER" not in report
+    _assert_private_memory_runner_report_is_public_safe(report, tmp_path)
 
 
 def test_hermes_private_memory_bridge_check_runs_full_sequence_in_order() -> None:
