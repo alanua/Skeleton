@@ -1,0 +1,146 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.skeleton.local/private_memory_approval_packet.schema.json",
+  "title": "Skeleton Private Memory Approval Packet",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "packet_id",
+    "packet_hash",
+    "source_inventory_hash",
+    "extraction_manifest_hash",
+    "reconciliation_report_hash",
+    "target_canonical_revision",
+    "namespace_policy_review_ref",
+    "import_contract",
+    "requested_operations",
+    "aggregate_counts",
+    "operator_approval",
+    "idempotency"
+  ],
+  "properties": {
+    "schema": {"const": "skeleton.private_memory_approval_packet.v1"},
+    "packet_id": {"$ref": "#/$defs/safe_ref"},
+    "packet_hash": {"$ref": "#/$defs/hash"},
+    "source_inventory_hash": {"$ref": "#/$defs/hash"},
+    "extraction_manifest_hash": {"$ref": "#/$defs/hash"},
+    "reconciliation_report_hash": {"$ref": "#/$defs/hash"},
+    "target_canonical_revision": {"type": "integer", "minimum": 0},
+    "namespace_policy_review_ref": {"$ref": "#/$defs/safe_ref"},
+    "import_contract": {
+      "const": "skeleton.memory_gateway.compatible_private_import.review_only.v1"
+    },
+    "requested_operations": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/requested_operation"}
+    },
+    "aggregate_counts": {"$ref": "#/$defs/aggregate_counts"},
+    "operator_approval": {"$ref": "#/$defs/operator_approval"},
+    "idempotency": {"$ref": "#/$defs/idempotency"}
+  },
+  "$defs": {
+    "safe_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+      "not": {"pattern": "://|/|\\\\|\\.\\.|\\s"}
+    },
+    "date_time": {"type": "string", "format": "date-time"},
+    "nullable_date_time": {"anyOf": [{"$ref": "#/$defs/date_time"}, {"type": "null"}]},
+    "hash": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "aggregate_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["add", "update", "tombstone", "conflict", "unchanged", "total"],
+      "properties": {
+        "add": {"type": "integer", "minimum": 0},
+        "update": {"type": "integer", "minimum": 0},
+        "tombstone": {"type": "integer", "minimum": 0},
+        "conflict": {"type": "integer", "minimum": 0},
+        "unchanged": {"type": "integer", "minimum": 0},
+        "total": {"type": "integer", "minimum": 0}
+      }
+    },
+    "requested_operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "stable_record_ref",
+        "namespace_proposal_ref",
+        "proposed_hash",
+        "idempotency_key"
+      ],
+      "properties": {
+        "operation": {"enum": ["add", "update", "tombstone"]},
+        "stable_record_ref": {"$ref": "#/$defs/safe_ref"},
+        "namespace_proposal_ref": {"$ref": "#/$defs/safe_ref"},
+        "proposed_hash": {"$ref": "#/$defs/hash"},
+        "idempotency_key": {"$ref": "#/$defs/safe_ref"}
+      }
+    },
+    "operator_approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "approval_state",
+        "approval_ref",
+        "approved_by_ref",
+        "approved_at",
+        "expires_at",
+        "revoked_at",
+        "revocation_ref"
+      ],
+      "properties": {
+        "approval_state": {
+          "enum": ["draft", "pending_approval", "approved", "rejected", "expired", "revoked"]
+        },
+        "approval_ref": {"$ref": "#/$defs/safe_ref"},
+        "approved_by_ref": {"anyOf": [{"$ref": "#/$defs/safe_ref"}, {"type": "null"}]},
+        "approved_at": {"$ref": "#/$defs/nullable_date_time"},
+        "expires_at": {"$ref": "#/$defs/nullable_date_time"},
+        "revoked_at": {"$ref": "#/$defs/nullable_date_time"},
+        "revocation_ref": {"anyOf": [{"$ref": "#/$defs/safe_ref"}, {"type": "null"}]}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"approval_state": {"const": "approved"}},
+            "required": ["approval_state"]
+          },
+          "then": {
+            "properties": {
+              "approved_by_ref": {"$ref": "#/$defs/safe_ref"},
+              "approved_at": {"$ref": "#/$defs/date_time"}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"approval_state": {"const": "revoked"}},
+            "required": ["approval_state"]
+          },
+          "then": {
+            "properties": {
+              "revoked_at": {"$ref": "#/$defs/date_time"},
+              "revocation_ref": {"$ref": "#/$defs/safe_ref"}
+            }
+          }
+        }
+      ]
+    },
+    "idempotency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["packet_idempotency_key", "packet_idempotency_hash"],
+      "properties": {
+        "packet_idempotency_key": {"$ref": "#/$defs/safe_ref"},
+        "packet_idempotency_hash": {"$ref": "#/$defs/hash"}
+      }
+    }
+  }
+}

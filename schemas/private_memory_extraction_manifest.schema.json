@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.skeleton.local/private_memory_extraction_manifest.schema.json",
+  "title": "Skeleton Private Memory Extraction Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "manifest_id",
+    "generated_at",
+    "source_inventory_ref",
+    "source_inventory_hash",
+    "records",
+    "manifest_hash"
+  ],
+  "properties": {
+    "schema": {"const": "skeleton.private_memory_extraction_manifest.v1"},
+    "manifest_id": {"$ref": "#/$defs/safe_ref"},
+    "generated_at": {"$ref": "#/$defs/date_time"},
+    "source_inventory_ref": {"$ref": "#/$defs/safe_ref"},
+    "source_inventory_hash": {"$ref": "#/$defs/hash"},
+    "records": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/record"}
+    },
+    "manifest_hash": {"$ref": "#/$defs/hash"}
+  },
+  "$defs": {
+    "safe_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+      "not": {"pattern": "://|/|\\\\|\\.\\.|\\s"}
+    },
+    "date_time": {"type": "string", "format": "date-time"},
+    "nullable_date_time": {"anyOf": [{"$ref": "#/$defs/date_time"}, {"type": "null"}]},
+    "hash": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "source_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stable_source_id", "source_hash"],
+      "properties": {
+        "stable_source_id": {"$ref": "#/$defs/safe_ref"},
+        "source_hash": {"$ref": "#/$defs/hash"}
+      }
+    },
+    "record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "record_id",
+        "record_type",
+        "namespace_proposal_ref",
+        "project_or_domain_ref",
+        "subject_ref",
+        "privacy_class",
+        "authority_class",
+        "source_refs",
+        "source_timestamp",
+        "observed_at",
+        "effective_from",
+        "valid_until",
+        "canonical_revision_expected",
+        "supersedes",
+        "correction_of",
+        "tombstones",
+        "confidence",
+        "approval_ref",
+        "content_hash"
+      ],
+      "properties": {
+        "record_id": {"$ref": "#/$defs/safe_ref"},
+        "record_type": {"$ref": "#/$defs/safe_ref"},
+        "namespace_proposal_ref": {"$ref": "#/$defs/safe_ref"},
+        "project_or_domain_ref": {"$ref": "#/$defs/safe_ref"},
+        "subject_ref": {"anyOf": [{"$ref": "#/$defs/safe_ref"}, {"type": "null"}]},
+        "privacy_class": {"enum": ["PRIVATE", "RESTRICTED", "SECRET_REF_ONLY"]},
+        "authority_class": {
+          "enum": [
+            "OPERATOR_CONFIRMED",
+            "APPROVED_CANON",
+            "SOURCE_FACT",
+            "OPERATIONAL",
+            "DERIVED",
+            "PROVISIONAL"
+          ]
+        },
+        "source_refs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/source_ref"}
+        },
+        "source_timestamp": {"$ref": "#/$defs/nullable_date_time"},
+        "observed_at": {"$ref": "#/$defs/nullable_date_time"},
+        "effective_from": {"$ref": "#/$defs/nullable_date_time"},
+        "valid_until": {"$ref": "#/$defs/nullable_date_time"},
+        "canonical_revision_expected": {
+          "anyOf": [
+            {"type": "integer", "minimum": 0},
+            {"type": "null"}
+          ]
+        },
+        "supersedes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/safe_ref"}
+        },
+        "correction_of": {"anyOf": [{"$ref": "#/$defs/safe_ref"}, {"type": "null"}]},
+        "tombstones": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/safe_ref"}
+        },
+        "confidence": {"enum": ["HIGH", "MEDIUM", "LOW"]},
+        "approval_ref": {"$ref": "#/$defs/safe_ref"},
+        "content_hash": {"$ref": "#/$defs/hash"}
+      }
+    }
+  }
+}
