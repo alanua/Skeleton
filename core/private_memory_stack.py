@@ -231,6 +231,7 @@ class PrivateMemoryStack:
         expected_sha256: str,
         create_backup: bool = False,
         env: Mapping[str, str] | None = None,
+        transaction_ref: str | None = None,
     ) -> dict[str, object]:
         self._ensure_private_root()
         self._initialize_canonical_database()
@@ -240,7 +241,7 @@ class PrivateMemoryStack:
             expected_sha256=expected_sha256,
             env=env,
         )
-        transaction = f"bundle-{prepared.receipt_id[:32]}"
+        transaction = transaction_ref or f"bundle-{prepared.receipt_id[:32]}"
         with _exclusive_lock(self.paths.lock):
             before = self._database_logical_backup()
             snapshot_temp: Path | None = None

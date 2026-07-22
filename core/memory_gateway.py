@@ -36,6 +36,7 @@ from core.memory_gateway_policy import (
     build_command_receipt,
     validate_public_payload,
 )
+from core.memory_gateway_storage import PrivateMemoryGatewayStorage
 from core.memory_override import MemoryOverrideRegistry
 from core.memory_patch_proposal import MemoryPatchProposalRegistry
 from core.skeleton_memory import SkeletonMemory
@@ -78,6 +79,7 @@ class MemoryGateway:
         mempalace_adapter: MemPalaceAdapter | None = None,
         graphify_adapter: object | None = None,
         skeleton_memory: SkeletonMemory | None = None,
+        private_memory_storage: PrivateMemoryGatewayStorage | None = None,
     ) -> None:
         self._token = _normalize_token(token)
         self._patch_registry = patch_registry or MemoryPatchProposalRegistry()
@@ -90,6 +92,7 @@ class MemoryGateway:
         self._mempalace_adapter = mempalace_adapter
         self._graphify_adapter = graphify_adapter
         self._skeleton_memory = skeleton_memory
+        self._private_memory_storage = private_memory_storage
 
     def execute(self, request: Mapping[str, Any]) -> dict[str, object]:
         if not isinstance(request, Mapping):
@@ -114,6 +117,7 @@ class MemoryGateway:
             "memory.get_index_freshness": self.get_memory_index_freshness,
             "memory.prepare_canonical_manifest": self.prepare_canonical_manifest,
             "memory.import_canonical_manifest": self.import_canonical_manifest,
+            "memory.private_mutate": self.private_mutate,
             "graph.query_code": self.query_code,
             "graph.get_index_freshness": self.get_graph_index_freshness,
             "memory.propose_patch": self.propose_patch,
@@ -125,6 +129,33 @@ class MemoryGateway:
                 project_id=payload.get("project_id"),
             )
         return handlers[suffix](namespace=namespace, **payload)
+
+    def private_mutate(self, *, namespace: str, **payload: object) -> dict[str, object]:
+        namespace = self._authorize_namespace(namespace)
+        if namespace != "skeleton":
+            raise MemoryGatewayPolicyError(
+                "PRIVATE_MEMORY_MUTATION_NAMESPACE_NOT_AUTHORIZED",
+                "private memory CLI bridge is only available through skeleton namespace",
+            )
+        if self._token.public_mode:
+            raise MemoryGatewayPolicyError(
+                "PRIVATE_MEMORY_MUTATION_PUBLIC_MODE_FORBIDDEN",
+                "private memory CLI bridge requires an explicit private capability",
+            )
+        if self._private_memory_storage is None:
+            raise MemoryGatewayPolicyError(
+                "PRIVATE_MEMORY_STORAGE_REQUIRED",
+                "private memory CLI bridge requires an injected storage adapter",
+            )
+        try:
+            receipt = self._private_memory_storage.execute_mutation(payload)
+        except Exception as exc:
+            raise MemoryGatewayPolicyError(type(exc).__name__, str(exc)) from exc
+        return self._response(
+            namespace=namespace,
+            command_suffix="memory.private_mutate",
+            payload=receipt,
+        )
 
     def lookup_exact(
         self,

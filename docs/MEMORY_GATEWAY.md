@@ -19,6 +19,9 @@ Allowlisted commands are namespace-qualified:
 - `<namespace>.memory.get_override_history`
 - `<namespace>.memory.get_audit_log`
 - `<namespace>.memory.get_index_freshness`
+- `<namespace>.memory.prepare_canonical_manifest`
+- `<namespace>.memory.import_canonical_manifest`
+- `<namespace>.memory.private_mutate`
 - `<namespace>.graph.query_code`
 - `<namespace>.graph.get_index_freshness`
 - `<namespace>.memory.propose_patch`
@@ -43,7 +46,9 @@ Stale derived results may be displayed with a warning but cannot support `memory
 
 ## Writes
 
-Writes are only accepted through `memory.propose_patch`, which delegates to `MemoryPatchProposalRegistry`. Semantic or graph evidence must be exact-confirmed with `confirmed_via_exact_ref` and `confirmed_canonical_revision`.
+Public writes are only accepted through `memory.propose_patch`, which delegates to `MemoryPatchProposalRegistry`. Semantic or graph evidence must be exact-confirmed with `confirmed_via_exact_ref` and `confirmed_canonical_revision`.
+
+The local `skeleton-memory` CLI has one private compatibility boundary, `skeleton.memory.private_mutate`, for operator-approved `put`, `delete`, and `import_bundle` mutations. It requires a non-public `skeleton` capability token and an injected private storage adapter. Requests carry project scope, approval, actor, reason, expected revision, idempotency key, source hash, and bundle hash metadata where applicable. The adapter records the mutation before entering the stack and recovers by transaction reference, so retry after a canonical SQLite commit cannot advance the canonical revision a second time. Receipts are sanitized and omit raw private values, paths, SQLite connection details, and bundle contents.
 
 Stable rejection reasons include:
 

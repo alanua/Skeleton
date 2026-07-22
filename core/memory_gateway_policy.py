@@ -18,6 +18,7 @@ ALLOWED_COMMAND_SUFFIXES = frozenset(
         "memory.get_index_freshness",
         "memory.prepare_canonical_manifest",
         "memory.import_canonical_manifest",
+        "memory.private_mutate",
         "graph.query_code",
         "graph.get_index_freshness",
         "memory.propose_patch",
@@ -174,6 +175,13 @@ _EVENT_FIELDS = frozenset(
         "idempotency_key",
         "idempotency_classification",
         "value_hash",
+        "operation",
+        "expected_revision",
+        "source_hash",
+        "bundle_hash",
+        "bundle_id",
+        "file_sha256",
+        "record_count",
     }
 )
 _MANIFEST_PREPARE_FIELDS = frozenset(
@@ -244,6 +252,7 @@ _PUBLIC_FIELDS = frozenset(
     confirmed_via_exact_ref confirmed_canonical_revision existing_canonical_ref
     existing_event_ref dedupe_key idempotency_key idempotency_classification
     proposal_event record_count bundle_id bundle_hash receipt_id file_sha256
+    operation expected_revision source_hash imported_canonical_refs
     aggregate_counts active_fact_count event_count tombstone_count wal_enabled
     item_count relationship_count confirmation_required privacy_classification
     provenance repo issue_number comment_id supersession supersedes record
@@ -254,6 +263,7 @@ _PUBLIC_FIELDS = frozenset(
     synthetic_only node_count edge_count stale_count blocked_count
     missing_provenance_count error_class next_operator_action bounded_text
  operation decision allowed reason gateway command contract_version payload conflict_count freshness_checked proposal_status classification
+ expected_revision source_hash imported_canonical_refs indexes degraded_indexes
     """.split()
 )
 
@@ -366,6 +376,12 @@ def _typed_child(key: str, child: object) -> object:
         return _typed_mapping(child, _FRESHNESS_FIELDS)
     if key in {"mempalace", "graphify", "canonical_sqlite"}:
         return _typed_mapping(child, _FRESHNESS_FIELDS | _INDEX_STATUS_FIELDS)
+    if key == "indexes":
+        return {
+            name: _typed_mapping(state, _FRESHNESS_FIELDS | _INDEX_STATUS_FIELDS)
+            for name, state in child.items()
+            if isinstance(name, str) and isinstance(state, Mapping)
+        } if isinstance(child, Mapping) else {}
     if key == "results":
         return [_typed_mapping(item, _RESULT_FIELDS) for item in _as_list(child)]
     if key == "conflicts":
@@ -463,6 +479,38 @@ def _proposal_receipt(payload: Mapping[str, Any]) -> dict[str, object]:
     return _typed_mapping(payload, frozenset({"project_id", "proposal_event", "idempotency_classification"}))
 
 
+def _private_mutation_receipt(payload: Mapping[str, Any]) -> dict[str, object]:
+    return _typed_mapping(
+        payload,
+        frozenset(
+            {
+                "schema",
+                "status",
+                "operation",
+                "project_id",
+                "idempotency_key",
+                "idempotency_classification",
+                "expected_revision",
+                "canonical_revision",
+                "canonical_sqlite",
+                "canonical_ref",
+                "source_hash",
+                "actor_ref",
+                "reason_code",
+                "approval_ref",
+                "indexes",
+                "degraded_indexes",
+                "bundle_id",
+                "bundle_hash",
+                "file_sha256",
+                "record_count",
+                "imported_canonical_refs",
+                "error_class",
+            }
+        ),
+    )
+
+
 _COMMAND_RECEIPT_BUILDERS: dict[str, Callable[[Mapping[str, Any]], dict[str, object]]] = {
     "memory.lookup_exact": _lookup_exact_receipt,
     "memory.search_semantic": _semantic_receipt,
@@ -472,6 +520,7 @@ _COMMAND_RECEIPT_BUILDERS: dict[str, Callable[[Mapping[str, Any]], dict[str, obj
     "memory.get_index_freshness": _memory_freshness_receipt,
     "memory.prepare_canonical_manifest": _prepare_manifest_receipt,
     "memory.import_canonical_manifest": _import_manifest_receipt,
+    "memory.private_mutate": _private_mutation_receipt,
     "graph.query_code": _graph_query_receipt,
     "graph.get_index_freshness": _graph_freshness_receipt,
     "memory.propose_patch": _proposal_receipt,
