@@ -4067,6 +4067,287 @@ def test_mempalace_synthetic_runtime_smoke_task_id_allowlisted() -> None:
     assert runner.MEMPALACE_SYNTHETIC_RUNTIME_SMOKE in runner.RUNTIME_MAINTENANCE_TASK_IDS
 
 
+def _travel_pages_body(
+    *,
+    approval: str | None = runner.TRAVEL_PAGES_OPERATOR_APPROVAL,
+    extra_metadata: tuple[str, ...] = (),
+    task_body: str = "",
+) -> str:
+    metadata = [*extra_metadata]
+    if approval is not None:
+        metadata.append(f"Operator Approval: {approval}")
+    return str(
+        _maintenance_issue(
+            runner.DISPATCH_TRAVEL_PAGES_PUBLICATION,
+            task_body=task_body,
+            metadata="\n".join(metadata),
+        )["body"]
+    )
+
+
+def _travel_run(
+    *,
+    database_id: int = 456,
+    created_at: str = "2026-07-22T00:00:02Z",
+    event: str = "workflow_dispatch",
+    branch: str = "main",
+    name: str = runner.TRAVEL_PAGES_WORKFLOW,
+    path: str = ".github/workflows/publish-encrypted-travel-pages.yml",
+    status: str = "completed",
+    conclusion: str | None = "success",
+    head_sha: str = "a" * 40,
+) -> dict[str, object]:
+    return {
+        "databaseId": database_id,
+        "createdAt": created_at,
+        "event": event,
+        "headBranch": branch,
+        "name": name,
+        "path": path,
+        "status": status,
+        "conclusion": conclusion,
+        "headSha": head_sha,
+    }
+
+
+def _travel_pages_commands(
+    runs: list[dict[str, object]] | None,
+    *,
+    main_sha: str = "a" * 40,
+    dispatch_code: int = 0,
+) -> mock.Mock:
+    def run(command: list[str], cwd: str | None = None, *, timeout: int | None = None) -> tuple[int, str]:
+        del cwd, timeout
+        if command == [
+            "gh",
+            "workflow",
+            "run",
+            runner.TRAVEL_PAGES_WORKFLOW,
+            "--repo",
+            runner.TRAVEL_PAGES_REPO,
+            "--ref",
+            runner.TRAVEL_PAGES_REF,
+        ]:
+            return dispatch_code, ""
+        if command == [
+            "gh",
+            "api",
+            f"repos/{runner.TRAVEL_PAGES_REPO}/commits/{runner.TRAVEL_PAGES_REF}",
+            "--jq",
+            ".sha",
+        ]:
+            return 0, f"{main_sha}\n"
+        if command == [
+            "gh",
+            "api",
+            f"repos/{runner.TRAVEL_PAGES_REPO}/actions/workflows/{runner.TRAVEL_PAGES_WORKFLOW}/runs",
+            "-f",
+            "event=workflow_dispatch",
+            "-f",
+            f"branch={runner.TRAVEL_PAGES_REF}",
+            "-f",
+            "per_page=10",
+            "--jq",
+            ".workflow_runs",
+        ]:
+            return 0, json.dumps(runs if runs is not None else [])
+        raise AssertionError(f"unexpected command: {command!r}")
+
+    return mock.Mock(side_effect=run)
+
+
+def _run_travel_pages_task(
+    run: mock.Mock,
+    body: str | None = None,
+    monkeypatch: pytest.MonkeyPatch | None = None,
+) -> str:
+    if monkeypatch is not None:
+        monkeypatch.setattr(runner, "TRAVEL_PAGES_RUN_TIMEOUT_SECONDS", 0)
+        monkeypatch.setattr(runner.time, "sleep", mock.Mock())
+        monkeypatch.setattr(
+            runner,
+            "_travel_pages_utc_now",
+            lambda: runner.datetime(2026, 7, 22, 0, 0, 1, tzinfo=runner.timezone.utc),
+        )
+    with mock.patch.object(runner, "run_command", run):
+        return runner.dispatch_runtime_maintenance_task(
+            runner.DISPATCH_TRAVEL_PAGES_PUBLICATION,
+            str(runner.ROOT),
+            body if body is not None else _travel_pages_body(),
+        )
+
+
+@pytest.mark.parametrize("approval", (None, "dispatch_travel_pages_publication"))
+def test_dispatch_travel_pages_publication_requires_exact_approval_before_gh(
+    approval: str | None,
+) -> None:
+    run = mock.Mock()
+    report = _run_travel_pages_task(run, _travel_pages_body(approval=approval))
+
+    assert report.startswith("BLOCKED:")
+    assert "maintenance_task_id=dispatch_travel_pages_publication" in report
+    assert "reason=travel_pages_dispatch_failed" in report
+    run.assert_not_called()
+
+
+def test_dispatch_travel_pages_publication_uses_only_fixed_gh_argv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = _travel_pages_commands([_travel_run()])
+    report = _run_travel_pages_task(
+        run,
+        _travel_pages_body(
+            extra_metadata=(
+                "Repository: attacker/Travel",
+                "Workflow: unsafe.yml",
+                "Ref: release",
+            ),
+            task_body=(
+                "gh workflow run unsafe.yml --repo attacker/Travel --ref release\n"
+                "gh run watch https://github.com/attacker/Travel/actions/runs/1"
+            ),
+        ),
+        monkeypatch,
+    )
+
+    assert report.startswith("DONE:")
+    commands = [call.args[0] for call in run.call_args_list]
+    assert commands == [
+        [
+            "gh",
+            "workflow",
+            "run",
+            "publish-encrypted-travel-pages.yml",
+            "--repo",
+            "alanua/Travel",
+            "--ref",
+            "main",
+        ],
+        [
+            "gh",
+            "api",
+            "repos/alanua/Travel/commits/main",
+            "--jq",
+            ".sha",
+        ],
+        [
+            "gh",
+            "api",
+            "repos/alanua/Travel/actions/workflows/publish-encrypted-travel-pages.yml/runs",
+            "-f",
+            "event=workflow_dispatch",
+            "-f",
+            "branch=main",
+            "-f",
+            "per_page=10",
+            "--jq",
+            ".workflow_runs",
+        ],
+    ]
+
+
+@pytest.mark.parametrize(
+    ("bad_run", "reason"),
+    (
+        (_travel_run(created_at="2026-07-22T00:00:00Z"), "travel_pages_run_not_found"),
+        (_travel_run(event="push"), "travel_pages_run_not_found"),
+        (_travel_run(branch="release"), "travel_pages_run_not_found"),
+        (_travel_run(name="Other workflow", path=".github/workflows/other.yml"), "travel_pages_run_not_found"),
+        (_travel_run(path=".github/workflows/other.yml"), "travel_pages_run_not_found"),
+    ),
+)
+def test_dispatch_travel_pages_publication_rejects_old_or_wrong_run(
+    bad_run: dict[str, object],
+    reason: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = _travel_pages_commands([bad_run])
+    report = _run_travel_pages_task(run, monkeypatch=monkeypatch)
+
+    assert report.startswith("BLOCKED:")
+    assert f"reason={reason}" in report
+    assert "run_found=false" in report
+
+
+@pytest.mark.parametrize(
+    ("workflow_run", "reason", "expected_fragment"),
+    (
+        (
+            _travel_run(status="completed", conclusion="failure"),
+            "travel_pages_run_failed",
+            "conclusion=failure",
+        ),
+        (
+            _travel_run(status="completed", conclusion="success", head_sha="b" * 40),
+            "travel_pages_head_mismatch",
+            "head_matches_main=false",
+        ),
+        (
+            _travel_run(status="in_progress", conclusion=None),
+            "travel_pages_run_timeout",
+            "status=in_progress",
+        ),
+    ),
+)
+def test_dispatch_travel_pages_publication_stable_blockers(
+    workflow_run: dict[str, object],
+    reason: str,
+    expected_fragment: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = _travel_pages_commands([workflow_run])
+    report = _run_travel_pages_task(run, monkeypatch=monkeypatch)
+
+    assert report.startswith("BLOCKED:")
+    assert "run_found=true" in report
+    assert f"reason={reason}" in report
+    assert expected_fragment in report
+
+
+def test_dispatch_travel_pages_publication_dispatch_failure_is_stable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = _travel_pages_commands([], dispatch_code=1)
+    report = _run_travel_pages_task(run, monkeypatch=monkeypatch)
+
+    assert report.startswith("BLOCKED:")
+    assert "requested=true" in report
+    assert "run_found=false" in report
+    assert "reason=travel_pages_dispatch_failed" in report
+
+
+def test_dispatch_travel_pages_publication_success_public_safe_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    main_sha = "c" * 40
+    run = _travel_pages_commands(
+        [
+            _travel_run(database_id=100, created_at="2026-07-22T00:00:03Z", head_sha=main_sha),
+            _travel_run(database_id=99, created_at="2026-07-22T00:00:02Z", head_sha=main_sha),
+        ],
+        main_sha=main_sha,
+    )
+    report = _run_travel_pages_task(run, monkeypatch=monkeypatch)
+
+    assert report.startswith("DONE:")
+    assert "maintenance_task_id=dispatch_travel_pages_publication" in report
+    assert "repo=alanua/Travel" in report
+    assert "workflow=publish-encrypted-travel-pages.yml" in report
+    assert "requested=true" in report
+    assert "run_found=true" in report
+    assert "run_id=100" in report
+    assert "status=completed" in report
+    assert "conclusion=success" in report
+    assert "head_matches_main=true" in report
+    assert "success_criteria=met" in report
+    assert main_sha not in report
+    assert "http" not in report.lower()
+
+
+def test_dispatch_travel_pages_publication_task_id_allowlisted() -> None:
+    assert runner.DISPATCH_TRAVEL_PAGES_PUBLICATION in runner.RUNTIME_MAINTENANCE_TASK_IDS
+
+
 def test_mempalace_synthetic_runtime_smoke_rejects_issue_controlled_input(
     tmp_path: Path,
 ) -> None:

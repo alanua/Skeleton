@@ -216,6 +216,7 @@ PUBLISH_ISSUE_WORKTREE_TO_EXISTING_PR = "publish_issue_worktree_to_existing_pr"
 OVERLAY_REGISTERED_WORKTREE_TO_EXISTING_PR = "overlay_registered_worktree_to_existing_pr"
 PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR = "publish_target_project_issue_worktree_pr"
 PUBLISH_CONTAINER_VALIDATION_WORKTREE = "publish_container_validation_worktree"
+DISPATCH_TRAVEL_PAGES_PUBLICATION = "dispatch_travel_pages_publication"
 QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES = (
     "quarantine_stale_clean_skeleton_worktrees"
 )
@@ -253,6 +254,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         OVERLAY_REGISTERED_WORKTREE_TO_EXISTING_PR,
         PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR,
         PUBLISH_CONTAINER_VALIDATION_WORKTREE,
+        DISPATCH_TRAVEL_PAGES_PUBLICATION,
         QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES,
         HOME_EDGE_01_READ_ONLY_DIAGNOSTIC,
         HOME_EDGE_01_LAN_INVENTORY_READ_ONLY,
@@ -280,6 +282,13 @@ CONTAINER_VALIDATION_PUBLISH_FILES = (
     "docs/CONTAINER_PACKAGE_VALIDATION.md",
     "tests/test_container_package_validation_workflow.py",
 )
+TRAVEL_PAGES_REPO = "alanua/Travel"
+TRAVEL_PAGES_REF = "main"
+TRAVEL_PAGES_WORKFLOW = "publish-encrypted-travel-pages.yml"
+TRAVEL_PAGES_OPERATOR_APPROVAL = "dispatch_travel_pages_publication_v1"
+TRAVEL_PAGES_GH_TIMEOUT_SECONDS = 30
+TRAVEL_PAGES_RUN_TIMEOUT_SECONDS = 300
+TRAVEL_PAGES_POLL_INTERVAL_SECONDS = 10
 AUFMASS_PRIVATE_PROJECT_ID = "aufmass_private"
 AUFMASS_PRIVATE_REGISTERED_REPO = "private/aufmass"
 AUFMASS_PRIVATE_SOURCE_PACK_MANIFEST = "source_pack_manifest.json"
@@ -478,6 +487,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "compare_behind_by",
         "compare_state",
         "compare_status",
+        "conclusion",
         "canonical_write_enabled",
         "constructed_head_sha",
         "current_branch",
@@ -526,6 +536,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "github_main_source_of_truth",
         "graphify_version",
         "head_branch",
+        "head_matches_main",
         "head_ref",
         "head_repository",
         "head_sha",
@@ -622,9 +633,12 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "runtime_smoke_stable_reason",
         "ram_bytes",
         "repository",
+        "repo",
+        "requested",
         "rollback_status",
         "room_area_row_count",
         "row_count",
+        "run_found",
         "run_id",
         "runner_root_exists",
         "runner_status",
@@ -706,6 +720,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "worktree_id",
         "worktree_ids",
         "worktree_root",
+        "workflow",
     }
 )
 RUNNER_MEMORY_DB_ENV = "SKELETON_RUNNER_MEMORY_DB"
@@ -11738,6 +11753,301 @@ def mempalace_synthetic_runtime_smoke(body: str) -> str:
     )
 
 
+def _travel_pages_receipt_lines(
+    *,
+    requested: bool,
+    run_found: bool,
+    run_id: str = "",
+    status: str = "",
+    conclusion: str = "",
+    head_matches_main: bool = False,
+    reason: str | None = None,
+) -> list[str]:
+    lines = [
+        f"repo={TRAVEL_PAGES_REPO}",
+        f"workflow={TRAVEL_PAGES_WORKFLOW}",
+        f"requested={str(requested).lower()}",
+        f"run_found={str(run_found).lower()}",
+        f"run_id={run_id or 'none'}",
+        f"status={status or 'none'}",
+        f"conclusion={conclusion or 'none'}",
+        f"head_matches_main={str(head_matches_main).lower()}",
+    ]
+    if reason is not None:
+        lines.append(f"reason={reason}")
+    return lines
+
+
+def _travel_pages_utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _travel_pages_parse_created_at(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _travel_pages_run_id(run: Mapping[str, Any]) -> str:
+    for key in ("databaseId", "id", "runNumber", "number"):
+        value = run.get(key)
+        if isinstance(value, int) and value > 0:
+            return str(value)
+        if isinstance(value, str) and re.fullmatch(r"[1-9]\d*", value):
+            return value
+    return ""
+
+
+def _travel_pages_run_matches(run: Mapping[str, Any], boundary: datetime) -> bool:
+    created_at = _travel_pages_parse_created_at(run.get("createdAt") or run.get("created_at"))
+    if created_at is None or created_at <= boundary:
+        return False
+    event = str(run.get("event") or "").lower()
+    branch = str(run.get("headBranch") or run.get("head_branch") or "")
+    name = str(run.get("name") or run.get("workflowName") or run.get("workflow_name") or "")
+    path = str(run.get("path") or run.get("workflowPath") or run.get("workflow_path") or "")
+    if event != "workflow_dispatch" or branch != TRAVEL_PAGES_REF:
+        return False
+    workflow_paths = {
+        TRAVEL_PAGES_WORKFLOW,
+        f".github/workflows/{TRAVEL_PAGES_WORKFLOW}",
+    }
+    if path:
+        return path in workflow_paths
+    return name == TRAVEL_PAGES_WORKFLOW
+
+
+def _travel_pages_newest_matching_run(
+    runs: object, boundary: datetime
+) -> Mapping[str, Any] | None:
+    if isinstance(runs, dict):
+        runs = runs.get("workflow_runs")
+    if not isinstance(runs, list):
+        return None
+    matches = [
+        run
+        for run in runs
+        if isinstance(run, Mapping) and _travel_pages_run_matches(run, boundary)
+    ]
+    if not matches:
+        return None
+    matches.sort(
+        key=lambda run: _travel_pages_parse_created_at(
+            run.get("createdAt") or run.get("created_at")
+        )
+        or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+    return matches[0]
+
+
+def _travel_pages_current_main_sha() -> str | None:
+    code, output = run_command(
+        [
+            "gh",
+            "api",
+            f"repos/{TRAVEL_PAGES_REPO}/commits/{TRAVEL_PAGES_REF}",
+            "--jq",
+            ".sha",
+        ],
+        timeout=TRAVEL_PAGES_GH_TIMEOUT_SECONDS,
+    )
+    sha = output.strip().lower()
+    if code != 0 or _HEAD_SHA_RE.fullmatch(sha) is None:
+        return None
+    return sha
+
+
+def _travel_pages_workflow_runs() -> object | None:
+    code, output = run_command(
+        [
+            "gh",
+            "api",
+            f"repos/{TRAVEL_PAGES_REPO}/actions/workflows/{TRAVEL_PAGES_WORKFLOW}/runs",
+            "-f",
+            "event=workflow_dispatch",
+            "-f",
+            f"branch={TRAVEL_PAGES_REF}",
+            "-f",
+            "per_page=10",
+            "--jq",
+            ".workflow_runs",
+        ],
+        timeout=TRAVEL_PAGES_GH_TIMEOUT_SECONDS,
+    )
+    if code != 0:
+        return None
+    try:
+        return json.loads(output or "null")
+    except json.JSONDecodeError:
+        return None
+
+
+def dispatch_travel_pages_publication(body: str) -> str:
+    task_id = DISPATCH_TRAVEL_PAGES_PUBLICATION
+    metadata = _metadata_before_task(body)
+    if _body_field(metadata, "Operator Approval") != TRAVEL_PAGES_OPERATOR_APPROVAL:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            _travel_pages_receipt_lines(
+                requested=False,
+                run_found=False,
+                reason="travel_pages_dispatch_failed",
+            ),
+            "not_met",
+        )
+
+    boundary = _travel_pages_utc_now()
+    code, _output = run_command(
+        [
+            "gh",
+            "workflow",
+            "run",
+            TRAVEL_PAGES_WORKFLOW,
+            "--repo",
+            TRAVEL_PAGES_REPO,
+            "--ref",
+            TRAVEL_PAGES_REF,
+        ],
+        timeout=TRAVEL_PAGES_GH_TIMEOUT_SECONDS,
+    )
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            _travel_pages_receipt_lines(
+                requested=True,
+                run_found=False,
+                reason="travel_pages_dispatch_failed",
+            ),
+            "not_met",
+        )
+
+    main_sha = _travel_pages_current_main_sha()
+    if main_sha is None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            _travel_pages_receipt_lines(
+                requested=True,
+                run_found=False,
+                reason="travel_pages_dispatch_failed",
+            ),
+            "not_met",
+        )
+
+    deadline = time.monotonic() + TRAVEL_PAGES_RUN_TIMEOUT_SECONDS
+    saw_runs = False
+    latest_run: Mapping[str, Any] | None = None
+    while True:
+        runs = _travel_pages_workflow_runs()
+        if runs is None:
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                _travel_pages_receipt_lines(
+                    requested=True,
+                    run_found=False,
+                    reason="travel_pages_dispatch_failed",
+                ),
+                "not_met",
+            )
+        if isinstance(runs, list) and runs:
+            saw_runs = True
+        latest_run = _travel_pages_newest_matching_run(runs, boundary)
+        if latest_run is not None:
+            status = str(latest_run.get("status") or "").lower()
+            conclusion = str(latest_run.get("conclusion") or "").lower()
+            run_id = _travel_pages_run_id(latest_run)
+            head_sha = str(latest_run.get("headSha") or latest_run.get("head_sha") or "").lower()
+            head_matches_main = head_sha == main_sha
+            if status == "completed":
+                if conclusion != "success":
+                    return _maintenance_report(
+                        "BLOCKED",
+                        task_id,
+                        _travel_pages_receipt_lines(
+                            requested=True,
+                            run_found=True,
+                            run_id=run_id,
+                            status=status,
+                            conclusion=conclusion,
+                            head_matches_main=head_matches_main,
+                            reason="travel_pages_run_failed",
+                        ),
+                        "not_met",
+                    )
+                if not head_matches_main:
+                    return _maintenance_report(
+                        "BLOCKED",
+                        task_id,
+                        _travel_pages_receipt_lines(
+                            requested=True,
+                            run_found=True,
+                            run_id=run_id,
+                            status=status,
+                            conclusion=conclusion,
+                            head_matches_main=False,
+                            reason="travel_pages_head_mismatch",
+                        ),
+                        "not_met",
+                    )
+                return _maintenance_report(
+                    "DONE",
+                    task_id,
+                    _travel_pages_receipt_lines(
+                        requested=True,
+                        run_found=True,
+                        run_id=run_id,
+                        status=status,
+                        conclusion=conclusion,
+                        head_matches_main=True,
+                    ),
+                    "met",
+                )
+        if time.monotonic() >= deadline:
+            if latest_run is not None:
+                return _maintenance_report(
+                    "BLOCKED",
+                    task_id,
+                    _travel_pages_receipt_lines(
+                        requested=True,
+                        run_found=True,
+                        run_id=_travel_pages_run_id(latest_run),
+                        status=str(latest_run.get("status") or "").lower(),
+                        conclusion=str(latest_run.get("conclusion") or "").lower(),
+                        head_matches_main=(
+                            str(latest_run.get("headSha") or latest_run.get("head_sha") or "").lower()
+                            == main_sha
+                        ),
+                        reason="travel_pages_run_timeout",
+                    ),
+                    "not_met",
+                )
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                _travel_pages_receipt_lines(
+                    requested=True,
+                    run_found=False,
+                    reason=(
+                        "travel_pages_run_not_found"
+                        if saw_runs
+                        else "travel_pages_run_timeout"
+                    ),
+                ),
+                "not_met",
+            )
+        time.sleep(TRAVEL_PAGES_POLL_INTERVAL_SECONDS)
+
+
 def dispatch_runtime_maintenance_task(
     task_id: str, workdir: str, body: str = ""
 ) -> str:
@@ -11807,6 +12117,8 @@ def dispatch_runtime_maintenance_task(
             return publish_target_project_issue_worktree_pr(body)
         if task_id == PUBLISH_CONTAINER_VALIDATION_WORKTREE:
             return publish_container_validation_worktree(body)
+        if task_id == DISPATCH_TRAVEL_PAGES_PUBLICATION:
+            return dispatch_travel_pages_publication(body)
         if task_id == QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES:
             return quarantine_stale_clean_skeleton_worktrees(body)
         if task_id == HOME_EDGE_01_READ_ONLY_DIAGNOSTIC:
