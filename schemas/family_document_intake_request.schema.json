@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.family_document_intake_request.schema.json",
+  "type": "object",
+  "required": ["source_paths", "intake_roots", "archive_root", "journal_path", "people"],
+  "additionalProperties": false,
+  "properties": {
+    "source_paths": {"type": "array", "items": {"type": "string"}},
+    "intake_roots": {"type": "array", "items": {"type": "string"}},
+    "archive_root": {"type": "string"},
+    "journal_path": {"type": "string"},
+    "dry_run": {"type": "boolean"},
+    "stable_after_seconds": {"type": "number", "minimum": 0},
+    "people": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["display_name"],
+        "additionalProperties": false,
+        "properties": {
+          "person_id": {"type": "string"},
+          "display_name": {"type": "string"},
+          "surnames": {"type": "array", "items": {"type": "string"}},
+          "country": {"type": "string"}
+        }
+      }
+    }
+  }
+}
