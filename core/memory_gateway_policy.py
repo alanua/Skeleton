@@ -19,6 +19,11 @@ ALLOWED_COMMAND_SUFFIXES = frozenset(
         "memory.prepare_canonical_manifest",
         "memory.import_canonical_manifest",
         "memory.private_mutate",
+        "memory.private_status",
+        "memory.private_current_revision",
+        "memory.private_read_exact",
+        "memory.private_list_exact",
+        "memory.private_projection_status",
         "graph.query_code",
         "graph.get_index_freshness",
         "memory.propose_patch",
@@ -418,6 +423,48 @@ def _typed_child(key: str, child: object) -> object:
     return child
 
 
+def _private_status_receipt(payload: Mapping[str, Any]) -> dict[str, object]:
+    return _typed_mapping(
+        payload,
+        frozenset({"schema", "status", "state", "project_id", "canonical_sqlite", "mempalace", "graphify", "aggregate_counts"}),
+    )
+
+
+def _private_revision_receipt(payload: Mapping[str, Any]) -> dict[str, object]:
+    return _typed_mapping(payload, frozenset({"schema", "status", "project_id", "canonical_revision"}))
+
+
+def _private_exact_receipt(payload: Mapping[str, Any]) -> dict[str, object]:
+    return _typed_mapping(
+        payload,
+        _EXACT_FIELDS
+        | frozenset(
+            {
+                "schema",
+                "status",
+                "fact_id",
+                "value_hash",
+                "aggregate_counts",
+                "bounded_text",
+            }
+        ),
+    )
+
+
+def _private_list_receipt(payload: Mapping[str, Any]) -> dict[str, object]:
+    return _typed_mapping(
+        payload,
+        frozenset({"schema", "status", "project_id", "canonical_revision", "result_refs", "aggregate_counts"}),
+    )
+
+
+def _private_projection_status_receipt(payload: Mapping[str, Any]) -> dict[str, object]:
+    return _typed_mapping(
+        payload,
+        frozenset({"schema", "status", "state", "project_id", "canonical_revision", "aggregate_counts", "reason_code"}),
+    )
+
+
 def _as_list(value: object) -> list[object]:
     return value if isinstance(value, list) else []
 
@@ -521,6 +568,11 @@ _COMMAND_RECEIPT_BUILDERS: dict[str, Callable[[Mapping[str, Any]], dict[str, obj
     "memory.prepare_canonical_manifest": _prepare_manifest_receipt,
     "memory.import_canonical_manifest": _import_manifest_receipt,
     "memory.private_mutate": _private_mutation_receipt,
+    "memory.private_status": _private_status_receipt,
+    "memory.private_current_revision": _private_revision_receipt,
+    "memory.private_read_exact": _private_exact_receipt,
+    "memory.private_list_exact": _private_list_receipt,
+    "memory.private_projection_status": _private_projection_status_receipt,
     "graph.query_code": _graph_query_receipt,
     "graph.get_index_freshness": _graph_freshness_receipt,
     "memory.propose_patch": _proposal_receipt,

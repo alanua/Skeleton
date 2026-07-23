@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.memory_bootstrap_request.schema.json",
+  "title": "Memory Bootstrap Request",
+  "type": "object",
+  "required": ["schema", "mode", "project_id", "dataset_id", "repository", "branch", "task_transition_hash"],
+  "additionalProperties": true,
+  "properties": {
+    "schema": {"const": "skeleton.memory_bootstrap.request.v1"},
+    "mode": {"enum": ["mandatory", "private"]},
+    "project_id": {"type": "string"},
+    "dataset_id": {"type": "string"},
+    "repository": {"type": "string"},
+    "branch": {"type": "string"},
+    "task_transition_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  }
+}
