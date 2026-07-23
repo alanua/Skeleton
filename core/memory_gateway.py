@@ -118,8 +118,14 @@ class MemoryGateway:
             "memory.prepare_canonical_manifest": self.prepare_canonical_manifest,
             "memory.import_canonical_manifest": self.import_canonical_manifest,
             "memory.private_mutate": self.private_mutate,
+            "memory.private_status": self.private_status,
+            "memory.private_read_exact": self.private_read_exact,
+            "memory.private_list_exact": self.private_list_exact,
+            "memory.private_projection_status": self.private_projection_status,
+            "memory.private_search_semantic": self.private_search_semantic,
             "graph.query_code": self.query_code,
             "graph.get_index_freshness": self.get_graph_index_freshness,
+            "graph.private_query": self.graph_private_query,
             "memory.propose_patch": self.propose_patch,
         }
         if suffix == "memory.import_canonical_manifest":
@@ -156,6 +162,29 @@ class MemoryGateway:
             command_suffix="memory.private_mutate",
             payload=receipt,
         )
+
+    def private_status(self, *, namespace: str, **payload: object) -> dict[str, object]:
+        return self._private_storage_response(namespace, "memory.private_status", "status", payload)
+
+    def private_read_exact(self, *, namespace: str, **payload: object) -> dict[str, object]:
+        return self._private_storage_response(namespace, "memory.private_read_exact", "read_exact", payload)
+
+    def private_list_exact(self, *, namespace: str, **payload: object) -> dict[str, object]:
+        return self._private_storage_response(namespace, "memory.private_list_exact", "list_exact", payload)
+
+    def private_projection_status(self, *, namespace: str, **payload: object) -> dict[str, object]:
+        return self._private_storage_response(
+            namespace,
+            "memory.private_projection_status",
+            "projection_status",
+            payload,
+        )
+
+    def private_search_semantic(self, *, namespace: str, **payload: object) -> dict[str, object]:
+        return self._private_storage_response(namespace, "memory.private_search_semantic", "search_semantic", payload)
+
+    def graph_private_query(self, *, namespace: str, **payload: object) -> dict[str, object]:
+        return self._private_storage_response(namespace, "graph.private_query", "query_graph", payload)
 
     def lookup_exact(
         self,
@@ -700,6 +729,43 @@ class MemoryGateway:
             "namespace": namespace,
             "command": command_name(namespace, command_suffix),
             "payload": build_command_receipt(command_suffix, payload),
+        }
+        json.dumps(response, allow_nan=False, sort_keys=True)
+        return response
+
+    def _private_storage_response(
+        self,
+        namespace: str,
+        command_suffix: str,
+        storage_method: str,
+        payload: Mapping[str, object],
+    ) -> dict[str, object]:
+        namespace = self._authorize_namespace(namespace)
+        if namespace != "skeleton":
+            raise MemoryGatewayPolicyError(
+                "PRIVATE_MEMORY_NAMESPACE_NOT_AUTHORIZED",
+                "private memory reads are only available through skeleton namespace",
+            )
+        if self._token.public_mode:
+            raise MemoryGatewayPolicyError(
+                "PRIVATE_MEMORY_PUBLIC_MODE_FORBIDDEN",
+                "private memory reads require an explicit private capability",
+            )
+        if self._private_memory_storage is None:
+            raise MemoryGatewayPolicyError(
+                "PRIVATE_MEMORY_STORAGE_REQUIRED",
+                "private memory reads require an injected storage adapter",
+            )
+        try:
+            result = getattr(self._private_memory_storage, storage_method)(payload)
+        except Exception as exc:
+            raise MemoryGatewayPolicyError(type(exc).__name__, str(exc)) from exc
+        response = {
+            "schema": MEMORY_GATEWAY_RESPONSE_SCHEMA,
+            "contract_version": MEMORY_GATEWAY_CONTRACT_VERSION,
+            "namespace": namespace,
+            "command": command_name(namespace, command_suffix),
+            "payload": result,
         }
         json.dumps(response, allow_nan=False, sort_keys=True)
         return response

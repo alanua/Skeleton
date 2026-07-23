@@ -19,8 +19,14 @@ ALLOWED_COMMAND_SUFFIXES = frozenset(
         "memory.prepare_canonical_manifest",
         "memory.import_canonical_manifest",
         "memory.private_mutate",
+        "memory.private_status",
+        "memory.private_read_exact",
+        "memory.private_list_exact",
+        "memory.private_projection_status",
+        "memory.private_search_semantic",
         "graph.query_code",
         "graph.get_index_freshness",
+        "graph.private_query",
         "memory.propose_patch",
     }
 )
@@ -521,7 +527,13 @@ _COMMAND_RECEIPT_BUILDERS: dict[str, Callable[[Mapping[str, Any]], dict[str, obj
     "memory.prepare_canonical_manifest": _prepare_manifest_receipt,
     "memory.import_canonical_manifest": _import_manifest_receipt,
     "memory.private_mutate": _private_mutation_receipt,
+    "memory.private_status": _memory_freshness_receipt,
+    "memory.private_read_exact": _lookup_exact_receipt,
+    "memory.private_list_exact": lambda payload: _typed_mapping(payload, frozenset({"project_id", "dataset_id", "canonical_refs", "aggregate_counts"})),
+    "memory.private_projection_status": lambda payload: _typed_mapping(payload, frozenset({"project_id", "dataset_id", "canonical_ref", "canonical_revision", "state", "aggregate_counts"})),
+    "memory.private_search_semantic": lambda payload: _typed_mapping(payload, frozenset({"project_id", "dataset_id", "state", "results"})),
     "graph.query_code": _graph_query_receipt,
     "graph.get_index_freshness": _graph_freshness_receipt,
+    "graph.private_query": lambda payload: _typed_mapping(payload, frozenset({"project_id", "dataset_id", "state", "results"})),
     "memory.propose_patch": _proposal_receipt,
 }

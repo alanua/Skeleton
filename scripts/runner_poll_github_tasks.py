@@ -105,6 +105,12 @@ from core.runner_retry_policy import (
     one_time_override_hash,
     parse_prior_blocked_reports,
 )
+from core.memory_bootstrap import (
+    MEMORY_BOOTSTRAP_REQUEST_SCHEMA,
+    MemoryBootstrapError,
+    MemoryBootstrap,
+)
+from core.memory_scope_resolver import MemoryScopeResolutionError, task_transition_hash
 from core.runner_private_memory_executor import (
     HERMES_MEMORY_GATEWAY_SMOKE_LOOKUP_KEY,
     HERMES_MEMORY_GATEWAY_SMOKE_NAMESPACE,
@@ -183,6 +189,11 @@ TELEGRAM_TIMEOUT_SECONDS = 10
 TELEGRAM_CALLBACK_DATA_LIMIT = 64
 TELEGRAM_CALLBACK_HMAC_ENV = "SKELETON_TG_CALLBACK_HMAC_SECRET"
 CODEX_MODEL_ENV = "SKELETON_CODEX_MODEL"
+RUNNER_PRIVATE_MEMORY_ROOT_ENV = "SKELETON_RUNNER_PRIVATE_MEMORY_ROOT"
+RUNNER_PRIVATE_MEMORY_DATASET_ENV = "SKELETON_RUNNER_PRIVATE_MEMORY_DATASET"
+RUNNER_PRIVATE_MEMORY_REFS_ENV = "SKELETON_RUNNER_PRIVATE_MEMORY_REFS"
+RUNNER_PRIVATE_MEMORY_REQUIRED_ENV = "SKELETON_RUNNER_PRIVATE_MEMORY_REQUIRED"
+RUNNER_BRANCH_ENV = "SKELETON_RUNNER_BRANCH"
 TELEGRAM_CARD_TEST_SUMMARY = "Runner pytest completed before draft PR creation."
 TELEGRAM_CARD_RISK_SUMMARY = "Review the changed-file list before approval."
 TELEGRAM_PR_READY_BUTTON_LABELS = {
@@ -835,6 +846,12 @@ class RunnerMemoryConfig:
     ledger_path: Path
 
 
+class RunnerPrivateMemoryConfigError(RuntimeError):
+    def __init__(self, reason_code: str) -> None:
+        super().__init__(reason_code)
+        self.reason_code = reason_code
+
+
 @dataclass(frozen=True)
 class PrBranchValidationRequest:
     repository: str
@@ -971,6 +988,7 @@ def run_command(
     cwd: str | Path | None = None,
     *,
     timeout: int | None = None,
+    input: str | None = None,
 ) -> tuple[int, str]:
     run_kwargs: dict[str, Any] = {
         "cwd": str(cwd) if cwd is not None else None,
@@ -979,6 +997,8 @@ def run_command(
         "text": True,
         "timeout": timeout,
     }
+    if input is not None:
+        run_kwargs["input"] = input
     environment = _RUN_COMMAND_ENV_OVERRIDE.get()
     if environment is not None:
         run_kwargs["env"] = dict(environment)
@@ -2274,9 +2294,116 @@ def codex_exec_command(
     return command
 
 
+def private_memory_bootstrap_request(
+    task_content: str, workdir: str, task: RunnerTask | None = None
+) -> dict[str, object] | None:
+    if os.environ.get(RUNNER_PRIVATE_MEMORY_REQUIRED_ENV) != "1":
+        return None
+    private_root = os.environ.get(RUNNER_PRIVATE_MEMORY_ROOT_ENV)
+    refs = [
+        item.strip()
+        for item in os.environ.get(RUNNER_PRIVATE_MEMORY_REFS_ENV, "").split(",")
+        if item.strip()
+    ]
+    if not private_root or not refs:
+        raise RunnerPrivateMemoryConfigError("PRIVATE_MEMORY_STORAGE_REQUIRED")
+    repository = task.target_repository if task is not None else QUEUE_REPOSITORY
+    branch = _actual_bounded_git_branch(workdir)
+    configured_branch = os.environ.get(RUNNER_BRANCH_ENV)
+    if configured_branch is not None and configured_branch.strip() and configured_branch.strip() != branch:
+        raise RunnerPrivateMemoryConfigError("EXACT_SCOPE_INVALID")
+    project_id = task.target_project if task is not None else "skeleton"
+    return {
+        "schema": MEMORY_BOOTSTRAP_REQUEST_SCHEMA,
+        "mandatory": True,
+        "private_root": private_root,
+        "scope": {
+            "project_id": "skeleton",
+            "dataset_id": os.environ.get(RUNNER_PRIVATE_MEMORY_DATASET_ENV, project_id),
+            "repository": repository,
+            "branch": branch,
+            "task_transition_hash": task_transition_hash(task_content),
+        },
+        "canonical_refs": refs,
+        "query": "summary",
+        "repository_root": str(ROOT),
+        "worktree_root": workdir,
+    }
+
+
+def _actual_bounded_git_branch(workdir: str) -> str:
+    code, output = run_command(["git", "branch", "--show-current"], cwd=workdir)
+    if code != 0:
+        raise RunnerPrivateMemoryConfigError("EXACT_SCOPE_REQUIRED")
+    branch = output.strip()
+    if not branch or len(branch) > 160:
+        raise RunnerPrivateMemoryConfigError("EXACT_SCOPE_INVALID")
+    if branch.startswith(("/", "~")) or "\\" in branch or ".." in branch or "*" in branch:
+        raise RunnerPrivateMemoryConfigError("EXACT_SCOPE_INVALID")
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_./:-]{0,159}", branch) is None:
+        raise RunnerPrivateMemoryConfigError("EXACT_SCOPE_INVALID")
+    return branch
+
+
+def _bootstrap_blocked_output(reason_code: str) -> str:
+    return "RESULT: BLOCKED\n" + json.dumps(
+        {
+            "schema": "skeleton.memory_bootstrap.runner_block.v1",
+            "status": "BLOCKED",
+            "reason_codes": [reason_code],
+            "aggregate_counts": {
+                "canonical_count": 0,
+                "semantic_count": 0,
+                "graph_count": 0,
+            },
+        },
+        sort_keys=True,
+    )
+
+
+def _bootstrap_receipt_output(receipt: Mapping[str, object]) -> str:
+    public_receipt = {key: value for key, value in receipt.items() if key != "safe_output"}
+    status = "DONE" if receipt.get("status") == "DONE" else "BLOCKED"
+    return f"RESULT: {status}\n" + json.dumps(public_receipt, sort_keys=True)
+
+
+def _codex_executor(argv: list[str], stdin_text: str, env: Mapping[str, str]) -> tuple[int, str]:
+    token = _RUN_COMMAND_ENV_OVERRIDE.set(
+        {
+            **sanitize_codegen_child_environment(os.environ),
+            **{key: value for key, value in env.items() if isinstance(value, str)},
+        }
+    )
+    try:
+        command = list(argv)
+        model = selected_codex_model()
+        if model is not None and "--model" not in command:
+            command[3:3] = ["--model", model]
+        command.append("-")
+        return run_command(command, cwd=command[command.index("--cd") + 1], input=stdin_text)
+    finally:
+        _RUN_COMMAND_ENV_OVERRIDE.reset(token)
+
+
 def run_codex_task(
     task_content: str, workdir: str, task: RunnerTask | None = None
 ) -> tuple[int, str]:
+    try:
+        bootstrap_request = private_memory_bootstrap_request(task_content, workdir, task)
+    except RunnerPrivateMemoryConfigError as exc:
+        return 0, _bootstrap_blocked_output(exc.reason_code)
+    if bootstrap_request is not None:
+        try:
+            receipt = MemoryBootstrap.from_request(bootstrap_request).execute(
+                task_body=build_codex_task_prompt(task_content, workdir, task),
+                executor=_codex_executor,
+            )
+        except (MemoryBootstrapError, MemoryScopeResolutionError, RunnerPrivateMemoryConfigError) as exc:
+            reason_code = getattr(exc, "reason_code", "MEMORY_CONFIGURATION_REQUIRED")
+            return 0, _bootstrap_blocked_output(str(reason_code))
+        if receipt.get("status") == "DONE" and isinstance(receipt.get("safe_output"), str):
+            return 0, str(receipt["safe_output"])
+        return 0, _bootstrap_receipt_output(receipt)
     with tempfile.NamedTemporaryFile(
         mode="w", encoding="utf-8", prefix="runnerjob-", delete=True
     ) as task_file:
