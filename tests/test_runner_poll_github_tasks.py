@@ -1413,6 +1413,54 @@ def test_codex_task_prompt_contains_parent_publication_contract() -> None:
     ) in prompt
 
 
+def test_codex_command_argv_does_not_contain_task_body_or_private_context_path() -> None:
+    command = runner.codex_exec_command(
+        "distinct public task body",
+        "/tmp/worktree",
+        runner.RunnerTask(content="distinct public task body"),
+    )
+    serialized = json.dumps(command)
+
+    assert "distinct public task body" not in serialized
+    assert runner.PRIVATE_CONTEXT_ENV not in serialized
+
+
+def test_codex_task_prompt_reaches_executor_once_via_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_run_command(args: list[str], **kwargs: object) -> tuple[int, str]:
+        calls.append({"args": args, **kwargs})
+        return 0, "RESULT: DONE"
+
+    class FakeBootstrap:
+        def bootstrap(self, request: dict[str, object]) -> dict[str, object]:
+            return {
+                "private_context": {
+                    "schema": "skeleton.private_memory_context.v1",
+                    "echo_sentinel": "a" * 64,
+                    "sentinel_marker": "SKELETON_PRIVATE_ECHO_SENTINEL",
+                    "records": [],
+                }
+            }
+
+    monkeypatch.setenv(runner.MANDATORY_MEMORY_ENV, "1")
+    monkeypatch.setattr(runner, "run_command", fake_run_command)
+    monkeypatch.setattr(runner, "_retained_memory_bootstrap", lambda: FakeBootstrap())
+    monkeypatch.setattr(runner, "_git_branch_name", lambda _workdir: "runner/issue-1911")
+    code, output = runner.run_codex_task(
+        "exact assigned task body",
+        "/tmp/worktree",
+        runner.RunnerTask(content="exact assigned task body"),
+    )
+
+    assert code == 0
+    assert output == "RESULT: DONE"
+    assert len(calls) == 1
+    assert "exact assigned task body" not in json.dumps(calls[0]["args"])
+    stdin_text = str(calls[0]["input_text"])
+    assert stdin_text.count("exact assigned task body") == 1
+
+
 def test_runner_task_accepts_matching_target_project_and_repository() -> None:
     task, reason = runner.extract_runner_task(
         "Target Project: lavalamp\n"
@@ -13753,7 +13801,7 @@ def test_maintenance_report_does_not_include_command_output_token_values() -> No
     assert report.startswith("BLOCKED:")
     assert token not in report
 
-def test_codex_exec_command_default_env_unset_keeps_existing_command(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_codex_exec_command_default_env_unset_uses_stdin_handoff(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(runner.CODEX_MODEL_ENV, raising=False)
 
     command = runner.codex_exec_command("Task body", "/tmp/work", None)
@@ -13765,11 +13813,11 @@ def test_codex_exec_command_default_env_unset_keeps_existing_command(monkeypatch
         "workspace-write",
         "--cd",
         "/tmp/work",
-        runner.build_codex_task_prompt("Task body", "/tmp/work", None),
     ]
+    assert "Task body" not in json.dumps(command)
 
 
-def test_codex_exec_command_blank_env_keeps_existing_command(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_codex_exec_command_blank_env_uses_stdin_handoff(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(runner.CODEX_MODEL_ENV, "   ")
 
     command = runner.codex_exec_command("Task body", "/tmp/work", None)
@@ -13782,8 +13830,8 @@ def test_codex_exec_command_blank_env_keeps_existing_command(monkeypatch: pytest
         "workspace-write",
         "--cd",
         "/tmp/work",
-        runner.build_codex_task_prompt("Task body", "/tmp/work", None),
     ]
+    assert "Task body" not in json.dumps(command)
 
 
 def test_codex_exec_command_env_override_inserts_model(monkeypatch: pytest.MonkeyPatch) -> None:

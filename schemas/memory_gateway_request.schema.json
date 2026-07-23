@@ -10,7 +10,7 @@
     "namespace": {"$ref": "#/$defs/namespace"},
     "command": {
       "type": "string",
-      "pattern": "^(aufmass|bauclock|skeleton|home_automation|legal_private)\\.(memory\\.lookup_exact|memory\\.search_semantic|memory\\.get_conflicts|memory\\.get_override_history|memory\\.get_audit_log|memory\\.get_index_freshness|memory\\.prepare_canonical_manifest|memory\\.import_canonical_manifest|memory\\.private_mutate|graph\\.query_code|graph\\.get_index_freshness|memory\\.propose_patch)$"
+      "pattern": "^(aufmass|bauclock|skeleton|home_automation|legal_private)\\.(memory\\.lookup_exact|memory\\.search_semantic|memory\\.get_conflicts|memory\\.get_override_history|memory\\.get_audit_log|memory\\.get_index_freshness|memory\\.prepare_canonical_manifest|memory\\.import_canonical_manifest|memory\\.private_mutate|memory\\.private_status|memory\\.private_current_revision|memory\\.private_read_exact|memory\\.private_list_exact|memory\\.private_projection_status|graph\\.query_code|graph\\.get_index_freshness|memory\\.propose_patch)$"
     },
     "payload": {
       "type": "object",

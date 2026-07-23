@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.memory_bootstrap_response.schema.json",
+  "title": "Memory Bootstrap Response",
+  "type": "object",
+  "required": ["schema", "status", "private_context", "semantic_layers", "public_receipt"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "skeleton.memory_bootstrap.response.v1"},
+    "status": {"enum": ["READY"]},
+    "private_context": {"type": "object"},
+    "semantic_layers": {"type": "array"},
+    "public_receipt": {"$ref": "memory_bootstrap_receipt.schema.json"}
+  }
+}

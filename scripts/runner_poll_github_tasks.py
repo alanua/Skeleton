@@ -45,6 +45,18 @@ from core.hermes_worker import run_hermes_memory_task_packet
 from core.loop_controller import LoopPolicy
 from core.loop_engine import LoopEngine
 from core.loop_runner_adapter import run_loop_task_packet
+from core.memory_bootstrap import (
+    PRIVATE_CONTEXT_ENV,
+    MemoryBootstrap,
+    MemoryBootstrapError,
+    bootstrap_request_from_task,
+    output_contains_private_echo,
+    private_context_file,
+    public_receipt_for_error,
+)
+from core.memory_gateway_storage import PrivateMemoryGatewayStorage
+from core.graphify_adapter import LocalGraphifyIndex
+from core.mempalace_adapter import LocalMemPalaceIndex
 from core.loop_state_store import LoopStateStore
 from core.runner_diagnostic_executor import (
     MEMPALACE_SYNTHETIC_BENCHMARK_SCHEMA,
@@ -76,6 +88,7 @@ from core.runner_loop_control_executor import (
     loop_task_packet_from_body as _executor_loop_task_packet_from_body,
 )
 from core.private_memory import healthcheck_private_memory, write_public_heartbeat
+from core.private_memory_stack import PRIVATE_MEMORY_STACK_ROOT_ENV, PrivateMemoryStack
 from core.runner_private_memory_source_inventory import (
     CANDIDATE_CATEGORIES as PRIVATE_MEMORY_INVENTORY_CATEGORIES,
     TASK_ID as PRIVATE_MEMORY_PHASE_A_INVENTORY,
@@ -183,6 +196,7 @@ TELEGRAM_TIMEOUT_SECONDS = 10
 TELEGRAM_CALLBACK_DATA_LIMIT = 64
 TELEGRAM_CALLBACK_HMAC_ENV = "SKELETON_TG_CALLBACK_HMAC_SECRET"
 CODEX_MODEL_ENV = "SKELETON_CODEX_MODEL"
+MANDATORY_MEMORY_ENV = "SKELETON_RUNNER_MANDATORY_MEMORY"
 TELEGRAM_CARD_TEST_SUMMARY = "Runner pytest completed before draft PR creation."
 TELEGRAM_CARD_RISK_SUMMARY = "Review the changed-file list before approval."
 TELEGRAM_PR_READY_BUTTON_LABELS = {
@@ -971,6 +985,7 @@ def run_command(
     cwd: str | Path | None = None,
     *,
     timeout: int | None = None,
+    input_text: str | None = None,
 ) -> tuple[int, str]:
     run_kwargs: dict[str, Any] = {
         "cwd": str(cwd) if cwd is not None else None,
@@ -979,6 +994,8 @@ def run_command(
         "text": True,
         "timeout": timeout,
     }
+    if input_text is not None:
+        run_kwargs["input"] = input_text
     environment = _RUN_COMMAND_ENV_OVERRIDE.get()
     if environment is not None:
         run_kwargs["env"] = dict(environment)
@@ -2264,34 +2281,103 @@ def codex_exec_command(
     model = selected_codex_model()
     if model is not None:
         command.extend(["--model", model])
-    command.extend(
-        [
-            "--cd",
-            workdir,
-            build_codex_task_prompt(task_content, workdir, task),
-        ]
-    )
+    command.extend(["--cd", workdir])
     return command
+
+
+_RETAINED_MEMORY_BOOTSTRAP: tuple[str, MemoryBootstrap] | None = None
+
+
+def _retained_memory_bootstrap() -> MemoryBootstrap:
+    global _RETAINED_MEMORY_BOOTSTRAP
+    root = os.environ.get(PRIVATE_MEMORY_STACK_ROOT_ENV, "")
+    key = hashlib.sha256(
+        json.dumps(
+            {
+                "root": root,
+                "public_mode": False,
+                "namespace": "skeleton",
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    if _RETAINED_MEMORY_BOOTSTRAP is not None and _RETAINED_MEMORY_BOOTSTRAP[0] == key:
+        return _RETAINED_MEMORY_BOOTSTRAP[1]
+    stack = PrivateMemoryStack(root or None)
+    mempalace = LocalMemPalaceIndex(stack.paths.mempalace) if stack.paths.mempalace.is_file() else None
+    graphify = LocalGraphifyIndex(stack.paths.graphify) if stack.paths.graphify.is_file() else None
+    gateway = MemoryGateway(
+        capability_token(namespaces=("skeleton",), public_mode=False),
+        private_memory_storage=PrivateMemoryGatewayStorage(stack),
+    )
+    bootstrap = MemoryBootstrap(
+        gateway,
+        mempalace_adapter=mempalace,
+        graphify_adapter=graphify,
+        cache_dir=Path(tempfile.gettempdir()) / "skeleton-runner-memory-cache",
+    )
+    _RETAINED_MEMORY_BOOTSTRAP = (key, bootstrap)
+    return bootstrap
+
+
+def _git_branch_name(workdir: str | Path) -> str:
+    code, output = run_command(["git", "branch", "--show-current"], cwd=workdir)
+    if code == 0 and output.strip():
+        return output.strip()
+    return "runner/unknown"
 
 
 def run_codex_task(
     task_content: str, workdir: str, task: RunnerTask | None = None
 ) -> tuple[int, str]:
-    with tempfile.NamedTemporaryFile(
-        mode="w", encoding="utf-8", prefix="runnerjob-", delete=True
-    ) as task_file:
-        task_file.write(task_content)
-        task_file.flush()
-        token = _RUN_COMMAND_ENV_OVERRIDE.set(
-            sanitize_codegen_child_environment(os.environ)
-        )
+    prompt = build_codex_task_prompt(task_content, workdir, task)
+    environment = sanitize_codegen_child_environment(os.environ)
+    private_context: Mapping[str, object] | None = None
+    if os.environ.get(MANDATORY_MEMORY_ENV) == "1":
         try:
+            bootstrap = _retained_memory_bootstrap()
+            branch = _git_branch_name(workdir)
+            response = bootstrap.bootstrap(
+                bootstrap_request_from_task(
+                    task_content=task_content,
+                    project_id=task.target_project if task is not None else "skeleton",
+                    dataset_id=task.target_project if task is not None else "skeleton",
+                    repository=task.target_repository if task is not None else QUEUE_REPOSITORY,
+                    branch=branch,
+                )
+            )
+            private_context = response["private_context"]
+        except MemoryBootstrapError as exc:
+            receipt = public_receipt_for_error(exc.reason_code)
+            return 1, "BLOCKED: mandatory private memory unavailable\n" + json.dumps(receipt, sort_keys=True)
+    token = _RUN_COMMAND_ENV_OVERRIDE.set(environment)
+    try:
+        if private_context is None:
             return run_command(
-                codex_exec_command(task_content, workdir, task),
+                [
+                    *codex_exec_command(task_content, workdir, task),
+                    prompt,
+                ],
                 cwd=workdir,
             )
-        finally:
-            _RUN_COMMAND_ENV_OVERRIDE.reset(token)
+        with private_context_file(private_context) as context_path:
+            checked_env = dict(environment)
+            checked_env[PRIVATE_CONTEXT_ENV] = str(context_path)
+            env_token = _RUN_COMMAND_ENV_OVERRIDE.set(checked_env)
+            try:
+                code, output = run_command(
+                    codex_exec_command(task_content, workdir, task),
+                    cwd=workdir,
+                    input_text=prompt,
+                )
+            finally:
+                _RUN_COMMAND_ENV_OVERRIDE.reset(env_token)
+            if output_contains_private_echo(output, private_context):
+                receipt = public_receipt_for_error("PRIVATE_ECHO_BLOCKED")
+                return 1, "BLOCKED: private memory echo blocked\n" + json.dumps(receipt, sort_keys=True)
+            return code, output
+    finally:
+        _RUN_COMMAND_ENV_OVERRIDE.reset(token)
 
 
 def post_issue_comment(issue_number: int, body: str) -> None:

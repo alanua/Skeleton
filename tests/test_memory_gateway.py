@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -507,6 +508,11 @@ def test_required_namespaces_and_allowlisted_commands_are_registered() -> None:
             f"{namespace}.memory.prepare_canonical_manifest",
             f"{namespace}.memory.import_canonical_manifest",
             f"{namespace}.memory.private_mutate",
+            f"{namespace}.memory.private_status",
+            f"{namespace}.memory.private_current_revision",
+            f"{namespace}.memory.private_read_exact",
+            f"{namespace}.memory.private_list_exact",
+            f"{namespace}.memory.private_projection_status",
             f"{namespace}.graph.query_code",
             f"{namespace}.graph.get_index_freshness",
             f"{namespace}.memory.propose_patch",
@@ -651,3 +657,77 @@ def test_private_memory_gateway_rejects_public_mode_and_wrong_project(tmp_path: 
             request("skeleton", "memory.private_mutate", {**mutation, "project_id": "other"})
         )
     assert project_exc.value.reason_code == "MemoryGatewayStorageError"
+
+
+def test_private_memory_gateway_read_only_status_list_exact_and_projection_missing(tmp_path: Path) -> None:
+    stack = PrivateMemoryStack(tmp_path)
+    stack.init(import_manifest=False)
+    stack.put(namespace="skeleton.notes", fact_id="status_note", value={"summary": "status list read"})
+    gw = MemoryGateway(
+        capability_token(namespaces=("skeleton",), public_mode=False),
+        private_memory_storage=PrivateMemoryGatewayStorage(stack),
+    )
+    before = stack.status()["canonical_sqlite"]["canonical_revision"]
+
+    status = gw.execute(request("skeleton", "memory.private_status", {"project_id": "skeleton"}))["payload"]
+    revision = gw.execute(request("skeleton", "memory.private_current_revision", {"project_id": "skeleton"}))[
+        "payload"
+    ]
+    listed = gw.execute(
+        request(
+            "skeleton",
+            "memory.private_list_exact",
+            {"project_id": "skeleton", "fact_namespace": "skeleton.notes", "limit": 5},
+        )
+    )["payload"]
+    exact = gw.execute(
+        request(
+            "skeleton",
+            "memory.private_read_exact",
+            {"project_id": "skeleton", "fact_namespace": "skeleton.notes", "fact_id": "status_note"},
+        )
+    )["payload"]
+    missing = gw.execute(
+        request(
+            "skeleton",
+            "memory.private_projection_status",
+            {"project_id": "skeleton", "work_key": "missing_work"},
+        )
+    )["payload"]
+
+    assert status["state"] == "READY"
+    assert revision["canonical_revision"] == before
+    assert listed["result_refs"] == ["skeleton.notes:status_note"]
+    assert exact["authoritative"] is True
+    assert exact["value_hash"] == stack.get(namespace="skeleton.notes", fact_id="status_note")["value_hash"]
+    assert missing["status"] == "MISSING"
+    assert missing["state"] == "NOT_QUEUED"
+    assert stack.status()["canonical_sqlite"]["canonical_revision"] == before
+
+
+def test_private_memory_gateway_put_delete_outbox_rows_are_idempotent(tmp_path: Path) -> None:
+    stack = PrivateMemoryStack(tmp_path)
+    stack.init(import_manifest=False)
+    adapter = PrivateMemoryGatewayStorage(stack)
+    gw = MemoryGateway(
+        capability_token(namespaces=("skeleton",), public_mode=False),
+        private_memory_storage=adapter,
+    )
+    mutation = {
+        "schema": PRIVATE_MEMORY_GATEWAY_MUTATION_SCHEMA,
+        "project_id": "skeleton",
+        "operation": "put",
+        "fact_namespace": "skeleton.notes",
+        "fact_id": "outbox_note",
+        "value": {"summary": "outbox once"},
+        "idempotency_key": "idem_outbox_once",
+    }
+
+    first = gw.execute(request("skeleton", "memory.private_mutate", mutation))["payload"]
+    second = gw.execute(request("skeleton", "memory.private_mutate", mutation))["payload"]
+
+    rows = sqlite3.connect(tmp_path / "memory_gateway_mutations.sqlite").execute(
+        "SELECT COUNT(*) FROM memory_gateway_projection_outbox"
+    ).fetchone()[0]
+    assert first["canonical_revision"] == second["canonical_revision"]
+    assert rows == 1

@@ -118,6 +118,11 @@ class MemoryGateway:
             "memory.prepare_canonical_manifest": self.prepare_canonical_manifest,
             "memory.import_canonical_manifest": self.import_canonical_manifest,
             "memory.private_mutate": self.private_mutate,
+            "memory.private_status": self.private_status,
+            "memory.private_current_revision": self.private_current_revision,
+            "memory.private_read_exact": self.private_read_exact,
+            "memory.private_list_exact": self.private_list_exact,
+            "memory.private_projection_status": self.private_projection_status,
             "graph.query_code": self.query_code,
             "graph.get_index_freshness": self.get_graph_index_freshness,
             "memory.propose_patch": self.propose_patch,
@@ -130,25 +135,34 @@ class MemoryGateway:
             )
         return handlers[suffix](namespace=namespace, **payload)
 
-    def private_mutate(self, *, namespace: str, **payload: object) -> dict[str, object]:
+    def _require_private_storage_command(self, namespace: str, suffix: str) -> tuple[str, PrivateMemoryGatewayStorage]:
         namespace = self._authorize_namespace(namespace)
         if namespace != "skeleton":
             raise MemoryGatewayPolicyError(
-                "PRIVATE_MEMORY_MUTATION_NAMESPACE_NOT_AUTHORIZED",
-                "private memory CLI bridge is only available through skeleton namespace",
+                "PRIVATE_MEMORY_NAMESPACE_NOT_AUTHORIZED",
+                "private memory commands are only available through skeleton namespace",
             )
         if self._token.public_mode:
+            reason = (
+                "PRIVATE_MEMORY_MUTATION_PUBLIC_MODE_FORBIDDEN"
+                if suffix == "memory.private_mutate"
+                else "PRIVATE_MEMORY_PUBLIC_MODE_FORBIDDEN"
+            )
             raise MemoryGatewayPolicyError(
-                "PRIVATE_MEMORY_MUTATION_PUBLIC_MODE_FORBIDDEN",
-                "private memory CLI bridge requires an explicit private capability",
+                reason,
+                "private memory commands require an explicit private capability",
             )
         if self._private_memory_storage is None:
             raise MemoryGatewayPolicyError(
                 "PRIVATE_MEMORY_STORAGE_REQUIRED",
-                "private memory CLI bridge requires an injected storage adapter",
+                "private memory commands require an injected storage adapter",
             )
+        return namespace, self._private_memory_storage
+
+    def private_mutate(self, *, namespace: str, **payload: object) -> dict[str, object]:
+        namespace, storage = self._require_private_storage_command(namespace, "memory.private_mutate")
         try:
-            receipt = self._private_memory_storage.execute_mutation(payload)
+            receipt = storage.execute_mutation(payload)
         except Exception as exc:
             raise MemoryGatewayPolicyError(type(exc).__name__, str(exc)) from exc
         return self._response(
@@ -156,6 +170,78 @@ class MemoryGateway:
             command_suffix="memory.private_mutate",
             payload=receipt,
         )
+
+    def private_status(self, *, namespace: str, project_id: object = "skeleton") -> dict[str, object]:
+        namespace, storage = self._require_private_storage_command(namespace, "memory.private_status")
+        try:
+            payload = storage.status(project_id=project_id)
+        except Exception as exc:
+            raise MemoryGatewayPolicyError(type(exc).__name__, str(exc)) from exc
+        return self._response(namespace=namespace, command_suffix="memory.private_status", payload=payload)
+
+    def private_current_revision(self, *, namespace: str, project_id: object = "skeleton") -> dict[str, object]:
+        namespace, storage = self._require_private_storage_command(namespace, "memory.private_current_revision")
+        try:
+            payload = storage.current_revision(project_id=project_id)
+        except Exception as exc:
+            raise MemoryGatewayPolicyError(type(exc).__name__, str(exc)) from exc
+        return self._response(namespace=namespace, command_suffix="memory.private_current_revision", payload=payload)
+
+    def private_read_exact(
+        self,
+        *,
+        namespace: str,
+        project_id: object = "skeleton",
+        fact_namespace: object,
+        fact_id: object,
+    ) -> dict[str, object]:
+        namespace, storage = self._require_private_storage_command(namespace, "memory.private_read_exact")
+        try:
+            payload = storage.read_exact(
+                project_id=project_id,
+                fact_namespace=fact_namespace,
+                fact_id=fact_id,
+            )
+        except Exception as exc:
+            raise MemoryGatewayPolicyError(type(exc).__name__, str(exc)) from exc
+        response = {
+            "schema": MEMORY_GATEWAY_RESPONSE_SCHEMA,
+            "contract_version": MEMORY_GATEWAY_CONTRACT_VERSION,
+            "namespace": namespace,
+            "command": command_name(namespace, "memory.private_read_exact"),
+            "payload": payload,
+        }
+        json.dumps(response, allow_nan=False, sort_keys=True)
+        return response
+
+    def private_list_exact(
+        self,
+        *,
+        namespace: str,
+        project_id: object = "skeleton",
+        fact_namespace: object,
+        limit: object = 8,
+    ) -> dict[str, object]:
+        namespace, storage = self._require_private_storage_command(namespace, "memory.private_list_exact")
+        try:
+            payload = storage.list_exact(project_id=project_id, fact_namespace=fact_namespace, limit=limit)
+        except Exception as exc:
+            raise MemoryGatewayPolicyError(type(exc).__name__, str(exc)) from exc
+        return self._response(namespace=namespace, command_suffix="memory.private_list_exact", payload=payload)
+
+    def private_projection_status(
+        self,
+        *,
+        namespace: str,
+        project_id: object = "skeleton",
+        work_key: object,
+    ) -> dict[str, object]:
+        namespace, storage = self._require_private_storage_command(namespace, "memory.private_projection_status")
+        try:
+            payload = storage.projection_status(project_id=project_id, work_key=work_key)
+        except Exception as exc:
+            raise MemoryGatewayPolicyError(type(exc).__name__, str(exc)) from exc
+        return self._response(namespace=namespace, command_suffix="memory.private_projection_status", payload=payload)
 
     def lookup_exact(
         self,
