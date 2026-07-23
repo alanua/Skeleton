@@ -35,6 +35,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.audit_ledger import AuditLedger, validate_public_safe_payload
+from core.memory_bootstrap import (
+    PRIVATE_CONTEXT_ENV,
+    build_private_context_payload as _build_private_context_payload,
+    retained_memory_bootstrap as _core_retained_memory_bootstrap,
+    sanitize_public_text_before_write as _sanitize_public_text_before_write,
+    write_private_context_payload as _write_private_context_payload,
+)
 from core.aufmass_source_pack import validate_source_pack_manifest
 from core.hermes_private_memory import (
     orient_hermes_private_memory,
@@ -89,6 +96,7 @@ from core.private_static_site_runtime import (
     prepare_private_static_site_handoff as _execute_prepare_private_static_site_handoff,
 )
 from core.project_tree import get_project, get_project_by_repo, load_project_tree
+from core.memory_gateway_policy import ALLOWED_NAMESPACES
 from core.runner_child_environment import sanitize_codegen_child_environment
 from core.runner_retry_policy import (
     BLOCK_REPEATED_REASON,
@@ -971,6 +979,7 @@ def run_command(
     cwd: str | Path | None = None,
     *,
     timeout: int | None = None,
+    input_text: str | None = None,
 ) -> tuple[int, str]:
     run_kwargs: dict[str, Any] = {
         "cwd": str(cwd) if cwd is not None else None,
@@ -979,6 +988,8 @@ def run_command(
         "text": True,
         "timeout": timeout,
     }
+    if input_text is not None:
+        run_kwargs["input"] = input_text
     environment = _RUN_COMMAND_ENV_OVERRIDE.get()
     if environment is not None:
         run_kwargs["env"] = dict(environment)
@@ -2264,34 +2275,83 @@ def codex_exec_command(
     model = selected_codex_model()
     if model is not None:
         command.extend(["--model", model])
-    command.extend(
-        [
-            "--cd",
-            workdir,
-            build_codex_task_prompt(task_content, workdir, task),
-        ]
-    )
+    command.extend(["--cd", workdir, "-"])
     return command
+
+
+def _retained_memory_bootstrap(
+    private_config: Mapping[str, Any] | None = None,
+    *,
+    current_canonical_revision: int = 0,
+) -> object:
+    return _core_retained_memory_bootstrap(
+        private_config,
+        current_canonical_revision=current_canonical_revision,
+    )
+
+
+def _safe_reason(reason: object) -> str:
+    from core.memory_bootstrap import safe_reason
+
+    return safe_reason(reason)
+
+
+def _private_context_for_executor(
+    task_content: str,
+    workdir: str,
+    task: RunnerTask | None = None,
+) -> tuple[Path | None, dict[str, str]]:
+    workdir_path = Path(workdir)
+    if not workdir_path.is_dir():
+        return None, {}
+    requested_project_id = task.target_project if task is not None else "skeleton"
+    project_id = requested_project_id if requested_project_id in ALLOWED_NAMESPACES else "skeleton"
+    revision = 3
+    retained = _retained_memory_bootstrap(
+        {"project_id": project_id, "dataset_id": project_id},
+        current_canonical_revision=revision,
+    )
+    gateway = MemoryGateway(
+        capability_token(namespaces=(project_id,), public_mode=False)
+    )
+    payload = _build_private_context_payload(
+        gateway=gateway,
+        project_id=project_id,
+        dataset_id=project_id,
+        query=task_content,
+        canonical_keys=("primary_fact",),
+        current_canonical_revision=revision,
+        cognee_adapter=retained.semantic_candidates[0],
+    )
+    context_path = _write_private_context_payload(payload, workdir_path / ".codex")
+    return context_path, {PRIVATE_CONTEXT_ENV: str(context_path)}
 
 
 def run_codex_task(
     task_content: str, workdir: str, task: RunnerTask | None = None
 ) -> tuple[int, str]:
-    with tempfile.NamedTemporaryFile(
-        mode="w", encoding="utf-8", prefix="runnerjob-", delete=True
-    ) as task_file:
-        task_file.write(task_content)
-        task_file.flush()
+    prompt = build_codex_task_prompt(task_content, workdir, task)
+    if not Path(workdir).is_dir():
         token = _RUN_COMMAND_ENV_OVERRIDE.set(
             sanitize_codegen_child_environment(os.environ)
         )
         try:
-            return run_command(
-                codex_exec_command(task_content, workdir, task),
-                cwd=workdir,
-            )
+            command = codex_exec_command(task_content, workdir, task)
+            return run_command([*command[:-1], prompt], cwd=workdir)
         finally:
             _RUN_COMMAND_ENV_OVERRIDE.reset(token)
+    _context_path, context_env = _private_context_for_executor(task_content, workdir, task)
+    child_env = sanitize_codegen_child_environment(os.environ)
+    child_env.update(context_env)
+    token = _RUN_COMMAND_ENV_OVERRIDE.set(child_env)
+    try:
+        return run_command(
+            codex_exec_command(task_content, workdir, task),
+            cwd=workdir,
+            input_text=prompt,
+        )
+    finally:
+        _RUN_COMMAND_ENV_OVERRIDE.reset(token)
 
 
 def post_issue_comment(issue_number: int, body: str) -> None:
@@ -2476,11 +2536,19 @@ def extract_pr_url(report: str) -> str | None:
 
 
 def sanitize_public_report(report: str) -> str:
-    return re.sub(
+    sanitized = re.sub(
         r"(?m)^(?P<label>(?:Draft )?PR):\s*\{PR_URL\}\s*$",
         r"\g<label>: none",
         report,
     )
+    private_config = runner_memory_config_from_env()
+    private_values = {
+        "runner_memory": {
+            "db_path": str(private_config.db_path) if private_config else "",
+            "ledger_path": str(private_config.ledger_path) if private_config else "",
+        }
+    }
+    return _sanitize_public_text_before_write(sanitized, private_values)
 
 
 def runner_memory_config_from_env() -> RunnerMemoryConfig | None:
@@ -2613,6 +2681,7 @@ def _runner_memory_payload(
     if status is not None:
         payload["status"] = status
     if report is not None:
+        report = sanitize_public_report(report)
         changed = extract_runner_memory_changed_files(report)
         if changed:
             payload["changed_files"] = changed

@@ -13753,37 +13753,23 @@ def test_maintenance_report_does_not_include_command_output_token_values() -> No
     assert report.startswith("BLOCKED:")
     assert token not in report
 
-def test_codex_exec_command_default_env_unset_keeps_existing_command(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_codex_exec_command_default_env_unset_uses_stdin_marker(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(runner.CODEX_MODEL_ENV, raising=False)
 
     command = runner.codex_exec_command("Task body", "/tmp/work", None)
 
-    assert command == [
-        "codex",
-        "exec",
-        "--sandbox",
-        "workspace-write",
-        "--cd",
-        "/tmp/work",
-        runner.build_codex_task_prompt("Task body", "/tmp/work", None),
-    ]
+    assert command == ["codex", "exec", "--sandbox", "workspace-write", "--cd", "/tmp/work", "-"]
+    assert "Task body" not in command
 
 
-def test_codex_exec_command_blank_env_keeps_existing_command(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_codex_exec_command_blank_env_uses_stdin_marker(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(runner.CODEX_MODEL_ENV, "   ")
 
     command = runner.codex_exec_command("Task body", "/tmp/work", None)
 
     assert "--model" not in command
-    assert command == [
-        "codex",
-        "exec",
-        "--sandbox",
-        "workspace-write",
-        "--cd",
-        "/tmp/work",
-        runner.build_codex_task_prompt("Task body", "/tmp/work", None),
-    ]
+    assert command == ["codex", "exec", "--sandbox", "workspace-write", "--cd", "/tmp/work", "-"]
+    assert "Task body" not in command
 
 
 def test_codex_exec_command_env_override_inserts_model(monkeypatch: pytest.MonkeyPatch) -> None:
