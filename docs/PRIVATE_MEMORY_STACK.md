@@ -41,7 +41,7 @@ All runtime files stay under one configured private root:
 - `mempalace.index.json`: derived semantic index
 - `graphify.index.json`: derived relationship index
 - `backups/*.sqlite`: local SQLite snapshots
-- `memory_gateway_import.sqlite`: local receipt database for the approved Memory Gateway manifest import path
+- `memory_gateway_import.sqlite`: local gateway receipt database for approved imports, private mutations, and projection work status
 
 The private root is created with mode `0700`. SQLite and derived files are written with mode `0600`. SQLite WAL and integrity checks are enabled where supported.
 

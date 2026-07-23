@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.memory_bootstrap.receipt.v1",
+  "type": "object",
+  "required": ["schema", "status", "public_safe"],
+  "properties": {
+    "schema": { "const": "skeleton.memory_bootstrap.receipt.v1" },
+    "status": { "type": "string" },
+    "public_safe": { "const": true },
+    "aggregate_counts": { "type": "object" }
+  },
+  "additionalProperties": true
+}

@@ -46,6 +46,7 @@ from core.loop_controller import LoopPolicy
 from core.loop_engine import LoopEngine
 from core.loop_runner_adapter import run_loop_task_packet
 from core.loop_state_store import LoopStateStore
+from core.memory_bootstrap import PRIVATE_MEMORY_CONTEXT_MARKER, private_memory_bootstrap
 from core.runner_diagnostic_executor import (
     MEMPALACE_SYNTHETIC_BENCHMARK_SCHEMA,
     MEMPALACE_SYNTHETIC_BENCHMARK_TIMEOUT_SECONDS,
@@ -183,6 +184,8 @@ TELEGRAM_TIMEOUT_SECONDS = 10
 TELEGRAM_CALLBACK_DATA_LIMIT = 64
 TELEGRAM_CALLBACK_HMAC_ENV = "SKELETON_TG_CALLBACK_HMAC_SECRET"
 CODEX_MODEL_ENV = "SKELETON_CODEX_MODEL"
+CODEX_CONTEXT_FILE_ENV = "SKELETON_CODEX_CONTEXT_FILE"
+RUNNER_PRIVATE_MEMORY_DATASET_ENV = "SKELETON_RUNNER_PRIVATE_MEMORY_DATASET"
 TELEGRAM_CARD_TEST_SUMMARY = "Runner pytest completed before draft PR creation."
 TELEGRAM_CARD_RISK_SUMMARY = "Review the changed-file list before approval."
 TELEGRAM_PR_READY_BUTTON_LABELS = {
@@ -2274,24 +2277,90 @@ def codex_exec_command(
     return command
 
 
+def _codex_exec_context_file_command(
+    task_content: str, workdir: str, task: RunnerTask | None = None
+) -> list[str]:
+    command = codex_exec_command(task_content, workdir, task)
+    command[-1] = (
+        "Read the complete Runner task context from the path named by "
+        f"{CODEX_CONTEXT_FILE_ENV}. Do not print private context."
+    )
+    return command
+
+
 def run_codex_task(
     task_content: str, workdir: str, task: RunnerTask | None = None
 ) -> tuple[int, str]:
-    with tempfile.NamedTemporaryFile(
-        mode="w", encoding="utf-8", prefix="runnerjob-", delete=True
-    ) as task_file:
-        task_file.write(task_content)
-        task_file.flush()
-        token = _RUN_COMMAND_ENV_OVERRIDE.set(
-            sanitize_codegen_child_environment(os.environ)
-        )
+    context_path: Path | None = None
+    try:
+        private_context, private_error = _runner_private_memory_context(task_content, task)
+        if private_error is not None:
+            return 1, private_error
+        fd, name = tempfile.mkstemp(prefix="runnerjob-", suffix=".context", dir=tempfile.gettempdir())
+        context_path = Path(name)
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as task_file:
+            task_file.write(build_codex_task_prompt(task_content, workdir, task))
+            if private_context is not None:
+                task_file.write("\n\nPrivate memory context follows as local-only JSON.\n")
+                json.dump(private_context, task_file, sort_keys=True)
+                task_file.write("\n")
+            task_file.flush()
+        environment = dict(sanitize_codegen_child_environment(os.environ))
+        environment[CODEX_CONTEXT_FILE_ENV] = str(context_path)
+        token = _RUN_COMMAND_ENV_OVERRIDE.set(environment)
         try:
-            return run_command(
-                codex_exec_command(task_content, workdir, task),
+            command = (
+                _codex_exec_context_file_command(task_content, workdir, task)
+                if private_context is not None
+                else codex_exec_command(task_content, workdir, task)
+            )
+            code, output = run_command(
+                command,
                 cwd=workdir,
             )
         finally:
             _RUN_COMMAND_ENV_OVERRIDE.reset(token)
+        if _codex_output_has_private_context_marker(output):
+            return 1, "BLOCKED: private context marker echoed by executor"
+        return code, output
+    finally:
+        if context_path is not None:
+            try:
+                context_path.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def _codex_output_has_private_context_marker(output: str) -> bool:
+    return PRIVATE_MEMORY_CONTEXT_MARKER in (output or "")
+
+
+def _runner_private_memory_context(
+    task_content: str,
+    task: RunnerTask | None,
+) -> tuple[dict[str, object] | None, str | None]:
+    dataset_id = os.environ.get(RUNNER_PRIVATE_MEMORY_DATASET_ENV)
+    if dataset_id is None or not dataset_id.strip():
+        return None, None
+    project_id = task.target_project if task is not None else "skeleton"
+    request = {
+        "schema": "skeleton.memory_bootstrap.request.v1",
+        "project_id": project_id,
+        "dataset_id": dataset_id.strip(),
+        "exact_keys": [],
+        "query": _bounded_private_memory_query(task_content),
+    }
+    try:
+        result = private_memory_bootstrap(request)
+    except Exception:
+        return None, "BLOCKED/MEMORY_UNAVAILABLE: private memory bootstrap failed closed"
+    return result.context, None
+
+
+def _bounded_private_memory_query(task_content: str) -> str:
+    text = re.sub(r"\s+", " ", task_content.strip())
+    return text[:512]
 
 
 def post_issue_comment(issue_number: int, body: str) -> None:

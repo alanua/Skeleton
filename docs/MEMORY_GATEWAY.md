@@ -19,6 +19,10 @@ Allowlisted commands are namespace-qualified:
 - `<namespace>.memory.get_override_history`
 - `<namespace>.memory.get_audit_log`
 - `<namespace>.memory.get_index_freshness`
+- `<namespace>.memory.private_status`
+- `<namespace>.memory.private_lookup_exact`
+- `<namespace>.memory.private_list_exact`
+- `<namespace>.memory.private_projection_status`
 - `<namespace>.memory.prepare_canonical_manifest`
 - `<namespace>.memory.import_canonical_manifest`
 - `<namespace>.memory.private_mutate`
@@ -33,6 +37,17 @@ Allowlisted commands are namespace-qualified:
 `memory.search_semantic` always returns `authoritative=false`, source kind `mempalace`, and authority classification `derived_semantic`.
 
 `graph.query_code` always returns `authoritative=false` for canonical facts, `authoritative_scope=code_graph`, source kind `graphify`, and authority classification `derived_code_graph`.
+
+## Private Exact Access
+
+Private exact values are available only through a private-mode capability token and an injected `PrivateMemoryGatewayStorage` backed by `PrivateMemoryStack`.
+
+- `memory.private_status` reads canonical status and the current revision from the private gateway storage.
+- `memory.private_lookup_exact` returns a bounded exact value for an exact project and dataset.
+- `memory.private_list_exact` returns a bounded dataset list when no exact keys are declared.
+- `memory.private_projection_status` is read-only and missing rows stay missing.
+
+Public mode, absent storage, malformed scope, wildcard scope, and foreign project/dataset attempts fail closed. Public receipts continue to sanitize raw values, local paths, canonical refs, and provenance.
 
 ## Freshness
 
@@ -49,6 +64,8 @@ Stale derived results may be displayed with a warning but cannot support `memory
 Public writes are only accepted through `memory.propose_patch`, which delegates to `MemoryPatchProposalRegistry`. Semantic or graph evidence must be exact-confirmed with `confirmed_via_exact_ref` and `confirmed_canonical_revision`.
 
 The local `skeleton-memory` CLI has one private compatibility boundary, `skeleton.memory.private_mutate`, for operator-approved `put`, `delete`, and `import_bundle` mutations. It requires a non-public `skeleton` capability token and an injected private storage adapter. Requests carry project scope, approval, actor, reason, expected revision, idempotency key, source hash, and bundle hash metadata where applicable. The adapter records the mutation before entering the stack and recovers by transaction reference, so retry after a canonical SQLite commit cannot advance the canonical revision a second time. Receipts are sanitized and omit raw private values, paths, SQLite connection details, and bundle contents.
+
+After a successful canonical mutation commit, the private storage adapter enqueues durable projection work keyed by exact project, dataset, and canonical revision. Duplicate mutation retries do not duplicate projection work. Derived projection failures do not roll back or duplicate canonical writes.
 
 Stable rejection reasons include:
 

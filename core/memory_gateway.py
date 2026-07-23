@@ -115,6 +115,10 @@ class MemoryGateway:
             "memory.get_override_history": self.get_override_history,
             "memory.get_audit_log": self.get_audit_log,
             "memory.get_index_freshness": self.get_memory_index_freshness,
+            "memory.private_status": self.private_status,
+            "memory.private_lookup_exact": self.private_lookup_exact,
+            "memory.private_list_exact": self.private_list_exact,
+            "memory.private_projection_status": self.private_projection_status,
             "memory.prepare_canonical_manifest": self.prepare_canonical_manifest,
             "memory.import_canonical_manifest": self.import_canonical_manifest,
             "memory.private_mutate": self.private_mutate,
@@ -156,6 +160,97 @@ class MemoryGateway:
             command_suffix="memory.private_mutate",
             payload=receipt,
         )
+
+    def private_status(self, *, namespace: str, project_id: object, dataset_id: object = "skeleton") -> dict[str, object]:
+        namespace = self._authorize_private_storage_command(namespace)
+        project = self._optional_project_id(project_id)
+        dataset = self._optional_project_id(dataset_id)
+        if project is None or dataset is None:
+            raise MemoryGatewayPolicyError("PROJECT_ID_REQUIRED", "private status requires exact scope")
+        try:
+            status = self._private_memory_storage.canonical_status(project_id=project, dataset_id=dataset)
+        except Exception as exc:
+            raise MemoryGatewayPolicyError(type(exc).__name__, str(exc)) from exc
+        return self._response(namespace=namespace, command_suffix="memory.private_status", payload=status)
+
+    def private_lookup_exact(
+        self,
+        *,
+        namespace: str,
+        project_id: object,
+        dataset_id: object,
+        key: object,
+    ) -> dict[str, object]:
+        namespace = self._authorize_private_storage_command(namespace)
+        project = self._optional_project_id(project_id)
+        dataset = self._optional_project_id(dataset_id)
+        if project is None or dataset is None:
+            raise MemoryGatewayPolicyError("PROJECT_ID_REQUIRED", "private exact read requires exact scope")
+        try:
+            exact = self._private_memory_storage.exact_get(project_id=project, dataset_id=dataset, key=str(key))
+        except Exception as exc:
+            raise MemoryGatewayPolicyError(type(exc).__name__, str(exc)) from exc
+        return {
+            "schema": MEMORY_GATEWAY_RESPONSE_SCHEMA,
+            "contract_version": MEMORY_GATEWAY_CONTRACT_VERSION,
+            "namespace": namespace,
+            "command": command_name(namespace, "memory.private_lookup_exact"),
+            "payload": exact,
+        }
+
+    def private_list_exact(
+        self,
+        *,
+        namespace: str,
+        project_id: object,
+        dataset_id: object,
+        limit: object = 8,
+    ) -> dict[str, object]:
+        namespace = self._authorize_private_storage_command(namespace)
+        project = self._optional_project_id(project_id)
+        dataset = self._optional_project_id(dataset_id)
+        if project is None or dataset is None:
+            raise MemoryGatewayPolicyError("PROJECT_ID_REQUIRED", "private exact list requires exact scope")
+        try:
+            exact_list = self._private_memory_storage.exact_list(
+                project_id=project,
+                dataset_id=dataset,
+                limit=limit if isinstance(limit, int) else 8,
+            )
+        except Exception as exc:
+            raise MemoryGatewayPolicyError(type(exc).__name__, str(exc)) from exc
+        return {
+            "schema": MEMORY_GATEWAY_RESPONSE_SCHEMA,
+            "contract_version": MEMORY_GATEWAY_CONTRACT_VERSION,
+            "namespace": namespace,
+            "command": command_name(namespace, "memory.private_list_exact"),
+            "payload": exact_list,
+        }
+
+    def private_projection_status(
+        self,
+        *,
+        namespace: str,
+        project_id: object,
+        dataset_id: object,
+        canonical_revision: object,
+    ) -> dict[str, object]:
+        namespace = self._authorize_private_storage_command(namespace)
+        project = self._optional_project_id(project_id)
+        dataset = self._optional_project_id(dataset_id)
+        if project is None or dataset is None or not isinstance(canonical_revision, int):
+            raise MemoryGatewayPolicyError("PROJECT_ID_REQUIRED", "private projection status requires exact scope")
+        try:
+            status = self._private_memory_storage.projection_status(
+                project_id=project,
+                dataset_id=dataset,
+                canonical_revision=canonical_revision,
+            )
+        except Exception as exc:
+            raise MemoryGatewayPolicyError(type(exc).__name__, str(exc)) from exc
+        if status is None:
+            raise MemoryGatewayPolicyError("PROJECTION_WORK_NOT_FOUND", "projection work status is missing")
+        return self._response(namespace=namespace, command_suffix="memory.private_projection_status", payload=status)
 
     def lookup_exact(
         self,
@@ -678,6 +773,25 @@ class MemoryGateway:
         authorized = validate_namespace(namespace, allowed_namespaces=frozenset(self._token.namespaces))
         if self._token.public_mode and authorized in PUBLIC_MODE_FORBIDDEN_NAMESPACES:
             raise MemoryGatewayPolicyError("PRIVATE_NAMESPACE_PUBLIC_MODE_FORBIDDEN", "namespace is private")
+        return authorized
+
+    def _authorize_private_storage_command(self, namespace: object) -> str:
+        authorized = self._authorize_namespace(namespace)
+        if authorized != "skeleton":
+            raise MemoryGatewayPolicyError(
+                "PRIVATE_MEMORY_NAMESPACE_NOT_AUTHORIZED",
+                "private memory storage is only available through skeleton namespace",
+            )
+        if self._token.public_mode:
+            raise MemoryGatewayPolicyError(
+                "PRIVATE_MEMORY_PUBLIC_MODE_FORBIDDEN",
+                "private memory storage requires an explicit private capability",
+            )
+        if self._private_memory_storage is None:
+            raise MemoryGatewayPolicyError(
+                "PRIVATE_MEMORY_STORAGE_REQUIRED",
+                "private memory storage requires an injected storage adapter",
+            )
         return authorized
 
     def _optional_project_id(self, project_id: object) -> str | None:
