@@ -507,8 +507,14 @@ def test_required_namespaces_and_allowlisted_commands_are_registered() -> None:
             f"{namespace}.memory.prepare_canonical_manifest",
             f"{namespace}.memory.import_canonical_manifest",
             f"{namespace}.memory.private_mutate",
+            f"{namespace}.memory.private_status",
+            f"{namespace}.memory.private_read_exact",
+            f"{namespace}.memory.private_list_exact",
+            f"{namespace}.memory.private_projection_status",
+            f"{namespace}.memory.private_search_semantic",
             f"{namespace}.graph.query_code",
             f"{namespace}.graph.get_index_freshness",
+            f"{namespace}.graph.private_query",
             f"{namespace}.memory.propose_patch",
         }
 
@@ -622,6 +628,92 @@ def test_private_memory_gateway_crash_retry_does_not_advance_revision_twice(
     assert recovered["idempotency_classification"] == "DUPLICATE_IDENTICAL"
     assert recovered["canonical_revision"] == after_crash
     assert stack.get(namespace="skeleton.notes", fact_id="crash_note")["value"]["summary"] == "committed before receipt"
+
+
+def test_private_memory_gateway_outbox_exactly_once_and_missing_status_read_only(tmp_path: Path) -> None:
+    stack = PrivateMemoryStack(tmp_path)
+    stack.init(import_manifest=False)
+    gw = MemoryGateway(
+        capability_token(namespaces=("skeleton",), public_mode=False),
+        private_memory_storage=PrivateMemoryGatewayStorage(stack),
+    )
+    mutation = {
+        "schema": PRIVATE_MEMORY_GATEWAY_MUTATION_SCHEMA,
+        "project_id": "skeleton",
+        "dataset_id": "issue1917",
+        "operation": "put",
+        "fact_namespace": "skeleton.notes",
+        "fact_id": "outbox_note",
+        "value": {"summary": "outbox"},
+        "idempotency_key": "idem_outbox_note",
+    }
+
+    first = gw.execute(request("skeleton", "memory.private_mutate", mutation))["payload"]
+    second = gw.execute(request("skeleton", "memory.private_mutate", mutation))["payload"]
+    status_before = gw.execute(
+        request(
+            "skeleton",
+            "memory.private_projection_status",
+            {
+                "project_id": "skeleton",
+                "dataset_id": "issue1917",
+                "canonical_ref": "skeleton.notes:missing",
+                "canonical_revision": first["canonical_revision"],
+            },
+        )
+    )["payload"]
+    status_after = gw.execute(
+        request(
+            "skeleton",
+            "memory.private_projection_status",
+            {
+                "project_id": "skeleton",
+                "dataset_id": "issue1917",
+                "canonical_ref": "skeleton.notes:missing",
+                "canonical_revision": first["canonical_revision"],
+            },
+        )
+    )["payload"]
+
+    assert second["idempotency_classification"] == "DUPLICATE_IDENTICAL"
+    assert status_before["state"] == "MISSING/NOT_QUEUED"
+    assert status_before["aggregate_counts"]["outbox_count"] == 1
+    assert status_after["aggregate_counts"]["outbox_count"] == 1
+
+
+def test_private_memory_gateway_missing_revision_fails_instead_of_skipping_outbox(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stack = PrivateMemoryStack(tmp_path)
+    stack.init(import_manifest=False)
+    adapter = PrivateMemoryGatewayStorage(stack)
+    gw = MemoryGateway(
+        capability_token(namespaces=("skeleton",), public_mode=False),
+        private_memory_storage=adapter,
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_execute_stack_mutation",
+        lambda _request: {
+            "status": "DONE",
+            "canonical_sqlite": "DONE",
+            "canonical_ref": "skeleton.notes:missing_revision",
+        },
+    )
+    mutation = {
+        "schema": PRIVATE_MEMORY_GATEWAY_MUTATION_SCHEMA,
+        "project_id": "skeleton",
+        "operation": "put",
+        "fact_namespace": "skeleton.notes",
+        "fact_id": "missing_revision",
+        "value": {"summary": "missing revision"},
+        "idempotency_key": "idem_missing_revision",
+    }
+
+    with pytest.raises(MemoryGatewayPolicyError) as excinfo:
+        gw.execute(request("skeleton", "memory.private_mutate", mutation))
+
+    assert excinfo.value.reason_code == "MemoryGatewayStorageError"
 
 
 def test_private_memory_gateway_rejects_public_mode_and_wrong_project(tmp_path: Path) -> None:

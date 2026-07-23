@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.memory_bootstrap_receipt.schema.json",
+  "title": "Memory Bootstrap Public Receipt",
+  "type": "object",
+  "required": ["schema", "status", "reason_codes", "aggregate_counts"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "skeleton.memory_bootstrap.receipt.v1"},
+    "status": {"enum": ["DONE", "BLOCKED"]},
+    "reason_codes": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "DONE",
+          "MEMORY_CONFIGURATION_REQUIRED",
+          "EXACT_SCOPE_REQUIRED",
+          "EXACT_SCOPE_INVALID",
+          "PRIVATE_MEMORY_STORAGE_REQUIRED",
+          "PRIVATE_MEMORY_NOT_READY",
+          "PRIVATE_CONTEXT_EMPTY",
+          "PRIVATE_CONTEXT_ECHO_BLOCKED",
+          "EXECUTOR_FAILED",
+          "INTERNAL_ERROR"
+        ]
+      }
+    },
+    "aggregate_counts": {
+      "type": "object",
+      "additionalProperties": {"type": "integer", "minimum": 0}
+    }
+  }
+}

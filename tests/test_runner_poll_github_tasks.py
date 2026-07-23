@@ -356,6 +356,70 @@ evidence text for recovery handling. Those words are not the final result.
     assert result == runner.CodexTaskResult("DONE")
 
 
+def test_private_memory_run_codex_preserves_safe_result_done_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv(runner.RUNNER_PRIVATE_MEMORY_REQUIRED_ENV, "1")
+    monkeypatch.setenv(runner.RUNNER_PRIVATE_MEMORY_ROOT_ENV, str(tmp_path / "private"))
+    monkeypatch.setenv(runner.RUNNER_PRIVATE_MEMORY_REFS_ENV, "skeleton.notes:handoff")
+
+    def fake_run_command(command: list[str], cwd: object = None, **_kwargs: object) -> tuple[int, str]:
+        assert command == ["git", "branch", "--show-current"]
+        return 0, "runner/issue-1917\n"
+
+    class FakeBootstrap:
+        def execute(self, *, task_body: str, executor: object) -> dict[str, object]:
+            assert "exact task body" in task_body
+            return {"status": "DONE", "safe_output": "RESULT: DONE\nChanged files:\n- core/memory_bootstrap.py"}
+
+    monkeypatch.setattr(runner, "run_command", fake_run_command)
+    monkeypatch.setattr(runner.MemoryBootstrap, "from_request", lambda _request: FakeBootstrap())
+
+    code, output = runner.run_codex_task("exact task body", str(tmp_path))
+
+    assert code == 0
+    assert output.startswith("RESULT: DONE")
+    assert runner.classify_codex_task_result(output, code) == runner.CodexTaskResult("DONE")
+
+
+def test_private_memory_missing_config_blocks_before_subprocess(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv(runner.RUNNER_PRIVATE_MEMORY_REQUIRED_ENV, "1")
+    monkeypatch.delenv(runner.RUNNER_PRIVATE_MEMORY_ROOT_ENV, raising=False)
+    monkeypatch.delenv(runner.RUNNER_PRIVATE_MEMORY_REFS_ENV, raising=False)
+
+    with mock.patch.object(runner.MemoryBootstrap, "from_request") as from_request:
+        code, output = runner.run_codex_task("exact task body", str(tmp_path))
+
+    assert code == 0
+    assert "RESULT: BLOCKED" in output
+    assert "PRIVATE_MEMORY_STORAGE_REQUIRED" in output
+    assert from_request.call_count == 0
+    assert runner.classify_codex_task_result(output, code).status == "BLOCKED"
+
+
+def test_private_memory_scope_binds_actual_branch_and_rejects_mismatch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv(runner.RUNNER_PRIVATE_MEMORY_REQUIRED_ENV, "1")
+    monkeypatch.setenv(runner.RUNNER_PRIVATE_MEMORY_ROOT_ENV, str(tmp_path / "private"))
+    monkeypatch.setenv(runner.RUNNER_PRIVATE_MEMORY_REFS_ENV, "skeleton.notes:handoff")
+    monkeypatch.setenv(runner.RUNNER_BRANCH_ENV, "runner/other")
+    monkeypatch.setattr(
+        runner,
+        "run_command",
+        lambda command, cwd=None, **_kwargs: (0, "runner/issue-1917\n"),
+    )
+
+    with mock.patch.object(runner.MemoryBootstrap, "from_request") as from_request:
+        code, output = runner.run_codex_task("exact task body", str(tmp_path))
+
+    assert code == 0
+    assert "EXACT_SCOPE_INVALID" in output
+    assert from_request.call_count == 0
+
+
 def test_codex_task_result_ignores_plain_decision_words_in_success_output() -> None:
     output = """Worker completed the requested parser repair.
 

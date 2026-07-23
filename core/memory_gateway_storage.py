@@ -50,8 +50,93 @@ class PrivateMemoryGatewayStorage:
             self._record_started(request)
 
         receipt = self._execute_stack_mutation(request)
+        self._queue_projection_work(request, receipt)
         self._record_done(request["idempotency_key"], receipt)
         return receipt
+
+    def status(self, payload: Mapping[str, Any]) -> dict[str, object]:
+        self._ensure_schema()
+        _scope(payload)
+        status = self.stack.status()
+        status["outbox_count"] = self._outbox_count()
+        return status
+
+    def read_exact(self, payload: Mapping[str, Any]) -> dict[str, object]:
+        project_id, dataset_id = _scope(payload)
+        namespace, fact_id = _canonical_ref_parts(payload.get("canonical_ref"))
+        exact = self.stack.get(namespace=namespace, fact_id=fact_id)
+        return {
+            **exact,
+            "project_id": project_id,
+            "dataset_id": dataset_id,
+            "source_kind": "canonical_sqlite",
+            "provenance_refs": [
+                {
+                    "ref": str(exact["canonical_ref"]),
+                    "kind": "exact_source",
+                    "evidence_hash": str(exact["value_hash"]),
+                }
+            ],
+        }
+
+    def list_exact(self, payload: Mapping[str, Any]) -> dict[str, object]:
+        project_id, dataset_id = _scope(payload)
+        limit = _bounded_limit(payload.get("limit", 20))
+        records = self.stack.list_exact(limit=limit)
+        return {
+            "schema": "skeleton.private_memory_gateway.exact_list.v1",
+            "project_id": project_id,
+            "dataset_id": dataset_id,
+            "canonical_refs": [record["canonical_ref"] for record in records],
+            "aggregate_counts": {"canonical_count": len(records)},
+        }
+
+    def projection_status(self, payload: Mapping[str, Any]) -> dict[str, object]:
+        project_id, dataset_id = _scope(payload)
+        canonical_ref = payload.get("canonical_ref")
+        revision = payload.get("canonical_revision")
+        if not isinstance(canonical_ref, str) or not canonical_ref:
+            raise MemoryGatewayStorageError("canonical ref is required")
+        if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+            raise MemoryGatewayStorageError("canonical revision is required")
+        self._ensure_schema()
+        with closing(sqlite3.connect(str(self._gateway_db))) as connection:
+            row = connection.execute(
+                """
+                SELECT state
+                FROM memory_gateway_projection_outbox
+                WHERE project_id = ? AND dataset_id = ? AND canonical_ref = ? AND canonical_revision = ?
+                """,
+                (project_id, dataset_id, canonical_ref, revision),
+            ).fetchone()
+            count = connection.execute("SELECT COUNT(*) FROM memory_gateway_projection_outbox").fetchone()[0]
+        return {
+            "schema": "skeleton.private_memory_gateway.projection_status.v1",
+            "project_id": project_id,
+            "dataset_id": dataset_id,
+            "canonical_ref": canonical_ref,
+            "canonical_revision": revision,
+            "state": str(row[0]) if row is not None else "MISSING/NOT_QUEUED",
+            "aggregate_counts": {"outbox_count": int(count)},
+        }
+
+    def search_semantic(self, payload: Mapping[str, Any]) -> dict[str, object]:
+        project_id, dataset_id = _scope(payload)
+        status = self.stack.status()
+        current = int(status["canonical_sqlite"]["canonical_revision"])
+        if status["mempalace"]["state"] != "READY" or status["mempalace"]["indexed_canonical_revision"] != current:
+            return {"state": "STALE", "project_id": project_id, "dataset_id": dataset_id, "results": []}
+        result = self.stack.search(query=str(payload.get("query", "")), limit=_bounded_limit(payload.get("limit", 5)))
+        return {"state": "READY", "project_id": project_id, "dataset_id": dataset_id, **result}
+
+    def query_graph(self, payload: Mapping[str, Any]) -> dict[str, object]:
+        project_id, dataset_id = _scope(payload)
+        status = self.stack.status()
+        current = int(status["canonical_sqlite"]["canonical_revision"])
+        if status["graphify"]["state"] != "READY" or status["graphify"]["indexed_canonical_revision"] != current:
+            return {"state": "STALE", "project_id": project_id, "dataset_id": dataset_id, "results": []}
+        result = self.stack.relations(query=str(payload.get("query", "")), limit=_bounded_limit(payload.get("limit", 5)))
+        return {"state": "READY", "project_id": project_id, "dataset_id": dataset_id, **result}
 
     def _normalize_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         if payload.get("schema") != PRIVATE_MEMORY_GATEWAY_MUTATION_SCHEMA:
@@ -70,6 +155,7 @@ class PrivateMemoryGatewayStorage:
             "schema": PRIVATE_MEMORY_GATEWAY_MUTATION_SCHEMA,
             "operation": operation,
             "project_id": project_id,
+            "dataset_id": safe_token(str(payload.get("dataset_id", "default")), "dataset_id"),
             "expected_revision": expected_revision,
             "actor_ref": safe_token(str(payload.get("actor_ref", "operator")), "actor_ref"),
             "reason_code": safe_token(str(payload.get("reason_code", "operator-memory-mutation")), "reason_code"),
@@ -184,6 +270,7 @@ class PrivateMemoryGatewayStorage:
         if event_report is None:
             return None
         receipt = self._receipt(request, event_report, idempotency_classification="DUPLICATE_IDENTICAL")
+        self._queue_projection_work(request, receipt)
         self._record_done(str(request["idempotency_key"]), receipt)
         return receipt
 
@@ -274,6 +361,20 @@ class PrivateMemoryGatewayStorage:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memory_gateway_projection_outbox (
+                    work_key TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    dataset_id TEXT NOT NULL,
+                    canonical_ref TEXT NOT NULL,
+                    canonical_revision INTEGER NOT NULL,
+                    operation TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
             connection.commit()
         self._gateway_db.chmod(0o600)
 
@@ -321,6 +422,41 @@ class PrivateMemoryGatewayStorage:
             )
             connection.commit()
 
+    def _queue_projection_work(self, request: Mapping[str, Any], receipt: Mapping[str, Any]) -> None:
+        self._ensure_schema()
+        refs = _projection_refs(request, receipt)
+        revision = receipt.get("canonical_revision")
+        if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+            raise MemoryGatewayStorageError("canonical mutation did not return a positive revision")
+        if not refs:
+            raise MemoryGatewayStorageError("canonical mutation did not return deterministic refs")
+        project_id = str(request.get("project_id", "skeleton"))
+        dataset_id = str(request.get("dataset_id", "default"))
+        with closing(sqlite3.connect(str(self._gateway_db))) as connection:
+            for canonical_ref in refs:
+                work_key = content_hash(
+                    {
+                        "project_id": project_id,
+                        "dataset_id": dataset_id,
+                        "canonical_ref": canonical_ref,
+                        "canonical_revision": revision,
+                    }
+                )
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO memory_gateway_projection_outbox (
+                        work_key, project_id, dataset_id, canonical_ref, canonical_revision, operation, state
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, 'QUEUED')
+                    """,
+                    (work_key, project_id, dataset_id, canonical_ref, revision, request["operation"]),
+                )
+            connection.commit()
+
+    def _outbox_count(self) -> int:
+        with closing(sqlite3.connect(str(self._gateway_db))) as connection:
+            return int(connection.execute("SELECT COUNT(*) FROM memory_gateway_projection_outbox").fetchone()[0])
+
 
 def _payload_fingerprint(request: Mapping[str, Any]) -> dict[str, object]:
     return {
@@ -332,6 +468,35 @@ def _payload_fingerprint(request: Mapping[str, Any]) -> dict[str, object]:
 
 def _default_idempotency_key(request: Mapping[str, Any]) -> str:
     return "cli_" + content_hash(_payload_fingerprint(request))[:48]
+
+
+def _scope(payload: Mapping[str, Any]) -> tuple[str, str]:
+    project_id = safe_token(str(payload.get("project_id", "skeleton")), "project_id")
+    dataset_id = safe_token(str(payload.get("dataset_id", "default")), "dataset_id")
+    if project_id != "skeleton":
+        raise MemoryGatewayStorageError("private memory project is not authorized")
+    return project_id, dataset_id
+
+
+def _canonical_ref_parts(value: object) -> tuple[str, str]:
+    if not isinstance(value, str) or ":" not in value or "/" in value or "\\" in value or ".." in value:
+        raise MemoryGatewayStorageError("canonical ref is malformed")
+    namespace, fact_id = value.split(":", 1)
+    return safe_token(namespace, "namespace"), safe_token(fact_id, "fact_id")
+
+
+def _bounded_limit(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 5
+    return min(max(value, 1), 50)
+
+
+def _projection_refs(request: Mapping[str, Any], receipt: Mapping[str, Any]) -> list[str]:
+    imported = receipt.get("imported_canonical_refs")
+    if isinstance(imported, list) and imported:
+        return [str(ref) for ref in imported if isinstance(ref, str)]
+    canonical_ref = receipt.get("canonical_ref") or request.get("canonical_ref")
+    return [str(canonical_ref)] if isinstance(canonical_ref, str) and canonical_ref else []
 
 
 _SAFE_BASENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")

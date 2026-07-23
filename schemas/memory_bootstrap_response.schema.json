@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.memory_bootstrap_response.schema.json",
+  "title": "Memory Bootstrap Private Response",
+  "type": "object",
+  "required": ["schema", "marker", "echo_sentinel", "canonical_revision", "canonical", "semantic", "graph"],
+  "additionalProperties": true,
+  "properties": {
+    "schema": {"const": "skeleton.memory_bootstrap.response.v1"},
+    "marker": {"const": "SKELETON_PRIVATE_MEMORY_CONTEXT_V1"},
+    "echo_sentinel": {"type": "string", "minLength": 32},
+    "canonical_revision": {"type": "integer", "minimum": 1},
+    "canonical": {"type": "array"},
+    "semantic": {"type": "object"},
+    "graph": {"type": "object"}
+  }
+}
