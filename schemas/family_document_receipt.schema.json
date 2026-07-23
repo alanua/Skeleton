@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.family_document_receipt.schema.json",
+  "type": "object",
+  "required": ["schema", "status"],
+  "additionalProperties": true,
+  "properties": {
+    "schema": {"const": "skeleton.family_document_intake.receipt.v1"},
+    "status": {"type": "string", "enum": ["DONE", "FAILED", "PARTIAL", "SKIPPED", "DRY_RUN"]},
+    "reason_code": {"type": ["string", "null"]},
+    "cluster_token": {"type": "string"},
+    "source_token": {"type": "string"},
+    "route_status": {"type": "string"},
+    "topic": {"type": "string"},
+    "country": {"type": "string"},
+    "document_year": {"type": "integer"},
+    "idempotency": {"type": "string"}
+  }
+}

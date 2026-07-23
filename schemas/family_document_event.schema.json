@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.family_document_event.schema.json",
+  "type": "object",
+  "required": ["schema", "event_id", "summary", "date", "source_cluster_token"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "skeleton.family_document_event.v1"},
+    "event_id": {"type": "string"},
+    "summary": {"type": "string"},
+    "date": {"type": "string"},
+    "source_cluster_token": {"type": "string"}
+  },
+  "not": {
+    "anyOf": [
+      {"required": ["attendees"]},
+      {"required": ["conferenceData"]},
+      {"required": ["hangoutLink"]},
+      {"required": ["sendUpdates"]}
+    ]
+  }
+}

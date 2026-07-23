@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.family_document_record.schema.json",
+  "type": "object",
+  "required": ["schema", "cluster_id", "content_sha256", "route_status", "person_token", "topic", "country", "document_date", "archive_relative_path", "ocr_engine"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "skeleton.family_document_record.v1"},
+    "cluster_id": {"type": "string"},
+    "content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "route_status": {"type": "string", "enum": ["READY", "REVIEW"]},
+    "person_token": {"type": "string"},
+    "topic": {"type": "string"},
+    "country": {"type": "string"},
+    "document_date": {"type": "string"},
+    "archive_relative_path": {"type": "string"},
+    "ocr_engine": {"type": "string"}
+  }
+}
