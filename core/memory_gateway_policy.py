@@ -16,6 +16,10 @@ ALLOWED_COMMAND_SUFFIXES = frozenset(
         "memory.get_override_history",
         "memory.get_audit_log",
         "memory.get_index_freshness",
+        "memory.private_status",
+        "memory.private_lookup_exact",
+        "memory.private_list_exact",
+        "memory.private_projection_status",
         "memory.prepare_canonical_manifest",
         "memory.import_canonical_manifest",
         "memory.private_mutate",
@@ -117,6 +121,7 @@ _EXACT_FIELDS = frozenset(
     {
         "namespace",
         "project_id",
+        "dataset_id",
         "canonical_ref",
         "canonical_revision",
         "created_revision",
@@ -131,6 +136,8 @@ _EXACT_FIELDS = frozenset(
         "authoritative",
         "authority_classification",
         "source_kind",
+        "value_hash",
+        "content_hash",
     }
 )
 _CONFLICT_FIELDS = frozenset(
@@ -511,6 +518,62 @@ def _private_mutation_receipt(payload: Mapping[str, Any]) -> dict[str, object]:
     )
 
 
+def _private_status_receipt(payload: Mapping[str, Any]) -> dict[str, object]:
+    return _typed_mapping(
+        payload,
+        frozenset(
+            {
+                "schema",
+                "status",
+                "state",
+                "project_id",
+                "dataset_id",
+                "canonical_revision",
+                "canonical_sqlite",
+                "mempalace",
+                "graphify",
+                "aggregate_counts",
+                "authoritative",
+            }
+        ),
+    )
+
+
+def _private_list_receipt(payload: Mapping[str, Any]) -> dict[str, object]:
+    return _typed_mapping(
+        payload,
+        frozenset(
+            {
+                "schema",
+                "status",
+                "project_id",
+                "dataset_id",
+                "canonical_revision",
+                "aggregate_counts",
+                "results",
+                "authoritative",
+            }
+        ),
+    )
+
+
+def _private_projection_status_receipt(payload: Mapping[str, Any]) -> dict[str, object]:
+    return _typed_mapping(
+        payload,
+        frozenset(
+            {
+                "schema",
+                "status",
+                "project_id",
+                "dataset_id",
+                "canonical_revision",
+                "aggregate_counts",
+                "authoritative",
+            }
+        ),
+    )
+
+
 _COMMAND_RECEIPT_BUILDERS: dict[str, Callable[[Mapping[str, Any]], dict[str, object]]] = {
     "memory.lookup_exact": _lookup_exact_receipt,
     "memory.search_semantic": _semantic_receipt,
@@ -518,6 +581,10 @@ _COMMAND_RECEIPT_BUILDERS: dict[str, Callable[[Mapping[str, Any]], dict[str, obj
     "memory.get_override_history": _override_history_receipt,
     "memory.get_audit_log": _audit_log_receipt,
     "memory.get_index_freshness": _memory_freshness_receipt,
+    "memory.private_status": _private_status_receipt,
+    "memory.private_lookup_exact": _lookup_exact_receipt,
+    "memory.private_list_exact": _private_list_receipt,
+    "memory.private_projection_status": _private_projection_status_receipt,
     "memory.prepare_canonical_manifest": _prepare_manifest_receipt,
     "memory.import_canonical_manifest": _import_manifest_receipt,
     "memory.private_mutate": _private_mutation_receipt,

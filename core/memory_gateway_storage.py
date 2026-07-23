@@ -13,6 +13,7 @@ from core.private_memory_history import canonical_json, content_hash, current_re
 
 PRIVATE_MEMORY_GATEWAY_MUTATION_SCHEMA = "skeleton.private_memory_gateway.mutation.v1"
 PRIVATE_MEMORY_GATEWAY_MUTATION_RECEIPT_SCHEMA = "skeleton.private_memory_gateway.mutation_receipt.v1"
+PRIVATE_MEMORY_GATEWAY_PROJECTION_WORK_SCHEMA = "skeleton.private_memory_gateway.projection_work.v1"
 
 
 class MemoryGatewayStorageError(RuntimeError):
@@ -31,7 +32,136 @@ class PrivateMemoryGatewayStorage:
             raise MemoryGatewayStorageError("private memory stack paths are unavailable")
         self._root = root
         self._canonical_db = db
-        self._gateway_db = root / "memory_gateway_mutations.sqlite"
+        gateway_db = getattr(paths, "gateway_db", None)
+        self._gateway_db = gateway_db if isinstance(gateway_db, Path) else root / "memory_gateway_mutations.sqlite"
+
+    def canonical_status(self, *, project_id: str, dataset_id: str) -> dict[str, object]:
+        self._authorize_scope(project_id=project_id, dataset_id=dataset_id)
+        status = self.stack.status()
+        canonical = status.get("canonical_sqlite")
+        if not isinstance(canonical, Mapping) or canonical.get("state") != "READY":
+            raise MemoryGatewayStorageError("canonical private memory storage is unavailable")
+        return {
+            "schema": "skeleton.private_memory_gateway.status.v1",
+            "status": "READY",
+            "state": status.get("state", "BLOCKED"),
+            "project_id": project_id,
+            "dataset_id": dataset_id,
+            "canonical_revision": int(canonical.get("canonical_revision", 0)),
+            "canonical_sqlite": canonical,
+            "mempalace": status.get("mempalace", {}),
+            "graphify": status.get("graphify", {}),
+            "aggregate_counts": {
+                "active_fact_count": int(canonical.get("active_fact_count", 0)),
+                "event_count": int(canonical.get("event_count", 0)),
+                "tombstone_count": int(canonical.get("tombstone_count", 0)),
+            },
+            "authoritative": True,
+        }
+
+    def exact_get(self, *, project_id: str, dataset_id: str, key: str) -> dict[str, object]:
+        self._authorize_scope(project_id=project_id, dataset_id=dataset_id)
+        namespace, fact_id = _split_exact_key(key)
+        if namespace != dataset_id:
+            raise MemoryGatewayStorageError("exact key is outside the authorized dataset")
+        source_exact = self.stack.get(namespace=namespace, fact_id=fact_id)
+        exact = dict(
+            source_exact,
+            project_id=project_id,
+            dataset_id=dataset_id,
+            namespace=namespace,
+            key=fact_id,
+            source_kind="canonical_sqlite",
+            provenance_refs=[
+                {
+                    "ref": f"{namespace}:{fact_id}",
+                    "kind": "exact_source",
+                    "evidence_hash": source_exact["value_hash"],
+                }
+            ],
+        )
+        self._validate_exact(exact, project_id=project_id, dataset_id=dataset_id)
+        return exact
+
+    def exact_list(self, *, project_id: str, dataset_id: str, limit: int = 8) -> dict[str, object]:
+        self._authorize_scope(project_id=project_id, dataset_id=dataset_id)
+        limit = _bounded_limit(limit)
+        if not self._canonical_db.is_file():
+            raise MemoryGatewayStorageError("canonical private memory storage is unavailable")
+        with closing(sqlite3.connect(f"file:{self._canonical_db.as_posix()}?mode=ro", uri=True)) as connection:
+            connection.row_factory = sqlite3.Row
+            revision = current_revision(connection)
+            rows = connection.execute(
+                """
+                SELECT namespace, fact_id, value_json, value_hash, canonical_revision, updated_at
+                FROM private_memory_facts
+                WHERE namespace = ? AND tombstoned_at IS NULL
+                ORDER BY fact_id
+                LIMIT ?
+                """,
+                (dataset_id, limit),
+            ).fetchall()
+        results = []
+        for row in rows:
+            item = {
+                "schema": "skeleton.private_memory_stack.exact_get.v1",
+                "authoritative": True,
+                "authority_classification": "canonical_sqlite",
+                "project_id": project_id,
+                "dataset_id": dataset_id,
+                "namespace": str(row["namespace"]),
+                "canonical_ref": f"{row['namespace']}:{row['fact_id']}",
+                "canonical_revision": int(row["canonical_revision"]),
+                "key": str(row["fact_id"]),
+                "value": json.loads(str(row["value_json"])),
+                "value_hash": str(row["value_hash"]),
+                "updated_at": str(row["updated_at"]),
+                "source_kind": "canonical_sqlite",
+                "provenance_refs": [
+                    {
+                        "ref": f"{row['namespace']}:{row['fact_id']}",
+                        "kind": "exact_source",
+                        "evidence_hash": str(row["value_hash"]),
+                    }
+                ],
+            }
+            self._validate_exact(item, project_id=project_id, dataset_id=dataset_id)
+            results.append(item)
+        return {
+            "schema": "skeleton.private_memory_gateway.exact_list.v1",
+            "status": "OK",
+            "project_id": project_id,
+            "dataset_id": dataset_id,
+            "canonical_revision": revision,
+            "aggregate_counts": {"record_count": len(results)},
+            "results": results,
+            "authoritative": True,
+        }
+
+    def projection_status(self, *, project_id: str, dataset_id: str, canonical_revision: int) -> dict[str, object] | None:
+        self._authorize_scope(project_id=project_id, dataset_id=dataset_id)
+        self._ensure_schema()
+        with closing(sqlite3.connect(str(self._gateway_db))) as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(
+                """
+                SELECT project_id, dataset_id, canonical_revision, state
+                FROM memory_gateway_projection_work
+                WHERE project_id = ? AND dataset_id = ? AND canonical_revision = ?
+                """,
+                (project_id, dataset_id, canonical_revision),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "schema": PRIVATE_MEMORY_GATEWAY_PROJECTION_WORK_SCHEMA,
+            "status": str(row["state"]),
+            "project_id": project_id,
+            "dataset_id": dataset_id,
+            "canonical_revision": int(row["canonical_revision"]),
+            "aggregate_counts": {"record_count": 1},
+            "authoritative": False,
+        }
 
     def execute_mutation(self, payload: Mapping[str, Any]) -> dict[str, object]:
         self._ensure_schema()
@@ -50,6 +180,7 @@ class PrivateMemoryGatewayStorage:
             self._record_started(request)
 
         receipt = self._execute_stack_mutation(request)
+        self._enqueue_projection_work(request, receipt)
         self._record_done(request["idempotency_key"], receipt)
         return receipt
 
@@ -274,6 +405,20 @@ class PrivateMemoryGatewayStorage:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memory_gateway_projection_work (
+                    project_id TEXT NOT NULL,
+                    dataset_id TEXT NOT NULL,
+                    canonical_revision INTEGER NOT NULL,
+                    state TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (project_id, dataset_id, canonical_revision)
+                )
+                """
+            )
             connection.commit()
         self._gateway_db.chmod(0o600)
 
@@ -321,6 +466,48 @@ class PrivateMemoryGatewayStorage:
             )
             connection.commit()
 
+    def _enqueue_projection_work(self, request: Mapping[str, Any], receipt: Mapping[str, Any]) -> None:
+        canonical_revision = receipt.get("canonical_revision")
+        if not isinstance(canonical_revision, int) or canonical_revision < 1:
+            return
+        dataset_id = str(request.get("fact_namespace") or request.get("project_id"))
+        try:
+            self._authorize_scope(project_id=str(request["project_id"]), dataset_id=dataset_id)
+        except MemoryGatewayStorageError:
+            return
+        with closing(sqlite3.connect(str(self._gateway_db))) as connection:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO memory_gateway_projection_work (
+                    project_id, dataset_id, canonical_revision, state, idempotency_key
+                )
+                VALUES (?, ?, ?, 'PENDING', ?)
+                """,
+                (request["project_id"], dataset_id, canonical_revision, request["idempotency_key"]),
+            )
+            connection.commit()
+
+    def _authorize_scope(self, *, project_id: str, dataset_id: str) -> None:
+        project_id = safe_token(project_id, "project_id")
+        dataset_id = safe_token(dataset_id, "dataset_id")
+        if project_id != "skeleton":
+            raise MemoryGatewayStorageError("private project is not authorized")
+        if dataset_id != "skeleton" and not dataset_id.startswith("skeleton."):
+            raise MemoryGatewayStorageError("private dataset is not authorized")
+
+    def _validate_exact(self, exact: Mapping[str, object], *, project_id: str, dataset_id: str) -> None:
+        if exact.get("authoritative") is not True:
+            raise MemoryGatewayStorageError("exact result is not authoritative")
+        revision = exact.get("canonical_revision")
+        if not isinstance(revision, int) or revision < 1:
+            raise MemoryGatewayStorageError("exact result has invalid canonical revision")
+        if exact.get("authority_classification") != "canonical_sqlite":
+            raise MemoryGatewayStorageError("exact result has invalid authority")
+        if exact.get("project_id") != project_id or exact.get("dataset_id") != dataset_id:
+            raise MemoryGatewayStorageError("exact result escaped authorized scope")
+        if not isinstance(exact.get("value_hash"), str) or not re.fullmatch(r"[a-f0-9]{64}", str(exact.get("value_hash"))):
+            raise MemoryGatewayStorageError("exact result has invalid value hash")
+
 
 def _payload_fingerprint(request: Mapping[str, Any]) -> dict[str, object]:
     return {
@@ -349,3 +536,18 @@ def _safe_hash(value: object) -> str:
     if not isinstance(value, str) or not re.fullmatch(r"[A-Fa-f0-9]{64}", value):
         raise MemoryGatewayStorageError("source hash must be sha256 hex")
     return value.lower()
+
+
+def _split_exact_key(value: object) -> tuple[str, str]:
+    if not isinstance(value, str) or ":" not in value:
+        raise MemoryGatewayStorageError("exact key must be namespace:fact_id")
+    namespace, fact_id = value.split(":", 1)
+    return safe_token(namespace, "namespace"), safe_token(fact_id, "fact_id")
+
+
+def _bounded_limit(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise MemoryGatewayStorageError("limit must be an integer")
+    if value < 1 or value > 20:
+        raise MemoryGatewayStorageError("limit is out of bounds")
+    return value

@@ -13802,6 +13802,66 @@ def test_codex_exec_command_env_override_inserts_model(monkeypatch: pytest.Monke
     assert command[6:8] == ["--cd", "/tmp/work"]
 
 
+def test_run_codex_task_uses_0600_context_file_and_removes_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    private_text = "synthetic-private-value"
+    observed: dict[str, object] = {}
+    monkeypatch.setenv(runner.RUNNER_PRIVATE_MEMORY_DATASET_ENV, "skeleton.notes")
+
+    class BootstrapResult:
+        context = {"marker": runner.PRIVATE_MEMORY_CONTEXT_MARKER, "value": private_text}
+
+    monkeypatch.setattr(runner, "private_memory_bootstrap", lambda _request: BootstrapResult())
+
+    def fake_run_command(args: list[str], cwd: str | None = None, **_kwargs: object) -> tuple[int, str]:
+        context_path = Path(runner._RUN_COMMAND_ENV_OVERRIDE.get()[runner.CODEX_CONTEXT_FILE_ENV])  # type: ignore[index]
+        observed["path"] = context_path
+        observed["mode"] = runner.stat.S_IMODE(context_path.stat().st_mode)
+        observed["content"] = context_path.read_text(encoding="utf-8")
+        observed["args"] = list(args)
+        assert cwd == "/tmp/work"
+        assert private_text not in json.dumps(args)
+        assert str(context_path) not in json.dumps(args)
+        return 0, "RESULT: DONE"
+
+    monkeypatch.setattr(runner, "run_command", fake_run_command)
+
+    code, output = runner.run_codex_task(f"Task body {private_text}", "/tmp/work", None)
+
+    assert code == 0
+    assert output == "RESULT: DONE"
+    assert observed["mode"] == 0o600
+    assert private_text in observed["content"]
+    assert not Path(observed["path"]).exists()
+
+
+def test_run_codex_task_blocks_private_marker_echo(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        runner,
+        "run_command",
+        lambda *_args, **_kwargs: (0, f"RESULT: DONE {runner.PRIVATE_MEMORY_CONTEXT_MARKER}"),
+    )
+
+    code, output = runner.run_codex_task("Task body", "/tmp/work", None)
+
+    assert code == 1
+    assert "private context marker echoed" in output
+
+
+def test_run_codex_task_blocks_when_configured_private_bootstrap_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(runner.RUNNER_PRIVATE_MEMORY_DATASET_ENV, "skeleton.notes")
+    monkeypatch.delenv("SKELETON_PRIVATE_MEMORY_ROOT", raising=False)
+    run_command = mock.Mock(return_value=(0, "RESULT: DONE"))
+    monkeypatch.setattr(runner, "run_command", run_command)
+
+    code, output = runner.run_codex_task("Task body", "/tmp/work", None)
+
+    assert code == 1
+    assert output == "BLOCKED/MEMORY_UNAVAILABLE: private memory bootstrap failed closed"
+    run_command.assert_not_called()
+
+
 def test_codex_exec_command_rejects_invalid_model_before_run_command(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(runner.CODEX_MODEL_ENV, "../../bad")
 

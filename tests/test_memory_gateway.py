@@ -497,6 +497,12 @@ def test_required_namespaces_and_allowlisted_commands_are_registered() -> None:
 
     assert set(gateway_capability["namespaces"]) == expected_namespaces
     for namespace in expected_namespaces:
+        private_commands = {
+            f"{namespace}.memory.private_status",
+            f"{namespace}.memory.private_lookup_exact",
+            f"{namespace}.memory.private_list_exact",
+            f"{namespace}.memory.private_projection_status",
+        }
         assert set(allowed_command_names(namespace)) == {
             f"{namespace}.memory.lookup_exact",
             f"{namespace}.memory.search_semantic",
@@ -504,6 +510,7 @@ def test_required_namespaces_and_allowlisted_commands_are_registered() -> None:
             f"{namespace}.memory.get_override_history",
             f"{namespace}.memory.get_audit_log",
             f"{namespace}.memory.get_index_freshness",
+            *private_commands,
             f"{namespace}.memory.prepare_canonical_manifest",
             f"{namespace}.memory.import_canonical_manifest",
             f"{namespace}.memory.private_mutate",
@@ -651,3 +658,91 @@ def test_private_memory_gateway_rejects_public_mode_and_wrong_project(tmp_path: 
             request("skeleton", "memory.private_mutate", {**mutation, "project_id": "other"})
         )
     assert project_exc.value.reason_code == "MemoryGatewayStorageError"
+
+
+def test_private_gateway_exact_read_list_status_and_projection_queue_are_private_only(tmp_path: Path) -> None:
+    stack = PrivateMemoryStack(tmp_path)
+    stack.init(import_manifest=False)
+    storage = PrivateMemoryGatewayStorage(stack)
+    gw = MemoryGateway(
+        capability_token(namespaces=("skeleton",), public_mode=False),
+        private_memory_storage=storage,
+    )
+    mutation = {
+        "schema": PRIVATE_MEMORY_GATEWAY_MUTATION_SCHEMA,
+        "project_id": "skeleton",
+        "operation": "put",
+        "fact_namespace": "skeleton.notes",
+        "fact_id": "exact_note",
+        "value": {"summary": "private exact payload marker"},
+        "idempotency_key": "idem_exact_note",
+    }
+
+    first = gw.execute(request("skeleton", "memory.private_mutate", mutation))["payload"]
+    second = gw.execute(request("skeleton", "memory.private_mutate", mutation))["payload"]
+    revision = first["canonical_revision"]
+    status = gw.execute(
+        request("skeleton", "memory.private_status", {"project_id": "skeleton", "dataset_id": "skeleton.notes"})
+    )["payload"]
+    exact = gw.execute(
+        request(
+            "skeleton",
+            "memory.private_lookup_exact",
+            {
+                "project_id": "skeleton",
+                "dataset_id": "skeleton.notes",
+                "key": "skeleton.notes:exact_note",
+            },
+        )
+    )["payload"]
+    exact_list = gw.execute(
+        request(
+            "skeleton",
+            "memory.private_list_exact",
+            {"project_id": "skeleton", "dataset_id": "skeleton.notes"},
+        )
+    )["payload"]
+    projection = gw.execute(
+        request(
+            "skeleton",
+            "memory.private_projection_status",
+            {
+                "project_id": "skeleton",
+                "dataset_id": "skeleton.notes",
+                "canonical_revision": revision,
+            },
+        )
+    )["payload"]
+
+    assert second["idempotency_classification"] == "DUPLICATE_IDENTICAL"
+    assert status["canonical_revision"] == revision
+    assert exact["value"]["summary"] == "private exact payload marker"
+    assert exact["canonical_revision"] == revision
+    assert exact_list["results"][0]["value"]["summary"] == "private exact payload marker"
+    assert projection["status"] == "PENDING"
+    assert projection["canonical_revision"] == revision
+    with pytest.raises(MemoryGatewayPolicyError) as missing:
+        gw.execute(
+            request(
+                "skeleton",
+                "memory.private_projection_status",
+                {
+                    "project_id": "skeleton",
+                    "dataset_id": "skeleton.notes",
+                    "canonical_revision": revision + 999,
+                },
+            )
+        )
+    assert missing.value.reason_code == "PROJECTION_WORK_NOT_FOUND"
+    with pytest.raises(MemoryGatewayPolicyError) as public:
+        MemoryGateway(
+            capability_token(namespaces=("skeleton",), public_mode=True),
+            private_memory_storage=storage,
+        ).execute(
+            request(
+                "skeleton",
+                "memory.private_lookup_exact",
+                {"project_id": "skeleton", "dataset_id": "skeleton.notes", "key": "skeleton.notes:exact_note"},
+            )
+        )
+    assert public.value.reason_code == "PRIVATE_MEMORY_PUBLIC_MODE_FORBIDDEN"

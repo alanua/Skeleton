@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.memory_bootstrap.response.v1",
+  "type": "object",
+  "required": ["schema", "status", "project_id", "dataset_id", "canonical_revision", "public_safe"],
+  "properties": {
+    "schema": { "const": "skeleton.memory_bootstrap.response.v1" },
+    "status": { "enum": ["READY", "BLOCKED"] },
+    "project_id": { "type": "string" },
+    "dataset_id": { "type": "string" },
+    "canonical_revision": { "type": "integer", "minimum": 0 },
+    "aggregate_counts": { "type": "object" },
+    "selected_projection": { "type": "string" },
+    "public_safe": { "const": true }
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.memory_bootstrap.request.v1",
+  "type": "object",
+  "required": ["schema", "project_id", "dataset_id"],
+  "properties": {
+    "schema": { "const": "skeleton.memory_bootstrap.request.v1" },
+    "project_id": { "type": "string" },
+    "dataset_id": { "type": "string" },
+    "exact_keys": { "type": "array", "items": { "type": "string" } },
+    "query": { "type": "string", "maxLength": 512 }
+  },
+  "additionalProperties": false
+}
