@@ -849,6 +849,399 @@ def test_prepare_issue_worktree_clones_workspace_with_writable_gitdir(
     ]
 
 
+def test_prepare_target_worktree_uses_explicit_safe_base_and_matching_sha(
+    tmp_path: Path,
+) -> None:
+    checkout_path = tmp_path / "lavalamp-main"
+    worktree_path = tmp_path / "lavalamp-worktrees" / "issue-139"
+    base = "recovery/lavalamp-2-base-3551e4b"
+    base_sha = "3551e4b40113bd02c19ee8d030e76e80c252c68b"
+    origin_url = "https://github.com/alanua/Lavalamp.git"
+
+    def run(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        if command == ["git", "remote", "get-url", "origin"]:
+            assert cwd == checkout_path
+            return 0, origin_url
+        if command == [
+            "git",
+            "fetch",
+            "origin",
+            f"refs/heads/{base}:refs/remotes/origin/{base}",
+        ]:
+            assert cwd in {checkout_path, worktree_path}
+            return 0, "fetched"
+        if command == ["git", "rev-parse", f"refs/remotes/origin/{base}"]:
+            assert cwd in {checkout_path, worktree_path}
+            return 0, f"{base_sha}\n"
+        if command == [
+            "git",
+            "clone",
+            "--local",
+            "--no-hardlinks",
+            "--no-checkout",
+            str(checkout_path.resolve()),
+            str(worktree_path),
+        ]:
+            assert cwd == checkout_path
+            return 0, "cloned"
+        if command == ["git", "remote", "set-url", "origin", origin_url]:
+            assert cwd == worktree_path
+            return 0, ""
+        if command == [
+            "git",
+            "checkout",
+            "-B",
+            "runner/issue-139",
+            f"origin/{base}",
+        ]:
+            assert cwd == worktree_path
+            return 0, "checked out"
+        raise AssertionError(f"unexpected command: {command!r} cwd={cwd!r}")
+
+    with mock.patch.object(runner, "run_command", side_effect=run) as run_command:
+        code, output, path = runner.prepare_git_issue_worktree(
+            139,
+            checkout_path,
+            worktree_path,
+            target_repository="alanua/Lavalamp",
+            base=base,
+            base_sha=base_sha,
+        )
+
+    assert code == 0
+    assert path == worktree_path
+    assert f"git checkout -B runner/issue-139 origin/{base}" in output
+    commands = [call.args[0] for call in run_command.call_args_list]
+    assert ["git", "fetch", "origin"] not in commands
+    assert ["git", "checkout", "-B", "runner/issue-139", "origin/main"] not in commands
+
+
+def test_yaml_task_block_base_fields_are_normalized_for_target_worktree(
+    tmp_path: Path,
+) -> None:
+    issue_path = tmp_path / "lavalamp" / "issue-147"
+    base = "recovery/lavalamp-2-base-3551e4b"
+    base_sha = "3551e4b40113bd02c19ee8d030e76e80c252c68b"
+    issue = {
+        "number": 147,
+        "title": "Target project lavalamp base",
+        "body": (
+            "Target Project: lavalamp\n"
+            "Expected Output: done\n\n"
+            "```task\n"
+            f"base: {base}\n"
+            f"base_sha: {base_sha}\n"
+            "instructions: Do it\n"
+            "```"
+        ),
+        "comments": [],
+    }
+
+    with mock.patch.object(
+        runner, "verify_target_repository_checkout", return_value=None
+    ), mock.patch.object(
+        runner,
+        "prepare_target_repository_issue_worktree",
+        return_value=(0, "ready", issue_path),
+    ) as prepare_target, mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, "codex output")
+    ), mock.patch.object(
+        runner, "finalize_local_worktree_success", return_value="DONE local report"
+    ), mock.patch.object(
+        runner, "cleanup_target_repository_issue_worktree", return_value=(0, "")
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "record_runner_task_picked_up", return_value=None
+    ), mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ):
+        runner.process_issue(issue)
+
+    prepare_target.assert_called_once_with(
+        "alanua/Lavalamp",
+        147,
+        base=base,
+        base_sha=base_sha,
+    )
+
+
+def test_prepare_target_worktree_explicit_main_remains_compatible(
+    tmp_path: Path,
+) -> None:
+    checkout_path = tmp_path / "repo"
+    worktree_path = tmp_path / "worktrees" / "issue-140"
+
+    with mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=(
+            (0, "https://github.com/alanua/Lavalamp.git"),
+            (0, "fetched"),
+            (0, "b" * 40 + "\n"),
+            (0, "cloned"),
+            (0, ""),
+            (0, "fetched clone"),
+            (0, "b" * 40 + "\n"),
+            (0, "checked out"),
+        ),
+    ) as run_command:
+        code, output, path = runner.prepare_git_issue_worktree(
+            140,
+            checkout_path,
+            worktree_path,
+            target_repository="alanua/Lavalamp",
+            base="main",
+            base_sha=None,
+        )
+
+    assert code == 0
+    assert path == worktree_path
+    assert "git checkout -B runner/issue-140 origin/main" in output
+    assert [
+        "git",
+        "fetch",
+        "origin",
+        "refs/heads/main:refs/remotes/origin/main",
+    ] in [call.args[0] for call in run_command.call_args_list]
+
+
+def test_prepare_target_worktree_missing_base_defaults_to_origin_main(
+    tmp_path: Path,
+) -> None:
+    checkout_path = tmp_path / "repo"
+    worktree_path = tmp_path / "worktrees" / "issue-141"
+
+    with mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=(
+            (0, "https://github.com/alanua/Lavalamp.git"),
+            (0, "fetched"),
+            (0, "cloned"),
+            (0, ""),
+            (0, "fetched clone"),
+            (0, "checked out"),
+        ),
+    ) as run_command:
+        code, output, path = runner.prepare_git_issue_worktree(
+            141,
+            checkout_path,
+            worktree_path,
+            target_repository="alanua/Lavalamp",
+        )
+
+    assert code == 0
+    assert path == worktree_path
+    assert "git checkout -B runner/issue-141 origin/main" in output
+    assert [call.args[0] for call in run_command.call_args_list] == [
+        ["git", "remote", "get-url", "origin"],
+        ["git", "fetch", "origin"],
+        [
+            "git",
+            "clone",
+            "--local",
+            "--no-hardlinks",
+            "--no-checkout",
+            str(checkout_path.resolve()),
+            str(worktree_path),
+        ],
+        ["git", "remote", "set-url", "origin", "https://github.com/alanua/Lavalamp.git"],
+        ["git", "fetch", "origin"],
+        ["git", "checkout", "-B", "runner/issue-141", "origin/main"],
+    ]
+
+
+def test_prepare_target_worktree_missing_base_sha_for_non_main_blocks_before_git(
+    tmp_path: Path,
+) -> None:
+    with mock.patch.object(runner, "run_command") as run_command:
+        code, output, path = runner.prepare_git_issue_worktree(
+            142,
+            tmp_path / "repo",
+            tmp_path / "worktrees" / "issue-142",
+            target_repository="alanua/Lavalamp",
+            base="recovery/lavalamp-2-base-3551e4b",
+            base_sha=None,
+        )
+
+    assert code == 1
+    assert path == tmp_path / "worktrees" / "issue-142"
+    assert "reason=missing_or_invalid_base_sha" in output
+    run_command.assert_not_called()
+
+
+def test_prepare_target_worktree_mismatched_base_sha_blocks_before_checkout(
+    tmp_path: Path,
+) -> None:
+    checkout_path = tmp_path / "repo"
+    worktree_path = tmp_path / "worktrees" / "issue-143"
+    base = "recovery/lavalamp-2-base-3551e4b"
+
+    with mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=(
+            (0, "https://github.com/alanua/Lavalamp.git"),
+            (0, "fetched"),
+            (0, "c" * 40 + "\n"),
+        ),
+    ) as run_command:
+        code, output, path = runner.prepare_git_issue_worktree(
+            143,
+            checkout_path,
+            worktree_path,
+            target_repository="alanua/Lavalamp",
+            base=base,
+            base_sha="b" * 40,
+        )
+
+    assert code == 1
+    assert path == worktree_path
+    assert "reason=base_sha_mismatch" in output
+    commands = [call.args[0] for call in run_command.call_args_list]
+    assert ["git", "clone"] not in commands
+    assert not any(command[:2] == ["git", "checkout"] for command in commands)
+
+
+def test_prepare_target_worktree_missing_remote_branch_blocks_before_checkout(
+    tmp_path: Path,
+) -> None:
+    checkout_path = tmp_path / "repo"
+    worktree_path = tmp_path / "worktrees" / "issue-144"
+    base = "recovery/missing"
+
+    with mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=(
+            (0, "https://github.com/alanua/Lavalamp.git"),
+            (128, "fatal: couldn't find remote ref"),
+        ),
+    ) as run_command:
+        code, output, path = runner.prepare_git_issue_worktree(
+            144,
+            checkout_path,
+            worktree_path,
+            target_repository="alanua/Lavalamp",
+            base=base,
+            base_sha="b" * 40,
+        )
+
+    assert code == 128
+    assert path == worktree_path
+    assert "reason=fetch_base_failed" in output
+    commands = [call.args[0] for call in run_command.call_args_list]
+    assert not any(command[:2] == ["git", "checkout"] for command in commands)
+
+
+@pytest.mark.parametrize(
+    "base",
+    (
+        "../main",
+        "main:refs/remotes/origin/main",
+        "-main",
+        "feature branch",
+        "feature;rm",
+        "refs/heads/main",
+        "refs/tags/v1",
+        "tags/v1",
+        "origin/main",
+        "HEAD",
+        "feature@{1}",
+    ),
+)
+def test_prepare_target_worktree_unsafe_base_blocks_before_git_mutation(
+    tmp_path: Path, base: str
+) -> None:
+    with mock.patch.object(runner, "run_command") as run_command:
+        code, output, _path = runner.prepare_git_issue_worktree(
+            145,
+            tmp_path / "repo",
+            tmp_path / "worktrees" / "issue-145",
+            target_repository="alanua/Lavalamp",
+            base=base,
+            base_sha="b" * 40,
+        )
+
+    assert code == 1
+    assert "reason=unsafe_base" in output
+    run_command.assert_not_called()
+
+
+def test_prepare_target_worktree_existing_clean_wrong_base_blocks(
+    tmp_path: Path,
+) -> None:
+    worktree_path = tmp_path / "worktrees" / "issue-146"
+    worktree_path.mkdir(parents=True)
+    base = "recovery/lavalamp-2-base-3551e4b"
+    base_sha = "b" * 40
+
+    with mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=(
+            (0, ""),
+            (0, "runner/issue-146\n"),
+            (0, "https://github.com/alanua/Lavalamp.git"),
+            (0, "fetched"),
+            (0, f"{base_sha}\n"),
+            (1, ""),
+        ),
+    ) as run_command:
+        code, output, path = runner.prepare_git_issue_worktree(
+            146,
+            tmp_path / "repo",
+            worktree_path,
+            target_repository="alanua/Lavalamp",
+            base=base,
+            base_sha=base_sha,
+        )
+
+    assert code == 1
+    assert path == worktree_path
+    assert "reason=existing_worktree_wrong_base" in output
+    assert [call.args[0] for call in run_command.call_args_list][-1] == [
+        "git",
+        "merge-base",
+        "--is-ancestor",
+        base_sha,
+        "HEAD",
+    ]
+
+
+def test_prepare_target_worktree_source_repository_mismatch_blocks_before_fetch(
+    tmp_path: Path,
+) -> None:
+    with mock.patch.object(
+        runner,
+        "run_command",
+        return_value=(0, "https://github.com/alanua/Wrong.git"),
+    ) as run_command:
+        code, output, _path = runner.prepare_git_issue_worktree(
+            147,
+            tmp_path / "repo",
+            tmp_path / "worktrees" / "issue-147",
+            target_repository="alanua/Lavalamp",
+            base="recovery/lavalamp-2-base-3551e4b",
+            base_sha="b" * 40,
+        )
+
+    assert code == 1
+    assert "reason=source_repository_mismatch" in output
+    run_command.assert_called_once_with(
+        ["git", "remote", "get-url", "origin"], cwd=tmp_path / "repo"
+    )
+
+
 def test_stale_dirty_worktree_blocks_instead_of_deleting(tmp_path: Path) -> None:
     worktree_path = tmp_path / "worktrees" / "issue-139"
     worktree_path.mkdir(parents=True)
