@@ -368,6 +368,7 @@ TELEGRAM_CALLBACK_POLLER_RUNTIME_FILES = (
 )
 
 _HEAD_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+_SAFE_TARGET_BASE_BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,159}$")
 _REGISTERED_OVERLAY_PUBLIC_REST_REPO = "alanua/Skeleton"
 _REGISTERED_OVERLAY_PUBLIC_REST_HOST = "api.github.com"
 _REGISTERED_OVERLAY_PUBLIC_REST_TIMEOUT_SECONDS = 8
@@ -821,6 +822,8 @@ class RunnerTask:
     has_target_project_metadata: bool = False
     target_repository: str = QUEUE_REPOSITORY
     has_target_repository_metadata: bool = False
+    base: str | None = None
+    base_sha: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1182,7 +1185,11 @@ def prepare_issue_worktree(
 
 
 def prepare_target_repository_issue_worktree(
-    target_repository: str, issue_number: int
+    target_repository: str,
+    issue_number: int,
+    *,
+    base: str | None = None,
+    base_sha: str | None = None,
 ) -> tuple[int, str, Path]:
     try:
         path = ensure_safe_target_repository_worktree_path(
@@ -1195,14 +1202,122 @@ def prepare_target_repository_issue_worktree(
     checkout_block_reason = verify_target_repository_checkout(target_repository)
     if checkout_block_reason is not None:
         return 1, checkout_block_reason, path
-    return prepare_git_issue_worktree(issue_number, checkout_path, path)
+    return prepare_git_issue_worktree(
+        issue_number,
+        checkout_path,
+        path,
+        target_repository=target_repository,
+        base=base,
+        base_sha=base_sha,
+    )
+
+
+def _normalize_optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _task_base_metadata(issue_body: str) -> tuple[str | None, str | None]:
+    task_fields = _shadow_task_block_mapping(issue_body)
+    base = _normalize_optional_text(
+        _shadow_field(issue_body, task_fields, "Base", "base")
+    )
+    base_sha = _normalize_optional_text(
+        _shadow_field(issue_body, task_fields, "Base SHA", "base_sha")
+    )
+    return base, base_sha.lower() if base_sha is not None else None
+
+
+def _safe_target_base_branch_name(base: str) -> bool:
+    if (
+        not base
+        or base != base.strip()
+        or base.startswith(("-", "/", "."))
+        or base.endswith(("/", ".", ".lock"))
+        or ".." in base
+        or "//" in base
+        or "@{" in base
+        or "\\" in base
+        or ":" in base
+        or base in {"HEAD", "FETCH_HEAD", "ORIG_HEAD"}
+        or base.startswith(("refs/", "origin/", "remotes/", "tags/"))
+        or base.endswith("^{}")
+        or _SAFE_TARGET_BASE_BRANCH_RE.fullmatch(base) is None
+    ):
+        return False
+    return all(
+        part not in {"", ".", "..", "refs", "heads", "tags"}
+        and not part.startswith(".")
+        and not part.endswith(".lock")
+        for part in base.split("/")
+    )
+
+
+def _target_base_validation_failure(base: str | None, base_sha: str | None) -> str | None:
+    if base is None:
+        return None
+    if not _safe_target_base_branch_name(base):
+        return "unsafe_base"
+    if base != "main" and (base_sha is None or _HEAD_SHA_RE.fullmatch(base_sha) is None):
+        return "missing_or_invalid_base_sha"
+    if base_sha is not None and _HEAD_SHA_RE.fullmatch(base_sha) is None:
+        return "invalid_base_sha"
+    return None
+
+
+def _format_base_preparation_failure(reason: str, base: str | None = None) -> str:
+    lines = ["Target issue worktree base validation failed.", f"reason={reason}"]
+    if base is not None:
+        lines.append(f"base={base}")
+    return "\n".join(lines)
+
+
+def _fetch_and_verify_target_base(
+    *,
+    cwd: str | Path,
+    base: str,
+    base_sha: str | None,
+    outputs: list[str],
+) -> tuple[int, str | None]:
+    remote_ref = f"refs/heads/{base}"
+    tracking_ref = f"refs/remotes/origin/{base}"
+    fetch_refspec = f"{remote_ref}:{tracking_ref}"
+    fetch_command = ["git", "fetch", "origin", fetch_refspec]
+    code, output = run_command(fetch_command, cwd=cwd)
+    outputs.append(format_command_output(fetch_command, output))
+    if code != 0:
+        return code, "fetch_base_failed"
+
+    rev_parse_command = ["git", "rev-parse", tracking_ref]
+    code, output = run_command(rev_parse_command, cwd=cwd)
+    outputs.append(format_command_output(rev_parse_command, output))
+    fetched_sha = output.strip().lower()
+    if code != 0 or _HEAD_SHA_RE.fullmatch(fetched_sha) is None:
+        return code or 1, "missing_remote_base"
+    if base_sha is not None and fetched_sha != base_sha:
+        return 1, "base_sha_mismatch"
+    return 0, fetched_sha
 
 
 def prepare_git_issue_worktree(
-    issue_number: int, coordinator_workdir: str | Path, path: Path
+    issue_number: int,
+    coordinator_workdir: str | Path,
+    path: Path,
+    *,
+    target_repository: str | None = None,
+    base: str | None = None,
+    base_sha: str | None = None,
 ) -> tuple[int, str, Path]:
     branch = issue_branch(issue_number)
     outputs: list[str] = []
+    base_ref = base or "main"
+    validation_failure = _target_base_validation_failure(base, base_sha)
+    if validation_failure is not None:
+        return 1, _format_base_preparation_failure(validation_failure, base), path
 
     if path.exists():
         checks = (
@@ -1234,6 +1349,54 @@ def prepare_git_issue_worktree(
                     + "\n".join(outputs),
                     path,
                 )
+        if target_repository is not None:
+            remote_command = ["git", "remote", "get-url", "origin"]
+            code, output = run_command(remote_command, cwd=path)
+            outputs.append(format_command_output(remote_command, output))
+            if code != 0 or not _remote_url_matches_project_repo(
+                output, target_repository
+            ):
+                return (
+                    code or 1,
+                    _format_base_preparation_failure("source_repository_mismatch")
+                    + "\n\n"
+                    + "\n".join(outputs),
+                    path,
+                )
+        if base is not None:
+            code, verified_sha_or_reason = _fetch_and_verify_target_base(
+                cwd=path,
+                base=base_ref,
+                base_sha=base_sha,
+                outputs=outputs,
+            )
+            if code != 0:
+                return (
+                    code,
+                    _format_base_preparation_failure(str(verified_sha_or_reason), base)
+                    + "\n\n"
+                    + "\n".join(outputs),
+                    path,
+                )
+            ancestor_command = [
+                "git",
+                "merge-base",
+                "--is-ancestor",
+                str(verified_sha_or_reason),
+                "HEAD",
+            ]
+            code, output = run_command(ancestor_command, cwd=path)
+            outputs.append(format_command_output(ancestor_command, output))
+            if code != 0:
+                return (
+                    1,
+                    _format_base_preparation_failure(
+                        "existing_worktree_wrong_base", base
+                    )
+                    + "\n\n"
+                    + "\n".join(outputs),
+                    path,
+                )
         return 0, "\n".join(outputs), path
 
     try:
@@ -1249,9 +1412,61 @@ def prepare_git_issue_worktree(
     origin_url = remote_output.strip()
     if not origin_url:
         return 1, "Coordinator origin URL is empty.", path
+    if target_repository is not None and not _remote_url_matches_project_repo(
+        origin_url, target_repository
+    ):
+        return 1, _format_base_preparation_failure("source_repository_mismatch"), path
+
+    if base is None:
+        commands = (
+            (["git", "fetch", "origin"], coordinator_workdir),
+            (
+                [
+                    "git",
+                    "clone",
+                    "--local",
+                    "--no-hardlinks",
+                    "--no-checkout",
+                    str(Path(coordinator_workdir).resolve()),
+                    str(path),
+                ],
+                coordinator_workdir,
+            ),
+            (["git", "fetch", "origin"], path),
+            (["git", "checkout", "-B", branch, "origin/main"], path),
+        )
+        for command, cwd in commands:
+            code, output = run_command(command, cwd=cwd)
+            outputs.append(format_command_output(command, output))
+            if code != 0:
+                return code, "\n".join(outputs), path
+            if command[1] == "clone":
+                config_code, config_output = run_command(
+                    ["git", "remote", "set-url", "origin", origin_url], cwd=path
+                )
+                outputs.append(
+                    "$ git remote set-url origin <coordinator-origin>\n" + config_output
+                )
+                if config_code != 0:
+                    return config_code, "\n".join(outputs), path
+        return 0, "\n".join(outputs), path
+
+    code, verified_sha_or_reason = _fetch_and_verify_target_base(
+        cwd=coordinator_workdir,
+        base=base_ref,
+        base_sha=base_sha,
+        outputs=outputs,
+    )
+    if code != 0:
+        return (
+            code,
+            _format_base_preparation_failure(str(verified_sha_or_reason), base)
+            + "\n\n"
+            + "\n".join(outputs),
+            path,
+        )
 
     commands = (
-        (["git", "fetch", "origin"], coordinator_workdir),
         (
             [
                 "git",
@@ -1264,14 +1479,35 @@ def prepare_git_issue_worktree(
             ],
             coordinator_workdir,
         ),
-        (["git", "fetch", "origin"], path),
-        (["git", "checkout", "-B", branch, "origin/main"], path),
+        (
+            [
+                "git",
+                "fetch",
+                "origin",
+                f"refs/heads/{base_ref}:refs/remotes/origin/{base_ref}",
+            ],
+            path,
+        ),
+        (["git", "rev-parse", f"refs/remotes/origin/{base_ref}"], path),
+        (["git", "checkout", "-B", branch, f"origin/{base_ref}"], path),
     )
     for command, cwd in commands:
         code, output = run_command(command, cwd=cwd)
         outputs.append(format_command_output(command, output))
         if code != 0:
             return code, "\n".join(outputs), path
+        if command[:3] == ["git", "rev-parse", f"refs/remotes/origin/{base_ref}"]:
+            fetched_sha = output.strip().lower()
+            if _HEAD_SHA_RE.fullmatch(fetched_sha) is None or (
+                base_sha is not None and fetched_sha != base_sha
+            ):
+                return (
+                    1,
+                    _format_base_preparation_failure("base_sha_mismatch", base)
+                    + "\n\n"
+                    + "\n".join(outputs),
+                    path,
+                )
         if command[1] == "clone":
             config_code, config_output = run_command(
                 ["git", "remote", "set-url", "origin", origin_url], cwd=path
@@ -1730,6 +1966,7 @@ def extract_runner_task(body: str) -> tuple[RunnerTask | None, str | None]:
     )
     if target_project is None or target_repository is None:
         return None, target_reason
+    base, base_sha = _task_base_metadata(body)
     return RunnerTask(
         content=content,
         lane=lane,
@@ -1745,6 +1982,8 @@ def extract_runner_task(body: str) -> tuple[RunnerTask | None, str | None]:
         has_target_repository_metadata=(
             _target_repository_metadata_field(metadata)[0] is not None
         ),
+        base=base,
+        base_sha=base_sha,
     ), None
 
 
@@ -12468,12 +12707,22 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
         )
         local_target_worktree = target_repository != QUEUE_REPOSITORY
         if local_target_worktree:
-            worktree_code, worktree_output, worktree_path = (
-                prepare_target_repository_issue_worktree(
-                    target_repository,
-                    issue_number,
+            if runner_task is not None and runner_task.base is not None:
+                worktree_code, worktree_output, worktree_path = (
+                    prepare_target_repository_issue_worktree(
+                        target_repository,
+                        issue_number,
+                        base=runner_task.base,
+                        base_sha=runner_task.base_sha,
+                    )
                 )
-            )
+            else:
+                worktree_code, worktree_output, worktree_path = (
+                    prepare_target_repository_issue_worktree(
+                        target_repository,
+                        issue_number,
+                    )
+                )
         else:
             worktree_code, worktree_output, worktree_path = prepare_issue_branch(
                 issue_number, coordinator_workdir
