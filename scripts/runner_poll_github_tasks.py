@@ -528,6 +528,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "excluded_infrastructure_cache_name_count",
         "excluded_secret_like_count",
         "external_side_effects_executed",
+        "exact_base_changed_files_count",
         "existing_pr_lookup",
         "existing_pr_url",
         "expected_branch",
@@ -720,6 +721,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "post_push_pr_changed_files_count",
         "validated_publish_files",
         "validated_publish_files_count",
+        "verified_base_branch",
+        "verified_base_sha",
         "validation_base_ref",
         "validation_base_sha",
         "validation_changed_file",
@@ -884,6 +887,7 @@ class IssueWorktreePublishInspectionRequest:
     allowed_files: frozenset[str]
     pr_title: str
     base_branch: str = "main"
+    base_sha: str | None = None
     draft_pr: bool = True
     target_project: str = "skeleton"
     worktree_root: Path | None = None
@@ -939,6 +943,7 @@ class ContainerValidationWorktreePublishRequest:
 class IssueWorktreePublishExistingPrLookup:
     pr_url: str | None
     reason: str
+    pr_state: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -9106,6 +9111,22 @@ def _safe_issue_publish_base_branch(branch: str) -> bool:
     )
 
 
+def _issue_worktree_publish_base_failure(
+    base_branch: str, base_sha: str | None, *, target_project_route: bool
+) -> str | None:
+    if target_project_route:
+        if not _safe_target_base_branch_name(base_branch):
+            return "missing_or_invalid_base_branch"
+        if base_sha is not None and _HEAD_SHA_RE.fullmatch(base_sha) is None:
+            return "missing_or_invalid_base_sha"
+        if base_branch != "main" and base_sha is None:
+            return "missing_or_invalid_base_sha"
+        return None
+    if not _safe_issue_publish_base_branch(base_branch):
+        return "missing_or_invalid_base_branch"
+    return None
+
+
 def _issue_publish_bool_field(
     metadata: str, field: str, *, default: bool | None = None
 ) -> tuple[bool | None, str | None]:
@@ -9176,6 +9197,9 @@ def _issue_worktree_publish_inspection_metadata(
         else _body_field(metadata, "Expected Branch")
     )
     base_branch = _body_field(metadata, "Base Branch") or "main"
+    base_sha = _normalize_optional_text(_body_field(metadata, "Base SHA"))
+    if base_sha is not None:
+        base_sha = base_sha.lower()
     draft_pr, draft_pr_reason = _issue_publish_bool_field(
         metadata, "Draft PR", default=True
     )
@@ -9200,10 +9224,15 @@ def _issue_worktree_publish_inspection_metadata(
         return None, "missing_or_invalid_expected_branch"
     if (explicit_recovery_route or target_project_route) and expected_branch != required_branch:
         return None, "output_branch_mismatch"
-    if not _safe_issue_publish_base_branch(base_branch):
-        return None, "missing_or_invalid_base_branch"
-    if (explicit_recovery_route or target_project_route) and base_branch != "main":
+    base_reason = _issue_worktree_publish_base_failure(
+        base_branch, base_sha, target_project_route=target_project_route
+    )
+    if base_reason is not None:
+        return None, base_reason
+    if explicit_recovery_route and base_branch != "main":
         return None, "unsupported_base_branch"
+    if explicit_recovery_route and base_sha is not None:
+        return None, "unsupported_metadata_field"
     if draft_pr_reason is not None:
         return None, draft_pr_reason
     if (explicit_recovery_route or target_project_route) and draft_pr is not True:
@@ -9222,6 +9251,7 @@ def _issue_worktree_publish_inspection_metadata(
             allowed_files=allowed_files,
             pr_title=pr_title,
             base_branch=base_branch,
+            base_sha=base_sha if target_project_route else None,
             draft_pr=bool(draft_pr),
             target_project=target_project,
             worktree_root=target_worktree_root,
@@ -9665,6 +9695,10 @@ def _is_ignored_issue_publish_untracked_path(path: str) -> bool:
 def _issue_worktree_publish_existing_pr_url(
     request: IssueWorktreePublishInspectionRequest, worktree_path: Path
 ) -> IssueWorktreePublishExistingPrLookup:
+    json_fields = (
+        "url,state,isDraft,baseRefName,baseRefOid,headRefName,headRefOid,"
+        "headRepository,headRepositoryOwner"
+    )
     code, output = run_command(
         [
             "gh",
@@ -9677,9 +9711,9 @@ def _issue_worktree_publish_existing_pr_url(
             "--state",
             "open",
             "--json",
-            "url",
+            json_fields,
             "--jq",
-            ".[0].url // \"\"",
+            ".[0] // {}",
         ],
         cwd=worktree_path,
     )
@@ -9687,18 +9721,112 @@ def _issue_worktree_publish_existing_pr_url(
         return IssueWorktreePublishExistingPrLookup(
             pr_url=None, reason="existing_pr_lookup_unavailable"
         )
-    pr_url = output.strip()
+    try:
+        parsed = json.loads(output or "{}")
+    except json.JSONDecodeError:
+        pr_url = output.strip()
+        if pr_url and _PUBLIC_GITHUB_PR_URL_RE.fullmatch(pr_url) is not None:
+            return IssueWorktreePublishExistingPrLookup(
+                pr_url=pr_url, reason="existing_pr_found"
+            )
+        return IssueWorktreePublishExistingPrLookup(
+            pr_url=None, reason="existing_pr_lookup_unavailable"
+        )
+    if not isinstance(parsed, dict):
+        return IssueWorktreePublishExistingPrLookup(
+            pr_url=None, reason="existing_pr_lookup_unavailable"
+        )
+    if not parsed:
+        return IssueWorktreePublishExistingPrLookup(
+            pr_url=None, reason="existing_pr_not_found"
+        )
+    pr_url = str(parsed.get("url") or "")
     if pr_url and _PUBLIC_GITHUB_PR_URL_RE.fullmatch(pr_url) is None:
         return IssueWorktreePublishExistingPrLookup(
             pr_url=None, reason="existing_pr_lookup_unavailable"
         )
     if pr_url:
         return IssueWorktreePublishExistingPrLookup(
-            pr_url=pr_url, reason="existing_pr_found"
+            pr_url=pr_url, reason="existing_pr_found", pr_state=parsed
         )
     return IssueWorktreePublishExistingPrLookup(
-        pr_url=None, reason="existing_pr_not_found"
+        pr_url=None, reason="existing_pr_lookup_unavailable"
     )
+
+
+def _issue_worktree_publish_pr_state(
+    request: IssueWorktreePublishInspectionRequest, worktree_path: Path
+) -> dict[str, Any]:
+    code, output = run_command(
+        [
+            "gh",
+            "pr",
+            "view",
+            request.expected_branch,
+            "--repo",
+            request.repository,
+            "--json",
+            (
+                "url,state,isDraft,baseRefName,baseRefOid,headRefName,headRefOid,"
+                "headRepository,headRepositoryOwner"
+            ),
+        ],
+        cwd=worktree_path,
+    )
+    if code != 0:
+        raise RuntimeError("gh pr view failed")
+    parsed = json.loads(output or "{}")
+    if not isinstance(parsed, dict):
+        raise RuntimeError("gh pr view returned non-object JSON")
+    return parsed
+
+
+def _issue_worktree_publish_pr_block_reason(
+    request: IssueWorktreePublishInspectionRequest,
+    pr_state: dict[str, Any],
+    *,
+    verified_base_sha: str,
+    expected_head_sha: str | None = None,
+    post_push: bool = False,
+) -> str | None:
+    prefix = "post_push_" if post_push else ""
+    if str(pr_state.get("state") or "").upper() != "OPEN":
+        return f"{prefix}pr_not_open"
+    if pr_state.get("isDraft") is not True:
+        return f"{prefix}pr_not_draft"
+    if pr_state.get("baseRefName") != request.base_branch:
+        return f"{prefix}pr_base_mismatch"
+    base_sha = str(pr_state.get("baseRefOid") or "").lower()
+    if base_sha != verified_base_sha:
+        return f"{prefix}pr_base_sha_mismatch"
+    if _head_repository_name_with_owner(pr_state) != request.repository:
+        return f"{prefix}pr_head_repository_mismatch"
+    if pr_state.get("headRefName") != request.expected_branch:
+        return f"{prefix}pr_head_branch_mismatch"
+    if expected_head_sha is not None:
+        head_sha = str(pr_state.get("headRefOid") or "").lower()
+        if head_sha != expected_head_sha:
+            return f"{prefix}pr_head_sha_mismatch"
+    if _existing_pr_publish_pr_url(pr_state) is None:
+        return f"{prefix}pr_url_unavailable"
+    return None
+
+
+def _issue_worktree_publish_fetch_and_verify_base(
+    request: IssueWorktreePublishInspectionRequest,
+    worktree_path: Path,
+) -> tuple[str | None, str | None]:
+    outputs: list[str] = []
+    code, result = _fetch_and_verify_target_base(
+        cwd=worktree_path,
+        base=request.base_branch,
+        base_sha=request.base_sha,
+        outputs=outputs,
+    )
+    if code != 0:
+        return None, result or "fetch_base_failed"
+    assert result is not None
+    return result, None
 
 
 def _issue_worktree_publish_override_result(
@@ -11545,6 +11673,71 @@ def _issue_worktree_publish_validated_report(
         ("step=read_origin_remote status=done", "step=verify_origin_remote status=done")
     )
 
+    verified_base_sha: str | None = None
+    exact_base_changed_files: list[str] = []
+    if target_project_route:
+        verified_base_sha, base_reason = _issue_worktree_publish_fetch_and_verify_base(
+            request, worktree_path
+        )
+        if base_reason is not None or verified_base_sha is None:
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [*status_lines, f"reason={base_reason or 'fetch_base_failed'}"],
+                "not_met",
+            )
+        status_lines.extend(
+            (
+                "step=fetch_verified_base status=done",
+                f"verified_base_branch={request.base_branch}",
+                f"verified_base_sha={verified_base_sha}",
+            )
+        )
+        code, _output = run_command(
+            ["git", "merge-base", "--is-ancestor", verified_base_sha, "HEAD"],
+            cwd=worktree_path,
+        )
+        if code != 0:
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [*status_lines, "reason=source_not_derived_from_exact_base"],
+                "not_met",
+            )
+        status_lines.append("step=verify_source_ancestor status=done")
+        code, output = run_command(
+            ["git", "diff", "--name-only", f"{verified_base_sha}...HEAD", "--"],
+            cwd=worktree_path,
+        )
+        if code != 0:
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [*status_lines, "step=read_exact_base_diff status=failed"],
+                "not_met",
+            )
+        exact_base_changed_files = _git_status_path_lines(output)
+        if not all(_safe_issue_publish_file_path(path) for path in exact_base_changed_files):
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [*status_lines, "reason=exact_base_changed_file_path_unsafe"],
+                "not_met",
+            )
+        if not set(exact_base_changed_files) <= set(request.allowed_files):
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [*status_lines, "reason=exact_base_changed_files_outside_allowlist"],
+                "not_met",
+            )
+        status_lines.extend(
+            (
+                "step=read_exact_base_diff status=done",
+                f"exact_base_changed_files_count={len(exact_base_changed_files)}",
+            )
+        )
+
     code, output = run_command(["git", "diff", "--name-only", "HEAD", "--"], cwd=worktree_path)
     if code != 0:
         return _maintenance_report(
@@ -11634,6 +11827,10 @@ def _issue_worktree_publish_validated_report(
             f"{','.join(validated_publish_files) if validated_publish_files else '(none)'}",
         )
     )
+    if target_project_route and not validated_publish_files and not exact_base_changed_files:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=no_publishable_changes"], "not_met"
+        )
 
     if not publish:
         return _maintenance_report("DONE", task_id, status_lines, "met")
@@ -11686,6 +11883,19 @@ def _issue_worktree_publish_validated_report(
         status_lines.append("step=verify_remote_branch_absent status=done")
     elif existing_pr_lookup.reason == "existing_pr_found":
         assert existing_pr_lookup.pr_url is not None
+        if target_project_route:
+            assert verified_base_sha is not None
+            pr_state = existing_pr_lookup.pr_state or {}
+            pr_reason = _issue_worktree_publish_pr_block_reason(
+                request, pr_state, verified_base_sha=verified_base_sha
+            )
+            if pr_reason is not None:
+                return _maintenance_report(
+                    "BLOCKED",
+                    task_id,
+                    [*status_lines, f"reason=existing_{pr_reason}"],
+                    "not_met",
+                )
         return _maintenance_report(
             "DONE",
             task_id,
@@ -11718,6 +11928,24 @@ def _issue_worktree_publish_validated_report(
             )
 
     if validated_publish_files:
+        if target_project_route:
+            assert verified_base_sha is not None
+            code, _output = run_command(
+                ["git", "diff", "--check", f"{verified_base_sha}...HEAD", "--"],
+                cwd=worktree_path,
+            )
+            if code != 0:
+                return _maintenance_report(
+                    "BLOCKED",
+                    task_id,
+                    [
+                        *status_lines,
+                        "step=exact_base_diff_check status=failed "
+                        "reason=diff_check_failed",
+                    ],
+                    "not_met",
+                )
+            status_lines.append("step=exact_base_diff_check status=done")
         code, _output = run_command(
             ["git", "diff", "--check", "--", *validated_publish_files],
             cwd=worktree_path,
@@ -11811,9 +12039,29 @@ def _issue_worktree_publish_validated_report(
                 "not_met",
             )
         status_lines.append("step=verify_commit_head_moved status=done")
+        pushed_head_sha = post_commit_head.lower()
     else:
+        branch_diff_base = verified_base_sha if target_project_route else request.base_branch
+        assert branch_diff_base is not None
+        if target_project_route:
+            code, _output = run_command(
+                ["git", "diff", "--check", f"{branch_diff_base}...HEAD", "--"],
+                cwd=worktree_path,
+            )
+            if code != 0:
+                return _maintenance_report(
+                    "BLOCKED",
+                    task_id,
+                    [
+                        *status_lines,
+                        "step=exact_base_diff_check status=failed "
+                        "reason=diff_check_failed",
+                    ],
+                    "not_met",
+                )
+            status_lines.append("step=exact_base_diff_check status=done")
         code, _output = run_command(
-            ["git", "diff", "--quiet", f"{request.base_branch}...HEAD", "--"],
+            ["git", "diff", "--quiet", f"{branch_diff_base}...HEAD", "--"],
             cwd=worktree_path,
         )
         if code == 0:
@@ -11831,6 +12079,23 @@ def _issue_worktree_publish_validated_report(
                 "not_met",
             )
         status_lines.append("step=read_branch_diff status=done")
+        code, output = run_command(["git", "rev-parse", "HEAD"], cwd=worktree_path)
+        if code != 0:
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [*status_lines, "step=read_publish_head status=failed"],
+                "not_met",
+            )
+        pushed_head_lines = _git_status_path_lines(output)
+        pushed_head_sha = pushed_head_lines[0].lower() if pushed_head_lines else ""
+    if _HEAD_SHA_RE.fullmatch(pushed_head_sha) is None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=publish_head_invalid"],
+            "not_met",
+        )
 
     push_ref = f"refs/heads/{request.expected_branch}:refs/heads/{request.expected_branch}"
     code, _output = run_command(["git", "push", "origin", push_ref], cwd=worktree_path)
@@ -11852,7 +12117,36 @@ def _issue_worktree_publish_validated_report(
             "not_met",
         )
     assert pr_url is not None
-    status_lines.extend(("step=create_draft_pr status=done", f"draft_pr_url={pr_url}"))
+    status_lines.extend(
+        (
+            "step=create_draft_pr status=done",
+            f"draft_pr_url={pr_url}",
+            f"pushed_head_sha={pushed_head_sha}",
+        )
+    )
+    if target_project_route:
+        assert verified_base_sha is not None
+        try:
+            post_push_pr_state = _issue_worktree_publish_pr_state(request, worktree_path)
+        except (RuntimeError, json.JSONDecodeError):
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [*status_lines, "step=post_push_read_pr_metadata status=failed"],
+                "not_met",
+            )
+        post_reason = _issue_worktree_publish_pr_block_reason(
+            request,
+            post_push_pr_state,
+            verified_base_sha=verified_base_sha,
+            expected_head_sha=pushed_head_sha,
+            post_push=True,
+        )
+        if post_reason is not None:
+            return _maintenance_report(
+                "BLOCKED", task_id, [*status_lines, f"reason={post_reason}"], "not_met"
+            )
+        status_lines.append("step=post_push_read_pr_metadata status=done")
     return _maintenance_report("DONE", task_id, status_lines, "met")
 
 

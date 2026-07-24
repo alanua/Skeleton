@@ -3441,6 +3441,7 @@ def _publish_target_project_issue_worktree_body(
     target_repository: str = "alanua/LumenFlow",
     source_issue: int | str = 123,
     base_branch: str = "main",
+    base_sha: str | None = None,
     output_branch: str = "runner/issue-123",
     allowed_files: tuple[str, ...] = ("README.md",),
     draft_pr: str = "true",
@@ -3451,6 +3452,7 @@ def _publish_target_project_issue_worktree_body(
         f"Target Repository: {target_repository}",
         f"Source Issue: {source_issue}",
         f"Base Branch: {base_branch}",
+        *([f"Base SHA: {base_sha}"] if base_sha is not None else []),
         f"Output Branch: {output_branch}",
         f"Draft PR: {draft_pr}",
         *extra_metadata,
@@ -3474,9 +3476,19 @@ def _issue_publish_commands(
     untracked_files: tuple[str, ...] = (),
     validated_publish_files: tuple[str, ...] | None = None,
     existing_pr_url: str = "",
+    existing_pr_base_branch: str = "main",
+    existing_pr_base_sha: str = "a" * 40,
     existing_pr_code: int = 0,
     remote_branch_exists: bool = False,
     ls_remote_code: int = 0,
+    base_branch: str = "main",
+    fetched_base_sha: str = "a" * 40,
+    fetch_base_code: int = 0,
+    read_base_code: int = 0,
+    ancestor_code: int = 0,
+    exact_base_changed_files: tuple[str, ...] | None = None,
+    exact_base_diff_code: int = 1,
+    exact_base_diff_check_code: int = 0,
     branch_diff_code: int = 1,
     diff_check_code: int = 0,
     add_code: int = 0,
@@ -3486,6 +3498,8 @@ def _issue_publish_commands(
     push_code: int = 0,
     pr_create_code: int = 0,
     pr_create_url: str = PR_URL,
+    post_push_pr_base_branch: str | None = None,
+    post_push_pr_base_sha: str | None = None,
     commit_message: str = "Publish issue #123 worktree",
     raw_suffix: str = "",
 ) -> object:
@@ -3493,6 +3507,7 @@ def _issue_publish_commands(
     expected_publish_files = (
         changed_files if validated_publish_files is None else validated_publish_files
     )
+    expected_exact_base_changed_files = exact_base_changed_files or ()
 
     def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
         nonlocal rev_parse_count
@@ -3501,6 +3516,33 @@ def _issue_publish_commands(
             return 0, f"{branch}\n{raw_suffix}"
         if command == ["git", "remote", "get-url", "origin"]:
             return 0, f"{remote_url}\n"
+        if command == [
+            "git",
+            "fetch",
+            "origin",
+            f"refs/heads/{base_branch}:refs/remotes/origin/{base_branch}",
+        ]:
+            return fetch_base_code, "fetch base output must not leak"
+        if command == ["git", "rev-parse", f"refs/remotes/origin/{base_branch}"]:
+            return read_base_code, f"{fetched_base_sha}\n"
+        if command == [
+            "git",
+            "merge-base",
+            "--is-ancestor",
+            fetched_base_sha,
+            "HEAD",
+        ]:
+            return ancestor_code, ""
+        if command == [
+            "git",
+            "diff",
+            "--name-only",
+            f"{fetched_base_sha}...HEAD",
+            "--",
+        ]:
+            return 0, "\n".join(expected_exact_base_changed_files) + (
+                "\n" if expected_exact_base_changed_files else ""
+            )
         if command == ["git", "diff", "--name-only", "HEAD", "--"]:
             return 0, "\n".join(changed_files) + ("\n" if changed_files else "")
         if command == ["git", "ls-files", "--others", "--exclude-standard"]:
@@ -3514,7 +3556,28 @@ def _issue_publish_commands(
             "--head",
             branch,
         ]:
-            return existing_pr_code, f"{existing_pr_url}\n" if existing_pr_url else ""
+            if existing_pr_code != 0:
+                return existing_pr_code, "existing PR output must not leak"
+            if not existing_pr_url:
+                return 0, "{}\n"
+            owner, name = repository.split("/", 1)
+            return 0, json.dumps(
+                {
+                    "url": existing_pr_url,
+                    "state": "OPEN",
+                    "isDraft": True,
+                    "baseRefName": existing_pr_base_branch,
+                    "baseRefOid": existing_pr_base_sha,
+                    "headRefName": branch,
+                    "headRefOid": post_commit_head,
+                    "headRepository": {
+                        "nameWithOwner": repository,
+                        "owner": {"login": owner},
+                        "name": name,
+                    },
+                    "headRepositoryOwner": {"login": owner},
+                }
+            )
         if command == ["git", "ls-remote", "--heads", "origin", branch]:
             output = (
                 f"{post_commit_head}\trefs/heads/{branch}\n"
@@ -3522,6 +3585,8 @@ def _issue_publish_commands(
                 else ""
             )
             return ls_remote_code, output
+        if command == ["git", "diff", "--check", f"{fetched_base_sha}...HEAD", "--"]:
+            return exact_base_diff_check_code, "exact base diff output must not leak"
         if command == ["git", "diff", "--check", "--", *expected_publish_files]:
             return diff_check_code, "diff check output must not leak"
         if command == ["git", "rev-parse", "HEAD"]:
@@ -3538,7 +3603,9 @@ def _issue_publish_commands(
             commit_message,
         ]:
             return commit_code, "commit failed output must not leak"
-        if command == ["git", "diff", "--quiet", "main...HEAD", "--"]:
+        if command == ["git", "diff", "--quiet", f"{fetched_base_sha}...HEAD", "--"]:
+            return exact_base_diff_code, "exact base diff output must not leak"
+        if command == ["git", "diff", "--quiet", f"{base_branch}...HEAD", "--"]:
             return branch_diff_code, "branch diff output must not leak"
         if command == [
             "git",
@@ -3554,9 +3621,28 @@ def _issue_publish_commands(
             "--repo",
             repository,
             "--base",
-            "main",
+            base_branch,
         ]:
             return pr_create_code, f"{pr_create_url}\n"
+        if command[:4] == ["gh", "pr", "view", branch]:
+            owner, name = repository.split("/", 1)
+            return 0, json.dumps(
+                {
+                    "url": pr_create_url,
+                    "state": "OPEN",
+                    "isDraft": True,
+                    "baseRefName": post_push_pr_base_branch or base_branch,
+                    "baseRefOid": post_push_pr_base_sha or fetched_base_sha,
+                    "headRefName": branch,
+                    "headRefOid": post_commit_head,
+                    "headRepository": {
+                        "nameWithOwner": repository,
+                        "owner": {"login": owner},
+                        "name": name,
+                    },
+                    "headRepositoryOwner": {"login": owner},
+                }
+            )
         return 2, "unexpected command output must not leak"
 
     return run
@@ -3957,9 +4043,14 @@ def _prepare_issue_publish_worktree(root: Path, issue_number: int = 123) -> Path
 
 
 def _target_project_tree(
-    worktree_root: Path, *, runner_enabled: bool = True
+    worktree_root: Path,
+    *,
+    runner_enabled: bool = True,
+    target_project: str = "lumenflow",
+    target_repository: str = "alanua/LumenFlow",
 ) -> dict[str, object]:
     workspace_root = worktree_root.parent
+    repo_name = target_repository.split("/", 1)[1]
     return {
         "version": "1.0.0",
         "default_project": "skeleton",
@@ -3975,9 +4066,9 @@ def _target_project_tree(
                 "runtime_approval_required": False,
                 "worktree_name_prefix": "skeleton",
             },
-            "lumenflow": {
-                "repo": "alanua/LumenFlow",
-                "checkout_path": str(workspace_root / "repos" / "LumenFlow"),
+            target_project: {
+                "repo": target_repository,
+                "checkout_path": str(workspace_root / "repos" / repo_name),
                 "worktree_root": str(worktree_root),
                 "public": True,
                 "runner_enabled": runner_enabled,
@@ -8624,6 +8715,349 @@ def test_publish_target_project_issue_worktree_pr_uses_project_tree_and_target_r
         if command[:3] == ["gh", "pr", "create"]
     )
     assert all("--force" not in command for command in commands)
+
+
+def test_publish_target_project_issue_worktree_pr_explicit_main_base_sha_succeeds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_root = tmp_path / "lumenflow"
+    base_sha = "a" * 40
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    worktree_path = _prepare_issue_publish_worktree(target_root)
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=_target_project_tree(target_root)
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            repository="alanua/LumenFlow",
+            remote_url="https://github.com/alanua/LumenFlow.git",
+            changed_files=("README.md",),
+            fetched_base_sha=base_sha,
+            commit_message="Publish target project issue #123 worktree",
+        ),
+    ) as run:
+        report = runner.publish_target_project_issue_worktree_pr(
+            _publish_target_project_issue_worktree_body(base_sha=base_sha.upper())
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert f"verified_base_sha={base_sha}" in report
+    assert [
+        "git",
+        "fetch",
+        "origin",
+        "refs/heads/main:refs/remotes/origin/main",
+    ] in commands
+
+
+def test_publish_target_project_issue_worktree_pr_safe_non_main_exact_base_succeeds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_root = tmp_path / "lavalamp"
+    base_branch = "recovery/lavalamp-2-base-3551e4b"
+    base_sha = "3551e4b40113bd02c19ee8d030e76e80c252c68b"
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    worktree_path = _prepare_issue_publish_worktree(target_root, issue_number=1931)
+    with mock.patch.object(
+        runner,
+        "load_runner_project_tree",
+        return_value=_target_project_tree(
+            target_root,
+            target_project="lavalamp",
+            target_repository="alanua/Lavalamp",
+        ),
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            repository="alanua/Lavalamp",
+            branch="runner/issue-1931",
+            remote_url="https://github.com/alanua/Lavalamp.git",
+            changed_files=("README.md",),
+            base_branch=base_branch,
+            fetched_base_sha=base_sha,
+            commit_message="Publish target project issue #1931 worktree",
+        ),
+    ) as run:
+        report = runner.publish_target_project_issue_worktree_pr(
+            _publish_target_project_issue_worktree_body(
+                target_project="lavalamp",
+                target_repository="alanua/Lavalamp",
+                source_issue=1931,
+                base_branch=base_branch,
+                base_sha=base_sha,
+                output_branch="runner/issue-1931",
+            )
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert f"verified_base_branch={base_branch}" in report
+    assert f"verified_base_sha={base_sha}" in report
+    assert [
+        "git",
+        "fetch",
+        "origin",
+        f"refs/heads/{base_branch}:refs/remotes/origin/{base_branch}",
+    ] in commands
+    assert [
+        "gh",
+        "pr",
+        "create",
+        "--repo",
+        "alanua/Lavalamp",
+        "--base",
+        base_branch,
+        "--head",
+        "runner/issue-1931",
+        "--title",
+        "Runner task #1931",
+        "--body",
+        "Automated Runner publish task from issue #1931.",
+        "--draft",
+    ] in commands
+
+
+def test_publish_target_project_issue_worktree_pr_metadata_normalizes_base_sha(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_root = tmp_path / "lumenflow"
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=_target_project_tree(target_root)
+    ):
+        request, reason = runner._issue_worktree_publish_inspection_metadata(
+            _publish_target_project_issue_worktree_body(base_sha="A" * 40),
+            require_repository=True,
+            target_project_route=True,
+        )
+
+    assert reason is None
+    assert request is not None
+    assert request.base_branch == "main"
+    assert request.base_sha == "a" * 40
+
+
+def test_publish_target_project_issue_worktree_pr_non_main_requires_base_sha(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_root = tmp_path / "lumenflow"
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=_target_project_tree(target_root)
+    ), mock.patch.object(runner, "run_command") as run:
+        report = runner.publish_target_project_issue_worktree_pr(
+            _publish_target_project_issue_worktree_body(base_branch="recovery/base")
+        )
+
+    assert report.startswith("NEEDS_OPERATOR:")
+    assert "reason=missing_or_invalid_base_sha" in report
+    run.assert_not_called()
+
+
+def test_publish_target_project_issue_worktree_pr_malformed_base_sha_blocks_before_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_root = tmp_path / "lumenflow"
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=_target_project_tree(target_root)
+    ), mock.patch.object(runner, "run_command") as run:
+        report = runner.publish_target_project_issue_worktree_pr(
+            _publish_target_project_issue_worktree_body(
+                base_branch="recovery/base",
+                base_sha="not-a-40-char-sha",
+            )
+        )
+
+    assert report.startswith("NEEDS_OPERATOR:")
+    assert "reason=missing_or_invalid_base_sha" in report
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "base_branch",
+    (
+        "../main",
+        "main:refs/remotes/origin/main",
+        "-main",
+        "feature branch",
+        "feature;rm",
+        "refs/heads/main",
+        "refs/tags/v1",
+        "tags/v1",
+        "origin/main",
+        "HEAD",
+        "feature@{1}",
+    ),
+)
+def test_publish_target_project_issue_worktree_pr_unsafe_base_branch_blocks_before_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    base_branch: str,
+) -> None:
+    target_root = tmp_path / "lumenflow"
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=_target_project_tree(target_root)
+    ), mock.patch.object(runner, "run_command") as run:
+        report = runner.publish_target_project_issue_worktree_pr(
+            _publish_target_project_issue_worktree_body(
+                base_branch=base_branch,
+                base_sha="a" * 40,
+            )
+        )
+
+    assert report.startswith("NEEDS_OPERATOR:")
+    assert "reason=missing_or_invalid_base_branch" in report
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("command_kwargs", "reason"),
+    (
+        ({"fetch_base_code": 128}, "fetch_base_failed"),
+        ({"fetched_base_sha": "b" * 40}, "base_sha_mismatch"),
+        ({"ancestor_code": 1}, "source_not_derived_from_exact_base"),
+        (
+            {"exact_base_changed_files": ("README.md", "secrets.env")},
+            "exact_base_changed_files_outside_allowlist",
+        ),
+    ),
+)
+def test_publish_target_project_issue_worktree_pr_exact_base_checks_block_before_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command_kwargs: dict[str, object],
+    reason: str,
+) -> None:
+    target_root = tmp_path / "lumenflow"
+    base_sha = "a" * 40
+    issue_command_kwargs = {
+        "fetched_base_sha": base_sha,
+        **command_kwargs,
+    }
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    worktree_path = _prepare_issue_publish_worktree(target_root)
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=_target_project_tree(target_root)
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            repository="alanua/LumenFlow",
+            remote_url="https://github.com/alanua/LumenFlow.git",
+            changed_files=("README.md",),
+            commit_message="Publish target project issue #123 worktree",
+            **issue_command_kwargs,
+        ),
+    ) as run:
+        report = runner.publish_target_project_issue_worktree_pr(
+            _publish_target_project_issue_worktree_body(base_sha=base_sha)
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("BLOCKED:")
+    assert f"reason={reason}" in report
+    assert all(command[:2] != ["git", "add"] for command in commands)
+    assert all(command[:2] != ["git", "push"] for command in commands)
+    assert all(command[:3] != ["gh", "pr", "create"] for command in commands)
+
+
+@pytest.mark.parametrize(
+    ("existing_kwargs", "reason"),
+    (
+        ({"existing_pr_base_branch": "develop"}, "existing_pr_base_mismatch"),
+        ({"existing_pr_base_sha": "b" * 40}, "existing_pr_base_sha_mismatch"),
+    ),
+)
+def test_publish_target_project_issue_worktree_pr_existing_pr_wrong_base_blocks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    existing_kwargs: dict[str, object],
+    reason: str,
+) -> None:
+    target_root = tmp_path / "lumenflow"
+    base_sha = "a" * 40
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    worktree_path = _prepare_issue_publish_worktree(target_root)
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=_target_project_tree(target_root)
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            repository="alanua/LumenFlow",
+            remote_url="https://github.com/alanua/LumenFlow.git",
+            changed_files=("README.md",),
+            fetched_base_sha=base_sha,
+            existing_pr_url="https://github.com/alanua/LumenFlow/pull/55",
+            commit_message="Publish target project issue #123 worktree",
+            **existing_kwargs,
+        ),
+    ) as run:
+        report = runner.publish_target_project_issue_worktree_pr(
+            _publish_target_project_issue_worktree_body(base_sha=base_sha)
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("BLOCKED:")
+    assert f"reason={reason}" in report
+    assert all(command[:2] != ["git", "add"] for command in commands)
+    assert all(command[:2] != ["git", "push"] for command in commands)
+
+
+@pytest.mark.parametrize(
+    ("command_kwargs", "reason"),
+    (
+        ({"post_push_pr_base_branch": "develop"}, "post_push_pr_base_mismatch"),
+        ({"post_push_pr_base_sha": "b" * 40}, "post_push_pr_base_sha_mismatch"),
+    ),
+)
+def test_publish_target_project_issue_worktree_pr_post_push_wrong_base_blocks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command_kwargs: dict[str, object],
+    reason: str,
+) -> None:
+    target_root = tmp_path / "lumenflow"
+    base_sha = "a" * 40
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    worktree_path = _prepare_issue_publish_worktree(target_root)
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=_target_project_tree(target_root)
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            repository="alanua/LumenFlow",
+            remote_url="https://github.com/alanua/LumenFlow.git",
+            changed_files=("README.md",),
+            fetched_base_sha=base_sha,
+            commit_message="Publish target project issue #123 worktree",
+            **command_kwargs,
+        ),
+    ):
+        report = runner.publish_target_project_issue_worktree_pr(
+            _publish_target_project_issue_worktree_body(base_sha=base_sha)
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert f"reason={reason}" in report
+    assert "step=push_expected_branch status=done" in report
+    assert "step=post_push_read_pr_metadata status=done" not in report
 
 
 def test_publish_target_project_issue_worktree_pr_rejects_issue_path_input(
