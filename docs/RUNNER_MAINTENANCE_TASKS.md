@@ -1048,6 +1048,8 @@ Target Project: lumenflow
 Target Repository: alanua/LumenFlow
 Source Issue: 1004
 Base Branch: main
+# Optional for main, required for any non-main base.
+Base SHA: <40-character verified base commit SHA>
 Output Branch: runner/issue-1004
 Draft PR: true
 Allowed Files:
@@ -1070,15 +1072,31 @@ It may only:
    `<registered target_project worktree_root>/issue-{Source Issue}`.
 3. Reject issue-provided source paths, absolute paths, traversal, mismatched
    project/repository metadata, private repositories, and disabled projects.
-4. Validate current branch, origin remote, base branch, output branch, draft
-   status, changed tracked files, and allowed untracked files before publishing.
+4. Validate current branch, origin remote, base branch, optional base SHA,
+   output branch, draft status, changed tracked files, and allowed untracked
+   files before publishing. Missing `Base Branch` still means `main`; `main`
+   may include a matching `Base SHA`, while any non-main base branch requires
+   an exact 40-character `Base SHA`.
 5. Ignore only local `.codex/` untracked runtime artifacts.
-6. Run `git diff --check`, stage only validated files, commit with the
+6. Validate target-project base branches with the strict safe remote-branch
+   rules: no `refs/`, `origin/`, `tags/`, traversal, refspecs, option-like
+   values, whitespace, shell metacharacters, or ambiguous refs.
+7. Fetch only
+   `refs/heads/<Base Branch>:refs/remotes/origin/<Base Branch>` from the
+   verified target repository, require the fetched SHA to match `Base SHA` when
+   supplied, and require the retained issue worktree `HEAD` to descend from
+   that exact fetched base.
+8. Compare committed publishable branch changes and run diff checks against
+   the verified exact base SHA, not an unverified local branch name.
+9. Run `git diff --check`, stage only validated files, commit with the
    deterministic target-project publish message, push only the exact expected
-   branch ref, and create only a draft PR against `main`.
-7. Reuse an existing open PR for the same head branch instead of creating a
-   duplicate.
-8. Never merge, force-push, deploy, restart services, read secrets, execute
+   branch ref, and create only a draft PR against the verified `Base Branch`.
+10. Reuse an existing open draft PR for the same head branch only when its base
+   branch, base SHA, head branch, and source repository match the verified
+   request.
+11. After creating a PR, verify the PR base branch, base SHA, head branch, head
+   SHA, draft state, and source repository before reporting `DONE`.
+12. Never merge, force-push, deploy, restart services, read secrets, execute
    issue-provided commands, use broad `git add`, or support private repositories.
 
 It reports only public-safe route identity such as `target_project`,
