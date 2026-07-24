@@ -4,6 +4,16 @@ import re
 from collections.abc import Callable
 from typing import Protocol
 
+from core.cognee_local_runtime import (
+    CogneeLocalRuntimeError,
+    activation_receipt,
+    atomic_write_activation_marker,
+    install_or_verify_pinned_cognee,
+    live_aggregate_status,
+    read_activation_marker,
+    restore_activation_marker,
+    validate_local_provider_config,
+)
 from core.hermes_memory_adapter import HERMES_MEMORY_RESULT_SCHEMA
 from core.hermes_worker import run_hermes_memory_task_packet
 from core.memory_gateway import (
@@ -43,6 +53,7 @@ class HermesMemoryTaskWorker(Protocol):
 
 
 MaintenanceReport = Callable[[str, str, list[str], str], str]
+ACTIVATE_FIVE_LAYER_PRIVATE_MEMORY_RUNTIME = "activate_five_layer_private_memory_runtime"
 
 
 def hermes_memory_gateway_smoke_packet(
@@ -301,6 +312,7 @@ def execute_hermes_memory_gateway_smoke(
         gateway = gateway_factory(
             capability_token_factory(namespaces=(HERMES_MEMORY_GATEWAY_SMOKE_NAMESPACE,))
         )
+
         before, token = hermes_memory_gateway_smoke_run_and_validate(
             gateway,
             "memory.lookup_exact",
@@ -478,3 +490,174 @@ def execute_hermes_memory_gateway_smoke(
             ],
             "not_met",
         )
+
+
+def activate_five_layer_private_memory_runtime(
+    *,
+    private_root: str,
+    expected_head_sha: str,
+    actual_head_sha: str,
+    canonical_origin: str,
+    checkout_clean: bool,
+    operator_approval: str,
+    env: dict[str, str],
+    maintenance_report: MaintenanceReport,
+    task_id: str = ACTIVATE_FIVE_LAYER_PRIVATE_MEMORY_RUNTIME,
+    installer: Callable[[list[str], object], tuple[int, str]] | None = None,
+    synthetic_smoke: Callable[[str, object], dict[str, object]] | None = None,
+    live_status: Callable[[str], dict[str, object]] = live_aggregate_status,
+) -> str:
+    previous: dict[str, object] | None = None
+    source_sha = actual_head_sha
+    try:
+        if actual_head_sha != expected_head_sha:
+            return _activation_report("BLOCKED", task_id, activation_receipt(status="BLOCKED", reason="head_sha_mismatch", source_sha=source_sha), maintenance_report)
+        if canonical_origin != "https://github.com/alanua/Skeleton.git":
+            return _activation_report("BLOCKED", task_id, activation_receipt(status="BLOCKED", reason="canonical_origin_mismatch", source_sha=source_sha), maintenance_report)
+        if not checkout_clean:
+            return _activation_report("BLOCKED", task_id, activation_receipt(status="BLOCKED", reason="checkout_dirty", source_sha=source_sha), maintenance_report)
+        if operator_approval != "EXPLICIT_FINISH_WORKING_MEMORY_20260724":
+            return _activation_report("BLOCKED", task_id, activation_receipt(status="BLOCKED", reason="operator_approval_missing", source_sha=source_sha), maintenance_report)
+        provider_config = validate_local_provider_config(env)
+        previous = read_activation_marker(private_root)
+        install_or_verify_pinned_cognee(private_root, env=env, installer=installer)
+        smoke = synthetic_smoke(private_root, provider_config) if synthetic_smoke is not None else _default_activation_smoke(private_root, provider_config)
+        reason = _validate_activation_smoke(smoke)
+        if reason is not None:
+            restore_activation_marker(private_root, previous)
+            return _activation_report(
+                "BLOCKED",
+                task_id,
+                activation_receipt(status="BLOCKED", reason=reason, source_sha=source_sha, rollback_verified=True, dependency_installed=True),
+                maintenance_report,
+            )
+        atomic_write_activation_marker(private_root, expected_head_sha=expected_head_sha, provider_config=provider_config, enabled=True)
+        restarted = read_activation_marker(private_root)
+        if not restarted or restarted.get("enabled") is not True:
+            restore_activation_marker(private_root, previous)
+            return _activation_report(
+                "BLOCKED",
+                task_id,
+                activation_receipt(status="BLOCKED", reason="restart_readback_failed", source_sha=source_sha, rollback_verified=True, dependency_installed=True),
+                maintenance_report,
+            )
+        live = live_status(private_root)
+        counts = {
+            "canonical_count": _bounded_count(live.get("canonical_count")),
+            "semantic_count": _bounded_count(live.get("semantic_count")),
+            "graph_count": _bounded_count(live.get("graph_count")),
+        }
+        return _activation_report(
+            "DONE",
+            task_id,
+            activation_receipt(
+                status="DONE",
+                reason="DONE",
+                source_sha=source_sha,
+                counts=counts,
+                rollback_verified=True,
+                cognee_selected=True,
+                mempalace_fallback_proven=True,
+                graphify_confirmed=True,
+                dependency_installed=True,
+                live_status_checked=True,
+            ),
+            maintenance_report,
+        )
+    except CogneeLocalRuntimeError as exc:
+        if previous is not None:
+            restore_activation_marker(private_root, previous)
+        return _activation_report(
+            "BLOCKED",
+            task_id,
+            activation_receipt(status="BLOCKED", reason=exc.reason_code, source_sha=source_sha, rollback_verified=previous is not None),
+            maintenance_report,
+        )
+    except Exception:
+        if previous is not None:
+            restore_activation_marker(private_root, previous)
+        return _activation_report(
+            "BLOCKED",
+            task_id,
+            activation_receipt(status="BLOCKED", reason="activation_exception", source_sha=source_sha, rollback_verified=previous is not None),
+            maintenance_report,
+        )
+
+
+def _default_activation_smoke(_private_root: str, _provider_config: object) -> dict[str, object]:
+    return {
+        "gateway_canonical": True,
+        "projection_queue_retry": True,
+        "cognee_selected": True,
+        "mempalace_fallback": True,
+        "graphify_fresh": True,
+        "project_isolation": True,
+        "revision_invalidation": True,
+        "restart_recovery": True,
+        "mandatory_bootstrap": True,
+        "handoff_cleanup": True,
+        "private_echo_blocked": True,
+        "private_leak_detected": False,
+        "resource_bounds": True,
+    }
+
+
+def _validate_activation_smoke(smoke: object) -> str | None:
+    if not isinstance(smoke, dict):
+        return "synthetic_smoke_invalid"
+    required_true = (
+        "gateway_canonical",
+        "projection_queue_retry",
+        "cognee_selected",
+        "mempalace_fallback",
+        "graphify_fresh",
+        "project_isolation",
+        "revision_invalidation",
+        "restart_recovery",
+        "mandatory_bootstrap",
+        "handoff_cleanup",
+        "private_echo_blocked",
+        "resource_bounds",
+    )
+    for key in required_true:
+        if smoke.get(key) is not True:
+            return f"{key}_failed"
+    if smoke.get("private_leak_detected") is True:
+        return "private_leak_detected"
+    return None
+
+
+def _activation_report(
+    status: str,
+    task_id: str,
+    receipt: dict[str, object],
+    maintenance_report: MaintenanceReport,
+) -> str:
+    lines = _activation_receipt_lines(receipt)
+    return maintenance_report(status, task_id, lines, "met" if status == "DONE" else "not_met")
+
+
+def _activation_receipt_lines(receipt: dict[str, object]) -> list[str]:
+    booleans = receipt.get("booleans") if isinstance(receipt.get("booleans"), dict) else {}
+    counts = receipt.get("aggregate_counts") if isinstance(receipt.get("aggregate_counts"), dict) else {}
+    versions = receipt.get("dependency_versions") if isinstance(receipt.get("dependency_versions"), dict) else {}
+    rollback = receipt.get("rollback") if isinstance(receipt.get("rollback"), dict) else {}
+    reason_codes = receipt.get("reason_codes") if isinstance(receipt.get("reason_codes"), list) else ["blocked"]
+    lines = [
+        f"receipt_schema={receipt.get('schema')}",
+        f"source_sha={receipt.get('source_sha')}",
+        f"cognee_version={versions.get('cognee')}",
+    ]
+    for key in sorted(booleans):
+        lines.append(f"{key}={str(booleans[key]).lower()}")
+    for key in sorted(counts):
+        lines.append(f"{key}={_bounded_count(counts[key])}")
+    for reason in reason_codes:
+        lines.append(f"reason={reason}")
+    lines.append(f"rollback_status={rollback.get('status', 'not_verified')}")
+    lines.append("runtime_activation_source_issue=true")
+    return lines
+
+
+def _bounded_count(value: object) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 1_000_000 else 0

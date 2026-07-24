@@ -4524,6 +4524,35 @@ def test_mempalace_synthetic_runtime_smoke_task_id_allowlisted() -> None:
     assert runner.MEMPALACE_SYNTHETIC_RUNTIME_SMOKE in runner.RUNTIME_MAINTENANCE_TASK_IDS
 
 
+def test_five_layer_activation_task_is_allowlisted_and_dispatched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(runner.RUNNER_PRIVATE_MEMORY_ROOT_ENV, str(tmp_path))
+    body = _maintenance_issue(
+        runner.ACTIVATE_FIVE_LAYER_PRIVATE_MEMORY_RUNTIME,
+        metadata="\n".join(
+            (
+                f"Expected Runtime HEAD: {HEAD_SHA}",
+                "Operator Approval: EXPLICIT_FINISH_WORKING_MEMORY_20260724",
+            )
+        ),
+    )["body"]
+
+    with mock.patch.object(runner, "_git_output", side_effect=(HEAD_SHA, "https://github.com/alanua/Skeleton.git", "")), mock.patch.object(
+        runner,
+        "_execute_activate_five_layer_private_memory_runtime",
+        return_value="DONE: ok\nmaintenance_task_id=activate_five_layer_private_memory_runtime\nsuccess_criteria=met",
+    ) as activate:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.ACTIVATE_FIVE_LAYER_PRIVATE_MEMORY_RUNTIME,
+            str(runner.ROOT),
+            str(body),
+        )
+
+    assert runner.ACTIVATE_FIVE_LAYER_PRIVATE_MEMORY_RUNTIME in runner.RUNTIME_MAINTENANCE_TASK_IDS
+    assert report.startswith("DONE:")
+    assert activate.call_args.kwargs["expected_head_sha"] == HEAD_SHA
+    assert activate.call_args.kwargs["checkout_clean"] is True
+
+
 def test_mempalace_synthetic_runtime_smoke_rejects_issue_controlled_input(
     tmp_path: Path,
 ) -> None:

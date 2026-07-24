@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from core.cognee_projection_adapter import CogneeProjectionAdapter
+from core.cognee_local_runtime import read_activation_marker
 from core.memory_gateway import MEMORY_GATEWAY_REQUEST_SCHEMA, MemoryGateway, capability_token
 from core.memory_gateway_policy import MemoryGatewayPolicyError
 from core.memory_gateway_storage import PrivateMemoryGatewayStorage
@@ -93,6 +94,9 @@ class MemoryBootstrap:
         root = request.get("private_root")
         if not isinstance(root, str) or not root:
             raise MemoryBootstrapError("PRIVATE_MEMORY_STORAGE_REQUIRED", "private memory root is required")
+        marker = read_activation_marker(root)
+        if not marker or marker.get("enabled") is not True or marker.get("mandatory_runner_bootstrap") is not True:
+            raise MemoryBootstrapError("PRIVATE_MEMORY_NOT_READY", "private memory activation marker is required")
         scope = resolve_exact_memory_scope(request.get("scope") if isinstance(request.get("scope"), Mapping) else {})
         refs = request.get("canonical_refs")
         if not isinstance(refs, list) or not refs or not all(isinstance(ref, str) for ref in refs):
@@ -422,7 +426,10 @@ def _source_value_hash(result: Mapping[str, object]) -> object:
 
 
 def _write_private_context_file(context: Mapping[str, object], config: MemoryBootstrapConfig) -> Path:
-    fd, name = tempfile.mkstemp(prefix="skeleton-private-context-", suffix=".json")
+    handoff_dir = config.private_root / "handoff"
+    handoff_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    handoff_dir.chmod(0o700)
+    fd, name = tempfile.mkstemp(prefix="skeleton-private-context-", suffix=".json", dir=str(handoff_dir))
     path = Path(name).resolve()
     try:
         _assert_outside(path, config.repository_root)

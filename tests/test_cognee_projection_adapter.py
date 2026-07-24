@@ -12,6 +12,11 @@ from core.cognee_projection_adapter import (
     CogneeProjectionAdapter,
     DisposableInMemoryCogneeBackend,
 )
+from core.cognee_local_runtime import (
+    CogneeLocalRuntimeError,
+    CogneePackageFacade,
+    validate_local_provider_config,
+)
 from core.semantic_memory_projection import (
     COGNEE_DEPENDENCY_UNAVAILABLE,
     COGNEE_RUNTIME_NOT_IMPLEMENTED,
@@ -332,6 +337,84 @@ def test_dependency_present_runtime_enabled_package_backend_fails_closed(monkeyp
     with pytest.raises(SemanticProjectionError) as forget_exc:
         adapter.forget_projection(project_id=PROJECT_ID, dataset_id=DATASET_ID)
     assert forget_exc.value.reason_code == COGNEE_RUNTIME_NOT_IMPLEMENTED
+
+
+def test_local_provider_config_accepts_loopback_and_rejects_cloud_credentials() -> None:
+    env = {
+        "SKELETON_COGNEE_LLM_ENDPOINT": "http://127.0.0.1:11434",
+        "SKELETON_COGNEE_LLM_MODEL": "llama-local",
+        "SKELETON_COGNEE_EMBEDDING_ENDPOINT": "http://localhost:11435",
+        "SKELETON_COGNEE_EMBEDDING_MODEL": "embed-local",
+        "SKELETON_COGNEE_TELEMETRY": "0",
+    }
+
+    assert validate_local_provider_config(env).llm_model == "llama-local"
+
+    with pytest.raises(CogneeLocalRuntimeError) as cloud:
+        validate_local_provider_config({**env, "SKELETON_COGNEE_LLM_ENDPOINT": "https://api.openai.com/v1"})
+    assert cloud.value.reason_code == "non_loopback_provider_endpoint"
+
+    with pytest.raises(CogneeLocalRuntimeError) as credential:
+        validate_local_provider_config({**env, "OPENAI_API_KEY": "sk-private"})
+    assert credential.value.reason_code == "inherited_model_credentials_rejected"
+
+    with pytest.raises(CogneeLocalRuntimeError) as telemetry:
+        validate_local_provider_config({**env, "COGNEE_TELEMETRY": "true"})
+    assert telemetry.value.reason_code == "telemetry_rejected"
+
+
+def test_package_backend_uses_injected_pinned_facade_with_scoped_revision_provenance(tmp_path: Path) -> None:
+    class FakeCognee:
+        __version__ = "1.4.0"
+
+        def __init__(self) -> None:
+            self.project_calls = 0
+            self.recall_calls = 0
+
+        def add(self, **_kwargs: object) -> None:
+            self.project_calls += 1
+
+        def search(self, **_kwargs: object) -> list[object]:
+            self.recall_calls += 1
+            return []
+
+    env = {
+        "SKELETON_COGNEE_LLM_ENDPOINT": "http://127.0.0.1:11434",
+        "SKELETON_COGNEE_LLM_MODEL": "llama-local",
+        "SKELETON_COGNEE_EMBEDDING_ENDPOINT": "http://[::1]:11435",
+        "SKELETON_COGNEE_EMBEDDING_MODEL": "embed-local",
+    }
+    fake = FakeCognee()
+    backend = CogneePackageBackend(
+        private_root=tmp_path,
+        runtime_enabled=True,
+        facade=CogneePackageFacade(fake),
+        env=env,
+    )
+    adapter = CogneeProjectionAdapter(backend)
+    payload = event("local cognee package boundary")
+
+    adapter.project(payload)
+    adapter.project(payload)
+    response = adapter.recall(recall_request(query="cognee boundary"))
+
+    assert fake.project_calls == 1
+    assert fake.recall_calls == 1
+    assert response["results"][0]["canonical_ref"] == payload["canonical_ref"]
+    assert response["results"][0]["canonical_revision"] == payload["canonical_revision"]
+    assert response["results"][0]["content_hash"] == payload["content_hash"]
+    assert response["results"][0]["metadata"]["source_kind"] == "cognee"
+
+
+def test_real_cognee_package_facade_is_version_gated_when_available() -> None:
+    cognee = pytest.importorskip("cognee")
+    version = str(getattr(cognee, "__version__", ""))
+    if version != "1.4.0":
+        pytest.skip(f"cognee {version or 'unknown'} is not the pinned compatibility target")
+
+    facade = CogneePackageFacade(cognee)
+
+    assert facade.version == "1.4.0"
 
 
 def test_improve_absent_and_local_forget_does_not_call_gateway_or_sqlite() -> None:

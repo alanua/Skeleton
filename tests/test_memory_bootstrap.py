@@ -8,12 +8,14 @@ from pathlib import Path
 import pytest
 
 from core.cognee_projection_adapter import CogneeProjectionAdapter, DisposableInMemoryCogneeBackend
+from core.cognee_local_runtime import CogneeProviderConfig, atomic_write_activation_marker
 from core.memory_bootstrap import (
     MEMORY_BOOTSTRAP_REQUEST_SCHEMA,
     PRIVATE_CONTEXT_ENV,
     PRIVATE_CONTEXT_MARKER,
     MemoryBootstrap,
     reset_bootstrap_adapter_cache,
+    MemoryBootstrapError,
 )
 from core.memory_scope_resolver import task_transition_hash
 from core.private_memory_stack import PrivateMemoryStack
@@ -24,6 +26,7 @@ _MISSING_PROVENANCE = object()
 
 
 def _request(root: Path, canonical_ref: str, task: str = "exact task body") -> dict[str, object]:
+    _activate(root)
     return {
         "schema": MEMORY_BOOTSTRAP_REQUEST_SCHEMA,
         "mandatory": True,
@@ -40,6 +43,19 @@ def _request(root: Path, canonical_ref: str, task: str = "exact task body") -> d
         "repository_root": str(Path.cwd()),
         "worktree_root": str(Path.cwd()),
     }
+
+
+def _activate(root: Path) -> None:
+    atomic_write_activation_marker(
+        root,
+        expected_head_sha="1" * 40,
+        provider_config=CogneeProviderConfig(
+            llm_endpoint="http://127.0.0.1:11434",
+            llm_model="synthetic-llm",
+            embedding_endpoint="http://localhost:11435",
+            embedding_model="synthetic-embed",
+        ),
+    )
 
 
 def _canonical_source_attribution(exact: dict[str, object]) -> dict[str, object]:
@@ -414,3 +430,17 @@ def test_bootstrap_private_file_deleted_after_nonzero_and_exception(
 
     assert receipt["status"] == "BLOCKED"
     assert not seen["path"].exists()
+
+
+def test_mandatory_bootstrap_requires_activation_marker(tmp_path: Path) -> None:
+    stack = PrivateMemoryStack(tmp_path)
+    stack.init(import_manifest=False)
+    stack.put(namespace="skeleton.notes", fact_id="no_marker", value={"summary": "marker"})
+    exact = stack.get(namespace="skeleton.notes", fact_id="no_marker")
+    request = _request(tmp_path, str(exact["canonical_ref"]))
+    (tmp_path / "five_layer_private_memory_activation.json").unlink()
+
+    with pytest.raises(MemoryBootstrapError) as excinfo:
+        MemoryBootstrap.from_request(request)
+
+    assert excinfo.value.reason_code == "PRIVATE_MEMORY_NOT_READY"

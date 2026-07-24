@@ -112,6 +112,7 @@ from core.memory_bootstrap import (
 )
 from core.memory_scope_resolver import MemoryScopeResolutionError, task_transition_hash
 from core.runner_private_memory_executor import (
+    ACTIVATE_FIVE_LAYER_PRIVATE_MEMORY_RUNTIME,
     HERMES_MEMORY_GATEWAY_SMOKE_LOOKUP_KEY,
     HERMES_MEMORY_GATEWAY_SMOKE_NAMESPACE,
     HERMES_MEMORY_GATEWAY_SMOKE_OPERATIONS,
@@ -120,6 +121,7 @@ from core.runner_private_memory_executor import (
     MEMORY_GATEWAY_RESPONSE_SCHEMA,
     MemoryGateway,
     capability_token,
+    activate_five_layer_private_memory_runtime as _execute_activate_five_layer_private_memory_runtime,
     execute_hermes_memory_gateway_smoke as _execute_hermes_memory_gateway_smoke,
     hermes_memory_gateway_smoke_bounded_count as _executor_hermes_memory_gateway_smoke_bounded_count,
     hermes_memory_gateway_smoke_bounded_ref as _executor_hermes_memory_gateway_smoke_bounded_ref,
@@ -253,6 +255,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         LOOP_ENGINE_PACKET,
         MEMPALACE_SYNTHETIC_RUNTIME_SMOKE,
         PRIVATE_MEMORY_HEALTHCHECK,
+        ACTIVATE_FIVE_LAYER_PRIVATE_MEMORY_RUNTIME,
         HERMES_PRIVATE_MEMORY_BRIDGE_CHECK,
         PRIVATE_MEMORY_PHASE_A_INVENTORY,
         INSTALL_GRAPHIFY_RUNTIME,
@@ -12073,6 +12076,34 @@ def hermes_memory_gateway_smoke() -> str:
     )
 
 
+def activate_five_layer_private_memory_runtime(body: str) -> str:
+    task_id = ACTIVATE_FIVE_LAYER_PRIVATE_MEMORY_RUNTIME
+    private_root = os.environ.get(RUNNER_PRIVATE_MEMORY_ROOT_ENV, "")
+    expected_head = _body_field(body, "Expected Runtime HEAD") or _git_output(["git", "rev-parse", "HEAD"], ROOT)
+    actual_head = _git_output(["git", "rev-parse", "HEAD"], ROOT)
+    origin = _git_output(["git", "remote", "get-url", "origin"], ROOT)
+    clean = _git_output(["git", "status", "--porcelain"], ROOT) == ""
+    approval = _body_field(body, "Operator Approval") or os.environ.get("SKELETON_PRIVATE_MEMORY_OPERATOR_APPROVAL", "")
+    if not private_root:
+        return _maintenance_report("BLOCKED", task_id, ["reason=private_root_missing"], "not_met")
+    return _execute_activate_five_layer_private_memory_runtime(
+        private_root=private_root,
+        expected_head_sha=str(expected_head),
+        actual_head_sha=str(actual_head),
+        canonical_origin=str(origin),
+        checkout_clean=clean,
+        operator_approval=str(approval),
+        env=dict(os.environ),
+        maintenance_report=_maintenance_report,
+        task_id=task_id,
+    )
+
+
+def _git_output(command: list[str], cwd: Path) -> str:
+    code, output = run_command(command, cwd=cwd)
+    return output.strip() if code == 0 else ""
+
+
 def _mempalace_runtime_smoke_reject_issue_input(
     body: str,
 ) -> str | None:
@@ -12221,6 +12252,8 @@ def dispatch_runtime_maintenance_task(
             return mempalace_synthetic_runtime_smoke(body)
         if task_id == PRIVATE_MEMORY_HEALTHCHECK:
             return private_memory_healthcheck(body)
+        if task_id == ACTIVATE_FIVE_LAYER_PRIVATE_MEMORY_RUNTIME:
+            return activate_five_layer_private_memory_runtime(body)
         if task_id == HERMES_PRIVATE_MEMORY_BRIDGE_CHECK:
             return hermes_private_memory_bridge_check()
         if task_id == PRIVATE_MEMORY_PHASE_A_INVENTORY:

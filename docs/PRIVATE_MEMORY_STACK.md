@@ -1,6 +1,6 @@
 # Private Memory Stack
 
-Skeleton private memory is a local-only stack for an operator server. SQLite is the only authority. Graphify and MemPalace are derived local indexes rebuilt from active SQLite facts.
+Skeleton private memory is a local-only stack for an operator server. SQLite is the only authority. Cognee, Graphify and MemPalace are derived local indexes rebuilt from active SQLite facts.
 
 Aufmass is out of scope.
 
@@ -53,7 +53,28 @@ After every successful canonical put or delete, both derived indexes are rebuilt
 
 If an index rebuild fails after a canonical mutation is committed, canonical SQLite remains the sole authority and the CLI reports a degraded receipt with the affected derived index names. Retry uses the gateway idempotency record and canonical transaction reference, so a crash after canonical commit cannot write a second mutation or advance the revision twice. Rollback for pre-commit canonical failures uses a logical SQLite backup made through SQLite's backup API instead of raw database bytes and removes stale `-wal` and `-shm` sidecars before reporting the mutation as blocked.
 
-Graphify and MemPalace never write canonical SQLite directly.
+Cognee is the primary semantic projection after activation. It uses the pinned optional `cognee==1.4.0` package through `core.cognee_local_runtime` and stores package data, cache, config, projection ledger and activation marker only under the configured private runtime root with private permissions. Cognee projections are non-authoritative, exact project+dataset scoped, idempotent by scope, canonical ref, canonical revision and content hash, and must carry canonical ref, revision, content hash and source-kind provenance before bootstrap accepts them. Cognee cannot promote canonical facts, run `improve`, recall across projects, bulk-import private data or delete canonical SQLite.
+
+MemPalace remains the explicit semantic fallback. Bootstrap can fall back to MemPalace when Cognee is unavailable or stale, but activation fails unless the real Cognee package path passes the synthetic Cognee smoke and a separate injected Cognee-unavailable/stale smoke proves the MemPalace fallback. Graphify remains an independent deterministic graph projection and bootstrap confirms revision and provenance before using graph results.
+
+Graphify, Cognee and MemPalace never write canonical SQLite directly.
+
+## Runtime Activation
+
+Source publication does not activate the runtime, install packages on the live host, mutate private data, restart services or call external model APIs. Runtime activation is a separate maintenance issue after merge. The maintenance handler is `activate_five_layer_private_memory_runtime`.
+
+Required maintenance issue body after merge:
+
+```text
+Runtime Maintenance Task: true
+Maintenance Task ID: activate_five_layer_private_memory_runtime
+Expected Runtime HEAD: <exact merged source SHA>
+Operator Approval: EXPLICIT_FINISH_WORKING_MEMORY_20260724
+```
+
+Before any model or package operation, the handler requires explicit local LLM and embedding configuration with loopback-only endpoints and rejects cloud defaults, telemetry and inherited model credentials. The dependency install step may contact the package index only inside the isolated private runtime environment. Projection, recall and smoke phases must deny non-loopback network.
+
+Activation uses a disposable synthetic private root and exact synthetic scope to prove canonical gateway put/read/list, durable projection queue retry, real Cognee health/project/recall, MemPalace fallback, Graphify freshness, project isolation, revision invalidation, restart recovery, mandatory bootstrap, `0600` handoff cleanup and private-output echo blocking. The real activation marker is written atomically only after all checks pass. On any failure after preflight, the previous marker state is restored and the public receipt reports only source SHA, pinned versions, booleans, aggregate counts, resource totals, reason codes and rollback status.
 
 ## Status
 
