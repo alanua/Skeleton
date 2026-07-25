@@ -25,12 +25,20 @@ from core.cognee_projection_adapter import (
     CogneeProjectionAdapter,
     DisposableInMemoryCogneeBackend,
 )
+from core.cognee_projection_outbox import (
+    drain_projection_outbox,
+    projection_outbox_status,
+)
 from core.memory_bootstrap import (
     MEMORY_BOOTSTRAP_REQUEST_SCHEMA,
     PRIVATE_CONTEXT_ENV,
     PRIVATE_CONTEXT_MARKER,
     MemoryBootstrap,
     reset_bootstrap_adapter_cache,
+)
+from core.memory_gateway_storage import (
+    PRIVATE_MEMORY_GATEWAY_MUTATION_SCHEMA,
+    PrivateMemoryGatewayStorage,
 )
 from core.memory_scope_resolver import task_transition_hash
 from core.private_memory_stack import PrivateMemoryStack
@@ -39,10 +47,28 @@ from core.semantic_memory_projection import (
     SEMANTIC_PROJECTION_EVENT_SCHEMA,
     SEMANTIC_RECALL_REQUEST_SCHEMA,
     SemanticProjectionError,
+    SemanticProjectionEvent,
+    SemanticScope,
     projection_text_hash,
 )
 
 APPROVAL = "EXPLICIT_FINISH_WORKING_MEMORY_20260724"
+
+
+class _RecordingProjectionBackend:
+    def __init__(self) -> None:
+        self.events: list[SemanticProjectionEvent] = []
+        self.forget_count = 0
+
+    def project(self, event: SemanticProjectionEvent) -> None:
+        self.events.append(event)
+
+    def forget_projection(self, scope: SemanticScope) -> int:
+        del scope
+        self.forget_count += 1
+        removed = len(self.events)
+        self.events.clear()
+        return removed
 
 
 def _git(*args: str) -> str:
@@ -57,6 +83,26 @@ def _git(*args: str) -> str:
     if completed.returncode != 0:
         raise RuntimeError("git preflight failed")
     return completed.stdout.strip()
+
+
+def _origin_is_skeleton(value: str) -> bool:
+    normalized = value.strip().removesuffix(".git").rstrip("/")
+    return normalized.endswith("github.com/alanua/Skeleton")
+
+
+def _quiet_installer(
+    command: list[str], child_env: Mapping[str, str]
+) -> tuple[int, str]:
+    completed = subprocess.run(
+        command,
+        env=dict(child_env),
+        text=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=600,
+        check=False,
+    )
+    return completed.returncode, ""
 
 
 def _disk_bytes(path: Path) -> int:
@@ -111,6 +157,63 @@ def _event(exact: Mapping[str, object]) -> dict[str, object]:
     }
 
 
+def _durable_outbox_smoke(smoke_root: Path) -> bool:
+    stack = PrivateMemoryStack(smoke_root)
+    stack.init(import_manifest=False)
+    storage = PrivateMemoryGatewayStorage(stack)
+    first = storage.execute_mutation(
+        {
+            "schema": PRIVATE_MEMORY_GATEWAY_MUTATION_SCHEMA,
+            "operation": "put",
+            "project_id": "skeleton",
+            "dataset_id": "activation_outbox_smoke",
+            "fact_namespace": "skeleton.notes",
+            "fact_id": "activation_outbox_probe",
+            "value": {"summary": "synthetic durable outbox probe"},
+            "actor_ref": "activation-smoke",
+            "reason_code": "activation-outbox-smoke",
+            "approval_ref": APPROVAL,
+            "idempotency_key": "activation-outbox-smoke-put",
+        }
+    )
+    duplicate = storage.execute_mutation(
+        {
+            "schema": PRIVATE_MEMORY_GATEWAY_MUTATION_SCHEMA,
+            "operation": "put",
+            "project_id": "skeleton",
+            "dataset_id": "activation_outbox_smoke",
+            "fact_namespace": "skeleton.notes",
+            "fact_id": "activation_outbox_probe",
+            "value": {"summary": "synthetic durable outbox probe"},
+            "actor_ref": "activation-smoke",
+            "reason_code": "activation-outbox-smoke",
+            "approval_ref": APPROVAL,
+            "idempotency_key": "activation-outbox-smoke-put",
+        }
+    )
+    scope = SemanticScope(
+        project_id="skeleton", dataset_id="activation_outbox_smoke"
+    )
+    backend = _RecordingProjectionBackend()
+    drained = drain_projection_outbox(smoke_root, scope, backend)
+    status = projection_outbox_status(smoke_root, scope)
+    exact = stack.get(
+        namespace="skeleton.notes", fact_id="activation_outbox_probe"
+    )
+    return (
+        first.get("status") in {"DONE", "DEGRADED"}
+        and duplicate.get("idempotency_classification") == "DUPLICATE_IDENTICAL"
+        and drained.get("claimed_count") == 1
+        and drained.get("projected_count") == 1
+        and status.get("queued_count") == 0
+        and status.get("processing_count") == 0
+        and status.get("done_count") == 1
+        and len(backend.events) == 1
+        and backend.events[0].canonical_ref == exact.get("canonical_ref")
+        and backend.events[0].content_hash == exact.get("value_hash")
+    )
+
+
 def _real_smoke(
     private_root: Path, env: Mapping[str, str]
 ) -> tuple[dict[str, bool], dict[str, int]]:
@@ -120,7 +223,12 @@ def _real_smoke(
     with tempfile.TemporaryDirectory(prefix="run-", dir=str(smoke_parent)) as name:
         smoke_root = Path(name)
         smoke_root.chmod(0o700)
-        stack = PrivateMemoryStack(smoke_root)
+        outbox_root = smoke_root / "outbox"
+        outbox_root.mkdir(mode=0o700)
+        outbox_root.chmod(0o700)
+        projection_queue_ok = _durable_outbox_smoke(outbox_root)
+
+        stack = PrivateMemoryStack(smoke_root / "stack")
         stack.init(import_manifest=False)
         mutation = stack.put(
             namespace="skeleton.notes",
@@ -209,13 +317,16 @@ def _real_smoke(
         ) -> tuple[int, str]:
             nonlocal private_path
             private_path = Path(child_env[PRIVATE_CONTEXT_ENV])
-            payload = json.loads(private_path.read_text(encoding="utf-8"))
-            captured.update(payload)
+            captured.update(
+                json.loads(private_path.read_text(encoding="utf-8"))
+            )
             return 0, "activation smoke complete"
 
         task = "activation smoke exact task"
         bootstrap_receipt = MemoryBootstrap.from_request(
-            _bootstrap_request(smoke_root, str(exact["canonical_ref"]), task),
+            _bootstrap_request(
+                stack.paths.root, str(exact["canonical_ref"]), task
+            ),
             cognee_adapter_factory=lambda: adapter,
         ).execute(task_body=task, executor=executor)
         semantic = captured.get("semantic")
@@ -244,7 +355,9 @@ def _real_smoke(
 
         fallback_receipt = MemoryBootstrap.from_request(
             _bootstrap_request(
-                smoke_root, str(exact["canonical_ref"]), task + " fallback"
+                stack.paths.root,
+                str(exact["canonical_ref"]),
+                task + " fallback",
             ),
             cognee_adapter_factory=lambda: CogneeProjectionAdapter(
                 DisposableInMemoryCogneeBackend()
@@ -268,12 +381,15 @@ def _real_smoke(
             )
 
         echo_receipt = MemoryBootstrap.from_request(
-            _bootstrap_request(smoke_root, str(exact["canonical_ref"]), task + " echo"),
+            _bootstrap_request(
+                stack.paths.root, str(exact["canonical_ref"]), task + " echo"
+            ),
             cognee_adapter_factory=lambda: adapter,
         ).execute(task_body=task + " echo", executor=echo_executor)
         echo_blocked = (
             echo_receipt.get("status") == "BLOCKED"
-            and echo_receipt.get("reason_codes") == ["PRIVATE_CONTEXT_ECHO_BLOCKED"]
+            and echo_receipt.get("reason_codes")
+            == ["PRIVATE_CONTEXT_ECHO_BLOCKED"]
         )
 
         removed = adapter.forget_projection(
@@ -292,9 +408,11 @@ def _real_smoke(
             "graph_count": int(graph_status.get("relationship_count", 0))
             if isinstance(graph_status, Mapping)
             else 0,
+            "outbox_done_count": 1 if projection_queue_ok else 0,
         }
         booleans = {
             "gateway_canonical": bool(canonical_ok),
+            "projection_queue": bool(projection_queue_ok),
             "cognee_selected": bool(cognee_ok),
             "mempalace_fallback": bool(fallback_ok and mempalace_ok),
             "graphify_fresh": bool(graphify_ok),
@@ -322,8 +440,7 @@ def main() -> int:
         raise SystemExit("head SHA mismatch")
     if _git("status", "--porcelain"):
         raise SystemExit("checkout is dirty")
-    origin = _git("remote", "get-url", "origin")
-    if not origin.endswith("alanua/Skeleton.git"):
+    if not _origin_is_skeleton(_git("remote", "get-url", "origin")):
         raise SystemExit("origin mismatch")
 
     private_root_value = os.environ.get(
@@ -341,7 +458,9 @@ def main() -> int:
     rollback_verified = False
     try:
         provider = validate_local_provider_config(os.environ)
-        install_or_verify_pinned_cognee(private_root, env=os.environ)
+        install_or_verify_pinned_cognee(
+            private_root, env=os.environ, installer=_quiet_installer
+        )
         booleans, counts = _real_smoke(private_root, os.environ)
         failed = [
             key
@@ -368,7 +487,9 @@ def main() -> int:
             )
         rollback_verified = restore_activation_marker(private_root, previous)
         if not rollback_verified:
-            raise CogneeLocalRuntimeError("rollback_failed", "activation rollback failed")
+            raise CogneeLocalRuntimeError(
+                "rollback_failed", "activation rollback failed"
+            )
         atomic_write_activation_marker(
             private_root,
             expected_head_sha=args.expected_sha,
@@ -381,7 +502,9 @@ def main() -> int:
             and live.get("cognee_version") == "1.4.0"
         )
         if not booleans["live_status_checked"]:
-            raise CogneeLocalRuntimeError("live_status_failed", "live status failed")
+            raise CogneeLocalRuntimeError(
+                "live_status_failed", "live status failed"
+            )
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
         disk_delta = max(0, _disk_bytes(private_root) - disk_before)
@@ -417,6 +540,7 @@ def main() -> int:
                 "canonical_count": 0,
                 "semantic_count": 0,
                 "graph_count": 0,
+                "outbox_done_count": 0,
             },
             resource_totals={
                 "elapsed_ms": int((time.monotonic() - start) * 1000),
