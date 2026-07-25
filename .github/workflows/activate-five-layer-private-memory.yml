@@ -1,5 +1,5 @@
 name: Activate Five-Layer Private Memory
-# PR validation synchronization marker; activation remains push-to-main only.
+# PR validation synchronization marker v2; activation remains push-to-main only.
 
 "on":
   pull_request:
