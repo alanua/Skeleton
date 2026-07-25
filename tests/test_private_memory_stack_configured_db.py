@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# Exact-path regression: live configured DB is reused, synthetic roots remain isolated.
+
 import json
 from pathlib import Path
 
