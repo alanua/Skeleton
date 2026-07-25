@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# Synchronize protected Runner validation for PR #1944 (v3).
+# Synchronize protected Runner validation for canonical-root activation fallback.
 
 import json
 from pathlib import Path
@@ -107,11 +107,21 @@ def _runner(
     return 0, _receipt() + "\n", ""
 
 
+def _prepare_explicit_private_root(monkeypatch, tmp_path: Path) -> Path:
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    private_root = tmp_path / "private"
+    private_root.mkdir()
+    (private_root / "canonical.sqlite").write_bytes(b"sqlite-placeholder")
+    monkeypatch.setenv("SKELETON_RUNNER_PRIVATE_MEMORY_ROOT", str(private_root))
+    return checkout
+
+
 def test_activation_executor_returns_public_safe_done(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("SKELETON_RUNNER_PRIVATE_MEMORY_ROOT", str(tmp_path / "private"))
+    checkout = _prepare_explicit_private_root(monkeypatch, tmp_path)
     report = execute_five_layer_memory_activation(
         _body(),
-        workdir=tmp_path,
+        workdir=checkout,
         maintenance_report=_report,
         command_runner=_runner,
     )
@@ -135,7 +145,7 @@ def test_activation_executor_rejects_wrong_approval(tmp_path: Path) -> None:
 
 
 def test_activation_executor_fails_closed_on_receipt_check(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("SKELETON_RUNNER_PRIVATE_MEMORY_ROOT", str(tmp_path / "private"))
+    checkout = _prepare_explicit_private_root(monkeypatch, tmp_path)
 
     def runner(
         command: list[str],
@@ -152,7 +162,7 @@ def test_activation_executor_fails_closed_on_receipt_check(monkeypatch, tmp_path
 
     report = execute_five_layer_memory_activation(
         _body(),
-        workdir=tmp_path,
+        workdir=checkout,
         maintenance_report=_report,
         command_runner=runner,
     )
