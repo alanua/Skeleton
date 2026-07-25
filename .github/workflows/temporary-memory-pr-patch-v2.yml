@@ -1,21 +1,17 @@
 name: Temporary Canonical Memory Root Patch
 
 "on":
-  pull_request:
+  push:
     branches:
       - main
     paths:
-      - core/private_memory_root_resolver.py
-      - core/runner_five_layer_memory_activation.py
-      - tests/test_private_memory_root_resolver.py
-      - tests/test_runner_five_layer_memory_activation.py
+      - .github/workflows/temporary-memory-pr-patch-v2.yml
 
 permissions:
   contents: write
 
 jobs:
   patch:
-    if: github.event.pull_request.number == 1950 && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
