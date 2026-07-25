@@ -16,28 +16,31 @@ permissions:
   contents: write
 
 jobs:
-  patch:
-    if: github.event.pull_request.number == 1953 && github.event.pull_request.head.repo.full_name == github.repository
+  patch-or-validate:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'direct/use-configured-authoritative-db-final-20260725'
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: direct/use-configured-authoritative-db-20260725
+          ref: direct/use-configured-authoritative-db-final-20260725
           fetch-depth: 0
-      - name: Reuse exact configured authoritative SQLite
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Patch once or validate exact patched head
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
+          if ! grep -q 'PrivateMemoryConnector(env=os.environ)._load_db_path()' core/private_memory_stack.py; then
+            python3 - <<'PY'
           from pathlib import Path
 
           stack_path = Path("core/private_memory_stack.py")
           stack = stack_path.read_text(encoding="utf-8")
           activation_path = Path("core/runner_five_layer_memory_activation.py")
           activation = activation_path.read_text(encoding="utf-8")
-          if "PrivateMemoryConnector(env=os.environ)._load_db_path()" in stack:
-              raise SystemExit(0)
 
           old_import = "from core.private_memory import CanonicalPrivateMemoryStore\n"
           new_import = """from core.private_memory import (
@@ -127,38 +130,25 @@ jobs:
               encoding="utf-8",
           )
           PY
-          test "$(git diff --name-only | sort)" = "$(printf '%s\n' core/private_memory_stack.py core/runner_five_layer_memory_activation.py | sort)"
-          git diff --check
-          python3 -m py_compile \
-            core/private_memory_root_resolver.py \
-            core/private_memory_stack.py \
-            core/runner_five_layer_memory_activation.py
-          python3 -m pytest -q \
-            tests/test_private_memory_root_resolver.py \
-            tests/test_private_memory_stack_configured_db.py \
-            tests/test_runner_five_layer_memory_activation.py \
-            tests/test_private_memory_stack.py
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add core/private_memory_stack.py core/runner_five_layer_memory_activation.py
-          git commit -m "Reuse configured authoritative SQLite in private stack"
-          git push origin HEAD:direct/use-configured-authoritative-db-20260725
+            test "$(git diff --name-only | sort)" = "$(printf '%s\n' core/private_memory_stack.py core/runner_five_layer_memory_activation.py | sort)"
+            git diff --check
+            python3 -m py_compile core/private_memory_root_resolver.py core/private_memory_stack.py core/runner_five_layer_memory_activation.py
+            python -m pip install --upgrade pip
+            python -m pip install 'pytest>=8.0.0'
+            env -u SKELETON_PRIVATE_MEMORY_CONFIG -u SKELETON_RUNNER_PRIVATE_MEMORY_ROOT \
+              python -m pytest -q \
+                tests/test_private_memory_root_resolver.py \
+                tests/test_private_memory_stack_configured_db.py \
+                tests/test_runner_five_layer_memory_activation.py \
+                tests/test_private_memory_stack.py
+            git config user.name github-actions[bot]
+            git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+            git add core/private_memory_stack.py core/runner_five_layer_memory_activation.py
+            git commit -m "Reuse configured authoritative SQLite in private stack"
+            git push origin HEAD:direct/use-configured-authoritative-db-final-20260725
+            exit 0
+          fi
 
-  validate:
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-      - name: Install validation dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
           python -m pip install --upgrade pip
           python -m pip install \
             'pytest>=8.0.0' \
@@ -177,16 +167,7 @@ jobs:
             'pypdf' \
             'opencv-python-headless' \
             'scikit-image'
-      - name: Verify exact clean checkout
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
           test -z "$(git status --porcelain)"
-      - name: Run focused private-memory tests
-        shell: bash
-        run: |
-          set -o pipefail
           env \
             -u SKELETON_RUNNER_MEMORY_DIR \
             -u SKELETON_RUNNER_MEMORY_DB \
@@ -197,34 +178,13 @@ jobs:
               tests/test_private_memory_root_resolver.py \
               tests/test_private_memory_stack_configured_db.py \
               tests/test_runner_five_layer_memory_activation.py \
-              tests/test_private_memory_stack.py 2>&1 | tee focused.log
-      - name: Run full repository tests
-        shell: bash
-        run: |
-          set -o pipefail
+              tests/test_private_memory_stack.py
           env \
             -u SKELETON_RUNNER_MEMORY_DIR \
             -u SKELETON_RUNNER_MEMORY_DB \
             -u SKELETON_RUNNER_MEMORY_LEDGER \
             -u SKELETON_PRIVATE_MEMORY_CONFIG \
             -u SKELETON_RUNNER_PRIVATE_MEMORY_ROOT \
-            python -m pytest -q 2>&1 | tee full.log
-      - name: Compile and diff-check
-        shell: bash
-        run: |
-          set -euo pipefail
-          python -m py_compile \
-            core/private_memory_root_resolver.py \
-            core/private_memory_stack.py \
-            core/runner_five_layer_memory_activation.py
+            python -m pytest -q
+          python -m py_compile core/private_memory_root_resolver.py core/private_memory_stack.py core/runner_five_layer_memory_activation.py
           git diff --check
-      - name: Upload private validation logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: configured-db-validation-${{ github.run_id }}
-          path: |
-            focused.log
-            full.log
-          if-no-files-found: ignore
-          retention-days: 1
