@@ -6,7 +6,6 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Mapping, Protocol
 
-
 SEMANTIC_PROJECTION_EVENT_SCHEMA = "skeleton.semantic_memory.projection_event.v1"
 SEMANTIC_RECALL_REQUEST_SCHEMA = "skeleton.semantic_memory.recall_request.v1"
 SEMANTIC_RECALL_RESPONSE_SCHEMA = "skeleton.semantic_memory.recall_response.v1"
@@ -26,9 +25,8 @@ MAX_QUERY_CHARS = 512
 MAX_RESULTS = 8
 HASH_HEX_LENGTH = 64
 
-class SemanticProjectionError(ValueError):
-    """Raised when a derived semantic projection fails closed."""
 
+class SemanticProjectionError(ValueError):
     def __init__(self, reason_code: str, message: str) -> None:
         super().__init__(message)
         self.reason_code = reason_code
@@ -69,6 +67,7 @@ class SemanticRecallResult:
     projection_text_hash: str
     score: float
     metadata: Mapping[str, object]
+    provenance: tuple[Mapping[str, object], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -106,19 +105,12 @@ class SemanticProjectionReceipt:
 
 
 class SemanticProjectionProtocol(Protocol):
-    """Public derived semantic projection contract."""
-
-    def project(self, event: Mapping[str, object]) -> dict[str, object]:
-        ...
-
-    def recall(self, request: Mapping[str, object]) -> dict[str, object]:
-        ...
-
-    def health(self, *, project_id: object, dataset_id: object, current_canonical_revision: int) -> dict[str, object]:
-        ...
-
-    def forget_projection(self, *, project_id: object, dataset_id: object) -> dict[str, object]:
-        ...
+    def project(self, event: Mapping[str, object]) -> dict[str, object]: ...
+    def recall(self, request: Mapping[str, object]) -> dict[str, object]: ...
+    def health(
+        self, *, project_id: object, dataset_id: object, current_canonical_revision: int
+    ) -> dict[str, object]: ...
+    def forget_projection(self, *, project_id: object, dataset_id: object) -> dict[str, object]: ...
 
 
 def canonical_json_hash(value: object) -> str:
@@ -199,10 +191,7 @@ def public_receipt(
     return SemanticProjectionReceipt(
         schema=SEMANTIC_PROJECTION_RECEIPT_SCHEMA,
         status=status,
-        aggregate_counts={
-            "event_count": event_count,
-            "result_count": result_count,
-        },
+        aggregate_counts={"event_count": event_count, "result_count": result_count},
         canonical_revisions={
             "indexed_canonical_revision": indexed_canonical_revision,
             "current_canonical_revision": current_canonical_revision,
@@ -262,6 +251,7 @@ def recall_response_to_private_dict(response: SemanticRecallResponse) -> dict[st
                 "projection_text_hash": result.projection_text_hash,
                 "score": result.score,
                 "metadata": dict(result.metadata),
+                "provenance": [dict(item) for item in result.provenance],
             }
             for result in response.results
         ],
