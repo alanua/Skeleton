@@ -1,4 +1,4 @@
-name: Temporary Memory PR Exact Patch V2
+name: Temporary Runner Memory Activation Route Patch
 
 "on":
   push:
@@ -17,58 +17,73 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: direct/finish-five-layer-memory-20260725
+          ref: direct/add-memory-activation-runtime-handler-20260725
           fetch-depth: 0
-      - name: Connect durable projection outbox to production health
+      - name: Register exact polling activation route
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "f5bcc7694d152648efffae6cb0955442b9ec0a51"
+          test "$(git rev-parse HEAD)" = "3064305bd95d770c24ca0a9572a9de553154a00e"
           python3 - <<'PY'
           from pathlib import Path
 
-          path = Path("core/cognee_projection_adapter.py")
+          path = Path("scripts/runner_poll_github_tasks.py")
           text = path.read_text(encoding="utf-8")
-          old = '''        dataset = opaque_dataset_name(scope.project_id, scope.dataset_id)
-          try:
-              result = self._client.health(
-          '''
-          old = old.replace("          try:", "        try:").replace("          ", "            ", 1)
-          old = '''        dataset = opaque_dataset_name(scope.project_id, scope.dataset_id)
-        try:
-            result = self._client.health(
-'''
-          new = '''        if self._private_root is not None:
-            try:
-                from core.cognee_projection_outbox import (
-                    CogneeProjectionOutboxError,
-                    drain_projection_outbox,
-                )
 
-                drain_projection_outbox(self._private_root, scope, self)
-            except CogneeProjectionOutboxError as exc:
-                return _health(
-                    scope,
-                    current_canonical_revision,
-                    indexed=0,
-                    status="UNAVAILABLE",
-                    reason_codes=(exc.reason_code.upper(),),
-                )
-        dataset = opaque_dataset_name(scope.project_id, scope.dataset_id)
-        try:
-            result = self._client.health(
-'''
-          if text.count(old) != 1:
-              raise SystemExit(f"exact match count={text.count(old)}")
-          path.write_text(text.replace(old, new), encoding="utf-8")
+          import_anchor = '''from core.runner_private_memory_source_inventory import (
+              CANDIDATE_CATEGORIES as PRIVATE_MEMORY_INVENTORY_CATEGORIES,
+              TASK_ID as PRIVATE_MEMORY_PHASE_A_INVENTORY,
+              execute_private_memory_phase_a_inventory,
+          )
+          '''
+          import_anchor = import_anchor.replace("              ", "    ")
+          import_block = import_anchor + '''from core.runner_five_layer_memory_activation import (
+              TASK_ID as ACTIVATE_FIVE_LAYER_PRIVATE_MEMORY,
+              execute_five_layer_memory_activation,
+          )
+          '''.replace("              ", "    ")
+          if text.count(import_anchor) != 1:
+              raise SystemExit(f"import anchor count={text.count(import_anchor)}")
+          text = text.replace(import_anchor, import_block)
+
+          allow_anchor = '''        PRIVATE_MEMORY_HEALTHCHECK,
+              HERMES_PRIVATE_MEMORY_BRIDGE_CHECK,
+          '''.replace("              ", "        ")
+          allow_block = '''        PRIVATE_MEMORY_HEALTHCHECK,
+              ACTIVATE_FIVE_LAYER_PRIVATE_MEMORY,
+              HERMES_PRIVATE_MEMORY_BRIDGE_CHECK,
+          '''.replace("              ", "        ")
+          if text.count(allow_anchor) != 1:
+              raise SystemExit(f"allow anchor count={text.count(allow_anchor)}")
+          text = text.replace(allow_anchor, allow_block)
+
+          dispatch_anchor = '''        if task_id == PRIVATE_MEMORY_HEALTHCHECK:
+              return private_memory_healthcheck(body)
+              if task_id == HERMES_PRIVATE_MEMORY_BRIDGE_CHECK:
+          '''.replace("              ", "            ")
+          dispatch_block = '''        if task_id == PRIVATE_MEMORY_HEALTHCHECK:
+              return private_memory_healthcheck(body)
+              if task_id == ACTIVATE_FIVE_LAYER_PRIVATE_MEMORY:
+                  return execute_five_layer_memory_activation(
+                      body,
+                      workdir=workdir,
+                      maintenance_report=_maintenance_report,
+                  )
+              if task_id == HERMES_PRIVATE_MEMORY_BRIDGE_CHECK:
+          '''.replace("              ", "            ")
+          if text.count(dispatch_anchor) != 1:
+              raise SystemExit(f"dispatch anchor count={text.count(dispatch_anchor)}")
+          text = text.replace(dispatch_anchor, dispatch_block)
+
+          path.write_text(text, encoding="utf-8")
           PY
-          test "$(git diff --name-only)" = "core/cognee_projection_adapter.py"
+          test "$(git diff --name-only)" = "scripts/runner_poll_github_tasks.py"
           git diff --check
           python3 -m py_compile \
-            core/cognee_projection_adapter.py \
-            core/cognee_projection_outbox.py
+            scripts/runner_poll_github_tasks.py \
+            core/runner_five_layer_memory_activation.py
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add core/cognee_projection_adapter.py
-          git commit -m "Drain durable projection outbox before Cognee health"
-          git push origin HEAD:direct/finish-five-layer-memory-20260725
+          git add scripts/runner_poll_github_tasks.py
+          git commit -m "Register polling five-layer memory activation route"
+          git push origin HEAD:direct/add-memory-activation-runtime-handler-20260725
