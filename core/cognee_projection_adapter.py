@@ -169,13 +169,13 @@ class CogneePackageBackend:
             raise SemanticProjectionError(
                 MEMORY_UNAVAILABLE, "Cognee runtime activation is not enabled"
             )
-        if self._private_root is None:
-            raise SemanticProjectionError(
-                "PRIVATE_RUNTIME_ROOT_REQUIRED", "private runtime root is required"
-            )
         if self._client is None:
             raise SemanticProjectionError(
                 COGNEE_RUNTIME_NOT_IMPLEMENTED, "isolated Cognee worker is unavailable"
+            )
+        if self._private_root is None:
+            raise SemanticProjectionError(
+                "PRIVATE_RUNTIME_ROOT_REQUIRED", "private runtime root is required"
             )
         return self._client
 
