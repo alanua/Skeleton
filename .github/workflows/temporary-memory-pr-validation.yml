@@ -33,7 +33,14 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          python -m pip install -e '.[dev]'
+          python -m pip install \
+            'pytest>=8.0.0' \
+            'PyYAML>=6.0.0' \
+            'jsonschema>=4.22.0,<5.0.0' \
+            'fastapi==0.116.1' \
+            'jinja2==3.1.6' \
+            'uvicorn==0.35.0' \
+            'httpx==0.28.1'
       - name: Validate protected memory PR
         shell: bash
         run: |
