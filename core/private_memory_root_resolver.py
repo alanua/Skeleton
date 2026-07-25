@@ -6,7 +6,6 @@ from typing import Mapping
 
 from core.private_memory import PRIVATE_MEMORY_CONFIG_ENV, PrivateMemoryConnector
 
-# One authority only: explicit stack root or the configured canonical SQLite parent.
 PRIVATE_MEMORY_ROOT_ENV = "SKELETON_RUNNER_PRIVATE_MEMORY_ROOT"
 CANONICAL_DATABASE_NAME = "canonical.sqlite"
 
@@ -22,37 +21,33 @@ def resolve_private_memory_root(
     *,
     checkout: str | Path | None = None,
 ) -> tuple[str, str]:
-    """Resolve one existing private stack root without creating a second authority."""
+    """Resolve the private stack directory without exposing or reusing legacy DB data."""
 
     values = dict(os.environ if env is None else env)
     explicit = values.get(PRIVATE_MEMORY_ROOT_ENV, "").strip()
     if explicit:
         root = Path(explicit).expanduser().resolve()
-        database = root / CANONICAL_DATABASE_NAME
+        anchor_database = root / CANONICAL_DATABASE_NAME
         source = "explicit"
     else:
         if not values.get(PRIVATE_MEMORY_CONFIG_ENV, "").strip():
             raise PrivateMemoryRootResolutionError("private_memory_root_unavailable")
         try:
             connector = PrivateMemoryConnector(env=values)
-            database = connector._load_db_path().expanduser().resolve()
+            anchor_database = connector._load_db_path().expanduser().resolve()
         except Exception as exc:  # noqa: BLE001 - public caller uses bounded reason codes.
             raise PrivateMemoryRootResolutionError(
                 "configured_private_memory_unavailable"
             ) from exc
-        if database.name != CANONICAL_DATABASE_NAME:
-            raise PrivateMemoryRootResolutionError(
-                "configured_private_memory_not_stack_canonical"
-            )
-        root = database.parent
-        source = "canonical_config"
+        root = anchor_database.parent
+        source = "private_config_parent"
 
     if not root.is_absolute() or not root.is_dir():
         raise PrivateMemoryRootResolutionError("private_memory_root_unavailable")
     if _path_has_symlink_component(root):
         raise PrivateMemoryRootResolutionError("private_memory_root_unsafe")
-    if not database.is_file():
-        raise PrivateMemoryRootResolutionError("canonical_database_unavailable")
+    if not anchor_database.is_file():
+        raise PrivateMemoryRootResolutionError("private_memory_anchor_unavailable")
 
     if checkout is not None:
         checkout_path = Path(checkout).expanduser().resolve()
