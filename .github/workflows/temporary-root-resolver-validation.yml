@@ -1,0 +1,71 @@
+name: Temporary Root Resolver Validation
+
+"on":
+  pull_request:
+    branches:
+      - main
+    paths:
+      - core/private_memory_root_resolver.py
+      - tests/test_private_memory_root_resolver.py
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            'pytest>=8.0.0' \
+            'PyYAML>=6.0.0' \
+            'jsonschema>=4.22.0,<5.0.0' \
+            'fastapi==0.116.1' \
+            'jinja2==3.1.6' \
+            'uvicorn==0.35.0' \
+            'httpx==0.28.1' \
+            'numpy==2.4.6' \
+            'ezdxf==1.4.4' \
+            'shapely==2.1.2' \
+            'networkx==3.6.1' \
+            'pillow==12.2.0' \
+            'pdfplumber' \
+            'pypdf' \
+            'opencv-python-headless' \
+            'scikit-image'
+      - name: Verify exact clean checkout
+        run: |
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          test -z "$(git status --porcelain)"
+      - name: Run focused validation
+        run: |
+          env \
+            -u SKELETON_RUNNER_MEMORY_DIR \
+            -u SKELETON_RUNNER_MEMORY_DB \
+            -u SKELETON_RUNNER_MEMORY_LEDGER \
+            -u SKELETON_PRIVATE_MEMORY_CONFIG \
+            -u SKELETON_RUNNER_PRIVATE_MEMORY_ROOT \
+            python -m pytest -q tests/test_private_memory_root_resolver.py
+      - name: Run full repository validation
+        run: |
+          env \
+            -u SKELETON_RUNNER_MEMORY_DIR \
+            -u SKELETON_RUNNER_MEMORY_DB \
+            -u SKELETON_RUNNER_MEMORY_LEDGER \
+            -u SKELETON_PRIVATE_MEMORY_CONFIG \
+            -u SKELETON_RUNNER_PRIVATE_MEMORY_ROOT \
+            python -m pytest -q
+      - name: Compile and diff-check
+        run: |
+          python -m py_compile core/private_memory_root_resolver.py
+          git diff --check
