@@ -1,18 +1,149 @@
-name: Temporary Protected Runner Activation Validation
+name: Temporary Configured DB Patch and Validation
 
 "on":
   pull_request:
     branches:
       - main
     paths:
+      - core/private_memory_root_resolver.py
+      - core/private_memory_stack.py
       - core/runner_five_layer_memory_activation.py
-      - scripts/runner_poll_github_tasks.py
+      - tests/test_private_memory_root_resolver.py
+      - tests/test_private_memory_stack_configured_db.py
       - tests/test_runner_five_layer_memory_activation.py
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
+  patch:
+    if: github.event.pull_request.number == 1953 && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: direct/use-configured-authoritative-db-20260725
+          fetch-depth: 0
+      - name: Reuse exact configured authoritative SQLite
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          stack_path = Path("core/private_memory_stack.py")
+          stack = stack_path.read_text(encoding="utf-8")
+          activation_path = Path("core/runner_five_layer_memory_activation.py")
+          activation = activation_path.read_text(encoding="utf-8")
+          if "PrivateMemoryConnector(env=os.environ)._load_db_path()" in stack:
+              raise SystemExit(0)
+
+          old_import = "from core.private_memory import CanonicalPrivateMemoryStore\n"
+          new_import = """from core.private_memory import (
+    PRIVATE_MEMORY_CONFIG_ENV,
+    CanonicalPrivateMemoryStore,
+    PrivateMemoryConnector,
+)
+"""
+          old_paths = """def _paths(private_root: str | Path | None) -> PrivateMemoryStackPaths:
+    root_value = private_root or os.environ.get(PRIVATE_MEMORY_STACK_ROOT_ENV)
+    if root_value is None:
+        root_value = Path.home() / ".local" / "share" / "skeleton-private-memory"
+    root = Path(root_value).expanduser().resolve()
+    return PrivateMemoryStackPaths(
+        root=root,
+        db=root / "canonical.sqlite",
+        graphify=root / "graphify.index.json",
+        mempalace=root / "mempalace.index.json",
+        backups=root / "backups",
+        gateway_db=root / "memory_gateway_import.sqlite",
+        lock=root / "private_memory_stack.lock",
+    )
+"""
+          new_paths = """def _paths(private_root: str | Path | None) -> PrivateMemoryStackPaths:
+    root_value = private_root or os.environ.get(PRIVATE_MEMORY_STACK_ROOT_ENV)
+    if root_value is None:
+        root_value = Path.home() / ".local" / "share" / "skeleton-private-memory"
+    root = Path(root_value).expanduser().resolve()
+    database = root / "canonical.sqlite"
+    if os.environ.get(PRIVATE_MEMORY_CONFIG_ENV, "").strip():
+        try:
+            configured = PrivateMemoryConnector(env=os.environ)._load_db_path().expanduser().resolve()
+        except Exception as exc:
+            raise PrivateMemoryStackError(
+                "configured authoritative database is unavailable"
+            ) from exc
+        if configured.parent == root:
+            if not configured.is_file():
+                raise PrivateMemoryStackError(
+                    "configured authoritative database is unavailable"
+                )
+            database = configured
+    return PrivateMemoryStackPaths(
+        root=root,
+        db=database,
+        graphify=root / "graphify.index.json",
+        mempalace=root / "mempalace.index.json",
+        backups=root / "backups",
+        gateway_db=root / "memory_gateway_import.sqlite",
+        lock=root / "private_memory_stack.lock",
+    )
+"""
+          old_child = """    child_env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": os.environ.get("HOME", ""),
+        "PYTHONPATH": str(checkout),
+        "SKELETON_RUNNER_PRIVATE_MEMORY_ROOT": private_root,
+        **model_config,
+    }
+    command = [
+"""
+          new_child = """    child_env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": os.environ.get("HOME", ""),
+        "PYTHONPATH": str(checkout),
+        "SKELETON_RUNNER_PRIVATE_MEMORY_ROOT": private_root,
+        **model_config,
+    }
+    private_config = os.environ.get("SKELETON_PRIVATE_MEMORY_CONFIG", "").strip()
+    if private_config:
+        child_env["SKELETON_PRIVATE_MEMORY_CONFIG"] = private_config
+    command = [
+"""
+          counts = {
+              "stack_import": stack.count(old_import),
+              "stack_paths": stack.count(old_paths),
+              "activation_child": activation.count(old_child),
+          }
+          if counts != {"stack_import": 1, "stack_paths": 1, "activation_child": 1}:
+              raise SystemExit(f"anchor counts={counts}")
+          stack_path.write_text(
+              stack.replace(old_import, new_import).replace(old_paths, new_paths),
+              encoding="utf-8",
+          )
+          activation_path.write_text(
+              activation.replace(old_child, new_child),
+              encoding="utf-8",
+          )
+          PY
+          test "$(git diff --name-only | sort)" = "$(printf '%s\n' core/private_memory_stack.py core/runner_five_layer_memory_activation.py | sort)"
+          git diff --check
+          python3 -m py_compile \
+            core/private_memory_root_resolver.py \
+            core/private_memory_stack.py \
+            core/runner_five_layer_memory_activation.py
+          python3 -m pytest -q \
+            tests/test_private_memory_root_resolver.py \
+            tests/test_private_memory_stack_configured_db.py \
+            tests/test_runner_five_layer_memory_activation.py \
+            tests/test_private_memory_stack.py
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add core/private_memory_stack.py core/runner_five_layer_memory_activation.py
+          git commit -m "Reuse configured authoritative SQLite in private stack"
+          git push origin HEAD:direct/use-configured-authoritative-db-20260725
+
   validate:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -52,7 +183,7 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
           test -z "$(git status --porcelain)"
-      - name: Run focused protected Runner tests
+      - name: Run focused private-memory tests
         shell: bash
         run: |
           set -o pipefail
@@ -60,9 +191,13 @@ jobs:
             -u SKELETON_RUNNER_MEMORY_DIR \
             -u SKELETON_RUNNER_MEMORY_DB \
             -u SKELETON_RUNNER_MEMORY_LEDGER \
+            -u SKELETON_PRIVATE_MEMORY_CONFIG \
+            -u SKELETON_RUNNER_PRIVATE_MEMORY_ROOT \
             python -m pytest -q \
+              tests/test_private_memory_root_resolver.py \
+              tests/test_private_memory_stack_configured_db.py \
               tests/test_runner_five_layer_memory_activation.py \
-              tests/test_runner_poll_github_tasks.py 2>&1 | tee focused.log
+              tests/test_private_memory_stack.py 2>&1 | tee focused.log
       - name: Run full repository tests
         shell: bash
         run: |
@@ -71,20 +206,23 @@ jobs:
             -u SKELETON_RUNNER_MEMORY_DIR \
             -u SKELETON_RUNNER_MEMORY_DB \
             -u SKELETON_RUNNER_MEMORY_LEDGER \
+            -u SKELETON_PRIVATE_MEMORY_CONFIG \
+            -u SKELETON_RUNNER_PRIVATE_MEMORY_ROOT \
             python -m pytest -q 2>&1 | tee full.log
       - name: Compile and diff-check
         shell: bash
         run: |
           set -euo pipefail
           python -m py_compile \
-            core/runner_five_layer_memory_activation.py \
-            scripts/runner_poll_github_tasks.py
+            core/private_memory_root_resolver.py \
+            core/private_memory_stack.py \
+            core/runner_five_layer_memory_activation.py
           git diff --check
       - name: Upload private validation logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: runner-memory-activation-validation-${{ github.run_id }}
+          name: configured-db-validation-${{ github.run_id }}
           path: |
             focused.log
             full.log
