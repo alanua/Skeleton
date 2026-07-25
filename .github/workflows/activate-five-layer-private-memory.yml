@@ -1,0 +1,157 @@
+name: Activate Five-Layer Private Memory
+
+"on":
+  pull_request:
+    branches:
+      - main
+    paths:
+      - core/cognee_local_runtime.py
+      - core/cognee_projection_adapter.py
+      - core/cognee_projection_outbox.py
+      - core/semantic_memory_projection.py
+      - schemas/semantic_memory_recall_response.schema.json
+      - scripts/activate_five_layer_private_memory.py
+      - tests/test_cognee_local_runtime.py
+      - tests/test_cognee_projection_outbox.py
+      - .github/workflows/activate-five-layer-private-memory.yml
+  push:
+    branches:
+      - main
+    paths:
+      - core/cognee_local_runtime.py
+      - core/cognee_projection_adapter.py
+      - core/cognee_projection_outbox.py
+      - core/semantic_memory_projection.py
+      - schemas/semantic_memory_recall_response.schema.json
+      - scripts/activate_five_layer_private_memory.py
+      - tests/test_cognee_local_runtime.py
+      - tests/test_cognee_projection_outbox.py
+      - .github/workflows/activate-five-layer-private-memory.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: activate-five-layer-private-memory-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: [self-hosted, hetzner-agent-runner-1]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify exact clean checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          test -z "$(git status --porcelain)"
+          origin="$(git remote get-url origin)"
+          origin="${origin%.git}"
+          test "${origin%/}" = "https://github.com/alanua/Skeleton"
+
+      - name: Run protected source validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          env \
+            -u SKELETON_RUNNER_MEMORY_DIR \
+            -u SKELETON_RUNNER_MEMORY_DB \
+            -u SKELETON_RUNNER_MEMORY_LEDGER \
+            python3 -m pytest -q \
+              tests/test_cognee_projection_adapter.py \
+              tests/test_cognee_local_runtime.py \
+              tests/test_cognee_projection_outbox.py \
+              tests/test_memory_bootstrap.py
+          python3 -m py_compile \
+            core/cognee_local_runtime.py \
+            core/cognee_projection_adapter.py \
+            core/cognee_projection_outbox.py \
+            core/semantic_memory_projection.py \
+            scripts/activate_five_layer_private_memory.py
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          import yaml
+          json.loads(Path("schemas/semantic_memory_recall_response.schema.json").read_text())
+          workflow = yaml.safe_load(Path(".github/workflows/activate-five-layer-private-memory.yml").read_text())
+          assert "on" in workflow and "jobs" in workflow
+          print("schemas-and-workflow-ok")
+          PY
+          git diff --check
+
+  activate:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: validate
+    runs-on: [self-hosted, hetzner-agent-runner-1]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify exact merged source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          test -z "$(git status --porcelain)"
+          origin="$(git remote get-url origin)"
+          origin="${origin%.git}"
+          test "${origin%/}" = "https://github.com/alanua/Skeleton"
+
+      - name: Select installed local Ollama models
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v ollama >/dev/null
+          models="$(ollama list | awk 'NR>1 && NF {print $1}')"
+          test -n "${models}"
+          embedding="$(printf '%s\n' "${models}" | grep -Ei '(^|/)(nomic-embed-text|mxbai-embed-large|all-minilm)(:|$)' | head -n1 || true)"
+          test -n "${embedding}"
+          llm="$(printf '%s\n' "${models}" | grep -Ev -i '(embed|minilm)' | head -n1 || true)"
+          test -n "${llm}"
+          case "${embedding}" in
+            *nomic-embed-text*) dimensions=768; tokenizer="nomic-ai/nomic-embed-text-v1.5" ;;
+            *mxbai-embed-large*) dimensions=1024; tokenizer="mixedbread-ai/mxbai-embed-large-v1" ;;
+            *all-minilm*) dimensions=384; tokenizer="sentence-transformers/all-MiniLM-L6-v2" ;;
+            *) exit 1 ;;
+          esac
+          {
+            echo "SKELETON_COGNEE_LLM_PROVIDER=ollama"
+            echo "SKELETON_COGNEE_LLM_MODEL=${llm}"
+            echo "SKELETON_COGNEE_LLM_ENDPOINT=http://127.0.0.1:11434"
+            echo "SKELETON_COGNEE_EMBEDDING_PROVIDER=ollama"
+            echo "SKELETON_COGNEE_EMBEDDING_MODEL=${embedding}"
+            echo "SKELETON_COGNEE_EMBEDDING_DIMENSIONS=${dimensions}"
+            echo "SKELETON_COGNEE_EMBEDDING_ENDPOINT=http://127.0.0.1:11434"
+            echo "SKELETON_COGNEE_HUGGINGFACE_TOKENIZER=${tokenizer}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Install, smoke, rollback-test and activate
+        shell: bash
+        env:
+          SKELETON_MEMORY_ACTIVATION_APPROVAL: EXPLICIT_FINISH_WORKING_MEMORY_20260724
+        run: |
+          set -euo pipefail
+          test -n "${SKELETON_RUNNER_PRIVATE_MEMORY_ROOT:-}"
+          env -i \
+            PATH="${PATH}" \
+            HOME="${HOME}" \
+            PYTHONPATH="${GITHUB_WORKSPACE}" \
+            SKELETON_RUNNER_PRIVATE_MEMORY_ROOT="${SKELETON_RUNNER_PRIVATE_MEMORY_ROOT}" \
+            SKELETON_COGNEE_LLM_PROVIDER="${SKELETON_COGNEE_LLM_PROVIDER}" \
+            SKELETON_COGNEE_LLM_MODEL="${SKELETON_COGNEE_LLM_MODEL}" \
+            SKELETON_COGNEE_LLM_ENDPOINT="${SKELETON_COGNEE_LLM_ENDPOINT}" \
+            SKELETON_COGNEE_EMBEDDING_PROVIDER="${SKELETON_COGNEE_EMBEDDING_PROVIDER}" \
+            SKELETON_COGNEE_EMBEDDING_MODEL="${SKELETON_COGNEE_EMBEDDING_MODEL}" \
+            SKELETON_COGNEE_EMBEDDING_DIMENSIONS="${SKELETON_COGNEE_EMBEDDING_DIMENSIONS}" \
+            SKELETON_COGNEE_EMBEDDING_ENDPOINT="${SKELETON_COGNEE_EMBEDDING_ENDPOINT}" \
+            SKELETON_COGNEE_HUGGINGFACE_TOKENIZER="${SKELETON_COGNEE_HUGGINGFACE_TOKENIZER}" \
+            python3 -m scripts.activate_five_layer_private_memory \
+              --expected-sha "${GITHUB_SHA}" \
+              --operator-approval "${SKELETON_MEMORY_ACTIVATION_APPROVAL}"
