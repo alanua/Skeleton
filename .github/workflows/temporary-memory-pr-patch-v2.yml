@@ -19,43 +19,56 @@ jobs:
         with:
           ref: direct/finish-five-layer-memory-20260725
           fetch-depth: 0
-      - name: Apply exact unavailable-reason patch
+      - name: Connect durable projection outbox to production health
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "56e7e4beba35cccb6667dfb8ca1eafe63458eef0"
+          test "$(git rev-parse HEAD)" = "f5bcc7694d152648efffae6cb0955442b9ec0a51"
           python3 - <<'PY'
-          import re
           from pathlib import Path
 
           path = Path("core/cognee_projection_adapter.py")
           text = path.read_text(encoding="utf-8")
-          pattern = re.compile(
-              r'''        if \(\n'''
-              r'''            health\.status != "READY"\n'''
-              r'''            or health\.indexed_canonical_revision != recall_request\.current_canonical_revision\n'''
-              r'''        \):\n'''
-              r'''            raise SemanticProjectionError\(PROJECTION_STALE, "projection is stale"\)'''
-          )
-          replacement = '''        if health.status == "UNAVAILABLE":
-              reason = health.reason_codes[0] if health.reason_codes else MEMORY_UNAVAILABLE
-              raise SemanticProjectionError(reason, "projection is unavailable")
-          if (
-              health.status != "READY"
-              or health.indexed_canonical_revision != recall_request.current_canonical_revision
-          ):
-              raise SemanticProjectionError(PROJECTION_STALE, "projection is stale")'''
-          replacement = replacement.replace("          reason", "            reason").replace("          raise", "            raise").replace("          if (", "        if (").replace("          health", "            health").replace("          or", "            or").replace("          ):", "        ):")
-          updated, count = pattern.subn(replacement, text)
-          if count != 1:
-              raise SystemExit(f"exact match count={count}")
-          path.write_text(updated, encoding="utf-8")
+          old = '''        dataset = opaque_dataset_name(scope.project_id, scope.dataset_id)
+          try:
+              result = self._client.health(
+          '''
+          old = old.replace("          try:", "        try:").replace("          ", "            ", 1)
+          old = '''        dataset = opaque_dataset_name(scope.project_id, scope.dataset_id)
+        try:
+            result = self._client.health(
+'''
+          new = '''        if self._private_root is not None:
+            try:
+                from core.cognee_projection_outbox import (
+                    CogneeProjectionOutboxError,
+                    drain_projection_outbox,
+                )
+
+                drain_projection_outbox(self._private_root, scope, self)
+            except CogneeProjectionOutboxError as exc:
+                return _health(
+                    scope,
+                    current_canonical_revision,
+                    indexed=0,
+                    status="UNAVAILABLE",
+                    reason_codes=(exc.reason_code.upper(),),
+                )
+        dataset = opaque_dataset_name(scope.project_id, scope.dataset_id)
+        try:
+            result = self._client.health(
+'''
+          if text.count(old) != 1:
+              raise SystemExit(f"exact match count={text.count(old)}")
+          path.write_text(text.replace(old, new), encoding="utf-8")
           PY
           test "$(git diff --name-only)" = "core/cognee_projection_adapter.py"
           git diff --check
-          python3 -m py_compile core/cognee_projection_adapter.py
+          python3 -m py_compile \
+            core/cognee_projection_adapter.py \
+            core/cognee_projection_outbox.py
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add core/cognee_projection_adapter.py
-          git commit -m "Preserve unavailable Cognee recall reason"
+          git commit -m "Drain durable projection outbox before Cognee health"
           git push origin HEAD:direct/finish-five-layer-memory-20260725
