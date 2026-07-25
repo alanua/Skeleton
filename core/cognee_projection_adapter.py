@@ -260,6 +260,22 @@ class CogneePackageBackend:
                 status="UNAVAILABLE",
                 reason_codes=(COGNEE_RUNTIME_NOT_IMPLEMENTED,),
             )
+        if self._private_root is not None:
+            try:
+                from core.cognee_projection_outbox import (
+                    CogneeProjectionOutboxError,
+                    drain_projection_outbox,
+                )
+
+                drain_projection_outbox(self._private_root, scope, self)
+            except CogneeProjectionOutboxError as exc:
+                return _health(
+                    scope,
+                    current_canonical_revision,
+                    indexed=0,
+                    status="UNAVAILABLE",
+                    reason_codes=(exc.reason_code.upper(),),
+                )
         dataset = opaque_dataset_name(scope.project_id, scope.dataset_id)
         try:
             result = self._client.health(
