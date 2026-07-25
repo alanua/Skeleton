@@ -81,6 +81,10 @@ from core.runner_private_memory_source_inventory import (
     TASK_ID as PRIVATE_MEMORY_PHASE_A_INVENTORY,
     execute_private_memory_phase_a_inventory,
 )
+from core.runner_five_layer_memory_activation import (
+    TASK_ID as ACTIVATE_FIVE_LAYER_PRIVATE_MEMORY,
+    execute_five_layer_memory_activation,
+)
 from core.private_static_site_runtime import (
     DEPLOY_TASK_ID as DEPLOY_PRIVATE_STATIC_SITE,
     PRIVATE_KEY_MARKERS,
@@ -253,6 +257,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         LOOP_ENGINE_PACKET,
         MEMPALACE_SYNTHETIC_RUNTIME_SMOKE,
         PRIVATE_MEMORY_HEALTHCHECK,
+        ACTIVATE_FIVE_LAYER_PRIVATE_MEMORY,
         HERMES_PRIVATE_MEMORY_BRIDGE_CHECK,
         PRIVATE_MEMORY_PHASE_A_INVENTORY,
         INSTALL_GRAPHIFY_RUNTIME,
@@ -12515,6 +12520,12 @@ def dispatch_runtime_maintenance_task(
             return mempalace_synthetic_runtime_smoke(body)
         if task_id == PRIVATE_MEMORY_HEALTHCHECK:
             return private_memory_healthcheck(body)
+        if task_id == ACTIVATE_FIVE_LAYER_PRIVATE_MEMORY:
+            return execute_five_layer_memory_activation(
+                body,
+                workdir=workdir,
+                maintenance_report=_maintenance_report,
+            )
         if task_id == HERMES_PRIVATE_MEMORY_BRIDGE_CHECK:
             return hermes_private_memory_bridge_check()
         if task_id == PRIVATE_MEMORY_PHASE_A_INVENTORY:
