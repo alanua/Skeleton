@@ -333,6 +333,9 @@ class CogneeProjectionAdapter:
             recall_request.scope,
             current_canonical_revision=recall_request.current_canonical_revision,
         )
+        if health.status == "UNAVAILABLE":
+            reason = health.reason_codes[0] if health.reason_codes else MEMORY_UNAVAILABLE
+            raise SemanticProjectionError(reason, "projection is unavailable")
         if (
             health.status != "READY"
             or health.indexed_canonical_revision != recall_request.current_canonical_revision
