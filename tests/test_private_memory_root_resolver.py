@@ -49,32 +49,33 @@ def test_resolves_existing_canonical_config_without_duplicate_env(tmp_path: Path
     )
 
     assert resolved == str(root.resolve())
-    assert source == "canonical_config"
+    assert source == "private_config_parent"
 
 
-def test_rejects_configured_database_that_is_not_stack_canonical(tmp_path: Path) -> None:
+def test_legacy_connector_database_only_anchors_private_directory(tmp_path: Path) -> None:
     root = tmp_path / "private"
     root.mkdir()
-    database = root / "other.sqlite"
-    database.write_bytes(b"sqlite-placeholder")
+    legacy_database = root / "legacy-heartbeat.sqlite"
+    legacy_database.write_bytes(b"sqlite-placeholder")
     config = tmp_path / "private-memory.json"
     config.write_text(
         json.dumps(
             {
                 "schema": "skeleton.private_memory.config.v0",
-                "database": {"path": str(database)},
+                "database": {"path": str(legacy_database)},
             }
         ),
         encoding="utf-8",
     )
 
-    with pytest.raises(PrivateMemoryRootResolutionError) as exc_info:
-        resolve_private_memory_root(
-            {"SKELETON_PRIVATE_MEMORY_CONFIG": str(config)},
-            checkout=tmp_path / "checkout",
-        )
+    resolved, source = resolve_private_memory_root(
+        {"SKELETON_PRIVATE_MEMORY_CONFIG": str(config)},
+        checkout=tmp_path / "checkout",
+    )
 
-    assert exc_info.value.reason_code == "configured_private_memory_not_stack_canonical"
+    assert resolved == str(root.resolve())
+    assert source == "private_config_parent"
+    assert not (root / "canonical.sqlite").exists()
 
 
 def test_rejects_private_root_inside_public_checkout(tmp_path: Path) -> None:
