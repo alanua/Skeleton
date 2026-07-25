@@ -1,17 +1,20 @@
-name: Temporary Runner Memory Activation Route Patch
+name: Temporary Protected Runner Memory Route Patch
 
 "on":
-  push:
+  pull_request:
     branches:
       - main
     paths:
-      - .github/workflows/temporary-memory-pr-patch-v2.yml
+      - core/runner_five_layer_memory_activation.py
+      - tests/test_runner_five_layer_memory_activation.py
+      - scripts/runner_poll_github_tasks.py
 
 permissions:
   contents: write
 
 jobs:
   patch:
+    if: github.event.pull_request.number == 1944 && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -23,20 +26,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "3064305bd95d770c24ca0a9572a9de553154a00e"
           python3 - <<'PY'
           from pathlib import Path
 
           path = Path("scripts/runner_poll_github_tasks.py")
           text = path.read_text(encoding="utf-8")
+          if "if task_id == ACTIVATE_FIVE_LAYER_PRIVATE_MEMORY:" in text:
+              raise SystemExit(0)
 
           import_anchor = '''from core.runner_private_memory_source_inventory import (
               CANDIDATE_CATEGORIES as PRIVATE_MEMORY_INVENTORY_CATEGORIES,
               TASK_ID as PRIVATE_MEMORY_PHASE_A_INVENTORY,
               execute_private_memory_phase_a_inventory,
           )
-          '''
-          import_anchor = import_anchor.replace("              ", "    ")
+          '''.replace("              ", "    ")
           import_block = import_anchor + '''from core.runner_five_layer_memory_activation import (
               TASK_ID as ACTIVATE_FIVE_LAYER_PRIVATE_MEMORY,
               execute_five_layer_memory_activation,
@@ -74,9 +77,11 @@ jobs:
           if text.count(dispatch_anchor) != 1:
               raise SystemExit(f"dispatch anchor count={text.count(dispatch_anchor)}")
           text = text.replace(dispatch_anchor, dispatch_block)
-
           path.write_text(text, encoding="utf-8")
           PY
+          if git diff --quiet -- scripts/runner_poll_github_tasks.py; then
+            exit 0
+          fi
           test "$(git diff --name-only)" = "scripts/runner_poll_github_tasks.py"
           git diff --check
           python3 -m py_compile \
