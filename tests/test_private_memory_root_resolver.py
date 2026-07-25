@@ -95,4 +95,4 @@ def test_missing_config_fails_closed(tmp_path: Path) -> None:
     with pytest.raises(PrivateMemoryRootResolutionError) as exc_info:
         resolve_private_memory_root({}, checkout=tmp_path / "checkout")
 
-    assert exc_info.value.reason_code == "configured_private_memory_unavailable"
+    assert exc_info.value.reason_code == "private_memory_root_unavailable"
