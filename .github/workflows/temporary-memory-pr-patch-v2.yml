@@ -34,49 +34,50 @@ jobs:
           if "if task_id == ACTIVATE_FIVE_LAYER_PRIVATE_MEMORY:" in text:
               raise SystemExit(0)
 
-          import_anchor = '''from core.runner_private_memory_source_inventory import (
+          old_import = """from core.runner_private_memory_source_inventory import (
               CANDIDATE_CATEGORIES as PRIVATE_MEMORY_INVENTORY_CATEGORIES,
               TASK_ID as PRIVATE_MEMORY_PHASE_A_INVENTORY,
               execute_private_memory_phase_a_inventory,
           )
-          '''.replace("              ", "    ")
-          import_block = import_anchor + '''from core.runner_five_layer_memory_activation import (
+          """.replace("              ", "    ")
+          new_import = old_import + """from core.runner_five_layer_memory_activation import (
               TASK_ID as ACTIVATE_FIVE_LAYER_PRIVATE_MEMORY,
               execute_five_layer_memory_activation,
           )
-          '''.replace("              ", "    ")
-          if text.count(import_anchor) != 1:
-              raise SystemExit(f"import anchor count={text.count(import_anchor)}")
-          text = text.replace(import_anchor, import_block)
+          """.replace("              ", "    ")
 
-          allow_anchor = '''        PRIVATE_MEMORY_HEALTHCHECK,
-              HERMES_PRIVATE_MEMORY_BRIDGE_CHECK,
-          '''.replace("              ", "        ")
-          allow_block = '''        PRIVATE_MEMORY_HEALTHCHECK,
-              ACTIVATE_FIVE_LAYER_PRIVATE_MEMORY,
-              HERMES_PRIVATE_MEMORY_BRIDGE_CHECK,
-          '''.replace("              ", "        ")
-          if text.count(allow_anchor) != 1:
-              raise SystemExit(f"allow anchor count={text.count(allow_anchor)}")
-          text = text.replace(allow_anchor, allow_block)
+          old_allow = "        PRIVATE_MEMORY_HEALTHCHECK,\n        HERMES_PRIVATE_MEMORY_BRIDGE_CHECK,\n"
+          new_allow = "        PRIVATE_MEMORY_HEALTHCHECK,\n        ACTIVATE_FIVE_LAYER_PRIVATE_MEMORY,\n        HERMES_PRIVATE_MEMORY_BRIDGE_CHECK,\n"
 
-          dispatch_anchor = '''        if task_id == PRIVATE_MEMORY_HEALTHCHECK:
-              return private_memory_healthcheck(body)
-              if task_id == HERMES_PRIVATE_MEMORY_BRIDGE_CHECK:
-          '''.replace("              ", "            ")
-          dispatch_block = '''        if task_id == PRIVATE_MEMORY_HEALTHCHECK:
-              return private_memory_healthcheck(body)
-              if task_id == ACTIVATE_FIVE_LAYER_PRIVATE_MEMORY:
-                  return execute_five_layer_memory_activation(
-                      body,
-                      workdir=workdir,
-                      maintenance_report=_maintenance_report,
-                  )
-              if task_id == HERMES_PRIVATE_MEMORY_BRIDGE_CHECK:
-          '''.replace("              ", "            ")
-          if text.count(dispatch_anchor) != 1:
-              raise SystemExit(f"dispatch anchor count={text.count(dispatch_anchor)}")
-          text = text.replace(dispatch_anchor, dispatch_block)
+          old_dispatch = (
+              "        if task_id == PRIVATE_MEMORY_HEALTHCHECK:\n"
+              "            return private_memory_healthcheck(body)\n"
+              "        if task_id == HERMES_PRIVATE_MEMORY_BRIDGE_CHECK:\n"
+          )
+          new_dispatch = (
+              "        if task_id == PRIVATE_MEMORY_HEALTHCHECK:\n"
+              "            return private_memory_healthcheck(body)\n"
+              "        if task_id == ACTIVATE_FIVE_LAYER_PRIVATE_MEMORY:\n"
+              "            return execute_five_layer_memory_activation(\n"
+              "                body,\n"
+              "                workdir=workdir,\n"
+              "                maintenance_report=_maintenance_report,\n"
+              "            )\n"
+              "        if task_id == HERMES_PRIVATE_MEMORY_BRIDGE_CHECK:\n"
+          )
+
+          counts = {
+              "import": text.count(old_import),
+              "allow": text.count(old_allow),
+              "dispatch": text.count(old_dispatch),
+          }
+          Path("patch-counts.json").write_text(__import__("json").dumps(counts, sort_keys=True))
+          if counts != {"import": 1, "allow": 1, "dispatch": 1}:
+              raise SystemExit(f"anchor counts={counts}")
+
+          text = text.replace(old_import, new_import)
+          text = text.replace(old_allow, new_allow)
+          text = text.replace(old_dispatch, new_dispatch)
           path.write_text(text, encoding="utf-8")
           PY
           if git diff --quiet -- scripts/runner_poll_github_tasks.py; then
@@ -92,3 +93,11 @@ jobs:
           git add scripts/runner_poll_github_tasks.py
           git commit -m "Register polling five-layer memory activation route"
           git push origin HEAD:direct/add-memory-activation-runtime-handler-20260725
+      - name: Upload patch diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-memory-route-patch-${{ github.run_id }}
+          path: patch-counts.json
+          if-no-files-found: ignore
+          retention-days: 1
