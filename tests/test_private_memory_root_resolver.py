@@ -52,10 +52,10 @@ def test_resolves_existing_canonical_config_without_duplicate_env(tmp_path: Path
     assert source == "canonical_config"
 
 
-def test_rejects_configured_database_that_is_not_stack_canonical(tmp_path: Path) -> None:
+def test_accepts_legacy_configured_authoritative_database_name(tmp_path: Path) -> None:
     root = tmp_path / "private"
     root.mkdir()
-    database = root / "other.sqlite"
+    database = root / "private-memory.sqlite"
     database.write_bytes(b"sqlite-placeholder")
     config = tmp_path / "private-memory.json"
     config.write_text(
@@ -68,13 +68,13 @@ def test_rejects_configured_database_that_is_not_stack_canonical(tmp_path: Path)
         encoding="utf-8",
     )
 
-    with pytest.raises(PrivateMemoryRootResolutionError) as exc_info:
-        resolve_private_memory_root(
-            {"SKELETON_PRIVATE_MEMORY_CONFIG": str(config)},
-            checkout=tmp_path / "checkout",
-        )
+    resolved, source = resolve_private_memory_root(
+        {"SKELETON_PRIVATE_MEMORY_CONFIG": str(config)},
+        checkout=tmp_path / "checkout",
+    )
 
-    assert exc_info.value.reason_code == "configured_private_memory_not_stack_canonical"
+    assert resolved == str(root.resolve())
+    assert source == "canonical_config"
 
 
 def test_rejects_private_root_inside_public_checkout(tmp_path: Path) -> None:
