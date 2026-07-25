@@ -1,90 +1,150 @@
-name: Temporary Canonical Memory Root Patch
+name: Temporary Configured Authoritative DB Patch
 
 "on":
-  push:
+  pull_request:
     branches:
       - main
     paths:
-      - .github/workflows/temporary-memory-pr-patch-v2.yml
+      - core/private_memory_root_resolver.py
+      - core/private_memory_stack.py
+      - core/runner_five_layer_memory_activation.py
+      - tests/test_private_memory_root_resolver.py
+      - tests/test_private_memory_stack_configured_db.py
+      - tests/test_runner_five_layer_memory_activation.py
 
 permissions:
   contents: write
 
 jobs:
   patch:
+    if: github.event.pull_request.number == 1953 && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: direct/derive-memory-root-from-canonical-config-20260725
+          ref: direct/use-configured-authoritative-db-20260725
           fetch-depth: 0
-      - name: Connect activation executor to canonical root resolver
+      - name: Reuse exact configured authoritative SQLite
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
 
-          path = Path("core/runner_five_layer_memory_activation.py")
-          text = path.read_text(encoding="utf-8")
-          if "resolve_private_memory_root(os.environ" in text:
-              raise SystemExit(0)
+          stack_path = Path("core/private_memory_stack.py")
+          stack = stack_path.read_text(encoding="utf-8")
+          activation_path = Path("core/runner_five_layer_memory_activation.py")
+          activation = activation_path.read_text(encoding="utf-8")
 
-          old_import = "from typing import Callable, Mapping\n\nTASK_ID"
-          new_import = """from typing import Callable, Mapping
-
-from core.private_memory_root_resolver import (
-    PrivateMemoryRootResolutionError,
-    resolve_private_memory_root,
+          old_import = "from core.private_memory import CanonicalPrivateMemoryStore\n"
+          new_import = """from core.private_memory import (
+    PRIVATE_MEMORY_CONFIG_ENV,
+    CanonicalPrivateMemoryStore,
+    PrivateMemoryConnector,
 )
+"""
+          old_paths = """def _paths(private_root: str | Path | None) -> PrivateMemoryStackPaths:
+    root_value = private_root or os.environ.get(PRIVATE_MEMORY_STACK_ROOT_ENV)
+    if root_value is None:
+        root_value = Path.home() / ".local" / "share" / "skeleton-private-memory"
+    root = Path(root_value).expanduser().resolve()
+    return PrivateMemoryStackPaths(
+        root=root,
+        db=root / "canonical.sqlite",
+        graphify=root / "graphify.index.json",
+        mempalace=root / "mempalace.index.json",
+        backups=root / "backups",
+        gateway_db=root / "memory_gateway_import.sqlite",
+        lock=root / "private_memory_stack.lock",
+    )
+"""
+          new_paths = """def _paths(private_root: str | Path | None) -> PrivateMemoryStackPaths:
+    root_value = private_root or os.environ.get(PRIVATE_MEMORY_STACK_ROOT_ENV)
+    if root_value is None:
+        root_value = Path.home() / ".local" / "share" / "skeleton-private-memory"
+    root = Path(root_value).expanduser().resolve()
+    database = root / "canonical.sqlite"
+    if os.environ.get(PRIVATE_MEMORY_CONFIG_ENV, "").strip():
+        try:
+            configured = PrivateMemoryConnector(env=os.environ)._load_db_path().expanduser().resolve()
+        except Exception as exc:
+            raise PrivateMemoryStackError(
+                "configured authoritative database is unavailable"
+            ) from exc
+        if configured.parent == root:
+            if not configured.is_file():
+                raise PrivateMemoryStackError(
+                    "configured authoritative database is unavailable"
+                )
+            database = configured
+    return PrivateMemoryStackPaths(
+        root=root,
+        db=database,
+        graphify=root / "graphify.index.json",
+        mempalace=root / "mempalace.index.json",
+        backups=root / "backups",
+        gateway_db=root / "memory_gateway_import.sqlite",
+        lock=root / "private_memory_stack.lock",
+    )
+"""
+          old_child = """    child_env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": os.environ.get("HOME", ""),
+        "PYTHONPATH": str(checkout),
+        "SKELETON_RUNNER_PRIVATE_MEMORY_ROOT": private_root,
+        **model_config,
+    }
+    command = [
+"""
+          new_child = """    child_env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": os.environ.get("HOME", ""),
+        "PYTHONPATH": str(checkout),
+        "SKELETON_RUNNER_PRIVATE_MEMORY_ROOT": private_root,
+        **model_config,
+    }
+    private_config = os.environ.get("SKELETON_PRIVATE_MEMORY_CONFIG", "").strip()
+    if private_config:
+        child_env["SKELETON_PRIVATE_MEMORY_CONFIG"] = private_config
+    command = [
+"""
 
-TASK_ID"""
-          old_root = """    private_root = os.environ.get("SKELETON_RUNNER_PRIVATE_MEMORY_ROOT", "").strip()
-    if not private_root:
-        return maintenance_report(
-            "BLOCKED",
-            TASK_ID,
-            ["reason=private_memory_root_unavailable"],
-            "not_met",
-        )
-"""
-          new_root = """    try:
-        private_root, _root_source = resolve_private_memory_root(
-            os.environ,
-            checkout=checkout,
-        )
-    except PrivateMemoryRootResolutionError as exc:
-        return maintenance_report(
-            "BLOCKED",
-            TASK_ID,
-            [f"reason={exc.reason_code}"],
-            "not_met",
-        )
-"""
           counts = {
-              "import": text.count(old_import),
-              "root": text.count(old_root),
+              "stack_import": stack.count(old_import),
+              "stack_paths": stack.count(old_paths),
+              "activation_child": activation.count(old_child),
           }
-          if counts != {"import": 1, "root": 1}:
+          if counts != {
+              "stack_import": 1,
+              "stack_paths": 1,
+              "activation_child": 1,
+          }:
               raise SystemExit(f"anchor counts={counts}")
-          text = text.replace(old_import, new_import)
-          text = text.replace(old_root, new_root)
-          path.write_text(text, encoding="utf-8")
+          stack_path.write_text(
+              stack.replace(old_import, new_import).replace(old_paths, new_paths),
+              encoding="utf-8",
+          )
+          activation_path.write_text(
+              activation.replace(old_child, new_child),
+              encoding="utf-8",
+          )
           PY
-          if git diff --quiet -- core/runner_five_layer_memory_activation.py; then
-            exit 0
-          fi
-          test "$(git diff --name-only)" = "core/runner_five_layer_memory_activation.py"
+          test "$(git diff --name-only | sort)" = "$(printf '%s\n' core/private_memory_stack.py core/runner_five_layer_memory_activation.py | sort)"
           git diff --check
           python3 -m py_compile \
             core/private_memory_root_resolver.py \
+            core/private_memory_stack.py \
             core/runner_five_layer_memory_activation.py
           python3 -m pytest -q \
             tests/test_private_memory_root_resolver.py \
-            tests/test_runner_five_layer_memory_activation.py
+            tests/test_private_memory_stack_configured_db.py \
+            tests/test_runner_five_layer_memory_activation.py \
+            tests/test_private_memory_stack.py
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add core/runner_five_layer_memory_activation.py
-          git commit -m "Derive activation root from canonical private-memory config"
-          git push origin HEAD:direct/derive-memory-root-from-canonical-config-20260725
+          git add \
+            core/private_memory_stack.py \
+            core/runner_five_layer_memory_activation.py
+          git commit -m "Reuse configured authoritative SQLite in private stack"
+          git push origin HEAD:direct/use-configured-authoritative-db-20260725
