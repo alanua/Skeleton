@@ -50,7 +50,9 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
           test -z "$(git status --porcelain)"
-          test "$(git remote get-url origin)" = "https://github.com/alanua/Skeleton.git"
+          origin="$(git remote get-url origin)"
+          origin="${origin%.git}"
+          test "${origin%/}" = "https://github.com/alanua/Skeleton"
 
       - name: Run protected source validation
         shell: bash
@@ -98,7 +100,9 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
           test -z "$(git status --porcelain)"
-          test "$(git remote get-url origin)" = "https://github.com/alanua/Skeleton.git"
+          origin="$(git remote get-url origin)"
+          origin="${origin%.git}"
+          test "${origin%/}" = "https://github.com/alanua/Skeleton"
 
       - name: Select installed local Ollama models
         shell: bash
@@ -134,10 +138,20 @@ jobs:
           SKELETON_MEMORY_ACTIVATION_APPROVAL: EXPLICIT_FINISH_WORKING_MEMORY_20260724
         run: |
           set -euo pipefail
-          unset OPENAI_API_KEY ANTHROPIC_API_KEY GOOGLE_API_KEY GEMINI_API_KEY \
-            COHERE_API_KEY MISTRAL_API_KEY TOGETHER_API_KEY VOYAGE_API_KEY \
-            AZURE_OPENAI_API_KEY AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN || true
           test -n "${SKELETON_RUNNER_PRIVATE_MEMORY_ROOT:-}"
-          python3 scripts/activate_five_layer_private_memory.py \
-            --expected-sha "${GITHUB_SHA}" \
-            --operator-approval "${SKELETON_MEMORY_ACTIVATION_APPROVAL}"
+          env -i \
+            PATH="${PATH}" \
+            HOME="${HOME}" \
+            PYTHONPATH="${GITHUB_WORKSPACE}" \
+            SKELETON_RUNNER_PRIVATE_MEMORY_ROOT="${SKELETON_RUNNER_PRIVATE_MEMORY_ROOT}" \
+            SKELETON_COGNEE_LLM_PROVIDER="${SKELETON_COGNEE_LLM_PROVIDER}" \
+            SKELETON_COGNEE_LLM_MODEL="${SKELETON_COGNEE_LLM_MODEL}" \
+            SKELETON_COGNEE_LLM_ENDPOINT="${SKELETON_COGNEE_LLM_ENDPOINT}" \
+            SKELETON_COGNEE_EMBEDDING_PROVIDER="${SKELETON_COGNEE_EMBEDDING_PROVIDER}" \
+            SKELETON_COGNEE_EMBEDDING_MODEL="${SKELETON_COGNEE_EMBEDDING_MODEL}" \
+            SKELETON_COGNEE_EMBEDDING_DIMENSIONS="${SKELETON_COGNEE_EMBEDDING_DIMENSIONS}" \
+            SKELETON_COGNEE_EMBEDDING_ENDPOINT="${SKELETON_COGNEE_EMBEDDING_ENDPOINT}" \
+            SKELETON_COGNEE_HUGGINGFACE_TOKENIZER="${SKELETON_COGNEE_HUGGINGFACE_TOKENIZER}" \
+            python3 -m scripts.activate_five_layer_private_memory \
+              --expected-sha "${GITHUB_SHA}" \
+              --operator-approval "${SKELETON_MEMORY_ACTIVATION_APPROVAL}"
