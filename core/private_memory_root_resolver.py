@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from typing import Mapping
 
-from core.private_memory import PrivateMemoryConnector
+from core.private_memory import PRIVATE_MEMORY_CONFIG_ENV, PrivateMemoryConnector
 
 PRIVATE_MEMORY_ROOT_ENV = "SKELETON_RUNNER_PRIVATE_MEMORY_ROOT"
 CANONICAL_DATABASE_NAME = "canonical.sqlite"
@@ -30,6 +30,8 @@ def resolve_private_memory_root(
         database = root / CANONICAL_DATABASE_NAME
         source = "explicit"
     else:
+        if not values.get(PRIVATE_MEMORY_CONFIG_ENV, "").strip():
+            raise PrivateMemoryRootResolutionError("private_memory_root_unavailable")
         try:
             connector = PrivateMemoryConnector(env=values)
             database = connector._load_db_path().expanduser().resolve()
