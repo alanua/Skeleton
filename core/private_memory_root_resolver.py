@@ -7,6 +7,7 @@ from typing import Mapping
 from core.private_memory import PRIVATE_MEMORY_CONFIG_ENV, PrivateMemoryConnector
 
 # One authority only: explicit stack root or the configured authoritative SQLite parent.
+# The configured file may retain its legacy private filename.
 PRIVATE_MEMORY_ROOT_ENV = "SKELETON_RUNNER_PRIVATE_MEMORY_ROOT"
 CANONICAL_DATABASE_NAME = "canonical.sqlite"
 
