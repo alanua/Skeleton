@@ -1,23 +1,17 @@
 name: Temporary Configured Authoritative DB Patch
 
 "on":
-  pull_request:
+  push:
     branches:
       - main
     paths:
-      - core/private_memory_root_resolver.py
-      - core/private_memory_stack.py
-      - core/runner_five_layer_memory_activation.py
-      - tests/test_private_memory_root_resolver.py
-      - tests/test_private_memory_stack_configured_db.py
-      - tests/test_runner_five_layer_memory_activation.py
+      - .github/workflows/temporary-memory-pr-patch-v2.yml
 
 permissions:
   contents: write
 
 jobs:
   patch:
-    if: github.event.pull_request.number == 1953 && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
@@ -110,26 +104,30 @@ jobs:
     command = [
 """
 
-          counts = {
-              "stack_import": stack.count(old_import),
-              "stack_paths": stack.count(old_paths),
-              "activation_child": activation.count(old_child),
-          }
-          if counts != {
-              "stack_import": 1,
-              "stack_paths": 1,
-              "activation_child": 1,
-          }:
-              raise SystemExit(f"anchor counts={counts}")
-          stack_path.write_text(
-              stack.replace(old_import, new_import).replace(old_paths, new_paths),
-              encoding="utf-8",
-          )
-          activation_path.write_text(
-              activation.replace(old_child, new_child),
-              encoding="utf-8",
-          )
+          if "PrivateMemoryConnector(env=os.environ)._load_db_path()" not in stack:
+              counts = {
+                  "stack_import": stack.count(old_import),
+                  "stack_paths": stack.count(old_paths),
+                  "activation_child": activation.count(old_child),
+              }
+              if counts != {
+                  "stack_import": 1,
+                  "stack_paths": 1,
+                  "activation_child": 1,
+              }:
+                  raise SystemExit(f"anchor counts={counts}")
+              stack_path.write_text(
+                  stack.replace(old_import, new_import).replace(old_paths, new_paths),
+                  encoding="utf-8",
+              )
+              activation_path.write_text(
+                  activation.replace(old_child, new_child),
+                  encoding="utf-8",
+              )
           PY
+          if git diff --quiet -- core/private_memory_stack.py core/runner_five_layer_memory_activation.py; then
+            exit 0
+          fi
           test "$(git diff --name-only | sort)" = "$(printf '%s\n' core/private_memory_stack.py core/runner_five_layer_memory_activation.py | sort)"
           git diff --check
           python3 -m py_compile \
