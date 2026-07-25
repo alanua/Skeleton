@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# Synchronize the bounded protected-route patch workflow for PR #1944.
+# Synchronize the bounded protected-route patch workflow for PR #1944 (v2).
 
 import json
 from pathlib import Path
