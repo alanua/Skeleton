@@ -1,5 +1,5 @@
 name: Activate Five-Layer Private Memory
-# PR validation synchronization marker v3; activation remains push-to-main only.
+# PR validation synchronization marker v4; activation remains push-to-main only.
 
 "on":
   pull_request:
@@ -116,6 +116,7 @@ jobs:
             echo "SKELETON_COGNEE_LLM_PROVIDER=ollama"
             echo "SKELETON_COGNEE_LLM_MODEL=${llm}"
             echo "SKELETON_COGNEE_LLM_ENDPOINT=http://127.0.0.1:11434"
+            echo "SKELETON_COGNEE_LLM_API_KEY=local-only"
             echo "SKELETON_COGNEE_EMBEDDING_PROVIDER=ollama"
             echo "SKELETON_COGNEE_EMBEDDING_MODEL=${embedding}"
             echo "SKELETON_COGNEE_EMBEDDING_DIMENSIONS=${dimensions}"
