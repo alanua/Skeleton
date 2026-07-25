@@ -1,0 +1,61 @@
+name: Temporary Memory PR Exact Patch
+
+"on":
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/temporary-memory-pr-patch.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: direct/finish-five-layer-memory-20260725
+          fetch-depth: 0
+      - name: Apply exact fail-closed reason patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "56e7e4beba35cccb6667dfb8ca1eafe63458eef0"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("core/cognee_projection_adapter.py")
+          text = path.read_text(encoding="utf-8")
+          old = '''        if (
+              health.status != "READY"
+              or health.indexed_canonical_revision != recall_request.current_canonical_revision
+          ):
+              raise SemanticProjectionError(PROJECTION_STALE, "projection is stale")
+          '''
+          old = old.replace("          health", "            health").replace("          or", "            or").replace("          ):", "        ):").replace("          raise", "            raise")
+          new = '''        if health.status == "UNAVAILABLE":
+              reason = health.reason_codes[0] if health.reason_codes else MEMORY_UNAVAILABLE
+              raise SemanticProjectionError(reason, "projection is unavailable")
+          if (
+              health.status != "READY"
+              or health.indexed_canonical_revision != recall_request.current_canonical_revision
+          ):
+              raise SemanticProjectionError(PROJECTION_STALE, "projection is stale")
+          '''
+          new = new.replace("          reason", "            reason").replace("          raise", "            raise").replace("          if (", "        if (").replace("          health", "            health").replace("          or", "            or").replace("          ):", "        ):")
+          if text.count(old) != 1:
+              raise SystemExit("exact source block mismatch")
+          path.write_text(text.replace(old, new), encoding="utf-8")
+          PY
+          changed="$(git diff --name-only)"
+          test "${changed}" = "core/cognee_projection_adapter.py"
+          git diff --check
+          python3 -m py_compile core/cognee_projection_adapter.py
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add core/cognee_projection_adapter.py
+          git commit -m "Preserve unavailable Cognee recall reason"
+          git push origin HEAD:direct/finish-five-layer-memory-20260725
