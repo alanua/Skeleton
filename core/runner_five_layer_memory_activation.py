@@ -8,6 +8,11 @@ import sys
 from pathlib import Path
 from typing import Callable, Mapping
 
+from core.private_memory_root_resolver import (
+    PrivateMemoryRootResolutionError,
+    resolve_private_memory_root,
+)
+
 TASK_ID = "activate_five_layer_private_memory"
 OPERATOR_APPROVAL = "EXPLICIT_FINISH_WORKING_MEMORY_20260724"
 RECEIPT_SCHEMA = "skeleton.five_layer_memory_activation_receipt.v2"
@@ -71,12 +76,16 @@ def execute_five_layer_memory_activation(
         )
     assert preflight is not None
 
-    private_root = os.environ.get("SKELETON_RUNNER_PRIVATE_MEMORY_ROOT", "").strip()
-    if not private_root:
+    try:
+        private_root, _root_source = resolve_private_memory_root(
+            os.environ,
+            checkout=checkout,
+        )
+    except PrivateMemoryRootResolutionError as exc:
         return maintenance_report(
             "BLOCKED",
             TASK_ID,
-            ["reason=private_memory_root_unavailable"],
+            [f"reason={exc.reason_code}"],
             "not_met",
         )
 
