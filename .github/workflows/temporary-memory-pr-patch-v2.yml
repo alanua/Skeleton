@@ -1,103 +1,94 @@
-name: Temporary Protected Runner Memory Route Patch
+name: Temporary Canonical Memory Root Patch
 
 "on":
   pull_request:
     branches:
       - main
     paths:
+      - core/private_memory_root_resolver.py
       - core/runner_five_layer_memory_activation.py
+      - tests/test_private_memory_root_resolver.py
       - tests/test_runner_five_layer_memory_activation.py
-      - scripts/runner_poll_github_tasks.py
 
 permissions:
   contents: write
 
 jobs:
   patch:
-    if: github.event.pull_request.number == 1944 && github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event.pull_request.number == 1950 && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: direct/add-memory-activation-runtime-handler-20260725
+          ref: direct/derive-memory-root-from-canonical-config-20260725
           fetch-depth: 0
-      - name: Register exact polling activation route
+      - name: Connect activation executor to canonical root resolver
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
 
-          path = Path("scripts/runner_poll_github_tasks.py")
+          path = Path("core/runner_five_layer_memory_activation.py")
           text = path.read_text(encoding="utf-8")
-          if "if task_id == ACTIVATE_FIVE_LAYER_PRIVATE_MEMORY:" in text:
+          if "resolve_private_memory_root(os.environ" in text:
               raise SystemExit(0)
 
-          old_import = """from core.runner_private_memory_source_inventory import (
-              CANDIDATE_CATEGORIES as PRIVATE_MEMORY_INVENTORY_CATEGORIES,
-              TASK_ID as PRIVATE_MEMORY_PHASE_A_INVENTORY,
-              execute_private_memory_phase_a_inventory,
-          )
-          """.replace("              ", "    ")
-          new_import = old_import + """from core.runner_five_layer_memory_activation import (
-              TASK_ID as ACTIVATE_FIVE_LAYER_PRIVATE_MEMORY,
-              execute_five_layer_memory_activation,
-          )
-          """.replace("              ", "    ")
+          old_import = "from typing import Callable, Mapping\n\nTASK_ID"
+          new_import = """from typing import Callable, Mapping
 
-          old_allow = "        PRIVATE_MEMORY_HEALTHCHECK,\n        HERMES_PRIVATE_MEMORY_BRIDGE_CHECK,\n"
-          new_allow = "        PRIVATE_MEMORY_HEALTHCHECK,\n        ACTIVATE_FIVE_LAYER_PRIVATE_MEMORY,\n        HERMES_PRIVATE_MEMORY_BRIDGE_CHECK,\n"
+from core.private_memory_root_resolver import (
+    PrivateMemoryRootResolutionError,
+    resolve_private_memory_root,
+)
 
-          old_dispatch = (
-              "        if task_id == PRIVATE_MEMORY_HEALTHCHECK:\n"
-              "            return private_memory_healthcheck(body)\n"
-              "        if task_id == HERMES_PRIVATE_MEMORY_BRIDGE_CHECK:\n"
-          )
-          new_dispatch = (
-              "        if task_id == PRIVATE_MEMORY_HEALTHCHECK:\n"
-              "            return private_memory_healthcheck(body)\n"
-              "        if task_id == ACTIVATE_FIVE_LAYER_PRIVATE_MEMORY:\n"
-              "            return execute_five_layer_memory_activation(\n"
-              "                body,\n"
-              "                workdir=workdir,\n"
-              "                maintenance_report=_maintenance_report,\n"
-              "            )\n"
-              "        if task_id == HERMES_PRIVATE_MEMORY_BRIDGE_CHECK:\n"
-          )
-
+TASK_ID"""
+          old_root = """    private_root = os.environ.get("SKELETON_RUNNER_PRIVATE_MEMORY_ROOT", "").strip()
+    if not private_root:
+        return maintenance_report(
+            "BLOCKED",
+            TASK_ID,
+            ["reason=private_memory_root_unavailable"],
+            "not_met",
+        )
+"""
+          new_root = """    try:
+        private_root, _root_source = resolve_private_memory_root(
+            os.environ,
+            checkout=checkout,
+        )
+    except PrivateMemoryRootResolutionError as exc:
+        return maintenance_report(
+            "BLOCKED",
+            TASK_ID,
+            [f"reason={exc.reason_code}"],
+            "not_met",
+        )
+"""
           counts = {
               "import": text.count(old_import),
-              "allow": text.count(old_allow),
-              "dispatch": text.count(old_dispatch),
+              "root": text.count(old_root),
           }
-          Path("patch-counts.json").write_text(__import__("json").dumps(counts, sort_keys=True))
-          if counts != {"import": 1, "allow": 1, "dispatch": 1}:
+          if counts != {"import": 1, "root": 1}:
               raise SystemExit(f"anchor counts={counts}")
-
           text = text.replace(old_import, new_import)
-          text = text.replace(old_allow, new_allow)
-          text = text.replace(old_dispatch, new_dispatch)
+          text = text.replace(old_root, new_root)
           path.write_text(text, encoding="utf-8")
           PY
-          if git diff --quiet -- scripts/runner_poll_github_tasks.py; then
+          if git diff --quiet -- core/runner_five_layer_memory_activation.py; then
             exit 0
           fi
-          test "$(git diff --name-only)" = "scripts/runner_poll_github_tasks.py"
+          test "$(git diff --name-only)" = "core/runner_five_layer_memory_activation.py"
           git diff --check
           python3 -m py_compile \
-            scripts/runner_poll_github_tasks.py \
+            core/private_memory_root_resolver.py \
             core/runner_five_layer_memory_activation.py
+          python3 -m pytest -q \
+            tests/test_private_memory_root_resolver.py \
+            tests/test_runner_five_layer_memory_activation.py
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add scripts/runner_poll_github_tasks.py
-          git commit -m "Register polling five-layer memory activation route"
-          git push origin HEAD:direct/add-memory-activation-runtime-handler-20260725
-      - name: Upload patch diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: runner-memory-route-patch-${{ github.run_id }}
-          path: patch-counts.json
-          if-no-files-found: ignore
-          retention-days: 1
+          git add core/runner_five_layer_memory_activation.py
+          git commit -m "Derive activation root from canonical private-memory config"
+          git push origin HEAD:direct/derive-memory-root-from-canonical-config-20260725
