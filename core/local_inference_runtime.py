@@ -320,13 +320,20 @@ class OllamaClient:
             raise InferenceRuntimeError("ollama_endpoint_not_loopback", retryable=False)
         self.endpoint = endpoint.rstrip("/")
 
-    def generate(self, *, model: str, prompt: str, timeout_seconds: int) -> str:
+    def generate(
+        self,
+        *,
+        model: str,
+        prompt: str,
+        timeout_seconds: int,
+        format_schema: Mapping[str, Any] | None = None,
+    ) -> str:
         body = json.dumps(
             {
                 "model": model,
                 "prompt": prompt,
                 "stream": False,
-                "format": "json",
+                "format": dict(format_schema) if format_schema is not None else "json",
                 "options": {"temperature": 0},
             },
             separators=(",", ":"),
@@ -389,6 +396,7 @@ class LocalInferenceWorker:
                 model=model,
                 prompt=prompt,
                 timeout_seconds=int(request["timeout_seconds"]),
+                format_schema=adapter.output_schema,
             )
             try:
                 parsed = json.loads(text)

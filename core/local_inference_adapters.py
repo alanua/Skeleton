@@ -17,6 +17,7 @@ class AdapterSpec:
     request_type: str
     prompt_builder: PromptBuilder
     output_validator: OutputValidator
+    output_schema: Mapping[str, Any] | None = None
 
 
 class AdapterRegistry:

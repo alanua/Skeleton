@@ -22,10 +22,19 @@ class FakeClient:
         self.outputs = list(outputs)
         self.calls = 0
 
-    def generate(self, *, model: str, prompt: str, timeout_seconds: int) -> str:
+    def generate(
+        self,
+        *,
+        model: str,
+        prompt: str,
+        timeout_seconds: int,
+        format_schema: dict[str, object] | None = None,
+    ) -> str:
         assert model == "qwen2.5:1.5b"
         assert timeout_seconds == 30
         assert "JSON" in prompt
+        assert format_schema is not None
+        assert format_schema["properties"]["schema"]["const"] == RESPONSE_SCHEMA_ID  # type: ignore[index]
         self.calls += 1
         return self.outputs.pop(0)
 

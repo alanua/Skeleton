@@ -192,3 +192,12 @@ def test_handoff_recovers_interrupted_claim(tmp_path) -> None:
     assert ingestor.ingest_one() is True
     assert ingestor.status()["accepted"] == 1
     assert queue.status()["counts"]["pending"] == 1
+
+
+def test_review_normalizes_only_configured_aliases() -> None:
+    value = output("REVIEW")
+    value["principal_subject_alias"] = "person-a"
+    value["linked_subject_aliases"] = ["person-b", "invented-person"]
+    normalized = validate_family_document_output(value, payload())
+    assert normalized["principal_subject_alias"] == "person-a"
+    assert normalized["linked_subject_aliases"] == ["person-b", "person-a"]
