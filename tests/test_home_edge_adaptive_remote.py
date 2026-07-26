@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 import pytest
 
@@ -200,3 +201,18 @@ def test_offline_reference_does_not_touch_live_tv_or_send_input() -> None:
 
     assert sink.commands[0].action == "home.remote.mute"
     assert not any(action.startswith(("ssh", "adb", "xdotool", "input keyevent")) for action in BROKER_MAPPING.values())
+
+
+def test_functional_phone_ui_matches_contract_and_has_three_remote_tabs() -> None:
+    source = (ROOT / "core/home_edge/static/adaptive_remote.html").read_text(encoding="utf-8")
+
+    assert re.findall(r'data-view="([^"]+)"', source) == ["pult", "touchpad", "keyboard"]
+    assert set(re.findall(r'data-gamepad="([^"]+)"', source)) == CONTROL_BUTTONS_BY_INTERFACE[ControlInterface.GAMEPAD]
+    assert "pointercancel" in source
+    assert "visibilitychange" in source
+    assert "window.addEventListener('blur'" in source
+    assert "setTimeout" in source
+    assert "screen.orientation.lock('landscape')" in source
+    assert "@media (orientation:portrait)" in source
+    assert "/api/remote/control" in source
+    assert not any(value in source.lower() for value in ("ark" + "anoid", "tetris", "breakout"))
