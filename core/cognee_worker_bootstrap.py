@@ -26,6 +26,16 @@ _STAGE_REASONS = {
     "search": "cognee_search_exception",
     "forget": "cognee_forget_exception",
 }
+_EXCEPTION_FAMILIES: tuple[tuple[type[BaseException], str], ...] = (
+    (ModuleNotFoundError, "module_not_found"),
+    (ImportError, "import_error"),
+    (TypeError, "type_error"),
+    (AttributeError, "attribute_error"),
+    (TimeoutError, "timeout"),
+    (ConnectionError, "connection_error"),
+    (ValueError, "value_error"),
+    (RuntimeError, "runtime_error"),
+)
 _SAFE_REASON_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,96}$")
 _WRAPPER_MARKER = "__skeleton_cognee_stage_wrapper__"
 _STALE_COMPATIBILITY_KWARGS = frozenset({"data_cache", "run_in_background"})
@@ -105,11 +115,20 @@ def _stage_wrapper(operation: Any, operation_name: str, reason: str) -> Any:
             main_module = sys.modules.get("__main__")
             error_type = getattr(main_module, "CogneeLocalRuntimeError", None)
             if isinstance(error_type, type) and issubclass(error_type, Exception):
-                raise error_type(reason, "Cognee operation failed") from exc
+                safe_reason = _safe_exception_reason(reason, exc)
+                raise error_type(safe_reason, "Cognee operation failed") from exc
             raise
 
     setattr(wrapped, _WRAPPER_MARKER, True)
     return wrapped
+
+
+def _safe_exception_reason(base_reason: str, exc: BaseException) -> str:
+    for exception_type, suffix in _EXCEPTION_FAMILIES:
+        if isinstance(exc, exception_type):
+            candidate = f"{base_reason}_{suffix}"
+            return candidate if _SAFE_REASON_RE.fullmatch(candidate) else base_reason
+    return base_reason
 
 
 def _normalize_operation_arguments(

@@ -23,6 +23,10 @@ class WorkerError(RuntimeError):
         self.reason_code = reason_code
 
 
+class UnclassifiedWorkerFailure(Exception):
+    pass
+
+
 def _worker_env(tmp_path: Path) -> dict[str, str]:
     home = tmp_path / "private"
     return {
@@ -96,7 +100,7 @@ def test_operation_wrappers_map_unknown_failures_to_safe_stage(
 ) -> None:
     async def failing_operation(*args, **kwargs):
         del args, kwargs
-        raise RuntimeError("private worker detail")
+        raise UnclassifiedWorkerFailure("private worker detail")
 
     module = SimpleNamespace(**{operation: failing_operation})
     monkeypatch.setattr(
@@ -107,6 +111,38 @@ def test_operation_wrappers_map_unknown_failures_to_safe_stage(
     with pytest.raises(WorkerError) as caught:
         asyncio.run(getattr(module, operation)())
     assert caught.value.reason_code == expected_reason
+    assert "private worker detail" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("exception_type", "expected_suffix"),
+    (
+        (ModuleNotFoundError, "module_not_found"),
+        (ImportError, "import_error"),
+        (TypeError, "type_error"),
+        (AttributeError, "attribute_error"),
+        (TimeoutError, "timeout"),
+        (ConnectionError, "connection_error"),
+        (ValueError, "value_error"),
+        (RuntimeError, "runtime_error"),
+    ),
+)
+def test_operation_wrapper_classifies_only_safe_exception_family(
+    monkeypatch, exception_type: type[Exception], expected_suffix: str
+) -> None:
+    async def failing_add(*args, **kwargs):
+        del args, kwargs
+        raise exception_type("private worker detail")
+
+    module = SimpleNamespace(add=failing_add)
+    monkeypatch.setattr(
+        sys.modules["__main__"], "CogneeLocalRuntimeError", WorkerError, raising=False
+    )
+    assert install_cognee_operation_wrappers(module) is True
+
+    with pytest.raises(WorkerError) as caught:
+        asyncio.run(module.add(data="synthetic"))
+    assert caught.value.reason_code == f"cognee_add_exception_{expected_suffix}"
     assert "private worker detail" not in str(caught.value)
 
 
