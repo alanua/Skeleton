@@ -1,12 +1,26 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import runpy
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
-from core.cognee_worker_bootstrap import configure_cognee_worker_environment
+import pytest
+
+from core.cognee_worker_bootstrap import (
+    configure_cognee_worker_environment,
+    install_cognee_operation_wrappers,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class WorkerError(RuntimeError):
+    def __init__(self, reason_code: str, message: str) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
 
 
 def _worker_env(tmp_path: Path) -> dict[str, str]:
@@ -66,3 +80,59 @@ def test_repository_sitecustomize_is_noop_for_normal_python(monkeypatch) -> None
     before = dict(os.environ)
     runpy.run_path(str(ROOT / "sitecustomize.py"))
     assert os.environ == before
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected_reason"),
+    (
+        ("add", "cognee_add_exception"),
+        ("cognify", "cognee_cognify_exception"),
+        ("search", "cognee_search_exception"),
+        ("forget", "cognee_forget_exception"),
+    ),
+)
+def test_operation_wrappers_map_unknown_failures_to_safe_stage(
+    monkeypatch, operation: str, expected_reason: str
+) -> None:
+    async def failing_operation(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("private worker detail")
+
+    module = SimpleNamespace(**{operation: failing_operation})
+    monkeypatch.setattr(
+        sys.modules["__main__"], "CogneeLocalRuntimeError", WorkerError, raising=False
+    )
+    assert install_cognee_operation_wrappers(module) is True
+
+    with pytest.raises(WorkerError) as caught:
+        asyncio.run(getattr(module, operation)())
+    assert caught.value.reason_code == expected_reason
+    assert "private worker detail" not in str(caught.value)
+
+
+def test_operation_wrapper_preserves_existing_safe_reason(monkeypatch) -> None:
+    error = WorkerError("existing_safe_reason", "bounded")
+
+    async def failing_search():
+        raise error
+
+    module = SimpleNamespace(search=failing_search)
+    monkeypatch.setattr(
+        sys.modules["__main__"], "CogneeLocalRuntimeError", WorkerError, raising=False
+    )
+    assert install_cognee_operation_wrappers(module) is True
+
+    with pytest.raises(WorkerError) as caught:
+        asyncio.run(module.search())
+    assert caught.value is error
+
+
+def test_operation_wrapper_installation_is_idempotent() -> None:
+    async def add():
+        return None
+
+    module = SimpleNamespace(add=add)
+    assert install_cognee_operation_wrappers(module) is True
+    wrapped = module.add
+    assert install_cognee_operation_wrappers(module) is False
+    assert module.add is wrapped

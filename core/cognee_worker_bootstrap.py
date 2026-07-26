@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import functools
+import importlib
+import inspect
 import ipaddress
 import os
+import re
+import sys
 from pathlib import Path
-from typing import MutableMapping
+from typing import Any, MutableMapping
 from urllib.parse import urlparse
 
 _REQUIRED_VALUES = {
@@ -15,6 +20,14 @@ _REQUIRED_VALUES = {
     "REQUIRE_AUTHENTICATION": "false",
 }
 _ALLOWED_EMBEDDING_PROVIDERS = frozenset({"ollama", "fastembed"})
+_STAGE_REASONS = {
+    "add": "cognee_add_exception",
+    "cognify": "cognee_cognify_exception",
+    "search": "cognee_search_exception",
+    "forget": "cognee_forget_exception",
+}
+_SAFE_REASON_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,96}$")
+_WRAPPER_MARKER = "__skeleton_cognee_stage_wrapper__"
 
 
 def configure_cognee_worker_environment(
@@ -28,23 +41,74 @@ def configure_cognee_worker_environment(
     """
 
     values = os.environ if env is None else env
-    if any(values.get(key, "").strip().casefold() != expected for key, expected in _REQUIRED_VALUES.items()):
+    if any(
+        values.get(key, "").strip().casefold() != expected
+        for key, expected in _REQUIRED_VALUES.items()
+    ):
         return False
-    if values.get("EMBEDDING_PROVIDER", "").strip().casefold() not in _ALLOWED_EMBEDDING_PROVIDERS:
+    if (
+        values.get("EMBEDDING_PROVIDER", "").strip().casefold()
+        not in _ALLOWED_EMBEDDING_PROVIDERS
+    ):
         return False
     if not _private_roots_are_bounded(values):
         return False
     if not _loopback_endpoint(values.get("LLM_ENDPOINT", "")):
         return False
-    if values.get("EMBEDDING_PROVIDER", "").strip().casefold() == "ollama" and not _loopback_endpoint(
-        values.get("EMBEDDING_ENDPOINT", "")
+    if (
+        values.get("EMBEDDING_PROVIDER", "").strip().casefold() == "ollama"
+        and not _loopback_endpoint(values.get("EMBEDDING_ENDPOINT", ""))
     ):
         return False
 
     values["ENABLE_BACKEND_ACCESS_CONTROL"] = "False"
     values["CACHING"] = "False"
     values["LLM_INSTRUCTOR_MODE"] = "json_schema_mode"
+    install_cognee_operation_wrappers()
     return True
+
+
+def install_cognee_operation_wrappers(cognee_module: Any | None = None) -> bool:
+    """Wrap pinned Cognee public operations with public-safe stage errors."""
+
+    if cognee_module is None:
+        try:
+            cognee_module = importlib.import_module("cognee")
+        except Exception:
+            return False
+    installed = False
+    for name, reason in _STAGE_REASONS.items():
+        original = getattr(cognee_module, name, None)
+        if not callable(original) or getattr(original, _WRAPPER_MARKER, False):
+            continue
+        setattr(cognee_module, name, _stage_wrapper(original, reason))
+        installed = True
+    return installed
+
+
+def _stage_wrapper(operation: Any, reason: str) -> Any:
+    @functools.wraps(operation)
+    async def wrapped(*args: Any, **kwargs: Any) -> Any:
+        try:
+            result = operation(*args, **kwargs)
+            return await result if inspect.isawaitable(result) else result
+        except Exception as exc:
+            existing_reason = getattr(exc, "reason_code", None)
+            if isinstance(existing_reason, str) and _SAFE_REASON_RE.fullmatch(
+                existing_reason
+            ):
+                raise
+            main_module = sys.modules.get("__main__")
+            error_type = getattr(main_module, "CogneeLocalRuntimeError", None)
+            if (
+                isinstance(error_type, type)
+                and issubclass(error_type, Exception)
+            ):
+                raise error_type(reason, "Cognee operation failed") from exc
+            raise
+
+    setattr(wrapped, _WRAPPER_MARKER, True)
+    return wrapped
 
 
 def _private_roots_are_bounded(env: MutableMapping[str, str]) -> bool:
