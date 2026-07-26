@@ -1,0 +1,12 @@
+[Unit]
+Description=Skeleton family document MFP intake worker
+
+[Service]
+Type=oneshot
+EnvironmentFile=-%h/.config/skeleton/family-document-intake.env
+ExecStart=%h/.local/bin/skeleton-family-document-worker --runtime-root ${SKELETON_FAMILY_DOCUMENT_RUNTIME_ROOT} --config ${SKELETON_FAMILY_DOCUMENT_CONFIG} --recover-stale
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/skeleton

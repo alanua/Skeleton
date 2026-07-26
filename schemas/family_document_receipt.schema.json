@@ -1,0 +1,20 @@
+{
+  "$id": "skeleton.family_document_receipt.schema.json",
+  "type": "object",
+  "required": ["schema", "status"],
+  "properties": {
+    "schema": {"const": "skeleton.family_document_receipt.v1"},
+    "status": {"enum": ["CLAIMED", "DUPLICATE", "DONE", "REVIEW", "BLOCKED"]},
+    "reason": {"type": "string"},
+    "component_count": {"type": "integer", "minimum": 0},
+    "document_count": {"type": "integer", "minimum": 0},
+    "total_output_pages": {"type": "integer", "minimum": 0},
+    "separator_pages_removed": {"type": "integer", "minimum": 0},
+    "readback_verified_before_ocr": {"type": "boolean"},
+    "assembled_hashes": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+    }
+  },
+  "additionalProperties": true
+}

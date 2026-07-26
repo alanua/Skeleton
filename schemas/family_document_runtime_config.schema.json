@@ -1,0 +1,23 @@
+{
+  "$id": "skeleton.family_document_runtime_config.schema.json",
+  "type": "object",
+  "required": ["schema", "mfp_sources"],
+  "properties": {
+    "schema": {"const": "skeleton.family_document_runtime_config.v1"},
+    "mfp_sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["source_id", "profile_id"],
+        "properties": {
+          "source_id": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{1,63}$"},
+          "profile_id": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{1,63}$"},
+          "intake_dir": {"type": "string"},
+          "inactivity_window_seconds": {"type": "integer", "minimum": 1, "maximum": 3600}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}
