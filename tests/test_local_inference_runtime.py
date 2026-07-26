@@ -86,6 +86,7 @@ def test_queue_idempotency_and_done_result(tmp_path: Path) -> None:
     assert created is True
     assert duplicate_created is False
     assert duplicate_id == request_id
+    assert not list((tmp_path / "state").glob("idempotency-*.json"))
 
     client = FakeClient([json.dumps(accepted_output())])
     worker = LocalInferenceWorker(

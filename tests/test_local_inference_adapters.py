@@ -11,7 +11,7 @@ from core.local_inference_adapters import (
 
 
 def test_registry_rejects_duplicate_and_unknown() -> None:
-    adapter = AdapterSpec("demo.task", lambda payload: str(payload), lambda value: value)
+    adapter = AdapterSpec("demo.task", lambda payload: str(payload), lambda value, payload: value)
     registry = AdapterRegistry()
     registry.register(adapter)
     assert registry.get("demo.task") is adapter

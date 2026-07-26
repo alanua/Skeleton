@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -lt 4 ]]; then
-  echo "usage: $0 REPO_ROOT PRIVATE_QUEUE_ROOT MFP_HANDOFF_ROOT RUN_AS_USER [MODEL]" >&2
+if [[ $# -lt 5 ]]; then
+  echo "usage: $0 REPO_ROOT PRIVATE_QUEUE_ROOT MFP_HANDOFF_ROOT SUBJECT_ALIASES_FILE RUN_AS_USER [MODEL]" >&2
   exit 2
 fi
 
 repo_root="$(cd "$1" && pwd -P)"
 queue_root="$2"
 mfp_handoff_root="$3"
-run_as_user="$4"
-model="${5:-qwen2.5:1.5b}"
+subject_aliases_file="$4"
+run_as_user="$5"
+model="${6:-qwen2.5:1.5b}"
 runtime_root="/usr/local/lib/skeleton/local-inference-runtime"
 
 case "$repo_root" in
@@ -24,6 +25,11 @@ case "$mfp_handoff_root" in
   /var/lib/skeleton/*) ;;
   *) echo "MFP handoff root must be below /var/lib/skeleton" >&2; exit 2 ;;
 esac
+case "$subject_aliases_file" in
+  /etc/skeleton/*) ;;
+  *) echo "subject aliases file must be below /etc/skeleton" >&2; exit 2 ;;
+esac
+[[ -f "$subject_aliases_file" ]] || { echo "subject aliases file missing" >&2; exit 2; }
 [[ "$run_as_user" =~ ^[a-z_][a-z0-9_-]*$ ]] || { echo "invalid service user" >&2; exit 2; }
 [[ "$model" =~ ^[A-Za-z0-9._:-]+$ ]] || { echo "invalid model name" >&2; exit 2; }
 
@@ -67,6 +73,7 @@ SKELETON_LOCAL_INFERENCE_ROOT=$queue_root
 SKELETON_LOCAL_INFERENCE_MODELS=$model
 SKELETON_LOCAL_INFERENCE_DEFAULT_MODEL=$model
 SKELETON_MFP_INFERENCE_HANDOFF_ROOT=$mfp_handoff_root
+SKELETON_FAMILY_SUBJECT_ALIASES_FILE=$subject_aliases_file
 SKELETON_OLLAMA_ENDPOINT=http://127.0.0.1:11434
 EOF
 

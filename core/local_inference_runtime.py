@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import fcntl
-import hashlib
 import ipaddress
 import json
 import os
@@ -142,7 +141,12 @@ class InferenceQueue:
         timeout_seconds: int = 120,
     ) -> tuple[str, bool]:
         now = _utc_now()
-        request_id = str(uuid.uuid4())
+        request_id = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"skeleton-local-inference:{request_type}:{idempotency_key}",
+            )
+        )
         request = {
             "schema": REQUEST_SCHEMA_ID,
             "request_id": request_id,
@@ -155,18 +159,21 @@ class InferenceQueue:
             "timeout_seconds": timeout_seconds,
         }
         validate_json_schema(request, REQUEST_SCHEMA)
-        key_hash = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()
-        index_path = self.root / "state" / f"idempotency-{key_hash}.json"
         with FileLock(self.root / "state" / "submit.lock"):
-            if index_path.exists():
-                existing = _read_json(index_path)
-                existing_id = existing.get("request_id")
-                if isinstance(existing_id, str):
-                    return existing_id, False
-                raise InferenceRuntimeError("idempotency_index_invalid", retryable=False)
+            if any(
+                (self.root / state / f"{request_id}.json").exists()
+                for state in (
+                    "pending",
+                    "processing",
+                    "retry",
+                    "done",
+                    "quarantine",
+                    "results",
+                )
+            ):
+                return request_id, False
             envelope = {"request": request, "attempt": 0, "next_attempt_at": 0.0, "last_reason": None}
             _atomic_write_json(self.root / "pending" / f"{request_id}.json", envelope)
-            _atomic_write_json(index_path, {"request_id": request_id})
         return request_id, True
 
     def claim_next(self, *, now: float | None = None) -> dict[str, Any] | None:
@@ -360,7 +367,7 @@ class LocalInferenceWorker:
                 parsed = json.loads(text)
                 if not isinstance(parsed, Mapping):
                     raise InferenceValidationError("model_output_not_object")
-                output = adapter.output_validator(parsed)
+                output = adapter.output_validator(parsed, request["payload"])
             except (json.JSONDecodeError, InferenceValidationError) as exc:
                 raise InferenceRuntimeError("model_output_invalid", retryable=True) from exc
             status = "REVIEW" if output.get("route") == "REVIEW" else "DONE"

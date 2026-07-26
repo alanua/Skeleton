@@ -32,7 +32,6 @@ Packet contract:
   "idempotency_key": "stable-private-document-key",
   "payload": {
     "ocr_text": "private OCR text",
-    "allowed_subject_aliases": ["configured-alias-1", "configured-alias-2", "configured-alias-3"],
     "languages": ["de"],
     "source_kind": "mfp",
     "page_count": 2,
@@ -41,7 +40,7 @@ Packet contract:
 }
 ```
 
-The worker claims the packet, writes a private receipt containing the opaque request ID, and immediately sends the bounded OCR payload to the configured local model. The result is a classification proposal only: subject aliases, fixed topic, issuing jurisdiction, date precision, document type, issuer, summary, evidence, confidence and allowed calendar-event candidates.
+The three allowed family aliases are loaded from a separate root-owned private configuration file; the scanner packet cannot choose or override them. The worker claims the packet, writes a private receipt containing the opaque request ID, and immediately sends the bounded OCR payload to the configured local model. The result is a classification proposal only: subject aliases, fixed topic, issuing jurisdiction, date precision, document type, issuer, summary, evidence, confidence and allowed calendar-event candidates.
 
 Invalid, low-confidence or incomplete model output is retried and then quarantined/reviewed. It never creates guessed archive paths. Deterministic archive verification, MemoryGateway mutation, canonical SQLite commit, calendar upsert and projection outbox remain separate controlled domain actions.
 
@@ -54,6 +53,7 @@ sudo scripts/install_local_inference_worker.sh \
   /opt/Skeleton \
   /var/lib/skeleton/local-inference \
   /var/lib/skeleton/mfp-inference-handoff \
+  /etc/skeleton/family-subject-aliases.json \
   agent \
   qwen2.5:1.5b
 ```

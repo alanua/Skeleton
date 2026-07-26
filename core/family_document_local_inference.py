@@ -192,13 +192,21 @@ def build_family_document_prompt(payload: Mapping[str, Any]) -> str:
     )
 
 
-def validate_family_document_output(value: Mapping[str, Any]) -> Mapping[str, Any]:
+def validate_family_document_output(
+    value: Mapping[str, Any], request_payload: Mapping[str, Any]
+) -> Mapping[str, Any]:
     validate_json_schema(value, _OUTPUT_SCHEMA)
     route = value["route"]
+    validate_json_schema(request_payload, _INPUT_SCHEMA)
+    allowed_aliases = set(request_payload["allowed_subject_aliases"])
     aliases = value["linked_subject_aliases"]
     if len(set(aliases)) != len(aliases):
         raise InferenceValidationError("linked_subject_aliases_not_unique")
+    if any(alias not in allowed_aliases for alias in aliases):
+        raise InferenceValidationError("linked_subject_alias_not_allowed")
     principal = value["principal_subject_alias"]
+    if principal is not None and principal not in allowed_aliases:
+        raise InferenceValidationError("principal_subject_not_allowed")
     if principal is not None and principal not in aliases:
         raise InferenceValidationError("principal_subject_not_linked")
     confidence = value["confidence"]
@@ -224,6 +232,23 @@ def validate_family_document_output(value: Mapping[str, Any]) -> Mapping[str, An
     return dict(value)
 
 
+_HANDOFF_PAYLOAD_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["ocr_text", "source_kind"],
+    "additionalProperties": False,
+    "properties": {
+        "ocr_text": {"type": "string", "minLength": 1, "maxLength": 24000},
+        "languages": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {"type": "string", "minLength": 2, "maxLength": 16},
+        },
+        "source_kind": {"type": "string", "const": "mfp"},
+        "page_count": {"type": "integer", "minimum": 1, "maximum": 500},
+        "mime_type": {"type": "string", "minLength": 1, "maxLength": 120},
+    },
+}
+
 _HANDOFF_SCHEMA: dict[str, Any] = {
     "type": "object",
     "required": ["schema", "idempotency_key", "payload"],
@@ -231,7 +256,7 @@ _HANDOFF_SCHEMA: dict[str, Any] = {
     "properties": {
         "schema": {"type": "string", "const": "skeleton.family_document_inference_handoff.v1"},
         "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 240},
-        "payload": _INPUT_SCHEMA,
+        "payload": _HANDOFF_PAYLOAD_SCHEMA,
     },
 }
 
@@ -260,12 +285,17 @@ class FamilyDocumentHandoffIngestor:
         queue: InferenceQueueProtocol,
         *,
         model: str,
+        allowed_subject_aliases: tuple[str, str, str],
         max_attempts: int = 3,
         timeout_seconds: int = 120,
     ) -> None:
         self.root = Path(root).expanduser().resolve()
         self.queue = queue
+        aliases = tuple(alias.strip() for alias in allowed_subject_aliases)
+        if len(aliases) != 3 or any(not alias for alias in aliases) or len(set(aliases)) != 3:
+            raise InferenceValidationError("exact_three_subject_aliases_required")
         self.model = model
+        self.allowed_subject_aliases = aliases
         self.max_attempts = max_attempts
         self.timeout_seconds = timeout_seconds
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -287,8 +317,12 @@ class FamilyDocumentHandoffIngestor:
                 if not isinstance(value, Mapping):
                     raise InferenceValidationError("handoff_packet_not_object")
                 validate_json_schema(value, _HANDOFF_SCHEMA)
-                payload = value["payload"]
-                assert isinstance(payload, Mapping)
+                raw_payload = value["payload"]
+                assert isinstance(raw_payload, Mapping)
+                payload = {
+                    **dict(raw_payload),
+                    "allowed_subject_aliases": list(self.allowed_subject_aliases),
+                }
                 build_family_document_prompt(payload)
                 request_id, created = self.queue.submit(
                     request_type=REQUEST_TYPE,

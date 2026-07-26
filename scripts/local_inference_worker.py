@@ -5,7 +5,6 @@ import json
 import os
 import signal
 import threading
-import time
 from pathlib import Path
 
 from core.family_document_local_inference import FamilyDocumentHandoffIngestor
@@ -34,6 +33,18 @@ def _models(value: str | None) -> set[str]:
     return models
 
 
+def _subject_aliases(path: str | None) -> tuple[str, str, str]:
+    if not path:
+        raise SystemExit("family subject aliases file missing")
+    value = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(value, list) or len(value) != 3 or any(not isinstance(item, str) for item in value):
+        raise SystemExit("family subject aliases file invalid")
+    aliases = tuple(item.strip() for item in value)
+    if any(not item for item in aliases) or len(set(aliases)) != 3:
+        raise SystemExit("family subject aliases file invalid")
+    return aliases  # type: ignore[return-value]
+
+
 def _worker(args: argparse.Namespace) -> tuple[InferenceQueue, LocalInferenceWorker, FamilyDocumentHandoffIngestor | None]:
     queue = InferenceQueue(_queue_root(args.root))
     client = OllamaClient(args.endpoint or os.environ.get("SKELETON_OLLAMA_ENDPOINT", "http://127.0.0.1:11434"))
@@ -52,6 +63,10 @@ def _worker(args: argparse.Namespace) -> tuple[InferenceQueue, LocalInferenceWor
             handoff_root,
             queue,
             model=os.environ.get("SKELETON_LOCAL_INFERENCE_DEFAULT_MODEL", "qwen2.5:1.5b"),
+            allowed_subject_aliases=_subject_aliases(
+                args.family_subject_aliases_file
+                or os.environ.get("SKELETON_FAMILY_SUBJECT_ALIASES_FILE")
+            ),
         )
         if handoff_root
         else None
@@ -70,6 +85,7 @@ def main() -> int:
     parser.add_argument("--endpoint")
     parser.add_argument("--models")
     parser.add_argument("--mfp-handoff-root")
+    parser.add_argument("--family-subject-aliases-file")
     parser.add_argument("--poll-seconds", type=float, default=0.5)
     parser.add_argument("--stale-seconds", type=int, default=600)
     args = parser.parse_args()

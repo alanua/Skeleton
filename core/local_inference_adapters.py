@@ -9,7 +9,7 @@ class InferenceValidationError(ValueError):
 
 
 PromptBuilder = Callable[[Mapping[str, Any]], str]
-OutputValidator = Callable[[Mapping[str, Any]], Mapping[str, Any]]
+OutputValidator = Callable[[Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]]
 
 
 @dataclass(frozen=True)

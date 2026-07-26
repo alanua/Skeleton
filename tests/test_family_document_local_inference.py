@@ -66,22 +66,22 @@ def test_prompt_is_bounded_and_forbids_side_effects() -> None:
 
 
 def test_valid_accept_and_review_outputs() -> None:
-    assert validate_family_document_output(output())["route"] == "ACCEPT"
-    assert validate_family_document_output(output("REVIEW"))["route"] == "REVIEW"
+    assert validate_family_document_output(output(), payload())["route"] == "ACCEPT"
+    assert validate_family_document_output(output("REVIEW"), payload())["route"] == "REVIEW"
 
 
 def test_accept_requires_confidence_and_required_values() -> None:
     value = output()
     value["confidence"]["overall"] = 0.79  # type: ignore[index]
     with pytest.raises(InferenceValidationError):
-        validate_family_document_output(value)
+        validate_family_document_output(value, payload())
 
 
 def test_output_rejects_side_effect_property() -> None:
     value = output()
     value["shell_command"] = "mv file"
     with pytest.raises(InferenceValidationError):
-        validate_family_document_output(value)
+        validate_family_document_output(value, payload())
 
 
 def test_handoff_ingestor_queues_completed_ocr_packet(tmp_path) -> None:
@@ -94,12 +94,17 @@ def test_handoff_ingestor_queues_completed_ocr_packet(tmp_path) -> None:
         handoff,
         queue,
         model="qwen2.5:1.5b",
+        allowed_subject_aliases=("person-a", "person-b", "person-c"),
         timeout_seconds=30,
     )
     packet = {
         "schema": "skeleton.family_document_inference_handoff.v1",
         "idempotency_key": "synthetic-handoff-document",
-        "payload": payload(),
+        "payload": {
+            key: value
+            for key, value in payload().items()
+            if key != "allowed_subject_aliases"
+        },
     }
     (handoff / "pending" / "packet.json").write_text(
         __import__("json").dumps(packet), encoding="utf-8"
@@ -120,8 +125,21 @@ def test_invalid_handoff_routes_to_review(tmp_path) -> None:
 
     queue = InferenceQueue(tmp_path / "queue")
     handoff = tmp_path / "handoff"
-    ingestor = FamilyDocumentHandoffIngestor(handoff, queue, model="qwen2.5:1.5b")
+    ingestor = FamilyDocumentHandoffIngestor(
+        handoff,
+        queue,
+        model="qwen2.5:1.5b",
+        allowed_subject_aliases=("person-a", "person-b", "person-c"),
+    )
     (handoff / "pending" / "bad.json").write_text("{}", encoding="utf-8")
     assert ingestor.ingest_one() is True
     assert ingestor.status()["review"] == 1
     assert queue.status()["counts"]["pending"] == 0
+
+
+def test_output_rejects_alias_not_in_request() -> None:
+    value = output()
+    value["principal_subject_alias"] = "invented-person"
+    value["linked_subject_aliases"] = ["invented-person"]
+    with pytest.raises(InferenceValidationError):
+        validate_family_document_output(value, payload())
