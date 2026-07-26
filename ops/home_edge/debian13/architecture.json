@@ -1,0 +1,34 @@
+{
+  "schema": "skeleton.home_edge_debian_media_platform.v2",
+  "status": "target_clean_install",
+  "node_id": "home-edge-01",
+  "target": {
+    "os": "Debian 13 stable trixie amd64",
+    "desktop_user": "valertos08",
+    "desktop_uid": 1000,
+    "display": "single persistent Sway Wayland session via greetd",
+    "audio": "PipeWire plus WirePlumber",
+    "player": "MPV only",
+    "browser": "dedicated Chromium TV profile",
+    "vlc": "not installed",
+    "waydroid": "rollback image only"
+  },
+  "invariants": {
+    "single_foreground_renderer": true,
+    "direct_play_only": true,
+    "phone_remote_p95_ms": 80,
+    "pointer_gyro_hz": 30,
+    "game_mode_surface": "automatic landscape universal gamepad",
+    "disk_erase_requires_verified_backup_and_rollback_image": true,
+    "no_secrets_in_github": true
+  },
+  "gates": [
+    "G0 branch",
+    "G1 backup",
+    "G2 rollback image",
+    "G3 physical install",
+    "G4 bootstrap",
+    "G5 restore",
+    "G6 acceptance"
+  ]
+}
