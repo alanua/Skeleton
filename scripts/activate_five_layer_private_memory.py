@@ -274,13 +274,25 @@ def _real_smoke(
                 "limit": 5,
             }
         )
-        result = recall["results"][0]
+        results = recall.get("results")
+        if not isinstance(results, list) or not results:
+            raise CogneeLocalRuntimeError(
+                "cognee_recall_empty", "Cognee recall returned no bound result"
+            )
+        result = results[0]
+        if not isinstance(result, Mapping):
+            raise CogneeLocalRuntimeError(
+                "cognee_recall_invalid", "Cognee recall result is invalid"
+            )
+        provenance = result.get("provenance")
         cognee_ok = (
             health.get("status") == "READY"
             and result.get("canonical_ref") == exact.get("canonical_ref")
             and result.get("content_hash") == exact.get("value_hash")
-            and isinstance(result.get("provenance"), list)
-            and result["provenance"][0].get("source_kind") == "canonical_sqlite"
+            and isinstance(provenance, list)
+            and bool(provenance)
+            and isinstance(provenance[0], Mapping)
+            and provenance[0].get("source_kind") == "canonical_sqlite"
         )
 
         stale = adapter.health(
@@ -404,7 +416,7 @@ def _real_smoke(
             "canonical_count": int(canonical.get("active_fact_count", 0))
             if isinstance(canonical, Mapping)
             else 0,
-            "semantic_count": len(recall["results"]),
+            "semantic_count": len(results),
             "graph_count": int(graph_status.get("relationship_count", 0))
             if isinstance(graph_status, Mapping)
             else 0,
@@ -456,11 +468,14 @@ def main() -> int:
     start = time.monotonic()
     disk_before = _disk_bytes(private_root)
     rollback_verified = False
+    stage = "provider_config"
     try:
         provider = validate_local_provider_config(os.environ)
+        stage = "cognee_install"
         install_or_verify_pinned_cognee(
             private_root, env=os.environ, installer=_quiet_installer
         )
+        stage = "real_smoke"
         booleans, counts = _real_smoke(private_root, os.environ)
         failed = [
             key
@@ -474,6 +489,7 @@ def main() -> int:
                 f"{failed[0]}_failed", "activation smoke failed"
             )
 
+        stage = "candidate_marker"
         atomic_write_activation_marker(
             private_root,
             expected_head_sha=args.expected_sha,
@@ -485,17 +501,20 @@ def main() -> int:
             raise CogneeLocalRuntimeError(
                 "candidate_marker_readback_failed", "candidate marker failed"
             )
+        stage = "rollback"
         rollback_verified = restore_activation_marker(private_root, previous)
         if not rollback_verified:
             raise CogneeLocalRuntimeError(
                 "rollback_failed", "activation rollback failed"
             )
+        stage = "activation_marker"
         atomic_write_activation_marker(
             private_root,
             expected_head_sha=args.expected_sha,
             provider_config=provider,
             enabled=True,
         )
+        stage = "live_status"
         live = live_aggregate_status(private_root)
         booleans["live_status_checked"] = (
             live.get("activation_enabled") is True
@@ -526,11 +545,10 @@ def main() -> int:
         return 0
     except Exception as exc:
         restore_activation_marker(private_root, previous)
-        reason = (
-            exc.reason_code
-            if isinstance(exc, CogneeLocalRuntimeError)
-            else "activation_exception"
-        )
+        if isinstance(exc, (CogneeLocalRuntimeError, SemanticProjectionError)):
+            reason = exc.reason_code
+        else:
+            reason = f"{stage}_exception"
         receipt = activation_receipt(
             status="BLOCKED",
             reason=reason,
