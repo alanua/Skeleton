@@ -171,6 +171,37 @@ def test_activation_executor_fails_closed_on_receipt_check(monkeypatch, tmp_path
     assert "private details" not in report
 
 
+def test_activation_executor_surfaces_safe_blocked_reason(monkeypatch, tmp_path: Path) -> None:
+    checkout = _prepare_explicit_private_root(monkeypatch, tmp_path)
+
+    def runner(
+        command: list[str],
+        cwd: Path,
+        env: Mapping[str, str] | None,
+        timeout: int,
+    ) -> tuple[int, str, str]:
+        code, stdout, stderr = _runner(command, cwd, env, timeout)
+        if command[:3] == [command[0], "-m", "scripts.activate_five_layer_private_memory"]:
+            payload = json.loads(stdout)
+            payload["status"] = "BLOCKED"
+            payload["reason_codes"] = ["cognee_selected_failed"]
+            payload["booleans"] = {"private_leak_detected": False}
+            payload["rollback"] = {"verified": False, "status": "not_verified"}
+            return 1, json.dumps(payload), "private details must not surface"
+        return code, stdout, stderr
+
+    report = execute_five_layer_memory_activation(
+        _body(),
+        workdir=checkout,
+        maintenance_report=_report,
+        command_runner=runner,
+    )
+    assert report.startswith("BLOCKED:")
+    assert "reason=cognee_selected_failed" in report
+    assert "activation_receipt_checks_failed" not in report
+    assert "private details" not in report
+
+
 def test_runner_poller_registers_activation_route() -> None:
     source = Path("scripts/runner_poll_github_tasks.py").read_text(encoding="utf-8")
     assert "ACTIVATE_FIVE_LAYER_PRIVATE_MEMORY" in source

@@ -273,10 +273,23 @@ def _parse_activation_receipt(
     booleans = payload.get("booleans")
     if not isinstance(booleans, dict):
         return None, "activation_receipt_checks_invalid"
-    if any(booleans.get(key) is not True for key in _REQUIRED_TRUE_CHECKS):
-        return None, "activation_receipt_checks_failed"
     if booleans.get("private_leak_detected") is not False:
         return None, "activation_private_leak_detected"
+    status = payload.get("status")
+    if status == "BLOCKED":
+        reason_codes = payload.get("reason_codes")
+        if (
+            not isinstance(reason_codes, list)
+            or len(reason_codes) != 1
+            or not isinstance(reason_codes[0], str)
+            or _SAFE_REASON_RE.fullmatch(reason_codes[0]) is None
+        ):
+            return None, "activation_receipt_reason_invalid"
+        return payload, None
+    if status != "DONE":
+        return None, "activation_receipt_status_invalid"
+    if any(booleans.get(key) is not True for key in _REQUIRED_TRUE_CHECKS):
+        return None, "activation_receipt_checks_failed"
     rollback = payload.get("rollback")
     if not isinstance(rollback, dict) or rollback.get("verified") is not True:
         return None, "activation_rollback_unverified"
