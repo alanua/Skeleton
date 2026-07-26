@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import json
 import os
-import subprocess
-import sys
+import runpy
 from pathlib import Path
 
 from core.cognee_worker_bootstrap import configure_cognee_worker_environment
@@ -51,37 +49,20 @@ def test_bootstrap_is_noop_outside_exact_worker_fingerprint(tmp_path: Path) -> N
     assert env == before
 
 
-def test_sitecustomize_applies_profile_in_fresh_worker_python(tmp_path: Path) -> None:
-    env = {**os.environ, **_worker_env(tmp_path), "PYTHONPATH": str(ROOT)}
-    output = subprocess.check_output(
-        [
-            sys.executable,
-            "-c",
-            (
-                "import json,os;"
-                "print(json.dumps({k:os.environ.get(k) for k in "
-                "('ENABLE_BACKEND_ACCESS_CONTROL','CACHING','LLM_INSTRUCTOR_MODE')},sort_keys=True))"
-            ),
-        ],
-        cwd=tmp_path,
-        env=env,
-        text=True,
-        timeout=30,
-    )
-    assert json.loads(output) == {
-        "CACHING": "False",
-        "ENABLE_BACKEND_ACCESS_CONTROL": "False",
-        "LLM_INSTRUCTOR_MODE": "json_schema_mode",
-    }
+def test_repository_sitecustomize_delegates_to_closed_bootstrap(
+    monkeypatch, tmp_path: Path
+) -> None:
+    for key, value in _worker_env(tmp_path).items():
+        monkeypatch.setenv(key, value)
+    runpy.run_path(str(ROOT / "sitecustomize.py"))
+    assert os.environ["ENABLE_BACKEND_ACCESS_CONTROL"] == "False"
+    assert os.environ["CACHING"] == "False"
+    assert os.environ["LLM_INSTRUCTOR_MODE"] == "json_schema_mode"
 
 
-def test_sitecustomize_does_not_mutate_normal_python(tmp_path: Path) -> None:
-    env = {**os.environ, "PYTHONPATH": str(ROOT), "ENABLE_BACKEND_ACCESS_CONTROL": "keep"}
-    output = subprocess.check_output(
-        [sys.executable, "-c", "import os;print(os.environ.get('ENABLE_BACKEND_ACCESS_CONTROL'))"],
-        cwd=tmp_path,
-        env=env,
-        text=True,
-        timeout=30,
-    )
-    assert output.strip() == "keep"
+def test_repository_sitecustomize_is_noop_for_normal_python(monkeypatch) -> None:
+    monkeypatch.delenv("DATA_ROOT_DIRECTORY", raising=False)
+    monkeypatch.setenv("ENABLE_BACKEND_ACCESS_CONTROL", "keep")
+    before = dict(os.environ)
+    runpy.run_path(str(ROOT / "sitecustomize.py"))
+    assert os.environ == before
