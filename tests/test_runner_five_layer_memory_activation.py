@@ -102,7 +102,9 @@ def _runner(
     assert command[:3] == [command[0], "-m", "scripts.activate_five_layer_private_memory"]
     assert env is not None
     assert env["SKELETON_COGNEE_LLM_MODEL"] == "qwen2.5:3b"
+    assert env["SKELETON_COGNEE_LLM_ENDPOINT"] == "http://127.0.0.1:11434/v1"
     assert env["SKELETON_COGNEE_EMBEDDING_MODEL"] == "nomic-embed-text:latest"
+    assert env["SKELETON_COGNEE_EMBEDDING_ENDPOINT"] == "http://127.0.0.1:11434/api/embed"
     assert "OPENAI_API_KEY" not in env
     return 0, _receipt() + "\n", ""
 
