@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.family_document_inference.v1",
+  "type": "object",
+  "required": ["schema", "route", "principal_subject_alias", "linked_subject_aliases", "topic_alias", "jurisdiction_country", "document_date", "date_precision", "document_type", "issuer", "summary", "confidence", "evidence", "event_candidates", "reason_codes"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "skeleton.family_document_inference.v1"},
+    "route": {"enum": ["ACCEPT", "REVIEW"]},
+    "principal_subject_alias": {"type": ["string", "null"]},
+    "linked_subject_aliases": {"type": "array", "items": {"type": "string"}},
+    "topic_alias": {"type": ["string", "null"]},
+    "jurisdiction_country": {"type": ["string", "null"]},
+    "document_date": {"type": ["string", "null"]},
+    "date_precision": {"enum": ["day", "month", "year", "unknown"]},
+    "document_type": {"type": ["string", "null"]},
+    "issuer": {"type": ["string", "null"]},
+    "summary": {"type": "string"},
+    "confidence": {"type": "object"},
+    "evidence": {"type": "object"},
+    "event_candidates": {"type": "array"},
+    "reason_codes": {"type": "array", "items": {"type": "string"}}
+  }
+}

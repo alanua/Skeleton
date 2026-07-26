@@ -1,0 +1,25 @@
+[Unit]
+Description=Skeleton local Ollama inference worker
+After=network.target ollama.service
+Wants=ollama.service
+
+[Service]
+Type=simple
+User=agent
+Group=agent
+EnvironmentFile=/etc/skeleton/local-inference.env
+ExecStart=/usr/local/lib/skeleton/local-inference-worker
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/skeleton
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target
