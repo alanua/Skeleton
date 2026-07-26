@@ -243,11 +243,11 @@ def _select_local_models(
     return {
         "SKELETON_COGNEE_LLM_PROVIDER": "ollama",
         "SKELETON_COGNEE_LLM_MODEL": llm,
-        "SKELETON_COGNEE_LLM_ENDPOINT": "http://127.0.0.1:11434",
+        "SKELETON_COGNEE_LLM_ENDPOINT": "http://127.0.0.1:11434/v1",
         "SKELETON_COGNEE_EMBEDDING_PROVIDER": "ollama",
         "SKELETON_COGNEE_EMBEDDING_MODEL": embedding,
         "SKELETON_COGNEE_EMBEDDING_DIMENSIONS": dimensions,
-        "SKELETON_COGNEE_EMBEDDING_ENDPOINT": "http://127.0.0.1:11434",
+        "SKELETON_COGNEE_EMBEDDING_ENDPOINT": "http://127.0.0.1:11434/api/embed",
         "SKELETON_COGNEE_HUGGINGFACE_TOKENIZER": tokenizer,
     }, None
 
