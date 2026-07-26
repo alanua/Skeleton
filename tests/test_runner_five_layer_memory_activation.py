@@ -204,6 +204,16 @@ def test_activation_executor_surfaces_safe_blocked_reason(monkeypatch, tmp_path:
     assert "private details" not in report
 
 
+def test_activation_script_preserves_safe_cognee_failure_reasons() -> None:
+    source = Path("scripts/activate_five_layer_private_memory.py").read_text(
+        encoding="utf-8"
+    )
+    assert "isinstance(exc, (CogneeLocalRuntimeError, SemanticProjectionError))" in source
+    assert 'reason = f"{stage}_exception"' in source
+    assert '"cognee_recall_empty"' in source
+    assert '"cognee_recall_invalid"' in source
+
+
 def test_runner_poller_registers_activation_route() -> None:
     source = Path("scripts/runner_poll_github_tasks.py").read_text(encoding="utf-8")
     assert "ACTIVATE_FIVE_LAYER_PRIVATE_MEMORY" in source
