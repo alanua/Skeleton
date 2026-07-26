@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Mapping
 
 from core.cognee_local_runtime import (
+    PINNED_COGNEE_VERSION,
     CogneeLocalRuntimeError,
     activation_receipt,
     atomic_write_activation_marker,
@@ -93,8 +94,12 @@ def _origin_is_skeleton(value: str) -> bool:
 def _quiet_installer(
     command: list[str], child_env: Mapping[str, str]
 ) -> tuple[int, str]:
+    expected = f"cognee=={PINNED_COGNEE_VERSION}"
+    if not command or command[-1] != expected:
+        return 1, ""
+    ollama_requirement = f"cognee[ollama]=={PINNED_COGNEE_VERSION}"
     completed = subprocess.run(
-        command,
+        [*command[:-1], ollama_requirement],
         env=dict(child_env),
         text=True,
         stdout=subprocess.DEVNULL,
