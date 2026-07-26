@@ -159,7 +159,7 @@ _OUTPUT_SCHEMA: dict[str, Any] = {
         "reason_codes": {
             "type": "array",
             "maxItems": 12,
-            "items": {"type": "string", "minLength": 1, "maxLength": 96, "pattern": r"[A-Z0-9_]+"},
+            "items": {"type": "string", "minLength": 1, "maxLength": 96, "pattern": r"^[A-Z0-9_]+$"},
         },
     },
 }
@@ -198,29 +198,41 @@ def validate_family_document_output(
     value: Mapping[str, Any], request_payload: Mapping[str, Any]
 ) -> Mapping[str, Any]:
     validate_json_schema(value, _OUTPUT_SCHEMA)
-    route = value["route"]
     validate_json_schema(request_payload, _INPUT_SCHEMA)
+    normalized = dict(value)
+    route = normalized["route"]
     allowed_aliases = set(request_payload["allowed_subject_aliases"])
-    aliases = value["linked_subject_aliases"]
-    if len(set(aliases)) != len(aliases):
-        raise InferenceValidationError("linked_subject_aliases_not_unique")
-    if any(alias not in allowed_aliases for alias in aliases):
-        raise InferenceValidationError("linked_subject_alias_not_allowed")
-    principal = value["principal_subject_alias"]
-    if principal is not None and principal not in allowed_aliases:
-        raise InferenceValidationError("principal_subject_not_allowed")
-    if principal is not None and principal not in aliases:
-        raise InferenceValidationError("principal_subject_not_linked")
-    confidence = value["confidence"]
+    aliases = list(normalized["linked_subject_aliases"])
+    principal = normalized["principal_subject_alias"]
+
+    if route == "REVIEW":
+        aliases = list(dict.fromkeys(alias for alias in aliases if alias in allowed_aliases))
+        if principal not in allowed_aliases:
+            principal = None
+        if principal is not None and principal not in aliases:
+            aliases.append(principal)
+        normalized["principal_subject_alias"] = principal
+        normalized["linked_subject_aliases"] = aliases
+    else:
+        if len(set(aliases)) != len(aliases):
+            raise InferenceValidationError("linked_subject_aliases_not_unique")
+        if any(alias not in allowed_aliases for alias in aliases):
+            raise InferenceValidationError("linked_subject_alias_not_allowed")
+        if principal is not None and principal not in allowed_aliases:
+            raise InferenceValidationError("principal_subject_not_allowed")
+        if principal is not None and principal not in aliases:
+            raise InferenceValidationError("principal_subject_not_linked")
+
+    confidence = normalized["confidence"]
     assert isinstance(confidence, Mapping)
-    evidence = value["evidence"]
+    evidence = normalized["evidence"]
     assert isinstance(evidence, Mapping)
     required_values = (
         principal,
-        value["topic_alias"],
-        value["jurisdiction_country"],
-        value["document_type"],
-        value["issuer"],
+        normalized["topic_alias"],
+        normalized["jurisdiction_country"],
+        normalized["document_type"],
+        normalized["issuer"],
     )
     required_evidence = all(bool(evidence[key]) for key in evidence)
     if route == "ACCEPT" and (
@@ -229,12 +241,12 @@ def validate_family_document_output(
         or not required_evidence
     ):
         raise InferenceValidationError("acceptance_contract_not_met")
-    if route == "REVIEW" and not value["reason_codes"]:
+    if route == "REVIEW" and not normalized["reason_codes"]:
         raise InferenceValidationError("review_reason_missing")
-    _validate_date_precision(value["document_date"], value["date_precision"])
-    for candidate in value["event_candidates"]:
+    _validate_date_precision(normalized["document_date"], normalized["date_precision"])
+    for candidate in normalized["event_candidates"]:
         _validate_partial_date(candidate["date"])
-    return dict(value)
+    return normalized
 
 
 def _validate_date_precision(raw: object, precision: object) -> None:
@@ -459,4 +471,5 @@ FAMILY_DOCUMENT_ADAPTER = AdapterSpec(
     request_type=REQUEST_TYPE,
     prompt_builder=build_family_document_prompt,
     output_validator=validate_family_document_output,
+    output_schema=_OUTPUT_SCHEMA,
 )
