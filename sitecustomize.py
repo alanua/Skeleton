@@ -1,0 +1,5 @@
+from __future__ import annotations
+
+from core.cognee_worker_bootstrap import configure_cognee_worker_environment
+
+configure_cognee_worker_environment()
