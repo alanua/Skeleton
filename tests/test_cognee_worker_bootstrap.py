@@ -136,3 +136,91 @@ def test_operation_wrapper_installation_is_idempotent() -> None:
     wrapped = module.add
     assert install_cognee_operation_wrappers(module) is False
     assert module.add is wrapped
+
+
+def test_add_wrapper_normalizes_only_stale_compatibility_arguments() -> None:
+    captured: dict[str, object] = {}
+
+    async def add(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return "added"
+
+    module = SimpleNamespace(add=add)
+    assert install_cognee_operation_wrappers(module) is True
+    original_data = ["synthetic projection"]
+    original_kwargs = {
+        "dataset_name": "sk_" + "a" * 48,
+        "incremental_loading": False,
+        "data_cache": True,
+        "run_in_background": False,
+    }
+
+    result = asyncio.run(module.add(original_data, **original_kwargs))
+
+    assert result == "added"
+    assert captured["args"] == ("synthetic projection",)
+    assert captured["kwargs"] == {
+        "dataset_name": "sk_" + "a" * 48,
+        "incremental_loading": False,
+    }
+    assert original_data == ["synthetic projection"]
+    assert original_kwargs["data_cache"] is True
+    assert original_kwargs["run_in_background"] is False
+
+
+def test_add_wrapper_normalizes_keyword_data_without_mutation() -> None:
+    captured: dict[str, object] = {}
+
+    async def add(**kwargs):
+        captured.update(kwargs)
+        return "added"
+
+    module = SimpleNamespace(add=add)
+    assert install_cognee_operation_wrappers(module) is True
+    original_data = ("synthetic projection",)
+
+    result = asyncio.run(
+        module.add(
+            data=original_data,
+            dataset_name="sk_" + "b" * 48,
+            incremental_loading=True,
+            data_cache=True,
+            run_in_background=False,
+        )
+    )
+
+    assert result == "added"
+    assert captured == {
+        "data": "synthetic projection",
+        "dataset_name": "sk_" + "b" * 48,
+        "incremental_loading": True,
+    }
+    assert original_data == ("synthetic projection",)
+
+
+def test_cognify_wrapper_removes_only_stale_compatibility_arguments() -> None:
+    captured: dict[str, object] = {}
+
+    async def cognify(**kwargs):
+        captured.update(kwargs)
+        return "cognified"
+
+    module = SimpleNamespace(cognify=cognify)
+    assert install_cognee_operation_wrappers(module) is True
+    datasets = ["sk_" + "c" * 48]
+
+    result = asyncio.run(
+        module.cognify(
+            datasets=datasets,
+            incremental_loading=False,
+            data_cache=True,
+            run_in_background=False,
+        )
+    )
+
+    assert result == "cognified"
+    assert captured == {
+        "datasets": datasets,
+        "incremental_loading": False,
+    }
