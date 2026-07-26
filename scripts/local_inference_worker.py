@@ -7,7 +7,10 @@ import signal
 import threading
 from pathlib import Path
 
-from core.family_document_local_inference import FamilyDocumentHandoffIngestor
+from core.family_document_local_inference import (
+    FamilyDocumentHandoffIngestor,
+    load_exact_subject_aliases,
+)
 from core.local_inference_adapters import build_default_registry
 from core.local_inference_runtime import (
     FileLock,
@@ -33,18 +36,6 @@ def _models(value: str | None) -> set[str]:
     return models
 
 
-def _subject_aliases(path: str | None) -> tuple[str, str, str]:
-    if not path:
-        raise SystemExit("family subject aliases file missing")
-    value = json.loads(Path(path).read_text(encoding="utf-8"))
-    if not isinstance(value, list) or len(value) != 3 or any(not isinstance(item, str) for item in value):
-        raise SystemExit("family subject aliases file invalid")
-    aliases = tuple(item.strip() for item in value)
-    if any(not item for item in aliases) or len(set(aliases)) != 3:
-        raise SystemExit("family subject aliases file invalid")
-    return aliases  # type: ignore[return-value]
-
-
 def _worker(args: argparse.Namespace) -> tuple[InferenceQueue, LocalInferenceWorker, FamilyDocumentHandoffIngestor | None]:
     queue = InferenceQueue(_queue_root(args.root))
     client = OllamaClient(args.endpoint or os.environ.get("SKELETON_OLLAMA_ENDPOINT", "http://127.0.0.1:11434"))
@@ -63,9 +54,9 @@ def _worker(args: argparse.Namespace) -> tuple[InferenceQueue, LocalInferenceWor
             handoff_root,
             queue,
             model=os.environ.get("SKELETON_LOCAL_INFERENCE_DEFAULT_MODEL", "qwen2.5:1.5b"),
-            allowed_subject_aliases=_subject_aliases(
+            allowed_subject_aliases=load_exact_subject_aliases(
                 args.family_subject_aliases_file
-                or os.environ.get("SKELETON_FAMILY_SUBJECT_ALIASES_FILE")
+                or os.environ.get("SKELETON_FAMILY_SUBJECT_ALIASES_FILE", "")
             ),
         )
         if handoff_root
@@ -90,15 +81,15 @@ def main() -> int:
     parser.add_argument("--stale-seconds", type=int, default=600)
     args = parser.parse_args()
 
-    queue, worker, ingestor = _worker(args)
-    if args.command == "status":
-        status = queue.status()
-        if ingestor is not None:
-            status["mfp_handoff_counts"] = ingestor.status()
-        _print_public(status)
-        return 0
-
     try:
+        queue, worker, ingestor = _worker(args)
+        if args.command == "status":
+            status = queue.status()
+            if ingestor is not None:
+                status["mfp_handoff_counts"] = ingestor.status()
+            _print_public(status)
+            return 0
+
         with FileLock(queue.worker_lock, nonblocking=True):
             queue.recover_stale_processing(stale_after_seconds=args.stale_seconds)
             if args.command == "once":
@@ -125,14 +116,17 @@ def main() -> int:
                     stop.wait(max(0.1, args.poll_seconds))
             return 0
     except InferenceRuntimeError as exc:
-        _print_public(
-            {
-                "schema": "skeleton.local_inference.worker_receipt.v1",
-                "status": "BLOCKED",
-                "reason": exc.reason_code,
-            }
-        )
-        return 1
+        reason = exc.reason_code
+    except Exception:
+        reason = "runtime_exception"
+    _print_public(
+        {
+            "schema": "skeleton.local_inference.worker_receipt.v1",
+            "status": "BLOCKED",
+            "reason": reason,
+        }
+    )
+    return 1
 
 
 if __name__ == "__main__":

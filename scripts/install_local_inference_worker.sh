@@ -30,6 +30,23 @@ case "$subject_aliases_file" in
   *) echo "subject aliases file must be below /etc/skeleton" >&2; exit 2 ;;
 esac
 [[ -f "$subject_aliases_file" ]] || { echo "subject aliases file missing" >&2; exit 2; }
+python3 - "$subject_aliases_file" <<'PY_VALIDATE_ALIASES'
+import json
+import pathlib
+import sys
+
+try:
+    value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+except Exception:
+    raise SystemExit(2)
+if (
+    not isinstance(value, list)
+    or len(value) != 3
+    or any(not isinstance(item, str) or not item.strip() for item in value)
+    or len({item.strip() for item in value}) != 3
+):
+    raise SystemExit(2)
+PY_VALIDATE_ALIASES
 [[ "$run_as_user" =~ ^[a-z_][a-z0-9_-]*$ ]] || { echo "invalid service user" >&2; exit 2; }
 [[ "$model" =~ ^[A-Za-z0-9._:-]+$ ]] || { echo "invalid model name" >&2; exit 2; }
 
@@ -75,6 +92,7 @@ SKELETON_LOCAL_INFERENCE_DEFAULT_MODEL=$model
 SKELETON_MFP_INFERENCE_HANDOFF_ROOT=$mfp_handoff_root
 SKELETON_FAMILY_SUBJECT_ALIASES_FILE=$subject_aliases_file
 SKELETON_OLLAMA_ENDPOINT=http://127.0.0.1:11434
+PYTHONDONTWRITEBYTECODE=1
 EOF
 
 sudo install -m 0755 "$wrapper_tmp" /usr/local/lib/skeleton/local-inference-worker

@@ -181,3 +181,59 @@ def test_ollama_endpoint_must_be_loopback() -> None:
         OllamaClient("https://127.0.0.1:11434")
     with pytest.raises(InferenceRuntimeError):
         OllamaClient("http://example.com:11434")
+
+
+def test_idempotency_conflict_fails_closed(tmp_path: Path) -> None:
+    queue = InferenceQueue(tmp_path)
+    queue.submit(
+        request_type="family_document.classify",
+        model="qwen2.5:1.5b",
+        payload=request_payload(),
+        idempotency_key="conflicting-document-key",
+        timeout_seconds=30,
+    )
+    changed = request_payload()
+    changed["ocr_text"] = "Different payload"
+    with pytest.raises(InferenceRuntimeError) as caught:
+        queue.submit(
+            request_type="family_document.classify",
+            model="qwen2.5:1.5b",
+            payload=changed,
+            idempotency_key="conflicting-document-key",
+            timeout_seconds=30,
+        )
+    assert caught.value.reason_code == "idempotency_conflict"
+
+
+def test_stale_processing_with_completed_result_finalizes_without_reinference(
+    tmp_path: Path,
+) -> None:
+    queue = InferenceQueue(tmp_path)
+    request_id, _created = queue.submit(
+        request_type="family_document.classify",
+        model="qwen2.5:1.5b",
+        payload=request_payload(),
+        idempotency_key="completed-before-done-move",
+        timeout_seconds=30,
+    )
+    envelope = queue.claim_next()
+    assert envelope is not None
+    result = {
+        "schema": "skeleton.local_inference.result.v1",
+        "request_id": request_id,
+        "request_type": "family_document.classify",
+        "status": "DONE",
+        "model": "qwen2.5:1.5b",
+        "attempt": 1,
+        "completed_at": "2026-07-26T20:00:00Z",
+        "reason_codes": [],
+        "output": accepted_output(),
+    }
+    (tmp_path / "results" / f"{request_id}.json").write_text(
+        json.dumps(result), encoding="utf-8"
+    )
+    processing = tmp_path / "processing" / f"{request_id}.json"
+    os.utime(processing, (1, 1))
+    assert queue.recover_stale_processing(stale_after_seconds=1, now=1000) == 1
+    assert queue.status()["counts"]["done"] == 1
+    assert queue.status()["counts"]["retry"] == 0

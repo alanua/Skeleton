@@ -160,18 +160,27 @@ class InferenceQueue:
         }
         validate_json_schema(request, REQUEST_SCHEMA)
         with FileLock(self.root / "state" / "submit.lock"):
-            if any(
-                (self.root / state / f"{request_id}.json").exists()
-                for state in (
-                    "pending",
-                    "processing",
-                    "retry",
-                    "done",
-                    "quarantine",
-                    "results",
-                )
-            ):
+            existing = next(
+                (
+                    self.root / state / f"{request_id}.json"
+                    for state in (
+                        "pending",
+                        "processing",
+                        "retry",
+                        "done",
+                        "quarantine",
+                    )
+                    if (self.root / state / f"{request_id}.json").exists()
+                ),
+                None,
+            )
+            if existing is not None:
+                existing_request = _request_from_envelope(_read_json(existing))
+                if _idempotent_request_signature(existing_request) != _idempotent_request_signature(request):
+                    raise InferenceRuntimeError("idempotency_conflict", retryable=False)
                 return request_id, False
+            if (self.root / "results" / f"{request_id}.json").exists():
+                raise InferenceRuntimeError("idempotency_state_incomplete", retryable=False)
             envelope = {"request": request, "attempt": 0, "next_attempt_at": 0.0, "last_reason": None}
             _atomic_write_json(self.root / "pending" / f"{request_id}.json", envelope)
         return request_id, True
@@ -257,6 +266,24 @@ class InferenceQueue:
                 continue
             if age < stale_after_seconds:
                 continue
+            result_path = self.root / "results" / path.name
+            if result_path.exists():
+                try:
+                    result = _read_json(result_path)
+                    validate_json_schema(result, RESULT_SCHEMA)
+                    if result.get("request_id") != path.stem:
+                        raise InferenceValidationError("result_request_mismatch")
+                    os.replace(path, self.root / "done" / path.name)
+                    recovered += 1
+                    continue
+                except (InferenceRuntimeError, InferenceValidationError):
+                    try:
+                        os.replace(
+                            result_path,
+                            self.root / "quarantine" / f"{path.stem}.result.json",
+                        )
+                    except FileNotFoundError:
+                        pass
             envelope = _read_json(path)
             envelope["last_reason"] = "stale_processing_recovered"
             envelope["next_attempt_at"] = current
@@ -391,6 +418,21 @@ class LocalInferenceWorker:
                 retryable=exc.retryable,
             )
         return True
+
+
+def _idempotent_request_signature(request: Mapping[str, Any]) -> str:
+    stable = {
+        key: request[key]
+        for key in (
+            "request_type",
+            "model",
+            "payload",
+            "idempotency_key",
+            "max_attempts",
+            "timeout_seconds",
+        )
+    }
+    return json.dumps(stable, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def _request_from_envelope(envelope: Mapping[str, Any]) -> dict[str, Any]:

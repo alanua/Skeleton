@@ -7,8 +7,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from core.local_inference_adapters import build_default_registry
-from core.local_inference_runtime import InferenceQueue
+from core.family_document_local_inference import (
+    REQUEST_TYPE as FAMILY_DOCUMENT_REQUEST_TYPE,
+    bind_family_subject_aliases,
+    load_exact_subject_aliases,
+)
+from core.local_inference_adapters import InferenceValidationError, build_default_registry
+from core.local_inference_runtime import InferenceQueue, InferenceRuntimeError
 
 
 def _read_payload(path: str | None) -> dict[str, Any]:
@@ -33,22 +38,34 @@ def main() -> int:
     parser.add_argument("--timeout-seconds", type=int, default=120)
     parser.add_argument("--private-receipt", action="store_true")
     args = parser.parse_args()
-    if not args.root:
-        raise SystemExit("local inference root missing")
-
-    registry = build_default_registry()
-    adapter = registry.get(args.request_type)
-    payload = _read_payload(args.payload_file)
-    adapter.prompt_builder(payload)
-
-    request_id, created = InferenceQueue(args.root).submit(
-        request_type=args.request_type,
-        model=args.model,
-        payload=payload,
-        idempotency_key=args.idempotency_key,
-        max_attempts=args.max_attempts,
-        timeout_seconds=args.timeout_seconds,
-    )
+    try:
+        if not args.root:
+            raise InferenceRuntimeError("local_inference_root_missing", retryable=False)
+        registry = build_default_registry()
+        adapter = registry.get(args.request_type)
+        payload = _read_payload(args.payload_file)
+        if args.request_type == FAMILY_DOCUMENT_REQUEST_TYPE:
+            aliases = load_exact_subject_aliases(
+                os.environ.get("SKELETON_FAMILY_SUBJECT_ALIASES_FILE", "")
+            )
+            payload = bind_family_subject_aliases(payload, aliases)
+        adapter.prompt_builder(payload)
+        request_id, created = InferenceQueue(args.root).submit(
+            request_type=args.request_type,
+            model=args.model,
+            payload=payload,
+            idempotency_key=args.idempotency_key,
+            max_attempts=args.max_attempts,
+            timeout_seconds=args.timeout_seconds,
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, InferenceValidationError, InferenceRuntimeError) as exc:
+        reason = exc.reason_code if isinstance(exc, InferenceRuntimeError) else "submission_invalid"
+        print(json.dumps({
+            "schema": "skeleton.local_inference.submit_receipt.v1",
+            "status": "BLOCKED",
+            "reason": reason,
+        }, sort_keys=True, separators=(",", ":")))
+        return 1
     receipt: dict[str, object] = {
         "schema": "skeleton.local_inference.submit_receipt.v1",
         "status": "QUEUED" if created else "DUPLICATE",

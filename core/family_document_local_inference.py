@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
+from datetime import date
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 
@@ -45,8 +47,8 @@ _INPUT_SCHEMA: dict[str, Any] = {
         "ocr_text": {"type": "string", "minLength": 1, "maxLength": 24000},
         "allowed_subject_aliases": {
             "type": "array",
-            "minItems": 1,
-            "maxItems": 12,
+            "minItems": 3,
+            "maxItems": 3,
             "items": {"type": "string", "minLength": 1, "maxLength": 80},
         },
         "languages": {
@@ -229,7 +231,73 @@ def validate_family_document_output(
         raise InferenceValidationError("acceptance_contract_not_met")
     if route == "REVIEW" and not value["reason_codes"]:
         raise InferenceValidationError("review_reason_missing")
+    _validate_date_precision(value["document_date"], value["date_precision"])
+    for candidate in value["event_candidates"]:
+        _validate_partial_date(candidate["date"])
     return dict(value)
+
+
+def _validate_date_precision(raw: object, precision: object) -> None:
+    if precision == "unknown":
+        if raw is not None:
+            raise InferenceValidationError("document_date_precision_invalid")
+        return
+    if not isinstance(raw, str):
+        raise InferenceValidationError("document_date_missing")
+    if precision == "day":
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw) is None:
+            raise InferenceValidationError("document_date_invalid")
+        try:
+            date.fromisoformat(raw)
+        except ValueError as exc:
+            raise InferenceValidationError("document_date_invalid") from exc
+    elif precision == "month":
+        if re.fullmatch(r"\d{4}-\d{2}", raw) is None or not 1 <= int(raw[5:7]) <= 12:
+            raise InferenceValidationError("document_date_invalid")
+    elif precision == "year":
+        if re.fullmatch(r"\d{4}", raw) is None:
+            raise InferenceValidationError("document_date_invalid")
+
+
+def _validate_partial_date(raw: object) -> None:
+    if not isinstance(raw, str):
+        raise InferenceValidationError("event_date_invalid")
+    if re.fullmatch(r"\d{4}", raw):
+        return
+    if re.fullmatch(r"\d{4}-\d{2}", raw):
+        if 1 <= int(raw[5:7]) <= 12:
+            return
+        raise InferenceValidationError("event_date_invalid")
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+        try:
+            date.fromisoformat(raw)
+            return
+        except ValueError as exc:
+            raise InferenceValidationError("event_date_invalid") from exc
+    raise InferenceValidationError("event_date_invalid")
+
+
+def load_exact_subject_aliases(path: str | Path) -> tuple[str, str, str]:
+    try:
+        value = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise InferenceValidationError("family_subject_aliases_invalid") from exc
+    if not isinstance(value, list) or len(value) != 3 or any(not isinstance(item, str) for item in value):
+        raise InferenceValidationError("family_subject_aliases_invalid")
+    aliases = tuple(item.strip() for item in value)
+    if any(not item for item in aliases) or len(set(aliases)) != 3:
+        raise InferenceValidationError("family_subject_aliases_invalid")
+    return aliases  # type: ignore[return-value]
+
+
+def bind_family_subject_aliases(
+    payload: Mapping[str, Any], aliases: tuple[str, str, str]
+) -> dict[str, Any]:
+    if "allowed_subject_aliases" in payload:
+        raise InferenceValidationError("subject_alias_override_forbidden")
+    bound = {**dict(payload), "allowed_subject_aliases": list(aliases)}
+    validate_json_schema(bound, _INPUT_SCHEMA)
+    return bound
 
 
 _HANDOFF_PAYLOAD_SCHEMA: dict[str, Any] = {
@@ -306,6 +374,7 @@ class FamilyDocumentHandoffIngestor:
             directory.chmod(0o700)
 
     def ingest_one(self) -> bool:
+        self._recover_processing_claims()
         for source in sorted((self.root / "pending").glob("*.json")):
             target = self.root / "processing" / source.name
             try:
@@ -319,10 +388,9 @@ class FamilyDocumentHandoffIngestor:
                 validate_json_schema(value, _HANDOFF_SCHEMA)
                 raw_payload = value["payload"]
                 assert isinstance(raw_payload, Mapping)
-                payload = {
-                    **dict(raw_payload),
-                    "allowed_subject_aliases": list(self.allowed_subject_aliases),
-                }
+                payload = bind_family_subject_aliases(
+                    raw_payload, self.allowed_subject_aliases
+                )
                 build_family_document_prompt(payload)
                 request_id, created = self.queue.submit(
                     request_type=REQUEST_TYPE,
@@ -353,6 +421,14 @@ class FamilyDocumentHandoffIngestor:
                 os.replace(target, self.root / "review" / target.name)
             return True
         return False
+
+    def _recover_processing_claims(self) -> None:
+        for claimed in sorted((self.root / "processing").glob("*.json")):
+            pending = self.root / "pending" / claimed.name
+            if pending.exists():
+                os.replace(claimed, self.root / "review" / claimed.name)
+            else:
+                os.replace(claimed, pending)
 
     def status(self) -> dict[str, int]:
         return {

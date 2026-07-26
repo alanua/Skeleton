@@ -5,6 +5,7 @@ import pytest
 from core.family_document_local_inference import (
     RESPONSE_SCHEMA_ID,
     TOPIC_ALIASES,
+    bind_family_subject_aliases,
     build_family_document_prompt,
     validate_family_document_output,
 )
@@ -143,3 +144,51 @@ def test_output_rejects_alias_not_in_request() -> None:
     value["linked_subject_aliases"] = ["invented-person"]
     with pytest.raises(InferenceValidationError):
         validate_family_document_output(value, payload())
+
+
+def test_family_alias_binding_rejects_packet_override() -> None:
+    raw = {
+        "ocr_text": "Synthetic",
+        "source_kind": "mfp",
+    }
+    bound = bind_family_subject_aliases(raw, ("person-a", "person-b", "person-c"))
+    assert bound["allowed_subject_aliases"] == ["person-a", "person-b", "person-c"]
+    with pytest.raises(InferenceValidationError):
+        bind_family_subject_aliases(payload(), ("person-a", "person-b", "person-c"))
+
+
+def test_invalid_dates_fail_closed() -> None:
+    value = output()
+    value["document_date"] = "2026-02-31"
+    with pytest.raises(InferenceValidationError):
+        validate_family_document_output(value, payload())
+
+
+def test_handoff_recovers_interrupted_claim(tmp_path) -> None:
+    import json
+
+    from core.family_document_local_inference import FamilyDocumentHandoffIngestor
+    from core.local_inference_runtime import InferenceQueue
+
+    queue = InferenceQueue(tmp_path / "queue")
+    handoff = tmp_path / "handoff"
+    ingestor = FamilyDocumentHandoffIngestor(
+        handoff,
+        queue,
+        model="qwen2.5:1.5b",
+        allowed_subject_aliases=("person-a", "person-b", "person-c"),
+    )
+    packet = {
+        "schema": "skeleton.family_document_inference_handoff.v1",
+        "idempotency_key": "interrupted-handoff-document",
+        "payload": {
+            "ocr_text": "Synthetic interrupted packet",
+            "source_kind": "mfp",
+        },
+    }
+    (handoff / "processing" / "interrupted.json").write_text(
+        json.dumps(packet), encoding="utf-8"
+    )
+    assert ingestor.ingest_one() is True
+    assert ingestor.status()["accepted"] == 1
+    assert queue.status()["counts"]["pending"] == 1
