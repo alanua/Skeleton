@@ -36,7 +36,25 @@ _EXCEPTION_FAMILIES: tuple[tuple[type[BaseException], str], ...] = (
     (ValueError, "value_error"),
     (RuntimeError, "runtime_error"),
 )
+_PUBLIC_EXCEPTION_MODULES = frozenset(
+    {
+        "cognee",
+        "pydantic",
+        "pydantic_core",
+        "httpx",
+        "httpcore",
+        "huggingface_hub",
+        "sqlalchemy",
+        "litellm",
+        "openai",
+        "aiohttp",
+        "lancedb",
+        "kuzu",
+    }
+)
 _SAFE_REASON_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,96}$")
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+_CAMEL_BOUNDARY_RE = re.compile(r"(?<!^)(?=[A-Z])")
 _WRAPPER_MARKER = "__skeleton_cognee_stage_wrapper__"
 _STALE_COMPATIBILITY_KWARGS = frozenset({"data_cache", "run_in_background"})
 
@@ -128,6 +146,16 @@ def _safe_exception_reason(base_reason: str, exc: BaseException) -> str:
         if isinstance(exc, exception_type):
             candidate = f"{base_reason}_{suffix}"
             return candidate if _SAFE_REASON_RE.fullmatch(candidate) else base_reason
+    exception_type = type(exc)
+    module_root = exception_type.__module__.split(".", 1)[0]
+    class_name = exception_type.__name__
+    if (
+        module_root in _PUBLIC_EXCEPTION_MODULES
+        and _IDENTIFIER_RE.fullmatch(class_name)
+    ):
+        class_suffix = _CAMEL_BOUNDARY_RE.sub("_", class_name).casefold()
+        candidate = f"{base_reason}_{module_root}_{class_suffix}"
+        return candidate if _SAFE_REASON_RE.fullmatch(candidate) else base_reason
     return base_reason
 
 
