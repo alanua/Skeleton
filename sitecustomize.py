@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from core.cognee_internal_file_access import enable_cognee_internal_file_access
+from core.cognee_search_response_compat import install_cognee_search_response_compat
 from core.cognee_validation_error_detail import (
     install_pydantic_validation_error_detail,
 )
@@ -10,4 +11,5 @@ from core.cognee_worker_output_guard import install_cognee_worker_output_guard
 enable_cognee_internal_file_access()
 install_pydantic_validation_error_detail()
 install_cognee_worker_output_guard()
+install_cognee_search_response_compat()
 configure_cognee_worker_environment()
