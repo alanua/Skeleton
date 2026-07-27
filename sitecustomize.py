@@ -5,7 +5,9 @@ from core.cognee_validation_error_detail import (
     install_pydantic_validation_error_detail,
 )
 from core.cognee_worker_bootstrap import configure_cognee_worker_environment
+from core.cognee_worker_output_guard import install_cognee_worker_output_guard
 
 enable_cognee_internal_file_access()
 install_pydantic_validation_error_detail()
+install_cognee_worker_output_guard()
 configure_cognee_worker_environment()
