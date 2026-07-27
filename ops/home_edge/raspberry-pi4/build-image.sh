@@ -41,9 +41,9 @@ cat >"$build/root/etc/skeleton/image-build.json" <<EOF
 EOF
 sync; umount "$build/root"; umount "$build/boot"; losetup -d "$loop"; loop=""
 final="$out/skeleton-kyiv-media-rpi4-arm64-20260727.img.xz"
-xz -T0 -6 -c "$raw" > "$final"
-sha256sum "$final" > "$final.sha256"
-sha512sum "$final" > "$final.sha512"
+xz -T0 -3 -c "$raw" > "$final"
+(cd "$out"; sha256sum "$(basename "$final")" > "$(basename "$final").sha256")
+(cd "$out"; sha512sum "$(basename "$final")" > "$(basename "$final").sha512")
 cat > "$final.build.json" <<EOF
 {"schema":"skeleton.image_build_receipt.v1","image":"$(basename "$final")","upstream":"$url","upstream_sha256":"$sha256","local_sha256":"$(sha256sum "$final" | awk '{print $1}')","local_sha512":"$(sha512sum "$final" | awk '{print $1}')","contains_secrets":false,"first_boot":"MPV/direct-play packages plus resolver federation after boot provisioning"}
 EOF

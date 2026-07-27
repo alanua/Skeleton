@@ -11,7 +11,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 [[ "$vmid" =~ ^[0-9]+$ && -f "$image" && -f "$image.sha256" && -f "$sshkey" ]] || { echo "required: --vmid N --image FILE --ssh-public-key FILE" >&2; exit 2; }
-sha256sum -c "$image.sha256"
+(cd "$(dirname "$image")"; sha256sum -c "$(basename "$image").sha256")
 qm status "$vmid" >/dev/null 2>&1 && { echo "VMID already exists" >&2; exit 2; }
 qm create "$vmid" --name "$name" --memory "$memory" --cores "$cores" --cpu host --machine q35 --ostype l26 --net0 "virtio,bridge=$bridge,firewall=1" --agent enabled=1 --serial0 socket --vga serial0
 qm importdisk "$vmid" "$image" "$storage" --format qcow2

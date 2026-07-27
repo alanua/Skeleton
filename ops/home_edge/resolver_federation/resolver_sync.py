@@ -335,7 +335,7 @@ def sync() -> dict[str, Any]:
     bundle = outbox / filename
     header = export_bundle(bundle)
     digest = hashlib.sha256(bundle.read_bytes()).hexdigest()
-    identity = pathlib.Path(env("SKELETON_RESOLVER_SSH_IDENTITY", "/etc/skeleton/resolver-sync/id_ed25519"))
+    identity = pathlib.Path(env("SKELETON_RESOLVER_SSH_IDENTITY", "/var/lib/skeleton-resolver/.ssh/id_ed25519"))
     remote_user = env("SKELETON_RESOLVER_SSH_USER", "skeleton-resolver")
     if not identity.is_file():
         raise RuntimeError(f"resolver sync SSH identity is missing: {identity}")

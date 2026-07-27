@@ -4,8 +4,11 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 user=skeleton-resolver
 if ! id "$user" >/dev/null 2>&1; then
-  useradd --system --home-dir /var/lib/skeleton-resolver --create-home --shell /usr/sbin/nologin "$user"
+  useradd --system --home-dir /var/lib/skeleton-resolver --create-home --shell /bin/bash "$user"
 fi
+usermod --shell /bin/bash "$user"
+passwd -l "$user" >/dev/null 2>&1 || true
+install -d -m 0700 -o "$user" -g "$user" /var/lib/skeleton-resolver/.ssh
 install -d -m 0750 -o "$user" -g "$user" /var/lib/skeleton-resolver/{inbox,outbox,archive,failed}
 install -d -m 0700 -o root -g root /etc/skeleton/resolver-sync
 install -d -m 0755 /usr/local/lib/skeleton-resolver
@@ -36,7 +39,7 @@ SKELETON_RESOLVER_STATE=/var/lib/skeleton-resolver
 SKELETON_RESOLVER_DB=/var/lib/skeleton-resolver/resolver-learning.sqlite3
 SKELETON_RESOLVER_PEERS=
 SKELETON_RESOLVER_SSH_USER=skeleton-resolver
-SKELETON_RESOLVER_SSH_IDENTITY=/etc/skeleton/resolver-sync/id_ed25519
+SKELETON_RESOLVER_SSH_IDENTITY=/var/lib/skeleton-resolver/.ssh/id_ed25519
 EOF
   chmod 0600 /etc/skeleton/resolver-sync.env
 fi

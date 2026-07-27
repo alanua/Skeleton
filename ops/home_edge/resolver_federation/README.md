@@ -2,7 +2,7 @@
 
 Run `sudo ./install.sh`, set the real `SKELETON_RESOLVER_NODE_ID`, peer targets and the dedicated SSH identity in `/etc/skeleton/resolver-sync.env`, then start `skeleton-resolver-sync.timer`.
 
-Generate one dedicated Ed25519 key per node. On the peer, install the public key for user `skeleton-resolver` with:
+Generate one dedicated Ed25519 key per node at `/var/lib/skeleton-resolver/.ssh/id_ed25519`, owned by `skeleton-resolver` with mode `0600`. On the peer, install the public key for user `skeleton-resolver` with:
 
 ```text
 restrict,command="/usr/local/bin/skeleton-resolver-receive-from-ssh" ssh-ed25519 AAAA...

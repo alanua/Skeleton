@@ -1,7 +1,7 @@
 [Unit]
 Description=Skeleton Debian node first boot
-After=network-online.target
-Wants=network-online.target
+After=network-online.target cloud-final.service
+Wants=network-online.target cloud-final.service
 ConditionPathExists=!/var/lib/skeleton/node-bootstrap/status.json
 
 [Service]

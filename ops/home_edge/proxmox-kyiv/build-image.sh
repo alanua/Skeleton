@@ -43,8 +43,8 @@ umount "$build/root"
 qemu-nbd --disconnect "$nbd"; nbd=""
 qemu-img resize "$image" 8G
 qemu-img check "$image"
-sha256sum "$image" > "$image.sha256"
-sha512sum "$image" > "$image.sha512"
+(cd "$out"; sha256sum "$(basename "$image")" > "$(basename "$image").sha256")
+(cd "$out"; sha512sum "$(basename "$image")" > "$(basename "$image").sha512")
 cat > "$image.build.json" <<EOF
 {"schema":"skeleton.image_build_receipt.v1","image":"$(basename "$image")","upstream":"$url","upstream_sha512":"$sha512","local_sha256":"$(sha256sum "$image" | awk '{print $1}')","local_sha512":"$(sha512sum "$image" | awk '{print $1}')","contains_secrets":false,"first_boot":"base packages plus resolver federation; node enrollment remains pending"}
 EOF
