@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodic resolver-learning federation
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+RandomizedDelaySec=30
+Persistent=true
+
+[Install]
+WantedBy=timers.target

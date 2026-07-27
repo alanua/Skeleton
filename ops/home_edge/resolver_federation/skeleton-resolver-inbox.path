@@ -1,0 +1,9 @@
+[Unit]
+Description=Import newly received resolver bundles
+
+[Path]
+PathExistsGlob=/var/lib/skeleton-resolver/inbox/*.jsonl.gz
+Unit=skeleton-resolver-sync.service
+
+[Install]
+WantedBy=multi-user.target

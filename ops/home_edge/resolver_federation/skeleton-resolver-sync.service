@@ -1,0 +1,20 @@
+[Unit]
+Description=Synchronize safe resolver-learning evidence
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=skeleton-resolver
+Group=skeleton-resolver
+EnvironmentFile=-/etc/skeleton/resolver-sync.env
+ExecStart=/usr/local/bin/skeleton-resolver-sync sync
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/skeleton-resolver
+ReadOnlyPaths=/etc/skeleton/resolver-sync /etc/skeleton/resolver-sync.env
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
