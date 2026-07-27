@@ -1,0 +1,1 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema","title":"Family document intake request","type":"object","additionalProperties":false,"required":["source","dry_run"],"properties":{"source":{"type":"string"},"dry_run":{"type":"boolean"}}}
