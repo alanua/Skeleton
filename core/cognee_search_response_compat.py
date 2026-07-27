@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import functools
 import inspect
+import math
 import re
 from collections.abc import Mapping
 from typing import Any
@@ -10,7 +11,6 @@ from core import cognee_worker_bootstrap as _bootstrap
 
 _PATCH_MARKER = "__skeleton_cognee_search_response_compat__"
 _OPAQUE_DATASET_RE = re.compile(r"^sk_[0-9a-f]{48}$")
-_CHUNK_KEYS = frozenset({"text", "score", "id", "type"})
 _ENVELOPE_KEYS = frozenset(
     {"dataset_id", "dataset_name", "dataset_tenant_id", "search_result"}
 )
@@ -63,10 +63,11 @@ def _normalize_direct_chunks(result: Any, kwargs: Mapping[str, Any]) -> Any:
         return result
     if not isinstance(result, list):
         return result
-
     if _is_existing_envelope(result):
         return result
-    if not all(_is_strict_chunk(item) for item in result):
+
+    minimized = [_minimize_chunk(item) for item in result]
+    if any(item is None for item in minimized):
         return result
 
     return [
@@ -74,7 +75,7 @@ def _normalize_direct_chunks(result: Any, kwargs: Mapping[str, Any]) -> Any:
             "dataset_id": None,
             "dataset_name": dataset_name,
             "dataset_tenant_id": None,
-            "search_result": [dict(item) for item in result],
+            "search_result": [item for item in minimized if item is not None],
         }
     ]
 
@@ -90,9 +91,18 @@ def _is_existing_envelope(result: list[Any]) -> bool:
     )
 
 
-def _is_strict_chunk(value: Any) -> bool:
-    return (
-        isinstance(value, Mapping)
-        and not (set(value) - _CHUNK_KEYS)
-        and isinstance(value.get("text"), str)
-    )
+def _minimize_chunk(value: Any) -> dict[str, object] | None:
+    if not isinstance(value, Mapping):
+        return None
+    text = value.get("text")
+    if not isinstance(text, str):
+        return None
+    minimized: dict[str, object] = {"text": text}
+    score = value.get("score")
+    if (
+        isinstance(score, (int, float))
+        and not isinstance(score, bool)
+        and math.isfinite(float(score))
+    ):
+        minimized["score"] = float(score)
+    return minimized
