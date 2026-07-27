@@ -1,0 +1,13 @@
+[Unit]
+Description=Skeleton Debian node first boot
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=!/var/lib/skeleton/node-bootstrap/status.json
+
+[Service]
+Type=oneshot
+ExecStart=/opt/skeleton-image/proxmox-firstboot.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

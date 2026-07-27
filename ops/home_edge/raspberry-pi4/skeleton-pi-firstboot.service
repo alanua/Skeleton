@@ -1,0 +1,15 @@
+[Unit]
+Description=Skeleton Raspberry Pi media endpoint first boot
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/boot/firmware/skeleton-node.env
+ConditionPathExists=/boot/firmware/authorized_keys
+ConditionPathExists=!/var/lib/skeleton/node-bootstrap/status.json
+
+[Service]
+Type=oneshot
+ExecStart=/opt/skeleton-image/pi-firstboot.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
