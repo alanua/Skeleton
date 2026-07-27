@@ -1,0 +1,58 @@
+{
+  "schema": "skeleton.node_image_release.v1",
+  "release_tag": "home-edge-images-20260727.1",
+  "branch": "architecture/home-edge-debian13-media-v2",
+  "status": "offline_content_and_checksum_verified_not_hardware_booted",
+  "images": [
+    {
+      "schema": "skeleton.image_build_receipt.v1",
+      "image": "skeleton-kyiv-home-edge-debian13-amd64-20260727.qcow2",
+      "upstream": "https://cloud.debian.org/images/cloud/trixie/20260722-2547/debian-13-genericcloud-amd64-20260722-2547.qcow2",
+      "upstream_sha512": "735d1b2d0ef265a0c2323fdaa7d46e7bd7a1b984f73e8a785e638034bf07876e26374a9d809d713501270c071b3464d2ada0c5589f07742b95ed853cc6d48f45",
+      "local_sha256": "fe301d55a950e33cfa9eaa3af5848752f358ca5d02c73d0ff539d410830f88ad",
+      "local_sha512": "e7bb65c3bd4f2911a5f62ae527c28f52e32c961dc46071ee3640572ecae77943c05bc49b4e49a5d461202fa269ed102112c2c94978f4d85729c2cf76a45d50d5",
+      "contains_secrets": false,
+      "first_boot": "base packages plus resolver federation; node enrollment remains pending",
+      "size_bytes": 344719488,
+      "sha256_sidecar": "skeleton-kyiv-home-edge-debian13-amd64-20260727.qcow2.sha256",
+      "sha512_sidecar": "skeleton-kyiv-home-edge-debian13-amd64-20260727.qcow2.sha512"
+    },
+    {
+      "schema": "skeleton.image_build_receipt.v1",
+      "image": "skeleton-kyiv-media-rpi4-arm64-20260727.img.xz",
+      "upstream": "https://downloads.raspberrypi.com/raspios_lite_arm64/images/raspios_lite_arm64-2026-06-19/2026-06-18-raspios-trixie-arm64-lite.img.xz",
+      "upstream_sha256": "acff736ca7945e3b305f07cda4abdb870910e12634991da69783611756e381b3",
+      "local_sha256": "1816a605599595bfd980fc0ec8fb416e41347d0cc98d9ad13d97585b210a7d03",
+      "local_sha512": "ce254a5049e92149bb050e6d53c8d3015b16eff13093ad2518bfe83f6a5c4133aa8d59a5bdf8e7277ab23f7da8c56ffcd417af892f0d2adccf4d4a93ac8a578e",
+      "contains_secrets": false,
+      "first_boot": "MPV/direct-play packages plus resolver federation after boot provisioning",
+      "size_bytes": 653571728,
+      "sha256_sidecar": "skeleton-kyiv-media-rpi4-arm64-20260727.img.xz.sha256",
+      "sha512_sidecar": "skeleton-kyiv-media-rpi4-arm64-20260727.img.xz.sha512"
+    }
+  ],
+  "resolver_federation": {
+    "nodes": [
+      "home-edge-01",
+      "kyiv-home-edge-01",
+      "kyiv-media-pi4-01"
+    ],
+    "transport": "dedicated forced-command SSH over approved private network",
+    "activation": "remote evidence requires local reproduction before promotion",
+    "private_data_shared": false
+  },
+  "verification": [
+    "upstream checksums verified",
+    "local SHA-256 and SHA-512 verified",
+    "qcow2 qemu-img check passed",
+    "Raspberry Pi xz integrity passed",
+    "offline root and boot filesystem payloads verified",
+    "no SSH private keys, passwords, Tailscale identity or media credentials embedded"
+  ],
+  "remaining": [
+    "boot test on Kyiv Proxmox",
+    "boot test on physical Raspberry Pi 4",
+    "enroll node identities and private peer keys",
+    "connect live resolver adapters to the federation event recorder"
+  ]
+}
