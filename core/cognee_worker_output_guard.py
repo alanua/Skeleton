@@ -40,34 +40,36 @@ def install_cognee_worker_output_guard() -> bool:
 
 @contextmanager
 def _silence_process_output() -> Iterator[None]:
-    """Discard Python and direct fd writes, restoring both streams reliably."""
+    """Discard Python streams and direct writes to process fds 1 and 2."""
 
+    saved_stdout: int | None = None
+    saved_stderr: int | None = None
     try:
-        stdout_fd = sys.stdout.fileno()
-        stderr_fd = sys.stderr.fileno()
-        saved_stdout = os.dup(stdout_fd)
-        saved_stderr = os.dup(stderr_fd)
-    except (AttributeError, OSError, ValueError):
+        saved_stdout = os.dup(1)
+        saved_stderr = os.dup(2)
+    except OSError:
+        if saved_stdout is not None:
+            os.close(saved_stdout)
         with open(os.devnull, "w", encoding="utf-8") as sink:
             with redirect_stdout(sink), redirect_stderr(sink):
                 yield
         return
 
-    null_fd = os.open(os.devnull, os.O_WRONLY)
     try:
-        _flush_stream(sys.stdout)
-        _flush_stream(sys.stderr)
-        os.dup2(null_fd, stdout_fd)
-        os.dup2(null_fd, stderr_fd)
-        try:
-            yield
-        finally:
+        with open(os.devnull, "w", encoding="utf-8") as sink:
             _flush_stream(sys.stdout)
             _flush_stream(sys.stderr)
-            os.dup2(saved_stdout, stdout_fd)
-            os.dup2(saved_stderr, stderr_fd)
+            os.dup2(sink.fileno(), 1)
+            os.dup2(sink.fileno(), 2)
+            try:
+                with redirect_stdout(sink), redirect_stderr(sink):
+                    yield
+            finally:
+                _flush_stream(sys.stdout)
+                _flush_stream(sys.stderr)
+                os.dup2(saved_stdout, 1)
+                os.dup2(saved_stderr, 2)
     finally:
-        os.close(null_fd)
         os.close(saved_stdout)
         os.close(saved_stderr)
 
