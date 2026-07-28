@@ -12,9 +12,12 @@ from core.private_memory_root_resolver import (
     PrivateMemoryRootResolutionError,
     resolve_private_memory_root,
 )
+from core.video_understanding.models import VideoUnderstandingError
+from core.video_understanding.runtime_install import install_runtime
 
 TASK_ID = "activate_five_layer_private_memory"
 OPERATOR_APPROVAL = "EXPLICIT_FINISH_WORKING_MEMORY_20260724"
+VIDEO_RUNTIME_APPROVAL = "OPERATOR_FINISH_AND_START_VIDEO_UNDERSTANDING_20260728"
 RECEIPT_SCHEMA = "skeleton.five_layer_memory_activation_receipt.v2"
 _MAX_OUTPUT_BYTES = 512 * 1024
 _SAFE_REASON_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,96}$")
@@ -41,6 +44,7 @@ CommandRunner = Callable[
     [list[str], Path, Mapping[str, str] | None, int], tuple[int, str, str]
 ]
 MaintenanceReport = Callable[[str, str, list[str], str], str]
+RuntimeInstaller = Callable[..., object]
 
 
 def execute_five_layer_memory_activation(
@@ -49,6 +53,7 @@ def execute_five_layer_memory_activation(
     workdir: str | Path,
     maintenance_report: MaintenanceReport,
     command_runner: CommandRunner | None = None,
+    runtime_installer: RuntimeInstaller | None = None,
 ) -> str:
     runner = command_runner or _run_command
     expected_sha = _body_field(body, "Expected Main SHA")
@@ -65,6 +70,15 @@ def execute_five_layer_memory_activation(
             "BLOCKED",
             TASK_ID,
             ["reason=operator_approval_invalid"],
+            "not_met",
+        )
+
+    video_launch, video_reason = _video_launch_request(body)
+    if video_reason is not None:
+        return maintenance_report(
+            "BLOCKED",
+            TASK_ID,
+            [f"reason={video_reason}"],
             "not_met",
         )
 
@@ -100,6 +114,7 @@ def execute_five_layer_memory_activation(
         "PATH": os.environ.get("PATH", ""),
         "HOME": os.environ.get("HOME", ""),
         "PYTHONPATH": str(checkout),
+        "PYTHONDONTWRITEBYTECODE": "1",
         "SKELETON_RUNNER_PRIVATE_MEMORY_ROOT": private_root,
         **model_config,
     }
@@ -151,21 +166,162 @@ def execute_five_layer_memory_activation(
         value = resource_totals.get("disk_bytes")
         if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
             disk_bytes = min(value, 10**12)
+
+    status_lines = [
+        "repository=alanua/Skeleton",
+        f"head_sha={expected_sha}",
+        "step=verify_checkout status=done",
+        "step=select_local_models status=done",
+        "step=execute_activation status=done",
+        f"runtime_smoke_check_count={check_count}",
+        "test_summary=five_layer_private_memory_activation_done",
+        f"disk_bytes={disk_bytes}",
+    ]
+    if video_launch:
+        video_lines, video_reason = _install_video_runtime(
+            checkout,
+            expected_sha=expected_sha,
+            private_root=private_root,
+            installer=runtime_installer or install_runtime,
+        )
+        if video_reason is not None:
+            return maintenance_report(
+                "BLOCKED",
+                TASK_ID,
+                [
+                    *status_lines,
+                    "step=install_video_understanding status=failed",
+                    f"reason={video_reason}",
+                ],
+                "not_met",
+            )
+        status_lines.extend(video_lines)
+
     return maintenance_report(
         "DONE",
         TASK_ID,
-        [
-            "repository=alanua/Skeleton",
-            f"head_sha={expected_sha}",
-            "step=verify_checkout status=done",
-            "step=select_local_models status=done",
-            "step=execute_activation status=done",
-            f"runtime_smoke_check_count={check_count}",
-            "test_summary=five_layer_private_memory_activation_done",
-            f"disk_bytes={disk_bytes}",
-        ],
+        status_lines,
         "met",
     )
+
+
+def _video_launch_request(body: str) -> tuple[bool, str | None]:
+    value = _body_field(body, "Launch Video Understanding")
+    if value is None or value.casefold() == "false":
+        return False, None
+    if value.casefold() != "true":
+        return False, "video_runtime_launch_invalid"
+    approval = _body_field(body, "Video Runtime Approval")
+    if approval != VIDEO_RUNTIME_APPROVAL:
+        return False, "video_runtime_approval_invalid"
+    return True, None
+
+
+def _install_video_runtime(
+    checkout: Path,
+    *,
+    expected_sha: str,
+    private_root: str,
+    installer: RuntimeInstaller,
+) -> tuple[list[str], str | None]:
+    install_env = {
+        **os.environ,
+        "SKELETON_PRIVATE_MEMORY_ROOT": private_root,
+    }
+    try:
+        result = installer(
+            checkout,
+            expected_sha=expected_sha,
+            enable=True,
+            env=install_env,
+        )
+    except VideoUnderstandingError as exc:
+        return [], _safe_reason(exc.reason_code)
+    except Exception:
+        return [], "video_runtime_install_failed"
+
+    public_dict = getattr(result, "public_dict", None)
+    if not callable(public_dict):
+        return [], "video_runtime_receipt_invalid"
+    try:
+        payload = public_dict()
+    except Exception:
+        return [], "video_runtime_receipt_invalid"
+    reason = _validate_video_runtime_receipt(payload, expected_sha)
+    if reason is not None:
+        return [], reason
+    assert isinstance(payload, Mapping)
+    reasons = payload.get("stable_reason_codes")
+    safe_reasons = (
+        sorted(str(value) for value in reasons)
+        if isinstance(reasons, list) and reasons
+        else ["none"]
+    )
+    return [
+        "step=install_video_understanding status=done",
+        f"video_provider_ready_count={payload['provider_ready_count']}",
+        f"video_provider_required_count={payload['provider_required_count']}",
+        f"video_ollama_status={payload['ollama_status']}",
+        f"video_sona_status={payload['sona_status']}",
+        f"video_memory_gateway_status={payload['memory_gateway_status']}",
+        f"video_memory_roundtrip_status={payload['memory_roundtrip_status']}",
+        f"video_service_install_status={payload['service_install_status']}",
+        "video_service_active=true",
+        "video_worker_count=1",
+        "video_rollback_ready=true",
+        f"video_stable_reason_codes={','.join(safe_reasons)}",
+    ], None
+
+
+def _validate_video_runtime_receipt(
+    payload: object, expected_sha: str
+) -> str | None:
+    if not isinstance(payload, Mapping):
+        return "video_runtime_receipt_invalid"
+    if payload.get("source_merge_sha") != expected_sha:
+        return "video_runtime_source_mismatch"
+    ready = payload.get("provider_ready_count")
+    required = payload.get("provider_required_count")
+    if (
+        isinstance(ready, bool)
+        or isinstance(required, bool)
+        or not isinstance(ready, int)
+        or not isinstance(required, int)
+        or ready < 0
+        or required <= 0
+        or ready != required
+    ):
+        return "video_runtime_provider_blocked"
+    exact_values = {
+        "runtime_config_status": "READY",
+        "ollama_status": "READY",
+        "artifact_store_status": "READY",
+        "queue_recovery_status": "DONE",
+        "memory_gateway_status": "READY",
+        "memory_roundtrip_status": "DONE",
+        "service_install_status": "ACTIVE",
+    }
+    for field, expected in exact_values.items():
+        if payload.get(field) != expected:
+            return f"video_runtime_{field}_blocked"
+    if payload.get("service_active") is not True:
+        return "video_runtime_service_inactive"
+    if payload.get("worker_count") != 1:
+        return "video_runtime_worker_count_invalid"
+    if payload.get("rollback_ready") is not True:
+        return "video_runtime_rollback_unverified"
+    sona = payload.get("sona_status")
+    if sona not in {"READY", "BLOCKED"}:
+        return "video_runtime_sona_status_invalid"
+    reasons = payload.get("stable_reason_codes")
+    if not isinstance(reasons, list):
+        return "video_runtime_reason_codes_invalid"
+    if any(
+        not isinstance(value, str) or _SAFE_REASON_RE.fullmatch(value) is None
+        for value in reasons
+    ):
+        return "video_runtime_reason_codes_invalid"
+    return None
 
 
 def _preflight_checkout(
