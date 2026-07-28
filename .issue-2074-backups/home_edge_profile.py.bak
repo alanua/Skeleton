@@ -50,49 +50,6 @@ HOME_EDGE_PUBLIC_PROFILE = PublicProfileFingerprint(
     target_user="home-edge-runner",
 )
 
-HOME_EDGE_AUDIT_PERSIST_OPERATION = {
-    "operation_id": "home_edge_audit_persist_v1",
-    "device_id": "home_edge_01",
-    "execution_node": "home-edge-01",
-    "argv": ["/usr/local/bin/home_edge_exec", "--server"],
-    "bounded_api_payload": {
-        "schema": "skeleton.home_edge.runtime_audit.persist_request.v1",
-        "audit_kind": "RUNTIME_AUDIT",
-        "device_id": "home_edge_01",
-        "execution_node": "home-edge-01",
-    },
-    "run_as": "desktop-user",
-    "timeout_seconds": 30,
-    "risk": "yellow",
-    "approval_gate": "operator_approval_required",
-    "preconditions": [
-        "protected_skeleton_runner_route",
-        "memory_gateway_private_storage_available",
-        "canonical_private_memory_stack_initialized",
-        "sqlite_gateway_db_available",
-        "runtime_audit_payload_is_private_and_hashable",
-    ],
-    "independent_verification": [
-        "canonical_memorygate_record_by_audit_id",
-        "sqlite_metadata_row_by_audit_id",
-        "sqlite_current_state_for_device",
-        "sqlite_state_history_row_by_audit_id",
-        "exact_replay_has_no_duplicate_rows",
-    ],
-    "retry_policy": {
-        "mode": "idempotent_by_audit_id",
-        "max_attempts": 3,
-        "conflicting_duplicate": "fail_closed",
-    },
-    "rollback": {
-        "mode": "retry_recovery",
-        "partial_failure": "recover_sqlite_rows_from_existing_canonical_event",
-        "conflict": "no_mutation",
-    },
-    "last_success": None,
-    "last_failure": None,
-}
-
 
 @dataclass(frozen=True)
 class HomeEdgeProfile:
@@ -219,7 +176,6 @@ def synthetic_profile_mapping() -> dict[str, Any]:
             "no_raw_shell_from_issue_payload",
             "public_reports_aggregate_only",
         ],
-        "operations": [HOME_EDGE_AUDIT_PERSIST_OPERATION],
     }
 
 
@@ -229,7 +185,8 @@ def _profile_path(path: str | Path | None) -> Path | None:
     env_path = os.environ.get(LOCAL_PROFILE_ENV, "").strip()
     if env_path:
         return Path(env_path)
-    return None
+    default_path = ROOT / DEFAULT_PROFILE_PATH
+    return default_path if default_path.exists() else None
 
 
 def _read_profile_mapping(profile_path: Path) -> dict[str, Any]:

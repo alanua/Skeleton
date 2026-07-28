@@ -1,0 +1,84 @@
+{
+  "node_id": "home-edge-01",
+  "hostname": "synthetic-home-edge",
+  "tailscale_ip": "100.64.0.10",
+  "controller": {
+    "host": "synthetic-controller",
+    "tailscale_ip": "100.64.0.11"
+  },
+  "ssh": {
+    "target_user": "home-edge-runner",
+    "transport": "openssh_over_tailscale_ip",
+    "identity_env": "SKELETON_HOME_EDGE_01_SSH_IDENTITY_FILE",
+    "known_hosts_env": "SKELETON_HOME_EDGE_01_SSH_KNOWN_HOSTS_FILE"
+  },
+  "gateway": {
+    "task_model": "typed_allowlisted_actions",
+    "risk_lanes": ["read_only", "approved_mutation", "destructive_manual"]
+  },
+  "os": "linux",
+  "primary_network": {
+    "interface": "synthetic-lan",
+    "gateway": "192.0.2.1"
+  },
+  "capabilities": [
+    "system_administration",
+    "network_diagnostics",
+    "containers_and_services",
+    "browser_and_desktop_diagnostics",
+    "media_operations",
+    "usb_hardware_inventory",
+    "home_automation"
+  ],
+  "safety_boundaries": [
+    "read_only_diagnostics_default",
+    "strict_ssh_host_key_checking",
+    "typed_allowlisted_actions_only",
+    "no_raw_shell_from_issue_payload",
+    "public_reports_aggregate_only"
+  ],
+  "operations": [
+    {
+      "operation_id": "home_edge_audit_persist_v1",
+      "device_id": "home_edge_01",
+      "execution_node": "home-edge-01",
+      "argv": ["/usr/local/bin/home_edge_exec", "--server"],
+      "bounded_api_payload": {
+        "schema": "skeleton.home_edge.runtime_audit.persist_request.v1",
+        "audit_kind": "RUNTIME_AUDIT",
+        "device_id": "home_edge_01",
+        "execution_node": "home-edge-01"
+      },
+      "run_as": "desktop-user",
+      "timeout_seconds": 30,
+      "risk": "yellow",
+      "approval_gate": "operator_approval_required",
+      "preconditions": [
+        "protected_skeleton_runner_route",
+        "memory_gateway_private_storage_available",
+        "canonical_private_memory_stack_initialized",
+        "sqlite_gateway_db_available",
+        "runtime_audit_payload_is_private_and_hashable"
+      ],
+      "independent_verification": [
+        "canonical_memorygate_record_by_audit_id",
+        "sqlite_metadata_row_by_audit_id",
+        "sqlite_current_state_for_device",
+        "sqlite_state_history_row_by_audit_id",
+        "exact_replay_has_no_duplicate_rows"
+      ],
+      "retry_policy": {
+        "mode": "idempotent_by_audit_id",
+        "max_attempts": 3,
+        "conflicting_duplicate": "fail_closed"
+      },
+      "rollback": {
+        "mode": "retry_recovery",
+        "partial_failure": "recover_sqlite_rows_from_existing_canonical_event",
+        "conflict": "no_mutation"
+      },
+      "last_success": null,
+      "last_failure": null
+    }
+  ]
+}

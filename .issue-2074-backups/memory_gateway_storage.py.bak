@@ -43,11 +43,6 @@ class PrivateMemoryGatewayStorage:
         if existing is not None:
             if existing["payload_hash"] != request["payload_hash"]:
                 raise MemoryGatewayStorageError("idempotency key reused with different mutation payload")
-            if request["operation"] == "home_edge_audit_persist" and existing.get("state") != "DONE":
-                receipt = self._execute_stack_mutation(request)
-                self._queue_projection_work(request, receipt)
-                self._record_done(request["idempotency_key"], receipt)
-                return receipt
             receipt = self._recover_or_replay(existing, request)
             if receipt is not None:
                 return receipt
@@ -147,7 +142,7 @@ class PrivateMemoryGatewayStorage:
         if payload.get("schema") != PRIVATE_MEMORY_GATEWAY_MUTATION_SCHEMA:
             raise MemoryGatewayStorageError("private mutation schema is invalid")
         operation = safe_token(str(payload.get("operation", "")), "operation")
-        if operation not in {"put", "delete", "import_bundle", "home_edge_audit_persist"}:
+        if operation not in {"put", "delete", "import_bundle"}:
             raise MemoryGatewayStorageError("private mutation operation is not approved")
         project_id = safe_token(str(payload.get("project_id", "skeleton")), "project_id")
         if project_id != "skeleton":
@@ -166,9 +161,7 @@ class PrivateMemoryGatewayStorage:
             "reason_code": safe_token(str(payload.get("reason_code", "operator-memory-mutation")), "reason_code"),
             "approval_ref": safe_token(str(payload.get("approval_ref", "local-operator")), "approval_ref"),
         }
-        if operation == "home_edge_audit_persist":
-            request.update(_normalize_home_edge_audit_payload(payload))
-        elif operation in {"put", "delete"}:
+        if operation in {"put", "delete"}:
             fact_namespace = safe_token(str(payload.get("fact_namespace", "")), "namespace")
             fact_id = safe_token(str(payload.get("fact_id", "")), "fact_id")
             request.update(
@@ -240,9 +233,7 @@ class PrivateMemoryGatewayStorage:
         if expected_revision is not None and before_revision != expected_revision:
             raise MemoryGatewayStorageError("expected revision does not match current canonical revision")
         operation = request["operation"]
-        if operation == "home_edge_audit_persist":
-            report = self._execute_home_edge_audit_persist(request)
-        elif operation == "put":
+        if operation == "put":
             report = self.stack.put(
                 namespace=request["fact_namespace"],
                 fact_id=request["fact_id"],
@@ -311,9 +302,6 @@ class PrivateMemoryGatewayStorage:
         for key in ("bundle_id", "bundle_hash", "file_sha256", "record_count"):
             if key in request:
                 payload[key] = request[key]
-        for key in ("audit_id", "device_id", "execution_node", "audit_kind", "runtime_audit_payload_hash"):
-            if key in request:
-                payload[key] = request[key]
         if "imported_canonical_refs" in report:
             payload["imported_canonical_refs"] = report["imported_canonical_refs"]
         if "index_rebuild_error_class" in report:
@@ -347,52 +335,6 @@ class PrivateMemoryGatewayStorage:
         if operation == "import_bundle":
             report["imported_canonical_refs"] = [f"{row['namespace']}:{row['fact_id']}" for row in rows]
         return report
-
-    def _execute_home_edge_audit_persist(self, request: Mapping[str, Any]) -> dict[str, object]:
-        self._ensure_schema()
-        audit_id = str(request["audit_id"])
-        existing = self._get_home_edge_audit(audit_id)
-        if existing is not None and existing["payload_hash"] != request["runtime_audit_payload_hash"]:
-            raise MemoryGatewayStorageError("audit_id reused with different runtime audit payload")
-        if existing is not None and existing["state"] == "DONE":
-            return {
-                "status": "DONE",
-                "canonical_sqlite": "DONE",
-                "canonical_revision": int(existing["canonical_revision"]),
-                "canonical_ref": request["canonical_ref"],
-                "home_edge_audit": "DONE",
-                "idempotency_classification": "DUPLICATE_IDENTICAL",
-            }
-        if existing is None:
-            self._record_home_edge_audit_started(request)
-
-        event_report = self._canonical_event_report(audit_id, "home_edge_audit_persist")
-        if event_report is None:
-            semantic_report = self.stack.put(
-                namespace=request["fact_namespace"],
-                fact_id=request["fact_id"],
-                value=request["semantic_record"],
-                actor_ref=request["actor_ref"],
-                reason_code=request["reason_code"],
-                approval_ref=request["approval_ref"],
-                transaction_ref=audit_id,
-            )
-            canonical_revision = int(semantic_report["canonical_revision"])
-        else:
-            canonical_revision = int(event_report["canonical_revision"])
-
-        if bool(request.get("inject_sqlite_failure")):
-            raise MemoryGatewayStorageError("injected home edge audit sqlite failure")
-
-        self._record_home_edge_audit_done(request, canonical_revision)
-        return {
-            "status": "DONE",
-            "canonical_sqlite": "DONE",
-            "canonical_revision": canonical_revision,
-            "canonical_ref": request["canonical_ref"],
-            "home_edge_audit": "DONE",
-            "idempotency_classification": "DUPLICATE_IDENTICAL" if event_report is not None else "NEW_MUTATION",
-        }
 
     def _current_revision(self) -> int:
         if not self._canonical_db.is_file():
@@ -433,154 +375,8 @@ class PrivateMemoryGatewayStorage:
                 )
                 """
             )
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS home_edge_runtime_audit_metadata (
-                    audit_id TEXT PRIMARY KEY,
-                    payload_hash TEXT NOT NULL,
-                    device_id TEXT NOT NULL,
-                    execution_node TEXT NOT NULL,
-                    audit_kind TEXT NOT NULL,
-                    state TEXT NOT NULL,
-                    canonical_ref TEXT NOT NULL,
-                    canonical_revision INTEGER,
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    completed_at TEXT
-                )
-                """
-            )
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS home_edge_runtime_audit_state (
-                    device_id TEXT PRIMARY KEY,
-                    current_audit_id TEXT NOT NULL,
-                    current_state TEXT NOT NULL,
-                    payload_hash TEXT NOT NULL,
-                    canonical_ref TEXT NOT NULL,
-                    canonical_revision INTEGER NOT NULL,
-                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                )
-                """
-            )
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS home_edge_runtime_audit_state_history (
-                    history_key TEXT PRIMARY KEY,
-                    audit_id TEXT NOT NULL,
-                    device_id TEXT NOT NULL,
-                    previous_state TEXT NOT NULL,
-                    new_state TEXT NOT NULL,
-                    payload_hash TEXT NOT NULL,
-                    canonical_revision INTEGER NOT NULL,
-                    changed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                )
-                """
-            )
             connection.commit()
         self._gateway_db.chmod(0o600)
-
-    def _get_home_edge_audit(self, audit_id: str) -> dict[str, object] | None:
-        with closing(sqlite3.connect(str(self._gateway_db))) as connection:
-            connection.row_factory = sqlite3.Row
-            row = connection.execute(
-                """
-                SELECT audit_id, payload_hash, state, canonical_revision
-                FROM home_edge_runtime_audit_metadata
-                WHERE audit_id = ?
-                """,
-                (audit_id,),
-            ).fetchone()
-        return dict(row) if row is not None else None
-
-    def _record_home_edge_audit_started(self, request: Mapping[str, Any]) -> None:
-        with closing(sqlite3.connect(str(self._gateway_db))) as connection:
-            connection.execute(
-                """
-                INSERT INTO home_edge_runtime_audit_metadata (
-                    audit_id, payload_hash, device_id, execution_node, audit_kind,
-                    state, canonical_ref
-                )
-                VALUES (?, ?, ?, ?, ?, 'STARTED', ?)
-                """,
-                (
-                    request["audit_id"],
-                    request["runtime_audit_payload_hash"],
-                    request["device_id"],
-                    request["execution_node"],
-                    request["audit_kind"],
-                    request["canonical_ref"],
-                ),
-            )
-            connection.commit()
-
-    def _record_home_edge_audit_done(self, request: Mapping[str, Any], canonical_revision: int) -> None:
-        device_id = str(request["device_id"])
-        with closing(sqlite3.connect(str(self._gateway_db))) as connection:
-            previous = connection.execute(
-                """
-                SELECT current_state FROM home_edge_runtime_audit_state
-                WHERE device_id = ?
-                """,
-                (device_id,),
-            ).fetchone()
-            previous_state = str(previous[0]) if previous is not None else "none"
-            history_key = content_hash(
-                {
-                    "audit_id": request["audit_id"],
-                    "device_id": device_id,
-                    "payload_hash": request["runtime_audit_payload_hash"],
-                    "canonical_revision": canonical_revision,
-                }
-            )
-            with connection:
-                connection.execute(
-                    """
-                    UPDATE home_edge_runtime_audit_metadata
-                    SET state = 'DONE', canonical_revision = ?, completed_at = CURRENT_TIMESTAMP
-                    WHERE audit_id = ?
-                    """,
-                    (canonical_revision, request["audit_id"]),
-                )
-                connection.execute(
-                    """
-                    INSERT INTO home_edge_runtime_audit_state (
-                        device_id, current_audit_id, current_state, payload_hash,
-                        canonical_ref, canonical_revision
-                    )
-                    VALUES (?, ?, 'verified', ?, ?, ?)
-                    ON CONFLICT(device_id) DO UPDATE SET
-                        current_audit_id = excluded.current_audit_id,
-                        current_state = excluded.current_state,
-                        payload_hash = excluded.payload_hash,
-                        canonical_ref = excluded.canonical_ref,
-                        canonical_revision = excluded.canonical_revision,
-                        updated_at = CURRENT_TIMESTAMP
-                    """,
-                    (
-                        device_id,
-                        request["audit_id"],
-                        request["runtime_audit_payload_hash"],
-                        request["canonical_ref"],
-                        canonical_revision,
-                    ),
-                )
-                connection.execute(
-                    """
-                    INSERT OR IGNORE INTO home_edge_runtime_audit_state_history (
-                        history_key, audit_id, device_id, previous_state, new_state,
-                        payload_hash, canonical_revision
-                    )
-                    VALUES (?, ?, ?, ?, 'verified', ?, ?)
-                    """,
-                    (
-                        history_key,
-                        request["audit_id"],
-                        device_id,
-                        previous_state,
-                        request["runtime_audit_payload_hash"],
-                        canonical_revision,
-                    ),
-                )
 
     def _get_mutation(self, idempotency_key: str) -> dict[str, object] | None:
         with closing(sqlite3.connect(str(self._gateway_db))) as connection:
@@ -667,7 +463,6 @@ def _payload_fingerprint(request: Mapping[str, Any]) -> dict[str, object]:
         key: request[key]
         for key in sorted(request)
         if key not in {"payload_hash", "value"} and key != "expected_revision"
-        and key != "inject_sqlite_failure"
     }
 
 
@@ -705,54 +500,6 @@ def _projection_refs(request: Mapping[str, Any], receipt: Mapping[str, Any]) -> 
 
 
 _SAFE_BASENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
-_HOME_EDGE_ALLOWED_DEVICE_ID = "home_edge_01"
-_HOME_EDGE_ALLOWED_EXECUTION_NODE = "home-edge-01"
-
-
-def _normalize_home_edge_audit_payload(payload: Mapping[str, Any]) -> dict[str, object]:
-    audit_id = safe_token(str(payload.get("audit_id", "")), "audit_id")
-    device_id = safe_token(str(payload.get("device_id", "")), "device_id")
-    execution_node = safe_token(str(payload.get("execution_node", "")), "execution_node")
-    audit_kind = safe_token(str(payload.get("audit_kind", "RUNTIME_AUDIT")), "audit_kind")
-    if device_id != _HOME_EDGE_ALLOWED_DEVICE_ID:
-        raise MemoryGatewayStorageError("home edge audit device is not authorized")
-    if execution_node != _HOME_EDGE_ALLOWED_EXECUTION_NODE:
-        raise MemoryGatewayStorageError("home edge audit execution node is not authorized")
-    if audit_kind != "RUNTIME_AUDIT":
-        raise MemoryGatewayStorageError("home edge audit kind is not authorized")
-    runtime_payload = payload.get("runtime_audit")
-    if not isinstance(runtime_payload, Mapping):
-        raise MemoryGatewayStorageError("runtime audit payload must be an object")
-    payload_hash = content_hash(runtime_payload)
-    semantic_record = {
-        "schema": "skeleton.home_edge.runtime_audit.semantic_record.v1",
-        "record_class": "private_semantic_audit",
-        "device_id": device_id,
-        "execution_node": execution_node,
-        "audit_kind": audit_kind,
-        "audit_id": audit_id,
-        "runtime_audit_payload_hash": payload_hash,
-        "procedure_ref": "home_edge_audit_persist_v1",
-        "evidence_policy": "skeleton_audit_receipt_only",
-        "secret_policy": "no_plaintext_secret_persistence",
-        "verified_procedure": "memory_gateway_to_canonical_memorygate_and_sqlite_metadata",
-        "failure_history": "idempotent_by_audit_id_conflict_payload_fails_closed",
-        "rollback": "sqlite_retry_recovers_after_semantic_write_partial_failure",
-        "next_safe_action": "exact_replay_or_operator_review_on_conflict",
-    }
-    return {
-        "audit_id": audit_id,
-        "device_id": device_id,
-        "execution_node": execution_node,
-        "audit_kind": audit_kind,
-        "runtime_audit_payload_hash": payload_hash,
-        "fact_namespace": "skeleton.home_edge.runtime_audits",
-        "fact_id": audit_id,
-        "canonical_ref": f"skeleton.home_edge.runtime_audits:{audit_id}",
-        "semantic_record": semantic_record,
-        "source_hash": payload_hash,
-        "inject_sqlite_failure": bool(payload.get("inject_sqlite_failure", False)),
-    }
 
 
 def _safe_basename(value: object) -> str:

@@ -65,23 +65,3 @@ is optional and does not determine node health.
 Local-network inventory is not periodic. It runs only through the explicit read-only
 `home_edge_01_lan_inventory_read_only` maintenance task. Detailed device records are private;
 public reports are aggregate only.
-
-## Registered Operation: home_edge_audit_persist_v1
-
-`home_edge_audit_persist_v1` is the canonical reusable persistence operation
-for private Home Edge `RUNTIME_AUDIT` payloads from device `home_edge_01` on
-execution node `home-edge-01`. The stable registry entry lives in
-`config/home_edge/home-edge-01.json`.
-
-The operation runs only through the existing protected Skeleton Runner
-maintenance path. It uses `MemoryGateway` with private storage to write one
-typed semantic audit record into the canonical MemoryGate store and writes only
-audit metadata, current device audit state, and state-change history into
-SQLite. Execution evidence stays in the Skeleton maintenance/audit receipt.
-
-Idempotency is by `audit_id`: exact replay returns success without duplicate
-semantic records, metadata rows, current-state rows, or history rows. Reusing an
-`audit_id` with a different payload hash fails closed. If SQLite completion
-fails after the semantic record is committed, retry recovers from the existing
-canonical event and finishes the SQLite rows without writing another semantic
-record.
