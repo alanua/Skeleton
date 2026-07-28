@@ -74,6 +74,8 @@ The reviewed `.github/workflows/scheduler-runtime-launch.yml` is the only automa
 
 The smoke database is created under the temporary runner directory and removed before completion. No synthetic schedule is written to the live scheduler database. GitHub receives only an aggregate DONE/BLOCKED receipt without schedule payloads, rows, private paths or host values.
 
+The authoritative aggregate production launch receipt is recorded in GitHub issue `#2051`.
+
 ## Boundaries
 
 - no direct canonical memory SQLite access;
