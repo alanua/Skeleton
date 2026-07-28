@@ -18,6 +18,43 @@ Missing or unknown maintenance task ids are reported as `BLOCKED`.
 
 ## Current allowlist
 
+`dispatch_travel_pages_publication` dispatches and verifies one fixed public
+Travel Pages publication workflow after an explicitly approved page publication.
+It requires:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: dispatch_travel_pages_publication
+Operator Approval: dispatch_travel_pages_publication_v1
+```
+
+Issue text may not supply a repository, workflow, ref, input, run identifier,
+URL, or command. The Runner records a UTC dispatch boundary, then invokes only
+this bounded noninteractive GitHub CLI command:
+
+```text
+gh workflow run publish-encrypted-travel-pages.yml --repo alanua/Travel --ref main
+```
+
+The Runner resolves the current `alanua/Travel` `main` SHA through a fixed
+GitHub CLI query and polls only the fixed workflow-dispatch run list for
+`publish-encrypted-travel-pages.yml` on branch `main`. It accepts only the
+newest matching workflow-dispatch run created after the dispatch boundary, with
+branch/ref `main` and exact workflow file/name match. It never follows
+issue-provided URLs or accepts issue-provided repository, workflow, ref, input,
+run id, branch, PR, Pages, Calendar, or command values.
+
+Success requires status `completed`, conclusion `success`, and a run head SHA
+exactly matching the resolved current `alanua/Travel` `main` SHA. The public
+receipt contains only the task id, repo token `alanua/Travel`, workflow
+filename, requested/run-found booleans, run id, status, conclusion,
+head-matches-main boolean, and success criteria. It does not include tokens,
+environment values, host paths, logs, URLs, issue content, private Milan values,
+workflow output, or the resolved SHA. Stable blockers include
+`travel_pages_dispatch_failed`, `travel_pages_run_not_found`,
+`travel_pages_run_timeout`, `travel_pages_run_failed`, and
+`travel_pages_head_mismatch`.
+
 `prepare_private_static_site_handoff` prepares a durable encrypted handoff for a
 private static web package. It requires exact operator approval and an artifact
 id:
