@@ -85,6 +85,14 @@ from core.runner_five_layer_memory_activation import (
     TASK_ID as ACTIVATE_FIVE_LAYER_PRIVATE_MEMORY,
     execute_five_layer_memory_activation,
 )
+from core.runner_video_ocr_provider import (
+    EXPECTED_REPOSITORY as VIDEO_OCR_EXPECTED_REPOSITORY,
+    TASK_ID as INSTALL_VIDEO_OCR_PROVIDER,
+    CommandResult as VideoOcrCommandResult,
+    RuntimeRequest as VideoOcrRuntimeRequest,
+    execute_install_video_ocr_provider as _execute_install_video_ocr_provider,
+    parse_runtime_request as _parse_video_ocr_runtime_request,
+)
 from core.private_static_site_runtime import (
     DEPLOY_TASK_ID as DEPLOY_PRIVATE_STATIC_SITE,
     PRIVATE_KEY_MARKERS,
@@ -262,6 +270,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         HERMES_PRIVATE_MEMORY_BRIDGE_CHECK,
         PRIVATE_MEMORY_PHASE_A_INVENTORY,
         INSTALL_GRAPHIFY_RUNTIME,
+        INSTALL_VIDEO_OCR_PROVIDER,
         PREPARE_AUFMASS_PRIVATE_RUNTIME,
         RUN_AUFMASS_PRIVATE_DXF_REVIEW,
         SUMMARIZE_AUFMASS_PRIVATE_REVIEW,
@@ -475,6 +484,9 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "approved_override_hash",
         "approval_status",
         "approved_head_sha",
+        "apt_install_timeout_seconds",
+        "apt_rollback_timeout_seconds",
+        "apt_update_timeout_seconds",
         "artifact_count",
         "artifact_id",
         "audit_id",
@@ -574,6 +586,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "input_row_count",
         "input_table_count",
         "installed_skill_platform_count",
+        "install_mutation_applied",
         "inventory_schema",
         "issue_number",
         "issue_worktree",
@@ -618,11 +631,15 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "pr_title",
         "pr_url",
         "payload_hash",
+        "packages_added_count",
+        "packages_preexisting_count",
+        "packages_required_count",
         "publish_override_hash",
         "private_memory_db_configured",
         "private_memory_db_openable",
         "private_memory_heartbeat_ok",
         "private_memory_integrity_ok",
+        "private_memory_accessed",
         "private_memory_schema_present",
         "private_memory_status",
         "private_memory_writable_when_requested",
@@ -633,6 +650,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "profile_backup_item_count",
         "profile_backup_private",
         "profile_backup_status",
+        "provider_status",
         "project_id",
         "project_state_existing",
         "project_state_written",
@@ -645,6 +663,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "quality_score",
         "quality_threshold",
         "pull_request",
+        "ready_language_count",
         "recovery_packet",
         "python_version",
         "reason",
@@ -660,6 +679,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "report_mode",
         "report_private_paths",
         "report_quantities",
+        "required_language_count",
         "review_table_count",
         "root_readable_count",
         "root_unreadable_count",
@@ -667,9 +687,12 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "runtime_smoke_decision",
         "runtime_smoke_stable_reason",
         "runtime_private_action",
+        "runtime_command_timeout_seconds",
         "semantic_record_count",
         "ram_bytes",
         "repository",
+        "rollback_applied",
+        "rollback_ready",
         "rollback_status",
         "room_area_row_count",
         "row_count",
@@ -681,6 +704,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "selected_source_count",
         "services_disabled",
         "services_enabled",
+        "services_restarted",
         "sqlite_history_count",
         "sqlite_metadata_count",
         "sqlite_state_count",
@@ -720,6 +744,9 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "system",
         "target_project",
         "task_id",
+        "video_understanding_activated",
+        "media_processed",
+        "ollama_altered",
         "target_project_route",
         "target_repository",
         "test_summary",
@@ -6956,6 +6983,172 @@ def check_project_checkout(body: str) -> str:
     return _verify_registered_project_checkout(task_id, registered_checkout)
 
 
+def _run_video_ocr_provider_command(
+    args: list[str], environment: Mapping[str, str], timeout: int
+) -> VideoOcrCommandResult:
+    completed = subprocess.run(
+        args,
+        check=False,
+        cwd="/",
+        env=dict(environment),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=timeout,
+    )
+    return VideoOcrCommandResult(completed.returncode, completed.stdout or "")
+
+
+def _video_ocr_provider_registered_preflight(
+    task_id: str,
+    request: VideoOcrRuntimeRequest,
+) -> tuple[list[str] | None, str | None]:
+    registered_checkout, report = _registered_skeleton_checkout(task_id)
+    if report is not None:
+        return None, report
+    assert registered_checkout is not None
+    status_lines = list(registered_checkout.status_lines)
+
+    if registered_checkout.repo != VIDEO_OCR_EXPECTED_REPOSITORY:
+        return None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=target_repository_mismatch"],
+            "not_met",
+        )
+
+    checkout_path = registered_checkout.checkout_path
+    if not checkout_path.exists():
+        return None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=checkout_path_missing"],
+            "not_met",
+        )
+    if not (checkout_path / ".git").exists():
+        return None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=checkout_git_missing"],
+            "not_met",
+        )
+
+    code, output = run_command(
+        ["git", "-C", str(checkout_path), "symbolic-ref", "--short", "HEAD"]
+    )
+    if code != 0:
+        return None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "step=read_checkout_branch status=failed"],
+            "not_met",
+        )
+    if output.strip() != "main":
+        return None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "step=verify_checkout_branch status=failed"],
+            "not_met",
+        )
+
+    code, output = run_command(
+        ["git", "-C", str(checkout_path), "remote", "get-url", "origin"]
+    )
+    if code != 0:
+        return None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "step=read_origin_remote status=failed"],
+            "not_met",
+        )
+    if not _remote_url_matches_project_repo(output, registered_checkout.repo):
+        return None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "step=verify_origin_remote status=failed"],
+            "not_met",
+        )
+
+    code, output = run_command(
+        ["git", "-C", str(checkout_path), "status", "--porcelain"]
+    )
+    if code != 0:
+        return None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "step=read_checkout_status status=failed"],
+            "not_met",
+        )
+    if output.strip():
+        return None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "step=verify_clean_worktree status=failed"],
+            "not_met",
+        )
+
+    code, output = run_command(
+        ["git", "-C", str(checkout_path), "rev-parse", "HEAD"]
+    )
+    checkout_head = output.strip() if code == 0 else ""
+    if code != 0 or checkout_head != request.expected_main_sha:
+        return None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "step=verify_expected_checkout_head status=failed"],
+            "not_met",
+        )
+
+    code, output = run_command(
+        ["git", "-C", str(checkout_path), "rev-parse", "origin/main"]
+    )
+    origin_main = output.strip() if code == 0 else ""
+    if code != 0 or origin_main != request.expected_main_sha:
+        return None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "step=verify_expected_origin_main status=failed"],
+            "not_met",
+        )
+
+    return [
+        *status_lines,
+        "step=read_checkout_branch status=done",
+        "step=verify_checkout_branch status=done",
+        "step=read_origin_remote status=done",
+        "step=verify_origin_remote status=done",
+        "step=read_checkout_status status=done",
+        "step=verify_clean_worktree status=done",
+        "step=verify_expected_checkout_head status=done",
+        "step=verify_expected_origin_main status=done",
+    ], None
+
+
+def install_video_ocr_provider(body: str) -> str:
+    request, input_reason = _parse_video_ocr_runtime_request(body)
+    if input_reason is not None:
+        return _maintenance_report(
+            "BLOCKED",
+            INSTALL_VIDEO_OCR_PROVIDER,
+            [f"reason={input_reason}"],
+            "not_met",
+        )
+    assert request is not None
+    status_lines, report = _video_ocr_provider_registered_preflight(
+        INSTALL_VIDEO_OCR_PROVIDER,
+        request,
+    )
+    if report is not None:
+        return report
+    assert status_lines is not None
+    return _execute_install_video_ocr_provider(
+        request,
+        preflight_status_lines=status_lines,
+        run_command=_run_video_ocr_provider_command,
+        maintenance_report=_maintenance_report,
+    )
+
+
 def _registered_skeleton_checkout(
     task_id: str,
 ) -> tuple[RegisteredProjectCheckout | None, str | None]:
@@ -12725,6 +12918,8 @@ def dispatch_runtime_maintenance_task(
             return private_memory_phase_a_inventory(body)
         if task_id == INSTALL_GRAPHIFY_RUNTIME:
             return install_graphify_runtime(body)
+        if task_id == INSTALL_VIDEO_OCR_PROVIDER:
+            return install_video_ocr_provider(body)
         if task_id == PREPARE_AUFMASS_PRIVATE_RUNTIME:
             return prepare_aufmass_private_runtime()
         if task_id == RUN_AUFMASS_PRIVATE_DXF_REVIEW:

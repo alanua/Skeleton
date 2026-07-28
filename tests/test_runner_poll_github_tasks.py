@@ -5,6 +5,7 @@ import json
 import os
 import re
 import urllib.parse
+from collections.abc import Mapping
 from pathlib import Path
 from unittest import mock
 
@@ -11988,6 +11989,272 @@ def test_check_project_checkout_task_never_runs_mutating_git_or_gh_pr() -> None:
     assert commands == [
         ["git", "-C", str(checkout_path), "remote", "get-url", "origin"]
     ]
+
+
+def _video_ocr_body(extra: str = "") -> str:
+    body = "\n".join(
+        [
+            "Mode: RUNTIME_MAINTENANCE_TASK",
+            f"Maintenance Task ID: {runner.INSTALL_VIDEO_OCR_PROVIDER}",
+            f"Repository: {runner.REPO}",
+            f"Expected Main SHA: {HEAD_SHA}",
+            "OCR Provider Approval: "
+            "EXPLICIT_INSTALL_VIDEO_OCR_PROVIDER_20260728",
+        ]
+    )
+    return body + ("\n" + extra if extra else "")
+
+
+def test_video_ocr_provider_task_is_allowlisted_and_dispatches_registered_checkout(
+    tmp_path: Path,
+) -> None:
+    checkout_path = _safe_checkout_path("video-ocr-provider-dispatch")
+    project_tree = _project_tree_for_skeleton_checkout(checkout_path)
+    captured: dict[str, object] = {}
+
+    def run_checkout_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        del cwd
+        if command == ["git", "-C", str(checkout_path), "remote", "get-url", "origin"]:
+            return 0, "https://github.com/alanua/Skeleton.git\n"
+        if command == ["git", "-C", str(checkout_path), "symbolic-ref", "--short", "HEAD"]:
+            return 0, "main\n"
+        if command == ["git", "-C", str(checkout_path), "status", "--porcelain"]:
+            return 0, ""
+        if command == ["git", "-C", str(checkout_path), "rev-parse", "HEAD"]:
+            return 0, f"{HEAD_SHA}\n"
+        if command == ["git", "-C", str(checkout_path), "rev-parse", "origin/main"]:
+            return 0, f"{HEAD_SHA}\n"
+        return 2, "unexpected command"
+
+    def execute(
+        request: runner.VideoOcrRuntimeRequest,
+        *,
+        preflight_status_lines: list[str],
+        run_command: object,
+        maintenance_report: object,
+    ) -> str:
+        captured["request"] = request
+        captured["preflight_status_lines"] = preflight_status_lines
+        captured["run_command"] = run_command
+        captured["maintenance_report"] = maintenance_report
+        return "DONE: Runner host maintenance task completed.\nmaintenance_task_id=install_video_ocr_provider\nsuccess_criteria=met"
+
+    assert runner.INSTALL_VIDEO_OCR_PROVIDER == "install_video_ocr_provider"
+    assert runner.INSTALL_VIDEO_OCR_PROVIDER in runner.RUNTIME_MAINTENANCE_TASK_IDS
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(Path, "exists", autospec=True) as path_exists, mock.patch.object(
+        runner, "run_command", side_effect=run_checkout_command
+    ), mock.patch.object(
+        runner, "_execute_install_video_ocr_provider", side_effect=execute
+    ):
+        path_exists.side_effect = lambda path: path in {
+            checkout_path,
+            checkout_path / ".git",
+        }
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.INSTALL_VIDEO_OCR_PROVIDER, str(tmp_path), _video_ocr_body()
+        )
+
+    assert report.startswith("DONE:")
+    assert captured["request"].expected_main_sha == HEAD_SHA
+    assert "target_repository=alanua/Skeleton" in captured["preflight_status_lines"]
+    assert "step=verify_expected_checkout_head status=done" in captured["preflight_status_lines"]
+    assert "step=verify_expected_origin_main status=done" in captured["preflight_status_lines"]
+
+
+def test_video_ocr_provider_blocks_unexpected_checkout_head_before_ocr_commands() -> None:
+    checkout_path = _safe_checkout_path("video-ocr-provider-wrong-main")
+    project_tree = _project_tree_for_skeleton_checkout(checkout_path)
+
+    def run_checkout_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        del cwd
+        if command == ["git", "-C", str(checkout_path), "remote", "get-url", "origin"]:
+            return 0, "https://github.com/alanua/Skeleton.git\n"
+        if command == ["git", "-C", str(checkout_path), "symbolic-ref", "--short", "HEAD"]:
+            return 0, "main\n"
+        if command == ["git", "-C", str(checkout_path), "status", "--porcelain"]:
+            return 0, ""
+        if command == ["git", "-C", str(checkout_path), "rev-parse", "HEAD"]:
+            return 0, "0" * 40 + "\n"
+        if command == ["git", "-C", str(checkout_path), "rev-parse", "origin/main"]:
+            return 0, f"{HEAD_SHA}\n"
+        return 2, "unexpected command"
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(Path, "exists", autospec=True) as path_exists, mock.patch.object(
+        runner, "run_command", side_effect=run_checkout_command
+    ), mock.patch.object(
+        runner, "_execute_install_video_ocr_provider"
+    ) as execute:
+        path_exists.side_effect = lambda path: path in {
+            checkout_path,
+            checkout_path / ".git",
+        }
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.INSTALL_VIDEO_OCR_PROVIDER, str(runner.ROOT), _video_ocr_body()
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "step=verify_expected_checkout_head status=failed" in report
+    execute.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("branch", "worktree_status", "head_sha", "origin_main_sha", "expected_step"),
+    (
+        ("runner/issue-1", "", HEAD_SHA, HEAD_SHA, "step=verify_checkout_branch status=failed"),
+        ("main", " M core/runner_video_ocr_provider.py\n", HEAD_SHA, HEAD_SHA, "step=verify_clean_worktree status=failed"),
+        ("main", "", HEAD_SHA, "b" * 40, "step=verify_expected_origin_main status=failed"),
+    ),
+)
+def test_video_ocr_provider_preflight_requires_clean_main_and_exact_head_origin(
+    branch: str,
+    worktree_status: str,
+    head_sha: str,
+    origin_main_sha: str,
+    expected_step: str,
+) -> None:
+    checkout_path = _safe_checkout_path("video-ocr-provider-preflight")
+    project_tree = _project_tree_for_skeleton_checkout(checkout_path)
+
+    def run_checkout_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        del cwd
+        if command == ["git", "-C", str(checkout_path), "symbolic-ref", "--short", "HEAD"]:
+            return 0, f"{branch}\n"
+        if command == ["git", "-C", str(checkout_path), "remote", "get-url", "origin"]:
+            return 0, "https://github.com/alanua/Skeleton.git\n"
+        if command == ["git", "-C", str(checkout_path), "status", "--porcelain"]:
+            return 0, worktree_status
+        if command == ["git", "-C", str(checkout_path), "rev-parse", "HEAD"]:
+            return 0, f"{head_sha}\n"
+        if command == ["git", "-C", str(checkout_path), "rev-parse", "origin/main"]:
+            return 0, f"{origin_main_sha}\n"
+        return 2, "unexpected command"
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(Path, "exists", autospec=True) as path_exists, mock.patch.object(
+        runner, "run_command", side_effect=run_checkout_command
+    ), mock.patch.object(
+        runner, "_execute_install_video_ocr_provider"
+    ) as execute:
+        path_exists.side_effect = lambda path: path in {
+            checkout_path,
+            checkout_path / ".git",
+        }
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.INSTALL_VIDEO_OCR_PROVIDER, str(runner.ROOT), _video_ocr_body()
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert expected_step in report
+    execute.assert_not_called()
+
+
+def test_video_ocr_provider_runtime_route_rejects_issue_controlled_commands() -> None:
+    checkout_path = _safe_checkout_path("video-ocr-provider-reject-input")
+    project_tree = _project_tree_for_skeleton_checkout(checkout_path)
+    ocr_commands: list[list[str]] = []
+
+    def run_checkout_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        del cwd
+        if command == ["git", "-C", str(checkout_path), "remote", "get-url", "origin"]:
+            return 0, "https://github.com/alanua/Skeleton.git\n"
+        if command == ["git", "-C", str(checkout_path), "symbolic-ref", "--short", "HEAD"]:
+            return 0, "main\n"
+        if command == ["git", "-C", str(checkout_path), "status", "--porcelain"]:
+            return 0, ""
+        if command == ["git", "-C", str(checkout_path), "rev-parse", "HEAD"]:
+            return 0, f"{HEAD_SHA}\n"
+        if command == ["git", "-C", str(checkout_path), "rev-parse", "origin/main"]:
+            return 0, f"{HEAD_SHA}\n"
+        return 2, "unexpected command"
+
+    def ocr_run(
+        args: list[str], environment: Mapping[str, str], timeout: int
+    ) -> runner.VideoOcrCommandResult:
+        del environment, timeout
+        ocr_commands.append(args)
+        return runner.VideoOcrCommandResult(99, "must not run")
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(Path, "exists", autospec=True) as path_exists, mock.patch.object(
+        runner, "run_command", side_effect=run_checkout_command
+    ), mock.patch.object(
+        runner,
+        "_run_video_ocr_provider_command",
+        side_effect=ocr_run,
+    ):
+        path_exists.side_effect = lambda path: path in {
+            checkout_path,
+            checkout_path / ".git",
+        }
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.INSTALL_VIDEO_OCR_PROVIDER,
+            str(runner.ROOT),
+            _video_ocr_body("Command: sudo apt-get install evil"),
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=unexpected_task_fields" in report
+    assert ocr_commands == []
+
+
+def test_video_ocr_provider_public_receipt_fields_survive_sanitizer() -> None:
+    report = runner._maintenance_report(
+        "DONE",
+        runner.INSTALL_VIDEO_OCR_PROVIDER,
+        [
+            "step=verify_package_manager status=done",
+            "provider_status=READY",
+            "required_language_count=4",
+            "ready_language_count=4",
+            "packages_required_count=5",
+            "packages_preexisting_count=0",
+            "packages_added_count=5",
+            "install_mutation_applied=true",
+            "rollback_ready=true",
+            "rollback_applied=false",
+            "reason=ready",
+        ],
+        "met",
+    )
+
+    for field in (
+        "provider_status=READY",
+        "required_language_count=4",
+        "ready_language_count=4",
+        "packages_required_count=5",
+        "packages_preexisting_count=0",
+        "packages_added_count=5",
+        "install_mutation_applied=true",
+        "rollback_ready=true",
+        "rollback_applied=false",
+        "reason=ready",
+    ):
+        assert field in report
+
+
+def test_runtime_dispatcher_does_not_route_other_issue_controlled_command() -> None:
+    report = runner.dispatch_runtime_maintenance_task(
+        "install_video_ocr_provider_extra",
+        str(runner.ROOT),
+        _video_ocr_body("Command: sudo apt-get install evil"),
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=maintenance_task_id_not_allowlisted" in report
 
 
 def test_check_skeleton_freshness_is_allowlisted() -> None:
