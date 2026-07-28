@@ -3,6 +3,12 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Mapping
 
+from core.memory_gateway import MEMORY_GATEWAY_REQUEST_SCHEMA, MemoryGateway, capability_token
+from core.memory_gateway_policy import MemoryGatewayPolicyError, command_name
+from core.memory_gateway_storage import (
+    PRIVATE_MEMORY_GATEWAY_MUTATION_SCHEMA,
+    PrivateMemoryGatewayStorage,
+)
 from core.private_memory_history import content_hash
 from core.private_memory_stack import PrivateMemoryStack, PrivateMemoryStackError
 
@@ -30,10 +36,14 @@ def idempotency_key(project_ref: str, input_hash: str, transaction_ref: str) -> 
 
 
 class AufmassMemoryBridge:
-    """Connect local Aufmass records to the active PrivateMemoryStack."""
+    """Connect local Aufmass records through the MemoryGateway boundary."""
 
     def __init__(self, private_root: str | None = None) -> None:
         self.stack = PrivateMemoryStack(private_root)
+        self.gateway = MemoryGateway(
+            capability_token(namespaces=("skeleton",), public_mode=False),
+            private_memory_storage=PrivateMemoryGatewayStorage(self.stack),
+        )
 
     def context(self, *, project_ref: str, query: str | None = None, limit: int = 5) -> dict[str, Any]:
         project_ref = _safe_token(project_ref, "project_ref")
@@ -127,7 +137,7 @@ class AufmassMemoryBridge:
                 "status": "DONE",
                 "idempotent": True,
                 "idempotency_key": idem,
-                "canonical_revision": self.stack.status()["canonical_sqlite"]["canonical_revision"],
+                "canonical_revision": self._status()["canonical_sqlite"]["canonical_revision"],
                 "compare": self.compare(project_ref=project_ref, current_record=current),
             }
 
@@ -145,8 +155,7 @@ class AufmassMemoryBridge:
         facts = _facts_for_record(project_ref, input_hash, record, fingerprint, existing_history)
         revision = 0
         for fact_id, value in facts:
-            mutation = self.stack.put(
-                namespace=AUFMASS_NAMESPACE,
+            mutation = self._mutate_put(
                 fact_id=fact_id,
                 value=value,
                 actor_ref=actor_ref,
@@ -198,8 +207,7 @@ class AufmassMemoryBridge:
             value["relationships"].append({"kind": "reviews_output", "target": _calculation_node(project_ref, input_hash)})
         if room_id:
             value["relationships"].append({"kind": "reviews_room", "target": _room_node(project_ref, room_id)})
-        mutation = self.stack.put(
-            namespace=AUFMASS_NAMESPACE,
+        mutation = self._mutate_put(
             fact_id=f"decision.{project_ref}.{decision_ref}",
             value=value,
             actor_ref=_safe_token(actor_ref, "actor"),
@@ -224,31 +232,88 @@ class AufmassMemoryBridge:
 
     def _get(self, fact_id: str) -> dict[str, Any] | None:
         try:
-            return self.stack.get(namespace=AUFMASS_NAMESPACE, fact_id=fact_id)["value"]  # type: ignore[return-value]
+            return self._gateway_payload(
+                "memory.private_read_exact",
+                {"canonical_ref": f"{AUFMASS_NAMESPACE}:{fact_id}"},
+            )["value"]  # type: ignore[return-value]
         except Exception:
             return None
 
     def _safe_search(self, query: str, *, limit: int) -> dict[str, Any]:
         try:
-            return self.stack.search(query=query, limit=_bounded_limit(limit))  # type: ignore[return-value]
+            return self._gateway_payload(
+                "memory.private_search_semantic",
+                {"query": query, "limit": _bounded_limit(limit)},
+            )  # type: ignore[return-value]
         except Exception:
             return {"results": []}
 
     def _safe_relations(self, query: str, *, limit: int) -> dict[str, Any]:
         try:
-            return self.stack.relations(query=query, limit=_bounded_limit(limit))  # type: ignore[return-value]
+            return self._gateway_payload(
+                "graph.private_query",
+                {"query": query, "limit": min(_bounded_limit(limit), 5)},
+            )  # type: ignore[return-value]
         except Exception:
             return {"results": []}
 
+    def _mutate_put(
+        self,
+        *,
+        fact_id: str,
+        value: Mapping[str, Any],
+        actor_ref: str,
+        reason_code: str,
+        approval_ref: str,
+        transaction_ref: str,
+    ) -> dict[str, Any]:
+        before = self._status()["canonical_sqlite"]["canonical_revision"]
+        source_hash = content_hash({"fact_id": fact_id, "value": value, "transaction_ref": transaction_ref})
+        return self._gateway_payload(
+            "memory.private_mutate",
+            {
+                "schema": PRIVATE_MEMORY_GATEWAY_MUTATION_SCHEMA,
+                "operation": "put",
+                "project_id": "skeleton",
+                "dataset_id": "default",
+                "expected_revision": before,
+                "actor_ref": actor_ref,
+                "reason_code": reason_code,
+                "approval_ref": approval_ref,
+                "fact_namespace": AUFMASS_NAMESPACE,
+                "fact_id": fact_id,
+                "value": value,
+                "source_hash": source_hash,
+                "idempotency_key": f"aufmass_{content_hash({'transaction_ref': transaction_ref, 'fact_id': fact_id})[:48]}",
+            },
+        )  # type: ignore[return-value]
+
+    def _status(self) -> dict[str, Any]:
+        return self._gateway_payload("memory.private_status", {})  # type: ignore[return-value]
+
+    def _gateway_payload(self, suffix: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+        response = self.gateway.execute(
+            {
+                "schema": MEMORY_GATEWAY_REQUEST_SCHEMA,
+                "namespace": "skeleton",
+                "command": command_name("skeleton", suffix),
+                "payload": {"project_id": "skeleton", "dataset_id": "default", **dict(payload)},
+            }
+        )
+        result = response.get("payload")
+        if not isinstance(result, Mapping):
+            raise AufmassMemoryBridgeError("memory gateway returned malformed payload")
+        return dict(result)
+
     def _ensure_writable(self) -> None:
         try:
-            status = self.stack.status()
+            status = self._status()
             if status["state"] in {"READY", "STALE"}:
                 if status["state"] == "STALE":
                     self.stack.rebuild()
                 return
             self.stack.init(import_manifest=False)
-        except PrivateMemoryStackError as exc:
+        except (MemoryGatewayPolicyError, PrivateMemoryStackError) as exc:
             raise AufmassMemoryBridgeError("private memory stack unavailable") from exc
 
 
