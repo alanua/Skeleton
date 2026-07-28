@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://skeleton.local/schemas/schedule.schema.json",
+  "title": "Skeleton Schedule v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schedule_id",
+    "trigger_kind",
+    "cron_expression",
+    "once_at",
+    "timezone",
+    "route_type",
+    "route_id",
+    "approval_policy",
+    "overlap_policy",
+    "misfire_policy",
+    "payload"
+  ],
+  "properties": {
+    "schema": {"const": "skeleton.schedule.v1"},
+    "schedule_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "trigger_kind": {"enum": ["cron", "once"]},
+    "cron_expression": {"type": ["string", "null"], "maxLength": 128},
+    "once_at": {"type": ["integer", "null"], "minimum": 0},
+    "timezone": {"type": "string", "minLength": 1, "maxLength": 128},
+    "route_type": {"enum": ["notify", "skill", "workflow", "loop", "runner"]},
+    "route_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "approval_policy": {
+      "enum": ["notify_only", "auto_run_low_risk", "require_operator_each_occurrence"]
+    },
+    "overlap_policy": {"enum": ["skip", "queue_one", "needs_operator"]},
+    "misfire_policy": {"enum": ["run_once", "skip", "needs_operator"]},
+    "payload": {"type": "object"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"trigger_kind": {"const": "cron"}}},
+      "then": {
+        "properties": {
+          "cron_expression": {"type": "string", "minLength": 1},
+          "once_at": {"const": null}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"trigger_kind": {"const": "once"}}},
+      "then": {
+        "properties": {
+          "cron_expression": {"const": null},
+          "once_at": {"type": "integer", "minimum": 0}
+        }
+      }
+    }
+  ]
+}
