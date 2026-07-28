@@ -24,11 +24,13 @@ def resolve_private_memory_root(
     *,
     checkout: str | Path | None = None,
 ) -> tuple[str, str]:
-    """Resolve the broader private runtime root used by existing memory services.
+    """Resolve the private runtime root used by existing memory services.
 
-    A legacy connector database may anchor this directory. Call
-    ``resolve_canonical_stack_root`` when a caller specifically requires the
-    authoritative ``PrivateMemoryStack`` root containing ``canonical.sqlite``.
+    An explicit Runner root remains authoritative. When only a legacy connector
+    configuration is present, an already-existing documented canonical stack is
+    preferred so all memory layers and new callers share one authority. If that
+    canonical stack does not exist, the historical connector-parent behavior is
+    preserved for memory-only compatibility.
     """
 
     values = dict(os.environ if env is None else env)
@@ -42,13 +44,26 @@ def resolve_private_memory_root(
             raise PrivateMemoryRootResolutionError("private_memory_root_unavailable")
         try:
             connector = PrivateMemoryConnector(env=values)
-            anchor_database = connector._load_db_path().expanduser().resolve()
+            configured_database = connector._load_db_path().expanduser().resolve()
         except Exception as exc:  # noqa: BLE001 - public caller uses bounded reason codes.
             raise PrivateMemoryRootResolutionError(
                 "configured_private_memory_unavailable"
             ) from exc
-        root = anchor_database.parent
-        source = "private_config_parent"
+        if configured_database.name == CANONICAL_DATABASE_NAME:
+            root = configured_database.parent
+            anchor_database = configured_database
+            source = "private_config_parent"
+        else:
+            default_root = _documented_default_root(values)
+            default_anchor = default_root / CANONICAL_DATABASE_NAME
+            if default_anchor.is_file():
+                root = default_root
+                anchor_database = default_anchor
+                source = "documented_default_canonical"
+            else:
+                root = configured_database.parent
+                anchor_database = configured_database
+                source = "private_config_parent"
 
     _validate_root(root, anchor_database, checkout=checkout)
     return str(root), source
@@ -100,14 +115,23 @@ def resolve_canonical_stack_root(
             _validate_root(root, configured_database, checkout=checkout)
             return str(root), "canonical_private_config"
 
-    home_root = Path(home).expanduser() if home is not None else Path.home()
-    default_root = (home_root / DEFAULT_CANONICAL_STACK_RELATIVE).resolve()
+    default_root = (
+        Path(home).expanduser().resolve()
+        if home is not None
+        else _documented_default_root(values)
+    )
     anchor = default_root / CANONICAL_DATABASE_NAME
     if anchor.is_file():
         _validate_root(default_root, anchor, checkout=checkout)
         return str(default_root), "documented_default"
 
     raise PrivateMemoryRootResolutionError("canonical_memory_root_unavailable")
+
+
+def _documented_default_root(values: Mapping[str, str]) -> Path:
+    home_value = str(values.get("HOME", "")).strip()
+    home = Path(home_value).expanduser() if home_value else Path.home()
+    return (home / DEFAULT_CANONICAL_STACK_RELATIVE).resolve()
 
 
 def _existing_canonical_candidate(value: str | Path) -> Path | None:
