@@ -68,3 +68,17 @@ def test_workflow_publishes_only_aggregate_receipt_and_fails_closed() -> None:
     assert "steps.install.outcome != 'success'" in text
     assert "steps.verify.outcome != 'success'" in text
     assert "steps.smoke.outcome != 'success'" in text
+
+
+def test_workflow_receipt_verification_rejects_bool_int_confusion() -> None:
+    text = _text()
+    assert "def exact_bool(payload, field, expected=True):" in text
+    assert "payload.get(field) is expected" in text
+    assert "def exact_int(payload, field, expected):" in text
+    assert "not isinstance(value, bool)" in text
+    assert 'exact_int(verify, "timer_count", 1)' in text
+    assert 'exact_int(smoke, "first_created", 1)' in text
+    assert 'exact_bool(verify, "timer_enabled")' in text
+    assert 'exact_bool(smoke, "synthetic_state_removed")' in text
+    assert 'verify.get("timer_count") == 1' not in text
+    assert 'smoke.get("first_created") == 1' not in text

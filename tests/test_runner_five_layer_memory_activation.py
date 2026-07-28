@@ -8,10 +8,12 @@ from typing import Mapping
 
 from core.runner_five_layer_memory_activation import (
     OPERATOR_APPROVAL,
+    SCHEDULER_RUNTIME_APPROVAL,
     TASK_ID,
     VIDEO_RUNTIME_APPROVAL,
     execute_five_layer_memory_activation,
 )
+from core.scheduler_runtime_install import SchedulerRuntimeInstallError
 from core.video_understanding.models import VideoUnderstandingError
 
 SHA = "a" * 40
@@ -23,6 +25,8 @@ def _body(
     approval: str = OPERATOR_APPROVAL,
     launch_video: bool | None = None,
     video_approval: str = VIDEO_RUNTIME_APPROVAL,
+    launch_scheduler: bool | None = None,
+    scheduler_approval: str = SCHEDULER_RUNTIME_APPROVAL,
 ) -> str:
     body = (
         "Mode: RUNTIME_MAINTENANCE_TASK\n"
@@ -33,6 +37,9 @@ def _body(
     if launch_video is not None:
         body += f"Launch Video Understanding: {str(launch_video).lower()}\n"
         body += f"Video Runtime Approval: {video_approval}\n"
+    if launch_scheduler is not None:
+        body += f"Launch Scheduler Core: {str(launch_scheduler).lower()}\n"
+        body += f"Scheduler Runtime Approval: {scheduler_approval}\n"
     return body
 
 
@@ -162,6 +169,32 @@ class _RuntimeResult:
         return dict(self.payload)
 
 
+class _SchedulerRuntimeResult:
+    def __init__(self, **overrides: object) -> None:
+        self.payload: dict[str, object] = {
+            "schema": "skeleton.scheduler.runtime_install_receipt.v1",
+            "source_merge_sha": SHA,
+            "runtime_status": "READY",
+            "service_install_status": "ACTIVE",
+            "timer_enabled": True,
+            "timer_active": True,
+            "timer_count": 1,
+            "service_result": "success",
+            "live_status": "READY",
+            "smoke_first_created": 1,
+            "smoke_first_done": 1,
+            "smoke_second_created": 0,
+            "smoke_occurrence_count": 1,
+            "synthetic_state_removed": True,
+            "rollback_ready": True,
+            "stable_reason_codes": [],
+        }
+        self.payload.update(overrides)
+
+    def public_dict(self) -> dict[str, object]:
+        return dict(self.payload)
+
+
 def test_activation_executor_returns_public_safe_done(monkeypatch, tmp_path: Path) -> None:
     checkout = _prepare_explicit_private_root(monkeypatch, tmp_path)
     report = execute_five_layer_memory_activation(
@@ -175,6 +208,7 @@ def test_activation_executor_returns_public_safe_done(monkeypatch, tmp_path: Pat
     assert "runtime_smoke_check_count=12" in report
     assert "disk_bytes=2048" in report
     assert "install_video_understanding" not in report
+    assert "install_scheduler_runtime" not in report
     assert str(tmp_path) not in report
     assert "success_criteria=met" in report
 
@@ -239,6 +273,167 @@ def test_activation_executor_rejects_video_launch_without_exact_approval(
     )
     assert report.startswith("BLOCKED:")
     assert "reason=video_runtime_approval_invalid" in report
+
+
+def test_activation_executor_rejects_scheduler_launch_before_mutation(
+    tmp_path: Path,
+) -> None:
+    def runner(*args, **kwargs):
+        raise AssertionError("checkout or runtime work must not start")
+
+    report = execute_five_layer_memory_activation(
+        _body(launch_scheduler=True, scheduler_approval="wrong"),
+        workdir=tmp_path,
+        maintenance_report=_report,
+        command_runner=runner,
+    )
+    assert report.startswith("BLOCKED:")
+    assert "reason=scheduler_runtime_approval_invalid" in report
+
+
+def test_activation_executor_launches_scheduler_after_memory_and_video(
+    monkeypatch, tmp_path: Path
+) -> None:
+    checkout = _prepare_explicit_private_root(monkeypatch, tmp_path)
+    calls: list[str] = []
+
+    def video_installer(*args, **kwargs) -> _RuntimeResult:
+        del args, kwargs
+        calls.append("video")
+        return _RuntimeResult()
+
+    def scheduler_installer(
+        source_root: Path,
+        *,
+        expected_sha: str,
+        enable: bool,
+    ) -> _SchedulerRuntimeResult:
+        calls.append("scheduler")
+        assert source_root == checkout.resolve()
+        assert expected_sha == SHA
+        assert enable is True
+        return _SchedulerRuntimeResult()
+
+    report = execute_five_layer_memory_activation(
+        _body(launch_video=True, launch_scheduler=True),
+        workdir=checkout,
+        maintenance_report=_report,
+        command_runner=_runner,
+        runtime_installer=video_installer,
+        scheduler_installer=scheduler_installer,
+    )
+    assert report.startswith("DONE:")
+    assert calls == ["video", "scheduler"]
+    assert "step=install_video_understanding status=done" in report
+    assert "step=install_scheduler_runtime status=done" in report
+    assert "scheduler_runtime_status=READY" in report
+    assert "scheduler_timer_count=1" in report
+    assert "scheduler_smoke_first_created=1" in report
+    assert "scheduler_synthetic_state_removed=true" in report
+    assert str(tmp_path) not in report
+
+
+def test_activation_executor_preserves_video_only_behavior(
+    monkeypatch, tmp_path: Path
+) -> None:
+    checkout = _prepare_explicit_private_root(monkeypatch, tmp_path)
+
+    def scheduler_installer(*args, **kwargs):
+        raise AssertionError("scheduler installer must not run")
+
+    report = execute_five_layer_memory_activation(
+        _body(launch_video=True, launch_scheduler=False),
+        workdir=checkout,
+        maintenance_report=_report,
+        command_runner=_runner,
+        runtime_installer=lambda *args, **kwargs: _RuntimeResult(),
+        scheduler_installer=scheduler_installer,
+    )
+    assert report.startswith("DONE:")
+    assert "step=install_video_understanding status=done" in report
+    assert "step=install_scheduler_runtime" not in report
+
+
+def test_activation_executor_surfaces_safe_scheduler_installer_reason(
+    monkeypatch, tmp_path: Path
+) -> None:
+    checkout = _prepare_explicit_private_root(monkeypatch, tmp_path)
+
+    def installer(*args, **kwargs):
+        del args, kwargs
+        raise SchedulerRuntimeInstallError("USER_TIMER_VERIFY_FAILED")
+
+    report = execute_five_layer_memory_activation(
+        _body(launch_scheduler=True),
+        workdir=checkout,
+        maintenance_report=_report,
+        command_runner=_runner,
+        scheduler_installer=installer,
+    )
+    assert report.startswith("BLOCKED:")
+    assert "step=execute_activation status=done" in report
+    assert "step=install_scheduler_runtime status=failed" in report
+    assert "reason=USER_TIMER_VERIFY_FAILED" in report
+
+
+def test_activation_executor_rejects_private_or_unexpected_scheduler_receipt(
+    monkeypatch, tmp_path: Path
+) -> None:
+    checkout = _prepare_explicit_private_root(monkeypatch, tmp_path)
+    result = _SchedulerRuntimeResult(private_path=str(tmp_path / "scheduler.sqlite3"))
+    report = execute_five_layer_memory_activation(
+        _body(launch_scheduler=True),
+        workdir=checkout,
+        maintenance_report=_report,
+        command_runner=_runner,
+        scheduler_installer=lambda *args, **kwargs: result,
+    )
+    assert report.startswith("BLOCKED:")
+    assert "reason=scheduler_runtime_receipt_invalid" in report
+    assert str(tmp_path) not in report
+
+
+def test_activation_executor_rejects_invalid_scheduler_aggregate(
+    monkeypatch, tmp_path: Path
+) -> None:
+    checkout = _prepare_explicit_private_root(monkeypatch, tmp_path)
+    report = execute_five_layer_memory_activation(
+        _body(launch_scheduler=True),
+        workdir=checkout,
+        maintenance_report=_report,
+        command_runner=_runner,
+        scheduler_installer=lambda *args, **kwargs: _SchedulerRuntimeResult(timer_count=2),
+    )
+    assert report.startswith("BLOCKED:")
+    assert "reason=scheduler_runtime_timer_count_blocked" in report
+
+
+def test_activation_executor_rejects_scheduler_bool_int_confusion(
+    monkeypatch, tmp_path: Path
+) -> None:
+    checkout = _prepare_explicit_private_root(monkeypatch, tmp_path)
+    cases = (
+        ("timer_count", True, "scheduler_runtime_timer_count_blocked"),
+        ("smoke_first_created", True, "scheduler_runtime_smoke_first_created_blocked"),
+        ("timer_enabled", 1, "scheduler_runtime_timer_enabled_blocked"),
+        (
+            "synthetic_state_removed",
+            1,
+            "scheduler_runtime_synthetic_state_removed_blocked",
+        ),
+    )
+    for field, value, reason in cases:
+        report = execute_five_layer_memory_activation(
+            _body(launch_scheduler=True),
+            workdir=checkout,
+            maintenance_report=_report,
+            command_runner=_runner,
+            scheduler_installer=lambda *args, field=field, value=value, **kwargs: (
+                _SchedulerRuntimeResult(**{field: value})
+            ),
+        )
+        assert report.startswith("BLOCKED:")
+        assert f"reason={reason}" in report
 
 
 def test_activation_executor_surfaces_safe_video_installer_reason(

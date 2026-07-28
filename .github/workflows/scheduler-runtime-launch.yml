@@ -271,30 +271,38 @@ jobs:
 
           verify = load("VERIFY_RECEIPT")
           smoke = load("SMOKE_RECEIPT")
+
+          def exact_bool(payload, field, expected=True):
+              return payload.get(field) is expected
+
+          def exact_int(payload, field, expected):
+              value = payload.get(field)
+              return isinstance(value, int) and not isinstance(value, bool) and value == expected
+
           success = (
               all(outcomes[name] == "success" for name in outcomes)
-              and verify.get("timer_enabled") is True
-              and verify.get("timer_active") is True
-              and verify.get("timer_count") == 1
+              and exact_bool(verify, "timer_enabled")
+              and exact_bool(verify, "timer_active")
+              and exact_int(verify, "timer_count", 1)
               and verify.get("live_status") == "READY"
-              and smoke.get("first_created") == 1
-              and smoke.get("second_created") == 0
-              and smoke.get("occurrence_count") == 1
-              and smoke.get("synthetic_state_removed") is True
+              and exact_int(smoke, "first_created", 1)
+              and exact_int(smoke, "second_created", 0)
+              and exact_int(smoke, "occurrence_count", 1)
+              and exact_bool(smoke, "synthetic_state_removed")
           )
           public = {
               "status": "DONE" if success else "BLOCKED",
               "source_merge_sha": os.environ["GITHUB_SHA"],
               "workflow_outcomes": outcomes,
-              "timer_enabled": verify.get("timer_enabled") is True,
-              "timer_active": verify.get("timer_active") is True,
-              "timer_count": verify.get("timer_count", 0),
+              "timer_enabled": exact_bool(verify, "timer_enabled"),
+              "timer_active": exact_bool(verify, "timer_active"),
+              "timer_count": verify.get("timer_count") if exact_int(verify, "timer_count", 1) else 0,
               "service_result": verify.get("service_result", "unknown"),
               "live_status": verify.get("live_status", "unknown"),
-              "smoke_first_created": smoke.get("first_created", 0),
-              "smoke_second_created": smoke.get("second_created", 0),
-              "smoke_occurrence_count": smoke.get("occurrence_count", 0),
-              "synthetic_state_removed": smoke.get("synthetic_state_removed") is True,
+              "smoke_first_created": smoke.get("first_created") if exact_int(smoke, "first_created", 1) else 0,
+              "smoke_second_created": smoke.get("second_created") if exact_int(smoke, "second_created", 0) else -1,
+              "smoke_occurrence_count": smoke.get("occurrence_count") if exact_int(smoke, "occurrence_count", 1) else 0,
+              "synthetic_state_removed": exact_bool(smoke, "synthetic_state_removed"),
               "stable_reason_codes": sorted(set(reasons)),
               "public_safe": True,
           }
