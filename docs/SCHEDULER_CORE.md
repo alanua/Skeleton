@@ -68,6 +68,12 @@ Defaults:
 
 Environment overrides are available through `SKELETON_SCHEDULER_INSTALL_ROOT`, `SKELETON_SCHEDULER_STATE_ROOT`, `SKELETON_SCHEDULER_USER` and `SKELETON_SCHEDULER_GROUP`.
 
+## Protected runtime launch
+
+The reviewed `.github/workflows/scheduler-runtime-launch.yml` is the only automated production launch route for v1. It runs on the registered Hetzner self-hosted runner from an exact clean `main` checkout, validates scheduler contracts, invokes the fixed installer through non-interactive sudo, verifies exactly one enabled and active timer, and runs an isolated synthetic idempotency smoke.
+
+The smoke database is created under the temporary runner directory and removed before completion. No synthetic schedule is written to the live scheduler database. GitHub receives only an aggregate DONE/BLOCKED receipt without schedule payloads, rows, private paths or host values.
+
 ## Boundaries
 
 - no direct canonical memory SQLite access;
