@@ -15630,6 +15630,86 @@ def test_home_edge_lan_inventory_task_is_explicitly_dispatched() -> None:
     action.assert_called_once_with()
 
 
+def _home_edge_audit_body(audit_id: str = "audit-2074-runner") -> str:
+    return "\n".join(
+        (
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {runner.HOME_EDGE_AUDIT_PERSIST_V1}",
+            "```task",
+            json.dumps(
+                {
+                    "operation_id": "home_edge_audit_persist_v1",
+                    "device_id": "home_edge_01",
+                    "execution_node": "home-edge-01",
+                    "approval_gate": "operator_approval_required",
+                    "runtime_audit": {
+                        "schema": "skeleton.home_edge.runtime_audit.v1",
+                        "audit_id": audit_id,
+                        "kind": "RUNTIME_AUDIT",
+                        "status": "verified",
+                    },
+                },
+                sort_keys=True,
+            ),
+            "```",
+        )
+    )
+
+
+def test_home_edge_audit_persist_task_is_explicitly_dispatched() -> None:
+    with mock.patch.object(
+        runner,
+        "home_edge_audit_persist_v1",
+        return_value="DONE: test",
+    ) as action:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HOME_EDGE_AUDIT_PERSIST_V1,
+            str(Path.cwd()),
+            _home_edge_audit_body(),
+        )
+
+    assert report == "DONE: test"
+    action.assert_called_once_with(_home_edge_audit_body())
+
+
+def test_home_edge_audit_persist_runner_reports_aggregate_only(tmp_path: Path) -> None:
+    with mock.patch.dict(
+        os.environ,
+        {"SKELETON_PRIVATE_MEMORY_ROOT": str(tmp_path)},
+        clear=False,
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HOME_EDGE_AUDIT_PERSIST_V1,
+            str(Path.cwd()),
+            _home_edge_audit_body(),
+        )
+
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert "operation_id=home_edge_audit_persist_v1" in report
+    assert "semantic_record_count=1" in report
+    assert "sqlite_metadata_count=1" in report
+    assert "sqlite_state_count=1" in report
+    assert "sqlite_history_count=1" in report
+    assert "conflict_status=fail_closed" in report
+    assert "rollback_status=retry_recovery" in report
+    assert "RUNTIME_AUDIT" not in report
+    assert "runtime_audit" not in report
+
+
+def test_home_edge_audit_persist_runner_blocks_wrong_registry_metadata() -> None:
+    body = _home_edge_audit_body().replace("home-edge-01", "wrong-node", 1)
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_AUDIT_PERSIST_V1,
+        str(Path.cwd()),
+        body,
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert "audit_persist_status=blocked" in report
+    assert "success_criteria=not_met" in report
+
+
 
 def test_validation_command_environment_strips_only_home_edge_runtime_values() -> None:
     environment = {
