@@ -53,26 +53,27 @@ CLI and systemd output are public-safe aggregate receipts. Schedule payloads and
 
 ## Installation
 
-Run as root from a reviewed checkout:
+Production launch uses the user-level runtime installer from the repository root:
 
 ```bash
-scripts/install_scheduler_core.sh
+python3 scripts/install_scheduler_runtime.py --expected-sha "$(git rev-parse HEAD)" --enable
 ```
 
-Defaults:
+The installer verifies the exact clean source SHA and the canonical `alanua/Skeleton` origin before writing runtime files. It creates an immutable release under `~/.local/share/skeleton/scheduler/releases/<sha>` and promotes it through the atomic `~/.local/share/skeleton/scheduler/current` symlink.
 
-- installation: `/opt/skeleton-scheduler`;
-- private state: `/var/lib/skeleton/scheduler`;
-- service user/group: `agent`;
-- one systemd timer tick every 60 seconds.
+Private scheduler state lives under `~/.local/state/skeleton/scheduler`; the live database is `scheduler.sqlite3`. The fixed user units are `~/.config/systemd/user/skeleton-scheduler.service` and `~/.config/systemd/user/skeleton-scheduler.timer`.
 
-Environment overrides are available through `SKELETON_SCHEDULER_INSTALL_ROOT`, `SKELETON_SCHEDULER_STATE_ROOT`, `SKELETON_SCHEDULER_USER` and `SKELETON_SCHEDULER_GROUP`.
+The service is `oneshot` and runs the fixed Python interpreter, immutable release CLI path and live DB path. No schedule, issue body, workflow input or environment variable can choose a command, script path or database authority. The timer is the single Scheduler Core timer, runs every 60 seconds, and is persistent.
+
+The installer initializes the live DB, requires the public-safe live status to be `READY`, and runs an isolated synthetic smoke against a temporary database. That smoke registers a due `notify_only` once schedule, verifies the first tick creates one `done` occurrence, verifies the second tick creates zero duplicates, verifies the occurrence count is one, and removes the temporary state before returning.
+
+The public installer receipt is aggregate-only: source SHA, runtime/service/timer/live statuses, synthetic smoke counts, rollback readiness and stable reason codes. It contains no paths, schedule payloads, rows, private values or host details.
 
 ## Protected runtime launch
 
-The reviewed `.github/workflows/scheduler-runtime-launch.yml` is the only automated production launch route for v1. It runs on the registered Hetzner self-hosted runner from an exact clean `main` checkout, validates scheduler contracts, invokes the fixed installer through non-interactive sudo, verifies exactly one enabled and active timer, and runs an isolated synthetic idempotency smoke.
+The reviewed `.github/workflows/scheduler-runtime-launch.yml` is the only automated production launch route for v1. It runs on the registered Hetzner self-hosted runner from an exact clean `main` checkout, validates scheduler contracts, invokes the fixed user-level installer, and verifies exactly one enabled and active user timer through `systemctl --user`.
 
-The smoke database is created under the temporary runner directory and removed before completion. No synthetic schedule is written to the live scheduler database. GitHub receives only an aggregate DONE/BLOCKED receipt without schedule payloads, rows, private paths or host values.
+No synthetic schedule is written to the live scheduler database. GitHub receives only an aggregate DONE/BLOCKED receipt without schedule payloads, rows, private paths or host values.
 
 The authoritative aggregate production launch receipt is recorded in GitHub issue `#2051`.
 

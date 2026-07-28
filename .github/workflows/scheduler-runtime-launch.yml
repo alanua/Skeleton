@@ -9,15 +9,15 @@ on:
       - "core/scheduler_models.py"
       - "core/scheduler_store.py"
       - "core/scheduler_engine.py"
+      - "core/scheduler_runtime_install.py"
       - "scripts/scheduler_tick.py"
-      - "scripts/install_scheduler_core.sh"
-      - "ops/systemd/skeleton-scheduler.service"
-      - "ops/systemd/skeleton-scheduler.timer"
+      - "scripts/install_scheduler_runtime.py"
       - "schemas/schedule.schema.json"
       - "schemas/scheduler_receipt.schema.json"
       - "tests/test_scheduler_models.py"
       - "tests/test_scheduler_store.py"
       - "tests/test_scheduler_engine.py"
+      - "tests/test_scheduler_runtime_install.py"
       - "tests/test_scheduler_runtime_launch_workflow.py"
       - "docs/SCHEDULER_CORE.md"
   workflow_dispatch:
@@ -44,8 +44,6 @@ jobs:
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONUNBUFFERED: "1"
       INSTALL_RECEIPT: ${{ runner.temp }}/scheduler-install-receipt.json
-      VERIFY_RECEIPT: ${{ runner.temp }}/scheduler-verify-receipt.json
-      SMOKE_RECEIPT: ${{ runner.temp }}/scheduler-smoke-receipt.json
     steps:
       - name: Checkout exact source
         id: checkout
@@ -74,11 +72,14 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m pytest -q \
+            tests/test_scheduler_runtime_install.py \
             tests/test_scheduler_models.py \
             tests/test_scheduler_store.py \
             tests/test_scheduler_engine.py \
             tests/test_scheduler_runtime_launch_workflow.py
           python3 -m py_compile \
+            core/scheduler_runtime_install.py \
+            scripts/install_scheduler_runtime.py \
             core/scheduler_models.py \
             core/scheduler_store.py \
             core/scheduler_engine.py \
@@ -92,7 +93,6 @@ jobs:
           ):
               json.loads(path.read_text(encoding="utf-8"))
           PY
-          bash -n scripts/install_scheduler_core.sh
 
       - name: Restore clean exact checkout
         id: restore
@@ -105,126 +105,77 @@ jobs:
 
       - name: Install and activate Scheduler Core
         id: install
+        if: steps.restore.outcome == 'success'
         continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
-          sudo -n env \
-            SKELETON_SCHEDULER_INSTALL_ROOT=/opt/skeleton-scheduler \
-            SKELETON_SCHEDULER_STATE_ROOT=/var/lib/skeleton/scheduler \
-            SKELETON_SCHEDULER_USER=agent \
-            SKELETON_SCHEDULER_GROUP=agent \
-            bash scripts/install_scheduler_core.sh "${GITHUB_WORKSPACE}" \
+          python3 scripts/install_scheduler_runtime.py --expected-sha "${GITHUB_SHA}" --enable \
             > "${INSTALL_RECEIPT}"
-          python3 - "${INSTALL_RECEIPT}" <<'PY'
+          python3 - "${INSTALL_RECEIPT}" "${GITHUB_SHA}" <<'PY'
           import json
           import pathlib
           import sys
 
           payload = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          expected_sha = sys.argv[2]
           allowed = {
-              "schema", "status", "schedules", "enabled", "pending", "running",
-              "done", "failed", "needs_operator", "skipped", "public_safe",
-              "private_payloads_included",
+              "schema",
+              "source_merge_sha",
+              "runtime_status",
+              "service_install_status",
+              "timer_enabled",
+              "timer_active",
+              "timer_count",
+              "service_result",
+              "live_status",
+              "smoke_first_created",
+              "smoke_first_done",
+              "smoke_second_created",
+              "smoke_occurrence_count",
+              "synthetic_state_removed",
+              "rollback_ready",
+              "stable_reason_codes",
           }
-          if set(payload) - allowed:
+          if set(payload) != allowed:
               raise SystemExit("unexpected installer receipt field")
-          if payload.get("status") != "READY" or payload.get("public_safe") is not True:
-              raise SystemExit("scheduler status blocked")
-          if payload.get("private_payloads_included") is not False:
-              raise SystemExit("private payload boundary failed")
-          PY
-
-      - name: Verify active singular timer
-        id: verify
-        if: steps.install.outcome == 'success'
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(sudo -n systemctl is-enabled skeleton-scheduler.timer)" = "enabled"
-          test "$(sudo -n systemctl is-active skeleton-scheduler.timer)" = "active"
-          test "$(sudo -n systemctl list-timers skeleton-scheduler.timer --all --no-legend | sed '/^[[:space:]]*$/d' | wc -l)" -eq 1
-          sudo -n systemctl start skeleton-scheduler.service
-          test "$(sudo -n systemctl show skeleton-scheduler.service --property=Result --value)" = "success"
-          live_status="$(sudo -n -u agent /usr/bin/python3 \
-            /opt/skeleton-scheduler/scripts/scheduler_tick.py \
-            --db /var/lib/skeleton/scheduler/scheduler.sqlite3 status)"
-          python3 - "${live_status}" "${VERIFY_RECEIPT}" <<'PY'
-          import json
-          import pathlib
-          import sys
-
-          payload = json.loads(sys.argv[1])
-          if payload.get("status") != "READY" or payload.get("public_safe") is not True:
-              raise SystemExit("live scheduler status blocked")
-          receipt = {
+          if payload.get("schema") != "skeleton.scheduler.runtime_install_receipt.v1":
+              raise SystemExit("installer receipt schema invalid")
+          if payload.get("source_merge_sha") != expected_sha:
+              raise SystemExit("installer source mismatch")
+          checks = {
+              "runtime_status": "READY",
+              "service_install_status": "ACTIVE",
               "timer_enabled": True,
               "timer_active": True,
               "timer_count": 1,
               "service_result": "success",
               "live_status": "READY",
+              "smoke_first_created": 1,
+              "smoke_first_done": 1,
+              "smoke_second_created": 0,
+              "smoke_occurrence_count": 1,
+              "synthetic_state_removed": True,
+              "rollback_ready": True,
           }
-          pathlib.Path(sys.argv[2]).write_text(
-              json.dumps(receipt, sort_keys=True), encoding="utf-8"
-          )
+          for key, value in checks.items():
+              if payload.get(key) != value:
+                  raise SystemExit(f"installer aggregate {key} blocked")
+          reasons = payload.get("stable_reason_codes")
+          if not isinstance(reasons, list) or any(not isinstance(item, str) for item in reasons):
+              raise SystemExit("stable reason codes invalid")
           PY
 
-      - name: Run isolated idempotency smoke
-        id: smoke
-        if: steps.verify.outcome == 'success'
+      - name: Verify user timer
+        id: verify
+        if: steps.install.outcome == 'success'
         shell: bash
         run: |
           set -euo pipefail
-          smoke_root="$(mktemp -d "${RUNNER_TEMP}/scheduler-smoke.XXXXXX")"
-          trap 'rm -rf "${smoke_root}"' EXIT
-          now="$(date +%s)"
-          cat > "${smoke_root}/schedule.json" <<JSON
-          {
-            "schema": "skeleton.schedule.v1",
-            "schedule_id": "synthetic.launch.smoke",
-            "trigger_kind": "once",
-            "cron_expression": null,
-            "once_at": ${now},
-            "timezone": "UTC",
-            "route_type": "notify",
-            "route_id": "synthetic.launch.notice",
-            "approval_policy": "notify_only",
-            "overlap_policy": "skip",
-            "misfire_policy": "run_once",
-            "payload": {"synthetic": true}
-          }
-          JSON
-          cli=/opt/skeleton-scheduler/scripts/scheduler_tick.py
-          db="${smoke_root}/scheduler.sqlite3"
-          /usr/bin/python3 "${cli}" --db "${db}" register \
-            "${smoke_root}/schedule.json" --now "$((now - 60))" >/dev/null
-          first="$(/usr/bin/python3 "${cli}" --db "${db}" tick --now "${now}")"
-          second="$(/usr/bin/python3 "${cli}" --db "${db}" tick --now "${now}")"
-          status="$(/usr/bin/python3 "${cli}" --db "${db}" status \
-            --schedule-id synthetic.launch.smoke)"
-          python3 - "${first}" "${second}" "${status}" "${SMOKE_RECEIPT}" <<'PY'
-          import json
-          import pathlib
-          import sys
-
-          first, second, status = (json.loads(value) for value in sys.argv[1:4])
-          if first.get("created_occurrences") != 1 or first.get("states", {}).get("done") != 1:
-              raise SystemExit("first occurrence smoke failed")
-          if second.get("created_occurrences") != 0:
-              raise SystemExit("duplicate occurrence created")
-          if status.get("schedule_occurrences") != 1:
-              raise SystemExit("occurrence ledger count failed")
-          receipt = {
-              "first_created": 1,
-              "first_done": 1,
-              "second_created": 0,
-              "occurrence_count": 1,
-              "synthetic_state_removed": True,
-          }
-          pathlib.Path(sys.argv[4]).write_text(
-              json.dumps(receipt, sort_keys=True), encoding="utf-8"
-          )
-          PY
+          test "$(systemctl --user is-enabled skeleton-scheduler.timer)" = "enabled"
+          test "$(systemctl --user is-active skeleton-scheduler.timer)" = "active"
+          test "$(systemctl --user list-timers skeleton-scheduler.timer --all --no-legend | sed '/^[[:space:]]*$/d' | wc -l)" -eq 1
+          test "$(systemctl --user show skeleton-scheduler.service --property=Result --value)" = "success"
 
       - name: Publish aggregate launch receipt
         if: always()
@@ -237,7 +188,6 @@ jobs:
           RESTORE_OUTCOME: ${{ steps.restore.outcome }}
           INSTALL_OUTCOME: ${{ steps.install.outcome }}
           VERIFY_OUTCOME: ${{ steps.verify.outcome }}
-          SMOKE_OUTCOME: ${{ steps.smoke.outcome }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -253,7 +203,6 @@ jobs:
               "restore": os.environ.get("RESTORE_OUTCOME", "unknown"),
               "install": os.environ.get("INSTALL_OUTCOME", "unknown"),
               "verify": os.environ.get("VERIFY_OUTCOME", "unknown"),
-              "smoke": os.environ.get("SMOKE_OUTCOME", "unknown"),
           }
           reasons = [
               f"WORKFLOW_{name.upper()}_FAILED"
@@ -261,41 +210,51 @@ jobs:
               if value not in {"success", "skipped"}
           ]
 
-          def load(path_name):
-              path = pathlib.Path(os.environ[path_name])
-              try:
-                  payload = json.loads(path.read_text(encoding="utf-8"))
-              except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-                  return {}
-              return payload if isinstance(payload, dict) else {}
+          try:
+              install = json.loads(
+                  pathlib.Path(os.environ["INSTALL_RECEIPT"]).read_text(encoding="utf-8")
+              )
+          except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+              install = {}
 
-          verify = load("VERIFY_RECEIPT")
-          smoke = load("SMOKE_RECEIPT")
           success = (
               all(outcomes[name] == "success" for name in outcomes)
-              and verify.get("timer_enabled") is True
-              and verify.get("timer_active") is True
-              and verify.get("timer_count") == 1
-              and verify.get("live_status") == "READY"
-              and smoke.get("first_created") == 1
-              and smoke.get("second_created") == 0
-              and smoke.get("occurrence_count") == 1
-              and smoke.get("synthetic_state_removed") is True
+              and install.get("runtime_status") == "READY"
+              and install.get("service_install_status") == "ACTIVE"
+              and install.get("timer_enabled") is True
+              and install.get("timer_active") is True
+              and install.get("timer_count") == 1
+              and install.get("service_result") == "success"
+              and install.get("live_status") == "READY"
+              and install.get("smoke_first_created") == 1
+              and install.get("smoke_first_done") == 1
+              and install.get("smoke_second_created") == 0
+              and install.get("smoke_occurrence_count") == 1
+              and install.get("synthetic_state_removed") is True
+              and install.get("rollback_ready") is True
           )
+          stable = install.get("stable_reason_codes")
+          if not isinstance(stable, list):
+              stable = []
           public = {
+              "schema": "skeleton.scheduler.runtime_launch_receipt.v1",
               "status": "DONE" if success else "BLOCKED",
               "source_merge_sha": os.environ["GITHUB_SHA"],
               "workflow_outcomes": outcomes,
-              "timer_enabled": verify.get("timer_enabled") is True,
-              "timer_active": verify.get("timer_active") is True,
-              "timer_count": verify.get("timer_count", 0),
-              "service_result": verify.get("service_result", "unknown"),
-              "live_status": verify.get("live_status", "unknown"),
-              "smoke_first_created": smoke.get("first_created", 0),
-              "smoke_second_created": smoke.get("second_created", 0),
-              "smoke_occurrence_count": smoke.get("occurrence_count", 0),
-              "synthetic_state_removed": smoke.get("synthetic_state_removed") is True,
-              "stable_reason_codes": sorted(set(reasons)),
+              "runtime_status": install.get("runtime_status", "BLOCKED"),
+              "service_install_status": install.get("service_install_status", "BLOCKED"),
+              "timer_enabled": install.get("timer_enabled") is True,
+              "timer_active": install.get("timer_active") is True,
+              "timer_count": install.get("timer_count", 0),
+              "service_result": install.get("service_result", "unknown"),
+              "live_status": install.get("live_status", "unknown"),
+              "smoke_first_created": install.get("smoke_first_created", 0),
+              "smoke_first_done": install.get("smoke_first_done", 0),
+              "smoke_second_created": install.get("smoke_second_created", 0),
+              "smoke_occurrence_count": install.get("smoke_occurrence_count", 0),
+              "synthetic_state_removed": install.get("synthetic_state_removed") is True,
+              "rollback_ready": install.get("rollback_ready") is True,
+              "stable_reason_codes": sorted(set([*reasons, *stable])),
               "public_safe": True,
           }
           body = "Scheduler Core runtime launch receipt.\n\n```json\n" + json.dumps(public, sort_keys=True) + "\n```"
@@ -317,6 +276,6 @@ jobs:
           PY
 
       - name: Fail workflow when launch did not complete
-        if: steps.install.outcome != 'success' || steps.verify.outcome != 'success' || steps.smoke.outcome != 'success'
+        if: steps.restore.outcome != 'success' || steps.install.outcome != 'success' || steps.verify.outcome != 'success'
         shell: bash
         run: exit 1
