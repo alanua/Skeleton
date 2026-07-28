@@ -14,10 +14,17 @@ from core.private_memory_root_resolver import (
 )
 from core.video_understanding.models import VideoUnderstandingError
 from core.video_understanding.runtime_install import install_runtime
+from core.scheduler_runtime_install import (
+    SchedulerRuntimeInstallError,
+    install_scheduler_runtime,
+)
 
 TASK_ID = "activate_five_layer_private_memory"
 OPERATOR_APPROVAL = "EXPLICIT_FINISH_WORKING_MEMORY_20260724"
 VIDEO_RUNTIME_APPROVAL = "OPERATOR_FINISH_AND_START_VIDEO_UNDERSTANDING_20260728"
+SCHEDULER_RUNTIME_APPROVAL = (
+    "EXPLICIT_DEVELOP_DEPLOY_CONNECT_ACTIVATE_SCHEDULER_20260728"
+)
 RECEIPT_SCHEMA = "skeleton.five_layer_memory_activation_receipt.v2"
 _MAX_OUTPUT_BYTES = 512 * 1024
 _SAFE_REASON_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,96}$")
@@ -54,6 +61,7 @@ def execute_five_layer_memory_activation(
     maintenance_report: MaintenanceReport,
     command_runner: CommandRunner | None = None,
     runtime_installer: RuntimeInstaller | None = None,
+    scheduler_installer: RuntimeInstaller | None = None,
 ) -> str:
     runner = command_runner or _run_command
     expected_sha = _body_field(body, "Expected Main SHA")
@@ -79,6 +87,14 @@ def execute_five_layer_memory_activation(
             "BLOCKED",
             TASK_ID,
             [f"reason={video_reason}"],
+            "not_met",
+        )
+    scheduler_launch, scheduler_reason = _scheduler_launch_request(body)
+    if scheduler_reason is not None:
+        return maintenance_report(
+            "BLOCKED",
+            TASK_ID,
+            [f"reason={scheduler_reason}"],
             "not_met",
         )
 
@@ -196,6 +212,24 @@ def execute_five_layer_memory_activation(
                 "not_met",
             )
         status_lines.extend(video_lines)
+    if scheduler_launch:
+        scheduler_lines, scheduler_reason = _install_scheduler_runtime(
+            checkout,
+            expected_sha=expected_sha,
+            installer=scheduler_installer or install_scheduler_runtime,
+        )
+        if scheduler_reason is not None:
+            return maintenance_report(
+                "BLOCKED",
+                TASK_ID,
+                [
+                    *status_lines,
+                    "step=install_scheduler_runtime status=failed",
+                    f"reason={scheduler_reason}",
+                ],
+                "not_met",
+            )
+        status_lines.extend(scheduler_lines)
 
     return maintenance_report(
         "DONE",
@@ -214,6 +248,18 @@ def _video_launch_request(body: str) -> tuple[bool, str | None]:
     approval = _body_field(body, "Video Runtime Approval")
     if approval != VIDEO_RUNTIME_APPROVAL:
         return False, "video_runtime_approval_invalid"
+    return True, None
+
+
+def _scheduler_launch_request(body: str) -> tuple[bool, str | None]:
+    value = _body_field(body, "Launch Scheduler Core")
+    if value is None or value.casefold() == "false":
+        return False, None
+    if value.casefold() != "true":
+        return False, "scheduler_runtime_launch_invalid"
+    approval = _body_field(body, "Scheduler Runtime Approval")
+    if approval != SCHEDULER_RUNTIME_APPROVAL:
+        return False, "scheduler_runtime_approval_invalid"
     return True, None
 
 
@@ -273,6 +319,59 @@ def _install_video_runtime(
     ], None
 
 
+def _install_scheduler_runtime(
+    checkout: Path,
+    *,
+    expected_sha: str,
+    installer: RuntimeInstaller,
+) -> tuple[list[str], str | None]:
+    try:
+        result = installer(
+            checkout,
+            expected_sha=expected_sha,
+            enable=True,
+        )
+    except SchedulerRuntimeInstallError as exc:
+        return [], _safe_reason(exc.reason_code)
+    except Exception:
+        return [], "scheduler_runtime_install_failed"
+
+    public_dict = getattr(result, "public_dict", None)
+    if not callable(public_dict):
+        return [], "scheduler_runtime_receipt_invalid"
+    try:
+        payload = public_dict()
+    except Exception:
+        return [], "scheduler_runtime_receipt_invalid"
+    reason = _validate_scheduler_runtime_receipt(payload, expected_sha)
+    if reason is not None:
+        return [], reason
+    assert isinstance(payload, Mapping)
+    reasons = payload.get("stable_reason_codes")
+    safe_reasons = (
+        sorted(str(value) for value in reasons)
+        if isinstance(reasons, list) and reasons
+        else ["none"]
+    )
+    return [
+        "step=install_scheduler_runtime status=done",
+        f"scheduler_runtime_status={payload['runtime_status']}",
+        f"scheduler_service_install_status={payload['service_install_status']}",
+        "scheduler_timer_enabled=true",
+        "scheduler_timer_active=true",
+        "scheduler_timer_count=1",
+        "scheduler_service_result=success",
+        f"scheduler_live_status={payload['live_status']}",
+        f"scheduler_smoke_first_created={payload['smoke_first_created']}",
+        f"scheduler_smoke_first_done={payload['smoke_first_done']}",
+        f"scheduler_smoke_second_created={payload['smoke_second_created']}",
+        f"scheduler_smoke_occurrence_count={payload['smoke_occurrence_count']}",
+        "scheduler_synthetic_state_removed=true",
+        "scheduler_rollback_ready=true",
+        f"scheduler_stable_reason_codes={','.join(safe_reasons)}",
+    ], None
+
+
 def _validate_video_runtime_receipt(
     payload: object, expected_sha: str
 ) -> str | None:
@@ -321,6 +420,72 @@ def _validate_video_runtime_receipt(
         for value in reasons
     ):
         return "video_runtime_reason_codes_invalid"
+    return None
+
+
+def _validate_scheduler_runtime_receipt(
+    payload: object, expected_sha: str
+) -> str | None:
+    allowed = {
+        "schema",
+        "source_merge_sha",
+        "runtime_status",
+        "service_install_status",
+        "timer_enabled",
+        "timer_active",
+        "timer_count",
+        "service_result",
+        "live_status",
+        "smoke_first_created",
+        "smoke_first_done",
+        "smoke_second_created",
+        "smoke_occurrence_count",
+        "synthetic_state_removed",
+        "rollback_ready",
+        "stable_reason_codes",
+    }
+    if not isinstance(payload, Mapping) or set(payload) != allowed:
+        return "scheduler_runtime_receipt_invalid"
+    if payload.get("schema") != "skeleton.scheduler.runtime_install_receipt.v1":
+        return "scheduler_runtime_receipt_invalid"
+    if payload.get("source_merge_sha") != expected_sha:
+        return "scheduler_runtime_source_mismatch"
+    exact_strings = {
+        "runtime_status": "READY",
+        "service_install_status": "ACTIVE",
+        "service_result": "success",
+        "live_status": "READY",
+    }
+    for field, expected in exact_strings.items():
+        if payload.get(field) != expected:
+            return f"scheduler_runtime_{field}_blocked"
+    for field in (
+        "timer_enabled",
+        "timer_active",
+        "synthetic_state_removed",
+        "rollback_ready",
+    ):
+        if payload.get(field) is not True:
+            return f"scheduler_runtime_{field}_blocked"
+    exact_ints = {
+        "timer_count": 1,
+        "smoke_first_created": 1,
+        "smoke_first_done": 1,
+        "smoke_second_created": 0,
+        "smoke_occurrence_count": 1,
+    }
+    for field, expected in exact_ints.items():
+        value = payload.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value != expected:
+            return f"scheduler_runtime_{field}_blocked"
+    reasons = payload.get("stable_reason_codes")
+    if not isinstance(reasons, list):
+        return "scheduler_runtime_reason_codes_invalid"
+    if any(
+        not isinstance(value, str) or _SAFE_REASON_RE.fullmatch(value) is None
+        for value in reasons
+    ):
+        return "scheduler_runtime_reason_codes_invalid"
     return None
 
 
