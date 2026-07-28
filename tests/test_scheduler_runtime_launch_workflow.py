@@ -58,13 +58,13 @@ def test_workflow_publishes_only_aggregate_receipt_and_fails_closed() -> None:
     text = _text()
     assert "issues/2051/comments" in text
     assert '"public_safe": True' in text
+    assert 'payload.get("private_payloads_included") is not False' in text
     assert '"timer_enabled"' in text
     assert '"timer_active"' in text
     assert '"smoke_first_created"' in text
     assert '"smoke_second_created"' in text
     assert '"stable_reason_codes"' in text
     assert "schedule payload" not in text.casefold()
-    assert "private_payload" not in text
     assert "steps.install.outcome != 'success'" in text
     assert "steps.verify.outcome != 'success'" in text
     assert "steps.smoke.outcome != 'success'" in text
