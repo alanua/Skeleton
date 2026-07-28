@@ -31,7 +31,7 @@ skeleton-memory backup --snapshot-id snapshot-001
 skeleton-memory status
 ```
 
-`put`, `delete`, and `import-bundle` enter the private `MemoryGateway` compatibility boundary before they reach the stack. The gateway request preserves operator approval, actor, reason, project scope, expected revision, idempotency key, source hash, and bundle hash metadata where applicable. `get` is exact and authoritative because it reads canonical SQLite directly. `search` and `relations` are non-authoritative derived results and include canonical refs and revisions for exact confirmation.
+`put`, `delete`, and `import-bundle` enter the private `MemoryGateway` compatibility boundary before they reach the stack. The gateway request preserves operator approval, actor, reason, project scope, expected revision, idempotency key, source hash, and bundle hash metadata where applicable. Normal domain/runtime code should use `core.memory_lifecycle` or typed `MemoryGateway` requests instead of writing `PrivateMemoryStack` directly. `get` is exact and authoritative because it reads canonical SQLite directly behind the gateway/storage boundary. `search` and `relations` are non-authoritative derived results and include canonical refs and revisions for exact confirmation.
 
 ## Storage
 
@@ -54,6 +54,8 @@ After every successful canonical put or delete, both derived indexes are rebuilt
 If an index rebuild fails after a canonical mutation is committed, canonical SQLite remains the sole authority and the CLI reports a degraded receipt with the affected derived index names. Retry uses the gateway idempotency record and canonical transaction reference, so a crash after canonical commit cannot write a second mutation or advance the revision twice. Rollback for pre-commit canonical failures uses a logical SQLite backup made through SQLite's backup API instead of raw database bytes and removes stale `-wal` and `-shm` sidecars before reporting the mutation as blocked.
 
 Graphify and MemPalace never write canonical SQLite directly.
+
+The automatic cross-domain lifecycle is documented in `docs/memory_lifecycle.md`. It resolves operator/domain/scope before tasks, recalls bounded relevant context through `MemoryGateway`, classifies durable candidates after meaningful events, writes accepted candidates through typed gateway mutations, and returns private runtime results plus public-safe receipts.
 
 ## Status
 
