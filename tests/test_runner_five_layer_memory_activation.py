@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Mapping
 
+from core.private_memory import PRIVATE_MEMORY_CONFIG_ENV
+from core.private_memory_stack import PrivateMemoryStack
 from core.runner_five_layer_memory_activation import (
     OPERATOR_APPROVAL,
     TASK_ID,
@@ -126,13 +128,38 @@ def _runner(
     return 0, _receipt() + "\n", ""
 
 
-def _prepare_explicit_private_root(monkeypatch, tmp_path: Path) -> Path:
+def _prepare_explicit_private_root(
+    monkeypatch, tmp_path: Path, *, initialize: bool = True
+) -> Path:
     checkout = tmp_path / "checkout"
     checkout.mkdir()
     private_root = tmp_path / "private"
     private_root.mkdir()
-    (private_root / "canonical.sqlite").write_bytes(b"sqlite-placeholder")
+    if initialize:
+        status = PrivateMemoryStack(private_root).init(import_manifest=True)
+        assert status["state"] == "READY"
     monkeypatch.setenv("SKELETON_RUNNER_PRIVATE_MEMORY_ROOT", str(private_root))
+    return checkout
+
+
+def _prepare_legacy_configured_private_root(monkeypatch, tmp_path: Path) -> Path:
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    private_root = tmp_path / "private"
+    private_root.mkdir()
+    legacy_database = private_root / "legacy-heartbeat.sqlite"
+    legacy_database.write_bytes(b"legacy anchor")
+    config = tmp_path / "private-memory.json"
+    config.write_text(
+        json.dumps(
+            {
+                "schema": "skeleton.private_memory.config.v0",
+                "database": {"path": str(legacy_database)},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(PRIVATE_MEMORY_CONFIG_ENV, str(config))
     return checkout
 
 
@@ -217,6 +244,9 @@ def test_activation_executor_launches_video_runtime_after_memory(
         "memory_root_present": True,
     }
     assert "step=install_video_understanding status=done" in report
+    assert "step=ensure_canonical_memory status=done" in report
+    assert "canonical_memory_initialized=false" in report
+    assert "canonical_memory_state=READY" in report
     assert "video_provider_ready_count=4" in report
     assert "video_ollama_status=READY" in report
     assert "video_sona_status=BLOCKED" in report
@@ -226,6 +256,137 @@ def test_activation_executor_launches_video_runtime_after_memory(
     assert "video_rollback_ready=true" in report
     assert "video_stable_reason_codes=ASR_FALLBACK_BLOCKED" in report
     assert str(tmp_path) not in report
+
+
+def test_activation_executor_initializes_missing_canonical_stack_before_video_installer(
+    monkeypatch, tmp_path: Path
+) -> None:
+    checkout = _prepare_legacy_configured_private_root(monkeypatch, tmp_path)
+    private_root = tmp_path / "private"
+    called: dict[str, object] = {}
+
+    def installer(
+        source_root: Path,
+        *,
+        expected_sha: str,
+        enable: bool,
+        env: Mapping[str, str],
+    ) -> _RuntimeResult:
+        del source_root, expected_sha, enable, env
+        status = PrivateMemoryStack(private_root).status()
+        called["canonical_exists"] = (private_root / "canonical.sqlite").is_file()
+        called["canonical_state"] = status["state"]
+        called["canonical_sqlite_state"] = status["canonical_sqlite"]["state"]
+        called["mempalace_state"] = status["mempalace"]["state"]
+        called["graphify_state"] = status["graphify"]["state"]
+        return _RuntimeResult()
+
+    report = execute_five_layer_memory_activation(
+        _body(launch_video=True),
+        workdir=checkout,
+        maintenance_report=_report,
+        command_runner=_runner,
+        runtime_installer=installer,
+    )
+
+    assert report.startswith("DONE:")
+    assert called == {
+        "canonical_exists": True,
+        "canonical_state": "READY",
+        "canonical_sqlite_state": "READY",
+        "mempalace_state": "READY",
+        "graphify_state": "READY",
+    }
+    assert "step=ensure_canonical_memory status=done" in report
+    assert "canonical_memory_initialized=true" in report
+    assert "canonical_memory_state=READY" in report
+    assert "step=install_video_understanding status=done" in report
+    assert str(tmp_path) not in report
+
+
+def test_activation_executor_reuses_ready_existing_canonical_stack_without_reinit(
+    monkeypatch, tmp_path: Path
+) -> None:
+    checkout = _prepare_explicit_private_root(monkeypatch, tmp_path)
+
+    def fail_reinit(self, *, import_manifest: bool = True):
+        del self, import_manifest
+        raise AssertionError("existing canonical stack must not be reinitialized")
+
+    monkeypatch.setattr(PrivateMemoryStack, "init", fail_reinit)
+
+    report = execute_five_layer_memory_activation(
+        _body(launch_video=True),
+        workdir=checkout,
+        maintenance_report=_report,
+        command_runner=_runner,
+        runtime_installer=lambda *args, **kwargs: _RuntimeResult(),
+    )
+
+    assert report.startswith("DONE:")
+    assert "canonical_memory_initialized=false" in report
+    assert "canonical_memory_state=READY" in report
+    assert "step=install_video_understanding status=done" in report
+
+
+def test_activation_executor_blocks_corrupt_existing_canonical_stack_before_installer(
+    monkeypatch, tmp_path: Path
+) -> None:
+    checkout = _prepare_explicit_private_root(
+        monkeypatch, tmp_path, initialize=False
+    )
+    private_root = tmp_path / "private"
+    (private_root / "canonical.sqlite").write_bytes(b"not a sqlite database")
+    called = False
+
+    def installer(*args, **kwargs):
+        nonlocal called
+        del args, kwargs
+        called = True
+        return _RuntimeResult()
+
+    report = execute_five_layer_memory_activation(
+        _body(launch_video=True),
+        workdir=checkout,
+        maintenance_report=_report,
+        command_runner=_runner,
+        runtime_installer=installer,
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert called is False
+    assert "step=ensure_canonical_memory status=failed" in report
+    assert "reason=canonical_memory_existing_invalid" in report
+    assert "install_video_understanding" not in report
+    assert "not a sqlite database" not in report
+    assert str(tmp_path) not in report
+
+
+def test_activation_executor_canonical_memory_failure_output_is_public_safe(
+    monkeypatch, tmp_path: Path
+) -> None:
+    checkout = _prepare_legacy_configured_private_root(monkeypatch, tmp_path)
+
+    def fail_init(self, *, import_manifest: bool = True):
+        del self, import_manifest
+        raise RuntimeError(f"raw private failure {tmp_path}")
+
+    monkeypatch.setattr(PrivateMemoryStack, "init", fail_init)
+
+    report = execute_five_layer_memory_activation(
+        _body(launch_video=True),
+        workdir=checkout,
+        maintenance_report=_report,
+        command_runner=_runner,
+        runtime_installer=lambda *args, **kwargs: _RuntimeResult(),
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert "step=ensure_canonical_memory status=failed" in report
+    assert "reason=canonical_memory_initialize_failed" in report
+    assert "raw private failure" not in report
+    assert str(tmp_path) not in report
+    assert "install_video_understanding" not in report
 
 
 def test_activation_executor_rejects_video_launch_without_exact_approval(

@@ -12,6 +12,7 @@ from core.private_memory_root_resolver import (
     PrivateMemoryRootResolutionError,
     resolve_private_memory_root,
 )
+from core.private_memory_stack import PrivateMemoryStack, PrivateMemoryStackError
 from core.video_understanding.models import VideoUnderstandingError
 from core.video_understanding.runtime_install import install_runtime
 
@@ -178,6 +179,19 @@ def execute_five_layer_memory_activation(
         f"disk_bytes={disk_bytes}",
     ]
     if video_launch:
+        memory_lines, memory_reason = _ensure_canonical_memory_ready(private_root)
+        if memory_reason is not None:
+            return maintenance_report(
+                "BLOCKED",
+                TASK_ID,
+                [
+                    *status_lines,
+                    "step=ensure_canonical_memory status=failed",
+                    f"reason={memory_reason}",
+                ],
+                "not_met",
+            )
+        status_lines.extend(memory_lines)
         video_lines, video_reason = _install_video_runtime(
             checkout,
             expected_sha=expected_sha,
@@ -215,6 +229,61 @@ def _video_launch_request(body: str) -> tuple[bool, str | None]:
     if approval != VIDEO_RUNTIME_APPROVAL:
         return False, "video_runtime_approval_invalid"
     return True, None
+
+
+def _ensure_canonical_memory_ready(private_root: str) -> tuple[list[str], str | None]:
+    stack = PrivateMemoryStack(private_root)
+    initialized = not (Path(private_root) / "canonical.sqlite").exists()
+    if initialized:
+        try:
+            status = stack.init(import_manifest=True)
+        except PrivateMemoryStackError:
+            return [], "canonical_memory_initialize_failed"
+        except Exception:
+            return [], "canonical_memory_initialize_failed"
+    else:
+        status = stack.status()
+
+    reason = _validate_canonical_memory_status(status, existing=not initialized)
+    if reason is not None:
+        return [], reason
+    return [
+        "step=ensure_canonical_memory status=done",
+        f"canonical_memory_initialized={str(initialized).lower()}",
+        "canonical_memory_state=READY",
+    ], None
+
+
+def _validate_canonical_memory_status(
+    status: object, *, existing: bool
+) -> str | None:
+    if not isinstance(status, Mapping):
+        return (
+            "canonical_memory_existing_invalid"
+            if existing
+            else "canonical_memory_not_ready"
+        )
+    if status.get("state") != "READY":
+        return (
+            "canonical_memory_existing_invalid"
+            if existing and status.get("state") == "BLOCKED"
+            else "canonical_memory_not_ready"
+        )
+    for key in ("canonical_sqlite", "mempalace", "graphify"):
+        value = status.get(key)
+        if not isinstance(value, Mapping):
+            return (
+                "canonical_memory_existing_invalid"
+                if existing
+                else "canonical_memory_not_ready"
+            )
+        if value.get("state") != "READY":
+            return (
+                "canonical_memory_existing_invalid"
+                if existing and value.get("state") == "BLOCKED"
+                else "canonical_memory_not_ready"
+            )
+    return None
 
 
 def _install_video_runtime(
