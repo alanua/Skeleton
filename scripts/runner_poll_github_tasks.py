@@ -7882,7 +7882,91 @@ def _pr_branch_validation_metadata(
     )
 
 
-def _get_pr_branch_validation_state(repository: str, pr_number: int) -> dict[str, Any]:
+def _normalize_pr_branch_validation_state(
+    payload: dict[str, Any],
+    *,
+    expected_repository: str,
+    expected_pr_number: int,
+    source: str,
+) -> dict[str, Any]:
+    number = payload.get("number")
+    state = payload.get("state")
+    base_ref = payload.get("baseRefName")
+    base_sha = payload.get("baseRefOid")
+    head_ref = payload.get("headRefName")
+    head_sha = payload.get("headRefOid")
+    if number != expected_pr_number:
+        raise RuntimeError(f"{source} PR number mismatch")
+    if not isinstance(state, str) or state.upper() not in {"OPEN", "CLOSED", "MERGED"}:
+        raise RuntimeError(f"{source} PR state malformed")
+    if not isinstance(base_ref, str) or not _safe_target_base_branch_name(base_ref):
+        raise RuntimeError(f"{source} base branch malformed")
+    if not isinstance(head_ref, str) or not _safe_target_base_branch_name(head_ref):
+        raise RuntimeError(f"{source} head branch malformed")
+    if not isinstance(base_sha, str) or _HEAD_SHA_RE.fullmatch(base_sha) is None:
+        raise RuntimeError(f"{source} base SHA malformed")
+    if not isinstance(head_sha, str) or _HEAD_SHA_RE.fullmatch(head_sha) is None:
+        raise RuntimeError(f"{source} head SHA malformed")
+    if expected_repository not in ALLOWED_TARGET_REPOSITORIES:
+        raise RuntimeError(f"{source} repository not allowed")
+    return {
+        "number": number,
+        "state": state.upper(),
+        "baseRefName": base_ref,
+        "baseRefOid": base_sha.lower(),
+        "headRefName": head_ref,
+        "headRefOid": head_sha.lower(),
+    }
+
+
+def _pr_branch_validation_rest_state(repository: str, pr_number: int) -> dict[str, Any]:
+    if repository not in ALLOWED_TARGET_REPOSITORIES:
+        raise RuntimeError("REST PR metadata repository not allowed")
+    if not isinstance(pr_number, int) or pr_number <= 0:
+        raise RuntimeError("REST PR metadata number malformed")
+    code, output = run_command(
+        [
+            "gh",
+            "api",
+            "--method",
+            "GET",
+            f"repos/{repository}/pulls/{pr_number}",
+        ]
+    )
+    if code != 0:
+        raise RuntimeError("REST PR metadata read failed")
+    parsed = json.loads(output or "{}")
+    if not isinstance(parsed, dict):
+        raise RuntimeError("REST PR metadata returned non-object JSON")
+    base = parsed.get("base")
+    head = parsed.get("head")
+    if not isinstance(base, dict) or not isinstance(head, dict):
+        raise RuntimeError("REST PR metadata refs malformed")
+    state = parsed.get("state")
+    if state == "closed" and parsed.get("merged") is True:
+        normalized_state = "MERGED"
+    elif isinstance(state, str):
+        normalized_state = state.upper()
+    else:
+        normalized_state = state
+    return _normalize_pr_branch_validation_state(
+        {
+            "number": parsed.get("number"),
+            "state": normalized_state,
+            "baseRefName": base.get("ref"),
+            "baseRefOid": base.get("sha"),
+            "headRefName": head.get("ref"),
+            "headRefOid": head.get("sha"),
+        },
+        expected_repository=repository,
+        expected_pr_number=pr_number,
+        source="REST PR metadata",
+    )
+
+
+def _get_pr_branch_validation_state(
+    repository: str, pr_number: int
+) -> tuple[dict[str, Any], str]:
     code, output = run_command(
         [
             "gh",
@@ -7895,12 +7979,26 @@ def _get_pr_branch_validation_state(repository: str, pr_number: int) -> dict[str
             "number,state,baseRefName,baseRefOid,headRefName,headRefOid",
         ]
     )
-    if code != 0:
-        raise RuntimeError("gh pr view failed")
-    parsed = json.loads(output or "{}")
-    if not isinstance(parsed, dict):
-        raise RuntimeError("gh pr view returned non-object JSON")
-    return parsed
+    try:
+        if code != 0:
+            raise RuntimeError("gh pr view failed")
+        parsed = json.loads(output or "{}")
+        if not isinstance(parsed, dict):
+            raise RuntimeError("gh pr view returned non-object JSON")
+        return (
+            _normalize_pr_branch_validation_state(
+                parsed,
+                expected_repository=repository,
+                expected_pr_number=pr_number,
+                source="gh pr view",
+            ),
+            "gh",
+        )
+    except (RuntimeError, json.JSONDecodeError):
+        try:
+            return _pr_branch_validation_rest_state(repository, pr_number), "rest"
+        except (RuntimeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("PR metadata unavailable") from exc
 
 
 def _preflight_pr_refresh_metadata(
@@ -8178,8 +8276,9 @@ def _pr_branch_validation_block_reason(
         return "pr_number_mismatch"
     if str(pr_state.get("state") or "").upper() != "OPEN":
         return "pr_not_open"
-    if pr_state.get("baseRefName") != "main":
-        return "pr_base_not_main"
+    base_ref = pr_state.get("baseRefName")
+    if not isinstance(base_ref, str) or not _safe_target_base_branch_name(base_ref):
+        return "pr_base_ref_unsafe"
     base_sha = str(pr_state.get("baseRefOid") or "").lower()
     if _HEAD_SHA_RE.fullmatch(base_sha) is None:
         return "pr_base_sha_invalid"
@@ -8566,17 +8665,31 @@ def validate_pr_branch(body: str) -> str:
     status_lines.append(f"checkout_path={checkout_path}")
 
     try:
-        pr_state = _get_pr_branch_validation_state(
+        pr_lookup = _get_pr_branch_validation_state(
             request.repository, request.pr_number
         )
     except Exception:
         return _maintenance_report(
             "BLOCKED",
             task_id,
-            [*status_lines, "step=read_pr_metadata status=failed"],
+            [
+                *status_lines,
+                "step=read_pr_metadata status=failed",
+                "reason=pr_metadata_unavailable",
+            ],
             "not_met",
         )
-    status_lines.append("step=read_pr_metadata status=done")
+    if isinstance(pr_lookup, tuple):
+        pr_state, pr_metadata_source = pr_lookup
+    else:
+        pr_state = pr_lookup
+        pr_metadata_source = "gh"
+    status_lines.extend(
+        (
+            "step=read_pr_metadata status=done",
+            f"pr_metadata_source={pr_metadata_source}",
+        )
+    )
 
     block_reason = _pr_branch_validation_block_reason(request, pr_state)
     if block_reason is not None:
