@@ -82,7 +82,7 @@ Memory writes use the current `skeleton.memory_gateway.request.v1` envelope and 
 
 ## Calendar contract
 
-Calendar events are created only for appointment, deadline, expiration, renewal, hearing, or booked travel. The event date is extracted from the keyword-local evidence window; the generic document date is never reused. Event IDs are deterministic, so replay is idempotent.
+Calendar events are created only for appointment, deadline, expiration, renewal, hearing, or booked travel. The event date is extracted from the keyword-local evidence window; the generic document date is never reused. Event IDs are deterministic. Source-specific `document_id` stays in the canonical private document record and is removed from the calendar upsert payload, so binary duplicates submit an identical event payload. The reverse document relation is retained through the shared event ID in each canonical document record.
 
 ## Runtime durability
 
