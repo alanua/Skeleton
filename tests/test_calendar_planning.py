@@ -34,17 +34,21 @@ def desired(
     suffix: str = "a",
     confirmed: bool = False,
     status: str = "ACTIVE",
+    start: int = 100,
+    end: int = 200,
+    invitation_change: bool = False,
 ) -> DesiredCalendarEvent:
     return DesiredCalendarEvent(
         subject_ref="trip:abc",
         projection_role=role,
         source_revision=2,
-        start_at=100,
-        end_at=200,
+        start_at=start,
+        end_at=end,
         desired_status=status,
-        field_hashes=hashes(suffix=suffix),
+        field_hashes=hashes(start=start, end=end, suffix=suffix),
         private_payload_ref=f"private:{role}:{suffix}",
         confirmed=confirmed,
+        invitation_change=invitation_change,
     )
 
 
@@ -148,6 +152,35 @@ def test_manual_time_drift_on_confirmed_trip_requires_operator() -> None:
     result = reconcile_calendar_event(desired(confirmed=True), binding, drifted)
     assert result.action == "NEEDS_OPERATOR"
     assert "TIME_MANUAL_DRIFT" in result.reason_codes
+
+
+def test_confirmed_trip_source_movement_requires_operator_even_if_remote_matches() -> None:
+    binding = bound(projected=hashes(start=100, end=200))
+    moved = desired(confirmed=True, start=120, end=220)
+    remote_matches_new_source = remote(start=120, end=220)
+    result = reconcile_calendar_event(moved, binding, remote_matches_new_source)
+    assert result.action == "NEEDS_OPERATOR"
+    assert (
+        "CONFIRMED_TRIP_TIME_CHANGE_REQUIRES_APPROVAL"
+        in result.reason_codes
+    )
+
+
+def test_invitation_and_attendee_source_changes_require_operator() -> None:
+    binding = bound(projected=hashes(suffix="old"))
+    invitation = desired(suffix="old", invitation_change=True)
+    unchanged_remote = remote(suffix="old")
+    explicit = reconcile_calendar_event(invitation, binding, unchanged_remote)
+    assert explicit.action == "NEEDS_OPERATOR"
+    assert "INVITATION_CHANGE_REQUIRES_APPROVAL" in explicit.reason_codes
+
+    new_attendees = desired(suffix="new")
+    remote_matches_new_source = remote(suffix="new")
+    attendee_change = reconcile_calendar_event(
+        new_attendees, binding, remote_matches_new_source
+    )
+    assert attendee_change.action == "NEEDS_OPERATOR"
+    assert "ATTENDEE_CHANGE_REQUIRES_APPROVAL" in attendee_change.reason_codes
 
 
 def test_external_deletion_and_confirmed_cancel_require_operator() -> None:
