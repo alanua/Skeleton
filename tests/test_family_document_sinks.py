@@ -30,3 +30,10 @@ def test_calendar_sink_is_typed_and_idempotent():
     seen=[]
     def runner(command,input_text,timeout,max_output): del command,timeout,max_output; seen.append(json.loads(input_text)); return 0,json.dumps({"status":"IDEMPOTENT"}),""
     event={"event_id":"family-document-event:"+"d"*48,"event_type":"deadline"}; assert CalendarSink(JsonCommandAdapter(("/usr/bin/true",),runner=runner)).upsert(event)=="IDEMPOTENT" and seen[0]["idempotency_key"]==event["event_id"]
+def test_calendar_duplicate_sources_send_identical_payloads():
+    seen=[]
+    def runner(command,input_text,timeout,max_output): del command,timeout,max_output; seen.append(json.loads(input_text)); return 0,json.dumps({"status":"IDEMPOTENT"}),""
+    sink=CalendarSink(JsonCommandAdapter(("/usr/bin/true",),runner=runner)); common={"event_id":"family-document-event:"+"e"*48,"event_type":"deadline","date":"2026-08-15","principal_subject":"oleksii","confidence":0.82,"evidence_hash":"f"*64,"privacy":"private","attendees":[],"conference":None}
+    sink.upsert({**common,"document_id":"document:"+"1"*48}); sink.upsert({**common,"document_id":"document:"+"2"*48})
+    assert seen[0]==seen[1]
+    assert "document_id" not in seen[0]["event"]
