@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://skeleton.local/schemas/calendar_reconcile_receipt.schema.json",
+  "title": "Skeleton Calendar Reconcile Public Receipt",
+  "oneOf": [
+    {"$ref": "#/$defs/single"},
+    {"$ref": "#/$defs/aggregate"}
+  ],
+  "$defs": {
+    "action": {"enum": ["CREATE", "UPDATE", "CANCEL", "NOOP", "NEEDS_OPERATOR"]},
+    "reason_codes": {
+      "type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$"}
+    },
+    "single": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "status", "action", "reason_codes", "changed_field_count",
+        "operator_required", "public_safe", "private_identifiers_included",
+        "external_side_effects_executed"
+      ],
+      "properties": {
+        "schema": {"const": "skeleton.calendar_reconcile_receipt.v1"},
+        "status": {"enum": ["DONE", "NEEDS_OPERATOR"]},
+        "action": {"$ref": "#/$defs/action"},
+        "reason_codes": {"$ref": "#/$defs/reason_codes"},
+        "changed_field_count": {"type": "integer", "minimum": 0, "maximum": 6},
+        "operator_required": {"type": "boolean"},
+        "public_safe": {"const": true},
+        "private_identifiers_included": {"const": false},
+        "external_side_effects_executed": {"const": false}
+      }
+    },
+    "aggregate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "status", "proposal_count", "actions", "reason_counts",
+        "changed_field_count", "operator_required_count", "public_safe",
+        "private_identifiers_included", "external_side_effects_executed"
+      ],
+      "properties": {
+        "schema": {"const": "skeleton.calendar_reconcile_receipt.v1"},
+        "status": {"enum": ["DONE", "NEEDS_OPERATOR"]},
+        "proposal_count": {"type": "integer", "minimum": 0},
+        "actions": {
+          "type": "object", "additionalProperties": false,
+          "required": ["CREATE", "UPDATE", "CANCEL", "NOOP", "NEEDS_OPERATOR"],
+          "properties": {
+            "CREATE": {"type": "integer", "minimum": 0},
+            "UPDATE": {"type": "integer", "minimum": 0},
+            "CANCEL": {"type": "integer", "minimum": 0},
+            "NOOP": {"type": "integer", "minimum": 0},
+            "NEEDS_OPERATOR": {"type": "integer", "minimum": 0}
+          }
+        },
+        "reason_counts": {
+          "type": "object",
+          "propertyNames": {"pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$"},
+          "additionalProperties": {"type": "integer", "minimum": 1}
+        },
+        "changed_field_count": {"type": "integer", "minimum": 0},
+        "operator_required_count": {"type": "integer", "minimum": 0},
+        "public_safe": {"const": true},
+        "private_identifiers_included": {"const": false},
+        "external_side_effects_executed": {"const": false}
+      }
+    }
+  }
+}
