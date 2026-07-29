@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from core.calendar_planning_models import hash_calendar_field
+from core.scheduler_models import thaw_json
 from core.travel_calendar_planning import (
     TravelPlanCalendarInput,
     build_desired_calendar_events,
@@ -91,7 +92,7 @@ def test_completed_and_cancelled_disable_future_schedules() -> None:
 def test_schedule_payloads_have_only_opaque_domain_refs() -> None:
     value = plan("CANDIDATE")
     schedules = build_travel_schedule_bundle(value, now=1_000_000)
-    rendered = json.dumps([dict(item.payload) for item in schedules])
+    rendered = json.dumps([thaw_json(item.payload) for item in schedules])
     assert "calendar:travel" not in rendered
     assert "private:" not in rendered
     assert "google" not in rendered.casefold()
