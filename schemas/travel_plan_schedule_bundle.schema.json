@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://skeleton.local/schemas/travel_plan_schedule_bundle.schema.json",
+  "title": "Travel Plan Scheduler Bundle Public Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "status", "lifecycle", "schedule_count", "operation_counts",
+    "projection_count", "public_safe", "private_identifiers_included",
+    "provider_identifiers_included", "external_side_effects_executed"
+  ],
+  "properties": {
+    "schema": {"const": "skeleton.travel_plan_schedule_bundle.v1"},
+    "status": {"const": "DONE"},
+    "lifecycle": {"enum": ["CANDIDATE", "PLANNED", "IN_TRIP", "COMPLETED", "CANCELLED"]},
+    "schedule_count": {"type": "integer", "minimum": 0},
+    "operation_counts": {
+      "type": "object",
+      "propertyNames": {"pattern": "^travel\\.[a-z0-9_]+$"},
+      "additionalProperties": {"type": "integer", "minimum": 1}
+    },
+    "projection_count": {"type": "integer", "minimum": 1, "maximum": 3},
+    "public_safe": {"const": true},
+    "private_identifiers_included": {"const": false},
+    "provider_identifiers_included": {"const": false},
+    "external_side_effects_executed": {"const": false}
+  }
+}

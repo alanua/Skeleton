@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://skeleton.local/schemas/calendar_binding.schema.json",
+  "title": "Skeleton Calendar Binding",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "binding_id", "subject_ref", "projection_role", "calendar_ref",
+    "remote_event_ref", "event_ownership", "field_ownership", "source_revision",
+    "projected_revision", "remote_revision", "projected_field_hashes", "status"
+  ],
+  "properties": {
+    "schema": {"const": "skeleton.calendar_binding.v1"},
+    "binding_id": {"type": "string", "pattern": "^calbind_[0-9a-f]{32}$"},
+    "subject_ref": {"$ref": "#/$defs/token"},
+    "projection_role": {"enum": ["travel_primary", "family", "work_absence"]},
+    "calendar_ref": {"$ref": "#/$defs/token"},
+    "remote_event_ref": {"oneOf": [{"$ref": "#/$defs/token"}, {"type": "null"}]},
+    "event_ownership": {"$ref": "#/$defs/ownership"},
+    "field_ownership": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["time", "title", "description", "location", "attendees", "reminders"],
+      "properties": {
+        "time": {"$ref": "#/$defs/ownership"},
+        "title": {"$ref": "#/$defs/ownership"},
+        "description": {"$ref": "#/$defs/ownership"},
+        "location": {"$ref": "#/$defs/ownership"},
+        "attendees": {"$ref": "#/$defs/ownership"},
+        "reminders": {"$ref": "#/$defs/ownership"}
+      }
+    },
+    "source_revision": {"type": "integer", "minimum": 0},
+    "projected_revision": {"type": "integer", "minimum": 0},
+    "remote_revision": {"oneOf": [{"$ref": "#/$defs/token"}, {"type": "null"}]},
+    "projected_field_hashes": {"$ref": "#/$defs/field_hashes"},
+    "status": {
+      "enum": ["ACTIVE", "CANCELLED", "ARCHIVED", "DELETED_EXTERNALLY", "DELETION_PENDING_APPROVAL"]
+    }
+  },
+  "$defs": {
+    "token": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$"},
+    "ownership": {
+      "enum": ["SKELETON_OWNED", "EXTERNAL_OWNED", "SHARED", "USER_OVERRIDDEN"]
+    },
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "field_hashes": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "time": {"$ref": "#/$defs/hash"},
+        "title": {"$ref": "#/$defs/hash"},
+        "description": {"$ref": "#/$defs/hash"},
+        "location": {"$ref": "#/$defs/hash"},
+        "attendees": {"$ref": "#/$defs/hash"},
+        "reminders": {"$ref": "#/$defs/hash"}
+      }
+    }
+  }
+}
