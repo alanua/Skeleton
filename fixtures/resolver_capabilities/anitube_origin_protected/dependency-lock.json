@@ -1,0 +1,10 @@
+{
+  "schema": "skeleton.resolver_capability.dependency_lock.v1",
+  "packages": {
+    "requests": "runtime-provided",
+    "lxml": "runtime-provided"
+  },
+  "tools": {
+    "curl": "system"
+  }
+}
