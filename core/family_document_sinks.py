@@ -102,7 +102,9 @@ class CalendarSink:
         event_type, event_id = event.get("event_type"), event.get("event_id")
         if not isinstance(event_type, str) or not isinstance(event_id, str):
             raise SinkError("calendar_event_invalid")
-        result = self.adapter.execute({"schema": "skeleton.family_document.calendar_upsert.v1", "operation": "upsert", "idempotency_key": event_id, "event": dict(event)})
+        calendar_event = dict(event)
+        calendar_event.pop("document_id", None)
+        result = self.adapter.execute({"schema": "skeleton.family_document.calendar_upsert.v1", "operation": "upsert", "idempotency_key": event_id, "event": calendar_event})
         if result.status not in {"DONE", "ACCEPTED", "IDEMPOTENT", "SUCCESS"}:
             raise SinkError("calendar_upsert_failed")
         return result.status
