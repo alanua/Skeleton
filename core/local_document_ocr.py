@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import os
+import selectors
+import shutil
+import signal
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
@@ -46,6 +50,98 @@ class CommandResult:
     stderr: bytes
 
 
+def run_bounded_argv(
+    argv: Sequence[str],
+    cwd: Path,
+    timeout: int,
+    max_output: int,
+    *,
+    input_bytes: bytes | None = None,
+) -> CommandResult:
+    if not argv or not Path(argv[0]).is_absolute():
+        raise OcrError("ocr_executable_invalid")
+    if any(not isinstance(value, str) or not value or "\x00" in value for value in argv):
+        raise OcrError("ocr_argument_invalid")
+    if input_bytes is not None and len(input_bytes) > max_output:
+        raise OcrError("ocr_input_too_large")
+    try:
+        process = subprocess.Popen(
+            list(argv), cwd=str(cwd),
+            stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False,
+            start_new_session=True,
+            env={"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "NO_COLOR": "1"},
+        )
+    except OSError as exc:
+        raise OcrError("ocr_command_failed") from exc
+    if input_bytes is not None:
+        assert process.stdin is not None
+        try:
+            process.stdin.write(input_bytes)
+            process.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass
+    assert process.stdout is not None and process.stderr is not None
+    selector = selectors.DefaultSelector()
+    buffers = {process.stdout.fileno(): bytearray(), process.stderr.fileno(): bytearray()}
+    streams = {process.stdout.fileno(): process.stdout, process.stderr.fileno(): process.stderr}
+    started = time.monotonic()
+    try:
+        for fd, stream in streams.items():
+            os.set_blocking(fd, False)
+            selector.register(stream, selectors.EVENT_READ, fd)
+        while selector.get_map() or process.poll() is None:
+            if time.monotonic() - started > timeout:
+                _terminate_process_group(process)
+                raise OcrError("ocr_timeout")
+            events = selector.select(0.1)
+            if not events and process.poll() is not None:
+                events = [(key, selectors.EVENT_READ) for key in list(selector.get_map().values())]
+            for key, _ in events:
+                fd = int(key.data)
+                try:
+                    chunk = os.read(fd, 65536)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    try:
+                        selector.unregister(key.fileobj)
+                    except KeyError:
+                        pass
+                    continue
+                buffers[fd].extend(chunk)
+                if sum(len(value) for value in buffers.values()) > max_output:
+                    _terminate_process_group(process)
+                    raise OcrError("ocr_output_too_large")
+        process.wait(timeout=1)
+    except subprocess.TimeoutExpired as exc:
+        _terminate_process_group(process)
+        raise OcrError("ocr_command_failed") from exc
+    finally:
+        selector.close()
+    return CommandResult(process.returncode, bytes(buffers[process.stdout.fileno()]), bytes(buffers[process.stderr.fileno()]))
+
+
+def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+
+
 @dataclass(frozen=True)
 class OcrResult:
     raw_text: str
@@ -75,10 +171,7 @@ class LocalDocumentOcr:
         self.runner = runner or self._run
 
     def validate_providers(self) -> dict[str, bool]:
-        return {
-            key: Path(value).is_file() and os.access(value, os.X_OK)
-            for key, value in self.config.executables.items()
-        }
+        return {key: Path(value).is_file() and os.access(value, os.X_OK) for key, value in self.config.executables.items()}
 
     def extract(self, source: Path) -> OcrResult:
         source = Path(source).resolve(strict=True)
@@ -106,14 +199,7 @@ class LocalDocumentOcr:
         if not raw:
             raise OcrError("ocr_empty")
         corrected = "\n".join(line.rstrip() for line in raw.replace("\r\n", "\n").replace("\r", "\n").split("\n")).strip()
-        return OcrResult(
-            raw_text=raw,
-            corrected_text=corrected,
-            providers=tuple(providers),
-            source_sha256=source_hash,
-            raw_text_sha256=hashlib.sha256(raw.encode("utf-8")).hexdigest(),
-            corrected_text_sha256=hashlib.sha256(corrected.encode("utf-8")).hexdigest(),
-        )
+        return OcrResult(raw, corrected, tuple(providers), source_hash, hashlib.sha256(raw.encode("utf-8")).hexdigest(), hashlib.sha256(corrected.encode("utf-8")).hexdigest())
 
     def _extract_pdf(self, source: Path) -> tuple[str, tuple[str, ...]]:
         text = self._pdftotext(source)
@@ -121,16 +207,7 @@ class LocalDocumentOcr:
             return text, ("pdftotext",)
         with tempfile.TemporaryDirectory(prefix="family-doc-ocr-") as temporary_dir:
             output = Path(temporary_dir) / "ocr.pdf"
-            args = (
-                self.config.executables["ocrmypdf"],
-                "--skip-text",
-                "--deskew",
-                "--rotate-pages",
-                "--language",
-                "+".join(self.config.languages),
-                str(source),
-                str(output),
-            )
+            args = (self.config.executables["ocrmypdf"], "--skip-text", "--deskew", "--rotate-pages", "--language", "+".join(self.config.languages), str(source), str(output))
             result = self.runner(args, Path(temporary_dir), self.config.timeout_seconds, self.config.max_output_bytes)
             if result.returncode != 0 or not output.is_file():
                 raise OcrError("pdf_ocr_failed")
@@ -142,15 +219,7 @@ class LocalDocumentOcr:
     def _extract_office(self, source: Path) -> tuple[str, tuple[str, ...]]:
         with tempfile.TemporaryDirectory(prefix="family-doc-office-") as temporary_dir:
             workspace = Path(temporary_dir)
-            args = (
-                self.config.executables["libreoffice"],
-                "--headless",
-                "--convert-to",
-                "pdf",
-                "--outdir",
-                str(workspace),
-                str(source),
-            )
+            args = (self.config.executables["libreoffice"], "--headless", "--convert-to", "pdf", "--outdir", str(workspace), str(source))
             result = self.runner(args, workspace, self.config.timeout_seconds, self.config.max_output_bytes)
             if result.returncode != 0:
                 raise OcrError("office_conversion_failed")
@@ -161,17 +230,13 @@ class LocalDocumentOcr:
             return text, ("libreoffice", *used)
 
     def _pdftotext(self, source: Path) -> str:
-        args = (self.config.executables["pdftotext"], "-layout", str(source), "-")
-        result = self.runner(args, source.parent, self.config.timeout_seconds, self.config.max_output_bytes)
+        result = self.runner((self.config.executables["pdftotext"], "-layout", str(source), "-"), source.parent, self.config.timeout_seconds, self.config.max_output_bytes)
         if result.returncode != 0:
             raise OcrError("pdftotext_failed")
         return result.stdout.decode("utf-8", errors="replace")[: self.config.max_output_bytes]
 
     def _tesseract(self, source: Path) -> str:
-        args = (
-            self.config.executables["tesseract"], str(source), "stdout", "-l",
-            "+".join(self.config.languages), "--psm", "6",
-        )
+        args = (self.config.executables["tesseract"], str(source), "stdout", "-l", "+".join(self.config.languages), "--psm", "6")
         result = self.runner(args, source.parent, self.config.timeout_seconds, self.config.max_output_bytes)
         if result.returncode != 0:
             raise OcrError("tesseract_failed")
@@ -179,19 +244,7 @@ class LocalDocumentOcr:
 
     @staticmethod
     def _run(argv: Sequence[str], cwd: Path, timeout: int, max_output: int) -> CommandResult:
-        try:
-            completed = subprocess.run(
-                list(argv), cwd=str(cwd), stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False,
-                start_new_session=True,
-                env={"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "NO_COLOR": "1"},
-                timeout=timeout, check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise OcrError("ocr_command_failed") from exc
-        if len(completed.stdout) + len(completed.stderr) > max_output:
-            raise OcrError("ocr_output_too_large")
-        return CommandResult(completed.returncode, completed.stdout, completed.stderr)
+        return run_bounded_argv(argv, cwd, timeout, max_output)
 
 
 def sha256_file(path: Path) -> str:

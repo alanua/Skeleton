@@ -5,9 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
-SUPPORTED_SUFFIXES = frozenset(
-    {".pdf", ".tif", ".tiff", ".png", ".jpg", ".jpeg", ".txt", ".doc", ".docx", ".odt", ".rtf", ".xls", ".xlsx", ".ods"}
-)
+SUPPORTED_SUFFIXES = frozenset({".pdf", ".tif", ".tiff", ".png", ".jpg", ".jpeg", ".txt", ".doc", ".docx", ".odt", ".rtf", ".xls", ".xlsx", ".ods"})
 PARTIAL_SUFFIXES = (".part", ".partial", ".tmp", ".crdownload")
 SKIP_DIRECTORIES = frozenset({".git", ".ssh", "secrets", "node_modules", "__pycache__"})
 
@@ -26,11 +24,12 @@ class ApprovedRoot:
     def __post_init__(self) -> None:
         if not self.alias or "/" in self.alias or "\\" in self.alias:
             raise SourceError("invalid_root_alias")
-        resolved = Path(self.path).expanduser().resolve(strict=True)
+        expanded = Path(self.path).expanduser()
+        if _has_symlink_component(expanded):
+            raise SourceError("approved_root_symlinked")
+        resolved = expanded.resolve(strict=True)
         if not resolved.is_dir():
             raise SourceError("approved_root_unavailable")
-        if _has_symlink_component(resolved):
-            raise SourceError("approved_root_symlinked")
         object.__setattr__(self, "path", resolved)
 
 
@@ -43,18 +42,12 @@ class SourceReference:
     mtime_ns: int
 
     def private_dict(self) -> dict[str, object]:
-        return {
-            "root_alias": self.root_alias,
-            "absolute_path": str(self.absolute_path),
-            "relative_path": self.relative_path,
-            "byte_size": self.byte_size,
-            "mtime_ns": self.mtime_ns,
-        }
+        return {"root_alias": self.root_alias, "absolute_path": str(self.absolute_path), "relative_path": self.relative_path, "byte_size": self.byte_size, "mtime_ns": self.mtime_ns}
 
 
 def resolve_source(path: Path, roots: Sequence[ApprovedRoot]) -> SourceReference:
     candidate = Path(path).expanduser()
-    if candidate.is_symlink():
+    if _has_symlink_component(candidate):
         raise SourceError("source_symlink_rejected")
     try:
         resolved = candidate.resolve(strict=True)
@@ -62,35 +55,18 @@ def resolve_source(path: Path, roots: Sequence[ApprovedRoot]) -> SourceReference
         raise SourceError("source_unavailable") from exc
     if not resolved.is_file() or resolved.suffix.casefold() not in SUPPORTED_SUFFIXES:
         raise SourceError("source_unsupported")
-    lowered_name = resolved.name.casefold()
-    if lowered_name.endswith(PARTIAL_SUFFIXES):
+    if resolved.name.casefold().endswith(PARTIAL_SUFFIXES):
         raise SourceError("source_partial")
-    if _has_symlink_component(resolved):
-        raise SourceError("source_symlink_rejected")
-    matched: ApprovedRoot | None = None
-    for root in roots:
-        if resolved == root.path or root.path in resolved.parents:
-            matched = root
-            break
+    matched = next((root for root in roots if resolved == root.path or root.path in resolved.parents), None)
     if matched is None:
         raise SourceError("source_outside_approved_roots")
     stat = resolved.stat()
     if stat.st_size <= 0:
         raise SourceError("source_empty")
-    return SourceReference(
-        root_alias=matched.alias,
-        absolute_path=resolved,
-        relative_path=resolved.relative_to(matched.path).as_posix(),
-        byte_size=stat.st_size,
-        mtime_ns=stat.st_mtime_ns,
-    )
+    return SourceReference(matched.alias, resolved, resolved.relative_to(matched.path).as_posix(), stat.st_size, stat.st_mtime_ns)
 
 
-def inventory_sources(
-    roots: Sequence[ApprovedRoot],
-    *,
-    max_files: int = 10000,
-) -> tuple[SourceReference, ...]:
+def inventory_sources(roots: Sequence[ApprovedRoot], *, max_files: int = 10000) -> tuple[SourceReference, ...]:
     if isinstance(max_files, bool) or not isinstance(max_files, int) or not 1 <= max_files <= 100000:
         raise SourceError("inventory_limit_invalid")
     found: list[SourceReference] = []
@@ -98,17 +74,10 @@ def inventory_sources(
     for root in sorted(roots, key=lambda item: item.alias):
         for current, dirs, files in os.walk(root.path, followlinks=False):
             current_path = Path(current)
-            dirs[:] = [
-                name
-                for name in sorted(dirs)
-                if name.casefold() not in SKIP_DIRECTORIES
-                and not (current_path / name).is_symlink()
-            ]
+            dirs[:] = [name for name in sorted(dirs) if name.casefold() not in SKIP_DIRECTORIES and not (current_path / name).is_symlink()]
             for name in sorted(files):
                 candidate = current_path / name
-                if candidate.suffix.casefold() not in SUPPORTED_SUFFIXES:
-                    continue
-                if name.casefold().endswith(PARTIAL_SUFFIXES):
+                if candidate.suffix.casefold() not in SUPPORTED_SUFFIXES or name.casefold().endswith(PARTIAL_SUFFIXES):
                     continue
                 try:
                     reference = resolve_source(candidate, roots)
@@ -123,26 +92,13 @@ def inventory_sources(
     return tuple(found)
 
 
-def stable_observation(
-    reference: SourceReference,
-    previous: dict[str, object] | None,
-    *,
-    observed_at: float,
-    settle_seconds: float,
-) -> tuple[bool, dict[str, object]]:
+def stable_observation(reference: SourceReference, previous: dict[str, object] | None, *, observed_at: float, settle_seconds: float) -> tuple[bool, dict[str, object]]:
     if settle_seconds < 0:
         raise SourceError("settle_seconds_invalid")
-    current = {
-        "byte_size": reference.byte_size,
-        "mtime_ns": reference.mtime_ns,
-        "observed_at": float(observed_at),
-    }
+    current = {"byte_size": reference.byte_size, "mtime_ns": reference.mtime_ns, "observed_at": float(observed_at)}
     if not isinstance(previous, dict):
         return False, current
-    unchanged = (
-        previous.get("byte_size") == reference.byte_size
-        and previous.get("mtime_ns") == reference.mtime_ns
-    )
+    unchanged = previous.get("byte_size") == reference.byte_size and previous.get("mtime_ns") == reference.mtime_ns
     prior_time = previous.get("observed_at")
     if isinstance(prior_time, bool) or not isinstance(prior_time, (int, float)):
         return False, current
@@ -150,8 +106,9 @@ def stable_observation(
 
 
 def _has_symlink_component(path: Path) -> bool:
-    current = Path(path.anchor)
-    for part in path.parts[1:]:
+    absolute = path if path.is_absolute() else Path.cwd() / path
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
         current = current / part
         try:
             if current.is_symlink():
