@@ -270,6 +270,17 @@ def reconcile_calendar_event(
             payload=False,
         )
 
+    if desired.invitation_change:
+        return _proposal(
+            "NEEDS_OPERATOR",
+            ("INVITATION_CHANGE_REQUIRES_APPROVAL",),
+            desired,
+            binding,
+            remote,
+            ("attendees",),
+            payload=False,
+        )
+
     changed: list[str] = []
     operator_reasons: list[str] = []
     safe_reasons: list[str] = []
@@ -277,11 +288,23 @@ def reconcile_calendar_event(
         desired_hash = desired.field_hashes[field]
         remote_hash = remote.field_hashes[field]
         projected_hash = binding.projected_field_hashes.get(field)
+        source_changed = projected_hash is None or desired_hash != projected_hash
+
+        if field == "time" and desired.confirmed and source_changed:
+            operator_reasons.append(
+                "CONFIRMED_TRIP_TIME_CHANGE_REQUIRES_APPROVAL"
+            )
+            changed.append(field)
+            continue
+        if field == "attendees" and source_changed:
+            operator_reasons.append("ATTENDEE_CHANGE_REQUIRES_APPROVAL")
+            changed.append(field)
+            continue
         if desired_hash == remote_hash:
             continue
+
         ownership = binding.field_ownership[field]
         remote_drift = projected_hash is not None and remote_hash != projected_hash
-        source_changed = projected_hash is None or desired_hash != projected_hash
 
         if ownership in {"EXTERNAL_OWNED", "USER_OVERRIDDEN"}:
             operator_reasons.append(f"{field.upper()}_OWNERSHIP_CONFLICT")
@@ -297,8 +320,8 @@ def reconcile_calendar_event(
             operator_reasons.append(f"{field.upper()}_MANUAL_DRIFT")
             changed.append(field)
             continue
-        if field == "attendees" or desired.invitation_change:
-            operator_reasons.append("INVITATION_CHANGE_REQUIRES_APPROVAL")
+        if field == "attendees":
+            operator_reasons.append("ATTENDEE_CHANGE_REQUIRES_APPROVAL")
             changed.append(field)
             continue
         if source_changed or remote_drift:
