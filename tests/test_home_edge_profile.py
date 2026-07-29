@@ -5,11 +5,21 @@ from pathlib import Path
 
 import pytest
 
-from core.home_edge.profile import load_home_edge_profile, synthetic_profile_mapping
+from core.home_edge.profile import (
+    HOME_EDGE_AUDIT_PERSIST_OPERATION,
+    load_home_edge_profile,
+    synthetic_profile_mapping,
+)
 
 
 def test_home_edge_profile_registers_universal_fixed_node() -> None:
     profile = load_home_edge_profile()
+    registry = synthetic_profile_mapping()
+    registry_file = json.loads(
+        (Path(__file__).resolve().parents[1] / "config" / "home_edge" / "home-edge-01.json").read_text(
+            encoding="utf-8"
+        )
+    )
 
     assert profile.node_id == "home-edge-01"
     assert profile.hostname == "synthetic-home-edge"
@@ -23,6 +33,17 @@ def test_home_edge_profile_registers_universal_fixed_node() -> None:
     assert "home_automation" in profile.capabilities
     assert profile.primary_network["interface"] == "synthetic-lan"
     assert profile.is_template_identity
+    assert registry["operations"] == [HOME_EDGE_AUDIT_PERSIST_OPERATION]
+    operation = registry["operations"][0]
+    assert operation["operation_id"] == "home_edge_audit_persist_v1"
+    assert operation["device_id"] == "home_edge_01"
+    assert operation["execution_node"] == "home-edge-01"
+    assert operation["run_as"] == "desktop-user"
+    assert operation["risk"] == "yellow"
+    assert operation["approval_gate"] == "operator_approval_required"
+    assert operation["last_success"] is None
+    assert operation["last_failure"] is None
+    assert registry_file["operations"] == [HOME_EDGE_AUDIT_PERSIST_OPERATION]
 
 
 def test_profile_rejects_changed_target_identity(tmp_path: Path) -> None:

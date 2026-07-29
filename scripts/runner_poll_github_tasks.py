@@ -241,6 +241,7 @@ QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES = (
 )
 HOME_EDGE_01_READ_ONLY_DIAGNOSTIC = "home_edge_01_read_only_diagnostic"
 HOME_EDGE_01_LAN_INVENTORY_READ_ONLY = "home_edge_01_lan_inventory_read_only"
+HOME_EDGE_AUDIT_PERSIST_V1 = "home_edge_audit_persist_v1"
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
         SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
@@ -278,6 +279,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES,
         HOME_EDGE_01_READ_ONLY_DIAGNOSTIC,
         HOME_EDGE_01_LAN_INVENTORY_READ_ONLY,
+        HOME_EDGE_AUDIT_PERSIST_V1,
         PREPARE_PRIVATE_STATIC_SITE_HANDOFF,
         DEPLOY_PRIVATE_STATIC_SITE,
     )
@@ -475,6 +477,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "approved_head_sha",
         "artifact_count",
         "artifact_id",
+        "audit_id",
+        "audit_persist_status",
         "base_branch",
         "base_ref_oid",
         "base_ref",
@@ -506,6 +510,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "compare_status",
         "canonical_write_enabled",
         "constructed_head_sha",
+        "conflict_status",
         "current_branch",
         "decision_records_skipped",
         "decision_records_written",
@@ -597,6 +602,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "network_provider_enabled",
         "next_action",
         "next_operator_action",
+        "operation_id",
         "open_issues_count",
         "open_pull_requests_count",
         "orient_status",
@@ -611,6 +617,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "pr_state",
         "pr_title",
         "pr_url",
+        "payload_hash",
         "publish_override_hash",
         "private_memory_db_configured",
         "private_memory_db_openable",
@@ -647,6 +654,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "recovery_stash_status",
         "recovery_snapshot_status",
         "reset_status",
+        "replay_status",
         "removed_worktrees_count",
         "report_drawings",
         "report_mode",
@@ -659,6 +667,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "runtime_smoke_decision",
         "runtime_smoke_stable_reason",
         "runtime_private_action",
+        "semantic_record_count",
         "ram_bytes",
         "repository",
         "rollback_status",
@@ -672,6 +681,9 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "selected_source_count",
         "services_disabled",
         "services_enabled",
+        "sqlite_history_count",
+        "sqlite_metadata_count",
+        "sqlite_state_count",
         "shortlist_row_count",
         "skipped_worktrees_count",
         "source_issue",
@@ -7882,7 +7894,91 @@ def _pr_branch_validation_metadata(
     )
 
 
-def _get_pr_branch_validation_state(repository: str, pr_number: int) -> dict[str, Any]:
+def _normalize_pr_branch_validation_state(
+    payload: dict[str, Any],
+    *,
+    expected_repository: str,
+    expected_pr_number: int,
+    source: str,
+) -> dict[str, Any]:
+    number = payload.get("number")
+    state = payload.get("state")
+    base_ref = payload.get("baseRefName")
+    base_sha = payload.get("baseRefOid")
+    head_ref = payload.get("headRefName")
+    head_sha = payload.get("headRefOid")
+    if number != expected_pr_number:
+        raise RuntimeError(f"{source} PR number mismatch")
+    if not isinstance(state, str) or state.upper() not in {"OPEN", "CLOSED", "MERGED"}:
+        raise RuntimeError(f"{source} PR state malformed")
+    if not isinstance(base_ref, str) or not _safe_target_base_branch_name(base_ref):
+        raise RuntimeError(f"{source} base branch malformed")
+    if not isinstance(head_ref, str) or not _safe_target_base_branch_name(head_ref):
+        raise RuntimeError(f"{source} head branch malformed")
+    if not isinstance(base_sha, str) or _HEAD_SHA_RE.fullmatch(base_sha) is None:
+        raise RuntimeError(f"{source} base SHA malformed")
+    if not isinstance(head_sha, str) or _HEAD_SHA_RE.fullmatch(head_sha) is None:
+        raise RuntimeError(f"{source} head SHA malformed")
+    if expected_repository not in ALLOWED_TARGET_REPOSITORIES:
+        raise RuntimeError(f"{source} repository not allowed")
+    return {
+        "number": number,
+        "state": state.upper(),
+        "baseRefName": base_ref,
+        "baseRefOid": base_sha.lower(),
+        "headRefName": head_ref,
+        "headRefOid": head_sha.lower(),
+    }
+
+
+def _pr_branch_validation_rest_state(repository: str, pr_number: int) -> dict[str, Any]:
+    if repository not in ALLOWED_TARGET_REPOSITORIES:
+        raise RuntimeError("REST PR metadata repository not allowed")
+    if not isinstance(pr_number, int) or pr_number <= 0:
+        raise RuntimeError("REST PR metadata number malformed")
+    code, output = run_command(
+        [
+            "gh",
+            "api",
+            "--method",
+            "GET",
+            f"repos/{repository}/pulls/{pr_number}",
+        ]
+    )
+    if code != 0:
+        raise RuntimeError("REST PR metadata read failed")
+    parsed = json.loads(output or "{}")
+    if not isinstance(parsed, dict):
+        raise RuntimeError("REST PR metadata returned non-object JSON")
+    base = parsed.get("base")
+    head = parsed.get("head")
+    if not isinstance(base, dict) or not isinstance(head, dict):
+        raise RuntimeError("REST PR metadata refs malformed")
+    state = parsed.get("state")
+    if state == "closed" and parsed.get("merged") is True:
+        normalized_state = "MERGED"
+    elif isinstance(state, str):
+        normalized_state = state.upper()
+    else:
+        normalized_state = state
+    return _normalize_pr_branch_validation_state(
+        {
+            "number": parsed.get("number"),
+            "state": normalized_state,
+            "baseRefName": base.get("ref"),
+            "baseRefOid": base.get("sha"),
+            "headRefName": head.get("ref"),
+            "headRefOid": head.get("sha"),
+        },
+        expected_repository=repository,
+        expected_pr_number=pr_number,
+        source="REST PR metadata",
+    )
+
+
+def _get_pr_branch_validation_state(
+    repository: str, pr_number: int
+) -> tuple[dict[str, Any], str]:
     code, output = run_command(
         [
             "gh",
@@ -7895,12 +7991,26 @@ def _get_pr_branch_validation_state(repository: str, pr_number: int) -> dict[str
             "number,state,baseRefName,baseRefOid,headRefName,headRefOid",
         ]
     )
-    if code != 0:
-        raise RuntimeError("gh pr view failed")
-    parsed = json.loads(output or "{}")
-    if not isinstance(parsed, dict):
-        raise RuntimeError("gh pr view returned non-object JSON")
-    return parsed
+    try:
+        if code != 0:
+            raise RuntimeError("gh pr view failed")
+        parsed = json.loads(output or "{}")
+        if not isinstance(parsed, dict):
+            raise RuntimeError("gh pr view returned non-object JSON")
+        return (
+            _normalize_pr_branch_validation_state(
+                parsed,
+                expected_repository=repository,
+                expected_pr_number=pr_number,
+                source="gh pr view",
+            ),
+            "gh",
+        )
+    except (RuntimeError, json.JSONDecodeError):
+        try:
+            return _pr_branch_validation_rest_state(repository, pr_number), "rest"
+        except (RuntimeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("PR metadata unavailable") from exc
 
 
 def _preflight_pr_refresh_metadata(
@@ -8178,8 +8288,9 @@ def _pr_branch_validation_block_reason(
         return "pr_number_mismatch"
     if str(pr_state.get("state") or "").upper() != "OPEN":
         return "pr_not_open"
-    if pr_state.get("baseRefName") != "main":
-        return "pr_base_not_main"
+    base_ref = pr_state.get("baseRefName")
+    if not isinstance(base_ref, str) or not _safe_target_base_branch_name(base_ref):
+        return "pr_base_ref_unsafe"
     base_sha = str(pr_state.get("baseRefOid") or "").lower()
     if _HEAD_SHA_RE.fullmatch(base_sha) is None:
         return "pr_base_sha_invalid"
@@ -8566,17 +8677,31 @@ def validate_pr_branch(body: str) -> str:
     status_lines.append(f"checkout_path={checkout_path}")
 
     try:
-        pr_state = _get_pr_branch_validation_state(
+        pr_lookup = _get_pr_branch_validation_state(
             request.repository, request.pr_number
         )
     except Exception:
         return _maintenance_report(
             "BLOCKED",
             task_id,
-            [*status_lines, "step=read_pr_metadata status=failed"],
+            [
+                *status_lines,
+                "step=read_pr_metadata status=failed",
+                "reason=pr_metadata_unavailable",
+            ],
             "not_met",
         )
-    status_lines.append("step=read_pr_metadata status=done")
+    if isinstance(pr_lookup, tuple):
+        pr_state, pr_metadata_source = pr_lookup
+    else:
+        pr_state = pr_lookup
+        pr_metadata_source = "gh"
+    status_lines.extend(
+        (
+            "step=read_pr_metadata status=done",
+            f"pr_metadata_source={pr_metadata_source}",
+        )
+    )
 
     block_reason = _pr_branch_validation_block_reason(request, pr_state)
     if block_reason is not None:
@@ -12269,6 +12394,74 @@ def home_edge_01_lan_inventory_read_only() -> str:
     )
 
 
+def home_edge_audit_persist_v1(body: str) -> str:
+    task_id = HOME_EDGE_AUDIT_PERSIST_V1
+    try:
+        from core.home_edge.audit_persist import persist_home_edge_runtime_audit
+
+        packet = _home_edge_audit_packet_from_body(body)
+        runtime_audit = packet.get("runtime_audit")
+        if not isinstance(runtime_audit, dict):
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                ["reason=runtime_audit_payload_missing"],
+                "not_met",
+            )
+        receipt = persist_home_edge_runtime_audit(runtime_audit)
+        verification = receipt.get("verification")
+        if not isinstance(verification, dict):
+            raise RuntimeError("home edge audit verification missing")
+        return _maintenance_report(
+            "DONE",
+            task_id,
+            [
+                f"operation_id={receipt['operation_id']}",
+                f"audit_id={receipt['audit_id']}",
+                f"audit_persist_status={receipt['status']}",
+                f"payload_hash={receipt['payload_hash']}",
+                f"semantic_record_count={verification['canonical_record_count']}",
+                f"sqlite_metadata_count={verification['sqlite_metadata_count']}",
+                f"sqlite_state_count={verification['sqlite_state_count']}",
+                f"sqlite_history_count={verification['sqlite_history_count']}",
+                f"replay_status={receipt['idempotency_classification']}",
+                "conflict_status=fail_closed",
+                "rollback_status=retry_recovery",
+                "next_operator_action=none",
+            ],
+            "met",
+        )
+    except Exception as exc:  # noqa: BLE001 - maintenance reports must fail closed.
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                f"reason={type(exc).__name__}",
+                "audit_persist_status=blocked",
+                "rollback_status=no_mutation_or_retry_recovery",
+            ],
+            "not_met",
+        )
+
+
+def _home_edge_audit_packet_from_body(body: str) -> dict[str, object]:
+    block = extract_task_block(body)
+    if block is None:
+        raise ValueError("runtime audit task block missing")
+    parsed = json.loads(block)
+    if not isinstance(parsed, dict):
+        raise ValueError("runtime audit task block must be a JSON object")
+    if parsed.get("operation_id") != HOME_EDGE_AUDIT_PERSIST_V1:
+        raise ValueError("runtime audit operation_id mismatch")
+    if parsed.get("device_id") != "home_edge_01":
+        raise ValueError("runtime audit device_id mismatch")
+    if parsed.get("execution_node") != "home-edge-01":
+        raise ValueError("runtime audit execution_node mismatch")
+    if parsed.get("approval_gate") != "operator_approval_required":
+        raise ValueError("runtime audit approval gate mismatch")
+    return parsed
+
+
 def _hermes_memory_gateway_smoke_packet(
     operation: str,
     parameters: dict[str, object],
@@ -12566,6 +12759,8 @@ def dispatch_runtime_maintenance_task(
             return home_edge_01_read_only_diagnostic()
         if task_id == HOME_EDGE_01_LAN_INVENTORY_READ_ONLY:
             return home_edge_01_lan_inventory_read_only()
+        if task_id == HOME_EDGE_AUDIT_PERSIST_V1:
+            return home_edge_audit_persist_v1(body)
         if task_id == PREPARE_PRIVATE_STATIC_SITE_HANDOFF:
             return _execute_prepare_private_static_site_handoff(body)
         if task_id == DEPLOY_PRIVATE_STATIC_SITE:

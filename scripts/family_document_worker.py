@@ -1,58 +1,55 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import argparse, json, os, time
+import argparse
+import json
+import sys
+import time
 from pathlib import Path
 
-from core.family_document_intake import Config, Intake, Person, State, inventory, stable_file
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from core.family_document_runtime import DurableJournal, FamilyDocumentWorker, RuntimeLimits
+from scripts.family_document_intake import load_processor
 
 
-def load_config(path: Path) -> tuple[Config, tuple[Path, ...]]:
-    value = json.loads(path.read_text(encoding='utf-8'))
-    people = tuple(Person(item['person_id'], tuple(item['aliases'])) for item in value['people'])
-    config = Config(
-        people=people,
-        archive_root=Path(value['archive_root']),
-        state_path=Path(value['state_path']),
-        outbox_path=Path(value['projection_outbox_path']),
-        memory_command=tuple(value['memory_adapter_command']),
-        calendar_command=tuple(value['calendar_adapter_command']),
-        settle_seconds=float(value.get('settle_seconds', 3)),
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="family-document-worker")
+    parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--once", action="store_true")
+    parser.add_argument("--poll-seconds", type=float, default=5.0)
+    parser.add_argument("--worker-id", default="family-document-worker-1")
+    args = parser.parse_args(argv)
+    payload = json.loads(args.config.expanduser().resolve(strict=True).read_text(encoding="utf-8"))
+    processor = load_processor(args.config)
+    journal = DurableJournal(
+        Path(str(payload["journal_path"])),
+        RuntimeLimits(
+            settle_seconds=float(payload.get("settle_seconds", 3.0)),
+            lease_seconds=int(payload.get("lease_seconds", 300)),
+            max_attempts=int(payload.get("max_attempts", 4)),
+            retry_base_seconds=int(payload.get("retry_base_seconds", 30)),
+            max_inventory_files=int(payload.get("max_inventory_files", 10000)),
+        ),
     )
-    return config, tuple(Path(item) for item in value['intake_roots'])
+    worker = FamilyDocumentWorker(
+        roots=processor.config.approved_roots,
+        journal=journal,
+        processor=processor,
+        lock_path=Path(str(payload["worker_lock_path"])),
+        worker_id=args.worker_id,
+    )
+    if args.once:
+        print(json.dumps(worker.run_once(), sort_keys=True))
+        return 0
+    if not 0.5 <= args.poll_seconds <= 300:
+        raise SystemExit("poll_interval_invalid")
+    while True:
+        print(json.dumps(worker.run_once(), sort_keys=True), flush=True)
+        time.sleep(args.poll_seconds)
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--config', required=True, type=Path)
-    parser.add_argument('--once', action='store_true')
-    args = parser.parse_args()
-    config, roots = load_config(args.config)
-    worker = Intake(config)
-    observations = State(config.state_path.with_suffix('.settling.json'))
-    lock_path = config.state_path.with_suffix('.lock')
-    lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    try:
-        while True:
-            counts = {'discovered': 0, 'processed': 0, 'review': 0, 'blocked': 0}
-            now = time.time()
-            for source in inventory(roots):
-                counts['discovered'] += 1
-                if not stable_file(source, observations.data, now, config.settle_seconds):
-                    continue
-                receipt = worker.process(source)
-                key = receipt['status'].lower()
-                counts['processed' if key == 'done' else key] = counts.get('processed' if key == 'done' else key, 0) + 1
-            observations.save()
-            print(json.dumps({'schema': 'skeleton.family_document_worker.public.v1', 'status': 'DONE', 'counts': counts}, sort_keys=True))
-            if args.once:
-                return 0
-            time.sleep(5)
-    finally:
-        os.close(lock_fd)
-        lock_path.unlink(missing_ok=True)
-
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     raise SystemExit(main())

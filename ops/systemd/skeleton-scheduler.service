@@ -1,0 +1,28 @@
+[Unit]
+Description=Skeleton Scheduler Core tick
+After=local-fs.target
+ConditionPathExists=@INSTALL_ROOT@/scripts/scheduler_tick.py
+
+[Service]
+Type=oneshot
+User=@SERVICE_USER@
+Group=@SERVICE_GROUP@
+WorkingDirectory=@INSTALL_ROOT@
+ExecStart=/usr/bin/python3 @INSTALL_ROOT@/scripts/scheduler_tick.py --db @STATE_ROOT@/scheduler.sqlite3 tick
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=@STATE_ROOT@
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

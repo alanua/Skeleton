@@ -1,184 +1,513 @@
 from __future__ import annotations
 
-import hashlib, json, os, re, shutil, subprocess, tempfile
+import hashlib
+import json
+import os
+import re
+import shutil
 from dataclasses import dataclass
-from datetime import date
 from pathlib import Path
-from typing import Callable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
-TOPICS = (
-    '01 identity_and_civil_status','02 migration_and_residence','03 health_and_insurance',
-    '04 work_tax_and_business','05 education_and_qualification','06 finance_banking_and_contracts',
-    '07 legal_courts_official_correspondence','08 housing_and_utilities','09 transport_and_travel',
+from core.family_document_runtime import ProjectionOutbox
+from core.family_document_sinks import CalendarSink, MemoryGatewaySink, SinkError, build_private_mutation
+from core.family_document_sources import ApprovedRoot, SourceError, SourceReference, inventory_sources, resolve_source
+from core.family_document_taxonomy import (
+    APPROVED_EVENT_TYPES,
+    COUNTRY_RULES,
+    DOCUMENT_TYPE_RULES,
+    SERVICE_FOLDERS,
+    TOPIC_RULES,
+    TOPICS,
+    extract_amounts,
+    extract_document_date,
+    extract_event_candidates,
+    extract_identifiers,
+    extract_issuer,
+    normalize_text,
+    score_unique,
 )
-SERVICE_FOLDERS = ('00 intake','98 duplicates_versions','99 review')
-SUPPORTED = {'.pdf','.tif','.tiff','.png','.jpg','.jpeg','.txt','.doc','.docx','.odt','.rtf','.xls','.xlsx','.ods'}
-PARTIAL = ('.part','.partial','.tmp','.crdownload')
-EVENT_WORDS = {'appointment':'appointment','termin':'appointment','deadline':'deadline','frist':'deadline','expires':'expiration','renewal':'renewal','hearing':'hearing','booking confirmed':'booked_travel','geburtsdatum':'birthday'}
-TOPIC_WORDS = {
-    TOPICS[0]:('birth certificate','marriage certificate','standesamt'), TOPICS[1]:('aufenthalt','residence permit','visa','jobcenter'),
-    TOPICS[2]:('krankenkasse','insurance','medical','arzt'), TOPICS[3]:('steuer','tax','invoice','gewerbe','finanzamt'),
-    TOPICS[4]:('schule','university','diploma','zeugnis'), TOPICS[5]:('bank','konto','contract','rechnung','iban'),
-    TOPICS[6]:('court','gericht','bescheid','legal'), TOPICS[7]:('rent','miete','wohnung','utility','strom'),
-    TOPICS[8]:('booking','flight','train','reise','ticket'),
-}
-COUNTRIES = {'DE':('deutschland','germany','finanzamt','jobcenter'),'UA':('ukraine','україна','київ'),'IT':('italia','italy'),'FR':('france','français'),'CA':('canada',)}
+from core.local_document_ocr import LocalDocumentOcr, OcrError, OcrResult, sha256_file
+
 
 class IntakeError(RuntimeError):
-    def __init__(self, reason: str): super().__init__(reason); self.reason = reason
+    def __init__(self, reason_code: str) -> None:
+        super().__init__(reason_code)
+        self.reason_code = reason_code
+
 
 @dataclass(frozen=True)
 class Person:
     person_id: str
     aliases: tuple[str, ...]
 
+    def __post_init__(self) -> None:
+        if not self.person_id or "/" in self.person_id or "\\" in self.person_id:
+            raise IntakeError("person_id_invalid")
+        aliases = tuple(alias.strip() for alias in self.aliases if alias.strip())
+        if not aliases:
+            raise IntakeError("person_aliases_required")
+        object.__setattr__(self, "aliases", aliases)
+
+
 @dataclass(frozen=True)
-class Config:
+class IntakeConfig:
     people: tuple[Person, ...]
+    approved_roots: tuple[ApprovedRoot, ...]
     archive_root: Path
-    state_path: Path
-    outbox_path: Path
-    memory_command: tuple[str, ...]
-    calendar_command: tuple[str, ...]
-    settle_seconds: float = 3.0
+    memory_sink: MemoryGatewaySink
+    calendar_sink: CalendarSink
+    projection_outbox: ProjectionOutbox
+    ocr: LocalDocumentOcr
+    record_revision: str = "family-document-v1"
 
-class State:
-    def __init__(self, path: Path): self.path=path; self.data=self._load()
-    def _load(self):
-        if not self.path.exists(): return {}
-        value=json.loads(self.path.read_text('utf-8'))
-        if not isinstance(value,dict): raise IntakeError('invalid_state')
-        return value
-    def save(self):
-        self.path.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
-        fd,tmp=tempfile.mkstemp(dir=self.path.parent,prefix=self.path.name+'.')
-        with os.fdopen(fd,'w',encoding='utf-8') as f: json.dump(self.data,f,sort_keys=True,separators=(',',':')); f.flush(); os.fsync(f.fileno())
-        os.chmod(tmp,0o600); os.replace(tmp,self.path)
+    def __post_init__(self) -> None:
+        if len(self.people) != 3 or len({person.person_id for person in self.people}) != 3:
+            raise IntakeError("exactly_three_people_required")
+        if not self.approved_roots:
+            raise IntakeError("approved_roots_required")
+        archive = Path(self.archive_root).expanduser().resolve(strict=False)
+        archive.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if archive.is_symlink():
+            raise IntakeError("archive_root_symlinked")
+        object.__setattr__(self, "archive_root", archive)
+        if not self.record_revision or len(self.record_revision) > 128:
+            raise IntakeError("record_revision_invalid")
 
-class Intake:
-    def __init__(self,cfg:Config, runner:Callable|None=None):
-        if len(cfg.people)!=3 or len({p.person_id for p in cfg.people})!=3: raise IntakeError('exactly_three_people_required')
-        if not cfg.memory_command or not cfg.calendar_command: raise IntakeError('adapter_missing')
-        self.cfg=cfg; self.runner=runner or self._run; self.state=State(cfg.state_path); self.outbox=State(cfg.outbox_path)
 
-    def plan(self,source:Path,text:str|None=None)->dict:
-        source=source.resolve()
-        if not source.is_file() or source.suffix.lower() not in SUPPORTED or source.name.lower().endswith(PARTIAL): raise IntakeError('source_unavailable')
-        digest=sha256(source); extracted=text if text is not None else local_text(source,self.runner)
-        normalized=' '.join(extracted.casefold().split())
-        subjects=[p.person_id for p in self.cfg.people if any(a.casefold() in normalized for a in p.aliases)]
-        topic=unique_rule(normalized,TOPIC_WORDS); country=unique_rule(normalized,COUNTRIES)
-        date_value,date_precision=extract_date(normalized); doc_type=extract_type(normalized,topic); issuer=extract_issuer(extracted)
-        ready=len(subjects)==1 and all((topic,country,doc_type,issuer))
-        name=visible_name(date_value,date_precision,doc_type or 'document',issuer or 'unknown issuer',source.suffix)
-        relative=Path(subjects[0],topic,country,(date_value or 'Без дати')[:4],name) if ready else Path('99 review',name)
-        doc_id=hashlib.sha256(('family_documents|'+digest).encode()).hexdigest()
-        events=events_from(normalized,date_value,subjects[0] if len(subjects)==1 else 'review',digest)
-        record={'schema':'skeleton.family_document_record.v1','document_id':doc_id,'cluster_id':digest,'binary_sha256':digest,'byte_size':source.stat().st_size,
-                'corrected_ocr_text':extracted,'raw_ocr_hash':hashlib.sha256(extracted.encode()).hexdigest(),'languages':languages(extracted),
-                'principal_subject':subjects[0] if len(subjects)==1 else None,'all_subjects':subjects,'topic':topic,'jurisdiction':country,
-                'document_date':date_value,'document_date_precision':date_precision,'document_type':doc_type,'issuer':issuer,
-                'field_evidence':{'subjects':subjects,'topic':topic,'jurisdiction':country},'archive_relative_path':str(relative),
-                'duplicate_relations':[],'version_relations':[],'event_candidates':events,'semantic_summary':' | '.join(x for x in (doc_type,issuer,topic,country) if x),
-                'canonical_source_kind':'canonical_sqlite'}
-        return {'ready':ready,'source':source,'digest':digest,'relative':relative,'record':record,'events':events,'key':doc_id}
+@dataclass(frozen=True)
+class DocumentPlan:
+    source: SourceReference
+    ocr: OcrResult
+    ready: bool
+    review_reasons: tuple[str, ...]
+    archive_relative_path: str
+    archive_target: Path
+    record: Mapping[str, Any]
+    calendar_events: tuple[Mapping[str, Any], ...]
+    version_fingerprint: str
 
-    def process(self,source:Path,*,dry_run=False,text:str|None=None)->Mapping[str,object]:
-        try: plan=self.plan(source,text)
-        except IntakeError as exc: return public('BLOCKED',exc.reason)
-        if not plan['ready']: return public('REVIEW','review_required',{'planned':1,'review':1,'written':0})
-        if dry_run: return public('DONE','done',{'planned':1,'written':0,'calendar_events':len(plan['events'])})
-        key=plan['key']; entry=self.state.data.setdefault(key,{'state':'DISCOVERED'})
-        archive=self.cfg.archive_root/plan['relative']; archive.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
-        if entry['state']=='DISCOVERED':
-            shutil.copyfile(plan['source'],archive)
-            if sha256(archive)!=plan['digest']: raise IntakeError('archive_failed')
-            entry.update(state='ARCHIVED',archive_verified=True); self.state.save()
-        if entry['state']=='ARCHIVED':
-            receipt=self._adapter(self.cfg.memory_command,{'command':'skeleton.memory.private_mutate','operation':'put','dataset':'family_documents','fact_key':'family_document:'+key,'idempotency_key':key+':v1','value':plan['record']},'memory_failed')
-            entry.update(state='MEMORY_COMMITTED',memory_receipt=receipt); self.state.save()
-        self.outbox.data.setdefault(key+':projection',{'status':'PENDING','attempts':0,'dataset':'family_documents','fact_key':'family_document:'+key,'value_hash':stable_hash(plan['record'])}); self.outbox.save()
-        if entry['state']=='MEMORY_COMMITTED':
-            for event in plan['events']: self._adapter(self.cfg.calendar_command,{'operation':'upsert','idempotency_key':event['uid'],'event':event},'calendar_failed')
-            entry.update(state='DONE',calendar_count=len(plan['events'])); self.state.save()
-        return public('DONE','projection_degraded',{'planned':1,'written':1,'calendar_events':len(plan['events']),'projection_pending':1})
+    def private_dict(self) -> dict[str, object]:
+        return {
+            "source": self.source.private_dict(),
+            "ready": self.ready,
+            "review_reasons": list(self.review_reasons),
+            "archive_relative_path": self.archive_relative_path,
+            "record": dict(self.record),
+            "calendar_events": [dict(event) for event in self.calendar_events],
+            "version_fingerprint": self.version_fingerprint,
+        }
 
-    def _adapter(self,command,payload,reason):
-        code,out,_=self.runner(command,json.dumps(payload,ensure_ascii=False,separators=(',',':')))
-        if code: raise IntakeError(reason)
-        try: value=json.loads(out)
-        except json.JSONDecodeError: raise IntakeError(reason)
-        if not isinstance(value,dict) or value.get('status') not in {'DONE','ACCEPTED','IDEMPOTENT'}: raise IntakeError(reason)
-        return value
-    @staticmethod
-    def _run(command,input_text):
-        try: p=subprocess.run(list(command),input=input_text,text=True,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=120,check=False)
-        except (OSError,subprocess.TimeoutExpired): return 1,'','adapter unavailable'
-        return p.returncode,p.stdout[:1000000],p.stderr[:4096]
 
-def stable_file(path:Path,observed:dict,now:float,settle:float)->bool:
-    s=path.stat(); current=(s.st_size,s.st_mtime_ns); previous=observed.get(str(path)); observed[str(path)]={'size':s.st_size,'mtime_ns':s.st_mtime_ns,'seen_at':now}
-    return bool(previous and (previous['size'],previous['mtime_ns'])==current and now-previous['seen_at']>=settle and s.st_size>0)
-def inventory(roots:Sequence[Path],limit=10000):
-    out=[]
-    for root in roots:
-        root=root.resolve()
-        for current,dirs,files in os.walk(root,followlinks=False):
-            dirs[:]=[d for d in sorted(dirs) if d.casefold() not in {'.git','.ssh','secrets','node_modules','__pycache__'}]
-            for name in sorted(files):
-                p=Path(current,name)
-                if p.suffix.lower() in SUPPORTED and not name.lower().endswith(PARTIAL): out.append(p)
-                if len(out)>=limit:return tuple(out)
-    return tuple(out)
-def local_text(path:Path,runner):
-    if path.suffix.lower()=='.txt': return path.read_text('utf-8')
-    cmd=('pdftotext','-layout',str(path),'-') if path.suffix.lower()=='.pdf' else ('tesseract',str(path),'stdout','-l','eng+deu+ukr')
-    code,out,_=runner(cmd,None)
-    if code or not out.strip(): raise IntakeError('ocr_failed')
-    return out[:2000000]
-def unique_rule(text,rules):
-    scores=[(sum(1 for w in words if w in text),name) for name,words in rules.items()]
-    scores=[item for item in scores if item[0]]; scores.sort(reverse=True)
-    return scores[0][1] if scores and (len(scores)==1 or scores[0][0]>scores[1][0]) else None
-def extract_date(text):
-    m=re.search(r'\b(20\d{2}|19\d{2})[-/.](0[1-9]|1[0-2])[-/.]([0-2]\d|3[01])\b',text)
-    if m:
-        try:return date(*map(int,m.groups())).isoformat(),'day'
-        except ValueError:pass
-    m=re.search(r'\b(20\d{2}|19\d{2})[-/.](0[1-9]|1[0-2])\b',text)
-    if m:return f'{m.group(1)}-{m.group(2)}','month'
-    m=re.search(r'\b(20\d{2}|19\d{2})\b',text); return (m.group(1),'year') if m else (None,None)
-def extract_type(text,topic):
-    for name,words in {'invoice':('invoice','rechnung'),'official notice':('bescheid','decision notice'),'contract':('contract','vertrag'),'appointment letter':('appointment','termin'),'travel booking':('booking confirmed','reservation')}.items():
-        if any(w in text for w in words): return name
-    return topic.split(' ',1)[1].replace('_',' ') if topic else None
-def extract_issuer(text):
-    for line in text.splitlines()[:20]:
-        m=re.match(r'(?i)(issuer|from|absender|herausgeber)\s*[:\-]\s*(.{2,80})$',line.strip())
-        if m:return m.group(2).strip()
-    return None
-def visible_name(value,precision,kind,issuer,suffix):
-    prefix=value if precision else 'Без дати'; clean=lambda s:re.sub(r'[^A-Za-z0-9ÄÖÜäöüßА-Яа-яІіЇїЄє ._-]+','',s).strip()[:80] or 'unknown'
-    return f'{prefix} — {clean(kind)} — {clean(issuer)}{suffix.lower()}'
-def events_from(text,value,subject,digest):
-    if not value or len(value)!=10:return []
-    out=[]
-    for word,kind in EVENT_WORDS.items():
-        if word in text:
-            uid=hashlib.sha256(f'{digest}|{kind}|{value}|{subject}'.encode()).hexdigest(); out.append({'uid':uid,'event_type':kind,'date':value,'subject':subject,'privacy':'private','attendees':[],'conference':None})
-    return out
-def languages(text):
-    out=[]
-    if re.search(r'[А-Яа-яІіЇїЄє]',text):out.append('uk')
-    if re.search(r'[ÄÖÜäöüß]',text):out.append('de')
-    if re.search(r'[A-Za-z]',text):out.append('en')
-    return out or ['und']
-def sha256(path):
-    h=hashlib.sha256()
-    with path.open('rb') as f:
-        for chunk in iter(lambda:f.read(1024*1024),b''):h.update(chunk)
-    return h.hexdigest()
-def stable_hash(value):return hashlib.sha256(json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(',',':')).encode()).hexdigest()
-def public(status,reason,counts=None):
-    allowed={'done','review_required','projection_degraded','source_unavailable','ocr_failed','archive_failed','memory_failed','calendar_failed','exactly_three_people_required','adapter_missing'}
-    return {'schema':'skeleton.family_document_receipt.public.v1','status':status,'reason_code':reason if reason in allowed else 'source_unavailable','counts':dict(counts or {})}
+class DocumentProcessor:
+    def __init__(self, config: IntakeConfig) -> None:
+        self.config = config
+
+    def plan(self, source: Path) -> DocumentPlan:
+        try:
+            reference = resolve_source(source, self.config.approved_roots)
+            ocr = self.config.ocr.extract(reference.absolute_path)
+        except SourceError as exc:
+            raise IntakeError(exc.reason_code) from exc
+        except OcrError as exc:
+            raise IntakeError(exc.reason_code) from exc
+
+        text = ocr.corrected_text
+        normalized = normalize_text(text)
+        subject_evidence = self._subjects(normalized)
+        subjects = [item["person_id"] for item in subject_evidence if item["matched"]]
+        principal = subjects[0] if len(subjects) == 1 else None
+        topic = score_unique(normalized, TOPIC_RULES)
+        jurisdiction = score_unique(normalized, COUNTRY_RULES)
+        document_type = score_unique(normalized, DOCUMENT_TYPE_RULES)
+        issuer = extract_issuer(text)
+        document_date, date_precision, date_evidence = extract_document_date(normalized)
+        identifiers = extract_identifiers(text)
+        amounts = extract_amounts(text)
+        event_candidates = extract_event_candidates(text)
+        deadlines = [candidate.to_dict() for candidate in event_candidates if candidate.event_type == "deadline"]
+
+        review_reasons: list[str] = []
+        if principal is None:
+            review_reasons.append("principal_subject_ambiguous")
+        if topic.value not in TOPICS or topic.confidence < 0.60:
+            review_reasons.append("topic_ambiguous")
+        if jurisdiction.value is None or jurisdiction.confidence < 0.60:
+            review_reasons.append("jurisdiction_ambiguous")
+        if document_type.value is None or document_type.confidence < 0.60:
+            review_reasons.append("document_type_ambiguous")
+        if issuer.value is None or issuer.confidence < 0.55:
+            review_reasons.append("issuer_ambiguous")
+
+        year = document_date[:4] if document_date else "Без дати"
+        visible_name = normalized_filename(
+            document_date,
+            date_precision,
+            document_type.value or "document",
+            issuer.value or "unknown issuer",
+            reference.absolute_path.suffix,
+        )
+        if review_reasons:
+            relative = Path(SERVICE_FOLDERS[2], visible_name)
+        else:
+            relative = Path(principal or "review", topic.value or "review", jurisdiction.value or "review", year, visible_name)
+        archive_target = _safe_archive_target(self.config.archive_root, relative)
+
+        document_id = "document:" + hashlib.sha256(
+            f"family_documents\x1f{ocr.source_sha256}".encode("utf-8")
+        ).hexdigest()[:48]
+        source_identity = "source:" + hashlib.sha256(
+            f"{reference.root_alias}\x1f{reference.relative_path}".encode("utf-8")
+        ).hexdigest()[:48]
+        version_fingerprint = hashlib.sha256(
+            "\x1f".join(
+                (
+                    principal or "review",
+                    topic.value or "review",
+                    jurisdiction.value or "review",
+                    document_type.value or "document",
+                    issuer.value or "unknown",
+                )
+            ).encode("utf-8")
+        ).hexdigest()
+
+        calendar_events: list[Mapping[str, Any]] = []
+        if principal is not None:
+            for candidate in event_candidates:
+                if candidate.event_type not in APPROVED_EVENT_TYPES or candidate.confidence < 0.80:
+                    continue
+                event_id = "family-document-event:" + hashlib.sha256(
+                    f"{document_id}\x1f{candidate.event_type}\x1f{candidate.date}\x1f{principal}".encode("utf-8")
+                ).hexdigest()[:48]
+                calendar_events.append(
+                    {
+                        "schema": "skeleton.family_document_event.v1",
+                        "event_id": event_id,
+                        "event_type": candidate.event_type,
+                        "date": candidate.date,
+                        "principal_subject": principal,
+                        "document_id": document_id,
+                        "confidence": candidate.confidence,
+                        "evidence_hash": hashlib.sha256(candidate.evidence.encode("utf-8")).hexdigest(),
+                        "privacy": "private",
+                        "attendees": [],
+                        "conference": None,
+                    }
+                )
+
+        field_confidence = {
+            "principal_subject": 0.95 if principal else 0.25,
+            "all_subjects": max((float(item["confidence"]) for item in subject_evidence), default=0.0),
+            "topic": topic.confidence,
+            "jurisdiction": jurisdiction.confidence,
+            "document_type": document_type.confidence,
+            "issuer": issuer.confidence,
+            "document_date": date_evidence.confidence,
+            "identifiers": 0.90 if identifiers else 0.0,
+            "amounts": 0.85 if amounts else 0.0,
+            "deadlines": max((float(item["confidence"]) for item in deadlines), default=0.0),
+        }
+        field_evidence = {
+            "subjects": subject_evidence,
+            "topic": topic.to_dict(),
+            "jurisdiction": jurisdiction.to_dict(),
+            "document_type": document_type.to_dict(),
+            "issuer": issuer.to_dict(),
+            "document_date": date_evidence.to_dict(),
+        }
+        record: dict[str, Any] = {
+            "schema": "skeleton.family_document_record.v1",
+            "record_revision": self.config.record_revision,
+            "document_id": document_id,
+            "binary_sha256": ocr.source_sha256,
+            "byte_size": reference.byte_size,
+            "source": {
+                "source_identity": source_identity,
+                "root_alias": reference.root_alias,
+                "absolute_path": str(reference.absolute_path),
+                "relative_path": reference.relative_path,
+                "mtime_ns": reference.mtime_ns,
+                "byte_size": reference.byte_size,
+            },
+            "ocr": ocr.private_dict(),
+            "principal_subject": principal,
+            "all_subjects": subjects,
+            "topic": topic.value,
+            "jurisdiction_country": jurisdiction.value,
+            "document_date": document_date,
+            "document_date_precision": date_precision,
+            "document_type": document_type.value,
+            "issuer": issuer.value,
+            "identifiers": identifiers,
+            "amounts": amounts,
+            "deadlines": deadlines,
+            "field_confidence": field_confidence,
+            "field_evidence": field_evidence,
+            "archive": {
+                "relative_path": relative.as_posix(),
+                "sha256": ocr.source_sha256,
+                "readback_verified": False,
+            },
+            "duplicate_relations": [],
+            "version_relations": [],
+            "version_fingerprint": version_fingerprint,
+            "event_candidates": [dict(event) for event in calendar_events],
+            "review": {"required": bool(review_reasons), "reason_codes": review_reasons},
+            "projection": {"status": "PENDING"},
+        }
+        return DocumentPlan(
+            source=reference,
+            ocr=ocr,
+            ready=not review_reasons,
+            review_reasons=tuple(review_reasons),
+            archive_relative_path=relative.as_posix(),
+            archive_target=archive_target,
+            record=record,
+            calendar_events=tuple(calendar_events),
+            version_fingerprint=version_fingerprint,
+        )
+
+    def process(self, source: Path, *, dry_run: bool = False) -> Mapping[str, object]:
+        try:
+            plan = self.plan(source)
+        except IntakeError as exc:
+            return public_receipt("BLOCKED", exc.reason_code, {"planned": 0, "written": 0})
+        if not plan.ready:
+            return public_receipt(
+                "REVIEW",
+                "review_required",
+                {"planned": 1, "review": 1, "written": 0, "event_candidates": len(plan.calendar_events)},
+            )
+        if dry_run:
+            return public_receipt(
+                "DONE",
+                "dry_run_complete",
+                {"planned": 1, "written": 0, "event_candidates": len(plan.calendar_events)},
+            )
+        try:
+            archive_path, duplicate = archive_verified(plan, self.config.archive_root)
+            record = json.loads(json.dumps(plan.record))
+            archive = record["archive"]
+            archive["absolute_path"] = str(archive_path)
+            archive["readback_verified"] = True
+            if duplicate:
+                record["duplicate_relations"] = [record["document_id"]]
+            memory = self.config.memory_sink.commit_and_readback(
+                record,
+                source_hash=plan.ocr.source_sha256,
+            )
+            projection_key = f"{memory['canonical_ref']}:projection"
+            self.config.projection_outbox.enqueue(projection_key, stable_hash(record))
+            calendar_done = 0
+            calendar_failed = 0
+            for event in plan.calendar_events:
+                try:
+                    self.config.calendar_sink.upsert(event)
+                    calendar_done += 1
+                except SinkError:
+                    calendar_failed += 1
+            reason = "calendar_degraded" if calendar_failed else "projection_pending"
+            return public_receipt(
+                "DONE",
+                reason,
+                {
+                    "planned": 1,
+                    "written": 0 if duplicate else 1,
+                    "duplicates": 1 if duplicate else 0,
+                    "canonical_commits": 1,
+                    "canonical_readbacks": 1,
+                    "calendar_events": calendar_done,
+                    "calendar_failed": calendar_failed,
+                    "projection_pending": 1,
+                },
+            )
+        except (IntakeError, SinkError) as exc:
+            return public_receipt("BLOCKED", exc.reason_code, {"planned": 1, "written": 0})
+
+    def reconcile(self, *, max_files: int = 10000) -> tuple[dict[str, object], dict[str, object]]:
+        plans: list[DocumentPlan] = []
+        blocked = 0
+        for reference in inventory_sources(self.config.approved_roots, max_files=max_files):
+            try:
+                plans.append(self.plan(reference.absolute_path))
+            except IntakeError:
+                blocked += 1
+        digest_groups: dict[str, list[int]] = {}
+        version_groups: dict[str, list[int]] = {}
+        for index, plan in enumerate(plans):
+            digest_groups.setdefault(plan.ocr.source_sha256, []).append(index)
+            version_groups.setdefault(plan.version_fingerprint, []).append(index)
+        items: list[dict[str, object]] = []
+        for index, plan in enumerate(plans):
+            record = json.loads(json.dumps(plan.record))
+            duplicates = [plans[position].record["document_id"] for position in digest_groups[plan.ocr.source_sha256] if position != index]
+            versions = [plans[position].record["document_id"] for position in version_groups[plan.version_fingerprint] if position != index and plans[position].ocr.source_sha256 != plan.ocr.source_sha256]
+            record["duplicate_relations"] = duplicates
+            record["version_relations"] = versions
+            mutation = build_private_mutation(
+                record,
+                approval_ref="operator.family_document.reconciliation",
+                source_hash=plan.ocr.source_sha256,
+            )
+            payload = mutation["payload"]
+            items.append(
+                {
+                    "source": plan.source.private_dict(),
+                    "ready": plan.ready,
+                    "review_reasons": list(plan.review_reasons),
+                    "archive_relative_path": plan.archive_relative_path,
+                    "document_id": record["document_id"],
+                    "fact_namespace": payload["fact_namespace"],
+                    "fact_id": payload["fact_id"],
+                    "idempotency_key": payload["idempotency_key"],
+                    "duplicate_relations": duplicates,
+                    "version_relations": versions,
+                    "calendar_event_ids": [event["event_id"] for event in plan.calendar_events],
+                    "record": record,
+                }
+            )
+        packet = {
+            "schema": "skeleton.family_document.reconciliation_packet.v1",
+            "zero_side_effect": True,
+            "items": items,
+        }
+        packet_hash = stable_hash(packet)
+        packet["packet_hash"] = packet_hash
+        counts = {
+            "inventory": len(plans) + blocked,
+            "planned": len(plans),
+            "ready": sum(1 for plan in plans if plan.ready),
+            "review": sum(1 for plan in plans if not plan.ready),
+            "blocked": blocked,
+            "duplicate_groups": sum(1 for values in digest_groups.values() if len(values) > 1),
+            "version_groups": sum(1 for values in version_groups.values() if len({plans[index].ocr.source_sha256 for index in values}) > 1),
+            "calendar_events": sum(len(plan.calendar_events) for plan in plans),
+        }
+        return packet, public_receipt("DONE", "reconciliation_packet_ready", counts)
+
+    def _subjects(self, normalized_text: str) -> list[dict[str, object]]:
+        result: list[dict[str, object]] = []
+        for person in self.config.people:
+            hits = [alias for alias in person.aliases if alias.casefold() in normalized_text]
+            result.append(
+                {
+                    "person_id": person.person_id,
+                    "matched": bool(hits),
+                    "confidence": min(0.99, 0.75 + 0.08 * len(hits)) if hits else 0.0,
+                    "aliases": hits,
+                }
+            )
+        return result
+
+
+def archive_verified(plan: DocumentPlan, archive_root: Path) -> tuple[Path, bool]:
+    target = _safe_archive_target(archive_root, Path(plan.archive_relative_path))
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if target.exists():
+        if target.is_symlink():
+            raise IntakeError("archive_target_symlinked")
+        if sha256_file(target) == plan.ocr.source_sha256:
+            return target, True
+        target = _safe_archive_target(
+            archive_root,
+            Path(
+                SERVICE_FOLDERS[1],
+                plan.version_fingerprint[:16],
+                f"{target.stem}--{plan.ocr.source_sha256[:12]}{target.suffix}",
+            ),
+        )
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if target.exists():
+            if sha256_file(target) == plan.ocr.source_sha256:
+                return target, True
+            raise IntakeError("archive_collision")
+    temporary = target.with_name(target.name + f".{os.getpid()}.part")
+    try:
+        with plan.source.absolute_path.open("rb") as reader, temporary.open("xb") as writer:
+            shutil.copyfileobj(reader, writer, length=1024 * 1024)
+            writer.flush()
+            os.fsync(writer.fileno())
+        if sha256_file(temporary) != plan.ocr.source_sha256:
+            raise IntakeError("archive_write_hash_mismatch")
+        os.replace(temporary, target)
+        target.chmod(0o600)
+        _fsync_directory(target.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
+    if sha256_file(target) != plan.ocr.source_sha256:
+        raise IntakeError("archive_readback_failed")
+    return target, False
+
+
+def normalized_filename(
+    date_value: str | None,
+    precision: str | None,
+    document_type: str,
+    issuer: str,
+    suffix: str,
+) -> str:
+    prefix = date_value if date_value and precision else "Без дати"
+    clean_type = _clean_component(document_type)
+    clean_issuer = _clean_component(issuer)
+    extension = suffix.casefold() if suffix else ".bin"
+    return f"{prefix} — {clean_type} — {clean_issuer}{extension}"
+
+
+def public_receipt(status: str, reason_code: str, counts: Mapping[str, int]) -> dict[str, object]:
+    allowed_reasons = {
+        "review_required", "dry_run_complete", "projection_pending", "calendar_degraded",
+        "reconciliation_packet_ready", "source_unavailable", "source_unsupported", "source_partial",
+        "source_symlink_rejected", "source_outside_approved_roots", "source_empty",
+        "ocr_format_unsupported", "ocr_empty", "text_read_failed", "pdf_ocr_failed",
+        "pdf_ocr_empty", "pdftotext_failed", "tesseract_failed", "office_conversion_failed",
+        "office_conversion_output_invalid", "archive_target_symlinked", "archive_collision",
+        "archive_write_hash_mismatch", "archive_readback_failed", "memory_mutation_failed",
+        "memory_exact_read_failed", "memory_exact_read_mismatch", "calendar_upsert_failed",
+        "adapter_failed", "adapter_response_invalid", "processing_failed",
+    }
+    safe_reason = reason_code if reason_code in allowed_reasons else "processing_failed"
+    safe_counts: dict[str, int] = {}
+    for key, value in counts.items():
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            continue
+        safe_counts[str(key)] = value
+    return {
+        "schema": "skeleton.family_document_receipt.public.v1",
+        "status": status if status in {"DONE", "REVIEW", "BLOCKED", "DEGRADED"} else "BLOCKED",
+        "reason_code": safe_reason,
+        "counts": safe_counts,
+    }
+
+
+def stable_hash(value: object) -> str:
+    encoded = json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _safe_archive_target(root: Path, relative: Path) -> Path:
+    if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+        raise IntakeError("archive_relative_path_invalid")
+    root = Path(root).resolve(strict=True)
+    target = (root / relative).resolve(strict=False)
+    if root not in target.parents:
+        raise IntakeError("archive_path_escape")
+    current = root
+    for part in relative.parts[:-1]:
+        current = current / part
+        if current.exists() and current.is_symlink():
+            raise IntakeError("archive_target_symlinked")
+    return target
+
+
+def _clean_component(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9ÄÖÜäöüßА-Яа-яІіЇїЄє ._-]+", "", value).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned[:80] or "unknown"
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)

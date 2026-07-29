@@ -11793,6 +11793,18 @@ def _pr_validation_state(**updates: object) -> dict[str, object]:
     return state
 
 
+def _pr_validation_rest_state(**updates: object) -> dict[str, object]:
+    state: dict[str, object] = {
+        "number": 123,
+        "state": "open",
+        "base": {"ref": "main", "sha": "b" * 40},
+        "head": {"ref": "runner-test-branch", "sha": HEAD_SHA},
+        "merged": False,
+    }
+    state.update(updates)
+    return state
+
+
 def _preflight_pr_state(**updates: object) -> dict[str, object]:
     state: dict[str, object] = {
         "number": 123,
@@ -13333,6 +13345,118 @@ def test_validate_pr_branch_unsupported_profile_blocks() -> None:
     assert "reason=unsupported_validation_profile" in report
 
 
+def test_validate_pr_branch_primary_gh_metadata_success_reports_source() -> None:
+    def run_validation_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        del cwd
+        if command[:3] == ["gh", "pr", "view"]:
+            return 0, json.dumps(_pr_validation_state())
+        return 2, "unexpected command"
+
+    with mock.patch.object(
+        runner, "run_command", side_effect=run_validation_command
+    ) as run:
+        report = runner.validate_pr_branch(
+            _validate_pr_issue_body(expected_head_sha="c" * 40)
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "step=read_pr_metadata status=done" in report
+    assert "pr_metadata_source=gh" in report
+    assert "reason=expected_head_sha_mismatch" in report
+    commands = [call.args[0] for call in run.call_args_list]
+    assert not any(command[:3] == ["git", "fetch", "origin"] for command in commands)
+
+
+def test_validate_pr_branch_gh_metadata_failure_uses_valid_rest_source() -> None:
+    def run_validation_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        del cwd
+        if command[:3] == ["gh", "pr", "view"]:
+            return 1, "gh metadata failed"
+        if command == [
+            "gh",
+            "api",
+            "--method",
+            "GET",
+            f"repos/{runner.REPO}/pulls/123",
+        ]:
+            return 0, json.dumps(_pr_validation_rest_state())
+        return 2, "unexpected command"
+
+    with mock.patch.object(
+        runner, "run_command", side_effect=run_validation_command
+    ) as run:
+        report = runner.validate_pr_branch(
+            _validate_pr_issue_body(expected_head_sha="c" * 40)
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "step=read_pr_metadata status=done" in report
+    assert "pr_metadata_source=rest" in report
+    assert "reason=expected_head_sha_mismatch" in report
+    assert [
+        "gh",
+        "api",
+        "--method",
+        "GET",
+        f"repos/{runner.REPO}/pulls/123",
+    ] in [call.args[0] for call in run.call_args_list]
+
+
+def test_validate_pr_branch_malformed_rest_metadata_fails_closed() -> None:
+    def run_validation_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        del cwd
+        if command[:3] == ["gh", "pr", "view"]:
+            return 1, "gh metadata failed"
+        if command[:2] == ["gh", "api"]:
+            return 0, json.dumps({"number": 123, "state": "open"})
+        return 2, "unexpected command"
+
+    with mock.patch.object(
+        runner, "run_command", side_effect=run_validation_command
+    ):
+        report = runner.validate_pr_branch(_validate_pr_issue_body())
+
+    assert report.startswith("BLOCKED:")
+    assert "step=read_pr_metadata status=failed" in report
+    assert "reason=pr_metadata_unavailable" in report
+    assert "pr_metadata_source=" not in report
+
+
+def test_validate_pr_branch_metadata_failures_do_not_leak_raw_output() -> None:
+    secret_output = (
+        "gh failed token=ghp_secret123 /home/agent/private "
+        "SKELETON_RUNNER_TOKEN=secret"
+    )
+
+    def run_validation_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        del cwd
+        if command[:3] == ["gh", "pr", "view"]:
+            return 1, secret_output
+        if command[:2] == ["gh", "api"]:
+            return 1, secret_output
+        return 2, "unexpected command"
+
+    with mock.patch.object(
+        runner, "run_command", side_effect=run_validation_command
+    ):
+        report = runner.validate_pr_branch(_validate_pr_issue_body())
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=pr_metadata_unavailable" in report
+    assert "ghp_secret123" not in report
+    assert "SKELETON_RUNNER_TOKEN" not in report
+    assert "/home/agent/private" not in report
+    assert "gh failed" not in report
+
+
 def test_validate_pr_branch_expected_head_sha_mismatch_blocks() -> None:
     with mock.patch.object(
         runner, "_get_pr_branch_validation_state", return_value=_pr_validation_state()
@@ -13372,6 +13496,120 @@ def test_validate_pr_branch_expected_base_sha_mismatch_blocks_before_commands() 
     run.assert_not_called()
 
 
+def test_validate_pr_branch_exact_non_main_stacked_base_is_accepted() -> None:
+    request = runner.PrBranchValidationRequest(
+        repository=runner.REPO,
+        pr_number=123,
+        expected_head_sha=HEAD_SHA,
+        expected_base_sha="b" * 40,
+        profile="full_pytest",
+    )
+
+    reason = runner._pr_branch_validation_block_reason(
+        request,
+        _pr_validation_state(baseRefName="runner/issue-2022", baseRefOid="b" * 40),
+    )
+
+    assert reason is None
+
+
+def test_validate_pr_branch_stacked_base_sha_mismatch_is_blocked() -> None:
+    request = runner.PrBranchValidationRequest(
+        repository=runner.REPO,
+        pr_number=123,
+        expected_head_sha=HEAD_SHA,
+        expected_base_sha="b" * 40,
+        profile="full_pytest",
+    )
+
+    reason = runner._pr_branch_validation_block_reason(
+        request,
+        _pr_validation_state(baseRefName="runner/issue-2022", baseRefOid="c" * 40),
+    )
+
+    assert reason == "expected_base_sha_mismatch"
+
+
+def test_validate_pr_branch_unsafe_or_malformed_base_ref_is_blocked() -> None:
+    request = runner.PrBranchValidationRequest(
+        repository=runner.REPO,
+        pr_number=123,
+        expected_head_sha=HEAD_SHA,
+        expected_base_sha="b" * 40,
+        profile="full_pytest",
+    )
+
+    unsafe_reason = runner._pr_branch_validation_block_reason(
+        request,
+        _pr_validation_state(baseRefName="runner/../issue-2022", baseRefOid="b" * 40),
+    )
+    malformed_reason = runner._pr_branch_validation_block_reason(
+        request,
+        _pr_validation_state(baseRefName=123, baseRefOid="b" * 40),
+    )
+
+    assert unsafe_reason == "pr_base_ref_unsafe"
+    assert malformed_reason == "pr_base_ref_unsafe"
+
+
+def test_validate_pr_branch_existing_main_base_validation_remains_accepted() -> None:
+    request = runner.PrBranchValidationRequest(
+        repository=runner.REPO,
+        pr_number=123,
+        expected_head_sha=HEAD_SHA,
+        expected_base_sha="b" * 40,
+        profile="full_pytest",
+    )
+
+    reason = runner._pr_branch_validation_block_reason(request, _pr_validation_state())
+
+    assert reason is None
+
+
+def test_validate_pr_branch_pr_2025_style_rest_metadata_normalizes() -> None:
+    def run_validation_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        del cwd
+        if command == [
+            "gh",
+            "api",
+            "--method",
+            "GET",
+            f"repos/{runner.REPO}/pulls/2025",
+        ]:
+            return 0, json.dumps(
+                _pr_validation_rest_state(
+                    number=2025,
+                    base={"ref": "runner/issue-2022", "sha": "d" * 40},
+                    head={"ref": "runner/issue-2025", "sha": "e" * 40},
+                )
+            )
+        return 2, "unexpected command"
+
+    with mock.patch.object(
+        runner, "run_command", side_effect=run_validation_command
+    ):
+        pr_state = runner._pr_branch_validation_rest_state(runner.REPO, 2025)
+
+    assert pr_state == {
+        "number": 2025,
+        "state": "OPEN",
+        "baseRefName": "runner/issue-2022",
+        "baseRefOid": "d" * 40,
+        "headRefName": "runner/issue-2025",
+        "headRefOid": "e" * 40,
+    }
+    request = runner.PrBranchValidationRequest(
+        repository=runner.REPO,
+        pr_number=2025,
+        expected_head_sha="e" * 40,
+        expected_base_sha="d" * 40,
+        profile="full_pytest",
+    )
+    assert runner._pr_branch_validation_block_reason(request, pr_state) is None
+
+
 def test_validate_pr_branch_rejects_closed_or_non_main_prs() -> None:
     with mock.patch.object(
         runner,
@@ -13382,14 +13620,14 @@ def test_validate_pr_branch_rejects_closed_or_non_main_prs() -> None:
     with mock.patch.object(
         runner,
         "_get_pr_branch_validation_state",
-        return_value=_pr_validation_state(baseRefName="develop"),
+        return_value=_pr_validation_state(baseRefName="develop", baseRefOid="c" * 40),
     ):
         base_report = runner.validate_pr_branch(_validate_pr_issue_body())
 
     assert closed_report.startswith("BLOCKED:")
     assert "reason=pr_not_open" in closed_report
     assert base_report.startswith("BLOCKED:")
-    assert "reason=pr_base_not_main" in base_report
+    assert "reason=expected_base_sha_mismatch" in base_report
 
 
 def test_validate_pr_branch_unsafe_validation_path_blocks(tmp_path: Path) -> None:
@@ -15390,6 +15628,86 @@ def test_home_edge_lan_inventory_task_is_explicitly_dispatched() -> None:
 
     assert report == "DONE: test"
     action.assert_called_once_with()
+
+
+def _home_edge_audit_body(audit_id: str = "audit-2074-runner") -> str:
+    return "\n".join(
+        (
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {runner.HOME_EDGE_AUDIT_PERSIST_V1}",
+            "```task",
+            json.dumps(
+                {
+                    "operation_id": "home_edge_audit_persist_v1",
+                    "device_id": "home_edge_01",
+                    "execution_node": "home-edge-01",
+                    "approval_gate": "operator_approval_required",
+                    "runtime_audit": {
+                        "schema": "skeleton.home_edge.runtime_audit.v1",
+                        "audit_id": audit_id,
+                        "kind": "RUNTIME_AUDIT",
+                        "status": "verified",
+                    },
+                },
+                sort_keys=True,
+            ),
+            "```",
+        )
+    )
+
+
+def test_home_edge_audit_persist_task_is_explicitly_dispatched() -> None:
+    with mock.patch.object(
+        runner,
+        "home_edge_audit_persist_v1",
+        return_value="DONE: test",
+    ) as action:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HOME_EDGE_AUDIT_PERSIST_V1,
+            str(Path.cwd()),
+            _home_edge_audit_body(),
+        )
+
+    assert report == "DONE: test"
+    action.assert_called_once_with(_home_edge_audit_body())
+
+
+def test_home_edge_audit_persist_runner_reports_aggregate_only(tmp_path: Path) -> None:
+    with mock.patch.dict(
+        os.environ,
+        {"SKELETON_PRIVATE_MEMORY_ROOT": str(tmp_path)},
+        clear=False,
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HOME_EDGE_AUDIT_PERSIST_V1,
+            str(Path.cwd()),
+            _home_edge_audit_body(),
+        )
+
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert "operation_id=home_edge_audit_persist_v1" in report
+    assert "semantic_record_count=1" in report
+    assert "sqlite_metadata_count=1" in report
+    assert "sqlite_state_count=1" in report
+    assert "sqlite_history_count=1" in report
+    assert "conflict_status=fail_closed" in report
+    assert "rollback_status=retry_recovery" in report
+    assert "RUNTIME_AUDIT" not in report
+    assert "runtime_audit" not in report
+
+
+def test_home_edge_audit_persist_runner_blocks_wrong_registry_metadata() -> None:
+    body = _home_edge_audit_body().replace("home-edge-01", "wrong-node", 1)
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_AUDIT_PERSIST_V1,
+        str(Path.cwd()),
+        body,
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert "audit_persist_status=blocked" in report
+    assert "success_criteria=not_met" in report
 
 
 
