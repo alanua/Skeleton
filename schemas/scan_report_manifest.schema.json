@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "skeleton.scan_report_manifest.v1",
   "type": "object",
-  "required": ["schema", "report_version", "manifest_id", "manifest_hash", "session_id", "created_at", "overall_status", "package_summary", "documents", "delivery", "audit"],
+  "required": ["schema", "report_version", "manifest_id", "manifest_hash", "session_id", "scan_id", "created_at", "overall_status", "package_summary", "documents", "delivery", "audit"],
   "additionalProperties": false,
   "properties": {
     "schema": {"const": "skeleton.scan_report_manifest.v1"},
@@ -10,6 +10,7 @@
     "manifest_id": {"type": "string"},
     "manifest_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
     "session_id": {"type": "string"},
+    "scan_id": {"type": "string"},
     "created_at": {"type": "string"},
     "overall_status": {"enum": ["success", "partial_success", "review_required", "error", "awaiting_additional_pass"]},
     "package_summary": {

@@ -12,6 +12,7 @@ The v1 flow is:
 6. Telegram delivery reads only the manifest and records message IDs/delivery state in the scan report SQLite store
 
 Telegram output shows only human storage paths such as `owner/documents/topic/year`. Canonical filesystem paths remain in the manifest/audit record and are never rendered into Telegram text.
+Delivery receipts are public-safe: they contain scan/session/document/manifest/artifact IDs, manifest and artifact SHA-256 values, channel status, message IDs, retry state, and stable reason codes. They do not contain document text, customer names, private paths, private links, tokens, cookies, or credentials.
 
 Operations:
 
@@ -26,4 +27,4 @@ Secrets are read from environment/secret store only:
 - `SKELETON_TG_BOT`
 - `SKELETON_TG_CHAT`
 
-Replay behavior is keyed by `session_id + document_id + report_version` in the manifest and by `session_id + report_version` for Telegram delivery. Replaying an unchanged finalized manifest does not send duplicate messages. A changed manifest for the same report version supersedes the previous delivery/audit record.
+Replay behavior is keyed by `session_id + manifest_version + manifest_sha` for the package delivery and by `session_id + document_id + manifest_version + manifest_sha` in per-document receipt entries. Replaying an unchanged finalized manifest after restart does not send duplicate Telegram messages. A changed manifest for the same session/version creates a new SHA-bound delivery key, supersedes the previous delivery state, and preserves the previous audit record.

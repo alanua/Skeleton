@@ -50,6 +50,7 @@ REPORT_ACTIONS = (
     "merge_next",
     "open_review_item",
 )
+DELIVERY_RECEIPT_SCHEMA_ID = "skeleton.scan_report_delivery_receipt.v1"
 
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _HASH_RE = re.compile(r"^[a-f0-9]{64}$")
@@ -63,6 +64,7 @@ SCAN_REPORT_MANIFEST_SCHEMA: dict[str, Any] = {
         "manifest_id",
         "manifest_hash",
         "session_id",
+        "scan_id",
         "created_at",
         "overall_status",
         "package_summary",
@@ -77,6 +79,7 @@ SCAN_REPORT_MANIFEST_SCHEMA: dict[str, Any] = {
         "manifest_id": {"type": "string", "minLength": 1, "maxLength": 160},
         "manifest_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
         "session_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "scan_id": {"type": "string", "minLength": 1, "maxLength": 128},
         "created_at": {"type": "string", "minLength": 20, "maxLength": 40},
         "overall_status": {"enum": list(OVERALL_STATUSES)},
         "package_summary": {
@@ -233,6 +236,25 @@ class ScanReportDeliveryStore:
         value["message_ids"] = json.loads(value.pop("message_ids_json"))
         return value
 
+    def read_current(self, session_id: str, report_version: int) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM scan_report_delivery
+                WHERE session_id = ?
+                  AND report_version = ?
+                  AND delivery_status IN ('sent', 'delivered')
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (session_id, report_version),
+            ).fetchone()
+        if row is None:
+            return None
+        value = dict(row)
+        value["message_ids"] = json.loads(value.pop("message_ids_json"))
+        return value
+
     def persist(
         self,
         *,
@@ -367,8 +389,13 @@ class ScanReportDeliveryStore:
     def audit_count(self, idempotency_key: str) -> int:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT COUNT(*) AS count FROM scan_report_audit WHERE idempotency_key = ?",
-                (idempotency_key,),
+                """
+                SELECT COUNT(*) AS count
+                FROM scan_report_audit
+                WHERE idempotency_key = ?
+                   OR idempotency_key LIKE ?
+                """,
+                (idempotency_key, f"{idempotency_key}:%"),
             ).fetchone()
         return int(row["count"])
 
@@ -387,6 +414,7 @@ def build_scan_report_manifest(
     created_at: str | None = None,
 ) -> dict[str, Any]:
     session_id = _safe_id(package.get("session_id"), "session_id")
+    scan_id = _safe_id(package.get("scan_id", session_id), "scan_id")
     package_id = _safe_id(package.get("package_id", session_id), "package_id")
     physical_page_count = _physical_page_count(package)
     documents_raw = package.get("documents")
@@ -421,6 +449,7 @@ def build_scan_report_manifest(
         "manifest_id": f"{session_id}.scan_report.v{REPORT_VERSION}",
         "manifest_hash": "0" * 64,
         "session_id": session_id,
+        "scan_id": scan_id,
         "created_at": now,
         "overall_status": overall_status,
         "package_summary": {
@@ -436,7 +465,7 @@ def build_scan_report_manifest(
         "delivery": {
             "telegram": {
                 "status": "prepared",
-                "idempotency_key": report_idempotency_key(session_id, REPORT_VERSION),
+                "idempotency_scope": "session_id+manifest_version+manifest_sha",
                 "message_ids": [],
                 "attempt_count": 0,
             }
@@ -509,17 +538,22 @@ def deliver_scan_report(
 ) -> dict[str, Any]:
     validate_scan_report_manifest(manifest)
     session_id = str(manifest["session_id"])
-    idempotency_key = report_idempotency_key(session_id, int(manifest["report_version"]))
+    report_version = int(manifest["report_version"])
+    idempotency_key = report_idempotency_key(session_id, report_version, str(manifest["manifest_hash"]))
     existing = store.read(idempotency_key)
     if existing and existing["manifest_hash"] == manifest["manifest_hash"] and existing["delivery_status"] in {"sent", "delivered"}:
-        return {
-            "schema": "skeleton.scan_report_delivery_receipt.v1",
-            "status": "delivered",
-            "idempotency": "duplicate_replay",
-            "message_ids": existing["message_ids"],
-        }
-    if existing and existing["manifest_hash"] != manifest["manifest_hash"]:
-        store.supersede(idempotency_key)
+        return _delivery_receipt(
+            manifest,
+            status="delivered",
+            idempotency="duplicate_replay",
+            message_ids=existing["message_ids"],
+            attempt_count=int(existing["attempt_count"]),
+        )
+    prior = store.read_current(session_id, report_version)
+    superseded_prior = False
+    if prior and prior["idempotency_key"] != idempotency_key and prior["manifest_hash"] != manifest["manifest_hash"]:
+        store.supersede(str(prior["idempotency_key"]))
+        superseded_prior = True
 
     send = sender or _send_telegram_message
     message_ids: list[int] = []
@@ -542,13 +576,14 @@ def deliver_scan_report(
             attempt_count=attempt_count,
             error_reason=reason,
         )
-        return {
-            "schema": "skeleton.scan_report_delivery_receipt.v1",
-            "status": "failed",
-            "idempotency": "new_or_retry",
-            "message_ids": message_ids,
-            "reason": reason,
-        }
+        return _delivery_receipt(
+            manifest,
+            status="failed",
+            idempotency="new_or_retry",
+            message_ids=message_ids,
+            attempt_count=attempt_count,
+            reason=reason,
+        )
 
     store.persist(
         idempotency_key=idempotency_key,
@@ -557,12 +592,146 @@ def deliver_scan_report(
         message_ids=message_ids,
         attempt_count=attempt_count,
     )
-    return {
-        "schema": "skeleton.scan_report_delivery_receipt.v1",
-        "status": "delivered",
-        "idempotency": "superseded" if existing else "new",
-        "message_ids": message_ids,
+    return _delivery_receipt(
+        manifest,
+        status="delivered",
+        idempotency="superseded" if superseded_prior else "new",
+        message_ids=message_ids,
+        attempt_count=attempt_count,
+    )
+
+
+def _delivery_receipt(
+    manifest: Mapping[str, Any],
+    *,
+    status: str,
+    idempotency: str,
+    message_ids: Sequence[int],
+    attempt_count: int,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    session_id = str(manifest["session_id"])
+    report_version = int(manifest["report_version"])
+    manifest_hash = str(manifest["manifest_hash"])
+    artifact_hashes = _artifact_hash_receipts(manifest)
+    idempotency_key = report_idempotency_key(session_id, report_version, manifest_hash)
+    receipt_seed = json.dumps(
+        {
+            "idempotency_key": idempotency_key,
+            "manifest_hash": manifest_hash,
+            "message_ids": list(message_ids),
+            "status": status,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    receipt = {
+        "schema": DELIVERY_RECEIPT_SCHEMA_ID,
+        "delivery_receipt_id": f"scan-report-receipt:{hashlib.sha256(receipt_seed.encode('utf-8')).hexdigest()[:24]}",
+        "session_id": session_id,
+        "manifest_id": str(manifest["manifest_id"]),
+        "manifest_version": report_version,
+        "manifest_sha256": manifest_hash,
+        "channel": "telegram",
+        "status": status,
+        "idempotency": idempotency,
+        "idempotency_key": idempotency_key,
+        "message_ids": list(message_ids),
+        "delivered_at": _utc_now() if status == "delivered" else None,
+        "attempt_status": status,
+        "attempt_count": attempt_count,
+        "retry_state": _retry_state(status=status, attempt_count=attempt_count, reason=reason),
+        "reason": _safe_reason(reason) if reason else None,
+        "documents": _document_receipts(manifest),
+        "artifact_sha256_values": artifact_hashes,
+        "traceability": {
+            "scan_id": _optional_text(manifest.get("scan_id")) or session_id,
+            "batch_session_id": session_id,
+            "manifest_id": str(manifest["manifest_id"]),
+            "document_ids": [str(document["document_id"]) for document in manifest["documents"] if isinstance(document, Mapping)],
+            "artifact_ids": sorted(artifact_hashes),
+            "delivery_receipt_id": f"scan-report-receipt:{hashlib.sha256(receipt_seed.encode('utf-8')).hexdigest()[:24]}",
+            "memory_gate_record_id": _optional_text(manifest.get("memory_gate_record_id")),
+        },
     }
+    rendered = json.dumps(receipt, sort_keys=True, separators=(",", ":"))
+    if re.search(r"(?i)(/home/|/tmp/|file:|https?://|token|bearer|cookie|password|secret)", rendered):
+        raise ScanReportError("delivery_receipt_private_leak")
+    return receipt
+
+
+def _document_receipts(manifest: Mapping[str, Any]) -> list[dict[str, Any]]:
+    receipts: list[dict[str, Any]] = []
+    for document in manifest["documents"]:
+        if not isinstance(document, Mapping):
+            continue
+        artifacts = document.get("artifacts")
+        artifact_ids = sorted(
+            str(artifact["artifact_id"])
+            for artifact in artifacts.values()
+            if isinstance(artifacts, Mapping)
+            if isinstance(artifact, Mapping) and artifact.get("artifact_id")
+        )
+        receipts.append(
+            {
+                "document_id": str(document["document_id"]),
+                "owner_id": _stable_public_id(document.get("recipient_owner"), prefix="owner"),
+                "processing_status": str(document["processing_status"]),
+                "review_required": bool(document["review_required"]),
+                "page_count": int(document["page_count"]),
+                "page_range": str(document["page_range"]),
+                "artifact_ids": artifact_ids,
+                "idempotency_key": _document_idempotency_key(
+                    str(manifest["session_id"]),
+                    str(document["document_id"]),
+                    int(manifest["report_version"]),
+                    str(manifest["manifest_hash"]),
+                ),
+            }
+        )
+    return receipts
+
+
+def _artifact_hash_receipts(manifest: Mapping[str, Any]) -> dict[str, str]:
+    hashes: dict[str, str] = {}
+    for document in manifest["documents"]:
+        if not isinstance(document, Mapping):
+            continue
+        artifacts = document.get("artifacts")
+        if not isinstance(artifacts, Mapping):
+            continue
+        for artifact in artifacts.values():
+            if not isinstance(artifact, Mapping):
+                continue
+            artifact_id = artifact.get("artifact_id")
+            sha256 = artifact.get("sha256")
+            if isinstance(artifact_id, str) and isinstance(sha256, str) and _HASH_RE.match(sha256):
+                hashes[artifact_id] = sha256
+    return dict(sorted(hashes.items()))
+
+
+def _retry_state(*, status: str, attempt_count: int, reason: str | None) -> str:
+    if status == "delivered":
+        return "not_applicable"
+    if reason and str(reason).startswith("dead_letter:"):
+        return "dead_letter"
+    if attempt_count >= TELEGRAM_DELIVERY_MAX_ATTEMPTS:
+        return "dead_letter"
+    return "queued_retry"
+
+
+def _document_idempotency_key(session_id: str, document_id: str, report_version: int, manifest_sha: str) -> str:
+    if not _HASH_RE.match(manifest_sha):
+        raise ScanReportError("manifest_hash_invalid")
+    _safe_id(document_id, "document_id")
+    return f"scan-report:{session_id}:{document_id}:v{report_version}:{manifest_sha[:16]}"
+
+
+def _stable_public_id(value: object, *, prefix: str) -> str | None:
+    text = _optional_text(value)
+    if not text:
+        return None
+    return f"{prefix}:{hashlib.sha256(text.encode('utf-8')).hexdigest()[:16]}"
 
 
 def write_scan_report_manifest(manifest: Mapping[str, Any], path: str | Path) -> None:
@@ -579,8 +748,12 @@ def write_scan_report_manifest(manifest: Mapping[str, Any], path: str | Path) ->
     os.replace(temporary, target)
 
 
-def report_idempotency_key(session_id: str, report_version: int) -> str:
-    return f"scan-report:{session_id}:v{report_version}"
+def report_idempotency_key(session_id: str, report_version: int, manifest_sha: str | None = None) -> str:
+    if manifest_sha is None:
+        return f"scan-report:{session_id}:v{report_version}"
+    if not _HASH_RE.match(manifest_sha):
+        raise ScanReportError("manifest_hash_invalid")
+    return f"scan-report:{session_id}:v{report_version}:{manifest_sha[:16]}"
 
 
 def _build_document_record(
@@ -601,10 +774,13 @@ def _build_document_record(
         raise ScanReportError("classification_invalid")
     confidences = _confidence_values(inference)
     ocr_quality = _optional_float(raw.get("ocr_quality"))
+    raw_summary = raw.get("summary") or inference.get("summary")
+    missing_content_summary = not bool(_optional_text(raw_summary))
     unreliable = (
         str(inference.get("route", "")).upper() == "REVIEW"
         or confidences["overall"] < LOW_CONFIDENCE_THRESHOLD
         or (ocr_quality is not None and ocr_quality < LOW_OCR_QUALITY_THRESHOLD)
+        or missing_content_summary
     )
     failures: list[dict[str, str]] = []
     artifacts: dict[str, dict[str, Any]] = {}
@@ -640,10 +816,12 @@ def _build_document_record(
     owner = _optional_text(raw.get("recipient_owner") or inference.get("principal_subject_alias"))
     title = _optional_text(raw.get("title") or inference.get("document_type") or "Untitled document")
     sender = _optional_text(raw.get("sender") or inference.get("issuer"))
-    summary = _summary(raw.get("summary") or inference.get("summary"), unreliable=unreliable)
+    summary = _summary(raw_summary, unreliable=unreliable)
     review_reason_codes = list(raw.get("review_reason_codes") or inference.get("reason_codes") or [])
     if unreliable and "LOW_CONFIDENCE_OR_OCR" not in review_reason_codes:
         review_reason_codes.append("LOW_CONFIDENCE_OR_OCR")
+    if missing_content_summary and "MISSING_OCR_CONTENT_SUMMARY" not in review_reason_codes:
+        review_reason_codes.append("MISSING_OCR_CONTENT_SUMMARY")
     return (
         {
             "document_id": document_id,
@@ -749,6 +927,8 @@ def _render_document_card(document: Mapping[str, Any]) -> str:
             f"{document['title']}",
             f"Sender: {document['sender'] or 'unknown'}",
             f"Owner: {document['recipient_owner'] or 'unknown'}",
+            f"Type: {document['document_type'] or 'unknown'}",
+            f"Topic: {document['topic'] or 'unknown'}",
             f"Pages: {document['page_count']} ({document['page_range']})",
             f"Summary: {document['summary']}",
             f"Classification: {document['classification_path']} ({document['confidence']['overall']:.2f})",

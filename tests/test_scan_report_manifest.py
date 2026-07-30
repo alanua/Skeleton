@@ -79,6 +79,7 @@ def _package(tmp_path: Path, *, low_confidence: bool = False, bad_second_pdf: bo
     doc2_original = _pdf(tmp_path / "doc2-original.pdf", 1 if bad_second_pdf else 2)
     doc2_searchable = _pdf(tmp_path / "doc2-searchable.pdf", 2)
     return {
+        "scan_id": "scan-2026-07-29-a",
         "session_id": "session-2026-07-29-a",
         "package_id": "package-2026-07-29-a",
         "physical_page_count": 4,
@@ -145,6 +146,8 @@ def test_synthetic_multi_document_package_builds_manifest_and_cards(tmp_path: Pa
     assert len(messages) == 3
     assert "Сканування завершено" in messages[0][0]
     assert "person-a/documents/work_tax_and_business/2026" in messages[1][0]
+    assert "Type: Bescheid" in messages[1][0]
+    assert "Topic: work_tax_and_business" in messages[1][0]
 
 
 def test_original_download_is_verified_stitched_pdf_with_hash(tmp_path: Path) -> None:
@@ -177,6 +180,20 @@ def test_low_confidence_is_marked_review_required_without_certainty(tmp_path: Pa
     assert "REVIEW REQUIRED" in render_telegram_report(manifest)[2][0]
 
 
+def test_missing_ocr_content_summary_is_review_required_without_fabrication(tmp_path: Path) -> None:
+    package = _package(tmp_path)
+    classification = dict(package["documents"][0]["classification"])  # type: ignore[index]
+    classification.pop("summary")
+    package["documents"][0]["classification"] = classification  # type: ignore[index]
+    manifest = build_scan_report_manifest(package, link_provider=_provider())
+    document = manifest["documents"][0]
+
+    assert document["processing_status"] == "review_required"
+    assert document["summary_reliability"] == "unreliable"
+    assert document["summary"] == "UNRELIABLE - review required: No reliable content summary was available."
+    assert "MISSING_OCR_CONTENT_SUMMARY" in document["review_reason_codes"]
+
+
 def test_partial_run_records_failed_stage_and_retained_artifacts(tmp_path: Path) -> None:
     manifest = build_scan_report_manifest(_package(tmp_path, bad_second_pdf=True), link_provider=_provider())
     assert manifest["overall_status"] == "partial_success"
@@ -200,6 +217,8 @@ def test_duplicate_replay_does_not_send_duplicate_telegram_messages(tmp_path: Pa
 
     assert first["status"] == "delivered"
     assert second["idempotency"] == "duplicate_replay"
+    assert first["manifest_sha256"] == manifest["manifest_hash"]
+    assert first["idempotency_key"].endswith(str(manifest["manifest_hash"])[:16])
     assert len(sent) == 3
     assert store.audit_count(report_idempotency_key("session-2026-07-29-a", 1)) == 1
 
@@ -223,6 +242,63 @@ def test_changed_boundary_supersedes_prior_audit_record(tmp_path: Path) -> None:
 
     assert receipt["idempotency"] == "superseded"
     assert store.audit_count(report_idempotency_key("session-2026-07-29-a", 1)) == 3
+
+
+def test_delivery_receipt_fields_are_public_safe_and_hash_bound(tmp_path: Path) -> None:
+    manifest = build_scan_report_manifest(_package(tmp_path), link_provider=_provider())
+    store = ScanReportDeliveryStore(tmp_path / "scan-report.sqlite")
+    receipt = deliver_scan_report(manifest, store=store, sender=lambda *_args: 42)
+    rendered = json.dumps(receipt, sort_keys=True)
+
+    assert receipt["schema"] == "skeleton.scan_report_delivery_receipt.v1"
+    assert receipt["channel"] == "telegram"
+    assert receipt["manifest_id"] == manifest["manifest_id"]
+    assert receipt["manifest_version"] == manifest["report_version"]
+    assert receipt["manifest_sha256"] == manifest["manifest_hash"]
+    assert receipt["traceability"]["scan_id"] == "scan-2026-07-29-a"
+    assert receipt["traceability"]["batch_session_id"] == "session-2026-07-29-a"
+    assert len(receipt["documents"]) == 2
+    assert set(receipt["artifact_sha256_values"]) == {
+        artifact["artifact_id"]
+        for document in manifest["documents"]
+        for artifact in document["artifacts"].values()
+    }
+    assert str(tmp_path) not in rendered
+    assert "https://download.example.invalid" not in rendered
+    assert "Synthetic Sender" not in rendered
+    assert "benefits decision" not in rendered
+    assert "synthetic-secret" not in rendered
+
+
+def test_callback_payloads_use_only_opaque_ids(tmp_path: Path) -> None:
+    manifest = build_scan_report_manifest(_package(tmp_path), link_provider=_provider())
+    rendered = json.dumps(render_telegram_report(manifest), sort_keys=True)
+    callback_payloads = re.findall(r"scan:v1:[A-Za-z0-9_]+:[a-f0-9]{12}", rendered)
+
+    assert callback_payloads
+    assert str(tmp_path) not in " ".join(callback_payloads)
+    assert "doc-001" not in " ".join(callback_payloads)
+    assert "https://" not in " ".join(callback_payloads)
+
+
+def test_dead_letter_after_bounded_retries_uses_existing_manifest(tmp_path: Path) -> None:
+    manifest = build_scan_report_manifest(_package(tmp_path), link_provider=_provider())
+    store = ScanReportDeliveryStore(tmp_path / "scan-report.sqlite")
+    calls = 0
+
+    def failing_sender(_text: str, _reply_markup: dict[str, object] | None) -> int:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("telegram unavailable")
+
+    for _attempt in range(3):
+        receipt = deliver_scan_report(manifest, store=store, sender=failing_sender)
+
+    assert calls == 3
+    assert receipt["status"] == "failed"
+    assert receipt["retry_state"] == "dead_letter"
+    assert receipt["reason"] == "dead_letter:telegram_unavailable"
+    assert receipt["artifact_sha256_values"]
 
 
 def test_telegram_failure_is_queued_for_retry_without_rebuilding_artifacts(tmp_path: Path) -> None:
