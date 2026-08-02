@@ -11,6 +11,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "skeleton-runtime-recovery-bootstrap.yml"
 EXPECTED_SOURCE_BASE_SHA = "f75c8961d480f6d93b514691e6be6613ffa364f5"
 OLD_PRE_MERGE_TARGET_SHA = EXPECTED_SOURCE_BASE_SHA
+OLD_RUNNER_NAME = "hetzner-agent-runner-1"
 ALLOWED_CHANGED_FILES = {
     ".github/workflows/skeleton-runtime-recovery-bootstrap.yml",
     "tests/test_skeleton_runtime_recovery_bootstrap_workflow.py",
@@ -54,7 +55,8 @@ def test_runner_labels_repository_and_source_base_constant_are_fixed() -> None:
     job = workflow["jobs"]["recover-runtime-checkout"]
 
     assert job["if"] == "github.repository == 'alanua/Skeleton' && github.ref == 'refs/heads/main'"
-    assert job["runs-on"] == ["self-hosted", "hetzner-agent-runner-1"]
+    assert job["runs-on"] == ["self-hosted", "Linux", "X64"]
+    assert OLD_RUNNER_NAME not in workflow_text()
     assert job["env"] == {
         "CANONICAL_REPOSITORY": "alanua/Skeleton",
         "EXPECTED_SOURCE_BASE_SHA": EXPECTED_SOURCE_BASE_SHA,
@@ -91,8 +93,11 @@ def test_target_checkout_origin_and_origin_main_are_verified_before_mutation() -
 
     first_stash = script.index("stash push --include-untracked")
     first_checkout = script.index('git -C "${TARGET_CHECKOUT}" checkout -B main origin/main')
-    assert script.index('test "${origin_main_sha}" = "${target_sha}"') < first_stash
-    assert script.index('grep -Fx "${EXPECTED_SOURCE_BASE_SHA}" >/dev/null') < first_stash
+    for destructive in [first_stash, first_checkout]:
+        assert script.index('test "${TARGET_CHECKOUT}" = "/home/agent/agent-dev/repos/Skeleton"') < destructive
+        assert script.index('git -C "${TARGET_CHECKOUT}" remote get-url origin') < destructive
+        assert script.index('test "${origin_main_sha}" = "${target_sha}"') < destructive
+        assert script.index('grep -Fx "${EXPECTED_SOURCE_BASE_SHA}" >/dev/null') < destructive
     assert first_stash < first_checkout
 
 
