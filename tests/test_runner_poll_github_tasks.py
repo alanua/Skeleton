@@ -1347,6 +1347,85 @@ def _shadow_maintenance_issue_body() -> str:
     )
 
 
+def _universal_code_issue_body(*, target_project: str = "bauclock") -> str:
+    return "\n".join(
+        (
+            f"Target Project: {target_project}",
+            f"Base SHA: {'b' * 40}",
+            "Allowed Files: tests/test_runner_poll_github_tasks.py",
+            "Approval Reference: GENERIC_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715",
+            "Idempotency Key: issue-1721-universal-enforce",
+            "Validation Timeout Seconds: 900",
+            "Privacy Boundary: PUBLIC_SAFE_REPOSITORY_ONLY",
+            (
+                "Requested Capabilities: repository_read, "
+                "repository_write_allowlisted, test_execution"
+            ),
+            "Expected Output: registry dispatch",
+            "",
+            "```task",
+            "Use the registered executor.",
+            "```",
+        )
+    )
+
+
+def _approval_comment(
+    *,
+    issue_number: int = 1721,
+    kind: str = runner.ROUTE_APPROVAL_KIND_GENERIC,
+    reference: str = "GENERIC_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715",
+    comment_id: str = "5002100944",
+    author: str = "alanua",
+    repository: str = runner.REPO,
+) -> dict[str, object]:
+    return {
+        "id": comment_id,
+        "author": {"login": author},
+        "body": "\n".join(
+            (
+                "Runner approval record",
+                f"Repository: {repository}",
+                f"Issue: #{issue_number}",
+                f"Comment ID: {comment_id}",
+                "Owner: alanua",
+                f"Approval Kind: {kind}",
+                f"Approval Reference: {reference}",
+                f"Verified Author: {author}",
+                f"Verified Operator: {author}",
+                "Public Safe Body: true",
+            )
+        ),
+    }
+
+
+def _universal_registry(
+    handler: object | None = None,
+    *,
+    include_code_edit: bool = True,
+    code_edit_capabilities: tuple[str, ...] | None = None,
+) -> runner.RunnerExecutorRegistry:
+    executors = []
+    compatibility = runner.protected_runner_shadow_compatibility_bindings()
+    for task_kind in compatibility.registered_task_kinds:
+        if task_kind == "code_edit" and not include_code_edit:
+            continue
+        task_handler = handler if task_kind == "code_edit" and handler else lambda _task: None
+        capabilities = (
+            code_edit_capabilities
+            if task_kind == "code_edit" and code_edit_capabilities is not None
+            else tuple(sorted(runner.ROUTE_REQUIRED_CAPABILITIES[task_kind]))
+        )
+        executors.append(
+            runner.CallableRunnerExecutor(
+                task_kind=task_kind,
+                handler=task_handler,
+                required_capabilities=capabilities,
+            )
+        )
+    return runner.RunnerExecutorRegistry(executors)
+
+
 def _run_code_generation_process_issue_for_shadow(
     tmp_path: Path,
     *,
@@ -1496,6 +1575,156 @@ def test_shadow_mode_env_uses_explicit_truthy_allowlist(
     assert runner.runner_shadow_mode_enabled() is enabled
 
 
+@pytest.mark.parametrize(
+    ("environment", "expected_mode"),
+    (
+        ({runner.RUNNER_MODE_ENV: "off"}, runner.RUNNER_MODE_OFF),
+        ({runner.RUNNER_MODE_ENV: "shadow"}, runner.RUNNER_MODE_SHADOW),
+        ({runner.RUNNER_MODE_ENV: "enforce"}, runner.RUNNER_MODE_ENFORCE),
+        ({runner.RUNNER_SHADOW_MODE_ENV: "1"}, runner.RUNNER_MODE_SHADOW),
+        ({}, runner.RUNNER_MODE_OFF),
+    ),
+)
+def test_universal_runner_mode_selection_is_deterministic(
+    environment: dict[str, str],
+    expected_mode: str,
+) -> None:
+    with mock.patch.dict(os.environ, environment, clear=True):
+        decision = runner.runner_mode_decision()
+
+    assert decision == runner.RunnerModeDecision(expected_mode)
+
+
+def test_universal_runner_enforce_blocked_gate_has_zero_legacy_side_effects(
+    tmp_path: Path,
+) -> None:
+    issue = {
+        "number": 1721,
+        "title": "Blocked universal enforce",
+        "body": _universal_code_issue_body(),
+        "comments": [],
+    }
+
+    with mock.patch.dict(
+        os.environ, {runner.RUNNER_MODE_ENV: runner.RUNNER_MODE_ENFORCE}, clear=True
+    ), mock.patch.object(runner, "block_issue") as block, mock.patch.object(
+        runner, "ensure_clean_worktree"
+    ) as clean, mock.patch.object(
+        runner, "verify_target_repository_checkout"
+    ) as verify_checkout, mock.patch.object(
+        runner, "prepare_target_repository_issue_worktree"
+    ) as prepare, mock.patch.object(
+        runner, "dispatch_runtime_maintenance_task"
+    ) as maintenance, mock.patch.object(
+        runner, "run_codex_task"
+    ) as codex, mock.patch.object(
+        runner, "set_issue_label"
+    ) as labels:
+        runner.process_issue(issue, workdir=str(tmp_path))
+
+    assert "approval_comments_missing" in block.call_args.args[1]
+    clean.assert_not_called()
+    verify_checkout.assert_not_called()
+    prepare.assert_not_called()
+    maintenance.assert_not_called()
+    codex.assert_not_called()
+    labels.assert_not_called()
+
+
+def test_universal_runner_enforce_allowed_dispatches_once_via_registry(
+    tmp_path: Path,
+) -> None:
+    issue_path = tmp_path / "bauclock" / "issue-1721"
+    dispatch_calls: list[object] = []
+
+    def code_edit_executor(task: object) -> tuple[int, str]:
+        dispatch_calls.append(task)
+        return 0, "registry output"
+
+    issue = {
+        "number": 1721,
+        "title": "Universal enforce",
+        "body": _universal_code_issue_body(),
+        "comments": [_approval_comment(issue_number=1721)],
+    }
+
+    with mock.patch.dict(
+        os.environ, {runner.RUNNER_MODE_ENV: runner.RUNNER_MODE_ENFORCE}, clear=True
+    ), mock.patch.object(
+        runner, "verify_target_repository_checkout", return_value=None
+    ) as verify_checkout, mock.patch.object(
+        runner,
+        "prepare_target_repository_issue_worktree",
+        return_value=(0, "ready", issue_path),
+    ) as prepare, mock.patch.object(
+        runner,
+        "build_universal_runner_executor_registry",
+        side_effect=lambda **_kwargs: _universal_registry(code_edit_executor),
+    ) as registry, mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "run_codex_task"
+    ) as codex, mock.patch.object(
+        runner, "finalize_local_worktree_success", return_value="DONE report"
+    ) as finalize, mock.patch.object(
+        runner, "cleanup_target_repository_issue_worktree", return_value=(0, "")
+    ), mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "record_runner_task_picked_up", return_value=None
+    ), mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ):
+        runner.process_issue(issue, workdir=str(tmp_path))
+
+    verify_checkout.assert_called_once_with("alanua/bauclock")
+    prepare.assert_called_once()
+    assert registry.call_count == 2
+    assert len(dispatch_calls) == 1
+    dispatched_task = dispatch_calls[0]
+    assert dispatched_task.repo == "alanua/bauclock"
+    assert dispatched_task.task_kind == "code_edit"
+    codex.assert_not_called()
+    finalize.assert_called_once_with(str(issue_path), "registry output", mock.ANY)
+
+
+def test_universal_runner_enforce_registry_failure_closes_before_checkout(
+    tmp_path: Path,
+) -> None:
+    issue = {
+        "number": 1721,
+        "title": "Universal enforce registry failure",
+        "body": _universal_code_issue_body(),
+        "comments": [_approval_comment(issue_number=1721)],
+    }
+
+    with mock.patch.dict(
+        os.environ, {runner.RUNNER_MODE_ENV: runner.RUNNER_MODE_ENFORCE}, clear=True
+    ), mock.patch.object(
+        runner,
+        "build_universal_runner_executor_registry",
+        side_effect=lambda **_kwargs: _universal_registry(include_code_edit=False),
+    ), mock.patch.object(
+        runner, "block_issue"
+    ) as block, mock.patch.object(
+        runner, "verify_target_repository_checkout"
+    ) as verify_checkout, mock.patch.object(
+        runner, "prepare_target_repository_issue_worktree"
+    ) as prepare, mock.patch.object(
+        runner, "run_codex_task"
+    ) as codex:
+        runner.process_issue(issue, workdir=str(tmp_path))
+
+    assert "EXECUTOR_NOT_REGISTERED" in block.call_args.args[1]
+    verify_checkout.assert_not_called()
+    prepare.assert_not_called()
+    codex.assert_not_called()
+
+
 def test_shadow_evaluator_exception_leaves_legacy_code_generation_dispatch_byte_for_byte(
     tmp_path: Path,
 ) -> None:
@@ -1624,7 +1853,7 @@ def test_absent_blank_and_unknown_shadow_env_skip_work_and_keep_legacy_dispatch(
         "schema": "skeleton.runner_shadow_receipt.v1",
         "shadow_status": "not_applicable",
         "semantic_route": None,
-        "reason_codes": ["SHADOW_MODE_DISABLED"],
+        "reason_codes": ["RUNNER_MODE_OFF"],
         "task_envelope_hash": None,
     }
 
