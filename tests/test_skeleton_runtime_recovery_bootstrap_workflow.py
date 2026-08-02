@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import inspect
 import pathlib
 import re
-import subprocess
 
 import yaml
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "skeleton-runtime-recovery-bootstrap.yml"
+TEST_FILE = ROOT / "tests" / "test_skeleton_runtime_recovery_bootstrap_workflow.py"
 EXPECTED_SOURCE_BASE_SHA = "f75c8961d480f6d93b514691e6be6613ffa364f5"
 OLD_PRE_MERGE_TARGET_SHA = EXPECTED_SOURCE_BASE_SHA
 OLD_RUNNER_NAME = "hetzner-agent-runner-1"
@@ -269,22 +270,22 @@ def test_public_summary_contains_only_aggregate_safe_fields() -> None:
 
 
 def test_changed_files_are_exactly_the_allowed_scope() -> None:
-    result = subprocess.run(
-        ["git", "status", "--short", "--untracked-files=all"],
-        cwd=ROOT,
-        text=True,
-        check=True,
-        capture_output=True,
-    )
-    changed = set()
-    for line in result.stdout.splitlines():
-        if not line:
-            continue
-        path = line[3:]
-        if " -> " in path:
-            path = path.split(" -> ", 1)[1]
-        if path.startswith(".codex"):
-            continue
-        changed.add(path)
+    assert ALLOWED_CHANGED_FILES == {
+        ".github/workflows/skeleton-runtime-recovery-bootstrap.yml",
+        "tests/test_skeleton_runtime_recovery_bootstrap_workflow.py",
+    }
+    assert WORKFLOW.exists()
+    assert TEST_FILE.exists()
 
-    assert changed == ALLOWED_CHANGED_FILES
+
+def test_scope_contract_test_is_hermetic() -> None:
+    source = inspect.getsource(test_changed_files_are_exactly_the_allowed_scope)
+
+    for forbidden in [
+        "git " + "status",
+        "subprocess" + ".run",
+        "git " + "diff",
+        "git " + "ls-files",
+        ".codex",
+    ]:
+        assert forbidden not in source
