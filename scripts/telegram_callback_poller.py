@@ -40,6 +40,8 @@ RUNNER_MERGE_ACTION = "squash"
 DEFAULT_CALLBACK_STATE_PATH = Path(
     "/home/agent/agent-dev/state/telegram_callback_poller.json"
 )
+SCAN_ACTION_ROOT = Path(os.environ.get("SKELETON_SCAN_ACTION_ROOT", "/var/lib/skeleton/scan-actions"))
+_SCAN_CALLBACK_RE = re.compile(r"^sdoc1:e:(?P<token>[0-9a-f]{16}):(?P<digest>[0-9a-f]{12})$")
 
 _CALLBACK_RE = re.compile(
     r"^tpr1:(?P<action>approve|reject|details):p(?P<pr_number>[1-9][0-9]{0,9}):"
@@ -131,6 +133,102 @@ def render_audit_comment(
     return "\n".join(lines)
 
 
+
+def _scan_action_secret() -> str:
+    directory = os.environ.get("CREDENTIALS_DIRECTORY")
+    candidates = [Path(directory) / "scan-action-hmac"] if directory else []
+    candidates.append(Path("/run/credentials/skeleton-telegram-callback-poll.service/scan-action-hmac"))
+    for path in candidates:
+        try:
+            value = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if value:
+            return value
+    raise RuntimeError("scan action credential unavailable")
+
+
+def _atomic_scan_json(path: Path, value: Mapping[str, object]) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(
+        json.dumps(dict(value), sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+
+
+def _handle_scan_callback(
+    callback_query: Mapping[str, object], *, dry_run: bool
+) -> dict[str, object]:
+    callback_id = _bounded_callback_id(callback_query.get("id"))
+    raw = callback_query.get("data")
+    match = _SCAN_CALLBACK_RE.fullmatch(raw) if isinstance(raw, str) else None
+    if match is None:
+        return _answer_callback_query(
+            _result(status="blocked", reason="scan callback malformed", github="not_called", posted=False, comment=None),
+            callback_id, dry_run=dry_run, text="Некоректна кнопка.", show_alert=True,
+        )
+    token = match.group("token")
+    message = f"sdoc1:e:{token}"
+    expected = hmac.new(
+        _scan_action_secret().encode("utf-8"),
+        message.encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()[:12]
+    if not hmac.compare_digest(match.group("digest"), expected):
+        return _answer_callback_query(
+            _result(status="blocked", reason="scan callback signature invalid", github="not_called", posted=False, comment=None),
+            callback_id, dry_run=dry_run, text="Підпис кнопки недійсний.", show_alert=True,
+        )
+    issued = SCAN_ACTION_ROOT / "issued" / f"{token}.json"
+    try:
+        record = json.loads(issued.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return _answer_callback_query(
+            _result(status="blocked", reason="scan action not issued", github="not_called", posted=False, comment=None),
+            callback_id, dry_run=dry_run, text="Ця кнопка вже недоступна.", show_alert=True,
+        )
+    now = __import__("time").time()
+    if float(record.get("expires_at") or 0) < now:
+        return _answer_callback_query(
+            _result(status="blocked", reason="scan action expired", github="not_called", posted=False, comment=None),
+            callback_id, dry_run=dry_run, text="Термін дії кнопки минув.", show_alert=True,
+        )
+    message_obj = callback_query.get("message")
+    chat = message_obj.get("chat") if isinstance(message_obj, Mapping) else None
+    chat_id = chat.get("id") if isinstance(chat, Mapping) else None
+    expected_chat = os.environ.get("SKELETON_TG_CHAT")
+    if expected_chat and str(chat_id) != str(expected_chat):
+        return _answer_callback_query(
+            _result(status="blocked", reason="scan callback chat mismatch", github="not_called", posted=False, comment=None),
+            callback_id, dry_run=dry_run, text="Кнопка доступна лише власнику.", show_alert=True,
+        )
+    for state in ("done", "processing", "pending"):
+        if (SCAN_ACTION_ROOT / state / f"{token}.json").exists():
+            answer = "PDF уже надіслано." if state == "done" else "Надсилання вже в черзі."
+            return _answer_callback_query(
+                _result(status="duplicate", reason=f"scan action {state}", github="not_called", posted=False, comment=None),
+                callback_id, dry_run=dry_run, text=answer,
+            )
+    pending = {
+        **record,
+        "schema": "skeleton.scan_action.request.v1",
+        "status": "pending",
+        "requested_at": now,
+        "attempts": 0,
+        "next_attempt": 0,
+        "chat_id": chat_id,
+    }
+    if not dry_run:
+        _atomic_scan_json(SCAN_ACTION_ROOT / "pending" / f"{token}.json", pending)
+    return _answer_callback_query(
+        _result(status="queued", reason="scan email action queued", github="not_called", posted=False, comment=None),
+        callback_id, dry_run=dry_run, text="Надсилання PDF поставлено в чергу.",
+    )
+
+
 def handle_callback_query(
     callback_query: Mapping[str, object],
     *,
@@ -139,8 +237,11 @@ def handle_callback_query(
 ) -> dict[str, object]:
     """Handle one bounded Telegram callback query."""
     callback_id = _bounded_callback_id(callback_query.get("id"))
+    callback_data = callback_query.get("data")
+    if isinstance(callback_data, str) and callback_data.startswith("sdoc1:"):
+        return _handle_scan_callback(callback_query, dry_run=dry_run)
     try:
-        parsed = parse_callback_data(callback_query.get("data"))
+        parsed = parse_callback_data(callback_data)
     except ValueError as exc:
         result = _result(
             status="blocked",
