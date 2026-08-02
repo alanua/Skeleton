@@ -1,0 +1,136 @@
+name: Skeleton Runtime Recovery Bootstrap
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/skeleton-runtime-recovery-bootstrap.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: skeleton-runtime-recovery-bootstrap
+  cancel-in-progress: false
+
+jobs:
+  recover-runtime-checkout:
+    name: Recover registered Skeleton runtime checkout
+    if: github.repository == 'alanua/Skeleton' && github.ref == 'refs/heads/main'
+    runs-on:
+      - self-hosted
+      - hetzner-agent-runner-1
+    timeout-minutes: 15
+    env:
+      CANONICAL_REPOSITORY: alanua/Skeleton
+      EXPECTED_SOURCE_BASE_SHA: f75c8961d480f6d93b514691e6be6613ffa364f5
+      TARGET_CHECKOUT: /home/agent/agent-dev/repos/Skeleton
+      RECOVERY_ROOT: /home/agent/agent-dev/private-recovery/skeleton
+    steps:
+      - name: Repair checkout after verified preservation
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          repository_verified=false
+          dirty_state_preserved=false
+          bundle_verified=false
+          final_branch=unknown
+          final_sha=unknown
+          final_clean_state=false
+          status=BLOCKED
+
+          write_summary() {
+            {
+              echo "repository_verified=${repository_verified}"
+              echo "dirty_state_preserved=${dirty_state_preserved}"
+              echo "bundle_verified=${bundle_verified}"
+              echo "final_branch=${final_branch}"
+              echo "final_sha=${final_sha}"
+              echo "final_clean_state=${final_clean_state}"
+              echo "status=${status}"
+            } >> "${GITHUB_STEP_SUMMARY}"
+          }
+          trap write_summary EXIT
+
+          test "${GITHUB_REPOSITORY}" = "${CANONICAL_REPOSITORY}"
+          test "${GITHUB_REF}" = "refs/heads/main"
+          if [[ ! "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            exit 1
+          fi
+          target_sha="${GITHUB_SHA}"
+
+          test "${TARGET_CHECKOUT}" = "/home/agent/agent-dev/repos/Skeleton"
+          test -d "${TARGET_CHECKOUT}"
+          test -d "${TARGET_CHECKOUT}/.git"
+
+          origin_url="$(git -C "${TARGET_CHECKOUT}" remote get-url origin)"
+          case "${origin_url}" in
+            https://github.com/alanua/Skeleton|https://github.com/alanua/Skeleton.git)
+              repository_verified=true
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
+
+          git -C "${TARGET_CHECKOUT}" fetch --quiet --prune origin main
+          origin_main_sha="$(git -C "${TARGET_CHECKOUT}" rev-parse origin/main)"
+          test "${origin_main_sha}" = "${target_sha}"
+          git -C "${TARGET_CHECKOUT}" rev-list --first-parent "${GITHUB_SHA}" \
+            | grep -Fx "${EXPECTED_SOURCE_BASE_SHA}" >/dev/null
+
+          poller_quiet=false
+          for _attempt in $(seq 1 30); do
+            if ! pgrep -f '(^|/)runner_poll_github_tasks[.]py([[:space:]]|$)' >/dev/null; then
+              poller_quiet=true
+              break
+            fi
+            sleep 2
+          done
+          test "${poller_quiet}" = "true"
+
+          status_file="$(mktemp "${RUNNER_TEMP}/skeleton-runtime-status.XXXXXX")"
+          git -C "${TARGET_CHECKOUT}" status --porcelain --untracked-files=all > "${status_file}"
+          if [[ -s "${status_file}" ]]; then
+            git -C "${TARGET_CHECKOUT}" stash push --include-untracked \
+              -m "skeleton-runtime-recovery-bootstrap" >/dev/null 2>&1
+            dirty_state_preserved=true
+
+            stash_sha="$(git -C "${TARGET_CHECKOUT}" rev-parse refs/stash)"
+            if [[ ! "${stash_sha}" =~ ^[0-9a-f]{40}$ ]]; then
+              exit 1
+            fi
+            recovery_ref="refs/skeleton-runtime-bootstrap/pending-recovery/${stash_sha}"
+            git -C "${TARGET_CHECKOUT}" update-ref "${recovery_ref}" "${stash_sha}"
+
+            install -d -m 700 "${RECOVERY_ROOT}"
+            bundle_name="skeleton-checkout-${stash_sha}.bundle"
+            bundle_path="${RECOVERY_ROOT}/${bundle_name}"
+            sha_path="${RECOVERY_ROOT}/${bundle_name}.sha256"
+            git -C "${TARGET_CHECKOUT}" bundle create "${bundle_path}" \
+              "${recovery_ref}" >/dev/null 2>&1
+            git -C "${TARGET_CHECKOUT}" bundle verify "${bundle_path}" >/dev/null 2>&1
+            (
+              cd "${RECOVERY_ROOT}"
+              sha256sum "${bundle_name}" > "${bundle_name}.sha256"
+              sha256sum --check "${bundle_name}.sha256" >/dev/null
+            )
+            test -s "${sha_path}"
+            bundle_verified=true
+          fi
+          rm -f "${status_file}"
+
+          git -C "${TARGET_CHECKOUT}" checkout -B main origin/main >/dev/null 2>&1
+          git -C "${TARGET_CHECKOUT}" reset --hard origin/main >/dev/null 2>&1
+          git -C "${TARGET_CHECKOUT}" clean -fd >/dev/null 2>&1
+
+          final_branch="$(git -C "${TARGET_CHECKOUT}" rev-parse --abbrev-ref HEAD)"
+          final_sha="$(git -C "${TARGET_CHECKOUT}" rev-parse HEAD)"
+          final_status="$(git -C "${TARGET_CHECKOUT}" status --porcelain --untracked-files=all)"
+          test "${final_branch}" = "main"
+          test "${final_sha}" = "${GITHUB_SHA}"
+          test -z "${final_status}"
+          final_clean_state=true
+          status=DONE
