@@ -1,11 +1,8 @@
 name: Skeleton Runtime Recovery Bootstrap
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/skeleton-runtime-recovery-bootstrap.yml"
+  issues:
+    types: [labeled]
 
 permissions:
   contents: read
@@ -17,7 +14,14 @@ concurrency:
 jobs:
   recover-runtime-checkout:
     name: Recover registered Skeleton runtime checkout
-    if: github.repository == 'alanua/Skeleton' && github.ref == 'refs/heads/main'
+    if: >-
+      github.repository == 'alanua/Skeleton' &&
+      github.event.action == 'labeled' &&
+      github.event.issue.number == 2124 &&
+      github.event.issue.state == 'open' &&
+      github.event.label.name == 'risk:green' &&
+      github.event.issue.user.login == 'alanua' &&
+      contains(github.event.issue.body, 'Authorization Marker: EXPLICIT_RUNTIME_RECOVERY_BOOTSTRAP_20260802')
     runs-on:
       - self-hosted
       - Linux
@@ -56,11 +60,6 @@ jobs:
           trap write_summary EXIT
 
           test "${GITHUB_REPOSITORY}" = "${CANONICAL_REPOSITORY}"
-          test "${GITHUB_REF}" = "refs/heads/main"
-          if [[ ! "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
-            exit 1
-          fi
-          target_sha="${GITHUB_SHA}"
 
           test "${TARGET_CHECKOUT}" = "/home/agent/agent-dev/repos/Skeleton"
           test -d "${TARGET_CHECKOUT}"
@@ -77,9 +76,15 @@ jobs:
           esac
 
           git -C "${TARGET_CHECKOUT}" fetch --quiet --prune origin main
-          origin_main_sha="$(git -C "${TARGET_CHECKOUT}" rev-parse origin/main)"
-          test "${origin_main_sha}" = "${target_sha}"
-          git -C "${TARGET_CHECKOUT}" rev-list --first-parent "${GITHUB_SHA}" \
+          target_sha="$(git -C "${TARGET_CHECKOUT}" rev-parse origin/main)"
+          if [[ ! "${target_sha}" =~ ^[0-9a-f]{40}$ ]]; then
+            exit 1
+          fi
+          if [[ -z "${GITHUB_SHA:-}" ]]; then
+            exit 1
+          fi
+          test "${GITHUB_SHA}" = "${target_sha}"
+          git -C "${TARGET_CHECKOUT}" rev-list --first-parent "${target_sha}" \
             | grep -Fx "${EXPECTED_SOURCE_BASE_SHA}" >/dev/null
 
           poller_quiet=false
@@ -131,7 +136,7 @@ jobs:
           final_sha="$(git -C "${TARGET_CHECKOUT}" rev-parse HEAD)"
           final_status="$(git -C "${TARGET_CHECKOUT}" status --porcelain --untracked-files=all)"
           test "${final_branch}" = "main"
-          test "${final_sha}" = "${GITHUB_SHA}"
+          test "${final_sha}" = "${target_sha}"
           test -z "${final_status}"
           final_clean_state=true
           status=DONE
