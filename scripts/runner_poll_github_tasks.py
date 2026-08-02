@@ -65,7 +65,14 @@ from core.runner_shadow_integration import (
     RunnerShadowCompatibilityBindings,
     blocked_shadow_receipt,
     evaluate_shadow_from_normalized_metadata,
+    gate_context_from_metadata,
+    registry_parity_reason_codes,
+    runner_task_from_normalized_metadata,
+    task_envelope_hash,
 )
+from core.runner_executor import CallableRunnerExecutor, RunnerExecutorError
+from core.runner_executor_registry import RunnerExecutorRegistry
+from core.runner_gate import ROUTE_REQUIRED_CAPABILITIES, RunnerGate
 from core.runner_loop_control_executor import (
     LOOP_ENGINE_PACKET,
     LOOP_STATE_DB_ENV,
@@ -144,7 +151,12 @@ from core.telegram_approval_buttons import build_pr_ready_card_payload
 QUEUE_REPOSITORY = "alanua/Skeleton"
 REPO = QUEUE_REPOSITORY
 RUNNER_GITHUB_ACTOR_ENV = "SKELETON_RUNNER_GITHUB_ACTOR"
+RUNNER_MODE_ENV = "SKELETON_RUNNER_MODE"
 RUNNER_SHADOW_MODE_ENV = "SKELETON_RUNNER_SHADOW_MODE"
+RUNNER_MODE_OFF = "off"
+RUNNER_MODE_SHADOW = "shadow"
+RUNNER_MODE_ENFORCE = "enforce"
+RUNNER_MODES = frozenset((RUNNER_MODE_OFF, RUNNER_MODE_SHADOW, RUNNER_MODE_ENFORCE))
 LAST_RUNNER_SHADOW_RECEIPT: dict[str, object] | None = None
 
 
@@ -293,6 +305,53 @@ PUBLISH_ONLY_MAINTENANCE_TASK_IDS = frozenset(
         OVERLAY_REGISTERED_WORKTREE_TO_EXISTING_PR,
         PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR,
         PUBLISH_CONTAINER_VALIDATION_WORKTREE,
+    )
+)
+ROUTE_APPROVAL_KIND_GENERIC = "generic"
+ROUTE_APPROVAL_KIND_PROTECTED = "protected"
+ROUTE_APPROVAL_KIND_RECOVERY = "recovery"
+TRUSTED_GENERIC_APPROVAL_REFERENCES = frozenset(
+    (
+        "GENERIC_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715",
+    )
+)
+TRUSTED_PROTECTED_APPROVAL_REFERENCES = frozenset(
+    (
+        "EXPLICIT_PROTECTED_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715",
+    )
+)
+TRUSTED_RECOVERY_APPROVAL_REFERENCES = frozenset(
+    (
+        "EXPLICIT_RECOVERY_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715",
+    )
+)
+TRUSTED_APPROVAL_COMMENT_IDS_BY_REFERENCE = {
+    "GENERIC_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715": "5002100944",
+    "EXPLICIT_PROTECTED_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715": "5002100945",
+    "EXPLICIT_RECOVERY_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715": "5002100946",
+}
+RECOVERY_ONLY_MAINTENANCE_TASK_IDS = frozenset(
+    (
+        OVERLAY_REGISTERED_WORKTREE_TO_EXISTING_PR,
+    )
+)
+PROTECTED_MAINTENANCE_TASK_IDS = frozenset(
+    (
+        SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
+        ENSURE_TELEGRAM_CALLBACK_LOCAL_CONFIG,
+        RUNTIME_SYNC_MAIN,
+        RECOVER_SKELETON_CHECKOUT,
+        ENSURE_PROJECT_CHECKOUT,
+        PREFLIGHT_PR_REFRESH,
+        LOOP_ENGINE_PACKET,
+        BACKFILL_SKELETON_MEMORY_RECENT,
+        INSTALL_GRAPHIFY_RUNTIME,
+        PREPARE_AUFMASS_PRIVATE_RUNTIME,
+        RUN_AUFMASS_PRIVATE_DXF_REVIEW,
+        SUMMARIZE_AUFMASS_PRIVATE_REVIEW,
+        BUILD_AUFMASS_PRIVATE_SHORTLIST,
+        BUILD_AUFMASS_PRIVATE_AREA_SCHEDULE,
+        QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES,
     )
 )
 CONTAINER_VALIDATION_SOURCE_ISSUE = 1667
@@ -852,6 +911,34 @@ class TelegramApprovedPrMergeRequest:
     approved_head_sha: str
     callback_digest: str
     action: str = TELEGRAM_APPROVED_PR_MERGE_ACTION
+
+
+@dataclass(frozen=True)
+class RouteAuthority:
+    generic_references: frozenset[str]
+    protected_references: frozenset[str]
+    recovery_references: frozenset[str]
+
+
+@dataclass(frozen=True)
+class RouteAuthorityDecision:
+    allowed: bool
+    reason: str | None = None
+    required_kind: str | None = None
+    required_reference: str | None = None
+
+
+@dataclass(frozen=True)
+class RunnerModeDecision:
+    mode: str | None
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class UniversalRunnerGateResult:
+    receipt: RunnerShadowReceipt
+    task: Any | None
+    registry: RunnerExecutorRegistry | None
 
 
 @dataclass(frozen=True)
@@ -2251,6 +2338,252 @@ def runner_task_route(
     return ROUTE_CODE_GENERATION
 
 
+def _comment_author_login(comment: Mapping[str, Any]) -> str | None:
+    author = comment.get("author")
+    if isinstance(author, Mapping):
+        login = author.get("login")
+        if isinstance(login, str):
+            return login
+    user = comment.get("user")
+    if isinstance(user, Mapping):
+        login = user.get("login")
+        if isinstance(login, str):
+            return login
+    login = comment.get("author")
+    return login if isinstance(login, str) else None
+
+
+def _comment_id_text(comment: Mapping[str, Any]) -> str | None:
+    for key in ("id", "databaseId", "database_id", "comment_id"):
+        value = comment.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return str(value)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _normalized_login(value: str | None) -> str | None:
+    normalized = (value or "").strip().lower()
+    return normalized or None
+
+
+def _approval_issue_number(value: str | None) -> int | None:
+    text = (value or "").strip()
+    if text.startswith("#"):
+        text = text[1:]
+    if not text.isdecimal():
+        return None
+    return int(text)
+
+
+def _approval_comment_is_public_safe(body: str) -> bool:
+    try:
+        validate_public_safe_payload({"approval_comment_body": body})
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _trusted_comment_route_authority(
+    issue_number: int,
+    comments: list[dict[str, Any]],
+) -> RouteAuthority:
+    generic: set[str] = set()
+    protected: set[str] = set()
+    recovery: set[str] = set()
+    trusted_by_kind = {
+        ROUTE_APPROVAL_KIND_GENERIC: TRUSTED_GENERIC_APPROVAL_REFERENCES,
+        ROUTE_APPROVAL_KIND_PROTECTED: TRUSTED_PROTECTED_APPROVAL_REFERENCES,
+        ROUTE_APPROVAL_KIND_RECOVERY: TRUSTED_RECOVERY_APPROVAL_REFERENCES,
+    }
+    output_by_kind = {
+        ROUTE_APPROVAL_KIND_GENERIC: generic,
+        ROUTE_APPROVAL_KIND_PROTECTED: protected,
+        ROUTE_APPROVAL_KIND_RECOVERY: recovery,
+    }
+    for comment in comments:
+        body = comment.get("body")
+        if not isinstance(body, str) or not _approval_comment_is_public_safe(body):
+            continue
+        fields = {
+            name: _body_field(body, name)
+            for name in (
+                "Repository",
+                "Issue",
+                "Issue Number",
+                "Comment ID",
+                "Verified Author",
+                "Verified Operator",
+                "Owner",
+                "Public Safe Body",
+                "Approval Kind",
+                "Kind",
+                "Approval Reference",
+                "Operator Approval",
+            )
+        }
+        author = _normalized_login(_comment_author_login(comment))
+        verified_author = _normalized_login(fields["Verified Author"])
+        verified_operator = _normalized_login(fields["Verified Operator"])
+        owner = _normalized_login(fields["Owner"] or QUEUE_REPOSITORY.split("/", 1)[0])
+        kind = (fields["Approval Kind"] or fields["Kind"] or "").strip().lower()
+        reference = fields["Approval Reference"] or fields["Operator Approval"]
+        expected_comment_id = (
+            TRUSTED_APPROVAL_COMMENT_IDS_BY_REFERENCE.get(reference or "")
+            if isinstance(reference, str)
+            else None
+        )
+        comment_id = _comment_id_text(comment)
+        comment_body_id = fields["Comment ID"]
+        comment_issue = _approval_issue_number(fields["Issue"] or fields["Issue Number"])
+        if fields["Repository"] != REPO:
+            continue
+        if comment_issue != issue_number:
+            continue
+        if comment_id is None or comment_body_id != comment_id:
+            continue
+        if expected_comment_id is None or comment_id != expected_comment_id:
+            continue
+        if author is None or owner != "alanua":
+            continue
+        if author != verified_author or verified_author != verified_operator:
+            continue
+        if fields["Public Safe Body"] != "true":
+            continue
+        if reference not in trusted_by_kind.get(kind, frozenset()):
+            continue
+        output_by_kind[kind].add(reference)
+    return RouteAuthority(
+        generic_references=frozenset(generic),
+        protected_references=frozenset(protected),
+        recovery_references=frozenset(recovery),
+    )
+
+
+def _issue_approval_reference(body: str) -> str | None:
+    reference = _body_field(body, "Approval Reference")
+    if reference:
+        return reference
+    legacy_reference = _body_field(body, "Operator Approval")
+    return legacy_reference if legacy_reference else None
+
+
+def _route_authority_decision(
+    *,
+    body: str,
+    route: str,
+    maintenance_task_id: str | None,
+    authority: RouteAuthority,
+) -> RouteAuthorityDecision:
+    reference = _issue_approval_reference(body)
+    if maintenance_task_id in RECOVERY_ONLY_MAINTENANCE_TASK_IDS:
+        if not reference:
+            return RouteAuthorityDecision(
+                False, "missing_recovery_approval_reference", ROUTE_APPROVAL_KIND_RECOVERY
+            )
+        allowed = reference in authority.recovery_references
+        return RouteAuthorityDecision(
+            allowed,
+            None if allowed else "untrusted_recovery_approval_reference",
+            ROUTE_APPROVAL_KIND_RECOVERY,
+            reference,
+        )
+    if (
+        route == ROUTE_PUBLISH_ONLY
+        and maintenance_task_id != INSPECT_ISSUE_WORKTREE_FOR_PUBLISH
+    ) or maintenance_task_id in PROTECTED_MAINTENANCE_TASK_IDS:
+        if not reference:
+            return RouteAuthorityDecision(
+                False, "missing_protected_approval_reference", ROUTE_APPROVAL_KIND_PROTECTED
+            )
+        allowed = reference in authority.protected_references
+        return RouteAuthorityDecision(
+            allowed,
+            None if allowed else "untrusted_protected_approval_reference",
+            ROUTE_APPROVAL_KIND_PROTECTED,
+            reference,
+        )
+    if route == ROUTE_CODE_GENERATION and reference:
+        allowed = (
+            reference in authority.generic_references
+            or reference in authority.protected_references
+        )
+        return RouteAuthorityDecision(
+            allowed,
+            None if allowed else "untrusted_generic_approval_reference",
+            ROUTE_APPROVAL_KIND_GENERIC,
+            reference,
+        )
+    return RouteAuthorityDecision(True)
+
+
+def route_authority_decision_for_issue(
+    *,
+    issue_number: int,
+    body: str,
+    route: str,
+    maintenance_task_id: str | None,
+    comments: list[dict[str, Any]] | None,
+) -> RouteAuthorityDecision:
+    requires_authority = (
+        (
+            route == ROUTE_PUBLISH_ONLY
+            and maintenance_task_id != INSPECT_ISSUE_WORKTREE_FOR_PUBLISH
+        )
+        or maintenance_task_id in PROTECTED_MAINTENANCE_TASK_IDS
+        or maintenance_task_id in RECOVERY_ONLY_MAINTENANCE_TASK_IDS
+        or (route == ROUTE_CODE_GENERATION and _issue_approval_reference(body) is not None)
+    )
+    if not requires_authority:
+        return RouteAuthorityDecision(True)
+    if comments is None:
+        return RouteAuthorityDecision(False, "approval_comments_unavailable")
+    if not comments:
+        return RouteAuthorityDecision(False, "approval_comments_missing")
+    authority = _trusted_comment_route_authority(issue_number, comments)
+    return _route_authority_decision(
+        body=body,
+        route=route,
+        maintenance_task_id=maintenance_task_id,
+        authority=authority,
+    )
+
+
+def trusted_runner_approval_references_for_issue(
+    issue_number: int,
+    comments: list[dict[str, Any]] | None,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    if comments is None:
+        return (), ()
+    authority = _trusted_comment_route_authority(issue_number, comments)
+    approved = tuple(
+        sorted(
+            {
+                *authority.generic_references,
+                *authority.protected_references,
+                *authority.recovery_references,
+            }
+        )
+    )
+    protected = tuple(
+        sorted({*authority.protected_references, *authority.recovery_references})
+    )
+    return approved, protected
+
+
+def runner_mode_decision() -> RunnerModeDecision:
+    configured = os.environ.get(RUNNER_MODE_ENV)
+    if configured is None:
+        return RunnerModeDecision(
+            RUNNER_MODE_SHADOW if runner_shadow_mode_enabled() else RUNNER_MODE_OFF
+        )
+    mode = configured.strip().lower()
+    if mode in RUNNER_MODES:
+        return RunnerModeDecision(mode)
+    return RunnerModeDecision(None, "invalid_runner_mode")
+
+
 def runner_shadow_mode_enabled() -> bool:
     configured = os.environ.get(RUNNER_SHADOW_MODE_ENV)
     if configured is None:
@@ -2388,7 +2721,11 @@ def normalized_runner_shadow_metadata(
         "issue_number": issue_number,
         "legacy_route": route,
         "maintenance_task_id": maintenance_task_id,
-        "repo": _body_field(issue_body, "Repository") or REPO,
+        "repo": (
+            runner_task.target_repository
+            if runner_task is not None
+            else (_body_field(issue_body, "Repository") or REPO)
+        ),
         "branch": _body_field(issue_body, "Branch") or f"runner/issue-{issue_number}",
         "base_sha": base_sha,
         "allowed_files": allowed_files,
@@ -2466,6 +2803,122 @@ def evaluate_runner_shadow_hook(
         receipt = blocked_shadow_receipt("SHADOW_EVALUATOR_EXCEPTION")
     LAST_RUNNER_SHADOW_RECEIPT = receipt.to_public_mapping()
     return receipt
+
+
+def _universal_runner_receipt(
+    status: str,
+    semantic_route: str | None,
+    reason_codes: tuple[str, ...],
+    task_hash: str | None,
+) -> RunnerShadowReceipt:
+    return RunnerShadowReceipt(
+        schema="skeleton.runner_shadow_receipt.v1",
+        shadow_status=status,
+        semantic_route=semantic_route,
+        reason_codes=tuple(sorted(set(reason_codes))),
+        task_envelope_hash=task_hash,
+    )
+
+
+def _universal_runner_noop_executor(_task: Any) -> None:
+    return None
+
+
+def build_universal_runner_executor_registry(
+    *,
+    task_content: str = "",
+    issue_workdir: str = "",
+    runner_task: RunnerTask | None = None,
+) -> RunnerExecutorRegistry:
+    compatibility = protected_runner_shadow_compatibility_bindings()
+
+    def code_edit_handler(_task: Any) -> tuple[int, str]:
+        return run_codex_task(task_content, issue_workdir, runner_task)
+
+    executors = []
+    for task_kind in compatibility.registered_task_kinds:
+        handler = (
+            code_edit_handler
+            if task_kind == "code_edit"
+            else _universal_runner_noop_executor
+        )
+        executors.append(
+            CallableRunnerExecutor(
+                task_kind=task_kind,
+                handler=handler,
+                required_capabilities=tuple(
+                    sorted(ROUTE_REQUIRED_CAPABILITIES[task_kind])
+                ),
+            )
+        )
+    return RunnerExecutorRegistry(executors)
+
+
+def evaluate_universal_runner_gate(
+    *,
+    issue_number: int,
+    issue_body: str,
+    route: str,
+    maintenance_task_id: str | None,
+    runner_task: RunnerTask | None,
+    merge_request: TelegramApprovedPrMergeRequest | None,
+    trusted_approval_references: tuple[str, ...],
+    trusted_protected_approval_references: tuple[str, ...],
+    registry: RunnerExecutorRegistry | None = None,
+) -> UniversalRunnerGateResult:
+    compatibility = protected_runner_shadow_compatibility_bindings()
+    metadata = normalized_runner_shadow_metadata(
+        issue_number=issue_number,
+        issue_body=issue_body,
+        route=route,
+        maintenance_task_id=maintenance_task_id,
+        runner_task=runner_task,
+        merge_request=merge_request,
+        trusted_approval_references=trusted_approval_references,
+        trusted_protected_approval_references=trusted_protected_approval_references,
+    )
+    try:
+        task = runner_task_from_normalized_metadata(metadata, None, compatibility)
+    except Exception as exc:
+        reason = getattr(exc, "reason_code", "UNIVERSAL_RUNNER_VALIDATION_FAILED")
+        receipt = _universal_runner_receipt("blocked", None, (reason,), None)
+        return UniversalRunnerGateResult(receipt, None, None)
+
+    task_hash = task_envelope_hash(task)
+    try:
+        active_registry = registry or build_universal_runner_executor_registry()
+        registry_reasons = registry_parity_reason_codes(
+            active_registry, task, compatibility
+        )
+    except RunnerExecutorError as exc:
+        receipt = _universal_runner_receipt(
+            "blocked", task.task_kind, (exc.reason_code,), task_hash
+        )
+        return UniversalRunnerGateResult(receipt, task, None)
+    except Exception:
+        receipt = _universal_runner_receipt(
+            "blocked", task.task_kind, ("UNIVERSAL_RUNNER_REGISTRY_FAILED",), task_hash
+        )
+        return UniversalRunnerGateResult(receipt, task, None)
+    if registry_reasons:
+        receipt = _universal_runner_receipt(
+            "blocked", task.task_kind, registry_reasons, task_hash
+        )
+        return UniversalRunnerGateResult(receipt, task, active_registry)
+
+    gate_decision = RunnerGate(
+        registered_repositories=ALLOWED_TARGET_REPOSITORIES
+    ).evaluate(
+        task,
+        gate_context_from_metadata(metadata, task, active_registry),
+    )
+    receipt = _universal_runner_receipt(
+        "allowed" if gate_decision.allowed else "blocked",
+        task.task_kind,
+        gate_decision.reason_codes,
+        task_hash,
+    )
+    return UniversalRunnerGateResult(receipt, task, active_registry)
 
 
 def retry_condition_for_issue(
@@ -9401,6 +9854,7 @@ _EXISTING_PR_PUBLISH_ALLOWED_METADATA_FIELDS = frozenset(
         "Pull Request",
         "Expected PR Head SHA",
         "Expected PR Head Branch",
+        "Approval Reference",
         "Operator Approval",
         "Allowed Files",
     )
@@ -9441,7 +9895,13 @@ REGISTERED_WORKTREE_OVERLAY_PACKETS: dict[str, RegisteredWorktreeOverlayPacket] 
 
 
 _REGISTERED_WORKTREE_OVERLAY_ALLOWED_METADATA_FIELDS = frozenset(
-    ("Mode", "Maintenance Task ID", "Recovery Packet", "Operator Approval")
+    (
+        "Mode",
+        "Maintenance Task ID",
+        "Recovery Packet",
+        "Approval Reference",
+        "Operator Approval",
+    )
 )
 
 
@@ -10049,6 +10509,7 @@ _CONTAINER_VALIDATION_PUBLISH_ALLOWED_METADATA_FIELDS = frozenset(
         "Base Branch",
         "Output Branch",
         "Draft PR",
+        "Approval Reference",
         "Operator Approval",
     )
 )
@@ -10573,7 +11034,13 @@ def _registered_worktree_overlay_metadata(
 ) -> tuple[RegisteredWorktreeOverlayRequest | None, str | None]:
     metadata = _metadata_before_task(body)
     fields = _metadata_field_names(metadata)
-    if fields != _REGISTERED_WORKTREE_OVERLAY_ALLOWED_METADATA_FIELDS:
+    required_fields = _REGISTERED_WORKTREE_OVERLAY_ALLOWED_METADATA_FIELDS - {
+        "Approval Reference"
+    }
+    if (
+        not required_fields <= fields
+        or not fields <= _REGISTERED_WORKTREE_OVERLAY_ALLOWED_METADATA_FIELDS
+    ):
         return None, "unsupported_metadata_field"
     if _body_field(metadata, "Mode") != RUNTIME_MAINTENANCE_MODE:
         return None, "invalid_mode"
@@ -12971,6 +13438,7 @@ def process_runtime_maintenance_issue(
 
 
 def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
+    global LAST_RUNNER_SHADOW_RECEIPT
     issue_number = int(issue["number"])
     if not is_open_task_issue(issue):
         return
@@ -12980,6 +13448,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
     claimed = False
     runner_task: RunnerTask | None = None
     retry_decision: RetryDecision | None = None
+    universal_gate_result: UniversalRunnerGateResult | None = None
     try:
         issue_body = issue.get("body") or ""
         fence_reason = task_fence_block_reason(issue_body)
@@ -13015,6 +13484,13 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             maintenance_task_id=maintenance_task_id,
             merge_mode=merge_mode,
         )
+        mode_decision = runner_mode_decision()
+        if mode_decision.mode is None:
+            block_issue(
+                issue_number,
+                f"Universal Runner mode check failed: {mode_decision.reason}.",
+            )
+            return
 
         if maintenance_mode:
             task_content = ""
@@ -13035,16 +13511,63 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             else:
                 task_content = runner_task.content
 
-        evaluate_runner_shadow_hook(
-            issue_number=issue_number,
-            issue_body=issue_body,
-            route=route,
-            maintenance_task_id=maintenance_task_id,
-            runner_task=runner_task,
-            merge_request=merge_request,
-        )
+        if mode_decision.mode == RUNNER_MODE_SHADOW:
+            evaluate_runner_shadow_hook(
+                issue_number=issue_number,
+                issue_body=issue_body,
+                route=route,
+                maintenance_task_id=maintenance_task_id,
+                runner_task=runner_task,
+                merge_request=merge_request,
+            )
+        elif mode_decision.mode == RUNNER_MODE_OFF:
+            LAST_RUNNER_SHADOW_RECEIPT = {
+                "schema": "skeleton.runner_shadow_receipt.v1",
+                "shadow_status": "not_applicable",
+                "semantic_route": None,
+                "reason_codes": ["RUNNER_MODE_OFF"],
+                "task_envelope_hash": None,
+            }
 
         prior_comments = get_issue_comments(issue)
+        if mode_decision.mode == RUNNER_MODE_ENFORCE:
+            authority_decision = route_authority_decision_for_issue(
+                issue_number=issue_number,
+                body=issue_body,
+                route=route,
+                maintenance_task_id=maintenance_task_id,
+                comments=prior_comments,
+            )
+            if not authority_decision.allowed:
+                reason = authority_decision.reason or "approval_authority_denied"
+                block_issue(
+                    issue_number,
+                    f"Route approval authority check failed: {reason}.",
+                )
+                return
+            trusted_approval_references, trusted_protected_approval_references = (
+                trusted_runner_approval_references_for_issue(issue_number, prior_comments)
+            )
+            universal_gate_result = evaluate_universal_runner_gate(
+                issue_number=issue_number,
+                issue_body=issue_body,
+                route=route,
+                maintenance_task_id=maintenance_task_id,
+                runner_task=runner_task,
+                merge_request=merge_request,
+                trusted_approval_references=trusted_approval_references,
+                trusted_protected_approval_references=trusted_protected_approval_references,
+            )
+            LAST_RUNNER_SHADOW_RECEIPT = (
+                universal_gate_result.receipt.to_public_mapping()
+            )
+            if universal_gate_result.receipt.shadow_status != "allowed":
+                reasons = ",".join(universal_gate_result.receipt.reason_codes)
+                block_issue(
+                    issue_number,
+                    f"Universal Runner enforce gate failed: {reasons}.",
+                )
+                return
         retry_block_reason = "executor_invocation"
         if route == ROUTE_CODE_GENERATION:
             expected_output_reason = code_task_expected_output_block_reason(issue_body)
@@ -13241,9 +13764,40 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
         issue_workdir = str(worktree_path)
 
         cleanup_runtime_artifacts(issue_workdir)
-        codex_code, codex_output = run_codex_task(
-            task_content, issue_workdir, runner_task
-        )
+        if (
+            mode_decision.mode == RUNNER_MODE_ENFORCE
+            and universal_gate_result is not None
+            and universal_gate_result.task is not None
+        ):
+            enforce_registry = build_universal_runner_executor_registry(
+                task_content=task_content,
+                issue_workdir=issue_workdir,
+                runner_task=runner_task,
+            )
+            try:
+                dispatch_result = enforce_registry.dispatch(universal_gate_result.task)
+            except RunnerExecutorError as exc:
+                block_issue(
+                    issue_number,
+                    f"Universal Runner executor dispatch failed: {exc.reason_code}.",
+                    remove_label=LABEL_RUNNING,
+                    runner_task=runner_task,
+                    retry_decision=retry_decision,
+                )
+                return
+            if (
+                isinstance(dispatch_result, tuple)
+                and len(dispatch_result) == 2
+                and isinstance(dispatch_result[0], int)
+                and isinstance(dispatch_result[1], str)
+            ):
+                codex_code, codex_output = dispatch_result
+            else:
+                codex_code, codex_output = 0, str(dispatch_result or "")
+        else:
+            codex_code, codex_output = run_codex_task(
+                task_content, issue_workdir, runner_task
+            )
         cleanup_runtime_artifacts(issue_workdir)
         codex_result = classify_codex_task_result(codex_output, codex_code)
         if codex_code != 0:
