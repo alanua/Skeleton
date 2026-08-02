@@ -36,25 +36,33 @@ def run_script() -> str:
     return workflow["jobs"]["recover-runtime-checkout"]["steps"][0]["run"]
 
 
-def test_workflow_yaml_parses_and_trigger_is_exact_push_main_path_only() -> None:
+AUTHORIZATION_MARKER = "Authorization Marker: EXPLICIT_RUNTIME_RECOVERY_BOOTSTRAP_20260802"
+
+
+def test_workflow_yaml_parses_and_trigger_is_exact_issues_labeled_only() -> None:
     workflow = load_workflow()
     triggers = workflow_on(workflow)
 
-    assert set(triggers) == {"push"}
-    assert triggers["push"]["branches"] == ["main"]
-    assert triggers["push"]["paths"] == [
-        ".github/workflows/skeleton-runtime-recovery-bootstrap.yml"
-    ]
+    assert triggers == {"issues": {"types": ["labeled"]}}
     assert "workflow_dispatch" not in triggers
     assert "repository_dispatch" not in triggers
+    assert "push" not in triggers
     assert "inputs" not in workflow_text()
 
 
-def test_runner_labels_repository_and_source_base_constant_are_fixed() -> None:
+def test_runner_labels_repository_issue_gate_and_source_base_constant_are_fixed() -> None:
     workflow = load_workflow()
     job = workflow["jobs"]["recover-runtime-checkout"]
 
-    assert job["if"] == "github.repository == 'alanua/Skeleton' && github.ref == 'refs/heads/main'"
+    assert job["if"] == (
+        "github.repository == 'alanua/Skeleton' && "
+        "github.event.action == 'labeled' && "
+        "github.event.issue.number == 2124 && "
+        "github.event.issue.state == 'open' && "
+        "github.event.label.name == 'risk:green' && "
+        "github.event.issue.user.login == 'alanua' && "
+        f"contains(github.event.issue.body, '{AUTHORIZATION_MARKER}')"
+    )
     assert job["runs-on"] == ["self-hosted", "Linux", "X64"]
     assert OLD_RUNNER_NAME not in workflow_text()
     assert job["env"] == {
@@ -67,12 +75,33 @@ def test_runner_labels_repository_and_source_base_constant_are_fixed() -> None:
 
     script = run_script()
     assert 'test "${GITHUB_REPOSITORY}" = "${CANONICAL_REPOSITORY}"' in script
-    assert 'test "${GITHUB_REF}" = "refs/heads/main"' in script
-    assert '[[ ! "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]]' in script
-    assert 'target_sha="${GITHUB_SHA}"' in script
-    assert 'rev-list --first-parent "${GITHUB_SHA}"' in script
+    assert 'test "${GITHUB_REF}" = "refs/heads/main"' not in script
+    assert 'target_sha="$(git -C "${TARGET_CHECKOUT}" rev-parse origin/main)"' in script
+    assert '[[ ! "${target_sha}" =~ ^[0-9a-f]{40}$ ]]' in script
+    assert 'test "${GITHUB_SHA}" = "${target_sha}"' in script
+    assert 'rev-list --first-parent "${target_sha}"' in script
     assert 'grep -Fx "${EXPECTED_SOURCE_BASE_SHA}" >/dev/null' in script
     assert "EXPECTED_TARGET_SHA" not in script
+
+
+def test_no_arbitrary_issue_input_consumption_or_command_parsing() -> None:
+    workflow = load_workflow()
+    text = workflow_text()
+    script = run_script()
+
+    assert workflow_on(workflow) == {"issues": {"types": ["labeled"]}}
+    assert "github.event.issue.body" in workflow["jobs"]["recover-runtime-checkout"]["if"]
+    assert AUTHORIZATION_MARKER in workflow["jobs"]["recover-runtime-checkout"]["if"]
+    for forbidden in [
+        "github.event.issue.number ==",
+        "github.event.label.name ==",
+        "github.event.issue.user.login ==",
+    ]:
+        assert forbidden in workflow["jobs"]["recover-runtime-checkout"]["if"]
+    assert "github.event.issue.body" not in script
+    assert "Authorization Marker" not in script
+    assert re.search(r"issue\.body.*(split|fromjson|contains\([^)]*(run|cmd|command))", text) is None
+    assert re.search(r"github\.event\.(inputs|client_payload)", text) is None
 
 
 def test_target_checkout_origin_and_origin_main_are_verified_before_mutation() -> None:
@@ -85,9 +114,9 @@ def test_target_checkout_origin_and_origin_main_are_verified_before_mutation() -
         'git -C "${TARGET_CHECKOUT}" remote get-url origin',
         "https://github.com/alanua/Skeleton|https://github.com/alanua/Skeleton.git",
         'git -C "${TARGET_CHECKOUT}" fetch --quiet --prune origin main',
-        'origin_main_sha="$(git -C "${TARGET_CHECKOUT}" rev-parse origin/main)"',
-        'test "${origin_main_sha}" = "${target_sha}"',
-        'git -C "${TARGET_CHECKOUT}" rev-list --first-parent "${GITHUB_SHA}"',
+        'target_sha="$(git -C "${TARGET_CHECKOUT}" rev-parse origin/main)"',
+        'test "${GITHUB_SHA}" = "${target_sha}"',
+        'git -C "${TARGET_CHECKOUT}" rev-list --first-parent "${target_sha}"',
     ]:
         assert snippet in script
 
@@ -96,7 +125,7 @@ def test_target_checkout_origin_and_origin_main_are_verified_before_mutation() -
     for destructive in [first_stash, first_checkout]:
         assert script.index('test "${TARGET_CHECKOUT}" = "/home/agent/agent-dev/repos/Skeleton"') < destructive
         assert script.index('git -C "${TARGET_CHECKOUT}" remote get-url origin') < destructive
-        assert script.index('test "${origin_main_sha}" = "${target_sha}"') < destructive
+        assert script.index('test "${GITHUB_SHA}" = "${target_sha}"') < destructive
         assert script.index('grep -Fx "${EXPECTED_SOURCE_BASE_SHA}" >/dev/null') < destructive
     assert first_stash < first_checkout
 
@@ -108,10 +137,29 @@ def test_old_pre_merge_sha_is_ancestry_only_never_final_target() -> None:
 
     assert job["env"]["EXPECTED_SOURCE_BASE_SHA"] == OLD_PRE_MERGE_TARGET_SHA
     assert "EXPECTED_TARGET_SHA" not in workflow_text()
-    assert 'test "${origin_main_sha}" = "${target_sha}"' in script
-    assert 'test "${final_sha}" = "${GITHUB_SHA}"' in script
+    assert 'test "${GITHUB_SHA}" = "${target_sha}"' in script
+    assert 'test "${final_sha}" = "${target_sha}"' in script
     assert f'test "${{origin_main_sha}}" = "{OLD_PRE_MERGE_TARGET_SHA}"' not in script
     assert f'test "${{final_sha}}" = "{OLD_PRE_MERGE_TARGET_SHA}"' not in script
+
+
+def test_source_base_ancestry_and_github_sha_equality_precede_mutation() -> None:
+    script = run_script()
+
+    target_from_origin = script.index(
+        'target_sha="$(git -C "${TARGET_CHECKOUT}" rev-parse origin/main)"'
+    )
+    target_format = script.index('[[ ! "${target_sha}" =~ ^[0-9a-f]{40}$ ]]')
+    github_sha_present = script.index('[[ -z "${GITHUB_SHA:-}" ]]')
+    github_sha_match = script.index('test "${GITHUB_SHA}" = "${target_sha}"')
+    ancestry = script.index('rev-list --first-parent "${target_sha}"')
+    source_base = script.index('grep -Fx "${EXPECTED_SOURCE_BASE_SHA}" >/dev/null')
+    stash = script.index("stash push --include-untracked")
+    checkout = script.index('git -C "${TARGET_CHECKOUT}" checkout -B main origin/main')
+
+    assert target_from_origin < target_format < github_sha_present < github_sha_match
+    assert github_sha_match < ancestry < source_base
+    assert source_base < stash < checkout
 
 
 def test_process_quiescence_is_bounded_and_does_not_manage_services() -> None:
@@ -159,7 +207,7 @@ def test_final_checkout_state_is_required_after_cleanup() -> None:
         'final_sha="$(git -C "${TARGET_CHECKOUT}" rev-parse HEAD)"',
         'final_status="$(git -C "${TARGET_CHECKOUT}" status --porcelain --untracked-files=all)"',
         'test "${final_branch}" = "main"',
-        'test "${final_sha}" = "${GITHUB_SHA}"',
+        'test "${final_sha}" = "${target_sha}"',
         'test -z "${final_status}"',
         "final_clean_state=true",
         "status=DONE",
