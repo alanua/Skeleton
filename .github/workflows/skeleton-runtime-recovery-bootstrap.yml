@@ -14,6 +14,8 @@ concurrency:
 jobs:
   recover-runtime-checkout:
     name: Recover registered Skeleton runtime checkout
+    # Repository changed-file enforcement is performed by Runner's PR allowlist.
+    # This workflow stays inert except for the exact hardcoded authorized issue event below.
     if: >-
       github.repository == 'alanua/Skeleton' &&
       github.event.action == 'labeled' &&
