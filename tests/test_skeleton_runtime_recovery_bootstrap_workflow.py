@@ -40,11 +40,21 @@ def run_script() -> str:
 AUTHORIZATION_MARKER = "Authorization Marker: EXPLICIT_RUNTIME_RECOVERY_BOOTSTRAP_20260802"
 
 
-def test_workflow_yaml_parses_and_trigger_is_exact_issues_labeled_only() -> None:
+def expected_triggers() -> dict:
+    return {
+        "issues": {"types": ["labeled"]},
+        "schedule": [{"cron": "*/5 * * * *"}],
+    }
+
+
+def test_workflow_yaml_parses_and_triggers_are_exact_issues_labeled_plus_schedule() -> None:
     workflow = load_workflow()
     triggers = workflow_on(workflow)
 
-    assert triggers == {"issues": {"types": ["labeled"]}}
+    assert triggers == expected_triggers()
+    assert triggers["issues"] == {"types": ["labeled"]}
+    assert triggers["schedule"] == [{"cron": "*/5 * * * *"}]
+    assert len(triggers["schedule"]) == 1
     assert "workflow_dispatch" not in triggers
     assert "repository_dispatch" not in triggers
     assert "push" not in triggers
@@ -55,7 +65,7 @@ def test_runner_labels_repository_issue_gate_and_source_base_constant_are_fixed(
     workflow = load_workflow()
     job = workflow["jobs"]["recover-runtime-checkout"]
 
-    assert job["if"] == (
+    issue_authorization = (
         "github.repository == 'alanua/Skeleton' && "
         "github.event.action == 'labeled' && "
         "github.event.issue.number == 2124 && "
@@ -64,6 +74,7 @@ def test_runner_labels_repository_issue_gate_and_source_base_constant_are_fixed(
         "github.event.issue.user.login == 'alanua' && "
         f"contains(github.event.issue.body, '{AUTHORIZATION_MARKER}')"
     )
+    assert job["if"] == f"github.event_name == 'schedule' || ({issue_authorization})"
     assert job["runs-on"] == ["self-hosted", "Linux", "X64"]
     assert OLD_RUNNER_NAME not in workflow_text()
     assert job["env"] == {
@@ -90,7 +101,7 @@ def test_no_arbitrary_issue_input_consumption_or_command_parsing() -> None:
     text = workflow_text()
     script = run_script()
 
-    assert workflow_on(workflow) == {"issues": {"types": ["labeled"]}}
+    assert workflow_on(workflow) == expected_triggers()
     assert "github.event.issue.body" in workflow["jobs"]["recover-runtime-checkout"]["if"]
     assert AUTHORIZATION_MARKER in workflow["jobs"]["recover-runtime-checkout"]["if"]
     for forbidden in [
