@@ -20,7 +20,8 @@ jobs:
     if: github.repository == 'alanua/Skeleton' && github.ref == 'refs/heads/main'
     runs-on:
       - self-hosted
-      - hetzner-agent-runner-1
+      - Linux
+      - X64
     timeout-minutes: 15
     env:
       CANONICAL_REPOSITORY: alanua/Skeleton
