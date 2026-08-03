@@ -434,6 +434,7 @@ TELEGRAM_CALLBACK_POLLER_RUNTIME_FILES = (
 )
 
 _HEAD_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+_SKELETON_RECOVERABLE_BRANCH_RE = re.compile(r"^runner/issue-[1-9][0-9]*$")
 _SAFE_TARGET_BASE_BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,159}$")
 _REGISTERED_OVERLAY_PUBLIC_REST_REPO = "alanua/Skeleton"
 _REGISTERED_OVERLAY_PUBLIC_REST_HOST = "api.github.com"
@@ -7723,6 +7724,42 @@ def _read_skeleton_current_branch(
     return None
 
 
+def _read_recoverable_skeleton_current_branch(
+    task_id: str, checkout_path: Path, status_lines: list[str]
+) -> tuple[str | None, str | None]:
+    current_branch, failure = _run_freshness_command(
+        ["git", "-C", str(checkout_path), "symbolic-ref", "--short", "HEAD"],
+        status_lines,
+        "read_current_branch",
+    )
+    if failure is not None or current_branch is None:
+        return None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                *status_lines,
+                failure or "step=read_current_branch status=failed",
+                "reason=detached_head",
+            ],
+            "not_met",
+        )
+    if current_branch != "main" and _SKELETON_RECOVERABLE_BRANCH_RE.fullmatch(
+        current_branch
+    ) is None:
+        return None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                *status_lines,
+                f"current_branch={current_branch}",
+                "reason=branch_not_recoverable",
+            ],
+            "not_met",
+        )
+    status_lines.append(f"current_branch={current_branch}")
+    return current_branch, None
+
+
 def _fetch_skeleton_origin_main(
     task_id: str, checkout_path: Path, status_lines: list[str]
 ) -> str | None:
@@ -8121,9 +8158,12 @@ def recover_skeleton_checkout(body: str) -> str:
     if origin_report is not None:
         return origin_report
 
-    branch_report = _read_skeleton_current_branch(task_id, checkout_path, status_lines)
+    current_branch, branch_report = _read_recoverable_skeleton_current_branch(
+        task_id, checkout_path, status_lines
+    )
     if branch_report is not None:
         return branch_report
+    assert current_branch is not None
 
     status_output, failure = _run_freshness_command(
         ["git", "-C", str(checkout_path), "status", "--porcelain"],
@@ -8174,6 +8214,21 @@ def recover_skeleton_checkout(body: str) -> str:
             )
     else:
         status_lines.append("recovery_stash_status=not_needed")
+
+    if current_branch != "main":
+        code, _output = run_command(
+            ["git", "-C", str(checkout_path), "checkout", "-B", "main", "origin/main"]
+        )
+        if code != 0:
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [*status_lines, f"step=checkout_main status=failed exit_code={code}"],
+                "not_met",
+            )
+        status_lines.append("step=checkout_main status=done")
+    else:
+        status_lines.append("step=checkout_main status=not_needed")
 
     code, _output = run_command(
         ["git", "-C", str(checkout_path), "reset", "--hard", "origin/main"]
@@ -8232,6 +8287,12 @@ def recover_skeleton_checkout(body: str) -> str:
             "not_met",
         )
     status_lines.append("final_clean_state=true")
+
+    final_branch_report = _read_skeleton_current_branch(
+        task_id, checkout_path, status_lines
+    )
+    if final_branch_report is not None:
+        return final_branch_report
 
     final_head_sha, failure_report = _read_skeleton_sha(
         task_id, checkout_path, "HEAD", status_lines, "read_final_head"

@@ -12924,6 +12924,101 @@ def test_recover_skeleton_checkout_bundle_recovers_tracked_and_untracked_after_r
     assert untracked.read_text(encoding="utf-8") == "untracked\n"
 
 
+def test_recover_skeleton_checkout_dirty_runner_branch_preserves_before_main_transition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _origin, _seed, checkout_path = _prepare_recover_skeleton_checkout_repo(tmp_path)
+    recovery_root = tmp_path / "recovery"
+    monkeypatch.setenv("SKELETON_RUNNER_CHECKOUT_RECOVERY_ROOT", str(recovery_root))
+    assert runner.run_command(["git", "checkout", "-b", "runner/issue-2096"], cwd=checkout_path)[
+        0
+    ] == 0
+    tracked = checkout_path / "tracked.txt"
+    untracked = checkout_path / "new.txt"
+    tracked.write_text("base\nmodified\n", encoding="utf-8")
+    untracked.write_text("untracked\n", encoding="utf-8")
+    origin_main_sha = runner.run_command(
+        ["git", "rev-parse", "origin/main"], cwd=checkout_path
+    )[1].strip()
+    project_tree = _project_tree_for_skeleton_checkout(checkout_path)
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(
+        runner, "_project_checkout_path_is_under_runner_base", return_value=True
+    ), mock.patch.object(
+        runner, "_remote_url_matches_project_repo", return_value=True
+    ):
+        report = runner.recover_skeleton_checkout(
+            _recover_skeleton_checkout_issue_body(expected_head_sha=origin_main_sha)
+        )
+
+    assert report.startswith("DONE:")
+    assert "current_branch=runner/issue-2096" in report
+    assert "recovery_stash_status=created" in report
+    assert "recovery_artifact_status=verified" in report
+    assert "step=checkout_main status=done" in report
+    assert "reset_status=hard_origin_main" in report
+    assert "step=clean_untracked status=done" in report
+    assert "final_clean_state=true" in report
+    assert f"checkout_head_sha={origin_main_sha}" in report
+    assert f"github_main_sha={origin_main_sha}" in report
+    assert "checkout_sync_state=equal" in report
+    assert str(recovery_root) not in report
+    assert "tracked.txt" not in report
+    assert "new.txt" not in report
+    assert runner.run_command(["git", "symbolic-ref", "--short", "HEAD"], cwd=checkout_path)[
+        1
+    ].strip() == "main"
+    assert runner.run_command(["git", "rev-parse", "HEAD"], cwd=checkout_path)[
+        1
+    ].strip() == origin_main_sha
+    assert runner.run_command(
+        ["git", "status", "--porcelain", "--untracked-files=all"], cwd=checkout_path
+    )[1].strip() == ""
+
+    _recover_from_bundle(checkout_path, recovery_root)
+    assert tracked.read_text(encoding="utf-8") == "base\nmodified\n"
+    assert untracked.read_text(encoding="utf-8") == "untracked\n"
+
+
+def test_recover_skeleton_checkout_clean_runner_branch_transitions_without_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _origin, _seed, checkout_path = _prepare_recover_skeleton_checkout_repo(tmp_path)
+    recovery_root = tmp_path / "recovery"
+    monkeypatch.setenv("SKELETON_RUNNER_CHECKOUT_RECOVERY_ROOT", str(recovery_root))
+    assert runner.run_command(["git", "checkout", "-b", "runner/issue-2096"], cwd=checkout_path)[
+        0
+    ] == 0
+    origin_main_sha = runner.run_command(
+        ["git", "rev-parse", "origin/main"], cwd=checkout_path
+    )[1].strip()
+    project_tree = _project_tree_for_skeleton_checkout(checkout_path)
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(
+        runner, "_project_checkout_path_is_under_runner_base", return_value=True
+    ), mock.patch.object(
+        runner, "_remote_url_matches_project_repo", return_value=True
+    ):
+        report = runner.recover_skeleton_checkout(_recover_skeleton_checkout_issue_body())
+
+    assert report.startswith("DONE:")
+    assert "current_branch=runner/issue-2096" in report
+    assert "recovery_stash_status=not_needed" in report
+    assert "recovery_artifact_status=verified" not in report
+    assert "step=checkout_main status=done" in report
+    assert not recovery_root.exists()
+    assert runner.run_command(["git", "symbolic-ref", "--short", "HEAD"], cwd=checkout_path)[
+        1
+    ].strip() == "main"
+    assert runner.run_command(["git", "rev-parse", "HEAD"], cwd=checkout_path)[
+        1
+    ].strip() == origin_main_sha
+
+
 def test_recover_skeleton_checkout_preverification_failure_restores_and_retries(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -12980,6 +13075,270 @@ def test_recover_skeleton_checkout_preverification_failure_restores_and_retries(
     _recover_from_bundle(checkout_path, recovery_root)
     assert tracked.read_text(encoding="utf-8") == "base\nmodified\n"
     assert untracked.read_text(encoding="utf-8") == "untracked\n"
+
+
+def test_recover_skeleton_checkout_feature_preservation_failure_leaves_state_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _origin, _seed, checkout_path = _prepare_recover_skeleton_checkout_repo(tmp_path)
+    recovery_root = tmp_path / "recovery"
+    monkeypatch.setenv("SKELETON_RUNNER_CHECKOUT_RECOVERY_ROOT", str(recovery_root))
+    assert runner.run_command(["git", "checkout", "-b", "runner/issue-2096"], cwd=checkout_path)[
+        0
+    ] == 0
+    tracked = checkout_path / "tracked.txt"
+    untracked = checkout_path / "new.txt"
+    tracked.write_text("base\nmodified\n", encoding="utf-8")
+    untracked.write_text("untracked\n", encoding="utf-8")
+    project_tree = _project_tree_for_skeleton_checkout(checkout_path)
+    original_run_command = runner.run_command
+
+    def fail_bundle_verify(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        if command[:5] == ["git", "-C", str(checkout_path), "bundle", "verify"]:
+            return 1, "bundle verify output must not leak"
+        return original_run_command(command, cwd=cwd)
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(
+        runner, "_project_checkout_path_is_under_runner_base", return_value=True
+    ), mock.patch.object(
+        runner, "_remote_url_matches_project_repo", return_value=True
+    ), mock.patch.object(
+        runner, "run_command", side_effect=fail_bundle_verify
+    ):
+        report = runner.recover_skeleton_checkout(_recover_skeleton_checkout_issue_body())
+
+    assert report.startswith("NEEDS_OPERATOR:")
+    assert "reason=recovery_artifact_verify_failed" in report
+    assert "step=checkout_main status=done" not in report
+    assert runner.run_command(["git", "symbolic-ref", "--short", "HEAD"], cwd=checkout_path)[
+        1
+    ].strip() == "runner/issue-2096"
+    assert tracked.read_text(encoding="utf-8") == "base\nmodified\n"
+    assert untracked.read_text(encoding="utf-8") == "untracked\n"
+
+
+@pytest.mark.parametrize(
+    ("branch_output", "branch_code", "reason"),
+    [
+        ("", 1, "reason=detached_head"),
+        ("feature/recover\n", 0, "reason=branch_not_recoverable"),
+        ("runner/issue-0\n", 0, "reason=branch_not_recoverable"),
+        ("runner/issue-2096-extra\n", 0, "reason=branch_not_recoverable"),
+    ],
+)
+def test_recover_skeleton_checkout_rejects_detached_and_non_runner_branches_before_mutation(
+    branch_output: str, branch_code: int, reason: str
+) -> None:
+    checkout_path = _safe_checkout_path("skeleton-recover-invalid-branch")
+    project_tree = _project_tree_for_skeleton_checkout(checkout_path)
+
+    def run_recover_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        del cwd
+        if command == ["git", "-C", str(checkout_path), "remote", "get-url", "origin"]:
+            return 0, "https://github.com/alanua/Skeleton.git\n"
+        if command == ["git", "-C", str(checkout_path), "symbolic-ref", "--short", "HEAD"]:
+            return branch_code, branch_output
+        return 2, "unexpected command"
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(Path, "exists", autospec=True) as path_exists, mock.patch.object(
+        runner, "run_command", side_effect=run_recover_command
+    ) as run, mock.patch.object(
+        runner, "_create_verified_skeleton_checkout_recovery"
+    ) as preserve:
+        path_exists.side_effect = lambda path: path in {
+            checkout_path,
+            checkout_path / ".git",
+        }
+        report = runner.recover_skeleton_checkout(_recover_skeleton_checkout_issue_body())
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("BLOCKED:")
+    assert reason in report
+    assert commands == [
+        ["git", "-C", str(checkout_path), "remote", "get-url", "origin"],
+        ["git", "-C", str(checkout_path), "symbolic-ref", "--short", "HEAD"],
+    ]
+    assert not any(command[2:3] == ["push"] for command in commands)
+    assert ["git", "-C", str(checkout_path), "stash", "push"] not in commands
+    assert ["git", "-C", str(checkout_path), "reset", "--hard", "origin/main"] not in commands
+    assert ["git", "-C", str(checkout_path), "clean", "-fd"] not in commands
+    preserve.assert_not_called()
+
+
+def test_recover_skeleton_checkout_expected_sha_mismatch_blocks_before_mutation() -> None:
+    checkout_path = _safe_checkout_path("skeleton-recover-expected-mismatch")
+    project_tree = _project_tree_for_skeleton_checkout(checkout_path)
+    origin_main_sha = "b" * 40
+    expected_head_sha = "c" * 40
+
+    def run_recover_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        del cwd
+        if command == ["git", "-C", str(checkout_path), "remote", "get-url", "origin"]:
+            return 0, "https://github.com/alanua/Skeleton.git\n"
+        if command == ["git", "-C", str(checkout_path), "symbolic-ref", "--short", "HEAD"]:
+            return 0, "runner/issue-2096\n"
+        if command == ["git", "-C", str(checkout_path), "status", "--porcelain"]:
+            return 0, " M tracked.txt\n?? new.txt\n"
+        if command == ["git", "-C", str(checkout_path), "fetch", "--prune", "origin", "main"]:
+            return 0, "fetch output must not leak"
+        if command == ["git", "-C", str(checkout_path), "rev-parse", "origin/main"]:
+            return 0, f"{origin_main_sha}\n"
+        return 2, "unexpected command"
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(Path, "exists", autospec=True) as path_exists, mock.patch.object(
+        runner, "run_command", side_effect=run_recover_command
+    ) as run, mock.patch.object(
+        runner, "_create_verified_skeleton_checkout_recovery"
+    ) as preserve:
+        path_exists.side_effect = lambda path: path in {
+            checkout_path,
+            checkout_path / ".git",
+        }
+        report = runner.recover_skeleton_checkout(
+            _recover_skeleton_checkout_issue_body(expected_head_sha=expected_head_sha)
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("BLOCKED:")
+    assert "reason=expected_head_sha_mismatch" in report
+    assert "fetch output" not in report
+    assert commands == [
+        ["git", "-C", str(checkout_path), "remote", "get-url", "origin"],
+        ["git", "-C", str(checkout_path), "symbolic-ref", "--short", "HEAD"],
+        ["git", "-C", str(checkout_path), "status", "--porcelain"],
+        ["git", "-C", str(checkout_path), "fetch", "--prune", "origin", "main"],
+        ["git", "-C", str(checkout_path), "rev-parse", "origin/main"],
+    ]
+    preserve.assert_not_called()
+
+
+def test_recover_skeleton_checkout_feature_branch_command_ordering_and_bounded_inputs() -> None:
+    checkout_path = _safe_checkout_path("skeleton-recover-ordering")
+    project_tree = _project_tree_for_skeleton_checkout(checkout_path)
+    origin_main_sha = "b" * 40
+    events: list[object] = []
+
+    def run_recover_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        del cwd
+        events.append(command)
+        if command == ["git", "-C", str(checkout_path), "remote", "get-url", "origin"]:
+            return 0, "https://github.com/alanua/Skeleton.git\n"
+        if command == ["git", "-C", str(checkout_path), "symbolic-ref", "--short", "HEAD"]:
+            if run_recover_command.on_main:
+                return 0, "main\n"
+            return 0, "runner/issue-2096\n"
+        if command == ["git", "-C", str(checkout_path), "status", "--porcelain"]:
+            return 0, " M tracked.txt\n?? new.txt\n"
+        if command == ["git", "-C", str(checkout_path), "fetch", "--prune", "origin", "main"]:
+            return 0, "raw fetch output must not leak"
+        if command == ["git", "-C", str(checkout_path), "rev-parse", "origin/main"]:
+            return 0, f"{origin_main_sha}\n"
+        if command == ["git", "-C", str(checkout_path), "checkout", "-B", "main", "origin/main"]:
+            run_recover_command.on_main = True
+            return 0, "checkout output must not leak"
+        if command == ["git", "-C", str(checkout_path), "reset", "--hard", "origin/main"]:
+            return 0, "reset output must not leak"
+        if command == ["git", "-C", str(checkout_path), "clean", "-fd"]:
+            return 0, "clean output must not leak"
+        if command == [
+            "git",
+            "-C",
+            str(checkout_path),
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+        ]:
+            return 0, ""
+        if command == ["git", "-C", str(checkout_path), "rev-parse", "HEAD"]:
+            return 0, f"{origin_main_sha}\n"
+        return 2, "unexpected command"
+
+    run_recover_command.on_main = False
+
+    def preserve(
+        path: Path, status_lines: list[str]
+    ) -> tuple[str | None, str | None]:
+        events.append("verified_preservation")
+        assert path == checkout_path
+        status_lines.extend(
+            (
+                "recovery_stash_status=created",
+                "recovery_ref_status=created",
+                "recovery_artifact_status=verified",
+            )
+        )
+        return "a" * 40, None
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=project_tree
+    ), mock.patch.object(Path, "exists", autospec=True) as path_exists, mock.patch.object(
+        runner, "run_command", side_effect=run_recover_command
+    ), mock.patch.object(
+        runner, "_create_verified_skeleton_checkout_recovery", side_effect=preserve
+    ):
+        path_exists.side_effect = lambda path: path in {
+            checkout_path,
+            checkout_path / ".git",
+        }
+        report = runner.recover_skeleton_checkout(
+            _recover_skeleton_checkout_issue_body(
+                expected_head_sha=origin_main_sha,
+                task_body="git push origin evil\n"
+                "gh pr merge 1\n"
+                "git checkout -B main issue-controlled",
+            )
+        )
+
+    assert report.startswith("DONE:")
+    assert "raw fetch output" not in report
+    assert "tracked.txt" not in report
+    assert "new.txt" not in report
+    assert events == [
+        ["git", "-C", str(checkout_path), "remote", "get-url", "origin"],
+        ["git", "-C", str(checkout_path), "symbolic-ref", "--short", "HEAD"],
+        ["git", "-C", str(checkout_path), "status", "--porcelain"],
+        ["git", "-C", str(checkout_path), "fetch", "--prune", "origin", "main"],
+        ["git", "-C", str(checkout_path), "rev-parse", "origin/main"],
+        "verified_preservation",
+        ["git", "-C", str(checkout_path), "checkout", "-B", "main", "origin/main"],
+        ["git", "-C", str(checkout_path), "reset", "--hard", "origin/main"],
+        ["git", "-C", str(checkout_path), "clean", "-fd"],
+        [
+            "git",
+            "-C",
+            str(checkout_path),
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+        ],
+        ["git", "-C", str(checkout_path), "symbolic-ref", "--short", "HEAD"],
+        ["git", "-C", str(checkout_path), "rev-parse", "HEAD"],
+    ]
+    assert all(
+        not (
+            isinstance(event, list)
+            and (
+                event[:2] == ["git", "push"]
+                or event[:2] == ["gh", "pr"]
+                or "issue-controlled" in event
+            )
+        )
+        for event in events
+    )
 
 
 def test_recover_skeleton_checkout_blocks_when_final_status_dirty_after_clean() -> None:
