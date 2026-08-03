@@ -73,6 +73,7 @@ from core.runner_shadow_integration import (
 from core.runner_executor import CallableRunnerExecutor, RunnerExecutorError
 from core.runner_executor_registry import RunnerExecutorRegistry
 from core.runner_gate import ROUTE_REQUIRED_CAPABILITIES, RunnerGate
+from core.runner_task import RunnerTask as UniversalRunnerTask
 from core.runner_loop_control_executor import (
     LOOP_ENGINE_PACKET,
     LOOP_STATE_DB_ENV,
@@ -88,6 +89,7 @@ from core.runner_private_memory_source_inventory import (
     TASK_ID as PRIVATE_MEMORY_PHASE_A_INVENTORY,
     execute_private_memory_phase_a_inventory,
 )
+from core.runner_repository_maintenance_executor import RepositoryMaintenanceExecutor
 from core.runner_five_layer_memory_activation import (
     TASK_ID as ACTIVATE_FIVE_LAYER_PRIVATE_MEMORY,
     execute_five_layer_memory_activation,
@@ -2825,6 +2827,52 @@ def _universal_runner_noop_executor(_task: Any) -> None:
     return None
 
 
+_REPOSITORY_MAINTENANCE_PAYLOAD_KEYS = (
+    "operation",
+    "project",
+    "repository",
+    "source_branch",
+    "source_sha",
+    "wled_repository",
+    "wled_sha",
+    "platformio_env",
+    "artifact_root",
+    "relay",
+    "target",
+    "idempotency_key",
+)
+
+
+def _repository_maintenance_payload_from_issue(body: str) -> dict[str, object]:
+    task_fields = _shadow_task_block_mapping(body)
+    payload = task_fields.get("payload")
+    if isinstance(payload, Mapping):
+        return {
+            key: value
+            for key, value in payload.items()
+            if key in _REPOSITORY_MAINTENANCE_PAYLOAD_KEYS
+        }
+    result: dict[str, object] = {}
+    for key in _REPOSITORY_MAINTENANCE_PAYLOAD_KEYS:
+        value = task_fields.get(key)
+        if value is not None:
+            result[key] = value
+    return result
+
+
+def _with_repository_maintenance_payload(
+    task: UniversalRunnerTask, body: str
+) -> UniversalRunnerTask:
+    if task.task_kind != "repository_maintenance":
+        return task
+    payload = _repository_maintenance_payload_from_issue(body)
+    if not payload:
+        return task
+    mapping = task.to_mapping()
+    mapping["payload"] = payload
+    return UniversalRunnerTask.from_mapping(mapping)
+
+
 def build_universal_runner_executor_registry(
     *,
     task_content: str = "",
@@ -2838,6 +2886,9 @@ def build_universal_runner_executor_registry(
 
     executors = []
     for task_kind in compatibility.registered_task_kinds:
+        if task_kind == "repository_maintenance":
+            executors.append(RepositoryMaintenanceExecutor())
+            continue
         handler = (
             code_edit_handler
             if task_kind == "code_edit"
@@ -2880,6 +2931,7 @@ def evaluate_universal_runner_gate(
     )
     try:
         task = runner_task_from_normalized_metadata(metadata, None, compatibility)
+        task = _with_repository_maintenance_payload(task, issue_body)
     except Exception as exc:
         reason = getattr(exc, "reason_code", "UNIVERSAL_RUNNER_VALIDATION_FAILED")
         receipt = _universal_runner_receipt("blocked", None, (reason,), None)
@@ -13708,7 +13760,14 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             notify_task_finished(issue_number, "NEEDS_OPERATOR", report)
             return
 
-        if runner_task is not None:
+        repository_maintenance_enforce = (
+            mode_decision.mode == RUNNER_MODE_ENFORCE
+            and universal_gate_result is not None
+            and universal_gate_result.task is not None
+            and universal_gate_result.task.task_kind == "repository_maintenance"
+        )
+
+        if runner_task is not None and not repository_maintenance_enforce:
             execution_block_reason = project_execution_block_reason(runner_task)
             if execution_block_reason is not None:
                 block_issue(
@@ -13749,12 +13808,68 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
 
         set_issue_label(issue_number, LABEL_READY, LABEL_RUNNING)
         claimed = True
-        executor_name = "maintenance" if maintenance_mode or merge_mode else "codex"
+        executor_name = (
+            "maintenance"
+            if maintenance_mode or merge_mode or repository_maintenance_enforce
+            else "codex"
+        )
         pickup_memory_warning = record_runner_task_picked_up(
             issue_number,
-            runner_task.target_project if runner_task is not None else "skeleton",
+            (
+                "lavalamp"
+                if repository_maintenance_enforce
+                else runner_task.target_project if runner_task is not None else "skeleton"
+            ),
             executor_name,
         )
+
+        if repository_maintenance_enforce:
+            enforce_registry = build_universal_runner_executor_registry(
+                task_content=task_content,
+                issue_workdir="",
+                runner_task=runner_task,
+            )
+            try:
+                dispatch_result = enforce_registry.dispatch(universal_gate_result.task)
+            except RunnerExecutorError as exc:
+                block_issue(
+                    issue_number,
+                    f"Universal Runner executor dispatch failed: {exc.reason_code}.",
+                    remove_label=LABEL_RUNNING,
+                    runner_task=runner_task,
+                    retry_decision=retry_decision,
+                )
+                return
+            if (
+                isinstance(dispatch_result, tuple)
+                and len(dispatch_result) == 2
+                and isinstance(dispatch_result[0], int)
+                and isinstance(dispatch_result[1], str)
+            ):
+                executor_code, executor_output = dispatch_result
+            else:
+                executor_code, executor_output = 0, str(dispatch_result or "")
+            executor_result = classify_codex_task_result(executor_output, executor_code)
+            report = executor_output
+            if executor_result.status != "DONE" and retry_decision is not None:
+                report = append_retry_fields(report, retry_decision)
+            warning = record_runner_executor_result(
+                issue_number,
+                "lavalamp",
+                executor_result.status,
+                executor_result.status,
+                "maintenance",
+                report,
+            )
+            report = append_memory_warning(report, warning or pickup_memory_warning)
+            post_issue_comment(issue_number, report)
+            set_issue_label(
+                issue_number,
+                LABEL_RUNNING,
+                LABEL_DONE if executor_result.status == "DONE" else LABEL_BLOCKED,
+            )
+            notify_task_finished(issue_number, executor_result.status, report)
+            return
 
         if maintenance_mode and maintenance_task_id is not None:
             if pickup_memory_warning:

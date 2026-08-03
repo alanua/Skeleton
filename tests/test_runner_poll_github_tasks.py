@@ -10,6 +10,7 @@ from unittest import mock
 
 import pytest
 
+from core.runner_task import RunnerTask as UniversalRunnerTask
 from scripts import runner_poll_github_tasks as runner
 from scripts import telegram_callback_poller as callback_poller
 
@@ -1723,6 +1724,64 @@ def test_universal_runner_enforce_registry_failure_closes_before_checkout(
     verify_checkout.assert_not_called()
     prepare.assert_not_called()
     codex.assert_not_called()
+
+
+def test_universal_runner_registers_repository_maintenance_executor() -> None:
+    registry = runner.build_universal_runner_executor_registry()
+    executor = registry.lookup("repository_maintenance")
+
+    assert executor is not runner._universal_runner_noop_executor
+    assert executor.__class__.__name__ == "RepositoryMaintenanceExecutor"
+    assert executor.required_capabilities == (
+        "repository_maintenance",
+        "repository_read",
+    )
+
+
+def test_repository_maintenance_payload_survives_universal_task_enrichment() -> None:
+    task = UniversalRunnerTask.from_mapping(
+        {
+            "schema": "skeleton.runner_task.v1",
+            "repo": "alanua/Lavalamp",
+            "branch": "main",
+            "base_sha": "c98acbf12c51492bee32e1ab07dd349752e4bee5",
+            "task_kind": "repository_maintenance",
+            "payload": {"issue_number": 1922},
+            "requested_capabilities": ["repository_read", "repository_maintenance"],
+            "allowed_files": ["firmware.bin", "manifest.json"],
+            "forbidden_actions": ["no_live_build"],
+            "validation_commands": [["python3", "-m", "pytest", "-q"]],
+            "validation_timeout_seconds": 900,
+            "expected_output": ["artifact"],
+            "privacy_boundary": "PUBLIC_SAFE_REPOSITORY_ONLY",
+            "approval_reference": "EXPLICIT_APPROVE_LAVALAMP_FIRMWARE_AND_LOCAL_OTA_20260724",
+            "idempotency_key": "lavalamp-c98acbf-build-ota-1922",
+        }
+    )
+    body = """
+```task
+payload:
+  operation: build_and_local_ota
+  project: lavalamp
+  repository: alanua/Lavalamp
+  source_branch: main
+  source_sha: c98acbf12c51492bee32e1ab07dd349752e4bee5
+  wled_repository: https://github.com/wled/WLED.git
+  wled_sha: 58a84b653672b3611bc90cbf1b52bd1615132468
+  platformio_env: cylinder_lava_esp32
+  artifact_root: /home/agent/agent-dev/artifacts/lavalamp/source-issue-2
+  relay: home-edge-01
+  target: 192.168.1.164
+  idempotency_key: lavalamp-c98acbf-build-ota-1922
+  arbitrary_shell: rm -rf /
+```
+"""
+
+    enriched = runner._with_repository_maintenance_payload(task, body)
+
+    assert enriched.payload["operation"] == "build_and_local_ota"
+    assert enriched.payload["target"] == "192.168.1.164"
+    assert "arbitrary_shell" not in enriched.payload
 
 
 def test_shadow_evaluator_exception_leaves_legacy_code_generation_dispatch_byte_for_byte(
