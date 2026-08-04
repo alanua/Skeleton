@@ -944,6 +944,21 @@ class UniversalRunnerGateResult:
 
 
 @dataclass(frozen=True)
+class UniversalRunnerDispatchContext:
+    issue_body: str
+    coordinator_workdir: str
+    issue_workdir: str
+    task_content: str
+    runner_task: RunnerTask | None
+    merge_request: TelegramApprovedPrMergeRequest | None
+
+
+_UNIVERSAL_RUNNER_DISPATCH_CONTEXT: ContextVar[
+    UniversalRunnerDispatchContext | None
+] = ContextVar("_UNIVERSAL_RUNNER_DISPATCH_CONTEXT", default=None)
+
+
+@dataclass(frozen=True)
 class RegisteredProjectCheckout:
     target_project: str
     repo: str
@@ -2826,6 +2841,63 @@ def _universal_runner_noop_executor(_task: Any) -> None:
     return None
 
 
+def _universal_runner_dispatch_context() -> UniversalRunnerDispatchContext:
+    context = _UNIVERSAL_RUNNER_DISPATCH_CONTEXT.get()
+    if context is None:
+        raise RunnerExecutorError(
+            "UNIVERSAL_RUNNER_DISPATCH_CONTEXT_MISSING",
+            "Universal Runner executor dispatch context is not bound",
+        )
+    return context
+
+
+def _universal_runner_code_edit_executor(_task: Any) -> tuple[int, str]:
+    context = _universal_runner_dispatch_context()
+    return run_codex_task(
+        context.task_content, context.issue_workdir, context.runner_task
+    )
+
+
+def _universal_runner_maintenance_executor(task: Any) -> str:
+    context = _universal_runner_dispatch_context()
+    maintenance_task_id = getattr(task, "payload", {}).get("maintenance_task_id")
+    if not isinstance(maintenance_task_id, str) or not maintenance_task_id:
+        raise RunnerExecutorError(
+            "UNIVERSAL_RUNNER_MAINTENANCE_TASK_ID_MISSING",
+            "repository maintenance executor requires a maintenance task id",
+        )
+    return dispatch_runtime_maintenance_task(
+        maintenance_task_id,
+        context.coordinator_workdir,
+        context.issue_body,
+    )
+
+
+def _universal_runner_publish_executor(_task: Any) -> str:
+    context = _universal_runner_dispatch_context()
+    if context.merge_request is None:
+        raise RunnerExecutorError(
+            "UNIVERSAL_RUNNER_PUBLISH_REQUEST_MISSING",
+            "publish executor requires a signed merge request",
+        )
+    return execute_telegram_approved_pr_merge(context.merge_request)
+
+
+def _universal_runner_executor_handler(task_kind: str) -> Any:
+    if task_kind == "code_edit":
+        return _universal_runner_code_edit_executor
+    if task_kind == "publish":
+        return _universal_runner_publish_executor
+    if task_kind in {
+        "repository_maintenance",
+        "private_memory",
+        "diagnostic",
+        "loop_control",
+    }:
+        return _universal_runner_maintenance_executor
+    return _universal_runner_noop_executor
+
+
 def build_universal_runner_executor_registry(
     *,
     task_content: str = "",
@@ -2834,20 +2906,12 @@ def build_universal_runner_executor_registry(
 ) -> RunnerExecutorRegistry:
     compatibility = protected_runner_shadow_compatibility_bindings()
 
-    def code_edit_handler(_task: Any) -> tuple[int, str]:
-        return run_codex_task(task_content, issue_workdir, runner_task)
-
     executors = []
     for task_kind in compatibility.registered_task_kinds:
-        handler = (
-            code_edit_handler
-            if task_kind == "code_edit"
-            else _universal_runner_noop_executor
-        )
         executors.append(
             CallableRunnerExecutor(
                 task_kind=task_kind,
-                handler=handler,
+                handler=_universal_runner_executor_handler(task_kind),
                 required_capabilities=tuple(
                     sorted(ROUTE_REQUIRED_CAPABILITIES[task_kind])
                 ),
@@ -13499,6 +13563,82 @@ def process_runtime_maintenance_issue(
     notify_task_finished(issue_number, status, report)
 
 
+def _universal_runner_dispatch_failure_report(reason_code: str) -> str:
+    return f"BLOCKED: Universal Runner executor dispatch failed.\nreason={reason_code}"
+
+
+def _dispatch_universal_runner_executor(
+    registry: RunnerExecutorRegistry,
+    task: Any,
+) -> tuple[str, object]:
+    try:
+        result = registry.dispatch(task)
+    except RunnerExecutorError as exc:
+        return exc.reason_code, _universal_runner_dispatch_failure_report(exc.reason_code)
+    except Exception:
+        reason_code = "UNIVERSAL_RUNNER_EXECUTOR_EXCEPTION"
+        return reason_code, _universal_runner_dispatch_failure_report(reason_code)
+
+    task_kind = getattr(task, "task_kind", None)
+    if task_kind == "code_edit":
+        if (
+            isinstance(result, tuple)
+            and len(result) == 2
+            and isinstance(result[0], int)
+            and isinstance(result[1], str)
+        ):
+            return "ok", result
+        reason_code = "UNIVERSAL_RUNNER_INVALID_EXECUTOR_RESULT"
+        return reason_code, _universal_runner_dispatch_failure_report(reason_code)
+    if task_kind in {
+        "repository_maintenance",
+        "private_memory",
+        "diagnostic",
+        "loop_control",
+        "publish",
+    }:
+        if isinstance(result, str) and result.strip():
+            return "ok", result
+        reason_code = "UNIVERSAL_RUNNER_INVALID_EXECUTOR_RESULT"
+        return reason_code, _universal_runner_dispatch_failure_report(reason_code)
+
+    reason_code = "UNIVERSAL_RUNNER_INVALID_EXECUTOR_RESULT"
+    return reason_code, _universal_runner_dispatch_failure_report(reason_code)
+
+
+def _finish_universal_runner_report(
+    *,
+    issue_number: int,
+    task: Any,
+    report: str,
+    pickup_memory_warning: str | None,
+    retry_decision: RetryDecision | None,
+) -> None:
+    task_kind = getattr(task, "task_kind", None)
+    if task_kind == "publish":
+        status = "DONE" if report.startswith("DONE:") else "BLOCKED"
+    else:
+        status = maintenance_report_status(report)
+    if status != "DONE" and retry_decision is not None:
+        report = append_retry_fields(report, retry_decision)
+    warning = record_runner_executor_result(
+        issue_number,
+        "skeleton",
+        status,
+        status,
+        "maintenance",
+        report,
+    )
+    report = append_memory_warning(report, warning or pickup_memory_warning)
+    post_issue_comment(issue_number, report)
+    set_issue_label(
+        issue_number,
+        LABEL_RUNNING,
+        LABEL_DONE if status == "DONE" else LABEL_BLOCKED,
+    )
+    notify_task_finished(issue_number, status, report)
+
+
 def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
     global LAST_RUNNER_SHADOW_RECEIPT
     issue_number = int(issue["number"])
@@ -13633,6 +13773,16 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                     f"Universal Runner enforce gate failed: {reasons}.",
                 )
                 return
+            if (
+                universal_gate_result.task is None
+                or universal_gate_result.registry is None
+            ):
+                block_issue(
+                    issue_number,
+                    "Universal Runner enforce gate failed: "
+                    "UNIVERSAL_RUNNER_INVALID_GATE_RESULT.",
+                )
+                return
         retry_block_reason = "executor_invocation"
         if route == ROUTE_CODE_GENERATION:
             expected_output_reason = code_task_expected_output_block_reason(issue_body)
@@ -13760,6 +13910,47 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             executor_name,
         )
 
+        if (
+            mode_decision.mode == RUNNER_MODE_ENFORCE
+            and universal_gate_result is not None
+            and universal_gate_result.task is not None
+            and universal_gate_result.registry is not None
+            and universal_gate_result.task.task_kind != "code_edit"
+        ):
+            context = UniversalRunnerDispatchContext(
+                issue_body=issue_body,
+                coordinator_workdir=coordinator_workdir,
+                issue_workdir="",
+                task_content=task_content,
+                runner_task=runner_task,
+                merge_request=merge_request,
+            )
+            token = _UNIVERSAL_RUNNER_DISPATCH_CONTEXT.set(context)
+            try:
+                dispatch_status, dispatch_result = _dispatch_universal_runner_executor(
+                    universal_gate_result.registry,
+                    universal_gate_result.task,
+                )
+            finally:
+                _UNIVERSAL_RUNNER_DISPATCH_CONTEXT.reset(token)
+            if dispatch_status != "ok":
+                block_issue(
+                    issue_number,
+                    f"Universal Runner executor dispatch failed: {dispatch_status}.",
+                    remove_label=LABEL_RUNNING,
+                    runner_task=runner_task,
+                    retry_decision=retry_decision,
+                )
+                return
+            _finish_universal_runner_report(
+                issue_number=issue_number,
+                task=universal_gate_result.task,
+                report=dispatch_result,
+                pickup_memory_warning=pickup_memory_warning,
+                retry_decision=retry_decision,
+            )
+            return
+
         if maintenance_mode and maintenance_task_id is not None:
             if pickup_memory_warning:
                 process_runtime_maintenance_issue(
@@ -13833,32 +14024,34 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             mode_decision.mode == RUNNER_MODE_ENFORCE
             and universal_gate_result is not None
             and universal_gate_result.task is not None
+            and universal_gate_result.registry is not None
         ):
-            enforce_registry = build_universal_runner_executor_registry(
-                task_content=task_content,
+            context = UniversalRunnerDispatchContext(
+                issue_body=issue_body,
+                coordinator_workdir=coordinator_workdir,
                 issue_workdir=issue_workdir,
+                task_content=task_content,
                 runner_task=runner_task,
+                merge_request=merge_request,
             )
+            token = _UNIVERSAL_RUNNER_DISPATCH_CONTEXT.set(context)
             try:
-                dispatch_result = enforce_registry.dispatch(universal_gate_result.task)
-            except RunnerExecutorError as exc:
+                dispatch_status, dispatch_result = _dispatch_universal_runner_executor(
+                    universal_gate_result.registry,
+                    universal_gate_result.task,
+                )
+            finally:
+                _UNIVERSAL_RUNNER_DISPATCH_CONTEXT.reset(token)
+            if dispatch_status != "ok":
                 block_issue(
                     issue_number,
-                    f"Universal Runner executor dispatch failed: {exc.reason_code}.",
+                    f"Universal Runner executor dispatch failed: {dispatch_status}.",
                     remove_label=LABEL_RUNNING,
                     runner_task=runner_task,
                     retry_decision=retry_decision,
                 )
                 return
-            if (
-                isinstance(dispatch_result, tuple)
-                and len(dispatch_result) == 2
-                and isinstance(dispatch_result[0], int)
-                and isinstance(dispatch_result[1], str)
-            ):
-                codex_code, codex_output = dispatch_result
-            else:
-                codex_code, codex_output = 0, str(dispatch_result or "")
+            codex_code, codex_output = dispatch_result
         else:
             codex_code, codex_output = run_codex_task(
                 task_content, issue_workdir, runner_task

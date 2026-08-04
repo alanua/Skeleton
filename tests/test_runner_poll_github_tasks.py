@@ -1370,6 +1370,23 @@ def _universal_code_issue_body(*, target_project: str = "bauclock") -> str:
     )
 
 
+def _universal_skeleton_repository_maintenance_issue_body() -> str:
+    return "\n".join(
+        (
+            f"Base SHA: {'b' * 40}",
+            "Allowed Files: tests/test_runner_poll_github_tasks.py",
+            "Approval Reference: GENERIC_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715",
+            "Idempotency Key: issue-2161-repository-maintenance",
+            "Validation Timeout Seconds: 900",
+            "Privacy Boundary: PUBLIC_SAFE_REPOSITORY_ONLY",
+            "Requested Capabilities: repository_read, repository_maintenance",
+            "Expected Output: registry maintenance dispatch",
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {runner.CHECK_SKELETON_FRESHNESS}",
+        )
+    )
+
+
 def _approval_comment(
     *,
     issue_number: int = 1721,
@@ -1404,13 +1421,20 @@ def _universal_registry(
     *,
     include_code_edit: bool = True,
     code_edit_capabilities: tuple[str, ...] | None = None,
+    handlers_by_kind: dict[str, object] | None = None,
 ) -> runner.RunnerExecutorRegistry:
     executors = []
     compatibility = runner.protected_runner_shadow_compatibility_bindings()
     for task_kind in compatibility.registered_task_kinds:
         if task_kind == "code_edit" and not include_code_edit:
             continue
-        task_handler = handler if task_kind == "code_edit" and handler else lambda _task: None
+        task_handler = (
+            handlers_by_kind[task_kind]
+            if handlers_by_kind is not None and task_kind in handlers_by_kind
+            else handler
+            if task_kind == "code_edit" and handler
+            else lambda _task: None
+        )
         capabilities = (
             code_edit_capabilities
             if task_kind == "code_edit" and code_edit_capabilities is not None
@@ -1683,13 +1707,130 @@ def test_universal_runner_enforce_allowed_dispatches_once_via_registry(
 
     verify_checkout.assert_called_once_with("alanua/bauclock")
     prepare.assert_called_once()
-    assert registry.call_count == 2
+    assert registry.call_count == 1
     assert len(dispatch_calls) == 1
     dispatched_task = dispatch_calls[0]
     assert dispatched_task.repo == "alanua/bauclock"
     assert dispatched_task.task_kind == "code_edit"
     codex.assert_not_called()
     finalize.assert_called_once_with(str(issue_path), "registry output", mock.ANY)
+
+
+def test_universal_runner_enforce_skeleton_repository_maintenance_uses_registered_executor_not_codex(
+    tmp_path: Path,
+) -> None:
+    dispatch_calls: list[object] = []
+
+    def repository_maintenance_executor(task: object) -> str:
+        dispatch_calls.append(task)
+        return (
+            "DONE: Runner host maintenance task completed.\n"
+            f"maintenance_task_id={runner.CHECK_SKELETON_FRESHNESS}\n"
+            "success_criteria=met"
+        )
+
+    issue = {
+        "number": 2161,
+        "title": "Universal enforce repository maintenance",
+        "body": _universal_skeleton_repository_maintenance_issue_body(),
+        "comments": [_approval_comment(issue_number=2161)],
+    }
+
+    with mock.patch.dict(
+        os.environ, {runner.RUNNER_MODE_ENV: runner.RUNNER_MODE_ENFORCE}, clear=True
+    ), mock.patch.object(
+        runner, "ensure_clean_worktree", return_value=(True, "")
+    ) as clean, mock.patch.object(
+        runner,
+        "build_universal_runner_executor_registry",
+        side_effect=lambda **_kwargs: _universal_registry(
+            handlers_by_kind={
+                "repository_maintenance": repository_maintenance_executor
+            }
+        ),
+    ) as registry, mock.patch.object(
+        runner, "dispatch_runtime_maintenance_task"
+    ) as legacy_maintenance, mock.patch.object(
+        runner, "prepare_issue_branch"
+    ) as prepare, mock.patch.object(
+        runner, "run_codex_task"
+    ) as codex, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(
+        runner, "post_issue_comment"
+    ) as post_comment, mock.patch.object(
+        runner, "notify_task_finished"
+    ) as notify, mock.patch.object(
+        runner, "record_runner_task_picked_up", return_value=None
+    ), mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ):
+        runner.process_issue(issue, workdir=str(tmp_path))
+
+    clean.assert_called_once_with(str(tmp_path))
+    assert registry.call_count == 1
+    assert len(dispatch_calls) == 1
+    dispatched_task = dispatch_calls[0]
+    assert dispatched_task.repo == runner.REPO
+    assert dispatched_task.task_kind == "repository_maintenance"
+    legacy_maintenance.assert_not_called()
+    prepare.assert_not_called()
+    codex.assert_not_called()
+    assert set_label.call_args_list[-1].args == (
+        2161,
+        runner.LABEL_RUNNING,
+        runner.LABEL_DONE,
+    )
+    assert "maintenance_task_id=check_skeleton_freshness" in post_comment.call_args.args[1]
+    notify.assert_called_once_with(2161, "DONE", mock.ANY)
+
+
+def test_universal_runner_enforce_executor_exception_fails_closed_without_legacy_side_effect(
+    tmp_path: Path,
+) -> None:
+    def repository_maintenance_executor(_task: object) -> str:
+        raise RuntimeError("executor failed")
+
+    issue = {
+        "number": 2161,
+        "title": "Universal enforce executor exception",
+        "body": _universal_skeleton_repository_maintenance_issue_body(),
+        "comments": [_approval_comment(issue_number=2161)],
+    }
+
+    with mock.patch.dict(
+        os.environ, {runner.RUNNER_MODE_ENV: runner.RUNNER_MODE_ENFORCE}, clear=True
+    ), mock.patch.object(
+        runner, "ensure_clean_worktree", return_value=(True, "")
+    ), mock.patch.object(
+        runner,
+        "build_universal_runner_executor_registry",
+        side_effect=lambda **_kwargs: _universal_registry(
+            handlers_by_kind={
+                "repository_maintenance": repository_maintenance_executor
+            }
+        ),
+    ), mock.patch.object(
+        runner, "block_issue"
+    ) as block, mock.patch.object(
+        runner, "dispatch_runtime_maintenance_task"
+    ) as legacy_maintenance, mock.patch.object(
+        runner, "prepare_issue_branch"
+    ) as prepare, mock.patch.object(
+        runner, "run_codex_task"
+    ) as codex, mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "record_runner_task_picked_up", return_value=None
+    ), mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ):
+        runner.process_issue(issue, workdir=str(tmp_path))
+
+    assert "UNIVERSAL_RUNNER_EXECUTOR_EXCEPTION" in block.call_args.args[1]
+    legacy_maintenance.assert_not_called()
+    prepare.assert_not_called()
+    codex.assert_not_called()
 
 
 def test_universal_runner_enforce_registry_failure_closes_before_checkout(
