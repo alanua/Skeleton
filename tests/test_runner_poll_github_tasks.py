@@ -1725,6 +1725,77 @@ def test_universal_runner_enforce_registry_failure_closes_before_checkout(
     codex.assert_not_called()
 
 
+def test_universal_runner_invalid_mode_fails_closed_before_side_effects(
+    tmp_path: Path,
+) -> None:
+    issue = {
+        "number": 1721,
+        "title": "Universal invalid mode",
+        "body": _universal_code_issue_body(),
+        "comments": [_approval_comment(issue_number=1721)],
+    }
+
+    with mock.patch.dict(
+        os.environ, {runner.RUNNER_MODE_ENV: "maybe"}, clear=True
+    ), mock.patch.object(runner, "block_issue") as block, mock.patch.object(
+        runner, "get_issue_comments"
+    ) as comments, mock.patch.object(
+        runner, "verify_target_repository_checkout"
+    ) as verify_checkout, mock.patch.object(
+        runner, "prepare_target_repository_issue_worktree"
+    ) as prepare, mock.patch.object(
+        runner, "dispatch_runtime_maintenance_task"
+    ) as maintenance, mock.patch.object(
+        runner, "run_codex_task"
+    ) as codex, mock.patch.object(
+        runner, "set_issue_label"
+    ) as labels:
+        runner.process_issue(issue, workdir=str(tmp_path))
+
+    assert "invalid_runner_mode" in block.call_args.args[1]
+    comments.assert_not_called()
+    verify_checkout.assert_not_called()
+    prepare.assert_not_called()
+    maintenance.assert_not_called()
+    codex.assert_not_called()
+    labels.assert_not_called()
+
+
+def test_universal_runner_enforce_capability_mismatch_closes_before_checkout(
+    tmp_path: Path,
+) -> None:
+    issue = {
+        "number": 1721,
+        "title": "Universal enforce capability mismatch",
+        "body": _universal_code_issue_body(),
+        "comments": [_approval_comment(issue_number=1721)],
+    }
+
+    with mock.patch.dict(
+        os.environ, {runner.RUNNER_MODE_ENV: runner.RUNNER_MODE_ENFORCE}, clear=True
+    ), mock.patch.object(
+        runner,
+        "build_universal_runner_executor_registry",
+        side_effect=lambda **_kwargs: _universal_registry(
+            code_edit_capabilities=("repository_read",)
+        ),
+    ), mock.patch.object(
+        runner, "block_issue"
+    ) as block, mock.patch.object(
+        runner, "verify_target_repository_checkout"
+    ) as verify_checkout, mock.patch.object(
+        runner, "prepare_target_repository_issue_worktree"
+    ) as prepare, mock.patch.object(
+        runner, "run_codex_task"
+    ) as codex:
+        runner.process_issue(issue, workdir=str(tmp_path))
+
+    assert "REGISTRY_CAPABILITY_MISMATCH" in block.call_args.args[1]
+    verify_checkout.assert_not_called()
+    prepare.assert_not_called()
+    codex.assert_not_called()
+
+
 def test_shadow_evaluator_exception_leaves_legacy_code_generation_dispatch_byte_for_byte(
     tmp_path: Path,
 ) -> None:

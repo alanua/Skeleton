@@ -157,6 +157,7 @@ RUNNER_MODE_OFF = "off"
 RUNNER_MODE_SHADOW = "shadow"
 RUNNER_MODE_ENFORCE = "enforce"
 RUNNER_MODES = frozenset((RUNNER_MODE_OFF, RUNNER_MODE_SHADOW, RUNNER_MODE_ENFORCE))
+UNIVERSAL_RUNNER_ALLOWED_STATUS = "allowed"
 LAST_RUNNER_SHADOW_RECEIPT: dict[str, object] | None = None
 
 
@@ -2914,7 +2915,7 @@ def evaluate_universal_runner_gate(
         gate_context_from_metadata(metadata, task, active_registry),
     )
     receipt = _universal_runner_receipt(
-        "allowed" if gate_decision.allowed else "blocked",
+        UNIVERSAL_RUNNER_ALLOWED_STATUS if gate_decision.allowed else "blocked",
         task.task_kind,
         gate_decision.reason_codes,
         task_hash,
@@ -13622,7 +13623,10 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             LAST_RUNNER_SHADOW_RECEIPT = (
                 universal_gate_result.receipt.to_public_mapping()
             )
-            if universal_gate_result.receipt.shadow_status != "allowed":
+            if (
+                universal_gate_result.receipt.shadow_status
+                != UNIVERSAL_RUNNER_ALLOWED_STATUS
+            ):
                 reasons = ",".join(universal_gate_result.receipt.reason_codes)
                 block_issue(
                     issue_number,
