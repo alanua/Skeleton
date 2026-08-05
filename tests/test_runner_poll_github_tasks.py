@@ -12,6 +12,7 @@ import pytest
 
 from scripts import runner_poll_github_tasks as runner
 from scripts import telegram_callback_poller as callback_poller
+from core.home_edge import debian_media_bootstrap as media_bootstrap
 
 
 ORIGINAL_GRAPHIFY_RESOLVE_USER_SCRIPT = runner._graphify_resolve_user_script
@@ -38,6 +39,48 @@ CALLBACK_DIGEST = runner.hmac.new(
     f"tpr1:approve:p123:{HEAD_SHA[:8]}".encode("ascii"),
     runner.hashlib.sha256,
 ).hexdigest()[:12]
+
+
+def _media_bootstrap_issue_body(expected_sha: str = HEAD_SHA) -> str:
+    return "\n".join(
+        (
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {runner.HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1}",
+            f"Repository: {runner.REPO}",
+            f"Expected Main SHA: {expected_sha}",
+            "Operator Approval: EXPLICIT_FINISH_DEBIAN_MEDIA_NODE_20260805",
+            "Target: home-edge-01",
+        )
+    )
+
+
+def _media_bootstrap_receipt() -> dict[str, object]:
+    return {
+        "maintenance_task_id": runner.HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1,
+        "os_identity_status": "verified",
+        "node_identity_status": "verified",
+        "reboot_guard_status": "not_present",
+        "reboot_performed": False,
+        "packages_required_count": len(media_bootstrap.FIXED_PACKAGES),
+        "packages_preexisting_count": 20,
+        "packages_added_count": 0,
+        "package_status": "installed",
+        "display_manager_status": "service_active",
+        "autologin_status": "configured",
+        "pipewire_status": "session_ready",
+        "vaapi_status": "physical_pending",
+        "mpv_status": "configured",
+        "chromium_status": "configured",
+        "ssh_status": "service_active",
+        "gateway_postcheck_status": "ok",
+        "physical_audio_status": "physical_pending",
+        "physical_video_status": "physical_pending",
+        "rollback_ready": True,
+        "rollback_applied": False,
+        "audit_receipt_hash": "a" * 64,
+        "stable_reason": "already_complete",
+        "success_criteria": "met",
+    }
 
 
 def _merge_issue_body(
@@ -153,6 +196,61 @@ def _json_response(payload: object) -> mock.MagicMock:
 def _request_payload(urlopen: mock.MagicMock) -> dict[str, list[str]]:
     request = urlopen.call_args.args[0]
     return urllib.parse.parse_qs(request.data.decode("utf-8"))
+
+
+def test_home_edge_debian_media_bootstrap_is_allowlisted_and_dispatches_exact_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_read_sha(ref: str) -> str:
+        assert ref in {"main", "origin/main"}
+        return HEAD_SHA
+
+    def fake_execute(body: str, *, registered_clean_main_sha: str, github_main_sha: str):
+        captured["body"] = body
+        captured["registered_clean_main_sha"] = registered_clean_main_sha
+        captured["github_main_sha"] = github_main_sha
+        return _media_bootstrap_receipt()
+
+    monkeypatch.setattr(runner, "_read_exact_git_sha", fake_read_sha)
+    monkeypatch.setattr(
+        media_bootstrap,
+        "execute_debian_media_bootstrap_task",
+        fake_execute,
+    )
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1,
+        str(runner.ROOT),
+        _media_bootstrap_issue_body(),
+    )
+
+    assert runner.HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1 in runner.RUNTIME_MAINTENANCE_TASK_IDS
+    assert report.startswith("DONE:")
+    assert "maintenance_task_id=home_edge_01_debian_media_bootstrap_v1" in report
+    assert "packages_required_count=20" in report
+    assert "physical_audio_status=physical_pending" in report
+    assert "success_criteria=met" in report
+    assert captured["registered_clean_main_sha"] == HEAD_SHA
+    assert captured["github_main_sha"] == HEAD_SHA
+    assert "/home/" not in report
+    assert "SECRET" not in report
+
+
+def test_home_edge_debian_media_bootstrap_malformed_input_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runner, "_read_exact_git_sha", lambda _ref: HEAD_SHA)
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1,
+        str(runner.ROOT),
+        _media_bootstrap_issue_body() + "\nPackage: evil",
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=unknown_runtime_input_field" in report
 
 
 def _plain_done_message(issue_number: int = 129) -> str:

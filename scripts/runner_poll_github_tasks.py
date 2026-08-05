@@ -255,6 +255,7 @@ QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES = (
 HOME_EDGE_01_READ_ONLY_DIAGNOSTIC = "home_edge_01_read_only_diagnostic"
 HOME_EDGE_01_LAN_INVENTORY_READ_ONLY = "home_edge_01_lan_inventory_read_only"
 HOME_EDGE_AUDIT_PERSIST_V1 = "home_edge_audit_persist_v1"
+HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1 = "home_edge_01_debian_media_bootstrap_v1"
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
         SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
@@ -293,6 +294,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         HOME_EDGE_01_READ_ONLY_DIAGNOSTIC,
         HOME_EDGE_01_LAN_INVENTORY_READ_ONLY,
         HOME_EDGE_AUDIT_PERSIST_V1,
+        HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1,
         PREPARE_PRIVATE_STATIC_SITE_HANDOFF,
         DEPLOY_PRIVATE_STATIC_SITE,
     )
@@ -540,6 +542,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "artifact_id",
         "audit_id",
         "audit_persist_status",
+        "audit_receipt_hash",
+        "autologin_status",
         "base_branch",
         "base_ref_oid",
         "base_ref",
@@ -580,8 +584,10 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "diagnostic_count",
         "device_count",
         "document_candidate_count",
+        "display_manager_status",
         "responsive_count",
         "gateway_presence",
+        "gateway_postcheck_status",
         "gateway_status",
         "service_category_counts",
         "risk_flags",
@@ -663,13 +669,17 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "network_provider_enabled",
         "next_action",
         "next_operator_action",
+        "node_identity_status",
         "operation_id",
         "open_issues_count",
         "open_pull_requests_count",
+        "os_identity_status",
         "orient_status",
         "other_candidate_count",
+        "chromium_status",
         "pilot_mode",
         "pilot_summary_schema",
+        "mpv_status",
         "ports_disabled",
         "ports_enabled",
         "post_push_pr_metadata_source",
@@ -691,6 +701,13 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "private_report_sha256",
         "project_handoff_candidate_count",
         "private_workspace",
+        "package_status",
+        "packages_added_count",
+        "packages_preexisting_count",
+        "packages_required_count",
+        "physical_audio_status",
+        "physical_video_status",
+        "pipewire_status",
         "profile_backup_item_count",
         "profile_backup_private",
         "profile_backup_status",
@@ -731,7 +748,11 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "semantic_record_count",
         "ram_bytes",
         "repository",
+        "reboot_guard_status",
+        "reboot_performed",
         "rollback_status",
+        "rollback_applied",
+        "rollback_ready",
         "room_area_row_count",
         "row_count",
         "run_id",
@@ -745,6 +766,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "sqlite_history_count",
         "sqlite_metadata_count",
         "sqlite_state_count",
+        "ssh_status",
         "shortlist_row_count",
         "skipped_worktrees_count",
         "source_issue",
@@ -769,6 +791,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "status_count_approved",
         "status_count_needs_review",
         "step",
+        "stable_reason",
         "success_criteria",
         "synthetic_corpus_status",
         "live_private_ingestion",
@@ -818,6 +841,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "validation_profile",
         "validation_state",
         "validation_pytest_totals",
+        "vaapi_status",
         "validation_pytest_version",
         "validation_real_writable_git_worktree",
         "wall_area_row_count",
@@ -12973,6 +12997,53 @@ def home_edge_audit_persist_v1(body: str) -> str:
         )
 
 
+def home_edge_01_debian_media_bootstrap_v1(body: str) -> str:
+    task_id = HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1
+    try:
+        from core.home_edge.debian_media_bootstrap import (
+            execute_debian_media_bootstrap_task,
+            receipt_status_lines,
+            success_criteria_met,
+        )
+
+        registered_sha = _read_exact_git_sha("main")
+        github_sha = _read_exact_git_sha("origin/main")
+        receipt = execute_debian_media_bootstrap_task(
+            body,
+            registered_clean_main_sha=registered_sha,
+            github_main_sha=github_sha,
+        )
+        success = success_criteria_met(receipt)
+        return _maintenance_report(
+            "DONE" if success else "BLOCKED",
+            task_id,
+            receipt_status_lines(receipt),
+            "met" if success else "not_met",
+        )
+    except ValueError as exc:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [f"reason={exc}"],
+            "not_met",
+        )
+    except Exception:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            ["reason=debian_media_bootstrap_failed_closed"],
+            "not_met",
+        )
+
+
+def _read_exact_git_sha(ref: str) -> str:
+    code, output = run_command(["git", "rev-parse", f"{ref}^{{commit}}"], cwd=ROOT)
+    sha = output.strip().splitlines()[0] if output.strip() else ""
+    if code != 0 or re.fullmatch(r"[0-9a-f]{40}", sha) is None:
+        raise ValueError(f"{ref.replace('/', '_')}_sha_unavailable")
+    return sha
+
+
 def _home_edge_audit_packet_from_body(body: str) -> dict[str, object]:
     block = extract_task_block(body)
     if block is None:
@@ -13290,6 +13361,8 @@ def dispatch_runtime_maintenance_task(
             return home_edge_01_lan_inventory_read_only()
         if task_id == HOME_EDGE_AUDIT_PERSIST_V1:
             return home_edge_audit_persist_v1(body)
+        if task_id == HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1:
+            return home_edge_01_debian_media_bootstrap_v1(body)
         if task_id == PREPARE_PRIVATE_STATIC_SITE_HANDOFF:
             return _execute_prepare_private_static_site_handoff(body)
         if task_id == DEPLOY_PRIVATE_STATIC_SITE:
