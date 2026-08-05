@@ -2620,6 +2620,14 @@ def runner_shadow_mode_enabled() -> bool:
 
 
 def protected_runner_shadow_compatibility_bindings() -> RunnerShadowCompatibilityBindings:
+    maintenance_task_kind_by_id = {
+        task_id: SHADOW_MAINTENANCE_TASK_KIND_BY_ID[task_id]
+        for task_id in sorted(RUNTIME_MAINTENANCE_TASK_IDS)
+        if task_id in SHADOW_MAINTENANCE_TASK_KIND_BY_ID
+    }
+    maintenance_task_kind_by_id.update(
+        {task_id: "publish" for task_id in sorted(PUBLISH_ONLY_MAINTENANCE_TASK_IDS)}
+    )
     return RunnerShadowCompatibilityBindings(
         legacy_routes=frozenset(
             {
@@ -2632,12 +2640,8 @@ def protected_runner_shadow_compatibility_bindings() -> RunnerShadowCompatibilit
             ROUTE_CODE_GENERATION: "code_edit",
             ROUTE_PUBLISH_ONLY: "publish",
         },
-        maintenance_task_kind_by_id={
-            task_id: SHADOW_MAINTENANCE_TASK_KIND_BY_ID[task_id]
-            for task_id in sorted(RUNTIME_MAINTENANCE_TASK_IDS)
-            if task_id in SHADOW_MAINTENANCE_TASK_KIND_BY_ID
-        },
-        publish_maintenance_task_ids=frozenset(PUBLISH_ONLY_MAINTENANCE_TASK_IDS),
+        maintenance_task_kind_by_id=maintenance_task_kind_by_id,
+        publish_maintenance_task_ids=frozenset(),
     )
 
 
@@ -2744,10 +2748,24 @@ def normalized_runner_shadow_metadata(
         current_head_sha = merge_request.approved_head_sha
         pr_number = merge_request.pr_number
         publish_mode = "signed_merge"
+    elif maintenance_task_id in PUBLISH_ONLY_MAINTENANCE_TASK_IDS:
+        pr_number = _shadow_int(
+            _shadow_field(issue_body, task_fields, "PR Number", "pr_number")
+        )
+        head_sha = _shadow_field(
+            issue_body, task_fields, "Current Head SHA", "current_head_sha"
+        )
+        if isinstance(head_sha, str):
+            current_head_sha = head_sha
+        publish_mode = "signed_merge"
 
     return {
         "issue_number": issue_number,
-        "legacy_route": route,
+        "legacy_route": (
+            ROUTE_RUNTIME_ONLY
+            if maintenance_task_id in PUBLISH_ONLY_MAINTENANCE_TASK_IDS
+            else route
+        ),
         "maintenance_task_id": maintenance_task_id,
         "repo": (
             runner_task.target_repository
@@ -2856,6 +2874,8 @@ def build_universal_runner_executor_registry(
     *,
     task_content: str = "",
     issue_workdir: str = "",
+    issue_body: str = "",
+    coordinator_workdir: str = "",
     runner_task: RunnerTask | None = None,
 ) -> RunnerExecutorRegistry:
     compatibility = protected_runner_shadow_compatibility_bindings()
@@ -2863,12 +2883,28 @@ def build_universal_runner_executor_registry(
     def code_edit_handler(_task: Any) -> tuple[int, str]:
         return run_codex_task(task_content, issue_workdir, runner_task)
 
+    def maintenance_handler(task: Any) -> str:
+        payload = getattr(task, "payload", {})
+        maintenance_task_id = (
+            payload.get("maintenance_task_id") if isinstance(payload, Mapping) else None
+        )
+        if not isinstance(maintenance_task_id, str) or not maintenance_task_id:
+            raise RunnerExecutorError(
+                "EXECUTOR_MAINTENANCE_TASK_ID_MISSING",
+                "typed maintenance executor requires a maintenance task id",
+            )
+        return dispatch_runtime_maintenance_task(
+            maintenance_task_id,
+            coordinator_workdir or issue_workdir,
+            issue_body,
+        )
+
     executors = []
     for task_kind in compatibility.registered_task_kinds:
         handler = (
             code_edit_handler
             if task_kind == "code_edit"
-            else _universal_runner_noop_executor
+            else maintenance_handler
         )
         executors.append(
             CallableRunnerExecutor(
@@ -13836,6 +13872,53 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
         )
 
         if maintenance_mode and maintenance_task_id is not None:
+            if (
+                mode_decision.mode == RUNNER_MODE_ENFORCE
+                and universal_gate_result is not None
+                and universal_gate_result.task is not None
+            ):
+                enforce_registry = build_universal_runner_executor_registry(
+                    issue_body=issue_body,
+                    coordinator_workdir=coordinator_workdir,
+                )
+                try:
+                    report = str(enforce_registry.dispatch(universal_gate_result.task))
+                except RunnerExecutorError as exc:
+                    block_issue(
+                        issue_number,
+                        f"Universal Runner executor dispatch failed: {exc.reason_code}.",
+                        remove_label=LABEL_RUNNING,
+                        retry_decision=retry_decision,
+                    )
+                    return
+                except Exception:
+                    block_issue(
+                        issue_number,
+                        "Universal Runner executor dispatch failed: EXECUTOR_RAISED.",
+                        remove_label=LABEL_RUNNING,
+                        retry_decision=retry_decision,
+                    )
+                    return
+                status = maintenance_report_status(report)
+                if status != "DONE":
+                    report = append_retry_fields(report, retry_decision)
+                warning = record_runner_executor_result(
+                    issue_number,
+                    "skeleton",
+                    status,
+                    status,
+                    universal_gate_result.task.task_kind,
+                    report,
+                )
+                report = append_memory_warning(report, warning or pickup_memory_warning)
+                post_issue_comment(issue_number, report)
+                set_issue_label(
+                    issue_number,
+                    LABEL_RUNNING,
+                    LABEL_DONE if status == "DONE" else LABEL_BLOCKED,
+                )
+                notify_task_finished(issue_number, status, report)
+                return
             if pickup_memory_warning:
                 process_runtime_maintenance_issue(
                     issue_number,
