@@ -73,6 +73,23 @@ from core.runner_shadow_integration import (
 from core.runner_executor import CallableRunnerExecutor, RunnerExecutorError
 from core.runner_executor_registry import RunnerExecutorRegistry
 from core.runner_gate import ROUTE_REQUIRED_CAPABILITIES, RunnerGate
+from core.runner_repository_maintenance_executor import (
+    APPROVAL_REFERENCE as LAVALAMP_APPROVAL_REFERENCE,
+    ARTIFACT_ROOT as LAVALAMP_ARTIFACT_ROOT,
+    DEVICE_TARGET as LAVALAMP_DEVICE_TARGET,
+    HOME_EDGE_NODE as LAVALAMP_HOME_EDGE_NODE,
+    IDEMPOTENCY_KEY as LAVALAMP_IDEMPOTENCY_KEY,
+    OPERATION as LAVALAMP_OPERATION,
+    PLATFORMIO_ENV as LAVALAMP_PLATFORMIO_ENV,
+    PROJECT as LAVALAMP_PROJECT,
+    REPOSITORY as LAVALAMP_REPOSITORY,
+    SOURCE_BRANCH as LAVALAMP_SOURCE_BRANCH,
+    SOURCE_SHA as LAVALAMP_SOURCE_SHA,
+    WLED_REPOSITORY as LAVALAMP_WLED_REPOSITORY,
+    WLED_SHA as LAVALAMP_WLED_SHA,
+    RepositoryMaintenanceExecutor,
+)
+from core.runner_task import RunnerTask as UniversalRunnerTask
 from core.runner_loop_control_executor import (
     LOOP_ENGINE_PACKET,
     LOOP_STATE_DB_ENV,
@@ -2698,6 +2715,55 @@ def _shadow_validation_commands(value: object) -> tuple[tuple[str, ...], ...]:
     return tuple(commands)
 
 
+_LAVALAMP_REPOSITORY_MAINTENANCE_PAYLOAD = {
+    "operation": LAVALAMP_OPERATION,
+    "project": LAVALAMP_PROJECT,
+    "repository": LAVALAMP_REPOSITORY,
+    "source_branch": LAVALAMP_SOURCE_BRANCH,
+    "source_sha": LAVALAMP_SOURCE_SHA,
+    "wled_repository": LAVALAMP_WLED_REPOSITORY,
+    "wled_sha": LAVALAMP_WLED_SHA,
+    "platformio_env": LAVALAMP_PLATFORMIO_ENV,
+    "artifact_root": str(LAVALAMP_ARTIFACT_ROOT),
+    "relay": LAVALAMP_HOME_EDGE_NODE,
+    "target": LAVALAMP_DEVICE_TARGET,
+    "idempotency_key": LAVALAMP_IDEMPOTENCY_KEY,
+}
+
+
+def _lavalamp_payload_from_issue_body(body: str) -> dict[str, object] | None:
+    task_fields = _shadow_task_block_mapping(body)
+    payload = task_fields.get("payload")
+    if not isinstance(payload, Mapping):
+        return None
+    candidate = {
+        key: payload.get(key)
+        for key in _LAVALAMP_REPOSITORY_MAINTENANCE_PAYLOAD
+    }
+    if candidate != _LAVALAMP_REPOSITORY_MAINTENANCE_PAYLOAD:
+        return None
+    return dict(candidate)
+
+
+def _with_repository_maintenance_payload(
+    task: UniversalRunnerTask,
+    body: str,
+) -> UniversalRunnerTask:
+    if (
+        task.task_kind != "repository_maintenance"
+        or task.repo != LAVALAMP_REPOSITORY
+        or task.branch != LAVALAMP_SOURCE_BRANCH
+        or task.base_sha != LAVALAMP_SOURCE_SHA
+        or task.approval_reference != LAVALAMP_APPROVAL_REFERENCE
+        or task.idempotency_key != LAVALAMP_IDEMPOTENCY_KEY
+    ):
+        return task
+    payload = _lavalamp_payload_from_issue_body(body)
+    if payload is None:
+        return task
+    return UniversalRunnerTask.from_mapping({**task.to_mapping(), "payload": payload})
+
+
 def normalized_runner_shadow_metadata(
     *,
     issue_number: int,
@@ -2901,6 +2967,9 @@ def build_universal_runner_executor_registry(
 
     executors = []
     for task_kind in compatibility.registered_task_kinds:
+        if task_kind == "repository_maintenance":
+            executors.append(RepositoryMaintenanceExecutor())
+            continue
         handler = (
             code_edit_handler
             if task_kind == "code_edit"
@@ -2943,6 +3012,7 @@ def evaluate_universal_runner_gate(
     )
     try:
         task = runner_task_from_normalized_metadata(metadata, None, compatibility)
+        task = _with_repository_maintenance_payload(task, issue_body)
     except Exception as exc:
         reason = getattr(exc, "reason_code", "UNIVERSAL_RUNNER_VALIDATION_FAILED")
         receipt = _universal_runner_receipt("blocked", None, (reason,), None)
