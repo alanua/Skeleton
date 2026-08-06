@@ -257,6 +257,50 @@ def test_home_edge_debian_media_bootstrap_malformed_input_blocks(
     assert "reason=unknown_runtime_input_field" in report
 
 
+def test_video_understanding_activation_packet_requires_exact_sha_and_local_runtime() -> None:
+    body = "\n".join(
+        (
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {runner.VIDEO_UNDERSTANDING_ACTIVATION_PACKET}",
+            f"Merged SHA: {HEAD_SHA}",
+            "Providers: tesseract-local,whisper-local,ollama-local,ffmpeg-local",
+            "Local Model Runtime: ollama-local",
+            "Artifact Store: private-hash-store",
+            "Rollback Ready: yes",
+        )
+    )
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.VIDEO_UNDERSTANDING_ACTIVATION_PACKET,
+        str(runner.ROOT),
+        body,
+    )
+
+    assert report.startswith("DONE:")
+    assert f"merged_sha={HEAD_SHA}" in report
+    assert "active_worker_count=1" in report
+    assert "live_activation=false" in report
+
+
+def test_video_understanding_activation_packet_blocks_cloud_runtime() -> None:
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.VIDEO_UNDERSTANDING_ACTIVATION_PACKET,
+        str(runner.ROOT),
+        "\n".join(
+            (
+                f"Merged SHA: {HEAD_SHA}",
+                "Providers: https://api.openai.com/v1",
+                "Local Model Runtime: ollama-local",
+                "Artifact Store: private-hash-store",
+                "Rollback Ready: yes",
+            )
+        ),
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=local_runtime_fields_required" in report
+
+
 def _plain_done_message(issue_number: int = 129) -> str:
     return runner.build_telegram_message(issue_number, "DONE", DONE_REPORT)
 

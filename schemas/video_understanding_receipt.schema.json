@@ -8,14 +8,30 @@
     "operation",
     "status",
     "reason_code",
-    "mode",
-    "transcript_count",
-    "frame_count",
-    "ocr_count",
-    "evidence_count",
     "review_required",
-    "canonical_mutation_status",
-    "projection_status"
+    "canonical_mutation_status"
+  ],
+  "anyOf": [
+    {
+      "required": [
+        "mode",
+        "transcript_count",
+        "frame_count",
+        "ocr_count",
+        "evidence_count",
+        "projection_status"
+      ]
+    },
+    {
+      "required": [
+        "transcript_count",
+        "frame_count",
+        "audio_count",
+        "ocr_count",
+        "model_output_count",
+        "artifact_count"
+      ]
+    }
   ],
   "additionalProperties": false,
   "properties": {
@@ -40,8 +56,11 @@
     },
     "transcript_count": {"type": "integer", "minimum": 0},
     "frame_count": {"type": "integer", "minimum": 0},
+    "audio_count": {"type": "integer", "minimum": 0},
     "ocr_count": {"type": "integer", "minimum": 0},
     "evidence_count": {"type": "integer", "minimum": 0},
+    "model_output_count": {"type": "integer", "minimum": 0},
+    "artifact_count": {"type": "integer", "minimum": 0},
     "review_required": {"type": "boolean"},
     "canonical_mutation_status": {"type": "string", "maxLength": 64},
     "projection_status": {"type": "string", "maxLength": 64}

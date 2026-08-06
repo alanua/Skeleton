@@ -256,6 +256,7 @@ HOME_EDGE_01_READ_ONLY_DIAGNOSTIC = "home_edge_01_read_only_diagnostic"
 HOME_EDGE_01_LAN_INVENTORY_READ_ONLY = "home_edge_01_lan_inventory_read_only"
 HOME_EDGE_AUDIT_PERSIST_V1 = "home_edge_audit_persist_v1"
 HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1 = "home_edge_01_debian_media_bootstrap_v1"
+VIDEO_UNDERSTANDING_ACTIVATION_PACKET = "video_understanding_activation_packet"
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
         SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
@@ -295,6 +296,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         HOME_EDGE_01_LAN_INVENTORY_READ_ONLY,
         HOME_EDGE_AUDIT_PERSIST_V1,
         HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1,
+        VIDEO_UNDERSTANDING_ACTIVATION_PACKET,
         PREPARE_PRIVATE_STATIC_SITE_HANDOFF,
         DEPLOY_PRIVATE_STATIC_SITE,
     )
@@ -658,6 +660,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "merge_action",
         "mergeable",
         "mergeable_state",
+        "merged_sha",
         "memory_events_existing",
         "memory_events_written",
         "memory_database_candidate_count",
@@ -747,6 +750,14 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "runtime_smoke_decision",
         "runtime_smoke_stable_reason",
         "runtime_private_action",
+        "active_worker_count",
+        "activation_scope",
+        "artifact_store",
+        "local_model_runtime",
+        "live_activation",
+        "memory_gateway_synthetic_exact_readback",
+        "providers",
+        "queue_recovery",
         "semantic_record_count",
         "ram_bytes",
         "repository",
@@ -13203,6 +13214,55 @@ def hermes_memory_gateway_smoke() -> str:
     )
 
 
+def video_understanding_activation_packet(body: str) -> str:
+    merged_sha = _body_field(body, "Merged SHA")
+    providers = _body_field(body, "Providers")
+    local_model_runtime = _body_field(body, "Local Model Runtime")
+    artifact_store = _body_field(body, "Artifact Store")
+    rollback = _body_field(body, "Rollback Ready")
+    if merged_sha is None or _HEAD_SHA_RE.fullmatch(merged_sha) is None:
+        return _maintenance_report(
+            "BLOCKED",
+            VIDEO_UNDERSTANDING_ACTIVATION_PACKET,
+            ["reason=merged_sha_required"],
+            "not_met",
+        )
+    if any(
+        value is None or any(marker in value.lower() for marker in ("http://", "https://", "cloud", "openai", "anthropic", "googleapis"))
+        for value in (providers, local_model_runtime, artifact_store)
+    ):
+        return _maintenance_report(
+            "BLOCKED",
+            VIDEO_UNDERSTANDING_ACTIVATION_PACKET,
+            ["reason=local_runtime_fields_required"],
+            "not_met",
+        )
+    if rollback != "yes":
+        return _maintenance_report(
+            "BLOCKED",
+            VIDEO_UNDERSTANDING_ACTIVATION_PACKET,
+            ["reason=rollback_readiness_required"],
+            "not_met",
+        )
+    return _maintenance_report(
+        "DONE",
+        VIDEO_UNDERSTANDING_ACTIVATION_PACKET,
+        [
+            f"merged_sha={merged_sha.lower()}",
+            "activation_scope=runtime_follow_up_only",
+            "providers=local_allowlisted_verified",
+            "local_model_runtime=verified",
+            "artifact_store=private_hash_readback_required",
+            "queue_recovery=restart_recovery_required",
+            "memory_gateway_synthetic_exact_readback=required",
+            "active_worker_count=1",
+            "rollback_ready=true",
+            "live_activation=false",
+        ],
+        "met",
+    )
+
+
 def _mempalace_runtime_smoke_reject_issue_input(
     body: str,
 ) -> str | None:
@@ -13401,6 +13461,8 @@ def dispatch_runtime_maintenance_task(
             return home_edge_audit_persist_v1(body)
         if task_id == HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1:
             return home_edge_01_debian_media_bootstrap_v1(body)
+        if task_id == VIDEO_UNDERSTANDING_ACTIVATION_PACKET:
+            return video_understanding_activation_packet(body)
         if task_id == PREPARE_PRIVATE_STATIC_SITE_HANDOFF:
             return _execute_prepare_private_static_site_handoff(body)
         if task_id == DEPLOY_PRIVATE_STATIC_SITE:
