@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/alanua/Skeleton/schemas/runner_repository_maintenance_receipt.schema.json",
+  "title": "Skeleton Runner Repository Maintenance Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "operation",
+    "success_criteria"
+  ],
+  "properties": {
+    "schema": {
+      "const": "skeleton.runner_repository_maintenance_receipt.v1"
+    },
+    "operation": {
+      "enum": [
+        "approved_pr_merge",
+        "remote_read_only_diagnostic"
+      ]
+    },
+    "repository": {
+      "const": "alanua/Skeleton"
+    },
+    "pr_number": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "approved_head_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "changed_files": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512
+      }
+    },
+    "node_id": {
+      "const": "home-edge-01"
+    },
+    "probe_profile": {
+      "const": "de_pc_read_only_v1"
+    },
+    "aggregate_classes": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "gateway",
+          "route",
+          "tailscale",
+          "modem"
+        ]
+      }
+    },
+    "reason_code": {
+      "enum": [
+        "healthy_transport",
+        "transport_unverified"
+      ]
+    },
+    "success_criteria": {
+      "enum": [
+        "met",
+        "not_met"
+      ]
+    }
+  }
+}

@@ -88,6 +88,7 @@ from core.runner_private_memory_source_inventory import (
     TASK_ID as PRIVATE_MEMORY_PHASE_A_INVENTORY,
     execute_private_memory_phase_a_inventory,
 )
+from core.runner_repository_maintenance_executor import RepositoryMaintenanceExecutor
 from core.runner_five_layer_memory_activation import (
     TASK_ID as ACTIVATE_FIVE_LAYER_PRIVATE_MEMORY,
     execute_five_layer_memory_activation,
@@ -2900,21 +2901,27 @@ def build_universal_runner_executor_registry(
         )
 
     executors = []
+    repository_maintenance_executor = RepositoryMaintenanceExecutor(
+        pr_state_reader=get_pr_merge_state
+    )
     for task_kind in compatibility.registered_task_kinds:
-        handler = (
-            code_edit_handler
-            if task_kind == "code_edit"
-            else maintenance_handler
-        )
-        executors.append(
-            CallableRunnerExecutor(
-                task_kind=task_kind,
-                handler=handler,
-                required_capabilities=tuple(
-                    sorted(ROUTE_REQUIRED_CAPABILITIES[task_kind])
+        if task_kind == "repository_maintenance":
+            executors.append(repository_maintenance_executor)
+        else:
+            handler = (
+                code_edit_handler
+                if task_kind == "code_edit"
+                else maintenance_handler
+            )
+            executors.append(
+                CallableRunnerExecutor(
+                    task_kind=task_kind,
+                    handler=handler,
+                    required_capabilities=tuple(
+                        sorted(ROUTE_REQUIRED_CAPABILITIES[task_kind])
+                    ),
                 ),
             )
-        )
     return RunnerExecutorRegistry(executors)
 
 
