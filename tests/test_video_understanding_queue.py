@@ -7,6 +7,7 @@ import pytest
 from core.video_understanding.models import VideoUnderstandingError
 from core.video_understanding.queue import FileQueue, QueueRecord
 from core.video_understanding.runtime_config import RuntimeLimits, VideoRuntimeConfig
+from core.video_understanding_queue import VideoQueueError, VideoUnderstandingQueue
 
 
 class Clock:
@@ -75,3 +76,30 @@ def test_queue_rejects_non_json_payload_reason_and_boolean_attempts(tmp_path: Pa
     }
     with pytest.raises(VideoUnderstandingError):
         QueueRecord.from_dict(payload)
+
+
+def test_review_retry_restart_recovery_and_one_worker_lock(tmp_path: Path) -> None:
+    clock = Clock()
+    queue = VideoUnderstandingQueue(tmp_path / "typed", lease_seconds=10, max_attempts=2, clock=clock)
+    first = queue.enqueue(operation="video_process_one", payload={"ambiguous": True}, idempotency_key="one")
+    assert queue.enqueue(operation="video_process_one", payload={}, idempotency_key="one").task_id == first.task_id
+
+    with queue.single_worker("worker-1"):
+        with pytest.raises(VideoQueueError) as exc:
+            with queue.single_worker("worker-2"):
+                pass
+        assert exc.value.reason_code == "WORKER_ALREADY_ACTIVE"
+        claimed = queue.claim("worker-1")
+        assert claimed is not None
+        reviewed = queue.complete(claimed.task_id, "worker-1", ambiguous=True)
+        assert reviewed.state == "review"
+
+    second = queue.enqueue(operation="video_process_one", payload={}, idempotency_key="two")
+    claimed = queue.claim("worker-1")
+    assert claimed is not None and claimed.task_id == second.task_id
+    assert queue.recover_after_restart() == 1
+    assert queue.counts()["retry"] == 1
+    claimed_again = queue.claim("worker-1")
+    assert claimed_again is not None and claimed_again.attempts == 2
+    failed = queue.fail(claimed_again.task_id, "worker-1", reason_code="TRANSIENT_FAILURE")
+    assert failed.state == "quarantined"

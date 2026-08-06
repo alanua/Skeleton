@@ -69,7 +69,13 @@ source acquisition
 
 The provider layer uses fixed private configuration for `yt-dlp`, `ffmpeg`, `ffprobe`, Sona and OCR. Commands are argv-only with bounded timeout/output and owned process groups. YouTube/Vimeo use fixed yt-dlp profiles; direct media requires an allowlisted HTTPS host, pinned global DNS result, bounded redirects, content type and size; local files use opaque registry identities.
 
-The file queue supports atomic enqueue/claim, leases, heartbeat, retry, quarantine and expired-lease recovery. It is operational state only, not a canonical database. The artifact store promotes immutable results only after manifest/hash/readback verification.
+The local-first provider registry has no cloud fallback. OCR, transcription, model and extraction providers must be explicitly allowlisted local executables with fixed argv prefixes, byte limits and timeouts. Network endpoints and cloud provider markers are rejected at registration time.
+
+The typed file queue supports `pending`, `processing`, `done`, `review`, `retry` and `quarantined`. It uses one queue lock plus one non-blocking worker lock, so exactly one active worker can claim tasks. Restart recovery moves abandoned `processing` tasks back to `retry` or `quarantined` according to the attempt bound. It is operational state only, not a canonical database.
+
+Private media, extracted frames, audio, OCR text, transcripts, model outputs, artifact paths, hashes, provenance and confidence stay in the private artifact store. Public receipts contain only schema names, operations, status, stable reason codes, aggregate counts and canonical/review status. Private-like receipt values are rejected.
+
+Idempotency is content-addressed at each layer: task enqueue reuses the same task id for the same idempotency key, artifact replay reuses the same hash object, ambiguous outputs move to `review`, and only non-ambiguous synthetic facts are sent through MemoryGateway for exact readback.
 
 Projection failure never rolls back a successful canonical commit.
 
@@ -110,3 +116,23 @@ dios_video_process_one → video_process_one(profile=DIOS)
 ## Current source boundary
 
 The source implementation contains the universal core, local provider contracts, queue, worker, artifact storage, Sona/Ollama transports and synthetic tests. It does not register protected operations, deploy to HomeEdge, process a real URL, enable a worker, import the DIOS corpus or merge itself.
+
+## Activation Packet
+
+Runtime activation is a separate post-merge task pinned to the exact merged SHA. The Runner maintenance task id is:
+
+```text
+video_understanding_activation_packet
+```
+
+The follow-up task must include:
+
+```text
+Merged SHA: <exact merged 40-hex SHA>
+Providers: tesseract-local,whisper-local,ollama-local,ffmpeg-local
+Local Model Runtime: ollama-local
+Artifact Store: private-hash-store
+Rollback Ready: yes
+```
+
+The packet must verify local providers, the local model runtime, private artifact store hash/readback, queue restart recovery, MemoryGateway synthetic exact readback, exactly one active worker and rollback readiness. It is not live activation and must not start services, import the DIOS corpus, process private media or upload artifacts.
