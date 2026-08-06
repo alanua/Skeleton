@@ -9,6 +9,9 @@ import yaml
 from core.memory_gateway_storage import PRIVATE_MEMORY_GATEWAY_MUTATION_SCHEMA, PrivateMemoryGatewayStorage
 from core.memory_gateway import (
     MEMORY_GATEWAY_REQUEST_SCHEMA,
+    PRIVATE_RUNTIME_ONLY,
+    PUBLIC_SAFE_CODE_TESTS_ONLY,
+    SECRET_REFERENCE_ONLY,
     MemoryGateway,
     allowed_command_names,
     capability_token,
@@ -214,6 +217,36 @@ def test_genuine_current_exact_confirmation_succeeds() -> None:
     result = gw.propose_patch(namespace="aufmass", proposal=candidate)
 
     assert result["payload"]["proposal_event"]["status"] == "ACCEPTED"
+
+
+@pytest.mark.parametrize("boundary", [PUBLIC_SAFE_CODE_TESTS_ONLY, SECRET_REFERENCE_ONLY])
+def test_private_proposal_blocks_before_gateway_registry_mutation(boundary: str) -> None:
+    patch_registry = MemoryPatchProposalRegistry()
+    gw = MemoryGateway(
+        capability_token(namespaces=("aufmass",), privacy_boundary=boundary),
+        patch_registry=patch_registry,
+    )
+    candidate = proposal(record_classification="PRIVATE")
+
+    with pytest.raises(MemoryGatewayPolicyError) as excinfo:
+        gw.propose_patch(namespace="aufmass", project_id="aufmass", proposal=candidate)
+
+    assert excinfo.value.reason_code == "PRIVATE_RECORD_BLOCKED_BY_PRIVACY_BOUNDARY"
+    assert patch_registry.lookup_by_idempotency_key(candidate["idempotency_key"]) is None
+
+
+def test_private_proposal_is_supported_under_private_runtime_only() -> None:
+    gw = MemoryGateway(capability_token(namespaces=("aufmass",), privacy_boundary=PRIVATE_RUNTIME_ONLY))
+    candidate = proposal(record_classification="PRIVATE")
+
+    result = gw.propose_patch(namespace="aufmass", project_id="aufmass", proposal=candidate)
+    payload = result["payload"]
+    serialized = json.dumps(payload, sort_keys=True)
+
+    assert payload["proposal_event"]["status"] == "ACCEPTED"
+    assert payload["idempotency_classification"] == "NEW_PROPOSAL"
+    assert "proposed_value" not in serialized
+    assert "ready" not in serialized
 
 
 def test_aufmass_conflict_query_excludes_bauclock_conflicts() -> None:

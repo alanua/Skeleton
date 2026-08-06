@@ -48,6 +48,16 @@ MEMORY_GATEWAY_AUDIT_SCHEMA = "skeleton.memory_gateway.audit_event.v1"
 MEMORY_GATEWAY_CONTRACT_VERSION = "1.0.0"
 GRAPHIFY_SYNTHETIC_NAMESPACE = "skeleton"
 GRAPHIFY_SYNTHETIC_PROJECT_ID = "graphify_synthetic"
+PUBLIC_SAFE_CODE_TESTS_ONLY = "PUBLIC_SAFE_CODE_TESTS_ONLY"
+SECRET_REFERENCE_ONLY = "SECRET_REFERENCE_ONLY"
+PRIVATE_RUNTIME_ONLY = "PRIVATE_RUNTIME_ONLY"
+MEMORY_GATEWAY_PRIVACY_BOUNDARIES = frozenset(
+    {
+        PUBLIC_SAFE_CODE_TESTS_ONLY,
+        SECRET_REFERENCE_ONLY,
+        PRIVATE_RUNTIME_ONLY,
+    }
+)
 _SAFE_PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _PRIVATE_EXACT_AUTHORIZATION = object()
 
@@ -57,13 +67,20 @@ class GatewayCapabilityToken:
     schema: str
     namespaces: tuple[str, ...]
     public_mode: bool = True
+    privacy_boundary: str = "PUBLIC_SAFE_CODE_TESTS_ONLY"
 
 
-def capability_token(*, namespaces: tuple[str, ...], public_mode: bool = True) -> GatewayCapabilityToken:
+def capability_token(
+    *,
+    namespaces: tuple[str, ...],
+    public_mode: bool = True,
+    privacy_boundary: str = "PUBLIC_SAFE_CODE_TESTS_ONLY",
+) -> GatewayCapabilityToken:
     return GatewayCapabilityToken(
         schema="skeleton.memory_gateway.capability_token.v1",
         namespaces=namespaces,
         public_mode=public_mode,
+        privacy_boundary=_normalize_privacy_boundary(privacy_boundary),
     )
 
 
@@ -162,6 +179,10 @@ class MemoryGateway:
             command_suffix="memory.private_mutate",
             payload=receipt,
         )
+
+    @property
+    def privacy_boundary(self) -> str:
+        return self._token.privacy_boundary
 
     def private_status(self, *, namespace: str, **payload: object) -> dict[str, object]:
         return self._private_storage_response(namespace, "memory.private_status", "status", payload)
@@ -546,6 +567,7 @@ class MemoryGateway:
         proposal_project_id = self._optional_project_id(proposal.get("project_id"))
         if bound_project_id is not None and proposal_project_id != bound_project_id:
             raise MemoryGatewayPolicyError("PROJECT_NOT_AUTHORIZED", "proposal project_id mismatch")
+        self._validate_proposal_privacy_boundary(proposal)
         self._validate_patch_evidence(namespace, bound_project_id, proposal)
         duplicate_existing = self._patch_registry.lookup_by_idempotency_key(
             str(proposal.get("idempotency_key", ""))
@@ -570,6 +592,14 @@ class MemoryGateway:
                 ),
             },
         )
+
+    def _validate_proposal_privacy_boundary(self, proposal: Mapping[str, Any]) -> None:
+        classification = _proposal_record_classification(proposal)
+        if classification == "PRIVATE" and self._token.privacy_boundary != PRIVATE_RUNTIME_ONLY:
+            raise MemoryGatewayPolicyError(
+                "PRIVATE_RECORD_BLOCKED_BY_PRIVACY_BOUNDARY",
+                "private records require PRIVATE_RUNTIME_ONLY",
+            )
 
     def _validate_patch_evidence(self, namespace: str, project_id: str, proposal: Mapping[str, Any]) -> None:
         provenance_refs = proposal.get("provenance_refs")
@@ -822,8 +852,13 @@ def _normalize_token(token: GatewayCapabilityToken | Mapping[str, Any]) -> Gatew
             raise MemoryGatewayPolicyError("INVALID_CAPABILITY_TOKEN", "capability token schema is invalid")
         raw_namespaces = token.get("namespaces")
         public_mode = bool(token.get("public_mode", True))
+        privacy_boundary = _normalize_privacy_boundary(
+            token.get("privacy_boundary", PUBLIC_SAFE_CODE_TESTS_ONLY)
+        )
     else:
         raise MemoryGatewayPolicyError("INVALID_CAPABILITY_TOKEN", "capability token must be an object")
+    if isinstance(token, GatewayCapabilityToken):
+        privacy_boundary = _normalize_privacy_boundary(token.privacy_boundary)
     if not isinstance(raw_namespaces, tuple | list) or not raw_namespaces:
         raise MemoryGatewayPolicyError("NAMESPACE_REQUIRED", "capability token requires namespaces")
     namespaces = tuple(
@@ -834,7 +869,28 @@ def _normalize_token(token: GatewayCapabilityToken | Mapping[str, Any]) -> Gatew
         schema="skeleton.memory_gateway.capability_token.v1",
         namespaces=namespaces,
         public_mode=public_mode,
+        privacy_boundary=privacy_boundary,
     )
+
+
+def _normalize_privacy_boundary(value: object) -> str:
+    if value not in MEMORY_GATEWAY_PRIVACY_BOUNDARIES:
+        raise MemoryGatewayPolicyError("INVALID_PRIVACY_BOUNDARY", "privacy boundary is not allowlisted")
+    return str(value)
+
+
+def _proposal_record_classification(proposal: Mapping[str, Any]) -> str:
+    for key in ("record_classification", "privacy_classification", "privacy"):
+        value = proposal.get(key)
+        if not isinstance(value, str) or not value:
+            continue
+        normalized = value.upper()
+        if normalized in {"PUBLIC_SAFE", "PUBLIC_SAFE_CODE"}:
+            return "PUBLIC"
+        if normalized in {"PUBLIC", "PRIVATE", "CANON"}:
+            return normalized
+        raise MemoryGatewayPolicyError("INVALID_RECORD_CLASSIFICATION", "record classification is invalid")
+    return "PUBLIC"
 
 
 def _is_mempalace_synthetic_scope(namespace: str, project_id: str) -> bool:

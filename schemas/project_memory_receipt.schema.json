@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.project_memory.receipt.schema.json",
+  "title": "Project Memory Public Receipt",
+  "type": "object",
+  "required": ["schema", "status", "namespace", "project_id", "decision", "payload"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "skeleton.project_memory.receipt.v1"},
+    "status": {
+      "enum": ["OPERATOR_APPROVAL_REQUIRED", "DUPLICATE_EXISTING", "BLOCKED"]
+    },
+    "namespace": {"type": ["string", "null"]},
+    "project_id": {"type": ["string", "null"]},
+    "classification": {"enum": ["PUBLIC", "PRIVATE", "CANON"]},
+    "decision": {
+      "type": "object",
+      "required": ["allowed", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "allowed": {"type": "boolean"},
+        "reason": {"type": "string"}
+      }
+    },
+    "gateway": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.project_memory.request.schema.json",
+  "title": "Project Memory Gateway Request",
+  "type": "object",
+  "required": ["schema", "namespace", "project_id", "operation", "privacy_boundary"],
+  "additionalProperties": true,
+  "properties": {
+    "schema": {"const": "skeleton.project_memory.request.v1"},
+    "namespace": {"$ref": "#/$defs/safe_token"},
+    "project_id": {"$ref": "#/$defs/safe_token"},
+    "operation": {"const": "memory.propose_patch"},
+    "privacy_boundary": {
+      "enum": [
+        "PUBLIC_SAFE_CODE_TESTS_ONLY",
+        "SECRET_REFERENCE_ONLY",
+        "PRIVATE_RUNTIME_ONLY"
+      ]
+    },
+    "record_classification": {"enum": ["PUBLIC", "PRIVATE", "CANON"]},
+    "parameters": {
+      "type": "object",
+      "required": ["proposal"],
+      "additionalProperties": true,
+      "properties": {
+        "proposal": {"type": "object"}
+      }
+    }
+  },
+  "$defs": {
+    "safe_token": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+    }
+  }
+}
