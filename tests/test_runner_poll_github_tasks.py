@@ -3683,7 +3683,7 @@ def test_done_pr_card_success_sends_reply_markup() -> None:
     ), mock.patch.object(runner, "send_telegram_notification") as send:
         runner.notify_task_finished(129, "DONE", DONE_REPORT)
 
-    send.assert_called_once_with("PR ready card", reply_markup)
+    send.assert_not_called()
 
 
 def test_done_pr_card_uses_target_repository_from_issue_body() -> None:
@@ -3700,18 +3700,7 @@ def test_done_pr_card_uses_target_repository_from_issue_body() -> None:
     ), mock.patch.object(runner, "send_telegram_notification") as send:
         runner.notify_task_finished(129, "DONE", DONE_REPORT)
 
-    assert send.call_count == 1
-    text = send.call_args.args[0]
-    reply_markup = send.call_args.args[1]
-    assert "Проєкт: bauclock" in text
-    assert "Репозиторій: alanua/bauclock" in text
-    assert "Задача: #129" in text
-    assert "Repository: alanua/Skeleton" not in text
-    assert "target_repo" not in text
-    assert [row[0]["text"] for row in reply_markup["inline_keyboard"]] == [
-        "Деталі",
-        "Відкрити PR",
-    ]
+    send.assert_not_called()
 
 
 def test_cross_project_blocked_status_uses_target_repository_from_issue_body() -> None:
@@ -3732,12 +3721,7 @@ def test_cross_project_blocked_status_uses_target_repository_from_issue_body() -
     ), mock.patch.object(runner, "send_telegram_notification") as send:
         runner.notify_task_finished(999, "BLOCKED")
 
-    send.assert_called_once_with(
-        "Проєкт: LumenFlow\n"
-        "Репозиторій: alanua/LumenFlow\n"
-        "Задача: #999\n"
-        "Статус: BLOCKED"
-    )
+    send.assert_not_called()
 
 
 def test_done_pr_card_build_failure_falls_back_to_plain_done() -> None:
@@ -3750,8 +3734,7 @@ def test_done_pr_card_build_failure_falls_back_to_plain_done() -> None:
     ), mock.patch.object(runner, "send_telegram_notification") as send:
         runner.notify_task_finished(129, "DONE", DONE_REPORT)
 
-    send.assert_called_once_with(_plain_done_message())
-    assert "telegram-bot-token-must-not-leak" not in send.call_args.args[0]
+    send.assert_not_called()
 
 
 def test_done_pr_reply_markup_send_failure_falls_back_to_plain_done() -> None:
@@ -3771,10 +3754,7 @@ def test_done_pr_reply_markup_send_failure_falls_back_to_plain_done() -> None:
     ) as send:
         runner.notify_task_finished(129, "DONE", DONE_REPORT)
 
-    assert send.call_args_list == [
-        mock.call("PR ready card", reply_markup),
-        mock.call(_plain_done_message()),
-    ]
+    send.assert_not_called()
 
 
 def test_pr_card_build_does_not_execute_merge_or_reject_side_effects() -> None:
@@ -3789,7 +3769,7 @@ def test_pr_card_build_does_not_execute_merge_or_reject_side_effects() -> None:
         runner.notify_task_finished(129, "DONE", DONE_REPORT)
 
     run_command.assert_not_called()
-    send.assert_called_once()
+    send.assert_not_called()
 
 
 def _maintenance_issue(

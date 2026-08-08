@@ -13,7 +13,6 @@ def _payload(**updates: object) -> dict[str, object]:
     payload: dict[str, object] = {
         "privacy_boundary": PRIVACY_PUBLIC_SAFE,
         "bounded": True,
-        "approved_capabilities": ["loop:state_write"],
         "requested_capabilities": ["loop:state_write"],
         "task_packet": {
             "schema": "skeleton.loop_runner_packet.v1",
@@ -76,11 +75,26 @@ def test_privacy_and_capability_mismatch_fail_closed(tmp_path: Path) -> None:
     )
     _, capability_request = _request(
         tmp_path,
-        payload=_payload(approved_capabilities=[], requested_capabilities=["loop:state_write"]),
+        payload=_payload(requested_capabilities=["repository_write"]),
     )
 
     assert dispatcher.dispatch(privacy_request).reason == "PRIVACY_BOUNDARY_MISMATCH"
     assert dispatcher.dispatch(capability_request).reason == "CAPABILITY_NOT_APPROVED"
+
+
+def test_scheduler_payload_cannot_self_approve_capabilities(tmp_path: Path) -> None:
+    dispatcher, request = _request(
+        tmp_path,
+        payload=_payload(
+            approved_capabilities=["repository_write"],
+            requested_capabilities=["repository_write"],
+        ),
+    )
+
+    result = dispatcher.dispatch(request)
+
+    assert result.status == "failed"
+    assert result.reason == "CAPABILITY_NOT_APPROVED"
 
 
 def test_loop_next_step_proposal_is_returned_not_executed(tmp_path: Path) -> None:
