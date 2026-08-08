@@ -2,13 +2,19 @@ from __future__ import annotations
 
 import json
 import hashlib
+import subprocess
 from datetime import UTC, datetime
 from typing import Any, Mapping
 
 import pytest
 
 from core.home_edge import post_migration_reconcile as reconcile
-from core.home_edge.executor import HomeEdgeExecReceipt, HomeEdgeExecRequest, sign_request
+from core.home_edge.executor import (
+    HomeEdgeExecError,
+    HomeEdgeExecReceipt,
+    HomeEdgeExecRequest,
+    sign_request,
+)
 
 
 SHA = "a" * 40
@@ -83,6 +89,18 @@ def executor_receipt(stdout: str, *, exit_code: int = 0, status: str = "ok") -> 
     )
 
 
+def assert_no_private_transport_leak(receipt: Mapping[str, object]) -> None:
+    encoded = json.dumps(receipt, sort_keys=True)
+    assert "/private/id_ed25519" not in encoded
+    assert "home-edge-01.tail" not in encoded
+    assert "ssh stderr" not in encoded
+    assert "super-secret-token" not in encoded
+    assert "synthetic transport boom" not in encoded
+    assert "TimeoutExpired" not in encoded
+    assert "RuntimeError" not in encoded
+    assert "HomeEdgeExecError" not in encoded
+
+
 def test_exact_runtime_input_accepted_and_main_sha_checked() -> None:
     parsed = reconcile.parse_runtime_input(issue_body())
 
@@ -144,6 +162,121 @@ def test_request_is_signed_fixed_and_dispatched_only_through_gateway(
     assert request.idempotency_key == reconcile.IDEMPOTENCY_KEY
     assert request.operator_approval_ref == reconcile.OPERATOR_APPROVAL
     assert request.script == reconcile.RECONCILE_SCRIPT
+    assert receipt["mutation_executor_receipt_hash"] == "f" * 64
+    assert receipt["audit_receipt_hash"] == reconcile._audit_hash(receipt)
+
+
+def test_execute_home_edge_exec_error_fails_closed_without_private_leakage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(reconcile.EXEC_HMAC_SECRET_ENV, SECRET)
+
+    def fake_execute(_request: Mapping[str, Any]):
+        raise HomeEdgeExecError(
+            "remote home_edge_exec failed: ssh stderr /private/id_ed25519 super-secret-token"
+        )
+
+    monkeypatch.setattr(reconcile, "execute_home_edge_request", fake_execute)
+
+    receipt = reconcile.execute_post_migration_reconcile_task(
+        issue_body(),
+        registered_clean_main_sha=SHA,
+        github_main_sha=SHA,
+    )
+
+    assert receipt["success_criteria"] == "not_met"
+    assert receipt["stable_reason"] == "executor_transport_failed"
+    assert receipt["mutation_executor_receipt_hash"] == "unavailable"
+    assert receipt["audit_receipt_hash"] == reconcile._audit_hash(receipt)
+    assert_no_private_transport_leak(receipt)
+
+
+@pytest.mark.parametrize(
+    "exception",
+    [
+        TimeoutError("home-edge-01.tail timeout /private/id_ed25519"),
+        subprocess.TimeoutExpired(
+            cmd=["ssh", "home-edge-01.tail", "-i", "/private/id_ed25519"],
+            timeout=930,
+            output="super-secret-token",
+            stderr="ssh stderr",
+        ),
+    ],
+)
+def test_execute_timeout_fails_closed_without_private_leakage(
+    monkeypatch: pytest.MonkeyPatch, exception: BaseException
+) -> None:
+    monkeypatch.setenv(reconcile.EXEC_HMAC_SECRET_ENV, SECRET)
+
+    def fake_execute(_request: Mapping[str, Any]):
+        raise exception
+
+    monkeypatch.setattr(reconcile, "execute_home_edge_request", fake_execute)
+
+    receipt = reconcile.execute_post_migration_reconcile_task(
+        issue_body(),
+        registered_clean_main_sha=SHA,
+        github_main_sha=SHA,
+    )
+
+    assert receipt["success_criteria"] == "not_met"
+    assert receipt["stable_reason"] == "executor_transport_timeout"
+    assert receipt["audit_receipt_hash"] == reconcile._audit_hash(receipt)
+    assert_no_private_transport_leak(receipt)
+
+
+def test_execute_unexpected_exception_fails_closed_without_private_leakage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(reconcile.EXEC_HMAC_SECRET_ENV, SECRET)
+
+    def fake_execute(_request: Mapping[str, Any]):
+        raise RuntimeError("synthetic transport boom /private/id_ed25519 super-secret-token")
+
+    monkeypatch.setattr(reconcile, "execute_home_edge_request", fake_execute)
+
+    receipt = reconcile.execute_post_migration_reconcile_task(
+        issue_body(),
+        registered_clean_main_sha=SHA,
+        github_main_sha=SHA,
+    )
+
+    assert receipt["success_criteria"] == "not_met"
+    assert receipt["stable_reason"] == "executor_transport_exception"
+    assert receipt["audit_receipt_hash"] == reconcile._audit_hash(receipt)
+    assert_no_private_transport_leak(receipt)
+
+
+def test_execute_preserves_failed_child_receipt_stable_reason_and_rollback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(reconcile.EXEC_HMAC_SECRET_ENV, SECRET)
+    embedded = public_receipt(
+        success_criteria="not_met",
+        stable_reason="rollback_failed",
+        rollback_ready=True,
+        rollback_applied=False,
+    )
+
+    def fake_execute(_request: Mapping[str, Any]):
+        return executor_receipt(
+            "diagnostic preface\n" + json.dumps(embedded) + "\n",
+            exit_code=60,
+            status="failed",
+        )
+
+    monkeypatch.setattr(reconcile, "execute_home_edge_request", fake_execute)
+
+    receipt = reconcile.execute_post_migration_reconcile_task(
+        issue_body(),
+        registered_clean_main_sha=SHA,
+        github_main_sha=SHA,
+    )
+
+    assert receipt["success_criteria"] == "not_met"
+    assert receipt["stable_reason"] == "rollback_failed"
+    assert receipt["rollback_ready"] is True
+    assert receipt["rollback_applied"] is False
     assert receipt["mutation_executor_receipt_hash"] == "f" * 64
     assert receipt["audit_receipt_hash"] == reconcile._audit_hash(receipt)
 

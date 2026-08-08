@@ -4,12 +4,13 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Mapping
 from uuid import uuid4
 
-from core.home_edge.executor import HomeEdgeExecRequest, sign_request
+from core.home_edge.executor import HomeEdgeExecError, HomeEdgeExecRequest, sign_request
 from core.home_edge.executor_gateway import EXEC_HMAC_SECRET_ENV, execute_home_edge_request
 
 
@@ -113,7 +114,14 @@ def execute_post_migration_reconcile_task(
         github_main_sha=github_main_sha,
     )
     request = build_reconcile_request(environment=environment)
-    executor_receipt = execute_home_edge_request(request.to_mapping())
+    try:
+        executor_receipt = execute_home_edge_request(request.to_mapping())
+    except (subprocess.TimeoutExpired, TimeoutError):
+        return _blocked_receipt("executor_transport_timeout")
+    except HomeEdgeExecError:
+        return _blocked_receipt("executor_transport_failed")
+    except Exception:
+        return _blocked_receipt("executor_transport_exception")
     public = public_receipt_from_executor_stdout(executor_receipt.to_mapping())
     public["mutation_executor_receipt_hash"] = executor_receipt.receipt_hash
     public["audit_receipt_hash"] = _audit_hash(public)
