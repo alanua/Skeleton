@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://alanua.github.io/Skeleton/schemas/project_memory_request.schema.json",
+  "title": "Project Memory Request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "project_id",
+    "namespace",
+    "operation",
+    "classification",
+    "privacy_boundary",
+    "evidence",
+    "parameters"
+  ],
+  "properties": {
+    "schema": {
+      "const": "skeleton.project_memory_request.v1"
+    },
+    "project_id": {
+      "$ref": "#/$defs/safe_token"
+    },
+    "namespace": {
+      "$ref": "#/$defs/safe_token"
+    },
+    "operation": {
+      "enum": [
+        "read_context",
+        "propose_fact",
+        "propose_task",
+        "propose_preference",
+        "list_pending_review"
+      ]
+    },
+    "classification": {
+      "enum": [
+        "CANON",
+        "REVIEW",
+        "BACKLOG",
+        "REJECTED",
+        "PRIVATE",
+        "TEMPORARY"
+      ]
+    },
+    "privacy_boundary": {
+      "enum": [
+        "PUBLIC_SAFE_CODE_TESTS_ONLY",
+        "PRIVATE_RUNTIME_ONLY",
+        "SECRET_REFERENCE_ONLY"
+      ]
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "source_evidence_hash",
+        "provenance_refs",
+        "actor_ref"
+      ],
+      "properties": {
+        "source_evidence_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "provenance_refs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "ref",
+              "kind",
+              "evidence_hash"
+            ],
+            "properties": {
+              "ref": {
+                "$ref": "#/$defs/safe_token"
+              },
+              "kind": {
+                "$ref": "#/$defs/safe_token"
+              },
+              "evidence_hash": {
+                "$ref": "#/$defs/sha256"
+              }
+            }
+          }
+        },
+        "actor_ref": {
+          "$ref": "#/$defs/safe_token"
+        },
+        "reason_code": {
+          "$ref": "#/$defs/safe_token"
+        },
+        "approval_tier": {
+          "$ref": "#/$defs/safe_token"
+        },
+        "approval_ref": {
+          "$ref": "#/$defs/safe_token"
+        },
+        "confirmed_via_exact_ref": {
+          "$ref": "#/$defs/safe_token"
+        },
+        "confirmed_canonical_revision": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "parameters": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "$defs": {
+    "safe_token": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

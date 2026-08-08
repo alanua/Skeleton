@@ -216,6 +216,56 @@ def test_genuine_current_exact_confirmation_succeeds() -> None:
     assert result["payload"]["proposal_event"]["status"] == "ACCEPTED"
 
 
+def test_private_proposal_requires_private_runtime_gateway_capability() -> None:
+    patch_registry = MemoryPatchProposalRegistry()
+    candidate = proposal(namespace="skeleton", project_id="skeleton", classification="PRIVATE")
+    public_gateway = MemoryGateway(
+        capability_token(namespaces=("skeleton",)),
+        patch_registry=patch_registry,
+    )
+
+    with pytest.raises(MemoryGatewayPolicyError) as public_exc:
+        public_gateway.propose_patch(namespace="skeleton", proposal=candidate)
+
+    assert public_exc.value.reason_code == "PRIVATE_PROPOSAL_REQUIRES_PRIVATE_RUNTIME_BOUNDARY"
+    assert patch_registry.lookup_by_idempotency_key(candidate["idempotency_key"]) is None
+
+    secret_gateway = MemoryGateway(
+        capability_token(
+            namespaces=("skeleton",),
+            public_mode=False,
+            privacy_boundary="SECRET_REFERENCE_ONLY",
+        ),
+        patch_registry=patch_registry,
+    )
+    with pytest.raises(MemoryGatewayPolicyError) as secret_exc:
+        secret_gateway.propose_patch(namespace="skeleton", proposal=candidate)
+
+    assert secret_exc.value.reason_code == "PRIVATE_PROPOSAL_REQUIRES_PRIVATE_RUNTIME_BOUNDARY"
+    assert patch_registry.lookup_by_idempotency_key(candidate["idempotency_key"]) is None
+
+
+def test_private_runtime_gateway_accepts_private_proposal_as_proposal_only() -> None:
+    patch_registry = MemoryPatchProposalRegistry()
+    gw = MemoryGateway(
+        capability_token(
+            namespaces=("skeleton",),
+            public_mode=False,
+            privacy_boundary="PRIVATE_RUNTIME_ONLY",
+        ),
+        patch_registry=patch_registry,
+    )
+    candidate = proposal(namespace="skeleton", project_id="skeleton", classification="PRIVATE")
+
+    result = gw.propose_patch(namespace="skeleton", proposal=candidate)
+
+    assert result["payload"]["proposal_event"]["status"] == "ACCEPTED"
+    assert "canonical_write_performed" not in result["payload"]["proposal_event"]
+    assert "operator_approval_required" not in result["payload"]["proposal_event"]
+    assert "proposed_value" not in json.dumps(result, sort_keys=True)
+    assert patch_registry.lookup_by_idempotency_key(candidate["idempotency_key"]) is not None
+
+
 def test_aufmass_conflict_query_excludes_bauclock_conflicts() -> None:
     patch_registry = MemoryPatchProposalRegistry()
     patch_registry.propose(proposal(namespace="bauclock"))
