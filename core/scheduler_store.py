@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import json
 from pathlib import Path
+import re
 import sqlite3
 from typing import Any, Iterator
 
@@ -86,6 +87,19 @@ class SchedulerStore:
                     ON occurrences(schedule_id, state, scheduled_for);
                 CREATE INDEX IF NOT EXISTS idx_occurrences_updated
                     ON occurrences(state, updated_at);
+
+                CREATE TABLE IF NOT EXISTS notification_ledger (
+                    notification_key TEXT PRIMARY KEY,
+                    issue_number INTEGER NOT NULL CHECK(issue_number > 0),
+                    status TEXT NOT NULL,
+                    report_hash TEXT NOT NULL,
+                    created_at INTEGER NOT NULL CHECK(created_at >= 0),
+                    last_seen_at INTEGER NOT NULL CHECK(last_seen_at >= 0),
+                    seen_count INTEGER NOT NULL CHECK(seen_count >= 1)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_notification_ledger_created
+                    ON notification_ledger(created_at);
                 """
             )
 
@@ -370,6 +384,55 @@ class SchedulerStore:
         result.update({str(state): int(count) for state, count in rows})
         return result
 
+    def claim_notification_once(
+        self,
+        *,
+        notification_key: str,
+        issue_number: int,
+        status: str,
+        report_hash: str,
+        now: int,
+        limit: int,
+    ) -> bool:
+        _notification_key(notification_key)
+        _issue_number(issue_number)
+        _notification_status(status)
+        _sha256_hex(report_hash, "report_hash")
+        _timestamp(now, "now")
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+            raise SchedulerValidationError(
+                "INVALID_NOTIFICATION_LIMIT", "limit must be a positive integer"
+            )
+        with self._transaction() as connection:
+            result = connection.execute(
+                """
+                INSERT OR IGNORE INTO notification_ledger (
+                    notification_key, issue_number, status, report_hash,
+                    created_at, last_seen_at, seen_count
+                ) VALUES (?, ?, ?, ?, ?, ?, 1)
+                """,
+                (notification_key, issue_number, status, report_hash, now, now),
+            )
+            claimed = result.rowcount == 1
+            if not claimed:
+                connection.execute(
+                    """
+                    UPDATE notification_ledger
+                       SET last_seen_at = ?,
+                           seen_count = seen_count + 1
+                     WHERE notification_key = ?
+                    """,
+                    (now, notification_key),
+                )
+            self._prune_notification_ledger(connection, limit)
+            return claimed
+
+    def notification_ledger_count(self) -> int:
+        with self._connect() as connection:
+            row = connection.execute("SELECT COUNT(*) FROM notification_ledger").fetchone()
+        assert row is not None
+        return int(row[0])
+
     def _load_current(
         self, connection: sqlite3.Connection, schedule_id: str
     ) -> StoredSchedule | None:
@@ -452,6 +515,23 @@ class SchedulerStore:
         connection.execute("PRAGMA synchronous = FULL")
         return connection
 
+    @staticmethod
+    def _prune_notification_ledger(
+        connection: sqlite3.Connection, limit: int
+    ) -> None:
+        connection.execute(
+            """
+            DELETE FROM notification_ledger
+             WHERE notification_key IN (
+                SELECT notification_key
+                  FROM notification_ledger
+                 ORDER BY created_at DESC, notification_key DESC
+                 LIMIT -1 OFFSET ?
+             )
+            """,
+            (limit,),
+        )
+
 
 def _timestamp(value: object, field: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -470,4 +550,36 @@ def _state(value: object) -> str:
 def _reason(value: object) -> str:
     if not isinstance(value, str) or not value or len(value) > 128:
         raise SchedulerValidationError("INVALID_REASON", "reason is invalid")
+    return value
+
+
+def _notification_key(value: object) -> str:
+    if not isinstance(value, str) or not value or len(value) > 200:
+        raise SchedulerValidationError(
+            "INVALID_NOTIFICATION_KEY", "notification key is invalid"
+        )
+    return value
+
+
+def _issue_number(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise SchedulerValidationError(
+            "INVALID_ISSUE_NUMBER", "issue number must be a positive integer"
+        )
+    return value
+
+
+def _notification_status(value: object) -> str:
+    if not isinstance(value, str) or value != "NEEDS_OPERATOR":
+        raise SchedulerValidationError(
+            "INVALID_NOTIFICATION_STATUS", "notification status is invalid"
+        )
+    return value
+
+
+def _sha256_hex(value: object, field: str) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise SchedulerValidationError(
+            f"INVALID_{field.upper()}", f"{field} must be a sha256 hex digest"
+        )
     return value

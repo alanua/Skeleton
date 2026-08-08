@@ -3656,126 +3656,109 @@ def test_send_telegram_notification_without_env_makes_no_network_call() -> None:
     urlopen.assert_not_called()
 
 
-def test_done_pr_card_success_sends_reply_markup() -> None:
-    card = {"text": "PR ready card", "buttons": []}
-    reply_markup = {"inline_keyboard": []}
-
-    with mock.patch.object(
-        runner, "should_notify_task_finished", return_value=True
-    ), mock.patch.object(
-        runner, "build_done_pr_ready_card_payload", return_value=card
-    ), mock.patch.object(
-        runner, "card_payload_to_inline_keyboard", return_value=reply_markup
-    ), mock.patch.object(runner, "send_telegram_notification") as send:
+def test_done_status_notification_is_routine_and_suppressed() -> None:
+    with mock.patch.object(runner, "get_notification_issue") as get_issue, mock.patch.object(
+        runner, "send_telegram_notification"
+    ) as send:
         runner.notify_task_finished(129, "DONE", DONE_REPORT)
 
-    send.assert_called_once_with("PR ready card", reply_markup)
+    get_issue.assert_not_called()
+    send.assert_not_called()
 
 
-def test_done_pr_card_uses_target_repository_from_issue_body() -> None:
+def test_needs_operator_notification_uses_target_repository_from_issue_body(
+    tmp_path: Path,
+) -> None:
     issue = {
         "number": 129,
         "body": "Target Repository: alanua/bauclock\nExpected Output: done\n\n```task\nDo it\n```",
         "state": "open",
         "closed": False,
-        "labels": [{"name": runner.LABEL_DONE}],
+        "labels": [{"name": runner.LABEL_BLOCKED}],
     }
 
-    with mock.patch.object(
+    with mock.patch.dict(
+        os.environ,
+        {
+            runner.RUNNER_MEMORY_DB_ENV: str(tmp_path / "runner.sqlite3"),
+            runner.RUNNER_MEMORY_LEDGER_ENV: str(tmp_path / "events.jsonl"),
+        },
+        clear=True,
+    ), mock.patch.object(
         runner, "get_notification_issue", return_value=issue
     ), mock.patch.object(runner, "send_telegram_notification") as send:
-        runner.notify_task_finished(129, "DONE", DONE_REPORT)
+        runner.notify_task_finished(129, "NEEDS_OPERATOR", "NEEDS_OPERATOR: approve retry")
 
     assert send.call_count == 1
     text = send.call_args.args[0]
-    reply_markup = send.call_args.args[1]
     assert "Проєкт: bauclock" in text
     assert "Репозиторій: alanua/bauclock" in text
     assert "Задача: #129" in text
     assert "Repository: alanua/Skeleton" not in text
     assert "target_repo" not in text
-    assert [row[0]["text"] for row in reply_markup["inline_keyboard"]] == [
-        "Деталі",
-        "Відкрити PR",
-    ]
+    assert "Статус: NEEDS_OPERATOR" in text
 
 
-def test_cross_project_blocked_status_uses_target_repository_from_issue_body() -> None:
+def test_cross_project_blocked_status_is_routine_and_suppressed() -> None:
+    with mock.patch.object(runner, "get_notification_issue") as get_issue, mock.patch.object(
+        runner, "send_telegram_notification"
+    ) as send:
+        runner.notify_task_finished(999, "BLOCKED")
+
+    get_issue.assert_not_called()
+    send.assert_not_called()
+
+
+def test_routine_done_suppression_does_not_build_pr_card() -> None:
+    with mock.patch.object(
+        runner,
+        "build_done_pr_ready_card_payload",
+        side_effect=RuntimeError("telegram-bot-token-must-not-leak"),
+    ) as build_card, mock.patch.object(runner, "send_telegram_notification") as send:
+        runner.notify_task_finished(129, "DONE", DONE_REPORT)
+
+    build_card.assert_not_called()
+    send.assert_not_called()
+
+
+def test_needs_operator_dedupe_survives_runner_process_restart(
+    tmp_path: Path,
+) -> None:
     issue = {
-        "number": 999,
-        "body": (
-            "Target Project: lumenflow\n"
-            "Target Repository: alanua/LumenFlow\n\n"
-            "```task\nDo it\n```"
-        ),
+        "number": 129,
+        "body": "Expected Output: operator\n\n```task\nDo it\n```",
         "state": "open",
         "closed": False,
         "labels": [{"name": runner.LABEL_BLOCKED}],
     }
+    environment = {
+        runner.RUNNER_MEMORY_DB_ENV: str(tmp_path / "runner.sqlite3"),
+        runner.RUNNER_MEMORY_LEDGER_ENV: str(tmp_path / "events.jsonl"),
+    }
 
-    with mock.patch.object(
+    with mock.patch.dict(os.environ, environment, clear=True), mock.patch.object(
         runner, "get_notification_issue", return_value=issue
     ), mock.patch.object(runner, "send_telegram_notification") as send:
-        runner.notify_task_finished(999, "BLOCKED")
+        runner.notify_task_finished(129, "NEEDS_OPERATOR", "NEEDS_OPERATOR: approve retry")
+        runner._NOTIFICATION_ISSUE_CACHE.clear()
+        runner.notify_task_finished(129, "NEEDS_OPERATOR", "NEEDS_OPERATOR: approve retry")
 
     send.assert_called_once_with(
-        "Проєкт: LumenFlow\n"
-        "Репозиторій: alanua/LumenFlow\n"
-        "Задача: #999\n"
-        "Статус: BLOCKED"
+        "Проєкт: Skeleton\nЗадача: #129\nСтатус: NEEDS_OPERATOR"
     )
 
 
-def test_done_pr_card_build_failure_falls_back_to_plain_done() -> None:
-    with mock.patch.object(
-        runner, "should_notify_task_finished", return_value=True
-    ), mock.patch.object(
-        runner,
-        "build_done_pr_ready_card_payload",
-        side_effect=RuntimeError("telegram-bot-token-must-not-leak"),
-    ), mock.patch.object(runner, "send_telegram_notification") as send:
-        runner.notify_task_finished(129, "DONE", DONE_REPORT)
-
-    send.assert_called_once_with(_plain_done_message())
-    assert "telegram-bot-token-must-not-leak" not in send.call_args.args[0]
-
-
-def test_done_pr_reply_markup_send_failure_falls_back_to_plain_done() -> None:
-    card = {"text": "PR ready card", "buttons": []}
-    reply_markup = {"inline_keyboard": []}
-
-    with mock.patch.object(
-        runner, "should_notify_task_finished", return_value=True
-    ), mock.patch.object(
-        runner, "build_done_pr_ready_card_payload", return_value=card
-    ), mock.patch.object(
-        runner, "card_payload_to_inline_keyboard", return_value=reply_markup
-    ), mock.patch.object(
-        runner,
-        "send_telegram_notification",
-        side_effect=(RuntimeError("reply_markup send failed"), None),
-    ) as send:
-        runner.notify_task_finished(129, "DONE", DONE_REPORT)
-
-    assert send.call_args_list == [
-        mock.call("PR ready card", reply_markup),
-        mock.call(_plain_done_message()),
-    ]
-
-
 def test_pr_card_build_does_not_execute_merge_or_reject_side_effects() -> None:
-    card = {"text": "PR ready card", "buttons": []}
     with mock.patch.object(
-        runner, "should_notify_task_finished", return_value=True
-    ), mock.patch.object(
-        runner, "build_done_pr_ready_card_payload", return_value=card
-    ), mock.patch.object(runner, "run_command") as run_command, mock.patch.object(
+        runner, "build_done_pr_ready_card_payload"
+    ) as build_card, mock.patch.object(runner, "run_command") as run_command, mock.patch.object(
         runner, "send_telegram_notification"
     ) as send:
         runner.notify_task_finished(129, "DONE", DONE_REPORT)
 
     run_command.assert_not_called()
-    send.assert_called_once()
+    build_card.assert_not_called()
+    send.assert_not_called()
 
 
 def _maintenance_issue(
