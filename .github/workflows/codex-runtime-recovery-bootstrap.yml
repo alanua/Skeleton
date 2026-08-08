@@ -1,0 +1,117 @@
+name: Codex Runtime Recovery Bootstrap
+
+"on":
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codex-runtime-recovery-bootstrap
+  cancel-in-progress: false
+
+jobs:
+  recover-codex:
+    name: Recover pinned Codex runtime
+    if: >-
+      github.repository == 'alanua/Skeleton' &&
+      github.event.issue.number == 2257 &&
+      github.event.issue.state == 'open' &&
+      github.event.label.name == 'risk:yellow' &&
+      github.event.issue.user.login == 'alanua' &&
+      contains(github.event.issue.body, 'Authorization Marker: EXPLICIT_REPAIR_AUTONOMOUS_CODE_EXECUTOR_20260808')
+    runs-on:
+      - self-hosted
+      - Linux
+      - X64
+    timeout-minutes: 12
+    env:
+      TARGET_CODEX_VERSION: "0.144.4"
+    steps:
+      - name: Upgrade and verify Codex without touching repository state
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          status=BLOCKED
+          mutation_applied=false
+          rollback_status=not_needed
+          smoke_status=not_run
+          old_version=unknown
+          new_version=unknown
+
+          write_summary() {
+            {
+              echo "status=${status}"
+              echo "mutation_applied=${mutation_applied}"
+              echo "rollback_status=${rollback_status}"
+              echo "smoke_status=${smoke_status}"
+              echo "old_version=${old_version}"
+              echo "new_version=${new_version}"
+            } >> "${GITHUB_STEP_SUMMARY}"
+          }
+          trap write_summary EXIT
+
+          command -v npm >/dev/null
+          codex_path="$(command -v codex)"
+          test -n "${codex_path}"
+
+          npm_prefix="$(npm prefix -g)"
+          test -n "${npm_prefix}"
+          expected_codex_path="${npm_prefix%/}/bin/codex"
+          test "${codex_path}" = "${expected_codex_path}"
+
+          old_version="$(codex --version | sed -nE 's/^codex-cli ([0-9]+\.[0-9]+\.[0-9]+)$/\1/p')"
+          test -n "${old_version}"
+          new_version="${old_version}"
+
+          if test "${old_version}" != "${TARGET_CODEX_VERSION}"; then
+            npm install -g "@openai/codex@${TARGET_CODEX_VERSION}" --no-audit --no-fund
+            mutation_applied=true
+            new_version="$(codex --version | sed -nE 's/^codex-cli ([0-9]+\.[0-9]+\.[0-9]+)$/\1/p')"
+            test "${new_version}" = "${TARGET_CODEX_VERSION}"
+          fi
+
+          smoke_dir="$(mktemp -d "${RUNNER_TEMP}/codex-recovery-smoke.XXXXXX")"
+          cleanup() {
+            rm -rf "${smoke_dir}"
+          }
+          trap 'cleanup; write_summary' EXIT
+
+          set +e
+          timeout 120 codex exec \
+            --sandbox read-only \
+            --model gpt-5.5 \
+            --cd "${smoke_dir}" \
+            "Return exactly RESULT: OK. Do not modify files." \
+            >"${smoke_dir}/stdout" 2>"${smoke_dir}/stderr"
+          smoke_rc=$?
+          set -e
+
+          if test "${smoke_rc}" -eq 0 && grep -Fxq "RESULT: OK" "${smoke_dir}/stdout"; then
+            smoke_status=pass
+            status=DONE
+            exit 0
+          fi
+
+          smoke_status=failed
+          if test "${mutation_applied}" = true; then
+            set +e
+            npm install -g "@openai/codex@${old_version}" --no-audit --no-fund \
+              >"${smoke_dir}/rollback.stdout" 2>"${smoke_dir}/rollback.stderr"
+            rollback_rc=$?
+            set -e
+            if test "${rollback_rc}" -eq 0; then
+              restored_version="$(codex --version | sed -nE 's/^codex-cli ([0-9]+\.[0-9]+\.[0-9]+)$/\1/p')"
+              if test "${restored_version}" = "${old_version}"; then
+                rollback_status=restored
+                new_version="${restored_version}"
+              else
+                rollback_status=failed
+              fi
+            else
+              rollback_status=failed
+            fi
+          fi
+          exit 1
