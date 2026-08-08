@@ -256,6 +256,7 @@ HOME_EDGE_01_READ_ONLY_DIAGNOSTIC = "home_edge_01_read_only_diagnostic"
 HOME_EDGE_01_LAN_INVENTORY_READ_ONLY = "home_edge_01_lan_inventory_read_only"
 HOME_EDGE_AUDIT_PERSIST_V1 = "home_edge_audit_persist_v1"
 HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1 = "home_edge_01_debian_media_bootstrap_v1"
+HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1 = "home_edge_01_post_migration_reconcile_v1"
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
         SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
@@ -295,6 +296,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         HOME_EDGE_01_LAN_INVENTORY_READ_ONLY,
         HOME_EDGE_AUDIT_PERSIST_V1,
         HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1,
+        HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1,
         PREPARE_PRIVATE_STATIC_SITE_HANDOFF,
         DEPLOY_PRIVATE_STATIC_SITE,
     )
@@ -554,6 +556,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "build_ms",
         "canon_note",
         "candidate_count",
+        "canonical_memory_post_step",
         "chat_export_candidate_count",
         "changed_file",
         "changed_file_count",
@@ -628,6 +631,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "git_worktree_list_status",
         "github_main_sha",
         "github_main_source_of_truth",
+        "gallery_post_count",
+        "gallery_pre_count",
         "graphify_version",
         "head_branch",
         "head_ref",
@@ -770,6 +775,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "sqlite_state_count",
         "ssh_status",
         "shortlist_row_count",
+        "screensaver_refresh_count",
+        "screensaver_status",
         "skipped_worktrees_count",
         "source_issue",
         "source_issue_number",
@@ -804,6 +811,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "synthetic_graph_node_count",
         "synthetic_smoke_timeout_seconds",
         "system",
+        "system_failed_units_count",
         "target_project",
         "task_id",
         "target_project_route",
@@ -848,6 +856,20 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "validation_real_writable_git_worktree",
         "wall_area_row_count",
         "warning_count",
+        "aggregate_source_repaired",
+        "aggregate_verify_status",
+        "boot_id_unchanged",
+        "brother_verify_status",
+        "cast_status",
+        "pointer_status",
+        "registry_pre_status",
+        "stale_files_changed_count",
+        "stale_operational_matches_after",
+        "stale_operational_matches_before",
+        "user_failed_units_count",
+        "watchdog_critical_count",
+        "watchdog_status",
+        "watchdog_warning_count",
         "worktree",
         "worktree_id",
         "worktree_ids",
@@ -13074,6 +13096,45 @@ def home_edge_01_debian_media_bootstrap_v1(body: str) -> str:
         )
 
 
+def home_edge_01_post_migration_reconcile_v1(body: str) -> str:
+    task_id = HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1
+    try:
+        from core.home_edge.post_migration_reconcile import (
+            execute_post_migration_reconcile_task,
+            receipt_status_lines,
+            success_criteria_met,
+        )
+
+        registered_sha = _read_exact_git_sha("main")
+        github_sha = _read_exact_git_sha("origin/main")
+        receipt = execute_post_migration_reconcile_task(
+            body,
+            registered_clean_main_sha=registered_sha,
+            github_main_sha=github_sha,
+        )
+        success = success_criteria_met(receipt)
+        return _maintenance_report(
+            "DONE" if success else "BLOCKED",
+            task_id,
+            receipt_status_lines(receipt),
+            "met" if success else "not_met",
+        )
+    except ValueError as exc:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [f"reason={exc}"],
+            "not_met",
+        )
+    except Exception:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            ["reason=post_migration_reconcile_failed_closed"],
+            "not_met",
+        )
+
+
 def _read_exact_git_sha(ref: str) -> str:
     code, output = run_command(["git", "rev-parse", f"{ref}^{{commit}}"], cwd=ROOT)
     sha = output.strip().splitlines()[0] if output.strip() else ""
@@ -13401,6 +13462,8 @@ def dispatch_runtime_maintenance_task(
             return home_edge_audit_persist_v1(body)
         if task_id == HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1:
             return home_edge_01_debian_media_bootstrap_v1(body)
+        if task_id == HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1:
+            return home_edge_01_post_migration_reconcile_v1(body)
         if task_id == PREPARE_PRIVATE_STATIC_SITE_HANDOFF:
             return _execute_prepare_private_static_site_handoff(body)
         if task_id == DEPLOY_PRIVATE_STATIC_SITE:
