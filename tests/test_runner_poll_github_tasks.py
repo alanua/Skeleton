@@ -3427,8 +3427,8 @@ def test_done_pr_report_builds_card_payload_from_runner_binding() -> None:
     assert localized_card is not None
     assert localized_card["text"] == (
         "Проєкт: Skeleton\n"
-        "Статус: очікує схвалення\n"
-        "Коментар: Перевір у ChatGPT перед схваленням."
+        "Статус: готово до перегляду\n"
+        "Коментар: Відкрий PR, якщо потрібні деталі."
     )
     assert localized_card["buttons"][0]["label"] == "Деталі"
 
@@ -3453,8 +3453,8 @@ def test_done_pr_card_hides_technical_details_from_operator_text() -> None:
     text = str(card["text"])
     assert text == (
         "Проєкт: Skeleton\n"
-        "Статус: очікує схвалення\n"
-        "Коментар: Перевір у ChatGPT перед схваленням."
+        "Статус: готово до перегляду\n"
+        "Коментар: Відкрий PR, якщо потрібні деталі."
     )
     assert HEAD_SHA not in text
     assert "PR:" not in text
@@ -3656,7 +3656,7 @@ def test_send_telegram_notification_without_env_makes_no_network_call() -> None:
     urlopen.assert_not_called()
 
 
-def test_done_pr_card_success_sends_reply_markup() -> None:
+def test_done_pr_card_success_suppresses_routine_operator_relay() -> None:
     card = {"text": "PR ready card", "buttons": []}
     reply_markup = {"inline_keyboard": []}
 
@@ -3669,10 +3669,10 @@ def test_done_pr_card_success_sends_reply_markup() -> None:
     ), mock.patch.object(runner, "send_telegram_notification") as send:
         runner.notify_task_finished(129, "DONE", DONE_REPORT)
 
-    send.assert_called_once_with("PR ready card", reply_markup)
+    send.assert_not_called()
 
 
-def test_done_pr_card_uses_target_repository_from_issue_body() -> None:
+def test_done_pr_card_uses_target_repository_from_issue_body_suppresses_relay() -> None:
     issue = {
         "number": 129,
         "body": "Target Repository: alanua/bauclock\nExpected Output: done\n\n```task\nDo it\n```",
@@ -3686,18 +3686,7 @@ def test_done_pr_card_uses_target_repository_from_issue_body() -> None:
     ), mock.patch.object(runner, "send_telegram_notification") as send:
         runner.notify_task_finished(129, "DONE", DONE_REPORT)
 
-    assert send.call_count == 1
-    text = send.call_args.args[0]
-    reply_markup = send.call_args.args[1]
-    assert "Проєкт: bauclock" in text
-    assert "Репозиторій: alanua/bauclock" in text
-    assert "Задача: #129" in text
-    assert "Repository: alanua/Skeleton" not in text
-    assert "target_repo" not in text
-    assert [row[0]["text"] for row in reply_markup["inline_keyboard"]] == [
-        "Деталі",
-        "Відкрити PR",
-    ]
+    send.assert_not_called()
 
 
 def test_cross_project_blocked_status_uses_target_repository_from_issue_body() -> None:
@@ -3726,7 +3715,7 @@ def test_cross_project_blocked_status_uses_target_repository_from_issue_body() -
     )
 
 
-def test_done_pr_card_build_failure_falls_back_to_plain_done() -> None:
+def test_done_pr_card_build_failure_is_not_operator_relay() -> None:
     with mock.patch.object(
         runner, "should_notify_task_finished", return_value=True
     ), mock.patch.object(
@@ -3736,11 +3725,10 @@ def test_done_pr_card_build_failure_falls_back_to_plain_done() -> None:
     ), mock.patch.object(runner, "send_telegram_notification") as send:
         runner.notify_task_finished(129, "DONE", DONE_REPORT)
 
-    send.assert_called_once_with(_plain_done_message())
-    assert "telegram-bot-token-must-not-leak" not in send.call_args.args[0]
+    send.assert_not_called()
 
 
-def test_done_pr_reply_markup_send_failure_falls_back_to_plain_done() -> None:
+def test_done_pr_reply_markup_send_failure_is_not_reached_for_routine_pr() -> None:
     card = {"text": "PR ready card", "buttons": []}
     reply_markup = {"inline_keyboard": []}
 
@@ -3757,13 +3745,10 @@ def test_done_pr_reply_markup_send_failure_falls_back_to_plain_done() -> None:
     ) as send:
         runner.notify_task_finished(129, "DONE", DONE_REPORT)
 
-    assert send.call_args_list == [
-        mock.call("PR ready card", reply_markup),
-        mock.call(_plain_done_message()),
-    ]
+    send.assert_not_called()
 
 
-def test_pr_card_build_does_not_execute_merge_or_reject_side_effects() -> None:
+def test_pr_card_build_does_not_execute_merge_reject_or_notify_side_effects() -> None:
     card = {"text": "PR ready card", "buttons": []}
     with mock.patch.object(
         runner, "should_notify_task_finished", return_value=True
@@ -3775,7 +3760,7 @@ def test_pr_card_build_does_not_execute_merge_or_reject_side_effects() -> None:
         runner.notify_task_finished(129, "DONE", DONE_REPORT)
 
     run_command.assert_not_called()
-    send.assert_called_once()
+    send.assert_not_called()
 
 
 def _maintenance_issue(
@@ -15624,6 +15609,8 @@ def test_inspect_pr_mergeability_validation_missing_reports_next_action() -> Non
 
     assert report.startswith("BLOCKED:")
     assert "validation_state=missing" in report
+    assert "internal_review_verdict=REQUEST_CHANGES" in report
+    assert "repair_task_id=repair-pr-123-" in report
     assert "reason=validation_missing" in report
     assert "next_action=run_required_validation" in report
 
@@ -15644,6 +15631,8 @@ def test_inspect_pr_mergeability_open_mergeable_pr_reports_ready_next_action() -
     assert "changed_files=scripts/runner_poll_github_tasks.py" in report
     assert "ahead_by=1" in report
     assert "behind_by=0" in report
+    assert "internal_review_verdict=NEEDS_OPERATOR" in report
+    assert "review_loop_event=OPERATOR_REQUIRED" in report
     assert "next_action=mark_ready_or_merge" in report
 
 

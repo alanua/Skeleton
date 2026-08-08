@@ -46,6 +46,9 @@ from core.loop_controller import LoopPolicy
 from core.loop_engine import LoopEngine
 from core.loop_runner_adapter import run_loop_task_packet
 from core.loop_state_store import LoopStateStore
+from core.notification_policy import should_notify_operator_for_runner_result
+from core.review_gate import ReviewGateRequest, evaluate_review_gate, render_review_gate_report
+from core.shared_dispatch import shared_continuation_receipt
 from core.runner_diagnostic_executor import (
     MEMPALACE_SYNTHETIC_BENCHMARK_SCHEMA,
     MEMPALACE_SYNTHETIC_BENCHMARK_TIMEOUT_SECONDS,
@@ -753,6 +756,16 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "report_private_paths",
         "report_quantities",
         "review_table_count",
+        "internal_review_verdict",
+        "internal_review_reason",
+        "review_receipt_id",
+        "review_continuation",
+        "review_loop_event",
+        "review_notify_operator",
+        "repair_task_id",
+        "repair_idempotency_key",
+        "repair_reused_existing",
+        "review_receipt_hash",
         "root_readable_count",
         "root_unreadable_count",
         "runtime_smoke_check_count",
@@ -3982,7 +3995,7 @@ def _localize_pr_ready_card_payload(
             pr_number,
             target_repository,
             source_issue_number=source_issue_number,
-            include_approval_instruction=True,
+            include_approval_instruction=False,
         ),
         "buttons": buttons,
     }
@@ -4150,6 +4163,8 @@ def notify_task_finished(
     issue_number: int, status: str, report: str | None = None
 ) -> None:
     try:
+        if not should_notify_operator_for_runner_result(status, report):
+            return
         if not should_notify_task_finished(issue_number, status):
             return
         issue = _NOTIFICATION_ISSUE_CACHE.pop((issue_number, status), None)
@@ -9702,14 +9717,33 @@ def inspect_pr_mergeability(body: str) -> str:
     validation_state, validation_reason = _validation_summary(
         combined_status, check_runs
     )
-    report_status, reason, next_action = _pr_mergeability_next_action(
-        pr, compare, validation_state, request
-    )
     changed_files = [
         str(file.get("filename"))
         for file in files
         if isinstance(file.get("filename"), str)
     ]
+    review_decision = evaluate_review_gate(
+        ReviewGateRequest(
+            repository=REPO,
+            pr_number=request.pr_number,
+            expected_head_sha=request.expected_head_sha,
+            pr=pr,
+            changed_files=tuple(changed_files),
+            validation_state=validation_state,
+            validation_reason=validation_reason,
+            compare_status=str(compare.get("status") or "unknown").lower(),
+            behind_by=(
+                compare.get("behind_by")
+                if isinstance(compare.get("behind_by"), int)
+                else None
+            ),
+            current_approvals=(),
+        )
+    )
+    continuation_receipt = shared_continuation_receipt(review_decision)
+    report_status, reason, next_action = _pr_mergeability_next_action(
+        pr, compare, validation_state, request
+    )
     mergeable = _github_bool_value(pr.get("mergeable"))
     mergeable_state = str(pr.get("mergeable_state") or "unknown")
     status_lines.extend(
@@ -9729,9 +9763,27 @@ def inspect_pr_mergeability(body: str) -> str:
             f"ahead_by={compare.get('ahead_by', 'unknown')}",
             f"behind_by={compare.get('behind_by', 'unknown')}",
             f"validation_state={validation_state}",
+            f"internal_review_verdict={review_decision.verdict}",
+            f"internal_review_reason={review_decision.reason}",
+            f"review_receipt_id={review_decision.receipt_id}",
+            f"review_continuation={continuation_receipt['continuation']}",
+            f"review_loop_event={continuation_receipt['loop_event']}",
+            f"review_notify_operator={str(review_decision.notify_operator).lower()}",
             f"reason={reason if reason != 'none' else validation_reason}",
             f"next_action={next_action}",
         )
+    )
+    if review_decision.repair_task is not None:
+        status_lines.extend(
+            (
+                f"repair_task_id={review_decision.repair_task['task_id']}",
+                f"repair_idempotency_key={review_decision.repair_task['idempotency_key']}",
+                f"repair_reused_existing={str(review_decision.repair_task['reused_existing']).lower()}",
+            )
+        )
+    status_lines.append(
+        "review_receipt_hash="
+        + hashlib.sha256(render_review_gate_report(review_decision).encode("utf-8")).hexdigest()[:16]
     )
     return _maintenance_report(
         report_status,
