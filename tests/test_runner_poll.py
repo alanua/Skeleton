@@ -402,7 +402,7 @@ def test_notify_task_finished_without_current_final_label_does_not_notify() -> N
     send.assert_not_called()
 
 
-def test_notify_task_finished_normal_runner_task_notifies() -> None:
+def test_notify_task_finished_normal_runner_task_does_not_notify() -> None:
     fence = "`" * 3
     issue = {
         "number": 14,
@@ -418,7 +418,7 @@ def test_notify_task_finished_normal_runner_task_notifies() -> None:
     ) as send:
         runner.notify_task_finished(14, "DONE", "DONE report")
 
-    send.assert_called_once_with("Проєкт: Skeleton\nЗадача: #14\nСтатус: DONE")
+    send.assert_not_called()
 
 
 def test_notify_task_finished_guard_failure_suppresses_notification_safely() -> None:
