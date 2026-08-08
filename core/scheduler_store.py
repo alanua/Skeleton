@@ -4,7 +4,8 @@ from contextlib import contextmanager
 import json
 from pathlib import Path
 import sqlite3
-from typing import Any, Iterator
+import hashlib
+from typing import Any, Iterator, Mapping
 
 from core.scheduler_models import (
     OCCURRENCE_STATES,
@@ -22,7 +23,10 @@ class SchedulerStoreError(RuntimeError):
 
 _ALLOWED_TRANSITIONS = {
     "pending": frozenset({"running", "skipped", "needs_operator", "failed"}),
-    "running": frozenset({"done", "failed", "needs_operator"}),
+    "running": frozenset(
+        {"done", "failed", "waiting_dependency", "needs_operator", "pending"}
+    ),
+    "waiting_dependency": frozenset({"pending", "needs_operator", "failed", "skipped"}),
     "needs_operator": frozenset({"pending", "skipped", "failed", "done"}),
     "done": frozenset(),
     "failed": frozenset(),
@@ -77,17 +81,40 @@ class SchedulerStore:
                     created_at INTEGER NOT NULL CHECK(created_at >= 0),
                     updated_at INTEGER NOT NULL CHECK(updated_at >= 0),
                     started_at INTEGER,
+                    attempt INTEGER NOT NULL DEFAULT 0 CHECK(attempt >= 0),
+                    idempotency_key TEXT,
+                    parent_occurrence_id TEXT,
+                    parent_receipt_id TEXT,
                     UNIQUE(schedule_id, schedule_version, scheduled_for),
                     FOREIGN KEY(schedule_id, schedule_version)
                         REFERENCES schedule_versions(schedule_id, version)
+                );
+
+                CREATE TABLE IF NOT EXISTS dispatch_receipts (
+                    receipt_id TEXT PRIMARY KEY,
+                    occurrence_id TEXT NOT NULL,
+                    attempt INTEGER NOT NULL CHECK(attempt >= 1),
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    status TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    evidence_ref TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
+                    created_at INTEGER NOT NULL CHECK(created_at >= 0),
+                    parent_receipt_id TEXT,
+                    FOREIGN KEY(occurrence_id) REFERENCES occurrences(occurrence_id)
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_occurrences_schedule_state
                     ON occurrences(schedule_id, state, scheduled_for);
                 CREATE INDEX IF NOT EXISTS idx_occurrences_updated
                     ON occurrences(state, updated_at);
+                CREATE INDEX IF NOT EXISTS idx_occurrences_pending
+                    ON occurrences(state, scheduled_for, occurrence_id);
+                CREATE INDEX IF NOT EXISTS idx_dispatch_receipts_occurrence
+                    ON dispatch_receipts(occurrence_id, attempt);
                 """
             )
+            self._ensure_occurrence_columns(connection)
 
     def register(
         self,
@@ -170,6 +197,13 @@ class SchedulerStore:
         with self._connect() as connection:
             return self._load_current(connection, schedule_id)
 
+    def get_occurrence(self, occurrence_id: str) -> OccurrenceRecord | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM occurrences WHERE occurrence_id = ?", (occurrence_id,)
+            ).fetchone()
+            return None if row is None else self._occurrence_from_row(row)
+
     def list_enabled(self) -> tuple[StoredSchedule, ...]:
         with self._connect() as connection:
             rows = connection.execute(
@@ -215,6 +249,8 @@ class SchedulerStore:
         reason: str,
         proposal: dict[str, Any],
         now: int,
+        parent_occurrence_id: str | None = None,
+        parent_receipt_id: str | None = None,
     ) -> tuple[OccurrenceRecord, bool]:
         _timestamp(scheduled_for, "scheduled_for")
         _timestamp(now, "now")
@@ -229,13 +265,15 @@ class SchedulerStore:
                 """
                 INSERT OR IGNORE INTO occurrences (
                     occurrence_id, schedule_id, schedule_version, scheduled_for,
-                    state, reason, proposal_json, created_at, updated_at, started_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    state, reason, proposal_json, created_at, updated_at, started_at,
+                    parent_occurrence_id, parent_receipt_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     occurrence_id, schedule.spec.schedule_id, schedule.version,
                     scheduled_for, state, reason, proposal_json, now, now,
-                    now if state == "running" else None,
+                    now if state == "running" else None, parent_occurrence_id,
+                    parent_receipt_id,
                 ),
             )
             row = connection.execute(
@@ -252,6 +290,60 @@ class SchedulerStore:
             if row is None:
                 raise SchedulerStoreError("OCCURRENCE_CREATE_FAILED")
             return self._occurrence_from_row(row), result.rowcount == 1
+
+    def claim_next_pending(
+        self, *, now: int, exclude_occurrence_ids: frozenset[str] = frozenset()
+    ) -> OccurrenceRecord | None:
+        _timestamp(now, "now")
+        with self._transaction() as connection:
+            where = "state = 'pending'"
+            params: list[object] = []
+            if exclude_occurrence_ids:
+                placeholders = ",".join("?" for _ in exclude_occurrence_ids)
+                where += f" AND occurrence_id NOT IN ({placeholders})"
+                params.extend(sorted(exclude_occurrence_ids))
+            row = connection.execute(
+                f"""
+                SELECT * FROM occurrences
+                 WHERE {where}
+                 ORDER BY scheduled_for, occurrence_id
+                 LIMIT 1
+                """,
+                params,
+            ).fetchone()
+            if row is None:
+                return None
+            current = self._occurrence_from_row(row)
+            next_attempt = current.attempt + 1
+            idempotency_key = f"{current.occurrence_id}:attempt:{next_attempt}"
+            result = connection.execute(
+                """
+                UPDATE occurrences
+                   SET state = 'running',
+                       reason = 'DISPATCH_CLAIMED',
+                       updated_at = ?,
+                       started_at = ?,
+                       attempt = ?,
+                       idempotency_key = ?
+                 WHERE occurrence_id = ? AND state = 'pending' AND attempt = ?
+                """,
+                (
+                    now,
+                    now,
+                    next_attempt,
+                    idempotency_key,
+                    current.occurrence_id,
+                    current.attempt,
+                ),
+            )
+            if result.rowcount != 1:
+                raise SchedulerStoreError("OCCURRENCE_CLAIM_CONFLICT")
+            claimed = connection.execute(
+                "SELECT * FROM occurrences WHERE occurrence_id = ?",
+                (current.occurrence_id,),
+            ).fetchone()
+            assert claimed is not None
+            return self._occurrence_from_row(claimed)
 
     def transition_occurrence(
         self,
@@ -297,25 +389,148 @@ class SchedulerStore:
             assert row is not None
             return self._occurrence_from_row(row)
 
-    def recover_stale_running(self, *, now: int, stale_after_seconds: int) -> int:
+    def recover_stale_running(
+        self, *, now: int, stale_after_seconds: int, max_attempts: int = 2
+    ) -> dict[str, int]:
         _timestamp(now, "now")
         if stale_after_seconds <= 0:
             raise SchedulerValidationError(
                 "INVALID_STALE_AFTER", "stale_after_seconds must be positive"
             )
+        if max_attempts <= 0:
+            raise SchedulerValidationError("INVALID_MAX_ATTEMPTS", "max_attempts must be positive")
         cutoff = max(0, now - stale_after_seconds)
         with self._transaction() as connection:
-            result = connection.execute(
+            retry = connection.execute(
+                """
+                UPDATE occurrences
+                   SET state = 'pending',
+                       reason = 'STALE_RUNNING_RETRY',
+                       updated_at = ?
+                 WHERE state = 'running'
+                   AND started_at IS NOT NULL
+                   AND started_at <= ?
+                   AND attempt < ?
+                """,
+                (now, cutoff, max_attempts),
+            )
+            escalated = connection.execute(
                 """
                 UPDATE occurrences
                    SET state = 'needs_operator',
-                       reason = 'STALE_RUNNING_RECOVERY',
+                       reason = 'STALE_RUNNING_RECOVERY_EXHAUSTED',
                        updated_at = ?
-                 WHERE state = 'running' AND started_at IS NOT NULL AND started_at <= ?
+                 WHERE state = 'running'
+                   AND started_at IS NOT NULL
+                   AND started_at <= ?
+                   AND attempt >= ?
                 """,
-                (now, cutoff),
+                (now, cutoff, max_attempts),
             )
-            return result.rowcount
+            return {"retried": retry.rowcount, "needs_operator": escalated.rowcount}
+
+    def resume_waiting_dependencies(self, *, now: int) -> int:
+        _timestamp(now, "now")
+        with self._transaction() as connection:
+            rows = connection.execute(
+                "SELECT * FROM occurrences WHERE state = 'waiting_dependency'"
+            ).fetchall()
+            resumed = 0
+            for row in rows:
+                record = self._occurrence_from_row(row)
+                payload = record.proposal.get("payload")
+                dependency = payload.get("wait_for") if isinstance(payload, Mapping) else None
+                if not isinstance(dependency, str):
+                    continue
+                dependency_row = connection.execute(
+                    "SELECT state FROM occurrences WHERE occurrence_id = ?",
+                    (dependency,),
+                ).fetchone()
+                if dependency_row is None or str(dependency_row[0]) != "done":
+                    continue
+                result = connection.execute(
+                    """
+                    UPDATE occurrences
+                       SET state = 'pending', reason = 'DEPENDENCY_SATISFIED', updated_at = ?
+                     WHERE occurrence_id = ? AND state = 'waiting_dependency'
+                    """,
+                    (now, record.occurrence_id),
+                )
+                resumed += result.rowcount
+            return resumed
+
+    def record_dispatch_receipt(
+        self,
+        *,
+        occurrence_id: str,
+        attempt: int,
+        idempotency_key: str,
+        status: str,
+        reason: str,
+        evidence_ref: str,
+        result: Mapping[str, Any],
+        now: int,
+        parent_receipt_id: str | None = None,
+    ) -> str:
+        _timestamp(now, "now")
+        if attempt <= 0:
+            raise SchedulerValidationError("INVALID_ATTEMPT", "attempt must be positive")
+        _reason(reason)
+        receipt_id = f"receipt_{_sha256_hex(idempotency_key)[:32]}"
+        result_json = json.dumps(
+            thaw_json(result), ensure_ascii=True, allow_nan=False,
+            separators=(",", ":"), sort_keys=True,
+        )
+        with self._transaction() as connection:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO dispatch_receipts(
+                    receipt_id, occurrence_id, attempt, idempotency_key, status, reason,
+                    evidence_ref, result_json, created_at, parent_receipt_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    receipt_id,
+                    occurrence_id,
+                    attempt,
+                    idempotency_key,
+                    status,
+                    reason,
+                    evidence_ref,
+                    result_json,
+                    now,
+                    parent_receipt_id,
+                ),
+            )
+        return receipt_id
+
+    def list_dispatch_receipts(self, occurrence_id: str) -> tuple[dict[str, Any], ...]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM dispatch_receipts
+                 WHERE occurrence_id = ?
+                 ORDER BY attempt, receipt_id
+                """,
+                (occurrence_id,),
+            ).fetchall()
+            return tuple(
+                {
+                    "receipt_id": str(row["receipt_id"]),
+                    "occurrence_id": str(row["occurrence_id"]),
+                    "attempt": int(row["attempt"]),
+                    "idempotency_key": str(row["idempotency_key"]),
+                    "status": str(row["status"]),
+                    "reason": str(row["reason"]),
+                    "evidence_ref": str(row["evidence_ref"]),
+                    "result": json.loads(str(row["result_json"])),
+                    "created_at": int(row["created_at"]),
+                    "parent_receipt_id": (
+                        None if row["parent_receipt_id"] is None else str(row["parent_receipt_id"])
+                    ),
+                }
+                for row in rows
+            )
 
     def active_counts(self, schedule_id: str) -> dict[str, int]:
         with self._connect() as connection:
@@ -428,7 +643,39 @@ class SchedulerStore:
             created_at=int(row[7]),
             updated_at=int(row[8]),
             started_at=None if row[9] is None else int(row[9]),
+            attempt=int(row["attempt"]) if "attempt" in row.keys() else 0,
+            idempotency_key=(
+                None
+                if "idempotency_key" not in row.keys() or row["idempotency_key"] is None
+                else str(row["idempotency_key"])
+            ),
+            parent_occurrence_id=(
+                None
+                if "parent_occurrence_id" not in row.keys() or row["parent_occurrence_id"] is None
+                else str(row["parent_occurrence_id"])
+            ),
+            parent_receipt_id=(
+                None
+                if "parent_receipt_id" not in row.keys() or row["parent_receipt_id"] is None
+                else str(row["parent_receipt_id"])
+            ),
         )
+
+    @staticmethod
+    def _ensure_occurrence_columns(connection: sqlite3.Connection) -> None:
+        columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(occurrences)").fetchall()
+        }
+        migrations = {
+            "attempt": "ALTER TABLE occurrences ADD COLUMN attempt INTEGER NOT NULL DEFAULT 0 CHECK(attempt >= 0)",
+            "idempotency_key": "ALTER TABLE occurrences ADD COLUMN idempotency_key TEXT",
+            "parent_occurrence_id": "ALTER TABLE occurrences ADD COLUMN parent_occurrence_id TEXT",
+            "parent_receipt_id": "ALTER TABLE occurrences ADD COLUMN parent_receipt_id TEXT",
+        }
+        for column, statement in migrations.items():
+            if column not in columns:
+                connection.execute(statement)
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
@@ -471,3 +718,7 @@ def _reason(value: object) -> str:
     if not isinstance(value, str) or not value or len(value) > 128:
         raise SchedulerValidationError("INVALID_REASON", "reason is invalid")
     return value
+
+
+def _sha256_hex(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()

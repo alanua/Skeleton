@@ -10,9 +10,11 @@ from core.scheduler_models import (
     StoredSchedule,
     build_execution_proposal,
     iter_due_times,
+    stable_followup_occurrence_id,
     stable_occurrence_id,
 )
 from core.scheduler_store import SchedulerStore
+from core.shared_dispatch import SharedDispatcher, SharedDispatchRequest
 
 
 @dataclass(frozen=True)
@@ -21,6 +23,8 @@ class SchedulerEngineConfig:
     max_occurrences_per_schedule: int = 256
     misfire_grace_seconds: int = 120
     stale_running_after_seconds: int = 60 * 60
+    max_dispatches_per_tick: int = 16
+    max_attempts: int = 2
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -28,6 +32,8 @@ class SchedulerEngineConfig:
             "max_occurrences_per_schedule",
             "misfire_grace_seconds",
             "stale_running_after_seconds",
+            "max_dispatches_per_tick",
+            "max_attempts",
         ):
             value = getattr(self, field_name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
@@ -43,7 +49,9 @@ class SchedulerEngine:
         self.store = store
         self.config = config or SchedulerEngineConfig()
 
-    def tick(self, *, now: int | None = None) -> dict[str, Any]:
+    def tick(
+        self, *, now: int | None = None, dispatcher: SharedDispatcher | None = None
+    ) -> dict[str, Any]:
         current = int(time.time()) if now is None else now
         if isinstance(current, bool) or not isinstance(current, int) or current < 0:
             raise ValueError("now must be a non-negative integer")
@@ -51,7 +59,9 @@ class SchedulerEngine:
         recovered = self.store.recover_stale_running(
             now=current,
             stale_after_seconds=self.config.stale_running_after_seconds,
+            max_attempts=self.config.max_attempts,
         )
+        resumed_dependencies = self.store.resume_waiting_dependencies(now=current)
         counters: Counter[str] = Counter()
         replayed = 0
         evaluated = 0
@@ -103,13 +113,31 @@ class SchedulerEngine:
                 evaluated_at=current,
             )
 
+        dispatch_receipt = (
+            self.dispatch_pending(dispatcher=dispatcher, now=current)
+            if dispatcher is not None
+            else {
+                "claimed": 0,
+                "done": 0,
+                "retried": 0,
+                "waiting_dependency": 0,
+                "needs_operator": 0,
+                "failed": 0,
+                "continued": 0,
+            }
+        )
+
         return {
             "schema": TICK_RECEIPT_SCHEMA,
             "status": "DONE",
             "evaluated_schedules": evaluated,
             "created_occurrences": sum(counters.values()),
             "replayed_occurrences": replayed,
-            "recovered_stale_running": recovered,
+            "recovered_stale_running": recovered["retried"] + recovered["needs_operator"],
+            "retried_stale_running": recovered["retried"],
+            "stale_running_needs_operator": recovered["needs_operator"],
+            "resumed_waiting_dependencies": resumed_dependencies,
+            "dispatch": dispatch_receipt,
             "states": {
                 state: counters.get(state, 0)
                 for state in (
@@ -121,6 +149,199 @@ class SchedulerEngine:
             "private_payloads_included": False,
             "external_side_effects_executed": False,
         }
+
+    def dispatch_pending(
+        self, *, dispatcher: SharedDispatcher, now: int | None = None
+    ) -> dict[str, int]:
+        current = int(time.time()) if now is None else now
+        if isinstance(current, bool) or not isinstance(current, int) or current < 0:
+            raise ValueError("now must be a non-negative integer")
+        counters: Counter[str] = Counter()
+        claimed_this_tick: set[str] = set()
+        for _ in range(self.config.max_dispatches_per_tick):
+            occurrence = self.store.claim_next_pending(
+                now=current,
+                exclude_occurrence_ids=frozenset(claimed_this_tick),
+            )
+            if occurrence is None:
+                break
+            claimed_this_tick.add(occurrence.occurrence_id)
+            counters["claimed"] += 1
+            proposal = occurrence.proposal
+            dependency = proposal.get("payload", {}).get("wait_for")
+            if isinstance(dependency, str):
+                dependency_record = self.store.get_occurrence(dependency)
+                if dependency_record is None or dependency_record.state != "done":
+                    self.store.record_dispatch_receipt(
+                        occurrence_id=occurrence.occurrence_id,
+                        attempt=occurrence.attempt,
+                        idempotency_key=occurrence.idempotency_key or "",
+                        status="waiting_dependency",
+                        reason="WAITING_DEPENDENCY",
+                        evidence_ref=f"dependency:{dependency}",
+                        result={
+                            "schema": "skeleton.scheduler_dispatch_receipt.v1",
+                            "occurrence_id": occurrence.occurrence_id,
+                            "attempt": occurrence.attempt,
+                            "idempotency_key": occurrence.idempotency_key,
+                            "reason": "WAITING_DEPENDENCY",
+                            "public_safe": True,
+                            "external_side_effects_executed": False,
+                        },
+                        now=current,
+                        parent_receipt_id=occurrence.parent_receipt_id,
+                    )
+                    self.store.transition_occurrence(
+                        occurrence.occurrence_id,
+                        expected_states={"running"},
+                        new_state="waiting_dependency",
+                        reason="WAITING_DEPENDENCY",
+                        now=current,
+                    )
+                    counters["waiting_dependency"] += 1
+                    continue
+            request = SharedDispatchRequest(
+                occurrence_id=occurrence.occurrence_id,
+                route_type=str(proposal.get("route_type", "")),
+                route_id=str(proposal.get("route_id", "")),
+                payload=proposal.get("payload", {}),
+                attempt=occurrence.attempt,
+                idempotency_key=occurrence.idempotency_key or "",
+                parent_receipt_id=occurrence.parent_receipt_id,
+            )
+            result = dispatcher.dispatch(request)
+            receipt_id = self.store.record_dispatch_receipt(
+                occurrence_id=occurrence.occurrence_id,
+                attempt=occurrence.attempt,
+                idempotency_key=occurrence.idempotency_key or "",
+                status=result.status,
+                reason=result.reason,
+                evidence_ref=result.evidence_ref,
+                result=result.receipt,
+                now=current,
+                parent_receipt_id=occurrence.parent_receipt_id,
+            )
+            final_status = self._complete_dispatch(
+                occurrence=occurrence,
+                dispatch=result,
+                receipt_id=receipt_id,
+                now=current,
+            )
+            counters[final_status] += 1
+            if result.next_step is not None:
+                counters["continued"] += self._create_followup(
+                    occurrence=occurrence,
+                    next_payload=result.next_step,
+                    parent_receipt_id=receipt_id,
+                    now=current,
+                )
+        return {
+            "claimed": counters["claimed"],
+            "done": counters["done"],
+            "retried": counters["retried"],
+            "waiting_dependency": counters["waiting_dependency"],
+            "needs_operator": counters["needs_operator"],
+            "failed": counters["failed"],
+            "continued": counters["continued"],
+        }
+
+    def _complete_dispatch(self, *, occurrence, dispatch, receipt_id: str, now: int) -> str:
+        if dispatch.status == "done":
+            self.store.transition_occurrence(
+                occurrence.occurrence_id,
+                expected_states={"running"},
+                new_state="done",
+                reason="DISPATCH_DONE",
+                now=now,
+            )
+            return "done"
+        if dispatch.status == "waiting_dependency":
+            proposal = dict(occurrence.proposal)
+            proposal["wait_for"] = dispatch.waiting_dependency
+            self.store.transition_occurrence(
+                occurrence.occurrence_id,
+                expected_states={"running"},
+                new_state="waiting_dependency",
+                reason="WAITING_DEPENDENCY",
+                now=now,
+            )
+            return "waiting_dependency"
+        if dispatch.status == "needs_operator":
+            self.store.transition_occurrence(
+                occurrence.occurrence_id,
+                expected_states={"running"},
+                new_state="needs_operator",
+                reason="DISPATCH_NEEDS_OPERATOR",
+                now=now,
+            )
+            return "needs_operator"
+        if dispatch.retryable and occurrence.attempt < self.config.max_attempts:
+            self.store.transition_occurrence(
+                occurrence.occurrence_id,
+                expected_states={"running"},
+                new_state="pending",
+                reason="DISPATCH_RETRY",
+                now=now,
+            )
+            return "retried"
+        self.store.transition_occurrence(
+            occurrence.occurrence_id,
+            expected_states={"running"},
+            new_state="needs_operator",
+            reason="DISPATCH_AUTOMATIC_PATHS_EXHAUSTED",
+            now=now,
+        )
+        return "needs_operator"
+
+    def _create_followup(
+        self,
+        *,
+        occurrence,
+        next_payload: dict[str, Any],
+        parent_receipt_id: str,
+        now: int,
+    ) -> int:
+        schedule = self.store.get_current(occurrence.schedule_id)
+        if schedule is None or schedule.version != occurrence.schedule_version:
+            return 0
+        workflow = next_payload.get("deterministic_workflow", {})
+        index = workflow.get("index") if isinstance(workflow, dict) else None
+        step_id = f"step:{index}" if isinstance(index, int) else "step:next"
+        occurrence_id = stable_followup_occurrence_id(occurrence.occurrence_id, step_id)
+        scheduled_for = max(now, occurrence.scheduled_for) + (
+            index if isinstance(index, int) and index > 0 else 1
+        )
+        proposal = {
+            "schema": "skeleton.scheduler_execution_proposal.v1",
+            "occurrence_id": occurrence_id,
+            "schedule_id": occurrence.schedule_id,
+            "schedule_version": occurrence.schedule_version,
+            "scheduled_for": scheduled_for,
+            "route_type": schedule.spec.route_type,
+            "route_id": schedule.spec.route_id,
+            "approval_policy": schedule.spec.approval_policy,
+            "payload": next_payload,
+            "authority": {
+                "proposal_only": True,
+                "external_side_effects_executed": False,
+                "runner_enqueued": False,
+                "loop_started": False,
+            },
+            "parent_occurrence_id": occurrence.occurrence_id,
+            "parent_receipt_id": parent_receipt_id,
+        }
+        _, created = self.store.create_occurrence(
+            occurrence_id=occurrence_id,
+            schedule=schedule,
+            scheduled_for=scheduled_for,
+            state="pending",
+            reason="CONTINUATION_DISPATCH_REQUIRED",
+            proposal=proposal,
+            now=now,
+            parent_occurrence_id=occurrence.occurrence_id,
+            parent_receipt_id=parent_receipt_id,
+        )
+        return int(created)
 
     def _apply_misfire_policy(
         self,

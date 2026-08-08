@@ -1,6 +1,7 @@
 from core.scheduler_engine import SchedulerEngine, SchedulerEngineConfig
 from core.scheduler_models import ScheduleSpec, build_execution_proposal, stable_occurrence_id
 from core.scheduler_store import SchedulerStore
+from core.shared_dispatch import PRIVACY_PUBLIC_SAFE, SharedDispatcher, SharedDispatchRequest
 
 
 def _once(
@@ -27,6 +28,55 @@ def _once(
             "payload": {"private": "payload"},
         }
     )
+
+
+def _loop_once(schedule_id: str, once_at: int, task_packet: dict[str, object], **payload):
+    merged_payload = {
+        "privacy_boundary": PRIVACY_PUBLIC_SAFE,
+        "bounded": True,
+        "approved_capabilities": ["loop:state_write"],
+        "requested_capabilities": ["loop:state_write"],
+        "task_packet": task_packet,
+    }
+    merged_payload.update(payload)
+    return ScheduleSpec.from_mapping(
+        {
+            "schema": "skeleton.schedule.v1",
+            "schedule_id": schedule_id,
+            "trigger_kind": "once",
+            "cron_expression": None,
+            "once_at": once_at,
+            "timezone": "UTC",
+            "route_type": "loop",
+            "route_id": "loop_engine_packet",
+            "approval_policy": "auto_run_low_risk",
+            "overlap_policy": "queue_one",
+            "misfire_policy": "run_once",
+            "payload": merged_payload,
+        }
+    )
+
+
+def _loop_packet(action: str, **updates: object) -> dict[str, object]:
+    packet: dict[str, object] = {
+        "schema": "skeleton.loop_runner_packet.v1",
+        "action": action,
+        "task_id": "task-1",
+        "run_id": "run-1",
+        "recorded_at": 1,
+        "public_safe": True,
+        "no_secrets": True,
+        "no_runtime_mutation": True,
+        "authority_boundary": {
+            "operational_state_write": True,
+            "external_side_effects_allowed": False,
+            "runtime_mutation_allowed": False,
+        },
+    }
+    if action == "step":
+        packet.update({"event": "PREPARED", "expected_version": 0})
+    packet.update(updates)
+    return packet
 
 
 def test_notify_only_tick_creates_once_and_prevents_duplicate(tmp_path) -> None:
@@ -110,4 +160,145 @@ def test_tick_recovers_stale_running_without_reexecution(tmp_path) -> None:
     )
     receipt = engine.tick(now=200)
     assert receipt["recovered_stale_running"] == 1
-    assert store.list_occurrences("test.recovery")[0].state == "needs_operator"
+    assert receipt["retried_stale_running"] == 1
+    assert store.list_occurrences("test.recovery")[0].state == "pending"
+
+
+def test_due_schedule_dispatches_to_loop_and_finishes_without_manual_nudge(tmp_path) -> None:
+    store = SchedulerStore(tmp_path / "scheduler.sqlite3")
+    loop_db = tmp_path / "loop.sqlite3"
+    store.initialize()
+    store.register(_loop_once("test.loop", 100, _loop_packet("create")), now=50)
+
+    receipt = SchedulerEngine(store).tick(
+        now=100,
+        dispatcher=SharedDispatcher.for_loop_engine(loop_state_db_path=str(loop_db)),
+    )
+
+    occurrences = store.list_occurrences("test.loop")
+    assert receipt["dispatch"]["claimed"] == 1
+    assert receipt["dispatch"]["done"] == 1
+    assert occurrences[0].state == "done"
+    assert occurrences[0].attempt == 1
+    receipts = store.list_dispatch_receipts(occurrences[0].occurrence_id)
+    assert len(receipts) == 1
+    assert receipts[0]["idempotency_key"].endswith(":attempt:1")
+
+
+def test_synthetic_multi_step_chain_activates_second_step(tmp_path) -> None:
+    store = SchedulerStore(tmp_path / "scheduler.sqlite3")
+    loop_db = tmp_path / "loop.sqlite3"
+    store.initialize()
+    steps = [
+        _loop_packet("create"),
+        _loop_packet("step", recorded_at=2, event="PREPARED", expected_version=0),
+    ]
+    store.register(
+        _loop_once(
+            "test.chain",
+            100,
+            steps[0],
+            deterministic_workflow={"steps": steps, "index": 0},
+        ),
+        now=50,
+    )
+    engine = SchedulerEngine(store)
+    dispatcher = SharedDispatcher.for_loop_engine(loop_state_db_path=str(loop_db))
+
+    first = engine.tick(now=100, dispatcher=dispatcher)
+    occurrences = store.list_occurrences("test.chain")
+    assert first["dispatch"]["continued"] == 1
+    assert first["dispatch"]["done"] == 2
+    assert [item.state for item in occurrences] == ["done", "done"]
+    assert occurrences[1].parent_occurrence_id == occurrences[0].occurrence_id
+
+
+def test_recoverable_failure_retries_and_then_succeeds(tmp_path) -> None:
+    store = SchedulerStore(tmp_path / "scheduler.sqlite3")
+    loop_db = tmp_path / "loop.sqlite3"
+    store.initialize()
+    store.register(
+        _loop_once(
+            "test.retry",
+            100,
+            _loop_packet("step", run_id="missing-run", recorded_at=1),
+        ),
+        now=50,
+    )
+    engine = SchedulerEngine(store)
+    dispatcher = SharedDispatcher.for_loop_engine(loop_state_db_path=str(loop_db))
+
+    first = engine.tick(now=100, dispatcher=dispatcher)
+    occurrences = store.list_occurrences("test.retry")
+    assert first["dispatch"]["retried"] == 1
+    assert occurrences[0].state == "pending"
+
+    run_id = occurrences[0].proposal["payload"]["task_packet"]["run_id"]
+    create = dict(occurrences[0].proposal["payload"]["task_packet"])
+    create.update({"action": "create", "recorded_at": 2})
+    create.pop("event", None)
+    create.pop("expected_version", None)
+    dispatcher.dispatch(
+        SharedDispatchRequest(
+            occurrence_id="manual",
+            route_type="loop",
+            route_id="loop_engine_packet",
+            payload={
+                "privacy_boundary": PRIVACY_PUBLIC_SAFE,
+                "bounded": True,
+                "approved_capabilities": ["loop:state_write"],
+                "requested_capabilities": ["loop:state_write"],
+                "task_packet": create,
+            },
+            attempt=1,
+            idempotency_key="manual:attempt:1",
+        )
+    )
+    second = engine.tick(now=101, dispatcher=dispatcher)
+
+    assert run_id == "missing-run"
+    assert second["dispatch"]["done"] == 1
+    assert store.list_occurrences("test.retry")[0].state == "done"
+
+
+def test_waiting_dependency_resumes_after_dependency_done(tmp_path) -> None:
+    store = SchedulerStore(tmp_path / "scheduler.sqlite3")
+    loop_db = tmp_path / "loop.sqlite3"
+    store.initialize()
+    dependency, _ = store.register(_loop_once("test.dep", 100, _loop_packet("create")), now=50)
+    dependent, _ = store.register(
+        _loop_once("test.wait", 100, _loop_packet("create", run_id="run-2"), wait_for="missing"),
+        now=50,
+    )
+    dep_id = stable_occurrence_id(dependency.spec.schedule_id, dependency.version, 100)
+    wait_id = stable_occurrence_id(dependent.spec.schedule_id, dependent.version, 100)
+    wait_proposal = build_execution_proposal(dependent, occurrence_id=wait_id, scheduled_for=100)
+    wait_proposal["payload"]["wait_for"] = dep_id
+    store.create_occurrence(
+        occurrence_id=wait_id,
+        schedule=dependent,
+        scheduled_for=100,
+        state="pending",
+        reason="DISPATCH_REQUIRED",
+        proposal=wait_proposal,
+        now=100,
+    )
+    engine = SchedulerEngine(store)
+    dispatcher = SharedDispatcher.for_loop_engine(loop_state_db_path=str(loop_db))
+
+    first = engine.dispatch_pending(dispatcher=dispatcher, now=100)
+    assert first["waiting_dependency"] == 1
+    dep_proposal = build_execution_proposal(dependency, occurrence_id=dep_id, scheduled_for=100)
+    store.create_occurrence(
+        occurrence_id=dep_id,
+        schedule=dependency,
+        scheduled_for=100,
+        state="done",
+        reason="DISPATCH_DONE",
+        proposal=dep_proposal,
+        now=101,
+    )
+    resumed = engine.tick(now=102, dispatcher=dispatcher)
+
+    assert resumed["resumed_waiting_dependencies"] == 1
+    assert store.get_occurrence(wait_id).state == "done"  # type: ignore[union-attr]

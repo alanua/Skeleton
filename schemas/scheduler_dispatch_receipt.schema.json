@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://skeleton.local/schemas/scheduler_dispatch_receipt.schema.json",
+  "title": "Skeleton Scheduler Dispatch Receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "occurrence_id",
+    "route_type",
+    "route_id",
+    "attempt",
+    "idempotency_key",
+    "parent_receipt_id",
+    "route_receipt",
+    "public_safe",
+    "external_side_effects_executed"
+  ],
+  "properties": {
+    "schema": {"const": "skeleton.scheduler_dispatch_receipt.v1"},
+    "occurrence_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "route_type": {"enum": ["loop", "runner"]},
+    "route_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "attempt": {"type": "integer", "minimum": 1},
+    "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 256},
+    "parent_receipt_id": {"type": ["string", "null"], "maxLength": 128},
+    "route_receipt": {"type": "object"},
+    "public_safe": {"const": true},
+    "external_side_effects_executed": {"const": false}
+  }
+}

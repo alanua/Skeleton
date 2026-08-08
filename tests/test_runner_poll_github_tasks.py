@@ -792,6 +792,20 @@ def test_runner_report_status_allows_no_change_done_without_draft_pr() -> None:
     assert runner.runner_report_status(report) == "DONE"
 
 
+def test_ready_queue_priority_markers_sort_deterministically_without_unknown_authority() -> None:
+    issues = [
+        {"number": 30, "labels": [{"name": runner.LABEL_READY}]},
+        {"number": 20, "labels": [{"name": "runner:priority-999"}, {"name": runner.LABEL_READY}]},
+        {"number": 11, "labels": [{"name": runner.LABEL_PRIORITY_1}, {"name": runner.LABEL_READY}]},
+        {"number": 10, "labels": [{"name": runner.LABEL_PRIORITY_1}, {"name": runner.LABEL_READY}]},
+        {"number": 5, "labels": [{"name": runner.LABEL_RUN_NOW}, {"name": runner.LABEL_READY}]},
+    ]
+
+    ordered = runner.sort_ready_issues_by_priority(issues)
+
+    assert [issue["number"] for issue in ordered] == [5, 10, 11, 20, 30]
+
+
 def test_runner_report_status_ignores_blocked_words_in_success_report_text() -> None:
     report = """DONE: Codex completed successfully with no file changes.
 
