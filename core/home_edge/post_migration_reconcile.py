@@ -208,16 +208,17 @@ def build_reconcile_request(
 
 
 def public_receipt_from_executor_stdout(receipt: Mapping[str, Any]) -> dict[str, object]:
-    if receipt.get("status") != "ok":
+    status = receipt.get("status")
+    if status not in {"ok", "failed"}:
         return _blocked_receipt("executor_receipt_not_ok")
     stdout = receipt.get("stdout")
     public = _public_receipt_from_stdout(stdout)
     if public is not None:
-        if receipt.get("exit_code") != 0:
+        if status == "failed" or receipt.get("exit_code") != 0:
             public["success_criteria"] = "not_met"
             public["audit_receipt_hash"] = _audit_hash(public)
         return public
-    if receipt.get("exit_code") != 0:
+    if status == "failed" or receipt.get("exit_code") != 0:
         return _blocked_receipt("executor_receipt_not_ok")
     if not isinstance(stdout, str):
         return _blocked_receipt("executor_stdout_missing")
