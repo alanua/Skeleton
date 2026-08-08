@@ -18,7 +18,7 @@ jobs:
       github.repository == 'alanua/Skeleton' &&
       github.event.issue.number == 2257 &&
       github.event.issue.state == 'open' &&
-      github.event.label.name == 'risk:yellow' &&
+      github.event.label.name == 'queue:RUN_NOW' &&
       github.event.issue.user.login == 'alanua' &&
       contains(github.event.issue.body, 'Authorization Marker: EXPLICIT_REPAIR_AUTONOMOUS_CODE_EXECUTOR_20260808')
     runs-on:
@@ -35,6 +35,7 @@ jobs:
           set -euo pipefail
 
           status=BLOCKED
+          mutation_attempted=false
           mutation_applied=false
           rollback_status=not_needed
           smoke_status=not_run
@@ -44,6 +45,7 @@ jobs:
           write_summary() {
             {
               echo "status=${status}"
+              echo "mutation_attempted=${mutation_attempted}"
               echo "mutation_applied=${mutation_applied}"
               echo "rollback_status=${rollback_status}"
               echo "smoke_status=${smoke_status}"
@@ -66,18 +68,56 @@ jobs:
           test -n "${old_version}"
           new_version="${old_version}"
 
-          if test "${old_version}" != "${TARGET_CODEX_VERSION}"; then
-            npm install -g "@openai/codex@${TARGET_CODEX_VERSION}" --no-audit --no-fund
-            mutation_applied=true
-            new_version="$(codex --version | sed -nE 's/^codex-cli ([0-9]+\.[0-9]+\.[0-9]+)$/\1/p')"
-            test "${new_version}" = "${TARGET_CODEX_VERSION}"
-          fi
-
-          smoke_dir="$(mktemp -d "${RUNNER_TEMP}/codex-recovery-smoke.XXXXXX")"
+          recovery_dir="$(mktemp -d "${RUNNER_TEMP}/codex-recovery.XXXXXX")"
           cleanup() {
-            rm -rf "${smoke_dir}"
+            rm -rf "${recovery_dir}"
           }
           trap 'cleanup; write_summary' EXIT
+
+          rollback_to_old() {
+            rollback_status=attempted
+            set +e
+            npm install -g "@openai/codex@${old_version}" --no-audit --no-fund \
+              >"${recovery_dir}/rollback.stdout" 2>"${recovery_dir}/rollback.stderr"
+            rollback_rc=$?
+            set -e
+            if test "${rollback_rc}" -ne 0; then
+              rollback_status=failed
+              return 1
+            fi
+            restored_version="$(codex --version 2>/dev/null | sed -nE 's/^codex-cli ([0-9]+\.[0-9]+\.[0-9]+)$/\1/p' || true)"
+            if test "${restored_version}" != "${old_version}"; then
+              rollback_status=failed
+              return 1
+            fi
+            rollback_status=restored
+            new_version="${restored_version}"
+            return 0
+          }
+
+          if test "${old_version}" != "${TARGET_CODEX_VERSION}"; then
+            mutation_attempted=true
+            set +e
+            npm install -g "@openai/codex@${TARGET_CODEX_VERSION}" --no-audit --no-fund \
+              >"${recovery_dir}/install.stdout" 2>"${recovery_dir}/install.stderr"
+            install_rc=$?
+            set -e
+
+            if test "${install_rc}" -ne 0; then
+              rollback_to_old || true
+              exit 1
+            fi
+
+            mutation_applied=true
+            new_version="$(codex --version 2>/dev/null | sed -nE 's/^codex-cli ([0-9]+\.[0-9]+\.[0-9]+)$/\1/p' || true)"
+            if test "${new_version}" != "${TARGET_CODEX_VERSION}"; then
+              rollback_to_old || true
+              exit 1
+            fi
+          fi
+
+          smoke_dir="${recovery_dir}/smoke"
+          mkdir -m 700 "${smoke_dir}"
 
           set +e
           timeout 120 codex exec \
@@ -85,33 +125,18 @@ jobs:
             --model gpt-5.5 \
             --cd "${smoke_dir}" \
             "Return exactly RESULT: OK. Do not modify files." \
-            >"${smoke_dir}/stdout" 2>"${smoke_dir}/stderr"
+            >"${recovery_dir}/smoke.stdout" 2>"${recovery_dir}/smoke.stderr"
           smoke_rc=$?
           set -e
 
-          if test "${smoke_rc}" -eq 0 && grep -Fxq "RESULT: OK" "${smoke_dir}/stdout"; then
+          if test "${smoke_rc}" -eq 0 && grep -Fxq "RESULT: OK" "${recovery_dir}/smoke.stdout"; then
             smoke_status=pass
             status=DONE
             exit 0
           fi
 
           smoke_status=failed
-          if test "${mutation_applied}" = true; then
-            set +e
-            npm install -g "@openai/codex@${old_version}" --no-audit --no-fund \
-              >"${smoke_dir}/rollback.stdout" 2>"${smoke_dir}/rollback.stderr"
-            rollback_rc=$?
-            set -e
-            if test "${rollback_rc}" -eq 0; then
-              restored_version="$(codex --version | sed -nE 's/^codex-cli ([0-9]+\.[0-9]+\.[0-9]+)$/\1/p')"
-              if test "${restored_version}" = "${old_version}"; then
-                rollback_status=restored
-                new_version="${restored_version}"
-              else
-                rollback_status=failed
-              fi
-            else
-              rollback_status=failed
-            fi
+          if test "${mutation_attempted}" = true; then
+            rollback_to_old || true
           fi
           exit 1
