@@ -256,6 +256,7 @@ HOME_EDGE_01_READ_ONLY_DIAGNOSTIC = "home_edge_01_read_only_diagnostic"
 HOME_EDGE_01_LAN_INVENTORY_READ_ONLY = "home_edge_01_lan_inventory_read_only"
 HOME_EDGE_AUDIT_PERSIST_V1 = "home_edge_audit_persist_v1"
 HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1 = "home_edge_01_debian_media_bootstrap_v1"
+HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1 = "home_edge_01_post_migration_reconcile_v1"
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
         SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
@@ -295,6 +296,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         HOME_EDGE_01_LAN_INVENTORY_READ_ONLY,
         HOME_EDGE_AUDIT_PERSIST_V1,
         HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1,
+        HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1,
         PREPARE_PRIVATE_STATIC_SITE_HANDOFF,
         DEPLOY_PRIVATE_STATIC_SITE,
     )
@@ -535,6 +537,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "allowed_files_count",
         "allowed_untracked_files",
         "allowed_untracked_files_count",
+        "aggregate_verifier_status",
         "approved_override_hash",
         "approval_status",
         "approved_head_sha",
@@ -551,6 +554,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "behind_by",
         "blocked_write_status",
         "branch",
+        "brother_specialized_status",
         "build_ms",
         "canon_note",
         "candidate_count",
@@ -590,6 +594,10 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "gateway_presence",
         "gateway_postcheck_status",
         "gateway_status",
+        "gallery_post_count",
+        "gallery_pre_count",
+        "gallery_root_cause_class",
+        "gallery_status",
         "service_category_counts",
         "risk_flags",
         "usb_modem_health_requirement",
@@ -661,6 +669,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "memory_events_existing",
         "memory_events_written",
         "memory_database_candidate_count",
+        "media_watchdog_status",
         "missing_file",
         "missing_dependency_module",
         "mode",
@@ -700,6 +709,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "private_memory_status",
         "private_memory_writable_when_requested",
         "private_memory_write_requested",
+        "pointer_status",
         "private_report_sha256",
         "project_handoff_candidate_count",
         "private_workspace",
@@ -749,6 +759,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "runtime_private_action",
         "semantic_record_count",
         "ram_bytes",
+        "registry_doctor_status",
         "repository",
         "reboot_guard_status",
         "reboot_performed",
@@ -792,6 +803,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "cleanup_status",
         "status_count_approved",
         "status_count_needs_review",
+        "stale_home_path_matches_after",
+        "stale_home_path_matches_before",
         "step",
         "stable_reason",
         "success_criteria",
@@ -13074,6 +13087,45 @@ def home_edge_01_debian_media_bootstrap_v1(body: str) -> str:
         )
 
 
+def home_edge_01_post_migration_reconcile_v1(body: str) -> str:
+    task_id = HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1
+    try:
+        from core.home_edge.post_migration_reconcile import (
+            execute_post_migration_reconcile_task,
+            receipt_status_lines,
+            success_criteria_met,
+        )
+
+        registered_sha = _read_exact_git_sha("main")
+        github_sha = _read_exact_git_sha("origin/main")
+        receipt = execute_post_migration_reconcile_task(
+            body,
+            registered_clean_main_sha=registered_sha,
+            github_main_sha=github_sha,
+        )
+        success = success_criteria_met(receipt)
+        return _maintenance_report(
+            "DONE" if success else "BLOCKED",
+            task_id,
+            receipt_status_lines(receipt),
+            "met" if success else "not_met",
+        )
+    except ValueError as exc:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [f"reason={exc}"],
+            "not_met",
+        )
+    except Exception:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            ["reason=post_migration_reconcile_failed_closed"],
+            "not_met",
+        )
+
+
 def _read_exact_git_sha(ref: str) -> str:
     code, output = run_command(["git", "rev-parse", f"{ref}^{{commit}}"], cwd=ROOT)
     sha = output.strip().splitlines()[0] if output.strip() else ""
@@ -13401,6 +13453,8 @@ def dispatch_runtime_maintenance_task(
             return home_edge_audit_persist_v1(body)
         if task_id == HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1:
             return home_edge_01_debian_media_bootstrap_v1(body)
+        if task_id == HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1:
+            return home_edge_01_post_migration_reconcile_v1(body)
         if task_id == PREPARE_PRIVATE_STATIC_SITE_HANDOFF:
             return _execute_prepare_private_static_site_handoff(body)
         if task_id == DEPLOY_PRIVATE_STATIC_SITE:

@@ -13,6 +13,7 @@ import pytest
 from scripts import runner_poll_github_tasks as runner
 from scripts import telegram_callback_poller as callback_poller
 from core.home_edge import debian_media_bootstrap as media_bootstrap
+from core.home_edge import post_migration_reconcile
 
 
 ORIGINAL_GRAPHIFY_RESOLVE_USER_SCRIPT = runner._graphify_resolve_user_script
@@ -81,6 +82,48 @@ def _media_bootstrap_receipt() -> dict[str, object]:
         "final_postcheck_receipt_hash": "c" * 64,
         "audit_receipt_hash": "a" * 64,
         "stable_reason": "already_complete",
+        "success_criteria": "met",
+    }
+
+
+def _post_migration_reconcile_issue_body(expected_sha: str = HEAD_SHA) -> str:
+    return "\n".join(
+        (
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {runner.HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1}",
+            f"Repository: {runner.REPO}",
+            f"Expected Main SHA: {expected_sha}",
+            "Operator Approval: EXPLICIT_RECONCILE_HOME_EDGE_POST_MIGRATION_20260808",
+            "Target: home-edge-01",
+        )
+    )
+
+
+def _post_migration_reconcile_receipt() -> dict[str, object]:
+    return {
+        "maintenance_task_id": runner.HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1,
+        "os_identity_status": "verified",
+        "node_identity_status": "verified",
+        "registry_doctor_status": "healthy",
+        "gallery_pre_count": 47,
+        "gallery_post_count": 47,
+        "gallery_root_cause_class": "unavailable_upstream_asset",
+        "gallery_status": "healthy",
+        "brother_specialized_status": "healthy",
+        "aggregate_verifier_status": "healthy",
+        "stale_home_path_matches_before": 1,
+        "stale_home_path_matches_after": 0,
+        "cast_status": "healthy",
+        "pointer_status": "healthy",
+        "media_watchdog_status": "healthy",
+        "failed_units_count": 0,
+        "reboot_performed": False,
+        "rollback_ready": True,
+        "rollback_applied": False,
+        "mutation_executor_receipt_hash": "d" * 64,
+        "final_postcheck_receipt_hash": "e" * 64,
+        "audit_receipt_hash": "a" * 64,
+        "stable_reason": "completed",
         "success_criteria": "met",
     }
 
@@ -251,6 +294,70 @@ def test_home_edge_debian_media_bootstrap_malformed_input_blocks(
         runner.HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1,
         str(runner.ROOT),
         _media_bootstrap_issue_body() + "\nPackage: evil",
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=unknown_runtime_input_field" in report
+
+
+def test_home_edge_post_migration_reconcile_is_allowlisted_and_dispatches_exact_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_read_sha(ref: str) -> str:
+        assert ref in {"main", "origin/main"}
+        return HEAD_SHA
+
+    def fake_execute(body: str, *, registered_clean_main_sha: str, github_main_sha: str):
+        captured["body"] = body
+        captured["registered_clean_main_sha"] = registered_clean_main_sha
+        captured["github_main_sha"] = github_main_sha
+        return _post_migration_reconcile_receipt()
+
+    monkeypatch.setattr(runner, "_read_exact_git_sha", fake_read_sha)
+    monkeypatch.setattr(
+        post_migration_reconcile,
+        "execute_post_migration_reconcile_task",
+        fake_execute,
+    )
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1,
+        str(runner.ROOT),
+        _post_migration_reconcile_issue_body(),
+    )
+
+    assert (
+        runner.HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1
+        in runner.RUNTIME_MAINTENANCE_TASK_IDS
+    )
+    assert report.startswith("DONE:")
+    assert "maintenance_task_id=home_edge_01_post_migration_reconcile_v1" in report
+    assert "gallery_pre_count=47" in report
+    assert "gallery_root_cause_class=unavailable_upstream_asset" in report
+    assert "brother_specialized_status=healthy" in report
+    assert "aggregate_verifier_status=healthy" in report
+    assert "stale_home_path_matches_after=0" in report
+    assert "media_watchdog_status=healthy" in report
+    assert "mutation_executor_receipt_hash=" + "d" * 64 in report
+    assert "final_postcheck_receipt_hash=" + "e" * 64 in report
+    assert "success_criteria=met" in report
+    assert captured["registered_clean_main_sha"] == HEAD_SHA
+    assert captured["github_main_sha"] == HEAD_SHA
+    assert "/home/" not in report
+    assert "SECRET" not in report
+
+
+def test_home_edge_post_migration_reconcile_malformed_input_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runner, "_read_exact_git_sha", lambda _ref: HEAD_SHA)
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1,
+        str(runner.ROOT),
+        _post_migration_reconcile_issue_body() + "\nCommand: /tmp/evil",
     )
 
     assert report.startswith("BLOCKED:")
