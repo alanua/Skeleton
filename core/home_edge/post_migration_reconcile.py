@@ -24,6 +24,7 @@ REQUEST_TIMEOUT_SECONDS = 900
 RECEIPT_SCHEMA = "skeleton.home_edge.post_migration_reconcile_receipt.v1"
 CANONICAL_MEMORY_POST_STEP = "home_edge_audit_persist_v1"
 EXPECTED_MAIN_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+EXEC_HMAC_SECRET_MISSING_REASON = "home_edge_exec_hmac_secret_missing"
 
 DESKTOP_USER = "oleksii"
 DESKTOP_UID = 1000
@@ -113,7 +114,12 @@ def execute_post_migration_reconcile_task(
         registered_clean_main_sha=registered_clean_main_sha,
         github_main_sha=github_main_sha,
     )
-    request = build_reconcile_request(environment=environment)
+    try:
+        request = build_reconcile_request(environment=environment)
+    except ValueError as exc:
+        if exc.args == (EXEC_HMAC_SECRET_MISSING_REASON,):
+            return _blocked_receipt("executor_auth_config_missing")
+        raise
     try:
         executor_receipt = execute_home_edge_request(request.to_mapping())
     except (subprocess.TimeoutExpired, TimeoutError):
@@ -193,7 +199,7 @@ def build_reconcile_request(
     env = os.environ if environment is None else environment
     secret = env.get(EXEC_HMAC_SECRET_ENV, "")
     if not secret:
-        raise ValueError("home_edge_exec_hmac_secret_missing")
+        raise ValueError(EXEC_HMAC_SECRET_MISSING_REASON)
     request = HomeEdgeExecRequest.from_mapping(
         {
             "request_id": f"{TASK_ID}-{uuid4()}",
