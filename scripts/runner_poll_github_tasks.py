@@ -101,6 +101,7 @@ from core.private_static_site_runtime import (
 )
 from core.project_tree import get_project, get_project_by_repo, load_project_tree
 from core.runner_child_environment import sanitize_codegen_child_environment
+from core.scheduler_store import SchedulerStore
 from core.runner_retry_policy import (
     BLOCK_REPEATED_REASON,
     NEEDS_OPERATOR,
@@ -122,6 +123,12 @@ from core.memory_bootstrap import (
     MemoryBootstrap,
 )
 from core.memory_scope_resolver import MemoryScopeResolutionError, task_transition_hash
+from core.notification_policy import (
+    NOTIFICATION_LEDGER_LIMIT,
+    notification_ledger_key,
+    notification_report_hash,
+    should_emit_task_notification,
+)
 from core.runner_private_memory_executor import (
     HERMES_MEMORY_GATEWAY_SMOKE_LOOKUP_KEY,
     HERMES_MEMORY_GATEWAY_SMOKE_NAMESPACE,
@@ -3412,9 +3419,7 @@ def runner_memory_config_from_env() -> RunnerMemoryConfig | None:
     db_path = os.environ.get(RUNNER_MEMORY_DB_ENV)
     ledger_path = os.environ.get(RUNNER_MEMORY_LEDGER_ENV)
     if db_path and ledger_path:
-        return _pytest_safe_runner_memory_config(
-            RunnerMemoryConfig(Path(db_path).expanduser(), Path(ledger_path).expanduser())
-        )
+        return RunnerMemoryConfig(Path(db_path).expanduser(), Path(ledger_path).expanduser())
 
     memory_dir = os.environ.get(RUNNER_MEMORY_DIR_ENV)
     if not memory_dir:
@@ -3422,23 +3427,23 @@ def runner_memory_config_from_env() -> RunnerMemoryConfig | None:
 
     base = Path(memory_dir).expanduser()
     month = datetime.now(timezone.utc).strftime("%Y_%m")
-    return _pytest_safe_runner_memory_config(
+    return _usable_runner_memory_config(
         RunnerMemoryConfig(base / "skeleton.db", base / f"events_{month}.jsonl")
     )
 
 
-def _pytest_safe_runner_memory_config(
+def _usable_runner_memory_config(
     config: RunnerMemoryConfig,
 ) -> RunnerMemoryConfig | None:
-    if "PYTEST_CURRENT_TEST" not in os.environ:
-        return config
-
-    tmp_root = Path(tempfile.gettempdir()).resolve(strict=False)
-    for path in (config.db_path, config.ledger_path):
-        try:
-            path.expanduser().resolve(strict=False).relative_to(tmp_root)
-        except ValueError:
-            return None
+    try:
+        for path in (config.db_path, config.ledger_path):
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            probe = path.parent / f".{path.name}.probe"
+            with probe.open("ab"):
+                pass
+            probe.unlink(missing_ok=True)
+    except OSError:
+        return None
     return config
 
 
@@ -4116,9 +4121,14 @@ def get_notification_issue(issue_number: int) -> dict[str, Any]:
     return parsed
 
 
-def notification_task_issue(issue_number: int, status: str) -> dict[str, Any] | None:
-    expected_label = FINAL_LABELS_BY_STATUS.get(status)
-    if expected_label is None:
+def notification_task_issue(
+    issue_number: int, status: str, report: str | None = None
+) -> dict[str, Any] | None:
+    if should_emit_task_notification(status):
+        expected_label = LABEL_BLOCKED
+    elif status == "DONE" and not extract_pr_url(report or ""):
+        expected_label = LABEL_DONE
+    else:
         return None
 
     issue = get_notification_issue(issue_number)
@@ -4132,8 +4142,10 @@ def notification_task_issue(issue_number: int, status: str) -> dict[str, Any] | 
     return issue
 
 
-def should_notify_task_finished(issue_number: int, status: str) -> bool:
-    return notification_task_issue(issue_number, status) is not None
+def should_notify_task_finished(
+    issue_number: int, status: str, report: str | None = None
+) -> bool:
+    return notification_task_issue(issue_number, status, report) is not None
 
 
 def notification_target_repository(issue: dict[str, Any]) -> str:
@@ -4146,11 +4158,36 @@ def notification_target_repository(issue: dict[str, Any]) -> str:
     return QUEUE_REPOSITORY
 
 
+def claim_task_notification_once(
+    issue_number: int, status: str, report: str | None = None
+) -> bool:
+    if not should_emit_task_notification(status):
+        return False
+    config = runner_memory_config_from_env()
+    if config is None:
+        return False
+    store = SchedulerStore(config.db_path)
+    store.initialize()
+    return store.claim_notification_once(
+        notification_key=notification_ledger_key(issue_number, status),
+        issue_number=issue_number,
+        status=status,
+        report_hash=notification_report_hash(report),
+        now=int(time.time()),
+        limit=NOTIFICATION_LEDGER_LIMIT,
+    )
+
+
 def notify_task_finished(
     issue_number: int, status: str, report: str | None = None
 ) -> None:
     try:
-        if not should_notify_task_finished(issue_number, status):
+        if not should_notify_task_finished(issue_number, status, report):
+            return
+        if should_emit_task_notification(status) and not claim_task_notification_once(
+            issue_number, status, report
+        ):
+            _NOTIFICATION_ISSUE_CACHE.pop((issue_number, status), None)
             return
         issue = _NOTIFICATION_ISSUE_CACHE.pop((issue_number, status), None)
         target_repository = (
