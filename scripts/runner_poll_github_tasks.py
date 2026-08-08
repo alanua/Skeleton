@@ -46,6 +46,20 @@ from core.loop_controller import LoopPolicy
 from core.loop_engine import LoopEngine
 from core.loop_runner_adapter import run_loop_task_packet
 from core.loop_state_store import LoopStateStore
+from core.notification_policy import (
+    claim_operator_notification,
+    should_notify_operator_for_runner_result,
+    should_notify_operator_status,
+)
+from core.review_gate import (
+    ReviewGateRequest,
+    continue_from_internal_review_verdict,
+    ensure_draft_pr_review_continuation,
+    evaluate_review_gate,
+    render_review_gate_report,
+    shared_continuation_receipt,
+)
+from core.scheduler_store import SchedulerStore
 from core.runner_diagnostic_executor import (
     MEMPALACE_SYNTHETIC_BENCHMARK_SCHEMA,
     MEMPALACE_SYNTHETIC_BENCHMARK_TIMEOUT_SECONDS,
@@ -880,6 +894,7 @@ RUNNER_MEMORY_DB_ENV = "SKELETON_RUNNER_MEMORY_DB"
 RUNNER_MEMORY_LEDGER_ENV = "SKELETON_RUNNER_MEMORY_LEDGER"
 RUNNER_MEMORY_DIR_ENV = "SKELETON_RUNNER_MEMORY_DIR"
 RUNNER_MEMORY_WARNING = "Memory warning: Runner memory write failed."
+SCHEDULER_DB_ENV = "SKELETON_SCHEDULER_DB"
 _PUBLIC_GITHUB_PR_URL_RE = re.compile(
     r"^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[1-9]\d*/?$"
 )
@@ -4184,7 +4199,24 @@ def notify_task_finished(
     issue_number: int, status: str, report: str | None = None
 ) -> None:
     try:
+        if not should_notify_operator_status(status):
+            return
+        if not should_notify_operator_for_runner_result(status, report):
+            return
         if not should_notify_task_finished(issue_number, status):
+            return
+        if not claim_operator_notification(
+            SchedulerStore(_scheduler_db_path()),
+            status=status,
+            now=int(time.time()),
+            issue_number=issue_number,
+            payload={
+                "issue_number": issue_number,
+                "status": status,
+                "report": report or "",
+            },
+            reason=_notification_reason_from_report(report),
+        ):
             return
         issue = _NOTIFICATION_ISSUE_CACHE.pop((issue_number, status), None)
         target_repository = (
@@ -4223,6 +4255,28 @@ def notify_task_finished(
             send_telegram_notification(plain_message)
     except Exception:
         return
+
+
+def _notification_reason_from_report(report: str | None) -> str | None:
+    if not report:
+        return None
+    for line in report.splitlines():
+        if line.startswith("reason="):
+            return line.split("=", 1)[1][:128]
+    first = report.splitlines()[0] if report.splitlines() else ""
+    if ":" in first:
+        return first.split(":", 1)[1].strip()[:128] or None
+    return first[:128] or None
+
+
+def _scheduler_db_path() -> str:
+    configured = os.environ.get(SCHEDULER_DB_ENV)
+    if configured:
+        return configured
+    default_parent = ROOT / ".codex"
+    if default_parent.exists() and not default_parent.is_dir():
+        return str(Path(tempfile.gettempdir()) / "skeleton-scheduler.sqlite3")
+    return str(default_parent / "scheduler.sqlite3")
 
 
 def ensure_clean_worktree(workdir: str) -> tuple[bool, str]:
@@ -9733,17 +9787,47 @@ def inspect_pr_mergeability(body: str) -> str:
             "not_met",
         )
 
-    validation_state, validation_reason = _validation_summary(
-        combined_status, check_runs
-    )
-    report_status, reason, next_action = _pr_mergeability_next_action(
-        pr, compare, validation_state, request
-    )
+    validation_state, validation_reason = _validation_summary(combined_status, check_runs)
     changed_files = [
         str(file.get("filename"))
         for file in files
         if isinstance(file.get("filename"), str)
     ]
+    review_decision = evaluate_review_gate(
+        ReviewGateRequest(
+            repository=REPO,
+            pr_number=request.pr_number,
+            expected_head_sha=request.expected_head_sha,
+            pr=pr,
+            changed_files=tuple(changed_files),
+            validation_state=validation_state,
+            validation_reason=validation_reason,
+            compare_status=str(compare.get("status") or "unknown").lower(),
+            behind_by=(
+                compare.get("behind_by")
+                if isinstance(compare.get("behind_by"), int)
+                else None
+            ),
+        )
+    )
+    continuation = continue_from_internal_review_verdict(
+        SchedulerStore(_scheduler_db_path()),
+        verdict=review_decision.verdict,
+        repository=REPO,
+        pr_number=request.pr_number,
+        expected_head_sha=request.expected_head_sha or _head_sha_for_review(pr),
+        observed_head_sha=_head_sha_for_review(pr),
+        permitted_merge_method="squash",
+        policy_reason=review_decision.reason,
+        source_issue=request.pr_number,
+        allowed_files=changed_files or ["docs/AUTONOMOUS_REVIEW_GATE.md"],
+        now=int(time.time()),
+        protected=review_decision.operator_packet is not None,
+    )
+    continuation_receipt = shared_continuation_receipt(review_decision)
+    report_status, reason, next_action = _pr_mergeability_next_action(
+        pr, compare, validation_state, request
+    )
     mergeable = _github_bool_value(pr.get("mergeable"))
     mergeable_state = str(pr.get("mergeable_state") or "unknown")
     status_lines.extend(
@@ -9763,9 +9847,42 @@ def inspect_pr_mergeability(body: str) -> str:
             f"ahead_by={compare.get('ahead_by', 'unknown')}",
             f"behind_by={compare.get('behind_by', 'unknown')}",
             f"validation_state={validation_state}",
+            f"internal_review_verdict={review_decision.verdict}",
+            f"internal_review_reason={review_decision.reason}",
+            f"review_receipt_id={review_decision.receipt_id}",
+            f"review_continuation={continuation_receipt['continuation']}",
+            f"review_loop_event={continuation_receipt['loop_event']}",
+            f"review_notify_operator={str(review_decision.notify_operator).lower()}",
+            f"materialized_schedule_id={continuation.schedule_id}",
+            f"materialized_occurrence_id={continuation.occurrence_id}",
+            f"materialized_reused={str(not continuation.created).lower()}",
             f"reason={reason if reason != 'none' else validation_reason}",
             f"next_action={next_action}",
         )
+    )
+    if review_decision.repair_task is not None:
+        status_lines.extend(
+            (
+                f"repair_task_id={review_decision.repair_task['task_id']}",
+                f"repair_idempotency_key={review_decision.repair_task['idempotency_key']}",
+                f"repair_reused_existing={str(review_decision.repair_task['reused_existing']).lower()}",
+            )
+        )
+    if review_decision.operator_packet is not None:
+        packet = review_decision.operator_packet
+        status_lines.extend(
+            (
+                f"operator_repository={packet['repository']}",
+                f"operator_pr_number={packet['pr_number']}",
+                f"operator_head_sha={packet['head_sha']}",
+                f"operator_permitted_merge_method={packet['permitted_merge_method']}",
+                f"operator_policy_reason={packet['policy_reason']}",
+                f"operator_next_continuation_step={packet['next_continuation_step']}",
+            )
+        )
+    status_lines.append(
+        "review_receipt_hash="
+        + hashlib.sha256(render_review_gate_report(review_decision).encode("utf-8")).hexdigest()[:16]
     )
     return _maintenance_report(
         report_status,
@@ -9773,6 +9890,10 @@ def inspect_pr_mergeability(body: str) -> str:
         status_lines,
         "met" if report_status == "DONE" else "not_met",
     )
+
+
+def _head_sha_for_review(pr: Mapping[str, Any]) -> str:
+    return str(((pr.get("head") if isinstance(pr.get("head"), Mapping) else {}) or {}).get("sha") or "").lower()
 
 
 def _safe_issue_publish_file_path(path: str) -> bool:
@@ -10675,6 +10796,35 @@ def _issue_worktree_publish_pr_url(
     if _PUBLIC_GITHUB_PR_URL_RE.fullmatch(pr_url) is None:
         return None, "create_pr_failed"
     return pr_url, None
+
+
+def _ensure_internal_review_after_draft_pr(
+    request: IssueWorktreePublishInspectionRequest,
+    *,
+    pr_url: str,
+    pushed_head_sha: str,
+) -> tuple[list[str], str | None]:
+    pr_number = extract_pr_number(pr_url)
+    if pr_number is None:
+        return [], "internal_review_pr_number_unavailable"
+    try:
+        continuation = ensure_draft_pr_review_continuation(
+            SchedulerStore(_scheduler_db_path()),
+            repository=request.repository,
+            pr_number=pr_number,
+            head_sha=pushed_head_sha,
+            source_issue=request.source_issue,
+            allowed_files=sorted(request.allowed_files),
+            now=int(time.time()),
+        )
+    except Exception:
+        return [], "internal_review_continuation_failed"
+    return [
+        "step=internal_review_continuation status=done",
+        f"internal_review_reused={str(not continuation.created).lower()}",
+        f"internal_review_schedule_id={continuation.schedule_id}",
+        f"internal_review_occurrence_id={continuation.occurrence_id}",
+    ], None
 
 
 _CONTAINER_VALIDATION_PUBLISH_ALLOWED_METADATA_FIELDS = frozenset(
@@ -12899,6 +13049,20 @@ def _issue_worktree_publish_validated_report(
             f"pushed_head_sha={pushed_head_sha}",
         )
     )
+    review_lines, review_reason = _ensure_internal_review_after_draft_pr(
+        request, pr_url=pr_url, pushed_head_sha=pushed_head_sha
+    )
+    if review_reason is not None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                *status_lines,
+                f"step=internal_review_continuation status=failed reason={review_reason}",
+            ],
+            "not_met",
+        )
+    status_lines.extend(review_lines)
     if target_project_route:
         assert verified_base_sha is not None
         try:
