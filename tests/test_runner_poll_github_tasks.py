@@ -14,6 +14,7 @@ from scripts import runner_poll_github_tasks as runner
 from scripts import telegram_callback_poller as callback_poller
 from core.home_edge import debian_media_bootstrap as media_bootstrap
 from core.home_edge import post_migration_reconcile
+from core.runner_task import RUNNER_TASK_SCHEMA, RunnerTask as CoreRunnerTask
 
 
 ORIGINAL_GRAPHIFY_RESOLVE_USER_SCRIPT = runner._graphify_resolve_user_script
@@ -16607,6 +16608,139 @@ def test_unrelated_runtime_maintenance_dispatch_is_unchanged() -> None:
 
     assert report == "DONE: unchanged"
     check.assert_called_once_with()
+
+
+def test_universal_registry_signed_merge_executes_bounded_merge_with_exact_files() -> None:
+    issue_body = "\n".join(
+        (
+            f"Mode: {runner.TELEGRAM_APPROVED_PR_MERGE_MODE}",
+            f"Repository: {runner.REPO}",
+            "Pull Request: 2193",
+            f"Approved Head SHA: {HEAD_SHA}",
+            "Merge Action: squash",
+            "Approval Source: signed_telegram_callback",
+            f"Callback Digest: {CALLBACK_DIGEST}",
+        )
+    )
+    task = CoreRunnerTask.from_mapping(
+        {
+            "schema": RUNNER_TASK_SCHEMA,
+            "repo": runner.REPO,
+            "branch": "runner/issue-2191",
+            "base_sha": "1" * 40,
+            "task_kind": "publish",
+            "payload": {"pr_number": 2193},
+            "requested_capabilities": ["repository_read", "publish_pull_request"],
+            "allowed_files": ["core/example.py"],
+            "forbidden_actions": ["no live merge in tests"],
+            "validation_commands": [["python3", "-m", "pytest", "-q"]],
+            "validation_timeout_seconds": 900,
+            "expected_output": ["bounded merge"],
+            "privacy_boundary": "PUBLIC_SAFE_REPOSITORY_ONLY",
+            "approval_reference": "operator-approved-merge",
+            "idempotency_key": "registry-signed-merge-test",
+        }
+    )
+    pr_state = {
+        "number": 2193,
+        "state": "OPEN",
+        "isDraft": False,
+        "headRefOid": HEAD_SHA,
+        "files": [{"path": "core/example.py"}],
+        "operatorApprovals": [
+            {
+                "approval_reference": "operator-approved-merge",
+                "action": "merge_pull_request",
+                "pr_number": 2193,
+                "expected_head_sha": HEAD_SHA,
+                "expected_files": ["core/example.py"],
+            }
+        ],
+    }
+
+    with mock.patch.object(
+        runner, "get_pr_merge_state", return_value=pr_state
+    ) as read_state, mock.patch.object(
+        runner, "run_command", return_value=(0, "")
+    ) as run_command:
+        registry = runner.build_universal_runner_executor_registry(issue_body=issue_body)
+        report = registry.dispatch(task)
+
+    assert report.startswith("DONE:")
+    assert "merge_side_effect=confirmed" in report
+    read_state.assert_called_once_with(2193)
+    run_command.assert_called_once_with(
+        [
+            "gh",
+            "pr",
+            "merge",
+            "2193",
+            "--repo",
+            runner.REPO,
+            "--squash",
+            "--match-head-commit",
+            HEAD_SHA,
+        ]
+    )
+
+
+def test_universal_registry_signed_merge_blocks_wrong_reviewed_file() -> None:
+    issue_body = "\n".join(
+        (
+            f"Mode: {runner.TELEGRAM_APPROVED_PR_MERGE_MODE}",
+            f"Repository: {runner.REPO}",
+            "Pull Request: 2193",
+            f"Approved Head SHA: {HEAD_SHA}",
+            "Merge Action: squash",
+            "Approval Source: signed_telegram_callback",
+            f"Callback Digest: {CALLBACK_DIGEST}",
+        )
+    )
+    task = CoreRunnerTask.from_mapping(
+        {
+            "schema": RUNNER_TASK_SCHEMA,
+            "repo": runner.REPO,
+            "branch": "runner/issue-2191",
+            "base_sha": "1" * 40,
+            "task_kind": "publish",
+            "payload": {"pr_number": 2193},
+            "requested_capabilities": ["repository_read", "publish_pull_request"],
+            "allowed_files": ["core/example.py"],
+            "forbidden_actions": ["no live merge in tests"],
+            "validation_commands": [["python3", "-m", "pytest", "-q"]],
+            "validation_timeout_seconds": 900,
+            "expected_output": ["bounded merge"],
+            "privacy_boundary": "PUBLIC_SAFE_REPOSITORY_ONLY",
+            "approval_reference": "operator-approved-merge",
+            "idempotency_key": "registry-signed-merge-test",
+        }
+    )
+    pr_state = {
+        "number": 2193,
+        "state": "OPEN",
+        "isDraft": False,
+        "headRefOid": HEAD_SHA,
+        "files": [{"path": "other.py"}],
+        "operatorApprovals": [
+            {
+                "approval_reference": "operator-approved-merge",
+                "action": "merge_pull_request",
+                "pr_number": 2193,
+                "expected_head_sha": HEAD_SHA,
+                "expected_files": ["core/example.py"],
+            }
+        ],
+    }
+
+    with mock.patch.object(
+        runner, "get_pr_merge_state", return_value=pr_state
+    ), mock.patch.object(runner, "run_command") as run_command:
+        registry = runner.build_universal_runner_executor_registry(issue_body=issue_body)
+        report = registry.dispatch(task)
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=changed_files_mismatch" in report
+    run_command.assert_not_called()
 
 def test_home_edge_lightweight_diagnostic_does_not_require_usb_modem() -> None:
     artifact = {

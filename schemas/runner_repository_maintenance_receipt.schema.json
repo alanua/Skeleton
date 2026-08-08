@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/skeleton/runner_repository_maintenance_receipt.schema.json",
+  "title": "Runner Repository Maintenance Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "status", "maintenance_task_id", "success_criteria", "reason_codes"],
+  "properties": {
+    "schema": {"const": "skeleton.runner_repository_maintenance_receipt.v1"},
+    "status": {"enum": ["DONE", "BLOCKED", "NEEDS_OPERATOR"]},
+    "maintenance_task_id": {"type": "string"},
+    "success_criteria": {"enum": ["met", "not_met"]},
+    "reason_codes": {
+      "type": "array",
+      "items": {"type": "string"},
+      "uniqueItems": true
+    }
+  }
+}
