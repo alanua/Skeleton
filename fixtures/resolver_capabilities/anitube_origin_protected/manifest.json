@@ -1,0 +1,70 @@
+{
+  "schema": "skeleton.resolver_capability.manifest.v1",
+  "capability_id": "skeleton_cast.anitube.origin_protected",
+  "version": "1.0.0",
+  "supported_hosts": ["anitube.in.ua", "www.anitube.in.ua"],
+  "input_schema": {
+    "type": "object",
+    "required": ["page_url"],
+    "properties": {
+      "page_url": {"type": "string", "format": "uri"}
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "required": ["status", "cooldown_remaining_seconds"],
+    "properties": {
+      "status": {"const": "origin_protected"},
+      "cooldown_remaining_seconds": {"type": "integer", "minimum": 1}
+    }
+  },
+  "dependencies": {
+    "python": ">=3.11",
+    "packages": ["requests", "lxml"],
+    "tools": ["curl"],
+    "lock": "fixtures/resolver_capabilities/anitube_origin_protected/dependency-lock.json"
+  },
+  "network_policy": {
+    "ssrf_guard": true,
+    "allowed_hosts": ["anitube.in.ua", "www.anitube.in.ua", "r.jina.ai"],
+    "forbidden_headers": ["Cookie", "Authorization"],
+    "allow_signed_media_urls": false
+  },
+  "timeouts": {
+    "fetch_seconds": 65,
+    "cooldown_seconds": 3600
+  },
+  "response_bounds": {
+    "max_input_bytes": 65536,
+    "max_output_bytes": 1048576,
+    "max_diagnostic_bytes": 1800
+  },
+  "authentication": {
+    "required": false,
+    "secret_refs": []
+  },
+  "test_fixtures": [
+    "tests/skeleton_cast/test_anitube_origin_protected.py"
+  ],
+  "risk": "medium",
+  "approvals": {
+    "research": "issue-2096",
+    "merge": "issue-2098",
+    "production_activation": null
+  },
+  "deploy": {
+    "operation_id": "skeleton_cast.resolver.deploy",
+    "executor": "home_edge_exec",
+    "args": ["ops/skeleton_cast/deploy.sh"]
+  },
+  "verify": {
+    "operation_id": "skeleton_cast.resolver.verify",
+    "executor": "home_edge_exec",
+    "args": ["python3", "-m", "pytest", "-q", "tests/skeleton_cast/test_anitube_origin_protected.py"]
+  },
+  "rollback": {
+    "operation_id": "skeleton_cast.resolver.rollback",
+    "executor": "home_edge_exec",
+    "args": ["ops/skeleton_cast/rollback.sh"]
+  }
+}
