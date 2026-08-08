@@ -57,13 +57,20 @@ class GatewayCapabilityToken:
     schema: str
     namespaces: tuple[str, ...]
     public_mode: bool = True
+    privacy_boundary: str = "PUBLIC_SAFE_CODE_TESTS_ONLY"
 
 
-def capability_token(*, namespaces: tuple[str, ...], public_mode: bool = True) -> GatewayCapabilityToken:
+def capability_token(
+    *,
+    namespaces: tuple[str, ...],
+    public_mode: bool = True,
+    privacy_boundary: str | None = None,
+) -> GatewayCapabilityToken:
     return GatewayCapabilityToken(
         schema="skeleton.memory_gateway.capability_token.v1",
         namespaces=namespaces,
         public_mode=public_mode,
+        privacy_boundary=_capability_privacy_boundary(public_mode, privacy_boundary),
     )
 
 
@@ -546,6 +553,7 @@ class MemoryGateway:
         proposal_project_id = self._optional_project_id(proposal.get("project_id"))
         if bound_project_id is not None and proposal_project_id != bound_project_id:
             raise MemoryGatewayPolicyError("PROJECT_NOT_AUTHORIZED", "proposal project_id mismatch")
+        self._authorize_proposal_classification(proposal)
         self._validate_patch_evidence(namespace, bound_project_id, proposal)
         duplicate_existing = self._patch_registry.lookup_by_idempotency_key(
             str(proposal.get("idempotency_key", ""))
@@ -570,6 +578,15 @@ class MemoryGateway:
                 ),
             },
         )
+
+    def _authorize_proposal_classification(self, proposal: Mapping[str, Any]) -> None:
+        if proposal.get("classification") != "PRIVATE":
+            return
+        if self._token.privacy_boundary != "PRIVATE_RUNTIME_ONLY":
+            raise MemoryGatewayPolicyError(
+                "PRIVATE_PROPOSAL_REQUIRES_PRIVATE_RUNTIME_BOUNDARY",
+                "private proposals require PRIVATE_RUNTIME_ONLY capability",
+            )
 
     def _validate_patch_evidence(self, namespace: str, project_id: str, proposal: Mapping[str, Any]) -> None:
         provenance_refs = proposal.get("provenance_refs")
@@ -817,11 +834,13 @@ def _normalize_token(token: GatewayCapabilityToken | Mapping[str, Any]) -> Gatew
     if isinstance(token, GatewayCapabilityToken):
         raw_namespaces = token.namespaces
         public_mode = token.public_mode
+        privacy_boundary = token.privacy_boundary
     elif isinstance(token, Mapping):
         if token.get("schema") != "skeleton.memory_gateway.capability_token.v1":
             raise MemoryGatewayPolicyError("INVALID_CAPABILITY_TOKEN", "capability token schema is invalid")
         raw_namespaces = token.get("namespaces")
         public_mode = bool(token.get("public_mode", True))
+        privacy_boundary = _capability_privacy_boundary(public_mode, token.get("privacy_boundary"))
     else:
         raise MemoryGatewayPolicyError("INVALID_CAPABILITY_TOKEN", "capability token must be an object")
     if not isinstance(raw_namespaces, tuple | list) or not raw_namespaces:
@@ -834,7 +853,25 @@ def _normalize_token(token: GatewayCapabilityToken | Mapping[str, Any]) -> Gatew
         schema="skeleton.memory_gateway.capability_token.v1",
         namespaces=namespaces,
         public_mode=public_mode,
+        privacy_boundary=_capability_privacy_boundary(public_mode, privacy_boundary),
     )
+
+
+def _capability_privacy_boundary(public_mode: bool, value: object) -> str:
+    if value is None:
+        return "PUBLIC_SAFE_CODE_TESTS_ONLY" if public_mode else "PRIVATE_RUNTIME_ONLY"
+    if value not in {
+        "PUBLIC_SAFE_CODE_TESTS_ONLY",
+        "PRIVATE_RUNTIME_ONLY",
+        "SECRET_REFERENCE_ONLY",
+    }:
+        raise MemoryGatewayPolicyError("INVALID_CAPABILITY_TOKEN", "capability token privacy boundary is invalid")
+    if value == "PRIVATE_RUNTIME_ONLY" and public_mode:
+        raise MemoryGatewayPolicyError(
+            "INVALID_CAPABILITY_TOKEN",
+            "PRIVATE_RUNTIME_ONLY capability cannot run in public mode",
+        )
+    return str(value)
 
 
 def _is_mempalace_synthetic_scope(namespace: str, project_id: str) -> bool:
@@ -875,7 +912,14 @@ def _current_canonical_revision(freshness: object) -> object:
 
 def _seed_scopes() -> tuple[tuple[str, str], ...]:
     scopes = [(namespace, namespace) for namespace in ALLOWED_NAMESPACES]
-    scopes.extend((("aufmass", "project-a"), ("aufmass", "project-b")))
+    scopes.extend(
+        (
+            ("aufmass", "project-a"),
+            ("aufmass", "project-b"),
+            ("skeleton", "gewerbe"),
+            ("skeleton", "travel"),
+        )
+    )
     return tuple(scopes)
 
 
