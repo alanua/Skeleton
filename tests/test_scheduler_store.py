@@ -64,7 +64,7 @@ def test_occurrence_unique_and_payload_not_in_public_receipt(tmp_path) -> None:
     assert "payload" not in first.public_receipt()
 
 
-def test_recover_stale_running_requires_operator(tmp_path) -> None:
+def test_recover_stale_running_retries_before_operator(tmp_path) -> None:
     store = SchedulerStore(tmp_path / "scheduler.sqlite3")
     store.initialize()
     schedule, _ = store.register(_spec(), now=1)
@@ -86,10 +86,39 @@ def test_recover_stale_running_requires_operator(tmp_path) -> None:
         reason="DISPATCH_STARTED",
         now=101,
     )
-    assert store.recover_stale_running(now=1000, stale_after_seconds=100) == 1
+    assert store.recover_stale_running(now=1000, stale_after_seconds=100) == {
+        "retried": 1,
+        "needs_operator": 0,
+    }
     occurrence = store.list_occurrences(schedule.spec.schedule_id)[0]
-    assert occurrence.state == "needs_operator"
-    assert occurrence.reason == "STALE_RUNNING_RECOVERY"
+    assert occurrence.state == "pending"
+    assert occurrence.reason == "STALE_RUNNING_RETRY"
+
+
+def test_atomic_claim_sets_attempt_and_prevents_duplicate_worker(tmp_path) -> None:
+    store = SchedulerStore(tmp_path / "scheduler.sqlite3")
+    store.initialize()
+    schedule, _ = store.register(_spec(), now=1)
+    occurrence_id = stable_occurrence_id(schedule.spec.schedule_id, schedule.version, 100)
+    proposal = build_execution_proposal(schedule, occurrence_id=occurrence_id, scheduled_for=100)
+    store.create_occurrence(
+        occurrence_id=occurrence_id,
+        schedule=schedule,
+        scheduled_for=100,
+        state="pending",
+        reason="DISPATCH_REQUIRED",
+        proposal=proposal,
+        now=100,
+    )
+
+    claimed = store.claim_next_pending(now=101)
+    duplicate = store.claim_next_pending(now=101)
+
+    assert claimed is not None
+    assert claimed.state == "running"
+    assert claimed.attempt == 1
+    assert claimed.idempotency_key == f"{occurrence_id}:attempt:1"
+    assert duplicate is None
 
 
 def test_transition_conflict_fails_closed(tmp_path) -> None:

@@ -46,6 +46,13 @@ from core.loop_controller import LoopPolicy
 from core.loop_engine import LoopEngine
 from core.loop_runner_adapter import run_loop_task_packet
 from core.loop_state_store import LoopStateStore
+from core.notification_policy import should_notify_operator_for_runner_result
+from core.review_gate import (
+    ReviewGateRequest,
+    evaluate_review_gate,
+    render_review_gate_report,
+)
+from core.shared_dispatch import shared_continuation_receipt
 from core.runner_diagnostic_executor import (
     MEMPALACE_SYNTHETIC_BENCHMARK_SCHEMA,
     MEMPALACE_SYNTHETIC_BENCHMARK_TIMEOUT_SECONDS,
@@ -173,6 +180,8 @@ def trusted_runner_comment_authors() -> frozenset[str]:
 
 
 LABEL_READY = "runner:ready"
+LABEL_PRIORITY_1 = "runner:priority-1"
+LABEL_RUN_NOW = "queue:RUN_NOW"
 LABEL_RUNNING = "runner:running"
 LABEL_DONE = "runner:done"
 LABEL_BLOCKED = "runner:blocked"
@@ -189,6 +198,7 @@ RUNNER_LANE_LABEL_DESCRIPTIONS = {
 FINAL_LABELS_BY_STATUS = {
     "DONE": LABEL_DONE,
     "BLOCKED": LABEL_BLOCKED,
+    "NEEDS_OPERATOR": LABEL_BLOCKED,
 }
 POLL_INTERVAL = 60
 DEFAULT_WORKDIR = Path(__file__).resolve().parents[1]
@@ -1940,7 +1950,39 @@ def get_ready_issues() -> list[dict[str, Any]]:
     parsed = json.loads(output or "[]")
     if not isinstance(parsed, list):
         raise RuntimeError("gh issue list returned non-list JSON")
-    return [issue for issue in parsed if is_open_task_issue(issue)]
+    return sort_ready_issues_by_priority(
+        [issue for issue in parsed if is_open_task_issue(issue)]
+    )
+
+
+def sort_ready_issues_by_priority(issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(issues, key=_ready_issue_priority_key)
+
+
+def _ready_issue_priority_key(issue: dict[str, Any]) -> tuple[int, int]:
+    labels = _issue_label_names(issue)
+    if LABEL_RUN_NOW in labels:
+        priority = 0
+    elif LABEL_PRIORITY_1 in labels:
+        priority = 1
+    else:
+        priority = 2
+    number = issue.get("number")
+    deterministic_number = int(number) if isinstance(number, int) and not isinstance(number, bool) else 0
+    return priority, deterministic_number
+
+
+def _issue_label_names(issue: Mapping[str, Any]) -> frozenset[str]:
+    labels = issue.get("labels", [])
+    if not isinstance(labels, list):
+        return frozenset()
+    names: set[str] = set()
+    for label in labels:
+        if isinstance(label, Mapping) and isinstance(label.get("name"), str):
+            names.add(str(label["name"]))
+        elif isinstance(label, str):
+            names.add(label)
+    return frozenset(names)
 
 
 def is_pull_request_item(item: dict[str, Any]) -> bool:
@@ -3982,7 +4024,7 @@ def _localize_pr_ready_card_payload(
             pr_number,
             target_repository,
             source_issue_number=source_issue_number,
-            include_approval_instruction=True,
+            include_approval_instruction=False,
         ),
         "buttons": buttons,
     }
@@ -4150,6 +4192,8 @@ def notify_task_finished(
     issue_number: int, status: str, report: str | None = None
 ) -> None:
     try:
+        if not should_notify_operator_for_runner_result(status, report):
+            return
         if not should_notify_task_finished(issue_number, status):
             return
         issue = _NOTIFICATION_ISSUE_CACHE.pop((issue_number, status), None)
@@ -9702,14 +9746,32 @@ def inspect_pr_mergeability(body: str) -> str:
     validation_state, validation_reason = _validation_summary(
         combined_status, check_runs
     )
-    report_status, reason, next_action = _pr_mergeability_next_action(
-        pr, compare, validation_state, request
-    )
     changed_files = [
         str(file.get("filename"))
         for file in files
         if isinstance(file.get("filename"), str)
     ]
+    review_decision = evaluate_review_gate(
+        ReviewGateRequest(
+            repository=REPO,
+            pr_number=request.pr_number,
+            expected_head_sha=request.expected_head_sha,
+            pr=pr,
+            changed_files=tuple(changed_files),
+            validation_state=validation_state,
+            validation_reason=validation_reason,
+            compare_status=str(compare.get("status") or "unknown").lower(),
+            behind_by=(
+                compare.get("behind_by")
+                if isinstance(compare.get("behind_by"), int)
+                else None
+            ),
+        )
+    )
+    continuation_receipt = shared_continuation_receipt(review_decision)
+    report_status, reason, next_action = _pr_mergeability_next_action(
+        pr, compare, validation_state, request
+    )
     mergeable = _github_bool_value(pr.get("mergeable"))
     mergeable_state = str(pr.get("mergeable_state") or "unknown")
     status_lines.extend(
@@ -9729,9 +9791,39 @@ def inspect_pr_mergeability(body: str) -> str:
             f"ahead_by={compare.get('ahead_by', 'unknown')}",
             f"behind_by={compare.get('behind_by', 'unknown')}",
             f"validation_state={validation_state}",
+            f"internal_review_verdict={review_decision.verdict}",
+            f"internal_review_reason={review_decision.reason}",
+            f"review_receipt_id={review_decision.receipt_id}",
+            f"review_continuation={continuation_receipt['continuation']}",
+            f"review_loop_event={continuation_receipt['loop_event']}",
+            f"review_notify_operator={str(review_decision.notify_operator).lower()}",
             f"reason={reason if reason != 'none' else validation_reason}",
             f"next_action={next_action}",
         )
+    )
+    if review_decision.repair_task is not None:
+        status_lines.extend(
+            (
+                f"repair_task_id={review_decision.repair_task['task_id']}",
+                f"repair_idempotency_key={review_decision.repair_task['idempotency_key']}",
+                f"repair_reused_existing={str(review_decision.repair_task['reused_existing']).lower()}",
+            )
+        )
+    if review_decision.operator_packet is not None:
+        packet = review_decision.operator_packet
+        status_lines.extend(
+            (
+                f"operator_repository={packet['repository']}",
+                f"operator_pr_number={packet['pr_number']}",
+                f"operator_head_sha={packet['head_sha']}",
+                f"operator_permitted_merge_method={packet['permitted_merge_method']}",
+                f"operator_policy_reason={packet['policy_reason']}",
+                f"operator_next_continuation_step={packet['next_continuation_step']}",
+            )
+        )
+    status_lines.append(
+        "review_receipt_hash="
+        + hashlib.sha256(render_review_gate_report(review_decision).encode("utf-8")).hexdigest()[:16]
     )
     return _maintenance_report(
         report_status,

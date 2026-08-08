@@ -26,7 +26,15 @@ APPROVAL_POLICIES: Final = frozenset(
 OVERLAP_POLICIES: Final = frozenset({"skip", "queue_one", "needs_operator"})
 MISFIRE_POLICIES: Final = frozenset({"run_once", "skip", "needs_operator"})
 OCCURRENCE_STATES: Final = frozenset(
-    {"pending", "running", "done", "failed", "needs_operator", "skipped"}
+    {
+        "pending",
+        "running",
+        "done",
+        "failed",
+        "waiting_dependency",
+        "needs_operator",
+        "skipped",
+    }
 )
 
 _SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -184,6 +192,10 @@ class OccurrenceRecord:
     created_at: int
     updated_at: int
     started_at: int | None
+    attempt: int = 0
+    idempotency_key: str | None = None
+    parent_occurrence_id: str | None = None
+    parent_receipt_id: str | None = None
 
     def public_receipt(self) -> dict[str, Any]:
         return {
@@ -194,6 +206,10 @@ class OccurrenceRecord:
             "scheduled_for": self.scheduled_for,
             "state": self.state,
             "reason": self.reason,
+            "attempt": self.attempt,
+            "idempotency_key": self.idempotency_key,
+            "parent_occurrence_id": self.parent_occurrence_id,
+            "parent_receipt_id": self.parent_receipt_id,
             "public_safe": True,
             "payload_included": False,
         }
@@ -206,6 +222,13 @@ def stable_occurrence_id(schedule_id: str, version: int, scheduled_for: int) -> 
     digest = hashlib.sha256(
         f"{schedule_id}\n{version}\n{scheduled_for}".encode("utf-8")
     ).hexdigest()
+    return f"occ_{digest[:32]}"
+
+
+def stable_followup_occurrence_id(parent_occurrence_id: str, step_id: str) -> str:
+    parent_occurrence_id = _safe_token(parent_occurrence_id, "parent_occurrence_id")
+    step_id = _safe_token(step_id, "step_id")
+    digest = hashlib.sha256(f"{parent_occurrence_id}\n{step_id}".encode("utf-8")).hexdigest()
     return f"occ_{digest[:32]}"
 
 
