@@ -116,6 +116,9 @@ from core.runner_retry_policy import (
     one_time_override_hash,
     parse_prior_blocked_reports,
 )
+from core.notification_policy import claim_operator_notification, should_notify_operator_status
+from core.review_gate import ensure_draft_pr_review_continuation
+from core.scheduler_store import SchedulerStore
 from core.memory_bootstrap import (
     MEMORY_BOOTSTRAP_REQUEST_SCHEMA,
     MemoryBootstrapError,
@@ -880,6 +883,7 @@ RUNNER_MEMORY_DB_ENV = "SKELETON_RUNNER_MEMORY_DB"
 RUNNER_MEMORY_LEDGER_ENV = "SKELETON_RUNNER_MEMORY_LEDGER"
 RUNNER_MEMORY_DIR_ENV = "SKELETON_RUNNER_MEMORY_DIR"
 RUNNER_MEMORY_WARNING = "Memory warning: Runner memory write failed."
+SCHEDULER_DB_ENV = "SKELETON_SCHEDULER_DB"
 _PUBLIC_GITHUB_PR_URL_RE = re.compile(
     r"^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[1-9]\d*/?$"
 )
@@ -4184,8 +4188,26 @@ def notify_task_finished(
     issue_number: int, status: str, report: str | None = None
 ) -> None:
     try:
+        if not should_notify_operator_status(status):
+            if _durable_notification_policy_available():
+                return
         if not should_notify_task_finished(issue_number, status):
             return
+        if should_notify_operator_status(status):
+            scheduler_db_path = _scheduler_db_path()
+            if not claim_operator_notification(
+                SchedulerStore(scheduler_db_path),
+                status=status,
+                now=int(time.time()),
+                issue_number=issue_number,
+                payload={
+                    "issue_number": issue_number,
+                    "status": status,
+                    "report": report or "",
+                },
+                reason=_notification_reason_from_report(report),
+            ):
+                return
         issue = _NOTIFICATION_ISSUE_CACHE.pop((issue_number, status), None)
         target_repository = (
             notification_target_repository(issue) if issue is not None else REPO
@@ -4223,6 +4245,35 @@ def notify_task_finished(
             send_telegram_notification(plain_message)
     except Exception:
         return
+
+
+def _notification_reason_from_report(report: str | None) -> str | None:
+    if not report:
+        return None
+    for line in report.splitlines():
+        if line.startswith("reason="):
+            return line.split("=", 1)[1][:128]
+    first = report.splitlines()[0] if report.splitlines() else ""
+    if ":" in first:
+        return first.split(":", 1)[1].strip()[:128] or None
+    return first[:128] or None
+
+
+def _scheduler_db_path() -> str:
+    configured = os.environ.get(SCHEDULER_DB_ENV)
+    if configured:
+        return configured
+    default_parent = ROOT / ".codex"
+    if default_parent.exists() and not default_parent.is_dir():
+        return str(Path(tempfile.gettempdir()) / "skeleton-scheduler.sqlite3")
+    return str(default_parent / "scheduler.sqlite3")
+
+
+def _durable_notification_policy_available() -> bool:
+    if os.environ.get(SCHEDULER_DB_ENV):
+        return True
+    default_parent = ROOT / ".codex"
+    return not default_parent.exists() or default_parent.is_dir()
 
 
 def ensure_clean_worktree(workdir: str) -> tuple[bool, str]:
@@ -10677,6 +10728,36 @@ def _issue_worktree_publish_pr_url(
     return pr_url, None
 
 
+def _ensure_internal_review_after_draft_pr(
+    request: IssueWorktreePublishInspectionRequest,
+    *,
+    pr_url: str,
+    pushed_head_sha: str,
+) -> tuple[list[str], str | None]:
+    pr_number = extract_pr_number(pr_url)
+    if pr_number is None:
+        return [], "internal_review_pr_number_unavailable"
+    scheduler_db_path = _scheduler_db_path()
+    try:
+        continuation = ensure_draft_pr_review_continuation(
+            SchedulerStore(scheduler_db_path),
+            repository=request.repository,
+            pr_number=pr_number,
+            head_sha=pushed_head_sha,
+            source_issue=request.source_issue,
+            allowed_files=sorted(request.allowed_files),
+            now=int(time.time()),
+        )
+    except Exception:
+        return [], "internal_review_continuation_failed"
+    return [
+        "step=internal_review_continuation status=done",
+        f"internal_review_reused={str(not continuation.created).lower()}",
+        f"internal_review_schedule_id={continuation.schedule_id}",
+        f"internal_review_occurrence_id={continuation.occurrence_id}",
+    ], None
+
+
 _CONTAINER_VALIDATION_PUBLISH_ALLOWED_METADATA_FIELDS = frozenset(
     (
         "Mode",
@@ -12899,6 +12980,17 @@ def _issue_worktree_publish_validated_report(
             f"pushed_head_sha={pushed_head_sha}",
         )
     )
+    review_lines, review_reason = _ensure_internal_review_after_draft_pr(
+        request, pr_url=pr_url, pushed_head_sha=pushed_head_sha
+    )
+    if review_reason is not None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, f"step=internal_review_continuation status=failed reason={review_reason}"],
+            "not_met",
+        )
+    status_lines.extend(review_lines)
     if target_project_route:
         assert verified_base_sha is not None
         try:
