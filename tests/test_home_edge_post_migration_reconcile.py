@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from datetime import UTC, datetime
 from typing import Any, Mapping
 
@@ -12,6 +13,7 @@ from core.home_edge.executor import HomeEdgeExecReceipt, HomeEdgeExecRequest, si
 
 SHA = "a" * 40
 SECRET = "test-home-edge-secret"
+RECONCILE_SCRIPT_SHA256 = "158771ad724894612b27961b8c4ac20ab926193409640012d5fca9e4b4aaba9d"
 
 
 def issue_body(**updates: str) -> str:
@@ -149,6 +151,7 @@ def test_request_is_signed_fixed_and_dispatched_only_through_gateway(
 def test_runtime_script_uses_exact_paths_and_boundaries() -> None:
     script = reconcile.RECONCILE_SCRIPT
 
+    assert hashlib.sha256(script.encode()).hexdigest() == RECONCILE_SCRIPT_SHA256
     assert "/home/valertos08" in script
     assert "/home/oleksii" in script
     assert "/home/jeeves" not in script
@@ -290,7 +293,8 @@ def test_success_criteria_requires_all_final_contracts() -> None:
     )
 
 
-def test_nonzero_executor_exit_preserves_valid_embedded_blocked_receipt() -> None:
+@pytest.mark.parametrize("exit_code", [10, 50, 60])
+def test_failed_executor_preserves_valid_embedded_blocked_receipt(exit_code: int) -> None:
     embedded = public_receipt(
         success_criteria="not_met",
         stable_reason="rollback_failed",
@@ -301,7 +305,8 @@ def test_nonzero_executor_exit_preserves_valid_embedded_blocked_receipt() -> Non
     parsed = reconcile.public_receipt_from_executor_stdout(
         executor_receipt(
             "diagnostic preface\n" + json.dumps(embedded) + "\n",
-            exit_code=60,
+            exit_code=exit_code,
+            status="failed",
         ).to_mapping()
     )
 
@@ -309,26 +314,50 @@ def test_nonzero_executor_exit_preserves_valid_embedded_blocked_receipt() -> Non
     assert parsed["stable_reason"] == "rollback_failed"
     assert parsed["rollback_ready"] is True
     assert parsed["rollback_applied"] is False
+    assert parsed["os_identity_status"] == "verified"
+    assert parsed["node_identity_status"] == "verified"
+    assert parsed["audit_receipt_hash"] == reconcile._audit_hash(parsed)
 
 
 @pytest.mark.parametrize("stdout", ["", "not-json", '{"stable_reason":'])
-def test_nonzero_executor_exit_without_valid_receipt_falls_back_generic(
+def test_failed_executor_without_valid_receipt_falls_back_generic(
     stdout: str,
 ) -> None:
     parsed = reconcile.public_receipt_from_executor_stdout(
-        executor_receipt(stdout, exit_code=10).to_mapping()
+        executor_receipt(stdout, exit_code=10, status="failed").to_mapping()
     )
 
     assert parsed["success_criteria"] == "not_met"
     assert parsed["stable_reason"] == "executor_receipt_not_ok"
 
 
-def test_transport_failure_falls_back_generic_even_with_stdout() -> None:
+@pytest.mark.parametrize("status", ["blocked", "timeout", "cancelled", "malformed"])
+def test_transport_failure_falls_back_generic_even_with_stdout(status: str) -> None:
     parsed = reconcile.public_receipt_from_executor_stdout(
-        executor_receipt(json.dumps(public_receipt()), status="blocked").to_mapping()
+        executor_receipt(json.dumps(public_receipt()), status=status).to_mapping()
     )
 
     assert parsed["stable_reason"] == "executor_receipt_not_ok"
+    assert parsed["os_identity_status"] == "unverified"
+
+
+def test_ok_executor_with_valid_success_receipt_remains_met() -> None:
+    parsed = reconcile.public_receipt_from_executor_stdout(
+        executor_receipt(json.dumps(public_receipt()), status="ok", exit_code=0).to_mapping()
+    )
+
+    assert parsed["success_criteria"] == "met"
+    assert parsed["stable_reason"] == "completed"
+
+
+def test_ok_executor_with_nonzero_exit_cannot_promote_success_receipt_to_met() -> None:
+    parsed = reconcile.public_receipt_from_executor_stdout(
+        executor_receipt(json.dumps(public_receipt()), status="ok", exit_code=50).to_mapping()
+    )
+
+    assert parsed["success_criteria"] == "not_met"
+    assert parsed["stable_reason"] == "completed"
+    assert parsed["audit_receipt_hash"] == reconcile._audit_hash(parsed)
 
 
 def test_runtime_script_watchdog_and_daemon_reload_fail_closed() -> None:
