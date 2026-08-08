@@ -173,6 +173,8 @@ def trusted_runner_comment_authors() -> frozenset[str]:
 
 
 LABEL_READY = "runner:ready"
+LABEL_PRIORITY_1 = "runner:priority-1"
+LABEL_RUN_NOW = "queue:RUN_NOW"
 LABEL_RUNNING = "runner:running"
 LABEL_DONE = "runner:done"
 LABEL_BLOCKED = "runner:blocked"
@@ -1940,7 +1942,39 @@ def get_ready_issues() -> list[dict[str, Any]]:
     parsed = json.loads(output or "[]")
     if not isinstance(parsed, list):
         raise RuntimeError("gh issue list returned non-list JSON")
-    return [issue for issue in parsed if is_open_task_issue(issue)]
+    return sort_ready_issues_by_priority(
+        [issue for issue in parsed if is_open_task_issue(issue)]
+    )
+
+
+def sort_ready_issues_by_priority(issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(issues, key=_ready_issue_priority_key)
+
+
+def _ready_issue_priority_key(issue: dict[str, Any]) -> tuple[int, int]:
+    labels = _issue_label_names(issue)
+    if LABEL_RUN_NOW in labels:
+        priority = 0
+    elif LABEL_PRIORITY_1 in labels:
+        priority = 1
+    else:
+        priority = 2
+    number = issue.get("number")
+    deterministic_number = int(number) if isinstance(number, int) and not isinstance(number, bool) else 0
+    return priority, deterministic_number
+
+
+def _issue_label_names(issue: Mapping[str, Any]) -> frozenset[str]:
+    labels = issue.get("labels", [])
+    if not isinstance(labels, list):
+        return frozenset()
+    names: set[str] = set()
+    for label in labels:
+        if isinstance(label, Mapping) and isinstance(label.get("name"), str):
+            names.add(str(label["name"]))
+        elif isinstance(label, str):
+            names.add(label)
+    return frozenset(names)
 
 
 def is_pull_request_item(item: dict[str, Any]) -> bool:
