@@ -70,9 +70,16 @@ from core.runner_shadow_integration import (
     runner_task_from_normalized_metadata,
     task_envelope_hash,
 )
+from core.runner_task import RunnerTask as CoreRunnerTask
 from core.runner_executor import CallableRunnerExecutor, RunnerExecutorError
 from core.runner_executor_registry import RunnerExecutorRegistry
 from core.runner_gate import ROUTE_REQUIRED_CAPABILITIES, RunnerGate
+from core.runner_repository_maintenance_executor import (
+    APPROVED_PR_MERGE_TASK_ID,
+    ApprovedPrMergeRequest,
+    RepositoryMaintenanceExecutor,
+)
+from core.home_edge.action import REMOTE_READ_ONLY_DIAGNOSTIC_TASK_ID
 from core.runner_loop_control_executor import (
     LOOP_ENGINE_PACKET,
     LOOP_STATE_DB_ENV,
@@ -297,6 +304,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         HOME_EDGE_AUDIT_PERSIST_V1,
         HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1,
         HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1,
+        REMOTE_READ_ONLY_DIAGNOSTIC_TASK_ID,
         PREPARE_PRIVATE_STATIC_SITE_HANDOFF,
         DEPLOY_PRIVATE_STATIC_SITE,
     )
@@ -2903,6 +2911,47 @@ def build_universal_runner_executor_registry(
     def code_edit_handler(_task: Any) -> tuple[int, str]:
         return run_codex_task(task_content, issue_workdir, runner_task)
 
+    def legacy_maintenance_runner(maintenance_task_id: str, _task: Any) -> str:
+        return dispatch_runtime_maintenance_task(
+            maintenance_task_id,
+            coordinator_workdir or issue_workdir,
+            issue_body,
+        )
+
+    def bounded_merge_runner(request: ApprovedPrMergeRequest) -> dict[str, Any]:
+        command = [
+            "gh",
+            "pr",
+            "merge",
+            str(request.pr_number),
+            "--repo",
+            REPO,
+            "--squash",
+            "--match-head-commit",
+            request.expected_head_sha,
+        ]
+        code, _output = run_command(command)
+        if code != 0:
+            return {
+                "status": "blocked",
+                "pr_number": request.pr_number,
+                "head_sha": request.expected_head_sha,
+                "merge_executed": False,
+            }
+        return {
+            "status": "merged",
+            "pr_number": request.pr_number,
+            "head_sha": request.expected_head_sha,
+            "merge_executed": True,
+        }
+
+    repository_maintenance_executor = RepositoryMaintenanceExecutor(
+        legacy_runner=legacy_maintenance_runner,
+        merge_runner=bounded_merge_runner,
+        pr_state_reader=get_pr_merge_state,
+        home_edge_execute=_home_edge_boundary_execute,
+    )
+
     def maintenance_handler(task: Any) -> str:
         payload = getattr(task, "payload", {})
         maintenance_task_id = (
@@ -2913,17 +2962,53 @@ def build_universal_runner_executor_registry(
                 "EXECUTOR_MAINTENANCE_TASK_ID_MISSING",
                 "typed maintenance executor requires a maintenance task id",
             )
-        return dispatch_runtime_maintenance_task(
-            maintenance_task_id,
-            coordinator_workdir or issue_workdir,
-            issue_body,
+        return repository_maintenance_executor.execute(task)
+
+    def publish_handler(task: Any) -> str:
+        payload = getattr(task, "payload", {})
+        if not isinstance(payload, Mapping) or "pr_number" not in payload:
+            raise RunnerExecutorError(
+                "EXECUTOR_PUBLISH_REQUEST_MISSING",
+                "typed publish executor requires a signed merge request",
+            )
+        _merge_mode, parsed_merge_request, _merge_reason = (
+            extract_telegram_approved_pr_merge_request(issue_body)
         )
+        merge_payload = dict(payload)
+        merge_payload.setdefault("maintenance_task_id", APPROVED_PR_MERGE_TASK_ID)
+        if parsed_merge_request is not None:
+            merge_payload.setdefault(
+                "expected_head_sha", parsed_merge_request.approved_head_sha
+            )
+        merge_payload.setdefault("operator_approval", task.approval_reference)
+        task_with_merge_payload = CoreRunnerTask.from_mapping(
+            {
+                "schema": task.schema,
+                "repo": task.repo,
+                "branch": task.branch,
+                "base_sha": task.base_sha,
+                "task_kind": "repository_maintenance",
+                "payload": merge_payload,
+                "requested_capabilities": list(task.requested_capabilities),
+                "allowed_files": list(task.allowed_files),
+                "forbidden_actions": list(task.forbidden_actions),
+                "validation_commands": [list(command) for command in task.validation_commands],
+                "validation_timeout_seconds": task.validation_timeout_seconds,
+                "expected_output": list(task.expected_output),
+                "privacy_boundary": task.privacy_boundary,
+                "approval_reference": task.approval_reference,
+                "idempotency_key": task.idempotency_key,
+            }
+        )
+        return repository_maintenance_executor.execute(task_with_merge_payload)
 
     executors = []
     for task_kind in compatibility.registered_task_kinds:
         handler = (
             code_edit_handler
             if task_kind == "code_edit"
+            else publish_handler
+            if task_kind == "publish"
             else maintenance_handler
         )
         executors.append(
@@ -12912,6 +12997,39 @@ def publish_existing_issue_worktree(body: str) -> str:
     )
 
 
+def _home_edge_boundary_execute(request: Mapping[str, Any]) -> Mapping[str, Any]:
+    from core.home_edge.executor_gateway import build_node_engine
+
+    return build_node_engine().execute(request).to_mapping()
+
+
+def remote_read_only_diagnostic() -> str:
+    task_id = REMOTE_READ_ONLY_DIAGNOSTIC_TASK_ID
+    executor = RepositoryMaintenanceExecutor(
+        home_edge_execute=_home_edge_boundary_execute,
+    )
+    task = CoreRunnerTask.from_mapping(
+        {
+            "schema": "skeleton.runner_task.v1",
+            "repo": REPO,
+            "branch": "runner/remote-read-only-diagnostic",
+            "base_sha": "0" * 40,
+            "task_kind": "repository_maintenance",
+            "payload": {"maintenance_task_id": task_id},
+            "requested_capabilities": ["repository_read", "repository_maintenance"],
+            "allowed_files": ["core/home_edge/action.py"],
+            "forbidden_actions": ["no arbitrary shell from issue payload"],
+            "validation_commands": [["python3", "-m", "pytest", "-q"]],
+            "validation_timeout_seconds": 900,
+            "expected_output": ["DE-PC Windows baseline aggregate receipt"],
+            "privacy_boundary": "PUBLIC_SAFE_AGGREGATE_ONLY",
+            "approval_reference": "fixed-home-edge-de-pc-read-only-baseline",
+            "idempotency_key": task_id,
+        }
+    )
+    return executor.execute(task)
+
+
 def publish_target_project_issue_worktree_pr(body: str) -> str:
     return _issue_worktree_publish_validated_report(
         body,
@@ -13462,6 +13580,8 @@ def dispatch_runtime_maintenance_task(
             return home_edge_01_debian_media_bootstrap_v1(body)
         if task_id == HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1:
             return home_edge_01_post_migration_reconcile_v1(body)
+        if task_id == REMOTE_READ_ONLY_DIAGNOSTIC_TASK_ID:
+            return remote_read_only_diagnostic()
         if task_id == PREPARE_PRIVATE_STATIC_SITE_HANDOFF:
             return _execute_prepare_private_static_site_handoff(body)
         if task_id == DEPLOY_PRIVATE_STATIC_SITE:
@@ -13508,7 +13628,7 @@ def get_pr_merge_state(pr_number: int) -> dict[str, Any]:
             "--repo",
             REPO,
             "--json",
-            "number,state,isDraft,mergeable,headRefOid,comments",
+            "number,state,isDraft,mergeable,headRefOid,files,comments",
         ]
     )
     if code != 0:
