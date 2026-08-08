@@ -3,10 +3,6 @@ name: Skeleton Runtime Recovery Bootstrap
 on:
   issues:
     types: [labeled]
-  schedule:
-    - cron: '*/5 * * * *'
-  pull_request:
-    types: [opened, reopened, synchronize]
 
 permissions:
   contents: read
@@ -22,22 +18,13 @@ jobs:
     # This workflow stays inert except for exact hardcoded authorized recovery routes.
     if: >-
       github.repository == 'alanua/Skeleton' &&
-      (github.event_name == 'schedule' ||
-      (github.event_name == 'issues' &&
+      github.event_name == 'issues' &&
       github.event.action == 'labeled' &&
       github.event.issue.number == 2124 &&
       github.event.issue.state == 'open' &&
       github.event.label.name == 'risk:green' &&
       github.event.issue.user.login == 'alanua' &&
-      contains(github.event.issue.body, 'Authorization Marker: EXPLICIT_RUNTIME_RECOVERY_BOOTSTRAP_20260802')) ||
-      (github.event_name == 'pull_request' &&
-      (github.event.action == 'opened' ||
-      github.event.action == 'reopened' ||
-      github.event.action == 'synchronize') &&
-      github.event.pull_request.base.ref == 'main' &&
-      github.event.pull_request.head.ref == 'runner/issue-2145' &&
-      github.event.pull_request.user.login == 'alanua' &&
-      contains(github.event.pull_request.body, 'Authorization Marker: EXPLICIT_RUNTIME_RECOVERY_CLEANUP_TRIGGER_20260803')))
+      contains(github.event.issue.body, 'Authorization Marker: EXPLICIT_RUNTIME_RECOVERY_BOOTSTRAP_20260802')
     runs-on:
       - self-hosted
       - Linux
@@ -46,7 +33,6 @@ jobs:
     env:
       CANONICAL_REPOSITORY: alanua/Skeleton
       EXPECTED_SOURCE_BASE_SHA: f75c8961d480f6d93b514691e6be6613ffa364f5
-      PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
       TARGET_CHECKOUT: /home/agent/agent-dev/repos/Skeleton
       RECOVERY_ROOT: /home/agent/agent-dev/private-recovery/skeleton
     steps:
@@ -97,25 +83,11 @@ jobs:
           if [[ ! "${origin_main_sha}" =~ ^[0-9a-f]{40}$ ]]; then
             exit 1
           fi
-          case "${GITHUB_EVENT_NAME}" in
-            pull_request)
-              if [[ -z "${PR_BASE_SHA:-}" ]]; then
-                exit 1
-              fi
-              if [[ ! "${PR_BASE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
-                exit 1
-              fi
-              test "${PR_BASE_SHA}" = "${origin_main_sha}"
-              target_sha="${PR_BASE_SHA}"
-              ;;
-            *)
-              if [[ -z "${GITHUB_SHA:-}" ]]; then
-                exit 1
-              fi
-              test "${GITHUB_SHA}" = "${origin_main_sha}"
-              target_sha="${GITHUB_SHA}"
-              ;;
-          esac
+          if [[ -z "${GITHUB_SHA:-}" ]]; then
+            exit 1
+          fi
+          test "${GITHUB_SHA}" = "${origin_main_sha}"
+          target_sha="${origin_main_sha}"
           git -C "${TARGET_CHECKOUT}" rev-list --first-parent "${target_sha}" \
             | grep -Fx "${EXPECTED_SOURCE_BASE_SHA}" >/dev/null
 
