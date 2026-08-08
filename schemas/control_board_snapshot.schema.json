@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/skeleton/control_board_snapshot.schema.json",
+  "title": "Skeleton Control Board Snapshot",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "generated_at", "title", "subtitle", "metrics", "today", "kanban", "projects", "approvals", "workflows", "evidence", "health"],
+  "properties": {
+    "schema": {"const": "skeleton.control_board.snapshot.v1"},
+    "generated_at": {"type": "string", "minLength": 1, "maxLength": 180},
+    "title": {"type": "string", "minLength": 1, "maxLength": 180},
+    "subtitle": {"type": "string", "minLength": 1, "maxLength": 480},
+    "metrics": {"type": "array", "minItems": 1, "maxItems": 24, "items": {"$ref": "#/$defs/metric"}},
+    "today": {"type": "array", "minItems": 1, "maxItems": 24, "items": {"$ref": "#/$defs/today"}},
+    "kanban": {"type": "array", "minItems": 1, "maxItems": 24, "items": {"$ref": "#/$defs/kanban"}},
+    "projects": {"type": "array", "minItems": 1, "maxItems": 24, "items": {"$ref": "#/$defs/project"}},
+    "approvals": {"type": "array", "minItems": 1, "maxItems": 24, "items": {"$ref": "#/$defs/approval"}},
+    "workflows": {"type": "array", "minItems": 1, "maxItems": 24, "items": {"$ref": "#/$defs/workflow"}},
+    "evidence": {"type": "array", "minItems": 1, "maxItems": 24, "items": {"$ref": "#/$defs/evidence"}},
+    "health": {"type": "array", "minItems": 1, "maxItems": 24, "items": {"$ref": "#/$defs/health"}}
+  },
+  "$defs": {
+    "status": {"enum": ["ok", "watch", "blocked", "review", "queued", "running", "done"]},
+    "shortText": {"type": "string", "minLength": 1, "maxLength": 180},
+    "longText": {"type": "string", "minLength": 1, "maxLength": 480},
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "value", "tone"],
+      "properties": {
+        "label": {"$ref": "#/$defs/shortText"},
+        "value": {"$ref": "#/$defs/shortText"},
+        "tone": {"$ref": "#/$defs/status"}
+      }
+    },
+    "today": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "detail", "status", "owner"],
+      "properties": {
+        "title": {"$ref": "#/$defs/shortText"},
+        "detail": {"$ref": "#/$defs/longText"},
+        "status": {"$ref": "#/$defs/status"},
+        "owner": {"$ref": "#/$defs/shortText"}
+      }
+    },
+    "kanban": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "detail", "lane", "status"],
+      "properties": {
+        "title": {"$ref": "#/$defs/shortText"},
+        "detail": {"$ref": "#/$defs/longText"},
+        "lane": {"$ref": "#/$defs/shortText"},
+        "status": {"$ref": "#/$defs/status"}
+      }
+    },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "summary", "status", "updated"],
+      "properties": {
+        "name": {"$ref": "#/$defs/shortText"},
+        "summary": {"$ref": "#/$defs/longText"},
+        "status": {"$ref": "#/$defs/status"},
+        "updated": {"$ref": "#/$defs/shortText"}
+      }
+    },
+    "approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request", "source", "status"],
+      "properties": {
+        "request": {"$ref": "#/$defs/longText"},
+        "source": {"$ref": "#/$defs/shortText"},
+        "status": {"$ref": "#/$defs/status"}
+      }
+    },
+    "workflow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "stage", "status", "next_step"],
+      "properties": {
+        "name": {"$ref": "#/$defs/shortText"},
+        "stage": {"$ref": "#/$defs/shortText"},
+        "status": {"$ref": "#/$defs/status"},
+        "next_step": {"$ref": "#/$defs/longText"}
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "reference", "status"],
+      "properties": {
+        "label": {"$ref": "#/$defs/shortText"},
+        "reference": {"$ref": "#/$defs/longText"},
+        "status": {"$ref": "#/$defs/status"}
+      }
+    },
+    "health": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["component", "status", "detail"],
+      "properties": {
+        "component": {"$ref": "#/$defs/shortText"},
+        "status": {"$ref": "#/$defs/status"},
+        "detail": {"$ref": "#/$defs/longText"}
+      }
+    }
+  }
+}
