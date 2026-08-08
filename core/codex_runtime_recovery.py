@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 
 
-TARGET_CODEX_VERSION = "0.144.4"
+TARGET_CODEX_VERSION = "0.145.0"
 TARGET_CODEX_PACKAGE = f"@openai/codex@{TARGET_CODEX_VERSION}"
 TARGET_CODEX_MODEL = "gpt-5.5"
 CANONICAL_RUNNER_ROOT = Path("/home/agent/agent-dev/repos/Skeleton")

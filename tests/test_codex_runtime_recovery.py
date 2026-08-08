@@ -75,7 +75,7 @@ def test_recovery_installs_exact_target_smokes_and_marks_success(
 
     assert recovery.ensure_pinned_codex_runtime(env)
     assert installs == [recovery.TARGET_CODEX_VERSION]
-    assert (tmp_path / "ok").read_text(encoding="utf-8") == "version=0.144.4\n"
+    assert (tmp_path / "ok").read_text(encoding="utf-8") == "version=0.145.0\n"
 
 
 def test_recovery_rolls_back_exact_prior_version_when_smoke_fails(
