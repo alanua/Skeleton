@@ -4,12 +4,20 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 import hashlib
 import json
+import time
 from typing import Any, Final
 
 from core.loop_controller import LoopPolicy
 from core.loop_engine import LoopEngine
 from core.loop_runner_adapter import run_loop_task_packet
 from core.loop_state_store import LoopStateStore
+from core.review_gate import (
+    INTERNAL_REVIEW_CONTROL_ROUTE,
+    ReviewControlAdapters,
+    ReviewStateReader,
+    dispatch_internal_review_control,
+)
+from core.scheduler_store import SchedulerStore
 
 
 DISPATCH_RECEIPT_SCHEMA: Final = "skeleton.scheduler_dispatch_receipt.v1"
@@ -60,7 +68,15 @@ class SharedDispatcher:
         self._routes = dict(routes)
 
     @classmethod
-    def for_loop_engine(cls, *, loop_state_db_path: str) -> "SharedDispatcher":
+    def for_loop_engine(
+        cls,
+        *,
+        loop_state_db_path: str,
+        scheduler_db_path: str | None = None,
+        review_state_reader: ReviewStateReader | None = None,
+        review_adapters: ReviewControlAdapters | None = None,
+        now: Callable[[], int] | None = None,
+    ) -> "SharedDispatcher":
         def handler(request: SharedDispatchRequest) -> Mapping[str, Any]:
             task_packet = request.payload.get("task_packet")
             store = LoopStateStore(loop_state_db_path)
@@ -74,7 +90,34 @@ class SharedDispatcher:
             required_capabilities=frozenset({"loop:state_write"}),
             handler=handler,
         )
-        return cls({("loop", ROUTE_LOOP_ENGINE_PACKET): route})
+        routes = {("loop", ROUTE_LOOP_ENGINE_PACKET): route}
+        adapters = review_adapters
+        if (
+            adapters is None
+            and scheduler_db_path is not None
+            and review_state_reader is not None
+        ):
+            adapters = ReviewControlAdapters(state_reader=review_state_reader)
+        if scheduler_db_path is not None and adapters is not None:
+            clock = now or (lambda: int(time.time()))
+
+            def review_handler(request: SharedDispatchRequest) -> Mapping[str, Any]:
+                store = SchedulerStore(scheduler_db_path)
+                store.initialize()
+                return dispatch_internal_review_control(
+                    request.payload,
+                    store=store,
+                    now=clock(),
+                    adapters=adapters,
+                )
+
+            routes[("runner", INTERNAL_REVIEW_CONTROL_ROUTE)] = DispatchRoute(
+                route_type="runner",
+                route_id=INTERNAL_REVIEW_CONTROL_ROUTE,
+                required_capabilities=frozenset({"repository_read"}),
+                handler=review_handler,
+            )
+        return cls(routes)
 
     def dispatch(self, request: SharedDispatchRequest) -> SharedDispatchResult:
         try:
@@ -145,18 +188,14 @@ def _validate_policy_envelope(
         raise SharedDispatchError("PRIVACY_BOUNDARY_MISMATCH")
     if payload.get("bounded") is not True:
         raise SharedDispatchError("UNBOUNDED_DISPATCH_PAYLOAD")
-    approved = payload.get("approved_capabilities")
-    if not isinstance(approved, list) or any(not isinstance(item, str) for item in approved):
-        raise SharedDispatchError("INVALID_APPROVED_CAPABILITIES")
-    approved_set = frozenset(approved)
-    if not required_capabilities.issubset(approved_set):
-        raise SharedDispatchError("CAPABILITY_NOT_APPROVED")
     requested = payload.get("requested_capabilities", [])
     if not isinstance(requested, list) or any(not isinstance(item, str) for item in requested):
         raise SharedDispatchError("INVALID_REQUESTED_CAPABILITIES")
-    if not frozenset(requested).issubset(approved_set):
+    if not required_capabilities.issubset(frozenset(requested)):
         raise SharedDispatchError("CAPABILITY_NOT_APPROVED")
-    if "task_packet" not in payload:
+    if not frozenset(requested).issubset(required_capabilities):
+        raise SharedDispatchError("CAPABILITY_NOT_APPROVED")
+    if required_capabilities == frozenset({"loop:state_write"}) and "task_packet" not in payload:
         raise SharedDispatchError("MISSING_TYPED_TASK_PACKET")
 
 
