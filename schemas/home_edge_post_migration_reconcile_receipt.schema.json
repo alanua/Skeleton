@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/alanua/Skeleton/schemas/home_edge_post_migration_reconcile_receipt.schema.json",
+  "title": "Home Edge Post Migration Reconcile Public Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "maintenance_task_id",
+    "os_identity_status",
+    "node_identity_status",
+    "boot_id_unchanged",
+    "registry_status",
+    "gallery_status",
+    "brother_status",
+    "aggregate_status",
+    "cast_status",
+    "pointer_status",
+    "watchdog_status",
+    "watchdog_critical_count",
+    "watchdog_warning_count",
+    "refresh_count",
+    "aggregate_source_repaired",
+    "stale_before_count",
+    "stale_after_count",
+    "changed_file_count",
+    "system_failed_unit_count",
+    "user_failed_unit_count",
+    "current_brother_service_status",
+    "current_brother_guard_timer_status",
+    "rollback_ready",
+    "rollback_applied",
+    "mutation_executor_receipt_hash",
+    "audit_receipt_hash",
+    "stable_reason",
+    "success_criteria",
+    "canonical_memory_post_step"
+  ],
+  "properties": {
+    "maintenance_task_id": {
+      "const": "home_edge_01_post_migration_reconcile_v1"
+    },
+    "os_identity_status": {
+      "enum": ["verified", "blocked", "unverified"]
+    },
+    "node_identity_status": {
+      "enum": ["verified", "blocked", "unverified"]
+    },
+    "boot_id_unchanged": {
+      "type": "boolean"
+    },
+    "registry_status": {
+      "enum": ["healthy", "blocked"]
+    },
+    "gallery_status": {
+      "enum": ["already_healthy", "repaired_healthy", "blocked"]
+    },
+    "brother_status": {
+      "enum": ["healthy", "blocked"]
+    },
+    "aggregate_status": {
+      "enum": ["healthy", "blocked"]
+    },
+    "cast_status": {
+      "enum": ["healthy", "blocked"]
+    },
+    "pointer_status": {
+      "enum": ["healthy", "blocked"]
+    },
+    "watchdog_status": {
+      "enum": ["healthy", "blocked"]
+    },
+    "watchdog_critical_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "watchdog_warning_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "refresh_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "aggregate_source_repaired": {
+      "type": "boolean"
+    },
+    "stale_before_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "stale_after_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "changed_file_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "system_failed_unit_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "user_failed_unit_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "current_brother_service_status": {
+      "enum": ["active", "blocked"]
+    },
+    "current_brother_guard_timer_status": {
+      "enum": ["active", "blocked"]
+    },
+    "rollback_ready": {
+      "type": "boolean"
+    },
+    "rollback_applied": {
+      "type": "boolean"
+    },
+    "mutation_executor_receipt_hash": {
+      "type": "string",
+      "pattern": "^([0-9a-f]{64}|pending|unavailable)$"
+    },
+    "audit_receipt_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "stable_reason": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.:=-]+$"
+    },
+    "success_criteria": {
+      "enum": ["met", "not_met"]
+    },
+    "canonical_memory_post_step": {
+      "const": "home_edge_audit_persist_v1"
+    }
+  }
+}
