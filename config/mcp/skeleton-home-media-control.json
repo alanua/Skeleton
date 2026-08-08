@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "home-media-control": {
+      "command": "/usr/local/bin/skeleton-home-media-control-mcp",
+      "args": []
+    }
+  }
+}
