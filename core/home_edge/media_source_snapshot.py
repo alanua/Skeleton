@@ -22,6 +22,7 @@ from core.home_edge.executor_gateway import EXEC_HMAC_SECRET_ENV, execute_home_e
 TASK_ID = "home_edge_01_media_source_snapshot_v1"
 REPOSITORY = "alanua/Skeleton"
 TARGET_NODE = "home-edge-01"
+OPERATOR_APPROVAL_REF = "EXPLICIT_MINIMAL_HOME_EDGE_SNAPSHOT_ACCESS_REPAIR_2026_08_09"
 SOURCE_IDENTITY_TOKEN = "home_edge_01_skeleton_cast_app_py"
 SOURCE_PATH = "/opt/skeleton/cast/app.py"
 RUN_AS = "desktop-user"
@@ -134,13 +135,16 @@ def execute_media_source_snapshot_task(
 
     try:
         request = build_snapshot_request(environment=environment)
+        request_payload = _validate_signed_snapshot_request_for_transport(request.to_mapping())
     except ValueError as exc:
         reason = exc.args[0] if exc.args else ""
         if isinstance(reason, str) and AUTH_CONFIG_REASON_RE.fullmatch(reason):
             return _blocked_receipt(reason)
+        if reason == "snapshot_request_authority_mismatch":
+            return _blocked_receipt(reason)
         raise
     try:
-        executor_receipt = execute_home_edge_request(request.to_mapping())
+        executor_receipt = execute_home_edge_request(request_payload)
     except (subprocess.TimeoutExpired, TimeoutError):
         return _blocked_receipt("executor_transport_timeout")
     except HomeEdgeExecError:
@@ -231,12 +235,17 @@ def validate_main_sha(
 
 
 def build_snapshot_request(*, environment: Mapping[str, str] | None = None) -> HomeEdgeExecRequest:
-    secret = _resolve_exec_hmac_secret(environment=environment)
-    request = HomeEdgeExecRequest.from_mapping(
+    request = _unsigned_snapshot_request()
+    return _sign_snapshot_request(request.to_mapping(include_signature=False), environment=environment)
+
+
+def _unsigned_snapshot_request() -> HomeEdgeExecRequest:
+    return HomeEdgeExecRequest.from_mapping(
         {
             "request_id": f"{TASK_ID}-{uuid4()}",
             "node_id": TARGET_NODE,
             "execution_lane": EXECUTION_LANE,
+            "operator_approval_ref": OPERATOR_APPROVAL_REF,
             "timeout_seconds": REQUEST_TIMEOUT_SECONDS,
             "idempotency_key": f"{IDEMPOTENCY_KEY_PREFIX}-{uuid4()}",
             "run_as": RUN_AS,
@@ -249,9 +258,68 @@ def build_snapshot_request(*, environment: Mapping[str, str] | None = None) -> H
             "public": False,
         }
     )
+
+
+def _sign_snapshot_request(
+    unsigned_request: Mapping[str, Any],
+    *,
+    environment: Mapping[str, str] | None = None,
+) -> HomeEdgeExecRequest:
+    request = _validate_unsigned_snapshot_request_for_signing(unsigned_request)
+    secret = _resolve_exec_hmac_secret(environment=environment)
     return HomeEdgeExecRequest.from_mapping(
         {**request.to_mapping(include_signature=False), "signature": sign_request(request, secret)}
     )
+
+
+def _validate_unsigned_snapshot_request_for_signing(
+    request: Mapping[str, Any],
+) -> HomeEdgeExecRequest:
+    if request.get("operator_approval_ref") != OPERATOR_APPROVAL_REF:
+        raise ValueError("snapshot_request_authority_mismatch")
+    parsed = HomeEdgeExecRequest.from_mapping(request)
+    if parsed.signature is not None:
+        raise ValueError("snapshot_request_authority_mismatch")
+    _validate_snapshot_request_authority(parsed)
+    return parsed
+
+
+def _validate_signed_snapshot_request_for_transport(
+    request: Mapping[str, Any],
+) -> dict[str, Any]:
+    if request.get("operator_approval_ref") != OPERATOR_APPROVAL_REF:
+        raise ValueError("snapshot_request_authority_mismatch")
+    parsed = HomeEdgeExecRequest.from_mapping(request)
+    if not parsed.signature:
+        raise ValueError("snapshot_request_authority_mismatch")
+    _validate_snapshot_request_authority(parsed)
+    return parsed.to_mapping()
+
+
+def _validate_snapshot_request_authority(request: HomeEdgeExecRequest) -> None:
+    if (
+        request.node_id != TARGET_NODE
+        or request.execution_lane.value != EXECUTION_LANE
+        or request.operator_approval_ref != OPERATOR_APPROVAL_REF
+        or request.run_as.value != RUN_AS
+        or request.mode.value != "script"
+        or request.script != SNAPSHOT_SCRIPT
+        or request.script_interpreter != "python3"
+        or request.timeout_seconds != REQUEST_TIMEOUT_SECONDS
+        or request.max_output_bytes != MAX_EXECUTOR_OUTPUT_BYTES
+        or request.public is not False
+        or request.argv
+        or request.stdin_text is not None
+        or request.stdin_base64 is not None
+        or request.cwd is not None
+        or request.environment
+        or not request.request_id.startswith(TASK_ID + "-")
+        or not request.nonce
+        or not request.nonce.startswith(TASK_ID + "-")
+        or not request.idempotency_key
+        or not request.idempotency_key.startswith(IDEMPOTENCY_KEY_PREFIX + "-")
+    ):
+        raise ValueError("snapshot_request_authority_mismatch")
 
 
 def _resolve_exec_hmac_secret(*, environment: Mapping[str, str] | None = None) -> str:

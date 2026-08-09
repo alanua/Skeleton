@@ -6,6 +6,7 @@
 - target: `home-edge-01`
 - public source identity token: `home_edge_01_skeleton_cast_app_py`
 - execution lane: `read_only`
+- operator approval ref: `EXPLICIT_MINIMAL_HOME_EDGE_SNAPSHOT_ACCESS_REPAIR_2026_08_09`
 - run user: `desktop-user`
 - timeout: `30` seconds
 - transport: signed `core.home_edge.executor_gateway` request only
@@ -13,6 +14,8 @@
 The operation is not a general file export facility. Issue metadata may provide only the runtime mode, exact maintenance task ID, repository, expected main SHA, and target. Path, command, script, output path, timeout, lane, user, node, and variant fields are rejected.
 
 ## Executor Authentication
+
+The snapshot request is code-bound to `operator_approval_ref=EXPLICIT_MINIMAL_HOME_EDGE_SNAPSHOT_ACCESS_REPAIR_2026_08_09`. The Runner cannot choose, omit, or alter that value: unsigned payloads missing that exact approval are rejected before any HMAC secret is resolved or any signing occurs, and signed payloads are revalidated for the same approval plus fixed node, lane, user, script, interpreter, timeout, output, public, idempotency, nonce, and request-id authority immediately before `execute_home_edge_request`.
 
 The Runner signs the Home Edge executor request with `SKELETON_HOME_EDGE_EXEC_HMAC_SECRET`. An explicit Runner-provided environment mapping or process environment value takes precedence. If that value is absent or empty, the task reads only `/etc/skeleton/home-edge-executor-controller.env` and only the single allowlisted variable `SKELETON_HOME_EDGE_EXEC_HMAC_SECRET`.
 

@@ -263,6 +263,9 @@ def test_exact_fixed_task_path_node_lane_run_as_contract(monkeypatch: pytest.Mon
     assert snapshot.SOURCE_PATH in first.script
     assert first.node_id == "home-edge-01"
     assert first.execution_lane.value == "read_only"
+    assert snapshot.OPERATOR_APPROVAL_REF == "EXPLICIT_MINIMAL_HOME_EDGE_SNAPSHOT_ACCESS_REPAIR_2026_08_09"
+    assert first.operator_approval_ref == snapshot.OPERATOR_APPROVAL_REF
+    assert second.operator_approval_ref == snapshot.OPERATOR_APPROVAL_REF
     assert first.run_as.value == "desktop-user"
     assert first.timeout_seconds == 30
     assert first.argv == ()
@@ -276,6 +279,59 @@ def test_exact_fixed_task_path_node_lane_run_as_contract(monkeypatch: pytest.Mon
     assert first.nonce != second.nonce
     assert first.signature == sign_request(first, SECRET)
     assert second.signature == sign_request(second, SECRET)
+
+
+@pytest.mark.parametrize(
+    "approval_update",
+    [
+        None,
+        "",
+        "EXPLICIT_MINIMAL_HOME_EDGE_SNAPSHOT_ACCESS_REPAIR_2026_08_08",
+        "root-read-only:home-edge-01-media-source-snapshot-v1",
+    ],
+)
+def test_unsigned_request_without_exact_approval_blocks_before_hmac_or_sign(
+    monkeypatch: pytest.MonkeyPatch,
+    approval_update: str | None,
+) -> None:
+    unsigned = snapshot._unsigned_snapshot_request().to_mapping(include_signature=False)
+    if approval_update is None:
+        unsigned.pop("operator_approval_ref")
+    else:
+        unsigned["operator_approval_ref"] = approval_update
+    hmac_reads = 0
+    sign_calls = 0
+
+    def fake_resolve(*, environment: Mapping[str, str] | None = None) -> str:
+        nonlocal hmac_reads
+        hmac_reads += 1
+        raise AssertionError("HMAC must not be read")
+
+    def fake_sign(_request: HomeEdgeExecRequest, _secret: str) -> str:
+        nonlocal sign_calls
+        sign_calls += 1
+        raise AssertionError("request must not be signed")
+
+    monkeypatch.setattr(snapshot, "_resolve_exec_hmac_secret", fake_resolve)
+    monkeypatch.setattr(snapshot, "sign_request", fake_sign)
+
+    with pytest.raises(ValueError, match="snapshot_request_authority_mismatch"):
+        snapshot._sign_snapshot_request(unsigned, environment={})
+
+    assert hmac_reads == 0
+    assert sign_calls == 0
+
+
+def test_exact_approved_unsigned_request_signs_successfully(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(snapshot, "_resolve_exec_hmac_secret", lambda *, environment=None: SECRET)
+    unsigned = snapshot._unsigned_snapshot_request().to_mapping(include_signature=False)
+
+    request = snapshot._sign_snapshot_request(unsigned, environment={})
+
+    assert request.operator_approval_ref == snapshot.OPERATOR_APPROVAL_REF
+    assert request.signature == sign_request(request, SECRET)
 
 
 def test_environment_secret_takes_precedence_without_config_read(
@@ -300,6 +356,40 @@ def test_environment_secret_takes_precedence_without_config_read(
     request = snapshot.build_snapshot_request(environment={snapshot.EXEC_HMAC_SECRET_ENV: SECRET})
 
     assert request.signature == sign_request(request, SECRET)
+
+
+def test_altered_signed_approval_blocks_before_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv(snapshot.EXEC_HMAC_SECRET_ENV, SECRET)
+    signed = snapshot.build_snapshot_request()
+    tampered = HomeEdgeExecRequest.from_mapping(
+        {
+            **signed.to_mapping(),
+            "operator_approval_ref": "EXPLICIT_MINIMAL_HOME_EDGE_SNAPSHOT_ACCESS_REPAIR_2026_08_08",
+        }
+    )
+    transport_calls = 0
+
+    def fake_execute(_request: Mapping[str, Any]) -> HomeEdgeExecReceipt:
+        nonlocal transport_calls
+        transport_calls += 1
+        raise AssertionError("transport must not be called")
+
+    monkeypatch.setattr(snapshot, "build_snapshot_request", lambda *, environment=None: tampered)
+    monkeypatch.setattr(snapshot, "execute_home_edge_request", fake_execute)
+
+    receipt = snapshot.execute_media_source_snapshot_task(
+        issue_body(),
+        registered_clean_main_sha=SHA,
+        github_main_sha=SHA,
+        private_root=tmp_path,
+    )
+
+    assert transport_calls == 0
+    assert receipt["stable_reason"] == "snapshot_request_authority_mismatch"
+    assert receipt["success_criteria"] == "not_met"
 
 
 def test_safe_fixed_controller_config_secret_signs_request_and_stays_private(
