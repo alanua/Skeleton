@@ -11,6 +11,7 @@ from core.codex_runtime_recovery import (
 
 
 HOME_EDGE_ENV_PREFIX = "SKELETON_HOME_EDGE_01_"
+HOME_EDGE_EXEC_HMAC_SECRET_ENV = "SKELETON_HOME_EDGE_EXEC_HMAC_SECRET"
 
 
 def sanitize_codegen_child_environment(
@@ -20,7 +21,10 @@ def sanitize_codegen_child_environment(
     sanitized = {
         key: value
         for key, value in environment.items()
-        if not key.startswith(HOME_EDGE_ENV_PREFIX)
+        if (
+            not key.startswith(HOME_EDGE_ENV_PREFIX)
+            and key != HOME_EDGE_EXEC_HMAC_SECRET_ENV
+        )
     }
     if should_attempt_codex_runtime_recovery(sanitized):
         try:

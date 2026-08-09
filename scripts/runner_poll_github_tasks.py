@@ -3212,11 +3212,12 @@ def _bootstrap_receipt_output(receipt: Mapping[str, object]) -> str:
 
 
 def _codex_executor(argv: list[str], stdin_text: str, env: Mapping[str, str]) -> tuple[int, str]:
+    child_environment = {
+        **os.environ,
+        **{key: value for key, value in env.items() if isinstance(value, str)},
+    }
     token = _RUN_COMMAND_ENV_OVERRIDE.set(
-        {
-            **sanitize_codegen_child_environment(os.environ),
-            **{key: value for key, value in env.items() if isinstance(value, str)},
-        }
+        sanitize_codegen_child_environment(child_environment)
     )
     try:
         command = list(argv)
