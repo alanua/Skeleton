@@ -41,6 +41,8 @@ CALLBACK_DIGEST = runner.hmac.new(
     f"tpr1:approve:p123:{HEAD_SHA[:8]}".encode("ascii"),
     runner.hashlib.sha256,
 ).hexdigest()[:12]
+HOME_EDGE_EXEC_HMAC_ENV = "SKELETON_HOME_EDGE_EXEC_HMAC_SECRET"
+SYNTHETIC_HOME_EDGE_EXEC_HMAC = "synthetic-home-edge-exec-hmac-marker"
 
 
 def _media_bootstrap_issue_body(expected_sha: str = HEAD_SHA) -> str:
@@ -5041,6 +5043,61 @@ def test_process_issue_clean_worktree_still_dispatches_maintenance_task() -> Non
     dispatch.assert_called_once_with(
         runner.CHECK_SKELETON_FRESHNESS, str(runner.ROOT), issue["body"]
     )
+
+
+def test_runtime_maintenance_dispatch_keeps_parent_hmac_only_inside_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(HOME_EDGE_EXEC_HMAC_ENV, SYNTHETIC_HOME_EDGE_EXEC_HMAC)
+    observed = {"handler_saw_hmac": False}
+
+    def fake_check_skeleton_freshness() -> str:
+        observed["handler_saw_hmac"] = (
+            os.environ.get(HOME_EDGE_EXEC_HMAC_ENV)
+            == SYNTHETIC_HOME_EDGE_EXEC_HMAC
+        )
+        return (
+            "DONE: Runner host maintenance task completed.\n"
+            "maintenance_task_id=check_skeleton_freshness\n"
+            f"{HOME_EDGE_EXEC_HMAC_ENV}_visible_to_handler=true\n"
+            "success_criteria=met"
+        )
+
+    with mock.patch.object(
+        runner,
+        "check_skeleton_freshness",
+        side_effect=fake_check_skeleton_freshness,
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.CHECK_SKELETON_FRESHNESS,
+            str(runner.ROOT),
+        )
+
+    assert observed["handler_saw_hmac"] is True
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert f"{HOME_EDGE_EXEC_HMAC_ENV}_visible_to_handler=true" in report
+    assert SYNTHETIC_HOME_EDGE_EXEC_HMAC not in report
+    assert os.environ[HOME_EDGE_EXEC_HMAC_ENV] == SYNTHETIC_HOME_EDGE_EXEC_HMAC
+
+
+def test_runtime_maintenance_exception_report_does_not_leak_hmac_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(HOME_EDGE_EXEC_HMAC_ENV, SYNTHETIC_HOME_EDGE_EXEC_HMAC)
+
+    with mock.patch.object(
+        runner,
+        "check_skeleton_freshness",
+        side_effect=RuntimeError(SYNTHETIC_HOME_EDGE_EXEC_HMAC),
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.CHECK_SKELETON_FRESHNESS,
+            str(runner.ROOT),
+        )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert HOME_EDGE_EXEC_HMAC_ENV not in report
+    assert SYNTHETIC_HOME_EDGE_EXEC_HMAC not in report
 
 
 def test_duplicate_blocker_blocks_before_executor_invocation() -> None:
@@ -16125,6 +16182,7 @@ def test_run_codex_task_sanitizes_home_edge_environment(
     tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("SKELETON_HOME_EDGE_01_HOSTNAME", "live-home-edge")
+    monkeypatch.setenv(HOME_EDGE_EXEC_HMAC_ENV, SYNTHETIC_HOME_EDGE_EXEC_HMAC)
     monkeypatch.setenv("SKELETON_RUNNER_MEMORY_DB", "/private/runner.sqlite")
     monkeypatch.setenv("PATH", "/usr/bin")
 
@@ -16146,8 +16204,58 @@ def test_run_codex_task_sanitizes_home_edge_environment(
     assert output == "done\n"
     child_environment = subprocess_run.call_args.kwargs["env"]
     assert "SKELETON_HOME_EDGE_01_HOSTNAME" not in child_environment
+    assert HOME_EDGE_EXEC_HMAC_ENV not in child_environment
     assert child_environment["SKELETON_RUNNER_MEMORY_DB"] == "/private/runner.sqlite"
     assert os.environ["SKELETON_HOME_EDGE_01_HOSTNAME"] == "live-home-edge"
+    assert os.environ[HOME_EDGE_EXEC_HMAC_ENV] == SYNTHETIC_HOME_EDGE_EXEC_HMAC
+
+
+def test_codex_executor_sanitizes_parent_and_overlay_hmac_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("SKELETON_HOME_EDGE_01_HOSTNAME", "live-home-edge")
+    monkeypatch.setenv(HOME_EDGE_EXEC_HMAC_ENV, "synthetic-parent-marker")
+    monkeypatch.setenv("PATH", "/usr/bin")
+
+    completed = runner.subprocess.CompletedProcess(
+        args=["codex"],
+        returncode=0,
+        stdout="done\n",
+        stderr="",
+    )
+    command = [
+        "codex",
+        "exec",
+        "--sandbox",
+        "workspace-write",
+        "--cd",
+        str(tmp_path),
+    ]
+
+    with mock.patch.object(
+        runner.subprocess,
+        "run",
+        return_value=completed,
+    ) as subprocess_run:
+        code, output = runner._codex_executor(
+            command,
+            "Task body",
+            {
+                HOME_EDGE_EXEC_HMAC_ENV: "synthetic-overlay-marker",
+                "SKELETON_HOME_EDGE_01_CONTROLLER_HOST": "controller",
+                "RUNNER_ALLOWED_OVERLAY": "kept-overlay",
+            },
+        )
+
+    assert code == 0
+    assert output == "done\n"
+    child_environment = subprocess_run.call_args.kwargs["env"]
+    assert HOME_EDGE_EXEC_HMAC_ENV not in child_environment
+    assert "SKELETON_HOME_EDGE_01_HOSTNAME" not in child_environment
+    assert "SKELETON_HOME_EDGE_01_CONTROLLER_HOST" not in child_environment
+    assert child_environment["RUNNER_ALLOWED_OVERLAY"] == "kept-overlay"
+    assert os.environ[HOME_EDGE_EXEC_HMAC_ENV] == "synthetic-parent-marker"
 
 
 
@@ -16896,6 +17004,8 @@ def test_validation_command_environment_strips_only_home_edge_runtime_values() -
         "PATH": "/usr/bin",
         "LANG": "C.UTF-8",
         "SKELETON_HOME_EDGE_01_HOSTNAME": "live-home-edge",
+        HOME_EDGE_EXEC_HMAC_ENV: SYNTHETIC_HOME_EDGE_EXEC_HMAC,
+        "SKELETON_UNRELATED_SETTING": "kept-skeleton-value",
         "SKELETON_RUNNER_MEMORY_DB": "/private/runner.sqlite",
     }
 
@@ -16905,9 +17015,11 @@ def test_validation_command_environment_strips_only_home_edge_runtime_values() -
         "HOME": "/home/agent",
         "PATH": "/usr/bin",
         "LANG": "C.UTF-8",
+        "SKELETON_UNRELATED_SETTING": "kept-skeleton-value",
         "SKELETON_RUNNER_MEMORY_DB": "/private/runner.sqlite",
     }
     assert environment["SKELETON_HOME_EDGE_01_HOSTNAME"] == "live-home-edge"
+    assert environment[HOME_EDGE_EXEC_HMAC_ENV] == SYNTHETIC_HOME_EDGE_EXEC_HMAC
     assert environment["SKELETON_RUNNER_MEMORY_DB"] == "/private/runner.sqlite"
 
 
@@ -16919,6 +17031,7 @@ def test_run_validation_profile_command_sanitizes_and_resets_environment(
         "SKELETON_HOME_EDGE_01_HOSTNAME",
         "live-home-edge",
     )
+    monkeypatch.setenv(HOME_EDGE_EXEC_HMAC_ENV, SYNTHETIC_HOME_EDGE_EXEC_HMAC)
     monkeypatch.setenv(
         "SKELETON_RUNNER_MEMORY_DB",
         "/private/runner.sqlite",
@@ -16958,6 +17071,7 @@ def test_run_validation_profile_command_sanitizes_and_resets_environment(
     assert validation_environment["PATH"] == "/usr/bin"
     assert validation_environment["HOME"] == "/home/agent"
     assert "SKELETON_HOME_EDGE_01_HOSTNAME" not in validation_environment
+    assert HOME_EDGE_EXEC_HMAC_ENV not in validation_environment
     assert validation_environment["SKELETON_RUNNER_MEMORY_DB"] == "/private/runner.sqlite"
     assert "env" not in normal_kwargs
 
@@ -16965,6 +17079,7 @@ def test_run_validation_profile_command_sanitizes_and_resets_environment(
         os.environ["SKELETON_HOME_EDGE_01_HOSTNAME"]
         == "live-home-edge"
     )
+    assert os.environ[HOME_EDGE_EXEC_HMAC_ENV] == SYNTHETIC_HOME_EDGE_EXEC_HMAC
     assert (
         os.environ["SKELETON_RUNNER_MEMORY_DB"]
         == "/private/runner.sqlite"
@@ -16976,6 +17091,7 @@ def test_run_validation_profile_command_resets_environment_after_failure(
     tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("SKELETON_HOME_EDGE_01_HOSTNAME", "live-home-edge")
+    monkeypatch.setenv(HOME_EDGE_EXEC_HMAC_ENV, SYNTHETIC_HOME_EDGE_EXEC_HMAC)
     completed = runner.subprocess.CompletedProcess(
         args=["python3"],
         returncode=0,
@@ -16998,6 +17114,7 @@ def test_run_validation_profile_command_resets_environment_after_failure(
     assert code == 0
     assert output == "ok\n"
     assert "env" in subprocess_run.call_args_list[0].kwargs
+    assert HOME_EDGE_EXEC_HMAC_ENV not in subprocess_run.call_args_list[0].kwargs["env"]
     assert "env" not in subprocess_run.call_args_list[1].kwargs
 
 
@@ -17007,6 +17124,7 @@ def test_finalize_success_validation_subprocesses_use_sanitized_environment(
     monkeypatch.setenv("SKELETON_HOME_EDGE_01_HOSTNAME", "live-home-edge")
     monkeypatch.setenv("SKELETON_HOME_EDGE_01_TAILSCALE_IP", "100.64.0.1")
     monkeypatch.setenv("SKELETON_HOME_EDGE_01_CONTROLLER_HOST", "controller")
+    monkeypatch.setenv(HOME_EDGE_EXEC_HMAC_ENV, SYNTHETIC_HOME_EDGE_EXEC_HMAC)
     monkeypatch.setenv("SKELETON_HOME_EDGE_TEST_FIXTURE", "public-fixture")
     monkeypatch.setenv("SKELETON_RUNNER_MEMORY_DB", "/private/runner.sqlite")
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "telegram-token")
@@ -17034,6 +17152,7 @@ def test_finalize_success_validation_subprocesses_use_sanitized_environment(
                 key.startswith("SKELETON_HOME_EDGE_01_")
                 for key in child_environment
             )
+            assert HOME_EDGE_EXEC_HMAC_ENV not in child_environment
             assert child_environment["SKELETON_HOME_EDGE_TEST_FIXTURE"] == "public-fixture"
             assert child_environment["SKELETON_RUNNER_MEMORY_DB"] == "/private/runner.sqlite"
             assert child_environment["TELEGRAM_BOT_TOKEN"] == "telegram-token"
