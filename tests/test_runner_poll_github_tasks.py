@@ -920,6 +920,133 @@ def test_ready_queue_priority_markers_sort_deterministically_without_unknown_aut
     assert [issue["number"] for issue in ordered] == [5, 10, 11, 20, 30]
 
 
+def _queue_task_issue(
+    number: int,
+    title: str,
+    *,
+    labels: list[str] | None = None,
+    body_extra: str = "",
+    task_extra: str = "Do the bounded public-safe work.",
+    updated_at: str = "2026-08-01T00:00:00Z",
+) -> dict[str, object]:
+    body = "\n".join(
+        line
+        for line in (
+            body_extra,
+            "```task",
+            "classification: YELLOW_LOCAL_PATCH",
+            "repo: alanua/Skeleton",
+            f"intent: intent-{number}",
+            task_extra,
+            "```",
+        )
+        if line
+    )
+    return {
+        "number": number,
+        "title": title,
+        "body": body,
+        "state": "OPEN",
+        "closed": False,
+        "labels": [{"name": label} for label in (labels or [])],
+        "updatedAt": updated_at,
+    }
+
+
+def test_autonomous_queue_replenisher_promotes_priority_candidates_without_telegram(
+    monkeypatch,
+) -> None:
+    labels_applied: list[tuple[int, str]] = []
+    issues = [
+        _queue_task_issue(30, "Normal dashboard cleanup", body_extra="Allowed Files:\n- docs/DASHBOARD.md"),
+        _queue_task_issue(20, "P0 recovery parser repair", body_extra="Allowed Files:\n- docs/RECOVERY.md"),
+        _queue_task_issue(10, "Existing ready", labels=[runner.LABEL_READY], body_extra="Allowed Files:\n- README.md"),
+        _queue_task_issue(40, "Private payload", body_extra="Privacy_Boundary: PRIVATE"),
+        _queue_task_issue(50, "Dependency task", labels=["needs:dependency"]),
+        _queue_task_issue(60, "Stale intent repair", updated_at="2026-05-01T00:00:00Z"),
+    ]
+    monkeypatch.setattr(runner, "get_open_queue_replenisher_issues", lambda: issues)
+    monkeypatch.setattr(
+        runner,
+        "add_issue_label",
+        lambda issue_number, label: labels_applied.append((issue_number, label)),
+    )
+    notify = mock.Mock(side_effect=AssertionError("routine Telegram notification"))
+    monkeypatch.setattr(runner, "send_telegram_notification", notify)
+
+    report = runner.autonomous_queue_replenisher(now=1786233600)
+
+    assert labels_applied == [
+        (20, runner.LABEL_READY),
+        (30, runner.LABEL_READY),
+        (50, runner.LABEL_BLOCKED),
+        (60, runner.LABEL_BLOCKED),
+    ]
+    assert "queue_depth_before=1" in report
+    assert "queue_depth_after=3" in report
+    assert "selected_issue_ids=20,30" in report
+    assert "20:verified_bounded_public_safe" in report
+    assert "routed_issue_ids=50,60" in report
+    assert "50:waiting_dependency_route" in report
+    assert "60:stale_repair_route" in report
+    assert "telegram_notifications=0" in report
+    assert notify.call_count == 0
+
+
+def test_autonomous_queue_replenisher_avoids_duplicate_intent_and_file_overlap(
+    monkeypatch,
+) -> None:
+    labels_applied: list[tuple[int, str]] = []
+    duplicate_body = (
+        "Idempotency Key: same-intent\n"
+        "Allowed Files:\n"
+        "- docs/QUEUE.md"
+    )
+    issues = [
+        _queue_task_issue(5, "P0 active", labels=[runner.LABEL_READY], body_extra="Allowed Files:\n- docs/ACTIVE.md"),
+        _queue_task_issue(11, "P0 first duplicate", body_extra=duplicate_body),
+        _queue_task_issue(12, "P0 second duplicate", body_extra=duplicate_body),
+        _queue_task_issue(13, "P0 active overlap", body_extra="Allowed Files:\n- docs/ACTIVE.md"),
+        _queue_task_issue(14, "P0 protected", body_extra="Allowed Files:\n- scripts/runner_poll_github_tasks.py"),
+        _queue_task_issue(15, "Normal safe", body_extra="Allowed Files:\n- docs/NORMAL.md"),
+    ]
+    monkeypatch.setattr(runner, "get_open_queue_replenisher_issues", lambda: issues)
+    monkeypatch.setattr(
+        runner,
+        "add_issue_label",
+        lambda issue_number, label: labels_applied.append((issue_number, label)),
+    )
+
+    report = runner.autonomous_queue_replenisher(now=1786233600)
+
+    assert labels_applied == [(11, runner.LABEL_READY), (15, runner.LABEL_READY)]
+    assert "queue_depth_after=3" in report
+    assert "selected_issue_ids=11,15" in report
+
+
+def test_autonomous_queue_replenisher_is_allowlisted() -> None:
+    assert runner.AUTONOMOUS_QUEUE_REPLENISHER in runner.RUNTIME_MAINTENANCE_TASK_IDS
+
+    with mock.patch.object(
+        runner,
+        "autonomous_queue_replenisher",
+        return_value=(
+            "DONE: Runner host maintenance task completed.\n"
+            "maintenance_task_id=autonomous_queue_replenisher\n"
+            "queue_depth_before=3\n"
+            "queue_depth_after=3\n"
+            "success_criteria=met"
+        ),
+    ) as replenish:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.AUTONOMOUS_QUEUE_REPLENISHER,
+            str(runner.ROOT),
+        )
+
+    assert "maintenance_task_id=autonomous_queue_replenisher" in report
+    replenish.assert_called_once_with()
+
+
 def test_runner_report_status_ignores_blocked_words_in_success_report_text() -> None:
     report = """DONE: Codex completed successfully with no file changes.
 

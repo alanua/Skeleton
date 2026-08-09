@@ -224,6 +224,30 @@ content. Bridge exceptions are summarized with safe tokens such as
 `HermesBridgeException` and `safe_operator_review`; they must not fall through
 to the generic maintenance-step exception report.
 
+`autonomous_queue_replenisher` is a public-safe Runner queue maintenance task.
+It inspects open GitHub task issues, counts current `runner:ready` depth, and
+adds only the existing `runner:ready` label to verified bounded candidates until
+ready depth reaches the configured 3-item target:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: autonomous_queue_replenisher
+```
+
+The task is deterministic and dependency-aware. It skips stale duplicates,
+private/privacy-marked payloads, protected runtime/publish scopes, protected file
+scopes, unmet dependencies, existing active lifecycle items, and candidate work
+that overlaps active ready/running file scopes. Stale or dependency-blocked
+items receive the existing `runner:blocked` label and are reported as routed
+repair/dependency candidates instead of promoted.
+
+Its public report is aggregate queue metadata only: ready depth before/after,
+selected issue ids with safe reason tokens, routed issue ids with safe reason
+tokens, public-safe dashboard status, idempotency key, and
+`telegram_notifications=0`. It must not send routine Telegram notifications,
+create another scheduler, execute merges/deploys/device/provider actions, or
+include private issue payloads.
+
 `install_graphify_runtime` is an approval-gated host runtime task for installing
 the pinned Graphify assistant skills on the Runner host. It requires the exact
 approval field:
