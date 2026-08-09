@@ -13,6 +13,7 @@ import pytest
 from scripts import runner_poll_github_tasks as runner
 from scripts import telegram_callback_poller as callback_poller
 from core.home_edge import debian_media_bootstrap as media_bootstrap
+from core.home_edge import media_source_snapshot
 from core.home_edge import post_migration_reconcile
 
 
@@ -130,6 +131,36 @@ def _post_migration_receipt() -> dict[str, object]:
         "stable_reason": "completed",
         "success_criteria": "met",
         "canonical_memory_post_step": "home_edge_audit_persist_v1",
+    }
+
+
+def _media_source_snapshot_issue_body(expected_sha: str = HEAD_SHA) -> str:
+    return "\n".join(
+        (
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1}",
+            f"Repository: {runner.REPO}",
+            f"Expected Main SHA: {expected_sha}",
+            "Target: home-edge-01",
+        )
+    )
+
+
+def _media_source_snapshot_receipt() -> dict[str, object]:
+    return {
+        "maintenance_task_id": runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1,
+        "source_identity": "verified",
+        "source_version_marker": "v63",
+        "source_bytes": 1234,
+        "source_sha256": "c" * 64,
+        "python_parse_status": "ok",
+        "video_route_present": True,
+        "health_route_present": True,
+        "private_artifact_written": True,
+        "private_artifact_hash_matches": True,
+        "executor_receipt_hash": "b" * 64,
+        "stable_reason": "completed",
+        "success_criteria": "met",
     }
 
 
@@ -359,6 +390,87 @@ def test_home_edge_post_migration_reconcile_malformed_input_blocks(
         runner.HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1,
         str(runner.ROOT),
         _post_migration_issue_body() + "\nCommand: evil",
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=unknown_runtime_input_field" in report
+
+
+def test_home_edge_media_source_snapshot_is_allowlisted_and_dispatches_sanitized_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_read_sha(ref: str) -> str:
+        assert ref in {"main", "origin/main"}
+        return HEAD_SHA
+
+    def fake_execute(body: str, *, registered_clean_main_sha: str, github_main_sha: str):
+        captured["body"] = body
+        captured["registered_clean_main_sha"] = registered_clean_main_sha
+        captured["github_main_sha"] = github_main_sha
+        return _media_source_snapshot_receipt()
+
+    monkeypatch.setattr(runner, "_read_exact_git_sha", fake_read_sha)
+    monkeypatch.setattr(
+        media_source_snapshot,
+        "execute_media_source_snapshot_task",
+        fake_execute,
+    )
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1,
+        str(runner.ROOT),
+        _media_source_snapshot_issue_body(),
+    )
+
+    assert runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1 in runner.RUNTIME_MAINTENANCE_TASK_IDS
+    assert report.startswith("DONE:")
+    assert "maintenance_task_id=home_edge_01_media_source_snapshot_v1" in report
+    assert "source_identity=verified" in report
+    assert "source_version_marker=v63" in report
+    assert "source_bytes=1234" in report
+    assert "source_sha256=" + "c" * 64 in report
+    assert "python_parse_status=ok" in report
+    assert "video_route_present=True" in report
+    assert "health_route_present=True" in report
+    assert "private_artifact_written=True" in report
+    assert "private_artifact_hash_matches=True" in report
+    assert "executor_receipt_hash=" + "b" * 64 in report
+    assert "success_criteria=met" in report
+    assert captured["registered_clean_main_sha"] == HEAD_SHA
+    assert captured["github_main_sha"] == HEAD_SHA
+    assert "/opt/skeleton/cast/app.py" not in report
+    assert "private_source_b64" not in report
+    assert "10.44.55.66" not in report
+
+
+def test_home_edge_media_source_snapshot_registry_exposes_only_exact_fixed_task_id() -> None:
+    variants = {
+        task_id
+        for task_id in runner.RUNTIME_MAINTENANCE_TASK_IDS
+        if "media_source_snapshot" in task_id
+    }
+
+    assert variants == {runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1}
+    assert (
+        runner.dispatch_runtime_maintenance_task(
+            "home_edge_01_media_source_snapshot_v1_extra",
+            str(runner.ROOT),
+            _media_source_snapshot_issue_body(),
+        ).startswith("BLOCKED:")
+    )
+
+
+def test_home_edge_media_source_snapshot_malformed_input_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runner, "_read_exact_git_sha", lambda _ref: HEAD_SHA)
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1,
+        str(runner.ROOT),
+        _media_source_snapshot_issue_body() + "\nPath: /tmp/evil.py",
     )
 
     assert report.startswith("BLOCKED:")
