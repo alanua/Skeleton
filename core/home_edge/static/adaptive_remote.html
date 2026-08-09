@@ -73,6 +73,10 @@
 .gp-y{left:72px;top:0}.gp-x{left:0;top:72px}.gp-b{right:0;top:72px}.gp-a{left:72px;bottom:0}
 .gp-center{position:absolute;left:50%;bottom:15%;transform:translateX(-50%);display:flex;gap:14px}
 .gp-center .gp-top-btn{min-width:92px}
+:root{--home-shell-version:"v124";--mode-button-label-size:12px;--mode-button-label-size-narrow:11px}
+.bottom-nav{grid-template-columns:repeat(3,minmax(0,1fr))}
+.mode-button .mode-label,.bottom-nav .nav-label{font-size:var(--mode-button-label-size)}
+@media (max-width:360px){.mode-button .mode-label,.bottom-nav .nav-label{font-size:var(--mode-button-label-size-narrow)}}
 @media (orientation:portrait){
   .gamepad.active{width:100dvh;height:100dvw;transform:rotate(90deg) translateY(-100%);transform-origin:top left}
 }
@@ -182,10 +186,9 @@
 </section>
 
 <nav class="bottom-nav" aria-label="Навігація">
-  <a class="nav-item" href="/phone"><span class="mdi" style="--icon:url('/static/icons/mdi/home.svg')"></span><span>Головна</span></a>
-  <a class="nav-item" href="/video"><span class="mdi" style="--icon:url('/static/icons/mdi/movie-open.svg')"></span><span>Відео</span></a>
-  <a class="nav-item active" href="/remote"><span class="mdi" style="--icon:url('/static/icons/mdi/remote.svg')"></span><span>Пульт</span></a>
-  <a class="nav-item" href="/devices"><span class="mdi" style="--icon:url('/static/icons/mdi/devices.svg')"></span><span>Пристрої</span></a>
+  <a class="nav-item" href="/phone"><span class="mdi" style="--icon:url('/static/icons/mdi/home.svg')"></span><span class="nav-label">Головна</span></a>
+  <a class="nav-item" href="/video"><span class="mdi" style="--icon:url('/static/icons/mdi/movie-open.svg')"></span><span class="nav-label">Відео</span></a>
+  <a class="nav-item" href="/devices"><span class="mdi" style="--icon:url('/static/icons/mdi/devices.svg')"></span><span class="nav-label">Пристрої</span></a>
 </nav>
 
 <script>

@@ -33,6 +33,7 @@ POSTERS = STATE / 'posters'
 REGISTRY = HOME / '.config/skeleton/device-registry/confirmed.yaml'
 LAN_HOST = '192.168.1.54'
 PORT = 8100
+SKELETON_CAST_VERSION = "v124"
 VOLUME_POLICY = HOME / '.local/bin/home-edge-volume-policy'
 VOLUME_STATE = HOME / '.local/state/skeleton/volume-policy.json'
 HOME_EDGE_CONTROL = HOME / '.local/bin/home-edge-control'
@@ -48,6 +49,11 @@ CHROME_MEDIA = HOME / '.local/bin/home-edge-chrome-media'
 ANDROID_SERIAL = '192.168.240.112:5555'
 ALLOWED = ('uakino.club', 'uakino.me', 'uakino.best', 'klon.fun', 'ashdi.vip')
 URL_RE = re.compile(r'https?://[^\s<>"\']+', re.I)
+BOTTOM_NAV_ITEMS = (
+    ('/phone', 'home.svg', 'Головна'),
+    ('/video', 'movie-open.svg', 'Відео'),
+    ('/devices', 'devices.svg', 'Пристрої'),
+)
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 64 * 1024
@@ -88,6 +94,169 @@ def _load(job_id: str) -> dict:
 
 def _save(job: dict) -> None:
     _atomic(_job_path(job['job_id']), job)
+
+
+def _public_job(job: dict) -> dict:
+    safe = json.loads(json.dumps(job))
+    for source in safe.get('sources', []):
+        source.pop('url', None)
+        source['headers'] = {
+            'Referer': bool(source.get('headers', {}).get('Referer')),
+            'User-Agent': bool(source.get('headers', {}).get('User-Agent')),
+        }
+    return safe
+
+
+def _identity_from_mapping(data: object) -> tuple[str, str]:
+    if not isinstance(data, dict):
+        return '', ''
+    job_id = str(
+        data.get('job_id')
+        or data.get('media_job_id')
+        or data.get('active_job_id')
+        or ''
+    ).strip()
+    source_id = str(
+        data.get('source_id')
+        or data.get('media_source_id')
+        or data.get('active_source_id')
+        or ''
+    ).strip()
+    for key in ('selection', 'source', 'job', 'current', 'active'):
+        nested = data.get(key)
+        if isinstance(nested, dict):
+            if not job_id:
+                job_id = str(nested.get('job_id') or nested.get('media_job_id') or '').strip()
+            if not source_id:
+                source_id = str(nested.get('source_id') or nested.get('media_source_id') or '').strip()
+    return job_id, source_id
+
+
+def _valid_job_source(job_id: str, source_id: str) -> tuple[dict, dict] | None:
+    if not re.fullmatch(r'[0-9a-f]{16}', job_id or '') or not source_id:
+        return None
+    job = _load(job_id)
+    source = next((item for item in job.get('sources', []) if item.get('source_id') == source_id), None)
+    if not isinstance(source, dict):
+        return None
+    return job, source
+
+
+def _player_identity() -> tuple[dict, str, str]:
+    status = player.status()
+    job_id, source_id = _identity_from_mapping(status)
+    return status, job_id, source_id
+
+
+def _selector_state(job: dict, source: dict) -> dict:
+    return {
+        'job_id': job.get('job_id'),
+        'source_id': source.get('source_id'),
+        'title': job.get('title') or source.get('title') or 'Відео',
+        'history_text': job.get('title') or source.get('title') or 'Відео',
+        'source': {
+            'source_id': source.get('source_id'),
+            'quality': source.get('quality'),
+            'translation': source.get('translation'),
+            'episode': source.get('episode'),
+            'season': source.get('season'),
+            'subtitles': source.get('subtitles'),
+            'height': source.get('height'),
+            'width': source.get('width'),
+        },
+    }
+
+
+def _reconcile_video_selection(saved: object) -> dict:
+    saved_job_id, saved_source_id = _identity_from_mapping(saved)
+    player_status, active_job_id, active_source_id = _player_identity()
+    active: tuple[dict, dict] | None = None
+    active_invalid = False
+    if active_job_id or active_source_id:
+        try:
+            active = _valid_job_source(active_job_id, active_source_id)
+        except Exception:
+            active = None
+        active_invalid = active is None
+
+    if active is not None:
+        active_job, active_source = active
+        matches = saved_job_id == active_job_id and saved_source_id == active_source_id
+        return {
+            'status': 'ok',
+            'selection_source': 'saved_selection' if matches else 'active_player',
+            'saved_selection_matches_active_player': matches,
+            'selection_changed': not matches,
+            'active_player_valid': True,
+            'active_player_invalid': False,
+            'canonical_selection': {'job_id': active_job_id, 'source_id': active_source_id},
+            'job': _public_job(active_job),
+            'selector': _selector_state(active_job, active_source),
+            'player': player_status,
+        }
+
+    restored: tuple[dict, dict] | None = None
+    try:
+        restored = _valid_job_source(saved_job_id, saved_source_id)
+    except Exception:
+        restored = None
+    response = {
+        'status': 'ok',
+        'selection_source': 'saved_selection',
+        'saved_selection_matches_active_player': False,
+        'selection_changed': False,
+        'active_player_valid': False,
+        'active_player_invalid': active_invalid,
+        'canonical_selection': {'job_id': saved_job_id, 'source_id': saved_source_id},
+        'player': player_status,
+    }
+    if restored is not None:
+        job, source = restored
+        response['job'] = _public_job(job)
+        response['selector'] = _selector_state(job, source)
+    return response
+
+
+def _bottom_nav(active_path: str) -> str:
+    links = []
+    for href, icon, label in BOTTOM_NAV_ITEMS:
+        active = ' active' if href == active_path else ''
+        links.append(
+            f'<a class="nav-item{active}" href="{href}">'
+            f'<span class="mdi" style="--icon:url(\'/static/icons/mdi/{icon}\')"></span>'
+            f'<span class="nav-label">{label}</span></a>'
+        )
+    return '<nav class="bottom-nav" aria-label="Навігація">' + ''.join(links) + '</nav>'
+
+
+def _shell_css() -> str:
+    return (
+        '<style id="home-shell-v124">'
+        ':root{--home-shell-version:"v124";--mode-button-label-size:12px;--mode-button-label-size-narrow:11px}'
+        '.bottom-nav{grid-template-columns:repeat(3,minmax(0,1fr))}'
+        '.mode-button .mode-label,.bottom-nav .nav-label{font-size:var(--mode-button-label-size)}'
+        '@media (max-width:360px){.mode-button .mode-label,.bottom-nav .nav-label{font-size:var(--mode-button-label-size-narrow)}}'
+        '</style>'
+    )
+
+
+def _shell_active_path(name: str) -> str:
+    if name == 'video.html':
+        return '/video'
+    if name == 'devices.html':
+        return '/devices'
+    return '/phone'
+
+
+def _prepare_shell(name: str, text: str) -> str:
+    nav = _bottom_nav(_shell_active_path(name))
+    text = re.sub(r'<nav class="bottom-nav"[^>]*>.*?</nav>', nav, text, flags=re.S)
+    if '__BOTTOM_NAV__' in text:
+        text = text.replace('__BOTTOM_NAV__', nav)
+    if 'id="home-shell-v124"' not in text:
+        marker = '</head>'
+        text = text.replace(marker, _shell_css() + marker, 1) if marker in text else _shell_css() + text
+    return text
 
 
 TRUSTED_CLIENT_IDS = ('redmi_12', 's20_liudmyla', 'iphone_son', 'samsung_kiosk')
@@ -219,7 +388,7 @@ def _template(name: str, **replace: str) -> str:
     text = (BASE / name).read_text(encoding='utf-8')
     for key, value in replace.items():
         text = text.replace(key, value)
-    return text
+    return _prepare_shell(name, text)
 
 
 def _volume_status() -> dict:
@@ -883,14 +1052,7 @@ def share() -> Response:
 def get_job(job_id: str) -> Response:
     _require()
     job = _load(job_id)
-    safe = json.loads(json.dumps(job))
-    for source in safe.get('sources', []):
-        source.pop('url', None)
-        source['headers'] = {
-            'Referer': bool(source.get('headers', {}).get('Referer')),
-            'User-Agent': bool(source.get('headers', {}).get('User-Agent')),
-        }
-    return jsonify(safe)
+    return jsonify(_public_job(job))
 
 
 @app.post('/api/jobs/<job_id>/refresh')
@@ -1122,6 +1284,16 @@ def remote_keyboard() -> Response:
 def player_state() -> Response:
     _require()
     return jsonify(player.status())
+
+
+@app.post('/api/video/boot')
+def video_boot() -> Response:
+    _require()
+    data = request.get_json(silent=True) or {}
+    saved = data.get('saved_selection') if isinstance(data, dict) else None
+    if saved is None:
+        saved = data
+    return jsonify(_reconcile_video_selection(saved))
 
 
 @app.post('/api/seek')
