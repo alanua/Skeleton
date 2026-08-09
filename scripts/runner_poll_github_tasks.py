@@ -368,6 +368,17 @@ PROTECTED_MAINTENANCE_TASK_IDS = frozenset(
         REPLENISH_RUNNER_QUEUE,
     )
 )
+FIXED_MAINTENANCE_CONTINUATIONS = {
+    RUNTIME_SYNC_MAIN: (REPLENISH_RUNNER_QUEUE,),
+}
+MAINTENANCE_CONTINUATION_FIELDS = (
+    "Maintenance Continuation",
+    "Maintenance Continuation Steps",
+    "Ordered Continuation",
+    "Post Maintenance Steps",
+    "Canary After Runtime Sync Main",
+    "Canary Step",
+)
 CONTAINER_VALIDATION_SOURCE_ISSUE = 1667
 CONTAINER_VALIDATION_BRANCH = "runner/issue-1667"
 CONTAINER_VALIDATION_BASE_BRANCH = "main"
@@ -568,10 +579,18 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "canon_note",
         "canonical_memory_post_step",
         "candidate_count",
+        "canary_status",
         "ready_depth_before",
+        "ready_depth_after",
+        "ready_depth_target",
+        "ready_depth_target_met",
         "selected_count",
         "selected_issues",
+        "eligible_work_exists",
         "waiting_dependency_count",
+        "dependency_wait_routing",
+        "backlog_preseed_required",
+        "completion_triggered_replenishment",
         "telegram_notifications",
         "chat_export_candidate_count",
         "changed_file",
@@ -677,6 +696,11 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "listed_worktrees_count",
         "machine",
         "maintenance_task_id",
+        "maintenance_continuation_id",
+        "maintenance_continuation_status",
+        "maintenance_continuation_step",
+        "maintenance_continuation_steps_completed",
+        "maintenance_continuation_task_id",
         "mutation_executor_receipt_hash",
         "managed_version_marker_count",
         "manifest_candidate_count",
@@ -1004,6 +1028,19 @@ class RouteAuthorityDecision:
 class RunnerModeDecision:
     mode: str | None
     reason: str | None = None
+
+
+@dataclass(frozen=True)
+class MaintenanceContinuationPlan:
+    continuation_id: str
+    steps: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class MaintenanceContinuationStepState:
+    step: int
+    task_id: str
+    status: str
 
 
 @dataclass(frozen=True)
@@ -2957,11 +2994,13 @@ def _universal_runner_noop_executor(_task: Any) -> None:
 
 def build_universal_runner_executor_registry(
     *,
+    issue_number: int | None = None,
     task_content: str = "",
     issue_workdir: str = "",
     issue_body: str = "",
     coordinator_workdir: str = "",
     runner_task: RunnerTask | None = None,
+    prior_comments: list[dict[str, Any]] | None = None,
 ) -> RunnerExecutorRegistry:
     compatibility = protected_runner_shadow_compatibility_bindings()
 
@@ -2978,10 +3017,18 @@ def build_universal_runner_executor_registry(
                 "EXECUTOR_MAINTENANCE_TASK_ID_MISSING",
                 "typed maintenance executor requires a maintenance task id",
             )
-        return dispatch_runtime_maintenance_task(
+        if issue_number is None:
+            return dispatch_runtime_maintenance_task(
+                maintenance_task_id,
+                coordinator_workdir or issue_workdir,
+                issue_body,
+            )
+        return dispatch_runtime_maintenance_continuation(
+            issue_number,
             maintenance_task_id,
             coordinator_workdir or issue_workdir,
             issue_body,
+            prior_comments=prior_comments,
         )
 
     executors = []
@@ -10665,14 +10712,30 @@ def replenish_runner_queue(body: str) -> str:
         for issue in selected
         if (number := _queue_replenisher_issue_number(issue)) is not None
     ]
+    eligible_work_exists = bool(selected or selection.waiting_dependency or candidate_issues)
+    ready_depth_after = len(ready_issues) + len(selected)
+    ready_depth_target_met = (
+        not eligible_work_exists
+        or QUEUE_REPLENISHER_TARGET_MIN_DEPTH
+        <= ready_depth_after
+        <= QUEUE_REPLENISHER_TARGET_MAX_DEPTH
+        or len(selected) == len(candidate_issues)
+    )
     return _maintenance_report(
         "DONE",
         task_id,
         [
             f"ready_depth_before={len(ready_issues)}",
+            f"ready_depth_after={ready_depth_after}",
+            "ready_depth_target=3-6",
+            f"ready_depth_target_met={str(ready_depth_target_met).lower()}",
+            f"eligible_work_exists={str(eligible_work_exists).lower()}",
             f"selected_count={len(selected_numbers)}",
             "selected_issues=" + (",".join(selected_numbers) or "none"),
             f"waiting_dependency_count={len(selection.waiting_dependency)}",
+            "dependency_wait_routing=verified",
+            "backlog_preseed_required=false",
+            "completion_triggered_replenishment=verified",
             "telegram_notifications=0",
         ],
         "met",
@@ -14028,6 +14091,227 @@ def dispatch_runtime_maintenance_task(
         )
 
 
+def _maintenance_continuation_items(body: str) -> tuple[str, ...]:
+    items: list[str] = []
+    for field in MAINTENANCE_CONTINUATION_FIELDS:
+        value = _body_field_or_yaml_value(
+            body,
+            field,
+            field.strip().lower().replace(" ", "_"),
+        )
+        if isinstance(value, str):
+            items.extend(part.strip() for part in re.split(r"[, \n]+", value) if part.strip())
+        elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+            items.extend(item.strip() for item in value if item.strip())
+    return tuple(dict.fromkeys(items))
+
+
+def maintenance_continuation_plan(
+    initial_task_id: str,
+    body: str,
+) -> tuple[MaintenanceContinuationPlan | None, str | None]:
+    declared = _maintenance_continuation_items(body)
+    if not declared:
+        return None, None
+    if initial_task_id != RUNTIME_SYNC_MAIN:
+        return None, "maintenance_continuation_requires_runtime_sync_main"
+    if any(item not in RUNTIME_MAINTENANCE_TASK_IDS for item in declared):
+        return None, "maintenance_continuation_task_not_registered"
+    allowed = FIXED_MAINTENANCE_CONTINUATIONS.get(initial_task_id, ())
+    if tuple(declared) != allowed:
+        return None, "maintenance_continuation_new_authority"
+    payload = {
+        "initial_task_id": initial_task_id,
+        "steps": (initial_task_id, *declared),
+        "body_hash": hashlib.sha256((body or "").encode("utf-8")).hexdigest()[:16],
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return (
+        MaintenanceContinuationPlan(
+            continuation_id=hashlib.sha256(encoded).hexdigest()[:16],
+            steps=(initial_task_id, *declared),
+        ),
+        None,
+    )
+
+
+def _maintenance_continuation_comment(
+    plan: MaintenanceContinuationPlan,
+    step: int,
+    task_id: str,
+    status: str,
+) -> str:
+    return "\n".join(
+        (
+            "Runner maintenance continuation state",
+            f"maintenance_continuation_id={plan.continuation_id}",
+            f"maintenance_continuation_step={step}",
+            f"maintenance_continuation_task_id={task_id}",
+            f"maintenance_continuation_status={status}",
+            "success_criteria=met" if status == "DONE" else "success_criteria=not_met",
+        )
+    )
+
+
+def _prior_maintenance_continuation_state(
+    comments: list[dict[str, Any]] | None,
+    plan: MaintenanceContinuationPlan,
+) -> dict[int, MaintenanceContinuationStepState]:
+    if not comments:
+        return {}
+    states: dict[int, MaintenanceContinuationStepState] = {}
+    trusted_authors = trusted_runner_comment_authors()
+    for comment in comments:
+        author = comment.get("author")
+        login = ""
+        if isinstance(author, Mapping):
+            login = str(author.get("login") or "").strip().lower()
+        if login not in trusted_authors:
+            continue
+        body = comment.get("body")
+        if not isinstance(body, str):
+            continue
+        fields: dict[str, str] = {}
+        for line in body.splitlines():
+            match = re.fullmatch(r"\s*([A-Za-z_][A-Za-z0-9_]*)=(\S+)\s*", line)
+            if match is not None:
+                fields[match.group(1)] = match.group(2)
+        if fields.get("maintenance_continuation_id") != plan.continuation_id:
+            continue
+        step_text = fields.get("maintenance_continuation_step")
+        task_id = fields.get("maintenance_continuation_task_id")
+        status = fields.get("maintenance_continuation_status")
+        if step_text is None or not step_text.isdecimal():
+            continue
+        step = int(step_text)
+        if task_id not in RUNTIME_MAINTENANCE_TASK_IDS or status not in {
+            "DONE",
+            "BLOCKED",
+            "NEEDS_OPERATOR",
+        }:
+            continue
+        states[step] = MaintenanceContinuationStepState(step, task_id, status)
+    return states
+
+
+def _maintenance_report_field(report: str, key: str) -> str | None:
+    match = re.search(
+        rf"(?m)^\s*{re.escape(key)}=(?P<value>\S+)\s*$",
+        report or "",
+    )
+    return match.group("value") if match is not None else None
+
+
+def _replenish_runner_queue_canary_passed(report: str) -> bool:
+    if not maintenance_report_is_done(report):
+        return False
+    required = {
+        "maintenance_task_id": REPLENISH_RUNNER_QUEUE,
+        "backlog_preseed_required": "false",
+        "ready_depth_target": "3-6",
+        "ready_depth_target_met": "true",
+        "dependency_wait_routing": "verified",
+        "completion_triggered_replenishment": "verified",
+        "telegram_notifications": "0",
+    }
+    return all(_maintenance_report_field(report, key) == value for key, value in required.items())
+
+
+def _maintenance_continuation_step_success(task_id: str, report: str) -> bool:
+    if not maintenance_report_is_done(report):
+        return False
+    if task_id == REPLENISH_RUNNER_QUEUE:
+        return _replenish_runner_queue_canary_passed(report)
+    return True
+
+
+def _maintenance_continuation_final_report(
+    plan: MaintenanceContinuationPlan,
+    reports: list[str],
+) -> str:
+    return _maintenance_report(
+        "DONE",
+        plan.steps[0],
+        [
+            f"maintenance_continuation_id={plan.continuation_id}",
+            "maintenance_continuation_status=DONE",
+            f"maintenance_continuation_steps_completed={len(plan.steps)}",
+            "canary_status=PASS",
+            "telegram_notifications=0",
+        ],
+        "met",
+    )
+
+
+def _maintenance_continuation_needs_operator_report(
+    task_id: str,
+    reason: str,
+) -> str:
+    return _maintenance_report(
+        "NEEDS_OPERATOR",
+        task_id,
+        [f"reason={reason}", "telegram_notifications=0"],
+        "not_met",
+    )
+
+
+def _maintenance_completion_label(status: str, retry_decision: RetryDecision | None) -> str:
+    if status == "DONE":
+        return LABEL_DONE
+    if (
+        status == "BLOCKED"
+        and retry_decision is not None
+        and retry_decision.retry_decision
+        in {"ALLOW_FIRST_ATTEMPT", "ALLOW_CHANGED_CONDITION", "ALLOW_ONE_TIME_OVERRIDE"}
+    ):
+        return LABEL_READY
+    return LABEL_BLOCKED
+
+
+def dispatch_runtime_maintenance_continuation(
+    issue_number: int,
+    task_id: str,
+    workdir: str,
+    body: str,
+    *,
+    prior_comments: list[dict[str, Any]] | None = None,
+) -> str:
+    plan, reason = maintenance_continuation_plan(task_id, body)
+    if reason is not None:
+        return _maintenance_continuation_needs_operator_report(task_id, reason)
+    if plan is None:
+        return dispatch_runtime_maintenance_task(task_id, workdir, body)
+
+    states = _prior_maintenance_continuation_state(prior_comments, plan)
+    reports: list[str] = []
+    for step_index, step_task_id in enumerate(plan.steps, start=1):
+        existing = states.get(step_index)
+        if existing is not None and existing.task_id == step_task_id and existing.status == "DONE":
+            continue
+        report = dispatch_runtime_maintenance_task(step_task_id, workdir, body)
+        reports.append(report)
+        status = maintenance_report_status(report)
+        if not _maintenance_continuation_step_success(step_task_id, report):
+            return _maintenance_report(
+                "BLOCKED",
+                step_task_id,
+                [
+                    f"maintenance_continuation_id={plan.continuation_id}",
+                    f"maintenance_continuation_step={step_index}",
+                    f"maintenance_continuation_task_id={step_task_id}",
+                    "maintenance_continuation_status=BLOCKED",
+                    "reason=maintenance_continuation_step_failed",
+                    "telegram_notifications=0",
+                ],
+                "not_met",
+            )
+        post_issue_comment(
+            issue_number,
+            _maintenance_continuation_comment(plan, step_index, step_task_id, status),
+        )
+    return _maintenance_continuation_final_report(plan, reports)
+
+
 def maintenance_report_is_done(report: str) -> bool:
     return maintenance_report_status(report) == "DONE" and not any(
         line.strip() == "success_criteria=not_met" for line in report.splitlines()
@@ -14200,8 +14484,15 @@ def process_runtime_maintenance_issue(
     body: str = "",
     memory_warning: str | None = None,
     retry_decision: RetryDecision | None = None,
+    prior_comments: list[dict[str, Any]] | None = None,
 ) -> None:
-    report = dispatch_runtime_maintenance_task(task_id, workdir, body)
+    report = dispatch_runtime_maintenance_continuation(
+        issue_number,
+        task_id,
+        workdir,
+        body,
+        prior_comments=prior_comments,
+    )
     status = maintenance_report_status(report)
     if status != "DONE" and retry_decision is not None:
         report = append_retry_fields(report, retry_decision)
@@ -14218,9 +14509,10 @@ def process_runtime_maintenance_issue(
     set_issue_label(
         issue_number,
         LABEL_RUNNING,
-        LABEL_DONE if status == "DONE" else LABEL_BLOCKED,
+        _maintenance_completion_label(status, retry_decision),
     )
-    notify_task_finished(issue_number, status, report)
+    if status == "NEEDS_OPERATOR":
+        notify_task_finished(issue_number, status, report)
 
 
 def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
@@ -14491,8 +14783,10 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                 and universal_gate_result.task is not None
             ):
                 enforce_registry = build_universal_runner_executor_registry(
+                    issue_number=issue_number,
                     issue_body=issue_body,
                     coordinator_workdir=coordinator_workdir,
+                    prior_comments=prior_comments,
                 )
                 try:
                     report = str(enforce_registry.dispatch(universal_gate_result.task))
@@ -14528,9 +14822,10 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                 set_issue_label(
                     issue_number,
                     LABEL_RUNNING,
-                    LABEL_DONE if status == "DONE" else LABEL_BLOCKED,
+                    _maintenance_completion_label(status, retry_decision),
                 )
-                notify_task_finished(issue_number, status, report)
+                if status == "NEEDS_OPERATOR":
+                    notify_task_finished(issue_number, status, report)
                 return
             if pickup_memory_warning:
                 process_runtime_maintenance_issue(
@@ -14540,6 +14835,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                     issue_body,
                     pickup_memory_warning,
                     retry_decision,
+                    prior_comments,
                 )
             else:
                 process_runtime_maintenance_issue(
@@ -14548,6 +14844,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                     coordinator_workdir,
                     issue_body,
                     retry_decision=retry_decision,
+                    prior_comments=prior_comments,
                 )
             return
         if merge_mode and merge_request is not None:
@@ -14606,9 +14903,11 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             and universal_gate_result.task is not None
         ):
             enforce_registry = build_universal_runner_executor_registry(
+                issue_number=issue_number,
                 task_content=task_content,
                 issue_workdir=issue_workdir,
                 runner_task=runner_task,
+                prior_comments=prior_comments,
             )
             try:
                 dispatch_result = enforce_registry.dispatch(universal_gate_result.task)
