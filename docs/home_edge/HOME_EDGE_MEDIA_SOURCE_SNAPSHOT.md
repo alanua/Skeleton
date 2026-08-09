@@ -9,22 +9,35 @@
 - run user: `desktop-user`
 - timeout: `30` seconds
 - transport: signed `core.home_edge.executor_gateway` request only
+- operator approval: `EXPLICIT_MINIMAL_HOME_EDGE_SNAPSHOT_ACCESS_REPAIR_2026_08_09`
 
 The operation is not a general file export facility. Issue metadata may provide only the runtime mode, exact maintenance task ID, repository, expected main SHA, and target. Path, command, script, output path, timeout, lane, user, node, and variant fields are rejected.
 
 ## Executor Authentication
 
-The Runner signs the Home Edge executor request with `SKELETON_HOME_EDGE_EXEC_HMAC_SECRET`. An explicit Runner-provided environment mapping or process environment value takes precedence. If that value is absent or empty, the task reads only `/etc/skeleton/home-edge-executor-controller.env` and only the single allowlisted variable `SKELETON_HOME_EDGE_EXEC_HMAC_SECRET`.
+The live Runner flow does not read the Home Edge executor HMAC and does not sign directly. It builds an unsigned request with the exact operator approval ref above, validates the fixed authority fields, and passes that JSON on stdin to the installed signer:
+
+`sudo --non-interactive /usr/local/libexec/skeleton/home-edge/media-source-snapshot/signer`
+
+The sudoers entry grants the Runner service user only that exact no-argument executable. The wrapper runs `/usr/bin/python3` with a minimal environment and an immutable root-owned payload at:
+
+`/usr/local/lib/skeleton/home-edge/media-source-snapshot/signer_payload.py`
+
+The payload imports only the Python standard library. It validates there are no argv arguments, bounds stdin, parses the unsigned request as JSON, rejects missing, empty, or different `operator_approval_ref`, and rechecks the exact node, lane, run user, script, interpreter, timeout, output cap, public flag, cwd absence, environment absence, stdin absence, argv absence, request id, nonce, and idempotency authority before opening any credential file.
+
+Only after that approval and authority validation does the signer read `/etc/skeleton/home-edge-executor-controller.env`, and only the single allowlisted variable `SKELETON_HOME_EDGE_EXEC_HMAC_SECRET`.
 
 That fixed private config is parsed as text, never sourced or executed. The resolver never reads or parses `/etc/skeleton/home-edge-01.env`; that file is metadata-only corroboration for the private controller ownership boundary. The fixed `/etc/skeleton` directory plus `/etc/skeleton/home-edge-01.env` and `/etc/skeleton/home-edge-executor-controller.env` are all checked with `lstat`; symlinks are rejected, `/etc/skeleton` must be a directory, both env paths must be regular files, none may be group/world writable, and each env file must be no larger than 64 KiB. The controller env is accepted when its owner is root or the current Runner uid, or when those three fixed paths share one identical owner and group boundary under the same strict checks. The parser accepts only simple `KEY=VALUE` or optional `export KEY=VALUE` entries for the allowlisted variable, ignoring comments, blank lines, and unrelated assignments. Duplicate target entries, NUL bytes, malformed quoted values, shell substitution or variable references, backticks, and multiline continuations fail closed before any executor request is made.
 
 Authentication setup failures are reported only as stable public-safe classes: `executor_auth_config_missing`, `executor_auth_config_unsafe`, or `executor_auth_config_invalid`. The credential value, config path, and variable name are never included in public receipts.
 
+After signing, the Runner reconstructs the executor request and revalidates the signed payload against the exact unsigned authority it originally built. Any changed approval, command, target, lane, user, script, interpreter, timeout, output cap, public flag, cwd, environment, stdin, argv, request id, nonce, or idempotency field blocks before `execute_home_edge_request` is called.
+
 ## Validation Boundary
 
 Before any Home Edge request is constructed or signed, the Runner first checks the fixed private artifact location. If a regular, non-symlink, owner-context-safe, private-mode artifact already exists, the Runner reads it with the same 700 KiB bound, reruns UTF-8, credential, Python parse, route, and Skeleton Cast media validation locally, recomputes SHA-256 and byte count, and returns `success_criteria=met` with `stable_reason=already_captured`. That local one-shot path performs zero executor calls and reports only the aggregate `not_required_existing_capture` executor marker.
 
-If the existing artifact is missing, the first capture uses a fresh attempt-scoped executor idempotency key. If transport fails ambiguously before the private artifact is published, the operation fails closed without retrying or writing an artifact; another capture requires a deliberate v2 or newly approved operation rather than unbounded retries.
+If the existing artifact is missing, the first capture uses a fresh attempt-scoped executor idempotency key and the installed signer described above. If transport fails ambiguously before the private artifact is published, the operation fails closed without retrying or writing an artifact; another capture requires a deliberate v2 or newly approved operation rather than unbounded retries.
 
 Before private publication from the first remote capture, the remote executor script checks the fixed source identity and safety:
 
