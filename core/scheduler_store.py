@@ -112,6 +112,13 @@ class SchedulerStore:
                     ON occurrences(state, scheduled_for, occurrence_id);
                 CREATE INDEX IF NOT EXISTS idx_dispatch_receipts_occurrence
                     ON dispatch_receipts(occurrence_id, attempt);
+
+                CREATE TABLE IF NOT EXISTS operational_ledger (
+                    ledger_key TEXT PRIMARY KEY,
+                    event_kind TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at INTEGER NOT NULL CHECK(created_at >= 0)
+                );
                 """
             )
             self._ensure_occurrence_columns(connection)
@@ -532,6 +539,65 @@ class SchedulerStore:
                 for row in rows
             )
 
+    def record_operational_event_once(
+        self,
+        *,
+        ledger_key: str,
+        event_kind: str,
+        payload: Mapping[str, Any],
+        now: int,
+    ) -> tuple[dict[str, Any], bool]:
+        _safe_ledger_token(ledger_key, "ledger_key")
+        _safe_ledger_token(event_kind, "event_kind")
+        _timestamp(now, "now")
+        payload_json = json.dumps(
+            thaw_json(payload),
+            ensure_ascii=True,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        with self._transaction() as connection:
+            result = connection.execute(
+                """
+                INSERT OR IGNORE INTO operational_ledger(
+                    ledger_key, event_kind, payload_json, created_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (ledger_key, event_kind, payload_json, now),
+            )
+            row = connection.execute(
+                "SELECT * FROM operational_ledger WHERE ledger_key = ?",
+                (ledger_key,),
+            ).fetchone()
+            if row is None:
+                raise SchedulerStoreError("OPERATIONAL_LEDGER_WRITE_FAILED")
+            return (
+                {
+                    "ledger_key": str(row["ledger_key"]),
+                    "event_kind": str(row["event_kind"]),
+                    "payload": json.loads(str(row["payload_json"])),
+                    "created_at": int(row["created_at"]),
+                },
+                result.rowcount == 1,
+            )
+
+    def get_operational_event(self, ledger_key: str) -> dict[str, Any] | None:
+        _safe_ledger_token(ledger_key, "ledger_key")
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM operational_ledger WHERE ledger_key = ?",
+                (ledger_key,),
+            ).fetchone()
+            if row is None:
+                return None
+            return {
+                "ledger_key": str(row["ledger_key"]),
+                "event_kind": str(row["event_kind"]),
+                "payload": json.loads(str(row["payload_json"])),
+                "created_at": int(row["created_at"]),
+            }
+
     def active_counts(self, schedule_id: str) -> dict[str, int]:
         with self._connect() as connection:
             rows = connection.execute(
@@ -722,3 +788,15 @@ def _reason(value: object) -> str:
 
 def _sha256_hex(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _safe_ledger_token(value: object, field: str) -> str:
+    if not isinstance(value, str) or not value or len(value) > 160:
+        raise SchedulerValidationError(
+            f"INVALID_{field.upper()}", f"{field} is invalid"
+        )
+    if not all(ch.isalnum() or ch in "._:-" for ch in value):
+        raise SchedulerValidationError(
+            f"INVALID_{field.upper()}", f"{field} is invalid"
+        )
+    return value
