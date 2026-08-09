@@ -47,7 +47,7 @@ AUTH_CONFIG_REASON_RE = re.compile(
 CONFIG_ASSIGNMENT_RE = re.compile(
     r"^(?:export[ \t]+)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)=(?P<value>.*)$"
 )
-VERSION_MARKER_RE = re.compile(r"(?i)\bv63\b")
+VERSION_MARKER_RE = re.compile(r"(?i)\bv(?:63|124)\b")
 SECRET_NAME_TOKENS = (
     "API_KEY",
     "ACCESS_TOKEN",
@@ -436,9 +436,14 @@ def sanitize_public_receipt(receipt: Mapping[str, Any]) -> dict[str, object]:
         raise ValueError("receipt_task_id_mismatch")
     if sanitized["source_identity"] not in {"verified", "blocked"}:
         raise ValueError("source_identity_invalid")
-    if sanitized["source_version_marker"] not in {"v63", "unknown"}:
+    if sanitized["source_version_marker"] not in {"v63", "v124", "unknown"}:
         raise ValueError("source_version_marker_invalid")
     return sanitized
+
+
+def _source_version_marker(text: str) -> str:
+    matches = VERSION_MARKER_RE.findall(text)
+    return matches[-1].lower() if matches else "unknown"
 
 
 def receipt_status_lines(receipt: Mapping[str, object]) -> list[str]:
@@ -497,7 +502,7 @@ def _validate_source_bytes(source: bytes) -> dict[str, object]:
     return {
         "maintenance_task_id": TASK_ID,
         "source_identity": "verified",
-        "source_version_marker": "v63" if VERSION_MARKER_RE.search(text) else "unknown",
+        "source_version_marker": _source_version_marker(text),
         "source_bytes": len(source),
         "source_sha256": source_hash,
         "python_parse_status": "ok",
@@ -992,7 +997,7 @@ def main():
         "public": {{
             "maintenance_task_id": TASK_ID,
             "source_identity": "verified",
-            "source_version_marker": "v63" if re.search(r"(?i)\\bv63\\b", text) else "unknown",
+            "source_version_marker": (("v" + re.findall(r"(?i)\\bv(63|124)\\b", text)[-1]) if re.findall(r"(?i)\\bv(63|124)\\b", text) else "unknown"),
             "source_bytes": len(source),
             "source_sha256": sha,
             "python_parse_status": "ok",
