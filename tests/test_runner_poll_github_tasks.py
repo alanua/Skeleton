@@ -13,6 +13,7 @@ import pytest
 from scripts import runner_poll_github_tasks as runner
 from scripts import telegram_callback_poller as callback_poller
 from core.home_edge import debian_media_bootstrap as media_bootstrap
+from core.home_edge import display_power_off
 from core.home_edge import media_source_snapshot
 from core.home_edge import post_migration_reconcile
 
@@ -161,6 +162,32 @@ def _media_source_snapshot_receipt() -> dict[str, object]:
         "private_artifact_written": True,
         "private_artifact_hash_matches": True,
         "executor_receipt_hash": "b" * 64,
+        "stable_reason": "completed",
+        "success_criteria": "met",
+    }
+
+
+def _display_power_off_issue_body(expected_sha: str = HEAD_SHA) -> str:
+    return "\n".join(
+        (
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {runner.HOME_EDGE_01_DISPLAY_POWER_OFF_V1}",
+            f"Repository: {runner.REPO}",
+            f"Expected Main SHA: {expected_sha}",
+            f"Operator Approval: {display_power_off.OPERATOR_APPROVAL}",
+            "Target: home-edge-01",
+        )
+    )
+
+
+def _display_power_off_receipt() -> dict[str, object]:
+    return {
+        "maintenance_task_id": runner.HOME_EDGE_01_DISPLAY_POWER_OFF_V1,
+        "request_accepted": True,
+        "applied": True,
+        "physically_verified": True,
+        "display_power_state": "off",
+        "executor_receipt_hash": "d" * 64,
         "stable_reason": "completed",
         "success_criteria": "met",
     }
@@ -473,6 +500,79 @@ def test_home_edge_media_source_snapshot_malformed_input_blocks(
         runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1,
         str(runner.ROOT),
         _media_source_snapshot_issue_body() + "\nPath: /tmp/evil.py",
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=unknown_runtime_input_field" in report
+
+
+def test_home_edge_display_power_off_is_allowlisted_and_dispatches_sanitized_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_read_sha(ref: str) -> str:
+        assert ref in {"main", "origin/main"}
+        return HEAD_SHA
+
+    def fake_execute(body: str, *, registered_clean_main_sha: str, github_main_sha: str):
+        captured["body"] = body
+        captured["registered_clean_main_sha"] = registered_clean_main_sha
+        captured["github_main_sha"] = github_main_sha
+        return _display_power_off_receipt()
+
+    monkeypatch.setattr(runner, "_read_exact_git_sha", fake_read_sha)
+    monkeypatch.setattr(
+        display_power_off,
+        "execute_display_power_off_task",
+        fake_execute,
+    )
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_01_DISPLAY_POWER_OFF_V1,
+        str(runner.ROOT),
+        _display_power_off_issue_body(),
+    )
+
+    assert runner.HOME_EDGE_01_DISPLAY_POWER_OFF_V1 in runner.RUNTIME_MAINTENANCE_TASK_IDS
+    assert report.startswith("DONE:")
+    assert "maintenance_task_id=home_edge_01_display_power_off_v1" in report
+    assert "request_accepted=True" in report
+    assert "applied=True" in report
+    assert "physically_verified=True" in report
+    assert "display_power_state=off" in report
+    assert "executor_receipt_hash=" + "d" * 64 in report
+    assert "success_criteria=met" in report
+    assert captured["registered_clean_main_sha"] == HEAD_SHA
+    assert captured["github_main_sha"] == HEAD_SHA
+
+
+def test_home_edge_display_power_off_registry_exposes_only_exact_fixed_task_id() -> None:
+    variants = {
+        task_id
+        for task_id in runner.RUNTIME_MAINTENANCE_TASK_IDS
+        if "display_power_off" in task_id
+    }
+
+    assert variants == {runner.HOME_EDGE_01_DISPLAY_POWER_OFF_V1}
+    assert (
+        runner.dispatch_runtime_maintenance_task(
+            "home_edge_01_display_power_off_v1_extra",
+            str(runner.ROOT),
+            _display_power_off_issue_body(),
+        ).startswith("BLOCKED:")
+    )
+
+
+def test_home_edge_display_power_off_malformed_input_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runner, "_read_exact_git_sha", lambda _ref: HEAD_SHA)
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_01_DISPLAY_POWER_OFF_V1,
+        str(runner.ROOT),
+        _display_power_off_issue_body() + "\nCommand: xset dpms force on",
     )
 
     assert report.startswith("BLOCKED:")

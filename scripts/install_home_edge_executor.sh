@@ -4,8 +4,8 @@ set -euo pipefail
 usage() {
   cat <<'USAGE'
 Usage:
-  install_home_edge_executor.sh --desktop-user USER [--ssh-target-user USER] [--root DIR]
-  install_home_edge_executor.sh --desktop-user USER [--ssh-target-user USER] --replace-secret-stdin [--root DIR]
+  install_home_edge_executor.sh --desktop-user USER [--ssh-target-user USER] [--runner-service-user USER] [--root DIR]
+  install_home_edge_executor.sh --desktop-user USER [--ssh-target-user USER] [--runner-service-user USER] --replace-secret-stdin [--root DIR]
   install_home_edge_executor.sh --uninstall [--root DIR]
 
 Installs the one-shot Home Edge executor for strict OpenSSH command:
@@ -26,6 +26,7 @@ USAGE
 ROOT=""
 DESKTOP_USER=""
 SSH_TARGET_USER=""
+RUNNER_SERVICE_USER=""
 REPLACE_SECRET_STDIN=0
 UNINSTALL=0
 
@@ -41,6 +42,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --ssh-target-user)
       SSH_TARGET_USER="${2:?--ssh-target-user requires a username}"
+      shift 2
+      ;;
+    --runner-service-user)
+      RUNNER_SERVICE_USER="${2:?--runner-service-user requires a username}"
       shift 2
       ;;
     --replace-secret-stdin)
@@ -77,6 +82,7 @@ env_file="${env_dir}/home_edge_executor.env"
 sudoers_file="${sudoers_dir}/skeleton-home-edge-executor"
 wrapper="${bin_dir}/home_edge_exec"
 root_wrapper="${sbin_dir}/home_edge_exec_root"
+display_off_signer="${sbin_dir}/skeleton-home-edge-display-off-signer"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 
@@ -170,7 +176,8 @@ install_wrapper() {
   chown_root_if_possible "$bin_dir" "$sbin_dir"
   backup_path "$wrapper"
   backup_path "$root_wrapper"
-  rm -f "$wrapper" "$root_wrapper"
+  backup_path "$display_off_signer"
+  rm -f "$wrapper" "$root_wrapper" "$display_off_signer"
   cat > "$wrapper" <<WRAPPER
 #!/usr/bin/env bash
 set -euo pipefail
@@ -214,9 +221,40 @@ exec env -i \\
   PYTHONPATH="\$python_root" \\
   /usr/bin/env python3 "\$server_script" --server
 ROOT_WRAPPER
+  cat > "$display_off_signer" <<SIGNER_WRAPPER
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\$#" -ne 0 ]]; then
+  echo "skeleton-home-edge-display-off-signer accepts no argv" >&2
+  exit 2
+fi
+env_file="$(runtime_path "/etc/skeleton/home_edge_executor.env")"
+python_root="$(runtime_path "/usr/local/lib/skeleton-home-edge-executor")"
+signer_script="\$python_root/scripts/home_edge_display_off_signer.py"
+if [[ ! -r "\$env_file" ]]; then
+  echo "home_edge_exec private environment is missing" >&2
+  exit 2
+fi
+if [[ ! -r "\$signer_script" ]]; then
+  echo "display-off signer is missing" >&2
+  exit 2
+fi
+set -a
+# shellcheck disable=SC1090
+. "\$env_file"
+set +a
+exec env -i \\
+  PATH="/usr/sbin:/usr/bin:/sbin:/bin" \\
+  LANG="\${LANG:-C.UTF-8}" \\
+  LC_ALL="\${LC_ALL:-}" \\
+  SKELETON_HOME_EDGE_EXEC_HMAC_SECRET="\${SKELETON_HOME_EDGE_EXEC_HMAC_SECRET:?}" \\
+  PYTHONPATH="\$python_root" \\
+  /usr/bin/env python3 "\$signer_script"
+SIGNER_WRAPPER
   chmod 0755 "$wrapper"
   chmod 0555 "$root_wrapper"
-  chown_root_if_possible "$wrapper" "$root_wrapper"
+  chmod 0555 "$display_off_signer"
+  chown_root_if_possible "$wrapper" "$root_wrapper" "$display_off_signer"
 }
 
 install_python_files() {
@@ -225,14 +263,21 @@ install_python_files() {
   chmod 0644 "$lib_dir/core/__init__.py"
   install -m 0644 "$repo_root/core/home_edge/executor.py" "$lib_dir/core/home_edge/executor.py"
   install -m 0644 "$repo_root/core/home_edge/executor_gateway.py" "$lib_dir/core/home_edge/executor_gateway.py"
+  install -m 0644 "$repo_root/core/home_edge/display_power_off.py" "$lib_dir/core/home_edge/display_power_off.py"
+  install -m 0644 "$repo_root/core/home_edge/media_source_snapshot.py" "$lib_dir/core/home_edge/media_source_snapshot.py"
   install -m 0644 "$repo_root/core/home_edge/profile.py" "$lib_dir/core/home_edge/profile.py"
   install -m 0755 "$repo_root/scripts/home_edge_exec.py" "$lib_dir/scripts/home_edge_exec.py"
+  install -m 0755 "$repo_root/scripts/home_edge_display_off_signer.py" "$lib_dir/scripts/home_edge_display_off_signer.py"
   install -m 0755 "$repo_root/scripts/home_edge_executor_server.py" "$lib_dir/scripts/home_edge_executor_server.py"
   python3 -m py_compile \
     "$lib_dir/core/home_edge/executor.py" \
     "$lib_dir/core/home_edge/executor_gateway.py" \
+    "$lib_dir/core/home_edge/display_power_off.py" \
+    "$lib_dir/core/home_edge/media_source_snapshot.py" \
     "$lib_dir/scripts/home_edge_exec.py" \
+    "$lib_dir/scripts/home_edge_display_off_signer.py" \
     "$lib_dir/scripts/home_edge_executor_server.py"
+  PYTHONPATH="$lib_dir" python3 -c 'import core.home_edge.display_power_off, scripts.home_edge_display_off_signer'
 }
 
 install_sudoers_rule() {
@@ -245,6 +290,7 @@ install_sudoers_rule() {
   {
     printf '# Managed by skeleton Home Edge executor installer.\n'
     printf '%s ALL=(root) NOPASSWD: /usr/local/sbin/home_edge_exec_root --server\n' "$SSH_TARGET_USER"
+    printf '%s ALL=(root) NOPASSWD: /usr/local/sbin/skeleton-home-edge-display-off-signer\n' "$RUNNER_SERVICE_USER"
   } > "$sudoers_file"
   chmod 0440 "$sudoers_file"
   chown_root_if_possible "$sudoers_file"
@@ -266,7 +312,11 @@ validate_desktop_user() {
   if [[ -z "$SSH_TARGET_USER" ]]; then
     SSH_TARGET_USER="$DESKTOP_USER"
   fi
+  if [[ -z "$RUNNER_SERVICE_USER" ]]; then
+    RUNNER_SERVICE_USER="$SSH_TARGET_USER"
+  fi
   validate_user_token "$SSH_TARGET_USER" "--ssh-target-user"
+  validate_user_token "$RUNNER_SERVICE_USER" "--runner-service-user"
 }
 
 install_state_dirs() {
@@ -279,6 +329,7 @@ uninstall_executor() {
   backup_path "$env_file"
   rm -f "$wrapper"
   rm -f "$root_wrapper"
+  rm -f "$display_off_signer"
   rm -f "$sudoers_file"
   rm -rf "$lib_dir"
   if [[ -f "$env_file" ]]; then

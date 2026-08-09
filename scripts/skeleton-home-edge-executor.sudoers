@@ -1,3 +1,5 @@
 # Managed by skeleton Home Edge executor installer.
 # The installer replaces __SSH_TARGET_USER__ with the configured strict SSH account.
 __SSH_TARGET_USER__ ALL=(root) NOPASSWD: /usr/local/sbin/home_edge_exec_root --server
+# The installer replaces __RUNNER_SERVICE_USER__ with the actual Runner service account.
+__RUNNER_SERVICE_USER__ ALL=(root) NOPASSWD: /usr/local/sbin/skeleton-home-edge-display-off-signer

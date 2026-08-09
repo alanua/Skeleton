@@ -48,13 +48,38 @@ desktop account before enabling any live command.
 
 The supported installer is `scripts/install_home_edge_executor.sh`. It validates
 the real desktop account, installs `/usr/local/bin/home_edge_exec` and
-`/usr/local/sbin/home_edge_exec_root`, writes a mode-`0600` private env file,
-creates mode-`0700` private state directories, and writes a mode-`0440` sudoers
-rule for only the configured strict SSH target user and only
-`/usr/local/sbin/home_edge_exec_root --server`. It does not enable a restartable
-service or public listener. Runtime deployment still requires a private HMAC
-secret, strict SSH identity and known-hosts files, the real desktop username,
-sudo policy for account switching, and filesystem permissions on the node.
+`/usr/local/sbin/home_edge_exec_root`, and installs the fixed controller-side
+`/usr/local/sbin/skeleton-home-edge-display-off-signer`. It writes a mode-`0600`
+private env file, creates mode-`0700` private state directories, and writes
+mode-`0440` sudoers rules for only the configured strict SSH target user and
+only `/usr/local/sbin/home_edge_exec_root --server`, plus only the configured
+Runner service user and only `/usr/local/sbin/skeleton-home-edge-display-off-signer`.
+It does not enable a restartable service or public listener. Runtime deployment
+still requires a private HMAC secret, strict SSH identity and known-hosts files,
+the real desktop username, sudo policy for account switching, and filesystem
+permissions on the node.
+
+## Registered Operation: home_edge_01_display_power_off_v1
+
+`home_edge_01_display_power_off_v1` is a fixed display power-off maintenance
+task for `home-edge-01`. It requires operator approval
+`EXPLICIT_2026_08_09_TURN_OFF_HOME_EDGE_MONITOR` and uses the fixed
+`routine_mutation` lane, `desktop-user` identity, bounded timeout/output, the
+idempotency key `home-edge-display-off-fixed-signer-20260809-v1`, and the
+code-owned display-off script in `core.home_edge.display_power_off`.
+
+The unprivileged Runner does not receive
+`SKELETON_HOME_EDGE_EXEC_HMAC_SECRET`. It invokes exactly `/usr/bin/sudo
+--non-interactive -- /usr/local/sbin/skeleton-home-edge-display-off-signer`
+with a minimal environment and exact minimal stdin metadata. The privileged
+boundary validates that metadata before resolving HMAC configuration, signs only
+this one fixed request envelope, returns only the signed envelope, and never
+executes Home Edge transport or arbitrary commands. The Runner revalidates all
+authority-bearing request fields and then calls the existing
+`execute_home_edge_request` transport itself.
+
+The public receipt keeps `request_accepted`, `applied`, and
+`physically_verified` as separate fields. Success requires a verified off state.
 
 ## Network inventory boundary
 
