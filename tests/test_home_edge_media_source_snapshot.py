@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import subprocess
 import stat
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,6 +13,7 @@ import pytest
 
 from core.home_edge import media_source_snapshot as snapshot
 from core.home_edge.executor import HomeEdgeExecReceipt, HomeEdgeExecRequest, sign_request
+from scripts import home_edge_media_source_snapshot_fixed as fixed_helper
 
 
 SHA = "a" * 40
@@ -687,6 +689,169 @@ def test_permission_denial_opening_controller_env_fails_closed_without_alternate
 
     assert receipt["stable_reason"] == "executor_auth_config_unsafe"
     assert fs.open_calls == [snapshot.EXEC_HMAC_SECRET_CONFIG_PATH]
+
+
+def test_runner_identity_uses_fixed_privileged_capability_when_controller_hmac_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fs = FixedHmacFs(monkeypatch, tmp_path, deny_controller_open=True)
+    completed = subprocess.CompletedProcess(
+        args=["sudo", "--non-interactive", "--", str(snapshot.PRIVILEGED_SNAPSHOT_HELPER)],
+        returncode=0,
+        stdout=json.dumps(
+            {
+                **snapshot._validate_source_bytes(valid_source()),
+                "private_artifact_written": True,
+                "private_artifact_hash_matches": True,
+                "executor_receipt_hash": "d" * 64,
+                "stable_reason": "completed",
+                "success_criteria": "met",
+            },
+            sort_keys=True,
+        ),
+        stderr="",
+    )
+    calls: list[dict[str, Any]] = []
+
+    def fake_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append({"args": args, "kwargs": kwargs})
+        return completed
+
+    monkeypatch.setattr(snapshot.subprocess, "run", fake_run)
+    receipt = snapshot.execute_media_source_snapshot_task(
+        issue_body(),
+        registered_clean_main_sha=SHA,
+        github_main_sha=SHA,
+        private_root=tmp_path / "private",
+        environment={},
+        use_privileged_snapshot_capability=True,
+    )
+
+    assert snapshot.success_criteria_met(receipt)
+    assert fs.open_calls == []
+    assert len(calls) == 1
+    assert calls[0]["args"][0] == ["sudo", "--non-interactive", "--", str(snapshot.PRIVILEGED_SNAPSHOT_HELPER)]
+    assert snapshot.EXEC_HMAC_SECRET_ENV not in calls[0]["kwargs"]["env"]
+
+
+
+def test_privileged_fixed_payload_resolves_synthetic_secret_without_returning_it(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    FixedHmacFs(monkeypatch, tmp_path)
+    monkeypatch.setenv("SKELETON_RUNNER_PRIVATE_MEMORY_ROOT", str(tmp_path / "private"))
+    source = valid_source()
+    captured: list[Mapping[str, Any]] = []
+
+    def fake_execute(request: Mapping[str, Any]) -> HomeEdgeExecReceipt:
+        captured.append(request)
+        return executor_receipt(executor_stdout(source))
+
+    monkeypatch.setattr(snapshot, "execute_home_edge_request", fake_execute)
+
+    receipt = snapshot.execute_privileged_fixed_snapshot_payload(
+        {
+            "maintenance_task_id": snapshot.TASK_ID,
+            "body": issue_body(),
+            "registered_clean_main_sha": SHA,
+            "github_main_sha": SHA,
+        }
+    )
+    public = json.dumps(receipt, sort_keys=True)
+
+    assert snapshot.success_criteria_met(receipt)
+    assert captured
+    request = HomeEdgeExecRequest.from_mapping(captured[0])
+    assert request.signature == sign_request(request, CONFIG_SECRET)
+    assert CONFIG_SECRET not in public
+    assert CONFIG_SECRET not in json.dumps(captured[0], sort_keys=True)
+    assert snapshot.EXEC_HMAC_SECRET_ENV not in public
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {
+            "maintenance_task_id": "home_edge_01_media_source_snapshot_v1_extra",
+            "body": issue_body(),
+            "registered_clean_main_sha": SHA,
+            "github_main_sha": SHA,
+        },
+        {
+            "maintenance_task_id": snapshot.TASK_ID,
+            "body": issue_body(),
+            "registered_clean_main_sha": SHA,
+            "github_main_sha": SHA,
+            "argv": ["python3", "-c", "print(1)"],
+        },
+        {
+            "maintenance_task_id": snapshot.TASK_ID,
+            "body": issue_body() + "\nPath: /tmp/evil.py",
+            "registered_clean_main_sha": SHA,
+            "github_main_sha": SHA,
+        },
+    ],
+)
+def test_privileged_fixed_payload_rejects_arbitrary_operation_argv_or_path(
+    monkeypatch: pytest.MonkeyPatch,
+    payload: Mapping[str, Any],
+) -> None:
+    monkeypatch.setattr(
+        snapshot,
+        "execute_home_edge_request",
+        lambda _request: pytest.fail("executor must not be reached"),
+    )
+
+    receipt = snapshot.execute_privileged_fixed_snapshot_payload(payload)
+    public = json.dumps(receipt, sort_keys=True)
+
+    assert receipt["success_criteria"] == "not_met"
+    assert receipt["private_artifact_written"] is False
+    assert CONFIG_SECRET not in public
+
+
+def test_privileged_capability_rejects_wildcard_argument_injection_before_sudo() -> None:
+    calls = 0
+
+    def fake_run(*_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        nonlocal calls
+        calls += 1
+        return subprocess.CompletedProcess(args=[], returncode=2, stdout="", stderr="secret path")
+
+    receipt = snapshot.execute_privileged_fixed_snapshot_capability(
+        issue_body() + "\nScript: print(1)",
+        registered_clean_main_sha=SHA,
+        github_main_sha=SHA,
+        environment={},
+        runner=fake_run,
+    )
+    public = json.dumps(receipt, sort_keys=True)
+
+    assert calls == 0
+    assert receipt["stable_reason"] == "unknown_runtime_input_field"
+    assert "secret path" not in public
+
+
+def test_fixed_privileged_helper_rejects_any_argv_before_payload_processing(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        snapshot,
+        "execute_privileged_fixed_snapshot_payload",
+        lambda _payload: pytest.fail("payload must not be processed when argv is present"),
+    )
+
+    code = fixed_helper.main(["--request-json", "/tmp/request.json"])
+    captured = capsys.readouterr()
+    receipt = json.loads(captured.out)
+
+    assert code == 2
+    assert receipt["stable_reason"] == "privileged_snapshot_capability_rejected"
+    assert receipt["success_criteria"] == "not_met"
 
 
 def test_auth_config_failure_receipt_excludes_secret_path_and_owner_metadata(

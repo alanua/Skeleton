@@ -48,13 +48,16 @@ desktop account before enabling any live command.
 
 The supported installer is `scripts/install_home_edge_executor.sh`. It validates
 the real desktop account, installs `/usr/local/bin/home_edge_exec` and
-`/usr/local/sbin/home_edge_exec_root`, writes a mode-`0600` private env file,
-creates mode-`0700` private state directories, and writes a mode-`0440` sudoers
-rule for only the configured strict SSH target user and only
-`/usr/local/sbin/home_edge_exec_root --server`. It does not enable a restartable
-service or public listener. Runtime deployment still requires a private HMAC
-secret, strict SSH identity and known-hosts files, the real desktop username,
-sudo policy for account switching, and filesystem permissions on the node.
+`/usr/local/sbin/home_edge_exec_root`, and the fixed no-argument
+`/usr/local/sbin/home_edge_media_source_snapshot_fixed` capability. It writes a
+mode-`0600` private env file, creates mode-`0700` private state directories, and
+writes mode-`0440` sudoers rules for only the configured strict SSH target user
+and only `/usr/local/sbin/home_edge_exec_root --server` plus
+`/usr/local/sbin/home_edge_media_source_snapshot_fixed`. It does not enable a
+restartable service or public listener. Runtime deployment still requires a
+private HMAC secret, strict SSH identity and known-hosts files, the real desktop
+username, sudo policy for account switching, and filesystem permissions on the
+node.
 
 ## Network inventory boundary
 

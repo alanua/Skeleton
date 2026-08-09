@@ -13195,6 +13195,7 @@ def home_edge_01_media_source_snapshot_v1(body: str) -> str:
             body,
             registered_clean_main_sha=registered_sha,
             github_main_sha=github_sha,
+            use_privileged_snapshot_capability=True,
         )
         success = success_criteria_met(receipt)
         return _maintenance_report(

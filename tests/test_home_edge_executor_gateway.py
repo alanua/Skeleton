@@ -427,17 +427,21 @@ def test_installer_secret_modes_idempotency_wrapper_sudoers_and_no_service_enabl
     sudoers = install_root / "etc/sudoers.d/skeleton-home-edge-executor"
     wrapper = install_root / "usr/local/bin/home_edge_exec"
     root_wrapper = install_root / "usr/local/sbin/home_edge_exec_root"
+    snapshot_wrapper = install_root / "usr/local/sbin/home_edge_media_source_snapshot_fixed"
     assert oct(stat.S_IMODE(env_file.stat().st_mode)) == "0o600"
     assert oct(stat.S_IMODE(state_dir.stat().st_mode)) == "0o700"
     assert oct(stat.S_IMODE(audit_dir.stat().st_mode)) == "0o700"
     assert oct(stat.S_IMODE(sudoers.stat().st_mode)) == "0o440"
     assert oct(stat.S_IMODE(wrapper.stat().st_mode)) == "0o755"
     assert oct(stat.S_IMODE(root_wrapper.stat().st_mode)) == "0o555"
+    assert oct(stat.S_IMODE(snapshot_wrapper.stat().st_mode)) == "0o555"
     assert "test-hmac-value" in env_file.read_text(encoding="utf-8")
     assert wrapper.exists()
     assert root_wrapper.exists()
+    assert snapshot_wrapper.exists()
     sudoers_text = sudoers.read_text(encoding="utf-8")
-    assert sudoers_text.strip().endswith("ALL=(root) NOPASSWD: /usr/local/sbin/home_edge_exec_root --server")
+    assert f"{desktop} ALL=(root) NOPASSWD: /usr/local/sbin/home_edge_exec_root --server" in sudoers_text
+    assert f"{desktop} ALL=(root) NOPASSWD: /usr/local/sbin/home_edge_media_source_snapshot_fixed" in sudoers_text
     assert "ALL=(ALL)" not in sudoers_text
     assert "ALL : ALL" not in sudoers_text
     assert "SETENV" not in sudoers_text
@@ -464,6 +468,11 @@ def test_installer_secret_modes_idempotency_wrapper_sudoers_and_no_service_enabl
     assert "/usr/bin/env python3 \"$server_script\" --server" in root_wrapper_text
     assert "/etc/skeleton/home_edge_executor.env" in root_wrapper_text
     assert "env -i" in root_wrapper_text
+    snapshot_wrapper_text = snapshot_wrapper.read_text(encoding="utf-8")
+    assert 'if [[ "$#" -ne 0 ]]' in snapshot_wrapper_text
+    assert "home_edge_media_source_snapshot_fixed.py" in snapshot_wrapper_text
+    assert "SKELETON_HOME_EDGE_EXEC_HMAC_SECRET" not in snapshot_wrapper_text
+    assert "env -i" in snapshot_wrapper_text
     assert "systemctl enable" not in installer.read_text(encoding="utf-8")
     assert "Restart=" not in installer.read_text(encoding="utf-8")
     assert 'SKELETON_HOME_EDGE_EXEC_HMAC_SECRET="$' not in Path("docs/HOME_EDGE_EXECUTOR.md").read_text(encoding="utf-8")
