@@ -244,6 +244,7 @@ BUILD_AUFMASS_PRIVATE_SHORTLIST = "build_aufmass_private_shortlist"
 BUILD_AUFMASS_PRIVATE_AREA_SCHEDULE = "build_aufmass_private_area_schedule"
 INSPECT_PR_MERGEABILITY = "inspect_pr_mergeability"
 BACKFILL_SKELETON_MEMORY_RECENT = "backfill_skeleton_memory_recent"
+REPLENISH_RUNNER_QUEUE = "replenish_runner_queue"
 INSPECT_ISSUE_WORKTREE_FOR_PUBLISH = "inspect_issue_worktree_for_publish"
 PUBLISH_ISSUE_WORKTREE_PR = "publish_issue_worktree_pr"
 PUBLISH_EXISTING_ISSUE_WORKTREE = "publish_existing_issue_worktree"
@@ -287,6 +288,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         BUILD_AUFMASS_PRIVATE_AREA_SCHEDULE,
         INSPECT_PR_MERGEABILITY,
         BACKFILL_SKELETON_MEMORY_RECENT,
+        REPLENISH_RUNNER_QUEUE,
         INSPECT_ISSUE_WORKTREE_FOR_PUBLISH,
         PUBLISH_ISSUE_WORKTREE_PR,
         PUBLISH_EXISTING_ISSUE_WORKTREE,
@@ -361,6 +363,7 @@ PROTECTED_MAINTENANCE_TASK_IDS = frozenset(
         BUILD_AUFMASS_PRIVATE_SHORTLIST,
         BUILD_AUFMASS_PRIVATE_AREA_SCHEDULE,
         QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES,
+        REPLENISH_RUNNER_QUEUE,
     )
 )
 CONTAINER_VALIDATION_SOURCE_ISSUE = 1667
@@ -1116,6 +1119,15 @@ class IssueWorktreePublishExistingPrLookup:
 class StaleCleanSkeletonWorktreeQuarantineRequest:
     worktree_ids: tuple[str, ...]
     protected_ids: frozenset[str]
+
+
+@dataclass(frozen=True)
+class RunnerQueueReplenisherCandidate:
+    issue: dict[str, Any]
+    number: int
+    intent_key: str
+    allowed_files: frozenset[str]
+    dependencies: frozenset[int]
 
 
 @dataclass(frozen=True)
@@ -10228,6 +10240,314 @@ def _body_list_items(metadata: str, field_names: tuple[str, ...]) -> list[str] |
     return None
 
 
+QUEUE_REPLENISHER_TARGET_MIN_DEPTH = 3
+QUEUE_REPLENISHER_TARGET_MAX_DEPTH = 6
+QUEUE_REPLENISHER_CANDIDATE_LABEL = "runner:backlog"
+QUEUE_REPLENISHER_PRIVATE_LABELS = frozenset(
+    ("privacy:private", "privacy:PRIVATE", "private", "payload:private")
+)
+QUEUE_REPLENISHER_PUBLIC_SAFE_LABELS = frozenset(
+    ("privacy:public-safe", "privacy:PUBLIC_SAFE", "public-safe")
+)
+
+
+def _queue_replenisher_issue_number(issue: Mapping[str, Any]) -> int | None:
+    number = issue.get("number")
+    if isinstance(number, int) and not isinstance(number, bool):
+        return number
+    return None
+
+
+def _queue_replenisher_metadata(issue: Mapping[str, Any]) -> str:
+    return _metadata_before_task(str(issue.get("body") or ""))
+
+
+def _queue_replenisher_task_fields(issue: Mapping[str, Any]) -> Mapping[str, Any]:
+    return _shadow_task_block_mapping(str(issue.get("body") or ""))
+
+
+def _queue_replenisher_field(
+    issue: Mapping[str, Any], public_field: str, typed_key: str
+) -> object:
+    task_fields = _queue_replenisher_task_fields(issue)
+    if typed_key in task_fields:
+        return task_fields[typed_key]
+    metadata = _queue_replenisher_metadata(issue)
+    for field in (public_field, typed_key):
+        multiline = _metadata_multiline_value(metadata, field)
+        if multiline is not None:
+            return multiline
+        match = re.search(
+            rf"^[^\S\r\n]*{re.escape(field)}:[^\S\r\n]*"
+            r"(?P<value>\S(?:[^\r\n]*\S)?)[^\S\r\n]*$",
+            metadata,
+            re.MULTILINE,
+        )
+        if match is not None:
+            return match.group("value")
+    return _metadata_yaml_value(metadata, typed_key)
+
+
+def _queue_replenisher_privacy_boundary(issue: Mapping[str, Any]) -> str | None:
+    value = _queue_replenisher_field(issue, "Privacy Boundary", "privacy_boundary")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _queue_replenisher_schema(issue: Mapping[str, Any]) -> str | None:
+    value = _queue_replenisher_field(issue, "Schema", "schema")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _queue_replenisher_privacy_block_reason(issue: Mapping[str, Any]) -> str | None:
+    labels = _issue_label_names(issue)
+    if labels & QUEUE_REPLENISHER_PRIVATE_LABELS:
+        return "private_label"
+
+    boundary = _queue_replenisher_privacy_boundary(issue)
+    if boundary is not None:
+        normalized = boundary.upper()
+        if normalized.startswith("PRIVATE") or normalized.endswith("_PRIVATE"):
+            return "private_privacy_boundary"
+        if normalized.startswith("PUBLIC_SAFE"):
+            return None
+        return "unsupported_privacy_boundary"
+
+    schema = _queue_replenisher_schema(issue)
+    if schema is not None and "PRIVATE" in schema.upper():
+        return "private_schema"
+    if labels & QUEUE_REPLENISHER_PUBLIC_SAFE_LABELS:
+        return None
+    return "missing_public_safe_privacy_boundary"
+
+
+def queue_replenisher_issue_is_public_safe(issue: Mapping[str, Any]) -> bool:
+    return _queue_replenisher_privacy_block_reason(issue) is None
+
+
+def _queue_replenisher_allowed_files(issue: Mapping[str, Any]) -> frozenset[str]:
+    value = _queue_replenisher_field(issue, "Allowed Files", "allowed_files")
+    files = _shadow_csv_or_sequence(value)
+    if not files:
+        files = tuple(
+            _body_list_items(
+                _queue_replenisher_metadata(issue), ("Allowed Files",)
+            )
+            or ()
+        )
+    return frozenset(files)
+
+
+def _queue_replenisher_protected_files(issue: Mapping[str, Any]) -> frozenset[str]:
+    value = _queue_replenisher_field(issue, "Protected Files", "protected_files")
+    files = _shadow_csv_or_sequence(value)
+    if not files:
+        files = tuple(
+            _body_list_items(
+                _queue_replenisher_metadata(issue), ("Protected Files",)
+            )
+            or ()
+        )
+    return frozenset(files)
+
+
+def _queue_replenisher_dependencies(issue: Mapping[str, Any]) -> frozenset[int]:
+    value = _queue_replenisher_field(issue, "Depends On", "depends_on")
+    dependencies = list(_shadow_csv_or_sequence(value))
+    if not dependencies:
+        listed = _body_list_items(
+            _queue_replenisher_metadata(issue), ("Depends On", "Dependencies")
+        )
+        dependencies.extend(listed or ())
+    numbers: set[int] = set()
+    for dependency in dependencies:
+        for match in re.finditer(r"#?(?P<number>[1-9]\d*)", dependency):
+            numbers.add(int(match.group("number")))
+    return frozenset(numbers)
+
+
+_QUEUE_REPLENISHER_INTENT_WORD_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _queue_replenisher_intent_key(issue: Mapping[str, Any]) -> str:
+    for public_field, typed_key in (
+        ("Idempotency Key", "idempotency_key"),
+        ("Intent Key", "intent_key"),
+        ("Operation", "operation"),
+    ):
+        value = _queue_replenisher_field(issue, public_field, typed_key)
+        if isinstance(value, str) and value.strip():
+            return value.strip().lower()
+    title = str(issue.get("title") or "")
+    normalized = _QUEUE_REPLENISHER_INTENT_WORD_RE.sub(" ", title.lower()).strip()
+    return " ".join(normalized.split())
+
+
+def _queue_replenisher_candidate(
+    issue: Mapping[str, Any],
+) -> RunnerQueueReplenisherCandidate | None:
+    number = _queue_replenisher_issue_number(issue)
+    if number is None:
+        return None
+    intent_key = _queue_replenisher_intent_key(issue)
+    if not intent_key:
+        return None
+    return RunnerQueueReplenisherCandidate(
+        issue=dict(issue),
+        number=number,
+        intent_key=intent_key,
+        allowed_files=_queue_replenisher_allowed_files(issue),
+        dependencies=_queue_replenisher_dependencies(issue),
+    )
+
+
+def select_runner_queue_replenishment_targets(
+    ready_issues: list[dict[str, Any]],
+    candidate_issues: list[dict[str, Any]],
+    *,
+    target_min_depth: int = QUEUE_REPLENISHER_TARGET_MIN_DEPTH,
+    target_max_depth: int = QUEUE_REPLENISHER_TARGET_MAX_DEPTH,
+    protected_files: frozenset[str] = frozenset(),
+) -> list[dict[str, Any]]:
+    ready_depth = len(ready_issues)
+    if ready_depth >= target_min_depth:
+        return []
+    target_depth = min(max(target_min_depth, ready_depth), target_max_depth)
+    slots = target_depth - ready_depth
+    if slots <= 0:
+        return []
+
+    done_numbers = {
+        number
+        for issue in (*ready_issues, *candidate_issues)
+        if (number := _queue_replenisher_issue_number(issue)) is not None
+        and LABEL_DONE in _issue_label_names(issue)
+    }
+    ready_numbers = {
+        number
+        for issue in ready_issues
+        if (number := _queue_replenisher_issue_number(issue)) is not None
+    }
+    used_intents = {
+        candidate.intent_key
+        for issue in ready_issues
+        if (candidate := _queue_replenisher_candidate(issue)) is not None
+    }
+    occupied_files: set[str] = set(protected_files)
+    for issue in ready_issues:
+        occupied_files.update(_queue_replenisher_allowed_files(issue))
+
+    selected: list[RunnerQueueReplenisherCandidate] = []
+    for issue in sorted(
+        candidate_issues,
+        key=lambda item: _queue_replenisher_issue_number(item) or 0,
+    ):
+        if len(selected) >= slots:
+            break
+        if LABEL_READY in _issue_label_names(issue):
+            continue
+        if _issue_label_names(issue) & {LABEL_RUNNING, LABEL_DONE, LABEL_BLOCKED}:
+            continue
+        if _queue_replenisher_privacy_block_reason(issue) is not None:
+            continue
+        candidate = _queue_replenisher_candidate(issue)
+        if candidate is None:
+            continue
+        if candidate.intent_key in used_intents:
+            continue
+        if candidate.dependencies - done_numbers - ready_numbers:
+            continue
+        if candidate.allowed_files & occupied_files:
+            continue
+        protected_overlap = candidate.allowed_files & _queue_replenisher_protected_files(
+            issue
+        )
+        if protected_overlap:
+            continue
+        selected.append(candidate)
+        used_intents.add(candidate.intent_key)
+        occupied_files.update(candidate.allowed_files)
+
+    return [candidate.issue for candidate in selected]
+
+
+def get_queue_replenisher_candidate_issues() -> list[dict[str, Any]]:
+    code, output = run_command(
+        [
+            "gh",
+            "issue",
+            "list",
+            "--repo",
+            REPO,
+            "--label",
+            QUEUE_REPLENISHER_CANDIDATE_LABEL,
+            "--state",
+            "open",
+            "--search",
+            "is:issue",
+            "--json",
+            "number,title,body,state,url,closed,labels",
+        ]
+    )
+    if code != 0:
+        raise RuntimeError(f"gh issue list failed:\n{output}")
+    parsed = json.loads(output or "[]")
+    if not isinstance(parsed, list):
+        raise RuntimeError("gh issue list returned non-list JSON")
+    return [issue for issue in parsed if isinstance(issue, dict)]
+
+
+def replenish_runner_queue(body: str) -> str:
+    task_id = REPLENISH_RUNNER_QUEUE
+    metadata = _metadata_before_task(body)
+    protected_files = frozenset(
+        _body_list_items(metadata, ("Protected Files",)) or ()
+    )
+    ready_issues = get_ready_issues()
+    candidate_issues = get_queue_replenisher_candidate_issues()
+    selected = select_runner_queue_replenishment_targets(
+        ready_issues,
+        candidate_issues,
+        protected_files=protected_files,
+    )
+    for issue in selected:
+        number = _queue_replenisher_issue_number(issue)
+        if number is None:
+            continue
+        code, output = run_command(
+            [
+                "gh",
+                "issue",
+                "edit",
+                str(number),
+                "--repo",
+                REPO,
+                "--remove-label",
+                QUEUE_REPLENISHER_CANDIDATE_LABEL,
+                "--add-label",
+                LABEL_READY,
+            ]
+        )
+        if code != 0:
+            raise RuntimeError(f"gh issue edit failed:\n{output}")
+
+    selected_numbers = [
+        str(number)
+        for issue in selected
+        if (number := _queue_replenisher_issue_number(issue)) is not None
+    ]
+    return _maintenance_report(
+        "DONE",
+        task_id,
+        [
+            f"ready_depth_before={len(ready_issues)}",
+            f"selected_count={len(selected_numbers)}",
+            "selected_issues=" + (",".join(selected_numbers) or "none"),
+            "telegram_notifications=0",
+        ],
+        "met",
+    )
+
+
 def _stale_clean_skeleton_worktree_quarantine_metadata(
     body: str,
 ) -> tuple[StaleCleanSkeletonWorktreeQuarantineRequest | None, str | None]:
@@ -13522,6 +13842,8 @@ def dispatch_runtime_maintenance_task(
             return inspect_pr_mergeability(body)
         if task_id == BACKFILL_SKELETON_MEMORY_RECENT:
             return backfill_skeleton_memory_recent()
+        if task_id == REPLENISH_RUNNER_QUEUE:
+            return replenish_runner_queue(body)
         if task_id == INSPECT_ISSUE_WORKTREE_FOR_PUBLISH:
             return inspect_issue_worktree_for_publish(body)
         if task_id == PUBLISH_ISSUE_WORKTREE_PR:

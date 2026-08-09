@@ -18,6 +18,24 @@ Missing or unknown maintenance task ids are reported as `BLOCKED`.
 
 ## Current allowlist
 
+`replenish_runner_queue` promotes public-safe backlog issues into
+`runner:ready` until the ready queue reaches deterministic target depth 3,
+bounded by maximum depth 6. Candidates are taken from
+`runner:backlog`, sorted by issue number, and skipped when they duplicate an
+already-ready or already-selected intent, depend on missing issues, overlap
+files already occupied by ready/selected tasks, or touch protected files.
+
+Privacy eligibility is based only on explicit metadata: `Privacy Boundary` /
+`privacy_boundary`, explicit privacy labels, and schema-level privacy markers.
+`PUBLIC_SAFE_*` candidates are eligible. `PRIVATE*` boundaries, private labels,
+and private schemas are ineligible. The replenisher must not classify an issue
+as private merely because its task body or forbidden-actions text contains
+safety wording such as `no secrets`, `no tokens`, or `private data`.
+
+The task performs no routine Telegram notification. Its public report includes
+only ready depth, selected issue numbers, selected count, and
+`telegram_notifications=0`.
+
 `prepare_private_static_site_handoff` prepares a durable encrypted handoff for a
 private static web package. It requires exact operator approval and an artifact
 id:
