@@ -17321,6 +17321,94 @@ def test_home_edge_lan_inventory_task_is_explicitly_dispatched() -> None:
     action.assert_called_once_with()
 
 
+def _home_edge_display_power_off_body(*, risk: str | None = "yellow") -> str:
+    lines = [
+        f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+        (
+            "Maintenance Task ID: "
+            f"{runner.HOME_EDGE_01_DISPLAY_POWER_OFF_CONTROLLER_V1}"
+        ),
+        "Operator Approval: EXPLICIT_HOME_EDGE_01_DISPLAY_POWER_OFF_CONTROLLER_20260809",
+        "Target Node: home-edge-01",
+        "Privacy Boundary: PRIVATE_CONTROLLER_CREDENTIAL / PUBLIC_SAFE_STATUS_ONLY",
+    ]
+    if risk is not None:
+        lines.append(f"Risk: {risk}")
+    lines.extend(("```task", "turn off the display", "```"))
+    return "\n".join(lines)
+
+
+def test_home_edge_display_power_off_task_is_explicitly_dispatched() -> None:
+    body = _home_edge_display_power_off_body()
+    with mock.patch.object(
+        runner,
+        "home_edge_01_display_power_off_controller_v1",
+        return_value="DONE: test",
+    ) as action:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HOME_EDGE_01_DISPLAY_POWER_OFF_CONTROLLER_V1,
+            str(Path.cwd()),
+            body,
+        )
+
+    assert report == "DONE: test"
+    action.assert_called_once_with(body)
+
+
+def test_home_edge_display_power_off_runner_reports_public_safe_receipt() -> None:
+    body = _home_edge_display_power_off_body()
+    receipt = {
+        "status": "ok",
+        "node_id": "home-edge-01",
+        "exit_code": 0,
+        "idempotency": "executed",
+        "receipt_hash": "hash",
+        "physically_verified": True,
+    }
+    with mock.patch.object(
+        runner, "_read_exact_git_sha", return_value="a" * 40
+    ), mock.patch(
+        "core.home_edge.display_power_off.execute_display_power_off_task",
+        return_value=receipt,
+    ) as execute:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HOME_EDGE_01_DISPLAY_POWER_OFF_CONTROLLER_V1,
+            str(Path.cwd()),
+            body,
+        )
+
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert "display_power_status=controller_request_sent" in report
+    assert "node_id=home-edge-01" in report
+    assert "physically_verified=true" in report
+    assert "executor_receipt_hash=hash" in report
+    assert "signature" not in report
+    assert "hmac" not in report.lower()
+    execute.assert_called_once_with(
+        body,
+        registered_clean_main_sha="a" * 40,
+        github_main_sha="a" * 40,
+    )
+
+
+def test_home_edge_display_power_off_runner_blocks_bad_risk_before_transport() -> None:
+    body = _home_edge_display_power_off_body(risk="yellowish")
+    with mock.patch.object(
+        runner, "_read_exact_git_sha", return_value="a" * 40
+    ), mock.patch(
+        "core.home_edge.display_power_off.execute_home_edge_request"
+    ) as transport:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HOME_EDGE_01_DISPLAY_POWER_OFF_CONTROLLER_V1,
+            str(Path.cwd()),
+            body,
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=unsupported_risk" in report
+    transport.assert_not_called()
+
+
 def _home_edge_audit_body(audit_id: str = "audit-2074-runner") -> str:
     return "\n".join(
         (

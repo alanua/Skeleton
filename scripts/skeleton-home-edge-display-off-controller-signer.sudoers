@@ -1,0 +1,2 @@
+Cmnd_Alias SKELETON_HOME_EDGE_DISPLAY_OFF_SIGNER = /usr/local/bin/skeleton-home-edge-display-off-controller-signer
+%sudo ALL=(root) NOPASSWD: SKELETON_HOME_EDGE_DISPLAY_OFF_SIGNER
