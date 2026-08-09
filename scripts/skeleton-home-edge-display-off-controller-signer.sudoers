@@ -1,0 +1,2 @@
+Cmnd_Alias SKELETON_HOME_EDGE_DISPLAY_OFF_CONTROLLER_SIGNER = /usr/local/libexec/skeleton/home-edge-display-off-controller-signer/current/home_edge_display_power_off_signer.py
+%sudo ALL=(root) NOPASSWD: SKELETON_HOME_EDGE_DISPLAY_OFF_CONTROLLER_SIGNER
