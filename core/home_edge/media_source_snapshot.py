@@ -102,6 +102,10 @@ ALLOWED_FIELDS = frozenset(
         "Repository",
         "Expected Main SHA",
         "Target",
+        "Target Node",
+        "Risk",
+        "Operator Approval",
+        "Privacy Boundary",
     }
 )
 
@@ -109,7 +113,6 @@ ALLOWED_FIELDS = frozenset(
 @dataclass(frozen=True)
 class RuntimeInput:
     repository: str
-    expected_main_sha: str
     target: str
 
 
@@ -123,7 +126,6 @@ def execute_media_source_snapshot_task(
 ) -> dict[str, object]:
     runtime_input = parse_runtime_input(body)
     validate_main_sha(
-        runtime_input.expected_main_sha,
         registered_clean_main_sha=registered_clean_main_sha,
         github_main_sha=github_main_sha,
     )
@@ -202,20 +204,17 @@ def parse_runtime_input(body: str) -> RuntimeInput:
         raise ValueError("maintenance_task_id_mismatch")
     runtime_input = RuntimeInput(
         repository=fields.get("Repository", ""),
-        expected_main_sha=fields.get("Expected Main SHA", ""),
-        target=fields.get("Target", ""),
+        target=fields.get("Target Node") or fields.get("Target", ""),
     )
-    if runtime_input.repository != REPOSITORY:
+    if runtime_input.repository and runtime_input.repository != REPOSITORY:
         raise ValueError("repository_mismatch")
-    if EXPECTED_MAIN_SHA_RE.fullmatch(runtime_input.expected_main_sha) is None:
-        raise ValueError("expected_main_sha_malformed")
     if runtime_input.target != TARGET_NODE:
         raise ValueError("target_mismatch")
     return runtime_input
 
 
 def validate_main_sha(
-    expected_main_sha: str,
+    expected_main_sha: str | None = None,
     *,
     registered_clean_main_sha: str,
     github_main_sha: str,
@@ -224,9 +223,9 @@ def validate_main_sha(
         raise ValueError("registered_clean_main_sha_unavailable")
     if EXPECTED_MAIN_SHA_RE.fullmatch(github_main_sha or "") is None:
         raise ValueError("github_main_sha_unavailable")
-    if expected_main_sha != registered_clean_main_sha:
+    if expected_main_sha is not None and expected_main_sha != registered_clean_main_sha:
         raise ValueError("registered_clean_main_sha_mismatch")
-    if expected_main_sha != github_main_sha:
+    if registered_clean_main_sha != github_main_sha:
         raise ValueError("github_main_sha_mismatch")
 
 

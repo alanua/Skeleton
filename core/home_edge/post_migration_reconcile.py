@@ -85,6 +85,9 @@ _ALLOWED_FIELDS = frozenset(
         "Expected Main SHA",
         "Operator Approval",
         "Target",
+        "Target Node",
+        "Risk",
+        "Privacy Boundary",
     }
 )
 _FIELD_RE = re.compile(r"^\s*(?P<field>[A-Za-z][A-Za-z0-9 _-]{0,80}):\s*(?P<value>.*?)\s*$")
@@ -95,7 +98,6 @@ _MAX_EXECUTOR_STDOUT_BYTES = 65536
 @dataclass(frozen=True)
 class RuntimeInput:
     repository: str
-    expected_main_sha: str
     operator_approval: str
     target: str
 
@@ -109,7 +111,6 @@ def execute_post_migration_reconcile_task(
 ) -> dict[str, object]:
     runtime_input = parse_runtime_input(body)
     validate_main_sha(
-        runtime_input.expected_main_sha,
         registered_clean_main_sha=registered_clean_main_sha,
         github_main_sha=github_main_sha,
     )
@@ -156,14 +157,11 @@ def parse_runtime_input(body: str) -> RuntimeInput:
         raise ValueError("maintenance_task_id_mismatch")
     runtime_input = RuntimeInput(
         repository=fields.get("Repository", ""),
-        expected_main_sha=fields.get("Expected Main SHA", ""),
         operator_approval=fields.get("Operator Approval", ""),
-        target=fields.get("Target", ""),
+        target=fields.get("Target Node") or fields.get("Target", ""),
     )
-    if runtime_input.repository != REPOSITORY:
+    if runtime_input.repository and runtime_input.repository != REPOSITORY:
         raise ValueError("repository_mismatch")
-    if EXPECTED_MAIN_SHA_RE.fullmatch(runtime_input.expected_main_sha) is None:
-        raise ValueError("expected_main_sha_malformed")
     if runtime_input.operator_approval != OPERATOR_APPROVAL:
         raise ValueError("operator_approval_mismatch")
     if runtime_input.target != TARGET_NODE:
@@ -172,7 +170,7 @@ def parse_runtime_input(body: str) -> RuntimeInput:
 
 
 def validate_main_sha(
-    expected_main_sha: str,
+    expected_main_sha: str | None = None,
     *,
     registered_clean_main_sha: str,
     github_main_sha: str,
@@ -181,9 +179,9 @@ def validate_main_sha(
         raise ValueError("registered_clean_main_sha_unavailable")
     if EXPECTED_MAIN_SHA_RE.fullmatch(github_main_sha or "") is None:
         raise ValueError("github_main_sha_unavailable")
-    if expected_main_sha != registered_clean_main_sha:
+    if expected_main_sha is not None and expected_main_sha != registered_clean_main_sha:
         raise ValueError("registered_clean_main_sha_mismatch")
-    if expected_main_sha != github_main_sha:
+    if registered_clean_main_sha != github_main_sha:
         raise ValueError("github_main_sha_mismatch")
 
 

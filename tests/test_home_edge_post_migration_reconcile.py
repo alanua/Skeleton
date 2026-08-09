@@ -105,18 +105,33 @@ def test_exact_runtime_input_accepted_and_main_sha_checked() -> None:
     parsed = reconcile.parse_runtime_input(issue_body())
 
     assert parsed.repository == reconcile.REPOSITORY
-    assert parsed.expected_main_sha == SHA
     reconcile.validate_main_sha(
-        SHA,
         registered_clean_main_sha=SHA,
         github_main_sha=SHA,
     )
 
 
+def test_canonical_metadata_does_not_require_issue_body_repository_or_sha() -> None:
+    body = "\n".join(
+        (
+            "Mode: RUNTIME_MAINTENANCE_TASK",
+            f"Maintenance Task ID: {reconcile.TASK_ID}",
+            "Risk: low",
+            f"Target Node: {reconcile.TARGET_NODE}",
+            f"Operator Approval: {reconcile.OPERATOR_APPROVAL}",
+            "Privacy Boundary: PRIVATE_CONTROLLER_CREDENTIAL / PUBLIC_SAFE_STATUS_ONLY",
+        )
+    )
+
+    parsed = reconcile.parse_runtime_input(body)
+
+    assert parsed.repository == ""
+    assert parsed.target == reconcile.TARGET_NODE
+
+
 @pytest.mark.parametrize(
     "body,reason",
     [
-        (issue_body(**{"Expected Main SHA": "A" * 40}), "expected_main_sha_malformed"),
         (issue_body() + "\nExpected Main SHA: " + SHA, "duplicate_runtime_input_field"),
         (issue_body() + "\nCommand: /bin/sh", "unknown_runtime_input_field"),
         (issue_body() + "\nPath: /tmp/anything", "unknown_runtime_input_field"),

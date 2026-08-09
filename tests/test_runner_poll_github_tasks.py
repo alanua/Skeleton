@@ -166,6 +166,32 @@ def _media_source_snapshot_receipt() -> dict[str, object]:
     }
 
 
+def _display_power_off_issue_body(**updates: str) -> str:
+    fields = {
+        "Mode": runner.RUNTIME_MAINTENANCE_MODE,
+        "Maintenance Task ID": runner.HOME_EDGE_01_DISPLAY_POWER_OFF_V1,
+        "Risk": "low",
+        "Target Node": "home-edge-01",
+        "Operator Approval": "EXPLICIT_2026_08_09_TURN_OFF_HOME_EDGE_MONITOR",
+        "Privacy Boundary": "PRIVATE_CONTROLLER_CREDENTIAL / PUBLIC_SAFE_STATUS_ONLY",
+    }
+    fields.update(updates)
+    return "\n".join(f"{key}: {value}" for key, value in fields.items())
+
+
+def _display_power_off_receipt() -> dict[str, object]:
+    return {
+        "maintenance_task_id": runner.HOME_EDGE_01_DISPLAY_POWER_OFF_V1,
+        "request_accepted": True,
+        "applied": True,
+        "physically_verified": True,
+        "display_power_state": "off",
+        "executor_receipt_hash": "f" * 64,
+        "stable_reason": "completed",
+        "success_criteria": "met",
+    }
+
+
 def _merge_issue_body(
     *,
     pr_number: int = 123,
@@ -17245,6 +17271,72 @@ def test_unrelated_runtime_maintenance_dispatch_is_unchanged() -> None:
 
     assert report == "DONE: unchanged"
     check.assert_called_once_with()
+
+
+def test_display_power_off_canonical_2374_fixture_reaches_controller_path() -> None:
+    calls: list[tuple[str, str, str]] = []
+
+    def fake_execute(body: str, *, registered_clean_main_sha: str, github_main_sha: str):
+        calls.append((body, registered_clean_main_sha, github_main_sha))
+        return _display_power_off_receipt()
+
+    with mock.patch.object(
+        runner,
+        "_read_exact_git_sha",
+        side_effect=lambda ref: HEAD_SHA if ref in {"main", "origin/main"} else "",
+    ), mock.patch(
+        "core.home_edge.display_power_off.execute_display_power_off_task",
+        side_effect=fake_execute,
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HOME_EDGE_01_DISPLAY_POWER_OFF_V1,
+            str(Path.cwd()),
+            _display_power_off_issue_body(),
+        )
+
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert "request_accepted=true" in report
+    assert "applied=true" in report
+    assert "physically_verified=true" in report
+    assert "display_power_state=off" in report
+    assert calls == [(_display_power_off_issue_body(), HEAD_SHA, HEAD_SHA)]
+
+
+@pytest.mark.parametrize(
+    "updates,reason",
+    [
+        ({"Target Node": "home-edge-0l"}, "target_node_mismatch"),
+        ({"Maintenance Task ID": "wrong"}, "maintenance_task_id_mismatch"),
+        ({"Operator Approval": "wrong"}, "operator_approval_mismatch"),
+        ({"Repository": runner.REPO}, "unknown_runtime_input_field"),
+        ({"Expected Main SHA": HEAD_SHA}, "unknown_runtime_input_field"),
+        ({"Target": "home-edge-01"}, "unknown_runtime_input_field"),
+    ],
+)
+def test_display_power_off_malformed_authority_fields_block_before_effects(
+    updates: dict[str, str],
+    reason: str,
+) -> None:
+    with mock.patch.object(
+        runner,
+        "_read_exact_git_sha",
+        return_value=HEAD_SHA,
+    ), mock.patch(
+        "core.home_edge.display_power_off.invoke_fixed_display_off_signer",
+        side_effect=AssertionError("signer must not run"),
+    ), mock.patch(
+        "core.home_edge.display_power_off.execute_home_edge_request",
+        side_effect=AssertionError("transport must not run"),
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HOME_EDGE_01_DISPLAY_POWER_OFF_V1,
+            str(Path.cwd()),
+            _display_power_off_issue_body(**updates),
+        )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert f"reason={reason}" in report
+
 
 def test_home_edge_lightweight_diagnostic_does_not_require_usb_modem() -> None:
     artifact = {

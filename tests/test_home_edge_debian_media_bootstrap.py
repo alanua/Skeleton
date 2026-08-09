@@ -82,18 +82,33 @@ def test_exact_runtime_input_accepted_and_main_sha_checked() -> None:
     parsed = bootstrap.parse_runtime_input(issue_body())
 
     assert parsed.repository == bootstrap.REPOSITORY
-    assert parsed.expected_main_sha == SHA
     bootstrap.validate_main_sha(
-        SHA,
         registered_clean_main_sha=SHA,
         github_main_sha=SHA,
     )
 
 
+def test_canonical_metadata_does_not_require_issue_body_repository_or_sha() -> None:
+    body = "\n".join(
+        (
+            "Mode: RUNTIME_MAINTENANCE_TASK",
+            f"Maintenance Task ID: {bootstrap.TASK_ID}",
+            "Risk: low",
+            f"Target Node: {bootstrap.TARGET_NODE}",
+            f"Operator Approval: {bootstrap.OPERATOR_APPROVAL}",
+            "Privacy Boundary: PRIVATE_CONTROLLER_CREDENTIAL / PUBLIC_SAFE_STATUS_ONLY",
+        )
+    )
+
+    parsed = bootstrap.parse_runtime_input(body)
+
+    assert parsed.repository == ""
+    assert parsed.target == bootstrap.TARGET_NODE
+
+
 @pytest.mark.parametrize(
     "body,reason",
     [
-        (issue_body(**{"Expected Main SHA": "A" * 40}), "expected_main_sha_malformed"),
         (
             issue_body() + "\nExpected Main SHA: " + SHA,
             "duplicate_runtime_input_field",
@@ -117,10 +132,8 @@ def test_malformed_duplicate_and_behavior_changing_fields_rejected(
 
 
 def test_expected_sha_must_equal_registered_and_github_main() -> None:
-    with pytest.raises(ValueError, match="registered_clean_main_sha_mismatch"):
-        bootstrap.validate_main_sha(SHA, registered_clean_main_sha="b" * 40, github_main_sha=SHA)
     with pytest.raises(ValueError, match="github_main_sha_mismatch"):
-        bootstrap.validate_main_sha(SHA, registered_clean_main_sha=SHA, github_main_sha="b" * 40)
+        bootstrap.validate_main_sha(registered_clean_main_sha=SHA, github_main_sha="b" * 40)
 
 
 def test_request_is_signed_fixed_and_dispatched_only_through_gateway(

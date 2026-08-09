@@ -771,7 +771,6 @@ def test_missing_fixed_config_or_target_variable_is_public_safe(
 @pytest.mark.parametrize(
     "body,reason",
     [
-        (issue_body(**{"Expected Main SHA": "A" * 40}), "expected_main_sha_malformed"),
         (issue_body() + "\nExpected Main SHA: " + SHA, "duplicate_runtime_input_field"),
         (issue_body() + "\nPath: /tmp/evil.py", "unknown_runtime_input_field"),
         (issue_body() + "\nScript: print(1)", "unknown_runtime_input_field"),
@@ -785,6 +784,24 @@ def test_missing_fixed_config_or_target_variable_is_public_safe(
 def test_malformed_unknown_issue_fields_cannot_change_behavior(body: str, reason: str) -> None:
     with pytest.raises(ValueError, match=reason):
         snapshot.parse_runtime_input(body)
+
+
+def test_canonical_metadata_does_not_require_issue_body_repository_or_sha() -> None:
+    body = "\n".join(
+        (
+            "Mode: RUNTIME_MAINTENANCE_TASK",
+            f"Maintenance Task ID: {snapshot.TASK_ID}",
+            "Risk: low",
+            f"Target Node: {snapshot.TARGET_NODE}",
+            "Operator Approval: EXPLICIT_2026_08_09_TURN_OFF_HOME_EDGE_MONITOR",
+            "Privacy Boundary: PRIVATE_CONTROLLER_CREDENTIAL / PUBLIC_SAFE_STATUS_ONLY",
+        )
+    )
+
+    parsed = snapshot.parse_runtime_input(body)
+
+    assert parsed.repository == ""
+    assert parsed.target == snapshot.TARGET_NODE
 
 
 def test_current_style_app_get_routes_validate() -> None:
