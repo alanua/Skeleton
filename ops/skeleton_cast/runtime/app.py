@@ -90,6 +90,107 @@ def _save(job: dict) -> None:
     _atomic(_job_path(job['job_id']), job)
 
 
+_TRAILER_CLASS_VALUES = {'trailer', 'трейлер', 'teaser', 'preview', 'promo'}
+_FULL_FILM_CLASS_VALUES = {'full', 'film', 'movie', 'feature', 'feature-film', 'full-film', 'episode'}
+_UNKNOWN_TRANSLATION_VALUES = {
+    '',
+    'none',
+    'null',
+    'unknown',
+    'n/a',
+    'mpv',
+    'youtube tv',
+    'озвучення не вказано',
+    'без озвучення',
+    'немає озвучення',
+    'субтитри',
+    'subtitles',
+}
+
+
+def _source_classification(source: dict) -> bool | None:
+    for key in ('is_trailer', 'isTrailer', 'trailer'):
+        if isinstance(source.get(key), bool):
+            return bool(source[key])
+
+    values: list[str] = []
+    classification = source.get('classification')
+    if isinstance(classification, dict):
+        for key in ('is_trailer', 'isTrailer', 'trailer'):
+            if isinstance(classification.get(key), bool):
+                return bool(classification[key])
+        for key in ('source_class', 'source_type', 'type', 'role', 'media_role', 'content_type', 'content_kind'):
+            value = classification.get(key)
+            if value is not None:
+                values.append(str(value))
+    elif classification is not None:
+        values.append(str(classification))
+
+    for key in ('source_class', 'source_type', 'type', 'role', 'media_role', 'content_type', 'content_kind'):
+        value = source.get(key)
+        if value is not None:
+            values.append(str(value))
+
+    normalized = {' '.join(value.replace('_', '-').lower().split()) for value in values}
+    if normalized.intersection(_TRAILER_CLASS_VALUES):
+        return True
+    if normalized.intersection(_FULL_FILM_CLASS_VALUES):
+        return False
+    return None
+
+
+def _playable_source(source: dict) -> bool:
+    if source.get('playable') is False or source.get('disabled') is True or source.get('has_drm') is True:
+        return False
+    return bool(source.get('source_id')) and any(
+        isinstance(source.get(key), str) and source.get(key)
+        for key in ('url', 'play_url', 'manifest_url', 'ytdl_format')
+    )
+
+
+def _usable_translation(source: dict) -> bool:
+    for key in ('translation', 'voice', 'audio_track', 'group'):
+        value = ' '.join(str(source.get(key) or '').split())
+        if value and value.lower() not in _UNKNOWN_TRANSLATION_VALUES:
+            return True
+    return False
+
+
+def _job_year(job: dict) -> str:
+    for key in ('year', 'release_year'):
+        value = job.get(key)
+        if isinstance(value, int) and 1800 <= value <= 2500:
+            return str(value)
+        if isinstance(value, str) and re.fullmatch(r'\d{4}', value.strip()):
+            return value.strip()
+    return ''
+
+
+def _derive_work_card_metadata(job: dict) -> dict:
+    media_type = str(job.get('media_type') or '').strip().lower()
+    year = _job_year(job)
+    if media_type != 'movie':
+        return {'trailer_only': False}
+
+    metadata_parts = ['Фільм']
+    playable_sources = [source for source in job.get('sources') or [] if isinstance(source, dict) and _playable_source(source)]
+    has_playable_trailer = any(_source_classification(source) is True for source in playable_sources)
+    has_translated_full_film = any(
+        _source_classification(source) is False and _usable_translation(source)
+        for source in playable_sources
+    )
+    trailer_only = has_playable_trailer and not has_translated_full_film
+    if trailer_only:
+        metadata_parts.append('Лише трейлер')
+    if year:
+        metadata_parts.append(year)
+    return {
+        'trailer_only': trailer_only,
+        'work_card_metadata': metadata_parts,
+        'work_card_metadata_label': ' · '.join(metadata_parts),
+    }
+
+
 TRUSTED_CLIENT_IDS = ('redmi_12', 's20_liudmyla', 'iphone_son', 'samsung_kiosk')
 
 
@@ -884,6 +985,7 @@ def get_job(job_id: str) -> Response:
     _require()
     job = _load(job_id)
     safe = json.loads(json.dumps(job))
+    safe.update(_derive_work_card_metadata(job))
     for source in safe.get('sources', []):
         source.pop('url', None)
         source['headers'] = {
