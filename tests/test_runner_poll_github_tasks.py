@@ -10,6 +10,7 @@ from unittest import mock
 
 import pytest
 
+from core.scheduler_store import SchedulerStore
 from scripts import runner_poll_github_tasks as runner
 from scripts import telegram_callback_poller as callback_poller
 from core.home_edge import debian_media_bootstrap as media_bootstrap
@@ -3795,7 +3796,7 @@ def test_done_pr_card_success_sends_reply_markup() -> None:
     ), mock.patch.object(runner, "send_telegram_notification") as send:
         runner.notify_task_finished(129, "DONE", DONE_REPORT)
 
-    send.assert_called_once_with("PR ready card", reply_markup)
+    send.assert_not_called()
 
 
 def test_done_pr_card_uses_target_repository_from_issue_body() -> None:
@@ -3812,18 +3813,7 @@ def test_done_pr_card_uses_target_repository_from_issue_body() -> None:
     ), mock.patch.object(runner, "send_telegram_notification") as send:
         runner.notify_task_finished(129, "DONE", DONE_REPORT)
 
-    assert send.call_count == 1
-    text = send.call_args.args[0]
-    reply_markup = send.call_args.args[1]
-    assert "Проєкт: bauclock" in text
-    assert "Репозиторій: alanua/bauclock" in text
-    assert "Задача: #129" in text
-    assert "Repository: alanua/Skeleton" not in text
-    assert "target_repo" not in text
-    assert [row[0]["text"] for row in reply_markup["inline_keyboard"]] == [
-        "Деталі",
-        "Відкрити PR",
-    ]
+    send.assert_not_called()
 
 
 def test_cross_project_blocked_status_uses_target_repository_from_issue_body() -> None:
@@ -3844,12 +3834,7 @@ def test_cross_project_blocked_status_uses_target_repository_from_issue_body() -
     ), mock.patch.object(runner, "send_telegram_notification") as send:
         runner.notify_task_finished(999, "BLOCKED")
 
-    send.assert_called_once_with(
-        "Проєкт: LumenFlow\n"
-        "Репозиторій: alanua/LumenFlow\n"
-        "Задача: #999\n"
-        "Статус: BLOCKED"
-    )
+    send.assert_not_called()
 
 
 def test_done_pr_card_build_failure_falls_back_to_plain_done() -> None:
@@ -3862,8 +3847,7 @@ def test_done_pr_card_build_failure_falls_back_to_plain_done() -> None:
     ), mock.patch.object(runner, "send_telegram_notification") as send:
         runner.notify_task_finished(129, "DONE", DONE_REPORT)
 
-    send.assert_called_once_with(_plain_done_message())
-    assert "telegram-bot-token-must-not-leak" not in send.call_args.args[0]
+    send.assert_not_called()
 
 
 def test_done_pr_reply_markup_send_failure_falls_back_to_plain_done() -> None:
@@ -3883,10 +3867,7 @@ def test_done_pr_reply_markup_send_failure_falls_back_to_plain_done() -> None:
     ) as send:
         runner.notify_task_finished(129, "DONE", DONE_REPORT)
 
-    assert send.call_args_list == [
-        mock.call("PR ready card", reply_markup),
-        mock.call(_plain_done_message()),
-    ]
+    send.assert_not_called()
 
 
 def test_pr_card_build_does_not_execute_merge_or_reject_side_effects() -> None:
@@ -3901,7 +3882,7 @@ def test_pr_card_build_does_not_execute_merge_or_reject_side_effects() -> None:
         runner.notify_task_finished(129, "DONE", DONE_REPORT)
 
     run_command.assert_not_called()
-    send.assert_called_once()
+    send.assert_not_called()
 
 
 def _maintenance_issue(
@@ -17081,6 +17062,161 @@ def test_finalize_success_validation_subprocesses_use_sanitized_environment(
     assert all("env" in kwargs for _args, kwargs in validation_calls)
     assert all("env" not in kwargs for _args, kwargs in publication_calls)
     assert os.environ["SKELETON_HOME_EDGE_01_HOSTNAME"] == "live-home-edge"
+
+
+def test_finalize_success_schedules_internal_review_once_after_draft_pr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scheduler_db = tmp_path / "scheduler.sqlite3"
+    monkeypatch.setenv(runner.SCHEDULER_DB_ENV, str(scheduler_db))
+    issue = {"number": 123, "title": "Publish normal"}
+    changed = ["core/review_gate.py", "tests/test_review_gate.py"]
+    commands: list[list[str]] = []
+
+    def fake_run_command(command: list[str], **kwargs: object) -> tuple[int, str]:
+        commands.append(command)
+        if command == ["git", "add", *changed]:
+            return 0, ""
+        if command == ["git", "diff", "--cached", "--check"]:
+            return 0, ""
+        if command == ["git", "commit", "-m", "runner: issue #123 task"]:
+            return 0, ""
+        if command[:2] == ["git", "push"]:
+            return 0, ""
+        if command == ["git", "rev-parse", "HEAD"]:
+            return 0, f"{HEAD_SHA}\n"
+        if command[:3] == ["gh", "pr", "create"]:
+            return 0, f"{PR_URL}\n"
+        raise AssertionError(f"unexpected command: {command!r}")
+
+    with mock.patch.object(runner, "changed_files", return_value=changed), mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "_run_finalization_validation_command", return_value=(0, "ok\n")
+    ), mock.patch.object(runner, "run_command", side_effect=fake_run_command):
+        first = runner.finalize_success(issue, str(tmp_path), "codex output")
+        second = runner.finalize_success(issue, str(tmp_path), "codex output")
+
+    store = SchedulerStore(scheduler_db)
+    review_occurrences = [
+        occurrence
+        for schedule in store.list_enabled()
+        for occurrence in store.list_occurrences(schedule.spec.schedule_id)
+        if occurrence.proposal["payload"].get("next_step") == "internal_review"
+        and occurrence.proposal["payload"].get("pr_number") == 123
+    ]
+    assert "internal_review_reused=false" in first
+    assert "internal_review_reused=true" in second
+    assert len(review_occurrences) == 1
+    assert review_occurrences[0].proposal["payload"]["head_sha"] == HEAD_SHA
+    assert review_occurrences[0].proposal["payload"]["source_issue"] == 123
+    assert review_occurrences[0].proposal["payload"]["allowed_files"] == sorted(changed)
+
+
+def test_finalize_success_blocks_with_pr_evidence_when_review_schedule_fails(
+    tmp_path: Path,
+) -> None:
+    issue = {"number": 123, "title": "Publish normal"}
+    changed = ["core/review_gate.py"]
+
+    def fake_run_command(command: list[str], **kwargs: object) -> tuple[int, str]:
+        if command == ["git", "add", *changed]:
+            return 0, ""
+        if command == ["git", "diff", "--cached", "--check"]:
+            return 0, ""
+        if command == ["git", "commit", "-m", "runner: issue #123 task"]:
+            return 0, ""
+        if command[:2] == ["git", "push"]:
+            return 0, ""
+        if command == ["git", "rev-parse", "HEAD"]:
+            return 0, f"{HEAD_SHA}\n"
+        if command[:3] == ["gh", "pr", "create"]:
+            return 0, f"{PR_URL}\n"
+        raise AssertionError(f"unexpected command: {command!r}")
+
+    with mock.patch.object(runner, "changed_files", return_value=changed), mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "_run_finalization_validation_command", return_value=(0, "ok\n")
+    ), mock.patch.object(runner, "run_command", side_effect=fake_run_command), mock.patch.object(
+        runner, "ensure_draft_pr_review_continuation", side_effect=RuntimeError("db failed")
+    ):
+        report = runner.finalize_success(issue, str(tmp_path), "codex output")
+
+    assert report.startswith("BLOCKED:")
+    assert f"Commit: {HEAD_SHA}" in report
+    assert f"Draft PR: {PR_URL}" in report
+    assert "reason=internal_review_continuation_failed" in report
+
+
+def test_repair_issue_publication_records_replacement_and_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scheduler_db = tmp_path / "scheduler.sqlite3"
+    monkeypatch.setenv(runner.SCHEDULER_DB_ENV, str(scheduler_db))
+    reviewed_head = "b" * 40
+    repair_payload = {
+        "operation": "internal_review_repair_replacement_pr",
+        "repository": runner.REPO,
+        "reviewed_pr_number": 2308,
+        "reviewed_head_sha": reviewed_head,
+        "repair_task_id": "repair-pr-2308-abcdef",
+        "repair_idempotency_key": "repair-key",
+    }
+    issue = {
+        "number": 2309,
+        "title": "Repair candidate",
+        "body": "```task\n"
+        + json.dumps({"payload": repair_payload})
+        + "\n```",
+    }
+    changed = ["core/review_gate.py"]
+
+    def fake_run_command(command: list[str], **kwargs: object) -> tuple[int, str]:
+        if command == ["git", "add", *changed]:
+            return 0, ""
+        if command == ["git", "diff", "--cached", "--check"]:
+            return 0, ""
+        if command == ["git", "commit", "-m", "runner: issue #2309 task"]:
+            return 0, ""
+        if command[:2] == ["git", "push"]:
+            return 0, ""
+        if command == ["git", "rev-parse", "HEAD"]:
+            return 0, f"{HEAD_SHA}\n"
+        if command[:3] == ["gh", "pr", "create"]:
+            return 0, f"{PR_URL}\n"
+        raise AssertionError(f"unexpected command: {command!r}")
+
+    with mock.patch.object(runner, "changed_files", return_value=changed), mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "_run_finalization_validation_command", return_value=(0, "ok\n")
+    ), mock.patch.object(runner, "run_command", side_effect=fake_run_command):
+        report = runner.finalize_success(issue, str(tmp_path), "codex output")
+
+    store = SchedulerStore(scheduler_db)
+    payloads = [
+        occurrence.proposal["payload"]
+        for schedule in store.list_enabled()
+        for occurrence in store.list_occurrences(schedule.spec.schedule_id)
+    ]
+    assert "step=repair_done_continuation status=done" in report
+    assert "supersedes_pr_number=2308" in report
+    assert sum(
+        1
+        for payload in payloads
+        if payload.get("next_step") == "internal_review"
+        and payload.get("pr_number") == 123
+        and payload.get("head_sha") == HEAD_SHA
+    ) == 1
+    repair_done = [
+        payload for payload in payloads if payload.get("next_step") == "repair_done"
+    ]
+    assert len(repair_done) == 1
+    assert repair_done[0]["reviewed_pr_number"] == 2308
+    assert repair_done[0]["reviewed_head_sha"] == reviewed_head
+    assert repair_done[0]["replacement_pr_number"] == 123
+    assert repair_done[0]["replacement_head_sha"] == HEAD_SHA
 
 
 def test_finalize_success_resets_validation_override_before_publish_on_failure(

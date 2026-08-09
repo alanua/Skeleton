@@ -46,6 +46,16 @@ from core.loop_controller import LoopPolicy
 from core.loop_engine import LoopEngine
 from core.loop_runner_adapter import run_loop_task_packet
 from core.loop_state_store import LoopStateStore
+from core.notification_policy import (
+    claim_operator_notification,
+    should_notify_operator_for_runner_result,
+    should_notify_operator_status,
+)
+from core.review_gate import (
+    ensure_draft_pr_review_continuation,
+    schedule_verified_repair_done,
+)
+from core.scheduler_store import SchedulerStore
 from core.runner_diagnostic_executor import (
     MEMPALACE_SYNTHETIC_BENCHMARK_SCHEMA,
     MEMPALACE_SYNTHETIC_BENCHMARK_TIMEOUT_SECONDS,
@@ -892,6 +902,7 @@ RUNNER_MEMORY_DB_ENV = "SKELETON_RUNNER_MEMORY_DB"
 RUNNER_MEMORY_LEDGER_ENV = "SKELETON_RUNNER_MEMORY_LEDGER"
 RUNNER_MEMORY_DIR_ENV = "SKELETON_RUNNER_MEMORY_DIR"
 RUNNER_MEMORY_WARNING = "Memory warning: Runner memory write failed."
+SCHEDULER_DB_ENV = "SKELETON_SCHEDULER_DB"
 _PUBLIC_GITHUB_PR_URL_RE = re.compile(
     r"^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[1-9]\d*/?$"
 )
@@ -4196,7 +4207,24 @@ def notify_task_finished(
     issue_number: int, status: str, report: str | None = None
 ) -> None:
     try:
+        if not should_notify_operator_status(status):
+            return
+        if not should_notify_operator_for_runner_result(status, report):
+            return
         if not should_notify_task_finished(issue_number, status):
+            return
+        if not claim_operator_notification(
+            SchedulerStore(_scheduler_db_path()),
+            status=status,
+            now=int(time.time()),
+            issue_number=issue_number,
+            payload={
+                "issue_number": issue_number,
+                "status": status,
+                "report": report or "",
+            },
+            reason=_notification_reason_from_report(report),
+        ):
             return
         issue = _NOTIFICATION_ISSUE_CACHE.pop((issue_number, status), None)
         target_repository = (
@@ -4235,6 +4263,28 @@ def notify_task_finished(
             send_telegram_notification(plain_message)
     except Exception:
         return
+
+
+def _notification_reason_from_report(report: str | None) -> str | None:
+    if not report:
+        return None
+    for line in report.splitlines():
+        if line.startswith("reason="):
+            return line.split("=", 1)[1][:128]
+    first = report.splitlines()[0] if report.splitlines() else ""
+    if ":" in first:
+        return first.split(":", 1)[1].strip()[:128] or None
+    return first[:128] or None
+
+
+def _scheduler_db_path() -> str:
+    configured = os.environ.get(SCHEDULER_DB_ENV)
+    if configured:
+        return configured
+    default_parent = ROOT / ".codex"
+    if default_parent.exists() and not default_parent.is_dir():
+        return str(Path(tempfile.gettempdir()) / "skeleton-scheduler.sqlite3")
+    return str(default_parent / "scheduler.sqlite3")
 
 
 def ensure_clean_worktree(workdir: str) -> tuple[bool, str]:
@@ -4353,6 +4403,41 @@ def finalize_success(issue: dict[str, Any], workdir: str, codex_output: str) -> 
             )
         pr_url = view_output.strip()
 
+    review_lines, review_reason = _ensure_internal_review_after_draft_pr(
+        repository=REPO,
+        pr_url=pr_url,
+        pushed_head_sha=commit_sha,
+        source_issue=issue_number,
+        allowed_files=files,
+    )
+    if review_reason is not None:
+        return (
+            "BLOCKED: Codex published a draft PR but could not persist internal review continuation.\n\n"
+            "Changed files:\n"
+            + "\n".join(f"- {file_name}" for file_name in files)
+            + "\n\n"
+            f"Commit: {commit_sha}\n"
+            f"Draft PR: {pr_url}\n"
+            f"reason={review_reason}"
+        )
+
+    repair_lines, repair_reason = _ensure_verified_repair_done_after_replacement_pr(
+        issue,
+        pr_url=pr_url,
+        pushed_head_sha=commit_sha,
+        changed_file_names=files,
+    )
+    if repair_reason is not None:
+        return (
+            "BLOCKED: Codex published a replacement draft PR but could not persist repair verification.\n\n"
+            "Changed files:\n"
+            + "\n".join(f"- {file_name}" for file_name in files)
+            + "\n\n"
+            f"Commit: {commit_sha}\n"
+            f"Draft PR: {pr_url}\n"
+            f"reason={repair_reason}"
+        )
+
     pytest_output = next(
         output for command, output in checks if command == "python3 -m pytest -q"
     )
@@ -4363,7 +4448,8 @@ def finalize_success(issue: dict[str, Any], workdir: str, codex_output: str) -> 
         + "\n\n"
         f"Pytest output:\n```\n{pytest_output.strip()}\n```\n\n"
         f"Commit: {commit_sha}\n"
-        f"Draft PR: {pr_url}"
+        f"Draft PR: {pr_url}\n"
+        + "\n".join(review_lines + repair_lines)
     )
 
 
@@ -9745,17 +9831,15 @@ def inspect_pr_mergeability(body: str) -> str:
             "not_met",
         )
 
-    validation_state, validation_reason = _validation_summary(
-        combined_status, check_runs
-    )
-    report_status, reason, next_action = _pr_mergeability_next_action(
-        pr, compare, validation_state, request
-    )
+    validation_state, validation_reason = _validation_summary(combined_status, check_runs)
     changed_files = [
         str(file.get("filename"))
         for file in files
         if isinstance(file.get("filename"), str)
     ]
+    report_status, reason, next_action = _pr_mergeability_next_action(
+        pr, compare, validation_state, request
+    )
     mergeable = _github_bool_value(pr.get("mergeable"))
     mergeable_state = str(pr.get("mergeable_state") or "unknown")
     status_lines.extend(
@@ -9785,7 +9869,6 @@ def inspect_pr_mergeability(body: str) -> str:
         status_lines,
         "met" if report_status == "DONE" else "not_met",
     )
-
 
 def _safe_issue_publish_file_path(path: str) -> bool:
     relative_path = Path(path)
@@ -10687,6 +10770,115 @@ def _issue_worktree_publish_pr_url(
     if _PUBLIC_GITHUB_PR_URL_RE.fullmatch(pr_url) is None:
         return None, "create_pr_failed"
     return pr_url, None
+
+
+def _ensure_internal_review_after_draft_pr(
+    *,
+    repository: str,
+    pr_url: str,
+    pushed_head_sha: str,
+    source_issue: int,
+    allowed_files: list[str] | tuple[str, ...] | frozenset[str],
+) -> tuple[list[str], str | None]:
+    pr_number = extract_pr_number(pr_url)
+    if pr_number is None:
+        return [], "internal_review_pr_number_unavailable"
+    try:
+        continuation = ensure_draft_pr_review_continuation(
+            SchedulerStore(_scheduler_db_path()),
+            repository=repository,
+            pr_number=pr_number,
+            head_sha=pushed_head_sha,
+            source_issue=source_issue,
+            allowed_files=sorted(allowed_files),
+            now=int(time.time()),
+        )
+    except Exception:
+        return [], "internal_review_continuation_failed"
+    return [
+        "step=internal_review_continuation status=done",
+        f"internal_review_reused={str(not continuation.created).lower()}",
+        f"internal_review_schedule_id={continuation.schedule_id}",
+        f"internal_review_occurrence_id={continuation.occurrence_id}",
+    ], None
+
+
+def _ensure_issue_worktree_internal_review_after_draft_pr(
+    request: IssueWorktreePublishInspectionRequest,
+    *,
+    pr_url: str,
+    pushed_head_sha: str,
+) -> tuple[list[str], str | None]:
+    return _ensure_internal_review_after_draft_pr(
+        repository=request.repository,
+        pr_url=pr_url,
+        pushed_head_sha=pushed_head_sha,
+        source_issue=request.source_issue,
+        allowed_files=request.allowed_files,
+    )
+
+
+def _repair_task_payload_from_issue(issue: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    body = issue.get("body")
+    if not isinstance(body, str):
+        return None
+    block = extract_task_block(body)
+    if block is None:
+        return None
+    try:
+        parsed = json.loads(block)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, Mapping):
+        return None
+    payload = parsed.get("payload")
+    if not isinstance(payload, Mapping):
+        return None
+    if payload.get("operation") != "internal_review_repair_replacement_pr":
+        return None
+    return payload
+
+
+def _ensure_verified_repair_done_after_replacement_pr(
+    issue: Mapping[str, Any],
+    *,
+    pr_url: str,
+    pushed_head_sha: str,
+    changed_file_names: list[str],
+) -> tuple[list[str], str | None]:
+    payload = _repair_task_payload_from_issue(issue)
+    if payload is None:
+        return [], None
+    replacement_pr_number = extract_pr_number(pr_url)
+    if replacement_pr_number is None:
+        return [], "repair_replacement_pr_number_unavailable"
+    try:
+        continuation = schedule_verified_repair_done(
+            SchedulerStore(_scheduler_db_path()),
+            repository=str(payload["repository"]),
+            replacement_pr_number=replacement_pr_number,
+            replacement_head_sha=pushed_head_sha,
+            source_issue=int(issue["number"]),
+            allowed_files=changed_file_names,
+            repair_task_id=str(payload["repair_task_id"]),
+            repair_idempotency_key=str(payload["repair_idempotency_key"]),
+            publication_status="DONE",
+            now=int(time.time()),
+            reviewed_pr_number=int(payload["reviewed_pr_number"]),
+            reviewed_head_sha=str(payload["reviewed_head_sha"]),
+        )
+    except Exception:
+        return [], "repair_done_continuation_failed"
+    return [
+        "step=repair_done_continuation status=done",
+        f"repair_done_reused={str(not continuation.created).lower()}",
+        f"repair_done_schedule_id={continuation.schedule_id}",
+        f"repair_done_occurrence_id={continuation.occurrence_id}",
+        f"replacement_pr_number={replacement_pr_number}",
+        f"replacement_head_sha={pushed_head_sha}",
+        f"supersedes_pr_number={int(payload['reviewed_pr_number'])}",
+        f"supersedes_head_sha={payload['reviewed_head_sha']}",
+    ], None
 
 
 _CONTAINER_VALIDATION_PUBLISH_ALLOWED_METADATA_FIELDS = frozenset(
@@ -12911,6 +13103,20 @@ def _issue_worktree_publish_validated_report(
             f"pushed_head_sha={pushed_head_sha}",
         )
     )
+    review_lines, review_reason = _ensure_issue_worktree_internal_review_after_draft_pr(
+        request, pr_url=pr_url, pushed_head_sha=pushed_head_sha
+    )
+    if review_reason is not None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                *status_lines,
+                f"step=internal_review_continuation status=failed reason={review_reason}",
+            ],
+            "not_met",
+        )
+    status_lines.extend(review_lines)
     if target_project_route:
         assert verified_base_sha is not None
         try:
