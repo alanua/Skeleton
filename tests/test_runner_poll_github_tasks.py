@@ -920,6 +920,129 @@ def test_ready_queue_priority_markers_sort_deterministically_without_unknown_aut
     assert [issue["number"] for issue in ordered] == [5, 10, 11, 20, 30]
 
 
+def _queue_candidate_issue(
+    number: int,
+    *,
+    title: str | None = None,
+    privacy_boundary: str = "PUBLIC_SAFE_QUEUE_METADATA_ONLY",
+    allowed_files: tuple[str, ...] = (),
+    idempotency_key: str | None = None,
+    body_lines: tuple[str, ...] = (),
+    labels: tuple[str, ...] = (runner.QUEUE_REPLENISHER_CANDIDATE_LABEL,),
+) -> dict[str, object]:
+    lines = [
+        "schema: skeleton.runner_task.v1",
+        f"privacy_boundary: {privacy_boundary}",
+    ]
+    if idempotency_key is not None:
+        lines.append(f"idempotency_key: {idempotency_key}")
+    if allowed_files:
+        lines.append("allowed_files:")
+        lines.extend(f"  - {path}" for path in allowed_files)
+    lines.extend(body_lines)
+    return {
+        "number": number,
+        "title": title or f"Queue candidate {number}",
+        "body": "\n".join(lines),
+        "labels": [{"name": label} for label in labels],
+    }
+
+
+def test_queue_replenisher_public_safe_no_secrets_wording_remains_eligible() -> None:
+    issue = _queue_candidate_issue(
+        236901,
+        body_lines=("forbidden_actions: no secrets may be accessed",),
+    )
+
+    assert runner.queue_replenisher_issue_is_public_safe(issue)
+
+
+def test_queue_replenisher_public_safe_no_tokens_wording_remains_eligible() -> None:
+    issue = _queue_candidate_issue(
+        236902,
+        body_lines=("task: keep no tokens in generated output",),
+    )
+
+    assert runner.queue_replenisher_issue_is_public_safe(issue)
+
+
+def test_queue_replenisher_public_safe_forbidden_private_data_remains_eligible() -> None:
+    issue = _queue_candidate_issue(
+        236903,
+        body_lines=("forbidden_actions: no secrets/private data/token access",),
+    )
+
+    assert runner.queue_replenisher_issue_is_public_safe(issue)
+
+
+def test_queue_replenisher_explicit_private_payload_is_ineligible() -> None:
+    issue = _queue_candidate_issue(
+        236904,
+        privacy_boundary="PRIVATE_PAYLOAD",
+        body_lines=("task: public wording is irrelevant here",),
+    )
+
+    assert not runner.queue_replenisher_issue_is_public_safe(issue)
+
+
+def test_queue_replenisher_preserves_depth_dependency_duplicate_and_overlap_rules() -> None:
+    ready = [
+        _queue_candidate_issue(
+            10,
+            allowed_files=("docs/ready.md",),
+            idempotency_key="existing-intent",
+            labels=(runner.LABEL_READY,),
+        ),
+    ]
+    candidates = [
+        _queue_candidate_issue(
+            20,
+            allowed_files=("docs/first.md",),
+            idempotency_key="first",
+        ),
+        _queue_candidate_issue(
+            21,
+            allowed_files=("docs/missing-dependency.md",),
+            idempotency_key="missing-dependency",
+            body_lines=("depends_on: '#999'",),
+        ),
+        _queue_candidate_issue(
+            22,
+            allowed_files=("docs/duplicate.md",),
+            idempotency_key="existing-intent",
+        ),
+        _queue_candidate_issue(
+            23,
+            allowed_files=("docs/protected.md",),
+            idempotency_key="protected",
+        ),
+        _queue_candidate_issue(
+            24,
+            allowed_files=("docs/first.md",),
+            idempotency_key="file-overlap",
+        ),
+        _queue_candidate_issue(
+            25,
+            allowed_files=("docs/second.md",),
+            idempotency_key="second",
+            body_lines=("depends_on: '#10'",),
+        ),
+        _queue_candidate_issue(
+            26,
+            allowed_files=("docs/third.md",),
+            idempotency_key="third",
+        ),
+    ]
+
+    selected = runner.select_runner_queue_replenishment_targets(
+        ready,
+        candidates,
+        protected_files=frozenset(("docs/protected.md",)),
+    )
+
+    assert [issue["number"] for issue in selected] == [20, 25]
+
+
 def test_runner_report_status_ignores_blocked_words_in_success_report_text() -> None:
     report = """DONE: Codex completed successfully with no file changes.
 
