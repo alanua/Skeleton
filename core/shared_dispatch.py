@@ -76,6 +76,44 @@ class SharedDispatcher:
         )
         return cls({("loop", ROUTE_LOOP_ENGINE_PACKET): route})
 
+    @classmethod
+    def for_media_translation_monitor(
+        cls,
+        *,
+        state_path: str,
+        scheduler_store,
+        notifier=None,
+        providers=(),
+    ) -> "SharedDispatcher":
+        from core.media_translation_monitor import (
+            MEDIA_MONITOR_CAPABILITY,
+            MEDIA_MONITOR_ROUTE_ID,
+            MEDIA_MONITOR_ROUTE_TYPE,
+            MediaTranslationMonitor,
+            MediaTranslationStateStore,
+        )
+
+        monitor = MediaTranslationMonitor(
+            state_store=MediaTranslationStateStore(state_path),
+            scheduler_store=scheduler_store,
+            notifier=notifier,
+            providers=providers,
+        )
+
+        def handler(request: SharedDispatchRequest) -> Mapping[str, Any]:
+            task_packet = request.payload.get("task_packet")
+            if not isinstance(task_packet, Mapping):
+                raise SharedDispatchError("MISSING_TYPED_TASK_PACKET")
+            return monitor.run_scheduler_task(task_packet)
+
+        route = DispatchRoute(
+            route_type=MEDIA_MONITOR_ROUTE_TYPE,
+            route_id=MEDIA_MONITOR_ROUTE_ID,
+            required_capabilities=frozenset({MEDIA_MONITOR_CAPABILITY}),
+            handler=handler,
+        )
+        return cls({(MEDIA_MONITOR_ROUTE_TYPE, MEDIA_MONITOR_ROUTE_ID): route})
+
     def dispatch(self, request: SharedDispatchRequest) -> SharedDispatchResult:
         try:
             route = self._validate_request(request)
