@@ -6,6 +6,11 @@ import hashlib
 import json
 from typing import Any, Final
 
+from core.control_recovery import (
+    ROUTE_CONTROL_RECOVERY,
+    RecoveryStore,
+    execute_recovery_packet,
+)
 from core.loop_controller import LoopPolicy
 from core.loop_engine import LoopEngine
 from core.loop_runner_adapter import run_loop_task_packet
@@ -14,6 +19,7 @@ from core.loop_state_store import LoopStateStore
 
 DISPATCH_RECEIPT_SCHEMA: Final = "skeleton.scheduler_dispatch_receipt.v1"
 ROUTE_LOOP_ENGINE_PACKET: Final = "loop_engine_packet"
+ROUTE_CONTROL_RECOVERY_PACKET: Final = ROUTE_CONTROL_RECOVERY
 PRIVACY_PUBLIC_SAFE: Final = "PUBLIC_SAFE_CODE_AND_SYNTHETIC_TESTS_ONLY"
 
 
@@ -51,6 +57,7 @@ class DispatchRoute:
     route_id: str
     required_capabilities: frozenset[str]
     handler: Callable[[SharedDispatchRequest], Mapping[str, Any]]
+    packet_key: str = "task_packet"
 
 
 class SharedDispatcher:
@@ -76,6 +83,34 @@ class SharedDispatcher:
         )
         return cls({("loop", ROUTE_LOOP_ENGINE_PACKET): route})
 
+    @classmethod
+    def for_control_recovery(
+        cls,
+        *,
+        recovery_db_path: str,
+        action_executor: Callable[[str], str],
+        canary_executor: Callable[[str], bool] | None = None,
+        now: int | None = None,
+    ) -> "SharedDispatcher":
+        def handler(request: SharedDispatchRequest) -> Mapping[str, Any]:
+            store = RecoveryStore(recovery_db_path)
+            return execute_recovery_packet(
+                request.payload.get("recovery_packet", {}),
+                store=store,
+                now=request.attempt if now is None else now,
+                action_executor=action_executor,
+                canary_executor=canary_executor,
+            )
+
+        route = DispatchRoute(
+            route_type="workflow",
+            route_id=ROUTE_CONTROL_RECOVERY_PACKET,
+            required_capabilities=frozenset({"control:recovery"}),
+            handler=handler,
+            packet_key="recovery_packet",
+        )
+        return cls({("workflow", ROUTE_CONTROL_RECOVERY_PACKET): route})
+
     def dispatch(self, request: SharedDispatchRequest) -> SharedDispatchResult:
         try:
             route = self._validate_request(request)
@@ -94,7 +129,7 @@ class SharedDispatcher:
         route = self._routes.get((request.route_type, request.route_id))
         if route is None:
             raise SharedDispatchError("ROUTE_NOT_ALLOWLISTED")
-        _validate_policy_envelope(request.payload, route.required_capabilities)
+        _validate_policy_envelope(request.payload, route.required_capabilities, route.packet_key)
         return route
 
     def _result_from_receipt(
@@ -108,6 +143,14 @@ class SharedDispatcher:
         accepted = receipt.get("accepted") is True
         decision = receipt.get("decision")
 
+        if status == "WAITING_RECOVERY":
+            return SharedDispatchResult(
+                "failed",
+                reason,
+                _wrap_receipt(request, receipt),
+                evidence_ref,
+                retryable=True,
+            )
         if not accepted or status in {"BLOCKED", "failed", "FAILED"} or decision == "REJECT":
             retryable = reason in {
                 "LOOP_STATE_CONFLICT",
@@ -137,7 +180,7 @@ class SharedDispatcher:
 
 
 def _validate_policy_envelope(
-    payload: Mapping[str, Any], required_capabilities: frozenset[str]
+    payload: Mapping[str, Any], required_capabilities: frozenset[str], packet_key: str
 ) -> None:
     if not isinstance(payload, Mapping):
         raise SharedDispatchError("INVALID_DISPATCH_PAYLOAD")
@@ -156,7 +199,7 @@ def _validate_policy_envelope(
         raise SharedDispatchError("INVALID_REQUESTED_CAPABILITIES")
     if not frozenset(requested).issubset(approved_set):
         raise SharedDispatchError("CAPABILITY_NOT_APPROVED")
-    if "task_packet" not in payload:
+    if packet_key not in payload:
         raise SharedDispatchError("MISSING_TYPED_TASK_PACKET")
 
 

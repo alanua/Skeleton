@@ -79,6 +79,31 @@ def _loop_packet(action: str, **updates: object) -> dict[str, object]:
     return packet
 
 
+def _recovery_once(schedule_id: str, once_at: int, recovery_packet: dict[str, object]):
+    return ScheduleSpec.from_mapping(
+        {
+            "schema": "skeleton.schedule.v1",
+            "schedule_id": schedule_id,
+            "trigger_kind": "once",
+            "cron_expression": None,
+            "once_at": once_at,
+            "timezone": "UTC",
+            "route_type": "workflow",
+            "route_id": "control_recovery",
+            "approval_policy": "auto_run_low_risk",
+            "overlap_policy": "queue_one",
+            "misfire_policy": "run_once",
+            "payload": {
+                "privacy_boundary": PRIVACY_PUBLIC_SAFE,
+                "bounded": True,
+                "approved_capabilities": ["control:recovery"],
+                "requested_capabilities": ["control:recovery"],
+                "recovery_packet": recovery_packet,
+            },
+        }
+    )
+
+
 def test_notify_only_tick_creates_once_and_prevents_duplicate(tmp_path) -> None:
     store = SchedulerStore(tmp_path / "scheduler.sqlite3")
     store.initialize()
@@ -302,3 +327,58 @@ def test_waiting_dependency_resumes_after_dependency_done(tmp_path) -> None:
 
     assert resumed["resumed_waiting_dependencies"] == 1
     assert store.get_occurrence(wait_id).state == "done"  # type: ignore[union-attr]
+
+
+def test_recovery_route_requeues_blocked_consumer_after_canary(tmp_path) -> None:
+    store = SchedulerStore(tmp_path / "scheduler.sqlite3")
+    store.initialize()
+    recovery, _ = store.register(
+        _recovery_once(
+            "test.recovery.route",
+            100,
+            {
+                "schema": "skeleton.control_recovery.v1",
+                "failure_class": "CODEGEN_RUNTIME_UNHEALTHY",
+                "failure_key": "control:p0-consumer",
+            },
+        ),
+        now=50,
+    )
+    consumer, _ = store.register(
+        _loop_once("test.consumer", 100, _loop_packet("create", run_id="run-consumer")),
+        now=50,
+    )
+    recovery_id = stable_occurrence_id(recovery.spec.schedule_id, recovery.version, 100)
+    consumer_id = stable_occurrence_id(consumer.spec.schedule_id, consumer.version, 100)
+    consumer_proposal = build_execution_proposal(
+        consumer, occurrence_id=consumer_id, scheduled_for=100
+    )
+    consumer_proposal["payload"]["wait_for"] = recovery_id
+    store.create_occurrence(
+        occurrence_id=consumer_id,
+        schedule=consumer,
+        scheduled_for=100,
+        state="waiting_dependency",
+        reason="WAITING_RECOVERY",
+        proposal=consumer_proposal,
+        now=99,
+    )
+    dispatcher = SharedDispatcher.for_control_recovery(
+        recovery_db_path=str(tmp_path / "recovery.sqlite3"),
+        action_executor=lambda _action: "DONE: ok\nsuccess_criteria=met",
+        canary_executor=lambda _canary: True,
+        now=100,
+    )
+
+    first = SchedulerEngine(store).tick(now=100, dispatcher=dispatcher)
+
+    assert first["dispatch"]["done"] == 1
+    assert first["resumed_waiting_dependencies"] == 0
+    second = SchedulerEngine(store).tick(
+        now=101,
+        dispatcher=SharedDispatcher.for_loop_engine(
+            loop_state_db_path=str(tmp_path / "loop.sqlite3")
+        ),
+    )
+    assert second["resumed_waiting_dependencies"] == 1
+    assert store.get_occurrence(consumer_id).state == "done"  # type: ignore[union-attr]
