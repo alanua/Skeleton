@@ -226,6 +226,7 @@ SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME = "sync_telegram_callback_poller_runtime"
 ENSURE_TELEGRAM_CALLBACK_LOCAL_CONFIG = "ensure_telegram_callback_local_config"
 CHECK_PROJECT_CHECKOUT = "check_project_checkout"
 CHECK_SKELETON_FRESHNESS = "check_skeleton_freshness"
+AUTONOMOUS_QUEUE_REPLENISHER = "autonomous_queue_replenisher"
 RUNTIME_SYNC_MAIN = "runtime_sync_main"
 RECOVER_SKELETON_CHECKOUT = "recover_skeleton_checkout"
 ENSURE_PROJECT_CHECKOUT = "ensure_project_checkout"
@@ -266,6 +267,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         ENSURE_TELEGRAM_CALLBACK_LOCAL_CONFIG,
         CHECK_PROJECT_CHECKOUT,
         CHECK_SKELETON_FRESHNESS,
+        AUTONOMOUS_QUEUE_REPLENISHER,
         RUNTIME_SYNC_MAIN,
         RECOVER_SKELETON_CHECKOUT,
         ENSURE_PROJECT_CHECKOUT,
@@ -655,6 +657,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "hermes_memory_smoke_status",
         "host_id_sha256_12",
         "handoff_ref",
+        "idempotency_key",
         "input_row_count",
         "input_table_count",
         "installed_skill_platform_count",
@@ -711,6 +714,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "pr_url",
         "payload_hash",
         "publish_override_hash",
+        "queue_depth_after",
+        "queue_depth_before",
         "private_memory_db_configured",
         "private_memory_db_openable",
         "private_memory_heartbeat_ok",
@@ -782,8 +787,12 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "run_id",
         "runner_root_exists",
         "runner_status",
+        "routed_issue_ids",
+        "routed_reasons",
         "scanned_entry_count",
         "selected_root_count",
+        "selected_issue_ids",
+        "selected_reasons",
         "selected_source_count",
         "services_disabled",
         "services_enabled",
@@ -837,6 +846,9 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "task_id",
         "target_project_route",
         "target_repository",
+        "dashboard_public_safe",
+        "safe_executable_work_exists",
+        "telegram_notifications",
         "test_summary",
         "tool_codex",
         "tool_gh",
@@ -1974,6 +1986,351 @@ def _ready_issue_priority_key(issue: dict[str, Any]) -> tuple[int, int]:
     number = issue.get("number")
     deterministic_number = int(number) if isinstance(number, int) and not isinstance(number, bool) else 0
     return priority, deterministic_number
+
+
+QUEUE_REPLENISHER_TARGET_READY_DEPTH = 3
+QUEUE_REPLENISHER_MAX_READY_DEPTH = 6
+QUEUE_REPLENISHER_STALE_AFTER_SECONDS = 45 * 24 * 60 * 60
+QUEUE_REPLENISHER_IDEMPOTENCY_KEY = "autonomous-queue-replenisher-20260809-v1"
+QUEUE_REPLENISHER_PRIORITY_TERMS: tuple[tuple[int, tuple[str, ...]], ...] = (
+    (0, ("p0", "recovery", "recover", "integration", "repair")),
+    (1, ("mail", "domain graph", "graphify", "bauclock", "dashboard")),
+    (2, ("home edge", "media")),
+)
+QUEUE_REPLENISHER_PRIVATE_MARKERS = (
+    "privacy_boundary: private",
+    "private_payload",
+    "private payload",
+    "secret",
+    "token",
+)
+QUEUE_REPLENISHER_DEPENDENCY_LABELS = frozenset(
+    ("needs:dependency", "dependency:blocked", "runner:waiting-dependency")
+)
+QUEUE_REPLENISHER_NEEDS_OPERATOR_LABELS = frozenset(
+    ("needs:operator", "runner:needs-operator")
+)
+QUEUE_REPLENISHER_LIFECYCLE_LABELS = frozenset(
+    (LABEL_READY, LABEL_RUNNING, LABEL_DONE, LABEL_BLOCKED)
+)
+QUEUE_REPLENISHER_PROTECTED_FILE_PREFIXES = (
+    ".github/",
+    "policies/",
+    "config/home_edge/",
+    "config/mcp/",
+    "ops/",
+    "scripts/home_edge_",
+)
+QUEUE_REPLENISHER_PROTECTED_FILES = frozenset(
+    (
+        "OPERATOR_RULES.yaml",
+        "PROVIDER_ROUTING.yaml",
+        "MEMORY_ROUTING.yaml",
+        "BOOT_MANIFEST.yaml",
+        "scripts/runner_poll_github_tasks.py",
+        "scripts/scheduler_runtime.py",
+        "scripts/scheduler_tick.py",
+    )
+)
+
+
+@dataclass(frozen=True)
+class QueueCandidateDecision:
+    issue: dict[str, Any]
+    status: str
+    reason: str
+    intent: str
+    files: frozenset[str]
+    priority: int
+
+
+def get_open_queue_replenisher_issues() -> list[dict[str, Any]]:
+    code, output = run_command(
+        [
+            "gh",
+            "issue",
+            "list",
+            "--repo",
+            REPO,
+            "--state",
+            "open",
+            "--limit",
+            "200",
+            "--json",
+            "number,title,body,state,url,closed,labels,updatedAt",
+        ]
+    )
+    if code != 0:
+        raise RuntimeError(f"gh issue list failed:\n{output}")
+    parsed = json.loads(output or "[]")
+    if not isinstance(parsed, list):
+        raise RuntimeError("gh issue list returned non-list JSON")
+    return [issue for issue in parsed if isinstance(issue, dict) and is_open_task_issue(issue)]
+
+
+def add_issue_label(issue_number: int, label: str) -> None:
+    code, output = run_command(
+        [
+            "gh",
+            "issue",
+            "edit",
+            str(issue_number),
+            "--repo",
+            REPO,
+            "--add-label",
+            label,
+        ]
+    )
+    if code != 0:
+        raise RuntimeError(f"gh issue edit failed:\n{output}")
+
+
+def _queue_replenisher_issue_number(issue: Mapping[str, Any]) -> int:
+    number = issue.get("number")
+    return int(number) if isinstance(number, int) and not isinstance(number, bool) else 0
+
+
+def _queue_replenisher_body(issue: Mapping[str, Any]) -> str:
+    body = issue.get("body")
+    return body if isinstance(body, str) else ""
+
+
+def _queue_replenisher_title(issue: Mapping[str, Any]) -> str:
+    title = issue.get("title")
+    return title if isinstance(title, str) else ""
+
+
+def _queue_replenisher_active_ready_depth(issues: list[dict[str, Any]]) -> int:
+    return sum(1 for issue in issues if LABEL_READY in _issue_label_names(issue))
+
+
+def _queue_replenisher_active_files(issues: list[dict[str, Any]]) -> set[str]:
+    active: set[str] = set()
+    for issue in issues:
+        labels = _issue_label_names(issue)
+        if labels.isdisjoint({LABEL_READY, LABEL_RUNNING}):
+            continue
+        active.update(_queue_replenisher_allowed_files(_queue_replenisher_body(issue)))
+    return active
+
+
+def _queue_replenisher_intent(issue: Mapping[str, Any]) -> str:
+    body = _queue_replenisher_body(issue)
+    for field in ("Idempotency Key", "idempotency_key", "Intent", "intent"):
+        value = _body_field(body, field)
+        if value is not None:
+            return re.sub(r"\s+", " ", value.strip().lower())
+    title = _queue_replenisher_title(issue).strip().lower()
+    return re.sub(r"\s+", " ", title) or f"issue:{_queue_replenisher_issue_number(issue)}"
+
+
+def _queue_replenisher_allowed_files(body: str) -> frozenset[str]:
+    values = _body_field_or_yaml_value(body, "Allowed Files", "allowed_files")
+    if isinstance(values, str):
+        candidates = re.split(r"[,\n]", values)
+    elif isinstance(values, list):
+        candidates = [str(value) for value in values]
+    else:
+        candidates = []
+    files: set[str] = set()
+    for raw in candidates:
+        value = raw.strip().removeprefix("-").strip()
+        if not value or value.startswith("/") or ".." in Path(value).parts:
+            continue
+        files.add(value)
+    return frozenset(sorted(files))
+
+
+def _queue_replenisher_is_protected_file(path: str) -> bool:
+    return path in QUEUE_REPLENISHER_PROTECTED_FILES or path.startswith(
+        QUEUE_REPLENISHER_PROTECTED_FILE_PREFIXES
+    )
+
+
+def _queue_replenisher_priority(issue: Mapping[str, Any]) -> int:
+    haystack = f"{_queue_replenisher_title(issue)}\n{_queue_replenisher_body(issue)}".lower()
+    for priority, terms in QUEUE_REPLENISHER_PRIORITY_TERMS:
+        if any(term in haystack for term in terms):
+            return priority
+    return 3
+
+
+def _queue_replenisher_is_stale(issue: Mapping[str, Any], *, now: int) -> bool:
+    updated_at = issue.get("updatedAt")
+    if not isinstance(updated_at, str) or not updated_at:
+        return False
+    try:
+        parsed = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return now - int(parsed.timestamp()) > QUEUE_REPLENISHER_STALE_AFTER_SECONDS
+
+
+def _queue_replenisher_dependency_unmet(body: str, labels: frozenset[str]) -> bool:
+    if not labels.isdisjoint(QUEUE_REPLENISHER_DEPENDENCY_LABELS):
+        return True
+    dependency_state = _body_field(body, "Dependency State")
+    if dependency_state is not None and dependency_state.lower() not in {
+        "ready",
+        "met",
+        "done",
+        "none",
+    }:
+        return True
+    depends_on = _body_field(body, "Depends On") or _body_field(body, "Dependency")
+    return depends_on is not None and depends_on.lower() not in {"none", "n/a", "ready"}
+
+
+def _queue_replenisher_decide_candidate(
+    issue: dict[str, Any],
+    *,
+    now: int,
+    active_files: set[str],
+    active_intents: set[str],
+    selected_files: set[str],
+    selected_intents: set[str],
+) -> QueueCandidateDecision:
+    body = _queue_replenisher_body(issue)
+    labels = _issue_label_names(issue)
+    intent = _queue_replenisher_intent(issue)
+    files = _queue_replenisher_allowed_files(body)
+    priority = _queue_replenisher_priority(issue)
+    lower_body = body.lower()
+    lower_labels = {label.lower() for label in labels}
+
+    if not has_runner_task_body(body):
+        return QueueCandidateDecision(issue, "skip", "missing_task_fence", intent, files, priority)
+    if not labels.isdisjoint(QUEUE_REPLENISHER_LIFECYCLE_LABELS - {LABEL_BLOCKED}):
+        return QueueCandidateDecision(issue, "skip", "already_lifecycle_managed", intent, files, priority)
+    if LABEL_BLOCKED in labels:
+        return QueueCandidateDecision(issue, "route", "blocked_existing_repair_route", intent, files, priority)
+    if not labels.isdisjoint(QUEUE_REPLENISHER_NEEDS_OPERATOR_LABELS):
+        return QueueCandidateDecision(issue, "skip", "needs_operator_gate", intent, files, priority)
+    if any(marker in lower_body for marker in QUEUE_REPLENISHER_PRIVATE_MARKERS) or any(
+        label in {"privacy:private", "private"} for label in lower_labels
+    ):
+        return QueueCandidateDecision(issue, "skip", "privacy_boundary_not_public_safe", intent, files, priority)
+    maintenance_mode, maintenance_task_id = extract_runtime_maintenance_task_id(body)
+    if maintenance_mode and (
+        maintenance_task_id is None
+        or maintenance_task_id in PROTECTED_MAINTENANCE_TASK_IDS
+        or maintenance_task_id in PUBLISH_ONLY_MAINTENANCE_TASK_IDS
+    ):
+        return QueueCandidateDecision(issue, "skip", "runtime_or_publish_scope", intent, files, priority)
+    if _queue_replenisher_dependency_unmet(body, labels):
+        return QueueCandidateDecision(issue, "route", "waiting_dependency_route", intent, files, priority)
+    if _queue_replenisher_is_stale(issue, now=now):
+        return QueueCandidateDecision(issue, "route", "stale_repair_route", intent, files, priority)
+    if intent in active_intents or intent in selected_intents:
+        return QueueCandidateDecision(issue, "skip", "duplicate_idempotency_intent", intent, files, priority)
+    if any(_queue_replenisher_is_protected_file(path) for path in files):
+        return QueueCandidateDecision(issue, "skip", "protected_file_scope", intent, files, priority)
+    if files and (files & (active_files | selected_files)):
+        return QueueCandidateDecision(issue, "skip", "file_overlap_with_active_work", intent, files, priority)
+    return QueueCandidateDecision(issue, "promote", "verified_bounded_public_safe", intent, files, priority)
+
+
+def _queue_replenisher_sorted_candidates(
+    decisions: list[QueueCandidateDecision],
+) -> list[QueueCandidateDecision]:
+    return sorted(
+        decisions,
+        key=lambda decision: (
+            decision.priority,
+            _queue_replenisher_issue_number(decision.issue),
+        ),
+    )
+
+
+def autonomous_queue_replenisher(now: int | None = None) -> str:
+    current = int(time.time()) if now is None else now
+    issues = get_open_queue_replenisher_issues()
+    ready_before = _queue_replenisher_active_ready_depth(issues)
+    target_depth = QUEUE_REPLENISHER_TARGET_READY_DEPTH
+    max_depth = QUEUE_REPLENISHER_MAX_READY_DEPTH
+    if ready_before >= target_depth:
+        return _maintenance_report(
+            "DONE",
+            AUTONOMOUS_QUEUE_REPLENISHER,
+            [
+                f"queue_depth_before={ready_before}",
+                f"queue_depth_after={ready_before}",
+                "selected_issue_ids=none",
+                "selected_reasons=ready_depth_sufficient",
+                "routed_issue_ids=none",
+                "telegram_notifications=0",
+                "dashboard_public_safe=true",
+                f"idempotency_key={QUEUE_REPLENISHER_IDEMPOTENCY_KEY}",
+            ],
+            "met",
+        )
+
+    active_files = _queue_replenisher_active_files(issues)
+    active_intents = {
+        _queue_replenisher_intent(issue)
+        for issue in issues
+        if not _issue_label_names(issue).isdisjoint({LABEL_READY, LABEL_RUNNING})
+    }
+    decisions: list[QueueCandidateDecision] = []
+    for issue in issues:
+        decision = _queue_replenisher_decide_candidate(
+            issue,
+            now=current,
+            active_files=active_files,
+            active_intents=active_intents,
+            selected_files=set(),
+            selected_intents=set(),
+        )
+        decisions.append(decision)
+
+    selected: list[QueueCandidateDecision] = []
+    selected_files: set[str] = set()
+    selected_intents: set[str] = set()
+    routed: list[QueueCandidateDecision] = [
+        decision for decision in decisions if decision.status == "route"
+    ]
+    desired = min(max_depth, max(0, target_depth - ready_before))
+    for decision in _queue_replenisher_sorted_candidates(decisions):
+        if len(selected) >= desired:
+            break
+        if decision.status != "promote":
+            continue
+        if decision.intent in selected_intents:
+            continue
+        if decision.files and decision.files & selected_files:
+            continue
+        selected.append(decision)
+        selected_intents.add(decision.intent)
+        selected_files.update(decision.files)
+
+    for decision in selected:
+        add_issue_label(_queue_replenisher_issue_number(decision.issue), LABEL_READY)
+    for decision in routed:
+        add_issue_label(_queue_replenisher_issue_number(decision.issue), LABEL_BLOCKED)
+
+    ready_after = ready_before + len(selected)
+    selected_ids = ",".join(str(_queue_replenisher_issue_number(item.issue)) for item in selected) or "none"
+    selected_reasons = ",".join(f"{_queue_replenisher_issue_number(item.issue)}:{item.reason}" for item in selected) or "none"
+    routed_ids = ",".join(str(_queue_replenisher_issue_number(item.issue)) for item in routed) or "none"
+    routed_reasons = ",".join(f"{_queue_replenisher_issue_number(item.issue)}:{item.reason}" for item in routed) or "none"
+    safe_work_exists = any(decision.status == "promote" for decision in decisions)
+    return _maintenance_report(
+        "DONE",
+        AUTONOMOUS_QUEUE_REPLENISHER,
+        [
+            f"queue_depth_before={ready_before}",
+            f"queue_depth_after={ready_after}",
+            f"selected_issue_ids={selected_ids}",
+            f"selected_reasons={selected_reasons}",
+            f"routed_issue_ids={routed_ids}",
+            f"routed_reasons={routed_reasons}",
+            "telegram_notifications=0",
+            "dashboard_public_safe=true",
+            f"safe_executable_work_exists={str(safe_work_exists).lower()}",
+            f"idempotency_key={QUEUE_REPLENISHER_IDEMPOTENCY_KEY}",
+        ],
+        "met",
+    )
 
 
 def _issue_label_names(issue: Mapping[str, Any]) -> frozenset[str]:
@@ -13476,6 +13833,8 @@ def dispatch_runtime_maintenance_task(
             return ensure_telegram_callback_local_config()
         if task_id == CHECK_SKELETON_FRESHNESS:
             return check_skeleton_freshness()
+        if task_id == AUTONOMOUS_QUEUE_REPLENISHER:
+            return autonomous_queue_replenisher()
         if task_id == RUNTIME_SYNC_MAIN:
             return runtime_sync_main(body)
         if task_id == RECOVER_SKELETON_CHECKOUT:
