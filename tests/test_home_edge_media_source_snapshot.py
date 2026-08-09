@@ -4,6 +4,7 @@ import base64
 import json
 import os
 import stat
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping
@@ -82,6 +83,14 @@ def executor_receipt(stdout: str) -> HomeEdgeExecReceipt:
         idempotency="executed",
         receipt_hash="f" * 64,
     )
+
+
+def signer_envelope(secret: str = SECRET) -> dict[str, Any]:
+    request = snapshot._build_snapshot_request_with_secret(secret)
+    return {
+        "schema": snapshot.CONTROLLER_SIGNED_REQUEST_SCHEMA,
+        "request": request.to_mapping(),
+    }
 
 
 def _write_file(path: Path, content: bytes | str, *, mode: int = 0o600) -> None:
@@ -431,15 +440,8 @@ def test_owner_or_group_mismatch_between_fixed_paths_fails_closed(
     defaults.update(overrides)
     FixedHmacFs(monkeypatch, tmp_path, **defaults)
 
-    receipt = snapshot.execute_media_source_snapshot_task(
-        issue_body(),
-        registered_clean_main_sha=SHA,
-        github_main_sha=SHA,
-        private_root=tmp_path / "private",
-        environment={},
-    )
-
-    assert receipt["stable_reason"] == "executor_auth_config_unsafe"
+    with pytest.raises(ValueError, match="executor_auth_config_unsafe"):
+        snapshot.build_snapshot_request(environment={})
 
 
 @pytest.mark.parametrize(
@@ -517,27 +519,12 @@ def test_invalid_fixed_config_blocks_before_executor_call(
     mode: int,
     reason: str,
 ) -> None:
-    calls = 0
     FixedHmacFs(monkeypatch, tmp_path, controller_content=content, controller_mode=mode)
 
-    def fake_execute(_request: Mapping[str, Any]) -> HomeEdgeExecReceipt:
-        nonlocal calls
-        calls += 1
-        raise AssertionError(f"executor must not be called for {kind}")
+    with pytest.raises(ValueError, match=reason) as excinfo:
+        snapshot.build_snapshot_request(environment={})
+    public = str(excinfo.value)
 
-    monkeypatch.setattr(snapshot, "execute_home_edge_request", fake_execute)
-
-    receipt = snapshot.execute_media_source_snapshot_task(
-        issue_body(),
-        registered_clean_main_sha=SHA,
-        github_main_sha=SHA,
-        private_root=tmp_path / "private",
-        environment={},
-    )
-    public = json.dumps(receipt, sort_keys=True)
-
-    assert calls == 0
-    assert receipt["stable_reason"] == reason
     assert CONFIG_SECRET not in public
     assert str(snapshot.EXEC_HMAC_SECRET_CONFIG_PATH) not in public
 
@@ -557,21 +544,9 @@ def test_symlink_fixed_boundary_blocks_before_executor_call(
     fs_kwargs: dict[str, str],
 ) -> None:
     FixedHmacFs(monkeypatch, tmp_path, **fs_kwargs)
-    monkeypatch.setattr(
-        snapshot,
-        "execute_home_edge_request",
-        lambda _request: pytest.fail(f"executor must not be called for {kind}"),
-    )
 
-    receipt = snapshot.execute_media_source_snapshot_task(
-        issue_body(),
-        registered_clean_main_sha=SHA,
-        github_main_sha=SHA,
-        private_root=tmp_path / "private",
-        environment={},
-    )
-
-    assert receipt["stable_reason"] == "executor_auth_config_unsafe"
+    with pytest.raises(ValueError, match="executor_auth_config_unsafe"):
+        snapshot.build_snapshot_request(environment={})
 
 
 @pytest.mark.parametrize(
@@ -589,15 +564,8 @@ def test_non_directory_or_non_regular_fixed_boundary_fails_closed(
 ) -> None:
     FixedHmacFs(monkeypatch, tmp_path, **fs_kwargs)
 
-    receipt = snapshot.execute_media_source_snapshot_task(
-        issue_body(),
-        registered_clean_main_sha=SHA,
-        github_main_sha=SHA,
-        private_root=tmp_path / "private",
-        environment={},
-    )
-
-    assert receipt["stable_reason"] == "executor_auth_config_unsafe"
+    with pytest.raises(ValueError, match="executor_auth_config_unsafe"):
+        snapshot.build_snapshot_request(environment={})
 
 
 @pytest.mark.parametrize(
@@ -618,15 +586,8 @@ def test_group_or_world_writable_fixed_boundary_fails_closed(
 ) -> None:
     FixedHmacFs(monkeypatch, tmp_path, **fs_kwargs)
 
-    receipt = snapshot.execute_media_source_snapshot_task(
-        issue_body(),
-        registered_clean_main_sha=SHA,
-        github_main_sha=SHA,
-        private_root=tmp_path / "private",
-        environment={},
-    )
-
-    assert receipt["stable_reason"] == "executor_auth_config_unsafe"
+    with pytest.raises(ValueError, match="executor_auth_config_unsafe"):
+        snapshot.build_snapshot_request(environment={})
 
 
 @pytest.mark.parametrize(
@@ -643,15 +604,8 @@ def test_oversize_profile_or_controller_env_fails_closed(
 ) -> None:
     FixedHmacFs(monkeypatch, tmp_path, **fs_kwargs)
 
-    receipt = snapshot.execute_media_source_snapshot_task(
-        issue_body(),
-        registered_clean_main_sha=SHA,
-        github_main_sha=SHA,
-        private_root=tmp_path / "private",
-        environment={},
-    )
-
-    assert receipt["stable_reason"] == "executor_auth_config_unsafe"
+    with pytest.raises(ValueError, match="executor_auth_config_unsafe"):
+        snapshot.build_snapshot_request(environment={})
 
 
 def test_controller_file_replacement_identity_race_fails_closed(
@@ -660,15 +614,8 @@ def test_controller_file_replacement_identity_race_fails_closed(
 ) -> None:
     FixedHmacFs(monkeypatch, tmp_path, replacement_race=True)
 
-    receipt = snapshot.execute_media_source_snapshot_task(
-        issue_body(),
-        registered_clean_main_sha=SHA,
-        github_main_sha=SHA,
-        private_root=tmp_path / "private",
-        environment={},
-    )
-
-    assert receipt["stable_reason"] == "executor_auth_config_unsafe"
+    with pytest.raises(ValueError, match="executor_auth_config_unsafe"):
+        snapshot.build_snapshot_request(environment={})
 
 
 def test_permission_denial_opening_controller_env_fails_closed_without_alternate_route(
@@ -677,15 +624,8 @@ def test_permission_denial_opening_controller_env_fails_closed_without_alternate
 ) -> None:
     fs = FixedHmacFs(monkeypatch, tmp_path, deny_controller_open=True)
 
-    receipt = snapshot.execute_media_source_snapshot_task(
-        issue_body(),
-        registered_clean_main_sha=SHA,
-        github_main_sha=SHA,
-        private_root=tmp_path / "private",
-        environment={},
-    )
-
-    assert receipt["stable_reason"] == "executor_auth_config_unsafe"
+    with pytest.raises(ValueError, match="executor_auth_config_unsafe"):
+        snapshot.build_snapshot_request(environment={})
     assert fs.open_calls == [snapshot.EXEC_HMAC_SECRET_CONFIG_PATH]
 
 
@@ -707,16 +647,10 @@ def test_auth_config_failure_receipt_excludes_secret_path_and_owner_metadata(
         controller_gid=private_gid,
     )
 
-    receipt = snapshot.execute_media_source_snapshot_task(
-        issue_body(),
-        registered_clean_main_sha=SHA,
-        github_main_sha=SHA,
-        private_root=tmp_path / "private",
-        environment={},
-    )
-    public = json.dumps(receipt, sort_keys=True)
+    with pytest.raises(ValueError, match="executor_auth_config_unsafe") as excinfo:
+        snapshot.build_snapshot_request(environment={})
+    public = str(excinfo.value)
 
-    assert receipt["stable_reason"] == "executor_auth_config_unsafe"
     assert CONFIG_SECRET not in public
     assert snapshot.EXEC_HMAC_SECRET_ENV not in public
     assert str(snapshot.EXEC_HMAC_SECRET_CONFIG_PATH) not in public
@@ -738,7 +672,6 @@ def test_missing_fixed_config_or_target_variable_is_public_safe(
     content: str | None,
     reason: str,
 ) -> None:
-    calls = 0
     FixedHmacFs(
         monkeypatch,
         tmp_path,
@@ -746,26 +679,73 @@ def test_missing_fixed_config_or_target_variable_is_public_safe(
         controller_missing=content is None,
     )
 
-    def fake_execute(_request: Mapping[str, Any]) -> HomeEdgeExecReceipt:
-        nonlocal calls
-        calls += 1
-        raise AssertionError("executor must not be called")
+    with pytest.raises(ValueError, match=reason) as excinfo:
+        snapshot.build_snapshot_request(environment={})
+    public = str(excinfo.value)
 
-    monkeypatch.setattr(snapshot, "execute_home_edge_request", fake_execute)
-
-    receipt = snapshot.execute_media_source_snapshot_task(
-        issue_body(),
-        registered_clean_main_sha=SHA,
-        github_main_sha=SHA,
-        private_root=tmp_path / "private",
-        environment={},
-    )
-    public = json.dumps(receipt, sort_keys=True)
-
-    assert calls == 0
-    assert receipt["stable_reason"] == reason
     assert str(snapshot.EXEC_HMAC_SECRET_CONFIG_PATH) not in public
     assert snapshot.EXEC_HMAC_SECRET_ENV not in public
+
+
+def test_controller_signer_exact_stdin_signs_without_returning_hmac(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fs = FixedHmacFs(monkeypatch, tmp_path)
+    stdin = json.dumps(
+        {
+            "schema": snapshot.CONTROLLER_SIGNER_SCHEMA,
+            "maintenance_task_id": snapshot.TASK_ID,
+            "repository": snapshot.REPOSITORY,
+            "expected_main_sha": SHA,
+            "target": snapshot.TARGET_NODE,
+        },
+        sort_keys=True,
+    )
+
+    envelope = snapshot.sign_snapshot_request_from_controller_stdin(stdin)
+    public = json.dumps(envelope, sort_keys=True)
+    request = HomeEdgeExecRequest.from_mapping(envelope["request"])
+
+    assert envelope["schema"] == snapshot.CONTROLLER_SIGNED_REQUEST_SCHEMA
+    assert request.signature == sign_request(request, CONFIG_SECRET)
+    assert CONFIG_SECRET not in public
+    assert snapshot.EXEC_HMAC_SECRET_ENV not in public
+    assert fs.open_calls == [snapshot.EXEC_HMAC_SECRET_CONFIG_PATH]
+
+
+@pytest.mark.parametrize(
+    "payload_update,argv",
+    [
+        ({"extra": "field"}, ()),
+        ({"maintenance_task_id": "home_edge_01_media_source_snapshot_v2"}, ()),
+        ({"repository": "other/repo"}, ()),
+        ({"expected_main_sha": "A" * 40}, ()),
+        ({"target": "home-edge-02"}, ()),
+        ({}, ("--anything",)),
+    ],
+)
+def test_controller_signer_rejects_arbitrary_stdin_or_argv_before_hmac_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+    payload_update: dict[str, str],
+    argv: tuple[str, ...],
+) -> None:
+    payload = {
+        "schema": snapshot.CONTROLLER_SIGNER_SCHEMA,
+        "maintenance_task_id": snapshot.TASK_ID,
+        "repository": snapshot.REPOSITORY,
+        "expected_main_sha": SHA,
+        "target": snapshot.TARGET_NODE,
+    }
+    payload.update(payload_update)
+    monkeypatch.setattr(
+        snapshot,
+        "_read_exec_hmac_secret_config",
+        lambda: pytest.fail("HMAC must not be resolved for invalid signer input"),
+    )
+
+    with pytest.raises(ValueError, match="controller_signer_"):
+        snapshot.sign_snapshot_request_from_controller_stdin(json.dumps(payload), argv)
 
 
 @pytest.mark.parametrize(
@@ -968,6 +948,52 @@ def test_execute_uses_only_signed_executor_gateway_and_writes_private_0600(
     assert stat.S_IMODE(artifact.parent.stat().st_mode) == 0o700
 
 
+def test_unprivileged_runner_uses_injected_signer_then_existing_transport_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = valid_source()
+    signer_calls: list[snapshot.RuntimeInput] = []
+    transport_calls: list[Mapping[str, Any]] = []
+    monkeypatch.delenv(snapshot.EXEC_HMAC_SECRET_ENV, raising=False)
+    monkeypatch.setattr(
+        snapshot,
+        "_read_exec_hmac_secret_config",
+        lambda: pytest.fail("Runner must not resolve the controller HMAC directly"),
+    )
+
+    def fake_signer(runtime_input: snapshot.RuntimeInput) -> HomeEdgeExecRequest:
+        signer_calls.append(runtime_input)
+        return snapshot.validate_signed_snapshot_request(signer_envelope()["request"])
+
+    def fake_execute(request: Mapping[str, Any]) -> HomeEdgeExecReceipt:
+        transport_calls.append(request)
+        return executor_receipt(executor_stdout(source))
+
+    monkeypatch.setattr(snapshot, "request_signed_snapshot_request", fake_signer)
+    monkeypatch.setattr(snapshot, "execute_home_edge_request", fake_execute)
+
+    first = snapshot.execute_media_source_snapshot_task(
+        issue_body(),
+        registered_clean_main_sha=SHA,
+        github_main_sha=SHA,
+        private_root=tmp_path,
+    )
+    second = snapshot.execute_media_source_snapshot_task(
+        issue_body(),
+        registered_clean_main_sha=SHA,
+        github_main_sha=SHA,
+        private_root=tmp_path,
+    )
+
+    assert snapshot.success_criteria_met(first)
+    assert snapshot.success_criteria_met(second)
+    assert len(signer_calls) == 1
+    assert len(transport_calls) == 1
+    assert second["stable_reason"] == "already_captured"
+    assert snapshot.private_artifact_path(private_root=tmp_path).read_bytes() == source
+
+
 def test_second_execute_uses_existing_artifact_without_home_edge_request(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1002,6 +1028,82 @@ def test_second_execute_uses_existing_artifact_without_home_edge_request(
     assert second["executor_receipt_hash"] == "not_required_existing_capture"
     assert second["source_sha256"] == first["source_sha256"]
     assert second["source_bytes"] == first["source_bytes"]
+
+
+@pytest.mark.parametrize(
+    "field,value,reason",
+    [
+        ("node_id", "home-edge-02", "node"),
+        ("execution_lane", "routine_mutation", "lane"),
+        ("run_as", "root", "run_as"),
+        ("script", "print('different')", "script"),
+        ("script_interpreter", "bash", "interpreter"),
+        ("timeout_seconds", 31, "timeout"),
+        ("public", True, "public"),
+        ("max_output_bytes", 999_999, "output"),
+    ],
+)
+def test_altered_controller_signed_request_fields_fail_before_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    field: str,
+    value: Any,
+    reason: str,
+) -> None:
+    altered = signer_envelope()["request"]
+    altered[field] = value
+    monkeypatch.delenv(snapshot.EXEC_HMAC_SECRET_ENV, raising=False)
+    monkeypatch.setattr(
+        snapshot,
+        "request_signed_snapshot_request",
+        lambda _runtime_input: snapshot.validate_signed_snapshot_request(altered),
+    )
+    monkeypatch.setattr(
+        snapshot,
+        "execute_home_edge_request",
+        lambda _request: pytest.fail("transport must not run for altered signer output"),
+    )
+
+    receipt = snapshot.execute_media_source_snapshot_task(
+        issue_body(),
+        registered_clean_main_sha=SHA,
+        github_main_sha=SHA,
+        private_root=tmp_path,
+    )
+
+    assert receipt["stable_reason"] == f"controller_signer_request_{reason}_mismatch"
+
+
+def test_controller_signer_sudo_invocation_is_absolute_fixed_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        assert kwargs["env"] == {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8"}
+        assert json.loads(kwargs["input"]) == {
+            "schema": snapshot.CONTROLLER_SIGNER_SCHEMA,
+            "maintenance_task_id": snapshot.TASK_ID,
+            "repository": snapshot.REPOSITORY,
+            "expected_main_sha": SHA,
+            "target": snapshot.TARGET_NODE,
+        }
+        return subprocess.CompletedProcess(command, 0, json.dumps(signer_envelope()), "")
+
+    monkeypatch.setattr(snapshot.subprocess, "run", fake_run)
+
+    request = snapshot.request_signed_snapshot_request(
+        snapshot.RuntimeInput(repository=snapshot.REPOSITORY, expected_main_sha=SHA, target=snapshot.TARGET_NODE)
+    )
+
+    assert request.node_id == snapshot.TARGET_NODE
+    assert commands == [
+        [
+            "/usr/bin/sudo",
+            "--non-interactive",
+            "--",
+            str(snapshot.CONTROLLER_SIGNER_PATH),
+        ]
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1166,3 +1268,58 @@ def test_public_receipt_and_status_lines_exclude_source_text_private_markers(
     assert snapshot.SOURCE_IDENTITY_TOKEN not in public
     assert "source_sha256" in public
     assert "source_bytes" in public
+
+
+def test_controller_signer_installer_smoke_and_sudoers_exact_command(tmp_path: Path) -> None:
+    install_root = tmp_path / "install-root"
+    installer = Path("scripts/install_home_edge_media_source_snapshot_controller_signer.sh")
+
+    completed = subprocess.run(
+        ["bash", str(installer), "--runner-user", "skeleton-runner", "--root", str(install_root)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    signer = install_root / "usr/local/sbin/home_edge_media_source_snapshot_signer"
+    installed_module = (
+        install_root
+        / "usr/local/lib/skeleton-home-edge-media-source-snapshot-signer/core/home_edge/media_source_snapshot.py"
+    )
+    sudoers = install_root / "etc/sudoers.d/skeleton-home-edge-media-source-snapshot-signer"
+    assert signer.exists()
+    assert installed_module.exists()
+    assert oct(stat.S_IMODE(signer.stat().st_mode)) == "0o555"
+    assert oct(stat.S_IMODE(sudoers.stat().st_mode)) == "0o440"
+
+    smoke = subprocess.run(
+        [
+            "python3",
+            "-c",
+            "from core.home_edge.media_source_snapshot import sign_snapshot_request_from_controller_stdin; "
+            "assert callable(sign_snapshot_request_from_controller_stdin)",
+        ],
+        env={
+            "PYTHONPATH": str(install_root / "usr/local/lib/skeleton-home-edge-media-source-snapshot-signer"),
+            "PATH": os.environ.get("PATH", ""),
+        },
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    assert smoke.returncode == 0, smoke.stderr
+
+    sudoers_text = sudoers.read_text(encoding="utf-8")
+    assert (
+        sudoers_text.strip().splitlines()[-1]
+        == "skeleton-runner ALL=(root) NOPASSWD: /usr/local/sbin/home_edge_media_source_snapshot_signer"
+    )
+    assert "SETENV" not in sudoers_text
+    assert "*" not in sudoers_text
+    assert "/bin/sh" not in sudoers_text
+    assert "/bin/bash" not in sudoers_text
+    assert "python" not in sudoers_text
+    assert "home_edge_exec_root" not in sudoers_text

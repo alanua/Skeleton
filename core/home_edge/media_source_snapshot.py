@@ -37,6 +37,10 @@ PRIVATE_ARTIFACT_RELATIVE_PATH = (
 EXEC_HMAC_SECRET_CONFIG_DIR = Path("/etc/skeleton")
 EXEC_HMAC_SECRET_PROFILE_METADATA_PATH = Path("/etc/skeleton/home-edge-01.env")
 EXEC_HMAC_SECRET_CONFIG_PATH = Path("/etc/skeleton/home-edge-executor-controller.env")
+CONTROLLER_SIGNER_PATH = Path("/usr/local/sbin/home_edge_media_source_snapshot_signer")
+CONTROLLER_SIGNER_SCHEMA = "skeleton.home_edge.media_source_snapshot_signer_input.v1"
+CONTROLLER_SIGNED_REQUEST_SCHEMA = "skeleton.home_edge.media_source_snapshot_signed_request.v1"
+CONTROLLER_SIGNER_TIMEOUT_SECONDS = 10
 MAX_EXEC_HMAC_SECRET_CONFIG_BYTES = 64 * 1024
 EXPECTED_MAIN_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 FIELD_RE = re.compile(r"^\s*(?P<field>[A-Za-z][A-Za-z0-9 _-]{0,80}):\s*(?P<value>.*?)\s*$")
@@ -133,10 +137,12 @@ def execute_media_source_snapshot_task(
         return existing
 
     try:
-        request = build_snapshot_request(environment=environment)
+        request = build_snapshot_request_for_runner(runtime_input, environment=environment)
     except ValueError as exc:
         reason = exc.args[0] if exc.args else ""
         if isinstance(reason, str) and AUTH_CONFIG_REASON_RE.fullmatch(reason):
+            return _blocked_receipt(reason)
+        if isinstance(reason, str) and reason.startswith("controller_signer_"):
             return _blocked_receipt(reason)
         raise
     try:
@@ -232,6 +238,21 @@ def validate_main_sha(
 
 def build_snapshot_request(*, environment: Mapping[str, str] | None = None) -> HomeEdgeExecRequest:
     secret = _resolve_exec_hmac_secret(environment=environment)
+    return _build_snapshot_request_with_secret(secret)
+
+
+def build_snapshot_request_for_runner(
+    runtime_input: RuntimeInput,
+    *,
+    environment: Mapping[str, str] | None = None,
+) -> HomeEdgeExecRequest:
+    env = os.environ if environment is None else environment
+    if env.get(EXEC_HMAC_SECRET_ENV, ""):
+        return build_snapshot_request(environment=environment)
+    return request_signed_snapshot_request(runtime_input)
+
+
+def _build_snapshot_request_with_secret(secret: str) -> HomeEdgeExecRequest:
     request = HomeEdgeExecRequest.from_mapping(
         {
             "request_id": f"{TASK_ID}-{uuid4()}",
@@ -252,6 +273,125 @@ def build_snapshot_request(*, environment: Mapping[str, str] | None = None) -> H
     return HomeEdgeExecRequest.from_mapping(
         {**request.to_mapping(include_signature=False), "signature": sign_request(request, secret)}
     )
+
+
+def request_signed_snapshot_request(runtime_input: RuntimeInput) -> HomeEdgeExecRequest:
+    signer_input = {
+        "schema": CONTROLLER_SIGNER_SCHEMA,
+        "maintenance_task_id": TASK_ID,
+        "repository": runtime_input.repository,
+        "expected_main_sha": runtime_input.expected_main_sha,
+        "target": runtime_input.target,
+    }
+    try:
+        completed = subprocess.run(
+            [
+                "/usr/bin/sudo",
+                "--non-interactive",
+                "--",
+                str(CONTROLLER_SIGNER_PATH),
+            ],
+            input=json.dumps(signer_input, sort_keys=True, separators=(",", ":")) + "\n",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=CONTROLLER_SIGNER_TIMEOUT_SECONDS,
+            check=False,
+            env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8"},
+        )
+    except (subprocess.TimeoutExpired, TimeoutError):
+        raise ValueError("controller_signer_timeout") from None
+    except OSError:
+        raise ValueError("controller_signer_unavailable") from None
+    if completed.returncode != 0:
+        raise ValueError("controller_signer_failed")
+    try:
+        decoded = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        raise ValueError("controller_signer_invalid_response") from None
+    if not isinstance(decoded, Mapping):
+        raise ValueError("controller_signer_invalid_response")
+    if decoded.get("schema") != CONTROLLER_SIGNED_REQUEST_SCHEMA:
+        raise ValueError("controller_signer_invalid_response")
+    request = decoded.get("request")
+    if not isinstance(request, Mapping):
+        raise ValueError("controller_signer_invalid_response")
+    return validate_signed_snapshot_request(request)
+
+
+def validate_signed_snapshot_request(request: Mapping[str, Any]) -> HomeEdgeExecRequest:
+    if request.get("node_id") != TARGET_NODE:
+        raise ValueError("controller_signer_request_node_mismatch")
+    if request.get("execution_lane") != EXECUTION_LANE:
+        raise ValueError("controller_signer_request_lane_mismatch")
+    if request.get("run_as") != RUN_AS:
+        raise ValueError("controller_signer_request_run_as_mismatch")
+    if request.get("timeout_seconds") != REQUEST_TIMEOUT_SECONDS:
+        raise ValueError("controller_signer_request_timeout_mismatch")
+    if request.get("max_output_bytes") != MAX_EXECUTOR_OUTPUT_BYTES:
+        raise ValueError("controller_signer_request_output_mismatch")
+    if request.get("public") is not False:
+        raise ValueError("controller_signer_request_public_mismatch")
+    if request.get("mode") != "script":
+        raise ValueError("controller_signer_request_mode_mismatch")
+    if request.get("argv", []) != []:
+        raise ValueError("controller_signer_request_argv_mismatch")
+    if request.get("script") != SNAPSHOT_SCRIPT:
+        raise ValueError("controller_signer_request_script_mismatch")
+    if request.get("script_interpreter") != "python3":
+        raise ValueError("controller_signer_request_interpreter_mismatch")
+    if request.get("environment", {}) != {}:
+        raise ValueError("controller_signer_request_environment_mismatch")
+    if request.get("cwd") is not None:
+        raise ValueError("controller_signer_request_cwd_mismatch")
+    if request.get("stdin_text") is not None or request.get("stdin_base64") is not None:
+        raise ValueError("controller_signer_request_stdin_mismatch")
+    if request.get("operator_approval_ref") is not None:
+        raise ValueError("controller_signer_request_approval_mismatch")
+    parsed = HomeEdgeExecRequest.from_mapping(request)
+    if not parsed.idempotency_key or not parsed.idempotency_key.startswith(IDEMPOTENCY_KEY_PREFIX + "-"):
+        raise ValueError("controller_signer_request_idempotency_mismatch")
+    if not parsed.request_id.startswith(TASK_ID + "-"):
+        raise ValueError("controller_signer_request_id_mismatch")
+    if not (parsed.nonce or "").startswith(TASK_ID + "-"):
+        raise ValueError("controller_signer_request_nonce_mismatch")
+    if not parsed.signature:
+        raise ValueError("controller_signer_request_signature_missing")
+    return parsed
+
+
+def sign_snapshot_request_from_controller_stdin(stdin: str, argv: list[str] | tuple[str, ...] = ()) -> dict[str, Any]:
+    if argv:
+        raise ValueError("controller_signer_argv_forbidden")
+    try:
+        decoded = json.loads(stdin)
+    except json.JSONDecodeError:
+        raise ValueError("controller_signer_stdin_invalid") from None
+    if not isinstance(decoded, Mapping):
+        raise ValueError("controller_signer_stdin_invalid")
+    allowed = {"schema", "maintenance_task_id", "repository", "expected_main_sha", "target"}
+    if set(decoded) != allowed:
+        raise ValueError("controller_signer_stdin_invalid")
+    if decoded.get("schema") != CONTROLLER_SIGNER_SCHEMA:
+        raise ValueError("controller_signer_stdin_invalid")
+    runtime_input = RuntimeInput(
+        repository=str(decoded.get("repository", "")),
+        expected_main_sha=str(decoded.get("expected_main_sha", "")),
+        target=str(decoded.get("target", "")),
+    )
+    if decoded.get("maintenance_task_id") != TASK_ID:
+        raise ValueError("controller_signer_stdin_invalid")
+    if runtime_input.repository != REPOSITORY:
+        raise ValueError("controller_signer_stdin_invalid")
+    if EXPECTED_MAIN_SHA_RE.fullmatch(runtime_input.expected_main_sha) is None:
+        raise ValueError("controller_signer_stdin_invalid")
+    if runtime_input.target != TARGET_NODE:
+        raise ValueError("controller_signer_stdin_invalid")
+    request = _build_snapshot_request_with_secret(_read_exec_hmac_secret_config())
+    return {
+        "schema": CONTROLLER_SIGNED_REQUEST_SCHEMA,
+        "request": request.to_mapping(),
+    }
 
 
 def _resolve_exec_hmac_secret(*, environment: Mapping[str, str] | None = None) -> str:

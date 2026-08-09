@@ -444,6 +444,8 @@ def test_home_edge_media_source_snapshot_is_allowlisted_and_dispatches_sanitized
     assert captured["github_main_sha"] == HEAD_SHA
     assert "/opt/skeleton/cast/app.py" not in report
     assert "private_source_b64" not in report
+    assert "signature" not in report
+    assert "media_source_snapshot_signed_request" not in report
     assert "10.44.55.66" not in report
 
 
