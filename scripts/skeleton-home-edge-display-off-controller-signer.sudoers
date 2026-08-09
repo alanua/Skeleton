@@ -1,0 +1,2 @@
+# Managed by Skeleton Home Edge display-off controller signer installer.
+__CONTROLLER_USER__ ALL=(root) NOPASSWD: /usr/local/sbin/home_edge_display_power_off_signer
