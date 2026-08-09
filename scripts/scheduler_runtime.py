@@ -24,14 +24,28 @@ def run_scheduler_tick(
     scheduler_db_path: str,
     loop_state_db_path: str,
     now: int | None = None,
+    review_state_reader=None,
+    review_adapters=None,
 ) -> dict[str, object]:
     store = SchedulerStore(scheduler_db_path)
     store.initialize()
-    dispatcher = SharedDispatcher.for_loop_engine(loop_state_db_path=loop_state_db_path)
+    dispatcher = SharedDispatcher.for_loop_engine(
+        loop_state_db_path=loop_state_db_path,
+        scheduler_db_path=scheduler_db_path,
+        review_state_reader=review_state_reader or _read_current_pr_review_state,
+        review_adapters=review_adapters,
+        now=(lambda: now) if now is not None else None,
+    )
     return SchedulerEngine(store, SchedulerEngineConfig()).tick(
         now=now,
         dispatcher=dispatcher,
     )
+
+
+def _read_current_pr_review_state(payload):
+    from scripts import runner_poll_github_tasks as runner
+
+    return runner._get_pr_mergeability_state(int(payload["pr_number"]))
 
 
 def main() -> None:
