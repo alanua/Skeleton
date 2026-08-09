@@ -38,6 +38,8 @@ EXEC_HMAC_SECRET_CONFIG_DIR = Path("/etc/skeleton")
 EXEC_HMAC_SECRET_PROFILE_METADATA_PATH = Path("/etc/skeleton/home-edge-01.env")
 EXEC_HMAC_SECRET_CONFIG_PATH = Path("/etc/skeleton/home-edge-executor-controller.env")
 MAX_EXEC_HMAC_SECRET_CONFIG_BYTES = 64 * 1024
+PRIVILEGED_SNAPSHOT_HELPER = Path("/usr/local/sbin/home_edge_media_source_snapshot_fixed")
+PRIVILEGED_SNAPSHOT_HELPER_TIMEOUT_SECONDS = 120
 EXPECTED_MAIN_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 FIELD_RE = re.compile(r"^\s*(?P<field>[A-Za-z][A-Za-z0-9 _-]{0,80}):\s*(?P<value>.*?)\s*$")
 PUBLIC_VALUE_RE = re.compile(r"^[A-Za-z0-9_.:=-]+$")
@@ -120,6 +122,7 @@ def execute_media_source_snapshot_task(
     github_main_sha: str,
     environment: Mapping[str, str] | None = None,
     private_root: Path | None = None,
+    use_privileged_snapshot_capability: bool = False,
 ) -> dict[str, object]:
     runtime_input = parse_runtime_input(body)
     validate_main_sha(
@@ -132,6 +135,15 @@ def execute_media_source_snapshot_task(
     if existing is not None:
         return existing
 
+    explicit_secret = _explicit_exec_hmac_secret(environment=environment)
+    if use_privileged_snapshot_capability and not explicit_secret:
+        return execute_privileged_fixed_snapshot_capability(
+            body,
+            registered_clean_main_sha=registered_clean_main_sha,
+            github_main_sha=github_main_sha,
+            environment=environment,
+            private_root=private_root,
+        )
     try:
         request = build_snapshot_request(environment=environment)
     except ValueError as exc:
@@ -232,6 +244,12 @@ def validate_main_sha(
 
 def build_snapshot_request(*, environment: Mapping[str, str] | None = None) -> HomeEdgeExecRequest:
     secret = _resolve_exec_hmac_secret(environment=environment)
+    return build_snapshot_request_with_secret(secret)
+
+
+def build_snapshot_request_with_secret(secret: str) -> HomeEdgeExecRequest:
+    if not secret:
+        raise ValueError("executor_auth_config_missing")
     request = HomeEdgeExecRequest.from_mapping(
         {
             "request_id": f"{TASK_ID}-{uuid4()}",
@@ -254,12 +272,138 @@ def build_snapshot_request(*, environment: Mapping[str, str] | None = None) -> H
     )
 
 
-def _resolve_exec_hmac_secret(*, environment: Mapping[str, str] | None = None) -> str:
+def execute_privileged_fixed_snapshot_capability(
+    body: str,
+    *,
+    registered_clean_main_sha: str,
+    github_main_sha: str,
+    environment: Mapping[str, str] | None = None,
+    private_root: Path | None = None,
+    runner: Any | None = None,
+) -> dict[str, object]:
+    try:
+        runtime_input = parse_runtime_input(body)
+        validate_main_sha(
+            runtime_input.expected_main_sha,
+            registered_clean_main_sha=registered_clean_main_sha,
+            github_main_sha=github_main_sha,
+        )
+    except ValueError as exc:
+        reason = exc.args[0] if exc.args else "privileged_snapshot_capability_rejected"
+        return _blocked_receipt(reason if isinstance(reason, str) else "privileged_snapshot_capability_rejected")
+    payload = {
+        "maintenance_task_id": TASK_ID,
+        "body": body,
+        "registered_clean_main_sha": registered_clean_main_sha,
+        "github_main_sha": github_main_sha,
+    }
+    command = ["sudo", "--non-interactive", "--", str(PRIVILEGED_SNAPSHOT_HELPER)]
+    run = runner or subprocess.run
+    try:
+        completed = run(
+            command,
+            input=json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=PRIVILEGED_SNAPSHOT_HELPER_TIMEOUT_SECONDS,
+            check=False,
+            env=_public_subprocess_environment(environment),
+        )
+    except (subprocess.TimeoutExpired, TimeoutError):
+        return _blocked_receipt("privileged_snapshot_capability_timeout")
+    except Exception:
+        return _blocked_receipt("privileged_snapshot_capability_failed")
+    if getattr(completed, "returncode", 1) != 0:
+        return _blocked_receipt("privileged_snapshot_capability_blocked")
+    decoded = _decode_stdout(getattr(completed, "stdout", ""))
+    if not isinstance(decoded, dict):
+        return _blocked_receipt("privileged_snapshot_capability_invalid")
+    try:
+        receipt = sanitize_public_receipt(decoded)
+    except ValueError:
+        return _blocked_receipt("privileged_snapshot_capability_invalid")
+    return _import_privileged_artifact_if_needed(receipt, private_root=private_root)
+
+
+def execute_privileged_fixed_snapshot_payload(payload: Mapping[str, Any]) -> dict[str, object]:
+    if not isinstance(payload, Mapping):
+        return _blocked_receipt("privileged_snapshot_capability_rejected")
+    if set(payload) != {
+        "maintenance_task_id",
+        "body",
+        "registered_clean_main_sha",
+        "github_main_sha",
+    }:
+        return _blocked_receipt("privileged_snapshot_capability_rejected")
+    if payload.get("maintenance_task_id") != TASK_ID:
+        return _blocked_receipt("privileged_snapshot_capability_rejected")
+    body = payload.get("body")
+    registered_clean_main_sha = payload.get("registered_clean_main_sha")
+    github_main_sha = payload.get("github_main_sha")
+    if not all(isinstance(value, str) for value in (body, registered_clean_main_sha, github_main_sha)):
+        return _blocked_receipt("privileged_snapshot_capability_rejected")
+    try:
+        task_environment = _privileged_task_environment()
+        receipt = execute_media_source_snapshot_task(
+            body,
+            registered_clean_main_sha=registered_clean_main_sha,
+            github_main_sha=github_main_sha,
+            environment=task_environment,
+            use_privileged_snapshot_capability=False,
+        )
+    except ValueError as exc:
+        reason = exc.args[0] if exc.args else "privileged_snapshot_capability_rejected"
+        return _blocked_receipt(reason if isinstance(reason, str) else "privileged_snapshot_capability_rejected")
+    return sanitize_public_receipt(receipt)
+
+
+def _privileged_task_environment() -> dict[str, str]:
+    environment: dict[str, str] = {}
+    private_root = os.environ.get("SKELETON_RUNNER_PRIVATE_MEMORY_ROOT", "").strip()
+    if private_root:
+        environment["SKELETON_RUNNER_PRIVATE_MEMORY_ROOT"] = private_root
+    return environment
+
+
+def _explicit_exec_hmac_secret(*, environment: Mapping[str, str] | None = None) -> str:
     env = os.environ if environment is None else environment
-    secret = env.get(EXEC_HMAC_SECRET_ENV, "")
+    return env.get(EXEC_HMAC_SECRET_ENV, "").strip()
+
+
+def _resolve_exec_hmac_secret(*, environment: Mapping[str, str] | None = None) -> str:
+    secret = _explicit_exec_hmac_secret(environment=environment)
     if secret:
         return secret
     return _read_exec_hmac_secret_config()
+
+
+def _public_subprocess_environment(environment: Mapping[str, str] | None) -> dict[str, str]:
+    source = os.environ if environment is None else environment
+    allowed = {}
+    for key in ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TERM"):
+        value = source.get(key)
+        if value:
+            allowed[key] = value
+    return allowed
+
+
+def _import_privileged_artifact_if_needed(
+    receipt: dict[str, object],
+    *,
+    private_root: Path | None,
+) -> dict[str, object]:
+    if not success_criteria_met(receipt) or receipt.get("private_artifact_written") is not True:
+        return receipt
+    source_hash = str(receipt["source_sha256"])
+    source_bytes = int(receipt["source_bytes"])
+    target = private_artifact_path(private_root=private_root)
+    existing = _existing_private_artifact_receipt(target)
+    if existing is not None and success_criteria_met(existing):
+        if existing["source_sha256"] == source_hash and existing["source_bytes"] == source_bytes:
+            return receipt
+        return _blocked_receipt("privileged_snapshot_artifact_mismatch")
+    return receipt
 
 
 def _read_exec_hmac_secret_config() -> str:

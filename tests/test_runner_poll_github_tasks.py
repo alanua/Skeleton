@@ -405,10 +405,17 @@ def test_home_edge_media_source_snapshot_is_allowlisted_and_dispatches_sanitized
         assert ref in {"main", "origin/main"}
         return HEAD_SHA
 
-    def fake_execute(body: str, *, registered_clean_main_sha: str, github_main_sha: str):
+    def fake_execute(
+        body: str,
+        *,
+        registered_clean_main_sha: str,
+        github_main_sha: str,
+        use_privileged_snapshot_capability: bool,
+    ):
         captured["body"] = body
         captured["registered_clean_main_sha"] = registered_clean_main_sha
         captured["github_main_sha"] = github_main_sha
+        captured["use_privileged_snapshot_capability"] = use_privileged_snapshot_capability
         return _media_source_snapshot_receipt()
 
     monkeypatch.setattr(runner, "_read_exact_git_sha", fake_read_sha)
@@ -440,6 +447,7 @@ def test_home_edge_media_source_snapshot_is_allowlisted_and_dispatches_sanitized
     assert "success_criteria=met" in report
     assert captured["registered_clean_main_sha"] == HEAD_SHA
     assert captured["github_main_sha"] == HEAD_SHA
+    assert captured["use_privileged_snapshot_capability"] is True
     assert "/opt/skeleton/cast/app.py" not in report
     assert "private_source_b64" not in report
     assert "10.44.55.66" not in report

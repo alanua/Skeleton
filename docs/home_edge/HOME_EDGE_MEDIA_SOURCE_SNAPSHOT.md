@@ -14,11 +14,17 @@ The operation is not a general file export facility. Issue metadata may provide 
 
 ## Executor Authentication
 
-The Runner signs the Home Edge executor request with `SKELETON_HOME_EDGE_EXEC_HMAC_SECRET`. An explicit Runner-provided environment mapping or process environment value takes precedence. If that value is absent or empty, the task reads only `/etc/skeleton/home-edge-executor-controller.env` and only the single allowlisted variable `SKELETON_HOME_EDGE_EXEC_HMAC_SECRET`.
+Trusted controller contexts may sign the Home Edge executor request with an explicit `SKELETON_HOME_EDGE_EXEC_HMAC_SECRET` environment value or by using the existing fixed controller-owned config resolver. The registered Runner maintenance handler does not need direct read access to that controller HMAC. If the explicit secret is unavailable in the Runner process, it uses only the fixed privileged capability:
+
+`sudo --non-interactive -- /usr/local/sbin/home_edge_media_source_snapshot_fixed`
+
+That capability accepts no argv and reads one bounded JSON request from stdin for this exact maintenance task. The JSON may name only `home_edge_01_media_source_snapshot_v1`, the original public task body, and the two already-public main SHAs. Any other task id, argument, path, script, command, timeout, lane, or user field fails closed before privileged execution or before executor signing.
+
+Inside the privileged controller context, the task reads only `/etc/skeleton/home-edge-executor-controller.env` and only the single allowlisted variable `SKELETON_HOME_EDGE_EXEC_HMAC_SECRET`.
 
 That fixed private config is parsed as text, never sourced or executed. The resolver never reads or parses `/etc/skeleton/home-edge-01.env`; that file is metadata-only corroboration for the private controller ownership boundary. The fixed `/etc/skeleton` directory plus `/etc/skeleton/home-edge-01.env` and `/etc/skeleton/home-edge-executor-controller.env` are all checked with `lstat`; symlinks are rejected, `/etc/skeleton` must be a directory, both env paths must be regular files, none may be group/world writable, and each env file must be no larger than 64 KiB. The controller env is accepted when its owner is root or the current Runner uid, or when those three fixed paths share one identical owner and group boundary under the same strict checks. The parser accepts only simple `KEY=VALUE` or optional `export KEY=VALUE` entries for the allowlisted variable, ignoring comments, blank lines, and unrelated assignments. Duplicate target entries, NUL bytes, malformed quoted values, shell substitution or variable references, backticks, and multiline continuations fail closed before any executor request is made.
 
-Authentication setup failures are reported only as stable public-safe classes: `executor_auth_config_missing`, `executor_auth_config_unsafe`, or `executor_auth_config_invalid`. The credential value, config path, and variable name are never included in public receipts.
+Authentication setup and privileged capability failures are reported only as stable public-safe classes such as `executor_auth_config_missing`, `executor_auth_config_unsafe`, `executor_auth_config_invalid`, or `privileged_snapshot_capability_blocked`. The credential value, config path, variable name, filesystem ownership, private identities, helper stderr, and controller paths are never included in public receipts.
 
 ## Validation Boundary
 
@@ -48,6 +54,10 @@ The source content is written only under Runner private state, outside the repos
 The directory is mode `0700`; the snapshot file is mode `0600`. The public maintenance report never includes the private artifact path or source content.
 
 Retention is intentionally narrow: keep only the latest private snapshot long enough for the bounded canonicalization follow-up. After canonicalization has consumed the snapshot, remove the private artifact unless an operator explicitly retains it for audit. Do not copy this file into the repository, public issue comments, fixtures, logs, or PR descriptions.
+
+## Runtime Activation
+
+Repository merge only represents the reviewed contract. Installing the `/usr/local/sbin/home_edge_media_source_snapshot_fixed` wrapper and the exact sudoers line is a separate protected runtime maintenance step. Code generation, tests, and review must not install, restart services, sync secrets, or execute a live Home Edge snapshot.
 
 ## Public Receipt
 
