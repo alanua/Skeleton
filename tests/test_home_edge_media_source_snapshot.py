@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import base64
+import importlib.util
+import io
 import json
 import os
+import subprocess
+import sys
 import stat
 from datetime import UTC, datetime
 from pathlib import Path
@@ -104,6 +108,18 @@ def _stat_with(st: os.stat_result, **updates: int) -> os.stat_result:
     for name, value in updates.items():
         values[index[name]] = value
     return os.stat_result(values)
+
+
+@pytest.fixture(autouse=True)
+def in_process_snapshot_signer(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_sign(unsigned_request: Mapping[str, Any]) -> Mapping[str, Any]:
+        secret = os.environ.get(snapshot.EXEC_HMAC_SECRET_ENV, "")
+        if secret:
+            request = HomeEdgeExecRequest.from_mapping(unsigned_request)
+            return {**request.to_mapping(include_signature=False), "signature": sign_request(request, secret)}
+        return snapshot.sign_validated_snapshot_request(unsigned_request)
+
+    monkeypatch.setattr(snapshot, "sign_snapshot_request", fake_sign)
 
 
 class FixedHmacFs:
@@ -323,6 +339,137 @@ def test_safe_fixed_controller_config_secret_signs_request_and_stays_private(
     assert snapshot.EXEC_HMAC_SECRET_CONFIG_PATH == Path("/etc/skeleton/home-edge-executor-controller.env")
     assert snapshot.EXEC_HMAC_SECRET_PROFILE_METADATA_PATH == Path("/etc/skeleton/home-edge-01.env")
     assert snapshot.EXEC_HMAC_SECRET_CONFIG_DIR == Path("/etc/skeleton")
+
+
+def test_signer_rejects_argv_and_bad_stdin_before_credential_read(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        snapshot,
+        "_read_exec_hmac_secret_config",
+        lambda: pytest.fail("credential config must not be read"),
+    )
+
+    assert snapshot.signer_main(["extra"]) == 2
+
+    class BadStdin:
+        buffer = io.BytesIO(b"[]\n")
+
+    monkeypatch.setattr(sys, "stdin", BadStdin())
+    assert snapshot.signer_main([]) == 2
+    assert "blocked" in capsys.readouterr().err
+
+
+def test_validate_signed_snapshot_request_rejects_authority_change_before_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    unsigned = snapshot.build_unsigned_snapshot_request()
+    request = HomeEdgeExecRequest.from_mapping(unsigned)
+    signed = {**request.to_mapping(include_signature=False), "signature": sign_request(request, SECRET)}
+    signed["timeout_seconds"] = 29
+
+    with pytest.raises(ValueError, match="authority_mismatch"):
+        snapshot.validate_signed_snapshot_request(unsigned, signed)
+
+    monkeypatch.setattr(snapshot, "sign_snapshot_request", lambda _unsigned: signed)
+    monkeypatch.setattr(
+        snapshot,
+        "execute_home_edge_request",
+        lambda _request: pytest.fail("transport must not run after signer authority drift"),
+    )
+
+    with pytest.raises(ValueError, match="authority_mismatch"):
+        snapshot.execute_media_source_snapshot_task(
+            issue_body(),
+            registered_clean_main_sha=SHA,
+            github_main_sha=SHA,
+            private_root=tmp_path / "private",
+        )
+
+
+def test_installed_snapshot_signer_uses_installed_payload_without_repo_path(
+    tmp_path: Path,
+) -> None:
+    install_root = tmp_path / "root"
+    runner_user = os.environ.get("USER") or "root"
+    installer = Path("scripts/install_home_edge_snapshot_signer.sh")
+
+    result = subprocess.run(
+        [str(installer), "--root", str(install_root), "--runner-user", runner_user],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+    etc = install_root / "etc/skeleton"
+    etc.mkdir(parents=True, exist_ok=True)
+    _write_file(etc / "home-edge-01.env", "metadata only\n", mode=0o600)
+    _write_file(
+        etc / "home-edge-executor-controller.env",
+        f"{snapshot.EXEC_HMAC_SECRET_ENV}={CONFIG_SECRET}\n",
+        mode=0o600,
+    )
+    os.chmod(etc, 0o700)
+
+    signer = install_root / "usr/local/sbin/home_edge_media_source_snapshot_signer"
+    lib_dir = install_root / "usr/local/lib/skeleton-home-edge-snapshot-signer"
+    assert signer.exists()
+    assert lib_dir.is_dir()
+    signer_text = signer.read_text(encoding="utf-8")
+    assert "PYTHONPATH" not in signer_text
+    assert "/home/agent" not in signer_text
+    assert "chdir" not in signer_text
+    installer_text = installer.read_text(encoding="utf-8")
+    assert "chown root:root" in installer_text
+    assert "NOPASSWD: /usr/local/sbin/home_edge_media_source_snapshot_signer" in installer_text
+    for path in [lib_dir, *lib_dir.rglob("*"), signer]:
+        st = path.lstat()
+        assert not stat.S_ISLNK(st.st_mode)
+        assert stat.S_IMODE(st.st_mode) & 0o022 == 0
+        if os.geteuid() == 0:
+            assert st.st_uid == 0
+            assert st.st_gid == 0
+
+    poison = tmp_path / "poison"
+    poison_pkg = poison / "core/home_edge"
+    poison_pkg.mkdir(parents=True)
+    _write_file(poison / "core/__init__.py", "")
+    _write_file(poison_pkg / "__init__.py", "")
+    _write_file(poison_pkg / "media_source_snapshot.py", "raise RuntimeError('repo payload imported')\n")
+
+    unsigned = snapshot.build_unsigned_snapshot_request()
+    first = subprocess.run(
+        [str(signer)],
+        input=json.dumps(unsigned, sort_keys=True, separators=(",", ":")) + "\n",
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=str(tmp_path),
+        env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "PYTHONPATH": str(poison)},
+        check=False,
+    )
+    assert first.returncode == 0, first.stderr
+    signed = json.loads(first.stdout)
+    request = HomeEdgeExecRequest.from_mapping(signed)
+    assert request.signature == sign_request(request, CONFIG_SECRET)
+
+    _write_file(poison_pkg / "media_source_snapshot.py", "REQUEST_TIMEOUT_SECONDS = 31\nraise RuntimeError('mutated repo imported')\n")
+    second = subprocess.run(
+        [str(signer)],
+        input=json.dumps(unsigned, sort_keys=True, separators=(",", ":")) + "\n",
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=str(tmp_path),
+        env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "PYTHONPATH": str(poison)},
+        check=False,
+    )
+    assert second.returncode == 0, second.stderr
+    assert json.loads(second.stdout)["signature"] == signed["signature"]
 
 
 def test_unrelated_config_variables_and_comments_do_not_affect_parsing(

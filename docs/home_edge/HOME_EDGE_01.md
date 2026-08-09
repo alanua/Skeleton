@@ -56,6 +56,15 @@ service or public listener. Runtime deployment still requires a private HMAC
 secret, strict SSH identity and known-hosts files, the real desktop username,
 sudo policy for account switching, and filesystem permissions on the node.
 
+The media source snapshot controller signer is installed separately with
+`scripts/install_home_edge_snapshot_signer.sh`. It installs an immutable
+root-owned signer payload under
+`/usr/local/lib/skeleton-home-edge-snapshot-signer` and grants the Runner service
+account only the exact no-argv command
+`/usr/local/sbin/home_edge_media_source_snapshot_signer`. That signer only signs
+the fixed snapshot request; the unprivileged Runner still performs the Home Edge
+transport call and private artifact write.
+
 ## Network inventory boundary
 
 `home-edge-01` uses the default gateway as its registered internet path. Any modem integrated

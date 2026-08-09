@@ -8,6 +8,7 @@ import os
 import re
 import stat
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -37,6 +38,9 @@ PRIVATE_ARTIFACT_RELATIVE_PATH = (
 EXEC_HMAC_SECRET_CONFIG_DIR = Path("/etc/skeleton")
 EXEC_HMAC_SECRET_PROFILE_METADATA_PATH = Path("/etc/skeleton/home-edge-01.env")
 EXEC_HMAC_SECRET_CONFIG_PATH = Path("/etc/skeleton/home-edge-executor-controller.env")
+SNAPSHOT_SIGNER_EXECUTABLE_PATH = Path("/usr/local/sbin/home_edge_media_source_snapshot_signer")
+MAX_SIGNER_STDIN_BYTES = 64 * 1024
+SIGNER_SUBPROCESS_TIMEOUT_SECONDS = 10
 MAX_EXEC_HMAC_SECRET_CONFIG_BYTES = 64 * 1024
 EXPECTED_MAIN_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 FIELD_RE = re.compile(r"^\s*(?P<field>[A-Za-z][A-Za-z0-9 _-]{0,80}):\s*(?P<value>.*?)\s*$")
@@ -105,6 +109,29 @@ ALLOWED_FIELDS = frozenset(
     }
 )
 
+EXPECTED_UNSIGNED_REQUEST_FIELDS = frozenset(
+    {
+        "schema",
+        "request_id",
+        "node_id",
+        "argv",
+        "cwd",
+        "environment",
+        "timeout_seconds",
+        "execution_lane",
+        "operator_approval_ref",
+        "idempotency_key",
+        "run_as",
+        "mode",
+        "script",
+        "script_interpreter",
+        "timestamp",
+        "nonce",
+        "max_output_bytes",
+        "public",
+    }
+)
+
 
 @dataclass(frozen=True)
 class RuntimeInput:
@@ -133,7 +160,9 @@ def execute_media_source_snapshot_task(
         return existing
 
     try:
-        request = build_snapshot_request(environment=environment)
+        unsigned_request = build_unsigned_snapshot_request()
+        signed_request = sign_snapshot_request(unsigned_request)
+        request = validate_signed_snapshot_request(unsigned_request, signed_request)
     except ValueError as exc:
         reason = exc.args[0] if exc.args else ""
         if isinstance(reason, str) and AUTH_CONFIG_REASON_RE.fullmatch(reason):
@@ -230,8 +259,7 @@ def validate_main_sha(
         raise ValueError("github_main_sha_mismatch")
 
 
-def build_snapshot_request(*, environment: Mapping[str, str] | None = None) -> HomeEdgeExecRequest:
-    secret = _resolve_exec_hmac_secret(environment=environment)
+def build_unsigned_snapshot_request() -> dict[str, Any]:
     request = HomeEdgeExecRequest.from_mapping(
         {
             "request_id": f"{TASK_ID}-{uuid4()}",
@@ -249,9 +277,103 @@ def build_snapshot_request(*, environment: Mapping[str, str] | None = None) -> H
             "public": False,
         }
     )
-    return HomeEdgeExecRequest.from_mapping(
-        {**request.to_mapping(include_signature=False), "signature": sign_request(request, secret)}
+    return request.to_mapping(include_signature=False)
+
+
+def build_snapshot_request(*, environment: Mapping[str, str] | None = None) -> HomeEdgeExecRequest:
+    """Compatibility helper for tests and manual diagnostics.
+
+    The Runner execution path uses the fixed sudo signer via
+    :func:`sign_snapshot_request` and never reads the controller HMAC directly.
+    """
+    secret = _resolve_exec_hmac_secret(environment=environment)
+    request = HomeEdgeExecRequest.from_mapping(build_unsigned_snapshot_request())
+    return HomeEdgeExecRequest.from_mapping({**request.to_mapping(include_signature=False), "signature": sign_request(request, secret)})
+
+
+def sign_snapshot_request(unsigned_request: Mapping[str, Any]) -> Mapping[str, Any]:
+    return _invoke_snapshot_signer(unsigned_request)
+
+
+def _invoke_snapshot_signer(unsigned_request: Mapping[str, Any]) -> Mapping[str, Any]:
+    if "signature" in unsigned_request:
+        raise ValueError("snapshot_signer_input_signed")
+    payload = json.dumps(dict(unsigned_request), sort_keys=True, separators=(",", ":"))
+    completed = subprocess.run(
+        ["sudo", "-n", "--", str(SNAPSHOT_SIGNER_EXECUTABLE_PATH)],
+        input=payload + "\n",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=SIGNER_SUBPROCESS_TIMEOUT_SECONDS,
+        cwd="/",
+        env={
+            "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+            "LANG": "C.UTF-8",
+        },
+        check=False,
     )
+    if completed.returncode != 0:
+        match = AUTH_CONFIG_REASON_RE.search(completed.stderr)
+        if match is not None:
+            raise ValueError(match.group(0))
+        raise ValueError("snapshot_signer_failed")
+    try:
+        decoded = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        raise ValueError("snapshot_signer_invalid_output") from None
+    if not isinstance(decoded, Mapping):
+        raise ValueError("snapshot_signer_invalid_output")
+    return decoded
+
+
+def validate_signed_snapshot_request(
+    unsigned_request: Mapping[str, Any],
+    signed_request: Mapping[str, Any],
+) -> HomeEdgeExecRequest:
+    if "signature" in unsigned_request:
+        raise ValueError("snapshot_unsigned_request_contains_signature")
+    unsigned = HomeEdgeExecRequest.from_mapping(unsigned_request)
+    signed = HomeEdgeExecRequest.from_mapping(signed_request)
+    if not signed.signature:
+        raise ValueError("snapshot_signer_signature_missing")
+    if signed.to_mapping(include_signature=False) != unsigned.to_mapping(include_signature=False):
+        raise ValueError("snapshot_signer_authority_mismatch")
+    _validate_snapshot_request_authority(signed)
+    return signed
+
+
+def _validate_snapshot_request_authority(request: HomeEdgeExecRequest) -> None:
+    if request.node_id != TARGET_NODE:
+        raise ValueError("snapshot_request_target_mismatch")
+    if request.execution_lane.value != EXECUTION_LANE:
+        raise ValueError("snapshot_request_lane_mismatch")
+    if request.run_as.value != RUN_AS:
+        raise ValueError("snapshot_request_run_as_mismatch")
+    if request.timeout_seconds != REQUEST_TIMEOUT_SECONDS:
+        raise ValueError("snapshot_request_timeout_mismatch")
+    if request.mode.value != "script":
+        raise ValueError("snapshot_request_mode_mismatch")
+    if request.argv:
+        raise ValueError("snapshot_request_argv_mismatch")
+    if request.cwd is not None:
+        raise ValueError("snapshot_request_cwd_mismatch")
+    if request.environment:
+        raise ValueError("snapshot_request_environment_mismatch")
+    if request.script != SNAPSHOT_SCRIPT:
+        raise ValueError("snapshot_request_script_mismatch")
+    if request.script_interpreter != "python3":
+        raise ValueError("snapshot_request_interpreter_mismatch")
+    if request.max_output_bytes != MAX_EXECUTOR_OUTPUT_BYTES:
+        raise ValueError("snapshot_request_output_cap_mismatch")
+    if request.public:
+        raise ValueError("snapshot_request_public_mismatch")
+    if not (request.idempotency_key or "").startswith(IDEMPOTENCY_KEY_PREFIX + "-"):
+        raise ValueError("snapshot_request_idempotency_mismatch")
+    if not (request.request_id or "").startswith(TASK_ID + "-"):
+        raise ValueError("snapshot_request_id_mismatch")
+    if not (request.nonce or "").startswith(TASK_ID + "-"):
+        raise ValueError("snapshot_request_nonce_mismatch")
 
 
 def _resolve_exec_hmac_secret(*, environment: Mapping[str, str] | None = None) -> str:
@@ -401,6 +523,47 @@ def _parse_exec_hmac_secret_config_value(value: str) -> str:
     if "\n" in decoded or "\r" in decoded or not decoded:
         raise ValueError("executor_auth_config_invalid")
     return decoded
+
+
+def signer_main(argv: list[str] | None = None) -> int:
+    actual_argv = sys.argv[1:] if argv is None else argv
+    if actual_argv:
+        print("snapshot signer accepts no argv", file=sys.stderr)
+        return 2
+    try:
+        unsigned_request = _read_signer_stdin(sys.stdin.buffer)
+        signed_request = sign_validated_snapshot_request(unsigned_request)
+    except ValueError as exc:
+        print(f"snapshot signer blocked: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(signed_request, sort_keys=True, separators=(",", ":")))
+    return 0
+
+
+def _read_signer_stdin(stdin: Any) -> Mapping[str, Any]:
+    data = stdin.read(MAX_SIGNER_STDIN_BYTES + 1)
+    if len(data) > MAX_SIGNER_STDIN_BYTES:
+        raise ValueError("snapshot_signer_stdin_oversize")
+    if not data or not data.endswith(b"\n") or data.count(b"\n") != 1:
+        raise ValueError("snapshot_signer_stdin_invalid")
+    try:
+        decoded = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise ValueError("snapshot_signer_stdin_invalid") from None
+    if not isinstance(decoded, Mapping):
+        raise ValueError("snapshot_signer_stdin_invalid")
+    if set(decoded) - EXPECTED_UNSIGNED_REQUEST_FIELDS:
+        raise ValueError("snapshot_signer_stdin_invalid")
+    if "signature" in decoded:
+        raise ValueError("snapshot_signer_stdin_invalid")
+    return decoded
+
+
+def sign_validated_snapshot_request(unsigned_request: Mapping[str, Any]) -> dict[str, Any]:
+    request = HomeEdgeExecRequest.from_mapping(unsigned_request)
+    _validate_snapshot_request_authority(request)
+    secret = _read_exec_hmac_secret_config()
+    return {**request.to_mapping(include_signature=False), "signature": sign_request(request, secret)}
 
 
 def public_receipt_from_executor_stdout(receipt: Mapping[str, Any]) -> dict[str, object]:

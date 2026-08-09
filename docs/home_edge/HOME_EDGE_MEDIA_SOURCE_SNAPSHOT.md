@@ -12,9 +12,35 @@
 
 The operation is not a general file export facility. Issue metadata may provide only the runtime mode, exact maintenance task ID, repository, expected main SHA, and target. Path, command, script, output path, timeout, lane, user, node, and variant fields are rejected.
 
-## Executor Authentication
+## Snapshot Signer Authentication
 
-The Runner signs the Home Edge executor request with `SKELETON_HOME_EDGE_EXEC_HMAC_SECRET`. An explicit Runner-provided environment mapping or process environment value takes precedence. If that value is absent or empty, the task reads only `/etc/skeleton/home-edge-executor-controller.env` and only the single allowlisted variable `SKELETON_HOME_EDGE_EXEC_HMAC_SECRET`.
+The Runner does not read the Home Edge executor HMAC. For a fresh capture it
+builds the exact unsigned `home_edge_01_media_source_snapshot_v1` executor
+request, invokes only the fixed no-argv sudo signer
+`/usr/local/sbin/home_edge_media_source_snapshot_signer`, validates that every
+authority-bearing field returned by the signer still matches the unsigned
+request, and then calls the existing `execute_home_edge_request` transport
+itself. The signer never executes transport and never reads or copies
+`/opt/skeleton/cast/app.py` or the private snapshot artifact.
+
+The supported signer installer is
+`scripts/install_home_edge_snapshot_signer.sh`. It copies the complete signer
+runtime payload into `/usr/local/lib/skeleton-home-edge-snapshot-signer` before
+activating sudoers, rejects symlinked or unsafe source/destination paths, compiles
+the installed payload, verifies the install tree is root-owned in production and
+not group/world writable, and atomically replaces the previous install tree. The
+sudoers rule grants the configured Runner service account only:
+
+`/usr/local/sbin/home_edge_media_source_snapshot_signer`
+
+The privileged signer process is launched with a minimal fixed environment,
+fixed system Python, and the installed module/script path only. It does not use
+repository `PYTHONPATH`, caller cwd, editable installs, relative imports, or
+mutable checkout files. Changing repository Python after installation does not
+change the privileged signer behavior; reinstalling is required.
+
+The signer reads only `/etc/skeleton/home-edge-executor-controller.env` and only
+the single allowlisted variable `SKELETON_HOME_EDGE_EXEC_HMAC_SECRET`.
 
 That fixed private config is parsed as text, never sourced or executed. The resolver never reads or parses `/etc/skeleton/home-edge-01.env`; that file is metadata-only corroboration for the private controller ownership boundary. The fixed `/etc/skeleton` directory plus `/etc/skeleton/home-edge-01.env` and `/etc/skeleton/home-edge-executor-controller.env` are all checked with `lstat`; symlinks are rejected, `/etc/skeleton` must be a directory, both env paths must be regular files, none may be group/world writable, and each env file must be no larger than 64 KiB. The controller env is accepted when its owner is root or the current Runner uid, or when those three fixed paths share one identical owner and group boundary under the same strict checks. The parser accepts only simple `KEY=VALUE` or optional `export KEY=VALUE` entries for the allowlisted variable, ignoring comments, blank lines, and unrelated assignments. Duplicate target entries, NUL bytes, malformed quoted values, shell substitution or variable references, backticks, and multiline continuations fail closed before any executor request is made.
 
