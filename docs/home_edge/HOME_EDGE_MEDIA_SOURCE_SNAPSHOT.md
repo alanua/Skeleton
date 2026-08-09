@@ -12,9 +12,17 @@
 
 The operation is not a general file export facility. Issue metadata may provide only the runtime mode, exact maintenance task ID, repository, expected main SHA, and target. Path, command, script, output path, timeout, lane, user, node, and variant fields are rejected.
 
-## Executor Authentication
+## Controller Signer
 
-The Runner signs the Home Edge executor request with `SKELETON_HOME_EDGE_EXEC_HMAC_SECRET`. An explicit Runner-provided environment mapping or process environment value takes precedence. If that value is absent or empty, the task reads only `/etc/skeleton/home-edge-executor-controller.env` and only the single allowlisted variable `SKELETON_HOME_EDGE_EXEC_HMAC_SECRET`.
+The unprivileged Runner never receives or reads the Home Edge executor HMAC. For a fresh capture it invokes exactly one controller-side signer command:
+
+`/usr/bin/sudo -n -- /usr/local/sbin/skeleton-home-edge-media-source-snapshot-signer`
+
+The signer accepts no argv and exactly this stdin:
+
+`{"maintenance_task_id":"home_edge_01_media_source_snapshot_v1"}`
+
+The signer reads only `/etc/skeleton/home-edge-executor-controller.env` and only the single allowlisted variable `SKELETON_HOME_EDGE_EXEC_HMAC_SECRET`. It constructs and signs exactly one fixed `home_edge_01_media_source_snapshot_v1` executor request. It never executes transport and never reads, copies, owns, or writes the media source artifact.
 
 That fixed private config is parsed as text, never sourced or executed. The resolver never reads or parses `/etc/skeleton/home-edge-01.env`; that file is metadata-only corroboration for the private controller ownership boundary. The fixed `/etc/skeleton` directory plus `/etc/skeleton/home-edge-01.env` and `/etc/skeleton/home-edge-executor-controller.env` are all checked with `lstat`; symlinks are rejected, `/etc/skeleton` must be a directory, both env paths must be regular files, none may be group/world writable, and each env file must be no larger than 64 KiB. The controller env is accepted when its owner is root or the current Runner uid, or when those three fixed paths share one identical owner and group boundary under the same strict checks. The parser accepts only simple `KEY=VALUE` or optional `export KEY=VALUE` entries for the allowlisted variable, ignoring comments, blank lines, and unrelated assignments. Duplicate target entries, NUL bytes, malformed quoted values, shell substitution or variable references, backticks, and multiline continuations fail closed before any executor request is made.
 
@@ -24,7 +32,7 @@ Authentication setup failures are reported only as stable public-safe classes: `
 
 Before any Home Edge request is constructed or signed, the Runner first checks the fixed private artifact location. If a regular, non-symlink, owner-context-safe, private-mode artifact already exists, the Runner reads it with the same 700 KiB bound, reruns UTF-8, credential, Python parse, route, and Skeleton Cast media validation locally, recomputes SHA-256 and byte count, and returns `success_criteria=met` with `stable_reason=already_captured`. That local one-shot path performs zero executor calls and reports only the aggregate `not_required_existing_capture` executor marker.
 
-If the existing artifact is missing, the first capture uses a fresh attempt-scoped executor idempotency key. If transport fails ambiguously before the private artifact is published, the operation fails closed without retrying or writing an artifact; another capture requires a deliberate v2 or newly approved operation rather than unbounded retries.
+If the existing artifact is missing, the Runner asks the controller signer for a signed request, validates that the signed request still matches the exact fixed task, and then executes the existing `execute_home_edge_request` transport. The first capture uses a fresh attempt-scoped executor idempotency key. If transport fails ambiguously before the private artifact is published, the operation fails closed without retrying or writing an artifact; another capture requires a deliberate v2 or newly approved operation rather than unbounded retries.
 
 Before private publication from the first remote capture, the remote executor script checks the fixed source identity and safety:
 
@@ -47,7 +55,7 @@ The source content is written only under Runner private state, outside the repos
 
 The directory is mode `0700`; the snapshot file is mode `0600`. The public maintenance report never includes the private artifact path or source content.
 
-Retention is intentionally narrow: keep only the latest private snapshot long enough for the bounded canonicalization follow-up. After canonicalization has consumed the snapshot, remove the private artifact unless an operator explicitly retains it for audit. Do not copy this file into the repository, public issue comments, fixtures, logs, or PR descriptions.
+Retention is intentionally narrow: keep only the latest private snapshot long enough for the bounded canonicalization follow-up. After canonicalization has consumed the snapshot, remove the private artifact unless an operator explicitly retains it for audit. Do not copy this file into the repository, public issue comments, fixtures, logs, or PR descriptions. The actual Debian Skeleton Cast source identity and version marker remain authoritative only after a fresh live runtime snapshot; code generation must not treat a stale path or marker as proof.
 
 ## Public Receipt
 

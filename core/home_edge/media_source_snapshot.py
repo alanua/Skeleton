@@ -8,6 +8,7 @@ import os
 import re
 import stat
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -34,6 +35,17 @@ IDEMPOTENCY_KEY_PREFIX = "home-edge-01-media-source-snapshot-v1"
 PRIVATE_ARTIFACT_RELATIVE_PATH = (
     Path("home_edge") / "home_edge_01" / "media_source_snapshot" / "app.py.latest"
 )
+SIGNER_COMMAND = (
+    "/usr/bin/sudo",
+    "-n",
+    "--",
+    "/usr/local/sbin/skeleton-home-edge-media-source-snapshot-signer",
+)
+SIGNER_STDIN = json.dumps(
+    {"maintenance_task_id": TASK_ID},
+    sort_keys=True,
+    separators=(",", ":"),
+) + "\n"
 EXEC_HMAC_SECRET_CONFIG_DIR = Path("/etc/skeleton")
 EXEC_HMAC_SECRET_PROFILE_METADATA_PATH = Path("/etc/skeleton/home-edge-01.env")
 EXEC_HMAC_SECRET_CONFIG_PATH = Path("/etc/skeleton/home-edge-executor-controller.env")
@@ -133,7 +145,7 @@ def execute_media_source_snapshot_task(
         return existing
 
     try:
-        request = build_snapshot_request(environment=environment)
+        request = request_signed_snapshot_request()
     except ValueError as exc:
         reason = exc.args[0] if exc.args else ""
         if isinstance(reason, str) and AUTH_CONFIG_REASON_RE.fullmatch(reason):
@@ -230,8 +242,12 @@ def validate_main_sha(
         raise ValueError("github_main_sha_mismatch")
 
 
-def build_snapshot_request(*, environment: Mapping[str, str] | None = None) -> HomeEdgeExecRequest:
-    secret = _resolve_exec_hmac_secret(environment=environment)
+def build_snapshot_request() -> HomeEdgeExecRequest:
+    secret = _read_exec_hmac_secret_config()
+    return _build_snapshot_request(secret)
+
+
+def _build_snapshot_request(secret: str) -> HomeEdgeExecRequest:
     request = HomeEdgeExecRequest.from_mapping(
         {
             "request_id": f"{TASK_ID}-{uuid4()}",
@@ -254,12 +270,104 @@ def build_snapshot_request(*, environment: Mapping[str, str] | None = None) -> H
     )
 
 
-def _resolve_exec_hmac_secret(*, environment: Mapping[str, str] | None = None) -> str:
-    env = os.environ if environment is None else environment
-    secret = env.get(EXEC_HMAC_SECRET_ENV, "")
-    if secret:
-        return secret
-    return _read_exec_hmac_secret_config()
+def request_signed_snapshot_request(
+    *,
+    signer_command: tuple[str, ...] = SIGNER_COMMAND,
+    signer_stdin: str = SIGNER_STDIN,
+) -> HomeEdgeExecRequest:
+    try:
+        completed = subprocess.run(
+            list(signer_command),
+            input=signer_stdin,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+            check=False,
+            env=_signer_subprocess_environment(),
+        )
+    except (subprocess.TimeoutExpired, TimeoutError):
+        raise ValueError("executor_auth_config_unsafe") from None
+    except Exception:
+        raise ValueError("executor_auth_config_unsafe") from None
+    if completed.returncode != 0:
+        raise ValueError("executor_auth_config_unsafe")
+    try:
+        decoded = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        raise ValueError("executor_auth_config_unsafe") from None
+    if not isinstance(decoded, dict):
+        raise ValueError("executor_auth_config_unsafe")
+    return validate_signed_snapshot_request(decoded)
+
+
+def _signer_subprocess_environment() -> dict[str, str]:
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key in {"HOME", "PATH", "LANG", "LC_ALL", "LC_CTYPE"}
+    }
+
+
+def validate_signed_snapshot_request(request: Mapping[str, Any]) -> HomeEdgeExecRequest:
+    parsed = HomeEdgeExecRequest.from_mapping(request)
+    if not parsed.signature:
+        raise ValueError("signed_snapshot_request_mismatch")
+    unsigned = parsed.to_mapping(include_signature=False)
+    expected = _fixed_request_fields(parsed)
+    for key, value in expected.items():
+        if unsigned.get(key) != value:
+            raise ValueError("signed_snapshot_request_mismatch")
+    if unsigned.get("environment") != {}:
+        raise ValueError("signed_snapshot_request_mismatch")
+    if "stdin_text" in unsigned or "stdin_base64" in unsigned:
+        raise ValueError("signed_snapshot_request_mismatch")
+    if "cwd" in unsigned or "operator_approval_ref" in unsigned:
+        raise ValueError("signed_snapshot_request_mismatch")
+    if not isinstance(unsigned.get("request_id"), str) or not unsigned["request_id"].startswith(TASK_ID + "-"):
+        raise ValueError("signed_snapshot_request_mismatch")
+    if not isinstance(unsigned.get("idempotency_key"), str) or not unsigned["idempotency_key"].startswith(
+        IDEMPOTENCY_KEY_PREFIX + "-"
+    ):
+        raise ValueError("signed_snapshot_request_mismatch")
+    if not isinstance(unsigned.get("nonce"), str) or not unsigned["nonce"].startswith(TASK_ID + "-"):
+        raise ValueError("signed_snapshot_request_mismatch")
+    if not isinstance(unsigned.get("timestamp"), str):
+        raise ValueError("signed_snapshot_request_mismatch")
+    return parsed
+
+
+def _fixed_request_fields(request: HomeEdgeExecRequest) -> dict[str, object]:
+    return {
+        "node_id": TARGET_NODE,
+        "execution_lane": EXECUTION_LANE,
+        "timeout_seconds": REQUEST_TIMEOUT_SECONDS,
+        "run_as": RUN_AS,
+        "mode": "script",
+        "script": SNAPSHOT_SCRIPT,
+        "script_interpreter": "python3",
+        "max_output_bytes": MAX_EXECUTOR_OUTPUT_BYTES,
+        "public": False,
+    }
+
+
+def signer_response(stdin: str, *, argv: list[str] | None = None) -> str:
+    if argv:
+        raise ValueError("signer_argv_not_allowed")
+    if stdin != SIGNER_STDIN:
+        raise ValueError("signer_stdin_mismatch")
+    request = build_snapshot_request()
+    return json.dumps(request.to_mapping(), sort_keys=True, separators=(",", ":")) + "\n"
+
+
+def main(argv: list[str] | None = None) -> int:
+    actual_argv = sys.argv[1:] if argv is None else argv
+    try:
+        sys.stdout.write(signer_response(sys.stdin.read(), argv=actual_argv))
+        return 0
+    except Exception:  # noqa: BLE001 - signer must fail closed without private detail.
+        sys.stderr.write("BLOCKED: media source snapshot signer failed closed\n")
+        return 2
 
 
 def _read_exec_hmac_secret_config() -> str:
@@ -1009,3 +1117,7 @@ def main():
 
 main()
 '''
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

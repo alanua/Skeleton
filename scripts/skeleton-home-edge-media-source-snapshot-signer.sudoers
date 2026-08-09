@@ -1,0 +1,3 @@
+# Managed by skeleton Home Edge media source snapshot signer installer.
+# The installer replaces __RUNNER_USER__ with the trusted local Runner account.
+__RUNNER_USER__ ALL=(root) NOPASSWD: /usr/local/sbin/skeleton-home-edge-media-source-snapshot-signer

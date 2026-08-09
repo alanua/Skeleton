@@ -76,3 +76,25 @@ def test_installer_runs_protocol_probe_and_live_read_only_probe() -> None:
     assert "home-edge-executor-controller.env" in installer
     assert "--skip-call" in installer
     assert "skeleton-home-edge-exec-probe" in installer
+
+
+def test_media_source_snapshot_signer_installer_is_separate_and_fixed_purpose() -> None:
+    installer = (
+        ROOT / "scripts/install_home_edge_media_source_snapshot_controller_signer.sh"
+    ).read_text(encoding="utf-8")
+    sudoers = (
+        ROOT / "scripts/skeleton-home-edge-media-source-snapshot-signer.sudoers"
+    ).read_text(encoding="utf-8")
+
+    assert "skeleton-home-edge-media-source-snapshot-signer" in installer
+    assert "/usr/local/sbin/skeleton-home-edge-media-source-snapshot-signer" in installer
+    assert "home_edge_01_media_source_snapshot_v1" in installer
+    assert "python3 -m core.home_edge.media_source_snapshot" in installer
+    assert "importlib.import_module(\"core.home_edge.media_source_snapshot\")" in installer
+    assert "home_edge_exec_root --server" not in installer
+    assert "systemctl" not in installer
+    assert "SETENV" not in sudoers
+    assert "*" not in sudoers
+    assert sudoers.strip().endswith(
+        "ALL=(root) NOPASSWD: /usr/local/sbin/skeleton-home-edge-media-source-snapshot-signer"
+    )
