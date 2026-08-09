@@ -7,9 +7,17 @@ import json
 from typing import Any, Final
 
 from core.loop_controller import LoopPolicy
+from core.loop_controller import LoopEvent
 from core.loop_engine import LoopEngine
 from core.loop_runner_adapter import run_loop_task_packet
 from core.loop_state_store import LoopStateStore
+from core.review_gate import (
+    APPROVE,
+    DO_NOT_MERGE,
+    NEEDS_OPERATOR,
+    REQUEST_CHANGES,
+    ReviewGateDecision,
+)
 
 
 DISPATCH_RECEIPT_SCHEMA: Final = "skeleton.scheduler_dispatch_receipt.v1"
@@ -238,3 +246,32 @@ def _safe_reason(value: object, *, default: str) -> str:
     if isinstance(value, str) and value and len(value) <= 128:
         return value
     return default
+
+
+def loop_event_for_review_gate(decision: ReviewGateDecision) -> LoopEvent:
+    if decision.verdict == APPROVE:
+        return LoopEvent.STEP_SUCCEEDED
+    if decision.verdict == REQUEST_CHANGES:
+        return LoopEvent.STEP_FAILED
+    if decision.verdict == NEEDS_OPERATOR:
+        return LoopEvent.OPERATOR_REQUIRED
+    if decision.verdict == DO_NOT_MERGE:
+        return LoopEvent.REVIEW_REQUIRED
+    raise ValueError("unsupported internal review verdict")
+
+
+def shared_continuation_receipt(decision: ReviewGateDecision) -> dict[str, object]:
+    event = loop_event_for_review_gate(decision)
+    receipt: dict[str, object] = {
+        "schema": "skeleton.shared_dispatch.review_continuation.v1",
+        "internal_review_verdict": decision.verdict,
+        "loop_event": event.value,
+        "continuation": decision.continuation,
+        "notify_operator": decision.notify_operator,
+        "receipt_id": decision.receipt_id,
+    }
+    if decision.operator_packet is not None:
+        receipt["operator_packet"] = dict(decision.operator_packet)
+    if decision.repair_task is not None:
+        receipt["repair_task"] = dict(decision.repair_task)
+    return receipt
