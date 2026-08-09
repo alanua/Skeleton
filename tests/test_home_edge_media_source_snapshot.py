@@ -293,8 +293,8 @@ def test_environment_secret_takes_precedence_without_config_read(
     )
     monkeypatch.setattr(
         snapshot,
-        "_read_exec_hmac_secret_config",
-        lambda: pytest.fail("config reader must not be called"),
+        "read_controller_exec_hmac_secret",
+        lambda: pytest.fail("shared config reader must not be called"),
     )
 
     request = snapshot.build_snapshot_request(environment={snapshot.EXEC_HMAC_SECRET_ENV: SECRET})

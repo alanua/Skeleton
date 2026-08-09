@@ -263,6 +263,7 @@ HOME_EDGE_AUDIT_PERSIST_V1 = "home_edge_audit_persist_v1"
 HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1 = "home_edge_01_debian_media_bootstrap_v1"
 HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1 = "home_edge_01_post_migration_reconcile_v1"
 HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1 = "home_edge_01_media_source_snapshot_v1"
+HOME_EDGE_01_DISPLAY_POWER_OFF_V1 = "home_edge_01_display_power_off_v1"
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
         SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
@@ -305,6 +306,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1,
         HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1,
         HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1,
+        HOME_EDGE_01_DISPLAY_POWER_OFF_V1,
         PREPARE_PRIVATE_STATIC_SITE_HANDOFF,
         DEPLOY_PRIVATE_STATIC_SITE,
     )
@@ -13681,6 +13683,45 @@ def home_edge_01_media_source_snapshot_v1(body: str) -> str:
         )
 
 
+def home_edge_01_display_power_off_v1(body: str) -> str:
+    task_id = HOME_EDGE_01_DISPLAY_POWER_OFF_V1
+    try:
+        from core.home_edge.display_power_off import (
+            execute_display_power_off_task,
+            receipt_status_lines,
+            success_criteria_met,
+        )
+
+        registered_sha = _read_exact_git_sha("main")
+        github_sha = _read_exact_git_sha("origin/main")
+        receipt = execute_display_power_off_task(
+            body,
+            registered_clean_main_sha=registered_sha,
+            github_main_sha=github_sha,
+        )
+        success = success_criteria_met(receipt)
+        return _maintenance_report(
+            "DONE" if success else "BLOCKED",
+            task_id,
+            receipt_status_lines(receipt),
+            "met" if success else "not_met",
+        )
+    except ValueError as exc:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [f"reason={exc}"],
+            "not_met",
+        )
+    except Exception:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            ["reason=display_power_off_failed_closed"],
+            "not_met",
+        )
+
+
 def _read_exact_git_sha(ref: str) -> str:
     code, output = run_command(["git", "rev-parse", f"{ref}^{{commit}}"], cwd=ROOT)
     sha = output.strip().splitlines()[0] if output.strip() else ""
@@ -14014,6 +14055,8 @@ def dispatch_runtime_maintenance_task(
             return home_edge_01_post_migration_reconcile_v1(body)
         if task_id == HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1:
             return home_edge_01_media_source_snapshot_v1(body)
+        if task_id == HOME_EDGE_01_DISPLAY_POWER_OFF_V1:
+            return home_edge_01_display_power_off_v1(body)
         if task_id == PREPARE_PRIVATE_STATIC_SITE_HANDOFF:
             return _execute_prepare_private_static_site_handoff(body)
         if task_id == DEPLOY_PRIVATE_STATIC_SITE:
