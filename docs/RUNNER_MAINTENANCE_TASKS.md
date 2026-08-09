@@ -18,12 +18,17 @@ Missing or unknown maintenance task ids are reported as `BLOCKED`.
 
 ## Current allowlist
 
-`replenish_runner_queue` promotes public-safe backlog issues into
+`replenish_runner_queue` promotes public-safe `agent:task` issues into
 `runner:ready` until the ready queue reaches deterministic target depth 3,
-bounded by maximum depth 6. Candidates are taken from
-`runner:backlog`, sorted by issue number, and skipped when they duplicate an
-already-ready or already-selected intent, depend on missing issues, overlap
-files already occupied by ready/selected tasks, or touch protected files.
+bounded by maximum depth 6. `runner:backlog` remains supported as an optional
+explicit hint, but humans and chats do not need to pre-seed that label.
+Candidates are taken from open bounded `agent:task` issues with explicit
+`PUBLIC_SAFE` privacy boundaries, sorted by issue number, and skipped when they
+duplicate an already-ready, already-done, or already-selected intent, have a
+terminal lifecycle label, require operator action, overlap files already
+occupied by ready/running/selected tasks, or touch protected files. Valid
+candidates that are only waiting on unmet issue dependencies are durably marked
+`runner:waiting-dependency` instead of being dropped.
 
 Privacy eligibility is based only on explicit metadata: `Privacy Boundary` /
 `privacy_boundary`, explicit privacy labels, and schema-level privacy markers.
@@ -33,8 +38,10 @@ as private merely because its task body or forbidden-actions text contains
 safety wording such as `no secrets`, `no tokens`, or `private data`.
 
 The task performs no routine Telegram notification. Its public report includes
-only ready depth, selected issue numbers, selected count, and
-`telegram_notifications=0`.
+only ready depth, selected issue numbers, selected count, dependency-waiting
+count, and `telegram_notifications=0`. After normal task completion, the
+Runner invokes the same replenishment path when ready depth falls below 3; ready
+depths 3 through 6 remain stable across repeated calls.
 
 `prepare_private_static_site_handoff` prepares a durable encrypted handoff for a
 private static web package. It requires exact operator approval and an artifact

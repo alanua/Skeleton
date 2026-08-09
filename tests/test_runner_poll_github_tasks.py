@@ -1043,6 +1043,287 @@ def test_queue_replenisher_preserves_depth_dependency_duplicate_and_overlap_rule
     assert [issue["number"] for issue in selected] == [20, 25]
 
 
+def test_queue_replenisher_selects_agent_task_candidates_without_backlog_seed() -> None:
+    ready: list[dict[str, object]] = []
+    candidates = [
+        _queue_candidate_issue(
+            number,
+            allowed_files=(f"docs/task-{number}.md",),
+            idempotency_key=f"agent-task-{number}",
+            labels=(runner.LABEL_AGENT_TASK,),
+        )
+        for number in range(30, 33)
+    ]
+
+    selected = runner.select_runner_queue_replenishment_targets(ready, candidates)
+
+    assert [issue["number"] for issue in selected] == [30, 31, 32]
+
+
+def test_queue_replenisher_backlog_label_remains_supported() -> None:
+    selected = runner.select_runner_queue_replenishment_targets(
+        [],
+        [
+            _queue_candidate_issue(
+                41,
+                allowed_files=("docs/backlog.md",),
+                idempotency_key="legacy-backlog",
+                labels=(runner.QUEUE_REPLENISHER_CANDIDATE_LABEL,),
+            )
+        ],
+    )
+
+    assert [issue["number"] for issue in selected] == [41]
+
+
+def test_replenisher_promotes_agent_tasks_when_backlog_query_is_empty() -> None:
+    candidates = [
+        _queue_candidate_issue(
+            number,
+            allowed_files=(f"docs/agent-{number}.md",),
+            idempotency_key=f"agent-{number}",
+            labels=(runner.LABEL_AGENT_TASK,),
+        )
+        for number in range(42, 45)
+    ]
+
+    with mock.patch.object(runner, "get_ready_issues", return_value=[]), mock.patch.object(
+        runner, "get_queue_replenisher_candidate_issues", return_value=candidates
+    ), mock.patch.object(runner, "run_command", return_value=(0, "")) as run:
+        report = runner.replenish_runner_queue("")
+
+    commands = [call.args[0] for call in run.call_args_list]
+    promoted = [
+        command[3]
+        for command in commands
+        if command[:3] == ["gh", "issue", "edit"]
+        and command[-2:] == ["--add-label", runner.LABEL_READY]
+    ]
+    assert promoted == ["42", "43", "44"]
+    assert "selected_count=3" in report
+    assert "selected_issues=42,43,44" in report
+    assert all(runner.QUEUE_REPLENISHER_CANDIDATE_LABEL not in command for command in commands)
+
+
+def test_queue_replenisher_excludes_terminal_private_operator_and_overlap_tasks() -> None:
+    ready = [
+        _queue_candidate_issue(
+            50,
+            allowed_files=("docs/ready-active.md",),
+            idempotency_key="ready-active",
+            labels=(runner.LABEL_READY,),
+        )
+    ]
+    candidates = [
+        _queue_candidate_issue(
+            51,
+            allowed_files=("docs/done.md",),
+            idempotency_key="done",
+            labels=(runner.LABEL_AGENT_TASK, runner.LABEL_DONE),
+        ),
+        _queue_candidate_issue(
+            52,
+            allowed_files=("docs/running.md",),
+            idempotency_key="running",
+            labels=(runner.LABEL_AGENT_TASK, runner.LABEL_RUNNING),
+        ),
+        _queue_candidate_issue(
+            53,
+            allowed_files=("docs/private.md",),
+            idempotency_key="private",
+            privacy_boundary="PRIVATE_PAYLOAD",
+            labels=(runner.LABEL_AGENT_TASK,),
+        ),
+        _queue_candidate_issue(
+            54,
+            allowed_files=("docs/operator.md",),
+            idempotency_key="operator",
+            labels=(runner.LABEL_AGENT_TASK, "runner:needs-operator"),
+        ),
+        _queue_candidate_issue(
+            55,
+            allowed_files=("docs/protected.md",),
+            idempotency_key="protected",
+            labels=(runner.LABEL_AGENT_TASK,),
+        ),
+        _queue_candidate_issue(
+            56,
+            allowed_files=("docs/ready-active.md",),
+            idempotency_key="ready-overlap",
+            labels=(runner.LABEL_AGENT_TASK,),
+        ),
+        _queue_candidate_issue(
+            57,
+            allowed_files=("docs/running-active.md",),
+            idempotency_key="running-active",
+            labels=(runner.LABEL_RUNNING,),
+        ),
+        _queue_candidate_issue(
+            58,
+            allowed_files=("docs/running-active.md",),
+            idempotency_key="running-overlap",
+            labels=(runner.LABEL_AGENT_TASK,),
+        ),
+        _queue_candidate_issue(
+            59,
+            allowed_files=("docs/selected.md",),
+            idempotency_key="selected",
+            labels=(runner.LABEL_AGENT_TASK,),
+        ),
+    ]
+
+    selected = runner.select_runner_queue_replenishment_targets(
+        ready,
+        candidates,
+        protected_files=frozenset(("docs/protected.md",)),
+    )
+
+    assert [issue["number"] for issue in selected] == [59]
+
+
+def test_queue_replenisher_routes_structurally_valid_dependency_wait() -> None:
+    waiting = _queue_candidate_issue(
+        61,
+        allowed_files=("docs/waiting.md",),
+        idempotency_key="waiting",
+        labels=(runner.LABEL_AGENT_TASK,),
+        body_lines=("depends_on: '#999'",),
+    )
+    selected = _queue_candidate_issue(
+        62,
+        allowed_files=("docs/selected.md",),
+        idempotency_key="selected",
+        labels=(runner.LABEL_AGENT_TASK,),
+    )
+
+    with mock.patch.object(runner, "get_ready_issues", return_value=[]), mock.patch.object(
+        runner, "get_queue_replenisher_candidate_issues", return_value=[waiting, selected]
+    ), mock.patch.object(runner, "run_command", return_value=(0, "")) as run:
+        report = runner.replenish_runner_queue("")
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert [
+        command
+        for command in commands
+        if command[:4] == ["gh", "issue", "edit", "61"]
+    ] == [
+        [
+            "gh",
+            "issue",
+            "edit",
+            "61",
+            "--repo",
+            runner.REPO,
+            "--add-label",
+            runner.LABEL_WAITING_DEPENDENCY,
+        ]
+    ]
+    assert [
+        command
+        for command in commands
+        if command[:4] == ["gh", "issue", "edit", "62"]
+    ] == [
+        [
+            "gh",
+            "issue",
+            "edit",
+            "62",
+            "--repo",
+            runner.REPO,
+            "--add-label",
+            runner.LABEL_READY,
+        ]
+    ]
+    assert "selected_issues=62" in report
+    assert "waiting_dependency_count=1" in report
+    assert "telegram_notifications=0" in report
+
+
+def test_queue_replenisher_ready_depth_three_to_six_is_idempotent() -> None:
+    candidates = [
+        _queue_candidate_issue(
+            70,
+            allowed_files=("docs/candidate.md",),
+            idempotency_key="candidate",
+            labels=(runner.LABEL_AGENT_TASK,),
+        )
+    ]
+    for depth in range(3, 7):
+        ready = [
+            _queue_candidate_issue(
+                700 + index,
+                allowed_files=(f"docs/ready-{index}.md",),
+                idempotency_key=f"ready-{index}",
+                labels=(runner.LABEL_READY,),
+            )
+            for index in range(depth)
+        ]
+        assert runner.select_runner_queue_replenishment_targets(ready, candidates) == []
+
+
+def test_queue_replenisher_candidate_discovery_queries_agent_task_without_backlog() -> None:
+    agent_issue = _queue_candidate_issue(
+        81,
+        allowed_files=("docs/agent.md",),
+        idempotency_key="agent",
+        labels=(runner.LABEL_AGENT_TASK,),
+    )
+    backlog_issue = _queue_candidate_issue(
+        82,
+        allowed_files=("docs/backlog.md",),
+        idempotency_key="backlog",
+        labels=(runner.QUEUE_REPLENISHER_CANDIDATE_LABEL,),
+    )
+
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        del cwd
+        if command[6] == runner.LABEL_AGENT_TASK:
+            return 0, json.dumps([agent_issue])
+        if command[6] == runner.QUEUE_REPLENISHER_CANDIDATE_LABEL:
+            return 0, json.dumps([backlog_issue])
+        return 1, "unexpected"
+
+    with mock.patch.object(runner, "run_command", side_effect=run) as run_command:
+        issues = runner.get_queue_replenisher_candidate_issues()
+
+    labels = [call.args[0][6] for call in run_command.call_args_list]
+    assert labels == [runner.LABEL_AGENT_TASK, runner.QUEUE_REPLENISHER_CANDIDATE_LABEL]
+    assert [issue["number"] for issue in issues] == [81, 82]
+
+
+def test_completion_path_invokes_replenishment_after_done_status(tmp_path: Path) -> None:
+    issue_path = tmp_path / "issue-90"
+    issue = {
+        "number": 90,
+        "title": "Complete task",
+        "body": "Expected Output: done\n\n```task\nDo it\n```",
+        "comments": [],
+    }
+
+    with mock.patch.object(runner, "set_issue_label"), mock.patch.object(
+        runner, "prepare_issue_branch", return_value=(0, "ready", issue_path)
+    ), mock.patch.object(runner, "cleanup_runtime_artifacts"), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, "codex output")
+    ), mock.patch.object(
+        runner, "finalize_success", return_value="DONE report"
+    ), mock.patch.object(
+        runner, "cleanup_issue_worktree", return_value=(0, "")
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "record_runner_task_picked_up", return_value=None
+    ), mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ), mock.patch.object(
+        runner, "maybe_replenish_runner_queue_after_completion", return_value=True
+    ) as replenish:
+        runner.process_issue(issue, workdir=str(tmp_path))
+
+    replenish.assert_called_once_with()
+
+
 def test_runner_report_status_ignores_blocked_words_in_success_report_text() -> None:
     report = """DONE: Codex completed successfully with no file changes.
 

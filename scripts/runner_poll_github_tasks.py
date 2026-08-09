@@ -178,6 +178,8 @@ LABEL_RUN_NOW = "queue:RUN_NOW"
 LABEL_RUNNING = "runner:running"
 LABEL_DONE = "runner:done"
 LABEL_BLOCKED = "runner:blocked"
+LABEL_AGENT_TASK = "agent:task"
+LABEL_WAITING_DEPENDENCY = "runner:waiting-dependency"
 RUNNER_LANE_LABELS = {
     "default": "runner:lane:default",
     "lane-1": "runner:lane:lane-1",
@@ -566,6 +568,11 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "canon_note",
         "canonical_memory_post_step",
         "candidate_count",
+        "ready_depth_before",
+        "selected_count",
+        "selected_issues",
+        "waiting_dependency_count",
+        "telegram_notifications",
         "chat_export_candidate_count",
         "changed_file",
         "changed_file_count",
@@ -10243,6 +10250,27 @@ def _body_list_items(metadata: str, field_names: tuple[str, ...]) -> list[str] |
 QUEUE_REPLENISHER_TARGET_MIN_DEPTH = 3
 QUEUE_REPLENISHER_TARGET_MAX_DEPTH = 6
 QUEUE_REPLENISHER_CANDIDATE_LABEL = "runner:backlog"
+QUEUE_REPLENISHER_DISCOVERY_LABELS = (
+    LABEL_AGENT_TASK,
+    QUEUE_REPLENISHER_CANDIDATE_LABEL,
+)
+QUEUE_REPLENISHER_TERMINAL_LABELS = frozenset(
+    (
+        LABEL_DONE,
+        LABEL_BLOCKED,
+        "runner:cancelled",
+        "runner:failed",
+        "runner:error",
+    )
+)
+QUEUE_REPLENISHER_NEEDS_OPERATOR_LABELS = frozenset(
+    (
+        "runner:needs-operator",
+        "needs-operator",
+        "NEEDS_OPERATOR",
+        "status:NEEDS_OPERATOR",
+    )
+)
 QUEUE_REPLENISHER_PRIVATE_LABELS = frozenset(
     ("privacy:private", "privacy:PRIVATE", "private", "payload:private")
 )
@@ -10296,6 +10324,13 @@ def _queue_replenisher_privacy_boundary(issue: Mapping[str, Any]) -> str | None:
 def _queue_replenisher_schema(issue: Mapping[str, Any]) -> str | None:
     value = _queue_replenisher_field(issue, "Schema", "schema")
     return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _queue_replenisher_has_explicit_public_safe_boundary(
+    issue: Mapping[str, Any]
+) -> bool:
+    boundary = _queue_replenisher_privacy_boundary(issue)
+    return boundary is not None and boundary.upper().startswith("PUBLIC_SAFE")
 
 
 def _queue_replenisher_privacy_block_reason(issue: Mapping[str, Any]) -> str | None:
@@ -10400,21 +10435,43 @@ def _queue_replenisher_candidate(
     )
 
 
-def select_runner_queue_replenishment_targets(
+def _queue_replenisher_issue_is_discoverable(issue: Mapping[str, Any]) -> bool:
+    labels = _issue_label_names(issue)
+    if not is_open_task_issue(dict(issue)):
+        return False
+    if not labels.intersection(QUEUE_REPLENISHER_DISCOVERY_LABELS):
+        return False
+    if labels & QUEUE_REPLENISHER_TERMINAL_LABELS:
+        return False
+    if labels & QUEUE_REPLENISHER_NEEDS_OPERATOR_LABELS:
+        return False
+    if LABEL_RUNNING in labels:
+        return False
+    schema = _queue_replenisher_schema(issue)
+    if schema != "skeleton.runner_task.v1":
+        return False
+    if not _queue_replenisher_has_explicit_public_safe_boundary(issue):
+        return False
+    return _queue_replenisher_privacy_block_reason(issue) is None
+
+
+@dataclass(frozen=True)
+class RunnerQueueReplenishmentSelection:
+    selected: tuple[dict[str, Any], ...]
+    waiting_dependency: tuple[dict[str, Any], ...]
+
+
+def _runner_queue_replenishment_selection(
     ready_issues: list[dict[str, Any]],
     candidate_issues: list[dict[str, Any]],
     *,
     target_min_depth: int = QUEUE_REPLENISHER_TARGET_MIN_DEPTH,
     target_max_depth: int = QUEUE_REPLENISHER_TARGET_MAX_DEPTH,
     protected_files: frozenset[str] = frozenset(),
-) -> list[dict[str, Any]]:
+) -> RunnerQueueReplenishmentSelection:
     ready_depth = len(ready_issues)
-    if ready_depth >= target_min_depth:
-        return []
     target_depth = min(max(target_min_depth, ready_depth), target_max_depth)
-    slots = target_depth - ready_depth
-    if slots <= 0:
-        return []
+    slots = max(0, target_depth - ready_depth)
 
     done_numbers = {
         number
@@ -10429,32 +10486,37 @@ def select_runner_queue_replenishment_targets(
     }
     used_intents = {
         candidate.intent_key
-        for issue in ready_issues
-        if (candidate := _queue_replenisher_candidate(issue)) is not None
+        for issue in (*ready_issues, *candidate_issues)
+        if (
+            (LABEL_READY in _issue_label_names(issue))
+            or (LABEL_DONE in _issue_label_names(issue))
+        )
+        and (candidate := _queue_replenisher_candidate(issue)) is not None
     }
     occupied_files: set[str] = set(protected_files)
     for issue in ready_issues:
         occupied_files.update(_queue_replenisher_allowed_files(issue))
+    for issue in candidate_issues:
+        if LABEL_RUNNING in _issue_label_names(issue):
+            occupied_files.update(_queue_replenisher_allowed_files(issue))
 
     selected: list[RunnerQueueReplenisherCandidate] = []
+    waiting_dependency: list[RunnerQueueReplenisherCandidate] = []
     for issue in sorted(
         candidate_issues,
         key=lambda item: _queue_replenisher_issue_number(item) or 0,
     ):
-        if len(selected) >= slots:
-            break
-        if LABEL_READY in _issue_label_names(issue):
+        labels = _issue_label_names(issue)
+        if LABEL_READY in labels:
             continue
-        if _issue_label_names(issue) & {LABEL_RUNNING, LABEL_DONE, LABEL_BLOCKED}:
-            continue
-        if _queue_replenisher_privacy_block_reason(issue) is not None:
+        if not _queue_replenisher_issue_is_discoverable(issue):
             continue
         candidate = _queue_replenisher_candidate(issue)
         if candidate is None:
             continue
-        if candidate.intent_key in used_intents:
+        if not candidate.allowed_files:
             continue
-        if candidate.dependencies - done_numbers - ready_numbers:
+        if candidate.intent_key in used_intents:
             continue
         if candidate.allowed_files & occupied_files:
             continue
@@ -10463,14 +10525,42 @@ def select_runner_queue_replenishment_targets(
         )
         if protected_overlap:
             continue
-        selected.append(candidate)
         used_intents.add(candidate.intent_key)
+        if candidate.dependencies - done_numbers - ready_numbers:
+            waiting_dependency.append(candidate)
+            continue
+        if len(selected) >= slots:
+            continue
+        selected.append(candidate)
         occupied_files.update(candidate.allowed_files)
 
-    return [candidate.issue for candidate in selected]
+    return RunnerQueueReplenishmentSelection(
+        selected=tuple(candidate.issue for candidate in selected),
+        waiting_dependency=tuple(candidate.issue for candidate in waiting_dependency),
+    )
 
 
-def get_queue_replenisher_candidate_issues() -> list[dict[str, Any]]:
+def select_runner_queue_replenishment_targets(
+    ready_issues: list[dict[str, Any]],
+    candidate_issues: list[dict[str, Any]],
+    *,
+    target_min_depth: int = QUEUE_REPLENISHER_TARGET_MIN_DEPTH,
+    target_max_depth: int = QUEUE_REPLENISHER_TARGET_MAX_DEPTH,
+    protected_files: frozenset[str] = frozenset(),
+) -> list[dict[str, Any]]:
+    if len(ready_issues) >= target_min_depth:
+        return []
+    selection = _runner_queue_replenishment_selection(
+        ready_issues,
+        candidate_issues,
+        target_min_depth=target_min_depth,
+        target_max_depth=target_max_depth,
+        protected_files=protected_files,
+    )
+    return list(selection.selected)
+
+
+def _queue_replenisher_issue_list_for_label(label: str) -> list[dict[str, Any]]:
     code, output = run_command(
         [
             "gh",
@@ -10479,7 +10569,7 @@ def get_queue_replenisher_candidate_issues() -> list[dict[str, Any]]:
             "--repo",
             REPO,
             "--label",
-            QUEUE_REPLENISHER_CANDIDATE_LABEL,
+            label,
             "--state",
             "open",
             "--search",
@@ -10496,6 +10586,61 @@ def get_queue_replenisher_candidate_issues() -> list[dict[str, Any]]:
     return [issue for issue in parsed if isinstance(issue, dict)]
 
 
+def get_queue_replenisher_candidate_issues() -> list[dict[str, Any]]:
+    discovered: dict[int, dict[str, Any]] = {}
+    unnumbered: list[dict[str, Any]] = []
+    for label in QUEUE_REPLENISHER_DISCOVERY_LABELS:
+        for issue in _queue_replenisher_issue_list_for_label(label):
+            number = _queue_replenisher_issue_number(issue)
+            if number is None:
+                unnumbered.append(issue)
+                continue
+            discovered.setdefault(number, issue)
+    return [*discovered.values(), *unnumbered]
+
+
+def _promote_queue_replenisher_issue(issue: Mapping[str, Any]) -> None:
+    number = _queue_replenisher_issue_number(issue)
+    if number is None:
+        return
+    labels = _issue_label_names(issue)
+    command = [
+        "gh",
+        "issue",
+        "edit",
+        str(number),
+        "--repo",
+        REPO,
+    ]
+    for label in (QUEUE_REPLENISHER_CANDIDATE_LABEL, LABEL_WAITING_DEPENDENCY):
+        if label in labels:
+            command.extend(["--remove-label", label])
+    command.extend(["--add-label", LABEL_READY])
+    code, output = run_command(command)
+    if code != 0:
+        raise RuntimeError(f"gh issue edit failed:\n{output}")
+
+
+def _route_queue_replenisher_dependency_wait(issue: Mapping[str, Any]) -> None:
+    number = _queue_replenisher_issue_number(issue)
+    if number is None or LABEL_WAITING_DEPENDENCY in _issue_label_names(issue):
+        return
+    code, output = run_command(
+        [
+            "gh",
+            "issue",
+            "edit",
+            str(number),
+            "--repo",
+            REPO,
+            "--add-label",
+            LABEL_WAITING_DEPENDENCY,
+        ]
+    )
+    if code != 0:
+        raise RuntimeError(f"gh issue edit failed:\n{output}")
+
+
 def replenish_runner_queue(body: str) -> str:
     task_id = REPLENISH_RUNNER_QUEUE
     metadata = _metadata_before_task(body)
@@ -10504,31 +10649,16 @@ def replenish_runner_queue(body: str) -> str:
     )
     ready_issues = get_ready_issues()
     candidate_issues = get_queue_replenisher_candidate_issues()
-    selected = select_runner_queue_replenishment_targets(
+    selection = _runner_queue_replenishment_selection(
         ready_issues,
         candidate_issues,
         protected_files=protected_files,
     )
+    selected = list(selection.selected)
     for issue in selected:
-        number = _queue_replenisher_issue_number(issue)
-        if number is None:
-            continue
-        code, output = run_command(
-            [
-                "gh",
-                "issue",
-                "edit",
-                str(number),
-                "--repo",
-                REPO,
-                "--remove-label",
-                QUEUE_REPLENISHER_CANDIDATE_LABEL,
-                "--add-label",
-                LABEL_READY,
-            ]
-        )
-        if code != 0:
-            raise RuntimeError(f"gh issue edit failed:\n{output}")
+        _promote_queue_replenisher_issue(issue)
+    for issue in selection.waiting_dependency:
+        _route_queue_replenisher_dependency_wait(issue)
 
     selected_numbers = [
         str(number)
@@ -10542,10 +10672,22 @@ def replenish_runner_queue(body: str) -> str:
             f"ready_depth_before={len(ready_issues)}",
             f"selected_count={len(selected_numbers)}",
             "selected_issues=" + (",".join(selected_numbers) or "none"),
+            f"waiting_dependency_count={len(selection.waiting_dependency)}",
             "telegram_notifications=0",
         ],
         "met",
     )
+
+
+def maybe_replenish_runner_queue_after_completion() -> bool:
+    try:
+        ready_depth = len(get_ready_issues())
+        if ready_depth >= QUEUE_REPLENISHER_TARGET_MIN_DEPTH:
+            return False
+        replenish_runner_queue("")
+        return True
+    except Exception:
+        return False
 
 
 def _stale_clean_skeleton_worktree_quarantine_metadata(
@@ -14570,6 +14712,8 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             LABEL_DONE if status == "DONE" else LABEL_BLOCKED,
         )
         notify_task_finished(issue_number, status, report)
+        if status == "DONE":
+            maybe_replenish_runner_queue_after_completion()
     except Exception as exc:
         if issue_workdir is not None:
             cleanup_runtime_artifacts(issue_workdir)
