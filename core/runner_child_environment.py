@@ -39,7 +39,6 @@ _MARKERS = (
     "service unavailable",
     "try again at",
 )
-_MODEL_METADATA_COMPATIBILITY_MARKER = "failed to decode models response: unknown variant `max`"
 
 
 def _quota_or_provider_outage(text: str) -> bool:
@@ -48,8 +47,7 @@ def _quota_or_provider_outage(text: str) -> bool:
 
 
 def _fallback_allowed(text: str) -> bool:
-    lowered = text.lower()
-    return _quota_or_provider_outage(lowered) or _MODEL_METADATA_COMPATIBILITY_MARKER in lowered
+    return _quota_or_provider_outage(text)
 
 
 def _workdir(argv: list[str]) -> str:
