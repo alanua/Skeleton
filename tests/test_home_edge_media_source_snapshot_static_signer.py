@@ -69,6 +69,23 @@ def test_installer_never_executes_checkout_python() -> None:
     assert 'NOPASSWD: $EXEC_ROOT/signer ""' in text
 
 
+def test_installer_rollback_restores_exact_preinstall_presence() -> None:
+    text = INSTALLER_PATH.read_text(encoding="utf-8")
+
+    for marker in ("HAD_INSTALL_ROOT=0", "HAD_EXEC_ROOT=0", "HAD_SUDOERS=0"):
+        assert marker in text
+    assert 'rm -rf "$STAGING_PARENT" "$INSTALL_ROOT.new" "$EXEC_ROOT.new"' in text
+    assert 'if [[ $HAD_INSTALL_ROOT -eq 1 ]]; then' in text
+    assert 'if [[ $HAD_EXEC_ROOT -eq 1 ]]; then' in text
+    assert 'if [[ $HAD_SUDOERS -eq 1 ]]; then' in text
+    assert 'rm -rf "$INSTALL_ROOT"' in text
+    assert 'rm -rf "$EXEC_ROOT"' in text
+    assert 'rm -f "$SUDOERS_PATH"' in text
+    assert "existing signer install root is unsafe" in text
+    assert "existing signer executable root is unsafe" in text
+    assert "existing signer sudoers entry is unsafe" in text
+
+
 def test_payload_and_wrapper_syntax() -> None:
     subprocess.run([sys.executable, "-m", "py_compile", str(PAYLOAD_PATH)], check=True)
     subprocess.run(["/bin/sh", "-n", str(WRAPPER_PATH)], check=True)
