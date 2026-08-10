@@ -72,9 +72,17 @@ def test_installer_never_executes_checkout_python() -> None:
 def test_installer_rollback_restores_exact_preinstall_presence() -> None:
     text = INSTALLER_PATH.read_text(encoding="utf-8")
 
-    for marker in ("HAD_INSTALL_ROOT=0", "HAD_EXEC_ROOT=0", "HAD_SUDOERS=0"):
+    for marker in (
+        "HAD_INSTALL_ROOT=0",
+        "HAD_EXEC_ROOT=0",
+        "HAD_SUDOERS=0",
+        "BACKUPS_READY=0",
+        "ACTIVATION_STARTED=0",
+    ):
         assert marker in text
     assert 'rm -rf "$STAGING_PARENT" "$INSTALL_ROOT.new" "$EXEC_ROOT.new"' in text
+    assert 'if [[ $COMMITTED -eq 0 && $ACTIVATION_STARTED -eq 1 ]]; then' in text
+    assert 'if [[ $BACKUPS_READY -ne 1 ]]; then' in text
     assert 'if [[ $HAD_INSTALL_ROOT -eq 1 ]]; then' in text
     assert 'if [[ $HAD_EXEC_ROOT -eq 1 ]]; then' in text
     assert 'if [[ $HAD_SUDOERS -eq 1 ]]; then' in text
@@ -84,6 +92,29 @@ def test_installer_rollback_restores_exact_preinstall_presence() -> None:
     assert "existing signer install root is unsafe" in text
     assert "existing signer executable root is unsafe" in text
     assert "existing signer sudoers entry is unsafe" in text
+
+
+def test_installer_activation_waits_for_complete_backups_and_fails_closed_during_reinstall() -> None:
+    text = INSTALLER_PATH.read_text(encoding="utf-8")
+
+    backups_ready = text.index("BACKUPS_READY=1")
+    activation_started = text.index("ACTIVATION_STARTED=1")
+    disable_sudoers = text.index('rm -f "$SUDOERS_PATH"', activation_started)
+    remove_install = text.index('rm -rf "$INSTALL_ROOT"', activation_started)
+    remove_exec = text.index('rm -rf "$EXEC_ROOT"', activation_started)
+    move_install = text.index('mv -T "$INSTALL_ROOT.new" "$INSTALL_ROOT"')
+    move_exec = text.index('mv -T "$EXEC_ROOT.new" "$EXEC_ROOT"')
+    new_sudoers = text.index('install -o root -g root -m 0440 "$BACKUP_DIR/sudoers.new" "$SUDOERS_PATH"')
+
+    assert backups_ready < activation_started
+    assert activation_started < disable_sudoers
+    assert disable_sudoers < remove_install < move_install
+    assert disable_sudoers < remove_exec < move_exec
+    assert move_install < new_sudoers
+    assert move_exec < new_sudoers
+    assert 'if [[ $HAD_INSTALL_ROOT -eq 1 ]]; then rm -rf "$INSTALL_ROOT"; fi' in text
+    assert 'if [[ $HAD_EXEC_ROOT -eq 1 ]]; then rm -rf "$EXEC_ROOT"; fi' in text
+    assert "FATAL: signer activation started without complete backups" in text
 
 
 def test_payload_and_wrapper_syntax() -> None:
