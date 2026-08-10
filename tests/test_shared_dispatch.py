@@ -52,9 +52,7 @@ def _request(tmp_path: Path, **updates: object) -> tuple[SharedDispatcher, Share
 
 def test_allowlisted_loop_route_dispatches_public_safe_receipt(tmp_path: Path) -> None:
     dispatcher, request = _request(tmp_path)
-
     result = dispatcher.dispatch(request)
-
     assert result.status == "done"
     assert result.receipt["schema"] == "skeleton.scheduler_dispatch_receipt.v1"
     assert result.receipt["external_side_effects_executed"] is False
@@ -62,9 +60,7 @@ def test_allowlisted_loop_route_dispatches_public_safe_receipt(tmp_path: Path) -
 
 def test_unknown_route_fails_closed_before_handler(tmp_path: Path) -> None:
     dispatcher, request = _request(tmp_path, route_id="unknown")
-
     result = dispatcher.dispatch(request)
-
     assert result.status == "failed"
     assert result.reason == "ROUTE_NOT_ALLOWLISTED"
     assert result.receipt["external_side_effects_executed"] is False
@@ -79,7 +75,6 @@ def test_privacy_and_capability_mismatch_fail_closed(tmp_path: Path) -> None:
         tmp_path,
         payload=_payload(approved_capabilities=[], requested_capabilities=["loop:state_write"]),
     )
-
     assert dispatcher.dispatch(privacy_request).reason == "PRIVACY_BOUNDARY_MISMATCH"
     assert dispatcher.dispatch(capability_request).reason == "CAPABILITY_NOT_APPROVED"
 
@@ -94,9 +89,7 @@ def test_loop_next_step_proposal_is_returned_not_executed(tmp_path: Path) -> Non
             deterministic_workflow={"steps": [first, second], "index": 0},
         ),
     )
-
     result = dispatcher.dispatch(request)
-
     assert result.status == "done"
     assert result.next_step is not None
     assert result.next_step["task_packet"]["run_id"] == "run-2"
@@ -128,8 +121,6 @@ def test_control_recovery_route_dispatches_without_task_packet_or_codegen(tmp_pa
         attempt=1,
         idempotency_key="recovery-1:attempt:1",
     )
-
     result = dispatcher.dispatch(request)
-
     assert result.status == "done"
-    assert calls == ["executor_service_preflight", "queue_reactivate"]
+    assert calls == ["codegen_runtime_recover", "queue_reactivate"]
