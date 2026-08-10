@@ -323,6 +323,74 @@ def test_home_edge_debian_media_bootstrap_is_allowlisted_and_dispatches_exact_re
     assert "SECRET" not in report
 
 
+def test_control_plane_recovery_uses_fixed_maintenance_actions_without_codex(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[str] = []
+
+    def fake_dispatch(task_id: str, workdir: str, body: str = "") -> str:
+        calls.append(task_id)
+        return (
+            "DONE: Runner host maintenance task completed.\n"
+            f"maintenance_task_id={task_id}\n"
+            "success_criteria=met"
+        )
+
+    monkeypatch.setattr(runner, "ROOT", tmp_path)
+    monkeypatch.setattr(runner, "dispatch_runtime_maintenance_task", fake_dispatch)
+
+    body = "\n".join(
+        (
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {runner.CONTROL_PLANE_SELF_HEALING_RECOVERY}",
+            "Failure Class: CODEGEN_RUNTIME_UNHEALTHY",
+            "Failure Key: control:codex-lane",
+        )
+    )
+
+    report = runner.control_plane_self_healing_recovery(body, str(tmp_path))
+
+    assert report.startswith("DONE:")
+    assert "status=RECOVERED" in report
+    assert "telegram_notifications=0" in report
+    assert calls == [
+        runner.HERMES_WORKER_PREFLIGHT,
+        runner.HERMES_WORKER_PREFLIGHT,
+        runner.REPLENISH_RUNNER_QUEUE,
+    ]
+
+
+def test_control_plane_recovery_rejects_issue_supplied_command_and_package(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(runner, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        runner,
+        "dispatch_runtime_maintenance_task",
+        lambda task_id, workdir, body="": calls.append(task_id) or "DONE: ok",
+    )
+    body = "\n".join(
+        (
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {runner.CONTROL_PLANE_SELF_HEALING_RECOVERY}",
+            "```task",
+            "schema: skeleton.control_recovery.v1",
+            "failure_class: CODEGEN_RUNTIME_UNHEALTHY",
+            "failure_key: control:unsafe",
+            "command: pip install arbitrary",
+            "package: arbitrary",
+            "```",
+        )
+    )
+
+    report = runner.control_plane_self_healing_recovery(body, str(tmp_path))
+
+    assert report.startswith("NEEDS_OPERATOR:")
+    assert "reason=UNREGISTERED_RECOVERY_AUTHORITY" in report
+    assert calls == []
+
+
 def test_home_edge_debian_media_bootstrap_malformed_input_blocks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
