@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 REPO_ROOT="/home/agent/agent-dev/repos/Skeleton"
-RUNNER_USER="${SUDO_USER:-agent}"
+RUNNER_USER="agent"
 INSTALL_ROOT="/usr/local/lib/skeleton/home-edge/media-source-snapshot"
 EXEC_ROOT="/usr/local/libexec/skeleton/home-edge/media-source-snapshot"
 SUDOERS_PATH="/etc/sudoers.d/skeleton-home-edge-media-source-snapshot-signer"
@@ -23,10 +23,11 @@ ACTIVATION_STARTED=0
 
 usage() {
   cat <<'EOF'
-Usage: sudo scripts/install_home_edge_media_source_snapshot_signer.sh [--repo-root PATH] [--runner-user USER]
+Usage: sudo scripts/install_home_edge_media_source_snapshot_signer.sh [--repo-root PATH]
 
 Copies exact reviewed signer files as inert data into a root-owned immutable runtime.
-The privileged installer never executes checkout content.
+The privileged installer never executes checkout content. Sudo access is bound
+only to the canonical Skeleton Runner service account: agent.
 EOF
 }
 
@@ -34,10 +35,6 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --repo-root)
       REPO_ROOT="${2:?missing value for --repo-root}"
-      shift 2
-      ;;
-    --runner-user)
-      RUNNER_USER="${2:?missing value for --runner-user}"
       shift 2
       ;;
     -h|--help)
@@ -57,7 +54,7 @@ if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
   exit 2
 fi
 if ! getent passwd "$RUNNER_USER" >/dev/null; then
-  printf 'BLOCKED: runner user is unavailable\n' >&2
+  printf 'BLOCKED: canonical runner user is unavailable\n' >&2
   exit 2
 fi
 
