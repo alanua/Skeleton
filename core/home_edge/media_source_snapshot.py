@@ -40,6 +40,7 @@ INSTALLED_SIGNER_PAYLOAD = Path("/usr/local/lib/skeleton/home-edge/media-source-
 SIGNER_SUDO_ARGV = ("sudo", "--non-interactive", str(INSTALLED_SIGNER_EXECUTABLE))
 SIGNER_STDIN_MAX_BYTES = 256 * 1024
 SIGNER_TIMEOUT_SECONDS = 10
+TEST_RUNNER_HMAC_OVERRIDE_ENV = "SKELETON_HOME_EDGE_TEST_ALLOW_RUNNER_HMAC"
 EXEC_HMAC_SECRET_CONFIG_DIR = Path("/etc/skeleton")
 EXEC_HMAC_SECRET_PROFILE_METADATA_PATH = Path("/etc/skeleton/home-edge-01.env")
 EXEC_HMAC_SECRET_CONFIG_PATH = Path("/etc/skeleton/home-edge-executor-controller.env")
@@ -280,7 +281,7 @@ def sign_snapshot_request(
 
 
 def _runner_hmac_override_allowed(*, environment: Mapping[str, str] | None = None) -> bool:
-    return environment is not None
+    return bool(environment is not None and environment.get(TEST_RUNNER_HMAC_OVERRIDE_ENV) == "1")
 
 
 def _sign_snapshot_request_with_installed_signer(unsigned: Mapping[str, Any]) -> HomeEdgeExecRequest:
