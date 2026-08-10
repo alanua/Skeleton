@@ -11,6 +11,8 @@ import subprocess
 from core.codex_runtime_recovery import (
     CodexRuntimeRecoveryError,
     ensure_pinned_codex_runtime,
+    pinned_codex_recovery_marker_present,
+    pinned_codex_runtime_path,
     should_attempt_codex_runtime_recovery,
 )
 
@@ -39,7 +41,6 @@ _MARKERS = (
     "service unavailable",
     "try again at",
 )
-_MODEL_METADATA_COMPATIBILITY_MARKER = "failed to decode models response: unknown variant `max`"
 
 
 def _quota_or_provider_outage(text: str) -> bool:
@@ -48,8 +49,7 @@ def _quota_or_provider_outage(text: str) -> bool:
 
 
 def _fallback_allowed(text: str) -> bool:
-    lowered = text.lower()
-    return _quota_or_provider_outage(lowered) or _MODEL_METADATA_COMPATIBILITY_MARKER in lowered
+    return _quota_or_provider_outage(text)
 
 
 def _workdir(argv: list[str]) -> str:
@@ -78,7 +78,6 @@ def main() -> int:
     original_path = os.environ.get("SKELETON_CODEGEN_ORIGINAL_PATH", os.environ.get("PATH", ""))
     if not real_codex or not Path(real_codex).is_file():
         return 127
-
     stdin_text = sys.stdin.read()
     child_env = dict(os.environ)
     child_env["PATH"] = original_path
@@ -95,13 +94,11 @@ def main() -> int:
         sys.stdout.write(codex.stdout)
         sys.stderr.write(codex.stderr)
         return 0
-
     combined = f"{codex.stdout}\n{codex.stderr}"
     if not _fallback_allowed(combined) or not openhands or not Path(openhands).is_file():
         sys.stdout.write(codex.stdout)
         sys.stderr.write(codex.stderr)
         return codex.returncode
-
     fallback = subprocess.run(
         [openhands, "--headless", "--json", "-t", _task(sys.argv[1:], stdin_text)],
         cwd=_workdir(sys.argv[1:]),
@@ -123,15 +120,32 @@ if __name__ == "__main__":
 '''
 
 
-def _install_fallback_wrapper(environment: dict[str, str]) -> None:
-    original_path = environment.get("PATH", "")
-    real_codex = shutil.which("codex", path=original_path)
-    openhands = shutil.which("openhands", path=original_path)
-    home = environment.get("HOME")
-    if not real_codex or not openhands or not home:
+def _without_home_edge_credentials(environment: Mapping[str, str]) -> dict[str, str]:
+    return {
+        key: value
+        for key, value in environment.items()
+        if not key.startswith(HOME_EDGE_ENV_PREFIX) and key != HOME_EDGE_EXEC_HMAC_SECRET_ENV
+    }
+
+
+def _install_fallback_wrapper(
+    environment: dict[str, str],
+    authority_environment: Mapping[str, str],
+) -> None:
+    """Bind child codegen to the recovered Runner runtime, never caller overlay authority."""
+    if not pinned_codex_recovery_marker_present(authority_environment):
+        return
+    try:
+        real_codex = pinned_codex_runtime_path(authority_environment)
+    except (CodexRuntimeRecoveryError, OSError, subprocess.SubprocessError):
         return
 
-    root = Path(home) / ".local" / "state" / "skeleton-runner" / "codegen-fallback-bin"
+    trusted_home = authority_environment.get("HOME", "").strip()
+    trusted_path = authority_environment.get("PATH", "")
+    if not trusted_home or not Path(trusted_home).is_absolute():
+        return
+    openhands = shutil.which("openhands", path=trusted_path)
+    root = Path(trusted_home) / ".local" / "state" / "skeleton-runner" / "codegen-fallback-bin"
     wrapper = root / "codex"
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     expected = _WRAPPER.encode("utf-8")
@@ -144,31 +158,31 @@ def _install_fallback_wrapper(environment: dict[str, str]) -> None:
     else:
         os.chmod(wrapper, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
 
+    environment["HOME"] = trusted_home
     environment[_REAL_CODEX_ENV] = str(Path(real_codex).resolve(strict=False))
-    environment[_OPENHANDS_ENV] = str(Path(openhands).resolve(strict=False))
-    environment[_ORIGINAL_PATH_ENV] = original_path
+    environment[_OPENHANDS_ENV] = str(Path(openhands).resolve(strict=False)) if openhands else ""
+    environment[_ORIGINAL_PATH_ENV] = trusted_path
     environment[_FALLBACK_BIN_ENV] = str(root)
-    environment["PATH"] = f"{root}:{original_path}" if original_path else str(root)
+    environment["PATH"] = f"{root}:{trusted_path}" if trusted_path else str(root)
 
 
 def sanitize_codegen_child_environment(
     environment: Mapping[str, str],
+    *,
+    authority_environment: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
-    """Return the bounded codegen child environment with private Home Edge keys removed."""
-    sanitized = {
-        key: value
-        for key, value in environment.items()
-        if not key.startswith(HOME_EDGE_ENV_PREFIX) and key != HOME_EDGE_EXEC_HMAC_SECRET_ENV
-    }
-    if should_attempt_codex_runtime_recovery(sanitized):
+    """Return a child environment while keeping runtime authority in the Runner process."""
+    sanitized = _without_home_edge_credentials(environment)
+    authority = _without_home_edge_credentials(
+        os.environ if authority_environment is None else authority_environment
+    )
+    if should_attempt_codex_runtime_recovery(authority):
         try:
-            ensure_pinned_codex_runtime(sanitized)
+            ensure_pinned_codex_runtime(authority)
         except (CodexRuntimeRecoveryError, OSError, subprocess.SubprocessError):
             pass
     try:
-        _install_fallback_wrapper(sanitized)
+        _install_fallback_wrapper(sanitized, authority)
     except OSError:
-        # Failure to provision the fallback must not broaden authority or break the
-        # existing Codex lane. Normal Runner failure handling remains authoritative.
         pass
     return sanitized

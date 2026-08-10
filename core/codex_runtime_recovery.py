@@ -20,6 +20,19 @@ _VERSION_RE = re.compile(r"^codex-cli ([0-9]+\.[0-9]+\.[0-9]+)$")
 _INSTALL_TIMEOUT_SECONDS = 240
 _SMOKE_TIMEOUT_SECONDS = 120
 _VERSION_TIMEOUT_SECONDS = 15
+_PROVIDER_OUTAGE_MARKERS = (
+    "usage limit",
+    "rate limit",
+    "quota",
+    "insufficient_quota",
+    "provider unavailable",
+    "temporarily unavailable",
+    "service unavailable",
+    "try again at",
+)
+_SMOKE_PASS = "pass"
+_SMOKE_PROVIDER_UNAVAILABLE = "provider_unavailable"
+_SMOKE_FAILED = "failed"
 
 
 class CodexRuntimeRecoveryError(RuntimeError):
@@ -93,51 +106,58 @@ def _codex_version(codex_path: str, environment: Mapping[str, str]) -> str:
 
 def _global_runtime_paths(environment: Mapping[str, str]) -> tuple[str, str]:
     npm_path = shutil.which("npm", path=environment.get("PATH"))
-    codex_path = shutil.which("codex", path=environment.get("PATH"))
-    if not npm_path or not codex_path:
-        raise CodexRuntimeRecoveryError("codex_runtime_binary_missing")
-
+    if not npm_path:
+        raise CodexRuntimeRecoveryError("npm_runtime_binary_missing")
     prefix_result = _safe_run(
         [npm_path, "prefix", "-g"],
         environment,
         timeout=_VERSION_TIMEOUT_SECONDS,
     )
-    if (
-        prefix_result is None
-        or prefix_result.returncode != 0
-        or not prefix_result.stdout.strip()
-    ):
+    if prefix_result is None or prefix_result.returncode != 0 or not prefix_result.stdout.strip():
         raise CodexRuntimeRecoveryError("npm_global_prefix_unavailable")
-
     prefix = Path(prefix_result.stdout.strip()).expanduser().resolve(strict=False)
-    expected_codex = (prefix / "bin" / "codex").resolve(strict=False)
-    actual_codex = Path(codex_path).resolve(strict=False)
-    if actual_codex != expected_codex:
-        raise CodexRuntimeRecoveryError("codex_runtime_path_mismatch")
-    return npm_path, codex_path
+    return npm_path, str((prefix / "bin" / "codex").resolve(strict=False))
 
 
-def _install_version(
-    npm_path: str,
-    version: str,
-    environment: Mapping[str, str],
-) -> bool:
+def pinned_codex_runtime_path(environment: Mapping[str, str]) -> str:
+    """Return the exact npm-global Codex path only when the pinned version is active."""
+    _npm_path, codex_path = _global_runtime_paths(environment)
+    if _codex_version(codex_path, environment) != TARGET_CODEX_VERSION:
+        raise CodexRuntimeRecoveryError("codex_runtime_version_mismatch")
+    return codex_path
+
+
+def _state_dir(environment: Mapping[str, str]) -> Path:
+    home_text = environment.get("HOME", "").strip()
+    if not home_text:
+        raise CodexRuntimeRecoveryError("runner_home_missing")
+    home = Path(home_text).expanduser()
+    if not home.is_absolute():
+        raise CodexRuntimeRecoveryError("runner_home_not_absolute")
+    return home / ".local" / "state" / "skeleton"
+
+
+def pinned_codex_recovery_marker_present(environment: Mapping[str, str]) -> bool:
+    """Cheap preflight proving a prior target-version recovery completed in this home."""
+    try:
+        marker = _state_dir(environment) / f"codex-runtime-recovery-{TARGET_CODEX_VERSION}.ok"
+        if marker.is_symlink() or not marker.is_file():
+            return False
+        return marker.read_text(encoding="utf-8") == f"version={TARGET_CODEX_VERSION}\n"
+    except (CodexRuntimeRecoveryError, OSError, UnicodeError):
+        return False
+
+
+def _install_version(npm_path: str, version: str, environment: Mapping[str, str]) -> bool:
     result = _safe_run(
-        [
-            npm_path,
-            "install",
-            "-g",
-            f"@openai/codex@{version}",
-            "--no-audit",
-            "--no-fund",
-        ],
+        [npm_path, "install", "-g", f"@openai/codex@{version}", "--no-audit", "--no-fund"],
         environment,
         timeout=_INSTALL_TIMEOUT_SECONDS,
     )
     return result is not None and result.returncode == 0
 
 
-def _smoke_codex(codex_path: str, environment: Mapping[str, str]) -> bool:
+def _smoke_codex(codex_path: str, environment: Mapping[str, str]) -> str:
     with tempfile.TemporaryDirectory(prefix="skeleton-codex-recovery-") as temp_dir:
         result = _safe_run(
             [
@@ -155,23 +175,23 @@ def _smoke_codex(codex_path: str, environment: Mapping[str, str]) -> bool:
             timeout=_SMOKE_TIMEOUT_SECONDS,
             cwd=temp_dir,
         )
-        if result is None or result.returncode != 0:
-            return False
-        return "RESULT: OK" in {line.strip() for line in result.stdout.splitlines()}
+        if result is None:
+            return _SMOKE_FAILED
+        if result.returncode == 0 and "RESULT: OK" in {line.strip() for line in result.stdout.splitlines()}:
+            return _SMOKE_PASS
+        combined = f"{result.stdout}\n{result.stderr}".lower()
+        if any(marker in combined for marker in _PROVIDER_OUTAGE_MARKERS):
+            return _SMOKE_PROVIDER_UNAVAILABLE
+        return _SMOKE_FAILED
 
 
 def _state_paths(environment: Mapping[str, str]) -> tuple[Path, Path]:
-    home_text = environment.get("HOME", "").strip()
-    if not home_text:
-        raise CodexRuntimeRecoveryError("runner_home_missing")
-    home = Path(home_text).expanduser()
-    if not home.is_absolute():
-        raise CodexRuntimeRecoveryError("runner_home_not_absolute")
-    state_dir = home / ".local" / "state" / "skeleton"
+    state_dir = _state_dir(environment)
     state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    marker = state_dir / f"codex-runtime-recovery-{TARGET_CODEX_VERSION}.ok"
-    lock = state_dir / f"codex-runtime-recovery-{TARGET_CODEX_VERSION}.lock"
-    return marker, lock
+    return (
+        state_dir / f"codex-runtime-recovery-{TARGET_CODEX_VERSION}.ok",
+        state_dir / f"codex-runtime-recovery-{TARGET_CODEX_VERSION}.lock",
+    )
 
 
 def _write_success_marker(marker: Path) -> None:
@@ -181,12 +201,7 @@ def _write_success_marker(marker: Path) -> None:
     os.replace(temp, marker)
 
 
-def _rollback(
-    npm_path: str,
-    codex_path: str,
-    old_version: str,
-    environment: Mapping[str, str],
-) -> bool:
+def _rollback(npm_path: str, codex_path: str, old_version: str, environment: Mapping[str, str]) -> bool:
     if not _install_version(npm_path, old_version, environment):
         return False
     try:
@@ -196,22 +211,18 @@ def _rollback(
 
 
 def ensure_pinned_codex_runtime(environment: Mapping[str, str]) -> bool:
-    """Pin and smoke one exact Codex version; restore the prior version on failure."""
+    """Pin and verify one exact Codex version; restore prior version on client failure."""
     npm_path, codex_path = _global_runtime_paths(environment)
     marker, lock_path = _state_paths(environment)
-
     lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
     os.chmod(lock_path, 0o600)
     with os.fdopen(lock_fd, "r+", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-
         old_version = _codex_version(codex_path, environment)
         if old_version == TARGET_CODEX_VERSION and marker.is_file():
             return True
-
         if marker.exists():
             marker.unlink()
-
         mutation_attempted = old_version != TARGET_CODEX_VERSION
         if mutation_attempted:
             if not _install_version(npm_path, TARGET_CODEX_VERSION, environment):
@@ -225,11 +236,10 @@ def ensure_pinned_codex_runtime(environment: Mapping[str, str]) -> bool:
             if installed_version != TARGET_CODEX_VERSION:
                 _rollback(npm_path, codex_path, old_version, environment)
                 return False
-
-        if not _smoke_codex(codex_path, environment):
+        smoke_status = _smoke_codex(codex_path, environment)
+        if smoke_status == _SMOKE_FAILED:
             if mutation_attempted:
                 _rollback(npm_path, codex_path, old_version, environment)
             return False
-
         _write_success_marker(marker)
         return True

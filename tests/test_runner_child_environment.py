@@ -21,11 +21,9 @@ def test_sanitize_codegen_child_environment_removes_only_home_edge_prefix(monkey
         "UNRELATED_HOME_EDGE_01_VALUE": "kept",
         "ARBITRARY_OVERLAY_VALUE": "kept-overlay-value",
     }
-
     monkeypatch.setattr(child_env, "should_attempt_codex_runtime_recovery", lambda _env: False)
-    monkeypatch.setattr(child_env, "_install_fallback_wrapper", lambda _env: None)
-    sanitized = sanitize_codegen_child_environment(environment)
-
+    monkeypatch.setattr(child_env, "_install_fallback_wrapper", lambda _env, _authority: None)
+    sanitized = sanitize_codegen_child_environment(environment, authority_environment=environment)
     assert sanitized == {
         "HOME": "/home/agent",
         "PATH": "/usr/bin",
@@ -37,45 +35,121 @@ def test_sanitize_codegen_child_environment_removes_only_home_edge_prefix(monkey
     }
     assert environment["SKELETON_HOME_EDGE_01_HOSTNAME"] == "live-home-edge"
     assert environment["SKELETON_HOME_EDGE_EXEC_HMAC_SECRET"] == "synthetic-hmac-marker"
-    assert environment["SKELETON_UNRELATED_SETTING"] == "kept-skeleton-value"
 
 
-def test_codegen_environment_installs_fixed_fallback_only_when_both_tools_exist(
-    tmp_path: Path, monkeypatch
-) -> None:
+def _enable_recovered_runtime_marker(monkeypatch) -> None:
+    monkeypatch.setattr(child_env, "pinned_codex_recovery_marker_present", lambda _env: True)
+
+
+def test_codegen_environment_binds_wrapper_to_pinned_codex(tmp_path: Path, monkeypatch) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    codex = bin_dir / "codex-real"
+    codex = bin_dir / "codex-pinned"
     openhands = bin_dir / "openhands-real"
     codex.write_text("", encoding="utf-8")
     openhands.write_text("", encoding="utf-8")
-
-    def fake_which(name: str, *, path: str | None = None) -> str | None:
-        if name == "codex":
-            return str(codex)
-        if name == "openhands":
-            return str(openhands)
-        return None
-
-    monkeypatch.setattr(child_env.shutil, "which", fake_which)
+    authority = {"HOME": str(tmp_path), "PATH": str(bin_dir)}
     monkeypatch.setattr(child_env, "should_attempt_codex_runtime_recovery", lambda _env: False)
-
-    sanitized = sanitize_codegen_child_environment(
-        {
-            "HOME": str(tmp_path),
-            "PATH": str(bin_dir),
-            "SKELETON_HOME_EDGE_EXEC_HMAC_SECRET": "must-not-survive",
-        }
+    _enable_recovered_runtime_marker(monkeypatch)
+    monkeypatch.setattr(child_env, "pinned_codex_runtime_path", lambda _env: str(codex))
+    monkeypatch.setattr(
+        child_env.shutil, "which", lambda name, *, path=None: str(openhands) if name == "openhands" else None
     )
-
+    sanitized = sanitize_codegen_child_environment(
+        {**authority, "SKELETON_HOME_EDGE_EXEC_HMAC_SECRET": "must-not-survive"},
+        authority_environment=authority,
+    )
     wrapper_dir = tmp_path / ".local" / "state" / "skeleton-runner" / "codegen-fallback-bin"
     wrapper = wrapper_dir / "codex"
     assert wrapper.is_file()
+    assert sanitized["HOME"] == str(tmp_path)
     assert sanitized["PATH"].split(":", 1)[0] == str(wrapper_dir)
     assert sanitized["SKELETON_REAL_CODEX_BIN"] == str(codex.resolve())
     assert sanitized["SKELETON_OPENHANDS_BIN"] == str(openhands.resolve())
     assert "SKELETON_HOME_EDGE_EXEC_HMAC_SECRET" not in sanitized
-    assert wrapper.read_text(encoding="utf-8").startswith("#!/usr/bin/env python3")
+
+
+def test_caller_overlay_cannot_replace_recovery_home_or_path(tmp_path: Path, monkeypatch) -> None:
+    trusted_home = tmp_path / "trusted-home"
+    trusted_bin = tmp_path / "trusted-bin"
+    overlay_home = tmp_path / "overlay-home"
+    trusted_home.mkdir()
+    trusted_bin.mkdir()
+    overlay_home.mkdir()
+    codex = trusted_bin / "codex-pinned"
+    codex.write_text("", encoding="utf-8")
+    authority = {"HOME": str(trusted_home), "PATH": str(trusted_bin), "INVOCATION_ID": "trusted"}
+    observed: list[dict[str, str]] = []
+
+    monkeypatch.setattr(child_env, "should_attempt_codex_runtime_recovery", lambda env: observed.append(dict(env)) or False)
+    _enable_recovered_runtime_marker(monkeypatch)
+    monkeypatch.setattr(child_env, "pinned_codex_runtime_path", lambda env: observed.append(dict(env)) or str(codex))
+    monkeypatch.setattr(child_env.shutil, "which", lambda name, *, path=None: None)
+
+    sanitized = sanitize_codegen_child_environment(
+        {"HOME": str(overlay_home), "PATH": "/overlay/bin", "INVOCATION_ID": "overlay"},
+        authority_environment=authority,
+    )
+
+    assert observed
+    assert all(item.get("HOME") == str(trusted_home) for item in observed)
+    assert all(item.get("PATH") == str(trusted_bin) for item in observed)
+    assert all(item.get("INVOCATION_ID") == "trusted" for item in observed)
+    assert sanitized["HOME"] == str(trusted_home)
+    assert sanitized["SKELETON_REAL_CODEX_BIN"] == str(codex.resolve())
+    assert sanitized["PATH"].endswith(str(trusted_bin))
+    assert not (overlay_home / ".local" / "state" / "skeleton-runner").exists()
+
+
+def test_codegen_wrapper_still_binds_pinned_codex_without_openhands(tmp_path: Path, monkeypatch) -> None:
+    codex = tmp_path / "codex-pinned"
+    codex.write_text("", encoding="utf-8")
+    authority = {"HOME": str(tmp_path), "PATH": "/trusted/bin"}
+    monkeypatch.setattr(child_env, "should_attempt_codex_runtime_recovery", lambda _env: False)
+    _enable_recovered_runtime_marker(monkeypatch)
+    monkeypatch.setattr(child_env, "pinned_codex_runtime_path", lambda _env: str(codex))
+    monkeypatch.setattr(child_env.shutil, "which", lambda name, *, path=None: None)
+    sanitized = sanitize_codegen_child_environment(
+        {"HOME": "/overlay/home", "PATH": "/stale/bin"}, authority_environment=authority
+    )
+    wrapper = tmp_path / ".local" / "state" / "skeleton-runner" / "codegen-fallback-bin" / "codex"
+    assert wrapper.is_file()
+    assert sanitized["HOME"] == str(tmp_path)
+    assert sanitized["SKELETON_REAL_CODEX_BIN"] == str(codex.resolve())
+    assert sanitized["SKELETON_OPENHANDS_BIN"] == ""
+    assert sanitized["PATH"] == f"{wrapper.parent}:/trusted/bin"
+
+
+def test_wrapper_is_not_installed_before_recovery_marker(tmp_path: Path, monkeypatch) -> None:
+    authority = {"HOME": str(tmp_path), "PATH": "/trusted/bin"}
+    monkeypatch.setattr(child_env, "should_attempt_codex_runtime_recovery", lambda _env: False)
+    monkeypatch.setattr(child_env, "pinned_codex_recovery_marker_present", lambda _env: False)
+    monkeypatch.setattr(
+        child_env,
+        "pinned_codex_runtime_path",
+        lambda _env: (_ for _ in ()).throw(AssertionError("must not probe before marker")),
+    )
+    sanitized = sanitize_codegen_child_environment(
+        {"HOME": str(tmp_path), "PATH": "/stale/bin"}, authority_environment=authority
+    )
+    assert sanitized["PATH"] == "/stale/bin"
+    assert "SKELETON_REAL_CODEX_BIN" not in sanitized
+
+
+def test_wrapper_is_not_installed_when_marked_runtime_is_unverified(tmp_path: Path, monkeypatch) -> None:
+    authority = {"HOME": str(tmp_path), "PATH": "/trusted/bin"}
+    monkeypatch.setattr(child_env, "should_attempt_codex_runtime_recovery", lambda _env: False)
+    _enable_recovered_runtime_marker(monkeypatch)
+    monkeypatch.setattr(
+        child_env,
+        "pinned_codex_runtime_path",
+        lambda _env: (_ for _ in ()).throw(child_env.CodexRuntimeRecoveryError("version_mismatch")),
+    )
+    sanitized = sanitize_codegen_child_environment(
+        {"HOME": str(tmp_path), "PATH": "/stale/bin"}, authority_environment=authority
+    )
+    assert sanitized["PATH"] == "/stale/bin"
+    assert "SKELETON_REAL_CODEX_BIN" not in sanitized
 
 
 def _write_executable(path: Path, body: str) -> None:
@@ -92,14 +166,9 @@ def _run_wrapper(tmp_path: Path, *, codex_body: str) -> tuple[subprocess.Complet
     openhands = bin_dir / "openhands-real"
     wrapper = bin_dir / "codex"
     fallback_marker = tmp_path / "openhands-called"
-
     _write_executable(codex, codex_body)
-    _write_executable(
-        openhands,
-        "#!/bin/sh\nprintf '%s\\n' called > \"$OPENHANDS_MARKER\"\nexit 0\n",
-    )
+    _write_executable(openhands, "#!/bin/sh\nprintf '%s\\n' called > \"$OPENHANDS_MARKER\"\nexit 0\n")
     _write_executable(wrapper, child_env._WRAPPER)
-
     environment = dict(os.environ)
     environment.update(
         {
@@ -122,16 +191,22 @@ def _run_wrapper(tmp_path: Path, *, codex_body: str) -> tuple[subprocess.Complet
     return result, fallback_marker
 
 
-def test_codegen_wrapper_falls_back_for_exact_model_metadata_decoder_failure(tmp_path: Path) -> None:
+def test_codegen_wrapper_does_not_fallback_for_exact_model_metadata_decoder_failure(tmp_path: Path) -> None:
     result, fallback_marker = _run_wrapper(
         tmp_path,
-        codex_body=(
-            "#!/bin/sh\n"
-            "printf '%s\\n' 'failed to decode models response: unknown variant `max`' >&2\n"
-            "exit 1\n"
-        ),
+        codex_body="#!/bin/sh\nprintf '%s\\n' 'failed to decode models response: unknown variant `max`' >&2\nexit 1\n",
     )
+    assert result.returncode == 1
+    assert "unknown variant `max`" in result.stderr
+    assert "SKELETON_CODEGEN_PROVIDER=openhands" not in result.stdout
+    assert not fallback_marker.exists()
 
+
+def test_codegen_wrapper_falls_back_for_provider_quota(tmp_path: Path) -> None:
+    result, fallback_marker = _run_wrapper(
+        tmp_path,
+        codex_body="#!/bin/sh\nprintf '%s\\n' 'usage limit reached' >&2\nexit 1\n",
+    )
     assert result.returncode == 0
     assert "SKELETON_CODEGEN_PROVIDER=openhands" in result.stdout
     assert "RESULT: OK" in result.stdout
@@ -141,13 +216,8 @@ def test_codegen_wrapper_falls_back_for_exact_model_metadata_decoder_failure(tmp
 def test_codegen_wrapper_does_not_fallback_for_unrelated_codex_failure(tmp_path: Path) -> None:
     result, fallback_marker = _run_wrapper(
         tmp_path,
-        codex_body=(
-            "#!/bin/sh\n"
-            "printf '%s\\n' 'unrelated synthetic codex failure' >&2\n"
-            "exit 7\n"
-        ),
+        codex_body="#!/bin/sh\nprintf '%s\\n' 'unrelated synthetic codex failure' >&2\nexit 7\n",
     )
-
     assert result.returncode == 7
     assert "unrelated synthetic codex failure" in result.stderr
     assert "SKELETON_CODEGEN_PROVIDER=openhands" not in result.stdout

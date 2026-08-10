@@ -49,9 +49,9 @@ def test_codegen_failure_uses_fixed_non_codegen_action_then_canary_and_queue(tmp
     )
 
     assert receipt["status"] == RecoveryStatus.RECOVERED.value
-    assert receipt["actions_executed"] == ["executor_service_preflight", "queue_reactivate"]
+    assert receipt["actions_executed"] == ["codegen_runtime_recover", "queue_reactivate"]
     assert receipt["canaries_executed"] == ["codegen_read_only_canary"]
-    assert calls == ["executor_service_preflight", "queue_reactivate"]
+    assert calls == ["codegen_runtime_recover", "queue_reactivate"]
 
 
 def test_missing_canary_executor_fails_closed(tmp_path: Path) -> None:
@@ -122,7 +122,7 @@ def test_duplicate_restart_tick_does_not_repeat_recovered_action(tmp_path: Path)
     second = execute_recovery_packet(packet, store=store, now=101, action_executor=lambda action: calls.append(action) or _done(action), canary_executor=lambda _canary: True)
     assert first["status"] == RecoveryStatus.RECOVERED.value
     assert second["reason"] == "RECOVERY_ALREADY_DONE"
-    assert calls == ["executor_service_preflight", "queue_reactivate"]
+    assert calls == ["codegen_runtime_recover", "queue_reactivate"]
 
 
 def test_failed_recovery_retries_with_backoff_then_exactly_one_operator_notice(tmp_path: Path) -> None:
