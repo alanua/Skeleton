@@ -9,6 +9,9 @@ SUDOERS_PATH="/etc/sudoers.d/skeleton-home-edge-media-source-snapshot-signer"
 PAYLOAD_REL="scripts/home_edge_media_source_snapshot_signer_payload.py"
 WRAPPER_REL="scripts/home_edge_media_source_snapshot_signer"
 CONTRACT_REL="core/home_edge/media_source_snapshot.py"
+PAYLOAD_BLOB_SHA="865e3df99a9256c67530d54f64b279093baf5a54"
+WRAPPER_BLOB_SHA="24620d9e9fe4f62c055113e6aeefb2d0984be2d5"
+CONTRACT_BLOB_SHA="75f76a2df425c269648f82a2659a9970cf8c6f12"
 COMMITTED=0
 BACKUP_DIR=""
 STAGING_PARENT=""
@@ -17,9 +20,8 @@ usage() {
   cat <<'EOF'
 Usage: sudo scripts/install_home_edge_media_source_snapshot_signer.sh [--repo-root PATH] [--runner-user USER]
 
-Copies reviewed signer files as inert data into a root-owned immutable runtime.
-No Python, module import, eval, compile, repository executable, or repository
-working-directory execution is allowed in the privileged installer.
+Copies exact reviewed signer files as inert data into a root-owned immutable runtime.
+The privileged installer never executes checkout content.
 EOF
 }
 
@@ -58,8 +60,12 @@ PAYLOAD_SRC="$REPO_ROOT/$PAYLOAD_REL"
 WRAPPER_SRC="$REPO_ROOT/$WRAPPER_REL"
 CONTRACT_SRC="$REPO_ROOT/$CONTRACT_REL"
 
+reviewed_blob_sha() {
+  /usr/bin/git hash-object --no-filters --stdin < "$1"
+}
+
 validate_source_file() {
-  local path="$1" max_bytes="$2" size mode
+  local path="$1" max_bytes="$2" expected_blob="$3" size mode actual_blob
   if [[ -L "$path" || ! -f "$path" || ! -r "$path" ]]; then
     printf 'BLOCKED: reviewed signer source is not a readable regular file\n' >&2
     exit 2
@@ -74,11 +80,16 @@ validate_source_file() {
     printf 'BLOCKED: reviewed signer source is group/world writable\n' >&2
     exit 2
   fi
+  actual_blob="$(reviewed_blob_sha "$path")"
+  if [[ "$actual_blob" != "$expected_blob" ]]; then
+    printf 'BLOCKED: reviewed signer source bytes do not match approved blob\n' >&2
+    exit 2
+  fi
 }
 
-validate_source_file "$PAYLOAD_SRC" $((128 * 1024))
-validate_source_file "$WRAPPER_SRC" $((16 * 1024))
-validate_source_file "$CONTRACT_SRC" $((256 * 1024))
+validate_source_file "$PAYLOAD_SRC" $((128 * 1024)) "$PAYLOAD_BLOB_SHA"
+validate_source_file "$WRAPPER_SRC" $((16 * 1024)) "$WRAPPER_BLOB_SHA"
+validate_source_file "$CONTRACT_SRC" $((256 * 1024)) "$CONTRACT_BLOB_SHA"
 for path in /etc/skeleton /etc/skeleton/home-edge-01.env /etc/skeleton/home-edge-executor-controller.env; do
   if [[ -L "$path" || ! -e "$path" ]]; then
     printf 'BLOCKED: controller boundary metadata is unavailable\n' >&2
@@ -120,21 +131,26 @@ trap rollback EXIT
 mkdir -p "$STAGING_PARENT/install" "$STAGING_PARENT/exec"
 
 copy_stable_source() {
-  local source="$1" destination="$2" mode="$3" before after source_hash destination_hash
-  before="$(stat -Lc '%d:%i:%s:%Y' -- "$source")"
-  install -o root -g root -m "$mode" -- "$source" "$destination"
-  after="$(stat -Lc '%d:%i:%s:%Y' -- "$source")"
-  source_hash="$(sha256sum -- "$source" | awk '{print $1}')"
-  destination_hash="$(sha256sum -- "$destination" | awk '{print $1}')"
-  if [[ "$before" != "$after" || "$source_hash" != "$destination_hash" ]]; then
+  local source="$1" destination="$2" mode="$3" expected_blob="$4" before after staged_blob
+  before="$(stat -c '%d:%i:%s:%Y:%Z:%a:%u:%g' -- "$source")"
+  cp --no-dereference -- "$source" "$destination"
+  if [[ -L "$destination" || ! -f "$destination" ]]; then
+    printf 'BLOCKED: inert copy did not produce a regular file\n' >&2
+    exit 2
+  fi
+  chown root:root "$destination"
+  chmod "$mode" "$destination"
+  after="$(stat -c '%d:%i:%s:%Y:%Z:%a:%u:%g' -- "$source")"
+  staged_blob="$(reviewed_blob_sha "$destination")"
+  if [[ "$before" != "$after" || "$staged_blob" != "$expected_blob" ]]; then
     printf 'BLOCKED: reviewed signer source changed during inert copy\n' >&2
     exit 2
   fi
 }
 
-copy_stable_source "$PAYLOAD_SRC" "$STAGING_PARENT/install/signer_payload.py" 0555
-copy_stable_source "$CONTRACT_SRC" "$STAGING_PARENT/install/contract_source.py" 0444
-copy_stable_source "$WRAPPER_SRC" "$STAGING_PARENT/exec/signer" 0555
+copy_stable_source "$PAYLOAD_SRC" "$STAGING_PARENT/install/signer_payload.py" 0555 "$PAYLOAD_BLOB_SHA"
+copy_stable_source "$CONTRACT_SRC" "$STAGING_PARENT/install/contract_source.py" 0444 "$CONTRACT_BLOB_SHA"
+copy_stable_source "$WRAPPER_SRC" "$STAGING_PARENT/exec/signer" 0555 "$WRAPPER_BLOB_SHA"
 
 install -d -o root -g root -m 0755 "$(dirname "$INSTALL_ROOT")" "$(dirname "$EXEC_ROOT")"
 rm -rf "$INSTALL_ROOT.new" "$EXEC_ROOT.new"
@@ -154,6 +170,12 @@ for installed in "$INSTALL_ROOT.new/signer_payload.py" "$INSTALL_ROOT.new/contra
     exit 2
   fi
 done
+if [[ "$(reviewed_blob_sha "$INSTALL_ROOT.new/signer_payload.py")" != "$PAYLOAD_BLOB_SHA" \
+   || "$(reviewed_blob_sha "$INSTALL_ROOT.new/contract_source.py")" != "$CONTRACT_BLOB_SHA" \
+   || "$(reviewed_blob_sha "$EXEC_ROOT.new/signer")" != "$WRAPPER_BLOB_SHA" ]]; then
+  printf 'BLOCKED: immutable signer staging bytes changed\n' >&2
+  exit 2
+fi
 
 mv -T "$INSTALL_ROOT.new" "$INSTALL_ROOT"
 mv -T "$EXEC_ROOT.new" "$EXEC_ROOT"
