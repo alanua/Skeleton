@@ -33,15 +33,13 @@ def test_unregistered_action_fails_closed() -> None:
 def test_codegen_runtime_recovery_pins_and_verifies_exact_version(monkeypatch) -> None:
     calls: list[str] = []
 
-    def fake_recover(environment: dict[str, str]) -> bool:
+    def fake_recover(environment: dict[str, str]):
         assert maintenance.HOME_EDGE_EXEC_HMAC_SECRET_ENV not in environment
         calls.append("recover")
-        return True
+        return type("Result", (), {"success": True, "reason": "ready"})()
 
-    monkeypatch.setattr(maintenance, "ensure_pinned_codex_runtime", fake_recover)
-    monkeypatch.setattr(
-        maintenance, "pinned_codex_runtime_path", lambda _environment: "/canonical/npm/bin/codex"
-    )
+    monkeypatch.setattr(maintenance, "recover_pinned_codex_runtime", fake_recover)
+    monkeypatch.setattr(maintenance, "pinned_codex_runtime_path", lambda _environment: "/canonical/npm/bin/codex")
     monkeypatch.setattr(
         maintenance,
         "_run_fixed",
@@ -49,24 +47,57 @@ def test_codegen_runtime_recovery_pins_and_verifies_exact_version(monkeypatch) -
             argv, 0, f"codex-cli {maintenance.TARGET_CODEX_VERSION}\n", ""
         ),
     )
-
     report = maintenance._recover_codegen_runtime()
     assert report.startswith("DONE:")
     assert "reason=CODEX_RUNTIME_RECOVERED" in report
     assert calls == ["recover"]
 
 
-def test_codegen_runtime_recovery_fails_closed_on_unverified_version(monkeypatch) -> None:
-    monkeypatch.setattr(maintenance, "ensure_pinned_codex_runtime", lambda _environment: True)
+def test_codegen_runtime_recovery_surfaces_stable_phase_reason(monkeypatch) -> None:
     monkeypatch.setattr(
-        maintenance, "pinned_codex_runtime_path", lambda _environment: "/canonical/npm/bin/codex"
+        maintenance,
+        "recover_pinned_codex_runtime",
+        lambda _environment: type(
+            "Result", (), {"success": False, "reason": "npm_runtime_binary_missing"}
+        )(),
     )
+    report = maintenance._recover_codegen_runtime()
+    assert report.startswith("BLOCKED:")
+    assert "reason=CODEX_RUNTIME_RECOVERY_NPM_RUNTIME_BINARY_MISSING" in report
+    assert "/" not in report.split("reason=", 1)[1].splitlines()[0]
+
+
+def test_codegen_runtime_recovery_reports_provider_unavailable_success(monkeypatch) -> None:
+    monkeypatch.setattr(
+        maintenance,
+        "recover_pinned_codex_runtime",
+        lambda _environment: type(
+            "Result", (), {"success": True, "reason": "ready_provider_unavailable"}
+        )(),
+    )
+    monkeypatch.setattr(maintenance, "pinned_codex_runtime_path", lambda _environment: "/canonical/npm/bin/codex")
     monkeypatch.setattr(
         maintenance,
         "_run_fixed",
         lambda argv, *, timeout=60, cwd=None: subprocess.CompletedProcess(
-            argv, 0, "codex-cli 0.125.0\n", ""
+            argv, 0, f"codex-cli {maintenance.TARGET_CODEX_VERSION}\n", ""
         ),
+    )
+    report = maintenance._recover_codegen_runtime()
+    assert "reason=CODEX_RUNTIME_RECOVERED_PROVIDER_UNAVAILABLE" in report
+
+
+def test_codegen_runtime_recovery_fails_closed_on_unverified_version(monkeypatch) -> None:
+    monkeypatch.setattr(
+        maintenance,
+        "recover_pinned_codex_runtime",
+        lambda _environment: type("Result", (), {"success": True, "reason": "ready"})(),
+    )
+    monkeypatch.setattr(maintenance, "pinned_codex_runtime_path", lambda _environment: "/canonical/npm/bin/codex")
+    monkeypatch.setattr(
+        maintenance,
+        "_run_fixed",
+        lambda argv, *, timeout=60, cwd=None: subprocess.CompletedProcess(argv, 0, "codex-cli 0.125.0\n", ""),
     )
     report = maintenance._recover_codegen_runtime()
     assert report.startswith("BLOCKED:")
@@ -74,9 +105,7 @@ def test_codegen_runtime_recovery_fails_closed_on_unverified_version(monkeypatch
 
 
 def _install_pinned_canary(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        maintenance, "pinned_codex_runtime_path", lambda _environment: "/canonical/npm/bin/codex"
-    )
+    monkeypatch.setattr(maintenance, "pinned_codex_runtime_path", lambda _environment: "/canonical/npm/bin/codex")
 
 
 def test_codegen_canary_does_not_fallback_for_exact_model_metadata_decoder_failure(monkeypatch) -> None:
@@ -91,9 +120,7 @@ def test_codegen_canary_does_not_fallback_for_exact_model_metadata_decoder_failu
         if argv[:3] == ["git", "init", "-q"]:
             return subprocess.CompletedProcess(argv, 0, "", "")
         if argv[0] == "/canonical/npm/bin/codex":
-            return subprocess.CompletedProcess(
-                argv, 1, "", "failed to decode models response: unknown variant `max`"
-            )
+            return subprocess.CompletedProcess(argv, 1, "", "failed to decode models response: unknown variant `max`")
         raise AssertionError("metadata incompatibility must not fall back")
 
     monkeypatch.setattr(maintenance.shutil, "which", fake_which)
@@ -166,9 +193,7 @@ def test_codegen_canary_fails_closed_when_pinned_runtime_cannot_be_verified(monk
     assert "reason=CODEX_CANARY_RUNTIME_UNVERIFIED" in report
 
 
-def test_control_plane_recovery_wires_fixed_actions_without_hermes_substitution(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_control_plane_recovery_wires_fixed_actions_without_hermes_substitution(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     calls: list[str] = []
 
     class FakeRegisteredMaintenanceExecutor:
