@@ -15,6 +15,9 @@ CONTRACT_BLOB_SHA="75f76a2df425c269648f82a2659a9970cf8c6f12"
 COMMITTED=0
 BACKUP_DIR=""
 STAGING_PARENT=""
+HAD_INSTALL_ROOT=0
+HAD_EXEC_ROOT=0
+HAD_SUDOERS=0
 
 usage() {
   cat <<'EOF'
@@ -97,25 +100,51 @@ for path in /etc/skeleton /etc/skeleton/home-edge-01.env /etc/skeleton/home-edge
   fi
 done
 
+if [[ -L "$INSTALL_ROOT" || ( -e "$INSTALL_ROOT" && ! -d "$INSTALL_ROOT" ) ]]; then
+  printf 'BLOCKED: existing signer install root is unsafe\n' >&2
+  exit 2
+fi
+if [[ -L "$EXEC_ROOT" || ( -e "$EXEC_ROOT" && ! -d "$EXEC_ROOT" ) ]]; then
+  printf 'BLOCKED: existing signer executable root is unsafe\n' >&2
+  exit 2
+fi
+if [[ -L "$SUDOERS_PATH" || ( -e "$SUDOERS_PATH" && ! -f "$SUDOERS_PATH" ) ]]; then
+  printf 'BLOCKED: existing signer sudoers entry is unsafe\n' >&2
+  exit 2
+fi
+[[ -e "$INSTALL_ROOT" ]] && HAD_INSTALL_ROOT=1
+[[ -e "$EXEC_ROOT" ]] && HAD_EXEC_ROOT=1
+[[ -e "$SUDOERS_PATH" ]] && HAD_SUDOERS=1
+
 BACKUP_DIR="$(mktemp -d /tmp/skeleton-home-edge-snapshot-signer.XXXXXX)"
 STAGING_PARENT="$(mktemp -d /tmp/skeleton-home-edge-snapshot-signer-stage.XXXXXX)"
 rollback() {
   local rc=$?
   trap - EXIT
-  rm -rf "$STAGING_PARENT"
+  rm -rf "$STAGING_PARENT" "$INSTALL_ROOT.new" "$EXEC_ROOT.new"
   if [[ $COMMITTED -eq 0 ]]; then
-    if [[ -e "$BACKUP_DIR/install-root" ]]; then
+    if [[ $HAD_INSTALL_ROOT -eq 1 ]]; then
+      if [[ -e "$BACKUP_DIR/install-root" ]]; then
+        rm -rf "$INSTALL_ROOT"
+        mkdir -p "$(dirname "$INSTALL_ROOT")"
+        mv "$BACKUP_DIR/install-root" "$INSTALL_ROOT"
+      fi
+    else
       rm -rf "$INSTALL_ROOT"
-      mkdir -p "$(dirname "$INSTALL_ROOT")"
-      mv "$BACKUP_DIR/install-root" "$INSTALL_ROOT"
     fi
-    if [[ -e "$BACKUP_DIR/exec-root" ]]; then
+    if [[ $HAD_EXEC_ROOT -eq 1 ]]; then
+      if [[ -e "$BACKUP_DIR/exec-root" ]]; then
+        rm -rf "$EXEC_ROOT"
+        mkdir -p "$(dirname "$EXEC_ROOT")"
+        mv "$BACKUP_DIR/exec-root" "$EXEC_ROOT"
+      fi
+    else
       rm -rf "$EXEC_ROOT"
-      mkdir -p "$(dirname "$EXEC_ROOT")"
-      mv "$BACKUP_DIR/exec-root" "$EXEC_ROOT"
     fi
-    if [[ -e "$BACKUP_DIR/sudoers" ]]; then
-      install -o root -g root -m 0440 "$BACKUP_DIR/sudoers" "$SUDOERS_PATH"
+    if [[ $HAD_SUDOERS -eq 1 ]]; then
+      if [[ -e "$BACKUP_DIR/sudoers" ]]; then
+        install -o root -g root -m 0440 "$BACKUP_DIR/sudoers" "$SUDOERS_PATH"
+      fi
     else
       rm -f "$SUDOERS_PATH"
     fi
@@ -125,9 +154,9 @@ rollback() {
 }
 trap rollback EXIT
 
-[[ ! -e "$INSTALL_ROOT" ]] || cp -a "$INSTALL_ROOT" "$BACKUP_DIR/install-root"
-[[ ! -e "$EXEC_ROOT" ]] || cp -a "$EXEC_ROOT" "$BACKUP_DIR/exec-root"
-[[ ! -e "$SUDOERS_PATH" ]] || cp -a "$SUDOERS_PATH" "$BACKUP_DIR/sudoers"
+if [[ $HAD_INSTALL_ROOT -eq 1 ]]; then cp -a "$INSTALL_ROOT" "$BACKUP_DIR/install-root"; fi
+if [[ $HAD_EXEC_ROOT -eq 1 ]]; then cp -a "$EXEC_ROOT" "$BACKUP_DIR/exec-root"; fi
+if [[ $HAD_SUDOERS -eq 1 ]]; then cp -a "$SUDOERS_PATH" "$BACKUP_DIR/sudoers"; fi
 mkdir -p "$STAGING_PARENT/install" "$STAGING_PARENT/exec"
 
 copy_stable_source() {
