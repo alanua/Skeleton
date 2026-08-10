@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 REPO_ROOT="/home/agent/agent-dev/repos/Skeleton"
 RUNNER_USER="agent"
+RUNNER_SERVICE="skeleton-runner-poll.service"
 INSTALL_ROOT="/usr/local/lib/skeleton/home-edge/media-source-snapshot"
 EXEC_ROOT="/usr/local/libexec/skeleton/home-edge/media-source-snapshot"
 SUDOERS_PATH="/etc/sudoers.d/skeleton-home-edge-media-source-snapshot-signer"
@@ -55,6 +56,11 @@ if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
 fi
 if ! getent passwd "$RUNNER_USER" >/dev/null; then
   printf 'BLOCKED: canonical runner user is unavailable\n' >&2
+  exit 2
+fi
+actual_runner_user="$(/usr/bin/systemctl show --property=User --value "$RUNNER_SERVICE" 2>/dev/null || true)"
+if [[ "$actual_runner_user" != "$RUNNER_USER" ]]; then
+  printf 'BLOCKED: live Runner service user does not match canonical agent account\n' >&2
   exit 2
 fi
 
