@@ -281,7 +281,11 @@ def sign_snapshot_request(
 
 
 def _runner_hmac_override_allowed(*, environment: Mapping[str, str] | None = None) -> bool:
-    return bool(environment is not None and environment.get(TEST_RUNNER_HMAC_OVERRIDE_ENV) == "1")
+    return bool(
+        environment is not None
+        and environment.get(TEST_RUNNER_HMAC_OVERRIDE_ENV) == "1"
+        and environment.get(EXEC_HMAC_SECRET_ENV)
+    )
 
 
 def _sign_snapshot_request_with_installed_signer(unsigned: Mapping[str, Any]) -> HomeEdgeExecRequest:
