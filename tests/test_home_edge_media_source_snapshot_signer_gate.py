@@ -59,10 +59,19 @@ def test_test_sentinel_allows_bounded_direct_hmac_override() -> None:
     assert signed.signature == sign_request(signed, secret)
 
 
-@pytest.mark.parametrize("value", ["", "0", "true", "TRUE", "yes", "2"])
-def test_only_exact_test_sentinel_value_one_enables_override(value: str) -> None:
+def test_test_sentinel_without_explicit_synthetic_secret_cannot_enable_override() -> None:
     assert snapshot._runner_hmac_override_allowed(
-        environment={snapshot.TEST_RUNNER_HMAC_OVERRIDE_ENV: value}
+        environment={snapshot.TEST_RUNNER_HMAC_OVERRIDE_ENV: "1"}
+    ) is False
+
+
+@pytest.mark.parametrize("value", ["", "0", "true", "TRUE", "yes", "2"])
+def test_wrong_test_sentinel_value_cannot_enable_override_even_with_secret(value: str) -> None:
+    assert snapshot._runner_hmac_override_allowed(
+        environment={
+            snapshot.TEST_RUNNER_HMAC_OVERRIDE_ENV: value,
+            snapshot.EXEC_HMAC_SECRET_ENV: "synthetic-test-only-signing-secret",
+        }
     ) is False
 
 
