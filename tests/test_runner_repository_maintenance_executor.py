@@ -42,9 +42,9 @@ def test_codegen_runtime_recovery_pins_and_verifies_exact_version(monkeypatch) -
 
     monkeypatch.setattr(maintenance, "ensure_pinned_codex_runtime", fake_recover)
     monkeypatch.setattr(
-        maintenance.shutil,
-        "which",
-        lambda name, *, path=None: "/trusted/codex" if name == "codex" else None,
+        maintenance,
+        "pinned_codex_runtime_path",
+        lambda _environment: "/canonical/npm/bin/codex",
     )
     monkeypatch.setattr(
         maintenance,
@@ -67,9 +67,9 @@ def test_codegen_runtime_recovery_pins_and_verifies_exact_version(monkeypatch) -
 def test_codegen_runtime_recovery_fails_closed_on_unverified_version(monkeypatch) -> None:
     monkeypatch.setattr(maintenance, "ensure_pinned_codex_runtime", lambda _environment: True)
     monkeypatch.setattr(
-        maintenance.shutil,
-        "which",
-        lambda name, *, path=None: "/trusted/codex" if name == "codex" else None,
+        maintenance,
+        "pinned_codex_runtime_path",
+        lambda _environment: "/canonical/npm/bin/codex",
     )
     monkeypatch.setattr(
         maintenance,
