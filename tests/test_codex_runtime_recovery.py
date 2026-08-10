@@ -58,6 +58,8 @@ def _install_fake_runtime(tmp_path: Path, monkeypatch, *, smoke_stderr: str = ""
             installed["version"] = version
             return _completed(argv, 0)
         if argv[:2] == ["/fake/bin/codex", "exec"]:
+            assert "--skip-git-repo-check" in argv
+            assert argv.index("--skip-git-repo-check") > argv.index("exec")
             if smoke_stderr:
                 return _completed(argv, 1, stderr=smoke_stderr)
             return _completed(argv, 0, "RESULT: OK\n")
