@@ -39,11 +39,17 @@ _MARKERS = (
     "service unavailable",
     "try again at",
 )
+_MODEL_METADATA_COMPATIBILITY_MARKER = "failed to decode models response: unknown variant `max`"
 
 
 def _quota_or_provider_outage(text: str) -> bool:
     lowered = text.lower()
     return any(marker in lowered for marker in _MARKERS)
+
+
+def _fallback_allowed(text: str) -> bool:
+    lowered = text.lower()
+    return _quota_or_provider_outage(lowered) or _MODEL_METADATA_COMPATIBILITY_MARKER in lowered
 
 
 def _workdir(argv: list[str]) -> str:
@@ -91,7 +97,7 @@ def main() -> int:
         return 0
 
     combined = f"{codex.stdout}\n{codex.stderr}"
-    if not _quota_or_provider_outage(combined) or not openhands or not Path(openhands).is_file():
+    if not _fallback_allowed(combined) or not openhands or not Path(openhands).is_file():
         sys.stdout.write(codex.stdout)
         sys.stderr.write(codex.stderr)
         return codex.returncode
