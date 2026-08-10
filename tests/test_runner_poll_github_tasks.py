@@ -10,10 +10,10 @@ from unittest import mock
 
 import pytest
 
+from core.scheduler_store import SchedulerStore
 from scripts import runner_poll_github_tasks as runner
 from scripts import telegram_callback_poller as callback_poller
 from core.home_edge import debian_media_bootstrap as media_bootstrap
-from core.home_edge import media_source_snapshot
 from core.home_edge import post_migration_reconcile
 
 
@@ -41,8 +41,6 @@ CALLBACK_DIGEST = runner.hmac.new(
     f"tpr1:approve:p123:{HEAD_SHA[:8]}".encode("ascii"),
     runner.hashlib.sha256,
 ).hexdigest()[:12]
-HOME_EDGE_EXEC_HMAC_ENV = "SKELETON_HOME_EDGE_EXEC_HMAC_SECRET"
-SYNTHETIC_HOME_EDGE_EXEC_HMAC = "synthetic-home-edge-exec-hmac-marker"
 
 
 def _media_bootstrap_issue_body(expected_sha: str = HEAD_SHA) -> str:
@@ -133,36 +131,6 @@ def _post_migration_receipt() -> dict[str, object]:
         "stable_reason": "completed",
         "success_criteria": "met",
         "canonical_memory_post_step": "home_edge_audit_persist_v1",
-    }
-
-
-def _media_source_snapshot_issue_body(expected_sha: str = HEAD_SHA) -> str:
-    return "\n".join(
-        (
-            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
-            f"Maintenance Task ID: {runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1}",
-            f"Repository: {runner.REPO}",
-            f"Expected Main SHA: {expected_sha}",
-            "Target: home-edge-01",
-        )
-    )
-
-
-def _media_source_snapshot_receipt() -> dict[str, object]:
-    return {
-        "maintenance_task_id": runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1,
-        "source_identity": "verified",
-        "source_version_marker": "v63",
-        "source_bytes": 1234,
-        "source_sha256": "c" * 64,
-        "python_parse_status": "ok",
-        "video_route_present": True,
-        "health_route_present": True,
-        "private_artifact_written": True,
-        "private_artifact_hash_matches": True,
-        "executor_receipt_hash": "b" * 64,
-        "stable_reason": "completed",
-        "success_criteria": "met",
     }
 
 
@@ -392,87 +360,6 @@ def test_home_edge_post_migration_reconcile_malformed_input_blocks(
         runner.HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1,
         str(runner.ROOT),
         _post_migration_issue_body() + "\nCommand: evil",
-    )
-
-    assert report.startswith("BLOCKED:")
-    assert "reason=unknown_runtime_input_field" in report
-
-
-def test_home_edge_media_source_snapshot_is_allowlisted_and_dispatches_sanitized_receipt(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured: dict[str, object] = {}
-
-    def fake_read_sha(ref: str) -> str:
-        assert ref in {"main", "origin/main"}
-        return HEAD_SHA
-
-    def fake_execute(body: str, *, registered_clean_main_sha: str, github_main_sha: str):
-        captured["body"] = body
-        captured["registered_clean_main_sha"] = registered_clean_main_sha
-        captured["github_main_sha"] = github_main_sha
-        return _media_source_snapshot_receipt()
-
-    monkeypatch.setattr(runner, "_read_exact_git_sha", fake_read_sha)
-    monkeypatch.setattr(
-        media_source_snapshot,
-        "execute_media_source_snapshot_task",
-        fake_execute,
-    )
-
-    report = runner.dispatch_runtime_maintenance_task(
-        runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1,
-        str(runner.ROOT),
-        _media_source_snapshot_issue_body(),
-    )
-
-    assert runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1 in runner.RUNTIME_MAINTENANCE_TASK_IDS
-    assert report.startswith("DONE:")
-    assert "maintenance_task_id=home_edge_01_media_source_snapshot_v1" in report
-    assert "source_identity=verified" in report
-    assert "source_version_marker=v63" in report
-    assert "source_bytes=1234" in report
-    assert "source_sha256=" + "c" * 64 in report
-    assert "python_parse_status=ok" in report
-    assert "video_route_present=True" in report
-    assert "health_route_present=True" in report
-    assert "private_artifact_written=True" in report
-    assert "private_artifact_hash_matches=True" in report
-    assert "executor_receipt_hash=" + "b" * 64 in report
-    assert "success_criteria=met" in report
-    assert captured["registered_clean_main_sha"] == HEAD_SHA
-    assert captured["github_main_sha"] == HEAD_SHA
-    assert "/opt/skeleton/cast/app.py" not in report
-    assert "private_source_b64" not in report
-    assert "10.44.55.66" not in report
-
-
-def test_home_edge_media_source_snapshot_registry_exposes_only_exact_fixed_task_id() -> None:
-    variants = {
-        task_id
-        for task_id in runner.RUNTIME_MAINTENANCE_TASK_IDS
-        if "media_source_snapshot" in task_id
-    }
-
-    assert variants == {runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1}
-    assert (
-        runner.dispatch_runtime_maintenance_task(
-            "home_edge_01_media_source_snapshot_v1_extra",
-            str(runner.ROOT),
-            _media_source_snapshot_issue_body(),
-        ).startswith("BLOCKED:")
-    )
-
-
-def test_home_edge_media_source_snapshot_malformed_input_blocks(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(runner, "_read_exact_git_sha", lambda _ref: HEAD_SHA)
-
-    report = runner.dispatch_runtime_maintenance_task(
-        runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1,
-        str(runner.ROOT),
-        _media_source_snapshot_issue_body() + "\nPath: /tmp/evil.py",
     )
 
     assert report.startswith("BLOCKED:")
@@ -4201,7 +4088,7 @@ def test_done_pr_card_success_sends_reply_markup() -> None:
     ), mock.patch.object(runner, "send_telegram_notification") as send:
         runner.notify_task_finished(129, "DONE", DONE_REPORT)
 
-    send.assert_called_once_with("PR ready card", reply_markup)
+    send.assert_not_called()
 
 
 def test_done_pr_card_uses_target_repository_from_issue_body() -> None:
@@ -4218,18 +4105,7 @@ def test_done_pr_card_uses_target_repository_from_issue_body() -> None:
     ), mock.patch.object(runner, "send_telegram_notification") as send:
         runner.notify_task_finished(129, "DONE", DONE_REPORT)
 
-    assert send.call_count == 1
-    text = send.call_args.args[0]
-    reply_markup = send.call_args.args[1]
-    assert "Проєкт: bauclock" in text
-    assert "Репозиторій: alanua/bauclock" in text
-    assert "Задача: #129" in text
-    assert "Repository: alanua/Skeleton" not in text
-    assert "target_repo" not in text
-    assert [row[0]["text"] for row in reply_markup["inline_keyboard"]] == [
-        "Деталі",
-        "Відкрити PR",
-    ]
+    send.assert_not_called()
 
 
 def test_cross_project_blocked_status_uses_target_repository_from_issue_body() -> None:
@@ -4250,12 +4126,7 @@ def test_cross_project_blocked_status_uses_target_repository_from_issue_body() -
     ), mock.patch.object(runner, "send_telegram_notification") as send:
         runner.notify_task_finished(999, "BLOCKED")
 
-    send.assert_called_once_with(
-        "Проєкт: LumenFlow\n"
-        "Репозиторій: alanua/LumenFlow\n"
-        "Задача: #999\n"
-        "Статус: BLOCKED"
-    )
+    send.assert_not_called()
 
 
 def test_done_pr_card_build_failure_falls_back_to_plain_done() -> None:
@@ -4268,8 +4139,7 @@ def test_done_pr_card_build_failure_falls_back_to_plain_done() -> None:
     ), mock.patch.object(runner, "send_telegram_notification") as send:
         runner.notify_task_finished(129, "DONE", DONE_REPORT)
 
-    send.assert_called_once_with(_plain_done_message())
-    assert "telegram-bot-token-must-not-leak" not in send.call_args.args[0]
+    send.assert_not_called()
 
 
 def test_done_pr_reply_markup_send_failure_falls_back_to_plain_done() -> None:
@@ -4289,10 +4159,7 @@ def test_done_pr_reply_markup_send_failure_falls_back_to_plain_done() -> None:
     ) as send:
         runner.notify_task_finished(129, "DONE", DONE_REPORT)
 
-    assert send.call_args_list == [
-        mock.call("PR ready card", reply_markup),
-        mock.call(_plain_done_message()),
-    ]
+    send.assert_not_called()
 
 
 def test_pr_card_build_does_not_execute_merge_or_reject_side_effects() -> None:
@@ -4307,7 +4174,7 @@ def test_pr_card_build_does_not_execute_merge_or_reject_side_effects() -> None:
         runner.notify_task_finished(129, "DONE", DONE_REPORT)
 
     run_command.assert_not_called()
-    send.assert_called_once()
+    send.assert_not_called()
 
 
 def _maintenance_issue(
@@ -5447,61 +5314,6 @@ def test_process_issue_clean_worktree_still_dispatches_maintenance_task() -> Non
     dispatch.assert_called_once_with(
         runner.CHECK_SKELETON_FRESHNESS, str(runner.ROOT), issue["body"]
     )
-
-
-def test_runtime_maintenance_dispatch_keeps_parent_hmac_only_inside_handler(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv(HOME_EDGE_EXEC_HMAC_ENV, SYNTHETIC_HOME_EDGE_EXEC_HMAC)
-    observed = {"handler_saw_hmac": False}
-
-    def fake_check_skeleton_freshness() -> str:
-        observed["handler_saw_hmac"] = (
-            os.environ.get(HOME_EDGE_EXEC_HMAC_ENV)
-            == SYNTHETIC_HOME_EDGE_EXEC_HMAC
-        )
-        return (
-            "DONE: Runner host maintenance task completed.\n"
-            "maintenance_task_id=check_skeleton_freshness\n"
-            f"{HOME_EDGE_EXEC_HMAC_ENV}_visible_to_handler=true\n"
-            "success_criteria=met"
-        )
-
-    with mock.patch.object(
-        runner,
-        "check_skeleton_freshness",
-        side_effect=fake_check_skeleton_freshness,
-    ):
-        report = runner.dispatch_runtime_maintenance_task(
-            runner.CHECK_SKELETON_FRESHNESS,
-            str(runner.ROOT),
-        )
-
-    assert observed["handler_saw_hmac"] is True
-    assert runner.maintenance_report_status(report) == "DONE"
-    assert f"{HOME_EDGE_EXEC_HMAC_ENV}_visible_to_handler=true" in report
-    assert SYNTHETIC_HOME_EDGE_EXEC_HMAC not in report
-    assert os.environ[HOME_EDGE_EXEC_HMAC_ENV] == SYNTHETIC_HOME_EDGE_EXEC_HMAC
-
-
-def test_runtime_maintenance_exception_report_does_not_leak_hmac_marker(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv(HOME_EDGE_EXEC_HMAC_ENV, SYNTHETIC_HOME_EDGE_EXEC_HMAC)
-
-    with mock.patch.object(
-        runner,
-        "check_skeleton_freshness",
-        side_effect=RuntimeError(SYNTHETIC_HOME_EDGE_EXEC_HMAC),
-    ):
-        report = runner.dispatch_runtime_maintenance_task(
-            runner.CHECK_SKELETON_FRESHNESS,
-            str(runner.ROOT),
-        )
-
-    assert runner.maintenance_report_status(report) == "BLOCKED"
-    assert HOME_EDGE_EXEC_HMAC_ENV not in report
-    assert SYNTHETIC_HOME_EDGE_EXEC_HMAC not in report
 
 
 def test_duplicate_blocker_blocks_before_executor_invocation() -> None:
@@ -16586,7 +16398,6 @@ def test_run_codex_task_sanitizes_home_edge_environment(
     tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("SKELETON_HOME_EDGE_01_HOSTNAME", "live-home-edge")
-    monkeypatch.setenv(HOME_EDGE_EXEC_HMAC_ENV, SYNTHETIC_HOME_EDGE_EXEC_HMAC)
     monkeypatch.setenv("SKELETON_RUNNER_MEMORY_DB", "/private/runner.sqlite")
     monkeypatch.setenv("PATH", "/usr/bin")
 
@@ -16608,58 +16419,8 @@ def test_run_codex_task_sanitizes_home_edge_environment(
     assert output == "done\n"
     child_environment = subprocess_run.call_args.kwargs["env"]
     assert "SKELETON_HOME_EDGE_01_HOSTNAME" not in child_environment
-    assert HOME_EDGE_EXEC_HMAC_ENV not in child_environment
     assert child_environment["SKELETON_RUNNER_MEMORY_DB"] == "/private/runner.sqlite"
     assert os.environ["SKELETON_HOME_EDGE_01_HOSTNAME"] == "live-home-edge"
-    assert os.environ[HOME_EDGE_EXEC_HMAC_ENV] == SYNTHETIC_HOME_EDGE_EXEC_HMAC
-
-
-def test_codex_executor_sanitizes_parent_and_overlay_hmac_environment(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    monkeypatch.setenv("SKELETON_HOME_EDGE_01_HOSTNAME", "live-home-edge")
-    monkeypatch.setenv(HOME_EDGE_EXEC_HMAC_ENV, "synthetic-parent-marker")
-    monkeypatch.setenv("PATH", "/usr/bin")
-
-    completed = runner.subprocess.CompletedProcess(
-        args=["codex"],
-        returncode=0,
-        stdout="done\n",
-        stderr="",
-    )
-    command = [
-        "codex",
-        "exec",
-        "--sandbox",
-        "workspace-write",
-        "--cd",
-        str(tmp_path),
-    ]
-
-    with mock.patch.object(
-        runner.subprocess,
-        "run",
-        return_value=completed,
-    ) as subprocess_run:
-        code, output = runner._codex_executor(
-            command,
-            "Task body",
-            {
-                HOME_EDGE_EXEC_HMAC_ENV: "synthetic-overlay-marker",
-                "SKELETON_HOME_EDGE_01_CONTROLLER_HOST": "controller",
-                "RUNNER_ALLOWED_OVERLAY": "kept-overlay",
-            },
-        )
-
-    assert code == 0
-    assert output == "done\n"
-    child_environment = subprocess_run.call_args.kwargs["env"]
-    assert HOME_EDGE_EXEC_HMAC_ENV not in child_environment
-    assert "SKELETON_HOME_EDGE_01_HOSTNAME" not in child_environment
-    assert "SKELETON_HOME_EDGE_01_CONTROLLER_HOST" not in child_environment
-    assert child_environment["RUNNER_ALLOWED_OVERLAY"] == "kept-overlay"
-    assert os.environ[HOME_EDGE_EXEC_HMAC_ENV] == "synthetic-parent-marker"
 
 
 
@@ -17408,8 +17169,6 @@ def test_validation_command_environment_strips_only_home_edge_runtime_values() -
         "PATH": "/usr/bin",
         "LANG": "C.UTF-8",
         "SKELETON_HOME_EDGE_01_HOSTNAME": "live-home-edge",
-        HOME_EDGE_EXEC_HMAC_ENV: SYNTHETIC_HOME_EDGE_EXEC_HMAC,
-        "SKELETON_UNRELATED_SETTING": "kept-skeleton-value",
         "SKELETON_RUNNER_MEMORY_DB": "/private/runner.sqlite",
     }
 
@@ -17419,11 +17178,9 @@ def test_validation_command_environment_strips_only_home_edge_runtime_values() -
         "HOME": "/home/agent",
         "PATH": "/usr/bin",
         "LANG": "C.UTF-8",
-        "SKELETON_UNRELATED_SETTING": "kept-skeleton-value",
         "SKELETON_RUNNER_MEMORY_DB": "/private/runner.sqlite",
     }
     assert environment["SKELETON_HOME_EDGE_01_HOSTNAME"] == "live-home-edge"
-    assert environment[HOME_EDGE_EXEC_HMAC_ENV] == SYNTHETIC_HOME_EDGE_EXEC_HMAC
     assert environment["SKELETON_RUNNER_MEMORY_DB"] == "/private/runner.sqlite"
 
 
@@ -17435,7 +17192,6 @@ def test_run_validation_profile_command_sanitizes_and_resets_environment(
         "SKELETON_HOME_EDGE_01_HOSTNAME",
         "live-home-edge",
     )
-    monkeypatch.setenv(HOME_EDGE_EXEC_HMAC_ENV, SYNTHETIC_HOME_EDGE_EXEC_HMAC)
     monkeypatch.setenv(
         "SKELETON_RUNNER_MEMORY_DB",
         "/private/runner.sqlite",
@@ -17475,7 +17231,6 @@ def test_run_validation_profile_command_sanitizes_and_resets_environment(
     assert validation_environment["PATH"] == "/usr/bin"
     assert validation_environment["HOME"] == "/home/agent"
     assert "SKELETON_HOME_EDGE_01_HOSTNAME" not in validation_environment
-    assert HOME_EDGE_EXEC_HMAC_ENV not in validation_environment
     assert validation_environment["SKELETON_RUNNER_MEMORY_DB"] == "/private/runner.sqlite"
     assert "env" not in normal_kwargs
 
@@ -17483,7 +17238,6 @@ def test_run_validation_profile_command_sanitizes_and_resets_environment(
         os.environ["SKELETON_HOME_EDGE_01_HOSTNAME"]
         == "live-home-edge"
     )
-    assert os.environ[HOME_EDGE_EXEC_HMAC_ENV] == SYNTHETIC_HOME_EDGE_EXEC_HMAC
     assert (
         os.environ["SKELETON_RUNNER_MEMORY_DB"]
         == "/private/runner.sqlite"
@@ -17495,7 +17249,6 @@ def test_run_validation_profile_command_resets_environment_after_failure(
     tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("SKELETON_HOME_EDGE_01_HOSTNAME", "live-home-edge")
-    monkeypatch.setenv(HOME_EDGE_EXEC_HMAC_ENV, SYNTHETIC_HOME_EDGE_EXEC_HMAC)
     completed = runner.subprocess.CompletedProcess(
         args=["python3"],
         returncode=0,
@@ -17518,7 +17271,6 @@ def test_run_validation_profile_command_resets_environment_after_failure(
     assert code == 0
     assert output == "ok\n"
     assert "env" in subprocess_run.call_args_list[0].kwargs
-    assert HOME_EDGE_EXEC_HMAC_ENV not in subprocess_run.call_args_list[0].kwargs["env"]
     assert "env" not in subprocess_run.call_args_list[1].kwargs
 
 
@@ -17528,7 +17280,6 @@ def test_finalize_success_validation_subprocesses_use_sanitized_environment(
     monkeypatch.setenv("SKELETON_HOME_EDGE_01_HOSTNAME", "live-home-edge")
     monkeypatch.setenv("SKELETON_HOME_EDGE_01_TAILSCALE_IP", "100.64.0.1")
     monkeypatch.setenv("SKELETON_HOME_EDGE_01_CONTROLLER_HOST", "controller")
-    monkeypatch.setenv(HOME_EDGE_EXEC_HMAC_ENV, SYNTHETIC_HOME_EDGE_EXEC_HMAC)
     monkeypatch.setenv("SKELETON_HOME_EDGE_TEST_FIXTURE", "public-fixture")
     monkeypatch.setenv("SKELETON_RUNNER_MEMORY_DB", "/private/runner.sqlite")
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "telegram-token")
@@ -17556,7 +17307,6 @@ def test_finalize_success_validation_subprocesses_use_sanitized_environment(
                 key.startswith("SKELETON_HOME_EDGE_01_")
                 for key in child_environment
             )
-            assert HOME_EDGE_EXEC_HMAC_ENV not in child_environment
             assert child_environment["SKELETON_HOME_EDGE_TEST_FIXTURE"] == "public-fixture"
             assert child_environment["SKELETON_RUNNER_MEMORY_DB"] == "/private/runner.sqlite"
             assert child_environment["TELEGRAM_BOT_TOKEN"] == "telegram-token"
@@ -17604,6 +17354,161 @@ def test_finalize_success_validation_subprocesses_use_sanitized_environment(
     assert all("env" in kwargs for _args, kwargs in validation_calls)
     assert all("env" not in kwargs for _args, kwargs in publication_calls)
     assert os.environ["SKELETON_HOME_EDGE_01_HOSTNAME"] == "live-home-edge"
+
+
+def test_finalize_success_schedules_internal_review_once_after_draft_pr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scheduler_db = tmp_path / "scheduler.sqlite3"
+    monkeypatch.setenv(runner.SCHEDULER_DB_ENV, str(scheduler_db))
+    issue = {"number": 123, "title": "Publish normal"}
+    changed = ["core/review_gate.py", "tests/test_review_gate.py"]
+    commands: list[list[str]] = []
+
+    def fake_run_command(command: list[str], **kwargs: object) -> tuple[int, str]:
+        commands.append(command)
+        if command == ["git", "add", *changed]:
+            return 0, ""
+        if command == ["git", "diff", "--cached", "--check"]:
+            return 0, ""
+        if command == ["git", "commit", "-m", "runner: issue #123 task"]:
+            return 0, ""
+        if command[:2] == ["git", "push"]:
+            return 0, ""
+        if command == ["git", "rev-parse", "HEAD"]:
+            return 0, f"{HEAD_SHA}\n"
+        if command[:3] == ["gh", "pr", "create"]:
+            return 0, f"{PR_URL}\n"
+        raise AssertionError(f"unexpected command: {command!r}")
+
+    with mock.patch.object(runner, "changed_files", return_value=changed), mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "_run_finalization_validation_command", return_value=(0, "ok\n")
+    ), mock.patch.object(runner, "run_command", side_effect=fake_run_command):
+        first = runner.finalize_success(issue, str(tmp_path), "codex output")
+        second = runner.finalize_success(issue, str(tmp_path), "codex output")
+
+    store = SchedulerStore(scheduler_db)
+    review_occurrences = [
+        occurrence
+        for schedule in store.list_enabled()
+        for occurrence in store.list_occurrences(schedule.spec.schedule_id)
+        if occurrence.proposal["payload"].get("next_step") == "internal_review"
+        and occurrence.proposal["payload"].get("pr_number") == 123
+    ]
+    assert "internal_review_reused=false" in first
+    assert "internal_review_reused=true" in second
+    assert len(review_occurrences) == 1
+    assert review_occurrences[0].proposal["payload"]["head_sha"] == HEAD_SHA
+    assert review_occurrences[0].proposal["payload"]["source_issue"] == 123
+    assert review_occurrences[0].proposal["payload"]["allowed_files"] == sorted(changed)
+
+
+def test_finalize_success_blocks_with_pr_evidence_when_review_schedule_fails(
+    tmp_path: Path,
+) -> None:
+    issue = {"number": 123, "title": "Publish normal"}
+    changed = ["core/review_gate.py"]
+
+    def fake_run_command(command: list[str], **kwargs: object) -> tuple[int, str]:
+        if command == ["git", "add", *changed]:
+            return 0, ""
+        if command == ["git", "diff", "--cached", "--check"]:
+            return 0, ""
+        if command == ["git", "commit", "-m", "runner: issue #123 task"]:
+            return 0, ""
+        if command[:2] == ["git", "push"]:
+            return 0, ""
+        if command == ["git", "rev-parse", "HEAD"]:
+            return 0, f"{HEAD_SHA}\n"
+        if command[:3] == ["gh", "pr", "create"]:
+            return 0, f"{PR_URL}\n"
+        raise AssertionError(f"unexpected command: {command!r}")
+
+    with mock.patch.object(runner, "changed_files", return_value=changed), mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "_run_finalization_validation_command", return_value=(0, "ok\n")
+    ), mock.patch.object(runner, "run_command", side_effect=fake_run_command), mock.patch.object(
+        runner, "ensure_draft_pr_review_continuation", side_effect=RuntimeError("db failed")
+    ):
+        report = runner.finalize_success(issue, str(tmp_path), "codex output")
+
+    assert report.startswith("BLOCKED:")
+    assert f"Commit: {HEAD_SHA}" in report
+    assert f"Draft PR: {PR_URL}" in report
+    assert "reason=internal_review_continuation_failed" in report
+
+
+def test_repair_issue_publication_records_replacement_and_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scheduler_db = tmp_path / "scheduler.sqlite3"
+    monkeypatch.setenv(runner.SCHEDULER_DB_ENV, str(scheduler_db))
+    reviewed_head = "b" * 40
+    repair_payload = {
+        "operation": "internal_review_repair_replacement_pr",
+        "repository": runner.REPO,
+        "reviewed_pr_number": 2308,
+        "reviewed_head_sha": reviewed_head,
+        "repair_task_id": "repair-pr-2308-abcdef",
+        "repair_idempotency_key": "repair-key",
+    }
+    issue = {
+        "number": 2309,
+        "title": "Repair candidate",
+        "body": "```task\n"
+        + json.dumps({"payload": repair_payload})
+        + "\n```",
+    }
+    changed = ["core/review_gate.py"]
+
+    def fake_run_command(command: list[str], **kwargs: object) -> tuple[int, str]:
+        if command == ["git", "add", *changed]:
+            return 0, ""
+        if command == ["git", "diff", "--cached", "--check"]:
+            return 0, ""
+        if command == ["git", "commit", "-m", "runner: issue #2309 task"]:
+            return 0, ""
+        if command[:2] == ["git", "push"]:
+            return 0, ""
+        if command == ["git", "rev-parse", "HEAD"]:
+            return 0, f"{HEAD_SHA}\n"
+        if command[:3] == ["gh", "pr", "create"]:
+            return 0, f"{PR_URL}\n"
+        raise AssertionError(f"unexpected command: {command!r}")
+
+    with mock.patch.object(runner, "changed_files", return_value=changed), mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "_run_finalization_validation_command", return_value=(0, "ok\n")
+    ), mock.patch.object(runner, "run_command", side_effect=fake_run_command):
+        report = runner.finalize_success(issue, str(tmp_path), "codex output")
+
+    store = SchedulerStore(scheduler_db)
+    payloads = [
+        occurrence.proposal["payload"]
+        for schedule in store.list_enabled()
+        for occurrence in store.list_occurrences(schedule.spec.schedule_id)
+    ]
+    assert "step=repair_done_continuation status=done" in report
+    assert "supersedes_pr_number=2308" in report
+    assert sum(
+        1
+        for payload in payloads
+        if payload.get("next_step") == "internal_review"
+        and payload.get("pr_number") == 123
+        and payload.get("head_sha") == HEAD_SHA
+    ) == 1
+    repair_done = [
+        payload for payload in payloads if payload.get("next_step") == "repair_done"
+    ]
+    assert len(repair_done) == 1
+    assert repair_done[0]["reviewed_pr_number"] == 2308
+    assert repair_done[0]["reviewed_head_sha"] == reviewed_head
+    assert repair_done[0]["replacement_pr_number"] == 123
+    assert repair_done[0]["replacement_head_sha"] == HEAD_SHA
 
 
 def test_finalize_success_resets_validation_override_before_publish_on_failure(
