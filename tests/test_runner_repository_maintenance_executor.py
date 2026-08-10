@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 import subprocess
 
 import pytest
@@ -10,6 +11,7 @@ from core.runner_repository_maintenance_executor import (
     RegisteredMaintenanceExecutor,
     registered_maintenance_task_id,
 )
+from scripts import runner_poll_github_tasks as runner
 
 
 def test_registered_executor_maps_only_fixed_actions() -> None:
@@ -81,3 +83,46 @@ def test_codegen_canary_does_not_fallback_for_unrelated_codex_failure(monkeypatc
 
     assert "reason=CODEX_CANARY_FAILED" in report
     assert not any(argv[0] == "/trusted/openhands" for argv in calls)
+
+
+def test_control_plane_recovery_wires_fixed_actions_without_hermes_substitution(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[str] = []
+
+    class FakeRegisteredMaintenanceExecutor:
+        def __init__(self, dispatch, workdir: str) -> None:
+            self.dispatch = dispatch
+            self.workdir = workdir
+
+        def run(self, action_id: str, body: str = "") -> str:
+            calls.append(action_id)
+            return (
+                "DONE: Runner host maintenance task completed.\n"
+                f"maintenance_task_id={action_id}\n"
+                "success_criteria=met"
+            )
+
+    monkeypatch.setattr(runner, "ROOT", tmp_path)
+    monkeypatch.setattr(runner, "RegisteredMaintenanceExecutor", FakeRegisteredMaintenanceExecutor)
+
+    body = "\n".join(
+        (
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {runner.CONTROL_PLANE_SELF_HEALING_RECOVERY}",
+            "Failure Class: CODEGEN_RUNTIME_UNHEALTHY",
+            "Failure Key: control:codex-lane",
+        )
+    )
+
+    report = runner.control_plane_self_healing_recovery(body, str(tmp_path))
+
+    assert report.startswith("DONE:")
+    assert "status=RECOVERED" in report
+    assert "telegram_notifications=0" in report
+    assert calls == [
+        "executor_service_preflight",
+        "codegen_read_only_canary",
+        "queue_reactivate",
+    ]
+    assert runner.HERMES_WORKER_PREFLIGHT not in calls
