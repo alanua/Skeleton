@@ -28,11 +28,9 @@ from pathlib import Path
 import subprocess
 import sys
 
-_QUOTA_MARKERS = (
+_FALLBACK_MARKERS = (
     "you've hit your usage limit",
-    "usage limit",
     "insufficient_quota",
-    "rate limit",
     "service unavailable",
     "temporarily unavailable",
 )
@@ -68,7 +66,7 @@ def main() -> int:
         return 0
 
     combined = (codex.stdout + "\n" + codex.stderr).lower()
-    may_fallback = bool(openhands) and any(marker in combined for marker in _QUOTA_MARKERS)
+    may_fallback = bool(openhands) and any(marker in combined for marker in _FALLBACK_MARKERS)
     if not may_fallback:
         sys.stdout.write(codex.stdout)
         sys.stderr.write(codex.stderr)
