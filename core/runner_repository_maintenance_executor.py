@@ -8,8 +8,6 @@ import shutil
 import subprocess
 import tempfile
 
-from core.runner_child_environment import sanitize_codegen_child_environment
-
 
 REGISTERED_ACTION_CHECK_SKELETON_FRESHNESS = "check_skeleton_freshness"
 REGISTERED_ACTION_RECOVER_SKELETON_CHECKOUT = "recover_skeleton_checkout"
@@ -17,6 +15,8 @@ REGISTERED_ACTION_REPLENISH_RUNNER_QUEUE = "replenish_runner_queue"
 
 RUNNER_SERVICE = "skeleton-runner-poll.service"
 RUNNER_TIMER = "skeleton-runner-poll.timer"
+HOME_EDGE_ENV_PREFIX = "SKELETON_HOME_EDGE_01_"
+HOME_EDGE_EXEC_HMAC_SECRET_ENV = "SKELETON_HOME_EDGE_EXEC_HMAC_SECRET"
 _FIXED_LOCAL_ACTIONS = frozenset(
     {
         "long_lived_poller_reload",
@@ -46,11 +46,19 @@ def _report(status: str, action_id: str, reason: str) -> str:
     )
 
 
+def _safe_child_environment() -> dict[str, str]:
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(HOME_EDGE_ENV_PREFIX) and key != HOME_EDGE_EXEC_HMAC_SECRET_ENV
+    }
+
+
 def _run_fixed(argv: list[str], *, timeout: int = 60, cwd: str | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         argv,
         cwd=cwd,
-        env=sanitize_codegen_child_environment(dict(os.environ)),
+        env=_safe_child_environment(),
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -62,6 +70,7 @@ def _run_fixed(argv: list[str], *, timeout: int = 60, cwd: str | None = None) ->
 def _recover_runner_timer() -> str:
     for argv in (
         ["systemctl", "--user", "daemon-reload"],
+        ["systemctl", "--user", "reset-failed", RUNNER_SERVICE],
         ["systemctl", "--user", "start", RUNNER_TIMER],
         ["systemctl", "--user", "is-active", "--quiet", RUNNER_TIMER],
     ):
@@ -72,15 +81,13 @@ def _recover_runner_timer() -> str:
 
 
 def _recover_executor_service() -> str:
-    timer = _run_fixed(["systemctl", "--user", "is-active", "--quiet", RUNNER_TIMER])
-    if timer.returncode != 0:
-        timer_report = _recover_runner_timer()
-        if not timer_report.startswith("DONE:"):
-            return _report("BLOCKED", "executor_service_preflight", "RUNNER_TIMER_NOT_ACTIVE")
-    result = _run_fixed(["systemctl", "--user", "start", RUNNER_SERVICE])
-    if result.returncode not in (0, 1):
-        return _report("BLOCKED", "executor_service_preflight", "RUNNER_SERVICE_START_FAILED")
-    return _report("DONE", "executor_service_preflight", "RUNNER_SERVICE_TRIGGERED")
+    # The recovery action executes inside the canonical Runner process. Starting the
+    # same oneshot service recursively can deadlock systemd. Reset its failed state
+    # and restore the canonical timer; the timer owns the next service activation.
+    report = _recover_runner_timer()
+    if not report.startswith("DONE:"):
+        return _report("BLOCKED", "executor_service_preflight", "RUNNER_EXECUTOR_RECOVERY_FAILED")
+    return _report("DONE", "executor_service_preflight", "RUNNER_EXECUTOR_REARMED_BY_TIMER")
 
 
 def _quota_or_provider_outage(text: str) -> bool:
