@@ -2,20 +2,32 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+
+from core.runner_child_environment import sanitize_codegen_child_environment
 
 
 REGISTERED_ACTION_CHECK_SKELETON_FRESHNESS = "check_skeleton_freshness"
 REGISTERED_ACTION_RECOVER_SKELETON_CHECKOUT = "recover_skeleton_checkout"
-REGISTERED_ACTION_SYNC_POLLER_RUNTIME = "sync_telegram_callback_poller_runtime"
-REGISTERED_ACTION_HERMES_WORKER_PREFLIGHT = "hermes_worker_preflight"
 REGISTERED_ACTION_REPLENISH_RUNNER_QUEUE = "replenish_runner_queue"
+
+RUNNER_SERVICE = "skeleton-runner-poll.service"
+RUNNER_TIMER = "skeleton-runner-poll.timer"
+_FIXED_LOCAL_ACTIONS = frozenset(
+    {
+        "long_lived_poller_reload",
+        "executor_service_preflight",
+        "codegen_read_only_canary",
+    }
+)
 
 REGISTERED_REPOSITORY_MAINTENANCE_ACTIONS: Mapping[str, str] = {
     "registered_checkout_recover": REGISTERED_ACTION_RECOVER_SKELETON_CHECKOUT,
     "registered_checkout_freshness_canary": REGISTERED_ACTION_CHECK_SKELETON_FRESHNESS,
-    "long_lived_poller_reload": REGISTERED_ACTION_SYNC_POLLER_RUNTIME,
-    "executor_service_preflight": REGISTERED_ACTION_HERMES_WORKER_PREFLIGHT,
-    "codegen_read_only_canary": REGISTERED_ACTION_HERMES_WORKER_PREFLIGHT,
     "queue_reactivate": REGISTERED_ACTION_REPLENISH_RUNNER_QUEUE,
 }
 
@@ -24,12 +36,127 @@ class RegisteredMaintenanceActionError(ValueError):
     pass
 
 
+def _report(status: str, action_id: str, reason: str) -> str:
+    success = "met" if status == "DONE" else "not_met"
+    return (
+        f"{status}: Runner host maintenance task completed.\n"
+        f"maintenance_task_id={action_id}\n"
+        f"reason={reason}\n"
+        f"success_criteria={success}"
+    )
+
+
+def _run_fixed(argv: list[str], *, timeout: int = 60, cwd: str | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        argv,
+        cwd=cwd,
+        env=sanitize_codegen_child_environment(dict(os.environ)),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def _recover_runner_timer() -> str:
+    for argv in (
+        ["systemctl", "--user", "daemon-reload"],
+        ["systemctl", "--user", "start", RUNNER_TIMER],
+        ["systemctl", "--user", "is-active", "--quiet", RUNNER_TIMER],
+    ):
+        result = _run_fixed(argv)
+        if result.returncode != 0:
+            return _report("BLOCKED", "long_lived_poller_reload", "RUNNER_TIMER_RECOVERY_FAILED")
+    return _report("DONE", "long_lived_poller_reload", "RUNNER_TIMER_ACTIVE")
+
+
+def _recover_executor_service() -> str:
+    timer = _run_fixed(["systemctl", "--user", "is-active", "--quiet", RUNNER_TIMER])
+    if timer.returncode != 0:
+        timer_report = _recover_runner_timer()
+        if not timer_report.startswith("DONE:"):
+            return _report("BLOCKED", "executor_service_preflight", "RUNNER_TIMER_NOT_ACTIVE")
+    result = _run_fixed(["systemctl", "--user", "start", RUNNER_SERVICE])
+    if result.returncode not in (0, 1):
+        return _report("BLOCKED", "executor_service_preflight", "RUNNER_SERVICE_START_FAILED")
+    return _report("DONE", "executor_service_preflight", "RUNNER_SERVICE_TRIGGERED")
+
+
+def _quota_or_provider_outage(text: str) -> bool:
+    lowered = text.lower()
+    markers = (
+        "usage limit",
+        "rate limit",
+        "quota",
+        "insufficient_quota",
+        "provider unavailable",
+        "temporarily unavailable",
+        "service unavailable",
+        "try again at",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+def _codegen_read_only_canary() -> str:
+    with tempfile.TemporaryDirectory(prefix="skeleton-codegen-canary-") as raw_dir:
+        workdir = Path(raw_dir)
+        init = _run_fixed(["git", "init", "-q"], cwd=str(workdir))
+        if init.returncode != 0:
+            return _report("BLOCKED", "codegen_read_only_canary", "CANARY_GIT_INIT_FAILED")
+
+        codex = shutil.which("codex", path=os.environ.get("PATH"))
+        if codex:
+            result = _run_fixed(
+                [
+                    codex,
+                    "exec",
+                    "--sandbox",
+                    "read-only",
+                    "--cd",
+                    str(workdir),
+                    "Return exactly RESULT: OK. Do not modify files.",
+                ],
+                timeout=120,
+            )
+            combined = f"{result.stdout}\n{result.stderr}"
+            if result.returncode == 0 and "RESULT: OK" in combined:
+                return _report("DONE", "codegen_read_only_canary", "CODEX_CANARY_OK")
+            if not _quota_or_provider_outage(combined):
+                return _report("BLOCKED", "codegen_read_only_canary", "CODEX_CANARY_FAILED")
+
+        openhands = shutil.which("openhands", path=os.environ.get("PATH"))
+        if not openhands:
+            return _report("BLOCKED", "codegen_read_only_canary", "NO_FALLBACK_PROVIDER")
+        result = _run_fixed(
+            [
+                openhands,
+                "--headless",
+                "--json",
+                "-t",
+                "Return exactly RESULT: OK. Do not modify files.",
+            ],
+            timeout=180,
+            cwd=str(workdir),
+        )
+        combined = f"{result.stdout}\n{result.stderr}"
+        if result.returncode == 0 and "RESULT: OK" in combined:
+            return _report("DONE", "codegen_read_only_canary", "OPENHANDS_FALLBACK_CANARY_OK")
+        return _report("BLOCKED", "codegen_read_only_canary", "OPENHANDS_FALLBACK_CANARY_FAILED")
+
+
 @dataclass(frozen=True)
 class RegisteredMaintenanceExecutor:
     dispatch: Callable[[str, str, str], str]
     workdir: str
 
     def run(self, action_id: str, body: str = "") -> str:
+        if action_id == "long_lived_poller_reload":
+            return _recover_runner_timer()
+        if action_id == "executor_service_preflight":
+            return _recover_executor_service()
+        if action_id == "codegen_read_only_canary":
+            return _codegen_read_only_canary()
         task_id = REGISTERED_REPOSITORY_MAINTENANCE_ACTIONS.get(action_id)
         if task_id is None:
             raise RegisteredMaintenanceActionError("REGISTERED_ACTION_NOT_ALLOWLISTED")
@@ -37,6 +164,8 @@ class RegisteredMaintenanceExecutor:
 
 
 def registered_maintenance_task_id(action_id: str) -> str:
+    if action_id in _FIXED_LOCAL_ACTIONS:
+        return action_id
     task_id = REGISTERED_REPOSITORY_MAINTENANCE_ACTIONS.get(action_id)
     if task_id is None:
         raise RegisteredMaintenanceActionError("REGISTERED_ACTION_NOT_ALLOWLISTED")
