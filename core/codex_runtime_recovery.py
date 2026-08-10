@@ -165,6 +165,7 @@ def _smoke_codex(codex_path: str, environment: Mapping[str, str]) -> str:
             [
                 codex_path,
                 "exec",
+                "--skip-git-repo-check",
                 "--sandbox",
                 "read-only",
                 "--model",
