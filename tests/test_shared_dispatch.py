@@ -4,6 +4,7 @@ from pathlib import Path
 
 from core.shared_dispatch import (
     PRIVACY_PUBLIC_SAFE,
+    ROUTE_CONTROL_RECOVERY_PACKET,
     SharedDispatcher,
     SharedDispatchRequest,
 )
@@ -99,3 +100,36 @@ def test_loop_next_step_proposal_is_returned_not_executed(tmp_path: Path) -> Non
     assert result.status == "done"
     assert result.next_step is not None
     assert result.next_step["task_packet"]["run_id"] == "run-2"
+
+
+def test_control_recovery_route_dispatches_without_task_packet_or_codegen(tmp_path: Path) -> None:
+    calls: list[str] = []
+    dispatcher = SharedDispatcher.for_control_recovery(
+        recovery_db_path=str(tmp_path / "recovery.sqlite3"),
+        action_executor=lambda action: calls.append(action) or "DONE: ok\nsuccess_criteria=met",
+        canary_executor=lambda canary: canary == "codegen_read_only_canary",
+        now=100,
+    )
+    request = SharedDispatchRequest(
+        occurrence_id="recovery-1",
+        route_type="workflow",
+        route_id=ROUTE_CONTROL_RECOVERY_PACKET,
+        payload={
+            "privacy_boundary": PRIVACY_PUBLIC_SAFE,
+            "bounded": True,
+            "approved_capabilities": ["control:recovery"],
+            "requested_capabilities": ["control:recovery"],
+            "recovery_packet": {
+                "schema": "skeleton.control_recovery.v1",
+                "failure_class": "CODEGEN_RUNTIME_UNHEALTHY",
+                "failure_key": "control:codegen",
+            },
+        },
+        attempt=1,
+        idempotency_key="recovery-1:attempt:1",
+    )
+
+    result = dispatcher.dispatch(request)
+
+    assert result.status == "done"
+    assert calls == ["executor_service_preflight", "queue_reactivate"]

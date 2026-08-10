@@ -36,6 +36,11 @@ if str(ROOT) not in sys.path:
 
 from core.audit_ledger import AuditLedger, validate_public_safe_payload
 from core.aufmass_source_pack import validate_source_pack_manifest
+from core.control_recovery import (
+    CONTROL_RECOVERY_SCHEMA,
+    RecoveryStore,
+    execute_recovery_packet,
+)
 from core.hermes_private_memory import (
     orient_hermes_private_memory,
     record_hermes_private_memory_note,
@@ -73,6 +78,7 @@ from core.runner_shadow_integration import (
 from core.runner_executor import CallableRunnerExecutor, RunnerExecutorError
 from core.runner_executor_registry import RunnerExecutorRegistry
 from core.runner_gate import ROUTE_REQUIRED_CAPABILITIES, RunnerGate
+from core.runner_repository_maintenance_executor import RegisteredMaintenanceExecutor
 from core.runner_loop_control_executor import (
     LOOP_ENGINE_PACKET,
     LOOP_STATE_DB_ENV,
@@ -247,6 +253,7 @@ BUILD_AUFMASS_PRIVATE_AREA_SCHEDULE = "build_aufmass_private_area_schedule"
 INSPECT_PR_MERGEABILITY = "inspect_pr_mergeability"
 BACKFILL_SKELETON_MEMORY_RECENT = "backfill_skeleton_memory_recent"
 REPLENISH_RUNNER_QUEUE = "replenish_runner_queue"
+CONTROL_PLANE_SELF_HEALING_RECOVERY = "control_plane_self_healing_recovery"
 INSPECT_ISSUE_WORKTREE_FOR_PUBLISH = "inspect_issue_worktree_for_publish"
 PUBLISH_ISSUE_WORKTREE_PR = "publish_issue_worktree_pr"
 PUBLISH_EXISTING_ISSUE_WORKTREE = "publish_existing_issue_worktree"
@@ -291,6 +298,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         INSPECT_PR_MERGEABILITY,
         BACKFILL_SKELETON_MEMORY_RECENT,
         REPLENISH_RUNNER_QUEUE,
+        CONTROL_PLANE_SELF_HEALING_RECOVERY,
         INSPECT_ISSUE_WORKTREE_FOR_PUBLISH,
         PUBLISH_ISSUE_WORKTREE_PR,
         PUBLISH_EXISTING_ISSUE_WORKTREE,
@@ -546,11 +554,13 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "allowed_files_count",
         "allowed_untracked_files",
         "allowed_untracked_files_count",
+        "attempt",
         "approved_override_hash",
         "approval_status",
         "approved_head_sha",
         "artifact_count",
         "artifact_id",
+        "actions_executed",
         "audit_id",
         "audit_persist_status",
         "audit_receipt_hash",
@@ -567,6 +577,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "build_ms",
         "canon_note",
         "canonical_memory_post_step",
+        "canaries_executed",
         "candidate_count",
         "ready_depth_before",
         "selected_count",
@@ -578,6 +589,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "changed_file_count",
         "changed_files",
         "final_postcheck_receipt_hash",
+        "failure_class",
+        "failure_key",
         "private_artifact_hash_matches",
         "private_artifact_written",
         "changed_files_count",
@@ -631,6 +644,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "excluded_secret_like_count",
         "external_side_effects_executed",
         "exact_base_changed_files_count",
+        "evidence_ref",
         "existing_pr_lookup",
         "existing_pr_url",
         "expected_branch",
@@ -695,6 +709,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "durable_handoff_status",
         "network_disabled",
         "network_provider_enabled",
+        "needs_operator_notification",
+        "next_retry_at",
         "next_action",
         "next_operator_action",
         "node_identity_status",
@@ -13921,6 +13937,135 @@ def mempalace_synthetic_runtime_smoke(body: str) -> str:
     )
 
 
+def _control_recovery_packet_from_body(body: str) -> Mapping[str, Any]:
+    packet: dict[str, Any] = {"schema": CONTROL_RECOVERY_SCHEMA}
+    task_fields = _shadow_task_block_mapping(body)
+    for key in (
+        "schema",
+        "failure_class",
+        "failure_key",
+        "status",
+        "reason",
+        "max_attempts",
+        "backoff_seconds",
+        "command",
+        "commands",
+        "path",
+        "package",
+        "packages",
+        "version",
+        "model",
+        "service",
+        "script",
+        "shell",
+        "protected_merge",
+        "new_authority",
+        "actions",
+        "canaries",
+    ):
+        if key in task_fields:
+            packet[key] = task_fields[key]
+    for field, key in (
+        ("Failure Class", "failure_class"),
+        ("Failure Key", "failure_key"),
+        ("Status", "status"),
+        ("Reason", "reason"),
+        ("Max Attempts", "max_attempts"),
+        ("Backoff Seconds", "backoff_seconds"),
+    ):
+        if key in packet:
+            continue
+        value = _body_field_or_yaml_value(body, field, key)
+        if value is not None:
+            packet[key] = value
+    for key in ("max_attempts", "backoff_seconds"):
+        value = packet.get(key)
+        if isinstance(value, str) and value.isdecimal():
+            packet[key] = int(value)
+    return packet
+
+
+def _control_recovery_status_line(key: str, value: object) -> str | None:
+    if isinstance(value, bool):
+        rendered = "true" if value else "false"
+    elif isinstance(value, int) and not isinstance(value, bool):
+        rendered = str(value)
+    elif isinstance(value, str):
+        rendered = value
+    elif value is None:
+        rendered = "none"
+    elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+        rendered = ",".join(value) or "none"
+    else:
+        return None
+    return f"{key}={rendered}"
+
+
+def control_plane_self_healing_recovery(body: str, workdir: str) -> str:
+    task_id = CONTROL_PLANE_SELF_HEALING_RECOVERY
+    packet = _control_recovery_packet_from_body(body)
+    executor = RegisteredMaintenanceExecutor(dispatch_runtime_maintenance_task, workdir)
+
+    def run_action(action_id: str) -> str:
+        if action_id == "issue_runner_continue":
+            return _maintenance_report(
+                "DONE",
+                task_id,
+                [
+                    "action=issue_runner_continue",
+                    "reason=github_actions_lane_isolated",
+                ],
+                "met",
+            )
+        return executor.run(action_id, body)
+
+    def run_canary(canary_id: str) -> bool:
+        if canary_id == "codegen_read_only_canary":
+            report = run_action(canary_id)
+            return maintenance_report_is_done(report)
+        if canary_id == "registered_checkout_freshness_canary":
+            report = run_action(canary_id)
+            return maintenance_report_is_done(report)
+        return False
+
+    receipt = execute_recovery_packet(
+        packet,
+        store=RecoveryStore(ROOT / ".codex" / "control_recovery.sqlite3"),
+        now=int(time.time()),
+        action_executor=run_action,
+        canary_executor=run_canary,
+    )
+    receipt_status = str(receipt.get("status") or "NEEDS_OPERATOR")
+    if receipt_status == "RECOVERED":
+        report_status = "DONE"
+        success = "met"
+    elif receipt_status == "NEEDS_OPERATOR":
+        report_status = "NEEDS_OPERATOR"
+        success = "not_met"
+    else:
+        report_status = "BLOCKED"
+        success = "not_met"
+    status_lines = [
+        line
+        for key in (
+            "schema",
+            "status",
+            "reason",
+            "failure_class",
+            "failure_key",
+            "attempt",
+            "next_retry_at",
+            "actions_executed",
+            "canaries_executed",
+            "evidence_ref",
+            "needs_operator_notification",
+        )
+        if (line := _control_recovery_status_line(key, receipt.get(key))) is not None
+    ]
+    status_lines.append("telegram_notifications=0")
+    return _maintenance_report(report_status, task_id, status_lines, success)
+
+
 def dispatch_runtime_maintenance_task(
     task_id: str, workdir: str, body: str = ""
 ) -> str:
@@ -13986,6 +14131,8 @@ def dispatch_runtime_maintenance_task(
             return backfill_skeleton_memory_recent()
         if task_id == REPLENISH_RUNNER_QUEUE:
             return replenish_runner_queue(body)
+        if task_id == CONTROL_PLANE_SELF_HEALING_RECOVERY:
+            return control_plane_self_healing_recovery(body, workdir)
         if task_id == INSPECT_ISSUE_WORKTREE_FOR_PUBLISH:
             return inspect_issue_worktree_for_publish(body)
         if task_id == PUBLISH_ISSUE_WORKTREE_PR:
