@@ -6,7 +6,7 @@ import core.runner_child_environment as child_env
 from core.runner_child_environment import sanitize_codegen_child_environment
 
 
-def test_sanitize_codegen_child_environment_removes_only_home_edge_prefix() -> None:
+def test_sanitize_codegen_child_environment_removes_only_home_edge_prefix(monkeypatch) -> None:
     environment = {
         "HOME": "/home/agent",
         "PATH": "/usr/bin",
@@ -19,6 +19,9 @@ def test_sanitize_codegen_child_environment_removes_only_home_edge_prefix() -> N
         "UNRELATED_HOME_EDGE_01_VALUE": "kept",
         "ARBITRARY_OVERLAY_VALUE": "kept-overlay-value",
     }
+
+    monkeypatch.setattr(child_env, "should_attempt_codex_runtime_recovery", lambda _env: False)
+    monkeypatch.setattr(child_env.shutil, "which", lambda _name, *, path=None: None)
 
     sanitized = sanitize_codegen_child_environment(environment)
 
