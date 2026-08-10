@@ -25,6 +25,7 @@ EXEC_HMAC_SECRET_CONFIG_DIR = Path("/etc/skeleton")
 EXEC_HMAC_SECRET_PROFILE_METADATA_PATH = Path("/etc/skeleton/home-edge-01.env")
 EXEC_HMAC_SECRET_CONFIG_PATH = Path("/etc/skeleton/home-edge-executor-controller.env")
 CONTRACT_SOURCE = Path("/usr/local/lib/skeleton/home-edge/media-source-snapshot/contract_source.py")
+CONTRACT_GIT_BLOB_SHA = "75f76a2df425c269648f82a2659a9970cf8c6f12"
 MAX_EXEC_HMAC_SECRET_CONFIG_BYTES = 64 * 1024
 MAX_CONTRACT_SOURCE_BYTES = 256 * 1024
 SIGNER_STDIN_MAX_BYTES = 256 * 1024
@@ -38,14 +39,21 @@ def fail(reason: str = "snapshot_signer_rejected") -> None:
     raise SystemExit(2)
 
 
-def _file_id(st: os.stat_result) -> tuple[int, int | None, int | None, int, int]:
+def _file_id(st: os.stat_result) -> tuple[int, int | None, int | None, int | None, int | None, int, int]:
     return (
-        stat.S_IFMT(st.st_mode),
+        st.st_mode,
         getattr(st, "st_dev", None),
         getattr(st, "st_ino", None),
+        getattr(st, "st_uid", None),
+        getattr(st, "st_gid", None),
         st.st_size,
         getattr(st, "st_mtime_ns", int(st.st_mtime * 1_000_000_000)),
     )
+
+
+def _git_blob_sha1(data: bytes) -> str:
+    header = f"blob {len(data)}\0".encode("ascii")
+    return hashlib.sha1(header + data, usedforsecurity=False).hexdigest()
 
 
 def _safe_regular(st: os.stat_result, *, max_bytes: int, require_root: bool = False) -> bool:
@@ -55,7 +63,7 @@ def _safe_regular(st: os.stat_result, *, max_bytes: int, require_root: bool = Fa
         return False
     if stat.S_IMODE(st.st_mode) & 0o022:
         return False
-    if require_root and hasattr(os, "getuid") and st.st_uid != 0:
+    if require_root and getattr(st, "st_uid", None) != 0:
         return False
     return True
 
@@ -209,11 +217,19 @@ def expected_snapshot_script() -> str:
         fd = os.open(CONTRACT_SOURCE, flags)
         with os.fdopen(fd, "rb") as handle:
             before = os.fstat(handle.fileno())
+            if not _safe_regular(before, max_bytes=MAX_CONTRACT_SOURCE_BYTES, require_root=True):
+                fail()
             data = handle.read(MAX_CONTRACT_SOURCE_BYTES + 1)
             after = os.fstat(handle.fileno())
     except OSError:
         fail()
-    if len(data) > MAX_CONTRACT_SOURCE_BYTES or _file_id(st_l) != _file_id(before) or _file_id(before) != _file_id(after):
+    if (
+        len(data) > MAX_CONTRACT_SOURCE_BYTES
+        or not _safe_regular(after, max_bytes=MAX_CONTRACT_SOURCE_BYTES, require_root=True)
+        or _file_id(st_l) != _file_id(before)
+        or _file_id(before) != _file_id(after)
+        or _git_blob_sha1(data) != CONTRACT_GIT_BLOB_SHA
+    ):
         fail()
     try:
         tree = ast.parse(data.decode("utf-8"), filename=str(CONTRACT_SOURCE))
