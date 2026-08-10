@@ -122,12 +122,28 @@ def _run_wrapper(tmp_path: Path, *, codex_body: str) -> tuple[subprocess.Complet
     return result, fallback_marker
 
 
-def test_codegen_wrapper_falls_back_for_exact_model_metadata_decoder_failure(tmp_path: Path) -> None:
+def test_codegen_wrapper_does_not_fallback_for_exact_model_metadata_decoder_failure(tmp_path: Path) -> None:
     result, fallback_marker = _run_wrapper(
         tmp_path,
         codex_body=(
             "#!/bin/sh\n"
             "printf '%s\\n' 'failed to decode models response: unknown variant `max`' >&2\n"
+            "exit 1\n"
+        ),
+    )
+
+    assert result.returncode == 1
+    assert "unknown variant `max`" in result.stderr
+    assert "SKELETON_CODEGEN_PROVIDER=openhands" not in result.stdout
+    assert not fallback_marker.exists()
+
+
+def test_codegen_wrapper_falls_back_for_provider_quota(tmp_path: Path) -> None:
+    result, fallback_marker = _run_wrapper(
+        tmp_path,
+        codex_body=(
+            "#!/bin/sh\n"
+            "printf '%s\\n' 'usage limit reached' >&2\n"
             "exit 1\n"
         ),
     )
