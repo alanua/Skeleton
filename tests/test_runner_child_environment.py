@@ -20,6 +20,7 @@ def test_sanitize_codegen_child_environment_removes_only_home_edge_prefix(monkey
         "ARBITRARY_OVERLAY_VALUE": "kept-overlay-value",
     }
 
+    # This regression test covers sanitization only; provider discovery is tested separately.
     monkeypatch.setattr(child_env, "should_attempt_codex_runtime_recovery", lambda _env: False)
     monkeypatch.setattr(child_env, "_install_fallback_wrapper", lambda _env: None)
 
