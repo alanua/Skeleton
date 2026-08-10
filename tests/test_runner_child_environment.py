@@ -21,7 +21,7 @@ def test_sanitize_codegen_child_environment_removes_only_home_edge_prefix(monkey
     }
 
     monkeypatch.setattr(child_env, "should_attempt_codex_runtime_recovery", lambda _env: False)
-    monkeypatch.setattr(child_env.shutil, "which", lambda _name, *, path=None: None)
+    monkeypatch.setattr(child_env, "_install_fallback_wrapper", lambda _env: None)
 
     sanitized = sanitize_codegen_child_environment(environment)
 
