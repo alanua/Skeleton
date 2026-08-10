@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import subprocess
 
 import core.runner_child_environment as child_env
 from core.runner_child_environment import sanitize_codegen_child_environment
@@ -74,3 +76,79 @@ def test_codegen_environment_installs_fixed_fallback_only_when_both_tools_exist(
     assert sanitized["SKELETON_OPENHANDS_BIN"] == str(openhands.resolve())
     assert "SKELETON_HOME_EDGE_EXEC_HMAC_SECRET" not in sanitized
     assert wrapper.read_text(encoding="utf-8").startswith("#!/usr/bin/env python3")
+
+
+def _write_executable(path: Path, body: str) -> None:
+    path.write_text(body, encoding="utf-8")
+    path.chmod(0o700)
+
+
+def _run_wrapper(tmp_path: Path, *, codex_body: str) -> tuple[subprocess.CompletedProcess[str], Path]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    codex = bin_dir / "codex-real"
+    openhands = bin_dir / "openhands-real"
+    wrapper = bin_dir / "codex"
+    fallback_marker = tmp_path / "openhands-called"
+
+    _write_executable(codex, codex_body)
+    _write_executable(
+        openhands,
+        "#!/bin/sh\nprintf '%s\\n' called > \"$OPENHANDS_MARKER\"\nexit 0\n",
+    )
+    _write_executable(wrapper, child_env._WRAPPER)
+
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "PATH": environment.get("PATH", "/usr/bin:/bin"),
+            "SKELETON_REAL_CODEX_BIN": str(codex),
+            "SKELETON_OPENHANDS_BIN": str(openhands),
+            "SKELETON_CODEGEN_ORIGINAL_PATH": environment.get("PATH", "/usr/bin:/bin"),
+            "OPENHANDS_MARKER": str(fallback_marker),
+        }
+    )
+    result = subprocess.run(
+        [str(wrapper), "exec", "--cd", str(workdir), "-"],
+        input="synthetic bounded task",
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=environment,
+        check=False,
+    )
+    return result, fallback_marker
+
+
+def test_codegen_wrapper_falls_back_for_exact_model_metadata_decoder_failure(tmp_path: Path) -> None:
+    result, fallback_marker = _run_wrapper(
+        tmp_path,
+        codex_body=(
+            "#!/bin/sh\n"
+            "printf '%s\\n' 'failed to decode models response: unknown variant `max`' >&2\n"
+            "exit 1\n"
+        ),
+    )
+
+    assert result.returncode == 0
+    assert "SKELETON_CODEGEN_PROVIDER=openhands" in result.stdout
+    assert "RESULT: OK" in result.stdout
+    assert fallback_marker.read_text(encoding="utf-8").strip() == "called"
+
+
+def test_codegen_wrapper_does_not_fallback_for_unrelated_codex_failure(tmp_path: Path) -> None:
+    result, fallback_marker = _run_wrapper(
+        tmp_path,
+        codex_body=(
+            "#!/bin/sh\n"
+            "printf '%s\\n' 'unrelated synthetic codex failure' >&2\n"
+            "exit 7\n"
+        ),
+    )
+
+    assert result.returncode == 7
+    assert "unrelated synthetic codex failure" in result.stderr
+    assert "SKELETON_CODEGEN_PROVIDER=openhands" not in result.stdout
+    assert not fallback_marker.exists()
