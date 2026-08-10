@@ -17,6 +17,7 @@ RUNNER_SERVICE = "skeleton-runner-poll.service"
 RUNNER_TIMER = "skeleton-runner-poll.timer"
 HOME_EDGE_ENV_PREFIX = "SKELETON_HOME_EDGE_01_"
 HOME_EDGE_EXEC_HMAC_SECRET_ENV = "SKELETON_HOME_EDGE_EXEC_HMAC_SECRET"
+_MODEL_METADATA_COMPATIBILITY_MARKER = "failed to decode models response: unknown variant `max`"
 _FIXED_LOCAL_ACTIONS = frozenset(
     {
         "long_lived_poller_reload",
@@ -105,6 +106,11 @@ def _quota_or_provider_outage(text: str) -> bool:
     return any(marker in lowered for marker in markers)
 
 
+def _fallback_allowed(text: str) -> bool:
+    lowered = text.lower()
+    return _quota_or_provider_outage(lowered) or _MODEL_METADATA_COMPATIBILITY_MARKER in lowered
+
+
 def _codegen_read_only_canary() -> str:
     with tempfile.TemporaryDirectory(prefix="skeleton-codegen-canary-") as raw_dir:
         workdir = Path(raw_dir)
@@ -129,7 +135,7 @@ def _codegen_read_only_canary() -> str:
             combined = f"{result.stdout}\n{result.stderr}"
             if result.returncode == 0 and "RESULT: OK" in combined:
                 return _report("DONE", "codegen_read_only_canary", "CODEX_CANARY_OK")
-            if not _quota_or_provider_outage(combined):
+            if not _fallback_allowed(combined):
                 return _report("BLOCKED", "codegen_read_only_canary", "CODEX_CANARY_FAILED")
 
         openhands = shutil.which("openhands", path=os.environ.get("PATH"))
