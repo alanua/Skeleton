@@ -4,6 +4,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -11,8 +12,8 @@ import tempfile
 from core.codex_runtime_recovery import (
     CodexRuntimeRecoveryError,
     TARGET_CODEX_VERSION,
-    ensure_pinned_codex_runtime,
     pinned_codex_runtime_path,
+    recover_pinned_codex_runtime,
 )
 
 
@@ -89,28 +90,39 @@ def _recover_runner_timer() -> str:
 
 
 def _recover_executor_service() -> str:
-    # The recovery action executes inside the canonical Runner process. Starting the
-    # same oneshot service recursively can deadlock systemd. Reset its failed state
-    # and restore the canonical timer; the timer owns the next service activation.
     report = _recover_runner_timer()
     if not report.startswith("DONE:"):
         return _report("BLOCKED", "executor_service_preflight", "RUNNER_EXECUTOR_RECOVERY_FAILED")
     return _report("DONE", "executor_service_preflight", "RUNNER_EXECUTOR_REARMED_BY_TIMER")
 
 
+def _public_recovery_reason(reason: str) -> str:
+    token = re.sub(r"[^A-Za-z0-9]+", "_", reason).strip("_").upper()
+    return f"CODEX_RUNTIME_RECOVERY_{token or 'FAILED'}"
+
+
 def _recover_codegen_runtime() -> str:
     environment = _safe_child_environment()
     try:
-        if not ensure_pinned_codex_runtime(environment):
-            return _report("BLOCKED", "codegen_runtime_recover", "CODEX_RUNTIME_RECOVERY_FAILED")
+        recovery = recover_pinned_codex_runtime(environment)
+    except (OSError, subprocess.SubprocessError):
+        return _report("BLOCKED", "codegen_runtime_recover", "CODEX_RUNTIME_RECOVERY_EXCEPTION")
+    if not recovery.success:
+        return _report("BLOCKED", "codegen_runtime_recover", _public_recovery_reason(recovery.reason))
+
+    try:
         codex = pinned_codex_runtime_path(environment)
     except (CodexRuntimeRecoveryError, OSError, subprocess.SubprocessError):
-        return _report("BLOCKED", "codegen_runtime_recover", "CODEX_RUNTIME_RECOVERY_FAILED")
-
+        return _report("BLOCKED", "codegen_runtime_recover", "CODEX_RUNTIME_VERSION_UNVERIFIED")
     version = _run_fixed([codex, "--version"], timeout=15)
     if version.returncode != 0 or version.stdout.strip() != f"codex-cli {TARGET_CODEX_VERSION}":
         return _report("BLOCKED", "codegen_runtime_recover", "CODEX_RUNTIME_VERSION_UNVERIFIED")
-    return _report("DONE", "codegen_runtime_recover", "CODEX_RUNTIME_RECOVERED")
+    success_reason = (
+        "CODEX_RUNTIME_RECOVERED_PROVIDER_UNAVAILABLE"
+        if recovery.reason == "ready_provider_unavailable"
+        else "CODEX_RUNTIME_RECOVERED"
+    )
+    return _report("DONE", "codegen_runtime_recover", success_reason)
 
 
 def _quota_or_provider_outage(text: str) -> bool:

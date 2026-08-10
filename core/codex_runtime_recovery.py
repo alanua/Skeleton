@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 import fcntl
 import os
 from pathlib import Path
@@ -30,13 +31,25 @@ _PROVIDER_OUTAGE_MARKERS = (
     "service unavailable",
     "try again at",
 )
+_METADATA_INCOMPATIBILITY_MARKERS = (
+    "failed to decode models response",
+    "unknown variant `max`",
+    "unknown variant max",
+)
 _SMOKE_PASS = "pass"
 _SMOKE_PROVIDER_UNAVAILABLE = "provider_unavailable"
+_SMOKE_METADATA_INCOMPATIBLE = "metadata_incompatible"
 _SMOKE_FAILED = "failed"
 
 
 class CodexRuntimeRecoveryError(RuntimeError):
     """Raised when the bounded Codex runtime recovery cannot complete safely."""
+
+
+@dataclass(frozen=True)
+class CodexRuntimeRecoveryResult:
+    success: bool
+    reason: str
 
 
 def should_attempt_codex_runtime_recovery(
@@ -46,7 +59,6 @@ def should_attempt_codex_runtime_recovery(
     canonical_root: Path = CANONICAL_RUNNER_ROOT,
     enable_marker: Path | None = None,
 ) -> bool:
-    """Limit the bootstrap to the explicitly enabled canonical systemd Runner."""
     root = (repository_root or Path(__file__).resolve().parents[1]).resolve(strict=False)
     canonical = canonical_root.resolve(strict=False)
     marker = enable_marker or (root / RECOVERY_ENABLE_MARKER)
@@ -91,11 +103,7 @@ def _safe_run(
 
 
 def _codex_version(codex_path: str, environment: Mapping[str, str]) -> str:
-    result = _safe_run(
-        [codex_path, "--version"],
-        environment,
-        timeout=_VERSION_TIMEOUT_SECONDS,
-    )
+    result = _safe_run([codex_path, "--version"], environment, timeout=_VERSION_TIMEOUT_SECONDS)
     if result is None or result.returncode != 0:
         raise CodexRuntimeRecoveryError("codex_version_unavailable")
     match = _VERSION_RE.fullmatch(result.stdout.strip())
@@ -108,11 +116,7 @@ def _global_runtime_paths(environment: Mapping[str, str]) -> tuple[str, str]:
     npm_path = shutil.which("npm", path=environment.get("PATH"))
     if not npm_path:
         raise CodexRuntimeRecoveryError("npm_runtime_binary_missing")
-    prefix_result = _safe_run(
-        [npm_path, "prefix", "-g"],
-        environment,
-        timeout=_VERSION_TIMEOUT_SECONDS,
-    )
+    prefix_result = _safe_run([npm_path, "prefix", "-g"], environment, timeout=_VERSION_TIMEOUT_SECONDS)
     if prefix_result is None or prefix_result.returncode != 0 or not prefix_result.stdout.strip():
         raise CodexRuntimeRecoveryError("npm_global_prefix_unavailable")
     prefix = Path(prefix_result.stdout.strip()).expanduser().resolve(strict=False)
@@ -120,7 +124,6 @@ def _global_runtime_paths(environment: Mapping[str, str]) -> tuple[str, str]:
 
 
 def pinned_codex_runtime_path(environment: Mapping[str, str]) -> str:
-    """Return the exact npm-global Codex path only when the pinned version is active."""
     _npm_path, codex_path = _global_runtime_paths(environment)
     if _codex_version(codex_path, environment) != TARGET_CODEX_VERSION:
         raise CodexRuntimeRecoveryError("codex_runtime_version_mismatch")
@@ -138,7 +141,6 @@ def _state_dir(environment: Mapping[str, str]) -> Path:
 
 
 def pinned_codex_recovery_marker_present(environment: Mapping[str, str]) -> bool:
-    """Cheap preflight proving a prior target-version recovery completed in this home."""
     try:
         marker = _state_dir(environment) / f"codex-runtime-recovery-{TARGET_CODEX_VERSION}.ok"
         if marker.is_symlink() or not marker.is_file():
@@ -180,6 +182,8 @@ def _smoke_codex(codex_path: str, environment: Mapping[str, str]) -> str:
         if result.returncode == 0 and "RESULT: OK" in {line.strip() for line in result.stdout.splitlines()}:
             return _SMOKE_PASS
         combined = f"{result.stdout}\n{result.stderr}".lower()
+        if any(marker in combined for marker in _METADATA_INCOMPATIBILITY_MARKERS):
+            return _SMOKE_METADATA_INCOMPATIBLE
         if any(marker in combined for marker in _PROVIDER_OUTAGE_MARKERS):
             return _SMOKE_PROVIDER_UNAVAILABLE
         return _SMOKE_FAILED
@@ -210,36 +214,82 @@ def _rollback(npm_path: str, codex_path: str, old_version: str, environment: Map
         return False
 
 
-def ensure_pinned_codex_runtime(environment: Mapping[str, str]) -> bool:
-    """Pin and verify one exact Codex version; restore prior version on client failure."""
-    npm_path, codex_path = _global_runtime_paths(environment)
-    marker, lock_path = _state_paths(environment)
-    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-    os.chmod(lock_path, 0o600)
+def _failure(reason: str, *, rollback_ok: bool | None = None) -> CodexRuntimeRecoveryResult:
+    if rollback_ok is False:
+        reason = f"{reason}_rollback_failed"
+    return CodexRuntimeRecoveryResult(False, reason)
+
+
+def recover_pinned_codex_runtime(environment: Mapping[str, str]) -> CodexRuntimeRecoveryResult:
+    """Pin the exact client and return only a stable public-safe recovery phase/reason."""
+    try:
+        npm_path, codex_path = _global_runtime_paths(environment)
+        marker, lock_path = _state_paths(environment)
+    except CodexRuntimeRecoveryError as exc:
+        return _failure(str(exc))
+    except OSError:
+        return _failure("recovery_state_unavailable")
+
+    try:
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        os.chmod(lock_path, 0o600)
+    except OSError:
+        return _failure("recovery_lock_unavailable")
+
     with os.fdopen(lock_fd, "r+", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        old_version = _codex_version(codex_path, environment)
+        try:
+            old_version = _codex_version(codex_path, environment)
+        except CodexRuntimeRecoveryError as exc:
+            return _failure(f"existing_{exc}")
+
         if old_version == TARGET_CODEX_VERSION and marker.is_file():
-            return True
+            return CodexRuntimeRecoveryResult(True, "already_ready")
         if marker.exists():
-            marker.unlink()
+            try:
+                marker.unlink()
+            except OSError:
+                return _failure("stale_marker_remove_failed")
+
         mutation_attempted = old_version != TARGET_CODEX_VERSION
         if mutation_attempted:
             if not _install_version(npm_path, TARGET_CODEX_VERSION, environment):
-                _rollback(npm_path, codex_path, old_version, environment)
-                return False
+                rollback_ok = _rollback(npm_path, codex_path, old_version, environment)
+                return _failure("target_install_failed", rollback_ok=rollback_ok)
             try:
                 installed_version = _codex_version(codex_path, environment)
-            except CodexRuntimeRecoveryError:
-                _rollback(npm_path, codex_path, old_version, environment)
-                return False
+            except CodexRuntimeRecoveryError as exc:
+                rollback_ok = _rollback(npm_path, codex_path, old_version, environment)
+                return _failure(f"installed_{exc}", rollback_ok=rollback_ok)
             if installed_version != TARGET_CODEX_VERSION:
-                _rollback(npm_path, codex_path, old_version, environment)
-                return False
+                rollback_ok = _rollback(npm_path, codex_path, old_version, environment)
+                return _failure("installed_version_mismatch", rollback_ok=rollback_ok)
+
         smoke_status = _smoke_codex(codex_path, environment)
-        if smoke_status == _SMOKE_FAILED:
+        if smoke_status in {_SMOKE_FAILED, _SMOKE_METADATA_INCOMPATIBLE}:
+            rollback_ok = None
             if mutation_attempted:
-                _rollback(npm_path, codex_path, old_version, environment)
-            return False
-        _write_success_marker(marker)
-        return True
+                rollback_ok = _rollback(npm_path, codex_path, old_version, environment)
+            reason = (
+                "smoke_metadata_incompatible"
+                if smoke_status == _SMOKE_METADATA_INCOMPATIBLE
+                else "smoke_client_failed"
+            )
+            return _failure(reason, rollback_ok=rollback_ok)
+
+        try:
+            _write_success_marker(marker)
+        except OSError:
+            rollback_ok = None
+            if mutation_attempted:
+                rollback_ok = _rollback(npm_path, codex_path, old_version, environment)
+            return _failure("success_marker_write_failed", rollback_ok=rollback_ok)
+
+        if smoke_status == _SMOKE_PROVIDER_UNAVAILABLE:
+            return CodexRuntimeRecoveryResult(True, "ready_provider_unavailable")
+        return CodexRuntimeRecoveryResult(True, "ready")
+
+
+def ensure_pinned_codex_runtime(environment: Mapping[str, str]) -> bool:
+    """Compatibility wrapper for callers that only need success/failure."""
+    return recover_pinned_codex_runtime(environment).success

@@ -35,6 +35,7 @@ class RecoveryStatus(str, Enum):
 
 _SAFE_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$")
 _SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_MAINTENANCE_REASON_RE = re.compile(r"(?m)^reason=([A-Z0-9_]{1,127})$")
 _KNOWN_ACTIONS = frozenset(
     {
         "registered_checkout_recover",
@@ -176,7 +177,12 @@ class RecoveryStore:
                 report = action_executor(action)
                 actions.append(action)
                 if not _maintenance_report_done(report):
-                    reason = "RECOVERY_ACTION_FAILED"
+                    detail = _maintenance_report_reason(report)
+                    reason = (
+                        f"RECOVERY_ACTION_FAILED_{detail}"
+                        if detail is not None
+                        else "RECOVERY_ACTION_FAILED"
+                    )
                     raise RuntimeError(reason)
 
             if plan.canaries and canary_executor is None:
@@ -195,7 +201,12 @@ class RecoveryStore:
                 report = action_executor(plan.queue_reactivation_action)
                 actions.append(plan.queue_reactivation_action)
                 if not _maintenance_report_done(report):
-                    reason = "QUEUE_REACTIVATION_FAILED"
+                    detail = _maintenance_report_reason(report)
+                    reason = (
+                        f"QUEUE_REACTIVATION_FAILED_{detail}"
+                        if detail is not None
+                        else "QUEUE_REACTIVATION_FAILED"
+                    )
                     raise RuntimeError(reason)
         except Exception:
             next_retry = now + plan.backoff_seconds * attempt
@@ -469,6 +480,11 @@ def _payload_attempts_to_broaden_authority(packet: Mapping[str, Any]) -> bool:
 def _maintenance_report_done(report: str) -> bool:
     text = str(report)
     return text.lstrip().startswith("DONE:") and "success_criteria=not_met" not in text
+
+
+def _maintenance_report_reason(report: str) -> str | None:
+    match = _MAINTENANCE_REASON_RE.search(str(report))
+    return match.group(1) if match is not None else None
 
 
 def _registered_action(action: str) -> str:
