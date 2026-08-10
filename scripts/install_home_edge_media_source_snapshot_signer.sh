@@ -18,6 +18,8 @@ STAGING_PARENT=""
 HAD_INSTALL_ROOT=0
 HAD_EXEC_ROOT=0
 HAD_SUDOERS=0
+BACKUPS_READY=0
+ACTIVATION_STARTED=0
 
 usage() {
   cat <<'EOF'
@@ -122,29 +124,27 @@ rollback() {
   local rc=$?
   trap - EXIT
   rm -rf "$STAGING_PARENT" "$INSTALL_ROOT.new" "$EXEC_ROOT.new"
-  if [[ $COMMITTED -eq 0 ]]; then
+  if [[ $COMMITTED -eq 0 && $ACTIVATION_STARTED -eq 1 ]]; then
+    if [[ $BACKUPS_READY -ne 1 ]]; then
+      printf 'FATAL: signer activation started without complete backups\n' >&2
+      exit 70
+    fi
     if [[ $HAD_INSTALL_ROOT -eq 1 ]]; then
-      if [[ -e "$BACKUP_DIR/install-root" ]]; then
-        rm -rf "$INSTALL_ROOT"
-        mkdir -p "$(dirname "$INSTALL_ROOT")"
-        mv "$BACKUP_DIR/install-root" "$INSTALL_ROOT"
-      fi
+      rm -rf "$INSTALL_ROOT"
+      mkdir -p "$(dirname "$INSTALL_ROOT")"
+      cp -a "$BACKUP_DIR/install-root" "$INSTALL_ROOT"
     else
       rm -rf "$INSTALL_ROOT"
     fi
     if [[ $HAD_EXEC_ROOT -eq 1 ]]; then
-      if [[ -e "$BACKUP_DIR/exec-root" ]]; then
-        rm -rf "$EXEC_ROOT"
-        mkdir -p "$(dirname "$EXEC_ROOT")"
-        mv "$BACKUP_DIR/exec-root" "$EXEC_ROOT"
-      fi
+      rm -rf "$EXEC_ROOT"
+      mkdir -p "$(dirname "$EXEC_ROOT")"
+      cp -a "$BACKUP_DIR/exec-root" "$EXEC_ROOT"
     else
       rm -rf "$EXEC_ROOT"
     fi
     if [[ $HAD_SUDOERS -eq 1 ]]; then
-      if [[ -e "$BACKUP_DIR/sudoers" ]]; then
-        install -o root -g root -m 0440 "$BACKUP_DIR/sudoers" "$SUDOERS_PATH"
-      fi
+      install -o root -g root -m 0440 "$BACKUP_DIR/sudoers" "$SUDOERS_PATH"
     else
       rm -f "$SUDOERS_PATH"
     fi
@@ -157,6 +157,7 @@ trap rollback EXIT
 if [[ $HAD_INSTALL_ROOT -eq 1 ]]; then cp -a "$INSTALL_ROOT" "$BACKUP_DIR/install-root"; fi
 if [[ $HAD_EXEC_ROOT -eq 1 ]]; then cp -a "$EXEC_ROOT" "$BACKUP_DIR/exec-root"; fi
 if [[ $HAD_SUDOERS -eq 1 ]]; then cp -a "$SUDOERS_PATH" "$BACKUP_DIR/sudoers"; fi
+BACKUPS_READY=1
 mkdir -p "$STAGING_PARENT/install" "$STAGING_PARENT/exec"
 
 copy_stable_source() {
@@ -205,7 +206,17 @@ if [[ "$(reviewed_blob_sha "$INSTALL_ROOT.new/signer_payload.py")" != "$PAYLOAD_
   printf 'BLOCKED: immutable signer staging bytes changed\n' >&2
   exit 2
 fi
+if [[ $BACKUPS_READY -ne 1 ]]; then
+  printf 'BLOCKED: signer activation backups are incomplete\n' >&2
+  exit 2
+fi
 
+# Disable any previous Runner entry before replacing the installed runtime. This
+# makes a reinstall fail closed during the short activation window.
+ACTIVATION_STARTED=1
+rm -f "$SUDOERS_PATH"
+if [[ $HAD_INSTALL_ROOT -eq 1 ]]; then rm -rf "$INSTALL_ROOT"; fi
+if [[ $HAD_EXEC_ROOT -eq 1 ]]; then rm -rf "$EXEC_ROOT"; fi
 mv -T "$INSTALL_ROOT.new" "$INSTALL_ROOT"
 mv -T "$EXEC_ROOT.new" "$EXEC_ROOT"
 
