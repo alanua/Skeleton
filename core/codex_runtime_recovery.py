@@ -20,6 +20,19 @@ _VERSION_RE = re.compile(r"^codex-cli ([0-9]+\.[0-9]+\.[0-9]+)$")
 _INSTALL_TIMEOUT_SECONDS = 240
 _SMOKE_TIMEOUT_SECONDS = 120
 _VERSION_TIMEOUT_SECONDS = 15
+_PROVIDER_OUTAGE_MARKERS = (
+    "usage limit",
+    "rate limit",
+    "quota",
+    "insufficient_quota",
+    "provider unavailable",
+    "temporarily unavailable",
+    "service unavailable",
+    "try again at",
+)
+_SMOKE_PASS = "pass"
+_SMOKE_PROVIDER_UNAVAILABLE = "provider_unavailable"
+_SMOKE_FAILED = "failed"
 
 
 class CodexRuntimeRecoveryError(RuntimeError):
@@ -137,7 +150,7 @@ def _install_version(
     return result is not None and result.returncode == 0
 
 
-def _smoke_codex(codex_path: str, environment: Mapping[str, str]) -> bool:
+def _smoke_codex(codex_path: str, environment: Mapping[str, str]) -> str:
     with tempfile.TemporaryDirectory(prefix="skeleton-codex-recovery-") as temp_dir:
         result = _safe_run(
             [
@@ -155,9 +168,16 @@ def _smoke_codex(codex_path: str, environment: Mapping[str, str]) -> bool:
             timeout=_SMOKE_TIMEOUT_SECONDS,
             cwd=temp_dir,
         )
-        if result is None or result.returncode != 0:
-            return False
-        return "RESULT: OK" in {line.strip() for line in result.stdout.splitlines()}
+        if result is None:
+            return _SMOKE_FAILED
+        if result.returncode == 0 and "RESULT: OK" in {
+            line.strip() for line in result.stdout.splitlines()
+        }:
+            return _SMOKE_PASS
+        combined = f"{result.stdout}\n{result.stderr}".lower()
+        if any(marker in combined for marker in _PROVIDER_OUTAGE_MARKERS):
+            return _SMOKE_PROVIDER_UNAVAILABLE
+        return _SMOKE_FAILED
 
 
 def _state_paths(environment: Mapping[str, str]) -> tuple[Path, Path]:
@@ -196,7 +216,7 @@ def _rollback(
 
 
 def ensure_pinned_codex_runtime(environment: Mapping[str, str]) -> bool:
-    """Pin and smoke one exact Codex version; restore the prior version on failure."""
+    """Pin and verify one exact Codex version; restore prior version on client failure."""
     npm_path, codex_path = _global_runtime_paths(environment)
     marker, lock_path = _state_paths(environment)
 
@@ -226,10 +246,15 @@ def ensure_pinned_codex_runtime(environment: Mapping[str, str]) -> bool:
                 _rollback(npm_path, codex_path, old_version, environment)
                 return False
 
-        if not _smoke_codex(codex_path, environment):
+        smoke_status = _smoke_codex(codex_path, environment)
+        if smoke_status == _SMOKE_FAILED:
             if mutation_attempted:
                 _rollback(npm_path, codex_path, old_version, environment)
             return False
 
+        # Provider quota/outage occurs after the client has reached normal provider
+        # handling. It must not roll a schema-compatible pinned client back to the
+        # known-bad prior runtime. The independent codegen canary may then use the
+        # separately bounded provider-outage fallback policy.
         _write_success_marker(marker)
         return True
