@@ -37,6 +37,10 @@ def test_sanitize_codegen_child_environment_removes_only_home_edge_prefix(monkey
     assert environment["SKELETON_HOME_EDGE_EXEC_HMAC_SECRET"] == "synthetic-hmac-marker"
 
 
+def _enable_recovered_runtime_marker(monkeypatch) -> None:
+    monkeypatch.setattr(child_env, "pinned_codex_recovery_marker_present", lambda _env: True)
+
+
 def test_codegen_environment_binds_wrapper_to_pinned_codex(tmp_path: Path, monkeypatch) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -44,15 +48,12 @@ def test_codegen_environment_binds_wrapper_to_pinned_codex(tmp_path: Path, monke
     openhands = bin_dir / "openhands-real"
     codex.write_text("", encoding="utf-8")
     openhands.write_text("", encoding="utf-8")
-
     monkeypatch.setattr(child_env, "should_attempt_codex_runtime_recovery", lambda _env: False)
+    _enable_recovered_runtime_marker(monkeypatch)
     monkeypatch.setattr(child_env, "pinned_codex_runtime_path", lambda _env: str(codex))
     monkeypatch.setattr(
-        child_env.shutil,
-        "which",
-        lambda name, *, path=None: str(openhands) if name == "openhands" else None,
+        child_env.shutil, "which", lambda name, *, path=None: str(openhands) if name == "openhands" else None
     )
-
     sanitized = sanitize_codegen_child_environment(
         {"HOME": str(tmp_path), "PATH": str(bin_dir), "SKELETON_HOME_EDGE_EXEC_HMAC_SECRET": "must-not-survive"}
     )
@@ -69,9 +70,9 @@ def test_codegen_wrapper_still_binds_pinned_codex_without_openhands(tmp_path: Pa
     codex = tmp_path / "codex-pinned"
     codex.write_text("", encoding="utf-8")
     monkeypatch.setattr(child_env, "should_attempt_codex_runtime_recovery", lambda _env: False)
+    _enable_recovered_runtime_marker(monkeypatch)
     monkeypatch.setattr(child_env, "pinned_codex_runtime_path", lambda _env: str(codex))
     monkeypatch.setattr(child_env.shutil, "which", lambda name, *, path=None: None)
-
     sanitized = sanitize_codegen_child_environment({"HOME": str(tmp_path), "PATH": "/stale/bin"})
     wrapper = tmp_path / ".local" / "state" / "skeleton-runner" / "codegen-fallback-bin" / "codex"
     assert wrapper.is_file()
@@ -80,8 +81,22 @@ def test_codegen_wrapper_still_binds_pinned_codex_without_openhands(tmp_path: Pa
     assert sanitized["PATH"].split(":", 1)[0] == str(wrapper.parent)
 
 
-def test_wrapper_is_not_installed_when_pinned_codex_is_unverified(tmp_path: Path, monkeypatch) -> None:
+def test_wrapper_is_not_installed_before_recovery_marker(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(child_env, "should_attempt_codex_runtime_recovery", lambda _env: False)
+    monkeypatch.setattr(child_env, "pinned_codex_recovery_marker_present", lambda _env: False)
+    monkeypatch.setattr(
+        child_env,
+        "pinned_codex_runtime_path",
+        lambda _env: (_ for _ in ()).throw(AssertionError("must not probe before marker")),
+    )
+    sanitized = sanitize_codegen_child_environment({"HOME": str(tmp_path), "PATH": "/stale/bin"})
+    assert sanitized["PATH"] == "/stale/bin"
+    assert "SKELETON_REAL_CODEX_BIN" not in sanitized
+
+
+def test_wrapper_is_not_installed_when_marked_runtime_is_unverified(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(child_env, "should_attempt_codex_runtime_recovery", lambda _env: False)
+    _enable_recovered_runtime_marker(monkeypatch)
     monkeypatch.setattr(
         child_env,
         "pinned_codex_runtime_path",
