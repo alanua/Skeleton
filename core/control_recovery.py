@@ -10,7 +10,6 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-
 CONTROL_RECOVERY_SCHEMA = "skeleton.control_recovery.v1"
 CONTROL_RECOVERY_RECEIPT_SCHEMA = "skeleton.control_recovery_receipt.v1"
 ROUTE_CONTROL_RECOVERY = "control_recovery"
@@ -42,7 +41,8 @@ _KNOWN_ACTIONS = frozenset(
         "registered_checkout_recover",
         "registered_checkout_freshness_canary",
         "long_lived_poller_reload",
-        "executor_service_preflight",
+        "executor_service_recover",
+        "codegen_runtime_recover",
         "codegen_read_only_canary",
         "queue_reactivate",
         "issue_runner_continue",
@@ -195,13 +195,19 @@ class RecoveryStore:
                 if not _maintenance_report_done(report):
                     reason = "RECOVERY_ACTION_FAILED"
                     raise RuntimeError(reason)
-            checker = canary_executor or (lambda _canary: True)
+
+            if plan.canaries and canary_executor is None:
+                reason = "CANARY_EXECUTOR_REQUIRED"
+                raise RuntimeError(reason)
+
             for canary in plan.canaries:
                 _registered_action(canary)
-                if not checker(canary):
+                assert canary_executor is not None
+                if not canary_executor(canary):
                     reason = "CANARY_FAILED_AFTER_RECOVERY"
                     raise RuntimeError(reason)
                 canaries.append(canary)
+
             if plan.queue_reactivation_action is not None:
                 _registered_action(plan.queue_reactivation_action)
                 report = action_executor(plan.queue_reactivation_action)
@@ -229,7 +235,6 @@ class RecoveryStore:
                         evidence={"actions": actions, "canaries": canaries},
                     )
                 else:
-                    evidence = {"actions": actions, "canaries": canaries, "reason": reason}
                     receipt = self._update(
                         connection,
                         plan=plan,
@@ -238,7 +243,7 @@ class RecoveryStore:
                         next_retry_at=next_retry,
                         reason=reason,
                         now=now,
-                        evidence=evidence,
+                        evidence={"actions": actions, "canaries": canaries, "reason": reason},
                     )
                 connection.commit()
                 return receipt
@@ -261,30 +266,23 @@ class RecoveryStore:
     def record_needs_operator(
         self, *, failure_key: str, reason: str, now: int
     ) -> RecoveryReceipt:
-        _safe_failure_key = _failure_key(failure_key)
+        safe_key = _failure_key(failure_key)
         _timestamp(now, "now")
         self.initialize()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT * FROM recovery_runs WHERE failure_key = ?",
-                (_safe_failure_key,),
+                "SELECT * FROM recovery_runs WHERE failure_key = ?", (safe_key,)
             ).fetchone()
             notify = row is None or not bool(row["needs_operator_emitted"])
             evidence = {
-                "failure_key": _safe_failure_key,
+                "failure_key": safe_key,
                 "status": RecoveryStatus.NEEDS_OPERATOR.value,
                 "reason": reason,
                 "evidence": {"actions": [], "canaries": []},
             }
             evidence_ref = _evidence_ref(evidence)
-            evidence_json = json.dumps(
-                {**evidence, "evidence_ref": evidence_ref},
-                ensure_ascii=True,
-                allow_nan=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            )
+            evidence_json = _json({**evidence, "evidence_ref": evidence_ref})
             connection.execute(
                 """
                 INSERT INTO recovery_runs(
@@ -298,7 +296,7 @@ class RecoveryStore:
                     updated_at = excluded.updated_at
                 """,
                 (
-                    _safe_failure_key,
+                    safe_key,
                     "UNKNOWN_UNSAFE_RECOVERY",
                     RecoveryStatus.NEEDS_OPERATOR.value,
                     evidence_json,
@@ -310,7 +308,7 @@ class RecoveryStore:
             status=RecoveryStatus.NEEDS_OPERATOR,
             reason=reason,
             failure_class=None,
-            failure_key=_safe_failure_key,
+            failure_key=safe_key,
             attempt=0,
             next_retry_at=None,
             actions_executed=(),
@@ -367,36 +365,44 @@ class RecoveryStore:
             "evidence": dict(evidence),
         }
         evidence_ref = _evidence_ref(payload)
-        evidence_json = json.dumps(
-            {**payload, "evidence_ref": evidence_ref},
-            ensure_ascii=True,
-            allow_nan=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-        emitted_sql = (
-            "needs_operator_emitted"
-            if needs_operator_emitted is None
-            else str(int(needs_operator_emitted))
-        )
-        connection.execute(
-            f"""
-            UPDATE recovery_runs
-               SET failure_class = ?, status = ?, attempt = ?, next_retry_at = ?,
-                   evidence_json = ?, updated_at = ?,
-                   needs_operator_emitted = {emitted_sql}
-             WHERE failure_key = ?
-            """,
-            (
-                plan.failure_class.value,
-                status.value,
-                attempt,
-                next_retry_at,
-                evidence_json,
-                now,
-                plan.failure_key,
-            ),
-        )
+        evidence_json = _json({**payload, "evidence_ref": evidence_ref})
+        if needs_operator_emitted is None:
+            connection.execute(
+                """
+                UPDATE recovery_runs
+                   SET failure_class = ?, status = ?, attempt = ?, next_retry_at = ?,
+                       evidence_json = ?, updated_at = ?
+                 WHERE failure_key = ?
+                """,
+                (
+                    plan.failure_class.value,
+                    status.value,
+                    attempt,
+                    next_retry_at,
+                    evidence_json,
+                    now,
+                    plan.failure_key,
+                ),
+            )
+        else:
+            connection.execute(
+                """
+                UPDATE recovery_runs
+                   SET failure_class = ?, status = ?, attempt = ?, next_retry_at = ?,
+                       evidence_json = ?, updated_at = ?, needs_operator_emitted = ?
+                 WHERE failure_key = ?
+                """,
+                (
+                    plan.failure_class.value,
+                    status.value,
+                    attempt,
+                    next_retry_at,
+                    evidence_json,
+                    now,
+                    int(needs_operator_emitted),
+                    plan.failure_key,
+                ),
+            )
         return RecoveryReceipt(
             status=status,
             reason=reason,
@@ -414,10 +420,16 @@ class RecoveryStore:
         details = evidence.get("evidence")
         if not isinstance(details, Mapping):
             details = {}
+        raw_class = str(row["failure_class"])
+        failure_class = None
+        try:
+            failure_class = FailureClass(raw_class)
+        except ValueError:
+            pass
         return RecoveryReceipt(
             status=RecoveryStatus(str(row["status"])),
             reason=reason,
-            failure_class=FailureClass(str(row["failure_class"])),
+            failure_class=failure_class,
             failure_key=str(row["failure_key"]),
             attempt=int(row["attempt"]),
             next_retry_at=None if row["next_retry_at"] is None else int(row["next_retry_at"]),
@@ -442,17 +454,21 @@ def classify_failure(packet: Mapping[str, Any]) -> FailureClass | None:
             return FailureClass(value)
         except ValueError:
             return None
-    status = str(packet.get("status") or packet.get("reason") or "")
-    if "checkout" in status.lower() and any(
-        marker in status.lower() for marker in ("stale", "dirty", "behind", "diverged")
+    status = str(packet.get("status") or packet.get("reason") or "").lower()
+    if "checkout" in status and any(
+        marker in status for marker in ("stale", "dirty", "behind", "diverged")
     ):
         return FailureClass.REGISTERED_CHECKOUT_STALE_OR_DIRTY
-    if "poller" in status.lower() and "stale" in status.lower():
+    if "poller" in status and "stale" in status:
         return FailureClass.LONG_LIVED_POLLER_STALE
-    if "github actions" in status.lower() and "issue-runner healthy" in status.lower():
+    if "github actions" in status and "issue-runner healthy" in status:
         return FailureClass.GITHUB_ACTIONS_LANE_UNAVAILABLE_BUT_ISSUE_RUNNER_HEALTHY
-    if "codegen" in status.lower() or "codex" in status.lower():
+    if "codegen" in status or "codex" in status or "quota" in status:
         return FailureClass.CODEGEN_RUNTIME_UNHEALTHY
+    if "executor" in status and any(marker in status for marker in ("not running", "inactive", "down")):
+        return FailureClass.EXECUTOR_SERVICE_NOT_RUNNING
+    if "queue" in status and any(marker in status for marker in ("stuck", "empty", "idle")):
+        return FailureClass.QUEUE_LABEL_STATE_STUCK
     return None
 
 
@@ -467,7 +483,7 @@ def build_recovery_plan(packet: Mapping[str, Any]) -> RecoveryPlan | None:
     backoff = _bounded_positive_int(packet.get("backoff_seconds"), default=60, maximum=3600)
     plans: dict[FailureClass, tuple[tuple[str, ...], tuple[str, ...], str | None]] = {
         FailureClass.CODEGEN_RUNTIME_UNHEALTHY: (
-            ("executor_service_preflight",),
+            ("codegen_runtime_recover",),
             ("codegen_read_only_canary",),
             "queue_reactivate",
         ),
@@ -482,13 +498,13 @@ def build_recovery_plan(packet: Mapping[str, Any]) -> RecoveryPlan | None:
             "queue_reactivate",
         ),
         FailureClass.EXECUTOR_SERVICE_NOT_RUNNING: (
-            ("executor_service_preflight",),
-            ("codegen_read_only_canary",),
+            ("executor_service_recover",),
+            ("registered_checkout_freshness_canary",),
             "queue_reactivate",
         ),
         FailureClass.GITHUB_ACTIONS_LANE_UNAVAILABLE_BUT_ISSUE_RUNNER_HEALTHY: (
             ("issue_runner_continue",),
-            ("codegen_read_only_canary",),
+            (),
             "queue_reactivate",
         ),
         FailureClass.QUEUE_LABEL_STATE_STUCK: (
@@ -498,8 +514,8 @@ def build_recovery_plan(packet: Mapping[str, Any]) -> RecoveryPlan | None:
         ),
         FailureClass.CANARY_FAILED_AFTER_RECOVERY: (
             (),
-            (),
-            None,
+            ("registered_checkout_freshness_canary",),
+            "queue_reactivate",
         ),
     }
     actions, canaries, queue_action = plans[failure_class]
@@ -525,9 +541,7 @@ def execute_recovery_packet(
 ) -> Mapping[str, Any]:
     if packet.get("schema") not in {None, CONTROL_RECOVERY_SCHEMA}:
         return store.record_needs_operator(
-            failure_key=_packet_failure_key(packet),
-            reason="SCHEMA_MISMATCH",
-            now=now,
+            failure_key=_packet_failure_key(packet), reason="SCHEMA_MISMATCH", now=now
         ).as_mapping()
     if _payload_attempts_to_broaden_authority(packet):
         return store.record_needs_operator(
@@ -542,13 +556,12 @@ def execute_recovery_packet(
             reason="UNKNOWN_UNSAFE_RECOVERY",
             now=now,
         ).as_mapping()
-    receipt = store.run_recovery(
+    return store.run_recovery(
         plan=plan,
         now=now,
         action_executor=action_executor,
         canary_executor=canary_executor,
-    )
-    return receipt.as_mapping()
+    ).as_mapping()
 
 
 def _packet_failure_key(packet: Mapping[str, Any]) -> str:
@@ -557,25 +570,13 @@ def _packet_failure_key(packet: Mapping[str, Any]) -> str:
 
 
 def _failure_key(value: str) -> str:
-    if not isinstance(value, str) or _SAFE_KEY_RE.fullmatch(value) is None:
-        return "control:UNKNOWN"
-    return value
+    return value if isinstance(value, str) and _SAFE_KEY_RE.fullmatch(value) else "control:UNKNOWN"
 
 
 def _payload_attempts_to_broaden_authority(packet: Mapping[str, Any]) -> bool:
     forbidden = {
-        "command",
-        "commands",
-        "path",
-        "package",
-        "packages",
-        "version",
-        "model",
-        "service",
-        "script",
-        "shell",
-        "protected_merge",
-        "new_authority",
+        "command", "commands", "path", "package", "packages", "version", "model",
+        "service", "script", "shell", "protected_merge", "new_authority",
     }
     if forbidden & set(packet):
         return True
@@ -588,7 +589,8 @@ def _payload_attempts_to_broaden_authority(packet: Mapping[str, Any]) -> bool:
 
 
 def _maintenance_report_done(report: str) -> bool:
-    return str(report).lstrip().startswith("DONE:") and "success_criteria=not_met" not in str(report)
+    text = str(report)
+    return text.lstrip().startswith("DONE:") and "success_criteria=not_met" not in text
 
 
 def _registered_action(action: str) -> str:
@@ -610,12 +612,15 @@ def _timestamp(value: object, field: str) -> None:
         raise ValueError(f"{field} must be a non-negative integer")
 
 
-def _evidence_ref(payload: Mapping[str, Any]) -> str:
-    encoded = json.dumps(
+def _json(payload: Mapping[str, Any]) -> str:
+    return json.dumps(
         dict(payload),
         ensure_ascii=True,
         allow_nan=False,
         separators=(",", ":"),
         sort_keys=True,
-    ).encode("utf-8")
-    return "control-recovery:" + hashlib.sha256(encoded).hexdigest()
+    )
+
+
+def _evidence_ref(payload: Mapping[str, Any]) -> str:
+    return "control-recovery:" + hashlib.sha256(_json(payload).encode("utf-8")).hexdigest()
