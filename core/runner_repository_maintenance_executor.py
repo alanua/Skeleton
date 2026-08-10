@@ -12,6 +12,7 @@ from core.codex_runtime_recovery import (
     CodexRuntimeRecoveryError,
     TARGET_CODEX_VERSION,
     ensure_pinned_codex_runtime,
+    pinned_codex_runtime_path,
 )
 
 
@@ -102,12 +103,10 @@ def _recover_codegen_runtime() -> str:
     try:
         if not ensure_pinned_codex_runtime(environment):
             return _report("BLOCKED", "codegen_runtime_recover", "CODEX_RUNTIME_RECOVERY_FAILED")
+        codex = pinned_codex_runtime_path(environment)
     except (CodexRuntimeRecoveryError, OSError, subprocess.SubprocessError):
         return _report("BLOCKED", "codegen_runtime_recover", "CODEX_RUNTIME_RECOVERY_FAILED")
 
-    codex = shutil.which("codex", path=environment.get("PATH"))
-    if not codex:
-        return _report("BLOCKED", "codegen_runtime_recover", "CODEX_RUNTIME_VERSION_UNVERIFIED")
     version = _run_fixed([codex, "--version"], timeout=15)
     if version.returncode != 0 or version.stdout.strip() != f"codex-cli {TARGET_CODEX_VERSION}":
         return _report("BLOCKED", "codegen_runtime_recover", "CODEX_RUNTIME_VERSION_UNVERIFIED")
