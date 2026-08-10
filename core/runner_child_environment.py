@@ -11,6 +11,7 @@ import subprocess
 from core.codex_runtime_recovery import (
     CodexRuntimeRecoveryError,
     ensure_pinned_codex_runtime,
+    pinned_codex_recovery_marker_present,
     pinned_codex_runtime_path,
     should_attempt_codex_runtime_recovery,
 )
@@ -77,7 +78,6 @@ def main() -> int:
     original_path = os.environ.get("SKELETON_CODEGEN_ORIGINAL_PATH", os.environ.get("PATH", ""))
     if not real_codex or not Path(real_codex).is_file():
         return 127
-
     stdin_text = sys.stdin.read()
     child_env = dict(os.environ)
     child_env["PATH"] = original_path
@@ -94,13 +94,11 @@ def main() -> int:
         sys.stdout.write(codex.stdout)
         sys.stderr.write(codex.stderr)
         return 0
-
     combined = f"{codex.stdout}\n{codex.stderr}"
     if not _fallback_allowed(combined) or not openhands or not Path(openhands).is_file():
         sys.stdout.write(codex.stdout)
         sys.stderr.write(codex.stderr)
         return codex.returncode
-
     fallback = subprocess.run(
         [openhands, "--headless", "--json", "-t", _task(sys.argv[1:], stdin_text)],
         cwd=_workdir(sys.argv[1:]),
@@ -123,6 +121,8 @@ if __name__ == "__main__":
 
 
 def _install_fallback_wrapper(environment: dict[str, str]) -> None:
+    if not pinned_codex_recovery_marker_present(environment):
+        return
     try:
         real_codex = pinned_codex_runtime_path(environment)
     except (CodexRuntimeRecoveryError, OSError, subprocess.SubprocessError):
@@ -132,7 +132,6 @@ def _install_fallback_wrapper(environment: dict[str, str]) -> None:
     home = environment.get("HOME")
     if not home:
         return
-
     root = Path(home) / ".local" / "state" / "skeleton-runner" / "codegen-fallback-bin"
     wrapper = root / "codex"
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -145,11 +144,8 @@ def _install_fallback_wrapper(environment: dict[str, str]) -> None:
         os.replace(tmp, wrapper)
     else:
         os.chmod(wrapper, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
-
     environment[_REAL_CODEX_ENV] = str(Path(real_codex).resolve(strict=False))
-    environment[_OPENHANDS_ENV] = (
-        str(Path(openhands).resolve(strict=False)) if openhands else ""
-    )
+    environment[_OPENHANDS_ENV] = str(Path(openhands).resolve(strict=False)) if openhands else ""
     environment[_ORIGINAL_PATH_ENV] = original_path
     environment[_FALLBACK_BIN_ENV] = str(root)
     environment["PATH"] = f"{root}:{original_path}" if original_path else str(root)
@@ -172,7 +168,5 @@ def sanitize_codegen_child_environment(
     try:
         _install_fallback_wrapper(sanitized)
     except OSError:
-        # Failure to provision the wrapper must not broaden authority or break the
-        # existing Codex lane. Normal Runner failure handling remains authoritative.
         pass
     return sanitized
