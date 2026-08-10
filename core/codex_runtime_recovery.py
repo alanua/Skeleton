@@ -106,9 +106,8 @@ def _codex_version(codex_path: str, environment: Mapping[str, str]) -> str:
 
 def _global_runtime_paths(environment: Mapping[str, str]) -> tuple[str, str]:
     npm_path = shutil.which("npm", path=environment.get("PATH"))
-    codex_path = shutil.which("codex", path=environment.get("PATH"))
-    if not npm_path or not codex_path:
-        raise CodexRuntimeRecoveryError("codex_runtime_binary_missing")
+    if not npm_path:
+        raise CodexRuntimeRecoveryError("npm_runtime_binary_missing")
 
     prefix_result = _safe_run(
         [npm_path, "prefix", "-g"],
@@ -124,10 +123,15 @@ def _global_runtime_paths(environment: Mapping[str, str]) -> tuple[str, str]:
 
     prefix = Path(prefix_result.stdout.strip()).expanduser().resolve(strict=False)
     expected_codex = (prefix / "bin" / "codex").resolve(strict=False)
-    actual_codex = Path(codex_path).resolve(strict=False)
-    if actual_codex != expected_codex:
-        raise CodexRuntimeRecoveryError("codex_runtime_path_mismatch")
-    return npm_path, codex_path
+    return npm_path, str(expected_codex)
+
+
+def pinned_codex_runtime_path(environment: Mapping[str, str]) -> str:
+    """Return the exact npm-global Codex path only when the pinned version is active."""
+    _npm_path, codex_path = _global_runtime_paths(environment)
+    if _codex_version(codex_path, environment) != TARGET_CODEX_VERSION:
+        raise CodexRuntimeRecoveryError("codex_runtime_version_mismatch")
+    return codex_path
 
 
 def _install_version(
