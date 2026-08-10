@@ -139,27 +139,31 @@ def _codegen_read_only_canary() -> str:
         if init.returncode != 0:
             return _report("BLOCKED", "codegen_read_only_canary", "CANARY_GIT_INIT_FAILED")
 
-        codex = shutil.which("codex", path=os.environ.get("PATH"))
-        if codex:
-            result = _run_fixed(
-                [
-                    codex,
-                    "exec",
-                    "--sandbox",
-                    "read-only",
-                    "--cd",
-                    str(workdir),
-                    "Return exactly RESULT: OK. Do not modify files.",
-                ],
-                timeout=120,
-            )
-            combined = f"{result.stdout}\n{result.stderr}"
-            if result.returncode == 0 and "RESULT: OK" in combined:
-                return _report("DONE", "codegen_read_only_canary", "CODEX_CANARY_OK")
-            if not _fallback_allowed(combined):
-                return _report("BLOCKED", "codegen_read_only_canary", "CODEX_CANARY_FAILED")
+        environment = _safe_child_environment()
+        try:
+            codex = pinned_codex_runtime_path(environment)
+        except (CodexRuntimeRecoveryError, OSError, subprocess.SubprocessError):
+            return _report("BLOCKED", "codegen_read_only_canary", "CODEX_CANARY_RUNTIME_UNVERIFIED")
 
-        openhands = shutil.which("openhands", path=os.environ.get("PATH"))
+        result = _run_fixed(
+            [
+                codex,
+                "exec",
+                "--sandbox",
+                "read-only",
+                "--cd",
+                str(workdir),
+                "Return exactly RESULT: OK. Do not modify files.",
+            ],
+            timeout=120,
+        )
+        combined = f"{result.stdout}\n{result.stderr}"
+        if result.returncode == 0 and "RESULT: OK" in combined:
+            return _report("DONE", "codegen_read_only_canary", "CODEX_CANARY_OK")
+        if not _fallback_allowed(combined):
+            return _report("BLOCKED", "codegen_read_only_canary", "CODEX_CANARY_FAILED")
+
+        openhands = shutil.which("openhands", path=environment.get("PATH"))
         if not openhands:
             return _report("BLOCKED", "codegen_read_only_canary", "NO_FALLBACK_PROVIDER")
         result = _run_fixed(
