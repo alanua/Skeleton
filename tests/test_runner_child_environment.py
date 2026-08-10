@@ -2,15 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 import core.runner_child_environment as child_env
 from core.runner_child_environment import sanitize_codegen_child_environment
 
 
-def test_sanitize_codegen_child_environment_removes_only_home_edge_prefix(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_sanitize_codegen_child_environment_removes_only_home_edge_prefix(monkeypatch) -> None:
     environment = {
         "HOME": "/home/agent",
         "PATH": "/usr/bin",
@@ -44,7 +40,7 @@ def test_sanitize_codegen_child_environment_removes_only_home_edge_prefix(
 
 
 def test_codegen_environment_installs_fixed_fallback_only_when_both_tools_exist(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch
 ) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
