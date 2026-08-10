@@ -41,6 +41,7 @@ _KNOWN_ACTIONS = frozenset(
         "registered_checkout_freshness_canary",
         "long_lived_poller_reload",
         "executor_service_preflight",
+        "codegen_runtime_recover",
         "codegen_read_only_canary",
         "queue_reactivate",
         "issue_runner_continue",
@@ -410,7 +411,7 @@ def build_recovery_plan(packet: Mapping[str, Any]) -> RecoveryPlan | None:
     max_attempts = _bounded_positive_int(packet.get("max_attempts"), default=3, maximum=5)
     backoff = _bounded_positive_int(packet.get("backoff_seconds"), default=60, maximum=3600)
     plans: dict[FailureClass, tuple[tuple[str, ...], tuple[str, ...], str | None]] = {
-        FailureClass.CODEGEN_RUNTIME_UNHEALTHY: (("executor_service_preflight",), ("codegen_read_only_canary",), "queue_reactivate"),
+        FailureClass.CODEGEN_RUNTIME_UNHEALTHY: (("codegen_runtime_recover",), ("codegen_read_only_canary",), "queue_reactivate"),
         FailureClass.REGISTERED_CHECKOUT_STALE_OR_DIRTY: (("registered_checkout_recover",), ("registered_checkout_freshness_canary",), "queue_reactivate"),
         FailureClass.LONG_LIVED_POLLER_STALE: (("long_lived_poller_reload",), ("registered_checkout_freshness_canary",), "queue_reactivate"),
         FailureClass.EXECUTOR_SERVICE_NOT_RUNNING: (("executor_service_preflight",), ("codegen_read_only_canary",), "queue_reactivate"),
