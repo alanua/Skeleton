@@ -12,6 +12,7 @@ import pytest
 
 from core.home_edge import media_source_snapshot as snapshot
 from core.home_edge.executor import HomeEdgeExecReceipt, HomeEdgeExecRequest, sign_request
+from scripts import home_edge_media_source_snapshot_signer as signer
 
 
 SHA = "a" * 40
@@ -27,6 +28,7 @@ def issue_body(**updates: str) -> str:
         "Repository": snapshot.REPOSITORY,
         "Expected Main SHA": SHA,
         "Target": snapshot.TARGET_NODE,
+        "Operator Approval": snapshot.OPERATOR_APPROVAL,
     }
     fields.update(updates)
     return "\n".join(f"{key}: {value}" for key, value in fields.items())
@@ -263,6 +265,7 @@ def test_exact_fixed_task_path_node_lane_run_as_contract(monkeypatch: pytest.Mon
     assert snapshot.SOURCE_PATH in first.script
     assert first.node_id == "home-edge-01"
     assert first.execution_lane.value == "read_only"
+    assert first.operator_approval_ref == snapshot.OPERATOR_APPROVAL
     assert first.run_as.value == "desktop-user"
     assert first.timeout_seconds == 30
     assert first.argv == ()
@@ -276,6 +279,61 @@ def test_exact_fixed_task_path_node_lane_run_as_contract(monkeypatch: pytest.Mon
     assert first.nonce != second.nonce
     assert first.signature == sign_request(first, SECRET)
     assert second.signature == sign_request(second, SECRET)
+
+
+@pytest.mark.parametrize("approval", [None, "", "wrong"])
+def test_missing_or_wrong_exact_operator_approval_blocks_before_artifact_signer_credential_or_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    approval: str | None,
+) -> None:
+    body = issue_body() if approval is not None else issue_body()
+    if approval is None:
+        body = "\n".join(
+            line for line in body.splitlines() if not line.startswith("Operator Approval:")
+        )
+    else:
+        body = issue_body(**{"Operator Approval": approval})
+    monkeypatch.setattr(
+        snapshot,
+        "_existing_private_artifact_receipt",
+        lambda _artifact: pytest.fail("private artifact must not be inspected"),
+    )
+    monkeypatch.setattr(
+        snapshot,
+        "build_snapshot_request",
+        lambda **_kwargs: pytest.fail("signer path must not be invoked"),
+    )
+    monkeypatch.setattr(
+        snapshot,
+        "_read_exec_hmac_secret_config",
+        lambda: pytest.fail("credential config must not be read"),
+    )
+    monkeypatch.setattr(
+        snapshot,
+        "execute_home_edge_request",
+        lambda _request: pytest.fail("transport must not be invoked"),
+    )
+
+    with pytest.raises(ValueError, match="operator_approval_mismatch"):
+        snapshot.execute_media_source_snapshot_task(
+            body,
+            registered_clean_main_sha=SHA,
+            github_main_sha=SHA,
+            private_root=tmp_path / "private",
+            environment={},
+        )
+
+
+def test_signer_helper_uses_fixed_installed_command_and_never_owns_transport_or_artifact() -> None:
+    assert signer.FIXED_INSTALLED_COMMAND == (
+        "/usr/bin/python3",
+        "/usr/local/lib/skeleton-home-edge-controller/scripts/home_edge_media_source_snapshot_signer.py",
+    )
+    assert signer.CANONICAL_RUNNER_SERVICE_USER == "agent"
+    assert signer.CANONICAL_RUNNER_SERVICE == "skeleton-runner-poll.service"
+    assert "execute_home_edge_request" not in Path(signer.__file__).read_text(encoding="utf-8")
+    assert "private_artifact" not in Path(signer.__file__).read_text(encoding="utf-8")
 
 
 def test_environment_secret_takes_precedence_without_config_read(

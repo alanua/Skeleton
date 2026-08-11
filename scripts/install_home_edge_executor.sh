@@ -77,6 +77,7 @@ env_file="${env_dir}/home_edge_executor.env"
 sudoers_file="${sudoers_dir}/skeleton-home-edge-executor"
 wrapper="${bin_dir}/home_edge_exec"
 root_wrapper="${sbin_dir}/home_edge_exec_root"
+max_install_source_bytes=$((1024 * 1024))
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 
@@ -114,6 +115,37 @@ runtime_path() {
   else
     printf '%s' "$path"
   fi
+}
+
+validate_install_source_file() {
+  local path="$1"
+  if [[ -L "$path" || ! -f "$path" || ! -r "$path" ]]; then
+    echo "unsafe installer source file: $path" >&2
+    exit 2
+  fi
+  local size
+  size="$(wc -c < "$path")"
+  if [[ ! "$size" =~ ^[0-9]+$ || "$size" -gt "$max_install_source_bytes" ]]; then
+    echo "installer source file is outside bounded reviewed size: $path" >&2
+    exit 2
+  fi
+}
+
+atomic_install_file() {
+  local source="$1"
+  local target="$2"
+  local mode="$3"
+  local target_dir
+  local tmp
+  target_dir="$(dirname "$target")"
+  validate_install_source_file "$source"
+  mkdir -p "$target_dir"
+  chown_root_if_possible "$target_dir"
+  chmod 0755 "$target_dir"
+  tmp="$(mktemp "${target}.tmp.XXXXXX")"
+  install -m "$mode" "$source" "$tmp"
+  chown_root_if_possible "$tmp"
+  mv -f "$tmp" "$target"
 }
 
 read_existing_secret() {
@@ -221,18 +253,16 @@ ROOT_WRAPPER
 
 install_python_files() {
   mkdir -p "$lib_dir/core/home_edge" "$lib_dir/scripts"
+  chown_root_if_possible "$lib_dir" "$lib_dir/core" "$lib_dir/core/home_edge" "$lib_dir/scripts"
+  chmod 0755 "$lib_dir" "$lib_dir/core" "$lib_dir/core/home_edge" "$lib_dir/scripts"
   printf '%s\n' '"""Minimal installed package for the Home Edge one-shot executor."""' > "$lib_dir/core/__init__.py"
   chmod 0644 "$lib_dir/core/__init__.py"
-  install -m 0644 "$repo_root/core/home_edge/executor.py" "$lib_dir/core/home_edge/executor.py"
-  install -m 0644 "$repo_root/core/home_edge/executor_gateway.py" "$lib_dir/core/home_edge/executor_gateway.py"
-  install -m 0644 "$repo_root/core/home_edge/profile.py" "$lib_dir/core/home_edge/profile.py"
-  install -m 0755 "$repo_root/scripts/home_edge_exec.py" "$lib_dir/scripts/home_edge_exec.py"
-  install -m 0755 "$repo_root/scripts/home_edge_executor_server.py" "$lib_dir/scripts/home_edge_executor_server.py"
-  python3 -m py_compile \
-    "$lib_dir/core/home_edge/executor.py" \
-    "$lib_dir/core/home_edge/executor_gateway.py" \
-    "$lib_dir/scripts/home_edge_exec.py" \
-    "$lib_dir/scripts/home_edge_executor_server.py"
+  chown_root_if_possible "$lib_dir/core/__init__.py"
+  atomic_install_file "$repo_root/core/home_edge/executor.py" "$lib_dir/core/home_edge/executor.py" 0644
+  atomic_install_file "$repo_root/core/home_edge/executor_gateway.py" "$lib_dir/core/home_edge/executor_gateway.py" 0644
+  atomic_install_file "$repo_root/core/home_edge/profile.py" "$lib_dir/core/home_edge/profile.py" 0644
+  atomic_install_file "$repo_root/scripts/home_edge_exec.py" "$lib_dir/scripts/home_edge_exec.py" 0755
+  atomic_install_file "$repo_root/scripts/home_edge_executor_server.py" "$lib_dir/scripts/home_edge_executor_server.py" 0755
 }
 
 install_sudoers_rule() {
