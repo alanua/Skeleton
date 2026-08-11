@@ -16662,6 +16662,106 @@ def test_codex_executor_sanitizes_parent_and_overlay_hmac_environment(
     assert os.environ[HOME_EDGE_EXEC_HMAC_ENV] == "synthetic-parent-marker"
 
 
+def test_recoverable_codegen_metadata_failure_schedules_recovery_and_waits(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(runner, "DEFAULT_SCHEDULER_DB_PATH", tmp_path / "scheduler.sqlite3")
+    monkeypatch.setattr(
+        runner,
+        "default_control_recovery_db_path",
+        lambda: tmp_path / "recovery.sqlite3",
+    )
+    monkeypatch.setattr(runner.time, "time", lambda: 100)
+    monkeypatch.setattr(
+        runner,
+        "dispatch_runtime_maintenance_task",
+        lambda _task_id, _workdir, _body="": "DONE: ok\nsuccess_criteria=met",
+    )
+
+    with mock.patch.object(runner, "set_issue_label") as set_label:
+        report = runner.handle_recoverable_codegen_runtime_failure(
+            issue_number=2439,
+            codex_output="failed to decode models response: unknown variant `max`",
+            codex_exit_code=1,
+            workdir=str(tmp_path),
+            issue_body="schema: skeleton.runner_task.v1",
+        )
+
+    assert report is not None
+    assert report.startswith("WAITING_RECOVERY:")
+    assert "failure_class=CODEGEN_RUNTIME_UNHEALTHY" in report
+    assert "failure_key=control:codegen-runtime:codex_model_metadata_decoder" in report
+    assert "telegram_notifications=0" in report
+    set_label.assert_called_once_with(
+        2439,
+        runner.LABEL_RUNNING,
+        runner.LABEL_WAITING_DEPENDENCY,
+    )
+
+
+def test_duplicate_codegen_runtime_failure_reuses_same_recovery_key_and_occurrence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(runner, "DEFAULT_SCHEDULER_DB_PATH", tmp_path / "scheduler.sqlite3")
+    monkeypatch.setattr(
+        runner,
+        "default_control_recovery_db_path",
+        lambda: tmp_path / "recovery.sqlite3",
+    )
+    monkeypatch.setattr(runner.time, "time", lambda: 100)
+    monkeypatch.setattr(
+        runner,
+        "dispatch_runtime_maintenance_task",
+        lambda _task_id, _workdir, _body="": "DONE: ok\nsuccess_criteria=met",
+    )
+
+    with mock.patch.object(runner, "set_issue_label"):
+        first = runner.handle_recoverable_codegen_runtime_failure(
+            issue_number=2441,
+            codex_output="failed to decode models response: unknown variant `max`",
+            codex_exit_code=1,
+            workdir=str(tmp_path),
+            issue_body="schema: skeleton.runner_task.v1",
+        )
+        second = runner.handle_recoverable_codegen_runtime_failure(
+            issue_number=2441,
+            codex_output="failed to decode models response: unknown variant `max`",
+            codex_exit_code=1,
+            workdir=str(tmp_path),
+            issue_body="schema: skeleton.runner_task.v1",
+        )
+
+    assert first is not None and second is not None
+    first_occurrence = re.search(r"recovery_occurrence_id=(?P<id>occ_[a-f0-9]+)", first)
+    second_occurrence = re.search(r"recovery_occurrence_id=(?P<id>occ_[a-f0-9]+)", second)
+    assert first_occurrence is not None
+    assert second_occurrence is not None
+    assert first_occurrence.group("id") == second_occurrence.group("id")
+    assert first.count("failure_key=control:codegen-runtime:codex_model_metadata_decoder") == 1
+    assert second.count("failure_key=control:codegen-runtime:codex_model_metadata_decoder") == 1
+
+
+def test_ordinary_codegen_failure_does_not_enter_infrastructure_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(runner, "DEFAULT_SCHEDULER_DB_PATH", tmp_path / "scheduler.sqlite3")
+
+    with mock.patch.object(runner, "set_issue_label") as set_label:
+        report = runner.handle_recoverable_codegen_runtime_failure(
+            issue_number=2442,
+            codex_output="ordinary task implementation failed",
+            codex_exit_code=1,
+            workdir=str(tmp_path),
+            issue_body="schema: skeleton.runner_task.v1",
+        )
+
+    assert report is None
+    set_label.assert_not_called()
+
+
 
 def test_maintenance_report_sanitizer_rejects_raw_blocks_paths_and_prose() -> None:
     report = runner._maintenance_report(

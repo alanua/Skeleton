@@ -1,4 +1,8 @@
-from core.scheduler_engine import SchedulerEngine, SchedulerEngineConfig
+from core.scheduler_engine import (
+    SchedulerEngine,
+    SchedulerEngineConfig,
+    schedule_codegen_runtime_recovery,
+)
 from core.scheduler_models import ScheduleSpec, build_execution_proposal, stable_occurrence_id
 from core.scheduler_store import SchedulerStore
 from core.shared_dispatch import PRIVACY_PUBLIC_SAFE, SharedDispatcher, SharedDispatchRequest
@@ -382,3 +386,54 @@ def test_recovery_route_requeues_blocked_consumer_after_canary(tmp_path) -> None
     )
     assert second["resumed_waiting_dependencies"] == 1
     assert store.get_occurrence(consumer_id).state == "done"  # type: ignore[union-attr]
+
+
+def test_codegen_runtime_recovery_occurrence_is_idempotent_across_restart(tmp_path) -> None:
+    db_path = tmp_path / "scheduler.sqlite3"
+    first_store = SchedulerStore(db_path)
+    first = schedule_codegen_runtime_recovery(
+        first_store,
+        issue_number=2439,
+        failure_signature="codex_model_metadata_decoder",
+        now=100,
+    )
+    second_store = SchedulerStore(db_path)
+    second = schedule_codegen_runtime_recovery(
+        second_store,
+        issue_number=2439,
+        failure_signature="codex_model_metadata_decoder",
+        now=101,
+    )
+
+    assert first.recovery_occurrence_id == second.recovery_occurrence_id
+    assert first.consumer_occurrence_id == second.consumer_occurrence_id
+    assert first.recovery_created is True
+    assert first.consumer_created is True
+    assert second.recovery_created is False
+    assert second.consumer_created is False
+    assert second_store.occurrence_count("control.codegen-runtime.codex_model_metadata_decoder") == 1
+    assert second_store.occurrence_count("runner.codegen.issue-2439") == 1
+
+
+def test_codegen_runtime_recovery_waits_then_resumes_same_consumer_after_green(tmp_path) -> None:
+    store = SchedulerStore(tmp_path / "scheduler.sqlite3")
+    scheduled = schedule_codegen_runtime_recovery(
+        store,
+        issue_number=2440,
+        failure_signature="codex_model_metadata_decoder",
+        now=100,
+    )
+    dispatcher = SharedDispatcher.for_control_recovery(
+        recovery_db_path=str(tmp_path / "recovery.sqlite3"),
+        action_executor=lambda _action: "DONE: ok\nsuccess_criteria=met",
+        canary_executor=lambda _canary: True,
+        now=100,
+    )
+
+    first = SchedulerEngine(store).dispatch_pending(dispatcher=dispatcher, now=100)
+    resumed = store.resume_waiting_dependencies(now=101)
+
+    assert first["done"] == 1
+    assert resumed == 1
+    assert store.get_occurrence(scheduled.recovery_occurrence_id).state == "done"  # type: ignore[union-attr]
+    assert store.get_occurrence(scheduled.consumer_occurrence_id).state == "pending"  # type: ignore[union-attr]
