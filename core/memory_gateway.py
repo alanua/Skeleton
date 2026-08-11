@@ -126,6 +126,10 @@ class MemoryGateway:
             "graph.query_code": self.query_code,
             "graph.get_index_freshness": self.get_graph_index_freshness,
             "graph.private_query": self.graph_private_query,
+            "domain_graph.apply_event": self.domain_graph_apply_event,
+            "domain_graph.query_edges": self.domain_graph_query_edges,
+            "domain_graph.dependency_state": self.domain_graph_dependency_state,
+            "domain_graph.followup_tasks": self.domain_graph_followup_tasks,
             "memory.propose_patch": self.propose_patch,
         }
         if suffix == "memory.import_canonical_manifest":
@@ -185,6 +189,18 @@ class MemoryGateway:
 
     def graph_private_query(self, *, namespace: str, **payload: object) -> dict[str, object]:
         return self._private_storage_response(namespace, "graph.private_query", "query_graph", payload)
+
+    def domain_graph_apply_event(self, *, namespace: str, **payload: object) -> dict[str, object]:
+        return self._private_storage_response(namespace, "domain_graph.apply_event", "apply_domain_event", payload)
+
+    def domain_graph_query_edges(self, *, namespace: str, **payload: object) -> dict[str, object]:
+        return self._private_storage_response(namespace, "domain_graph.query_edges", "query_domain_edges", payload)
+
+    def domain_graph_dependency_state(self, *, namespace: str, **payload: object) -> dict[str, object]:
+        return self._private_storage_response(namespace, "domain_graph.dependency_state", "domain_dependency_state", payload)
+
+    def domain_graph_followup_tasks(self, *, namespace: str, **payload: object) -> dict[str, object]:
+        return self._private_storage_response(namespace, "domain_graph.followup_tasks", "domain_followup_tasks", payload)
 
     def lookup_exact(
         self,

@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 import time
-from typing import Any
+from typing import Any, Callable, Mapping
 
 from core.scheduler_models import (
     TICK_RECEIPT_SCHEMA,
@@ -45,9 +45,11 @@ class SchedulerEngine:
         self,
         store: SchedulerStore,
         config: SchedulerEngineConfig | None = None,
+        dependency_resolver: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
     ) -> None:
         self.store = store
         self.config = config or SchedulerEngineConfig()
+        self.dependency_resolver = dependency_resolver
 
     def tick(
         self, *, now: int | None = None, dispatcher: SharedDispatcher | None = None
@@ -196,6 +198,40 @@ class SchedulerEngine:
                         expected_states={"running"},
                         new_state="waiting_dependency",
                         reason="WAITING_DEPENDENCY",
+                        now=current,
+                    )
+                    counters["waiting_dependency"] += 1
+                    continue
+            graph_dependency = _graph_dependency_payload(proposal.get("payload"))
+            if graph_dependency is not None and self.dependency_resolver is not None:
+                state = self.dependency_resolver(graph_dependency)
+                if state.get("verified") is not True:
+                    self.store.record_dispatch_receipt(
+                        occurrence_id=occurrence.occurrence_id,
+                        attempt=occurrence.attempt,
+                        idempotency_key=occurrence.idempotency_key or "",
+                        status="waiting_dependency",
+                        reason="GRAPH_DEPENDENCY_UNVERIFIED",
+                        evidence_ref=f"domain_graph:{state.get('source_ref')}->{state.get('target_ref')}",
+                        result={
+                            "schema": "skeleton.scheduler_dispatch_receipt.v1",
+                            "occurrence_id": occurrence.occurrence_id,
+                            "attempt": occurrence.attempt,
+                            "idempotency_key": occurrence.idempotency_key,
+                            "reason": "GRAPH_DEPENDENCY_UNVERIFIED",
+                            "dependency_state": dict(state),
+                            "public_safe": True,
+                            "external_side_effects_executed": False,
+                            "destructive_actions_allowed": False,
+                        },
+                        now=current,
+                        parent_receipt_id=occurrence.parent_receipt_id,
+                    )
+                    self.store.transition_occurrence(
+                        occurrence.occurrence_id,
+                        expected_states={"running"},
+                        new_state="waiting_dependency",
+                        reason="GRAPH_DEPENDENCY_UNVERIFIED",
                         now=current,
                     )
                     counters["waiting_dependency"] += 1
@@ -393,3 +429,16 @@ class SchedulerEngine:
         if schedule.spec.approval_policy == "require_operator_each_occurrence":
             return "needs_operator", "OPERATOR_REQUIRED"
         return "pending", "DISPATCH_REQUIRED"
+
+
+def _graph_dependency_payload(payload: object) -> Mapping[str, Any] | None:
+    if not isinstance(payload, Mapping):
+        return None
+    dependency = payload.get("graph_dependency")
+    if not isinstance(dependency, Mapping):
+        return None
+    source_ref = dependency.get("source_ref")
+    target_ref = dependency.get("target_ref")
+    if not isinstance(source_ref, str) or not isinstance(target_ref, str):
+        return None
+    return dependency

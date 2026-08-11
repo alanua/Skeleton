@@ -27,6 +27,10 @@ ALLOWED_COMMAND_SUFFIXES = frozenset(
         "graph.query_code",
         "graph.get_index_freshness",
         "graph.private_query",
+        "domain_graph.apply_event",
+        "domain_graph.query_edges",
+        "domain_graph.dependency_state",
+        "domain_graph.followup_tasks",
         "memory.propose_patch",
     }
 )
@@ -117,6 +121,24 @@ _RESULT_FIELDS = frozenset(
         "related_refs",
         "source_snapshot_id",
         "bounded_text",
+        "edge_id",
+        "confidence",
+        "inferred",
+        "verified",
+        "destructive_capable",
+        "created_by_event_id",
+        "dataset_id",
+    }
+)
+_FOLLOWUP_TASK_FIELDS = frozenset(
+    {
+        "task_id",
+        "kind",
+        "title",
+        "edge_refs",
+        "bounded",
+        "public_safe",
+        "validation_command",
     }
 )
 _EXACT_FIELDS = frozenset(
@@ -270,6 +292,11 @@ _PUBLIC_FIELDS = frozenset(
     missing_provenance_count error_class next_operator_action bounded_text
  operation decision allowed reason gateway command contract_version payload conflict_count freshness_checked proposal_status classification
  expected_revision source_hash imported_canonical_refs indexes degraded_indexes
+    dataset_id event_id producer_ref privacy_boundary private_payloads_included
+    entities edges source target domain local_id edge_id confidence inferred
+    verified destructive_capable created_by_event_id source_ref target_ref
+    edge_refs blocked_edge_refs tasks task_id title bounded validation_command
+    destructive_actions_allowed
     """.split()
 )
 
@@ -390,6 +417,8 @@ def _typed_child(key: str, child: object) -> object:
         } if isinstance(child, Mapping) else {}
     if key == "results":
         return [_typed_mapping(item, _RESULT_FIELDS) for item in _as_list(child)]
+    if key == "tasks":
+        return [_typed_mapping(item, _FOLLOWUP_TASK_FIELDS) for item in _as_list(child)]
     if key == "conflicts":
         return [_typed_mapping(item, _CONFLICT_FIELDS) for item in _as_list(child)]
     if key == "events":
@@ -535,5 +564,9 @@ _COMMAND_RECEIPT_BUILDERS: dict[str, Callable[[Mapping[str, Any]], dict[str, obj
     "graph.query_code": _graph_query_receipt,
     "graph.get_index_freshness": _graph_freshness_receipt,
     "graph.private_query": lambda payload: _typed_mapping(payload, frozenset({"project_id", "dataset_id", "state", "results"})),
+    "domain_graph.apply_event": lambda payload: _typed_mapping(payload, frozenset({"schema", "status", "project_id", "dataset_id", "event_id", "idempotency_key", "idempotency_classification", "node_count", "edge_count", "public_safe", "private_payloads_included"})),
+    "domain_graph.query_edges": lambda payload: _typed_mapping(payload, frozenset({"schema", "project_id", "dataset_id", "results", "aggregate_counts", "public_safe"})),
+    "domain_graph.dependency_state": lambda payload: _typed_mapping(payload, frozenset({"schema", "project_id", "dataset_id", "source_ref", "target_ref", "state", "verified", "destructive_actions_allowed", "edge_refs", "blocked_edge_refs", "public_safe"})),
+    "domain_graph.followup_tasks": lambda payload: _typed_mapping(payload, frozenset({"schema", "project_id", "dataset_id", "tasks", "aggregate_counts", "public_safe"})),
     "memory.propose_patch": _proposal_receipt,
 }

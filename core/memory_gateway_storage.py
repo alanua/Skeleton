@@ -7,6 +7,13 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any, Mapping
 
+from core.domain_event_graph import (
+    DOMAIN_EVENT_GRAPH_QUERY_SCHEMA,
+    DOMAIN_EVENT_GRAPH_RECEIPT_SCHEMA,
+    DomainEventEnvelope,
+    bounded_followup_tasks,
+    dependency_state as graph_dependency_state,
+)
 from core.private_memory_bundle import prepare_private_memory_import_bundle
 from core.private_memory_history import canonical_json, content_hash, current_revision, safe_token
 
@@ -142,6 +149,148 @@ class PrivateMemoryGatewayStorage:
             return {"state": "STALE", "project_id": project_id, "dataset_id": dataset_id, "results": []}
         result = self.stack.relations(query=str(payload.get("query", "")), limit=_bounded_limit(payload.get("limit", 5)))
         return {"state": "READY", "project_id": project_id, "dataset_id": dataset_id, **result}
+
+    def apply_domain_event(self, payload: Mapping[str, Any]) -> dict[str, object]:
+        project_id, dataset_id = _scope(payload)
+        self._ensure_schema()
+        envelope = DomainEventEnvelope.from_mapping(payload)
+        payload_hash = envelope.payload_hash()
+        existing = self._get_domain_graph_event(envelope.idempotency_key)
+        if existing is not None:
+            if existing["payload_hash"] != payload_hash:
+                raise MemoryGatewayStorageError("domain graph idempotency key reused with different event payload")
+            return {
+                "schema": DOMAIN_EVENT_GRAPH_RECEIPT_SCHEMA,
+                "status": "DONE",
+                "project_id": project_id,
+                "dataset_id": dataset_id,
+                "event_id": envelope.event_id,
+                "idempotency_key": envelope.idempotency_key,
+                "idempotency_classification": "DUPLICATE_IDENTICAL",
+                "node_count": int(existing["node_count"]),
+                "edge_count": int(existing["edge_count"]),
+                "public_safe": True,
+                "private_payloads_included": False,
+            }
+        with closing(sqlite3.connect(str(self._gateway_db))) as connection:
+            with connection:
+                connection.execute(
+                    """
+                    INSERT INTO domain_graph_events (
+                        idempotency_key, payload_hash, project_id, dataset_id,
+                        event_id, event_type, producer_ref, node_count, edge_count
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        envelope.idempotency_key,
+                        payload_hash,
+                        project_id,
+                        dataset_id,
+                        envelope.event_id,
+                        envelope.event_type,
+                        envelope.producer_ref,
+                        len(envelope.entities),
+                        len(envelope.edges),
+                    ),
+                )
+                for entity in envelope.entities:
+                    connection.execute(
+                        """
+                        INSERT OR IGNORE INTO domain_graph_nodes (
+                            project_id, dataset_id, node_ref, domain, entity_kind, local_id
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (project_id, dataset_id, entity.stable_id(), entity.domain, entity.kind, entity.local_id),
+                    )
+                for edge in envelope.edges:
+                    connection.execute(
+                        """
+                        INSERT OR IGNORE INTO domain_graph_edges (
+                            edge_id, project_id, dataset_id, source_ref, target_ref,
+                            edge_kind, confidence, inferred, verified, destructive_capable,
+                            provenance_json, created_by_event_id
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            edge.edge_id(),
+                            project_id,
+                            dataset_id,
+                            edge.source.stable_id(),
+                            edge.target.stable_id(),
+                            edge.edge_kind,
+                            edge.confidence,
+                            int(edge.inferred),
+                            int(edge.verified()),
+                            int(edge.destructive_capable),
+                            canonical_json([item.to_mapping() for item in edge.provenance_refs]),
+                            envelope.event_id,
+                        ),
+                    )
+        return {
+            "schema": DOMAIN_EVENT_GRAPH_RECEIPT_SCHEMA,
+            "status": "DONE",
+            "project_id": project_id,
+            "dataset_id": dataset_id,
+            "event_id": envelope.event_id,
+            "idempotency_key": envelope.idempotency_key,
+            "idempotency_classification": "NEW_MUTATION",
+            "node_count": len(envelope.entities),
+            "edge_count": len(envelope.edges),
+            "public_safe": True,
+            "private_payloads_included": False,
+        }
+
+    def query_domain_edges(self, payload: Mapping[str, Any]) -> dict[str, object]:
+        project_id, dataset_id = _scope(payload)
+        self._ensure_schema()
+        source_ref = payload.get("source_ref")
+        target_ref = payload.get("target_ref")
+        edge_kind = payload.get("edge_kind")
+        limit = _bounded_limit(payload.get("limit", 20))
+        clauses = ["project_id = ?", "dataset_id = ?"]
+        params: list[object] = [project_id, dataset_id]
+        for column, value in (("source_ref", source_ref), ("target_ref", target_ref), ("edge_kind", edge_kind)):
+            if isinstance(value, str) and value:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+        rows = self._domain_edge_rows(" AND ".join(clauses), params, limit=limit)
+        return {
+            "schema": DOMAIN_EVENT_GRAPH_QUERY_SCHEMA,
+            "project_id": project_id,
+            "dataset_id": dataset_id,
+            "results": rows,
+            "aggregate_counts": {"edge_count": len(rows)},
+            "public_safe": True,
+        }
+
+    def domain_dependency_state(self, payload: Mapping[str, Any]) -> dict[str, object]:
+        project_id, dataset_id = _scope(payload)
+        source_ref = _safe_graph_ref(payload.get("source_ref"))
+        target_ref = _safe_graph_ref(payload.get("target_ref"))
+        self._ensure_schema()
+        rows = self._domain_edge_rows(
+            "project_id = ? AND dataset_id = ? AND source_ref = ? AND target_ref = ?",
+            [project_id, dataset_id, source_ref, target_ref],
+            limit=50,
+        )
+        result = graph_dependency_state(rows, source_ref=source_ref, target_ref=target_ref)
+        result.update({"project_id": project_id, "dataset_id": dataset_id})
+        return result
+
+    def domain_followup_tasks(self, payload: Mapping[str, Any]) -> dict[str, object]:
+        project_id, dataset_id = _scope(payload)
+        self._ensure_schema()
+        rows = self._domain_edge_rows(
+            "project_id = ? AND dataset_id = ?",
+            [project_id, dataset_id],
+            limit=200,
+        )
+        result = bounded_followup_tasks(rows)
+        result.update({"project_id": project_id, "dataset_id": dataset_id})
+        return result
 
     def _normalize_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         if payload.get("schema") != PRIVATE_MEMORY_GATEWAY_MUTATION_SCHEMA:
@@ -476,8 +625,115 @@ class PrivateMemoryGatewayStorage:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS domain_graph_events (
+                    idempotency_key TEXT PRIMARY KEY,
+                    payload_hash TEXT NOT NULL,
+                    project_id TEXT NOT NULL,
+                    dataset_id TEXT NOT NULL,
+                    event_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    producer_ref TEXT NOT NULL,
+                    node_count INTEGER NOT NULL,
+                    edge_count INTEGER NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS domain_graph_nodes (
+                    project_id TEXT NOT NULL,
+                    dataset_id TEXT NOT NULL,
+                    node_ref TEXT NOT NULL,
+                    domain TEXT NOT NULL,
+                    entity_kind TEXT NOT NULL,
+                    local_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY(project_id, dataset_id, node_ref)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS domain_graph_edges (
+                    edge_id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    dataset_id TEXT NOT NULL,
+                    source_ref TEXT NOT NULL,
+                    target_ref TEXT NOT NULL,
+                    edge_kind TEXT NOT NULL,
+                    confidence REAL NOT NULL,
+                    inferred INTEGER NOT NULL CHECK(inferred IN (0, 1)),
+                    verified INTEGER NOT NULL CHECK(verified IN (0, 1)),
+                    destructive_capable INTEGER NOT NULL CHECK(destructive_capable IN (0, 1)),
+                    provenance_json TEXT NOT NULL,
+                    created_by_event_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_domain_graph_edges_scope_source
+                ON domain_graph_edges(project_id, dataset_id, source_ref, edge_kind)
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_domain_graph_edges_scope_target
+                ON domain_graph_edges(project_id, dataset_id, target_ref, edge_kind)
+                """
+            )
             connection.commit()
         self._gateway_db.chmod(0o600)
+
+    def _get_domain_graph_event(self, idempotency_key: str) -> dict[str, object] | None:
+        with closing(sqlite3.connect(str(self._gateway_db))) as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(
+                """
+                SELECT idempotency_key, payload_hash, node_count, edge_count
+                FROM domain_graph_events
+                WHERE idempotency_key = ?
+                """,
+                (idempotency_key,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def _domain_edge_rows(self, where_sql: str, params: list[object], *, limit: int) -> list[dict[str, object]]:
+        with closing(sqlite3.connect(str(self._gateway_db))) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                f"""
+                SELECT edge_id, project_id, dataset_id, source_ref, target_ref,
+                       edge_kind, confidence, inferred, verified,
+                       destructive_capable, provenance_json, created_by_event_id
+                FROM domain_graph_edges
+                WHERE {where_sql}
+                ORDER BY edge_id
+                LIMIT ?
+                """,
+                [*params, limit],
+            ).fetchall()
+        return [
+            {
+                "edge_id": str(row["edge_id"]),
+                "project_id": str(row["project_id"]),
+                "dataset_id": str(row["dataset_id"]),
+                "source_ref": str(row["source_ref"]),
+                "target_ref": str(row["target_ref"]),
+                "edge_kind": str(row["edge_kind"]),
+                "confidence": float(row["confidence"]),
+                "inferred": bool(row["inferred"]),
+                "verified": bool(row["verified"]),
+                "destructive_capable": bool(row["destructive_capable"]),
+                "provenance_refs": json.loads(str(row["provenance_json"])),
+                "created_by_event_id": str(row["created_by_event_id"]),
+            }
+            for row in rows
+        ]
 
     def _get_home_edge_audit(self, audit_id: str) -> dict[str, object] | None:
         with closing(sqlite3.connect(str(self._gateway_db))) as connection:
@@ -767,3 +1023,11 @@ def _safe_hash(value: object) -> str:
     if not isinstance(value, str) or not re.fullmatch(r"[A-Fa-f0-9]{64}", value):
         raise MemoryGatewayStorageError("source hash must be sha256 hex")
     return value.lower()
+
+
+def _safe_graph_ref(value: object) -> str:
+    if not isinstance(value, str) or not value or len(value) > 160:
+        raise MemoryGatewayStorageError("domain graph ref is required")
+    if "/" in value or "\\" in value or " " in value or ".." in value:
+        raise MemoryGatewayStorageError("domain graph ref is malformed")
+    return value
