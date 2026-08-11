@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.project_memory_receipt.schema.json",
+  "title": "Project Memory Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "contract_version",
+    "project_id",
+    "dataset_id",
+    "operation",
+    "memory_class",
+    "capability_class",
+    "gateway",
+    "payload"
+  ],
+  "properties": {
+    "schema": {"const": "skeleton.project_memory.receipt.v1"},
+    "contract_version": {"const": "1.0.0"},
+    "project_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},
+    "dataset_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},
+    "operation": {
+      "enum": [
+        "read_context",
+        "propose_fact",
+        "propose_task",
+        "propose_preference",
+        "list_pending_review"
+      ]
+    },
+    "memory_class": {
+      "enum": ["CANON", "REVIEW", "BACKLOG", "REJECTED", "PRIVATE", "TEMPORARY"]
+    },
+    "capability_class": {"enum": ["PUBLIC_SAFE", "PRIVATE_RUNTIME_ONLY"]},
+    "gateway": {"const": "MemoryGateway"},
+    "payload": {"type": "object"}
+  }
+}
