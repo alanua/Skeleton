@@ -14,6 +14,7 @@ from core.home_edge.executor import HomeEdgeExecRequest, sign_request
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "scripts/install_home_edge_media_source_snapshot_signer.sh"
+SIGNER_PAYLOAD = ROOT / "scripts/home_edge_media_source_snapshot_signer_payload.py"
 
 
 def _synthetic_installed_signature(unsigned: Mapping[str, Any]) -> HomeEdgeExecRequest:
@@ -102,6 +103,32 @@ def test_installer_contract_blob_pin_matches_current_contract_source() -> None:
     ).hexdigest()
     installer = INSTALLER.read_text(encoding="utf-8")
     match = re.search(r'^CONTRACT_BLOB_SHA="([0-9a-f]{40})"$', installer, re.MULTILINE)
+
+    assert match is not None
+    assert match.group(1) == git_blob
+
+
+def test_installer_payload_blob_pin_matches_current_signer_payload() -> None:
+    data = SIGNER_PAYLOAD.read_bytes()
+    git_blob = hashlib.sha1(
+        b"blob " + str(len(data)).encode("ascii") + b"\0" + data,
+        usedforsecurity=False,
+    ).hexdigest()
+    installer = INSTALLER.read_text(encoding="utf-8")
+    match = re.search(r'^PAYLOAD_BLOB_SHA="([0-9a-f]{40})"$', installer, re.MULTILINE)
+
+    assert match is not None
+    assert match.group(1) == git_blob
+
+
+def test_signer_payload_contract_blob_pin_matches_current_contract_source() -> None:
+    data = Path(snapshot.__file__).read_bytes()
+    git_blob = hashlib.sha1(
+        b"blob " + str(len(data)).encode("ascii") + b"\0" + data,
+        usedforsecurity=False,
+    ).hexdigest()
+    payload = SIGNER_PAYLOAD.read_text(encoding="utf-8")
+    match = re.search(r'^CONTRACT_GIT_BLOB_SHA = "([0-9a-f]{40})"$', payload, re.MULTILINE)
 
     assert match is not None
     assert match.group(1) == git_blob
