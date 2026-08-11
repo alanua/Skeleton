@@ -3,12 +3,16 @@ from __future__ import annotations
 from pathlib import Path
 
 from core.control_recovery import (
+    CODEGEN_UNKNOWN_VARIANT_MAX_MESSAGE,
     CONTROL_RECOVERY_SCHEMA,
     FailureClass,
     RecoveryStatus,
     RecoveryStore,
     build_recovery_plan,
     execute_recovery_packet,
+    is_codegen_unknown_variant_max_failure,
+    production_control_recovery_db_path,
+    _validated_agent_state_db_path,
 )
 
 
@@ -234,6 +238,70 @@ def test_unknown_or_issue_supplied_authority_fails_closed(tmp_path: Path) -> Non
     assert unknown["needs_operator_notification"] is True
     assert unknown_again["needs_operator_notification"] is False
     assert broadened["reason"] == "UNREGISTERED_RECOVERY_AUTHORITY"
+
+
+def test_only_exact_live_unknown_variant_max_autoclassifies_codegen() -> None:
+    noisy = f"prefix {CODEGEN_UNKNOWN_VARIANT_MAX_MESSAGE} suffix OpenAI Codex v0.999"
+    assert is_codegen_unknown_variant_max_failure(noisy, 1) is True
+    plan = build_recovery_plan(
+        {
+            "schema": CONTROL_RECOVERY_SCHEMA,
+            "failure_key": "control:live-max",
+            "output": noisy,
+        }
+    )
+    assert plan is not None
+    assert plan.failure_class is FailureClass.CODEGEN_RUNTIME_UNHEALTHY
+
+    non_matches = (
+        "sqlite3.OperationalError: attempt to write a readonly database",
+        "permission denied while opening worktree",
+        "quota exceeded",
+        "provider outage",
+        "prompt task failed validation",
+        "generic codex failed",
+        "failed to decode models response: unknown variant `high`",
+    )
+    for text in non_matches:
+        assert is_codegen_unknown_variant_max_failure(text, 1) is False
+        assert build_recovery_plan({"failure_key": "control:x", "output": text}) is None
+    assert is_codegen_unknown_variant_max_failure(noisy, 0) is False
+
+
+def test_production_control_recovery_db_is_fixed_agent_local() -> None:
+    assert production_control_recovery_db_path() == Path(
+        "/home/agent/.local/state/skeleton-runner/control-recovery/control_recovery.sqlite3"
+    )
+    rendered = str(production_control_recovery_db_path())
+    assert "/var/lib" not in rendered
+    assert "/tmp" not in rendered
+    assert "/.codex/" not in rendered
+
+
+def test_agent_state_path_hardening_fails_closed_for_symlink_and_private_modes(
+    tmp_path: Path,
+) -> None:
+    loose_parent = tmp_path / "loose"
+    loose_parent.mkdir(mode=0o755)
+    db = loose_parent / "control_recovery.sqlite3"
+    db.write_text("", encoding="utf-8")
+    try:
+        _validated_agent_state_db_path(db)
+        raise AssertionError("loose state parent must fail closed")
+    except ValueError as exc:
+        assert str(exc) == "STATE_PATH_PRIVATE_MODE_REQUIRED"
+
+    private_parent = tmp_path / "private"
+    private_parent.mkdir(mode=0o700)
+    target = private_parent / "target.sqlite3"
+    target.write_text("", encoding="utf-8")
+    symlink = private_parent / "link.sqlite3"
+    symlink.symlink_to(target)
+    try:
+        _validated_agent_state_db_path(symlink)
+        raise AssertionError("state DB symlink must fail closed")
+    except ValueError as exc:
+        assert str(exc) == "STATE_DB_NOT_REGULAR_FILE"
 
 
 def test_plans_never_require_codegen() -> None:

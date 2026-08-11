@@ -29,7 +29,13 @@ Recovery plans may call only code-owned registered action IDs. Issue payloads ca
 - `queue_reactivate` -> existing `replenish_runner_queue` primitive
 - `issue_runner_continue` -> typed continuation when only the GitHub Actions lane is unhealthy and the issue Runner itself remains healthy
 
-A model-metadata/schema incompatibility such as an unsupported reasoning-level value is a Codex runtime failure. It must be repaired and verified by Codex itself; it must not be masked by a fallback provider.
+The automatic codegen-runtime classifier is intentionally narrow. It only treats a nonzero Codex run as `CODEGEN_RUNTIME_UNHEALTHY` when the output contains the confirmed live metadata failure text:
+
+```text
+failed to decode models response: unknown variant `max`
+```
+
+Harmless prefix, suffix, and version noise may surround that exact phrase. Generic Codex failures, prompt/task failures, sqlite read-only errors, permission failures, quota, and provider outages do not enter this classifier.
 
 ## Codex Runtime Boundary
 
@@ -43,6 +49,13 @@ After successful recovery, a local non-secret marker records the exact pinned ve
 
 `core.control_recovery.RecoveryStore` persists one row per failure key. Duplicate ticks and restarts observe the durable row, so a recovered failure does not execute again. Failed recovery moves to `WAITING_RECOVERY` with deterministic backoff. Exhaustion records exactly one durable `NEEDS_OPERATOR` notification flag.
 
+Production state is code-owned local agent state:
+
+- control recovery DB: `/home/agent/.local/state/skeleton-runner/control-recovery/control_recovery.sqlite3`
+- scheduler DB: `/home/agent/.local/state/skeleton-runner/scheduler/scheduler.sqlite3`
+
+Production recovery state never uses `/var/lib`, the repository, an issue worktree, `.codex`, `/tmp`, or an issue/environment-controlled path. Regression tests may monkeypatch the runner module `ROOT`; only that explicit synthetic mode moves recovery/scheduler state under the monkeypatched root so tests cannot observe persistent live rows.
+
 For `CODEGEN_RUNTIME_UNHEALTHY`, the fixed order is:
 
 `codegen_runtime_recover -> codegen_read_only_canary -> queue_reactivate`
@@ -53,7 +66,7 @@ The recovery action itself is codegen-independent. The canary is verification, n
 
 Recoverable blocked consumers should wait on the recovery occurrence. Once recovery is `RECOVERED`, the existing Scheduler dependency resumer moves those consumers back to pending dispatch, preserving scheduled priority order.
 
-The remaining integration requirement is that ordinary Runner codegen failures classified as a known recoverable failure must enter this existing recovery route automatically rather than becoming terminal `runner:blocked`. That wiring belongs in the canonical Runner/Scheduler continuation path; it must not be implemented as a second recovery queue or external control plane.
+Ordinary Runner codegen failures classified by the exact live metadata phrase enter the existing recovery route before terminal blocking. The issue is moved to `runner:waiting-dependency`, a durable recovery occurrence is recorded, and a same-issue consumer waits on it. After `codegen_runtime_recover` and the read-only Codex canary succeed, `queue_reactivate` removes `runner:waiting-dependency` from that same GitHub issue and adds `runner:ready`.
 
 ## Operator Noise
 

@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,10 @@ from typing import Any
 CONTROL_RECOVERY_SCHEMA = "skeleton.control_recovery.v1"
 CONTROL_RECOVERY_RECEIPT_SCHEMA = "skeleton.control_recovery_receipt.v1"
 ROUTE_CONTROL_RECOVERY = "control_recovery"
+CODEGEN_UNKNOWN_VARIANT_MAX_MESSAGE = "failed to decode models response: unknown variant `max`"
+PRODUCTION_CONTROL_RECOVERY_DB = Path(
+    "/home/agent/.local/state/skeleton-runner/control-recovery/control_recovery.sqlite3"
+)
 
 
 class FailureClass(str, Enum):
@@ -402,6 +407,8 @@ def classify_failure(packet: Mapping[str, Any]) -> FailureClass | None:
             return FailureClass(value)
         except ValueError:
             return None
+    if _packet_has_codegen_unknown_variant_max(packet):
+        return FailureClass.CODEGEN_RUNTIME_UNHEALTHY
     text = str(packet.get("status") or packet.get("reason") or "").lower()
     if "checkout" in text and any(marker in text for marker in ("stale", "dirty", "behind", "diverged")):
         return FailureClass.REGISTERED_CHECKOUT_STALE_OR_DIRTY
@@ -409,9 +416,46 @@ def classify_failure(packet: Mapping[str, Any]) -> FailureClass | None:
         return FailureClass.LONG_LIVED_POLLER_STALE
     if "github actions" in text and "issue-runner healthy" in text:
         return FailureClass.GITHUB_ACTIONS_LANE_UNAVAILABLE_BUT_ISSUE_RUNNER_HEALTHY
-    if "codegen" in text or "codex" in text:
-        return FailureClass.CODEGEN_RUNTIME_UNHEALTHY
     return None
+
+
+def is_codegen_unknown_variant_max_failure(output: str, exit_code: int) -> bool:
+    if isinstance(exit_code, bool) or not isinstance(exit_code, int) or exit_code == 0:
+        return False
+    return CODEGEN_UNKNOWN_VARIANT_MAX_MESSAGE in str(output or "")
+
+
+def production_control_recovery_db_path() -> Path:
+    return PRODUCTION_CONTROL_RECOVERY_DB
+
+
+def _packet_has_codegen_unknown_variant_max(packet: Mapping[str, Any]) -> bool:
+    for key in ("output", "stderr", "status", "reason", "message"):
+        value = packet.get(key)
+        if isinstance(value, str) and CODEGEN_UNKNOWN_VARIANT_MAX_MESSAGE in value:
+            return True
+    return False
+
+
+def _validated_agent_state_db_path(path: Path) -> Path:
+    path = path.expanduser()
+    if not path.is_absolute():
+        raise ValueError("STATE_PATH_NOT_ABSOLUTE")
+    parent = path.parent
+    if parent.exists():
+        parent_stat = parent.stat()
+        if stat.S_IMODE(parent_stat.st_mode) & 0o077:
+            raise ValueError("STATE_PATH_PRIVATE_MODE_REQUIRED")
+    if path.exists():
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("STATE_DB_NOT_REGULAR_FILE")
+        file_stat = path.stat()
+        if stat.S_IMODE(file_stat.st_mode) & 0o077:
+            raise ValueError("STATE_DB_PRIVATE_MODE_REQUIRED")
+    disallowed_roots = (Path("/var/lib"), Path("/tmp"))
+    if any(path == root or root in path.parents for root in disallowed_roots):
+        raise ValueError("STATE_PATH_FORBIDDEN")
+    return path
 
 
 def build_recovery_plan(packet: Mapping[str, Any]) -> RecoveryPlan | None:

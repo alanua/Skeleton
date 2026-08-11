@@ -1,4 +1,8 @@
-from core.scheduler_engine import SchedulerEngine, SchedulerEngineConfig
+from core.scheduler_engine import (
+    SchedulerEngine,
+    SchedulerEngineConfig,
+    production_scheduler_db_path,
+)
 from core.scheduler_models import ScheduleSpec, build_execution_proposal, stable_occurrence_id
 from core.scheduler_store import SchedulerStore
 from core.shared_dispatch import PRIVACY_PUBLIC_SAFE, SharedDispatcher, SharedDispatchRequest
@@ -382,3 +386,14 @@ def test_recovery_route_requeues_blocked_consumer_after_canary(tmp_path) -> None
     )
     assert second["resumed_waiting_dependencies"] == 1
     assert store.get_occurrence(consumer_id).state == "done"  # type: ignore[union-attr]
+
+
+def test_production_scheduler_db_is_fixed_agent_local() -> None:
+    path = production_scheduler_db_path()
+    assert path.as_posix() == (
+        "/home/agent/.local/state/skeleton-runner/scheduler/scheduler.sqlite3"
+    )
+    rendered = str(path)
+    assert "/var/lib" not in rendered
+    assert "/tmp" not in rendered
+    assert "/.codex/" not in rendered
