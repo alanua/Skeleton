@@ -1324,6 +1324,127 @@ def test_completion_path_invokes_replenishment_after_done_status(tmp_path: Path)
     replenish.assert_called_once_with()
 
 
+def test_process_issue_routes_exact_unknown_variant_max_to_recovery_wait(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    issue_path = tmp_path / "issue-2490"
+    issue = {
+        "number": 2490,
+        "title": "Codegen runtime",
+        "body": "Expected Output: done\n\n```task\nDo it\n```",
+        "comments": [],
+        "labels": [runner.LABEL_READY],
+    }
+    labels: list[tuple[int, str, str]] = []
+
+    monkeypatch.setattr(runner, "ROOT", tmp_path)
+    with mock.patch.object(
+        runner, "set_issue_label", side_effect=lambda *args: labels.append(args)
+    ), mock.patch.object(
+        runner, "prepare_issue_branch", return_value=(0, "ready", issue_path)
+    ), mock.patch.object(runner, "cleanup_runtime_artifacts"), mock.patch.object(
+        runner,
+        "run_codex_task",
+        return_value=(
+            1,
+            "OpenAI Codex v0.999\n"
+            "failed to decode models response: unknown variant `max`\n"
+            "retry later",
+        ),
+    ), mock.patch.object(runner, "post_issue_comment") as comment, mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "record_runner_task_picked_up", return_value=None
+    ), mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ):
+        runner.process_issue(issue, workdir=str(tmp_path))
+
+    assert labels == [
+        (2490, runner.LABEL_READY, runner.LABEL_RUNNING),
+        (2490, runner.LABEL_RUNNING, runner.LABEL_WAITING_DEPENDENCY),
+    ]
+    report = comment.call_args.args[1]
+    assert "failure_class=CODEGEN_RUNTIME_UNHEALTHY" in report
+    assert "terminal_block=false" in report
+    store = runner.SchedulerStore(runner.scheduler_db_path())
+    assert store.occurrence_count(runner._codegen_recovery_schedule_id(2490)) == 1
+    assert store.occurrence_count(runner._codegen_recovery_consumer_schedule_id(2490)) == 1
+    consumer = store.list_occurrences(runner._codegen_recovery_consumer_schedule_id(2490))[0]
+    assert consumer.state == "waiting_dependency"
+
+
+def test_unknown_variant_max_recovery_survives_restart_and_requeues_same_issue(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[str] = []
+    gh_edits: list[list[str]] = []
+
+    class FakeRegisteredMaintenanceExecutor:
+        def __init__(self, _dispatch: object, _workdir: str) -> None:
+            pass
+
+        def run(self, action_id: str, _body: str = "") -> str:
+            calls.append(action_id)
+            if len(calls) == 1:
+                return "BLOCKED: no\nreason=SYNTHETIC_FIRST_FAILURE\nsuccess_criteria=not_met"
+            return "DONE: ok\nsuccess_criteria=met"
+
+    def fake_run_command(command: list[str], **_kwargs: object) -> tuple[int, str]:
+        gh_edits.append(command)
+        return 0, ""
+
+    monkeypatch.setattr(runner, "ROOT", tmp_path)
+    monkeypatch.setattr(runner, "RegisteredMaintenanceExecutor", FakeRegisteredMaintenanceExecutor)
+    monkeypatch.setattr(runner, "run_command", fake_run_command)
+    runner.record_codegen_runtime_recovery_dependency(
+        2490,
+        "failed to decode models response: unknown variant `max`",
+        now=100,
+    )
+
+    first = runner.run_due_codegen_recovery_for_issue(2490, now=100)
+    second = runner.run_due_codegen_recovery_for_issue(2490, now=200)
+
+    assert first["dispatch"]["retried"] == 1
+    assert second["dispatch"]["done"] == 1
+    assert calls == [
+        "codegen_runtime_recover",
+        "codegen_runtime_recover",
+        "codegen_read_only_canary",
+    ]
+    assert gh_edits == [
+        [
+            "gh",
+            "issue",
+            "edit",
+            "2490",
+            "--repo",
+            runner.REPO,
+            "--remove-label",
+            runner.LABEL_WAITING_DEPENDENCY,
+            "--add-label",
+            runner.LABEL_READY,
+        ]
+    ]
+
+
+def test_recovery_paths_use_synthetic_state_only_when_root_is_monkeypatched(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    assert runner.control_recovery_db_path() == Path(
+        "/home/agent/.local/state/skeleton-runner/control-recovery/control_recovery.sqlite3"
+    )
+    assert runner.scheduler_db_path() == Path(
+        "/home/agent/.local/state/skeleton-runner/scheduler/scheduler.sqlite3"
+    )
+
+    monkeypatch.setattr(runner, "ROOT", tmp_path)
+
+    assert runner.control_recovery_db_path() == tmp_path / ".codex" / "control_recovery.sqlite3"
+    assert runner.scheduler_db_path() == tmp_path / ".codex" / "scheduler.sqlite3"
+
+
 def test_runner_report_status_ignores_blocked_words_in_success_report_text() -> None:
     report = """DONE: Codex completed successfully with no file changes.
 

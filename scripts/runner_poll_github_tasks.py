@@ -31,15 +31,20 @@ from typing import Any
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
+MODULE_ROOT = ROOT
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.audit_ledger import AuditLedger, validate_public_safe_payload
 from core.aufmass_source_pack import validate_source_pack_manifest
 from core.control_recovery import (
+    CODEGEN_UNKNOWN_VARIANT_MAX_MESSAGE,
     CONTROL_RECOVERY_SCHEMA,
+    FailureClass,
     RecoveryStore,
     execute_recovery_packet,
+    is_codegen_unknown_variant_max_failure,
+    production_control_recovery_db_path,
 )
 from core.hermes_private_memory import (
     orient_hermes_private_memory,
@@ -122,6 +127,10 @@ from core.runner_retry_policy import (
     one_time_override_hash,
     parse_prior_blocked_reports,
 )
+from core.scheduler_engine import SchedulerEngine, production_scheduler_db_path
+from core.scheduler_models import ScheduleSpec, build_execution_proposal, stable_occurrence_id
+from core.scheduler_store import SchedulerStore
+from core.shared_dispatch import PRIVACY_PUBLIC_SAFE, SharedDispatcher
 from core.memory_bootstrap import (
     MEMORY_BOOTSTRAP_REQUEST_SCHEMA,
     MemoryBootstrapError,
@@ -1896,6 +1905,188 @@ def classify_codex_task_result(output: str, exit_code: int) -> CodexTaskResult:
     if marker is not None:
         return CodexTaskResult("BLOCKED", marker)
     return CodexTaskResult("DONE")
+
+
+def control_recovery_db_path() -> Path:
+    if ROOT != MODULE_ROOT:
+        return ROOT / ".codex" / "control_recovery.sqlite3"
+    return production_control_recovery_db_path()
+
+
+def scheduler_db_path() -> Path:
+    if ROOT != MODULE_ROOT:
+        return ROOT / ".codex" / "scheduler.sqlite3"
+    return production_scheduler_db_path()
+
+
+def _codegen_recovery_schedule_id(issue_number: int) -> str:
+    return f"control.codegen.issue-{issue_number}"
+
+
+def _codegen_recovery_consumer_schedule_id(issue_number: int) -> str:
+    return f"control.codegen.issue-{issue_number}.consumer"
+
+
+def _codegen_recovery_failure_key(issue_number: int) -> str:
+    return f"control:codegen-runtime:issue-{issue_number}"
+
+
+def _codegen_recovery_packet(issue_number: int, output: str = "") -> dict[str, object]:
+    return {
+        "schema": CONTROL_RECOVERY_SCHEMA,
+        "failure_class": FailureClass.CODEGEN_RUNTIME_UNHEALTHY.value,
+        "failure_key": _codegen_recovery_failure_key(issue_number),
+        "status": CODEGEN_UNKNOWN_VARIANT_MAX_MESSAGE,
+        "output": output,
+        "max_attempts": 3,
+        "backoff_seconds": 60,
+    }
+
+
+def _recovery_schedule_spec(issue_number: int, now: int, output: str = "") -> ScheduleSpec:
+    return ScheduleSpec.from_mapping(
+        {
+            "schema": "skeleton.schedule.v1",
+            "schedule_id": _codegen_recovery_schedule_id(issue_number),
+            "trigger_kind": "once",
+            "cron_expression": None,
+            "once_at": now,
+            "timezone": "UTC",
+            "route_type": "workflow",
+            "route_id": "control_recovery",
+            "approval_policy": "auto_run_low_risk",
+            "overlap_policy": "queue_one",
+            "misfire_policy": "run_once",
+            "payload": {
+                "privacy_boundary": PRIVACY_PUBLIC_SAFE,
+                "bounded": True,
+                "approved_capabilities": ["control:recovery"],
+                "requested_capabilities": ["control:recovery"],
+                "recovery_packet": _codegen_recovery_packet(issue_number, output),
+            },
+        }
+    )
+
+
+def _consumer_schedule_spec(issue_number: int, now: int, recovery_occurrence_id: str) -> ScheduleSpec:
+    return ScheduleSpec.from_mapping(
+        {
+            "schema": "skeleton.schedule.v1",
+            "schedule_id": _codegen_recovery_consumer_schedule_id(issue_number),
+            "trigger_kind": "once",
+            "cron_expression": None,
+            "once_at": now,
+            "timezone": "UTC",
+            "route_type": "notify",
+            "route_id": "same_issue_requeue",
+            "approval_policy": "auto_run_low_risk",
+            "overlap_policy": "queue_one",
+            "misfire_policy": "run_once",
+            "payload": {
+                "privacy_boundary": PRIVACY_PUBLIC_SAFE,
+                "bounded": True,
+                "wait_for": recovery_occurrence_id,
+                "issue_number": issue_number,
+            },
+        }
+    )
+
+
+def record_codegen_runtime_recovery_dependency(
+    issue_number: int, codex_output: str, *, now: int | None = None
+) -> str:
+    current = int(time.time()) if now is None else now
+    store = SchedulerStore(scheduler_db_path())
+    store.initialize()
+    recovery_schedule, _ = store.register(
+        _recovery_schedule_spec(issue_number, current, codex_output),
+        now=current,
+    )
+    recovery_id = stable_occurrence_id(
+        recovery_schedule.spec.schedule_id, recovery_schedule.version, current
+    )
+    recovery_proposal = build_execution_proposal(
+        recovery_schedule, occurrence_id=recovery_id, scheduled_for=current
+    )
+    store.create_occurrence(
+        occurrence_id=recovery_id,
+        schedule=recovery_schedule,
+        scheduled_for=current,
+        state="pending",
+        reason="CODEGEN_RUNTIME_UNHEALTHY",
+        proposal=recovery_proposal,
+        now=current,
+    )
+    consumer_schedule, _ = store.register(
+        _consumer_schedule_spec(issue_number, current, recovery_id),
+        now=current,
+    )
+    consumer_id = stable_occurrence_id(
+        consumer_schedule.spec.schedule_id, consumer_schedule.version, current
+    )
+    consumer_proposal = build_execution_proposal(
+        consumer_schedule, occurrence_id=consumer_id, scheduled_for=current
+    )
+    consumer_proposal["payload"]["wait_for"] = recovery_id
+    store.create_occurrence(
+        occurrence_id=consumer_id,
+        schedule=consumer_schedule,
+        scheduled_for=current,
+        state="waiting_dependency",
+        reason="WAITING_RECOVERY",
+        proposal=consumer_proposal,
+        now=current,
+    )
+    return recovery_id
+
+
+def _reactivate_same_issue(issue_number: int) -> None:
+    code, output = run_command(
+        [
+            "gh",
+            "issue",
+            "edit",
+            str(issue_number),
+            "--repo",
+            REPO,
+            "--remove-label",
+            LABEL_WAITING_DEPENDENCY,
+            "--add-label",
+            LABEL_READY,
+        ]
+    )
+    if code != 0:
+        raise RuntimeError(f"gh issue edit failed:\n{output}")
+
+
+def run_due_codegen_recovery_for_issue(issue_number: int, *, now: int | None = None) -> dict[str, object]:
+    current = int(time.time()) if now is None else now
+    store = SchedulerStore(scheduler_db_path())
+    store.initialize()
+
+    def run_action(action_id: str) -> str:
+        if action_id == "queue_reactivate":
+            _reactivate_same_issue(issue_number)
+            return _maintenance_report(
+                "DONE",
+                action_id,
+                [f"reactivated_issue={issue_number}", "queue_label=runner:ready"],
+                "met",
+            )
+        return RegisteredMaintenanceExecutor(
+            dispatch_runtime_maintenance_task, str(ROOT)
+        ).run(action_id, "")
+
+    def run_canary(canary_id: str) -> bool:
+        return maintenance_report_is_done(run_action(canary_id))
+
+    dispatcher = SharedDispatcher.for_control_recovery(
+        recovery_db_path=str(control_recovery_db_path()),
+        action_executor=run_action,
+        canary_executor=run_canary,
+        now=current,
+    )
+    return SchedulerEngine(store).tick(now=current, dispatcher=dispatcher)
 
 
 def runner_report_status(report: str) -> str:
@@ -14030,7 +14221,7 @@ def control_plane_self_healing_recovery(body: str, workdir: str) -> str:
 
     receipt = execute_recovery_packet(
         packet,
-        store=RecoveryStore(ROOT / ".codex" / "control_recovery.sqlite3"),
+        store=RecoveryStore(control_recovery_db_path()),
         now=int(time.time()),
         action_executor=run_action,
         canary_executor=run_canary,
@@ -14374,6 +14565,10 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
     global LAST_RUNNER_SHADOW_RECEIPT
     issue_number = int(issue["number"])
     if not is_open_task_issue(issue):
+        return
+    labels = _issue_label_names(issue)
+    if LABEL_WAITING_DEPENDENCY in labels and LABEL_READY not in labels:
+        run_due_codegen_recovery_for_issue(issue_number)
         return
 
     coordinator_workdir = str(Path(workdir) if workdir is not None else DEFAULT_WORKDIR)
@@ -14783,6 +14978,30 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             )
         cleanup_runtime_artifacts(issue_workdir)
         codex_result = classify_codex_task_result(codex_output, codex_code)
+        if is_codegen_unknown_variant_max_failure(codex_output, codex_code):
+            recovery_id = record_codegen_runtime_recovery_dependency(
+                issue_number, codex_output
+            )
+            report = report_runner_lane(
+                "BLOCKED: Codex runtime metadata decode failed; recovery is pending.\n\n"
+                f"failure_class={FailureClass.CODEGEN_RUNTIME_UNHEALTHY.value}\n"
+                f"failure_key={_codegen_recovery_failure_key(issue_number)}\n"
+                f"recovery_occurrence_id={recovery_id}\n"
+                "issue_state=waiting_dependency\n"
+                "terminal_block=false",
+                runner_task,
+            )
+            warning = record_runner_executor_result(
+                issue_number,
+                runner_task.target_project if runner_task is not None else "skeleton",
+                FailureClass.CODEGEN_RUNTIME_UNHEALTHY.value,
+                "WAITING_DEPENDENCY",
+                "codex",
+                report,
+            )
+            post_issue_comment(issue_number, append_memory_warning(report, warning or pickup_memory_warning))
+            set_issue_label(issue_number, LABEL_RUNNING, LABEL_WAITING_DEPENDENCY)
+            return
         if codex_code != 0:
             block_issue(
                 issue_number,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+from pathlib import Path
 import time
 from typing import Any
 
@@ -15,6 +16,14 @@ from core.scheduler_models import (
 )
 from core.scheduler_store import SchedulerStore
 from core.shared_dispatch import SharedDispatcher, SharedDispatchRequest
+
+PRODUCTION_SCHEDULER_DB = Path(
+    "/home/agent/.local/state/skeleton-runner/scheduler/scheduler.sqlite3"
+)
+
+
+def production_scheduler_db_path() -> Path:
+    return PRODUCTION_SCHEDULER_DB
 
 
 @dataclass(frozen=True)
