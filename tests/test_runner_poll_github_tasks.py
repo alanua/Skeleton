@@ -2055,6 +2055,144 @@ def test_process_issue_runs_codex_in_prepared_issue_worktree(tmp_path: Path) -> 
     finalize.assert_called_once_with(issue, str(issue_path), "codex output")
 
 
+def test_process_issue_known_codex_runtime_failure_schedules_recovery_not_terminal_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    issue_path = tmp_path / "issue-2481"
+    scheduler_db = tmp_path / "scheduler.sqlite3"
+    issue = {
+        "number": 2481,
+        "title": "Runtime fail",
+        "body": "Expected Output: done\n\n```task\nDo it\n```",
+        "comments": [],
+    }
+    monkeypatch.setattr(runner, "scheduler_db_path", lambda: scheduler_db)
+
+    with mock.patch.object(runner, "set_issue_label") as labels, mock.patch.object(
+        runner, "prepare_issue_branch", return_value=(0, "ready", issue_path)
+    ), mock.patch.object(runner, "cleanup_runtime_artifacts"), mock.patch.object(
+        runner,
+        "run_codex_task",
+        return_value=(
+            1,
+            "OpenAI Codex v0.125.0\n.codex metadata sqlite database is read-only",
+        ),
+    ), mock.patch.object(runner, "post_issue_comment") as comment, mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "record_runner_task_picked_up", return_value=None
+    ), mock.patch.object(
+        runner, "block_issue"
+    ) as block:
+        runner.process_issue(issue, workdir=str(tmp_path))
+
+    block.assert_not_called()
+    assert labels.call_args_list[-1].args == (
+        2481,
+        runner.LABEL_RUNNING,
+        runner.LABEL_WAITING_DEPENDENCY,
+    )
+    report = comment.call_args.args[1]
+    assert "failure_class=CODEGEN_RUNTIME_UNHEALTHY" in report
+    assert "reason=CODEGEN_RUNTIME_RECOVERY_PENDING" in report
+    store = runner.SchedulerStore(scheduler_db)
+    counts = store.status_counts()
+    assert counts["pending"] == 1
+    assert counts["waiting_dependency"] == 1
+
+
+def test_generic_codex_nonzero_still_uses_terminal_block(tmp_path: Path) -> None:
+    issue_path = tmp_path / "issue-2482"
+    issue = {
+        "number": 2482,
+        "title": "Generic fail",
+        "body": "Expected Output: done\n\n```task\nDo it\n```",
+        "comments": [],
+    }
+
+    with mock.patch.object(runner, "set_issue_label"), mock.patch.object(
+        runner, "prepare_issue_branch", return_value=(0, "ready", issue_path)
+    ), mock.patch.object(runner, "cleanup_runtime_artifacts"), mock.patch.object(
+        runner, "run_codex_task", return_value=(1, "provider quota exceeded")
+    ), mock.patch.object(
+        runner, "record_runner_task_picked_up", return_value=None
+    ), mock.patch.object(
+        runner, "block_issue"
+    ) as block, mock.patch.object(
+        runner, "schedule_codegen_runtime_recovery"
+    ) as schedule:
+        runner.process_issue(issue, workdir=str(tmp_path))
+
+    schedule.assert_not_called()
+    block.assert_called_once()
+    assert "Codex task failed" in block.call_args.args[1]
+
+
+def test_later_poll_continues_backoff_recovery_and_requeues_same_issue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scheduler_db = tmp_path / "scheduler.sqlite3"
+    recovery_db = tmp_path / "recovery.sqlite3"
+    monkeypatch.setattr(runner, "scheduler_db_path", lambda: scheduler_db)
+    monkeypatch.setattr(runner, "control_recovery_db_path", lambda: recovery_db)
+    packet = {
+        "schema": runner.CONTROL_RECOVERY_SCHEMA,
+        "failure_key": "control:codegen-runtime:issue-2490",
+        "runtime_signature": "CODEX_LOCAL_METADATA_SQLITE_READONLY",
+        "issue_number": 2490,
+        "backoff_seconds": 60,
+        "max_attempts": 3,
+    }
+    runner.schedule_codegen_runtime_recovery(
+        issue_number=2490, recovery_packet=packet, now=100
+    )
+    labels = {runner.LABEL_WAITING_DEPENDENCY}
+    action_calls: list[str] = []
+
+    class FakeExecutor:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def run(self, action_id: str, _body: str) -> str:
+            action_calls.append(action_id)
+            if action_id == "codegen_runtime_recover" and action_calls.count(action_id) == 1:
+                return "BLOCKED: no\nsuccess_criteria=not_met"
+            return "DONE: ok\nsuccess_criteria=met"
+
+    def set_label(_issue_number: int, remove: str, add: str) -> None:
+        labels.discard(remove)
+        labels.add(add)
+
+    def ready_issues() -> list[dict[str, object]]:
+        if runner.LABEL_READY in labels:
+            return [{"number": 2490, "title": "same issue", "body": "```task\nx\n```"}]
+        return []
+
+    with mock.patch.object(runner, "RegisteredMaintenanceExecutor", FakeExecutor), mock.patch.object(
+        runner, "set_issue_label", side_effect=set_label
+    ), mock.patch.object(
+        runner, "get_ready_issues", side_effect=ready_issues
+    ), mock.patch.object(
+        runner, "process_issue"
+    ) as process_issue, mock.patch.object(
+        runner.time, "time", side_effect=[100, 159, 160, 161]
+    ):
+        assert runner.poll_once() == 0
+        assert runner.poll_once() == 0
+        assert runner.poll_once() == 1
+        assert runner.poll_once() == 1
+
+    assert action_calls == [
+        "codegen_runtime_recover",
+        "codegen_runtime_recover",
+        "codegen_read_only_canary",
+    ]
+    process_issue.assert_called()
+    occurrences = runner.SchedulerStore(scheduler_db).status_counts()
+    assert occurrences["done"] == 2
+    assert occurrences["waiting_dependency"] == 0
+
+
 def _shadow_code_issue_body() -> str:
     return "\n".join(
         (

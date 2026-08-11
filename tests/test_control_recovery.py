@@ -8,6 +8,7 @@ from core.control_recovery import (
     RecoveryStatus,
     RecoveryStore,
     build_recovery_plan,
+    classify_failure,
     execute_recovery_packet,
 )
 
@@ -247,3 +248,20 @@ def test_plans_never_require_codegen() -> None:
         )
         assert plan is not None
         assert plan.requires_codegen is False
+
+
+def test_only_fixed_codex_runtime_signature_maps_to_codegen_recovery() -> None:
+    assert (
+        classify_failure(
+            {"runtime_signature": "CODEX_LOCAL_METADATA_SQLITE_READONLY"}
+        )
+        is FailureClass.CODEGEN_RUNTIME_UNHEALTHY
+    )
+    for reason in (
+        "codex task failed with exit code 1",
+        "provider quota exceeded",
+        "model outage",
+        "prompt validation error",
+        "unknown codex error",
+    ):
+        assert classify_failure({"reason": reason}) is None

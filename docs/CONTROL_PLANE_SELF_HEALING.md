@@ -33,6 +33,8 @@ A model-metadata/schema incompatibility such as an unsupported reasoning-level v
 
 ## Codex Runtime Boundary
 
+Ordinary Runner codegen failures enter this infrastructure only for narrow local Codex metadata/runtime signatures emitted by the Runner-owned execution path, such as the fixed read-only metadata SQLite signature. Generic nonzero Codex exits, provider quota/outage, prompt errors, model/provider failures, and unknown output stay on the normal terminal Runner path and do not become `CODEGEN_RUNTIME_UNHEALTHY`.
+
 The compatible Codex executable is derived from the fixed npm-global runtime (`npm prefix -g/bin/codex`), not from a potentially stale `codex` resolved through the Runner service PATH. Recovery pins the exact reviewed version, verifies the installed semantic version, and runs a read-only smoke.
 
 A true client/schema smoke failure rolls the mutation back to the exact previous semantic version. A provider quota/outage proves the compatible client got past local metadata decoding; it therefore keeps the compatible pin and leaves provider fallback policy to the independent canary.
@@ -43,6 +45,13 @@ After successful recovery, a local non-secret marker records the exact pinned ve
 
 `core.control_recovery.RecoveryStore` persists one row per failure key. Duplicate ticks and restarts observe the durable row, so a recovered failure does not execute again. Failed recovery moves to `WAITING_RECOVERY` with deterministic backoff. Exhaustion records exactly one durable `NEEDS_OPERATOR` notification flag.
 
+Durable state is agent-owned and fixed in code:
+
+- Control recovery DB: `/home/agent/.local/state/skeleton-runner/control-recovery/control_recovery.sqlite3`
+- Scheduler DB: `/home/agent/.local/state/skeleton-runner/scheduler/scheduler.sqlite3`
+
+Neither DB path is read from the issue, environment, repo, worktree, `.codex`, `/tmp`, or `/var/lib`. Runner initialization creates or repairs the runner-owned state subtree with private modes and rejects symlink or non-regular DB paths fail-closed. It does not require root, `chown`, runtime installers, service restarts, provider actions, or Home Edge actions.
+
 For `CODEGEN_RUNTIME_UNHEALTHY`, the fixed order is:
 
 `codegen_runtime_recover -> codegen_read_only_canary -> queue_reactivate`
@@ -51,9 +60,11 @@ The recovery action itself is codegen-independent. The canary is verification, n
 
 ## Queue Resume
 
-Recoverable blocked consumers should wait on the recovery occurrence. Once recovery is `RECOVERED`, the existing Scheduler dependency resumer moves those consumers back to pending dispatch, preserving scheduled priority order.
+Recoverable blocked consumers wait on the recovery occurrence. Once recovery is `RECOVERED`, the existing Scheduler dependency resumer moves those consumers back to pending dispatch, preserving scheduled priority order.
 
-The remaining integration requirement is that ordinary Runner codegen failures classified as a known recoverable failure must enter this existing recovery route automatically rather than becoming terminal `runner:blocked`. That wiring belongs in the canonical Runner/Scheduler continuation path; it must not be implemented as a second recovery queue or external control plane.
+For a matching ordinary Runner codegen failure, `process_issue` creates exactly one durable control-recovery occurrence and one same-issue consumer occurrence. The GitHub issue moves from `runner:running` to `runner:waiting-dependency` while recovery is pending. `queue_reactivate` runs only after the existing read-only canary succeeds, removes `runner:waiting-dependency`, and restores `runner:ready`, making the same GitHub issue eligible for the normal Runner pickup path again.
+
+A later ordinary Runner poll ticks the same Scheduler/SharedDispatcher/RecoveryStore path before listing ready issues. Pending or backoff recovery is therefore rediscovered after process/store restart without another chat message and without invoking the original Codex failure handler again. Backoff keeps the consumer waiting; exhaustion yields exactly one durable `NEEDS_OPERATOR` notification flag.
 
 ## Operator Noise
 

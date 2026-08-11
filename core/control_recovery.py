@@ -402,6 +402,13 @@ def classify_failure(packet: Mapping[str, Any]) -> FailureClass | None:
             return FailureClass(value)
         except ValueError:
             return None
+    signature = packet.get("runtime_signature")
+    if isinstance(signature, str) and signature in {
+        "CODEX_LOCAL_METADATA_SQLITE_READONLY",
+        "CODEX_LOCAL_METADATA_PERMISSION_DENIED",
+        "CODEX_LOCAL_RUNTIME_SIGNATURE_MISMATCH",
+    }:
+        return FailureClass.CODEGEN_RUNTIME_UNHEALTHY
     text = str(packet.get("status") or packet.get("reason") or "").lower()
     if "checkout" in text and any(marker in text for marker in ("stale", "dirty", "behind", "diverged")):
         return FailureClass.REGISTERED_CHECKOUT_STALE_OR_DIRTY
@@ -409,8 +416,6 @@ def classify_failure(packet: Mapping[str, Any]) -> FailureClass | None:
         return FailureClass.LONG_LIVED_POLLER_STALE
     if "github actions" in text and "issue-runner healthy" in text:
         return FailureClass.GITHUB_ACTIONS_LANE_UNAVAILABLE_BUT_ISSUE_RUNNER_HEALTHY
-    if "codegen" in text or "codex" in text:
-        return FailureClass.CODEGEN_RUNTIME_UNHEALTHY
     return None
 
 
