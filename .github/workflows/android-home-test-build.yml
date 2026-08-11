@@ -1,0 +1,136 @@
+name: Android Home Test Build
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+    paths:
+      - "android/home/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-home-test-build-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build-debug-apk:
+    name: Build unsigned debug APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    if: github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    steps:
+      - name: Checkout pull request HEAD
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout workflow dispatch source
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb
+        with:
+          gradle-version: "8.9"
+          cache-read-only: true
+          dependency-graph: disabled
+
+      - name: Verify pinned Android SDK components
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${ANDROID_HOME:-}" ]]; then
+            echo "ANDROID_HOME is not set on the runner image" >&2
+            exit 1
+          fi
+          if [[ -z "${ANDROID_SDK_ROOT:-}" ]]; then
+            echo "ANDROID_SDK_ROOT is not set on the runner image" >&2
+            exit 1
+          fi
+          if [[ "$ANDROID_HOME" != "$ANDROID_SDK_ROOT" ]]; then
+            echo "ANDROID_HOME and ANDROID_SDK_ROOT differ" >&2
+            exit 1
+          fi
+
+          platform_dir="${ANDROID_SDK_ROOT}/platforms/android-35"
+          build_tools_dir="${ANDROID_SDK_ROOT}/build-tools/34.0.0"
+          if [[ ! -d "$platform_dir" ]]; then
+            echo "Required Android SDK platform android-35 is unavailable at $platform_dir" >&2
+            exit 1
+          fi
+          if [[ ! -d "$build_tools_dir" ]]; then
+            echo "Required Android SDK build-tools 34.0.0 is unavailable at $build_tools_dir" >&2
+            exit 1
+          fi
+
+          echo "android_platform=android-35"
+          echo "android_build_tools=34.0.0"
+
+      - name: Build and test Android Home debug APK
+        working-directory: android/home
+        run: gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug
+
+      - name: Verify debug APK and write metadata
+        id: artifact
+        env:
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+
+          apk_path="android/home/app/build/outputs/apk/debug/app-debug.apk"
+          metadata_path="${RUNNER_TEMP}/android-home-debug-apk-metadata.txt"
+
+          if [[ ! -f "$apk_path" ]]; then
+            echo "Debug APK was not produced at $apk_path" >&2
+            exit 1
+          fi
+
+          apk_size="$(wc -c < "$apk_path" | tr -d ' ')"
+          apk_sha256="$(sha256sum "$apk_path" | awk '{print $1}')"
+
+          {
+            echo "source_sha=${SOURCE_SHA}"
+            echo "apk_path=${apk_path}"
+            echo "apk_sha256=${apk_sha256}"
+            echo "apk_bytes=${apk_size}"
+            echo "artifact_scope=unsigned_debug_operator_testing_only"
+          } > "$metadata_path"
+
+          echo "apk_path=${apk_path}" >> "$GITHUB_OUTPUT"
+          echo "metadata_path=${metadata_path}" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=android-home-debug-${SOURCE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload debug APK artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ steps.artifact.outputs.artifact_name }}
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            ${{ steps.artifact.outputs.apk_path }}
+            ${{ steps.artifact.outputs.metadata_path }}
