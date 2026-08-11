@@ -1,3 +1,8 @@
+from concurrent.futures import ThreadPoolExecutor
+import sqlite3
+import threading
+import time
+
 from core.scheduler_engine import (
     SchedulerEngine,
     SchedulerEngineConfig,
@@ -5,7 +10,12 @@ from core.scheduler_engine import (
 )
 from core.scheduler_models import ScheduleSpec, build_execution_proposal, stable_occurrence_id
 from core.scheduler_store import SchedulerStore
-from core.shared_dispatch import PRIVACY_PUBLIC_SAFE, SharedDispatcher, SharedDispatchRequest
+from core.shared_dispatch import (
+    PRIVACY_PUBLIC_SAFE,
+    SharedDispatcher,
+    SharedDispatchRequest,
+    SharedDispatchResult,
+)
 
 
 def _once(
@@ -191,6 +201,297 @@ def test_tick_recovers_stale_running_without_reexecution(tmp_path) -> None:
     assert receipt["recovered_stale_running"] == 1
     assert receipt["retried_stale_running"] == 1
     assert store.list_occurrences("test.recovery")[0].state == "pending"
+
+
+def test_live_heartbeat_prevents_reclaim_during_long_dispatch(tmp_path) -> None:
+    store = SchedulerStore(tmp_path / "scheduler.sqlite3")
+    store.initialize()
+    schedule, _ = store.register(_loop_once("test.heartbeat", 100, _loop_packet("create")), now=50)
+    occurrence_id = stable_occurrence_id(schedule.spec.schedule_id, schedule.version, 100)
+    proposal = build_execution_proposal(schedule, occurrence_id=occurrence_id, scheduled_for=100)
+    store.create_occurrence(
+        occurrence_id=occurrence_id,
+        schedule=schedule,
+        scheduled_for=100,
+        state="pending",
+        reason="DISPATCH_REQUIRED",
+        proposal=proposal,
+        now=100,
+    )
+    started = threading.Event()
+    release = threading.Event()
+
+    class LongDispatcher:
+        def dispatch(self, request: SharedDispatchRequest) -> SharedDispatchResult:
+            started.set()
+            assert release.wait(timeout=5)
+            return SharedDispatchResult(
+                "done",
+                "SYNTHETIC_DONE",
+                {
+                    "status": "DONE",
+                    "accepted": True,
+                    "reason": "SYNTHETIC_DONE",
+                    "public_safe": True,
+                    "external_side_effects_executed": False,
+                },
+                "synthetic:done",
+            )
+
+    clock_values = iter(range(101, 120))
+    engine = SchedulerEngine(
+        store,
+        SchedulerEngineConfig(
+            initial_lease_seconds=2,
+            heartbeat_interval_seconds=1,
+            stale_running_after_seconds=2,
+        ),
+        clock=lambda: next(clock_values),
+    )
+    result: dict[str, object] = {}
+
+    def dispatch() -> None:
+        result.update(engine.dispatch_pending(dispatcher=LongDispatcher(), now=100))
+
+    thread = threading.Thread(target=dispatch)
+    thread.start()
+    assert started.wait(timeout=5)
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        with sqlite3.connect(store.db_path) as connection:
+            row = connection.execute(
+                "SELECT lease_expires_at FROM occurrences WHERE occurrence_id = ?",
+                (occurrence_id,),
+            ).fetchone()
+        if row is not None and int(row[0]) > 103:
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("heartbeat did not renew lease")
+
+    recovered = SchedulerEngine(
+        store,
+        SchedulerEngineConfig(
+            initial_lease_seconds=2,
+            heartbeat_interval_seconds=1,
+            stale_running_after_seconds=2,
+        ),
+    ).tick(now=103)
+
+    assert recovered["recovered_stale_running"] == 0
+    assert store.get_occurrence(occurrence_id).state == "running"  # type: ignore[union-attr]
+    release.set()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert result["done"] == 1
+    assert store.get_occurrence(occurrence_id).state == "done"  # type: ignore[union-attr]
+
+
+def test_stopped_heartbeat_crash_becomes_recoverable_after_lease_expiry(tmp_path) -> None:
+    store = SchedulerStore(tmp_path / "scheduler.sqlite3")
+    store.initialize()
+    schedule, _ = store.register(_loop_once("test.crash", 100, _loop_packet("create")), now=50)
+    occurrence_id = stable_occurrence_id(schedule.spec.schedule_id, schedule.version, 100)
+    proposal = build_execution_proposal(schedule, occurrence_id=occurrence_id, scheduled_for=100)
+    store.create_occurrence(
+        occurrence_id=occurrence_id,
+        schedule=schedule,
+        scheduled_for=100,
+        state="pending",
+        reason="DISPATCH_REQUIRED",
+        proposal=proposal,
+        now=100,
+    )
+    claimed = store.claim_next_pending(now=100, owner="worker-a", lease_seconds=2)
+
+    early = store.recover_stale_running(now=101, stale_after_seconds=2, max_attempts=2)
+    expired = store.recover_stale_running(now=102, stale_after_seconds=2, max_attempts=2)
+
+    assert claimed is not None
+    assert early == {"retried": 0, "needs_operator": 0}
+    assert expired["retried"] == 1
+    assert store.get_occurrence(occurrence_id).state == "pending"  # type: ignore[union-attr]
+
+
+def test_crash_before_receipt_reclaims_with_bounded_retry(tmp_path) -> None:
+    store = SchedulerStore(tmp_path / "scheduler.sqlite3")
+    store.initialize()
+    schedule, _ = store.register(_loop_once("test.before.receipt", 100, _loop_packet("create")), now=50)
+    occurrence_id = stable_occurrence_id(schedule.spec.schedule_id, schedule.version, 100)
+    proposal = build_execution_proposal(schedule, occurrence_id=occurrence_id, scheduled_for=100)
+    store.create_occurrence(
+        occurrence_id=occurrence_id,
+        schedule=schedule,
+        scheduled_for=100,
+        state="pending",
+        reason="DISPATCH_REQUIRED",
+        proposal=proposal,
+        now=100,
+    )
+    store.claim_next_pending(now=100, owner="worker-a", lease_seconds=1)
+
+    recovered = store.recover_stale_running(now=101, stale_after_seconds=1, max_attempts=1)
+
+    assert recovered["needs_operator"] == 1
+    record = store.get_occurrence(occurrence_id)
+    assert record is not None
+    assert record.state == "needs_operator"
+    assert record.reason == "STALE_RUNNING_RECOVERY_EXHAUSTED"
+
+
+def test_crash_after_successful_receipt_finalizes_without_dispatcher_call(tmp_path) -> None:
+    store = SchedulerStore(tmp_path / "scheduler.sqlite3")
+    store.initialize()
+    schedule, _ = store.register(_loop_once("test.after.receipt", 100, _loop_packet("create")), now=50)
+    occurrence_id = stable_occurrence_id(schedule.spec.schedule_id, schedule.version, 100)
+    proposal = build_execution_proposal(schedule, occurrence_id=occurrence_id, scheduled_for=100)
+    store.create_occurrence(
+        occurrence_id=occurrence_id,
+        schedule=schedule,
+        scheduled_for=100,
+        state="pending",
+        reason="DISPATCH_REQUIRED",
+        proposal=proposal,
+        now=100,
+    )
+    claimed = store.claim_next_pending(now=100, owner="worker-a", lease_seconds=1)
+    assert claimed is not None
+    store.record_dispatch_receipt(
+        occurrence_id=occurrence_id,
+        attempt=claimed.attempt,
+        idempotency_key=claimed.idempotency_key or "",
+        status="done",
+        reason="SYNTHETIC_DONE",
+        evidence_ref="synthetic:done",
+        result={"status": "DONE", "external_side_effects_executed": False},
+        now=100,
+    )
+
+    recovered = SchedulerEngine(
+        store,
+        SchedulerEngineConfig(stale_running_after_seconds=1),
+    ).tick(now=101)
+
+    assert recovered["recovered_stale_running"] == 1
+    assert recovered["finalized_stale_running"] == 1
+    assert recovered["dispatch"]["claimed"] == 0
+    assert store.get_occurrence(occurrence_id).state == "done"  # type: ignore[union-attr]
+
+
+def test_ambiguous_mutating_receipt_needs_operator_without_replay(tmp_path) -> None:
+    store = SchedulerStore(tmp_path / "scheduler.sqlite3")
+    store.initialize()
+    schedule, _ = store.register(_loop_once("test.ambiguous", 100, _loop_packet("create")), now=50)
+    occurrence_id = stable_occurrence_id(schedule.spec.schedule_id, schedule.version, 100)
+    proposal = build_execution_proposal(schedule, occurrence_id=occurrence_id, scheduled_for=100)
+    store.create_occurrence(
+        occurrence_id=occurrence_id,
+        schedule=schedule,
+        scheduled_for=100,
+        state="pending",
+        reason="DISPATCH_REQUIRED",
+        proposal=proposal,
+        now=100,
+    )
+    claimed = store.claim_next_pending(now=100, owner="worker-a", lease_seconds=1)
+    assert claimed is not None
+    store.record_dispatch_receipt(
+        occurrence_id=occurrence_id,
+        attempt=claimed.attempt,
+        idempotency_key=claimed.idempotency_key or "",
+        status="failed",
+        reason="AMBIGUOUS_RESULT",
+        evidence_ref="synthetic:ambiguous",
+        result={
+            "status": "UNKNOWN",
+            "external_side_effects_executed": True,
+        },
+        now=100,
+    )
+
+    recovered = SchedulerEngine(
+        store,
+        SchedulerEngineConfig(stale_running_after_seconds=1),
+    ).tick(now=101)
+
+    assert recovered["stale_running_needs_operator"] == 1
+    assert recovered["dispatch"]["claimed"] == 0
+    record = store.get_occurrence(occurrence_id)
+    assert record is not None
+    assert record.state == "needs_operator"
+    assert record.reason == "AMBIGUOUS_MUTATING_RECEIPT"
+
+
+def test_live_ambiguous_mutating_result_needs_operator_without_retry(tmp_path) -> None:
+    store = SchedulerStore(tmp_path / "scheduler.sqlite3")
+    store.initialize()
+    schedule, _ = store.register(_loop_once("test.live.ambiguous", 100, _loop_packet("create")), now=50)
+    occurrence_id = stable_occurrence_id(schedule.spec.schedule_id, schedule.version, 100)
+    proposal = build_execution_proposal(schedule, occurrence_id=occurrence_id, scheduled_for=100)
+    store.create_occurrence(
+        occurrence_id=occurrence_id,
+        schedule=schedule,
+        scheduled_for=100,
+        state="pending",
+        reason="DISPATCH_REQUIRED",
+        proposal=proposal,
+        now=100,
+    )
+
+    class AmbiguousDispatcher:
+        def dispatch(self, request: SharedDispatchRequest) -> SharedDispatchResult:
+            return SharedDispatchResult(
+                "failed",
+                "AMBIGUOUS_RESULT",
+                {
+                    "status": "UNKNOWN",
+                    "accepted": False,
+                    "reason": "AMBIGUOUS_RESULT",
+                    "external_side_effects_executed": True,
+                },
+                "synthetic:ambiguous",
+                retryable=True,
+            )
+
+    receipt = SchedulerEngine(store).dispatch_pending(
+        dispatcher=AmbiguousDispatcher(), now=100
+    )
+
+    assert receipt["needs_operator"] == 1
+    assert receipt["retried"] == 0
+    record = store.get_occurrence(occurrence_id)
+    assert record is not None
+    assert record.state == "needs_operator"
+    assert record.reason == "AMBIGUOUS_MUTATING_RECEIPT"
+
+
+def test_concurrent_claim_attempts_yield_single_owner_attempt(tmp_path) -> None:
+    store = SchedulerStore(tmp_path / "scheduler.sqlite3")
+    store.initialize()
+    schedule, _ = store.register(_loop_once("test.concurrent", 100, _loop_packet("create")), now=50)
+    occurrence_id = stable_occurrence_id(schedule.spec.schedule_id, schedule.version, 100)
+    proposal = build_execution_proposal(schedule, occurrence_id=occurrence_id, scheduled_for=100)
+    store.create_occurrence(
+        occurrence_id=occurrence_id,
+        schedule=schedule,
+        scheduled_for=100,
+        state="pending",
+        reason="DISPATCH_REQUIRED",
+        proposal=proposal,
+        now=100,
+    )
+
+    def claim(owner: str):
+        local = SchedulerStore(store.db_path)
+        return local.claim_next_pending(now=100, owner=owner, lease_seconds=30)
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(executor.map(claim, [f"owner-{index}" for index in range(8)]))
+
+    claimed = [item for item in results if item is not None]
+    assert len(claimed) == 1
+    assert claimed[0].attempt == 1
+    assert store.get_occurrence(occurrence_id).state == "running"  # type: ignore[union-attr]
 
 
 def test_due_schedule_dispatches_to_loop_and_finishes_without_manual_nudge(tmp_path) -> None:

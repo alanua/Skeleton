@@ -49,6 +49,10 @@ After successful recovery, a local non-secret marker records the exact pinned ve
 
 `core.control_recovery.RecoveryStore` persists one row per failure key. Duplicate ticks and restarts observe the durable row, so a recovered failure does not execute again. Failed recovery moves to `WAITING_RECOVERY` with deterministic backoff. Exhaustion records exactly one durable `NEEDS_OPERATOR` notification flag.
 
+Scheduler dispatch uses durable single-owner claims. A pending occurrence is atomically moved to `running` with an attempt number, idempotency key, claim owner, lease expiry, and heartbeat timestamp. While the existing shared dispatcher is actively handling that occurrence, `SchedulerEngine` starts one bounded renewal thread for that claim only. The renewal extends the same owner lease before expiry and stops in a `finally` block when dispatch completes, fails, or is cancelled. A killed process naturally stops renewing, so the occurrence is recoverable only after the stored lease expires.
+
+Startup and ordinary Runner polls perform passive scheduler reconciliation without a dispatcher. Reconciliation first checks expired running occurrences for durable dispatch receipts. A successful receipt finalizes the occurrence as done without re-executing the dispatcher. A non-success receipt that reports external side effects becomes durable `NEEDS_OPERATOR` with reason `AMBIGUOUS_MUTATING_RECEIPT`; it is not replayed. Receipt-less expired work is retried only up to the bounded scheduler attempt limit, then escalates to `NEEDS_OPERATOR`.
+
 Production state is code-owned local agent state:
 
 - control recovery DB: `/home/agent/.local/state/skeleton-runner/control-recovery/control_recovery.sqlite3`

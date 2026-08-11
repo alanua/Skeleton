@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+import threading
 import time
 from typing import Any
+import uuid
 
 from core.scheduler_models import (
     TICK_RECEIPT_SCHEMA,
@@ -34,6 +37,8 @@ class SchedulerEngineConfig:
     stale_running_after_seconds: int = 60 * 60
     max_dispatches_per_tick: int = 16
     max_attempts: int = 2
+    initial_lease_seconds: int = 60 * 60
+    heartbeat_interval_seconds: int = 60
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -43,10 +48,14 @@ class SchedulerEngineConfig:
             "stale_running_after_seconds",
             "max_dispatches_per_tick",
             "max_attempts",
+            "initial_lease_seconds",
+            "heartbeat_interval_seconds",
         ):
             value = getattr(self, field_name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{field_name} must be a positive integer")
+        if self.heartbeat_interval_seconds >= self.initial_lease_seconds:
+            raise ValueError("heartbeat_interval_seconds must be less than initial_lease_seconds")
 
 
 class SchedulerEngine:
@@ -54,9 +63,12 @@ class SchedulerEngine:
         self,
         store: SchedulerStore,
         config: SchedulerEngineConfig | None = None,
+        clock: Any | None = None,
     ) -> None:
         self.store = store
         self.config = config or SchedulerEngineConfig()
+        self._owner = f"scheduler-engine:{uuid.uuid4().hex}"
+        self._clock = clock or time.time
 
     def tick(
         self, *, now: int | None = None, dispatcher: SharedDispatcher | None = None
@@ -142,9 +154,12 @@ class SchedulerEngine:
             "evaluated_schedules": evaluated,
             "created_occurrences": sum(counters.values()),
             "replayed_occurrences": replayed,
-            "recovered_stale_running": recovered["retried"] + recovered["needs_operator"],
+            "recovered_stale_running": (
+                recovered["retried"] + recovered["needs_operator"] + recovered.get("finalized", 0)
+            ),
             "retried_stale_running": recovered["retried"],
             "stale_running_needs_operator": recovered["needs_operator"],
+            "finalized_stale_running": recovered.get("finalized", 0),
             "resumed_waiting_dependencies": resumed_dependencies,
             "dispatch": dispatch_receipt,
             "states": {
@@ -170,6 +185,8 @@ class SchedulerEngine:
         for _ in range(self.config.max_dispatches_per_tick):
             occurrence = self.store.claim_next_pending(
                 now=current,
+                owner=self._owner,
+                lease_seconds=self.config.initial_lease_seconds,
                 exclude_occurrence_ids=frozenset(claimed_this_tick),
             )
             if occurrence is None:
@@ -218,7 +235,14 @@ class SchedulerEngine:
                 idempotency_key=occurrence.idempotency_key or "",
                 parent_receipt_id=occurrence.parent_receipt_id,
             )
-            result = dispatcher.dispatch(request)
+            heartbeat_stop, heartbeat_thread = self._start_dispatch_heartbeat(
+                occurrence.occurrence_id
+            )
+            try:
+                result = dispatcher.dispatch(request)
+            finally:
+                heartbeat_stop.set()
+                heartbeat_thread.join(timeout=max(1, self.config.heartbeat_interval_seconds))
             receipt_id = self.store.record_dispatch_receipt(
                 occurrence_id=occurrence.occurrence_id,
                 attempt=occurrence.attempt,
@@ -254,6 +278,31 @@ class SchedulerEngine:
             "continued": counters["continued"],
         }
 
+    def _start_dispatch_heartbeat(
+        self, occurrence_id: str
+    ) -> tuple[threading.Event, threading.Thread]:
+        stop = threading.Event()
+
+        def run() -> None:
+            while not stop.is_set():
+                renewed = self.store.renew_running_claim(
+                    occurrence_id,
+                    owner=self._owner,
+                    lease_seconds=self.config.initial_lease_seconds,
+                    now=int(self._clock()),
+                )
+                if not renewed:
+                    return
+                stop.wait(self.config.heartbeat_interval_seconds)
+
+        thread = threading.Thread(
+            target=run,
+            name=f"scheduler-heartbeat-{occurrence_id[:12]}",
+            daemon=True,
+        )
+        thread.start()
+        return stop, thread
+
     def _complete_dispatch(self, *, occurrence, dispatch, receipt_id: str, now: int) -> str:
         if dispatch.status == "done":
             self.store.transition_occurrence(
@@ -281,6 +330,15 @@ class SchedulerEngine:
                 expected_states={"running"},
                 new_state="needs_operator",
                 reason="DISPATCH_NEEDS_OPERATOR",
+                now=now,
+            )
+            return "needs_operator"
+        if _dispatch_is_ambiguous_mutating(dispatch.receipt):
+            self.store.transition_occurrence(
+                occurrence.occurrence_id,
+                expected_states={"running"},
+                new_state="needs_operator",
+                reason="AMBIGUOUS_MUTATING_RECEIPT",
                 now=now,
             )
             return "needs_operator"
@@ -402,3 +460,22 @@ class SchedulerEngine:
         if schedule.spec.approval_policy == "require_operator_each_occurrence":
             return "needs_operator", "OPERATOR_REQUIRED"
         return "pending", "DISPATCH_REQUIRED"
+
+
+def _dispatch_is_ambiguous_mutating(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    status = str(value.get("status") or "").upper()
+    reason = str(value.get("reason") or "").upper()
+    decision = str(value.get("decision") or "").upper()
+    if (
+        value.get("external_side_effects_executed") is True
+        and (
+            status in {"UNKNOWN", "AMBIGUOUS"}
+            or decision in {"UNKNOWN", "AMBIGUOUS"}
+            or "AMBIGUOUS" in reason
+        )
+    ):
+        return True
+    route_receipt = value.get("route_receipt")
+    return _dispatch_is_ambiguous_mutating(route_receipt)
