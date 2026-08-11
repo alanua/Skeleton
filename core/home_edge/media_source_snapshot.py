@@ -15,8 +15,8 @@ from pathlib import Path
 from typing import Any, Mapping
 from uuid import uuid4
 
-from core.home_edge.executor import HomeEdgeExecError, HomeEdgeExecRequest, sign_request
-from core.home_edge.executor_gateway import EXEC_HMAC_SECRET_ENV, execute_home_edge_request
+from core.home_edge.executor import HomeEdgeExecError, HomeEdgeExecRequest
+from core.home_edge.executor_gateway import execute_home_edge_request
 
 
 TASK_ID = "home_edge_01_media_source_snapshot_v1"
@@ -29,24 +29,20 @@ EXECUTION_LANE = "read_only"
 REQUEST_TIMEOUT_SECONDS = 30
 MAX_SOURCE_BYTES = 700 * 1024
 MAX_EXECUTOR_OUTPUT_BYTES = 1_000_000
+OPERATOR_APPROVAL_REF = "EXPLICIT_MINIMAL_HOME_EDGE_SNAPSHOT_ACCESS_REPAIR_2026_08_09"
+SIGNER_ENVELOPE_SCHEMA = "skeleton.home_edge.media_source_snapshot_signed_request.v1"
+SIGNER_COMMAND = ("/usr/bin/sudo", "--non-interactive", "--", "/usr/local/sbin/home_edge_media_source_snapshot_signer")
+MAX_SIGNER_STDIN_BYTES = 900_000
+MAX_SIGNER_STDOUT_BYTES = 900_000
 RECEIPT_SCHEMA = "skeleton.home_edge.media_source_snapshot_receipt.v1"
 IDEMPOTENCY_KEY_PREFIX = "home-edge-01-media-source-snapshot-v1"
 PRIVATE_ARTIFACT_RELATIVE_PATH = (
     Path("home_edge") / "home_edge_01" / "media_source_snapshot" / "app.py.latest"
 )
-EXEC_HMAC_SECRET_CONFIG_DIR = Path("/etc/skeleton")
-EXEC_HMAC_SECRET_PROFILE_METADATA_PATH = Path("/etc/skeleton/home-edge-01.env")
-EXEC_HMAC_SECRET_CONFIG_PATH = Path("/etc/skeleton/home-edge-executor-controller.env")
-MAX_EXEC_HMAC_SECRET_CONFIG_BYTES = 64 * 1024
 EXPECTED_MAIN_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 FIELD_RE = re.compile(r"^\s*(?P<field>[A-Za-z][A-Za-z0-9 _-]{0,80}):\s*(?P<value>.*?)\s*$")
 PUBLIC_VALUE_RE = re.compile(r"^[A-Za-z0-9_.:=-]+$")
-AUTH_CONFIG_REASON_RE = re.compile(
-    r"^executor_auth_config_(?:missing|unsafe|invalid)$"
-)
-CONFIG_ASSIGNMENT_RE = re.compile(
-    r"^(?:export[ \t]+)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)=(?P<value>.*)$"
-)
+SIGNER_REASON_RE = re.compile(r"^snapshot_signer_(?:unavailable|rejected|invalid_response)$")
 VERSION_MARKER_RE = re.compile(r"(?i)\bv63\b")
 SECRET_NAME_TOKENS = (
     "API_KEY",
@@ -132,15 +128,16 @@ def execute_media_source_snapshot_task(
     if existing is not None:
         return existing
 
+    request = build_unsigned_snapshot_request()
     try:
-        request = build_snapshot_request(environment=environment)
+        signed_request = sign_snapshot_request_with_privileged_signer(request)
     except ValueError as exc:
         reason = exc.args[0] if exc.args else ""
-        if isinstance(reason, str) and AUTH_CONFIG_REASON_RE.fullmatch(reason):
+        if isinstance(reason, str) and SIGNER_REASON_RE.fullmatch(reason):
             return _blocked_receipt(reason)
         raise
     try:
-        executor_receipt = execute_home_edge_request(request.to_mapping())
+        executor_receipt = execute_home_edge_request(signed_request.to_mapping())
     except (subprocess.TimeoutExpired, TimeoutError):
         return _blocked_receipt("executor_transport_timeout")
     except HomeEdgeExecError:
@@ -230,15 +227,15 @@ def validate_main_sha(
         raise ValueError("github_main_sha_mismatch")
 
 
-def build_snapshot_request(*, environment: Mapping[str, str] | None = None) -> HomeEdgeExecRequest:
-    secret = _resolve_exec_hmac_secret(environment=environment)
-    request = HomeEdgeExecRequest.from_mapping(
+def build_unsigned_snapshot_request() -> HomeEdgeExecRequest:
+    return HomeEdgeExecRequest.from_mapping(
         {
             "request_id": f"{TASK_ID}-{uuid4()}",
             "node_id": TARGET_NODE,
             "execution_lane": EXECUTION_LANE,
             "timeout_seconds": REQUEST_TIMEOUT_SECONDS,
             "idempotency_key": f"{IDEMPOTENCY_KEY_PREFIX}-{uuid4()}",
+            "operator_approval_ref": OPERATOR_APPROVAL_REF,
             "run_as": RUN_AS,
             "mode": "script",
             "script": SNAPSHOT_SCRIPT,
@@ -249,158 +246,88 @@ def build_snapshot_request(*, environment: Mapping[str, str] | None = None) -> H
             "public": False,
         }
     )
-    return HomeEdgeExecRequest.from_mapping(
-        {**request.to_mapping(include_signature=False), "signature": sign_request(request, secret)}
-    )
 
 
-def _resolve_exec_hmac_secret(*, environment: Mapping[str, str] | None = None) -> str:
-    env = os.environ if environment is None else environment
-    secret = env.get(EXEC_HMAC_SECRET_ENV, "")
-    if secret:
-        return secret
-    return _read_exec_hmac_secret_config()
+def build_snapshot_request(*, environment: Mapping[str, str] | None = None) -> HomeEdgeExecRequest:
+    del environment
+    return sign_snapshot_request_with_privileged_signer(build_unsigned_snapshot_request())
 
 
-def _read_exec_hmac_secret_config() -> str:
+def sign_snapshot_request_with_privileged_signer(request: HomeEdgeExecRequest) -> HomeEdgeExecRequest:
+    unsigned = _validated_unsigned_snapshot_mapping(request)
+    stdin = json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if len(stdin) > MAX_SIGNER_STDIN_BYTES:
+        raise ValueError("snapshot_signer_rejected")
     try:
-        controller_st = _validate_exec_hmac_secret_config_path()
-        flags = os.O_RDONLY
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        fd = os.open(EXEC_HMAC_SECRET_CONFIG_PATH, flags)
-    except FileNotFoundError:
-        raise ValueError("executor_auth_config_missing") from None
-    except OSError:
-        raise ValueError("executor_auth_config_unsafe") from None
-
+        completed = subprocess.run(
+            list(SIGNER_COMMAND),
+            input=stdin,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise ValueError("snapshot_signer_unavailable") from None
+    if completed.returncode != 0:
+        raise ValueError("snapshot_signer_rejected")
+    if len(completed.stdout) > MAX_SIGNER_STDOUT_BYTES:
+        raise ValueError("snapshot_signer_invalid_response")
     try:
-        with os.fdopen(fd, "rb") as handle:
-            before = os.fstat(handle.fileno())
-            if not _safe_exec_hmac_secret_config_file_metadata(before):
-                raise ValueError("executor_auth_config_unsafe")
-            data = handle.read(MAX_EXEC_HMAC_SECRET_CONFIG_BYTES + 1)
-            after = os.fstat(handle.fileno())
-    except ValueError:
-        raise
-    except OSError:
-        raise ValueError("executor_auth_config_unsafe") from None
-
-    if (
-        _file_id(controller_st) != _file_id(before)
-        or _file_id(before) != _file_id(after)
-        or len(data) > MAX_EXEC_HMAC_SECRET_CONFIG_BYTES
-    ):
-        raise ValueError("executor_auth_config_unsafe")
-    return _parse_exec_hmac_secret_config(data)
+        envelope = json.loads(completed.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise ValueError("snapshot_signer_invalid_response") from None
+    return signed_snapshot_request_from_envelope(envelope, original_unsigned=unsigned)
 
 
-def _validate_exec_hmac_secret_config_path() -> os.stat_result:
-    try:
-        directory_st = EXEC_HMAC_SECRET_CONFIG_DIR.lstat()
-        profile_st = EXEC_HMAC_SECRET_PROFILE_METADATA_PATH.lstat()
-        controller_st = EXEC_HMAC_SECRET_CONFIG_PATH.lstat()
-    except FileNotFoundError:
-        raise ValueError("executor_auth_config_missing") from None
-    except OSError:
-        raise ValueError("executor_auth_config_unsafe") from None
-    if not _safe_exec_hmac_secret_config_boundary(
-        directory_st=directory_st,
-        profile_st=profile_st,
-        controller_st=controller_st,
-    ):
-        raise ValueError("executor_auth_config_unsafe")
-    return controller_st
-
-
-def _safe_exec_hmac_secret_config_boundary(
+def signed_snapshot_request_from_envelope(
+    envelope: Mapping[str, Any],
     *,
-    directory_st: os.stat_result,
-    profile_st: os.stat_result,
-    controller_st: os.stat_result,
-) -> bool:
-    if stat.S_ISLNK(directory_st.st_mode) or not stat.S_ISDIR(directory_st.st_mode):
-        return False
-    if not _safe_exec_hmac_secret_config_file_metadata(profile_st):
-        return False
-    if not _safe_exec_hmac_secret_config_file_metadata(controller_st):
-        return False
-    if stat.S_IMODE(directory_st.st_mode) & 0o022:
-        return False
-
-    current_uid = os.getuid() if hasattr(os, "getuid") else None
-    controller_owned_by_trusted_process = (
-        controller_st.st_uid == 0
-        or (current_uid is not None and controller_st.st_uid == current_uid)
-    )
-    coherent_private_controller = (
-        directory_st.st_uid == profile_st.st_uid == controller_st.st_uid
-        and directory_st.st_gid == profile_st.st_gid == controller_st.st_gid
-    )
-    return controller_owned_by_trusted_process or coherent_private_controller
-
-
-def _safe_exec_hmac_secret_config_file_metadata(st: os.stat_result) -> bool:
-    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
-        return False
-    if st.st_size > MAX_EXEC_HMAC_SECRET_CONFIG_BYTES:
-        return False
-    if stat.S_IMODE(st.st_mode) & 0o022:
-        return False
-    return True
-
-
-def _safe_exec_hmac_secret_config_stat(st: os.stat_result) -> bool:
-    if not _safe_exec_hmac_secret_config_file_metadata(st):
-        return False
-    current_uid = os.getuid() if hasattr(os, "getuid") else None
-    return st.st_uid == 0 or (current_uid is not None and st.st_uid == current_uid)
-
-
-def _parse_exec_hmac_secret_config(data: bytes) -> str:
-    if b"\x00" in data:
-        raise ValueError("executor_auth_config_invalid")
+    original_unsigned: Mapping[str, Any],
+) -> HomeEdgeExecRequest:
+    if not isinstance(envelope, Mapping):
+        raise ValueError("snapshot_signer_invalid_response")
+    if set(envelope) != {"schema", "unsigned_request", "signed_request"}:
+        raise ValueError("snapshot_signer_invalid_response")
+    if envelope.get("schema") != SIGNER_ENVELOPE_SCHEMA:
+        raise ValueError("snapshot_signer_invalid_response")
+    returned_unsigned = envelope.get("unsigned_request")
+    signed = envelope.get("signed_request")
+    if returned_unsigned != dict(original_unsigned) or not isinstance(signed, Mapping):
+        raise ValueError("snapshot_signer_invalid_response")
     try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError:
-        raise ValueError("executor_auth_config_invalid") from None
-    secret: str | None = None
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.endswith("\\"):
-            raise ValueError("executor_auth_config_invalid")
-        match = CONFIG_ASSIGNMENT_RE.fullmatch(line)
-        if match is None:
-            raise ValueError("executor_auth_config_invalid")
-        if match.group("name") != EXEC_HMAC_SECRET_ENV:
-            continue
-        if secret is not None:
-            raise ValueError("executor_auth_config_invalid")
-        secret = _parse_exec_hmac_secret_config_value(match.group("value"))
-    if not secret:
-        raise ValueError("executor_auth_config_missing")
-    return secret
+        parsed = HomeEdgeExecRequest.from_mapping(signed)
+    except HomeEdgeExecError:
+        raise ValueError("snapshot_signer_invalid_response") from None
+    if parsed.to_mapping(include_signature=False) != dict(original_unsigned):
+        raise ValueError("snapshot_signer_invalid_response")
+    if not parsed.signature:
+        raise ValueError("snapshot_signer_invalid_response")
+    return parsed
 
 
-def _parse_exec_hmac_secret_config_value(value: str) -> str:
-    if "$" in value or "`" in value:
-        raise ValueError("executor_auth_config_invalid")
-    if value.startswith(("'", '"')):
-        quote = value[0]
-        if len(value) < 2 or not value.endswith(quote):
-            raise ValueError("executor_auth_config_invalid")
-        decoded = value[1:-1]
-        if quote in decoded or "\\" in decoded:
-            raise ValueError("executor_auth_config_invalid")
-    elif "'" in value or '"' in value:
-        raise ValueError("executor_auth_config_invalid")
-    else:
-        decoded = value
-    if "\n" in decoded or "\r" in decoded or not decoded:
-        raise ValueError("executor_auth_config_invalid")
-    return decoded
+def _validated_unsigned_snapshot_mapping(request: HomeEdgeExecRequest | Mapping[str, Any]) -> dict[str, Any]:
+    parsed = request if isinstance(request, HomeEdgeExecRequest) else HomeEdgeExecRequest.from_mapping(request)
+    unsigned = parsed.to_mapping(include_signature=False)
+    if parsed.signature is not None:
+        raise ValueError("snapshot_signer_rejected")
+    expected = build_unsigned_snapshot_request().to_mapping(include_signature=False)
+    for dynamic in ("request_id", "idempotency_key", "timestamp", "nonce"):
+        expected.pop(dynamic, None)
+    comparable = dict(unsigned)
+    for dynamic in ("request_id", "idempotency_key", "timestamp", "nonce"):
+        comparable.pop(dynamic, None)
+    if comparable != expected:
+        raise ValueError("snapshot_signer_rejected")
+    if not str(parsed.request_id).startswith(f"{TASK_ID}-"):
+        raise ValueError("snapshot_signer_rejected")
+    if not str(parsed.idempotency_key or "").startswith(f"{IDEMPOTENCY_KEY_PREFIX}-"):
+        raise ValueError("snapshot_signer_rejected")
+    if not str(parsed.nonce or "").startswith(f"{TASK_ID}-"):
+        raise ValueError("snapshot_signer_rejected")
+    if parsed.operator_approval_ref != OPERATOR_APPROVAL_REF:
+        raise ValueError("snapshot_signer_rejected")
+    return unsigned
 
 
 def public_receipt_from_executor_stdout(receipt: Mapping[str, Any]) -> dict[str, object]:
