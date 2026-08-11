@@ -8,13 +8,20 @@
 - execution lane: `read_only`
 - run user: `desktop-user`
 - timeout: `30` seconds
+- signer: exact installed controller command `/usr/local/bin/skeleton-home-edge-media-source-snapshot-signer --sign`
 - transport: signed `core.home_edge.executor_gateway` request only
 
-The operation is not a general file export facility. Issue metadata may provide only the runtime mode, exact maintenance task ID, repository, expected main SHA, and target. Path, command, script, output path, timeout, lane, user, node, and variant fields are rejected.
+The operation is not a general file export facility. Issue metadata may provide only the runtime mode, exact maintenance task ID, repository, expected main SHA, target, and exact operator approval `OPERATOR_APPROVED_HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1`. Path, command, script, output path, timeout, lane, user, node, and variant fields are rejected. Operator approval is checked before signer activation or transport.
+
+## Controller Signer Boundary
+
+The Home Edge node executor installer remains node-only and does not install or activate snapshot signer code. The trusted controller installer installs the snapshot signer into `/usr/local/lib/skeleton-home-edge-controller` and exposes only `/usr/local/bin/skeleton-home-edge-media-source-snapshot-signer --sign`. That wrapper is root-owned, executable only by the canonical Runner service identity group, and invokes the installed library copy with an exact `/usr/bin/python3` command and `env -i`.
+
+The signer only returns the fixed immutable executor request for this operation. It never opens transport, never executes SSH or MCP, never reads or writes the Runner private artifact, never accepts caller-provided signing material, and rejects any invocation other than `--sign`. Runtime task execution invokes that exact absolute command rather than resolving a command from `PATH` or environment.
 
 ## Executor Authentication
 
-The Runner signs the Home Edge executor request with `SKELETON_HOME_EDGE_EXEC_HMAC_SECRET`. An explicit Runner-provided environment mapping or process environment value takes precedence. If that value is absent or empty, the task reads only `/etc/skeleton/home-edge-executor-controller.env` and only the single allowlisted variable `SKELETON_HOME_EDGE_EXEC_HMAC_SECRET`.
+The controller signer signs the Home Edge executor request with `SKELETON_HOME_EDGE_EXEC_HMAC_SECRET`. The installed signer reads only `/etc/skeleton/home-edge-executor-controller.env` and only the single allowlisted variable `SKELETON_HOME_EDGE_EXEC_HMAC_SECRET`.
 
 That fixed private config is parsed as text, never sourced or executed. The resolver never reads or parses `/etc/skeleton/home-edge-01.env`; that file is metadata-only corroboration for the private controller ownership boundary. The fixed `/etc/skeleton` directory plus `/etc/skeleton/home-edge-01.env` and `/etc/skeleton/home-edge-executor-controller.env` are all checked with `lstat`; symlinks are rejected, `/etc/skeleton` must be a directory, both env paths must be regular files, none may be group/world writable, and each env file must be no larger than 64 KiB. The controller env is accepted when its owner is root or the current Runner uid, or when those three fixed paths share one identical owner and group boundary under the same strict checks. The parser accepts only simple `KEY=VALUE` or optional `export KEY=VALUE` entries for the allowlisted variable, ignoring comments, blank lines, and unrelated assignments. Duplicate target entries, NUL bytes, malformed quoted values, shell substitution or variable references, backticks, and multiline continuations fail closed before any executor request is made.
 

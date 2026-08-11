@@ -74,5 +74,15 @@ def test_installer_runs_protocol_probe_and_live_read_only_probe() -> None:
 
     assert "systemctl" not in installer
     assert "home-edge-executor-controller.env" in installer
+    assert "skeleton-home-edge-media-source-snapshot-signer" in installer
+    assert "RUNNER_SERVICE_USER=\"agent\"" in installer
+    assert "chmod 0750" in installer
     assert "--skip-call" in installer
     assert "skeleton-home-edge-exec-probe" in installer
+
+
+def test_executor_node_installer_does_not_install_controller_snapshot_signer() -> None:
+    installer = (ROOT / "scripts/install_home_edge_executor.sh").read_text(encoding="utf-8")
+
+    assert "media-source-snapshot-signer" not in installer
+    assert "home_edge_media_source_snapshot_signer.py" not in installer
