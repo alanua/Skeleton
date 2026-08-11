@@ -43,6 +43,8 @@ After successful recovery, a local non-secret marker records the exact pinned ve
 
 `core.control_recovery.RecoveryStore` persists one row per failure key. Duplicate ticks and restarts observe the durable row, so a recovered failure does not execute again. Failed recovery moves to `WAITING_RECOVERY` with deterministic backoff. Exhaustion records exactly one durable `NEEDS_OPERATOR` notification flag.
 
+Runner-owned self-healing state lives under `/home/agent/.local/state/skeleton-runner/`, outside repositories, issue worktrees, `.codex`, temporary directories, and runtime installer roots. Control recovery uses `control-recovery/control_recovery.sqlite3`; Runner Scheduler state uses `scheduler/scheduler.sqlite3`. Both are ordinary agent-writable local-state files with private parent/file modes, so normal Runner recovery does not require root, `chown`, or `/var/lib/skeleton` mutation.
+
 For `CODEGEN_RUNTIME_UNHEALTHY`, the fixed order is:
 
 `codegen_runtime_recover -> codegen_read_only_canary -> queue_reactivate`

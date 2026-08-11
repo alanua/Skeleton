@@ -1,7 +1,58 @@
-from core.scheduler_engine import SchedulerEngine, SchedulerEngineConfig
+import stat
+from pathlib import Path
+
+import pytest
+
+from core.scheduler_engine import (
+    RUNNER_SCHEDULER_DB_PATH,
+    RUNNER_SCHEDULER_STATE_DIR,
+    SchedulerEngine,
+    SchedulerEngineConfig,
+    initialize_runner_scheduler_store,
+    runner_scheduler_db_path,
+)
 from core.scheduler_models import ScheduleSpec, build_execution_proposal, stable_occurrence_id
 from core.scheduler_store import SchedulerStore
 from core.shared_dispatch import PRIVACY_PUBLIC_SAFE, SharedDispatcher, SharedDispatchRequest
+
+
+def test_runner_scheduler_default_path_is_fixed_durable_local_state() -> None:
+    path = RUNNER_SCHEDULER_DB_PATH
+
+    assert path == Path(
+        "/home/agent/.local/state/skeleton-runner/scheduler/scheduler.sqlite3"
+    )
+    assert path == runner_scheduler_db_path()
+    assert path.parent == RUNNER_SCHEDULER_STATE_DIR
+    assert path.is_absolute()
+    assert "/var/lib" not in str(path)
+    assert "/.codex/" not in str(path)
+    assert "/tmp/" not in str(path)
+    assert "worktree" not in str(path)
+    assert "issue-" not in str(path)
+
+
+def test_runner_scheduler_store_initializes_from_agent_writable_state_root(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "home" / "agent" / ".local" / "state" / "skeleton-runner"
+
+    store = initialize_runner_scheduler_store(state_root)
+
+    assert store.db_path == state_root / "scheduler" / "scheduler.sqlite3"
+    assert store.db_path.exists()
+    assert stat.S_IMODE(store.db_path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(store.db_path.stat().st_mode) == 0o600
+
+
+def test_runner_scheduler_store_rejects_symlinked_state_path(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    state_root = tmp_path / "state"
+    state_root.symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(OSError, match="RUNNER_SCHEDULER_STATE_SYMLINK_UNSAFE"):
+        initialize_runner_scheduler_store(state_root)
 
 
 def _once(

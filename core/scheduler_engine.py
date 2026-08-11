@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+from pathlib import Path
 import time
 from typing import Any
 
@@ -15,6 +16,36 @@ from core.scheduler_models import (
 )
 from core.scheduler_store import SchedulerStore
 from core.shared_dispatch import SharedDispatcher, SharedDispatchRequest
+
+
+RUNNER_LOCAL_STATE_ROOT = Path("/home/agent/.local/state/skeleton-runner")
+RUNNER_SCHEDULER_STATE_DIR = RUNNER_LOCAL_STATE_ROOT / "scheduler"
+RUNNER_SCHEDULER_DB_PATH = RUNNER_SCHEDULER_STATE_DIR / "scheduler.sqlite3"
+
+
+def runner_scheduler_db_path(
+    state_root: str | Path = RUNNER_LOCAL_STATE_ROOT,
+) -> Path:
+    return Path(state_root) / "scheduler" / "scheduler.sqlite3"
+
+
+def initialize_runner_scheduler_store(
+    state_root: str | Path = RUNNER_LOCAL_STATE_ROOT,
+) -> SchedulerStore:
+    db_path = runner_scheduler_db_path(state_root)
+    _reject_symlinked_state_path(db_path)
+    store = SchedulerStore(db_path)
+    store.initialize()
+    _reject_symlinked_state_path(db_path)
+    db_path.parent.chmod(0o700)
+    db_path.chmod(0o600)
+    return store
+
+
+def _reject_symlinked_state_path(path: Path) -> None:
+    for candidate in (path, *path.parents):
+        if candidate.exists() and candidate.is_symlink():
+            raise OSError("RUNNER_SCHEDULER_STATE_SYMLINK_UNSAFE")
 
 
 @dataclass(frozen=True)
