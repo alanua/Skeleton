@@ -3216,8 +3216,30 @@ def test_poll_once_self_heals_run_now_missing_ready_and_does_not_duplicate_claim
 
     assert first_count == 1
     assert second_count == 0
-    promote_issue.assert_called_once()
-    process_issue.assert_called_once()
+    assert promote_issue.call_count == 1
+    assert process_issue.call_count == 1
+
+
+def test_poll_once_runs_passive_scheduler_reconciliation_before_queue_intake() -> None:
+    calls: list[str] = []
+
+    with mock.patch.object(
+        runner,
+        "reconcile_scheduler_on_poll",
+        side_effect=lambda: calls.append("reconcile"),
+    ), mock.patch.object(
+        runner,
+        "self_heal_run_now_queue_intake",
+        side_effect=lambda: calls.append("intake"),
+    ), mock.patch.object(
+        runner,
+        "get_ready_issues",
+        return_value=[],
+    ):
+        count = runner.poll_once(workdir="/coordinator")
+
+    assert count == 0
+    assert calls == ["reconcile", "intake"]
 
 
 def test_runner_task_defaults_to_default_lane() -> None:
