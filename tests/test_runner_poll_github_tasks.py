@@ -1291,6 +1291,91 @@ def test_queue_replenisher_candidate_discovery_queries_agent_task_without_backlo
     assert [issue["number"] for issue in issues] == [81, 82]
 
 
+def test_run_now_intake_selects_valid_missing_ready_agent_task() -> None:
+    issue = _queue_candidate_issue(
+        2502,
+        allowed_files=("scripts/runner_poll_github_tasks.py",),
+        idempotency_key="runner-run-now-auto-intake-2502",
+        labels=(runner.LABEL_AGENT_TASK, runner.LABEL_RUN_NOW),
+    )
+
+    selected = runner.select_run_now_queue_intake_targets([], [issue])
+
+    assert [item["number"] for item in selected] == [2502]
+
+
+def test_run_now_intake_preserves_existing_holds_and_terminal_policy() -> None:
+    issues = [
+        _queue_candidate_issue(
+            2503,
+            allowed_files=("docs/waiting.md",),
+            idempotency_key="waiting",
+            labels=(
+                runner.LABEL_AGENT_TASK,
+                runner.LABEL_RUN_NOW,
+                runner.LABEL_WAITING_DEPENDENCY,
+            ),
+        ),
+        _queue_candidate_issue(
+            2504,
+            allowed_files=("docs/running.md",),
+            idempotency_key="running",
+            labels=(runner.LABEL_AGENT_TASK, runner.LABEL_RUN_NOW, runner.LABEL_RUNNING),
+        ),
+        _queue_candidate_issue(
+            2505,
+            allowed_files=("docs/done.md",),
+            idempotency_key="done",
+            labels=(runner.LABEL_AGENT_TASK, runner.LABEL_RUN_NOW, runner.LABEL_DONE),
+        ),
+        _queue_candidate_issue(
+            2506,
+            allowed_files=("docs/non-agent.md",),
+            idempotency_key="non-agent",
+            labels=(runner.LABEL_RUN_NOW,),
+        ),
+        _queue_candidate_issue(
+            2507,
+            allowed_files=("docs/missing-dependency.md",),
+            idempotency_key="missing-dependency",
+            labels=(runner.LABEL_AGENT_TASK, runner.LABEL_RUN_NOW),
+            body_lines=("depends_on: '#999'",),
+        ),
+    ]
+
+    selected = runner.select_run_now_queue_intake_targets([], issues)
+
+    assert selected == []
+
+
+def test_run_now_intake_self_heals_missing_ready_label_idempotently() -> None:
+    issue = _queue_candidate_issue(
+        2502,
+        allowed_files=("scripts/runner_poll_github_tasks.py",),
+        idempotency_key="runner-run-now-auto-intake-2502",
+        labels=(runner.LABEL_AGENT_TASK, runner.LABEL_RUN_NOW),
+    )
+
+    with mock.patch.object(runner, "get_ready_issues", return_value=[]), mock.patch.object(
+        runner, "get_run_now_queue_intake_candidate_issues", return_value=[issue]
+    ), mock.patch.object(runner, "run_command", return_value=(0, "")) as run:
+        promoted_count = runner.self_heal_run_now_queue_intake()
+
+    assert promoted_count == 1
+    run.assert_called_once_with(
+        [
+            "gh",
+            "issue",
+            "edit",
+            "2502",
+            "--repo",
+            runner.REPO,
+            "--add-label",
+            runner.LABEL_READY,
+        ]
+    )
+
+
 def test_completion_path_invokes_replenishment_after_done_status(tmp_path: Path) -> None:
     issue_path = tmp_path / "issue-90"
     issue = {
@@ -3075,7 +3160,7 @@ def test_typed_task_block_fields_feed_shadow_hash_without_receipt_leakage() -> N
 
 def test_poll_once_processes_issues_single_lane() -> None:
     issues = [{"number": 139}, {"number": 140}]
-    with mock.patch.object(
+    with mock.patch.object(runner, "self_heal_run_now_queue_intake", return_value=0), mock.patch.object(
         runner, "get_ready_issues", return_value=issues
     ), mock.patch.object(runner, "process_issue") as process_issue:
         count = runner.poll_once(workdir="/coordinator")
@@ -3085,6 +3170,54 @@ def test_poll_once_processes_issues_single_lane() -> None:
         mock.call(issues[0], workdir="/coordinator"),
         mock.call(issues[1], workdir="/coordinator"),
     ]
+
+
+def test_poll_once_self_heals_run_now_missing_ready_and_does_not_duplicate_claim() -> None:
+    labels = {runner.LABEL_AGENT_TASK, runner.LABEL_RUN_NOW}
+    issue = _queue_candidate_issue(
+        2502,
+        allowed_files=("scripts/runner_poll_github_tasks.py",),
+        idempotency_key="runner-run-now-auto-intake-2502",
+        labels=(),
+    )
+
+    def issue_snapshot() -> dict[str, object]:
+        snapshot = dict(issue)
+        snapshot["labels"] = [{"name": label} for label in sorted(labels)]
+        return snapshot
+
+    def ready_issues() -> list[dict[str, object]]:
+        if runner.LABEL_READY in labels and runner.LABEL_RUNNING not in labels:
+            return [issue_snapshot()]
+        return []
+
+    def run_now_candidates() -> list[dict[str, object]]:
+        return [issue_snapshot()]
+
+    def promote(promoted_issue: dict[str, object]) -> None:
+        assert promoted_issue["number"] == 2502
+        labels.add(runner.LABEL_READY)
+
+    def process(processed_issue: dict[str, object], *, workdir: str | None = None) -> None:
+        assert workdir == "/coordinator"
+        assert processed_issue["number"] == 2502
+        labels.discard(runner.LABEL_READY)
+        labels.add(runner.LABEL_RUNNING)
+
+    with mock.patch.object(runner, "get_ready_issues", side_effect=ready_issues), mock.patch.object(
+        runner, "get_run_now_queue_intake_candidate_issues", side_effect=run_now_candidates
+    ), mock.patch.object(
+        runner, "_promote_queue_replenisher_issue", side_effect=promote
+    ) as promote_issue, mock.patch.object(
+        runner, "process_issue", side_effect=process
+    ) as process_issue:
+        first_count = runner.poll_once(workdir="/coordinator")
+        second_count = runner.poll_once(workdir="/coordinator")
+
+    assert first_count == 1
+    assert second_count == 0
+    promote_issue.assert_called_once()
+    process_issue.assert_called_once()
 
 
 def test_runner_task_defaults_to_default_lane() -> None:
