@@ -14,6 +14,10 @@ from typing import Any
 CONTROL_RECOVERY_SCHEMA = "skeleton.control_recovery.v1"
 CONTROL_RECOVERY_RECEIPT_SCHEMA = "skeleton.control_recovery_receipt.v1"
 ROUTE_CONTROL_RECOVERY = "control_recovery"
+RUNNER_LOCAL_STATE_ROOT = Path("/home/agent/.local/state/skeleton-runner")
+RUNNER_CONTROL_RECOVERY_DB_PATH = (
+    RUNNER_LOCAL_STATE_ROOT / "control-recovery" / "control_recovery.sqlite3"
+)
 
 
 class FailureClass(str, Enum):
@@ -99,6 +103,7 @@ class RecoveryStore:
         self.db_path = Path(db_path)
 
     def initialize(self) -> None:
+        self._reject_symlinked_state_path()
         self.db_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         with self._connect() as connection:
             connection.executescript(
@@ -115,6 +120,14 @@ class RecoveryStore:
                 ) WITHOUT ROWID;
                 """
             )
+        self._reject_symlinked_state_path()
+        self.db_path.parent.chmod(0o700)
+        self.db_path.chmod(0o600)
+
+    def _reject_symlinked_state_path(self) -> None:
+        for candidate in (self.db_path, *self.db_path.parents):
+            if candidate.exists() and candidate.is_symlink():
+                raise OSError("CONTROL_RECOVERY_STATE_SYMLINK_UNSAFE")
 
     def run_recovery(
         self,

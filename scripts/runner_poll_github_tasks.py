@@ -30,7 +30,8 @@ from typing import Any
 
 import yaml
 
-ROOT = Path(__file__).resolve().parents[1]
+_MODULE_ROOT = Path(__file__).resolve().parents[1]
+ROOT = _MODULE_ROOT
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -38,6 +39,7 @@ from core.audit_ledger import AuditLedger, validate_public_safe_payload
 from core.aufmass_source_pack import validate_source_pack_manifest
 from core.control_recovery import (
     CONTROL_RECOVERY_SCHEMA,
+    RUNNER_CONTROL_RECOVERY_DB_PATH,
     RecoveryStore,
     execute_recovery_packet,
 )
@@ -14030,7 +14032,7 @@ def control_plane_self_healing_recovery(body: str, workdir: str) -> str:
 
     receipt = execute_recovery_packet(
         packet,
-        store=RecoveryStore(ROOT / ".codex" / "control_recovery.sqlite3"),
+        store=RecoveryStore(_runner_control_recovery_db_path()),
         now=int(time.time()),
         action_executor=run_action,
         canary_executor=run_canary,
@@ -14064,6 +14066,19 @@ def control_plane_self_healing_recovery(body: str, workdir: str) -> str:
     ]
     status_lines.append("telegram_notifications=0")
     return _maintenance_report(report_status, task_id, status_lines, success)
+
+
+def _runner_control_recovery_db_path() -> Path:
+    if ROOT != _MODULE_ROOT:
+        return (
+            ROOT
+            / ".local"
+            / "state"
+            / "skeleton-runner"
+            / "control-recovery"
+            / "control_recovery.sqlite3"
+        )
+    return RUNNER_CONTROL_RECOVERY_DB_PATH
 
 
 def dispatch_runtime_maintenance_task(

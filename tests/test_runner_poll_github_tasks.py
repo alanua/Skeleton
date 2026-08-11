@@ -14173,6 +14173,52 @@ def test_recover_skeleton_checkout_feature_preservation_failure_leaves_state_unt
     assert untracked.read_text(encoding="utf-8") == "untracked\n"
 
 
+def test_control_plane_self_healing_recovery_uses_runner_local_state_store(
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, Path] = {}
+
+    def fake_execute_recovery_packet(*_args: object, **kwargs: object) -> dict[str, object]:
+        store = kwargs["store"]
+        captured["db_path"] = store.db_path
+        return {
+            "schema": "skeleton.control_recovery_receipt.v1",
+            "status": "RECOVERED",
+            "reason": "RECOVERY_VERIFIED",
+            "failure_class": "CODEGEN_RUNTIME_UNHEALTHY",
+            "failure_key": "control:codegen-runtime",
+            "attempt": 1,
+            "next_retry_at": None,
+            "actions_executed": ["codegen_runtime_recover", "queue_reactivate"],
+            "canaries_executed": ["codegen_read_only_canary"],
+            "evidence_ref": "sha256:test",
+            "needs_operator_notification": False,
+        }
+
+    with mock.patch.object(
+        runner, "execute_recovery_packet", side_effect=fake_execute_recovery_packet
+    ):
+        report = runner.control_plane_self_healing_recovery(
+            "\n".join(
+                (
+                    "Failure Class: CODEGEN_RUNTIME_UNHEALTHY",
+                    "Failure Key: control:codegen-runtime",
+                )
+            ),
+            str(tmp_path),
+        )
+
+    path = captured["db_path"]
+    assert report.startswith("DONE:")
+    assert path == runner.RUNNER_CONTROL_RECOVERY_DB_PATH
+    assert "/home/agent/.local/state/skeleton-runner/" in str(path)
+    assert "/var/lib" not in str(path)
+    assert "/.codex/" not in str(path)
+    assert "/tmp/" not in str(path)
+    assert "worktree" not in str(path)
+    assert "issue-" not in str(path)
+
+
 @pytest.mark.parametrize(
     ("branch_output", "branch_code", "reason"),
     [

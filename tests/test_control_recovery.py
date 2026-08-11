@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import stat
 from pathlib import Path
+
+import pytest
 
 from core.control_recovery import (
     CONTROL_RECOVERY_SCHEMA,
+    RUNNER_CONTROL_RECOVERY_DB_PATH,
     FailureClass,
     RecoveryStatus,
     RecoveryStore,
@@ -154,6 +158,52 @@ def test_github_actions_lane_failure_does_not_stall_healthy_issue_runner(tmp_pat
     )
     assert receipt["status"] == RecoveryStatus.RECOVERED.value
     assert calls == ["issue_runner_continue", "queue_reactivate"]
+
+
+def test_runner_control_recovery_default_path_is_private_local_state() -> None:
+    path = RUNNER_CONTROL_RECOVERY_DB_PATH
+
+    assert path == Path(
+        "/home/agent/.local/state/skeleton-runner/control-recovery/control_recovery.sqlite3"
+    )
+    assert path.is_absolute()
+    assert "/var/lib" not in str(path)
+    assert "/.codex/" not in str(path)
+    assert "/tmp/" not in str(path)
+    assert "worktree" not in str(path)
+    assert "issue-" not in str(path)
+
+
+def test_recovery_store_initializes_private_modes_without_privileged_parent(
+    tmp_path: Path,
+) -> None:
+    db_path = (
+        tmp_path
+        / "home"
+        / "agent"
+        / ".local"
+        / "state"
+        / "skeleton-runner"
+        / "control-recovery"
+        / "control_recovery.sqlite3"
+    )
+
+    store = RecoveryStore(db_path)
+    store.initialize()
+
+    assert db_path.exists()
+    assert stat.S_IMODE(db_path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(db_path.stat().st_mode) == 0o600
+
+
+def test_recovery_store_rejects_symlinked_state_path(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    linked_parent = tmp_path / "linked"
+    linked_parent.symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(OSError, match="CONTROL_RECOVERY_STATE_SYMLINK_UNSAFE"):
+        RecoveryStore(linked_parent / "control_recovery.sqlite3").initialize()
 
 
 def test_duplicate_restart_tick_does_not_repeat_recovered_action(tmp_path: Path) -> None:
