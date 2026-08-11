@@ -22,6 +22,8 @@ from core.home_edge.executor_gateway import EXEC_HMAC_SECRET_ENV, execute_home_e
 TASK_ID = "home_edge_01_media_source_snapshot_v1"
 REPOSITORY = "alanua/Skeleton"
 TARGET_NODE = "home-edge-01"
+OPERATOR_APPROVAL = "EXPLICIT_MINIMAL_HOME_EDGE_SNAPSHOT_ACCESS_REPAIR_2026_08_09"
+OPERATOR_APPROVAL_REF = "operator-approval:home-edge-01-media-source-snapshot-v1"
 SOURCE_IDENTITY_TOKEN = "home_edge_01_skeleton_cast_app_py"
 SOURCE_PATH = "/opt/skeleton/cast/app.py"
 RUN_AS = "desktop-user"
@@ -38,6 +40,14 @@ EXEC_HMAC_SECRET_CONFIG_DIR = Path("/etc/skeleton")
 EXEC_HMAC_SECRET_PROFILE_METADATA_PATH = Path("/etc/skeleton/home-edge-01.env")
 EXEC_HMAC_SECRET_CONFIG_PATH = Path("/etc/skeleton/home-edge-executor-controller.env")
 MAX_EXEC_HMAC_SECRET_CONFIG_BYTES = 64 * 1024
+SNAPSHOT_SIGNER_PATH = "/usr/local/bin/skeleton-home-edge-media-source-snapshot-signer"
+SNAPSHOT_SIGNER_COMMAND = (
+    "/usr/bin/sudo",
+    "--non-interactive",
+    "--",
+    SNAPSHOT_SIGNER_PATH,
+    "--sign",
+)
 EXPECTED_MAIN_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 FIELD_RE = re.compile(r"^\s*(?P<field>[A-Za-z][A-Za-z0-9 _-]{0,80}):\s*(?P<value>.*?)\s*$")
 PUBLIC_VALUE_RE = re.compile(r"^[A-Za-z0-9_.:=-]+$")
@@ -102,6 +112,7 @@ ALLOWED_FIELDS = frozenset(
         "Repository",
         "Expected Main SHA",
         "Target",
+        "Operator Approval",
     }
 )
 
@@ -111,6 +122,7 @@ class RuntimeInput:
     repository: str
     expected_main_sha: str
     target: str
+    operator_approval: str
 
 
 def execute_media_source_snapshot_task(
@@ -120,6 +132,7 @@ def execute_media_source_snapshot_task(
     github_main_sha: str,
     environment: Mapping[str, str] | None = None,
     private_root: Path | None = None,
+    signer: Any | None = None,
 ) -> dict[str, object]:
     runtime_input = parse_runtime_input(body)
     validate_main_sha(
@@ -133,7 +146,8 @@ def execute_media_source_snapshot_task(
         return existing
 
     try:
-        request = build_snapshot_request(environment=environment)
+        request = signer() if signer is not None else _invoke_installed_snapshot_signer()
+        _validate_snapshot_request_contract(request)
     except ValueError as exc:
         reason = exc.args[0] if exc.args else ""
         if isinstance(reason, str) and AUTH_CONFIG_REASON_RE.fullmatch(reason):
@@ -204,6 +218,7 @@ def parse_runtime_input(body: str) -> RuntimeInput:
         repository=fields.get("Repository", ""),
         expected_main_sha=fields.get("Expected Main SHA", ""),
         target=fields.get("Target", ""),
+        operator_approval=fields.get("Operator Approval", ""),
     )
     if runtime_input.repository != REPOSITORY:
         raise ValueError("repository_mismatch")
@@ -211,7 +226,58 @@ def parse_runtime_input(body: str) -> RuntimeInput:
         raise ValueError("expected_main_sha_malformed")
     if runtime_input.target != TARGET_NODE:
         raise ValueError("target_mismatch")
+    if runtime_input.operator_approval != OPERATOR_APPROVAL:
+        raise ValueError("operator_approval_mismatch")
     return runtime_input
+
+
+def _invoke_installed_snapshot_signer() -> HomeEdgeExecRequest:
+    try:
+        completed = subprocess.run(
+            list(SNAPSHOT_SIGNER_COMMAND),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise ValueError("executor_auth_config_unsafe") from None
+    if completed.returncode != 0:
+        raise ValueError("executor_auth_config_unsafe")
+    try:
+        decoded = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        raise ValueError("executor_auth_config_unsafe") from None
+    if not isinstance(decoded, dict):
+        raise ValueError("executor_auth_config_unsafe")
+    request = HomeEdgeExecRequest.from_mapping(decoded)
+    _validate_snapshot_request_contract(request)
+    return request
+
+
+def _validate_snapshot_request_contract(request: HomeEdgeExecRequest) -> None:
+    if request.node_id != TARGET_NODE:
+        raise ValueError("snapshot_signer_contract_mismatch")
+    if request.execution_lane.value != EXECUTION_LANE:
+        raise ValueError("snapshot_signer_contract_mismatch")
+    if request.operator_approval_ref != OPERATOR_APPROVAL_REF:
+        raise ValueError("snapshot_signer_contract_mismatch")
+    if request.run_as.value != RUN_AS:
+        raise ValueError("snapshot_signer_contract_mismatch")
+    if request.timeout_seconds != REQUEST_TIMEOUT_SECONDS:
+        raise ValueError("snapshot_signer_contract_mismatch")
+    if request.argv:
+        raise ValueError("snapshot_signer_contract_mismatch")
+    if request.mode.value != "script" or request.script != SNAPSHOT_SCRIPT:
+        raise ValueError("snapshot_signer_contract_mismatch")
+    if request.script_interpreter != "python3":
+        raise ValueError("snapshot_signer_contract_mismatch")
+    if request.max_output_bytes != MAX_EXECUTOR_OUTPUT_BYTES:
+        raise ValueError("snapshot_signer_contract_mismatch")
+    if not request.idempotency_key.startswith(IDEMPOTENCY_KEY_PREFIX + "-"):
+        raise ValueError("snapshot_signer_contract_mismatch")
+    if not request.signature:
+        raise ValueError("snapshot_signer_contract_mismatch")
 
 
 def validate_main_sha(
@@ -230,13 +296,15 @@ def validate_main_sha(
         raise ValueError("github_main_sha_mismatch")
 
 
-def build_snapshot_request(*, environment: Mapping[str, str] | None = None) -> HomeEdgeExecRequest:
-    secret = _resolve_exec_hmac_secret(environment=environment)
+def build_snapshot_request(*, hmac_secret: str) -> HomeEdgeExecRequest:
+    if not hmac_secret:
+        raise ValueError("executor_auth_config_missing")
     request = HomeEdgeExecRequest.from_mapping(
         {
             "request_id": f"{TASK_ID}-{uuid4()}",
             "node_id": TARGET_NODE,
             "execution_lane": EXECUTION_LANE,
+            "operator_approval_ref": OPERATOR_APPROVAL_REF,
             "timeout_seconds": REQUEST_TIMEOUT_SECONDS,
             "idempotency_key": f"{IDEMPOTENCY_KEY_PREFIX}-{uuid4()}",
             "run_as": RUN_AS,
@@ -250,16 +318,12 @@ def build_snapshot_request(*, environment: Mapping[str, str] | None = None) -> H
         }
     )
     return HomeEdgeExecRequest.from_mapping(
-        {**request.to_mapping(include_signature=False), "signature": sign_request(request, secret)}
+        {**request.to_mapping(include_signature=False), "signature": sign_request(request, hmac_secret)}
     )
 
 
-def _resolve_exec_hmac_secret(*, environment: Mapping[str, str] | None = None) -> str:
-    env = os.environ if environment is None else environment
-    secret = env.get(EXEC_HMAC_SECRET_ENV, "")
-    if secret:
-        return secret
-    return _read_exec_hmac_secret_config()
+def build_snapshot_request_from_controller_config() -> HomeEdgeExecRequest:
+    return build_snapshot_request(hmac_secret=_read_exec_hmac_secret_config())
 
 
 def _read_exec_hmac_secret_config() -> str:

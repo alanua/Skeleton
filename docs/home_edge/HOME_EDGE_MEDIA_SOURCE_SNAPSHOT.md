@@ -8,13 +8,22 @@
 - execution lane: `read_only`
 - run user: `desktop-user`
 - timeout: `30` seconds
+- signer: exact Runner invocation `/usr/bin/sudo --non-interactive -- /usr/local/bin/skeleton-home-edge-media-source-snapshot-signer --sign`
 - transport: signed `core.home_edge.executor_gateway` request only
 
-The operation is not a general file export facility. Issue metadata may provide only the runtime mode, exact maintenance task ID, repository, expected main SHA, and target. Path, command, script, output path, timeout, lane, user, node, and variant fields are rejected.
+The operation is not a general file export facility. Issue metadata may provide only the runtime mode, exact maintenance task ID, repository, expected main SHA, target, and exact operator approval `EXPLICIT_MINIMAL_HOME_EDGE_SNAPSHOT_ACCESS_REPAIR_2026_08_09`. Path, command, script, output path, timeout, lane, user, node, and variant fields are rejected. Operator approval is checked before signer activation, credential reads, request signing, or transport.
+
+## Controller Signer Boundary
+
+The trusted controller installer establishes an immutable bootstrap at `/usr/local/lib/skeleton-home-edge-controller/bootstrap/install_home_edge_realtime_controller.sh`. Checkout/worktree installer bytes may be copied and hash-verified only as inert data by the existing protected maintenance fabric; root execution is accepted only from the fixed root-owned `0500` installed bootstrap path. Every runtime payload file copied from the checkout is also pinned by SHA-256 before installation, so mutating or removing the checkout after the inert bootstrap copy cannot alter privileged installer behavior.
+
+The Home Edge node executor installer remains node-only and does not install or activate snapshot signer code. The controller installer copies the reviewed static signer payload and Home Edge request contract into `/usr/local/lib/skeleton-home-edge-controller` and exposes only `/usr/local/bin/skeleton-home-edge-media-source-snapshot-signer --sign`. That wrapper is root-owned, restricted to the canonical Runner service identity `agent`, and invokes the installed library copy with exact `/usr/bin/python3`, `env -i`, and the fixed installed path.
+
+The signer only returns the fixed immutable executor request for this operation. It never opens transport, never executes SSH or MCP, never reads or writes the Runner private artifact, never accepts caller-provided signing material, and rejects any invocation other than `--sign`. Runtime task execution invokes the exact absolute `/usr/bin/sudo` command rather than resolving `sudo` or the signer from `PATH`.
 
 ## Executor Authentication
 
-The Runner signs the Home Edge executor request with `SKELETON_HOME_EDGE_EXEC_HMAC_SECRET`. An explicit Runner-provided environment mapping or process environment value takes precedence. If that value is absent or empty, the task reads only `/etc/skeleton/home-edge-executor-controller.env` and only the single allowlisted variable `SKELETON_HOME_EDGE_EXEC_HMAC_SECRET`.
+The installed controller signer signs the Home Edge executor request with `SKELETON_HOME_EDGE_EXEC_HMAC_SECRET`. Production Runner code cannot directly read or use that HMAC value under any environment combination. The signer reads only `/etc/skeleton/home-edge-executor-controller.env` and only the single allowlisted variable `SKELETON_HOME_EDGE_EXEC_HMAC_SECRET`.
 
 That fixed private config is parsed as text, never sourced or executed. The resolver never reads or parses `/etc/skeleton/home-edge-01.env`; that file is metadata-only corroboration for the private controller ownership boundary. The fixed `/etc/skeleton` directory plus `/etc/skeleton/home-edge-01.env` and `/etc/skeleton/home-edge-executor-controller.env` are all checked with `lstat`; symlinks are rejected, `/etc/skeleton` must be a directory, both env paths must be regular files, none may be group/world writable, and each env file must be no larger than 64 KiB. The controller env is accepted when its owner is root or the current Runner uid, or when those three fixed paths share one identical owner and group boundary under the same strict checks. The parser accepts only simple `KEY=VALUE` or optional `export KEY=VALUE` entries for the allowlisted variable, ignoring comments, blank lines, and unrelated assignments. Duplicate target entries, NUL bytes, malformed quoted values, shell substitution or variable references, backticks, and multiline continuations fail closed before any executor request is made.
 
