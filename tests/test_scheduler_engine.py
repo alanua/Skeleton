@@ -108,6 +108,35 @@ def _recovery_once(schedule_id: str, once_at: int, recovery_packet: dict[str, ob
     )
 
 
+class _CountingDispatcher:
+    def __init__(self, status: str = "done") -> None:
+        self.status = status
+        self.calls: list[SharedDispatchRequest] = []
+
+    def dispatch(self, request: SharedDispatchRequest):
+        self.calls.append(request)
+        return type(
+            "DispatchResult",
+            (),
+            {
+                "status": self.status,
+                "reason": "TEST_DISPATCH",
+                "receipt": {
+                    "schema": "skeleton.scheduler_dispatch_receipt.v1",
+                    "status": "DONE" if self.status == "done" else "BLOCKED",
+                    "accepted": self.status == "done",
+                    "reason": "TEST_DISPATCH",
+                    "public_safe": True,
+                    "external_side_effects_executed": False,
+                },
+                "evidence_ref": "test:dispatch",
+                "retryable": False,
+                "waiting_dependency": None,
+                "next_step": None,
+            },
+        )()
+
+
 def test_notify_only_tick_creates_once_and_prevents_duplicate(tmp_path) -> None:
     store = SchedulerStore(tmp_path / "scheduler.sqlite3")
     store.initialize()
@@ -191,6 +220,166 @@ def test_tick_recovers_stale_running_without_reexecution(tmp_path) -> None:
     assert receipt["recovered_stale_running"] == 1
     assert receipt["retried_stale_running"] == 1
     assert store.list_occurrences("test.recovery")[0].state == "pending"
+
+
+def test_crash_after_claim_before_receipt_reclaims_after_restart(tmp_path) -> None:
+    db_path = tmp_path / "scheduler.sqlite3"
+    store = SchedulerStore(db_path)
+    store.initialize()
+    store.register(_loop_once("test.claim.crash", 100, _loop_packet("create")), now=50)
+    SchedulerEngine(store).tick(now=100)
+    claimed = store.claim_next_pending(now=101, lease_seconds=10)
+    assert claimed is not None
+    assert claimed.attempt == 1
+
+    restarted = SchedulerStore(db_path)
+    dispatcher = _CountingDispatcher()
+    receipt = SchedulerEngine(
+        restarted,
+        SchedulerEngineConfig(stale_running_after_seconds=10, lease_seconds=10),
+    ).tick(now=112, dispatcher=dispatcher)  # type: ignore[arg-type]
+
+    occurrence = restarted.list_occurrences("test.claim.crash")[0]
+    assert receipt["retried_stale_running"] == 1
+    assert receipt["dispatch"]["done"] == 1
+    assert occurrence.state == "done"
+    assert occurrence.attempt == 2
+    assert len(dispatcher.calls) == 1
+
+
+def test_crash_after_success_receipt_finalizes_without_replay(tmp_path) -> None:
+    db_path = tmp_path / "scheduler.sqlite3"
+    store = SchedulerStore(db_path)
+    store.initialize()
+    store.register(_loop_once("test.receipt.crash", 100, _loop_packet("create")), now=50)
+    SchedulerEngine(store).tick(now=100)
+    occurrence = store.claim_next_pending(now=101, lease_seconds=10)
+    assert occurrence is not None
+    store.record_dispatch_receipt(
+        occurrence_id=occurrence.occurrence_id,
+        attempt=occurrence.attempt,
+        idempotency_key=occurrence.idempotency_key or "",
+        status="done",
+        reason="TEST_DONE",
+        evidence_ref="test:done",
+        result={
+            "schema": "skeleton.scheduler_dispatch_receipt.v1",
+            "status": "DONE",
+            "accepted": True,
+            "reason": "TEST_DONE",
+            "public_safe": True,
+            "external_side_effects_executed": False,
+        },
+        now=102,
+    )
+
+    restarted = SchedulerStore(db_path)
+    dispatcher = _CountingDispatcher()
+    receipt = SchedulerEngine(
+        restarted,
+        SchedulerEngineConfig(stale_running_after_seconds=10, lease_seconds=10),
+    ).tick(now=112, dispatcher=dispatcher)  # type: ignore[arg-type]
+
+    occurrence = restarted.list_occurrences("test.receipt.crash")[0]
+    assert receipt["finished_stale_running"] == 1
+    assert receipt["dispatch"]["claimed"] == 0
+    assert occurrence.state == "done"
+    assert occurrence.attempt == 1
+    assert dispatcher.calls == []
+
+
+def test_ambiguous_protected_receipt_needs_operator_after_restart(tmp_path) -> None:
+    db_path = tmp_path / "scheduler.sqlite3"
+    store = SchedulerStore(db_path)
+    store.initialize()
+    store.register(
+        _recovery_once(
+            "test.ambiguous.protected",
+            100,
+            {
+                "schema": "skeleton.control_recovery.v1",
+                "failure_class": "CODEGEN_RUNTIME_UNHEALTHY",
+                "failure_key": "control:ambiguous",
+            },
+        ),
+        now=50,
+    )
+    SchedulerEngine(store).tick(now=100)
+    occurrence = store.claim_next_pending(now=101, lease_seconds=10)
+    assert occurrence is not None
+    store.record_dispatch_receipt(
+        occurrence_id=occurrence.occurrence_id,
+        attempt=occurrence.attempt,
+        idempotency_key=occurrence.idempotency_key or "",
+        status="failed",
+        reason="DISPATCH_HANDLER_RAISED",
+        evidence_ref="test:ambiguous",
+        result={
+            "schema": "skeleton.scheduler_dispatch_receipt.v1",
+            "status": "BLOCKED",
+            "accepted": False,
+            "reason": "DISPATCH_HANDLER_RAISED",
+            "route_receipt": {
+                "status": "WAITING_RECOVERY",
+                "external_side_effects_executed": True,
+            },
+            "public_safe": True,
+            "external_side_effects_executed": True,
+        },
+        now=102,
+    )
+
+    restarted = SchedulerStore(db_path)
+    dispatcher = _CountingDispatcher()
+    receipt = SchedulerEngine(
+        restarted,
+        SchedulerEngineConfig(stale_running_after_seconds=10, lease_seconds=10),
+    ).tick(now=112, dispatcher=dispatcher)  # type: ignore[arg-type]
+
+    occurrence = restarted.list_occurrences("test.ambiguous.protected")[0]
+    assert receipt["stale_running_needs_operator"] == 1
+    assert occurrence.state == "needs_operator"
+    assert occurrence.reason == "AMBIGUOUS_DISPATCH_RECEIPT_NEEDS_OPERATOR"
+    assert dispatcher.calls == []
+
+
+def test_duplicate_claims_and_heartbeat_reconciliation_are_idempotent(tmp_path) -> None:
+    db_path = tmp_path / "scheduler.sqlite3"
+    store = SchedulerStore(db_path)
+    store.initialize()
+    store.register(_loop_once("test.lease", 100, _loop_packet("create")), now=50)
+    SchedulerEngine(store).tick(now=100)
+
+    first = SchedulerStore(db_path).claim_next_pending(
+        now=101, lease_seconds=10, owner="worker-a"
+    )
+    second = SchedulerStore(db_path).claim_next_pending(
+        now=101, lease_seconds=10, owner="worker-b"
+    )
+    assert first is not None
+    assert second is None
+    assert SchedulerStore(db_path).refresh_heartbeat(
+        occurrence_id=first.occurrence_id,
+        owner="worker-a",
+        now=108,
+        lease_seconds=20,
+    )
+
+    live = SchedulerEngine(
+        SchedulerStore(db_path),
+        SchedulerEngineConfig(stale_running_after_seconds=10, lease_seconds=10),
+    ).tick(now=125, dispatcher=_CountingDispatcher())  # type: ignore[arg-type]
+    assert live["recovered_stale_running"] == 0
+    assert SchedulerStore(db_path).list_occurrences("test.lease")[0].state == "running"
+
+    expired = SchedulerEngine(
+        SchedulerStore(db_path),
+        SchedulerEngineConfig(stale_running_after_seconds=10, lease_seconds=10),
+    ).tick(now=129)
+    occurrence = SchedulerStore(db_path).list_occurrences("test.lease")[0]
+    assert expired["retried_stale_running"] == 1
+    assert occurrence.state == "pending"
+    assert occurrence.attempt == 1
 
 
 def test_due_schedule_dispatches_to_loop_and_finishes_without_manual_nudge(tmp_path) -> None:

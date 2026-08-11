@@ -14,6 +14,7 @@ import os
 import re
 import shlex
 import shutil
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -2087,6 +2088,23 @@ def run_due_codegen_recovery_for_issue(issue_number: int, *, now: int | None = N
         now=current,
     )
     return SchedulerEngine(store).tick(now=current, dispatcher=dispatcher)
+
+
+def reconcile_scheduler_on_poll(*, now: int | None = None) -> dict[str, object]:
+    current = int(time.time()) if now is None else now
+    store = SchedulerStore(scheduler_db_path())
+    try:
+        store.initialize()
+        return SchedulerEngine(store).tick(now=current)
+    except sqlite3.Error:
+        return {
+            "schema": "skeleton.scheduler_tick_receipt.v1",
+            "status": "NEEDS_OPERATOR",
+            "reason": "SCHEDULER_RECONCILIATION_UNAVAILABLE",
+            "public_safe": True,
+            "private_payloads_included": False,
+            "external_side_effects_executed": False,
+        }
 
 
 def runner_report_status(report: str) -> str:
@@ -15103,6 +15121,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
 
 
 def poll_once(workdir: str | None = None) -> int:
+    reconcile_scheduler_on_poll()
     issues = get_ready_issues()
     for issue in issues:
         process_issue(issue, workdir=workdir)

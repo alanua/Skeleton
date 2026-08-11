@@ -49,6 +49,12 @@ After successful recovery, a local non-secret marker records the exact pinned ve
 
 `core.control_recovery.RecoveryStore` persists one row per failure key. Duplicate ticks and restarts observe the durable row, so a recovered failure does not execute again. Failed recovery moves to `WAITING_RECOVERY` with deterministic backoff. Exhaustion records exactly one durable `NEEDS_OPERATOR` notification flag.
 
+Scheduler occurrences use the same durable state boundary. A pending occurrence is atomically claimed by changing the existing occurrence row to `running`, incrementing the bounded attempt number, assigning the deterministic idempotency key, and recording a code-owned lease owner, lease expiry, and heartbeat timestamp. Active workers may refresh that heartbeat without changing route, payload, approval policy, idempotency key, or task authority.
+
+Every ordinary Scheduler tick and Runner poll startup reconciles expired `running` claims from the existing scheduler DB. A stale claim with no dispatch receipt returns to `pending` while attempts remain. Once attempts are exhausted it becomes `needs_operator`. If a crash happens after a successful dispatch receipt is persisted but before the occurrence is finalized, restart reconciliation marks the occurrence `done` from that receipt and does not call the dispatcher again. A persisted `needs_operator` receipt remains operator-bound. A failed or ambiguous receipt for protected runtime, provider, deploy, device, financial, workflow, or externally-mutating work becomes `needs_operator` instead of being replayed blindly.
+
+Repeated polls and restarts are idempotent: claims are single-row conditional updates, receipts are keyed by the existing idempotency key, stale recovery clears leases when it changes state, and completed/blocked terminal rows are not requeued.
+
 Production state is code-owned local agent state:
 
 - control recovery DB: `/home/agent/.local/state/skeleton-runner/control-recovery/control_recovery.sqlite3`

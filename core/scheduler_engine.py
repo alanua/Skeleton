@@ -32,6 +32,7 @@ class SchedulerEngineConfig:
     max_occurrences_per_schedule: int = 256
     misfire_grace_seconds: int = 120
     stale_running_after_seconds: int = 60 * 60
+    lease_seconds: int = 60 * 60
     max_dispatches_per_tick: int = 16
     max_attempts: int = 2
 
@@ -41,6 +42,7 @@ class SchedulerEngineConfig:
             "max_occurrences_per_schedule",
             "misfire_grace_seconds",
             "stale_running_after_seconds",
+            "lease_seconds",
             "max_dispatches_per_tick",
             "max_attempts",
         ):
@@ -68,6 +70,7 @@ class SchedulerEngine:
         recovered = self.store.recover_stale_running(
             now=current,
             stale_after_seconds=self.config.stale_running_after_seconds,
+            lease_seconds=self.config.lease_seconds,
             max_attempts=self.config.max_attempts,
         )
         resumed_dependencies = self.store.resume_waiting_dependencies(now=current)
@@ -142,9 +145,16 @@ class SchedulerEngine:
             "evaluated_schedules": evaluated,
             "created_occurrences": sum(counters.values()),
             "replayed_occurrences": replayed,
-            "recovered_stale_running": recovered["retried"] + recovered["needs_operator"],
-            "retried_stale_running": recovered["retried"],
-            "stale_running_needs_operator": recovered["needs_operator"],
+            "recovered_stale_running": (
+                recovered.get("retried", 0)
+                + recovered.get("needs_operator", 0)
+                + recovered.get("done", 0)
+                + recovered.get("waiting_dependency", 0)
+            ),
+            "retried_stale_running": recovered.get("retried", 0),
+            "finished_stale_running": recovered.get("done", 0),
+            "waiting_dependency_stale_running": recovered.get("waiting_dependency", 0),
+            "stale_running_needs_operator": recovered.get("needs_operator", 0),
             "resumed_waiting_dependencies": resumed_dependencies,
             "dispatch": dispatch_receipt,
             "states": {
@@ -170,6 +180,7 @@ class SchedulerEngine:
         for _ in range(self.config.max_dispatches_per_tick):
             occurrence = self.store.claim_next_pending(
                 now=current,
+                lease_seconds=self.config.lease_seconds,
                 exclude_occurrence_ids=frozenset(claimed_this_tick),
             )
             if occurrence is None:

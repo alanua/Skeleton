@@ -3077,14 +3077,68 @@ def test_poll_once_processes_issues_single_lane() -> None:
     issues = [{"number": 139}, {"number": 140}]
     with mock.patch.object(
         runner, "get_ready_issues", return_value=issues
-    ), mock.patch.object(runner, "process_issue") as process_issue:
+    ), mock.patch.object(runner, "process_issue") as process_issue, mock.patch.object(
+        runner, "reconcile_scheduler_on_poll"
+    ) as reconcile:
         count = runner.poll_once(workdir="/coordinator")
 
     assert count == 2
+    reconcile.assert_called_once_with()
     assert process_issue.call_args_list == [
         mock.call(issues[0], workdir="/coordinator"),
         mock.call(issues[1], workdir="/coordinator"),
     ]
+
+
+def test_poll_once_reconciles_stale_scheduler_claims(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(runner, "ROOT", tmp_path)
+    store = runner.SchedulerStore(runner.scheduler_db_path())
+    store.initialize()
+    schedule, _ = store.register(
+        runner.ScheduleSpec.from_mapping(
+            {
+                "schema": "skeleton.schedule.v1",
+                "schedule_id": "poll.stale",
+                "trigger_kind": "once",
+                "cron_expression": None,
+                "once_at": 100,
+                "timezone": "UTC",
+                "route_type": "notify",
+                "route_id": "notify.test",
+                "approval_policy": "auto_run_low_risk",
+                "overlap_policy": "queue_one",
+                "misfire_policy": "run_once",
+                "payload": {
+                    "privacy_boundary": runner.PRIVACY_PUBLIC_SAFE,
+                    "bounded": True,
+                },
+            }
+        ),
+        now=50,
+    )
+    occurrence_id = runner.stable_occurrence_id(
+        schedule.spec.schedule_id, schedule.version, 100
+    )
+    store.create_occurrence(
+        occurrence_id=occurrence_id,
+        schedule=schedule,
+        scheduled_for=100,
+        state="running",
+        reason="DISPATCH_CLAIMED",
+        proposal=runner.build_execution_proposal(
+            schedule, occurrence_id=occurrence_id, scheduled_for=100
+        ),
+        now=100,
+    )
+
+    with mock.patch.object(runner, "get_ready_issues", return_value=[]):
+        assert runner.poll_once(workdir="/coordinator") == 0
+
+    assert runner.SchedulerStore(runner.scheduler_db_path()).get_occurrence(
+        occurrence_id
+    ).state == "pending"
 
 
 def test_runner_task_defaults_to_default_lane() -> None:
