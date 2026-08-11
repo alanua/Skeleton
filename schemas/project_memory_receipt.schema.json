@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://alanua.github.io/Skeleton/schemas/project_memory_receipt.schema.json",
+  "title": "Project Memory Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "contract_version",
+    "status",
+    "reason_code",
+    "namespace",
+    "project_id",
+    "operation",
+    "classification",
+    "privacy_boundary",
+    "aggregates",
+    "payload"
+  ],
+  "properties": {
+    "schema": {
+      "const": "skeleton.project_memory_receipt.v1"
+    },
+    "contract_version": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "DONE",
+        "OPERATOR_APPROVAL_REQUIRED",
+        "DUPLICATE_EXISTING",
+        "TEMPORARY_ONLY",
+        "BLOCKED"
+      ]
+    },
+    "reason_code": {
+      "$ref": "#/$defs/safe_token"
+    },
+    "namespace": {
+      "$ref": "#/$defs/safe_token"
+    },
+    "project_id": {
+      "$ref": "#/$defs/safe_token"
+    },
+    "operation": {
+      "enum": [
+        "read_context",
+        "propose_fact",
+        "propose_task",
+        "propose_preference",
+        "list_pending_review"
+      ]
+    },
+    "classification": {
+      "enum": [
+        "CANON",
+        "REVIEW",
+        "BACKLOG",
+        "REJECTED",
+        "PRIVATE",
+        "TEMPORARY"
+      ]
+    },
+    "privacy_boundary": {
+      "enum": [
+        "PUBLIC_SAFE_CODE_TESTS_ONLY",
+        "PRIVATE_RUNTIME_ONLY",
+        "SECRET_REFERENCE_ONLY"
+      ]
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "gateway": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema": {
+          "type": "string"
+        },
+        "contract_version": {
+          "type": "string"
+        },
+        "command": {
+          "type": "string"
+        }
+      }
+    },
+    "aggregates": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "$defs": {
+    "safe_token": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+    }
+  }
+}
