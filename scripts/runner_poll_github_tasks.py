@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextvars import ContextVar
 import csv
 from dataclasses import dataclass
@@ -39,6 +39,8 @@ from core.aufmass_source_pack import validate_source_pack_manifest
 from core.control_recovery import (
     CONTROL_RECOVERY_SCHEMA,
     RecoveryStore,
+    classify_codegen_runtime_failure,
+    default_control_recovery_db_path,
     execute_recovery_packet,
 )
 from core.hermes_private_memory import (
@@ -150,6 +152,13 @@ from core.runner_private_memory_executor import (
     hermes_memory_gateway_smoke_validate_isolation as _executor_hermes_memory_gateway_smoke_validate_isolation,
     hermes_memory_gateway_smoke_validate_payload as _executor_hermes_memory_gateway_smoke_validate_payload,
 )
+from core.scheduler_engine import (
+    SchedulerEngine,
+    SchedulerEngineConfig,
+    schedule_codegen_runtime_recovery,
+)
+from core.scheduler_store import SchedulerStore
+from core.shared_dispatch import SharedDispatcher
 from core.skeleton_memory import SkeletonMemory
 from core.telegram_approval_buttons import build_pr_ready_card_payload
 
@@ -203,6 +212,7 @@ FINAL_LABELS_BY_STATUS = {
 POLL_INTERVAL = 60
 DEFAULT_WORKDIR = Path(__file__).resolve().parents[1]
 DEFAULT_WORKTREE_ROOT = Path("/home/agent/agent-dev/worktrees/skeleton")
+DEFAULT_SCHEDULER_DB_PATH = Path("/var/lib/skeleton/scheduler/scheduler.sqlite3")
 PROJECT_TREE_PATH = ROOT / "PROJECT_TREE.yaml"
 MAX_COMMENT_LENGTH = 60000
 RUNTIME_ARTIFACTS = (
@@ -14030,7 +14040,7 @@ def control_plane_self_healing_recovery(body: str, workdir: str) -> str:
 
     receipt = execute_recovery_packet(
         packet,
-        store=RecoveryStore(ROOT / ".codex" / "control_recovery.sqlite3"),
+        store=RecoveryStore(_runner_control_recovery_db_path()),
         now=int(time.time()),
         action_executor=run_action,
         canary_executor=run_canary,
@@ -14064,6 +14074,120 @@ def control_plane_self_healing_recovery(body: str, workdir: str) -> str:
     ]
     status_lines.append("telegram_notifications=0")
     return _maintenance_report(report_status, task_id, status_lines, success)
+
+
+def _runner_control_recovery_db_path() -> Path:
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        actual_root = Path(__file__).resolve().parents[1]
+        if ROOT.resolve(strict=False) != actual_root:
+            return ROOT / ".pytest-control-recovery" / "control_recovery.sqlite3"
+    return default_control_recovery_db_path()
+
+
+def codegen_runtime_recovery_wait_report(
+    *,
+    issue_number: int,
+    failure_signature: str,
+    failure_key: str,
+    recovery_occurrence_id: str,
+    consumer_occurrence_id: str,
+    dispatch: Mapping[str, Any],
+) -> str:
+    return "\n".join(
+        (
+            "WAITING_RECOVERY: Runner codegen runtime recovery was scheduled.",
+            f"issue_number={issue_number}",
+            "failure_class=CODEGEN_RUNTIME_UNHEALTHY",
+            f"failure_signature={failure_signature}",
+            f"failure_key={failure_key}",
+            f"recovery_occurrence_id={recovery_occurrence_id}",
+            f"consumer_occurrence_id={consumer_occurrence_id}",
+            f"dispatch_done={dispatch.get('done', 0)}",
+            f"dispatch_waiting_dependency={dispatch.get('waiting_dependency', 0)}",
+            f"dispatch_needs_operator={dispatch.get('needs_operator', 0)}",
+            "telegram_notifications=0",
+            "public_safe=true",
+        )
+    )
+
+
+def _control_recovery_action_executor(workdir: str, body: str) -> Callable[[str], str]:
+    executor = RegisteredMaintenanceExecutor(dispatch_runtime_maintenance_task, workdir)
+
+    def run_action(action_id: str) -> str:
+        if action_id == "issue_runner_continue":
+            return _maintenance_report(
+                "DONE",
+                CONTROL_PLANE_SELF_HEALING_RECOVERY,
+                [
+                    "action=issue_runner_continue",
+                    "reason=github_actions_lane_isolated",
+                ],
+                "met",
+            )
+        return executor.run(action_id, body)
+
+    return run_action
+
+
+def _control_recovery_canary_executor(
+    action_executor: Callable[[str], str],
+) -> Callable[[str], bool]:
+    def run_canary(canary_id: str) -> bool:
+        if canary_id not in {
+            "codegen_read_only_canary",
+            "registered_checkout_freshness_canary",
+        }:
+            return False
+        return maintenance_report_is_done(action_executor(canary_id))
+
+    return run_canary
+
+
+def handle_recoverable_codegen_runtime_failure(
+    *,
+    issue_number: int,
+    codex_output: str,
+    codex_exit_code: int,
+    workdir: str,
+    issue_body: str,
+) -> str | None:
+    failure_signature = classify_codegen_runtime_failure(codex_output, codex_exit_code)
+    if failure_signature is None:
+        return None
+
+    now = int(time.time())
+    scheduler_store = SchedulerStore(DEFAULT_SCHEDULER_DB_PATH)
+    scheduled = schedule_codegen_runtime_recovery(
+        scheduler_store,
+        issue_number=issue_number,
+        failure_signature=failure_signature,
+        now=now,
+    )
+    set_issue_label(issue_number, LABEL_RUNNING, LABEL_WAITING_DEPENDENCY)
+    action_executor = _control_recovery_action_executor(workdir, issue_body)
+    dispatcher = SharedDispatcher.for_control_recovery(
+        recovery_db_path=str(_runner_control_recovery_db_path()),
+        action_executor=action_executor,
+        canary_executor=_control_recovery_canary_executor(action_executor),
+        now=now,
+    )
+    dispatch = SchedulerEngine(
+        scheduler_store,
+        SchedulerEngineConfig(max_dispatches_per_tick=1),
+    ).dispatch_pending(dispatcher=dispatcher, now=now)
+    scheduler_store.resume_waiting_dependencies(now=now + 1)
+    consumer = scheduler_store.get_occurrence(scheduled.consumer_occurrence_id)
+    if dispatch.get("done", 0) == 0 and consumer is not None and consumer.state == "pending":
+        set_issue_label(issue_number, LABEL_WAITING_DEPENDENCY, LABEL_READY)
+    return codegen_runtime_recovery_wait_report(
+        issue_number=issue_number,
+        failure_signature=failure_signature,
+        failure_key=scheduled.failure_key,
+        recovery_occurrence_id=scheduled.recovery_occurrence_id,
+        consumer_occurrence_id=scheduled.consumer_occurrence_id,
+        dispatch=dispatch,
+    )
 
 
 def dispatch_runtime_maintenance_task(
@@ -14784,6 +14908,27 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
         cleanup_runtime_artifacts(issue_workdir)
         codex_result = classify_codex_task_result(codex_output, codex_code)
         if codex_code != 0:
+            recovery_report = handle_recoverable_codegen_runtime_failure(
+                issue_number=issue_number,
+                codex_output=codex_output,
+                codex_exit_code=codex_code,
+                workdir=coordinator_workdir,
+                issue_body=issue_body,
+            )
+            if recovery_report is not None:
+                warning = record_runner_executor_result(
+                    issue_number,
+                    runner_task.target_project if runner_task is not None else "skeleton",
+                    "WAITING_RECOVERY",
+                    "WAITING_RECOVERY",
+                    "codex",
+                    recovery_report,
+                )
+                post_issue_comment(
+                    issue_number,
+                    append_memory_warning(recovery_report, warning or pickup_memory_warning),
+                )
+                return
             block_issue(
                 issue_number,
                 f"Codex task failed:\n```\n{codex_output}\n```"

@@ -5,8 +5,10 @@ from dataclasses import dataclass
 import time
 from typing import Any
 
+from core.control_recovery import CONTROL_RECOVERY_SCHEMA, FailureClass
 from core.scheduler_models import (
     TICK_RECEIPT_SCHEMA,
+    ScheduleSpec,
     StoredSchedule,
     build_execution_proposal,
     iter_due_times,
@@ -393,3 +395,148 @@ class SchedulerEngine:
         if schedule.spec.approval_policy == "require_operator_each_occurrence":
             return "needs_operator", "OPERATOR_REQUIRED"
         return "pending", "DISPATCH_REQUIRED"
+
+
+@dataclass(frozen=True)
+class CodegenRecoverySchedulingResult:
+    recovery_occurrence_id: str
+    consumer_occurrence_id: str
+    failure_key: str
+    recovery_created: bool
+    consumer_created: bool
+
+
+def schedule_codegen_runtime_recovery(
+    store: SchedulerStore,
+    *,
+    issue_number: int,
+    failure_signature: str,
+    now: int,
+) -> CodegenRecoverySchedulingResult:
+    if isinstance(issue_number, bool) or not isinstance(issue_number, int) or issue_number <= 0:
+        raise ValueError("issue_number must be a positive integer")
+    if not isinstance(failure_signature, str) or not failure_signature:
+        raise ValueError("failure_signature must be non-empty")
+    if isinstance(now, bool) or not isinstance(now, int) or now < 0:
+        raise ValueError("now must be a non-negative integer")
+    safe_signature = "".join(
+        character if character.isalnum() or character in "._:-" else "-"
+        for character in failure_signature.lower()
+    )[:64].strip(".:-")
+    if not safe_signature:
+        raise ValueError("failure_signature must contain a safe token")
+
+    store.initialize()
+    failure_key = f"control:codegen-runtime:{safe_signature}"
+    recovery_schedule, _ = store.register(
+        _codegen_recovery_schedule(safe_signature, failure_key),
+        now=now,
+    )
+    recovery_occurrence_id = stable_occurrence_id(
+        recovery_schedule.spec.schedule_id,
+        recovery_schedule.version,
+        0,
+    )
+    recovery_proposal = build_execution_proposal(
+        recovery_schedule,
+        occurrence_id=recovery_occurrence_id,
+        scheduled_for=0,
+    )
+    _, recovery_created = store.create_occurrence(
+        occurrence_id=recovery_occurrence_id,
+        schedule=recovery_schedule,
+        scheduled_for=0,
+        state="pending",
+        reason="CODEGEN_RUNTIME_RECOVERY_REQUIRED",
+        proposal=recovery_proposal,
+        now=now,
+    )
+
+    consumer_schedule, _ = store.register(
+        _codegen_consumer_schedule(issue_number, recovery_occurrence_id),
+        now=now,
+    )
+    consumer_occurrence_id = stable_occurrence_id(
+        consumer_schedule.spec.schedule_id,
+        consumer_schedule.version,
+        0,
+    )
+    consumer_proposal = build_execution_proposal(
+        consumer_schedule,
+        occurrence_id=consumer_occurrence_id,
+        scheduled_for=0,
+    )
+    _, consumer_created = store.create_occurrence(
+        occurrence_id=consumer_occurrence_id,
+        schedule=consumer_schedule,
+        scheduled_for=0,
+        state="waiting_dependency",
+        reason="WAITING_RECOVERY",
+        proposal=consumer_proposal,
+        now=now,
+        parent_occurrence_id=recovery_occurrence_id,
+    )
+    return CodegenRecoverySchedulingResult(
+        recovery_occurrence_id=recovery_occurrence_id,
+        consumer_occurrence_id=consumer_occurrence_id,
+        failure_key=failure_key,
+        recovery_created=recovery_created,
+        consumer_created=consumer_created,
+    )
+
+
+def _codegen_recovery_schedule(signature: str, failure_key: str) -> ScheduleSpec:
+    return ScheduleSpec.from_mapping(
+        {
+            "schema": "skeleton.schedule.v1",
+            "schedule_id": f"control.codegen-runtime.{signature}",
+            "trigger_kind": "once",
+            "cron_expression": None,
+            "once_at": 0,
+            "timezone": "UTC",
+            "route_type": "workflow",
+            "route_id": "control_recovery",
+            "approval_policy": "auto_run_low_risk",
+            "overlap_policy": "queue_one",
+            "misfire_policy": "run_once",
+            "payload": {
+                "privacy_boundary": "PUBLIC_SAFE_CODE_AND_SYNTHETIC_TESTS_ONLY",
+                "bounded": True,
+                "approved_capabilities": ["control:recovery"],
+                "requested_capabilities": ["control:recovery"],
+                "recovery_packet": {
+                    "schema": CONTROL_RECOVERY_SCHEMA,
+                    "failure_class": FailureClass.CODEGEN_RUNTIME_UNHEALTHY.value,
+                    "failure_key": failure_key,
+                    "backoff_seconds": 60,
+                    "max_attempts": 3,
+                },
+            },
+        }
+    )
+
+
+def _codegen_consumer_schedule(issue_number: int, recovery_occurrence_id: str) -> ScheduleSpec:
+    return ScheduleSpec.from_mapping(
+        {
+            "schema": "skeleton.schedule.v1",
+            "schedule_id": f"runner.codegen.issue-{issue_number}",
+            "trigger_kind": "once",
+            "cron_expression": None,
+            "once_at": 0,
+            "timezone": "UTC",
+            "route_type": "runner",
+            "route_id": "codegen_task",
+            "approval_policy": "auto_run_low_risk",
+            "overlap_policy": "queue_one",
+            "misfire_policy": "run_once",
+            "payload": {
+                "privacy_boundary": "PUBLIC_SAFE_CONTROL_STATUS_ONLY",
+                "bounded": True,
+                "issue_number": issue_number,
+                "consumer": "github_issue_runner_codegen",
+                "wait_for": recovery_occurrence_id,
+                "private_payload_included": False,
+            },
+        }
+    )

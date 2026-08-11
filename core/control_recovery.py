@@ -5,8 +5,10 @@ from dataclasses import dataclass
 from enum import Enum
 import hashlib
 import json
+import os
 import re
 import sqlite3
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +16,12 @@ from typing import Any
 CONTROL_RECOVERY_SCHEMA = "skeleton.control_recovery.v1"
 CONTROL_RECOVERY_RECEIPT_SCHEMA = "skeleton.control_recovery_receipt.v1"
 ROUTE_CONTROL_RECOVERY = "control_recovery"
+RUNNER_LOCAL_STATE_ROOT = Path("/home/agent/.local/state/skeleton-runner")
+DEFAULT_CONTROL_RECOVERY_DB_PATH = (
+    RUNNER_LOCAL_STATE_ROOT / "control-recovery" / "control_recovery.sqlite3"
+)
+CODEGEN_METADATA_DECODE_SIGNATURE = "codex_model_metadata_decoder"
+_CODEGEN_METADATA_DECODE_MARKER = "failed to decode models response: unknown variant `max`"
 
 
 class FailureClass(str, Enum):
@@ -99,7 +107,7 @@ class RecoveryStore:
         self.db_path = Path(db_path)
 
     def initialize(self) -> None:
-        self.db_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        _prepare_private_state_file(self.db_path)
         with self._connect() as connection:
             connection.executescript(
                 """
@@ -115,6 +123,7 @@ class RecoveryStore:
                 ) WITHOUT ROWID;
                 """
             )
+        _private_file(self.db_path)
 
     def run_recovery(
         self,
@@ -409,9 +418,63 @@ def classify_failure(packet: Mapping[str, Any]) -> FailureClass | None:
         return FailureClass.LONG_LIVED_POLLER_STALE
     if "github actions" in text and "issue-runner healthy" in text:
         return FailureClass.GITHUB_ACTIONS_LANE_UNAVAILABLE_BUT_ISSUE_RUNNER_HEALTHY
-    if "codegen" in text or "codex" in text:
+    if _known_codegen_runtime_signature(text) is not None:
         return FailureClass.CODEGEN_RUNTIME_UNHEALTHY
     return None
+
+
+def default_control_recovery_db_path() -> Path:
+    """Fixed Runner-owned local state path, never derived from issue payload."""
+    return DEFAULT_CONTROL_RECOVERY_DB_PATH
+
+
+def classify_codegen_runtime_failure(output: str, exit_code: int) -> str | None:
+    if exit_code == 0:
+        return None
+    return _known_codegen_runtime_signature(output)
+
+
+def _known_codegen_runtime_signature(text: object) -> str | None:
+    lowered = str(text or "").lower()
+    if _CODEGEN_METADATA_DECODE_MARKER in lowered:
+        return CODEGEN_METADATA_DECODE_SIGNATURE
+    return None
+
+
+def _private_dir(path: Path) -> None:
+    if path.exists() and not path.is_dir():
+        raise RuntimeError("CONTROL_RECOVERY_STATE_DIR_INVALID")
+    if path.is_symlink():
+        raise RuntimeError("CONTROL_RECOVERY_STATE_DIR_INVALID")
+    os.chmod(path, stat.S_IRWXU)
+
+
+def _private_file(path: Path) -> None:
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError("CONTROL_RECOVERY_STATE_FILE_INVALID")
+    os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+
+
+def _prepare_private_state_file(path: Path) -> None:
+    parent = path.parent
+    _reject_unsafe_existing_state_ancestors(parent)
+    parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _private_dir(parent)
+    if path.exists() or path.is_symlink():
+        _private_file(path)
+        return
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, stat.S_IRUSR | stat.S_IWUSR)
+    os.close(fd)
+    _private_file(path)
+
+
+def _reject_unsafe_existing_state_ancestors(path: Path) -> None:
+    candidates = [path, *path.parents]
+    for candidate in candidates:
+        if candidate.is_symlink():
+            raise RuntimeError("CONTROL_RECOVERY_STATE_DIR_INVALID")
+        if candidate.exists() and not candidate.is_dir():
+            raise RuntimeError("CONTROL_RECOVERY_STATE_DIR_INVALID")
 
 
 def build_recovery_plan(packet: Mapping[str, Any]) -> RecoveryPlan | None:

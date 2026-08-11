@@ -41,7 +41,11 @@ After successful recovery, a local non-secret marker records the exact pinned ve
 
 ## Execution Model
 
-`core.control_recovery.RecoveryStore` persists one row per failure key. Duplicate ticks and restarts observe the durable row, so a recovered failure does not execute again. Failed recovery moves to `WAITING_RECOVERY` with deterministic backoff. Exhaustion records exactly one durable `NEEDS_OPERATOR` notification flag.
+`core.control_recovery.RecoveryStore` persists one row per failure key in the fixed Runner-owned local-state database:
+
+`/home/agent/.local/state/skeleton-runner/control-recovery/control_recovery.sqlite3`
+
+The recovery authority is not under repository `.codex`, issue worktrees, `/tmp`, or cleanup-owned artifact trees, and issue payloads cannot select the path. The state directory is forced to `0700`; the SQLite file is forced to `0600`. Symlink, non-directory, and non-file substitutions fail closed. Duplicate ticks and restarts observe the durable row, so a recovered failure does not execute again. Failed recovery moves to `WAITING_RECOVERY` with deterministic backoff. Exhaustion records exactly one durable `NEEDS_OPERATOR` notification flag.
 
 For `CODEGEN_RUNTIME_UNHEALTHY`, the fixed order is:
 
@@ -53,7 +57,11 @@ The recovery action itself is codegen-independent. The canary is verification, n
 
 Recoverable blocked consumers should wait on the recovery occurrence. Once recovery is `RECOVERED`, the existing Scheduler dependency resumer moves those consumers back to pending dispatch, preserving scheduled priority order.
 
-The remaining integration requirement is that ordinary Runner codegen failures classified as a known recoverable failure must enter this existing recovery route automatically rather than becoming terminal `runner:blocked`. That wiring belongs in the canonical Runner/Scheduler continuation path; it must not be implemented as a second recovery queue or external control plane.
+Ordinary Runner codegen failures enter this existing recovery route automatically only when a narrow known local Codex runtime incompatibility signature is present. The current classifier recognizes the exact Codex model metadata decode incompatibility:
+
+`failed to decode models response: unknown variant \`max\``
+
+Provider quota/outage, prompt failures, task implementation failures, and generic Codex failures are not classified as `CODEGEN_RUNTIME_UNHEALTHY`; they continue through the existing bounded fallback and retry policy. Recoverable codegen consumers get a public-safe scheduler occurrence that waits on the stable recovery occurrence, and the GitHub issue is moved to `runner:waiting-dependency` instead of terminal `runner:blocked`.
 
 ## Operator Noise
 
