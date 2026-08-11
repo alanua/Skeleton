@@ -203,8 +203,8 @@ class HomeEdgeExecRequest:
         if self.run_as is current_user:
             return command
         if self.run_as is ExecutionUser.ROOT:
-            return ["sudo", "--non-interactive", "--"] + command
-        return ["sudo", "--non-interactive", "-u", _desktop_account().pw_name, "--"] + command
+            return ["/usr/bin/sudo", "--non-interactive", "--"] + command
+        return ["/usr/bin/sudo", "--non-interactive", "-u", _desktop_account().pw_name, "--"] + command
 
     def to_mapping(self, *, include_signature: bool = True) -> dict[str, Any]:
         payload: dict[str, Any] = {

@@ -136,7 +136,7 @@ def test_root_lane_command_prefix_is_universal_not_handler() -> None:
         request(execution_lane="privileged_mutation", operator_approval_ref="approval", run_as="root", argv=["id", "-u"])
     )
 
-    assert parsed.command_argv(current_user=ExecutionUser.DESKTOP_USER)[:3] == ["sudo", "--non-interactive", "--"]
+    assert parsed.command_argv(current_user=ExecutionUser.DESKTOP_USER)[:3] == ["/usr/bin/sudo", "--non-interactive", "--"]
 
 
 def test_non_root_root_request_uses_non_interactive_sudo_and_fails_normally(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -159,7 +159,7 @@ def test_non_root_root_request_uses_non_interactive_sudo_and_fails_normally(tmp_
         )
     )
 
-    assert commands[0][:3] == ["sudo", "--non-interactive", "--"]
+    assert commands[0][:3] == ["/usr/bin/sudo", "--non-interactive", "--"]
     assert receipt.status == "failed"
     assert "sudo: command not found" in receipt.stderr
 
@@ -306,7 +306,7 @@ def test_root_process_switches_desktop_request_instead_of_running_as_root(tmp_pa
     receipt = exec_engine.execute(signed_request(nonce="root-switch", idempotency_key="root-switch"))
 
     assert receipt.status == "ok"
-    assert commands[0][:3] == ["sudo", "--non-interactive", "-u"]
+    assert commands[0][:3] == ["/usr/bin/sudo", "--non-interactive", "-u"]
 
 
 def test_mutation_lanes_require_approval_and_enforce_identity() -> None:
