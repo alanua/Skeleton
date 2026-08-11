@@ -4,13 +4,14 @@
 
 - repository: `alanua/Skeleton`
 - target: `home-edge-01`
+- operator approval: `EXPLICIT_MINIMAL_HOME_EDGE_SNAPSHOT_ACCESS_REPAIR_2026_08_09`
 - public source identity token: `home_edge_01_skeleton_cast_app_py`
 - execution lane: `read_only`
 - run user: `desktop-user`
 - timeout: `30` seconds
 - transport: signed `core.home_edge.executor_gateway` request only
 
-The operation is not a general file export facility. Issue metadata may provide only the runtime mode, exact maintenance task ID, repository, expected main SHA, and target. Path, command, script, output path, timeout, lane, user, node, and variant fields are rejected.
+The operation is not a general file export facility. Issue metadata may provide only the runtime mode, exact maintenance task ID, repository, expected main SHA, target, and exact operator approval. Path, command, script, output path, timeout, lane, user, node, and variant fields are rejected.
 
 ## Executor Authentication
 
@@ -22,7 +23,7 @@ Authentication setup failures are reported only as stable public-safe classes: `
 
 ## Validation Boundary
 
-Before any Home Edge request is constructed or signed, the Runner first checks the fixed private artifact location. If a regular, non-symlink, owner-context-safe, private-mode artifact already exists, the Runner reads it with the same 700 KiB bound, reruns UTF-8, credential, Python parse, route, and Skeleton Cast media validation locally, recomputes SHA-256 and byte count, and returns `success_criteria=met` with `stable_reason=already_captured`. That local one-shot path performs zero executor calls and reports only the aggregate `not_required_existing_capture` executor marker.
+Before any Home Edge request is constructed, signed, or authenticated, the Runner validates the issue metadata and rejects a missing or wrong `EXPLICIT_MINIMAL_HOME_EDGE_SNAPSHOT_ACCESS_REPAIR_2026_08_09` operator approval. Only after that approval check does it inspect the fixed private artifact location. If a regular, non-symlink, owner-context-safe, private-mode artifact already exists, the Runner reads it with the same 700 KiB bound, reruns UTF-8, credential, Python parse, route, and Skeleton Cast media validation locally, recomputes SHA-256 and byte count, and returns `success_criteria=met` with `stable_reason=already_captured`. That local one-shot path performs zero executor calls and reports only the aggregate `not_required_existing_capture` executor marker.
 
 If the existing artifact is missing, the first capture uses a fresh attempt-scoped executor idempotency key. If transport fails ambiguously before the private artifact is published, the operation fails closed without retrying or writing an artifact; another capture requires a deliberate v2 or newly approved operation rather than unbounded retries.
 

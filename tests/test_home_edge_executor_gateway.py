@@ -464,8 +464,19 @@ def test_installer_secret_modes_idempotency_wrapper_sudoers_and_no_service_enabl
     assert "/usr/bin/env python3 \"$server_script\" --server" in root_wrapper_text
     assert "/etc/skeleton/home_edge_executor.env" in root_wrapper_text
     assert "env -i" in root_wrapper_text
-    assert "systemctl enable" not in installer.read_text(encoding="utf-8")
-    assert "Restart=" not in installer.read_text(encoding="utf-8")
+    installer_text = installer.read_text(encoding="utf-8")
+    assert "systemctl enable" not in installer_text
+    assert "Restart=" not in installer_text
+    assert "py_compile" not in installer_text
+    assert "compile(" not in installer_text
+    assert " eval " not in installer_text
+    assert "importlib" not in installer_text
+    installed_tree = install_root / "usr/local/lib/skeleton-home-edge-executor"
+    assert oct(stat.S_IMODE(installed_tree.stat().st_mode)) == "0o755"
+    assert oct(stat.S_IMODE((installed_tree / "core/home_edge").stat().st_mode)) == "0o755"
+    assert oct(stat.S_IMODE((installed_tree / "scripts").stat().st_mode)) == "0o755"
+    assert oct(stat.S_IMODE((installed_tree / "core/home_edge/executor.py").stat().st_mode)) == "0o644"
+    assert oct(stat.S_IMODE((installed_tree / "scripts/home_edge_exec.py").stat().st_mode)) == "0o755"
     assert 'SKELETON_HOME_EDGE_EXEC_HMAC_SECRET="$' not in Path("docs/HOME_EDGE_EXECUTOR.md").read_text(encoding="utf-8")
 
     payload = {
@@ -560,6 +571,17 @@ def test_installer_secret_modes_idempotency_wrapper_sudoers_and_no_service_enabl
     assert not root_wrapper.exists()
     assert not sudoers.exists()
     assert list((install_root / "etc/skeleton").glob("home_edge_executor.env.bak.*"))
+
+
+def test_controller_installer_copies_snapshot_signer_without_compile_import_or_smoke() -> None:
+    installer_text = Path("scripts/install_home_edge_realtime_controller.sh").read_text(encoding="utf-8")
+
+    assert "home_edge_media_source_snapshot_signer.py" in installer_text
+    assert "py_compile" not in installer_text
+    assert "compile(" not in installer_text
+    assert "importlib" not in installer_text
+    assert " eval " not in installer_text
+    assert "SKELETON_HOME_EDGE_REPO_ROOT=" not in installer_text
 
 
 def test_installer_creates_missing_etc_skeleton_parent(tmp_path: Path) -> None:

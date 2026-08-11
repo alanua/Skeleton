@@ -69,10 +69,15 @@ def test_launcher_reuses_existing_private_runtime_files() -> None:
     assert "github" not in launcher.lower()
 
 
-def test_installer_runs_protocol_probe_and_live_read_only_probe() -> None:
+def test_installer_copies_reviewed_files_without_probe_smoke_execution() -> None:
     installer = (ROOT / "scripts/install_home_edge_realtime_controller.sh").read_text(encoding="utf-8")
 
     assert "systemctl" not in installer
     assert "home-edge-executor-controller.env" in installer
-    assert "--skip-call" in installer
     assert "skeleton-home-edge-exec-probe" in installer
+    assert "home_edge_media_source_snapshot_signer.py" in installer
+    assert "--skip-call" not in installer
+    assert "SKELETON_HOME_EDGE_REPO_ROOT=" not in installer
+    assert "py_compile" not in installer
+    assert "compile(" not in installer
+    assert "importlib" not in installer

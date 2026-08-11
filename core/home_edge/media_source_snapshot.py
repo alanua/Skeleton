@@ -22,6 +22,7 @@ from core.home_edge.executor_gateway import EXEC_HMAC_SECRET_ENV, execute_home_e
 TASK_ID = "home_edge_01_media_source_snapshot_v1"
 REPOSITORY = "alanua/Skeleton"
 TARGET_NODE = "home-edge-01"
+OPERATOR_APPROVAL = "EXPLICIT_MINIMAL_HOME_EDGE_SNAPSHOT_ACCESS_REPAIR_2026_08_09"
 SOURCE_IDENTITY_TOKEN = "home_edge_01_skeleton_cast_app_py"
 SOURCE_PATH = "/opt/skeleton/cast/app.py"
 RUN_AS = "desktop-user"
@@ -102,6 +103,7 @@ ALLOWED_FIELDS = frozenset(
         "Repository",
         "Expected Main SHA",
         "Target",
+        "Operator Approval",
     }
 )
 
@@ -111,6 +113,7 @@ class RuntimeInput:
     repository: str
     expected_main_sha: str
     target: str
+    operator_approval: str
 
 
 def execute_media_source_snapshot_task(
@@ -204,6 +207,7 @@ def parse_runtime_input(body: str) -> RuntimeInput:
         repository=fields.get("Repository", ""),
         expected_main_sha=fields.get("Expected Main SHA", ""),
         target=fields.get("Target", ""),
+        operator_approval=fields.get("Operator Approval", ""),
     )
     if runtime_input.repository != REPOSITORY:
         raise ValueError("repository_mismatch")
@@ -211,6 +215,8 @@ def parse_runtime_input(body: str) -> RuntimeInput:
         raise ValueError("expected_main_sha_malformed")
     if runtime_input.target != TARGET_NODE:
         raise ValueError("target_mismatch")
+    if runtime_input.operator_approval != OPERATOR_APPROVAL:
+        raise ValueError("operator_approval_mismatch")
     return runtime_input
 
 
@@ -237,6 +243,7 @@ def build_snapshot_request(*, environment: Mapping[str, str] | None = None) -> H
             "request_id": f"{TASK_ID}-{uuid4()}",
             "node_id": TARGET_NODE,
             "execution_lane": EXECUTION_LANE,
+            "operator_approval_ref": OPERATOR_APPROVAL,
             "timeout_seconds": REQUEST_TIMEOUT_SECONDS,
             "idempotency_key": f"{IDEMPOTENCY_KEY_PREFIX}-{uuid4()}",
             "run_as": RUN_AS,
