@@ -11,6 +11,7 @@ import tempfile
 
 from core.codex_runtime_recovery import (
     CodexRuntimeRecoveryError,
+    TARGET_CODEX_MODEL,
     TARGET_CODEX_VERSION,
     pinned_codex_runtime_path,
     recover_pinned_codex_runtime,
@@ -163,6 +164,8 @@ def _codegen_read_only_canary() -> str:
                 "exec",
                 "--sandbox",
                 "read-only",
+                "--model",
+                TARGET_CODEX_MODEL,
                 "--cd",
                 str(workdir),
                 "Return exactly RESULT: OK. Do not modify files.",

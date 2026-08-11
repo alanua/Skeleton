@@ -108,6 +108,12 @@ def _install_pinned_canary(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(maintenance, "pinned_codex_runtime_path", lambda _environment: "/canonical/npm/bin/codex")
 
 
+def _assert_fixed_canary_model(argv: list[str]) -> None:
+    assert "--model" in argv
+    model_index = argv.index("--model")
+    assert argv[model_index + 1] == maintenance.TARGET_CODEX_MODEL
+
+
 def test_codegen_canary_does_not_fallback_for_exact_model_metadata_decoder_failure(monkeypatch) -> None:
     calls: list[list[str]] = []
     _install_pinned_canary(monkeypatch)
@@ -120,6 +126,7 @@ def test_codegen_canary_does_not_fallback_for_exact_model_metadata_decoder_failu
         if argv[:3] == ["git", "init", "-q"]:
             return subprocess.CompletedProcess(argv, 0, "", "")
         if argv[0] == "/canonical/npm/bin/codex":
+            _assert_fixed_canary_model(argv)
             return subprocess.CompletedProcess(argv, 1, "", "failed to decode models response: unknown variant `max`")
         raise AssertionError("metadata incompatibility must not fall back")
 
@@ -142,6 +149,7 @@ def test_codegen_canary_still_falls_back_for_provider_quota(monkeypatch) -> None
         if argv[:3] == ["git", "init", "-q"]:
             return subprocess.CompletedProcess(argv, 0, "", "")
         if argv[0] == "/canonical/npm/bin/codex":
+            _assert_fixed_canary_model(argv)
             return subprocess.CompletedProcess(argv, 1, "", "usage limit reached")
         if argv[0] == "/trusted/openhands":
             return subprocess.CompletedProcess(argv, 0, "RESULT: OK\n", "")
@@ -166,6 +174,7 @@ def test_codegen_canary_does_not_fallback_for_unrelated_codex_failure(monkeypatc
         if argv[:3] == ["git", "init", "-q"]:
             return subprocess.CompletedProcess(argv, 0, "", "")
         if argv[0] == "/canonical/npm/bin/codex":
+            _assert_fixed_canary_model(argv)
             return subprocess.CompletedProcess(argv, 9, "", "unrelated synthetic codex failure")
         raise AssertionError("fallback must not run")
 

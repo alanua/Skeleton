@@ -14,6 +14,15 @@ def test_recovery_gate_requires_canonical_root_systemd_and_enable_marker(tmp_pat
     marker = tmp_path / "enabled"
     marker.write_text("enabled\n", encoding="utf-8")
     env = {"INVOCATION_ID": "unit"}
+    assert recovery.is_canonical_systemd_runner_context(
+        env, repository_root=tmp_path, canonical_root=tmp_path
+    )
+    assert not recovery.is_canonical_systemd_runner_context(
+        {}, repository_root=tmp_path, canonical_root=tmp_path
+    )
+    assert not recovery.is_canonical_systemd_runner_context(
+        env, repository_root=tmp_path / "worktree", canonical_root=tmp_path
+    )
     assert recovery.should_attempt_codex_runtime_recovery(env, repository_root=tmp_path, canonical_root=tmp_path, enable_marker=marker)
     assert not recovery.should_attempt_codex_runtime_recovery({}, repository_root=tmp_path, canonical_root=tmp_path, enable_marker=marker)
     assert not recovery.should_attempt_codex_runtime_recovery(env, repository_root=tmp_path / "worktree", canonical_root=tmp_path, enable_marker=marker)

@@ -41,6 +41,10 @@ def _enable_recovered_runtime_marker(monkeypatch) -> None:
     monkeypatch.setattr(child_env, "pinned_codex_recovery_marker_present", lambda _env: True)
 
 
+def _enable_canonical_runner_context(monkeypatch) -> None:
+    monkeypatch.setattr(child_env, "is_canonical_systemd_runner_context", lambda _env: True)
+
+
 def test_codegen_environment_binds_wrapper_to_pinned_codex(tmp_path: Path, monkeypatch) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -50,6 +54,7 @@ def test_codegen_environment_binds_wrapper_to_pinned_codex(tmp_path: Path, monke
     openhands.write_text("", encoding="utf-8")
     authority = {"HOME": str(tmp_path), "PATH": str(bin_dir)}
     monkeypatch.setattr(child_env, "should_attempt_codex_runtime_recovery", lambda _env: False)
+    _enable_canonical_runner_context(monkeypatch)
     _enable_recovered_runtime_marker(monkeypatch)
     monkeypatch.setattr(child_env, "pinned_codex_runtime_path", lambda _env: str(codex))
     monkeypatch.setattr(
@@ -69,6 +74,32 @@ def test_codegen_environment_binds_wrapper_to_pinned_codex(tmp_path: Path, monke
     assert "SKELETON_HOME_EDGE_EXEC_HMAC_SECRET" not in sanitized
 
 
+def test_validation_worktree_never_binds_live_recovery_wrapper(tmp_path: Path, monkeypatch) -> None:
+    authority = {
+        "HOME": str(tmp_path),
+        "PATH": "/trusted/bin",
+        "INVOCATION_ID": "live-systemd-marker",
+    }
+    monkeypatch.setattr(child_env, "should_attempt_codex_runtime_recovery", lambda _env: False)
+    monkeypatch.setattr(child_env, "is_canonical_systemd_runner_context", lambda _env: False)
+    monkeypatch.setattr(
+        child_env,
+        "pinned_codex_recovery_marker_present",
+        lambda _env: (_ for _ in ()).throw(AssertionError("worktree must not inspect live marker")),
+    )
+    monkeypatch.setattr(
+        child_env,
+        "pinned_codex_runtime_path",
+        lambda _env: (_ for _ in ()).throw(AssertionError("worktree must not probe live Codex")),
+    )
+    sanitized = sanitize_codegen_child_environment(
+        {"HOME": "/overlay/home", "PATH": "/overlay/bin"},
+        authority_environment=authority,
+    )
+    assert sanitized == {"HOME": "/overlay/home", "PATH": "/overlay/bin"}
+    assert not (tmp_path / ".local" / "state" / "skeleton-runner").exists()
+
+
 def test_caller_overlay_cannot_replace_recovery_home_or_path(tmp_path: Path, monkeypatch) -> None:
     trusted_home = tmp_path / "trusted-home"
     trusted_bin = tmp_path / "trusted-bin"
@@ -82,6 +113,7 @@ def test_caller_overlay_cannot_replace_recovery_home_or_path(tmp_path: Path, mon
     observed: list[dict[str, str]] = []
 
     monkeypatch.setattr(child_env, "should_attempt_codex_runtime_recovery", lambda env: observed.append(dict(env)) or False)
+    _enable_canonical_runner_context(monkeypatch)
     _enable_recovered_runtime_marker(monkeypatch)
     monkeypatch.setattr(child_env, "pinned_codex_runtime_path", lambda env: observed.append(dict(env)) or str(codex))
     monkeypatch.setattr(child_env.shutil, "which", lambda name, *, path=None: None)
@@ -106,6 +138,7 @@ def test_codegen_wrapper_still_binds_pinned_codex_without_openhands(tmp_path: Pa
     codex.write_text("", encoding="utf-8")
     authority = {"HOME": str(tmp_path), "PATH": "/trusted/bin"}
     monkeypatch.setattr(child_env, "should_attempt_codex_runtime_recovery", lambda _env: False)
+    _enable_canonical_runner_context(monkeypatch)
     _enable_recovered_runtime_marker(monkeypatch)
     monkeypatch.setattr(child_env, "pinned_codex_runtime_path", lambda _env: str(codex))
     monkeypatch.setattr(child_env.shutil, "which", lambda name, *, path=None: None)
@@ -123,6 +156,7 @@ def test_codegen_wrapper_still_binds_pinned_codex_without_openhands(tmp_path: Pa
 def test_wrapper_is_not_installed_before_recovery_marker(tmp_path: Path, monkeypatch) -> None:
     authority = {"HOME": str(tmp_path), "PATH": "/trusted/bin"}
     monkeypatch.setattr(child_env, "should_attempt_codex_runtime_recovery", lambda _env: False)
+    _enable_canonical_runner_context(monkeypatch)
     monkeypatch.setattr(child_env, "pinned_codex_recovery_marker_present", lambda _env: False)
     monkeypatch.setattr(
         child_env,
@@ -139,6 +173,7 @@ def test_wrapper_is_not_installed_before_recovery_marker(tmp_path: Path, monkeyp
 def test_wrapper_is_not_installed_when_marked_runtime_is_unverified(tmp_path: Path, monkeypatch) -> None:
     authority = {"HOME": str(tmp_path), "PATH": "/trusted/bin"}
     monkeypatch.setattr(child_env, "should_attempt_codex_runtime_recovery", lambda _env: False)
+    _enable_canonical_runner_context(monkeypatch)
     _enable_recovered_runtime_marker(monkeypatch)
     monkeypatch.setattr(
         child_env,

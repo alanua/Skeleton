@@ -11,6 +11,7 @@ import subprocess
 from core.codex_runtime_recovery import (
     CodexRuntimeRecoveryError,
     ensure_pinned_codex_runtime,
+    is_canonical_systemd_runner_context,
     pinned_codex_recovery_marker_present,
     pinned_codex_runtime_path,
     should_attempt_codex_runtime_recovery,
@@ -132,7 +133,9 @@ def _install_fallback_wrapper(
     environment: dict[str, str],
     authority_environment: Mapping[str, str],
 ) -> None:
-    """Bind child codegen to the recovered Runner runtime, never caller overlay authority."""
+    """Bind child codegen only from the canonical recovered Runner runtime."""
+    if not is_canonical_systemd_runner_context(authority_environment):
+        return
     if not pinned_codex_recovery_marker_present(authority_environment):
         return
     try:
@@ -171,7 +174,7 @@ def sanitize_codegen_child_environment(
     *,
     authority_environment: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
-    """Return a child environment while keeping runtime authority in the Runner process."""
+    """Return a child environment while keeping runtime authority in canonical Runner."""
     sanitized = _without_home_edge_credentials(environment)
     authority = _without_home_edge_credentials(
         os.environ if authority_environment is None else authority_environment
