@@ -10806,6 +10806,39 @@ def get_queue_replenisher_candidate_issues() -> list[dict[str, Any]]:
     return [*discovered.values(), *unnumbered]
 
 
+def get_run_now_queue_intake_candidate_issues() -> list[dict[str, Any]]:
+    discovered: dict[int, dict[str, Any]] = {}
+    unnumbered: list[dict[str, Any]] = []
+    for issue in _queue_replenisher_issue_list_for_label(LABEL_RUN_NOW):
+        number = _queue_replenisher_issue_number(issue)
+        if number is None:
+            unnumbered.append(issue)
+            continue
+        discovered.setdefault(number, issue)
+    return [*discovered.values(), *unnumbered]
+
+
+def select_run_now_queue_intake_targets(
+    ready_issues: list[dict[str, Any]],
+    candidate_issues: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    candidates = [
+        issue
+        for issue in candidate_issues
+        if LABEL_RUN_NOW in _issue_label_names(issue)
+        and LABEL_AGENT_TASK in _issue_label_names(issue)
+        and LABEL_READY not in _issue_label_names(issue)
+        and LABEL_WAITING_DEPENDENCY not in _issue_label_names(issue)
+    ]
+    selection = _runner_queue_replenishment_selection(
+        ready_issues,
+        candidates,
+        target_min_depth=len(ready_issues) + len(candidates),
+        target_max_depth=len(ready_issues) + len(candidates),
+    )
+    return list(selection.selected)
+
+
 def _promote_queue_replenisher_issue(issue: Mapping[str, Any]) -> None:
     number = _queue_replenisher_issue_number(issue)
     if number is None:
@@ -10895,6 +10928,18 @@ def maybe_replenish_runner_queue_after_completion() -> bool:
         return True
     except Exception:
         return False
+
+
+def self_heal_run_now_queue_intake() -> int:
+    try:
+        ready_issues = get_ready_issues()
+        candidate_issues = get_run_now_queue_intake_candidate_issues()
+        selected = select_run_now_queue_intake_targets(ready_issues, candidate_issues)
+        for issue in selected:
+            _promote_queue_replenisher_issue(issue)
+        return len(selected)
+    except Exception:
+        return 0
 
 
 def _stale_clean_skeleton_worktree_quarantine_metadata(
@@ -15103,6 +15148,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
 
 
 def poll_once(workdir: str | None = None) -> int:
+    self_heal_run_now_queue_intake()
     issues = get_ready_issues()
     for issue in issues:
         process_issue(issue, workdir=workdir)

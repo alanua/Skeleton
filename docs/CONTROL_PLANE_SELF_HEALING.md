@@ -68,6 +68,8 @@ Recoverable blocked consumers should wait on the recovery occurrence. Once recov
 
 Ordinary Runner codegen failures classified by the exact live metadata phrase enter the existing recovery route before terminal blocking. The issue is moved to `runner:waiting-dependency`, a durable recovery occurrence is recorded, and a same-issue consumer waits on it. After `codegen_runtime_recover` and the read-only Codex canary succeed, `queue_reactivate` removes `runner:waiting-dependency` from that same GitHub issue and adds `runner:ready`.
 
+During each ordinary Runner poll, the single poller also checks open `agent:task` issues marked `queue:RUN_NOW` that are missing `runner:ready`. Valid public-safe Skeleton task issues that are not running, waiting on dependencies, terminal, operator-held, duplicate, dependency-blocked, or otherwise excluded by the existing queue policy are idempotently promoted with `runner:ready` before normal ready-issue selection. This only restores eligibility for the existing Runner path; it does not add a second queue, bypass RunnerGate, or weaken route, privacy, approval, runtime, protected-file, secret, merge, or operator gates.
+
 ## Operator Noise
 
 Retry, recovery, and success remain silent. Operator notification is reserved for true durable `NEEDS_OPERATOR` after bounded recovery is unavailable or exhausted.
