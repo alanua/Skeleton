@@ -85,6 +85,9 @@ class SchedulerStore:
                     idempotency_key TEXT,
                     parent_occurrence_id TEXT,
                     parent_receipt_id TEXT,
+                    claim_owner TEXT,
+                    lease_expires_at INTEGER,
+                    heartbeat_at INTEGER,
                     UNIQUE(schedule_id, schedule_version, scheduled_for),
                     FOREIGN KEY(schedule_id, schedule_version)
                         REFERENCES schedule_versions(schedule_id, version)
@@ -115,6 +118,12 @@ class SchedulerStore:
                 """
             )
             self._ensure_occurrence_columns(connection)
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_occurrences_running_lease
+                    ON occurrences(state, lease_expires_at, started_at)
+                """
+            )
 
     def register(
         self,
@@ -292,9 +301,18 @@ class SchedulerStore:
             return self._occurrence_from_row(row), result.rowcount == 1
 
     def claim_next_pending(
-        self, *, now: int, exclude_occurrence_ids: frozenset[str] = frozenset()
+        self,
+        *,
+        now: int,
+        owner: str = "scheduler",
+        lease_seconds: int = 60 * 60,
+        exclude_occurrence_ids: frozenset[str] = frozenset(),
     ) -> OccurrenceRecord | None:
         _timestamp(now, "now")
+        _owner(owner)
+        if isinstance(lease_seconds, bool) or not isinstance(lease_seconds, int) or lease_seconds <= 0:
+            raise SchedulerValidationError("INVALID_LEASE_SECONDS", "lease_seconds must be positive")
+        lease_expires_at = now + lease_seconds
         with self._transaction() as connection:
             where = "state = 'pending'"
             params: list[object] = []
@@ -324,7 +342,10 @@ class SchedulerStore:
                        updated_at = ?,
                        started_at = ?,
                        attempt = ?,
-                       idempotency_key = ?
+                       idempotency_key = ?,
+                       claim_owner = ?,
+                       lease_expires_at = ?,
+                       heartbeat_at = ?
                  WHERE occurrence_id = ? AND state = 'pending' AND attempt = ?
                 """,
                 (
@@ -332,6 +353,9 @@ class SchedulerStore:
                     now,
                     next_attempt,
                     idempotency_key,
+                    owner,
+                    lease_expires_at,
+                    now,
                     current.occurrence_id,
                     current.attempt,
                 ),
@@ -344,6 +368,34 @@ class SchedulerStore:
             ).fetchone()
             assert claimed is not None
             return self._occurrence_from_row(claimed)
+
+    def renew_running_claim(
+        self,
+        occurrence_id: str,
+        *,
+        owner: str,
+        lease_seconds: int,
+        now: int,
+    ) -> bool:
+        _timestamp(now, "now")
+        _owner(owner)
+        if isinstance(lease_seconds, bool) or not isinstance(lease_seconds, int) or lease_seconds <= 0:
+            raise SchedulerValidationError("INVALID_LEASE_SECONDS", "lease_seconds must be positive")
+        with self._transaction() as connection:
+            result = connection.execute(
+                """
+                UPDATE occurrences
+                   SET updated_at = ?,
+                       heartbeat_at = ?,
+                       lease_expires_at = ?
+                 WHERE occurrence_id = ?
+                   AND state = 'running'
+                   AND claim_owner = ?
+                   AND (lease_expires_at IS NULL OR lease_expires_at >= ?)
+                """,
+                (now, now, now + lease_seconds, occurrence_id, owner, now),
+            )
+            return result.rowcount == 1
 
     def transition_occurrence(
         self,
@@ -373,11 +425,15 @@ class SchedulerStore:
                 f"""
                 UPDATE occurrences
                    SET state = ?, reason = ?, updated_at = ?,
-                       started_at = CASE WHEN ? IS NOT NULL THEN ? ELSE started_at END
+                       started_at = CASE WHEN ? IS NOT NULL THEN ? ELSE started_at END,
+                       claim_owner = CASE WHEN ? = 'running' THEN claim_owner ELSE NULL END,
+                       lease_expires_at = CASE WHEN ? = 'running' THEN lease_expires_at ELSE NULL END,
+                       heartbeat_at = CASE WHEN ? = 'running' THEN heartbeat_at ELSE NULL END
                  WHERE occurrence_id = ? AND state IN ({placeholders})
                 """,
                 [
-                    new_state, reason, now, started_at, started_at, occurrence_id,
+                    new_state, reason, now, started_at, started_at,
+                    new_state, new_state, new_state, occurrence_id,
                     *sorted(expected_states),
                 ],
             )
@@ -401,33 +457,89 @@ class SchedulerStore:
             raise SchedulerValidationError("INVALID_MAX_ATTEMPTS", "max_attempts must be positive")
         cutoff = max(0, now - stale_after_seconds)
         with self._transaction() as connection:
-            retry = connection.execute(
+            rows = connection.execute(
                 """
-                UPDATE occurrences
-                   SET state = 'pending',
-                       reason = 'STALE_RUNNING_RETRY',
-                       updated_at = ?
+                SELECT * FROM occurrences
                  WHERE state = 'running'
                    AND started_at IS NOT NULL
-                   AND started_at <= ?
-                   AND attempt < ?
+                   AND (
+                       (lease_expires_at IS NOT NULL AND lease_expires_at <= ?)
+                       OR (lease_expires_at IS NULL AND started_at <= ?)
+                   )
+                 ORDER BY scheduled_for, occurrence_id
                 """,
-                (now, cutoff, max_attempts),
-            )
-            escalated = connection.execute(
-                """
-                UPDATE occurrences
-                   SET state = 'needs_operator',
-                       reason = 'STALE_RUNNING_RECOVERY_EXHAUSTED',
-                       updated_at = ?
-                 WHERE state = 'running'
-                   AND started_at IS NOT NULL
-                   AND started_at <= ?
-                   AND attempt >= ?
-                """,
-                (now, cutoff, max_attempts),
-            )
-            return {"retried": retry.rowcount, "needs_operator": escalated.rowcount}
+                (now, cutoff),
+            ).fetchall()
+            retried = 0
+            needs_operator = 0
+            finalized = 0
+            for row in rows:
+                record = self._occurrence_from_row(row)
+                receipt = self._latest_receipt_for_attempt(
+                    connection, record.occurrence_id, record.attempt
+                )
+                if receipt is not None:
+                    status = str(receipt["status"])
+                    result = json.loads(str(receipt["result_json"]))
+                    if status == "done":
+                        update = connection.execute(
+                            """
+                            UPDATE occurrences
+                               SET state = 'done',
+                                   reason = 'DISPATCH_DONE_AFTER_RESTART',
+                                   updated_at = ?,
+                                   lease_expires_at = NULL
+                             WHERE occurrence_id = ? AND state = 'running'
+                            """,
+                            (now, record.occurrence_id),
+                        )
+                        finalized += update.rowcount
+                        continue
+                    if _receipt_is_ambiguous_mutating(result):
+                        update = connection.execute(
+                            """
+                            UPDATE occurrences
+                               SET state = 'needs_operator',
+                                   reason = 'AMBIGUOUS_MUTATING_RECEIPT',
+                                   updated_at = ?,
+                                   lease_expires_at = NULL
+                             WHERE occurrence_id = ? AND state = 'running'
+                            """,
+                            (now, record.occurrence_id),
+                        )
+                        needs_operator += update.rowcount
+                        continue
+                if record.attempt < max_attempts:
+                    update = connection.execute(
+                        """
+                        UPDATE occurrences
+                           SET state = 'pending',
+                               reason = 'STALE_RUNNING_RETRY',
+                               updated_at = ?,
+                               claim_owner = NULL,
+                               lease_expires_at = NULL
+                         WHERE occurrence_id = ? AND state = 'running'
+                        """,
+                        (now, record.occurrence_id),
+                    )
+                    retried += update.rowcount
+                else:
+                    update = connection.execute(
+                        """
+                        UPDATE occurrences
+                           SET state = 'needs_operator',
+                               reason = 'STALE_RUNNING_RECOVERY_EXHAUSTED',
+                               updated_at = ?,
+                               lease_expires_at = NULL
+                         WHERE occurrence_id = ? AND state = 'running'
+                        """,
+                        (now, record.occurrence_id),
+                    )
+                    needs_operator += update.rowcount
+            result = {"retried": retried, "needs_operator": needs_operator}
+            if finalized:
+                result["finalized"] = finalized
+            return result
 
     def resume_waiting_dependencies(self, *, now: int) -> int:
         _timestamp(now, "now")
@@ -531,6 +643,20 @@ class SchedulerStore:
                 }
                 for row in rows
             )
+
+    @staticmethod
+    def _latest_receipt_for_attempt(
+        connection: sqlite3.Connection, occurrence_id: str, attempt: int
+    ) -> sqlite3.Row | None:
+        return connection.execute(
+            """
+            SELECT * FROM dispatch_receipts
+             WHERE occurrence_id = ? AND attempt = ?
+             ORDER BY created_at DESC, receipt_id DESC
+             LIMIT 1
+            """,
+            (occurrence_id, attempt),
+        ).fetchone()
 
     def active_counts(self, schedule_id: str) -> dict[str, int]:
         with self._connect() as connection:
@@ -672,6 +798,9 @@ class SchedulerStore:
             "idempotency_key": "ALTER TABLE occurrences ADD COLUMN idempotency_key TEXT",
             "parent_occurrence_id": "ALTER TABLE occurrences ADD COLUMN parent_occurrence_id TEXT",
             "parent_receipt_id": "ALTER TABLE occurrences ADD COLUMN parent_receipt_id TEXT",
+            "claim_owner": "ALTER TABLE occurrences ADD COLUMN claim_owner TEXT",
+            "lease_expires_at": "ALTER TABLE occurrences ADD COLUMN lease_expires_at INTEGER",
+            "heartbeat_at": "ALTER TABLE occurrences ADD COLUMN heartbeat_at INTEGER",
         }
         for column, statement in migrations.items():
             if column not in columns:
@@ -718,6 +847,33 @@ def _reason(value: object) -> str:
     if not isinstance(value, str) or not value or len(value) > 128:
         raise SchedulerValidationError("INVALID_REASON", "reason is invalid")
     return value
+
+
+def _owner(value: object) -> str:
+    if not isinstance(value, str) or not value or len(value) > 128:
+        raise SchedulerValidationError("INVALID_CLAIM_OWNER", "claim owner is invalid")
+    return value
+
+
+def _receipt_is_ambiguous_mutating(value: object) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    status = str(value.get("status") or "").upper()
+    reason = str(value.get("reason") or "").upper()
+    decision = str(value.get("decision") or "").upper()
+    if (
+        value.get("external_side_effects_executed") is True
+        and (
+            status in {"UNKNOWN", "AMBIGUOUS"}
+            or decision in {"UNKNOWN", "AMBIGUOUS"}
+            or "AMBIGUOUS" in reason
+        )
+    ):
+        return True
+    route_receipt = value.get("route_receipt")
+    if isinstance(route_receipt, Mapping):
+        return _receipt_is_ambiguous_mutating(route_receipt)
+    return False
 
 
 def _sha256_hex(value: str) -> str:
