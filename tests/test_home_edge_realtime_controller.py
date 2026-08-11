@@ -74,5 +74,31 @@ def test_installer_runs_protocol_probe_and_live_read_only_probe() -> None:
 
     assert "systemctl" not in installer
     assert "home-edge-executor-controller.env" in installer
+    assert "IMMUTABLE_BOOTSTRAP=\"/usr/local/lib/skeleton-home-edge-controller/bootstrap/install_home_edge_realtime_controller.sh\"" in installer
+    assert "checkout controller installer cannot execute as root" in installer
+    assert "500:root:root" in installer
+    assert "sha256sum" in installer
+    assert "EXPECTED_SOURCE_SHA256" in installer
+    assert "reviewed controller source hash mismatch" in installer
+    assert "skeleton-home-edge-media-source-snapshot-signer" in installer
+    assert "RUNNER_SERVICE_USER=\"agent\"" in installer
+    assert "chmod 0750" in installer
     assert "--skip-call" in installer
     assert "skeleton-home-edge-exec-probe" in installer
+
+
+def test_immutable_bootstrap_model_rejects_checkout_mutation_after_copy() -> None:
+    installer = (ROOT / "scripts/install_home_edge_realtime_controller.sh").read_text(encoding="utf-8")
+
+    assert 'rel="${source#"$REPO_ROOT"/}"' in installer
+    assert '"core/home_edge/media_source_snapshot.py"' in installer
+    assert '"scripts/home_edge_media_source_snapshot_signer.py"' in installer
+    assert 'EXPECTED_SOURCE_SHA256[$rel]' in installer
+    assert "inert controller file copy hash mismatch" in installer
+
+
+def test_executor_node_installer_does_not_install_controller_snapshot_signer() -> None:
+    installer = (ROOT / "scripts/install_home_edge_executor.sh").read_text(encoding="utf-8")
+
+    assert "media-source-snapshot-signer" not in installer
+    assert "home_edge_media_source_snapshot_signer.py" not in installer

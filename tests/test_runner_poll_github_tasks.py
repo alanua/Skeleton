@@ -144,6 +144,7 @@ def _media_source_snapshot_issue_body(expected_sha: str = HEAD_SHA) -> str:
             f"Repository: {runner.REPO}",
             f"Expected Main SHA: {expected_sha}",
             "Target: home-edge-01",
+            f"Operator Approval: {media_source_snapshot.OPERATOR_APPROVAL}",
         )
     )
 
