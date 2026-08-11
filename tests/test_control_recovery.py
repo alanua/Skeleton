@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import stat
 
 from core.control_recovery import (
     CONTROL_RECOVERY_SCHEMA,
@@ -8,6 +9,8 @@ from core.control_recovery import (
     RecoveryStatus,
     RecoveryStore,
     build_recovery_plan,
+    classify_codegen_runtime_failure,
+    default_control_recovery_db_path,
     execute_recovery_packet,
 )
 
@@ -158,3 +161,63 @@ def test_plans_never_require_codegen() -> None:
         plan = build_recovery_plan({"schema": CONTROL_RECOVERY_SCHEMA, "failure_class": failure_class.value, "failure_key": f"control:{failure_class.value}"})
         assert plan is not None
         assert plan.requires_codegen is False
+
+
+def test_default_recovery_db_is_fixed_runner_local_state_not_repo_codex() -> None:
+    path = default_control_recovery_db_path()
+
+    assert path == Path("/home/agent/.local/state/skeleton-runner/control-recovery/control_recovery.sqlite3")
+    assert ".codex" not in path.parts
+    assert "worktrees" not in path.parts
+    assert "/tmp" not in str(path)
+
+
+def test_recovery_store_survives_modeled_repo_codex_cleanup_and_preserves_attempt(tmp_path: Path) -> None:
+    repo_codex = tmp_path / "repo" / ".codex"
+    repo_codex.mkdir(parents=True)
+    store_path = tmp_path / "runner-state" / "control_recovery.sqlite3"
+    packet = _packet(failure_key="control:durable", backoff_seconds=5)
+
+    first = execute_recovery_packet(
+        packet,
+        store=RecoveryStore(store_path),
+        now=100,
+        action_executor=lambda _action: "BLOCKED: no\nsuccess_criteria=not_met",
+    )
+    for child in repo_codex.iterdir():
+        child.unlink()
+    repo_codex.rmdir()
+    second = execute_recovery_packet(
+        packet,
+        store=RecoveryStore(store_path),
+        now=105,
+        action_executor=lambda _action: "BLOCKED: no\nsuccess_criteria=not_met",
+    )
+
+    assert first["attempt"] == 1
+    assert first["next_retry_at"] == 105
+    assert second["attempt"] == 2
+    assert second["status"] == RecoveryStatus.WAITING_RECOVERY.value
+
+
+def test_recovery_store_private_modes(tmp_path: Path) -> None:
+    path = tmp_path / "private" / "recovery.sqlite3"
+    store = RecoveryStore(path)
+
+    store.initialize()
+
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_codegen_runtime_classifier_is_narrow() -> None:
+    assert (
+        classify_codegen_runtime_failure(
+            "failed to decode models response: unknown variant `max`",
+            1,
+        )
+        == "codex_model_metadata_decoder"
+    )
+    assert classify_codegen_runtime_failure("quota exceeded", 1) is None
+    assert classify_codegen_runtime_failure("ordinary codex task failed", 1) is None
+    assert classify_codegen_runtime_failure("failed to decode models response: unknown variant `max`", 0) is None

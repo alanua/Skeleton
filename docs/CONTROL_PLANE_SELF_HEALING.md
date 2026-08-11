@@ -32,13 +32,25 @@ Issue payloads cannot supply commands, package names, versions, paths, services,
 
 ## Execution Model
 
-`core.control_recovery.RecoveryStore` persists one row per failure key. Duplicate ticks and restarts observe the durable row, so a recovered failure does not execute again. Failed recovery moves to `WAITING_RECOVERY` with deterministic backoff. Exhaustion records exactly one durable `NEEDS_OPERATOR` notification flag.
+`core.control_recovery.RecoveryStore` persists one row per failure key in the fixed Runner-owned local-state database:
+
+`/home/agent/.local/state/skeleton-runner/control-recovery/control_recovery.sqlite3`
+
+The recovery authority is not under repository `.codex`, issue worktrees, `/tmp`, or cleanup-owned artifact trees, and issue payloads cannot select the path. The state directory is forced to `0700`; the SQLite file is forced to `0600`. Duplicate ticks and restarts observe the durable row, so a recovered failure does not execute again. Failed recovery moves to `WAITING_RECOVERY` with deterministic backoff. Exhaustion records exactly one durable `NEEDS_OPERATOR` notification flag.
 
 Codex/codegen recovery never invokes Codex. It uses fixed maintenance actions and a read-only canary, then reactivates the queue.
 
+Ordinary Runner codegen failures are bridged into recovery only for fixed known local Codex/runtime incompatibility signatures. The current codegen infrastructure classifier recognizes the exact Codex model metadata decode incompatibility:
+
+`failed to decode models response: unknown variant \`max\``
+
+Provider quota/outage, prompt failures, task implementation failures, and generic Codex failures are not classified as `CODEGEN_RUNTIME_UNHEALTHY`; they continue through the existing bounded fallback and retry policy.
+
 ## Queue Resume
 
-Recoverable blocked consumers should wait on the recovery occurrence. Once recovery is `RECOVERED`, the existing scheduler dependency resumer moves those consumers back to pending dispatch, preserving scheduled priority order.
+Recoverable codegen consumers get one public-safe scheduler occurrence that waits on the stable recovery occurrence. The GitHub issue is moved to the existing `runner:waiting-dependency` label instead of terminal `runner:blocked`. Once recovery is `RECOVERED`, the existing scheduler dependency resumer moves the consumer back to pending dispatch, and the existing queue reactivation action promotes eligible waiting work back to `runner:ready` without a chat `+`.
+
+Protected Runner changes still require a fresh exact-head review before merge; recovery only gets the task back into the normal queue.
 
 ## Operator Noise
 
