@@ -15,6 +15,15 @@ def test_app_display_name_is_home() -> None:
     assert 'android:label="@string/app_name"' in read("app/src/main/AndroidManifest.xml")
 
 
+def test_debug_preview_has_distinct_install_identity() -> None:
+    gradle = read("app/build.gradle.kts")
+    debug_strings = read("app/src/debug/res/values/strings.xml")
+    assert 'applicationId = "com.skeleton.home"' in gradle
+    assert 'applicationIdSuffix = ".preview"' in gradle
+    assert 'versionNameSuffix = "-preview"' in gradle
+    assert '<string name="app_name">Skeleton Home Preview</string>' in debug_strings
+
+
 def test_native_compose_shell_without_webview() -> None:
     source = "\n".join(path.read_text(encoding="utf-8") for path in ANDROID_HOME.rglob("*.kt"))
     gradle = read("app/build.gradle.kts")
