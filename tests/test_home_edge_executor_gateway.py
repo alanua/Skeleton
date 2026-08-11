@@ -437,7 +437,8 @@ def test_installer_secret_modes_idempotency_wrapper_sudoers_and_no_service_enabl
     assert wrapper.exists()
     assert root_wrapper.exists()
     sudoers_text = sudoers.read_text(encoding="utf-8")
-    assert sudoers_text.strip().endswith("ALL=(root) NOPASSWD: /usr/local/sbin/home_edge_exec_root --server")
+    assert f"{desktop} ALL=(root) NOPASSWD: /usr/local/sbin/home_edge_exec_root --server" in sudoers_text
+    assert f"{desktop} ALL=(root) NOPASSWD: /usr/local/sbin/home_edge_media_source_snapshot_signer" in sudoers_text
     assert "ALL=(ALL)" not in sudoers_text
     assert "ALL : ALL" not in sudoers_text
     assert "SETENV" not in sudoers_text
@@ -460,9 +461,10 @@ def test_installer_secret_modes_idempotency_wrapper_sudoers_and_no_service_enabl
     assert "/usr/local/sbin/home_edge_exec_root" in wrapper_text
     assert "/etc/skeleton/home_edge_executor.env" not in wrapper_text
     root_wrapper_text = root_wrapper.read_text(encoding="utf-8")
-    assert "server_script=\"$python_root/scripts/home_edge_exec.py\"" in root_wrapper_text
-    assert "/usr/bin/env python3 \"$server_script\" --server" in root_wrapper_text
-    assert "/etc/skeleton/home_edge_executor.env" in root_wrapper_text
+    assert "home_edge_exec_root_payload.py" in root_wrapper_text
+    assert "/usr/bin/python3" in root_wrapper_text
+    assert ". \"$env_file\"" not in root_wrapper_text
+    assert "PYTHONPATH" not in root_wrapper_text
     assert "env -i" in root_wrapper_text
     assert "systemctl enable" not in installer.read_text(encoding="utf-8")
     assert "Restart=" not in installer.read_text(encoding="utf-8")

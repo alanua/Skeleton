@@ -77,6 +77,8 @@ env_file="${env_dir}/home_edge_executor.env"
 sudoers_file="${sudoers_dir}/skeleton-home-edge-executor"
 wrapper="${bin_dir}/home_edge_exec"
 root_wrapper="${sbin_dir}/home_edge_exec_root"
+snapshot_signer="${bin_dir}/home_edge_media_source_snapshot_sign"
+snapshot_root_signer="${sbin_dir}/home_edge_media_source_snapshot_signer"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 
@@ -114,6 +116,42 @@ runtime_path() {
   else
     printf '%s' "$path"
   fi
+}
+
+validate_static_source() {
+  local source="$1"
+  local max_bytes="$2"
+  if [[ -L "$source" || ! -f "$source" ]]; then
+    echo "unsafe install source: $source" >&2
+    exit 2
+  fi
+  local bytes mode
+  bytes="$(wc -c < "$source")"
+  if [[ "$bytes" -le 0 || "$bytes" -gt "$max_bytes" ]]; then
+    echo "bounded install source rejected: $source" >&2
+    exit 2
+  fi
+  mode="$(stat -c '%a' "$source")"
+  if (( (8#$mode & 8#022) != 0 )); then
+    echo "writable install source rejected: $source" >&2
+    exit 2
+  fi
+}
+
+atomic_install_file() {
+  local source="$1"
+  local target="$2"
+  local mode="$3"
+  local max_bytes="$4"
+  validate_static_source "$source" "$max_bytes"
+  mkdir -p "$(dirname "$target")"
+  chown_root_if_possible "$(dirname "$target")"
+  local tmp
+  tmp="$(mktemp "$(dirname "$target")/.install.XXXXXX")"
+  cp -- "$source" "$tmp"
+  chmod "$mode" "$tmp"
+  chown_root_if_possible "$tmp"
+  mv -f "$tmp" "$target"
 }
 
 read_existing_secret() {
@@ -170,7 +208,9 @@ install_wrapper() {
   chown_root_if_possible "$bin_dir" "$sbin_dir"
   backup_path "$wrapper"
   backup_path "$root_wrapper"
-  rm -f "$wrapper" "$root_wrapper"
+  backup_path "$snapshot_signer"
+  backup_path "$snapshot_root_signer"
+  rm -f "$wrapper" "$root_wrapper" "$snapshot_signer" "$snapshot_root_signer"
   cat > "$wrapper" <<WRAPPER
 #!/usr/bin/env bash
 set -euo pipefail
@@ -187,52 +227,49 @@ if [[ "\${1:-}" != "--server" || "\$#" -ne 1 ]]; then
   echo "home_edge_exec_root supports only --server" >&2
   exit 2
 fi
-env_file="$(runtime_path "/etc/skeleton/home_edge_executor.env")"
-python_root="$(runtime_path "/usr/local/lib/skeleton-home-edge-executor")"
-server_script="\$python_root/scripts/home_edge_exec.py"
-if [[ ! -r "\$env_file" ]]; then
-  echo "home_edge_exec private environment is missing" >&2
-  exit 2
-fi
-if [[ ! -r "\$server_script" ]]; then
-  echo "home_edge_exec server is missing" >&2
-  exit 2
-fi
-set -a
-# shellcheck disable=SC1090
-. "\$env_file"
-set +a
 exec env -i \\
   PATH="/usr/sbin:/usr/bin:/sbin:/bin" \\
-  LANG="\${LANG:-C.UTF-8}" \\
-  LC_ALL="\${LC_ALL:-}" \\
-  SKELETON_HOME_EDGE_EXEC_HMAC_SECRET="\${SKELETON_HOME_EDGE_EXEC_HMAC_SECRET:?}" \\
-  SKELETON_HOME_EDGE_DESKTOP_USER="\${SKELETON_HOME_EDGE_DESKTOP_USER:?}" \\
-  SKELETON_HOME_EDGE_EXEC_AUDIT_LOG="\${SKELETON_HOME_EDGE_EXEC_AUDIT_LOG:?}" \\
-  SKELETON_HOME_EDGE_EXEC_IDEMPOTENCY_CACHE="\${SKELETON_HOME_EDGE_EXEC_IDEMPOTENCY_CACHE:?}" \\
-  SKELETON_HOME_EDGE_EXEC_CANCEL_DIR="\${SKELETON_HOME_EDGE_EXEC_CANCEL_DIR:?}" \\
-  PYTHONPATH="\$python_root" \\
-  /usr/bin/env python3 "\$server_script" --server
+  LANG="C.UTF-8" \\
+  PYTHONSAFEPATH="1" \\
+  SKELETON_HOME_EDGE_EXEC_ENV_FILE="$(runtime_path "/etc/skeleton/home_edge_executor.env")" \\
+  SKELETON_HOME_EDGE_EXEC_SERVER_SCRIPT="$(runtime_path "/usr/local/lib/skeleton-home-edge-executor/scripts/home_edge_exec.py")" \\
+  /usr/bin/python3 "$(runtime_path "/usr/local/lib/skeleton-home-edge-executor/scripts/home_edge_exec_root_payload.py")" --server
 ROOT_WRAPPER
+  cat > "$snapshot_signer" <<SNAPSHOT_SIGNER
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\$#" -ne 0 ]]; then
+  echo "home_edge_media_source_snapshot_sign supports no argv" >&2
+  exit 2
+fi
+exec sudo -n -- "$(runtime_path "/usr/local/sbin/home_edge_media_source_snapshot_signer")"
+SNAPSHOT_SIGNER
   chmod 0755 "$wrapper"
   chmod 0555 "$root_wrapper"
-  chown_root_if_possible "$wrapper" "$root_wrapper"
+  chmod 0755 "$snapshot_signer"
+  atomic_install_file "$repo_root/scripts/home_edge_media_source_snapshot_signer_wrapper.sh" "$snapshot_root_signer" 0555 16384
+  if [[ -n "$ROOT" ]]; then
+    sed -i "s#/usr/local/lib/skeleton-home-edge-executor/scripts/home_edge_media_source_snapshot_signer.py#$(runtime_path "/usr/local/lib/skeleton-home-edge-executor/scripts/home_edge_media_source_snapshot_signer.py")#g" "$snapshot_root_signer"
+  fi
+  chown_root_if_possible "$wrapper" "$root_wrapper" "$snapshot_signer" "$snapshot_root_signer"
 }
 
 install_python_files() {
   mkdir -p "$lib_dir/core/home_edge" "$lib_dir/scripts"
+  umask 022
   printf '%s\n' '"""Minimal installed package for the Home Edge one-shot executor."""' > "$lib_dir/core/__init__.py"
   chmod 0644 "$lib_dir/core/__init__.py"
-  install -m 0644 "$repo_root/core/home_edge/executor.py" "$lib_dir/core/home_edge/executor.py"
-  install -m 0644 "$repo_root/core/home_edge/executor_gateway.py" "$lib_dir/core/home_edge/executor_gateway.py"
-  install -m 0644 "$repo_root/core/home_edge/profile.py" "$lib_dir/core/home_edge/profile.py"
-  install -m 0755 "$repo_root/scripts/home_edge_exec.py" "$lib_dir/scripts/home_edge_exec.py"
-  install -m 0755 "$repo_root/scripts/home_edge_executor_server.py" "$lib_dir/scripts/home_edge_executor_server.py"
-  python3 -m py_compile \
-    "$lib_dir/core/home_edge/executor.py" \
-    "$lib_dir/core/home_edge/executor_gateway.py" \
-    "$lib_dir/scripts/home_edge_exec.py" \
-    "$lib_dir/scripts/home_edge_executor_server.py"
+  chown_root_if_possible "$lib_dir/core/__init__.py"
+  atomic_install_file "$repo_root/core/home_edge/executor.py" "$lib_dir/core/home_edge/executor.py" 0644 262144
+  atomic_install_file "$repo_root/core/home_edge/executor_gateway.py" "$lib_dir/core/home_edge/executor_gateway.py" 0644 262144
+  atomic_install_file "$repo_root/core/home_edge/profile.py" "$lib_dir/core/home_edge/profile.py" 0644 65536
+  atomic_install_file "$repo_root/scripts/home_edge_exec.py" "$lib_dir/scripts/home_edge_exec.py" 0755 131072
+  atomic_install_file "$repo_root/scripts/home_edge_executor_server.py" "$lib_dir/scripts/home_edge_executor_server.py" 0755 65536
+  atomic_install_file "$repo_root/scripts/home_edge_exec_root_payload.py" "$lib_dir/scripts/home_edge_exec_root_payload.py" 0755 65536
+  atomic_install_file "$repo_root/scripts/home_edge_media_source_snapshot_signer.py" "$lib_dir/scripts/home_edge_media_source_snapshot_signer.py" 0755 131072
+  atomic_install_file "$repo_root/scripts/home_edge_media_source_snapshot_payload.py" "$lib_dir/scripts/home_edge_media_source_snapshot_payload.py" 0644 262144
+  chmod -R go-w "$lib_dir"
+  chown_root_if_possible "$lib_dir" "$lib_dir/core" "$lib_dir/core/home_edge" "$lib_dir/scripts"
 }
 
 install_sudoers_rule() {
@@ -245,6 +282,7 @@ install_sudoers_rule() {
   {
     printf '# Managed by skeleton Home Edge executor installer.\n'
     printf '%s ALL=(root) NOPASSWD: /usr/local/sbin/home_edge_exec_root --server\n' "$SSH_TARGET_USER"
+    printf '%s ALL=(root) NOPASSWD: /usr/local/sbin/home_edge_media_source_snapshot_signer\n' "$SSH_TARGET_USER"
   } > "$sudoers_file"
   chmod 0440 "$sudoers_file"
   chown_root_if_possible "$sudoers_file"
@@ -279,6 +317,8 @@ uninstall_executor() {
   backup_path "$env_file"
   rm -f "$wrapper"
   rm -f "$root_wrapper"
+  rm -f "$snapshot_signer"
+  rm -f "$snapshot_root_signer"
   rm -f "$sudoers_file"
   rm -rf "$lib_dir"
   if [[ -f "$env_file" ]]; then

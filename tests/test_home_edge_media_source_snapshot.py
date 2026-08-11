@@ -4,6 +4,8 @@ import base64
 import json
 import os
 import stat
+import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping
@@ -81,6 +83,58 @@ def executor_receipt(stdout: str) -> HomeEdgeExecReceipt:
         duration_seconds=0.01,
         idempotency="executed",
         receipt_hash="f" * 64,
+    )
+
+
+def install_fake_snapshot_signer(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_signer(*, environment: Mapping[str, str] | None = None) -> HomeEdgeExecRequest:
+        return snapshot.build_snapshot_request(environment={snapshot.EXEC_HMAC_SECRET_ENV: SECRET})
+
+    monkeypatch.setattr(snapshot, "sign_snapshot_request_with_installed_signer", fake_signer)
+
+
+def signer_input(**updates: str) -> dict[str, str]:
+    request = snapshot.build_unsigned_snapshot_request()
+    payload = {
+        "operator_approval_ref": snapshot.OPERATOR_APPROVAL_REF,
+        "request_id": request.request_id,
+        "idempotency_key": request.idempotency_key or "",
+        "timestamp": request.timestamp or "",
+        "nonce": request.nonce or "",
+    }
+    payload.update(updates)
+    return payload
+
+
+def run_static_signer(
+    tmp_path: Path,
+    payload_file: Path,
+    request_payload: Mapping[str, object],
+    *,
+    secret: str = SECRET,
+    argv: list[str] | None = None,
+    stdin_text: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    config_dir = tmp_path / "etc/skeleton"
+    config_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    config_path = config_dir / "home-edge-executor-controller.env"
+    config_path.write_text(f"{snapshot.EXEC_HMAC_SECRET_ENV}='{secret}'\n", encoding="utf-8")
+    config_path.chmod(0o600)
+    env = {
+        "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+        "LANG": "C.UTF-8",
+        "SKELETON_HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PAYLOAD": str(payload_file),
+        "SKELETON_HOME_EDGE_EXEC_HMAC_CONFIG_DIR": str(config_dir),
+        "SKELETON_HOME_EDGE_EXEC_HMAC_CONFIG_PATH": str(config_path),
+    }
+    return subprocess.run(
+        [sys.executable, "scripts/home_edge_media_source_snapshot_signer.py", *(argv or [])],
+        input=stdin_text if stdin_text is not None else json.dumps(request_payload),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        check=False,
     )
 
 
@@ -276,6 +330,127 @@ def test_exact_fixed_task_path_node_lane_run_as_contract(monkeypatch: pytest.Mon
     assert first.nonce != second.nonce
     assert first.signature == sign_request(first, SECRET)
     assert second.signature == sign_request(second, SECRET)
+
+
+def test_static_snapshot_signer_signs_only_exact_approved_unsigned_request(tmp_path: Path) -> None:
+    payload_file = tmp_path / "installed_payload.py"
+    payload_file.write_text(snapshot.SNAPSHOT_SCRIPT, encoding="utf-8")
+    payload_file.chmod(0o644)
+
+    result = run_static_signer(tmp_path, payload_file, signer_input())
+
+    assert result.returncode == 0, result.stderr
+    request = HomeEdgeExecRequest.from_mapping(json.loads(result.stdout))
+    assert request.signature == sign_request(request, SECRET)
+    assert request.operator_approval_ref == snapshot.OPERATOR_APPROVAL_REF
+    assert request.node_id == snapshot.TARGET_NODE
+    assert request.execution_lane.value == snapshot.EXECUTION_LANE
+    assert request.run_as.value == snapshot.RUN_AS
+    assert request.script == snapshot.SNAPSHOT_SCRIPT
+    snapshot._validate_snapshot_request_authority(request)
+
+
+def test_static_snapshot_signer_rejects_wrong_approval_before_credential_read(tmp_path: Path) -> None:
+    payload_file = tmp_path / "installed_payload.py"
+    payload_file.write_text(snapshot.SNAPSHOT_SCRIPT, encoding="utf-8")
+    payload_file.chmod(0o644)
+    missing_config_dir = tmp_path / "missing-etc"
+    env = {
+        "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+        "LANG": "C.UTF-8",
+        "SKELETON_HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PAYLOAD": str(payload_file),
+        "SKELETON_HOME_EDGE_EXEC_HMAC_CONFIG_DIR": str(missing_config_dir),
+        "SKELETON_HOME_EDGE_EXEC_HMAC_CONFIG_PATH": str(missing_config_dir / "missing.env"),
+    }
+
+    result = subprocess.run(
+        [sys.executable, "scripts/home_edge_media_source_snapshot_signer.py"],
+        input=json.dumps(signer_input(operator_approval_ref="wrong")),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "operator_approval_mismatch" in result.stderr
+    assert "executor_auth_config" not in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("argv", "stdin_text", "reason"),
+    [
+        (["extra"], None, "argv_rejected"),
+        (None, "x" * (snapshot.MAX_SIGNER_STDIN_BYTES + 1), "stdin_oversize"),
+        (None, json.dumps({**signer_input(), "extra": "field"}), "stdin_shape_mismatch"),
+    ],
+)
+def test_static_snapshot_signer_rejects_argv_oversize_and_extra_stdin_before_sign(
+    tmp_path: Path,
+    argv: list[str] | None,
+    stdin_text: str | None,
+    reason: str,
+) -> None:
+    payload_file = tmp_path / "installed_payload.py"
+    payload_file.write_text(snapshot.SNAPSHOT_SCRIPT, encoding="utf-8")
+    payload_file.chmod(0o644)
+
+    result = run_static_signer(
+        tmp_path,
+        payload_file,
+        signer_input(),
+        argv=argv,
+        stdin_text=stdin_text,
+    )
+
+    assert result.returncode == 2
+    assert reason in result.stderr
+
+
+def test_static_snapshot_signer_uses_installed_payload_when_checkout_mutates(tmp_path: Path) -> None:
+    installed_payload = tmp_path / "installed_payload.py"
+    installed_payload.write_text(snapshot.SNAPSHOT_SCRIPT, encoding="utf-8")
+    installed_payload.chmod(0o644)
+    checkout_payload = tmp_path / "checkout_payload.py"
+    checkout_payload.write_text("print('mutated checkout')\n", encoding="utf-8")
+    checkout_payload.chmod(0o644)
+
+    result = run_static_signer(tmp_path, installed_payload, signer_input())
+
+    assert result.returncode == 0, result.stderr
+    request = HomeEdgeExecRequest.from_mapping(json.loads(result.stdout))
+    assert "mutated checkout" not in (request.script or "")
+    assert request.script == installed_payload.read_text(encoding="utf-8")
+
+
+def test_altered_signed_snapshot_approval_blocks_before_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    signed = snapshot.build_snapshot_request(environment={snapshot.EXEC_HMAC_SECRET_ENV: SECRET})
+    altered = HomeEdgeExecRequest.from_mapping(
+        {**signed.to_mapping(), "operator_approval_ref": "wrong-approval"}
+    )
+    monkeypatch.setattr(
+        snapshot,
+        "sign_snapshot_request_with_installed_signer",
+        lambda *, environment=None: altered,
+    )
+    monkeypatch.setattr(
+        snapshot,
+        "execute_home_edge_request",
+        lambda _request: pytest.fail("transport must not be called"),
+    )
+
+    receipt = snapshot.execute_media_source_snapshot_task(
+        issue_body(),
+        registered_clean_main_sha=SHA,
+        github_main_sha=SHA,
+        private_root=tmp_path,
+    )
+
+    assert receipt["stable_reason"] == "snapshot_request_approval_mismatch"
 
 
 def test_environment_secret_takes_precedence_without_config_read(
@@ -938,6 +1113,7 @@ def test_execute_uses_only_signed_executor_gateway_and_writes_private_0600(
     calls: list[Mapping[str, Any]] = []
     source = valid_source()
     monkeypatch.setenv(snapshot.EXEC_HMAC_SECRET_ENV, SECRET)
+    install_fake_snapshot_signer(monkeypatch)
 
     def fake_execute(request: Mapping[str, Any]) -> HomeEdgeExecReceipt:
         calls.append(request)
@@ -975,6 +1151,7 @@ def test_second_execute_uses_existing_artifact_without_home_edge_request(
     calls: list[Mapping[str, Any]] = []
     source = valid_source()
     monkeypatch.setenv(snapshot.EXEC_HMAC_SECRET_ENV, SECRET)
+    install_fake_snapshot_signer(monkeypatch)
 
     def fake_execute(request: Mapping[str, Any]) -> HomeEdgeExecReceipt:
         calls.append(request)
@@ -1056,6 +1233,7 @@ def test_ambiguous_transport_failure_does_not_write_artifact_or_retry(
 ) -> None:
     calls = 0
     monkeypatch.setenv(snapshot.EXEC_HMAC_SECRET_ENV, SECRET)
+    install_fake_snapshot_signer(monkeypatch)
 
     def fake_execute(_request: Mapping[str, Any]) -> HomeEdgeExecReceipt:
         nonlocal calls
@@ -1119,6 +1297,7 @@ def test_artifact_hash_size_mismatch_blocks_fresh_write(
 ) -> None:
     artifact = snapshot.private_artifact_path(private_root=tmp_path)
     monkeypatch.setenv(snapshot.EXEC_HMAC_SECRET_ENV, SECRET)
+    install_fake_snapshot_signer(monkeypatch)
     monkeypatch.setattr(snapshot, "_sha256_file", lambda _path: "0" * 64)
     monkeypatch.setattr(
         snapshot,
@@ -1144,6 +1323,7 @@ def test_public_receipt_and_status_lines_exclude_source_text_private_markers(
 ) -> None:
     source = valid_source(marker=PRIVATE_MARKER)
     monkeypatch.setenv(snapshot.EXEC_HMAC_SECRET_ENV, SECRET)
+    install_fake_snapshot_signer(monkeypatch)
     monkeypatch.setattr(
         snapshot,
         "execute_home_edge_request",
