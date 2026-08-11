@@ -23,7 +23,7 @@ TASK_ID = "home_edge_01_media_source_snapshot_v1"
 REPOSITORY = "alanua/Skeleton"
 TARGET_NODE = "home-edge-01"
 SOURCE_IDENTITY_TOKEN = "home_edge_01_skeleton_cast_app_py"
-SOURCE_PATH = "/opt/skeleton/cast/app.py"
+SOURCE_PATH = ".local/lib/skeleton-cast/app.py"
 RUN_AS = "desktop-user"
 EXECUTION_LANE = "read_only"
 REQUEST_TIMEOUT_SECONDS = 30
@@ -795,6 +795,7 @@ import base64
 import hashlib
 import json
 import os
+import pwd
 import re
 import stat
 
@@ -834,6 +835,43 @@ def file_id(st):
 
 def same_file(before, after):
     return file_id(before) == file_id(after)
+
+def blocked_effective_account(reason):
+    print(json.dumps(blocked(reason), sort_keys=True, separators=(",", ":")))
+    return None
+
+def effective_source_path():
+    try:
+        euid = os.geteuid()
+    except OSError:
+        return blocked_effective_account("effective_account_unresolvable")
+    if euid == 0:
+        return blocked_effective_account("effective_account_root")
+    try:
+        entry = pwd.getpwuid(euid)
+    except (KeyError, OSError):
+        return blocked_effective_account("effective_account_unresolvable")
+    home = getattr(entry, "pw_dir", "")
+    if (
+        not isinstance(home, str)
+        or not home
+        or "\\x00" in home
+        or not os.path.isabs(home)
+        or os.path.normpath(home) != home
+        or home == os.path.sep
+    ):
+        return blocked_effective_account("effective_account_home_malformed")
+    try:
+        home_st = os.lstat(home)
+    except OSError:
+        return blocked_effective_account("effective_account_home_unsafe")
+    if stat.S_ISLNK(home_st.st_mode) or not stat.S_ISDIR(home_st.st_mode):
+        return blocked_effective_account("effective_account_home_unsafe")
+    if getattr(home_st, "st_uid", None) != euid:
+        return blocked_effective_account("effective_account_home_unsafe")
+    if stat.S_IMODE(home_st.st_mode) & stat.S_IWOTH:
+        return blocked_effective_account("effective_account_home_unsafe")
+    return os.path.join(home, SOURCE_PATH)
 
 def assignment_name(node):
     if isinstance(node, ast.Name):
@@ -925,8 +963,11 @@ def route_markers(tree):
     return video, health
 
 def main():
+    source_path = effective_source_path()
+    if source_path is None:
+        return
     try:
-        st_l = os.lstat(SOURCE_PATH)
+        st_l = os.lstat(source_path)
     except OSError:
         print(json.dumps(blocked("source_lstat_failed"), sort_keys=True, separators=(",", ":")))
         return
@@ -942,13 +983,13 @@ def main():
     if st_l.st_size > MAX_SOURCE_BYTES:
         print(json.dumps(blocked("source_oversize"), sort_keys=True, separators=(",", ":")))
         return
-    if not os.access(SOURCE_PATH, os.R_OK):
+    if not os.access(source_path, os.R_OK):
         print(json.dumps(blocked("source_unreadable"), sort_keys=True, separators=(",", ":")))
         return
-    with open(SOURCE_PATH, "rb") as handle:
+    with open(source_path, "rb") as handle:
         source = handle.read(MAX_SOURCE_BYTES + 1)
     try:
-        st_after = os.lstat(SOURCE_PATH)
+        st_after = os.lstat(source_path)
     except OSError:
         print(json.dumps(blocked("source_lstat_changed"), sort_keys=True, separators=(",", ":")))
         return

@@ -4,8 +4,10 @@ import base64
 import io
 import json
 import os
+import pwd
 import stat
 import sys
+from types import SimpleNamespace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping
@@ -308,7 +310,7 @@ def test_exact_fixed_task_path_node_lane_run_as_contract(monkeypatch: pytest.Mon
     signed = snapshot.sign_snapshot_request(first, environment={})
 
     assert snapshot.TASK_ID == "home_edge_01_media_source_snapshot_v1"
-    assert snapshot.SOURCE_PATH == "/opt/skeleton/cast/app.py"
+    assert snapshot.SOURCE_PATH == ".local/lib/skeleton-cast/app.py"
     assert snapshot.MAX_SOURCE_BYTES == 700 * 1024
     assert snapshot.SOURCE_PATH in first.script
     assert first.operator_approval_ref == snapshot.OPERATOR_APPROVAL_REF
@@ -1241,18 +1243,158 @@ def test_ambiguous_transport_failure_does_not_write_artifact_or_retry(
 def test_remote_script_checks_file_safety_before_export() -> None:
     script = snapshot.SNAPSHOT_SCRIPT
 
-    assert "os.lstat(SOURCE_PATH)" in script
+    assert "pwd.getpwuid(euid)" in script
+    assert "pw_name" not in script
+    assert "desktop-user" not in script
+    assert "os.lstat(source_path)" in script
     assert "same_file(st_l, st_after)" in script
     assert "source_changed_during_read" in script
     assert "stat.S_ISLNK" in script
     assert "stat.S_ISREG" in script
     assert "stat.S_IWOTH" in script
-    assert "os.access(SOURCE_PATH, os.R_OK)" in script
+    assert "os.access(source_path, os.R_OK)" in script
     assert "has_credential_literal(tree)" in script
     assert "base64.b64encode(source)" in script
     assert "private_source_b64" in script
+    obsolete_source_path = "/".join(("", "opt", "skeleton", "cast", "app.py"))
+    assert obsolete_source_path not in script
+    assert "os.environ" not in script
     assert "ssh " not in script.lower()
     assert "sudo" not in script.lower()
+
+
+def _run_remote_snapshot_script(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    home: Path,
+    *,
+    euid: int | None = None,
+    passwd_home: str | None = None,
+    passwd_error: Exception | None = None,
+    lstat_overrides: Mapping[Path, dict[str, int]] | None = None,
+) -> dict[str, Any]:
+    real_lstat = os.lstat
+    effective_uid = os.getuid() if euid is None else euid
+    monkeypatch.setattr(os, "geteuid", lambda: effective_uid)
+
+    def fake_getpwuid(uid: int) -> Any:
+        assert uid == effective_uid
+        if passwd_error is not None:
+            raise passwd_error
+        return SimpleNamespace(
+            pw_name="synthetic-real-account",
+            pw_dir=str(home) if passwd_home is None else passwd_home,
+        )
+
+    def fake_lstat(path: str | bytes | os.PathLike[str] | os.PathLike[bytes]) -> os.stat_result:
+        st = real_lstat(path)
+        overrides = (lstat_overrides or {}).get(Path(path))
+        return _stat_with(st, **overrides) if overrides else st
+
+    monkeypatch.setattr(pwd, "getpwuid", fake_getpwuid)
+    monkeypatch.setattr(os, "lstat", fake_lstat)
+    exec(snapshot.SNAPSHOT_SCRIPT, {"__name__": "remote_snapshot_test"})
+    output = capsys.readouterr().out
+    return json.loads(output)
+
+
+def test_remote_script_resolves_passwd_home_for_executor_selected_real_account(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "real-account-home"
+    source_path = home / snapshot.SOURCE_PATH
+    source_path.parent.mkdir(parents=True)
+    source_path.write_bytes(valid_source())
+    monkeypatch.setenv("HOME", str(tmp_path / "wrong-home"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "wrong-xdg"))
+
+    receipt = _run_remote_snapshot_script(monkeypatch, capsys, home)
+
+    assert receipt["public"]["source_identity"] == "verified"
+    assert receipt["public"]["stable_reason"] == "validated"
+    assert base64.b64decode(receipt["private_source_b64"].encode("ascii"), validate=True) == valid_source()
+
+
+@pytest.mark.parametrize(
+    "euid,passwd_error,reason",
+    [
+        (0, None, "effective_account_root"),
+        (12345, KeyError("missing"), "effective_account_unresolvable"),
+    ],
+)
+def test_remote_script_rejects_root_or_unresolvable_effective_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    euid: int,
+    passwd_error: Exception | None,
+    reason: str,
+) -> None:
+    receipt = _run_remote_snapshot_script(
+        monkeypatch,
+        capsys,
+        tmp_path / "home",
+        euid=euid,
+        passwd_error=passwd_error,
+    )
+
+    assert receipt["public"]["stable_reason"] == reason
+    assert "private_source_b64" not in receipt
+
+
+@pytest.mark.parametrize(
+    "passwd_home",
+    ["", "relative/home", "/tmp/../tmp/skeleton-home", "/"],
+)
+def test_remote_script_rejects_malformed_passwd_home(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    passwd_home: str,
+) -> None:
+    receipt = _run_remote_snapshot_script(
+        monkeypatch,
+        capsys,
+        tmp_path / "unused",
+        passwd_home=passwd_home,
+    )
+
+    assert receipt["public"]["stable_reason"] == "effective_account_home_malformed"
+
+
+@pytest.mark.parametrize("kind", ["symlink", "file", "wrong_owner", "world_writable"])
+def test_remote_script_rejects_unsafe_passwd_home(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    home = tmp_path / "home"
+    overrides: dict[Path, dict[str, int]] = {}
+    if kind == "symlink":
+        target = tmp_path / "target-home"
+        target.mkdir()
+        os.symlink(target, home)
+    elif kind == "file":
+        home.write_text("not a directory", encoding="utf-8")
+    else:
+        home.mkdir()
+        if kind == "wrong_owner":
+            overrides[home] = {"st_uid": os.getuid() + 1}
+        else:
+            os.chmod(home, 0o707)
+
+    receipt = _run_remote_snapshot_script(
+        monkeypatch,
+        capsys,
+        home,
+        lstat_overrides=overrides,
+    )
+
+    assert receipt["public"]["stable_reason"] == "effective_account_home_unsafe"
+    assert "private_source_b64" not in receipt
 
 
 def test_simulated_file_change_between_pre_post_metadata_blocks() -> None:

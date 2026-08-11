@@ -105,3 +105,30 @@ def test_installer_contract_blob_pin_matches_current_contract_source() -> None:
 
     assert match is not None
     assert match.group(1) == git_blob
+
+
+def test_signer_payload_and_installer_blob_pins_match_current_sources() -> None:
+    contract_data = Path(snapshot.__file__).read_bytes()
+    contract_blob = hashlib.sha1(
+        b"blob " + str(len(contract_data)).encode("ascii") + b"\0" + contract_data,
+        usedforsecurity=False,
+    ).hexdigest()
+    payload_path = ROOT / "scripts/home_edge_media_source_snapshot_signer_payload.py"
+    payload_data = payload_path.read_bytes()
+    payload_blob = hashlib.sha1(
+        b"blob " + str(len(payload_data)).encode("ascii") + b"\0" + payload_data,
+        usedforsecurity=False,
+    ).hexdigest()
+    payload = payload_path.read_text(encoding="utf-8")
+    installer = INSTALLER.read_text(encoding="utf-8")
+
+    payload_contract = re.search(r'^CONTRACT_GIT_BLOB_SHA = "([0-9a-f]{40})"$', payload, re.MULTILINE)
+    installer_contract = re.search(r'^CONTRACT_BLOB_SHA="([0-9a-f]{40})"$', installer, re.MULTILINE)
+    installer_payload = re.search(r'^PAYLOAD_BLOB_SHA="([0-9a-f]{40})"$', installer, re.MULTILINE)
+
+    assert payload_contract is not None
+    assert installer_contract is not None
+    assert installer_payload is not None
+    assert payload_contract.group(1) == contract_blob
+    assert installer_contract.group(1) == contract_blob
+    assert installer_payload.group(1) == payload_blob
