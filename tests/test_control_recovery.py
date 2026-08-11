@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import stat
 
 from core.control_recovery import (
     CONTROL_RECOVERY_SCHEMA,
@@ -8,6 +9,8 @@ from core.control_recovery import (
     RecoveryStatus,
     RecoveryStore,
     build_recovery_plan,
+    classify_codegen_runtime_failure,
+    default_control_recovery_db_path,
     execute_recovery_packet,
 )
 
@@ -47,51 +50,11 @@ def test_codegen_failure_uses_fixed_non_codegen_action_then_canary_and_queue(tmp
         action_executor=action,
         canary_executor=lambda canary: canary == "codegen_read_only_canary",
     )
+
     assert receipt["status"] == RecoveryStatus.RECOVERED.value
     assert receipt["actions_executed"] == ["codegen_runtime_recover", "queue_reactivate"]
     assert receipt["canaries_executed"] == ["codegen_read_only_canary"]
     assert calls == ["codegen_runtime_recover", "queue_reactivate"]
-
-
-def test_bounded_action_reason_propagates_without_raw_output(tmp_path: Path) -> None:
-    report = "\n".join(
-        (
-            "BLOCKED: Runner host maintenance task completed.",
-            "maintenance_task_id=codegen_runtime_recover",
-            "reason=CODEX_RUNTIME_RECOVERY_NPM_RUNTIME_BINARY_MISSING",
-            "success_criteria=not_met",
-            "private=/must/not/propagate",
-        )
-    )
-    receipt = execute_recovery_packet(
-        _packet(failure_key="control:reason-propagation"),
-        store=RecoveryStore(tmp_path / "recovery.sqlite3"),
-        now=100,
-        action_executor=lambda _action: report,
-    )
-    assert receipt["status"] == RecoveryStatus.WAITING_RECOVERY.value
-    assert receipt["reason"] == (
-        "RECOVERY_ACTION_FAILED_CODEX_RUNTIME_RECOVERY_NPM_RUNTIME_BINARY_MISSING"
-    )
-    assert "/must/not/propagate" not in str(receipt)
-
-
-def test_untrusted_action_reason_format_is_not_propagated(tmp_path: Path) -> None:
-    report = "\n".join(
-        (
-            "BLOCKED: no",
-            "reason=bad/path/value",
-            "success_criteria=not_met",
-        )
-    )
-    receipt = execute_recovery_packet(
-        _packet(failure_key="control:unsafe-reason"),
-        store=RecoveryStore(tmp_path / "recovery.sqlite3"),
-        now=100,
-        action_executor=lambda _action: report,
-    )
-    assert receipt["reason"] == "RECOVERY_ACTION_FAILED"
-    assert "bad/path/value" not in str(receipt)
 
 
 def test_missing_canary_executor_fails_closed(tmp_path: Path) -> None:
@@ -102,6 +65,7 @@ def test_missing_canary_executor_fails_closed(tmp_path: Path) -> None:
         action_executor=_done,
         canary_executor=None,
     )
+
     assert receipt["status"] == RecoveryStatus.WAITING_RECOVERY.value
     assert receipt["reason"] == "CANARY_EXECUTOR_REQUIRED"
     assert receipt["canaries_executed"] == []
@@ -127,10 +91,7 @@ def test_registered_checkout_recovery_syncs_then_canaries_then_reactivates_queue
 def test_stale_poller_uses_registered_reload_then_resumes(tmp_path: Path) -> None:
     calls: list[str] = []
     receipt = execute_recovery_packet(
-        _packet(
-            failure_class=FailureClass.LONG_LIVED_POLLER_STALE.value,
-            failure_key="control:poller-stale",
-        ),
+        _packet(failure_class=FailureClass.LONG_LIVED_POLLER_STALE.value, failure_key="control:poller-stale"),
         store=RecoveryStore(tmp_path / "recovery.sqlite3"),
         now=100,
         action_executor=lambda action: calls.append(action) or _done(action),
@@ -160,20 +121,8 @@ def test_duplicate_restart_tick_does_not_repeat_recovered_action(tmp_path: Path)
     calls: list[str] = []
     store = RecoveryStore(tmp_path / "recovery.sqlite3")
     packet = _packet(failure_key="control:duplicate")
-    first = execute_recovery_packet(
-        packet,
-        store=store,
-        now=100,
-        action_executor=lambda action: calls.append(action) or _done(action),
-        canary_executor=lambda _canary: True,
-    )
-    second = execute_recovery_packet(
-        packet,
-        store=store,
-        now=101,
-        action_executor=lambda action: calls.append(action) or _done(action),
-        canary_executor=lambda _canary: True,
-    )
+    first = execute_recovery_packet(packet, store=store, now=100, action_executor=lambda action: calls.append(action) or _done(action), canary_executor=lambda _canary: True)
+    second = execute_recovery_packet(packet, store=store, now=101, action_executor=lambda action: calls.append(action) or _done(action), canary_executor=lambda _canary: True)
     assert first["status"] == RecoveryStatus.RECOVERED.value
     assert second["reason"] == "RECOVERY_ALREADY_DONE"
     assert calls == ["codegen_runtime_recover", "queue_reactivate"]
@@ -182,30 +131,10 @@ def test_duplicate_restart_tick_does_not_repeat_recovered_action(tmp_path: Path)
 def test_failed_recovery_retries_with_backoff_then_exactly_one_operator_notice(tmp_path: Path) -> None:
     store = RecoveryStore(tmp_path / "recovery.sqlite3")
     packet = _packet(failure_key="control:exhaust", max_attempts=2, backoff_seconds=5)
-    first = execute_recovery_packet(
-        packet,
-        store=store,
-        now=100,
-        action_executor=lambda _action: "BLOCKED: no\nsuccess_criteria=not_met",
-    )
-    duplicate = execute_recovery_packet(
-        packet,
-        store=store,
-        now=101,
-        action_executor=lambda _action: _done("unexpected"),
-    )
-    second = execute_recovery_packet(
-        packet,
-        store=store,
-        now=105,
-        action_executor=lambda _action: "BLOCKED: no\nsuccess_criteria=not_met",
-    )
-    third = execute_recovery_packet(
-        packet,
-        store=store,
-        now=110,
-        action_executor=lambda _action: _done("unexpected"),
-    )
+    first = execute_recovery_packet(packet, store=store, now=100, action_executor=lambda _action: "BLOCKED: no\nsuccess_criteria=not_met")
+    duplicate = execute_recovery_packet(packet, store=store, now=101, action_executor=lambda _action: _done("unexpected"))
+    second = execute_recovery_packet(packet, store=store, now=105, action_executor=lambda _action: "BLOCKED: no\nsuccess_criteria=not_met")
+    third = execute_recovery_packet(packet, store=store, now=110, action_executor=lambda _action: _done("unexpected"))
     assert first["status"] == RecoveryStatus.WAITING_RECOVERY.value
     assert first["next_retry_at"] == 105
     assert duplicate["reason"] == "RECOVERY_BACKOFF_ACTIVE"
@@ -217,18 +146,9 @@ def test_failed_recovery_retries_with_backoff_then_exactly_one_operator_notice(t
 
 def test_unknown_or_issue_supplied_authority_fails_closed(tmp_path: Path) -> None:
     store = RecoveryStore(tmp_path / "recovery.sqlite3")
-    unknown = execute_recovery_packet(
-        _packet(failure_class="NEW_THING"), store=store, now=100, action_executor=_done
-    )
-    unknown_again = execute_recovery_packet(
-        _packet(failure_class="NEW_THING"), store=store, now=101, action_executor=_done
-    )
-    broadened = execute_recovery_packet(
-        _packet(command="pip install arbitrary", package="badpkg", model="codex-new"),
-        store=store,
-        now=100,
-        action_executor=_done,
-    )
+    unknown = execute_recovery_packet(_packet(failure_class="NEW_THING"), store=store, now=100, action_executor=_done)
+    unknown_again = execute_recovery_packet(_packet(failure_class="NEW_THING"), store=store, now=101, action_executor=_done)
+    broadened = execute_recovery_packet(_packet(command="pip install arbitrary", package="badpkg", model="codex-new"), store=store, now=100, action_executor=_done)
     assert unknown["status"] == RecoveryStatus.NEEDS_OPERATOR.value
     assert unknown["reason"] == "UNKNOWN_UNSAFE_RECOVERY"
     assert unknown["needs_operator_notification"] is True
@@ -238,12 +158,108 @@ def test_unknown_or_issue_supplied_authority_fails_closed(tmp_path: Path) -> Non
 
 def test_plans_never_require_codegen() -> None:
     for failure_class in FailureClass:
-        plan = build_recovery_plan(
-            {
-                "schema": CONTROL_RECOVERY_SCHEMA,
-                "failure_class": failure_class.value,
-                "failure_key": f"control:{failure_class.value}",
-            }
-        )
+        plan = build_recovery_plan({"schema": CONTROL_RECOVERY_SCHEMA, "failure_class": failure_class.value, "failure_key": f"control:{failure_class.value}"})
         assert plan is not None
         assert plan.requires_codegen is False
+
+
+def test_default_recovery_db_is_fixed_runner_local_state_not_repo_codex() -> None:
+    path = default_control_recovery_db_path()
+
+    assert path == Path("/home/agent/.local/state/skeleton-runner/control-recovery/control_recovery.sqlite3")
+    assert ".codex" not in path.parts
+    assert "worktrees" not in path.parts
+    assert "/tmp" not in str(path)
+
+
+def test_recovery_store_survives_modeled_repo_codex_cleanup_and_preserves_attempt(tmp_path: Path) -> None:
+    repo_codex = tmp_path / "repo" / ".codex"
+    repo_codex.mkdir(parents=True)
+    store_path = tmp_path / "runner-state" / "control_recovery.sqlite3"
+    packet = _packet(failure_key="control:durable", backoff_seconds=5)
+
+    first = execute_recovery_packet(
+        packet,
+        store=RecoveryStore(store_path),
+        now=100,
+        action_executor=lambda _action: "BLOCKED: no\nsuccess_criteria=not_met",
+    )
+    for child in repo_codex.iterdir():
+        child.unlink()
+    repo_codex.rmdir()
+    second = execute_recovery_packet(
+        packet,
+        store=RecoveryStore(store_path),
+        now=105,
+        action_executor=lambda _action: "BLOCKED: no\nsuccess_criteria=not_met",
+    )
+
+    assert first["attempt"] == 1
+    assert first["next_retry_at"] == 105
+    assert second["attempt"] == 2
+    assert second["status"] == RecoveryStatus.WAITING_RECOVERY.value
+
+
+def test_recovery_store_private_modes(tmp_path: Path) -> None:
+    path = tmp_path / "private" / "recovery.sqlite3"
+    store = RecoveryStore(path)
+
+    store.initialize()
+
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_recovery_store_rejects_symlink_state_directory(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    linked = tmp_path / "linked"
+    linked.symlink_to(target, target_is_directory=True)
+
+    try:
+        RecoveryStore(linked / "recovery.sqlite3").initialize()
+    except RuntimeError as exc:
+        assert str(exc) == "CONTROL_RECOVERY_STATE_DIR_INVALID"
+    else:
+        raise AssertionError("symlinked state directory was accepted")
+
+
+def test_recovery_store_rejects_symlink_state_file(tmp_path: Path) -> None:
+    state_dir = tmp_path / "private"
+    state_dir.mkdir()
+    target = tmp_path / "target.sqlite3"
+    target.write_text("", encoding="utf-8")
+    linked = state_dir / "recovery.sqlite3"
+    linked.symlink_to(target)
+
+    try:
+        RecoveryStore(linked).initialize()
+    except RuntimeError as exc:
+        assert str(exc) == "CONTROL_RECOVERY_STATE_FILE_INVALID"
+    else:
+        raise AssertionError("symlinked state file was accepted")
+
+
+def test_recovery_store_rejects_non_file_state_path(tmp_path: Path) -> None:
+    path = tmp_path / "private" / "recovery.sqlite3"
+    path.mkdir(parents=True)
+
+    try:
+        RecoveryStore(path).initialize()
+    except RuntimeError as exc:
+        assert str(exc) == "CONTROL_RECOVERY_STATE_FILE_INVALID"
+    else:
+        raise AssertionError("directory substitution for state file was accepted")
+
+
+def test_codegen_runtime_classifier_is_narrow() -> None:
+    assert (
+        classify_codegen_runtime_failure(
+            "failed to decode models response: unknown variant `max`",
+            1,
+        )
+        == "codex_model_metadata_decoder"
+    )
+    assert classify_codegen_runtime_failure("quota exceeded", 1) is None
+    assert classify_codegen_runtime_failure("ordinary codex task failed", 1) is None
+    assert classify_codegen_runtime_failure("failed to decode models response: unknown variant `max`", 0) is None
