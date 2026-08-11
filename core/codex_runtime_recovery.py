@@ -52,6 +52,18 @@ class CodexRuntimeRecoveryResult:
     reason: str
 
 
+def is_canonical_systemd_runner_context(
+    environment: Mapping[str, str],
+    *,
+    repository_root: Path | None = None,
+    canonical_root: Path = CANONICAL_RUNNER_ROOT,
+) -> bool:
+    """Return true only for the canonical registered checkout under systemd Runner."""
+    root = (repository_root or Path(__file__).resolve().parents[1]).resolve(strict=False)
+    canonical = canonical_root.resolve(strict=False)
+    return root == canonical and bool(environment.get(SYSTEMD_INVOCATION_ENV, "").strip())
+
+
 def should_attempt_codex_runtime_recovery(
     environment: Mapping[str, str],
     *,
@@ -60,12 +72,14 @@ def should_attempt_codex_runtime_recovery(
     enable_marker: Path | None = None,
 ) -> bool:
     root = (repository_root or Path(__file__).resolve().parents[1]).resolve(strict=False)
-    canonical = canonical_root.resolve(strict=False)
     marker = enable_marker or (root / RECOVERY_ENABLE_MARKER)
     return (
-        root == canonical
+        is_canonical_systemd_runner_context(
+            environment,
+            repository_root=root,
+            canonical_root=canonical_root,
+        )
         and marker.is_file()
-        and bool(environment.get(SYSTEMD_INVOCATION_ENV, "").strip())
     )
 
 
