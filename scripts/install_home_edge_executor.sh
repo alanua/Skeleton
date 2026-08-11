@@ -77,6 +77,7 @@ env_file="${env_dir}/home_edge_executor.env"
 sudoers_file="${sudoers_dir}/skeleton-home-edge-executor"
 wrapper="${bin_dir}/home_edge_exec"
 root_wrapper="${sbin_dir}/home_edge_exec_root"
+snapshot_signer="${sbin_dir}/home_edge_media_source_snapshot_signer"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 
@@ -170,7 +171,8 @@ install_wrapper() {
   chown_root_if_possible "$bin_dir" "$sbin_dir"
   backup_path "$wrapper"
   backup_path "$root_wrapper"
-  rm -f "$wrapper" "$root_wrapper"
+  backup_path "$snapshot_signer"
+  rm -f "$wrapper" "$root_wrapper" "$snapshot_signer"
   cat > "$wrapper" <<WRAPPER
 #!/usr/bin/env bash
 set -euo pipefail
@@ -216,7 +218,28 @@ exec env -i \\
 ROOT_WRAPPER
   chmod 0755 "$wrapper"
   chmod 0555 "$root_wrapper"
-  chown_root_if_possible "$wrapper" "$root_wrapper"
+  cat > "$snapshot_signer" <<SIGNER_WRAPPER
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\$#" -ne 0 ]]; then
+  echo "home_edge_media_source_snapshot_signer accepts no argv" >&2
+  exit 2
+fi
+python_root="$(runtime_path "/usr/local/lib/skeleton-home-edge-executor")"
+signer_script="\$python_root/scripts/home_edge_media_source_snapshot_signer.py"
+if [[ ! -r "\$signer_script" ]]; then
+  echo "home_edge_media_source_snapshot_signer is missing" >&2
+  exit 2
+fi
+exec env -i \\
+  PATH="/usr/sbin:/usr/bin:/sbin:/bin" \\
+  LANG="\${LANG:-C.UTF-8}" \\
+  LC_ALL="\${LC_ALL:-}" \\
+  PYTHONPATH="\$python_root" \\
+  /usr/bin/python3 "\$signer_script"
+SIGNER_WRAPPER
+  chmod 0555 "$snapshot_signer"
+  chown_root_if_possible "$wrapper" "$root_wrapper" "$snapshot_signer"
 }
 
 install_python_files() {
@@ -225,14 +248,11 @@ install_python_files() {
   chmod 0644 "$lib_dir/core/__init__.py"
   install -m 0644 "$repo_root/core/home_edge/executor.py" "$lib_dir/core/home_edge/executor.py"
   install -m 0644 "$repo_root/core/home_edge/executor_gateway.py" "$lib_dir/core/home_edge/executor_gateway.py"
+  install -m 0644 "$repo_root/core/home_edge/media_source_snapshot.py" "$lib_dir/core/home_edge/media_source_snapshot.py"
   install -m 0644 "$repo_root/core/home_edge/profile.py" "$lib_dir/core/home_edge/profile.py"
   install -m 0755 "$repo_root/scripts/home_edge_exec.py" "$lib_dir/scripts/home_edge_exec.py"
   install -m 0755 "$repo_root/scripts/home_edge_executor_server.py" "$lib_dir/scripts/home_edge_executor_server.py"
-  python3 -m py_compile \
-    "$lib_dir/core/home_edge/executor.py" \
-    "$lib_dir/core/home_edge/executor_gateway.py" \
-    "$lib_dir/scripts/home_edge_exec.py" \
-    "$lib_dir/scripts/home_edge_executor_server.py"
+  install -m 0755 "$repo_root/scripts/home_edge_media_source_snapshot_signer.py" "$lib_dir/scripts/home_edge_media_source_snapshot_signer.py"
 }
 
 install_sudoers_rule() {
@@ -245,6 +265,7 @@ install_sudoers_rule() {
   {
     printf '# Managed by skeleton Home Edge executor installer.\n'
     printf '%s ALL=(root) NOPASSWD: /usr/local/sbin/home_edge_exec_root --server\n' "$SSH_TARGET_USER"
+    printf '%s ALL=(root) NOPASSWD: /usr/local/sbin/home_edge_media_source_snapshot_signer\n' "$SSH_TARGET_USER"
   } > "$sudoers_file"
   chmod 0440 "$sudoers_file"
   chown_root_if_possible "$sudoers_file"
@@ -279,6 +300,7 @@ uninstall_executor() {
   backup_path "$env_file"
   rm -f "$wrapper"
   rm -f "$root_wrapper"
+  rm -f "$snapshot_signer"
   rm -f "$sudoers_file"
   rm -rf "$lib_dir"
   if [[ -f "$env_file" ]]; then
