@@ -8,6 +8,7 @@ from core.scheduler_engine import (
     SchedulerEngineConfig,
     production_scheduler_db_path,
 )
+from core.domain_event_graph import DomainEventGraph
 from core.scheduler_models import ScheduleSpec, build_execution_proposal, stable_occurrence_id
 from core.scheduler_store import SchedulerStore
 from core.shared_dispatch import (
@@ -632,6 +633,40 @@ def test_waiting_dependency_resumes_after_dependency_done(tmp_path) -> None:
 
     assert resumed["resumed_waiting_dependencies"] == 1
     assert store.get_occurrence(wait_id).state == "done"  # type: ignore[union-attr]
+
+
+def test_waiting_dependency_records_domain_graph_hook(tmp_path) -> None:
+    store = SchedulerStore(tmp_path / "scheduler.sqlite3")
+    loop_db = tmp_path / "loop.sqlite3"
+    graph = DomainEventGraph()
+    store.initialize()
+    dependency, _ = store.register(_loop_once("test.dep.graph", 100, _loop_packet("create")), now=50)
+    dependent, _ = store.register(
+        _loop_once("test.wait.graph", 100, _loop_packet("create", run_id="run-graph"), wait_for="missing"),
+        now=50,
+    )
+    dep_id = stable_occurrence_id(dependency.spec.schedule_id, dependency.version, 100)
+    wait_id = stable_occurrence_id(dependent.spec.schedule_id, dependent.version, 100)
+    wait_proposal = build_execution_proposal(dependent, occurrence_id=wait_id, scheduled_for=100)
+    wait_proposal["payload"]["wait_for"] = dep_id
+    store.create_occurrence(
+        occurrence_id=wait_id,
+        schedule=dependent,
+        scheduled_for=100,
+        state="pending",
+        reason="DISPATCH_REQUIRED",
+        proposal=wait_proposal,
+        now=100,
+    )
+    dispatcher = SharedDispatcher.for_loop_engine(loop_state_db_path=str(loop_db))
+    engine = SchedulerEngine(store, domain_event_graph=graph)
+
+    first = engine.dispatch_pending(dispatcher=dispatcher, now=100)
+    second = engine.dispatch_pending(dispatcher=dispatcher, now=100)
+
+    assert first["waiting_dependency"] == 1
+    assert second["claimed"] == 0
+    assert graph.summary()["aggregate_counts"]["event_count"] == 1
 
 
 def test_recovery_route_requeues_blocked_consumer_after_canary(tmp_path) -> None:

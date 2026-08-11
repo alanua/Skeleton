@@ -515,6 +515,8 @@ def test_required_namespaces_and_allowlisted_commands_are_registered() -> None:
             f"{namespace}.graph.query_code",
             f"{namespace}.graph.get_index_freshness",
             f"{namespace}.graph.private_query",
+            f"{namespace}.graph.ingest_domain_event",
+            f"{namespace}.graph.get_case_timeline",
             f"{namespace}.memory.propose_patch",
         }
 
