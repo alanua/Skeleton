@@ -4,10 +4,12 @@ import base64
 import io
 import json
 import os
+import pwd
 import stat
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Mapping
 
 import pytest
@@ -308,9 +310,10 @@ def test_exact_fixed_task_path_node_lane_run_as_contract(monkeypatch: pytest.Mon
     signed = snapshot.sign_snapshot_request(first, environment={})
 
     assert snapshot.TASK_ID == "home_edge_01_media_source_snapshot_v1"
-    assert snapshot.SOURCE_PATH == "/opt/skeleton/cast/app.py"
+    assert snapshot.SOURCE_RELATIVE_PATH == ".local/lib/skeleton-cast/app.py"
     assert snapshot.MAX_SOURCE_BYTES == 700 * 1024
-    assert snapshot.SOURCE_PATH in first.script
+    assert snapshot.SOURCE_RELATIVE_PATH in first.script
+    assert "/opt/skeleton/cast/app.py" not in first.script
     assert first.operator_approval_ref == snapshot.OPERATOR_APPROVAL_REF
     assert first.node_id == "home-edge-01"
     assert first.execution_lane.value == "read_only"
@@ -1241,23 +1244,111 @@ def test_ambiguous_transport_failure_does_not_write_artifact_or_retry(
 def test_remote_script_checks_file_safety_before_export() -> None:
     script = snapshot.SNAPSHOT_SCRIPT
 
-    assert "os.lstat(SOURCE_PATH)" in script
+    assert "resolve_source_path()" in script
+    assert "pwd.getpwuid(euid)" in script
+    assert "os.lstat(source_path)" in script
     assert "same_file(st_l, st_after)" in script
     assert "source_changed_during_read" in script
     assert "stat.S_ISLNK" in script
     assert "stat.S_ISREG" in script
     assert "stat.S_IWOTH" in script
-    assert "os.access(SOURCE_PATH, os.R_OK)" in script
+    assert "os.access(source_path, os.R_OK)" in script
     assert "has_credential_literal(tree)" in script
     assert "base64.b64encode(source)" in script
     assert "private_source_b64" in script
+    assert "os.environ" not in script
+    assert "/opt/skeleton/cast/app.py" not in script
     assert "ssh " not in script.lower()
     assert "sudo" not in script.lower()
 
 
-def test_simulated_file_change_between_pre_post_metadata_blocks() -> None:
+def _remote_script_namespace() -> dict[str, Any]:
     namespace: dict[str, Any] = {}
     exec(snapshot.SNAPSHOT_SCRIPT.rsplit("\nmain()", 1)[0], namespace)
+    return namespace
+
+
+@pytest.mark.parametrize(
+    "euid,account,reason",
+    [
+        (0, SimpleNamespace(pw_name=snapshot.RUN_AS, pw_dir="/home/desktop-user"), "source_account_root"),
+        (1000, KeyError, "source_account_unavailable"),
+        (1000, SimpleNamespace(pw_name="agent", pw_dir="/home/desktop-user"), "source_account_mismatch"),
+        (1000, SimpleNamespace(pw_name=snapshot.RUN_AS, pw_dir="relative"), "source_home_invalid"),
+        (1000, SimpleNamespace(pw_name=snapshot.RUN_AS, pw_dir="/home/desktop-user/.."), "source_home_invalid"),
+        (1000, SimpleNamespace(pw_name=snapshot.RUN_AS, pw_dir="/home/desktop-user\x00x"), "source_home_invalid"),
+    ],
+)
+def test_remote_source_resolution_rejects_account_and_malformed_home_before_source_lstat(
+    monkeypatch: pytest.MonkeyPatch,
+    euid: int,
+    account: SimpleNamespace | type[KeyError],
+    reason: str,
+) -> None:
+    namespace = _remote_script_namespace()
+    monkeypatch.setattr(os, "geteuid", lambda: euid, raising=False)
+
+    def fake_getpwuid(_uid: int) -> SimpleNamespace:
+        if account is KeyError:
+            raise KeyError(_uid)
+        return account
+
+    monkeypatch.setattr(pwd, "getpwuid", fake_getpwuid)
+    monkeypatch.setattr(os, "lstat", lambda _path: pytest.fail("source path must not be statted"))
+
+    source_path, actual_reason = namespace["resolve_source_path"]()
+
+    assert source_path is None
+    assert actual_reason == reason
+
+
+@pytest.mark.parametrize(
+    "mode,uid",
+    [
+        (stat.S_IFLNK | 0o777, 1000),
+        (stat.S_IFREG | 0o600, 1000),
+        (stat.S_IFDIR | 0o777, 1000),
+        (stat.S_IFDIR | 0o700, 1001),
+    ],
+)
+def test_remote_source_resolution_rejects_unusable_passwd_home(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: int,
+    uid: int,
+) -> None:
+    namespace = _remote_script_namespace()
+    account = SimpleNamespace(pw_name=snapshot.RUN_AS, pw_dir="/home/desktop-user")
+    st = os.stat_result((mode, 1, 1, 1, uid, 1, 0, 0, 0, 0))
+    monkeypatch.setattr(os, "geteuid", lambda: 1000, raising=False)
+    monkeypatch.setattr(pwd, "getpwuid", lambda _uid: account)
+    monkeypatch.setattr(os, "lstat", lambda path: st if path == account.pw_dir else pytest.fail("source path must not be statted"))
+
+    source_path, reason = namespace["resolve_source_path"]()
+
+    assert source_path is None
+    assert reason == "source_home_unusable"
+
+
+def test_remote_source_resolution_uses_passwd_home_and_ignores_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    namespace = _remote_script_namespace()
+    account = SimpleNamespace(pw_name=snapshot.RUN_AS, pw_dir="/home/desktop-user")
+    st = os.stat_result((stat.S_IFDIR | 0o700, 1, 1, 1, 1000, 1, 0, 0, 0, 0))
+    monkeypatch.setenv("HOME", "/tmp/evil-home")
+    monkeypatch.setenv("XDG_DATA_HOME", "/tmp/evil-xdg")
+    monkeypatch.setattr(os, "geteuid", lambda: 1000, raising=False)
+    monkeypatch.setattr(pwd, "getpwuid", lambda _uid: account)
+    monkeypatch.setattr(os, "lstat", lambda path: st if path == account.pw_dir else pytest.fail("source path must not be statted"))
+
+    source_path, reason = namespace["resolve_source_path"]()
+
+    assert reason is None
+    assert source_path == "/home/desktop-user/.local/lib/skeleton-cast/app.py"
+
+
+def test_simulated_file_change_between_pre_post_metadata_blocks() -> None:
+    namespace = _remote_script_namespace()
 
     class St:
         st_mode = stat.S_IFREG | 0o644
@@ -1326,7 +1417,7 @@ def test_public_receipt_and_status_lines_exclude_source_text_private_markers(
     assert "Flask" not in public
     assert "skeleton-cast-media" not in public
     assert PRIVATE_MARKER not in public
-    assert snapshot.SOURCE_PATH not in public
+    assert snapshot.SOURCE_RELATIVE_PATH not in public
     assert snapshot.SOURCE_IDENTITY_TOKEN not in public
     assert "source_sha256" in public
     assert "source_bytes" in public

@@ -23,7 +23,8 @@ TASK_ID = "home_edge_01_media_source_snapshot_v1"
 REPOSITORY = "alanua/Skeleton"
 TARGET_NODE = "home-edge-01"
 SOURCE_IDENTITY_TOKEN = "home_edge_01_skeleton_cast_app_py"
-SOURCE_PATH = "/opt/skeleton/cast/app.py"
+SOURCE_PATH = ".local/lib/skeleton-cast/app.py"
+SOURCE_RELATIVE_PATH = SOURCE_PATH
 RUN_AS = "desktop-user"
 EXECUTION_LANE = "read_only"
 REQUEST_TIMEOUT_SECONDS = 30
@@ -483,8 +484,8 @@ def _validate_source_bytes(source: bytes) -> dict[str, object]:
     if credential_literal_names(text):
         return _blocked_receipt("suspicious_credential_literal", source_bytes=len(source), source_sha256=source_hash)
     try:
-        tree = ast.parse(text, filename=SOURCE_PATH)
-        compile(tree, SOURCE_PATH, "exec")
+        tree = ast.parse(text, filename=SOURCE_IDENTITY_TOKEN)
+        compile(tree, SOURCE_IDENTITY_TOKEN, "exec")
     except SyntaxError:
         return _blocked_receipt("python_parse_failed", source_bytes=len(source), source_sha256=source_hash)
     video_route, health_route = _route_markers(tree)
@@ -795,10 +796,12 @@ import base64
 import hashlib
 import json
 import os
+import pwd
 import re
 import stat
 
 TASK_ID = {TASK_ID!r}
+RUN_AS = "desktop-user"
 SOURCE_PATH = {SOURCE_PATH!r}
 MAX_SOURCE_BYTES = {MAX_SOURCE_BYTES!r}
 SECRET_SUFFIXES = {tuple(_SECRET_SUFFIXES)!r}
@@ -834,6 +837,37 @@ def file_id(st):
 
 def same_file(before, after):
     return file_id(before) == file_id(after)
+
+def resolve_source_path():
+    try:
+        euid = os.geteuid()
+    except AttributeError:
+        euid = os.getuid()
+    if euid == 0:
+        return None, "source_account_root"
+    try:
+        account = pwd.getpwuid(euid)
+    except KeyError:
+        return None, "source_account_unavailable"
+    if account.pw_name != RUN_AS:
+        return None, "source_account_mismatch"
+    home = account.pw_dir
+    if not isinstance(home, str) or not home or "\\x00" in home or not os.path.isabs(home):
+        return None, "source_home_invalid"
+    if os.path.normpath(home) != home:
+        return None, "source_home_invalid"
+    try:
+        home_st = os.lstat(home)
+    except OSError:
+        return None, "source_home_unusable"
+    if (
+        stat.S_ISLNK(home_st.st_mode)
+        or not stat.S_ISDIR(home_st.st_mode)
+        or home_st.st_uid != euid
+        or (home_st.st_mode & stat.S_IWOTH)
+    ):
+        return None, "source_home_unusable"
+    return os.path.join(home, SOURCE_PATH), None
 
 def assignment_name(node):
     if isinstance(node, ast.Name):
@@ -925,8 +959,12 @@ def route_markers(tree):
     return video, health
 
 def main():
+    source_path, reason = resolve_source_path()
+    if source_path is None:
+        print(json.dumps(blocked(reason), sort_keys=True, separators=(",", ":")))
+        return
     try:
-        st_l = os.lstat(SOURCE_PATH)
+        st_l = os.lstat(source_path)
     except OSError:
         print(json.dumps(blocked("source_lstat_failed"), sort_keys=True, separators=(",", ":")))
         return
@@ -942,13 +980,13 @@ def main():
     if st_l.st_size > MAX_SOURCE_BYTES:
         print(json.dumps(blocked("source_oversize"), sort_keys=True, separators=(",", ":")))
         return
-    if not os.access(SOURCE_PATH, os.R_OK):
+    if not os.access(source_path, os.R_OK):
         print(json.dumps(blocked("source_unreadable"), sort_keys=True, separators=(",", ":")))
         return
-    with open(SOURCE_PATH, "rb") as handle:
+    with open(source_path, "rb") as handle:
         source = handle.read(MAX_SOURCE_BYTES + 1)
     try:
-        st_after = os.lstat(SOURCE_PATH)
+        st_after = os.lstat(source_path)
     except OSError:
         print(json.dumps(blocked("source_lstat_changed"), sort_keys=True, separators=(",", ":")))
         return
