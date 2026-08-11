@@ -3161,11 +3161,14 @@ def test_typed_task_block_fields_feed_shadow_hash_without_receipt_leakage() -> N
 def test_poll_once_processes_issues_single_lane() -> None:
     issues = [{"number": 139}, {"number": 140}]
     with mock.patch.object(runner, "self_heal_run_now_queue_intake", return_value=0), mock.patch.object(
+        runner, "reconcile_scheduler_running_work_on_poll", return_value={"status": "DONE"}
+    ) as reconcile, mock.patch.object(
         runner, "get_ready_issues", return_value=issues
     ), mock.patch.object(runner, "process_issue") as process_issue:
         count = runner.poll_once(workdir="/coordinator")
 
     assert count == 2
+    reconcile.assert_called_once_with()
     assert process_issue.call_args_list == [
         mock.call(issues[0], workdir="/coordinator"),
         mock.call(issues[1], workdir="/coordinator"),
@@ -3204,7 +3207,11 @@ def test_poll_once_self_heals_run_now_missing_ready_and_does_not_duplicate_claim
         labels.discard(runner.LABEL_READY)
         labels.add(runner.LABEL_RUNNING)
 
-    with mock.patch.object(runner, "get_ready_issues", side_effect=ready_issues), mock.patch.object(
+    with mock.patch.object(
+        runner, "reconcile_scheduler_running_work_on_poll", return_value={"status": "DONE"}
+    ) as reconcile, mock.patch.object(
+        runner, "get_ready_issues", side_effect=ready_issues
+    ), mock.patch.object(
         runner, "get_run_now_queue_intake_candidate_issues", side_effect=run_now_candidates
     ), mock.patch.object(
         runner, "_promote_queue_replenisher_issue", side_effect=promote
@@ -3216,6 +3223,7 @@ def test_poll_once_self_heals_run_now_missing_ready_and_does_not_duplicate_claim
 
     assert first_count == 1
     assert second_count == 0
+    assert reconcile.call_count == 2
     promote_issue.assert_called_once()
     process_issue.assert_called_once()
 

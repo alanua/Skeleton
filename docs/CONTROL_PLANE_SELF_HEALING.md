@@ -66,6 +66,22 @@ The recovery action itself is codegen-independent. The canary is verification, n
 
 Recoverable blocked consumers should wait on the recovery occurrence. Once recovery is `RECOVERED`, the existing Scheduler dependency resumer moves those consumers back to pending dispatch, preserving scheduled priority order.
 
+## Scheduler Crash Reconciliation
+
+Claimed Scheduler occurrences use durable bounded leases in the Scheduler DB. A claim records an owner, heartbeat timestamp, lease expiry, attempt number, and idempotency key on the existing occurrence row. Active work extends the lease with a heartbeat; live leases are not reclaimed.
+
+Every ordinary Scheduler tick, including the passive reconciliation pass at the start of each Runner poll, checks expired running occurrences. The poll pass uses the single existing Scheduler with no dispatcher, so it can reconcile durable state but cannot execute queued side effects from the Runner poll path.
+
+Recovery is receipt-aware and idempotent:
+
+- expired running work with no dispatch receipt returns to `pending` only while bounded attempts remain
+- an already-recorded successful dispatch receipt finalizes the occurrence as `done` after restart without re-running the dispatch
+- an already-recorded waiting-dependency receipt resumes the dependency wait state
+- an ambiguous receipt for protected, runtime, external, device, provider, deploy, or financial mutation moves to `needs_operator` and is not replayed
+- exhausted automatic attempts move to `needs_operator`
+
+Repeated polls and restarts observe the same occurrence row, receipt idempotency key, and terminal state, so they do not duplicate occurrences, receipts, requeues, or operator notifications.
+
 Ordinary Runner codegen failures classified by the exact live metadata phrase enter the existing recovery route before terminal blocking. The issue is moved to `runner:waiting-dependency`, a durable recovery occurrence is recorded, and a same-issue consumer waits on it. After `codegen_runtime_recover` and the read-only Codex canary succeed, `queue_reactivate` removes `runner:waiting-dependency` from that same GitHub issue and adds `runner:ready`.
 
 During each ordinary Runner poll, the single poller also checks open `agent:task` issues marked `queue:RUN_NOW` that are missing `runner:ready`. Valid public-safe Skeleton task issues that are not running, waiting on dependencies, terminal, operator-held, duplicate, dependency-blocked, or otherwise excluded by the existing queue policy are idempotently promoted with `runner:ready` before normal ready-issue selection. This only restores eligibility for the existing Runner path; it does not add a second queue, bypass RunnerGate, or weaken route, privacy, approval, runtime, protected-file, secret, merge, or operator gates.

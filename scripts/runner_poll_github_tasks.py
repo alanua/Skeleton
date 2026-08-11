@@ -2089,6 +2089,12 @@ def run_due_codegen_recovery_for_issue(issue_number: int, *, now: int | None = N
     return SchedulerEngine(store).tick(now=current, dispatcher=dispatcher)
 
 
+def reconcile_scheduler_running_work_on_poll(*, now: int | None = None) -> dict[str, object]:
+    current = int(time.time()) if now is None else now
+    store = SchedulerStore(scheduler_db_path())
+    return SchedulerEngine(store).tick(now=current)
+
+
 def runner_report_status(report: str) -> str:
     status = _first_final_status(report)
     if status != "DONE":
@@ -15149,6 +15155,10 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
 
 def poll_once(workdir: str | None = None) -> int:
     self_heal_run_now_queue_intake()
+    try:
+        reconcile_scheduler_running_work_on_poll()
+    except Exception:
+        pass
     issues = get_ready_issues()
     for issue in issues:
         process_issue(issue, workdir=workdir)

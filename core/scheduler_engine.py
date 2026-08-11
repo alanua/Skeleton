@@ -32,8 +32,10 @@ class SchedulerEngineConfig:
     max_occurrences_per_schedule: int = 256
     misfire_grace_seconds: int = 120
     stale_running_after_seconds: int = 60 * 60
+    claim_lease_seconds: int = 60 * 60
     max_dispatches_per_tick: int = 16
     max_attempts: int = 2
+    claim_owner: str = "scheduler"
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -41,12 +43,19 @@ class SchedulerEngineConfig:
             "max_occurrences_per_schedule",
             "misfire_grace_seconds",
             "stale_running_after_seconds",
+            "claim_lease_seconds",
             "max_dispatches_per_tick",
             "max_attempts",
         ):
             value = getattr(self, field_name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{field_name} must be a positive integer")
+        if (
+            not isinstance(self.claim_owner, str)
+            or not self.claim_owner
+            or len(self.claim_owner) > 128
+        ):
+            raise ValueError("claim_owner must be a non-empty bounded string")
 
 
 class SchedulerEngine:
@@ -170,12 +179,20 @@ class SchedulerEngine:
         for _ in range(self.config.max_dispatches_per_tick):
             occurrence = self.store.claim_next_pending(
                 now=current,
+                claim_owner=self.config.claim_owner,
+                lease_seconds=self.config.claim_lease_seconds,
                 exclude_occurrence_ids=frozenset(claimed_this_tick),
             )
             if occurrence is None:
                 break
             claimed_this_tick.add(occurrence.occurrence_id)
             counters["claimed"] += 1
+            self.store.heartbeat_occurrence(
+                occurrence.occurrence_id,
+                claim_owner=self.config.claim_owner,
+                now=current,
+                lease_seconds=self.config.claim_lease_seconds,
+            )
             proposal = occurrence.proposal
             dependency = proposal.get("payload", {}).get("wait_for")
             if isinstance(dependency, str):
