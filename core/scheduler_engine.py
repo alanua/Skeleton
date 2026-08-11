@@ -275,7 +275,13 @@ class SchedulerEngine:
                 now=now,
             )
             return "needs_operator"
-        if dispatch.retryable and occurrence.attempt < self.config.max_attempts:
+        if dispatch.retryable and (
+            occurrence.attempt < self.config.max_attempts
+            or (
+                str(occurrence.proposal.get("route_type")) == "workflow"
+                and str(occurrence.proposal.get("route_id")) == "control_recovery"
+            )
+        ):
             self.store.transition_occurrence(
                 occurrence.occurrence_id,
                 expected_states={"running"},
