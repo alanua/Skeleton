@@ -25,18 +25,26 @@ _REAL_CODEX_ENV = "SKELETON_REAL_CODEX_BIN"
 _OPENHANDS_ENV = "SKELETON_OPENHANDS_BIN"
 _ORIGINAL_PATH_ENV = "SKELETON_CODEGEN_ORIGINAL_PATH"
 _OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
-_OPENHANDS_LLM_API_KEY_ENV = "LLM_API_KEY"
-_OPENHANDS_LLM_MODEL_ENV = "LLM_MODEL"
-_OPENHANDS_LLM_BASE_URL_ENV = "LLM_BASE_URL"
 _OPENROUTER_REQUIRED_ENV = "SKELETON_OPENHANDS_OPENROUTER_REQUIRED"
+_OPENROUTER_FALLBACK_KEY_ENV = "SKELETON_OPENROUTER_FALLBACK_API_KEY"
+_OPENROUTER_FALLBACK_MODEL_ENV = "SKELETON_OPENROUTER_FALLBACK_MODEL"
 _OPENROUTER_CREDENTIAL_NAME = "openrouter-api-key"
 _OPENROUTER_FREE_MODEL = "openrouter/z-ai/glm-4.5-air:free"
+_OPENHANDS_MAX_BUDGET_USD = "0.50"
+_OPENHANDS_MAX_ITERATIONS = "20"
+_OPENHANDS_LLM_NUM_RETRIES = "1"
 _PROVIDER_OVERRIDE_ENV = frozenset(
     {
         _OPENROUTER_API_KEY_ENV,
-        _OPENHANDS_LLM_API_KEY_ENV,
-        _OPENHANDS_LLM_MODEL_ENV,
-        _OPENHANDS_LLM_BASE_URL_ENV,
+        "LLM_API_KEY",
+        "LLM_MODEL",
+        "LLM_BASE_URL",
+        "MAX_BUDGET_PER_TASK",
+        "MAX_ITERATIONS",
+        "LLM_NUM_RETRIES",
+        _OPENROUTER_FALLBACK_KEY_ENV,
+        _OPENROUTER_FALLBACK_MODEL_ENV,
+        _OPENROUTER_REQUIRED_ENV,
     }
 )
 
@@ -92,11 +100,20 @@ def main() -> int:
     real_codex = os.environ.get("SKELETON_REAL_CODEX_BIN", "")
     openhands = os.environ.get("SKELETON_OPENHANDS_BIN", "")
     original_path = os.environ.get("SKELETON_CODEGEN_ORIGINAL_PATH", os.environ.get("PATH", ""))
+    openrouter_required = os.environ.get("SKELETON_OPENHANDS_OPENROUTER_REQUIRED") == "1"
+    openrouter_key = os.environ.get("SKELETON_OPENROUTER_FALLBACK_API_KEY", "")
+    openrouter_model = os.environ.get("SKELETON_OPENROUTER_FALLBACK_MODEL", "")
     if not real_codex or not Path(real_codex).is_file():
         return 127
     stdin_text = sys.stdin.read()
     child_env = dict(os.environ)
     child_env["PATH"] = original_path
+    child_env.pop("SKELETON_OPENROUTER_FALLBACK_API_KEY", None)
+    child_env.pop("SKELETON_OPENROUTER_FALLBACK_MODEL", None)
+    child_env.pop("SKELETON_OPENHANDS_OPENROUTER_REQUIRED", None)
+    child_env.pop("LLM_API_KEY", None)
+    child_env.pop("LLM_MODEL", None)
+    child_env.pop("LLM_BASE_URL", None)
     codex = subprocess.run(
         [real_codex, *sys.argv[1:]],
         input=stdin_text,
@@ -115,12 +132,18 @@ def main() -> int:
         sys.stdout.write(codex.stdout)
         sys.stderr.write(codex.stderr)
         return codex.returncode
-    if child_env.get("SKELETON_OPENHANDS_OPENROUTER_REQUIRED") == "1" and (
-        not child_env.get("LLM_API_KEY", "")
-        or not child_env.get("LLM_MODEL", "").startswith("openrouter/")
+    if openrouter_required and (
+        not openrouter_key or not openrouter_model.startswith("openrouter/")
     ):
         sys.stderr.write("SKELETON_CODEGEN_FALLBACK_CONFIG_UNAVAILABLE\n")
         return codex.returncode
+    fallback_env = dict(child_env)
+    if openrouter_required:
+        fallback_env["LLM_API_KEY"] = openrouter_key
+        fallback_env["LLM_MODEL"] = openrouter_model
+        fallback_env["MAX_BUDGET_PER_TASK"] = "0.50"
+        fallback_env["MAX_ITERATIONS"] = "20"
+        fallback_env["LLM_NUM_RETRIES"] = "1"
     fallback = subprocess.run(
         [
             openhands,
@@ -134,7 +157,7 @@ def main() -> int:
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env=child_env,
+        env=fallback_env,
         check=False,
     )
     if fallback.returncode == 0:
@@ -178,8 +201,8 @@ def _bind_trusted_openrouter(environment: dict[str, str], authority_environment:
     api_key = _trusted_openrouter_api_key(authority_environment)
     if not api_key:
         return False
-    environment[_OPENHANDS_LLM_API_KEY_ENV] = api_key
-    environment[_OPENHANDS_LLM_MODEL_ENV] = _OPENROUTER_FREE_MODEL
+    environment[_OPENROUTER_FALLBACK_KEY_ENV] = api_key
+    environment[_OPENROUTER_FALLBACK_MODEL_ENV] = _OPENROUTER_FREE_MODEL
     return True
 
 
