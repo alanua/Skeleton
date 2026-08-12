@@ -33,7 +33,16 @@ jobs:
             'fastapi==0.116.1' \
             'jinja2==3.1.6' \
             'uvicorn==0.35.0' \
-            'httpx==0.28.1'
+            'httpx==0.28.1' \
+            'numpy==2.4.6' \
+            'ezdxf==1.4.4' \
+            'shapely==2.1.2' \
+            'networkx==3.6.1' \
+            'pillow==12.2.0' \
+            'pdfplumber' \
+            'pypdf' \
+            'opencv-python-headless' \
+            'scikit-image'
       - name: Compile and shell syntax
         run: |
           set -euo pipefail
@@ -49,6 +58,7 @@ jobs:
           set -euo pipefail
           python3 -m pytest -q
       - name: Diff check
+        if: always()
         run: |
           set -euo pipefail
           git diff --check c84537c37023a46946b863163bd588a59464f27c..a1a034ca1f9c5b75d171deb5e832e54f82f8512f
