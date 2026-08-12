@@ -19,6 +19,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
@@ -126,11 +127,52 @@ fun HomeScreen(
             "Синтетичний режим. Живі значення, пристрої та дії очікують канонічне джерело.",
             style = MaterialTheme.typography.bodyLarge,
         )
+        Seek15Controls()
         Button(onClick = onRemote) {
             Icon(Icons.Filled.SettingsRemote, contentDescription = "Пульт")
             Spacer(modifier = Modifier.size(8.dp))
             Text("Пульт")
         }
+    }
+}
+
+@Composable
+private fun Seek15Controls() {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Seek15Button(
+            contentDescription = "control-back-15",
+            icon = SeekBack15Icon,
+            label = "15 с",
+            modifier = Modifier.weight(1f),
+        )
+        Seek15Button(
+            contentDescription = "control-forward-15",
+            icon = SeekForward15Icon,
+            label = "15 с",
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+@Composable
+private fun Seek15Button(
+    contentDescription: String,
+    icon: ImageVector,
+    label: String,
+    modifier: Modifier = Modifier,
+) {
+    OutlinedButton(
+        onClick = {},
+        modifier = modifier.semantics {
+            this.contentDescription = contentDescription
+        },
+    ) {
+        Icon(icon, contentDescription = null)
+        Spacer(modifier = Modifier.size(8.dp))
+        Text(label)
     }
 }
 
@@ -193,6 +235,74 @@ private fun HomeRoute.icon(): ImageVector = when (this) {
     HomeRoute.Devices -> Icons.Filled.Devices
     HomeRoute.Remote -> Icons.Filled.SettingsRemote
     HomeRoute.OperatorHub -> MaterialHubIcon
+}
+
+private val SeekBack15Icon: ImageVector by lazy {
+    ImageVector.Builder(
+        name = "SeekBack15",
+        defaultWidth = 24.dp,
+        defaultHeight = 24.dp,
+        viewportWidth = 24f,
+        viewportHeight = 24f,
+    ).apply {
+        path(
+            fill = SolidColor(Color.Black),
+            pathFillType = PathFillType.NonZero,
+        ) {
+            moveTo(11f, 4f)
+            lineTo(6f, 8f)
+            lineTo(11f, 12f)
+            lineTo(11f, 9.1f)
+            quadTo(13.9f, 9.15f, 15.95f, 11.15f)
+            quadTo(18f, 13.15f, 18f, 16f)
+            quadTo(18f, 18.1f, 16.9f, 19.7f)
+            quadTo(15.8f, 21.3f, 13.9f, 22f)
+            lineTo(12.9f, 20.05f)
+            quadTo(14.35f, 19.5f, 15.18f, 18.42f)
+            quadTo(16f, 17.35f, 16f, 16f)
+            quadTo(16f, 14f, 14.55f, 12.6f)
+            quadTo(13.1f, 11.2f, 11f, 11.1f)
+            lineTo(11f, 14f)
+            lineTo(4f, 8f)
+            lineTo(11f, 2f)
+            lineTo(11f, 4f)
+            close()
+        }
+    }.build()
+}
+
+private val SeekForward15Icon: ImageVector by lazy {
+    ImageVector.Builder(
+        name = "SeekForward15",
+        defaultWidth = 24.dp,
+        defaultHeight = 24.dp,
+        viewportWidth = 24f,
+        viewportHeight = 24f,
+    ).apply {
+        path(
+            fill = SolidColor(Color.Black),
+            pathFillType = PathFillType.NonZero,
+        ) {
+            moveTo(13f, 4f)
+            lineTo(18f, 8f)
+            lineTo(13f, 12f)
+            lineTo(13f, 9.1f)
+            quadTo(10.1f, 9.15f, 8.05f, 11.15f)
+            quadTo(6f, 13.15f, 6f, 16f)
+            quadTo(6f, 18.1f, 7.1f, 19.7f)
+            quadTo(8.2f, 21.3f, 10.1f, 22f)
+            lineTo(11.1f, 20.05f)
+            quadTo(9.65f, 19.5f, 8.82f, 18.42f)
+            quadTo(8f, 17.35f, 8f, 16f)
+            quadTo(8f, 14f, 9.45f, 12.6f)
+            quadTo(10.9f, 11.2f, 13f, 11.1f)
+            lineTo(13f, 14f)
+            lineTo(20f, 8f)
+            lineTo(13f, 2f)
+            lineTo(13f, 4f)
+            close()
+        }
+    }.build()
 }
 
 private val MaterialHubIcon: ImageVector by lazy {
