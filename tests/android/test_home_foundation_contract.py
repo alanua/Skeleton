@@ -21,7 +21,7 @@ def test_debug_preview_has_distinct_install_identity() -> None:
     assert 'applicationId = "com.skeleton.home"' in gradle
     assert 'applicationIdSuffix = ".preview"' in gradle
     assert 'versionNameSuffix = "-preview"' in gradle
-    assert '<string name="app_name">Skeleton Home Preview</string>' in debug_strings
+    assert '<string name="app_name">Home</string>' in debug_strings
 
 
 def test_native_compose_shell_without_webview() -> None:
@@ -33,13 +33,14 @@ def test_native_compose_shell_without_webview() -> None:
     assert "android.webkit" not in source
 
 
-def test_bottom_navigation_contract_and_remote_contextual_route() -> None:
+def test_bottom_navigation_contract_without_remote_destination() -> None:
     nav = read("app/src/main/java/com/skeleton/home/navigation/HomeRoutes.kt")
     assert 'val PrimaryBottomRoutes = listOf(\n    HomeRoute.Home,\n    HomeRoute.Video,\n    HomeRoute.Devices,\n)' in nav
     assert "fun bottomRoutesFor(" in nav
     assert "PrimaryBottomRoutes + HomeRoute.OperatorHub" in nav
-    assert 'data object Remote : HomeRoute("remote", "Пульт")' in nav
-    assert "HomeRoute.Remote" not in nav.split("val PrimaryBottomRoutes = listOf(", 1)[1].split(")", 1)[0]
+    assert "data object Remote" not in nav
+    assert '"remote"' not in nav
+    assert '"Пульт"' not in nav
     assert '"Головна"' in nav
     assert '"Відео"' in nav
     assert '"Пристрої"' in nav
@@ -85,6 +86,40 @@ def test_future_interfaces_and_state_values_exist() -> None:
         assert value in contracts
 
 
+def test_current_home_visual_structure_is_synthetic_and_capability_driven() -> None:
+    contracts = read("app/src/main/java/com/skeleton/home/domain/HomeContracts.kt")
+    repo = read("app/src/main/java/com/skeleton/home/data/SyntheticHomeRepository.kt")
+    ui = read("app/src/main/java/com/skeleton/home/ui/HomeApp.kt")
+    android_test = read("app/src/androidTest/java/com/skeleton/home/HomeShellUiTest.kt")
+
+    for name in [
+        "enum class HomeMode",
+        "enum class HomeControlCapability",
+        "data class HomeControlSurfaceState",
+        "data class SyntheticActiveMedia",
+        "data class SyntheticPlaybackState",
+    ]:
+        assert name in contracts
+    for label in ["YouTube", "Cast", "TV", "Games", "Placeholder Series", "Synthetic artwork"]:
+        assert label in repo or label in ui
+    for marker in [
+        "home-top-status-row",
+        "home-mode-row",
+        "home-active-media-card",
+        "home-playback-progress",
+        "home-adaptive-controls",
+        "control-back-15",
+        "control-play-pause",
+        "control-forward-15",
+        "control-mute",
+        "home-volume-control",
+    ]:
+        assert marker in ui
+        assert marker in android_test
+    assert "HomeControlCapability.VOLUME in surface.capabilities" in ui
+    assert "capability !in surface.capabilities" in ui
+
+
 def test_no_endpoint_secret_or_live_fixture_values() -> None:
     text = "\n".join(
         path.read_text(encoding="utf-8")
@@ -98,3 +133,4 @@ def test_no_endpoint_secret_or_live_fixture_values() -> None:
     for word in forbidden:
         assert word not in lowered
     assert "Синтетичний режим" in text
+    assert "Пульт" not in text

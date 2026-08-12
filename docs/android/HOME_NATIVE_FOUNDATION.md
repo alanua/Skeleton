@@ -8,7 +8,7 @@ This worktree adds a source-independent native Android Home foundation under `an
 - App display name: `Home`.
 - Synthetic `OPERATOR` bottom navigation has exactly four tabs: `Головна`, `Відео`, `Пристрої`, `СК`.
 - Synthetic `ORDINARY` and `SPOUSE` bottom navigation has exactly three tabs: `Головна`, `Відео`, `Пристрої`.
-- `Пульт` is a contextual/direct route and is not a fourth bottom tab.
+- `Головна` is the adaptive synthetic remote/control surface; there is no standalone remote destination.
 - `СК` is an operator-only Material hub destination in the bottom navigation, not a Home screen card.
 - Synthetic `OPERATOR` sessions can see and navigate to the internal native `СК` placeholder dashboard.
 - Synthetic `ORDINARY` and `SPOUSE` sessions do not render `СК` in bottom navigation, and direct navigation fails closed through `canNavigateTo`.
