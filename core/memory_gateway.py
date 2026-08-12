@@ -94,6 +94,10 @@ class MemoryGateway:
         self._skeleton_memory = skeleton_memory
         self._private_memory_storage = private_memory_storage
 
+    @property
+    def private_runtime_capable(self) -> bool:
+        return not self._token.public_mode
+
     def execute(self, request: Mapping[str, Any]) -> dict[str, object]:
         if not isinstance(request, Mapping):
             raise MemoryGatewayPolicyError("INVALID_REQUEST", "request must be an object")

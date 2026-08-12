@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.project_memory_request.schema.json",
+  "title": "Project Memory Request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "operation", "project_id", "memory_class"],
+  "properties": {
+    "schema": {"const": "skeleton.project_memory.request.v1"},
+    "operation": {
+      "enum": [
+        "read_context",
+        "propose_fact",
+        "propose_task",
+        "propose_preference",
+        "list_pending_review"
+      ]
+    },
+    "project_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},
+    "dataset_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},
+    "memory_class": {
+      "enum": ["CANON", "REVIEW", "BACKLOG", "REJECTED", "PRIVATE", "TEMPORARY"]
+    },
+    "capability_class": {"enum": ["PUBLIC_SAFE", "PRIVATE_RUNTIME_ONLY"]},
+    "key": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},
+    "canonical_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}:[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},
+    "value": true,
+    "idempotency_key": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},
+    "actor_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},
+    "reason_code": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},
+    "approval_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"}
+  }
+}
