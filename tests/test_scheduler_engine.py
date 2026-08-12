@@ -11,6 +11,7 @@ from core.scheduler_engine import (
 from core.domain_event_graph import DomainEventGraph
 from core.scheduler_models import ScheduleSpec, build_execution_proposal, stable_occurrence_id
 from core.scheduler_store import SchedulerStore
+from core.control_recovery import FailureClass, RecoveryStore, execute_recovery_packet
 from core.shared_dispatch import (
     PRIVACY_PUBLIC_SAFE,
     SharedDispatcher,
@@ -130,6 +131,32 @@ def test_notify_only_tick_creates_once_and_prevents_duplicate(tmp_path) -> None:
     assert first["states"]["done"] == 1
     assert second["created_occurrences"] == 0
     assert store.occurrence_count("test.once") == 1
+
+
+def test_tick_exposes_public_safe_learning_metrics(tmp_path) -> None:
+    scheduler_store = SchedulerStore(tmp_path / "scheduler.sqlite3")
+    recovery_store = RecoveryStore(tmp_path / "recovery.sqlite3")
+    packet = {
+        "schema": "skeleton.control_recovery.v1",
+        "failure_class": FailureClass.STALE_BASE.value,
+        "failure_key": "control:stale-base:metrics",
+        "reason_class": "STALE_BASE",
+        "task_kind": "code_generation",
+        "phase": "preflight",
+    }
+    execute_recovery_packet(
+        packet,
+        store=recovery_store,
+        now=100,
+        action_executor=lambda action: (
+            "DONE: ok\nsuccess_criteria=met" if action else "DONE: ok\nsuccess_criteria=met"
+        ),
+        canary_executor=lambda _canary: True,
+    )
+    receipt = SchedulerEngine(scheduler_store, learning_store=recovery_store).tick(now=100)
+    assert receipt["learning_metrics"]["incident_classes_seen"] == 1
+    assert receipt["learning_metrics"]["lessons_verified"] == 1
+    assert receipt["private_payloads_included"] is False
 
 
 def test_misfire_skip_records_skipped(tmp_path) -> None:

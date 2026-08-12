@@ -957,6 +957,51 @@ def test_queue_replenisher_public_safe_no_secrets_wording_remains_eligible() -> 
     assert runner.queue_replenisher_issue_is_public_safe(issue)
 
 
+def test_public_safe_adaptation_classifiers_are_bounded() -> None:
+    old_sha = "a" * 40
+    new_sha = "b" * 40
+    stale = runner.classify_stale_base_rebuild(
+        expected_main_sha=old_sha,
+        current_main_sha=new_sha,
+        intent_still_valid=True,
+        allowlist_still_valid=True,
+    )
+    conflict = runner.classify_merge_conflict_replacement(
+        pr_number=123,
+        mergeable=False,
+        mergeable_state="dirty",
+        base_advanced=True,
+        intent_still_valid=True,
+        allowlist_still_valid=True,
+    )
+    android = runner.classify_toolchain_capability_mismatch(
+        missing_tool="gradle",
+        capability="android:gradle",
+    )
+    unknown = runner.classify_toolchain_capability_mismatch(
+        missing_tool="curl | sh",
+        capability="unknown:tool",
+    )
+    idle = runner.classify_queue_idle_recovery(
+        ready_count=0,
+        running_count=0,
+        eligible_count=2,
+    )
+
+    assert stale is not None
+    assert stale["failure_class"] == runner.FailureClass.STALE_BASE.value
+    assert stale["operation"] == "current_main_rebuild"
+    assert old_sha not in str(stale["fingerprint"])
+    assert conflict is not None
+    assert conflict["operation"] == "current_main_replacement"
+    assert android["validation_lane"] == "github_actions:android_home_ci"
+    assert android["operation"] == runner.SafeResponseClass.APPROVED_GITHUB_VALIDATION_LANE.value
+    assert "curl" not in str(unknown)
+    assert unknown["operation"] == runner.SafeResponseClass.REPAIR_TASK_REQUIRED.value
+    assert idle is not None
+    assert idle["failure_class"] == runner.FailureClass.QUEUE_IDLE_WITH_ELIGIBLE_WORK.value
+
+
 def test_queue_replenisher_public_safe_no_tokens_wording_remains_eligible() -> None:
     issue = _queue_candidate_issue(
         236902,

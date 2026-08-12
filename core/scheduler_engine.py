@@ -10,6 +10,7 @@ from typing import Any
 import uuid
 
 from core.domain_event_graph import DomainEventGraph, DomainEventGraphError
+from core.control_recovery import RecoveryStore
 from core.scheduler_models import (
     TICK_RECEIPT_SCHEMA,
     StoredSchedule,
@@ -66,12 +67,14 @@ class SchedulerEngine:
         config: SchedulerEngineConfig | None = None,
         clock: Any | None = None,
         domain_event_graph: DomainEventGraph | None = None,
+        learning_store: RecoveryStore | None = None,
     ) -> None:
         self.store = store
         self.config = config or SchedulerEngineConfig()
         self._owner = f"scheduler-engine:{uuid.uuid4().hex}"
         self._clock = clock or time.time
         self._domain_event_graph = domain_event_graph
+        self._learning_store = learning_store
 
     def tick(
         self, *, now: int | None = None, dispatcher: SharedDispatcher | None = None
@@ -165,6 +168,17 @@ class SchedulerEngine:
             "finalized_stale_running": recovered.get("finalized", 0),
             "resumed_waiting_dependencies": resumed_dependencies,
             "dispatch": dispatch_receipt,
+            "learning_metrics": (
+                self._learning_store.learning_metrics()
+                if self._learning_store is not None
+                else {
+                    "incident_classes_seen": 0,
+                    "lessons_verified": 0,
+                    "lessons_failed": 0,
+                    "repeats_prevented": 0,
+                    "needs_operator_count": 0,
+                }
+            ),
             "states": {
                 state: counters.get(state, 0)
                 for state in (

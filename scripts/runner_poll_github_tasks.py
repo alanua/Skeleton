@@ -42,6 +42,8 @@ from core.control_recovery import (
     CONTROL_RECOVERY_SCHEMA,
     FailureClass,
     RecoveryStore,
+    SafeResponseClass,
+    derive_failure_fingerprint,
     execute_recovery_packet,
     is_codegen_unknown_variant_max_failure,
     production_control_recovery_db_path,
@@ -174,6 +176,9 @@ RUNNER_MODE_ENFORCE = "enforce"
 RUNNER_MODES = frozenset((RUNNER_MODE_OFF, RUNNER_MODE_SHADOW, RUNNER_MODE_ENFORCE))
 UNIVERSAL_RUNNER_ALLOWED_STATUS = "allowed"
 LAST_RUNNER_SHADOW_RECEIPT: dict[str, object] | None = None
+APPROVED_VALIDATION_LANES_BY_CAPABILITY: Mapping[str, str] = {
+    "android:gradle": "github_actions:android_home_ci",
+}
 
 
 def trusted_runner_comment_authors() -> frozenset[str]:
@@ -1911,6 +1916,144 @@ def control_recovery_db_path() -> Path:
     if ROOT != MODULE_ROOT:
         return ROOT / ".codex" / "control_recovery.sqlite3"
     return production_control_recovery_db_path()
+
+
+def approved_validation_lane_for_capability(capability: str) -> str | None:
+    if not isinstance(capability, str):
+        return None
+    return APPROVED_VALIDATION_LANES_BY_CAPABILITY.get(capability)
+
+
+def public_safe_failure_packet(
+    *,
+    failure_class: FailureClass,
+    failure_key: str,
+    reason_class: str,
+    task_kind: str = "runner_task",
+    phase: str = "dispatch",
+    capability: str | None = None,
+    validation_lane: str | None = None,
+    operation: str | None = None,
+) -> dict[str, object]:
+    packet: dict[str, object] = {
+        "schema": CONTROL_RECOVERY_SCHEMA,
+        "failure_class": failure_class.value,
+        "failure_key": failure_key,
+        "reason_class": reason_class,
+        "task_kind": task_kind,
+        "phase": phase,
+        "route_type": "runner",
+        "repository": REPO.replace("/", ":"),
+        "max_attempts": 2,
+        "backoff_seconds": 30,
+    }
+    if capability is not None:
+        packet["capability"] = capability
+    if validation_lane is not None:
+        packet["validation_lane"] = validation_lane
+    if operation is not None:
+        packet["operation"] = operation
+    packet["fingerprint"] = derive_failure_fingerprint(packet, failure_class=failure_class)
+    return packet
+
+
+def classify_stale_base_rebuild(
+    *,
+    expected_main_sha: str,
+    current_main_sha: str,
+    intent_still_valid: bool,
+    allowlist_still_valid: bool,
+) -> dict[str, object] | None:
+    if (
+        expected_main_sha == current_main_sha
+        or not _looks_like_sha(expected_main_sha)
+        or not _looks_like_sha(current_main_sha)
+        or not intent_still_valid
+        or not allowlist_still_valid
+    ):
+        return None
+    return public_safe_failure_packet(
+        failure_class=FailureClass.STALE_BASE,
+        failure_key=f"control:stale-base:{expected_main_sha[:12]}:{current_main_sha[:12]}",
+        reason_class="STALE_BASE",
+        phase="preflight",
+        operation="current_main_rebuild",
+    )
+
+
+def classify_merge_conflict_replacement(
+    *,
+    pr_number: int,
+    mergeable: object,
+    mergeable_state: str,
+    base_advanced: bool,
+    intent_still_valid: bool,
+    allowlist_still_valid: bool,
+) -> dict[str, object] | None:
+    conflict = mergeable is False or str(mergeable_state or "").lower() in {
+        "dirty",
+        "blocked",
+        "conflicting",
+    }
+    if (
+        not conflict
+        or not isinstance(pr_number, int)
+        or pr_number <= 0
+        or not base_advanced
+        or not intent_still_valid
+        or not allowlist_still_valid
+    ):
+        return None
+    return public_safe_failure_packet(
+        failure_class=FailureClass.MERGE_CONFLICT_AFTER_MAIN_ADVANCE,
+        failure_key=f"control:merge-conflict:{pr_number}",
+        reason_class="MERGE_CONFLICT_AFTER_MAIN_ADVANCE",
+        phase="publish",
+        operation="current_main_replacement",
+    )
+
+
+def classify_toolchain_capability_mismatch(
+    *,
+    missing_tool: str,
+    capability: str,
+) -> dict[str, object]:
+    lane = approved_validation_lane_for_capability(capability)
+    packet = public_safe_failure_packet(
+        failure_class=FailureClass.TOOLCHAIN_CAPABILITY_MISMATCH,
+        failure_key=f"control:toolchain:{capability.replace(':', '-')}",
+        reason_class="TOOLCHAIN_CAPABILITY_MISMATCH",
+        phase="validation",
+        capability=capability,
+        validation_lane=lane,
+        operation=(
+            SafeResponseClass.APPROVED_GITHUB_VALIDATION_LANE.value
+            if lane is not None
+            else SafeResponseClass.REPAIR_TASK_REQUIRED.value
+        ),
+    )
+    packet["local_tool_class"] = (
+        missing_tool if re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", missing_tool) else "unknown"
+    )
+    return packet
+
+
+def classify_queue_idle_recovery(
+    *, ready_count: int, running_count: int, eligible_count: int
+) -> dict[str, object] | None:
+    if ready_count != 0 or running_count != 0 or eligible_count <= 0:
+        return None
+    return public_safe_failure_packet(
+        failure_class=FailureClass.QUEUE_IDLE_WITH_ELIGIBLE_WORK,
+        failure_key="control:queue-idle:eligible-work",
+        reason_class="QUEUE_IDLE_WITH_ELIGIBLE_WORK",
+        phase="poll",
+        operation="queue_replenish",
+    )
+
+
+def _looks_like_sha(value: str) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-fA-F]{40}", value) is not None
 
 
 def scheduler_db_path() -> Path:
@@ -14189,6 +14332,15 @@ def _control_recovery_packet_from_body(body: str) -> Mapping[str, Any]:
         "failure_key",
         "status",
         "reason",
+        "reason_class",
+        "task_kind",
+        "operation",
+        "phase",
+        "route_type",
+        "route_id",
+        "capability",
+        "validation_lane",
+        "repository",
         "max_attempts",
         "backoff_seconds",
         "command",
@@ -14213,6 +14365,12 @@ def _control_recovery_packet_from_body(body: str) -> Mapping[str, Any]:
         ("Failure Key", "failure_key"),
         ("Status", "status"),
         ("Reason", "reason"),
+        ("Reason Class", "reason_class"),
+        ("Task Kind", "task_kind"),
+        ("Operation", "operation"),
+        ("Phase", "phase"),
+        ("Capability", "capability"),
+        ("Validation Lane", "validation_lane"),
         ("Max Attempts", "max_attempts"),
         ("Backoff Seconds", "backoff_seconds"),
     ):
@@ -14257,6 +14415,20 @@ def control_plane_self_healing_recovery(body: str, workdir: str) -> str:
                 [
                     "action=issue_runner_continue",
                     "reason=github_actions_lane_isolated",
+                ],
+                "met",
+            )
+        if action_id in {
+            "current_main_rebuild",
+            "current_main_replacement",
+            "android_github_ci_validation",
+        }:
+            return _maintenance_report(
+                "DONE",
+                task_id,
+                [
+                    f"action={action_id}",
+                    "reason=pre_registered_adaptation_selected",
                 ],
                 "met",
             )
