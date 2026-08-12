@@ -26,6 +26,11 @@ def _wire_queue(monkeypatch, tmp_path: Path, *, progress: bool):
     monkeypatch.setattr(runner, "get_ready_issues", lambda: list(ready))
     monkeypatch.setattr(
         runner,
+        "get_run_now_queue_intake_candidate_issues",
+        lambda: [],
+    )
+    monkeypatch.setattr(
+        runner,
         "get_queue_replenisher_candidate_issues",
         lambda: [candidate],
     )
@@ -43,7 +48,7 @@ def _wire_queue(monkeypatch, tmp_path: Path, *, progress: bool):
             ready.append(candidate)
         return _done_report()
 
-    monkeypatch.setattr(runner, "replenish_runner_queue", replenish)
+    monkeypatch.setattr(runner, "_impl_replenish_runner_queue", replenish)
     return ready, candidate, calls, db_path
 
 
