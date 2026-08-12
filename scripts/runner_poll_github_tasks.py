@@ -50,6 +50,8 @@ _impl_validate_pr_branch = validate_pr_branch
 _impl_telegram_approve_digest_is_signed = telegram_approve_digest_is_signed
 _impl_telegram_approve_audit_matches_request = telegram_approve_audit_matches_request
 _impl_process_issue = process_issue
+_impl_control_recovery_db_path = control_recovery_db_path
+_impl_get_queue_replenisher_candidate_issues = get_queue_replenisher_candidate_issues
 
 
 def trusted_runner_comment_authors(*args, **kwargs):
@@ -92,6 +94,39 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
     return _impl_process_issue(issue, workdir=workdir)
 
 
+def control_recovery_db_path() -> Path:
+    """Use production recovery state only from the canonical main checkout."""
+    if ROOT != MODULE_ROOT:
+        return ROOT / ".codex" / "control_recovery.sqlite3"
+    try:
+        code, output = run_command(
+            ["git", "branch", "--show-current"],
+            cwd=ROOT,
+        )
+    except Exception:
+        code, output = 1, ""
+    if code == 0 and output.strip() == "main":
+        return production_control_recovery_db_path()
+    return ROOT / ".codex" / "control_recovery.sqlite3"
+
+
+def get_queue_replenisher_candidate_issues() -> list[dict[str, Any]]:
+    """Discover normal backlog plus RUN_NOW through one read-only candidate set."""
+    discovered: dict[int, dict[str, Any]] = {}
+    unnumbered: list[dict[str, Any]] = []
+    for source in (
+        _impl_get_queue_replenisher_candidate_issues(),
+        get_run_now_queue_intake_candidate_issues(),
+    ):
+        for issue in source:
+            number = _queue_replenisher_issue_number(issue)
+            if number is None:
+                unnumbered.append(issue)
+                continue
+            discovered.setdefault(number, issue)
+    return [*discovered.values(), *unnumbered]
+
+
 def _autonomous_queue_eligible_snapshot() -> tuple[
     list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]
 ]:
@@ -107,30 +142,68 @@ def _autonomous_queue_eligible_snapshot() -> tuple[
     return ready_issues, candidate_issues, eligible
 
 
-def _autonomous_queue_occurrence_key(eligible: list[dict[str, Any]]) -> str:
-    numbers = sorted(
-        number
-        for issue in eligible
-        if (number := _queue_replenisher_issue_number(issue)) is not None
-    )
-    payload = ",".join(str(number) for number in numbers).encode("ascii")
-    digest = hashlib.sha256(payload).hexdigest()[:20]
-    return f"control:queue-idle:{digest}"
-
-
-def _autonomous_queue_packet(eligible: list[dict[str, Any]]) -> dict[str, object]:
-    packet = public_safe_failure_packet(
+def _autonomous_queue_stable_packet() -> dict[str, object]:
+    return public_safe_failure_packet(
         failure_class=FailureClass.QUEUE_IDLE_WITH_ELIGIBLE_WORK,
-        failure_key=_autonomous_queue_occurrence_key(eligible),
+        failure_key="control:queue-idle:episode",
         reason_class="QUEUE_IDLE_WITH_ELIGIBLE_WORK",
         task_kind="runner_poll",
         phase="queue_intake",
         capability="queue:label",
         operation="replenish_runner_queue",
     )
+
+
+def _autonomous_queue_verified_generation(
+    store: RecoveryStore,
+    fingerprint: str,
+) -> str:
+    """Return a bounded generation that advances only after verified recovery."""
+    try:
+        store.initialize()
+        with store._connect() as connection:  # RecoveryStore owns this private DB schema.
+            row = connection.execute(
+                "SELECT verification_json FROM failure_lessons WHERE fingerprint=?",
+                (fingerprint,),
+            ).fetchone()
+        if row is None:
+            return "initial"
+        parsed = json.loads(str(row["verification_json"]))
+        evidence_ref = parsed.get("evidence_ref") if isinstance(parsed, dict) else None
+        if not isinstance(evidence_ref, str) or not evidence_ref:
+            return "initial"
+        return hashlib.sha256(evidence_ref.encode("utf-8")).hexdigest()[:16]
+    except Exception:
+        return "initial"
+
+
+def _autonomous_queue_occurrence_key(
+    eligible: list[dict[str, Any]],
+    generation: str,
+) -> str:
+    numbers = sorted(
+        number
+        for issue in eligible
+        if (number := _queue_replenisher_issue_number(issue)) is not None
+    )
+    payload = (",".join(str(number) for number in numbers) + "|" + generation).encode(
+        "ascii"
+    )
+    digest = hashlib.sha256(payload).hexdigest()[:20]
+    return f"control:queue-idle:{digest}"
+
+
+def _autonomous_queue_packet(
+    eligible: list[dict[str, Any]],
+    store: RecoveryStore,
+) -> dict[str, object]:
+    packet = _autonomous_queue_stable_packet()
+    fingerprint = str(packet["fingerprint"])
+    generation = _autonomous_queue_verified_generation(store, fingerprint)
+    packet["failure_key"] = _autonomous_queue_occurrence_key(eligible, generation)
     packet["route_id"] = "runner_queue"
-    # The failure key is occurrence-specific, while the fingerprint remains a
-    # stable public-safe incident class so verified lessons can be reused.
+    # Failure key is episode-specific; fingerprint remains stable so a verified
+    # response is reusable only after current queue gates are recomputed.
     packet["fingerprint"] = derive_failure_fingerprint(
         packet,
         failure_class=FailureClass.QUEUE_IDLE_WITH_ELIGIBLE_WORK,
@@ -147,14 +220,14 @@ def _autonomous_queue_blocked_report(reason: str) -> str:
     )
 
 
-def _autonomous_queue_replenish_action(expected_key: str) -> str:
+def _autonomous_queue_replenish_action(expected_key: str, generation: str) -> str:
     # Recheck all current gates immediately before the only queue mutation.
     ready_before, _candidates, eligible = _autonomous_queue_eligible_snapshot()
     if ready_before:
         return _autonomous_queue_blocked_report("QUEUE_RECOVERY_READY_WORK_PRESENT")
     if not eligible:
         return _autonomous_queue_blocked_report("QUEUE_RECOVERY_NO_ELIGIBLE_WORK")
-    if _autonomous_queue_occurrence_key(eligible) != expected_key:
+    if _autonomous_queue_occurrence_key(eligible, generation) != expected_key:
         return _autonomous_queue_blocked_report("QUEUE_RECOVERY_CANDIDATES_CHANGED")
 
     report = replenish_runner_queue("")
@@ -172,19 +245,22 @@ def maybe_recover_idle_runner_queue() -> bool:
         ready_before, _candidates, eligible = _autonomous_queue_eligible_snapshot()
         if ready_before or not eligible:
             return False
-        packet = _autonomous_queue_packet(eligible)
+        store = RecoveryStore(control_recovery_db_path())
+        packet = _autonomous_queue_packet(eligible, store)
         expected_key = str(packet["failure_key"])
+        fingerprint = str(packet["fingerprint"])
+        generation = _autonomous_queue_verified_generation(store, fingerprint)
 
         def run_action(action_id: str) -> str:
             if action_id != "queue_reactivate":
                 return _autonomous_queue_blocked_report(
                     "QUEUE_RECOVERY_ACTION_NOT_ALLOWLISTED"
                 )
-            return _autonomous_queue_replenish_action(expected_key)
+            return _autonomous_queue_replenish_action(expected_key, generation)
 
         receipt = execute_recovery_packet(
             packet,
-            store=RecoveryStore(control_recovery_db_path()),
+            store=store,
             now=int(time.time()),
             action_executor=run_action,
             canary_executor=None,
