@@ -97,7 +97,11 @@ def test_missing_scan_action_secret_fails_closed_without_leaking_secret(
 ) -> None:
     root = tmp_path / "scan-actions"
     monkeypatch.setattr(poller, "SCAN_ACTION_ROOT", root)
-    monkeypatch.delenv("CREDENTIALS_DIRECTORY", raising=False)
+    monkeypatch.setattr(
+        poller,
+        "_scan_action_secret",
+        mock.Mock(side_effect=RuntimeError("scan action credential unavailable")),
+    )
     write_issued(root)
 
     with pytest.raises(RuntimeError) as excinfo:
