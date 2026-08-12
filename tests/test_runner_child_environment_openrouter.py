@@ -43,18 +43,22 @@ def test_openrouter_binding_uses_only_trusted_authority_environment(
         "LLM_API_KEY": "synthetic-overlay-llm-key",
         "LLM_MODEL": "openrouter/attacker/model",
         "LLM_BASE_URL": "https://attacker.invalid",
+        "MAX_BUDGET_PER_TASK": "999",
     }
 
     sanitized = sanitize_codegen_child_environment(
         overlay, authority_environment=authority
     )
 
-    assert sanitized["LLM_API_KEY"] == "synthetic-trusted-openrouter-key"
-    assert sanitized["LLM_MODEL"] == child_env._OPENROUTER_FREE_MODEL
+    assert sanitized["SKELETON_OPENROUTER_FALLBACK_API_KEY"] == "synthetic-trusted-openrouter-key"
+    assert sanitized["SKELETON_OPENROUTER_FALLBACK_MODEL"] == child_env._OPENROUTER_FREE_MODEL
     assert sanitized["SKELETON_OPENHANDS_OPENROUTER_REQUIRED"] == "1"
     assert sanitized["SKELETON_OPENHANDS_BIN"] == str(openhands.resolve())
     assert "OPENROUTER_API_KEY" not in sanitized
+    assert "LLM_API_KEY" not in sanitized
+    assert "LLM_MODEL" not in sanitized
     assert "LLM_BASE_URL" not in sanitized
+    assert "MAX_BUDGET_PER_TASK" not in sanitized
     assert "attacker.invalid" not in repr(sanitized)
 
 
@@ -83,8 +87,8 @@ def test_openrouter_binding_reads_systemd_credential_directory(
         },
     )
 
-    assert sanitized["LLM_API_KEY"] == "synthetic-credential-key"
-    assert sanitized["LLM_MODEL"] == child_env._OPENROUTER_FREE_MODEL
+    assert sanitized["SKELETON_OPENROUTER_FALLBACK_API_KEY"] == "synthetic-credential-key"
+    assert sanitized["SKELETON_OPENROUTER_FALLBACK_MODEL"] == child_env._OPENROUTER_FREE_MODEL
     assert sanitized["SKELETON_OPENHANDS_OPENROUTER_REQUIRED"] == "1"
 
 
@@ -104,15 +108,24 @@ def _run_production_wrapper(
     openhands = bin_dir / "openhands-real"
     wrapper = bin_dir / "codex"
     marker = tmp_path / "openhands-argv"
+    codex_env_marker = tmp_path / "codex-env"
     _write_executable(
         codex,
-        "#!/bin/sh\nprintf '%s\\n' 'usage limit reached' >&2\nexit 1\n",
+        "#!/bin/sh\n"
+        "test -z \"${SKELETON_OPENROUTER_FALLBACK_API_KEY:-}\" || exit 21\n"
+        "test -z \"${LLM_API_KEY:-}\" || exit 22\n"
+        "printf '%s\\n' clean > \"$CODEX_ENV_MARKER\"\n"
+        "printf '%s\\n' 'usage limit reached' >&2\n"
+        "exit 1\n",
     )
     _write_executable(
         openhands,
         "#!/bin/sh\n"
         "test \"${LLM_MODEL:-}\" = 'openrouter/synthetic-model' || exit 9\n"
         "test \"${LLM_API_KEY:-}\" = 'synthetic-key' || exit 10\n"
+        "test \"${MAX_BUDGET_PER_TASK:-}\" = '0.50' || exit 11\n"
+        "test \"${MAX_ITERATIONS:-}\" = '20' || exit 12\n"
+        "test \"${LLM_NUM_RETRIES:-}\" = '1' || exit 13\n"
         "printf '%s\\n' \"$@\" > \"$OPENHANDS_MARKER\"\n"
         "exit 0\n",
     )
@@ -126,13 +139,14 @@ def _run_production_wrapper(
             "SKELETON_CODEGEN_ORIGINAL_PATH": environment.get("PATH", "/usr/bin:/bin"),
             "SKELETON_OPENHANDS_OPENROUTER_REQUIRED": "1",
             "OPENHANDS_MARKER": str(marker),
+            "CODEX_ENV_MARKER": str(codex_env_marker),
         }
     )
     if include_openrouter_config:
         environment.update(
             {
-                "LLM_MODEL": "openrouter/synthetic-model",
-                "LLM_API_KEY": "synthetic-key",
+                "SKELETON_OPENROUTER_FALLBACK_MODEL": "openrouter/synthetic-model",
+                "SKELETON_OPENROUTER_FALLBACK_API_KEY": "synthetic-key",
             }
         )
     result = subprocess.run(
@@ -144,6 +158,7 @@ def _run_production_wrapper(
         env=environment,
         check=False,
     )
+    assert codex_env_marker.read_text(encoding="utf-8").strip() == "clean"
     return result, marker
 
 
@@ -160,7 +175,7 @@ def test_production_wrapper_fails_closed_without_openrouter_configuration(
     assert not marker.exists()
 
 
-def test_production_wrapper_runs_openhands_with_environment_override(
+def test_production_wrapper_runs_openhands_with_environment_override_and_budget(
     tmp_path: Path,
 ) -> None:
     result, marker = _run_production_wrapper(
