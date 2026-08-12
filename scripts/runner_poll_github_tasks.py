@@ -50,8 +50,6 @@ _impl_validate_pr_branch = validate_pr_branch
 _impl_telegram_approve_digest_is_signed = telegram_approve_digest_is_signed
 _impl_telegram_approve_audit_matches_request = telegram_approve_audit_matches_request
 _impl_process_issue = process_issue
-_impl_control_recovery_db_path = control_recovery_db_path
-_impl_get_queue_replenisher_candidate_issues = get_queue_replenisher_candidate_issues
 
 
 def trusted_runner_comment_authors(*args, **kwargs):
@@ -92,39 +90,6 @@ def telegram_approve_audit_matches_request(*args, **kwargs):
 
 def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
     return _impl_process_issue(issue, workdir=workdir)
-
-
-def control_recovery_db_path() -> Path:
-    """Use production recovery state only from the canonical main checkout."""
-    if ROOT != MODULE_ROOT:
-        return ROOT / ".codex" / "control_recovery.sqlite3"
-    try:
-        code, output = run_command(
-            ["git", "branch", "--show-current"],
-            cwd=ROOT,
-        )
-    except Exception:
-        code, output = 1, ""
-    if code == 0 and output.strip() == "main":
-        return production_control_recovery_db_path()
-    return ROOT / ".codex" / "control_recovery.sqlite3"
-
-
-def get_queue_replenisher_candidate_issues() -> list[dict[str, Any]]:
-    """Discover normal backlog plus RUN_NOW through one read-only candidate set."""
-    discovered: dict[int, dict[str, Any]] = {}
-    unnumbered: list[dict[str, Any]] = []
-    for source in (
-        _impl_get_queue_replenisher_candidate_issues(),
-        get_run_now_queue_intake_candidate_issues(),
-    ):
-        for issue in source:
-            number = _queue_replenisher_issue_number(issue)
-            if number is None:
-                unnumbered.append(issue)
-                continue
-            discovered.setdefault(number, issue)
-    return [*discovered.values(), *unnumbered]
 
 
 def _autonomous_queue_eligible_snapshot() -> tuple[
@@ -220,7 +185,10 @@ def _autonomous_queue_blocked_report(reason: str) -> str:
     )
 
 
-def _autonomous_queue_replenish_action(expected_key: str, generation: str) -> str:
+def _autonomous_queue_replenish_action(
+    expected_key: str,
+    generation: str,
+) -> str:
     # Recheck all current gates immediately before the only queue mutation.
     ready_before, _candidates, eligible = _autonomous_queue_eligible_snapshot()
     if ready_before:
