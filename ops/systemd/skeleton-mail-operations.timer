@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Skeleton private mail operations scan on bounded cadence
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+RandomizedDelaySec=30s
+Persistent=true
+Unit=skeleton-mail-operations.service
+
+[Install]
+WantedBy=timers.target

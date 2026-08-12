@@ -1,0 +1,23 @@
+[Unit]
+Description=Skeleton private Gmail mail operations worker
+Documentation=docs/MAIL_OPERATIONS.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=agent
+Group=agent
+WorkingDirectory=/home/agent/agent-dev/Skeleton
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 scripts/mail_operations_worker.py --once --account /home/agent/.config/skeleton/mail/gmail-account.json
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/agent/.local/state/skeleton-runner
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

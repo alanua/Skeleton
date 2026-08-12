@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.mail_runtime_receipt.schema.json",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema",
+    "status",
+    "reason",
+    "provider_alias",
+    "public_safe",
+    "private_payloads_included",
+    "external_mail_send_enabled"
+  ],
+  "properties": {
+    "schema": {"const": "skeleton.mail_runtime.receipt.v1"},
+    "status": {"enum": ["DONE", "PARTIAL", "AUTH_REQUIRED"]},
+    "reason": {"type": "string", "maxLength": 128},
+    "provider_alias": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,96}$"},
+    "scan_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+    "reason_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+    "state_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+    "public_safe": {"const": true},
+    "private_payloads_included": {"const": false},
+    "external_mail_send_enabled": {"const": false}
+  }
+}
