@@ -71,6 +71,19 @@ def test_operator_hub_bottom_navigation_and_authorization() -> None:
     assert "Доступ до розділу відхилено" in ui
 
 
+def test_home_seek_15_controls_use_local_dependency_free_icons() -> None:
+    ui = read("app/src/main/java/com/skeleton/home/ui/HomeApp.kt")
+    unavailable_icons = ["Forward" + "15", "Replay" + "15"]
+    for icon in unavailable_icons:
+        assert f"Icons.Filled.{icon}" not in ui
+        assert f"androidx.compose.material.icons.filled.{icon}" not in ui
+    assert 'contentDescription = "control-back-15"' in ui
+    assert 'contentDescription = "control-forward-15"' in ui
+    assert 'name = "SeekBack15"' in ui
+    assert 'name = "SeekForward15"' in ui
+    assert 'label = "15 с"' in ui
+
+
 def test_future_interfaces_and_state_values_exist() -> None:
     contracts = read("app/src/main/java/com/skeleton/home/domain/HomeContracts.kt")
     for name in [
