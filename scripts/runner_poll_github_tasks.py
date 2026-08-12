@@ -279,6 +279,9 @@ HOME_EDGE_AUDIT_PERSIST_V1 = "home_edge_audit_persist_v1"
 HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1 = "home_edge_01_debian_media_bootstrap_v1"
 HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1 = "home_edge_01_post_migration_reconcile_v1"
 HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1 = "home_edge_01_media_source_snapshot_v1"
+HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1 = (
+    "home_edge_01_media_source_snapshot_signer_install_v1"
+)
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
         SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
@@ -322,6 +325,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1,
         HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1,
         HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1,
+        HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1,
         PREPARE_PRIVATE_STATIC_SITE_HANDOFF,
         DEPLOY_PRIVATE_STATIC_SITE,
     )
@@ -381,6 +385,7 @@ PROTECTED_MAINTENANCE_TASK_IDS = frozenset(
         SUMMARIZE_AUFMASS_PRIVATE_REVIEW,
         BUILD_AUFMASS_PRIVATE_SHORTLIST,
         BUILD_AUFMASS_PRIVATE_AREA_SCHEDULE,
+        HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1,
         QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES,
         REPLENISH_RUNNER_QUEUE,
     )
@@ -682,6 +687,18 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "head_repository",
         "head_sha",
         "health_route_present",
+        "installer_blob_sha",
+        "source_installer_blob_sha",
+        "payload_blob_sha",
+        "wrapper_blob_sha",
+        "contract_blob_sha",
+        "protected_copy_verified",
+        "exact_installer_invoked",
+        "privileged_primitive",
+        "installer_result",
+        "post_audit_status",
+        "signer_state",
+        "signer_sudo_authorization",
         "hermes_bridge_status",
         "hermes_gateway_contract",
         "hermes_memory_operation_count",
@@ -13940,6 +13957,435 @@ def home_edge_01_media_source_snapshot_v1(body: str) -> str:
         )
 
 
+HOME_EDGE_SNAPSHOT_SIGNER_INSTALLER_REL = (
+    "scripts/install_home_edge_media_source_snapshot_signer.sh"
+)
+HOME_EDGE_SNAPSHOT_SIGNER_PAYLOAD_REL = (
+    "scripts/home_edge_media_source_snapshot_signer_payload.py"
+)
+HOME_EDGE_SNAPSHOT_SIGNER_WRAPPER_REL = (
+    "scripts/home_edge_media_source_snapshot_signer"
+)
+HOME_EDGE_SNAPSHOT_SIGNER_CONTRACT_REL = "core/home_edge/media_source_snapshot.py"
+HOME_EDGE_SNAPSHOT_SIGNER_INSTALL_ROOT = Path(
+    "/usr/local/lib/skeleton/home-edge/media-source-snapshot"
+)
+HOME_EDGE_SNAPSHOT_SIGNER_EXEC_ROOT = Path(
+    "/usr/local/libexec/skeleton/home-edge/media-source-snapshot"
+)
+HOME_EDGE_SNAPSHOT_SIGNER_PAYLOAD_PATH = (
+    HOME_EDGE_SNAPSHOT_SIGNER_INSTALL_ROOT / "signer_payload.py"
+)
+HOME_EDGE_SNAPSHOT_SIGNER_CONTRACT_PATH = (
+    HOME_EDGE_SNAPSHOT_SIGNER_INSTALL_ROOT / "contract_source.py"
+)
+HOME_EDGE_SNAPSHOT_SIGNER_EXECUTABLE = HOME_EDGE_SNAPSHOT_SIGNER_EXEC_ROOT / "signer"
+HOME_EDGE_SNAPSHOT_SIGNER_SUDOERS_LINE = (
+    "agent ALL=(root) NOPASSWD: "
+    f"{HOME_EDGE_SNAPSHOT_SIGNER_EXECUTABLE} \"\""
+)
+HOME_EDGE_SNAPSHOT_SIGNER_INSTALLER_PATH_RE = re.compile(
+    r'^PROTECTED_INSTALLER_PATH="(?P<path>/usr/local/libexec/skeleton/home-edge/media-source-snapshot-installer/install_home_edge_media_source_snapshot_signer\.sh)"$',
+    re.MULTILINE,
+)
+HOME_EDGE_SNAPSHOT_SIGNER_PIN_RE = re.compile(
+    r'^(?P<name>PAYLOAD|WRAPPER|CONTRACT)_BLOB_SHA="(?P<sha>[0-9a-f]{40})"$',
+    re.MULTILINE,
+)
+
+
+@dataclass(frozen=True)
+class HomeEdgeSnapshotSignerPreflight:
+    checkout_path: Path
+    checkout_head_sha: str
+    installer_blob_sha: str
+    protected_installer_path: str
+    installer_bytes: bytes
+    payload_blob_sha: str
+    wrapper_blob_sha: str
+    contract_blob_sha: str
+    status_lines: list[str]
+
+
+def _git_blob_sha(data: bytes) -> str:
+    header = f"blob {len(data)}\0".encode("ascii")
+    return hashlib.sha1(header + data, usedforsecurity=False).hexdigest()
+
+
+def _read_regular_bytes(path: Path, max_bytes: int) -> tuple[bytes | None, str | None]:
+    try:
+        path_stat = path.stat()
+        if path.is_symlink() or not stat.S_ISREG(path_stat.st_mode):
+            return None, "source_file_not_regular"
+        if path_stat.st_size <= 0 or path_stat.st_size > max_bytes:
+            return None, "source_file_size_unsafe"
+        return path.read_bytes(), None
+    except OSError:
+        return None, "source_file_unreadable"
+
+
+def _read_current_main_blob_sha(
+    task_id: str,
+    checkout_path: Path,
+    relative_path: str,
+    status_lines: list[str],
+) -> tuple[str | None, str | None]:
+    blob_sha, failure_report = _read_skeleton_sha(
+        task_id,
+        checkout_path,
+        f"origin/main:{relative_path}",
+        status_lines,
+        f"read_{Path(relative_path).name.replace('.', '_')}_main_blob",
+    )
+    if failure_report is not None or blob_sha is None:
+        return None, failure_report
+    return blob_sha, None
+
+
+def _parse_home_edge_snapshot_signer_installer(
+    installer_text: str,
+) -> tuple[str | None, dict[str, str] | None, str | None]:
+    path_match = HOME_EDGE_SNAPSHOT_SIGNER_INSTALLER_PATH_RE.search(installer_text)
+    if path_match is None:
+        return None, None, "protected_installer_path_missing"
+    pins = {
+        match.group("name"): match.group("sha")
+        for match in HOME_EDGE_SNAPSHOT_SIGNER_PIN_RE.finditer(installer_text)
+    }
+    if set(pins) != {"PAYLOAD", "WRAPPER", "CONTRACT"}:
+        return None, None, "installer_pins_missing"
+    return path_match.group("path"), pins, None
+
+
+def _home_edge_snapshot_signer_preflight(
+    task_id: str,
+) -> tuple[HomeEdgeSnapshotSignerPreflight | None, str | None]:
+    registered_checkout, report = _registered_skeleton_checkout(task_id)
+    if report is not None or registered_checkout is None:
+        return None, report
+    if registered_checkout.repo != "alanua/Skeleton":
+        return None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*registered_checkout.status_lines, "reason=wrong_repository"],
+            "not_met",
+        )
+
+    checkout_path = registered_checkout.checkout_path
+    status_lines = list(registered_checkout.status_lines)
+    for check in (
+        _verify_skeleton_checkout_present(task_id, registered_checkout),
+        _read_skeleton_origin(task_id, registered_checkout, status_lines),
+        _read_skeleton_current_branch(task_id, checkout_path, status_lines),
+        _read_skeleton_clean_state(task_id, checkout_path, status_lines),
+        _fetch_skeleton_origin_main(task_id, checkout_path, status_lines),
+    ):
+        if check is not None:
+            return None, check
+
+    head_sha, report = _read_skeleton_sha(
+        task_id, checkout_path, "HEAD", status_lines, "read_checkout_head"
+    )
+    if report is not None or head_sha is None:
+        return None, report
+    origin_main_sha, report = _read_skeleton_sha(
+        task_id, checkout_path, "origin/main", status_lines, "read_origin_main"
+    )
+    if report is not None or origin_main_sha is None:
+        return None, report
+
+    github_main_output, failure = _run_freshness_command(
+        ["git", "-C", str(checkout_path), "ls-remote", "origin", "refs/heads/main"],
+        status_lines,
+        "read_github_main",
+    )
+    github_main_parts = (github_main_output or "").split()
+    github_main_sha = github_main_parts[0] if github_main_parts else ""
+    if (
+        failure is not None
+        or _HEAD_SHA_RE.fullmatch(github_main_sha) is None
+        or len(github_main_parts) < 2
+        or github_main_parts[1] != "refs/heads/main"
+    ):
+        return None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, failure or "reason=github_main_read_failed"],
+            "not_met",
+        )
+    github_main_sha = github_main_sha.lower()
+    if head_sha != origin_main_sha or origin_main_sha != github_main_sha:
+        return None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                *status_lines,
+                f"checkout_head_sha={head_sha}",
+                f"github_main_sha={github_main_sha}",
+                "checkout_sync_state=stale",
+                "reason=checkout_not_exact_current_main",
+            ],
+            "not_met",
+        )
+
+    installer_path = checkout_path / HOME_EDGE_SNAPSHOT_SIGNER_INSTALLER_REL
+    installer_bytes, reason = _read_regular_bytes(installer_path, 128 * 1024)
+    if installer_bytes is None:
+        return None, _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, f"reason={reason}"], "not_met"
+        )
+    installer_blob_sha = _git_blob_sha(installer_bytes)
+    installer_main_blob_sha, report = _read_current_main_blob_sha(
+        task_id,
+        checkout_path,
+        HOME_EDGE_SNAPSHOT_SIGNER_INSTALLER_REL,
+        status_lines,
+    )
+    if report is not None or installer_main_blob_sha is None:
+        return None, report
+    if installer_blob_sha != installer_main_blob_sha:
+        return None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=installer_blob_mismatch"],
+            "not_met",
+        )
+
+    protected_path, pins, reason = _parse_home_edge_snapshot_signer_installer(
+        installer_bytes.decode("utf-8", errors="strict")
+    )
+    if protected_path is None or pins is None:
+        return None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, f"reason={reason or 'installer_parse_failed'}"],
+            "not_met",
+        )
+
+    expected_by_rel = {
+        HOME_EDGE_SNAPSHOT_SIGNER_PAYLOAD_REL: pins["PAYLOAD"],
+        HOME_EDGE_SNAPSHOT_SIGNER_WRAPPER_REL: pins["WRAPPER"],
+        HOME_EDGE_SNAPSHOT_SIGNER_CONTRACT_REL: pins["CONTRACT"],
+    }
+    for relative_path, expected_blob_sha in expected_by_rel.items():
+        source_bytes, reason = _read_regular_bytes(checkout_path / relative_path, 256 * 1024)
+        if source_bytes is None:
+            return None, _maintenance_report(
+                "BLOCKED", task_id, [*status_lines, f"reason={reason}"], "not_met"
+            )
+        current_blob_sha = _git_blob_sha(source_bytes)
+        main_blob_sha, report = _read_current_main_blob_sha(
+            task_id, checkout_path, relative_path, status_lines
+        )
+        if report is not None or main_blob_sha is None:
+            return None, report
+        if current_blob_sha != main_blob_sha or main_blob_sha != expected_blob_sha:
+            return None, _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [*status_lines, "reason=signer_source_blob_mismatch"],
+                "not_met",
+            )
+
+    status_lines.extend(
+        (
+            f"checkout_head_sha={head_sha}",
+            f"github_main_sha={github_main_sha}",
+            "checkout_sync_state=equal",
+            f"installer_blob_sha={installer_blob_sha}",
+            f"source_installer_blob_sha={installer_main_blob_sha}",
+            f"payload_blob_sha={pins['PAYLOAD']}",
+            f"wrapper_blob_sha={pins['WRAPPER']}",
+            f"contract_blob_sha={pins['CONTRACT']}",
+        )
+    )
+    return HomeEdgeSnapshotSignerPreflight(
+        checkout_path=checkout_path,
+        checkout_head_sha=head_sha,
+        installer_blob_sha=installer_blob_sha,
+        protected_installer_path=protected_path,
+        installer_bytes=installer_bytes,
+        payload_blob_sha=pins["PAYLOAD"],
+        wrapper_blob_sha=pins["WRAPPER"],
+        contract_blob_sha=pins["CONTRACT"],
+        status_lines=status_lines,
+    ), None
+
+
+def _fixed_home_edge_snapshot_signer_primitive(workdir: str) -> Any | None:
+    executor = RegisteredMaintenanceExecutor(dispatch_runtime_maintenance_task, workdir)
+    primitive = getattr(
+        executor,
+        "home_edge_media_source_snapshot_signer_install_repair",
+        None,
+    )
+    return primitive if callable(primitive) else None
+
+
+def _home_edge_snapshot_signer_primitive_done(result: object) -> bool:
+    if not isinstance(result, Mapping):
+        return False
+    return (
+        result.get("status") == "DONE"
+        and result.get("protected_copy_verified") is True
+        and result.get("exact_installer_invoked") is True
+        and result.get("installer_exit_code") == 0
+    )
+
+
+def _home_edge_snapshot_signer_file_blob(path: Path) -> str | None:
+    try:
+        path_stat = path.stat()
+        if path.is_symlink() or not stat.S_ISREG(path_stat.st_mode):
+            return None
+        if path_stat.st_uid != 0 or path_stat.st_gid != 0:
+            return None
+        if stat.S_IMODE(path_stat.st_mode) & 0o022:
+            return None
+        return _git_blob_sha(path.read_bytes())
+    except OSError:
+        return None
+
+
+def _home_edge_snapshot_signer_post_audit(
+    preflight: HomeEdgeSnapshotSignerPreflight,
+) -> list[str] | None:
+    payload_blob = _home_edge_snapshot_signer_file_blob(
+        HOME_EDGE_SNAPSHOT_SIGNER_PAYLOAD_PATH
+    )
+    wrapper_blob = _home_edge_snapshot_signer_file_blob(
+        HOME_EDGE_SNAPSHOT_SIGNER_EXECUTABLE
+    )
+    contract_blob = _home_edge_snapshot_signer_file_blob(
+        HOME_EDGE_SNAPSHOT_SIGNER_CONTRACT_PATH
+    )
+    pins_match = (
+        payload_blob == preflight.payload_blob_sha
+        and wrapper_blob == preflight.wrapper_blob_sha
+        and contract_blob == preflight.contract_blob_sha
+    )
+
+    sudo_code, _sudo_output = run_command(
+        [
+            "sudo",
+            "-n",
+            "-l",
+            str(HOME_EDGE_SNAPSHOT_SIGNER_EXECUTABLE),
+            "",
+        ]
+    )
+    sudoers_available = sudo_code == 0
+    if not sudoers_available:
+        try:
+            sudoers_text = Path(
+                "/etc/sudoers.d/skeleton-home-edge-media-source-snapshot-signer"
+            ).read_text(encoding="utf-8")
+            sudoers_available = (
+                HOME_EDGE_SNAPSHOT_SIGNER_SUDOERS_LINE in sudoers_text.splitlines()
+            )
+        except OSError:
+            sudoers_available = False
+
+    if not pins_match or not sudoers_available:
+        return None
+    return [
+        "post_audit_status=verified",
+        "signer_state=CURRENT",
+        "signer_sudo_authorization=exact_no_argv",
+    ]
+
+
+def home_edge_01_media_source_snapshot_signer_install_v1(
+    workdir: str,
+    body: str,
+) -> str:
+    task_id = HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1
+    preflight, report = _home_edge_snapshot_signer_preflight(task_id)
+    if report is not None or preflight is None:
+        return report or _maintenance_report(
+            "BLOCKED", task_id, ["reason=preflight_failed"], "not_met"
+        )
+
+    primitive = _fixed_home_edge_snapshot_signer_primitive(workdir)
+    if primitive is None:
+        return _maintenance_report(
+            "NEEDS_OPERATOR",
+            task_id,
+            [
+                *preflight.status_lines,
+                "privileged_primitive=unavailable",
+                "reason=missing_fixed_root_capable_primitive",
+            ],
+            "not_met",
+        )
+
+    try:
+        result = primitive(
+            installer_bytes=preflight.installer_bytes,
+            installer_blob_sha=preflight.installer_blob_sha,
+            protected_installer_path=preflight.protected_installer_path,
+            repo_root=str(preflight.checkout_path),
+            checkout_head_sha=preflight.checkout_head_sha,
+        )
+    except Exception:
+        return _maintenance_report(
+            "NEEDS_OPERATOR",
+            task_id,
+            [
+                *preflight.status_lines,
+                "privileged_primitive=available",
+                "installer_result=ambiguous",
+                "reason=privileged_primitive_exception",
+            ],
+            "not_met",
+        )
+
+    if not _home_edge_snapshot_signer_primitive_done(result):
+        return _maintenance_report(
+            "NEEDS_OPERATOR",
+            task_id,
+            [
+                *preflight.status_lines,
+                "privileged_primitive=available",
+                "installer_result=ambiguous",
+                "reason=installer_result_ambiguous",
+            ],
+            "not_met",
+        )
+
+    audit_lines = _home_edge_snapshot_signer_post_audit(preflight)
+    if audit_lines is None:
+        return _maintenance_report(
+            "NEEDS_OPERATOR",
+            task_id,
+            [
+                *preflight.status_lines,
+                "privileged_primitive=available",
+                "protected_copy_verified=true",
+                "exact_installer_invoked=true",
+                "installer_result=done",
+                "post_audit_status=failed",
+                "signer_state=not_current",
+            ],
+            "not_met",
+        )
+
+    return _maintenance_report(
+        "DONE",
+        task_id,
+        [
+            *preflight.status_lines,
+            "privileged_primitive=available",
+            "protected_copy_verified=true",
+            "exact_installer_invoked=true",
+            "installer_result=done",
+            *audit_lines,
+            "telegram_notifications=0",
+        ],
+        "met",
+    )
+
+
 def _read_exact_git_sha(ref: str) -> str:
     code, output = run_command(["git", "rev-parse", f"{ref}^{{commit}}"], cwd=ROOT)
     sha = output.strip().splitlines()[0] if output.strip() else ""
@@ -14404,6 +14850,8 @@ def dispatch_runtime_maintenance_task(
             return home_edge_01_post_migration_reconcile_v1(body)
         if task_id == HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1:
             return home_edge_01_media_source_snapshot_v1(body)
+        if task_id == HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1:
+            return home_edge_01_media_source_snapshot_signer_install_v1(workdir, body)
         if task_id == PREPARE_PRIVATE_STATIC_SITE_HANDOFF:
             return _execute_prepare_private_static_site_handoff(body)
         if task_id == DEPLOY_PRIVATE_STATIC_SITE:
