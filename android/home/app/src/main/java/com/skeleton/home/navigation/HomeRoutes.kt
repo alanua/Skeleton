@@ -7,7 +7,6 @@ sealed class HomeRoute(val route: String, val label: String) {
     data object Home : HomeRoute("home", "Головна")
     data object Video : HomeRoute("video", "Відео")
     data object Devices : HomeRoute("devices", "Пристрої")
-    data object Remote : HomeRoute("remote", "Пульт")
     data object OperatorHub : HomeRoute("operator-hub", "СК")
 }
 
@@ -36,6 +35,5 @@ fun canNavigateTo(
     HomeRoute.Home,
     HomeRoute.Video,
     HomeRoute.Devices,
-    HomeRoute.Remote,
     -> true
 }

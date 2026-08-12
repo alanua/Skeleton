@@ -28,6 +28,52 @@ data class HomePlaceholderState(
     val connectivityStatus: ConnectivityStatus,
     val actionState: VerifiedActionState?,
     val summary: String,
+    val surface: HomeControlSurfaceState,
+)
+
+enum class HomeMode {
+    YOUTUBE,
+    CAST,
+    TV,
+    GAMES,
+}
+
+enum class HomeControlCapability {
+    SEEK_BACK_15,
+    PLAY_PAUSE,
+    SEEK_FORWARD_15,
+    MUTE,
+    VOLUME,
+}
+
+data class HomeModeContext(
+    val mode: HomeMode,
+    val label: String,
+    val isActive: Boolean,
+    val isAvailable: Boolean,
+)
+
+data class SyntheticActiveMedia(
+    val title: String,
+    val year: String,
+    val seasonEpisodeLine: String?,
+    val artworkLabel: String,
+)
+
+data class SyntheticPlaybackState(
+    val positionLabel: String,
+    val durationLabel: String,
+    val progress: Float,
+    val isPlaying: Boolean,
+    val isMuted: Boolean,
+    val volume: Float,
+)
+
+data class HomeControlSurfaceState(
+    val modes: List<HomeModeContext>,
+    val activeMedia: SyntheticActiveMedia,
+    val playback: SyntheticPlaybackState,
+    val capabilities: Set<HomeControlCapability>,
 )
 
 interface CanonicalHomeApi {

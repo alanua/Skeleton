@@ -1,6 +1,8 @@
 package com.skeleton.home
 
 import com.skeleton.home.auth.SyntheticSession
+import com.skeleton.home.data.SyntheticHomeRepository
+import com.skeleton.home.domain.HomeControlCapability
 import com.skeleton.home.domain.ConnectivityStatus
 import com.skeleton.home.domain.UserRole
 import com.skeleton.home.domain.VerifiedActionState
@@ -22,7 +24,7 @@ class HomeContractTest {
             listOf("Головна", "Відео", "Пристрої", "СК"),
             bottomRoutesFor(operator.currentSession(), operator).map { it.label },
         )
-        assertFalse(bottomRoutesFor(operator.currentSession(), operator).contains(HomeRoute.Remote))
+        assertEquals(listOf("home", "video", "devices", "operator-hub"), bottomRoutesFor(operator.currentSession(), operator).map { it.route })
     }
 
     @Test
@@ -39,7 +41,6 @@ class HomeContractTest {
             listOf("Головна", "Відео", "Пристрої"),
             bottomRoutesFor(spouse.currentSession(), spouse).map { it.label },
         )
-        assertFalse(PrimaryBottomRoutes.contains(HomeRoute.Remote))
         assertFalse(bottomRoutesFor(ordinary.currentSession(), ordinary).contains(HomeRoute.OperatorHub))
         assertFalse(bottomRoutesFor(spouse.currentSession(), spouse).contains(HomeRoute.OperatorHub))
     }
@@ -62,6 +63,25 @@ class HomeContractTest {
         assertEquals(
             listOf("SENT", "ACCEPTED", "APPLIED", "PHYSICALLY_VERIFIED"),
             VerifiedActionState.entries.map { it.name },
+        )
+    }
+
+    @Test
+    fun syntheticHomeSurfaceProvidesCurrentControlStructureWithoutLiveApis() {
+        val state = SyntheticHomeRepository().placeholderState(SyntheticSession.operator().currentSession())
+
+        assertEquals(listOf("YouTube", "Cast", "TV", "Games"), state.surface.modes.map { it.label })
+        assertEquals("Placeholder Series", state.surface.activeMedia.title)
+        assertEquals("Season 2 · Episode 4", state.surface.activeMedia.seasonEpisodeLine)
+        assertEquals(
+            setOf(
+                HomeControlCapability.SEEK_BACK_15,
+                HomeControlCapability.PLAY_PAUSE,
+                HomeControlCapability.SEEK_FORWARD_15,
+                HomeControlCapability.MUTE,
+                HomeControlCapability.VOLUME,
+            ),
+            state.surface.capabilities,
         )
     }
 }

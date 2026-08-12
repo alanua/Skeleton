@@ -25,6 +25,7 @@ class HomeShellUiTest {
         compose.onNodeWithContentDescription("bottom-nav-video").assertIsDisplayed()
         compose.onNodeWithContentDescription("bottom-nav-devices").assertIsDisplayed()
         compose.onNodeWithContentDescription("bottom-nav-operator-hub").assertIsDisplayed()
+        compose.onNodeWithText("\u041f\u0443\u043b\u044c\u0442").assertDoesNotExist()
     }
 
     @Test
@@ -37,6 +38,32 @@ class HomeShellUiTest {
         compose.onNodeWithContentDescription("bottom-nav-video").assertIsDisplayed()
         compose.onNodeWithContentDescription("bottom-nav-devices").assertIsDisplayed()
         compose.onNodeWithContentDescription("bottom-nav-operator-hub").assertDoesNotExist()
+        compose.onNodeWithText("\u041f\u0443\u043b\u044c\u0442").assertDoesNotExist()
+    }
+
+    @Test
+    fun homeScreenShowsCurrentSyntheticVisualStructure() {
+        compose.setContent {
+            HomeApp(session = SyntheticSession.operator())
+        }
+
+        compose.onNodeWithContentDescription("home-top-status-row").assertIsDisplayed()
+        compose.onNodeWithContentDescription("home-mode-row").assertIsDisplayed()
+        compose.onNodeWithText("YouTube").assertIsDisplayed()
+        compose.onNodeWithText("Cast").assertIsDisplayed()
+        compose.onNodeWithText("TV").assertIsDisplayed()
+        compose.onNodeWithText("Games").assertIsDisplayed()
+        compose.onNodeWithContentDescription("home-active-media-card").assertIsDisplayed()
+        compose.onNodeWithContentDescription("home-artwork-placeholder").assertIsDisplayed()
+        compose.onNodeWithText("Placeholder Series").assertIsDisplayed()
+        compose.onNodeWithText("Season 2 · Episode 4").assertIsDisplayed()
+        compose.onNodeWithContentDescription("home-playback-progress").assertIsDisplayed()
+        compose.onNodeWithContentDescription("home-adaptive-controls").assertIsDisplayed()
+        compose.onNodeWithContentDescription("control-back-15").assertIsDisplayed()
+        compose.onNodeWithContentDescription("control-play-pause").assertIsDisplayed()
+        compose.onNodeWithContentDescription("control-forward-15").assertIsDisplayed()
+        compose.onNodeWithContentDescription("control-mute").assertIsDisplayed()
+        compose.onNodeWithContentDescription("home-volume-control").assertIsDisplayed()
     }
 
     @Test
