@@ -24,6 +24,20 @@ _FALLBACK_BIN_ENV = "SKELETON_CODEGEN_FALLBACK_BIN"
 _REAL_CODEX_ENV = "SKELETON_REAL_CODEX_BIN"
 _OPENHANDS_ENV = "SKELETON_OPENHANDS_BIN"
 _ORIGINAL_PATH_ENV = "SKELETON_CODEGEN_ORIGINAL_PATH"
+_OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
+_OPENHANDS_LLM_API_KEY_ENV = "LLM_API_KEY"
+_OPENHANDS_LLM_MODEL_ENV = "LLM_MODEL"
+_OPENHANDS_LLM_BASE_URL_ENV = "LLM_BASE_URL"
+_OPENROUTER_CREDENTIAL_NAME = "openrouter-api-key"
+_OPENROUTER_FREE_MODEL = "openrouter/z-ai/glm-4.5-air:free"
+_PROVIDER_OVERRIDE_ENV = frozenset(
+    {
+        _OPENROUTER_API_KEY_ENV,
+        _OPENHANDS_LLM_API_KEY_ENV,
+        _OPENHANDS_LLM_MODEL_ENV,
+        _OPENHANDS_LLM_BASE_URL_ENV,
+    }
+)
 
 _WRAPPER = r'''#!/usr/bin/env python3
 from __future__ import annotations
@@ -100,8 +114,18 @@ def main() -> int:
         sys.stdout.write(codex.stdout)
         sys.stderr.write(codex.stderr)
         return codex.returncode
+    if not child_env.get("LLM_API_KEY", "") or not child_env.get("LLM_MODEL", "").startswith("openrouter/"):
+        sys.stderr.write("SKELETON_CODEGEN_FALLBACK_CONFIG_UNAVAILABLE\n")
+        return codex.returncode
     fallback = subprocess.run(
-        [openhands, "--headless", "--json", "-t", _task(sys.argv[1:], stdin_text)],
+        [
+            openhands,
+            "--headless",
+            "--json",
+            "--override-with-envs",
+            "-t",
+            _task(sys.argv[1:], stdin_text),
+        ],
         cwd=_workdir(sys.argv[1:]),
         text=True,
         stdout=subprocess.PIPE,
@@ -129,6 +153,32 @@ def _without_home_edge_credentials(environment: Mapping[str, str]) -> dict[str, 
     }
 
 
+def _trusted_openrouter_api_key(authority_environment: Mapping[str, str]) -> str | None:
+    direct = authority_environment.get(_OPENROUTER_API_KEY_ENV, "").strip()
+    if direct:
+        return direct
+    directory = authority_environment.get("CREDENTIALS_DIRECTORY", "").strip()
+    if not directory:
+        return None
+    candidate = Path(directory) / _OPENROUTER_CREDENTIAL_NAME
+    try:
+        value = candidate.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return value or None
+
+
+def _bind_trusted_openrouter(environment: dict[str, str], authority_environment: Mapping[str, str]) -> bool:
+    for name in _PROVIDER_OVERRIDE_ENV:
+        environment.pop(name, None)
+    api_key = _trusted_openrouter_api_key(authority_environment)
+    if not api_key:
+        return False
+    environment[_OPENHANDS_LLM_API_KEY_ENV] = api_key
+    environment[_OPENHANDS_LLM_MODEL_ENV] = _OPENROUTER_FREE_MODEL
+    return True
+
+
 def _install_fallback_wrapper(
     environment: dict[str, str],
     authority_environment: Mapping[str, str],
@@ -148,6 +198,7 @@ def _install_fallback_wrapper(
     if not trusted_home or not Path(trusted_home).is_absolute():
         return
     openhands = shutil.which("openhands", path=trusted_path)
+    openrouter_ready = _bind_trusted_openrouter(environment, authority_environment)
     root = Path(trusted_home) / ".local" / "state" / "skeleton-runner" / "codegen-fallback-bin"
     wrapper = root / "codex"
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -163,7 +214,9 @@ def _install_fallback_wrapper(
 
     environment["HOME"] = trusted_home
     environment[_REAL_CODEX_ENV] = str(Path(real_codex).resolve(strict=False))
-    environment[_OPENHANDS_ENV] = str(Path(openhands).resolve(strict=False)) if openhands else ""
+    environment[_OPENHANDS_ENV] = (
+        str(Path(openhands).resolve(strict=False)) if openhands and openrouter_ready else ""
+    )
     environment[_ORIGINAL_PATH_ENV] = trusted_path
     environment[_FALLBACK_BIN_ENV] = str(root)
     environment["PATH"] = f"{root}:{trusted_path}" if trusted_path else str(root)
