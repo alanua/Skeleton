@@ -1,0 +1,43 @@
+name: validate-media-display-ownership
+
+on:
+  push:
+    branches:
+      - validation/media-display-ownership-a1a034c
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout validation branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Runtime versions
+        run: |
+          set -euo pipefail
+          python3 --version
+          git rev-parse HEAD
+      - name: Compile and shell syntax
+        run: |
+          set -euo pipefail
+          python3 -m py_compile core/home_edge/media_display_ownership.py scripts/home_edge_media_display_owner.py
+          bash -n scripts/install_home_edge_media_display_owner.sh
+          bash -n scripts/rollback_home_edge_media_display_owner.sh
+      - name: Focused tests
+        run: |
+          set -euo pipefail
+          python3 -m pytest -q tests/test_home_edge_media_display_ownership.py
+      - name: Full pytest
+        run: |
+          set -euo pipefail
+          python3 -m pytest -q
+      - name: Diff check
+        run: |
+          set -euo pipefail
+          git diff --check c84537c37023a46946b863163bd588a59464f27c..a1a034ca1f9c5b75d171deb5e832e54f82f8512f
