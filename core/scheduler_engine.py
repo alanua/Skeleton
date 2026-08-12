@@ -9,6 +9,7 @@ import time
 from typing import Any
 import uuid
 
+from core.domain_event_graph import DomainEventGraph, DomainEventGraphError
 from core.scheduler_models import (
     TICK_RECEIPT_SCHEMA,
     StoredSchedule,
@@ -64,11 +65,13 @@ class SchedulerEngine:
         store: SchedulerStore,
         config: SchedulerEngineConfig | None = None,
         clock: Any | None = None,
+        domain_event_graph: DomainEventGraph | None = None,
     ) -> None:
         self.store = store
         self.config = config or SchedulerEngineConfig()
         self._owner = f"scheduler-engine:{uuid.uuid4().hex}"
         self._clock = clock or time.time
+        self._domain_event_graph = domain_event_graph
 
     def tick(
         self, *, now: int | None = None, dispatcher: SharedDispatcher | None = None
@@ -198,6 +201,11 @@ class SchedulerEngine:
             if isinstance(dependency, str):
                 dependency_record = self.store.get_occurrence(dependency)
                 if dependency_record is None or dependency_record.state != "done":
+                    self._record_dependency_wait(
+                        occurrence_id=occurrence.occurrence_id,
+                        dependency_id=dependency,
+                        now=current,
+                    )
                     self.store.record_dispatch_receipt(
                         occurrence_id=occurrence.occurrence_id,
                         attempt=occurrence.attempt,
@@ -277,6 +285,19 @@ class SchedulerEngine:
             "failed": counters["failed"],
             "continued": counters["continued"],
         }
+
+    def _record_dependency_wait(self, *, occurrence_id: str, dependency_id: str, now: int) -> None:
+        if self._domain_event_graph is None:
+            return
+        try:
+            self._domain_event_graph.record_scheduler_dependency(
+                occurrence_ref=occurrence_id,
+                dependency_ref=dependency_id,
+                observed_at=now,
+                idempotency_key=f"scheduler-dependency-{occurrence_id}-{dependency_id}",
+            )
+        except DomainEventGraphError:
+            return
 
     def _start_dispatch_heartbeat(
         self, occurrence_id: str

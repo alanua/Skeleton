@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from core.domain_event_graph import DomainEventGraph
 from core.loop_controller import LoopDecision, LoopEvent, LoopPolicy, LoopState
 from core.loop_engine import LoopEngine
 from core.loop_state_store import LoopStateConflictError, LoopStateStore
@@ -135,3 +136,21 @@ def test_duplicate_create_and_bad_inputs_fail_closed(tmp_path: Path) -> None:
             recorded_at=2,
             expected_version=-1,
         )
+
+
+def test_loop_engine_records_runner_continuation_dependency_hook(tmp_path: Path) -> None:
+    graph = DomainEventGraph()
+    store = LoopStateStore(tmp_path / "loop-state.sqlite")
+    store.initialize()
+    engine = LoopEngine(store, LoopPolicy(), domain_event_graph=graph)
+
+    engine.create(run_id="run-hook", task_id="runner-task-hook", recorded_at=1)
+    engine.step(
+        run_id="run-hook",
+        event=LoopEvent.PREPARED,
+        recorded_at=2,
+        expected_version=0,
+    )
+
+    summary = graph.summary()
+    assert summary["aggregate_counts"]["event_count"] == 1

@@ -27,6 +27,8 @@ ALLOWED_COMMAND_SUFFIXES = frozenset(
         "graph.query_code",
         "graph.get_index_freshness",
         "graph.private_query",
+        "graph.ingest_domain_event",
+        "graph.get_case_timeline",
         "memory.propose_patch",
     }
 )
@@ -240,6 +242,20 @@ _QUERY_REPORT_FIELDS = frozenset(
         "next_operator_action",
     }
 )
+_TIMELINE_FIELDS = frozenset(
+    {
+        "event_ref",
+        "domain",
+        "event_type",
+        "source_ref",
+        "observed_at",
+        "confidence",
+        "inferred",
+        "node_refs",
+        "edge_refs",
+        "provenance_refs",
+    }
+)
 
 _PUBLIC_FIELDS = frozenset(
     """
@@ -270,6 +286,9 @@ _PUBLIC_FIELDS = frozenset(
     missing_provenance_count error_class next_operator_action bounded_text
  operation decision allowed reason gateway command contract_version payload conflict_count freshness_checked proposal_status classification
  expected_revision source_hash imported_canonical_refs indexes degraded_indexes
+    event_hash domain source_ref observed_at confidence inferred private_payloads_included
+    case_ref timeline node_refs edge_refs node_ref edge_ref edge_type ref_type ref_id
+    allows_destructive_action canonical_write_performed idempotency_key
     """.split()
 )
 
@@ -390,6 +409,8 @@ def _typed_child(key: str, child: object) -> object:
         } if isinstance(child, Mapping) else {}
     if key == "results":
         return [_typed_mapping(item, _RESULT_FIELDS) for item in _as_list(child)]
+    if key == "timeline":
+        return [_typed_mapping(item, _TIMELINE_FIELDS) for item in _as_list(child)]
     if key == "conflicts":
         return [_typed_mapping(item, _CONFLICT_FIELDS) for item in _as_list(child)]
     if key == "events":
@@ -485,6 +506,42 @@ def _proposal_receipt(payload: Mapping[str, Any]) -> dict[str, object]:
     return _typed_mapping(payload, frozenset({"project_id", "proposal_event", "idempotency_classification"}))
 
 
+def _domain_event_graph_receipt(payload: Mapping[str, Any]) -> dict[str, object]:
+    return _typed_mapping(
+        payload,
+        frozenset(
+            {
+                "schema",
+                "status",
+                "event_ref",
+                "idempotency_key",
+                "idempotency_classification",
+                "node_refs",
+                "edge_refs",
+                "public_safe",
+                "private_payloads_included",
+                "canonical_write_performed",
+            }
+        ),
+    )
+
+
+def _case_timeline_receipt(payload: Mapping[str, Any]) -> dict[str, object]:
+    return _typed_mapping(
+        payload,
+        frozenset(
+            {
+                "schema",
+                "case_ref",
+                "timeline",
+                "aggregate_counts",
+                "public_safe",
+                "private_payloads_included",
+            }
+        ),
+    )
+
+
 def _private_mutation_receipt(payload: Mapping[str, Any]) -> dict[str, object]:
     return _typed_mapping(
         payload,
@@ -535,5 +592,7 @@ _COMMAND_RECEIPT_BUILDERS: dict[str, Callable[[Mapping[str, Any]], dict[str, obj
     "graph.query_code": _graph_query_receipt,
     "graph.get_index_freshness": _graph_freshness_receipt,
     "graph.private_query": lambda payload: _typed_mapping(payload, frozenset({"project_id", "dataset_id", "state", "results"})),
+    "graph.ingest_domain_event": _domain_event_graph_receipt,
+    "graph.get_case_timeline": _case_timeline_receipt,
     "memory.propose_patch": _proposal_receipt,
 }

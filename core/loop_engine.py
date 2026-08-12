@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from core.domain_event_graph import DomainEventGraph, DomainEventGraphError
 from core.loop_controller import (
     LoopContext,
     LoopDecision,
@@ -38,13 +39,19 @@ class LoopStepResult:
 class LoopEngine:
     """Compose deterministic transition logic with operational persistence."""
 
-    def __init__(self, store: LoopStateStore, policy: LoopPolicy) -> None:
+    def __init__(
+        self,
+        store: LoopStateStore,
+        policy: LoopPolicy,
+        domain_event_graph: DomainEventGraph | None = None,
+    ) -> None:
         if not isinstance(store, LoopStateStore):
             raise TypeError("store must be LoopStateStore")
         if not isinstance(policy, LoopPolicy):
             raise TypeError("policy must be LoopPolicy")
         self.store = store
         self.policy = policy
+        self._domain_event_graph = domain_event_graph
 
     def create(
         self,
@@ -57,12 +64,14 @@ class LoopEngine:
         initial = context if context is not None else LoopContext()
         if not isinstance(initial, LoopContext):
             raise TypeError("context must be LoopContext")
-        return self.store.create_run(
+        run = self.store.create_run(
             run_id=run_id,
             task_id=task_id,
             context=initial,
             recorded_at=recorded_at,
         )
+        self._record_dependency(run_id=run_id, task_id=task_id, recorded_at=recorded_at)
+        return run
 
     def step(
         self,
@@ -93,7 +102,21 @@ class LoopEngine:
             result=transition,
             recorded_at=recorded_at,
         )
+        self._record_dependency(run_id=run_id, task_id=current.task_id, recorded_at=recorded_at)
         return LoopStepResult(run=stored, transition=transition)
+
+    def _record_dependency(self, *, run_id: str, task_id: str, recorded_at: int) -> None:
+        if self._domain_event_graph is None:
+            return
+        try:
+            self._domain_event_graph.record_loop_dependency(
+                run_ref=run_id,
+                task_ref=task_id,
+                observed_at=recorded_at,
+                idempotency_key=f"loop-dependency-{run_id}-{task_id}",
+            )
+        except DomainEventGraphError:
+            return
 
 
 def _non_negative_int(value: int, name: str) -> None:

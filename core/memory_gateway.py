@@ -16,6 +16,7 @@ from core.canonical_memory_import import (
     import_approved_operator_preference_manifest,
 )
 from core.canonical_memory_manifest import prepare_canonical_memory_manifest
+from core.domain_event_graph import DomainEventGraph, DomainEventGraphError
 from core.graphify_adapter import GraphifyAdapterError
 from core.mempalace_adapter import MemPalaceAdapter, MemPalaceAdapterError
 from core.mempalace_projection import MEMPALACE_SYNTHETIC_NAMESPACE, MEMPALACE_SYNTHETIC_PROJECT_ID
@@ -78,6 +79,7 @@ class MemoryGateway:
         override_registry: MemoryOverrideRegistry | None = None,
         mempalace_adapter: MemPalaceAdapter | None = None,
         graphify_adapter: object | None = None,
+        domain_event_graph: DomainEventGraph | None = None,
         skeleton_memory: SkeletonMemory | None = None,
         private_memory_storage: PrivateMemoryGatewayStorage | None = None,
     ) -> None:
@@ -91,6 +93,7 @@ class MemoryGateway:
         self._freshness = _freshness_seed()
         self._mempalace_adapter = mempalace_adapter
         self._graphify_adapter = graphify_adapter
+        self._domain_event_graph = domain_event_graph
         self._skeleton_memory = skeleton_memory
         self._private_memory_storage = private_memory_storage
 
@@ -130,6 +133,8 @@ class MemoryGateway:
             "graph.query_code": self.query_code,
             "graph.get_index_freshness": self.get_graph_index_freshness,
             "graph.private_query": self.graph_private_query,
+            "graph.ingest_domain_event": self.ingest_domain_event,
+            "graph.get_case_timeline": self.get_case_timeline,
             "memory.propose_patch": self.propose_patch,
         }
         if suffix == "memory.import_canonical_manifest":
@@ -189,6 +194,50 @@ class MemoryGateway:
 
     def graph_private_query(self, *, namespace: str, **payload: object) -> dict[str, object]:
         return self._private_storage_response(namespace, "graph.private_query", "query_graph", payload)
+
+    def ingest_domain_event(self, *, namespace: str, envelope: Mapping[str, Any], **_payload: object) -> dict[str, object]:
+        namespace = self._authorize_namespace(namespace)
+        if namespace != "skeleton":
+            raise MemoryGatewayPolicyError(
+                "DOMAIN_EVENT_GRAPH_NAMESPACE_NOT_AUTHORIZED",
+                "domain event graph is only available through skeleton namespace",
+            )
+        if self._domain_event_graph is None:
+            raise MemoryGatewayPolicyError(
+                "DOMAIN_EVENT_GRAPH_REQUIRED",
+                "domain event graph requires explicit injection",
+            )
+        try:
+            receipt = self._domain_event_graph.ingest(envelope)
+        except DomainEventGraphError as exc:
+            raise MemoryGatewayPolicyError(exc.reason_code, str(exc)) from exc
+        return self._response(
+            namespace=namespace,
+            command_suffix="graph.ingest_domain_event",
+            payload=receipt,
+        )
+
+    def get_case_timeline(self, *, namespace: str, case_ref: str, **_payload: object) -> dict[str, object]:
+        namespace = self._authorize_namespace(namespace)
+        if namespace != "skeleton":
+            raise MemoryGatewayPolicyError(
+                "DOMAIN_EVENT_GRAPH_NAMESPACE_NOT_AUTHORIZED",
+                "case timeline is only available through skeleton namespace",
+            )
+        if self._domain_event_graph is None:
+            raise MemoryGatewayPolicyError(
+                "DOMAIN_EVENT_GRAPH_REQUIRED",
+                "case timeline requires explicit graph injection",
+            )
+        try:
+            timeline = self._domain_event_graph.case_timeline(case_ref=case_ref)
+        except DomainEventGraphError as exc:
+            raise MemoryGatewayPolicyError(exc.reason_code, str(exc)) from exc
+        return self._response(
+            namespace=namespace,
+            command_suffix="graph.get_case_timeline",
+            payload=timeline,
+        )
 
     def lookup_exact(
         self,
