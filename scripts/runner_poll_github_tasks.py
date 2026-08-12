@@ -50,6 +50,8 @@ _impl_validate_pr_branch = validate_pr_branch
 _impl_telegram_approve_digest_is_signed = telegram_approve_digest_is_signed
 _impl_telegram_approve_audit_matches_request = telegram_approve_audit_matches_request
 _impl_process_issue = process_issue
+_impl_get_queue_replenisher_candidate_issues = get_queue_replenisher_candidate_issues
+_impl_replenish_runner_queue = replenish_runner_queue
 
 
 def trusted_runner_comment_authors(*args, **kwargs):
@@ -92,14 +94,58 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
     return _impl_process_issue(issue, workdir=workdir)
 
 
+_QUEUE_RECOVERY_CANDIDATE_OVERRIDE: ContextVar[list[dict[str, Any]] | None] = ContextVar(
+    "skeleton_queue_recovery_candidate_override",
+    default=None,
+)
+
+
+def get_queue_replenisher_candidate_issues() -> list[dict[str, Any]]:
+    """Return the rechecked snapshot only while the existing replenisher executes."""
+    override = _QUEUE_RECOVERY_CANDIDATE_OVERRIDE.get()
+    if override is not None:
+        return [dict(issue) for issue in override]
+    return _impl_get_queue_replenisher_candidate_issues()
+
+
+def _autonomous_queue_store_path() -> Path:
+    """Keep validation/feature recovery state local; production main stays canonical."""
+    configured = control_recovery_db_path()
+    production = production_control_recovery_db_path()
+    if configured != production:
+        return configured
+    try:
+        projects = load_runner_project_tree().get("projects")
+        matches = [
+            Path(project["checkout_path"]).resolve(strict=False)
+            for project in (projects.values() if isinstance(projects, dict) else ())
+            if isinstance(project, dict)
+            and project.get("repo") == REPO
+            and isinstance(project.get("checkout_path"), str)
+        ]
+        if len(matches) == 1 and ROOT.resolve(strict=False) == matches[0]:
+            return configured
+    except Exception:
+        pass
+    return ROOT / ".codex" / "control_recovery.sqlite3"
+
+
 def _autonomous_queue_eligible_snapshot() -> tuple[
     list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]
 ]:
-    """Read queue state and apply the existing public-safe selection gates without mutation."""
+    """Read queue state and apply existing public-safe gates without mutation."""
     ready_issues = get_ready_issues()
     if ready_issues:
         return ready_issues, [], []
-    candidate_issues = get_queue_replenisher_candidate_issues()
+
+    # RUN_NOW is only a priority discovery view. It does not mutate labels and
+    # still passes through the same replenishment selector and RecoveryStore.
+    run_now_candidates = get_run_now_queue_intake_candidate_issues()
+    candidate_issues = (
+        run_now_candidates
+        if run_now_candidates
+        else get_queue_replenisher_candidate_issues()
+    )
     eligible = select_runner_queue_replenishment_targets(
         ready_issues,
         candidate_issues,
@@ -190,7 +236,7 @@ def _autonomous_queue_replenish_action(
     generation: str,
 ) -> str:
     # Recheck all current gates immediately before the only queue mutation.
-    ready_before, _candidates, eligible = _autonomous_queue_eligible_snapshot()
+    ready_before, candidate_issues, eligible = _autonomous_queue_eligible_snapshot()
     if ready_before:
         return _autonomous_queue_blocked_report("QUEUE_RECOVERY_READY_WORK_PRESENT")
     if not eligible:
@@ -198,7 +244,14 @@ def _autonomous_queue_replenish_action(
     if _autonomous_queue_occurrence_key(eligible, generation) != expected_key:
         return _autonomous_queue_blocked_report("QUEUE_RECOVERY_CANDIDATES_CHANGED")
 
-    report = replenish_runner_queue("")
+    token = _QUEUE_RECOVERY_CANDIDATE_OVERRIDE.set(candidate_issues)
+    try:
+        # This is the original existing replenisher; the context only supplies
+        # the exact rechecked read snapshot to its existing selector/mutator.
+        report = _impl_replenish_runner_queue("")
+    finally:
+        _QUEUE_RECOVERY_CANDIDATE_OVERRIDE.reset(token)
+
     ready_after = get_ready_issues()
     if len(ready_after) <= len(ready_before):
         return _autonomous_queue_blocked_report("QUEUE_RECOVERY_NO_PROGRESS")
@@ -208,12 +261,12 @@ def _autonomous_queue_replenish_action(
 
 
 def maybe_recover_idle_runner_queue() -> bool:
-    """Recover an idle queue through the existing durable RecoveryStore only."""
+    """Attempt idle recovery through the existing durable RecoveryStore only."""
     try:
         ready_before, _candidates, eligible = _autonomous_queue_eligible_snapshot()
         if ready_before or not eligible:
             return False
-        store = RecoveryStore(control_recovery_db_path())
+        store = RecoveryStore(_autonomous_queue_store_path())
         packet = _autonomous_queue_packet(eligible, store)
         expected_key = str(packet["failure_key"])
         fingerprint = str(packet["fingerprint"])
@@ -233,9 +286,23 @@ def maybe_recover_idle_runner_queue() -> bool:
             action_executor=run_action,
             canary_executor=None,
         )
-        if str(receipt.get("status") or "") != "RECOVERED":
-            return False
-        return bool(get_ready_issues())
+        status = str(receipt.get("status") or "")
+        if status == "RECOVERED":
+            return bool(get_ready_issues())
+
+        # Preserve the historical hook's "promotion attempted" return contract
+        # without treating that attempt as verified. Backoff/already-done polls
+        # must not report a new attempt.
+        reason = str(receipt.get("reason") or "")
+        actions = receipt.get("actions_executed")
+        attempted = isinstance(actions, list) and "queue_reactivate" in actions
+        if attempted and reason not in {
+            "RECOVERY_BACKOFF_ACTIVE",
+            "RECOVERY_ALREADY_DONE",
+            "RECOVERY_NEEDS_OPERATOR_DURABLE",
+        }:
+            return True
+        return False
     except Exception:
         # Query/control failures fail closed. RecoveryStore itself owns retry
         # and backoff once a bounded incident has been recorded.
