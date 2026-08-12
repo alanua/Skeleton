@@ -98,6 +98,10 @@ _QUEUE_RECOVERY_CANDIDATE_OVERRIDE: ContextVar[list[dict[str, Any]] | None] = Co
     "skeleton_queue_recovery_candidate_override",
     default=None,
 )
+_QUEUE_RECOVERY_SOURCE: ContextVar[str] = ContextVar(
+    "skeleton_queue_recovery_source",
+    default="compat",
+)
 
 
 def get_queue_replenisher_candidate_issues() -> list[dict[str, Any]]:
@@ -197,9 +201,14 @@ def _autonomous_queue_occurrence_key(
         for issue in eligible
         if (number := _queue_replenisher_issue_number(issue)) is not None
     )
-    payload = (",".join(str(number) for number in numbers) + "|" + generation).encode(
-        "ascii"
-    )
+    source = _QUEUE_RECOVERY_SOURCE.get()
+    payload = (
+        ",".join(str(number) for number in numbers)
+        + "|"
+        + generation
+        + "|"
+        + source
+    ).encode("ascii")
     digest = hashlib.sha256(payload).hexdigest()[:20]
     return f"control:queue-idle:{digest}"
 
@@ -213,8 +222,9 @@ def _autonomous_queue_packet(
     generation = _autonomous_queue_verified_generation(store, fingerprint)
     packet["failure_key"] = _autonomous_queue_occurrence_key(eligible, generation)
     packet["route_id"] = "runner_queue"
-    # Failure key is episode-specific; fingerprint remains stable so a verified
-    # response is reusable only after current queue gates are recomputed.
+    # Failure key is occurrence-specific; fingerprint remains stable so manual
+    # and poll entrypoints share the same verified lesson without sharing a
+    # retry/backoff occurrence record.
     packet["fingerprint"] = derive_failure_fingerprint(
         packet,
         failure_class=FailureClass.QUEUE_IDLE_WITH_ELIGIBLE_WORK,
@@ -325,9 +335,13 @@ def poll_once(workdir: str | None = None) -> int:
     except Exception:
         pass
 
-    # Keep the historical intake hook in the ordinary poll lifecycle, but it is
-    # now only a compatibility name for the single durable learned recovery path.
-    self_heal_run_now_queue_intake()
+    # Ordinary poll owns a separate occurrence record from direct compatibility
+    # invocations, but both share the same durable lesson fingerprint.
+    source_token = _QUEUE_RECOVERY_SOURCE.set("poll")
+    try:
+        self_heal_run_now_queue_intake()
+    finally:
+        _QUEUE_RECOVERY_SOURCE.reset(source_token)
     issues = get_ready_issues()
     for issue in issues:
         process_issue(issue, workdir=workdir)
