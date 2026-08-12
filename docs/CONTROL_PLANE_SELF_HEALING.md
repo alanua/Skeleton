@@ -12,6 +12,7 @@ Initial typed classes:
 - `EXECUTOR_SERVICE_NOT_RUNNING`
 - `GITHUB_ACTIONS_LANE_UNAVAILABLE_BUT_ISSUE_RUNNER_HEALTHY`
 - `QUEUE_LABEL_STATE_STUCK`
+- `QUEUE_IDLE`
 - `CANARY_FAILED_AFTER_RECOVERY`
 
 Unknown failures and unsafe payloads become `NEEDS_OPERATOR`.
@@ -73,6 +74,8 @@ Recoverable blocked consumers should wait on the recovery occurrence. Once recov
 Ordinary Runner codegen failures classified by the exact live metadata phrase enter the existing recovery route before terminal blocking. The issue is moved to `runner:waiting-dependency`, a durable recovery occurrence is recorded, and a same-issue consumer waits on it. After `codegen_runtime_recover` and the read-only Codex canary succeed, `queue_reactivate` removes `runner:waiting-dependency` from that same GitHub issue and adds `runner:ready`.
 
 During each ordinary Runner poll, the single poller also checks open `agent:task` issues marked `queue:RUN_NOW` that are missing `runner:ready`. Valid public-safe Skeleton task issues that are not running, waiting on dependencies, terminal, operator-held, duplicate, dependency-blocked, or otherwise excluded by the existing queue policy are idempotently promoted with `runner:ready` before normal ready-issue selection. This only restores eligibility for the existing Runner path; it does not add a second queue, bypass RunnerGate, or weaken route, privacy, approval, runtime, protected-file, secret, merge, or operator gates.
+
+When an ordinary Runner poll observes `ready_depth=0`, `running_depth=0`, and at least one dependency-satisfied public-safe eligible task under the same queue policy, it records a durable `QUEUE_IDLE` recovery incident. The selected code-owned response is `REPLENISH_QUEUE`, which executes only the existing `replenish_runner_queue` maintenance primitive (`queue_reactivate`). A verified recovery row is reused on later idle recurrence, but each recurrence still re-reads current ready, running, and eligible candidate state before acting. If replenishment cannot verify ready work, the durable recovery store records bounded negative outcome/backoff instead of looping. Routine queue-idle recovery remains Telegram-silent.
 
 ## Operator Noise
 

@@ -263,6 +263,8 @@ INSPECT_PR_MERGEABILITY = "inspect_pr_mergeability"
 BACKFILL_SKELETON_MEMORY_RECENT = "backfill_skeleton_memory_recent"
 REPLENISH_RUNNER_QUEUE = "replenish_runner_queue"
 CONTROL_PLANE_SELF_HEALING_RECOVERY = "control_plane_self_healing_recovery"
+QUEUE_IDLE_FAILURE_KEY = "control:queue-idle:runner-poll"
+QUEUE_IDLE_ADAPTATION_RESPONSE_REPLENISH_QUEUE = "REPLENISH_QUEUE"
 INSPECT_ISSUE_WORKTREE_FOR_PUBLISH = "inspect_issue_worktree_for_publish"
 PUBLISH_ISSUE_WORKTREE_PR = "publish_issue_worktree_pr"
 PUBLISH_EXISTING_ISSUE_WORKTREE = "publish_existing_issue_worktree"
@@ -588,6 +590,9 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "canonical_memory_post_step",
         "canaries_executed",
         "candidate_count",
+        "eligible_count",
+        "running_depth",
+        "adaptation_response",
         "ready_depth_before",
         "selected_count",
         "selected_issues",
@@ -2190,6 +2195,32 @@ def get_ready_issues() -> list[dict[str, Any]]:
     return sort_ready_issues_by_priority(
         [issue for issue in parsed if is_open_task_issue(issue)]
     )
+
+
+def get_running_issues() -> list[dict[str, Any]]:
+    code, output = run_command(
+        [
+            "gh",
+            "issue",
+            "list",
+            "--repo",
+            REPO,
+            "--label",
+            LABEL_RUNNING,
+            "--state",
+            "open",
+            "--search",
+            "is:issue",
+            "--json",
+            "number,title,body,state,url,closed,labels",
+        ]
+    )
+    if code != 0:
+        raise RuntimeError(f"gh issue list failed:\n{output}")
+    parsed = json.loads(output or "[]")
+    if not isinstance(parsed, list):
+        raise RuntimeError("gh issue list returned non-list JSON")
+    return [issue for issue in parsed if isinstance(issue, dict) and is_open_task_issue(issue)]
 
 
 def sort_ready_issues_by_priority(issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -10926,6 +10957,109 @@ def replenish_runner_queue(body: str) -> str:
     )
 
 
+def _maintenance_report_value(report: str, key: str) -> str | None:
+    prefix = f"{key}="
+    for line in str(report or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith(prefix):
+            return stripped[len(prefix) :]
+    return None
+
+
+def _queue_idle_recovery_packet() -> dict[str, object]:
+    return {
+        "schema": CONTROL_RECOVERY_SCHEMA,
+        "failure_class": FailureClass.QUEUE_IDLE.value,
+        "failure_key": QUEUE_IDLE_FAILURE_KEY,
+        "reason": "QUEUE_IDLE",
+        "max_attempts": 3,
+        "backoff_seconds": 60,
+    }
+
+
+def _queue_idle_replenish_action() -> str:
+    report = replenish_runner_queue("")
+    try:
+        ready_depth = len(get_ready_issues())
+    except Exception:
+        ready_depth = 0
+    if ready_depth > 0:
+        return report
+    return _maintenance_report(
+        "BLOCKED",
+        REPLENISH_RUNNER_QUEUE,
+        [
+            "reason=QUEUE_IDLE_REPLENISH_NO_PROGRESS",
+            "selected_count=0",
+            "telegram_notifications=0",
+        ],
+        "not_met",
+    )
+
+
+def _queue_idle_selected_replenish_response(
+    ready_issues: list[dict[str, Any]],
+    running_issues: list[dict[str, Any]],
+    candidate_issues: list[dict[str, Any]],
+) -> tuple[str | None, list[dict[str, Any]]]:
+    if ready_issues or running_issues:
+        return None, []
+    selected = select_runner_queue_replenishment_targets(
+        ready_issues,
+        candidate_issues,
+        target_min_depth=1,
+        target_max_depth=1,
+    )
+    if not selected:
+        return None, []
+    return QUEUE_IDLE_ADAPTATION_RESPONSE_REPLENISH_QUEUE, selected
+
+
+def maybe_recover_idle_runner_queue(
+    ready_issues: list[dict[str, Any]] | None = None,
+) -> bool:
+    try:
+        ready_snapshot = list(get_ready_issues() if ready_issues is None else ready_issues)
+        running_snapshot = get_running_issues()
+        candidate_snapshot = get_queue_replenisher_candidate_issues()
+        response, eligible = _queue_idle_selected_replenish_response(
+            ready_snapshot,
+            running_snapshot,
+            candidate_snapshot,
+        )
+        if response != QUEUE_IDLE_ADAPTATION_RESPONSE_REPLENISH_QUEUE:
+            return False
+
+        def run_action(action_id: str) -> str:
+            if action_id != "queue_reactivate":
+                return _maintenance_report(
+                    "BLOCKED",
+                    action_id,
+                    ["reason=queue_idle_action_not_allowlisted"],
+                    "not_met",
+                )
+            return _queue_idle_replenish_action()
+
+        receipt = execute_recovery_packet(
+            _queue_idle_recovery_packet(),
+            store=RecoveryStore(control_recovery_db_path()),
+            now=int(time.time()),
+            action_executor=run_action,
+            canary_executor=lambda _canary: False,
+        )
+        if (
+            receipt.get("reason") == "RECOVERY_ALREADY_DONE"
+            and "queue_reactivate" in receipt.get("actions_executed", [])
+        ):
+            report = _queue_idle_replenish_action()
+            return maintenance_report_is_done(report)
+        if receipt.get("status") == "RECOVERED":
+            return True
+        return False
+    except Exception:
+        return False
+
+
 def maybe_replenish_runner_queue_after_completion() -> bool:
     try:
         ready_depth = len(get_ready_issues())
@@ -15159,6 +15293,12 @@ def poll_once(workdir: str | None = None) -> int:
         reconcile_scheduler_on_poll()
     except Exception:
         pass
+    try:
+        ready_before_intake = get_ready_issues()
+    except Exception:
+        ready_before_intake = None
+    if ready_before_intake == []:
+        maybe_recover_idle_runner_queue(ready_before_intake)
     self_heal_run_now_queue_intake()
     issues = get_ready_issues()
     for issue in issues:

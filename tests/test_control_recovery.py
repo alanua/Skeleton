@@ -160,6 +160,25 @@ def test_github_actions_lane_failure_does_not_stall_healthy_issue_runner(tmp_pat
     assert calls == ["issue_runner_continue", "queue_reactivate"]
 
 
+def test_queue_idle_selects_existing_queue_reactivation_without_canary(tmp_path: Path) -> None:
+    calls: list[str] = []
+    receipt = execute_recovery_packet(
+        _packet(
+            failure_class=FailureClass.QUEUE_IDLE.value,
+            failure_key="control:queue-idle:runner-poll",
+        ),
+        store=RecoveryStore(tmp_path / "recovery.sqlite3"),
+        now=100,
+        action_executor=lambda action: calls.append(action) or _done(action),
+        canary_executor=lambda _canary: False,
+    )
+
+    assert receipt["status"] == RecoveryStatus.RECOVERED.value
+    assert receipt["actions_executed"] == ["queue_reactivate"]
+    assert receipt["canaries_executed"] == []
+    assert calls == ["queue_reactivate"]
+
+
 def test_duplicate_restart_tick_does_not_repeat_recovered_action(tmp_path: Path) -> None:
     calls: list[str] = []
     store = RecoveryStore(tmp_path / "recovery.sqlite3")
