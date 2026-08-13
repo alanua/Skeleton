@@ -29,7 +29,7 @@ EVENT_TYPES: tuple[str, ...] = (
     "birthday",
 )
 
-TAXONOMY_VERSION = "family-document-taxonomy-2026-08-11"
+TAXONOMY_VERSION = "family-document-taxonomy-2026-08-13"
 _TOKEN_RE = re.compile(r"[^a-z0-9]+")
 _DATE_RE = re.compile(r"\b(20\d{2}|19\d{2})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])\b")
 _TOPIC_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -37,9 +37,9 @@ _TOPIC_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (TOPIC_ALIASES[1], ("residence", "visa", "immigration", "aufenthalt", "migration")),
     (TOPIC_ALIASES[2], ("insurance", "medical", "health", "arzt", "krankenkasse")),
     (TOPIC_ALIASES[3], ("tax", "employment", "salary", "invoice", "finanzamt", "work")),
-    (TOPIC_ALIASES[4], ("school", "university", "certificate", "zeugnis", "education")),
+    (TOPIC_ALIASES[4], ("school", "university", "certificate", "zeugnis", "education", "schule")),
     (TOPIC_ALIASES[5], ("bank", "loan", "contract", "finance", "konto")),
-    (TOPIC_ALIASES[6], ("court", "hearing", "lawyer", "legal", "gericht", "deadline")),
+    (TOPIC_ALIASES[6], ("court", "hearing", "lawyer", "legal", "gericht", "deadline", "frist")),
     (TOPIC_ALIASES[7], ("rent", "utility", "housing", "lease", "wohnung", "strom")),
     (TOPIC_ALIASES[8], ("flight", "travel", "ticket", "vehicle", "train", "reise")),
 )
@@ -51,12 +51,18 @@ _EVENT_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("booked_travel", ("flight", "booking", "ticket")),
     ("birthday", ("birthday", "geburtstag")),
 )
+_COUNTRY_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("DE", ("deutschland", "bundesrepublik", "germany", "finanzamt", "krankenkasse", "aufenthaltstitel")),
+    ("UA", ("україна", "ukraine", "украины", "україни")),
+    ("GE", ("საქართველო", "georgia", "sakartvelo")),
+)
 
 
 @dataclass(frozen=True)
 class TaxonomyDecision:
     route: str
     topic_alias: str | None
+    jurisdiction_country: str | None
     document_date: str | None
     date_precision: str
     document_type: str | None
@@ -68,10 +74,11 @@ class TaxonomyDecision:
 
 
 def classify_text_locally(text: str, *, source_name: str = "") -> TaxonomyDecision:
+    del source_name  # filenames are not evidence for classification.
     normalized = " ".join(text.split())
-    lowered = normalized.lower()
+    lowered = normalized.casefold()
     topic_hits = [
-        (topic, sum(1 for keyword in keywords if keyword in lowered))
+        (topic, sum(1 for keyword in keywords if keyword.casefold() in lowered))
         for topic, keywords in _TOPIC_KEYWORDS
     ]
     topic_hits = [(topic, score) for topic, score in topic_hits if score > 0]
@@ -90,21 +97,24 @@ def classify_text_locally(text: str, *, source_name: str = "") -> TaxonomyDecisi
     if document_date is None:
         reason_codes.append("DATE_UNCERTAIN")
 
-    issuer = _first_labeled_value(normalized, ("Issuer", "Issued by", "Aussteller", "From"))
+    issuer = _first_labeled_value(normalized, ("Issuer", "Issued by", "Aussteller", "Absender", "From", "Від", "От"))
     if issuer is None:
         reason_codes.append("ISSUER_UNCERTAIN")
-    document_type = _document_type(lowered, source_name)
+    document_type = _document_type(lowered)
     if document_type is None:
         reason_codes.append("DOCUMENT_TYPE_UNCERTAIN")
 
+    jurisdiction = _jurisdiction(lowered)
+    if jurisdiction is None:
+        reason_codes.append("JURISDICTION_UNCERTAIN")
+
     events = _events(lowered, valid_dates)
-    confidence = 0.92
-    if reason_codes:
-        confidence = 0.55 if topic is not None or document_date is not None else 0.25
+    confidence = 0.94 if not reason_codes else (0.55 if topic is not None or document_date is not None else 0.25)
     route = "ACCEPT" if not reason_codes else "REVIEW"
     return TaxonomyDecision(
         route=route,
         topic_alias=topic,
+        jurisdiction_country=jurisdiction,
         document_date=document_date,
         date_precision="day" if document_date else "unknown",
         document_type=document_type,
@@ -116,13 +126,14 @@ def classify_text_locally(text: str, *, source_name: str = "") -> TaxonomyDecisi
     )
 
 
-def deterministic_document_name(parts: Mapping[str, object]) -> str:
+def deterministic_document_name(parts: Mapping[str, object], *, extension: str = ".bin") -> str:
     date_part = _clean_token(str(parts.get("document_date") or "undated"))
     subject = _clean_token(str(parts.get("principal_subject_alias") or "review"))
     topic = _clean_token(str(parts.get("topic_alias") or "uncategorized"))
     document_type = _clean_token(str(parts.get("document_type") or "document"))
     digest = _clean_token(str(parts.get("sha256", "")))[:12]
-    return "-".join(item for item in (date_part, subject, topic, document_type, digest) if item) + ".json"
+    suffix = extension.lower() if re.fullmatch(r"\.[a-z0-9]{1,10}", extension.lower()) else ".bin"
+    return "-".join(item for item in (date_part, subject, topic, document_type, digest) if item) + suffix
 
 
 def public_receipt(statuses: Iterable[str]) -> dict[str, object]:
@@ -151,28 +162,36 @@ def _valid_day(raw: str) -> bool:
 
 def _first_labeled_value(text: str, labels: tuple[str, ...]) -> str | None:
     for label in labels:
-        match = re.search(rf"\b{re.escape(label)}\s*:\s*([A-Za-z0-9 ._-]{{2,80}})", text, re.IGNORECASE)
+        match = re.search(rf"(?:^|\s){re.escape(label)}\s*:\s*([^\n;]{{2,80}})", text, re.IGNORECASE)
         if match:
             return " ".join(match.group(1).split())[:80]
     return None
 
 
-def _document_type(lowered: str, source_name: str) -> str | None:
+def _document_type(lowered: str) -> str | None:
     for keyword, value in (
         ("invoice", "invoice"),
+        ("rechnung", "invoice"),
         ("bescheid", "official decision"),
         ("certificate", "certificate"),
+        ("zeugnis", "certificate"),
         ("contract", "contract"),
+        ("vertrag", "contract"),
         ("notice", "notice"),
         ("letter", "letter"),
+        ("schreiben", "letter"),
     ):
         if keyword in lowered:
             return value
-    if source_name:
-        stem = re.sub(r"\.[^.]+$", "", source_name)
-        token = _clean_token(stem).replace("-", " ")
-        return token[:80] if token else None
     return None
+
+
+def _jurisdiction(lowered: str) -> str | None:
+    hits = []
+    for country, markers in _COUNTRY_MARKERS:
+        if any(marker.casefold() in lowered for marker in markers):
+            hits.append(country)
+    return hits[0] if len(set(hits)) == 1 else None
 
 
 def _events(lowered: str, dates: tuple[str, ...]) -> tuple[dict[str, object], ...]:
@@ -180,7 +199,8 @@ def _events(lowered: str, dates: tuple[str, ...]) -> tuple[dict[str, object], ..
         return ()
     events = []
     for event_type, keywords in _EVENT_KEYWORDS:
-        if any(keyword in lowered for keyword in keywords):
+        matched = next((keyword for keyword in keywords if keyword.casefold() in lowered), None)
+        if matched is not None:
             events.append(
                 {
                     "schema": "skeleton.family_document_event.v1",
@@ -188,7 +208,7 @@ def _events(lowered: str, dates: tuple[str, ...]) -> tuple[dict[str, object], ..
                     "date": dates[0],
                     "title": f"Family document {event_type.replace('_', ' ')}",
                     "confidence": 0.82,
-                    "evidence": "synthetic local keyword/date match",
+                    "evidence": {"keyword": matched, "date": dates[0]},
                 }
             )
     return tuple(events)
