@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest import mock
 
 import scripts.runner_poll_github_tasks as runner
 from core.control_recovery import RecoveryStore
@@ -24,6 +25,7 @@ def _wire_queue(monkeypatch, tmp_path: Path, *, progress: bool):
     monkeypatch.setattr(runner, "control_recovery_db_path", lambda: db_path)
     monkeypatch.setattr(runner, "reconcile_scheduler_on_poll", lambda: {})
     monkeypatch.setattr(runner, "get_ready_issues", lambda: list(ready))
+    monkeypatch.setattr(runner, "_autonomous_queue_running_issues", lambda: [])
     monkeypatch.setattr(
         runner,
         "get_run_now_queue_intake_candidate_issues",
@@ -113,6 +115,38 @@ def test_ready_work_never_triggers_replenishment(monkeypatch, tmp_path: Path) ->
     assert runner.poll_once() == 1
     assert calls["replenish"] == 0
     assert processed == [int(candidate["number"])]
+
+
+def test_running_work_never_triggers_learned_replenishment(monkeypatch, tmp_path: Path) -> None:
+    _ready, _candidate, calls, _db_path = _wire_queue(
+        monkeypatch, tmp_path, progress=True
+    )
+    monkeypatch.setattr(
+        runner,
+        "_autonomous_queue_running_issues",
+        lambda: [{"number": 990002, "state": "open"}],
+    )
+    monkeypatch.setattr(runner, "process_issue", lambda *_args, **_kwargs: None)
+
+    assert runner.poll_once() == 0
+    assert calls["replenish"] == 0
+
+
+def test_replenish_action_rechecks_running_before_mutation(monkeypatch, tmp_path: Path) -> None:
+    _ready, _candidate, calls, _db_path = _wire_queue(
+        monkeypatch, tmp_path, progress=True
+    )
+    monkeypatch.setattr(
+        runner,
+        "_autonomous_queue_running_issues",
+        lambda: [{"number": 990003, "state": "open"}],
+    )
+    with mock.patch.object(runner, "_impl_replenish_runner_queue") as replenish:
+        report = runner._autonomous_queue_replenish_action("unused", "initial")
+
+    assert "QUEUE_RECOVERY_NO_ELIGIBLE_WORK" in report
+    replenish.assert_not_called()
+    assert calls["replenish"] == 0
 
 
 def test_no_eligible_work_does_not_mutate(monkeypatch, tmp_path: Path) -> None:
