@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from core.home_edge.executor import HomeEdgeExecRequest, HomeEdgeExecReceipt, PUBLIC_ERROR_MESSAGE, receipt_from_mapping, sign_request
+from core.home_edge import display_power_off
 from core.home_edge.executor_gateway import EXEC_HMAC_SECRET_ENV, LocalExecTransport, OpenSSHExecTransport, execute_home_edge_request
 from core.home_edge.profile import load_home_edge_profile
 from scripts import home_edge_exec
@@ -427,23 +428,28 @@ def test_installer_secret_modes_idempotency_wrapper_sudoers_and_no_service_enabl
     sudoers = install_root / "etc/sudoers.d/skeleton-home-edge-executor"
     wrapper = install_root / "usr/local/bin/home_edge_exec"
     root_wrapper = install_root / "usr/local/sbin/home_edge_exec_root"
+    display_off_signer = install_root / "usr/local/sbin/skeleton-home-edge-display-off-signer"
     assert oct(stat.S_IMODE(env_file.stat().st_mode)) == "0o600"
     assert oct(stat.S_IMODE(state_dir.stat().st_mode)) == "0o700"
     assert oct(stat.S_IMODE(audit_dir.stat().st_mode)) == "0o700"
     assert oct(stat.S_IMODE(sudoers.stat().st_mode)) == "0o440"
     assert oct(stat.S_IMODE(wrapper.stat().st_mode)) == "0o755"
     assert oct(stat.S_IMODE(root_wrapper.stat().st_mode)) == "0o555"
+    assert oct(stat.S_IMODE(display_off_signer.stat().st_mode)) == "0o555"
     assert "test-hmac-value" in env_file.read_text(encoding="utf-8")
     assert wrapper.exists()
     assert root_wrapper.exists()
     sudoers_text = sudoers.read_text(encoding="utf-8")
-    assert sudoers_text.strip().endswith("ALL=(root) NOPASSWD: /usr/local/sbin/home_edge_exec_root --server")
+    sudoers_lines = sudoers_text.splitlines()
+    assert sudoers_lines[-2].endswith("ALL=(root) NOPASSWD: /usr/local/sbin/home_edge_exec_root --server")
+    assert sudoers_lines[-1].endswith("ALL=(root) NOPASSWD: /usr/local/sbin/skeleton-home-edge-display-off-signer")
     assert "ALL=(ALL)" not in sudoers_text
     assert "ALL : ALL" not in sudoers_text
     assert "SETENV" not in sudoers_text
     assert "*" not in sudoers_text
     assert "/bin/sh" not in sudoers_text
     assert "/bin/bash" not in sudoers_text
+    assert "python" not in sudoers_text
 
     second = subprocess.run(
         [str(installer), "--root", str(install_root), "--desktop-user", desktop],
@@ -464,6 +470,11 @@ def test_installer_secret_modes_idempotency_wrapper_sudoers_and_no_service_enabl
     assert "/usr/bin/env python3 \"$server_script\" --server" in root_wrapper_text
     assert "/etc/skeleton/home_edge_executor.env" in root_wrapper_text
     assert "env -i" in root_wrapper_text
+    signer_wrapper_text = display_off_signer.read_text(encoding="utf-8")
+    assert "accepts no argv" in signer_wrapper_text
+    assert "signer_script=\"$python_root/scripts/home_edge_display_off_signer.py\"" in signer_wrapper_text
+    assert "/usr/bin/env python3 \"$signer_script\"" in signer_wrapper_text
+    assert "--server" not in signer_wrapper_text
     assert "systemctl enable" not in installer.read_text(encoding="utf-8")
     assert "Restart=" not in installer.read_text(encoding="utf-8")
     assert 'SKELETON_HOME_EDGE_EXEC_HMAC_SECRET="$' not in Path("docs/HOME_EDGE_EXECUTOR.md").read_text(encoding="utf-8")
@@ -535,6 +546,33 @@ def test_installer_secret_modes_idempotency_wrapper_sudoers_and_no_service_enabl
     assert injected.returncode == 0, injected.stderr
     assert json.loads(injected.stdout)["stdout"].strip() == "missing"
 
+    signer = subprocess.run(
+        [str(display_off_signer)],
+        input=json.dumps(display_power_off.SIGNER_STDIN),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={**os.environ, "SKELETON_HOME_EDGE_EXEC_HMAC_SECRET": "wrong"},
+        check=False,
+    )
+    assert signer.returncode == 0, signer.stderr
+    envelope = json.loads(signer.stdout)
+    parsed = HomeEdgeExecRequest.from_mapping(envelope)
+    assert parsed.signature == sign_request(parsed, "test-hmac-value")
+    assert "test-hmac-value" not in signer.stdout
+    assert parsed.script == display_power_off.DISPLAY_POWER_OFF_SCRIPT
+
+    signer_extra = subprocess.run(
+        [str(display_off_signer), "--server"],
+        input=json.dumps(display_power_off.SIGNER_STDIN),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert signer_extra.returncode == 2
+    assert "accepts no argv" in signer_extra.stderr
+
     env_file.chmod(0)
     denied = subprocess.run(
         [str(root_wrapper), "--server"],
@@ -558,6 +596,7 @@ def test_installer_secret_modes_idempotency_wrapper_sudoers_and_no_service_enabl
     assert uninstall.returncode == 0, uninstall.stderr
     assert not wrapper.exists()
     assert not root_wrapper.exists()
+    assert not display_off_signer.exists()
     assert not sudoers.exists()
     assert list((install_root / "etc/skeleton").glob("home_edge_executor.env.bak.*"))
 
