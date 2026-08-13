@@ -13,8 +13,38 @@ Initial typed classes:
 - `GITHUB_ACTIONS_LANE_UNAVAILABLE_BUT_ISSUE_RUNNER_HEALTHY`
 - `QUEUE_LABEL_STATE_STUCK`
 - `CANARY_FAILED_AFTER_RECOVERY`
+- `STALE_BASE`
+- `MERGE_CONFLICT_AFTER_MAIN_ADVANCE`
+- `TOOLCHAIN_CAPABILITY_MISMATCH`
+- `OPAQUE_CI_FAILURE`
+- `QUEUE_IDLE_WITH_ELIGIBLE_WORK`
+- `AMBIGUOUS_MUTATING_RESULT`
 
 Unknown failures and unsafe payloads become `NEEDS_OPERATOR`.
+
+## Continuous Failure Learning
+
+The same `RecoveryStore` now owns durable failure lessons. It derives one bounded fingerprint from public-safe fields only: failure class, bounded reason class, task kind, operation, phase, route type/id, capability, registered validation lane, repository token, and a hash of allowed-file metadata when present. Raw logs, titles, emails, paths, provider URLs, credentials, device data, and arbitrary issue text are not part of the fingerprint or durable public evidence.
+
+Each fingerprint has one lesson row. Duplicate polls, restarts, and repeated occurrences reuse that row instead of spawning unbounded repair/retry records. A verified lesson stores:
+
+`fingerprint -> safe response class -> public verification evidence ref`
+
+On future matching incidents, the selector prefers the verified safe response and increments `repeats_prevented`. Failed adaptations record only bounded negative evidence (`response_class`, outcome, reason class, evidence ref, timestamp) and advance to the next already-registered response class. If all registered responses are exhausted, the lesson emits exactly one durable `NEEDS_OPERATOR`.
+
+Learning changes policy selection only inside registered authority. It never learns commands, package names, versions, paths, services, models, providers, endpoints, secrets, approvals, or protected merge authority from incident text.
+
+Registered safe response classes:
+
+- `CONTROL_RECOVERY` -> existing fixed recovery plans
+- `CURRENT_MAIN_REBUILD` -> one current-main rebuild for stale-base tasks whose intent and allowlist remain valid
+- `CURRENT_MAIN_REPLACEMENT` -> one replacement for merge-conflicted generated PRs after unrelated main advance
+- `APPROVED_GITHUB_VALIDATION_LANE` -> an already-approved validation lane such as the Android GitHub CI lane for `android:gradle`
+- `QUEUE_REPLENISH` -> existing queue replenisher/reactivation path
+- `REPAIR_TASK_REQUIRED` -> one bounded normal repair task/review/operator-gated route
+- `NEEDS_OPERATOR` -> protected, ambiguous, unknown, or exhausted incidents
+
+Ambiguous mutating receipts remain authoritative `NEEDS_OPERATOR` and are never converted into retry lessons. Successful receipts after crash/restart still finalize the occurrence without replaying the side effect.
 
 ## Fixed Actions
 
@@ -73,6 +103,20 @@ Recoverable blocked consumers should wait on the recovery occurrence. Once recov
 Ordinary Runner codegen failures classified by the exact live metadata phrase enter the existing recovery route before terminal blocking. The issue is moved to `runner:waiting-dependency`, a durable recovery occurrence is recorded, and a same-issue consumer waits on it. After `codegen_runtime_recover` and the read-only Codex canary succeed, `queue_reactivate` removes `runner:waiting-dependency` from that same GitHub issue and adds `runner:ready`.
 
 During each ordinary Runner poll, the single poller also checks open `agent:task` issues marked `queue:RUN_NOW` that are missing `runner:ready`. Valid public-safe Skeleton task issues that are not running, waiting on dependencies, terminal, operator-held, duplicate, dependency-blocked, or otherwise excluded by the existing queue policy are idempotently promoted with `runner:ready` before normal ready-issue selection. This only restores eligibility for the existing Runner path; it does not add a second queue, bypass RunnerGate, or weaken route, privacy, approval, runtime, protected-file, secret, merge, or operator gates.
+
+When ready depth is zero, running depth is zero, and eligible safe work exists, the incident is classified as `QUEUE_IDLE_WITH_ELIGIBLE_WORK` and routed to the existing replenisher. Routine replenish, retry, and verified adaptation remain Telegram-silent.
+
+## Dashboard Metrics
+
+Dashboard callers can read aggregate public-safe learning metrics:
+
+- `incident_classes_seen`
+- `lessons_verified`
+- `lessons_failed`
+- `repeats_prevented`
+- `needs_operator_count`
+
+These are counts only. They do not include private payloads, raw diagnostics, paths, titles, emails, or provider/device data.
 
 ## Operator Noise
 

@@ -29,12 +29,30 @@ class FailureClass(str, Enum):
     GITHUB_ACTIONS_LANE_UNAVAILABLE_BUT_ISSUE_RUNNER_HEALTHY = "GITHUB_ACTIONS_LANE_UNAVAILABLE_BUT_ISSUE_RUNNER_HEALTHY"
     QUEUE_LABEL_STATE_STUCK = "QUEUE_LABEL_STATE_STUCK"
     CANARY_FAILED_AFTER_RECOVERY = "CANARY_FAILED_AFTER_RECOVERY"
+    STALE_BASE = "STALE_BASE"
+    MERGE_CONFLICT_AFTER_MAIN_ADVANCE = "MERGE_CONFLICT_AFTER_MAIN_ADVANCE"
+    TOOLCHAIN_CAPABILITY_MISMATCH = "TOOLCHAIN_CAPABILITY_MISMATCH"
+    OPAQUE_CI_FAILURE = "OPAQUE_CI_FAILURE"
+    QUEUE_IDLE_WITH_ELIGIBLE_WORK = "QUEUE_IDLE_WITH_ELIGIBLE_WORK"
+    AMBIGUOUS_MUTATING_RESULT = "AMBIGUOUS_MUTATING_RESULT"
 
 
 class RecoveryStatus(str, Enum):
     WAITING_RECOVERY = "WAITING_RECOVERY"
     RETRYING = "RETRYING"
     RECOVERED = "RECOVERED"
+    NEEDS_OPERATOR = "NEEDS_OPERATOR"
+
+
+class SafeResponseClass(str, Enum):
+    CONTROL_RECOVERY = "CONTROL_RECOVERY"
+    RETRY_SAME_ROUTE = "RETRY_SAME_ROUTE"
+    REQUEUE_SAME_ISSUE = "REQUEUE_SAME_ISSUE"
+    CURRENT_MAIN_REBUILD = "CURRENT_MAIN_REBUILD"
+    CURRENT_MAIN_REPLACEMENT = "CURRENT_MAIN_REPLACEMENT"
+    APPROVED_GITHUB_VALIDATION_LANE = "APPROVED_GITHUB_VALIDATION_LANE"
+    QUEUE_REPLENISH = "QUEUE_REPLENISH"
+    REPAIR_TASK_REQUIRED = "REPAIR_TASK_REQUIRED"
     NEEDS_OPERATOR = "NEEDS_OPERATOR"
 
 
@@ -51,8 +69,78 @@ _KNOWN_ACTIONS = frozenset(
         "codegen_read_only_canary",
         "queue_reactivate",
         "issue_runner_continue",
+        "current_main_rebuild",
+        "current_main_replacement",
+        "android_github_ci_validation",
     }
 )
+_SAFE_CONTEXT_FIELDS = (
+    "failure_class",
+    "reason_class",
+    "task_kind",
+    "operation",
+    "phase",
+    "route_type",
+    "route_id",
+    "capability",
+    "validation_lane",
+    "repository",
+)
+
+
+_RESPONSE_PLANS: dict[
+    SafeResponseClass, tuple[tuple[str, ...], tuple[str, ...], str | None]
+] = {
+    SafeResponseClass.CONTROL_RECOVERY: ((), (), None),
+    SafeResponseClass.RETRY_SAME_ROUTE: ((), (), None),
+    SafeResponseClass.REQUEUE_SAME_ISSUE: (("issue_runner_continue",), (), "queue_reactivate"),
+    SafeResponseClass.CURRENT_MAIN_REBUILD: (
+        ("current_main_rebuild",),
+        ("registered_checkout_freshness_canary",),
+        "queue_reactivate",
+    ),
+    SafeResponseClass.CURRENT_MAIN_REPLACEMENT: (
+        ("current_main_replacement",),
+        ("registered_checkout_freshness_canary",),
+        "queue_reactivate",
+    ),
+    SafeResponseClass.APPROVED_GITHUB_VALIDATION_LANE: (
+        ("android_github_ci_validation",),
+        (),
+        "queue_reactivate",
+    ),
+    SafeResponseClass.QUEUE_REPLENISH: (("queue_reactivate",), (), None),
+    SafeResponseClass.REPAIR_TASK_REQUIRED: ((), (), None),
+    SafeResponseClass.NEEDS_OPERATOR: ((), (), None),
+}
+
+
+_SAFE_RESPONSE_REGISTRY: dict[FailureClass, tuple[SafeResponseClass, ...]] = {
+    FailureClass.CODEGEN_RUNTIME_UNHEALTHY: (SafeResponseClass.CONTROL_RECOVERY,),
+    FailureClass.REGISTERED_CHECKOUT_STALE_OR_DIRTY: (SafeResponseClass.CONTROL_RECOVERY,),
+    FailureClass.LONG_LIVED_POLLER_STALE: (SafeResponseClass.CONTROL_RECOVERY,),
+    FailureClass.EXECUTOR_SERVICE_NOT_RUNNING: (SafeResponseClass.CONTROL_RECOVERY,),
+    FailureClass.GITHUB_ACTIONS_LANE_UNAVAILABLE_BUT_ISSUE_RUNNER_HEALTHY: (
+        SafeResponseClass.CONTROL_RECOVERY,
+    ),
+    FailureClass.QUEUE_LABEL_STATE_STUCK: (SafeResponseClass.QUEUE_REPLENISH,),
+    FailureClass.CANARY_FAILED_AFTER_RECOVERY: (SafeResponseClass.REPAIR_TASK_REQUIRED,),
+    FailureClass.STALE_BASE: (SafeResponseClass.CURRENT_MAIN_REBUILD,),
+    FailureClass.MERGE_CONFLICT_AFTER_MAIN_ADVANCE: (
+        SafeResponseClass.CURRENT_MAIN_REPLACEMENT,
+    ),
+    FailureClass.TOOLCHAIN_CAPABILITY_MISMATCH: (
+        SafeResponseClass.APPROVED_GITHUB_VALIDATION_LANE,
+        SafeResponseClass.REPAIR_TASK_REQUIRED,
+    ),
+    FailureClass.OPAQUE_CI_FAILURE: (
+        SafeResponseClass.CURRENT_MAIN_REBUILD,
+        SafeResponseClass.CURRENT_MAIN_REPLACEMENT,
+        SafeResponseClass.REPAIR_TASK_REQUIRED,
+    ),
+    FailureClass.QUEUE_IDLE_WITH_ELIGIBLE_WORK: (SafeResponseClass.QUEUE_REPLENISH,),
+    FailureClass.AMBIGUOUS_MUTATING_RESULT: (SafeResponseClass.NEEDS_OPERATOR,),
+}
 
 
 @dataclass(frozen=True)
@@ -65,6 +153,9 @@ class RecoveryPlan:
     max_attempts: int = 3
     backoff_seconds: int = 60
     requires_codegen: bool = False
+    fingerprint: str | None = None
+    response_class: SafeResponseClass = SafeResponseClass.CONTROL_RECOVERY
+    response_classes: tuple[SafeResponseClass, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -79,6 +170,7 @@ class RecoveryReceipt:
     canaries_executed: tuple[str, ...]
     evidence_ref: str
     needs_operator_notification: bool = False
+    response_class: SafeResponseClass | None = None
 
     def as_mapping(self) -> dict[str, Any]:
         return {
@@ -94,6 +186,9 @@ class RecoveryReceipt:
             "canaries_executed": list(self.canaries_executed),
             "evidence_ref": self.evidence_ref,
             "needs_operator_notification": self.needs_operator_notification,
+            "response_class": (
+                None if self.response_class is None else self.response_class.value
+            ),
             "public_safe": True,
             "external_side_effects_executed": bool(self.actions_executed),
         }
@@ -118,6 +213,24 @@ class RecoveryStore:
                     evidence_json TEXT NOT NULL,
                     updated_at INTEGER NOT NULL CHECK(updated_at >= 0)
                 ) WITHOUT ROWID;
+
+                CREATE TABLE IF NOT EXISTS failure_lessons (
+                    fingerprint TEXT PRIMARY KEY,
+                    failure_class TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    preferred_response_class TEXT,
+                    next_response_index INTEGER NOT NULL CHECK(next_response_index >= 0),
+                    attempts_json TEXT NOT NULL,
+                    verification_json TEXT NOT NULL,
+                    needs_operator_emitted INTEGER NOT NULL CHECK(needs_operator_emitted IN (0, 1)),
+                    created_at INTEGER NOT NULL CHECK(created_at >= 0),
+                    updated_at INTEGER NOT NULL CHECK(updated_at >= 0)
+                ) WITHOUT ROWID;
+
+                CREATE TABLE IF NOT EXISTS failure_learning_metrics (
+                    metric TEXT PRIMARY KEY,
+                    value INTEGER NOT NULL CHECK(value >= 0)
+                ) WITHOUT ROWID;
                 """
             )
 
@@ -131,6 +244,28 @@ class RecoveryStore:
     ) -> RecoveryReceipt:
         _timestamp(now, "now")
         self.initialize()
+        existing = self._existing_recovery_receipt(plan.failure_key, now)
+        if existing is not None:
+            return existing
+        response_class = plan.response_class
+        if plan.fingerprint is not None:
+            response_class = self._select_response(plan=plan, now=now)
+            plan = _plan_for_response(plan, response_class)
+            if response_class in {
+                SafeResponseClass.NEEDS_OPERATOR,
+                SafeResponseClass.REPAIR_TASK_REQUIRED,
+            }:
+                return self.record_needs_operator(
+                    failure_key=plan.failure_key,
+                    reason=(
+                        "REPAIR_TASK_REQUIRED"
+                        if response_class is SafeResponseClass.REPAIR_TASK_REQUIRED
+                        else "SAFE_ADAPTATIONS_EXHAUSTED"
+                    ),
+                    now=now,
+                    fingerprint=plan.fingerprint,
+                    failure_class=plan.failure_class,
+                )
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -217,6 +352,16 @@ class RecoveryStore:
             next_retry = now + plan.backoff_seconds * attempt
             with self._connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
+                if plan.fingerprint is not None:
+                    self._record_lesson_attempt(
+                        connection,
+                        plan=plan,
+                        response_class=response_class,
+                        outcome="failed",
+                        reason=reason,
+                        evidence_ref=None,
+                        now=now,
+                    )
                 row = connection.execute(
                     "SELECT needs_operator_emitted FROM recovery_runs WHERE failure_key=?",
                     (plan.failure_key,),
@@ -259,15 +404,54 @@ class RecoveryStore:
                 now=now,
                 evidence={"actions": actions, "canaries": canaries},
             )
+            if plan.fingerprint is not None:
+                self._record_lesson_attempt(
+                    connection,
+                    plan=plan,
+                    response_class=response_class,
+                    outcome="verified",
+                    reason="RECOVERY_VERIFIED",
+                    evidence_ref=receipt.evidence_ref,
+                    now=now,
+                )
             connection.commit()
             return receipt
 
-    def record_needs_operator(self, *, failure_key: str, reason: str, now: int) -> RecoveryReceipt:
+    def record_needs_operator(
+        self,
+        *,
+        failure_key: str,
+        reason: str,
+        now: int,
+        fingerprint: str | None = None,
+        failure_class: FailureClass | None = None,
+    ) -> RecoveryReceipt:
         safe_key = _failure_key(failure_key)
         _timestamp(now, "now")
         self.initialize()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if fingerprint is not None and failure_class is not None:
+                self._ensure_lesson(connection, fingerprint, failure_class, now)
+                lesson = connection.execute(
+                    "SELECT needs_operator_emitted FROM failure_lessons WHERE fingerprint=?",
+                    (fingerprint,),
+                ).fetchone()
+                lesson_notify = lesson is None or not bool(lesson["needs_operator_emitted"])
+                connection.execute(
+                    """
+                    UPDATE failure_lessons
+                       SET status='NEEDS_OPERATOR',
+                           preferred_response_class=?,
+                           needs_operator_emitted=1,
+                           updated_at=?
+                     WHERE fingerprint=?
+                    """,
+                    (SafeResponseClass.NEEDS_OPERATOR.value, now, fingerprint),
+                )
+                self._increment_metric(connection, "needs_operator_count")
+            else:
+                lesson_notify = True
             row = connection.execute(
                 "SELECT needs_operator_emitted FROM recovery_runs WHERE failure_key=?", (safe_key,)
             ).fetchone()
@@ -299,7 +483,208 @@ class RecoveryStore:
             (),
             (),
             evidence_ref,
-            notify,
+            notify and lesson_notify,
+        )
+
+    def learning_metrics(self) -> dict[str, int]:
+        self.initialize()
+        with self._connect() as connection:
+            lessons = connection.execute(
+                """
+                SELECT
+                    COUNT(*) AS seen,
+                    COALESCE(SUM(CASE WHEN status='VERIFIED' THEN 1 ELSE 0 END), 0) AS verified,
+                    COALESCE(SUM(CASE WHEN status='FAILED' THEN 1 ELSE 0 END), 0) AS failed,
+                    COALESCE(SUM(CASE WHEN status='NEEDS_OPERATOR' THEN 1 ELSE 0 END), 0) AS needs_operator
+                  FROM failure_lessons
+                """
+            ).fetchone()
+            metric_rows = connection.execute(
+                "SELECT metric, value FROM failure_learning_metrics"
+            ).fetchall()
+        metrics = {str(row["metric"]): int(row["value"]) for row in metric_rows}
+        assert lessons is not None
+        return {
+            "incident_classes_seen": int(lessons["seen"]),
+            "lessons_verified": int(lessons["verified"]),
+            "lessons_failed": int(lessons["failed"]),
+            "repeats_prevented": int(metrics.get("repeats_prevented", 0)),
+            "needs_operator_count": int(
+                metrics.get("needs_operator_count", int(lessons["needs_operator"]))
+            ),
+        }
+
+    def _select_response(self, *, plan: RecoveryPlan, now: int) -> SafeResponseClass:
+        assert plan.fingerprint is not None
+        self.initialize()
+        responses = plan.response_classes or _registered_responses(plan.failure_class)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._ensure_lesson(connection, plan.fingerprint, plan.failure_class, now)
+            row = connection.execute(
+                "SELECT * FROM failure_lessons WHERE fingerprint=?", (plan.fingerprint,)
+            ).fetchone()
+            assert row is not None
+            status = str(row["status"])
+            preferred = row["preferred_response_class"]
+            if len(responses) == 1 and status != "VERIFIED":
+                connection.commit()
+                return responses[0]
+            if status == "VERIFIED" and isinstance(preferred, str):
+                try:
+                    response = SafeResponseClass(preferred)
+                except ValueError:
+                    response = SafeResponseClass.NEEDS_OPERATOR
+                if response in responses:
+                    self._increment_metric(connection, "repeats_prevented")
+                    connection.commit()
+                    return response
+            failed = {
+                str(item.get("response_class"))
+                for item in _safe_json_list(row["attempts_json"])
+                if item.get("outcome") == "failed"
+            }
+            for response in responses:
+                if response.value not in failed:
+                    connection.commit()
+                    return response
+            connection.execute(
+                """
+                UPDATE failure_lessons
+                   SET status='FAILED',
+                       preferred_response_class=?,
+                       next_response_index=?,
+                       updated_at=?
+                 WHERE fingerprint=?
+                """,
+                (SafeResponseClass.NEEDS_OPERATOR.value, len(responses), now, plan.fingerprint),
+            )
+            connection.commit()
+            return SafeResponseClass.NEEDS_OPERATOR
+
+    def _existing_recovery_receipt(
+        self, failure_key: str, now: int
+    ) -> RecoveryReceipt | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM recovery_runs WHERE failure_key = ?", (failure_key,)
+            ).fetchone()
+        if row is None:
+            return None
+        status = RecoveryStatus(str(row["status"]))
+        if status is RecoveryStatus.RECOVERED:
+            return self._receipt_from_row(row, "RECOVERY_ALREADY_DONE")
+        if status is RecoveryStatus.NEEDS_OPERATOR:
+            return self._receipt_from_row(row, "RECOVERY_NEEDS_OPERATOR_DURABLE")
+        next_retry_at = row["next_retry_at"]
+        if next_retry_at is not None and now < int(next_retry_at):
+            return self._receipt_from_row(row, "RECOVERY_BACKOFF_ACTIVE")
+        return None
+
+    def _ensure_lesson(
+        self,
+        connection: sqlite3.Connection,
+        fingerprint: str,
+        failure_class: FailureClass,
+        now: int,
+    ) -> None:
+        result = connection.execute(
+            """
+            INSERT OR IGNORE INTO failure_lessons(
+                fingerprint, failure_class, status, preferred_response_class,
+                next_response_index, attempts_json, verification_json,
+                needs_operator_emitted, created_at, updated_at
+            ) VALUES(?,?,?,?,0,'[]','{}',0,?,?)
+            """,
+            (fingerprint, failure_class.value, "OPEN", None, now, now),
+        )
+        if result.rowcount == 1:
+            self._increment_metric(connection, "incident_classes_seen")
+
+    def _record_lesson_attempt(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        plan: RecoveryPlan,
+        response_class: SafeResponseClass,
+        outcome: str,
+        reason: str,
+        evidence_ref: str | None,
+        now: int,
+    ) -> None:
+        assert plan.fingerprint is not None
+        self._ensure_lesson(connection, plan.fingerprint, plan.failure_class, now)
+        row = connection.execute(
+            "SELECT attempts_json FROM failure_lessons WHERE fingerprint=?",
+            (plan.fingerprint,),
+        ).fetchone()
+        attempts = _safe_json_list("[]" if row is None else str(row["attempts_json"]))
+        attempts.append(
+            {
+                "response_class": response_class.value,
+                "outcome": outcome,
+                "reason_class": _safe_reason(reason),
+                "evidence_ref": evidence_ref,
+                "recorded_at": now,
+            }
+        )
+        attempts_json = json.dumps(attempts[-10:], sort_keys=True, separators=(",", ":"))
+        if outcome == "verified":
+            verification_json = json.dumps(
+                {
+                    "response_class": response_class.value,
+                    "reason_class": _safe_reason(reason),
+                    "evidence_ref": evidence_ref,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            connection.execute(
+                """
+                UPDATE failure_lessons
+                   SET status='VERIFIED',
+                       preferred_response_class=?,
+                       attempts_json=?,
+                       verification_json=?,
+                       updated_at=?
+                 WHERE fingerprint=?
+                """,
+                (
+                    response_class.value,
+                    attempts_json,
+                    verification_json,
+                    now,
+                    plan.fingerprint,
+                ),
+            )
+        else:
+            failed_count = len(
+                {
+                    str(item.get("response_class"))
+                    for item in attempts
+                    if item.get("outcome") == "failed"
+                }
+            )
+            connection.execute(
+                """
+                UPDATE failure_lessons
+                   SET status='FAILED',
+                       attempts_json=?,
+                       next_response_index=?,
+                       updated_at=?
+                 WHERE fingerprint=?
+                """,
+                (attempts_json, failed_count, now, plan.fingerprint),
+            )
+
+    @staticmethod
+    def _increment_metric(connection: sqlite3.Connection, metric: str) -> None:
+        connection.execute(
+            """
+            INSERT INTO failure_learning_metrics(metric, value) VALUES(?, 1)
+            ON CONFLICT(metric) DO UPDATE SET value=value+1
+            """,
+            (metric,),
         )
 
     def _mark_needs_operator(
@@ -345,6 +730,7 @@ class RecoveryStore:
             "status": status.value,
             "attempt": attempt,
             "reason": reason,
+            "response_class": plan.response_class.value,
             "evidence": dict(evidence),
         }
         evidence_ref = _evidence_ref(payload)
@@ -369,6 +755,7 @@ class RecoveryStore:
             tuple(str(x) for x in evidence.get("actions", ())),
             tuple(str(x) for x in evidence.get("canaries", ())),
             evidence_ref,
+            response_class=plan.response_class,
         )
 
     def _receipt_from_row(self, row: sqlite3.Row, reason: str) -> RecoveryReceipt:
@@ -390,6 +777,12 @@ class RecoveryStore:
             tuple(str(x) for x in details.get("canaries", ())),
             str(evidence.get("evidence_ref") or _evidence_ref(evidence)),
             False,
+            (
+                SafeResponseClass(str(evidence["response_class"]))
+                if isinstance(evidence.get("response_class"), str)
+                and str(evidence["response_class"]) in {item.value for item in SafeResponseClass}
+                else None
+            ),
         )
 
     def _connect(self) -> sqlite3.Connection:
@@ -416,6 +809,18 @@ def classify_failure(packet: Mapping[str, Any]) -> FailureClass | None:
         return FailureClass.LONG_LIVED_POLLER_STALE
     if "github actions" in text and "issue-runner healthy" in text:
         return FailureClass.GITHUB_ACTIONS_LANE_UNAVAILABLE_BUT_ISSUE_RUNNER_HEALTHY
+    if "stale_base" in text or ("stale" in text and "base" in text):
+        return FailureClass.STALE_BASE
+    if "merge" in text and "conflict" in text:
+        return FailureClass.MERGE_CONFLICT_AFTER_MAIN_ADVANCE
+    if "toolchain" in text and "mismatch" in text:
+        return FailureClass.TOOLCHAIN_CAPABILITY_MISMATCH
+    if "queue" in text and "idle" in text:
+        return FailureClass.QUEUE_IDLE_WITH_ELIGIBLE_WORK
+    if "opaque" in text and "ci" in text:
+        return FailureClass.OPAQUE_CI_FAILURE
+    if "ambiguous" in text and "mutating" in text:
+        return FailureClass.AMBIGUOUS_MUTATING_RESULT
     return None
 
 
@@ -474,8 +879,26 @@ def build_recovery_plan(packet: Mapping[str, Any]) -> RecoveryPlan | None:
         FailureClass.QUEUE_LABEL_STATE_STUCK: (("queue_reactivate",), ("registered_checkout_freshness_canary",), None),
         FailureClass.CANARY_FAILED_AFTER_RECOVERY: ((), (), None),
     }
-    actions, canaries, queue_action = plans[failure_class]
-    return RecoveryPlan(failure_class, raw_key, actions, canaries, queue_action, max_attempts, backoff, False)
+    response_classes = _registered_responses_for_packet(failure_class, packet)
+    response_class = response_classes[0] if response_classes else SafeResponseClass.NEEDS_OPERATOR
+    if response_class is SafeResponseClass.CONTROL_RECOVERY:
+        actions, canaries, queue_action = plans[failure_class]
+    else:
+        actions, canaries, queue_action = _RESPONSE_PLANS[response_class]
+    fingerprint = derive_failure_fingerprint(packet, failure_class=failure_class)
+    return RecoveryPlan(
+        failure_class,
+        raw_key,
+        actions,
+        canaries,
+        queue_action,
+        max_attempts,
+        backoff,
+        False,
+        fingerprint,
+        response_class,
+        response_classes,
+    )
 
 
 def execute_recovery_packet(
@@ -489,7 +912,18 @@ def execute_recovery_packet(
     if packet.get("schema") not in {None, CONTROL_RECOVERY_SCHEMA}:
         return store.record_needs_operator(failure_key=_packet_failure_key(packet), reason="SCHEMA_MISMATCH", now=now).as_mapping()
     if _payload_attempts_to_broaden_authority(packet):
-        return store.record_needs_operator(failure_key=_packet_failure_key(packet), reason="UNREGISTERED_RECOVERY_AUTHORITY", now=now).as_mapping()
+        failure_class = classify_failure(packet)
+        return store.record_needs_operator(
+            failure_key=_packet_failure_key(packet),
+            reason="UNREGISTERED_RECOVERY_AUTHORITY",
+            now=now,
+            fingerprint=(
+                derive_failure_fingerprint(packet, failure_class=failure_class)
+                if failure_class is not None
+                else None
+            ),
+            failure_class=failure_class,
+        ).as_mapping()
     plan = build_recovery_plan(packet)
     if plan is None:
         return store.record_needs_operator(failure_key=_packet_failure_key(packet), reason="UNKNOWN_UNSAFE_RECOVERY", now=now).as_mapping()
@@ -519,6 +953,97 @@ def _payload_attempts_to_broaden_authority(packet: Mapping[str, Any]) -> bool:
         if value is not None and (not isinstance(value, list) or any(item not in _KNOWN_ACTIONS for item in value)):
             return True
     return False
+
+
+def derive_failure_fingerprint(
+    packet: Mapping[str, Any], *, failure_class: FailureClass | None = None
+) -> str:
+    selected_class = failure_class or classify_failure(packet)
+    bounded: dict[str, str] = {
+        "failure_class": (
+            selected_class.value if selected_class is not None else "UNKNOWN_UNSAFE_RECOVERY"
+        )
+    }
+    for key in _SAFE_CONTEXT_FIELDS:
+        value = packet.get(key)
+        if isinstance(value, str) and _SAFE_TOKEN_RE.fullmatch(value):
+            bounded[key] = value
+    for capability_key in ("capability", "requested_capability", "approved_capability"):
+        value = packet.get(capability_key)
+        if isinstance(value, str) and _SAFE_TOKEN_RE.fullmatch(value):
+            bounded["capability"] = value
+            break
+    allowed = packet.get("allowed_files")
+    if isinstance(allowed, list) and all(isinstance(item, str) for item in allowed):
+        safe_allowed = sorted(item for item in allowed if _SAFE_KEY_RE.fullmatch(item))
+        if safe_allowed:
+            bounded["allowed_files_hash"] = hashlib.sha256(
+                json.dumps(safe_allowed, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()[:16]
+    encoded = json.dumps(
+        bounded,
+        ensure_ascii=True,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return "failure-fp:" + hashlib.sha256(encoded).hexdigest()[:32]
+
+
+def _initial_response_class(failure_class: FailureClass) -> SafeResponseClass:
+    responses = _registered_responses(failure_class)
+    return responses[0] if responses else SafeResponseClass.NEEDS_OPERATOR
+
+
+def _registered_responses(failure_class: FailureClass) -> tuple[SafeResponseClass, ...]:
+    return _SAFE_RESPONSE_REGISTRY.get(failure_class, (SafeResponseClass.REPAIR_TASK_REQUIRED,))
+
+
+def _registered_responses_for_packet(
+    failure_class: FailureClass, packet: Mapping[str, Any]
+) -> tuple[SafeResponseClass, ...]:
+    responses = _registered_responses(failure_class)
+    if failure_class is not FailureClass.TOOLCHAIN_CAPABILITY_MISMATCH:
+        return responses
+    lane = packet.get("validation_lane")
+    if isinstance(lane, str) and _SAFE_TOKEN_RE.fullmatch(lane):
+        return responses
+    return (SafeResponseClass.REPAIR_TASK_REQUIRED,)
+
+
+def _plan_for_response(plan: RecoveryPlan, response_class: SafeResponseClass) -> RecoveryPlan:
+    if response_class is SafeResponseClass.CONTROL_RECOVERY:
+        return plan
+    actions, canaries, queue_action = _RESPONSE_PLANS[response_class]
+    return RecoveryPlan(
+        plan.failure_class,
+        plan.failure_key,
+        actions,
+        canaries,
+        queue_action,
+        plan.max_attempts,
+        plan.backoff_seconds,
+        plan.requires_codegen,
+        plan.fingerprint,
+        response_class,
+        plan.response_classes,
+    )
+
+
+def _safe_json_list(raw: str) -> list[dict[str, Any]]:
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _safe_reason(reason: str) -> str:
+    token = re.sub(r"[^A-Za-z0-9_]+", "_", str(reason)).strip("_").upper()
+    token = token[:127] or "UNKNOWN"
+    return token if _SAFE_TOKEN_RE.fullmatch(token) else "UNKNOWN"
 
 
 def _maintenance_report_done(report: str) -> bool:
