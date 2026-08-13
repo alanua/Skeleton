@@ -28,6 +28,7 @@ class FailureClass(str, Enum):
     EXECUTOR_SERVICE_NOT_RUNNING = "EXECUTOR_SERVICE_NOT_RUNNING"
     GITHUB_ACTIONS_LANE_UNAVAILABLE_BUT_ISSUE_RUNNER_HEALTHY = "GITHUB_ACTIONS_LANE_UNAVAILABLE_BUT_ISSUE_RUNNER_HEALTHY"
     QUEUE_LABEL_STATE_STUCK = "QUEUE_LABEL_STATE_STUCK"
+    QUEUE_IDLE = "QUEUE_IDLE"
     CANARY_FAILED_AFTER_RECOVERY = "CANARY_FAILED_AFTER_RECOVERY"
 
 
@@ -472,6 +473,7 @@ def build_recovery_plan(packet: Mapping[str, Any]) -> RecoveryPlan | None:
         FailureClass.EXECUTOR_SERVICE_NOT_RUNNING: (("executor_service_preflight",), ("codegen_read_only_canary",), "queue_reactivate"),
         FailureClass.GITHUB_ACTIONS_LANE_UNAVAILABLE_BUT_ISSUE_RUNNER_HEALTHY: (("issue_runner_continue",), ("codegen_read_only_canary",), "queue_reactivate"),
         FailureClass.QUEUE_LABEL_STATE_STUCK: (("queue_reactivate",), ("registered_checkout_freshness_canary",), None),
+        FailureClass.QUEUE_IDLE: (("queue_reactivate",), (), None),
         FailureClass.CANARY_FAILED_AFTER_RECOVERY: ((), (), None),
     }
     actions, canaries, queue_action = plans[failure_class]

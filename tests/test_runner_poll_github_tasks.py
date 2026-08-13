@@ -4,6 +4,7 @@ import csv
 import json
 import os
 import re
+import sqlite3
 import urllib.parse
 from pathlib import Path
 from unittest import mock
@@ -3240,6 +3241,237 @@ def test_poll_once_runs_passive_scheduler_reconciliation_before_queue_intake() -
 
     assert count == 0
     assert calls == ["reconcile", "intake"]
+
+
+def test_poll_once_recovers_idle_run_now_queue_through_durable_adaptation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(runner, "ROOT", tmp_path)
+    labels = {runner.LABEL_AGENT_TASK, runner.LABEL_RUN_NOW}
+    issue = _queue_candidate_issue(
+        2560,
+        allowed_files=("scripts/runner_poll_github_tasks.py",),
+        idempotency_key="queue-idle-run-now-2560",
+        labels=(),
+    )
+    promoted: list[int] = []
+    processed: list[int] = []
+
+    def issue_snapshot() -> dict[str, object]:
+        snapshot = dict(issue)
+        snapshot["labels"] = [{"name": label} for label in sorted(labels)]
+        return snapshot
+
+    def ready_issues() -> list[dict[str, object]]:
+        if runner.LABEL_READY in labels and runner.LABEL_RUNNING not in labels:
+            return [issue_snapshot()]
+        return []
+
+    def running_issues() -> list[dict[str, object]]:
+        return [issue_snapshot()] if runner.LABEL_RUNNING in labels else []
+
+    def promote(promoted_issue: dict[str, object]) -> None:
+        promoted.append(int(promoted_issue["number"]))
+        labels.add(runner.LABEL_READY)
+
+    def process(processed_issue: dict[str, object], *, workdir: str | None = None) -> None:
+        assert workdir == "/coordinator"
+        processed.append(int(processed_issue["number"]))
+        labels.discard(runner.LABEL_READY)
+        labels.add(runner.LABEL_RUNNING)
+
+    with mock.patch.object(runner, "reconcile_scheduler_on_poll"), mock.patch.object(
+        runner, "get_ready_issues", side_effect=ready_issues
+    ), mock.patch.object(
+        runner, "get_running_issues", side_effect=running_issues
+    ), mock.patch.object(
+        runner, "get_queue_replenisher_candidate_issues", return_value=[issue_snapshot()]
+    ), mock.patch.object(
+        runner, "_promote_queue_replenisher_issue", side_effect=promote
+    ), mock.patch.object(
+        runner, "self_heal_run_now_queue_intake", return_value=0
+    ), mock.patch.object(
+        runner, "process_issue", side_effect=process
+    ), mock.patch.object(
+        runner, "send_telegram_notification"
+    ) as telegram:
+        first_count = runner.poll_once(workdir="/coordinator")
+        second_count = runner.poll_once(workdir="/coordinator")
+
+    assert first_count == 1
+    assert second_count == 0
+    assert promoted == [2560]
+    assert processed == [2560]
+    telegram.assert_not_called()
+
+
+def test_poll_once_idle_with_no_eligible_work_makes_zero_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(runner, "ROOT", tmp_path)
+    waiting = _queue_candidate_issue(
+        2561,
+        allowed_files=("docs/waiting.md",),
+        idempotency_key="waiting",
+        labels=(runner.LABEL_AGENT_TASK, runner.LABEL_RUN_NOW),
+        body_lines=("depends_on: '#999'",),
+    )
+    private = _queue_candidate_issue(
+        2562,
+        allowed_files=("docs/private.md",),
+        idempotency_key="private",
+        privacy_boundary="PRIVATE_PAYLOAD",
+        labels=(runner.LABEL_AGENT_TASK, runner.LABEL_RUN_NOW),
+    )
+
+    with mock.patch.object(runner, "reconcile_scheduler_on_poll"), mock.patch.object(
+        runner, "get_ready_issues", return_value=[]
+    ), mock.patch.object(
+        runner, "get_running_issues", return_value=[]
+    ), mock.patch.object(
+        runner, "get_queue_replenisher_candidate_issues", return_value=[waiting, private]
+    ), mock.patch.object(
+        runner, "_promote_queue_replenisher_issue"
+    ) as promote, mock.patch.object(
+        runner, "self_heal_run_now_queue_intake", return_value=0
+    ), mock.patch.object(
+        runner, "process_issue"
+    ) as process_issue:
+        count = runner.poll_once(workdir="/coordinator")
+
+    assert count == 0
+    promote.assert_not_called()
+    process_issue.assert_not_called()
+    assert not runner.control_recovery_db_path().exists()
+
+
+def test_poll_once_idle_skips_when_ready_or_running_work_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(runner, "ROOT", tmp_path)
+    ready = _queue_candidate_issue(
+        2563,
+        allowed_files=("docs/ready.md",),
+        idempotency_key="ready",
+        labels=(runner.LABEL_READY,),
+    )
+    candidate = _queue_candidate_issue(
+        2564,
+        allowed_files=("docs/candidate.md",),
+        idempotency_key="candidate",
+        labels=(runner.LABEL_AGENT_TASK, runner.LABEL_RUN_NOW),
+    )
+
+    with mock.patch.object(runner, "reconcile_scheduler_on_poll"), mock.patch.object(
+        runner, "get_ready_issues", return_value=[ready]
+    ), mock.patch.object(
+        runner, "maybe_recover_idle_runner_queue"
+    ) as idle, mock.patch.object(
+        runner, "self_heal_run_now_queue_intake", return_value=0
+    ), mock.patch.object(
+        runner, "process_issue"
+    ):
+        assert runner.poll_once(workdir="/coordinator") == 1
+
+    idle.assert_not_called()
+
+    with mock.patch.object(runner, "reconcile_scheduler_on_poll"), mock.patch.object(
+        runner, "get_ready_issues", return_value=[]
+    ), mock.patch.object(
+        runner, "get_running_issues", return_value=[ready]
+    ), mock.patch.object(
+        runner, "get_queue_replenisher_candidate_issues", return_value=[candidate]
+    ), mock.patch.object(
+        runner, "_promote_queue_replenisher_issue"
+    ) as promote, mock.patch.object(
+        runner, "self_heal_run_now_queue_intake", return_value=0
+    ), mock.patch.object(
+        runner, "process_issue"
+    ):
+        assert runner.poll_once(workdir="/coordinator") == 0
+
+    promote.assert_not_called()
+
+
+def test_queue_idle_verified_recurrence_reuses_lesson_after_rechecking_gates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(runner, "ROOT", tmp_path)
+    first = _queue_candidate_issue(
+        2565,
+        allowed_files=("docs/first.md",),
+        idempotency_key="first-idle",
+        labels=(runner.LABEL_AGENT_TASK, runner.LABEL_RUN_NOW),
+    )
+    second = _queue_candidate_issue(
+        2566,
+        allowed_files=("docs/second.md",),
+        idempotency_key="second-idle",
+        labels=(runner.LABEL_AGENT_TASK, runner.LABEL_RUN_NOW),
+    )
+    candidate_batches = [[first], [first], [second], [second]]
+    ready_depth = 0
+    promoted: list[int] = []
+
+    def promote(issue: dict[str, object]) -> None:
+        nonlocal ready_depth
+        promoted.append(int(issue["number"]))
+        ready_depth += 1
+
+    def ready_issues() -> list[dict[str, object]]:
+        return [{}] * ready_depth
+
+    with mock.patch.object(runner, "get_ready_issues", side_effect=ready_issues), mock.patch.object(
+        runner, "get_running_issues", return_value=[]
+    ), mock.patch.object(
+        runner, "get_queue_replenisher_candidate_issues", side_effect=candidate_batches
+    ), mock.patch.object(
+        runner, "_promote_queue_replenisher_issue", side_effect=promote
+    ):
+        assert runner.maybe_recover_idle_runner_queue([]) is True
+        ready_depth = 0
+        assert runner.maybe_recover_idle_runner_queue([]) is True
+
+    assert promoted == [2565, 2566]
+    with sqlite3.connect(runner.control_recovery_db_path()) as connection:
+        row = connection.execute(
+            "SELECT status, attempt FROM recovery_runs WHERE failure_key=?",
+            (runner.QUEUE_IDLE_FAILURE_KEY,),
+        ).fetchone()
+    assert row == ("RECOVERED", 1)
+
+
+def test_queue_idle_failed_replenishment_uses_bounded_backoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(runner, "ROOT", tmp_path)
+    candidate = _queue_candidate_issue(
+        2567,
+        allowed_files=("docs/flaky.md",),
+        idempotency_key="flaky-idle",
+        labels=(runner.LABEL_AGENT_TASK, runner.LABEL_RUN_NOW),
+    )
+    promoted: list[int] = []
+
+    with mock.patch.object(runner, "get_ready_issues", return_value=[]), mock.patch.object(
+        runner, "get_running_issues", return_value=[]
+    ), mock.patch.object(
+        runner, "get_queue_replenisher_candidate_issues", return_value=[candidate]
+    ), mock.patch.object(
+        runner, "_promote_queue_replenisher_issue", side_effect=lambda issue: promoted.append(int(issue["number"]))
+    ), mock.patch.object(
+        runner.time, "time", return_value=100
+    ):
+        assert runner.maybe_recover_idle_runner_queue([]) is False
+        assert runner.maybe_recover_idle_runner_queue([]) is False
+
+    assert promoted == [2567]
+    with sqlite3.connect(runner.control_recovery_db_path()) as connection:
+        row = connection.execute(
+            "SELECT status, attempt, next_retry_at FROM recovery_runs WHERE failure_key=?",
+            (runner.QUEUE_IDLE_FAILURE_KEY,),
+        ).fetchone()
+    assert row == ("WAITING_RECOVERY", 1, 160)
 
 
 def test_runner_task_defaults_to_default_lane() -> None:
