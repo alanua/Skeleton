@@ -3160,7 +3160,7 @@ def test_typed_task_block_fields_feed_shadow_hash_without_receipt_leakage() -> N
 
 def test_poll_once_processes_issues_single_lane() -> None:
     issues = [{"number": 139}, {"number": 140}]
-    with mock.patch.object(runner, "self_heal_run_now_queue_intake", return_value=0), mock.patch.object(
+    with mock.patch.object(runner, "recover_queue_idle_once", return_value=0), mock.patch.object(
         runner, "get_ready_issues", return_value=issues
     ), mock.patch.object(runner, "process_issue") as process_issue:
         count = runner.poll_once(workdir="/coordinator")
@@ -3205,7 +3205,9 @@ def test_poll_once_self_heals_run_now_missing_ready_and_does_not_duplicate_claim
         labels.add(runner.LABEL_RUNNING)
 
     with mock.patch.object(runner, "get_ready_issues", side_effect=ready_issues), mock.patch.object(
-        runner, "get_run_now_queue_intake_candidate_issues", side_effect=run_now_candidates
+        runner, "get_running_issues", return_value=[]
+    ), mock.patch.object(
+        runner, "get_queue_replenisher_candidate_issues", side_effect=run_now_candidates
     ), mock.patch.object(
         runner, "_promote_queue_replenisher_issue", side_effect=promote
     ) as promote_issue, mock.patch.object(
@@ -3229,7 +3231,7 @@ def test_poll_once_runs_passive_scheduler_reconciliation_before_queue_intake() -
         side_effect=lambda: calls.append("reconcile"),
     ), mock.patch.object(
         runner,
-        "self_heal_run_now_queue_intake",
+        "recover_queue_idle_once",
         side_effect=lambda: calls.append("intake"),
     ), mock.patch.object(
         runner,
@@ -3240,6 +3242,110 @@ def test_poll_once_runs_passive_scheduler_reconciliation_before_queue_intake() -
 
     assert count == 0
     assert calls == ["reconcile", "intake"]
+
+
+def test_queue_idle_recovery_requires_ready_and_running_depth_zero() -> None:
+    candidate = _queue_candidate_issue(
+        2601,
+        allowed_files=("docs/idle.md",),
+        idempotency_key="queue-idle-2601",
+        labels=(runner.LABEL_AGENT_TASK,),
+    )
+
+    with mock.patch.object(runner, "get_ready_issues", return_value=[]), mock.patch.object(
+        runner, "get_running_issues", return_value=[{"number": 2600}]
+    ), mock.patch.object(
+        runner, "get_queue_replenisher_candidate_issues", return_value=[candidate]
+    ) as candidates, mock.patch.object(
+        runner, "_promote_queue_replenisher_issue"
+    ) as promote:
+        promoted_count = runner.recover_queue_idle_once()
+
+    assert promoted_count == 0
+    candidates.assert_not_called()
+    promote.assert_not_called()
+
+
+def test_queue_idle_recovery_rechecks_running_before_mutation() -> None:
+    candidate = _queue_candidate_issue(
+        2602,
+        allowed_files=("docs/idle-race.md",),
+        idempotency_key="queue-idle-race-2602",
+        labels=(runner.LABEL_AGENT_TASK,),
+    )
+
+    with mock.patch.object(runner, "get_ready_issues", return_value=[]), mock.patch.object(
+        runner, "get_running_issues", side_effect=[[], [{"number": 2600}]]
+    ), mock.patch.object(
+        runner, "get_queue_replenisher_candidate_issues", return_value=[candidate]
+    ), mock.patch.object(
+        runner, "_promote_queue_replenisher_issue"
+    ) as promote:
+        promoted_count = runner.recover_queue_idle_once()
+
+    assert promoted_count == 0
+    promote.assert_not_called()
+
+
+def test_queue_idle_recovery_promotes_single_eligible_candidate_for_bounded_continuation() -> None:
+    candidate = _queue_candidate_issue(
+        2603,
+        allowed_files=("docs/idle-progress.md",),
+        idempotency_key="queue-idle-progress-2603",
+        labels=(runner.LABEL_AGENT_TASK,),
+    )
+
+    with mock.patch.object(runner, "get_ready_issues", return_value=[]), mock.patch.object(
+        runner, "get_running_issues", return_value=[]
+    ), mock.patch.object(
+        runner, "get_queue_replenisher_candidate_issues", return_value=[candidate]
+    ), mock.patch.object(
+        runner, "_promote_queue_replenisher_issue"
+    ) as promote:
+        promoted_count = runner.recover_queue_idle_once()
+
+    assert promoted_count == 1
+    promote.assert_called_once_with(candidate)
+
+
+def test_queue_idle_recovery_skips_when_ready_or_no_eligible_candidate() -> None:
+    ready = [
+        _queue_candidate_issue(
+            2604,
+            allowed_files=("docs/ready.md",),
+            idempotency_key="ready-2604",
+            labels=(runner.LABEL_READY,),
+        )
+    ]
+    ineligible = _queue_candidate_issue(
+        2605,
+        allowed_files=("docs/private.md",),
+        idempotency_key="private-2605",
+        privacy_boundary="PRIVATE_PAYLOAD",
+        labels=(runner.LABEL_AGENT_TASK,),
+    )
+
+    with mock.patch.object(runner, "get_ready_issues", return_value=ready), mock.patch.object(
+        runner, "get_running_issues", return_value=[]
+    ) as running, mock.patch.object(
+        runner, "get_queue_replenisher_candidate_issues", return_value=[ineligible]
+    ) as candidates, mock.patch.object(
+        runner, "_promote_queue_replenisher_issue"
+    ) as promote:
+        assert runner.recover_queue_idle_once() == 0
+    running.assert_not_called()
+    candidates.assert_not_called()
+    promote.assert_not_called()
+
+    with mock.patch.object(runner, "get_ready_issues", return_value=[]), mock.patch.object(
+        runner, "get_running_issues", return_value=[]
+    ), mock.patch.object(
+        runner, "get_queue_replenisher_candidate_issues", return_value=[ineligible]
+    ), mock.patch.object(
+        runner, "_promote_queue_replenisher_issue"
+    ) as promote:
+        assert runner.recover_queue_idle_once() == 0
+    promote.assert_not_called()
 
 
 def test_runner_task_defaults_to_default_lane() -> None:
