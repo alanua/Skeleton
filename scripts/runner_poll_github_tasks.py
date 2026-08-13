@@ -112,6 +112,33 @@ def get_queue_replenisher_candidate_issues() -> list[dict[str, Any]]:
     return _impl_get_queue_replenisher_candidate_issues()
 
 
+def _autonomous_queue_running_issues() -> list[dict[str, Any]]:
+    """Read current GitHub running depth without mutating queue state."""
+    code, output = run_command(
+        [
+            "gh",
+            "issue",
+            "list",
+            "--repo",
+            REPO,
+            "--label",
+            LABEL_RUNNING,
+            "--state",
+            "open",
+            "--search",
+            "is:issue",
+            "--json",
+            "number,title,body,state,url,closed,labels",
+        ]
+    )
+    if code != 0:
+        raise RuntimeError(f"gh issue list failed:\n{output}")
+    parsed = json.loads(output or "[]")
+    if not isinstance(parsed, list):
+        raise RuntimeError("gh issue list returned non-list JSON")
+    return [issue for issue in parsed if is_open_task_issue(issue)]
+
+
 def _autonomous_queue_store_path() -> Path:
     """Keep validation/feature recovery state local; production main stays canonical."""
     configured = control_recovery_db_path()
@@ -141,6 +168,8 @@ def _autonomous_queue_eligible_snapshot() -> tuple[
     ready_issues = get_ready_issues()
     if ready_issues:
         return ready_issues, [], []
+    if _autonomous_queue_running_issues():
+        return [], [], []
 
     # RUN_NOW is only a priority discovery view. It does not mutate labels and
     # still passes through the same replenishment selector and RecoveryStore.
@@ -245,7 +274,8 @@ def _autonomous_queue_replenish_action(
     expected_key: str,
     generation: str,
 ) -> str:
-    # Recheck all current gates immediately before the only queue mutation.
+    # Recheck all current gates, including running depth, immediately before
+    # the only queue mutation.
     ready_before, candidate_issues, eligible = _autonomous_queue_eligible_snapshot()
     if ready_before:
         return _autonomous_queue_blocked_report("QUEUE_RECOVERY_READY_WORK_PRESENT")
