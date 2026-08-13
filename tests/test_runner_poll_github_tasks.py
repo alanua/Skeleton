@@ -17677,6 +17677,66 @@ def test_home_edge_audit_persist_runner_blocks_wrong_registry_metadata() -> None
     assert "success_criteria=not_met" in report
 
 
+def _home_edge_display_power_off_body() -> str:
+    return "\n".join(
+        (
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {runner.HOME_EDGE_01_DISPLAY_POWER_OFF_V1}",
+            "Risk: yellow",
+            "Target Node: home-edge-01",
+            "Operator Approval: EXPLICIT_2026_08_09_TURN_OFF_HOME_EDGE_MONITOR",
+            "Privacy Boundary: PRIVATE_RUNTIME_STATE_PUBLIC_SAFE_STATUS",
+        )
+    )
+
+
+def test_home_edge_display_power_off_task_is_explicitly_dispatched() -> None:
+    with mock.patch.object(
+        runner,
+        "home_edge_01_display_power_off_v1",
+        return_value="DONE: test",
+    ) as action:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HOME_EDGE_01_DISPLAY_POWER_OFF_V1,
+            str(Path.cwd()),
+            _home_edge_display_power_off_body(),
+        )
+
+    assert report == "DONE: test"
+    action.assert_called_once_with(_home_edge_display_power_off_body())
+
+
+def test_home_edge_display_power_off_runner_reports_distinct_semantics() -> None:
+    class Receipt:
+        request_accepted = True
+        applied = True
+        physically_verified = False
+        physical_verification = "unobservable"
+        success_criteria = "not_met"
+        receipt_status = "ok"
+        exit_code = 0
+        request_id = "home-edge-01-display-power-off-v1"
+
+    with mock.patch(
+        "core.home_edge.display_power_off.execute_display_power_off_task",
+        return_value=Receipt(),
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HOME_EDGE_01_DISPLAY_POWER_OFF_V1,
+            str(Path.cwd()),
+            _home_edge_display_power_off_body(),
+        )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "maintenance_task_id=home_edge_01_display_power_off_v1" in report
+    assert "request_accepted=true" in report
+    assert "applied=true" in report
+    assert "physically_verified=false" in report
+    assert "physical_verification=unobservable" in report
+    assert "exit_code=0" in report
+    assert "success_criteria=not_met" in report
+
+
 
 def test_validation_command_environment_strips_only_home_edge_runtime_values() -> None:
     environment = {
