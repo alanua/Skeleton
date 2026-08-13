@@ -8,6 +8,12 @@ import shutil
 import stat
 import subprocess
 
+from core.secret_store import (
+    SecretReference,
+    SecretResolutionContext,
+    SecretResolutionError,
+    SecretStoreGate,
+)
 from core.codex_runtime_recovery import (
     CodexRuntimeRecoveryError,
     ensure_pinned_codex_runtime,
@@ -24,6 +30,15 @@ _FALLBACK_BIN_ENV = "SKELETON_CODEGEN_FALLBACK_BIN"
 _REAL_CODEX_ENV = "SKELETON_REAL_CODEX_BIN"
 _OPENHANDS_ENV = "SKELETON_OPENHANDS_BIN"
 _ORIGINAL_PATH_ENV = "SKELETON_CODEGEN_ORIGINAL_PATH"
+_OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
+_CREDENTIALS_DIRECTORY_ENV = "CREDENTIALS_DIRECTORY"
+_OPENROUTER_CODE_OWNED_ENV = {
+    "OPENROUTER_MODEL": "anthropic/claude-sonnet-4",
+    "OPENROUTER_BUDGET_USD": "0.50",
+    "OPENROUTER_MAX_ITERATIONS": "12",
+    "OPENROUTER_MAX_RETRIES": "2",
+    "OPENROUTER_HTTP_TIMEOUT_SECONDS": "60",
+}
 
 _WRAPPER = r'''#!/usr/bin/env python3
 from __future__ import annotations
@@ -129,6 +144,22 @@ def _without_home_edge_credentials(environment: Mapping[str, str]) -> dict[str, 
     }
 
 
+def _without_codegen_secret_sources(environment: Mapping[str, str]) -> dict[str, str]:
+    return {
+        key: value
+        for key, value in environment.items()
+        if key not in {_OPENROUTER_API_KEY_ENV, _CREDENTIALS_DIRECTORY_ENV}
+    }
+
+
+def _without_openrouter_runtime_overrides(environment: Mapping[str, str]) -> dict[str, str]:
+    return {
+        key: value
+        for key, value in environment.items()
+        if key not in _OPENROUTER_CODE_OWNED_ENV and key != _OPENROUTER_API_KEY_ENV
+    }
+
+
 def _install_fallback_wrapper(
     environment: dict[str, str],
     authority_environment: Mapping[str, str],
@@ -175,7 +206,7 @@ def sanitize_codegen_child_environment(
     authority_environment: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """Return a child environment while keeping runtime authority in canonical Runner."""
-    sanitized = _without_home_edge_credentials(environment)
+    sanitized = _without_codegen_secret_sources(_without_home_edge_credentials(environment))
     authority = _without_home_edge_credentials(
         os.environ if authority_environment is None else authority_environment
     )
@@ -189,3 +220,29 @@ def sanitize_codegen_child_environment(
     except OSError:
         pass
     return sanitized
+
+
+def openhands_openrouter_execution_environment(
+    environment: Mapping[str, str],
+    *,
+    secret_reference: SecretReference,
+    secret_store_gate: SecretStoreGate,
+    machine_identity: str,
+    audience: str,
+    task_kind: str,
+) -> dict[str, str]:
+    """Resolve and inject the OpenRouter key only for the OpenHands child process."""
+    child_environment = _without_openrouter_runtime_overrides(
+        _without_codegen_secret_sources(_without_home_edge_credentials(environment))
+    )
+    context = SecretResolutionContext(
+        machine_identity=machine_identity,
+        audience=audience,
+        task_kind=task_kind,
+    )
+    try:
+        child_environment[_OPENROUTER_API_KEY_ENV] = secret_store_gate.resolve(secret_reference, context)
+    except SecretResolutionError:
+        raise
+    child_environment.update(_OPENROUTER_CODE_OWNED_ENV)
+    return child_environment
