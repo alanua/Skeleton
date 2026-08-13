@@ -2759,7 +2759,7 @@ def test_universal_runner_enforce_typed_maintenance_dispatches_registered_execut
         mock.ANY,
     )
     assert f"maintenance_task_id={maintenance_task_id}" in post.call_args.args[1]
-    notify.assert_called_once_with(1722, "DONE", mock.ANY)
+    notify.assert_not_called()
 
 
 def test_universal_runner_enforce_executor_exception_fails_closed_without_legacy_side_effect(
@@ -11752,7 +11752,7 @@ def test_blocked_maintenance_output_is_not_labeled_runner_done() -> None:
         )
 
     set_label.assert_called_once_with(145, runner.LABEL_RUNNING, runner.LABEL_BLOCKED)
-    notify.assert_called_once_with(145, "BLOCKED", report)
+    notify.assert_not_called()
 
 
 def test_needs_operator_maintenance_output_records_and_notifies_exact_status() -> None:
@@ -11862,6 +11862,177 @@ def test_maintenance_report_is_done_requires_success_criteria_met() -> None:
 
     assert runner.maintenance_report_status(report) == "DONE"
     assert runner.maintenance_report_is_done(report) is False
+
+
+def _compound_runtime_sync_body(continuation: str | None = None) -> str:
+    lines = [
+        "Mode: RUNTIME_MAINTENANCE_TASK",
+        f"Maintenance Task ID: {runner.RUNTIME_SYNC_MAIN}",
+    ]
+    if continuation is not None:
+        lines.append(f"Canary After Runtime Sync Main: {continuation}")
+    return "\n".join(lines)
+
+
+def _maintenance_done(task_id: str, extra: tuple[str, ...] = ()) -> str:
+    return runner._maintenance_report("DONE", task_id, list(extra), "met")
+
+
+def _replenish_canary_done() -> str:
+    return _maintenance_done(
+        runner.REPLENISH_RUNNER_QUEUE,
+        (
+            "ready_depth_before=1",
+            "ready_depth_after=3",
+            "ready_depth_target=3-6",
+            "ready_depth_target_met=true",
+            "eligible_work_exists=true",
+            "selected_count=2",
+            "selected_issues=42,43",
+            "waiting_dependency_count=1",
+            "dependency_wait_routing=verified",
+            "backlog_preseed_required=false",
+            "completion_triggered_replenishment=verified",
+            "telegram_notifications=0",
+        ),
+    )
+
+
+def test_compound_runtime_sync_runs_replenish_canary_before_done() -> None:
+    body = _compound_runtime_sync_body(runner.REPLENISH_RUNNER_QUEUE)
+
+    def dispatch(task_id: str, workdir: str, issue_body: str) -> str:
+        del workdir, issue_body
+        if task_id == runner.RUNTIME_SYNC_MAIN:
+            return _maintenance_done(task_id)
+        if task_id == runner.REPLENISH_RUNNER_QUEUE:
+            return _replenish_canary_done()
+        raise AssertionError(task_id)
+
+    with mock.patch.object(
+        runner, "dispatch_runtime_maintenance_task", side_effect=dispatch
+    ) as dispatch_mock, mock.patch.object(
+        runner, "post_issue_comment"
+    ) as post, mock.patch.object(
+        runner, "set_issue_label"
+    ) as labels, mock.patch.object(
+        runner, "notify_task_finished"
+    ) as notify, mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ):
+        runner.process_runtime_maintenance_issue(
+            145,
+            runner.RUNTIME_SYNC_MAIN,
+            str(runner.ROOT),
+            body,
+            retry_decision=runner.RetryDecision(
+                retry_decision="ALLOW_FIRST_ATTEMPT",
+                retry_attempt=1,
+                blocker_signature="a" * 16,
+                route=runner.ROUTE_RUNTIME_ONLY,
+            ),
+        )
+
+    assert [call.args[0] for call in dispatch_mock.call_args_list] == [
+        runner.RUNTIME_SYNC_MAIN,
+        runner.REPLENISH_RUNNER_QUEUE,
+    ]
+    final_report = post.call_args_list[-1].args[1]
+    assert "maintenance_continuation_status=DONE" in final_report
+    assert "canary_status=PASS" in final_report
+    labels.assert_called_once_with(145, runner.LABEL_RUNNING, runner.LABEL_DONE)
+    notify.assert_not_called()
+
+
+def test_compound_restart_resumes_replenish_without_redoing_runtime_sync() -> None:
+    body = _compound_runtime_sync_body(runner.REPLENISH_RUNNER_QUEUE)
+    plan, reason = runner.maintenance_continuation_plan(runner.RUNTIME_SYNC_MAIN, body)
+    assert plan is not None and reason is None
+    comments = [
+        {
+            "author": {"login": "github-actions[bot]"},
+            "body": runner._maintenance_continuation_comment(
+                plan, 1, runner.RUNTIME_SYNC_MAIN, "DONE"
+            ),
+        }
+    ]
+
+    with mock.patch.object(
+        runner,
+        "dispatch_runtime_maintenance_task",
+        return_value=_replenish_canary_done(),
+    ) as dispatch_mock, mock.patch.object(runner, "post_issue_comment"):
+        report = runner.dispatch_runtime_maintenance_continuation(
+            145,
+            runner.RUNTIME_SYNC_MAIN,
+            str(runner.ROOT),
+            body,
+            prior_comments=comments,
+        )
+
+    dispatch_mock.assert_called_once_with(
+        runner.REPLENISH_RUNNER_QUEUE, str(runner.ROOT), body
+    )
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert "maintenance_continuation_steps_completed=2" in report
+
+
+def test_compound_replenish_failure_routes_one_retry_without_telegram() -> None:
+    body = _compound_runtime_sync_body(runner.REPLENISH_RUNNER_QUEUE)
+    failed_canary = runner._maintenance_report(
+        "BLOCKED",
+        runner.REPLENISH_RUNNER_QUEUE,
+        ["reason=synthetic_canary_failed"],
+        "not_met",
+    )
+
+    def dispatch(task_id: str, workdir: str, issue_body: str) -> str:
+        del workdir, issue_body
+        if task_id == runner.RUNTIME_SYNC_MAIN:
+            return _maintenance_done(task_id)
+        return failed_canary
+
+    with mock.patch.object(
+        runner, "dispatch_runtime_maintenance_task", side_effect=dispatch
+    ), mock.patch.object(runner, "post_issue_comment") as post, mock.patch.object(
+        runner, "set_issue_label"
+    ) as labels, mock.patch.object(
+        runner, "notify_task_finished"
+    ) as notify, mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ):
+        runner.process_runtime_maintenance_issue(
+            145,
+            runner.RUNTIME_SYNC_MAIN,
+            str(runner.ROOT),
+            body,
+            retry_decision=runner.RetryDecision(
+                retry_decision="ALLOW_FIRST_ATTEMPT",
+                retry_attempt=1,
+                blocker_signature="b" * 16,
+                route=runner.ROUTE_RUNTIME_ONLY,
+            ),
+        )
+
+    final_report = post.call_args_list[-1].args[1]
+    assert final_report.startswith("BLOCKED:")
+    assert "retry_attempt=1" in final_report
+    labels.assert_called_once_with(145, runner.LABEL_RUNNING, runner.LABEL_READY)
+    notify.assert_not_called()
+
+
+def test_compound_unregistered_continuation_fails_closed_needs_operator() -> None:
+    body = _compound_runtime_sync_body("unsafe_new_authority")
+    with mock.patch.object(
+        runner, "dispatch_runtime_maintenance_task"
+    ) as dispatch_mock, mock.patch.object(runner, "post_issue_comment"):
+        report = runner.dispatch_runtime_maintenance_continuation(
+            145, runner.RUNTIME_SYNC_MAIN, str(runner.ROOT), body
+        )
+
+    dispatch_mock.assert_not_called()
+    assert runner.maintenance_report_status(report) == "NEEDS_OPERATOR"
+    assert "reason=maintenance_continuation_task_not_registered" in report
 
 
 def test_maintenance_report_sanitizer_drops_multiline_status_line() -> None:
@@ -16762,7 +16933,7 @@ def test_failed_maintenance_verification_is_not_labeled_runner_done() -> None:
         )
 
     set_label.assert_called_once_with(145, runner.LABEL_RUNNING, runner.LABEL_BLOCKED)
-    notify.assert_called_once_with(145, "BLOCKED", report)
+    notify.assert_not_called()
 
 
 def test_maintenance_issue_body_does_not_execute_arbitrary_command() -> None:
