@@ -112,33 +112,6 @@ def get_queue_replenisher_candidate_issues() -> list[dict[str, Any]]:
     return _impl_get_queue_replenisher_candidate_issues()
 
 
-def _autonomous_queue_running_issues() -> list[dict[str, Any]]:
-    """Read current GitHub running depth without mutating queue state."""
-    code, output = run_command(
-        [
-            "gh",
-            "issue",
-            "list",
-            "--repo",
-            REPO,
-            "--label",
-            LABEL_RUNNING,
-            "--state",
-            "open",
-            "--search",
-            "is:issue",
-            "--json",
-            "number,title,body,state,url,closed,labels",
-        ]
-    )
-    if code != 0:
-        raise RuntimeError(f"gh issue list failed:\n{output}")
-    parsed = json.loads(output or "[]")
-    if not isinstance(parsed, list):
-        raise RuntimeError("gh issue list returned non-list JSON")
-    return [issue for issue in parsed if is_open_task_issue(issue)]
-
-
 def _autonomous_queue_store_path() -> Path:
     """Keep validation/feature recovery state local; production main stays canonical."""
     configured = control_recovery_db_path()
@@ -168,17 +141,21 @@ def _autonomous_queue_eligible_snapshot() -> tuple[
     ready_issues = get_ready_issues()
     if ready_issues:
         return ready_issues, [], []
-    if _autonomous_queue_running_issues():
-        return [], [], []
 
-    # RUN_NOW is only a priority discovery view. It does not mutate labels and
-    # still passes through the same replenishment selector and RecoveryStore.
+    # RUN_NOW is the canonical priority discovery view used by this learned
+    # intake path. Preserve running labels in the snapshot so an already
+    # claimed task suppresses QUEUE_IDLE recovery without a second GitHub query.
     run_now_candidates = get_run_now_queue_intake_candidate_issues()
+    if any(LABEL_RUNNING in _issue_label_names(issue) for issue in run_now_candidates):
+        return [], run_now_candidates, []
+
     candidate_issues = (
         run_now_candidates
         if run_now_candidates
         else get_queue_replenisher_candidate_issues()
     )
+    if any(LABEL_RUNNING in _issue_label_names(issue) for issue in candidate_issues):
+        return [], candidate_issues, []
     eligible = select_runner_queue_replenishment_targets(
         ready_issues,
         candidate_issues,
