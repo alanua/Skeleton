@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0a0d10">
+<title>Відео · Home</title>
+<link rel="stylesheet" href="/static/ui.css">
+<style>
+.video-page{background:#0a0d10;color:#e8eaed;min-height:100dvh;display:flex;flex-direction:column}
+.video-main{display:flex;flex-direction:column;gap:14px;padding:14px 16px 92px}
+.media-search{display:flex;gap:8px}
+.media-search input{flex:1;height:42px;border:1px solid #343840;border-radius:8px;background:#15181d;color:#e8eaed;padding:0 12px;font-size:15px}
+.media-search button,.media-control{height:42px;border:1px solid #343840;border-radius:8px;background:#1f2227;color:#e8eaed;font-weight:650}
+.media-controls{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;align-items:center}
+.monitor-toggle{height:42px;border:1px solid #343840;border-radius:8px;background:#1f2227;color:#e8eaed;display:flex;align-items:center;justify-content:center;gap:8px;font-weight:650}
+.monitor-toggle input{inline-size:18px;block-size:18px;accent-color:#8ab4f8}
+.media-result{border:1px solid #343840;background:#15181d;border-radius:8px;padding:12px;display:grid;gap:5px}
+.media-title{font-size:17px;font-weight:700}
+.media-meta{color:#9aa0a6;font-size:13px}
+</style>
+</head>
+<body class="video-page">
+<header class="detail-topbar">
+  <button class="icon-btn" type="button" onclick="location.href='/phone'" aria-label="Назад"><span class="mdi" style="--icon:url('/static/icons/mdi/arrow-left.svg')"></span></button>
+  <span id="targetLabel">Відео</span>
+  <button class="icon-btn" type="button" id="refreshVideo" aria-label="Оновити"><span class="mdi" style="--icon:url('/static/icons/mdi/refresh.svg')"></span></button>
+</header>
+
+<main class="video-main">
+  <form class="media-search" id="mediaSearch">
+    <input id="mediaQuery" name="query" autocomplete="off" placeholder="Пошук фільмів і серіалів">
+    <button type="submit">Пошук</button>
+  </form>
+
+  <section class="media-result" id="mediaResult" data-canonical-id="" data-tmdb-id="">
+    <div class="media-title" id="mediaTitle">Synthetic title</div>
+    <div class="media-meta" id="mediaMeta">TMDB identity controls the monitor state</div>
+  </section>
+
+  <div class="media-controls" aria-label="Відео керування">
+    <button class="media-control" type="button" id="playMedia" data-action="play">Play</button>
+    <label class="monitor-toggle" for="monitorMedia" data-control="monitor">
+      <input type="checkbox" id="monitorMedia" aria-label="Monitor translations">
+      <span>Monitor</span>
+    </label>
+    <button class="media-control" type="button" id="resetMedia" data-action="reset">Reset</button>
+    <button class="media-control" type="button" id="autoplayMedia" data-action="autoplay">Autoplay</button>
+  </div>
+</main>
+
+<nav class="bottom-nav" aria-label="Навігація">
+  <a class="nav-item" href="/phone"><span class="mdi" style="--icon:url('/static/icons/mdi/home.svg')"></span><span>Головна</span></a>
+  <a class="nav-item active" href="/video"><span class="mdi" style="--icon:url('/static/icons/mdi/movie-open.svg')"></span><span>Відео</span></a>
+  <a class="nav-item" href="/remote"><span class="mdi" style="--icon:url('/static/icons/mdi/remote.svg')"></span><span>Пульт</span></a>
+  <a class="nav-item" href="/devices"><span class="mdi" style="--icon:url('/static/icons/mdi/devices.svg')"></span><span>Пристрої</span></a>
+</nav>
+
+<script>
+const result=document.getElementById('mediaResult');
+const monitor=document.getElementById('monitorMedia');
+async function loadMonitorState(canonicalId){
+  if(!canonicalId)return;
+  const response=await fetch('/api/video/monitor/state?canonical_id='+encodeURIComponent(canonicalId),{cache:'no-store'});
+  if(!response.ok)return;
+  const payload=await response.json();
+  monitor.checked=!!payload.monitor_enabled;
+}
+document.getElementById('mediaSearch').addEventListener('submit',async event=>{
+  event.preventDefault();
+  const query=document.getElementById('mediaQuery').value.trim();
+  const response=await fetch('/api/video/search?q='+encodeURIComponent(query),{cache:'no-store'});
+  if(!response.ok)return;
+  const payload=await response.json();
+  result.dataset.canonicalId=payload.canonical_id||'';
+  result.dataset.tmdbId=payload.tmdb_id||'';
+  document.getElementById('mediaTitle').textContent=payload.title||query;
+  document.getElementById('mediaMeta').textContent=payload.canonical_id||'';
+  monitor.checked=!!payload.monitor_enabled;
+});
+monitor.addEventListener('change',async ()=>{
+  const canonicalId=result.dataset.canonicalId;
+  if(!canonicalId)return;
+  await fetch('/api/video/monitor',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({canonical_id:canonicalId,enabled:monitor.checked})});
+  await loadMonitorState(canonicalId);
+});
+</script>
+</body>
+</html>
