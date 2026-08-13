@@ -1,96 +1,118 @@
 from __future__ import annotations
 
 import os
-import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Sequence
 
-from core.local_document_ocr import ALLOWED_EXTENSIONS
+SUPPORTED_SUFFIXES = frozenset({".pdf", ".tif", ".tiff", ".png", ".jpg", ".jpeg", ".txt", ".doc", ".docx", ".odt", ".rtf", ".xls", ".xlsx", ".ods"})
+PARTIAL_SUFFIXES = (".part", ".partial", ".tmp", ".crdownload")
+SKIP_DIRECTORIES = frozenset({".git", ".ssh", "secrets", "node_modules", "__pycache__"})
 
 
-class FamilyDocumentSourceError(RuntimeError):
-    def __init__(self, reason_code: str, message: str) -> None:
-        super().__init__(message)
+class SourceError(RuntimeError):
+    def __init__(self, reason_code: str) -> None:
+        super().__init__(reason_code)
         self.reason_code = reason_code
 
 
 @dataclass(frozen=True)
-class SourceInventoryItem:
+class ApprovedRoot:
+    alias: str
     path: Path
-    size: int
+
+    def __post_init__(self) -> None:
+        if not self.alias or "/" in self.alias or "\\" in self.alias:
+            raise SourceError("invalid_root_alias")
+        expanded = Path(self.path).expanduser()
+        if _has_symlink_component(expanded):
+            raise SourceError("approved_root_symlinked")
+        resolved = expanded.resolve(strict=True)
+        if not resolved.is_dir():
+            raise SourceError("approved_root_unavailable")
+        object.__setattr__(self, "path", resolved)
+
+
+@dataclass(frozen=True)
+class SourceReference:
+    root_alias: str
+    absolute_path: Path
+    relative_path: str
+    byte_size: int
     mtime_ns: int
-    extension: str
+
+    def private_dict(self) -> dict[str, object]:
+        return {"root_alias": self.root_alias, "absolute_path": str(self.absolute_path), "relative_path": self.relative_path, "byte_size": self.byte_size, "mtime_ns": self.mtime_ns}
 
 
-class ApprovedLocalSourceInventory:
-    """Enumerates local inbox files without following unapproved roots."""
+def resolve_source(path: Path, roots: Sequence[ApprovedRoot]) -> SourceReference:
+    candidate = Path(path).expanduser()
+    if _has_symlink_component(candidate):
+        raise SourceError("source_symlink_rejected")
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise SourceError("source_unavailable") from exc
+    if not resolved.is_file() or resolved.suffix.casefold() not in SUPPORTED_SUFFIXES:
+        raise SourceError("source_unsupported")
+    if resolved.name.casefold().endswith(PARTIAL_SUFFIXES):
+        raise SourceError("source_partial")
+    matched = next((root for root in roots if resolved == root.path or root.path in resolved.parents), None)
+    if matched is None:
+        raise SourceError("source_outside_approved_roots")
+    stat = resolved.stat()
+    if stat.st_size <= 0:
+        raise SourceError("source_empty")
+    return SourceReference(matched.alias, resolved, resolved.relative_to(matched.path).as_posix(), stat.st_size, stat.st_mtime_ns)
 
-    def __init__(
-        self,
-        roots: tuple[str | Path, ...],
-        *,
-        allowed_extensions: tuple[str, ...] = ALLOWED_EXTENSIONS,
-    ) -> None:
-        if not roots:
-            raise FamilyDocumentSourceError("source_roots_required", "at least one source root is required")
-        self.roots = tuple(Path(root).expanduser().resolve() for root in roots)
-        self.allowed_extensions = tuple(ext.lower() for ext in allowed_extensions)
 
-    def iter_candidates(self) -> tuple[SourceInventoryItem, ...]:
-        items: list[SourceInventoryItem] = []
-        for root in self.roots:
-            if not root.exists():
-                continue
-            if not root.is_dir():
-                raise FamilyDocumentSourceError("source_root_not_directory", "source root is not a directory")
-            for path in sorted(root.rglob("*")):
-                if not path.is_file() or path.is_symlink():
+def inventory_sources(roots: Sequence[ApprovedRoot], *, max_files: int = 10000) -> tuple[SourceReference, ...]:
+    if isinstance(max_files, bool) or not isinstance(max_files, int) or not 1 <= max_files <= 100000:
+        raise SourceError("inventory_limit_invalid")
+    found: list[SourceReference] = []
+    seen: set[Path] = set()
+    for root in sorted(roots, key=lambda item: item.alias):
+        for current, dirs, files in os.walk(root.path, followlinks=False):
+            current_path = Path(current)
+            dirs[:] = [name for name in sorted(dirs) if name.casefold() not in SKIP_DIRECTORIES and not (current_path / name).is_symlink()]
+            for name in sorted(files):
+                candidate = current_path / name
+                if candidate.suffix.casefold() not in SUPPORTED_SUFFIXES or name.casefold().endswith(PARTIAL_SUFFIXES):
                     continue
-                resolved = path.resolve()
-                if not self.is_approved_path(resolved):
+                try:
+                    reference = resolve_source(candidate, roots)
+                except SourceError:
                     continue
-                extension = resolved.suffix.lower()
-                if extension not in self.allowed_extensions:
+                if reference.absolute_path in seen:
                     continue
-                stat = resolved.stat()
-                items.append(SourceInventoryItem(resolved, int(stat.st_size), int(stat.st_mtime_ns), extension))
-        return tuple(items)
-
-    def is_approved_path(self, path: str | Path) -> bool:
-        resolved = Path(path).expanduser().resolve()
-        return any(resolved == root or resolved.is_relative_to(root) for root in self.roots)
+                seen.add(reference.absolute_path)
+                found.append(reference)
+                if len(found) >= max_files:
+                    return tuple(found)
+    return tuple(found)
 
 
-class StableFileGate:
-    def __init__(self, *, min_age_seconds: float = 1.0) -> None:
-        if min_age_seconds < 0:
-            raise FamilyDocumentSourceError("stable_gate_age_invalid", "stable gate age must be non-negative")
-        self.min_age_seconds = min_age_seconds
-
-    def check(self, path: str | Path) -> tuple[bool, dict[str, object]]:
-        source = Path(path)
-        first = source.stat()
-        now = time.time_ns()
-        age_seconds = max(0.0, (now - int(first.st_mtime_ns)) / 1_000_000_000)
-        if age_seconds < self.min_age_seconds:
-            return False, {"reason": "FILE_TOO_NEW", "age_seconds": age_seconds}
-        second = source.stat()
-        stable = first.st_size == second.st_size and first.st_mtime_ns == second.st_mtime_ns
-        return stable, {
-            "reason": "STABLE" if stable else "FILE_CHANGED",
-            "size": int(second.st_size),
-            "mtime_ns": int(second.st_mtime_ns),
-            "device": int(getattr(second, "st_dev", 0)),
-            "inode": int(getattr(second, "st_ino", 0)),
-        }
+def stable_observation(reference: SourceReference, previous: dict[str, object] | None, *, observed_at: float, settle_seconds: float) -> tuple[bool, dict[str, object]]:
+    if settle_seconds < 0:
+        raise SourceError("settle_seconds_invalid")
+    current = {"byte_size": reference.byte_size, "mtime_ns": reference.mtime_ns, "observed_at": float(observed_at)}
+    if not isinstance(previous, dict):
+        return False, current
+    unchanged = previous.get("byte_size") == reference.byte_size and previous.get("mtime_ns") == reference.mtime_ns
+    prior_time = previous.get("observed_at")
+    if isinstance(prior_time, bool) or not isinstance(prior_time, (int, float)):
+        return False, current
+    return bool(unchanged and observed_at - float(prior_time) >= settle_seconds), current
 
 
-def approved_source_inventory_receipt(items: tuple[SourceInventoryItem, ...]) -> dict[str, object]:
-    by_extension: dict[str, int] = {}
-    for item in items:
-        by_extension[item.extension] = by_extension.get(item.extension, 0) + 1
-    return {
-        "schema": "skeleton.family_document_source_inventory.v1",
-        "privacy": "aggregate_only",
-        "aggregate_counts": {"total": len(items), "by_extension": by_extension},
-    }
+def _has_symlink_component(path: Path) -> bool:
+    absolute = path if path.is_absolute() else Path.cwd() / path
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current = current / part
+        try:
+            if current.is_symlink():
+                return True
+        except OSError:
+            return True
+    return False

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Iterable, Mapping
 
-TOPIC_ALIASES: tuple[str, ...] = (
+TOPICS: tuple[str, ...] = (
     "01 identity_and_civil_status",
     "02 migration_and_residence",
     "03 health_and_insurance",
@@ -16,205 +16,201 @@ TOPIC_ALIASES: tuple[str, ...] = (
     "08 housing_and_utilities",
     "09 transport_and_travel",
 )
-
-EVENT_TYPES: tuple[str, ...] = (
-    "appointment",
-    "hearing",
-    "deadline",
-    "expiration_renewal",
-    "contract_boundary",
-    "employment_boundary",
-    "insurance_boundary",
-    "booked_travel",
-    "birthday",
+SERVICE_FOLDERS: tuple[str, ...] = ("00 intake", "98 duplicates_versions", "99 review")
+APPROVED_EVENT_TYPES: frozenset[str] = frozenset(
+    {"appointment", "deadline", "expiration", "renewal", "hearing", "booked_travel"}
 )
 
-TAXONOMY_VERSION = "family-document-taxonomy-2026-08-13"
-_TOKEN_RE = re.compile(r"[^a-z0-9]+")
-_DATE_RE = re.compile(r"\b(20\d{2}|19\d{2})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])\b")
-_TOPIC_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    (TOPIC_ALIASES[0], ("passport", "birth certificate", "marriage", "identity", "personalausweis")),
-    (TOPIC_ALIASES[1], ("residence", "visa", "immigration", "aufenthalt", "migration")),
-    (TOPIC_ALIASES[2], ("insurance", "medical", "health", "arzt", "krankenkasse")),
-    (TOPIC_ALIASES[3], ("tax", "employment", "salary", "invoice", "finanzamt", "work")),
-    (TOPIC_ALIASES[4], ("school", "university", "certificate", "zeugnis", "education", "schule")),
-    (TOPIC_ALIASES[5], ("bank", "loan", "contract", "finance", "konto")),
-    (TOPIC_ALIASES[6], ("court", "hearing", "lawyer", "legal", "gericht", "deadline", "frist")),
-    (TOPIC_ALIASES[7], ("rent", "utility", "housing", "lease", "wohnung", "strom")),
-    (TOPIC_ALIASES[8], ("flight", "travel", "ticket", "vehicle", "train", "reise")),
+TOPIC_RULES: Mapping[str, tuple[str, ...]] = {
+    TOPICS[0]: ("birth certificate", "marriage certificate", "standesamt", "geburtsurkunde", "heiratsurkunde"),
+    TOPICS[1]: ("aufenthalt", "residence permit", "visa", "jobcenter", "ausländerbehörde", "bürgergeld"),
+    TOPICS[2]: ("krankenkasse", "health insurance", "medical", "arzt", "krankenversicherung", "pflegeversicherung"),
+    TOPICS[3]: ("steuer", "tax", "invoice", "gewerbe", "finanzamt", "soka-bau", "lohn"),
+    TOPICS[4]: ("schule", "university", "diploma", "zeugnis", "qualification", "ausbildung"),
+    TOPICS[5]: ("bank", "konto", "contract", "rechnung", "iban", "darlehen", "zahlung"),
+    TOPICS[6]: ("court", "gericht", "bescheid", "legal", "widerspruch", "anwalt", "behörde"),
+    TOPICS[7]: ("rent", "miete", "wohnung", "utility", "strom", "gas", "nebenkosten"),
+    TOPICS[8]: ("booking", "flight", "train", "reise", "ticket", "hotel", "reservation"),
+}
+
+COUNTRY_RULES: Mapping[str, tuple[str, ...]] = {
+    "DE": ("deutschland", "germany", "finanzamt", "jobcenter", "bundesrepublik", "deutsche"),
+    "UA": ("ukraine", "україна", "київ", "україн"),
+    "IT": ("italia", "italy", "italiano"),
+    "FR": ("france", "français", "république française"),
+    "CA": ("canada", "canadian"),
+}
+
+DOCUMENT_TYPE_RULES: Mapping[str, tuple[str, ...]] = {
+    "invoice": ("invoice", "rechnung", "рахунок"),
+    "official notice": ("bescheid", "decision notice", "mitteilung", "aufforderung"),
+    "contract": ("contract", "vertrag", "договір"),
+    "appointment letter": ("appointment", "termin", "einladung zum termin"),
+    "travel booking": ("booking confirmed", "reservation", "buchungsbestätigung"),
+    "bank statement": ("kontoauszug", "bank statement"),
+    "insurance letter": ("versicherung", "krankenkasse"),
+    "tax letter": ("finanzamt", "steuerbescheid", "steuererklärung"),
+}
+
+EVENT_KEYWORDS: Mapping[str, tuple[str, ...]] = {
+    "appointment": ("appointment", "termin", "vorsprache"),
+    "deadline": ("deadline", "frist", "spätestens", "bis zum"),
+    "expiration": ("expires", "gültig bis", "ablauf", "expiration"),
+    "renewal": ("renewal", "verlängerung", "erneuern"),
+    "hearing": ("hearing", "anhörung", "gerichtstermin"),
+    "booked_travel": ("booking confirmed", "buchungsbestätigung", "departure", "abflug"),
+}
+
+DATE_PATTERNS = (
+    re.compile(r"\b(?P<day>[0-3]?\d)[./-](?P<month>[01]?\d)[./-](?P<year>20\d{2}|19\d{2})\b"),
+    re.compile(r"\b(?P<year>20\d{2}|19\d{2})[./-](?P<month>[01]?\d)[./-](?P<day>[0-3]?\d)\b"),
 )
-_EVENT_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("hearing", ("hearing", "gerichtstermin", "court date")),
-    ("appointment", ("appointment", "termin")),
-    ("deadline", ("deadline", "due by", "frist")),
-    ("expiration_renewal", ("expires", "valid until", "renewal", "ablauf")),
-    ("booked_travel", ("flight", "booking", "ticket")),
-    ("birthday", ("birthday", "geburtstag")),
-)
-_COUNTRY_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("DE", ("deutschland", "bundesrepublik", "germany", "finanzamt", "krankenkasse", "aufenthaltstitel")),
-    ("UA", ("україна", "ukraine", "украины", "україни")),
-    ("GE", ("საქართველო", "georgia", "sakartvelo")),
-)
+MONTH_PATTERN = re.compile(r"\b(?P<year>20\d{2}|19\d{2})[./-](?P<month>[01]?\d)\b")
+YEAR_PATTERN = re.compile(r"\b(20\d{2}|19\d{2})\b")
+IDENTIFIER_PATTERNS: Mapping[str, re.Pattern[str]] = {
+    "reference": re.compile(r"(?i)\b(?:aktenzeichen|geschäftszeichen|reference|vorgangsnummer|kundennummer)\s*[:#-]?\s*([A-Z0-9][A-Z0-9./_-]{3,40})"),
+    "invoice": re.compile(r"(?i)\b(?:rechnungsnummer|invoice\s*(?:number|no\.?))\s*[:#-]?\s*([A-Z0-9][A-Z0-9./_-]{2,40})"),
+    "contract": re.compile(r"(?i)\b(?:vertragsnummer|contract\s*(?:number|no\.?))\s*[:#-]?\s*([A-Z0-9][A-Z0-9./_-]{2,40})"),
+}
+AMOUNT_PATTERN = re.compile(r"(?<!\w)(\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})|\d+(?:[.,]\d{2}))\s*(€|EUR|USD|UAH)\b", re.I)
+ISSUER_PATTERN = re.compile(r"(?i)^(?:issuer|from|absender|herausgeber|behörde|firma)\s*[:\-]\s*(.{2,100})$")
 
 
 @dataclass(frozen=True)
-class TaxonomyDecision:
-    route: str
-    topic_alias: str | None
-    jurisdiction_country: str | None
-    document_date: str | None
-    date_precision: str
-    document_type: str | None
-    issuer: str | None
-    summary: str
+class Evidence:
+    value: str | None
     confidence: float
-    reason_codes: tuple[str, ...]
-    event_candidates: tuple[dict[str, object], ...]
+    snippets: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, object]:
+        return {"value": self.value, "confidence": self.confidence, "snippets": list(self.snippets)}
 
 
-def classify_text_locally(text: str, *, source_name: str = "") -> TaxonomyDecision:
-    del source_name  # filenames are not evidence for classification.
-    normalized = " ".join(text.split())
-    lowered = normalized.casefold()
-    topic_hits = [
-        (topic, sum(1 for keyword in keywords if keyword.casefold() in lowered))
-        for topic, keywords in _TOPIC_KEYWORDS
-    ]
-    topic_hits = [(topic, score) for topic, score in topic_hits if score > 0]
-    topic_hits.sort(key=lambda item: (-item[1], item[0]))
-    reason_codes: list[str] = []
-    topic = topic_hits[0][0] if topic_hits else None
-    ambiguous_topic = len(topic_hits) > 1 and topic_hits[0][1] == topic_hits[1][1]
-    if topic is None:
-        reason_codes.append("TOPIC_UNCERTAIN")
-    if ambiguous_topic:
-        reason_codes.append("TOPIC_AMBIGUOUS")
+@dataclass(frozen=True)
+class EventCandidate:
+    event_type: str
+    date: str
+    confidence: float
+    evidence: str
 
-    dates = [match.group(0) for match in _DATE_RE.finditer(normalized)]
-    valid_dates = tuple(item for item in dates if _valid_day(item))
-    document_date = valid_dates[0] if valid_dates else None
-    if document_date is None:
-        reason_codes.append("DATE_UNCERTAIN")
-
-    issuer = _first_labeled_value(normalized, ("Issuer", "Issued by", "Aussteller", "Absender", "From", "Від", "От"))
-    if issuer is None:
-        reason_codes.append("ISSUER_UNCERTAIN")
-    document_type = _document_type(lowered)
-    if document_type is None:
-        reason_codes.append("DOCUMENT_TYPE_UNCERTAIN")
-
-    jurisdiction = _jurisdiction(lowered)
-    if jurisdiction is None:
-        reason_codes.append("JURISDICTION_UNCERTAIN")
-
-    events = _events(lowered, valid_dates)
-    confidence = 0.94 if not reason_codes else (0.55 if topic is not None or document_date is not None else 0.25)
-    route = "ACCEPT" if not reason_codes else "REVIEW"
-    return TaxonomyDecision(
-        route=route,
-        topic_alias=topic,
-        jurisdiction_country=jurisdiction,
-        document_date=document_date,
-        date_precision="day" if document_date else "unknown",
-        document_type=document_type,
-        issuer=issuer,
-        summary=_summary(normalized),
-        confidence=confidence,
-        reason_codes=tuple(reason_codes),
-        event_candidates=events,
-    )
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "event_type": self.event_type,
+            "date": self.date,
+            "confidence": self.confidence,
+            "evidence": self.evidence,
+        }
 
 
-def deterministic_document_name(parts: Mapping[str, object], *, extension: str = ".bin") -> str:
-    date_part = _clean_token(str(parts.get("document_date") or "undated"))
-    subject = _clean_token(str(parts.get("principal_subject_alias") or "review"))
-    topic = _clean_token(str(parts.get("topic_alias") or "uncategorized"))
-    document_type = _clean_token(str(parts.get("document_type") or "document"))
-    digest = _clean_token(str(parts.get("sha256", "")))[:12]
-    suffix = extension.lower() if re.fullmatch(r"\.[a-z0-9]{1,10}", extension.lower()) else ".bin"
-    return "-".join(item for item in (date_part, subject, topic, document_type, digest) if item) + suffix
+def normalize_text(text: str) -> str:
+    return " ".join(text.casefold().split())
 
 
-def public_receipt(statuses: Iterable[str]) -> dict[str, object]:
-    counts: dict[str, int] = {}
-    for status in statuses:
-        counts[status] = counts.get(status, 0) + 1
-    return {
-        "schema": "skeleton.family_document_receipt.v1",
-        "privacy": "aggregate_only",
-        "aggregate_counts": counts,
-    }
+def score_unique(text: str, rules: Mapping[str, Iterable[str]]) -> Evidence:
+    scored: list[tuple[int, str, tuple[str, ...]]] = []
+    for value, words in rules.items():
+        hits = tuple(word for word in words if word.casefold() in text)
+        if hits:
+            scored.append((len(hits), value, hits))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    if not scored:
+        return Evidence(None, 0.0, ())
+    if len(scored) > 1 and scored[0][0] == scored[1][0]:
+        return Evidence(None, 0.35, scored[0][2] + scored[1][2])
+    score, value, hits = scored[0]
+    confidence = min(0.98, 0.62 + score * 0.09)
+    return Evidence(value, confidence, hits)
 
 
-def _clean_token(value: str) -> str:
-    cleaned = _TOKEN_RE.sub("-", value.lower()).strip("-")
-    return cleaned[:80] or "unknown"
-
-
-def _valid_day(raw: str) -> bool:
-    try:
-        date.fromisoformat(raw)
-        return True
-    except ValueError:
-        return False
-
-
-def _first_labeled_value(text: str, labels: tuple[str, ...]) -> str | None:
-    for label in labels:
-        match = re.search(rf"(?:^|\s){re.escape(label)}\s*:\s*([^\n;]{{2,80}})", text, re.IGNORECASE)
+def extract_document_date(text: str) -> tuple[str | None, str | None, Evidence]:
+    for pattern in DATE_PATTERNS:
+        match = pattern.search(text)
         if match:
-            return " ".join(match.group(1).split())[:80]
-    return None
+            try:
+                value = date(int(match.group("year")), int(match.group("month")), int(match.group("day"))).isoformat()
+            except ValueError:
+                continue
+            return value, "day", Evidence(value, 0.86, (match.group(0),))
+    match = MONTH_PATTERN.search(text)
+    if match:
+        value = f"{int(match.group('year')):04d}-{int(match.group('month')):02d}"
+        return value, "month", Evidence(value, 0.70, (match.group(0),))
+    match = YEAR_PATTERN.search(text)
+    if match:
+        value = match.group(1)
+        return value, "year", Evidence(value, 0.55, (match.group(0),))
+    return None, None, Evidence(None, 0.0, ())
 
 
-def _document_type(lowered: str) -> str | None:
-    for keyword, value in (
-        ("invoice", "invoice"),
-        ("rechnung", "invoice"),
-        ("bescheid", "official decision"),
-        ("certificate", "certificate"),
-        ("zeugnis", "certificate"),
-        ("contract", "contract"),
-        ("vertrag", "contract"),
-        ("notice", "notice"),
-        ("letter", "letter"),
-        ("schreiben", "letter"),
-    ):
-        if keyword in lowered:
-            return value
-    return None
+def extract_issuer(text: str) -> Evidence:
+    for line in text.splitlines()[:30]:
+        match = ISSUER_PATTERN.match(line.strip())
+        if match:
+            value = match.group(1).strip()[:100]
+            return Evidence(value, 0.88, (line.strip()[:160],))
+    lines = [line.strip() for line in text.splitlines()[:8] if 3 <= len(line.strip()) <= 100]
+    if lines:
+        return Evidence(lines[0], 0.45, (lines[0][:160],))
+    return Evidence(None, 0.0, ())
 
 
-def _jurisdiction(lowered: str) -> str | None:
-    hits = []
-    for country, markers in _COUNTRY_MARKERS:
-        if any(marker.casefold() in lowered for marker in markers):
-            hits.append(country)
-    return hits[0] if len(set(hits)) == 1 else None
+def extract_identifiers(text: str) -> list[dict[str, object]]:
+    found: list[dict[str, object]] = []
+    for kind, pattern in IDENTIFIER_PATTERNS.items():
+        for match in pattern.finditer(text):
+            value = match.group(1).strip()
+            found.append({"kind": kind, "value": value, "confidence": 0.9, "evidence": match.group(0)[:180]})
+    return found[:50]
 
 
-def _events(lowered: str, dates: tuple[str, ...]) -> tuple[dict[str, object], ...]:
-    if not dates:
-        return ()
-    events = []
-    for event_type, keywords in _EVENT_KEYWORDS:
-        matched = next((keyword for keyword in keywords if keyword.casefold() in lowered), None)
-        if matched is not None:
-            events.append(
-                {
-                    "schema": "skeleton.family_document_event.v1",
-                    "event_type": event_type,
-                    "date": dates[0],
-                    "title": f"Family document {event_type.replace('_', ' ')}",
-                    "confidence": 0.82,
-                    "evidence": {"keyword": matched, "date": dates[0]},
-                }
-            )
-    return tuple(events)
+def extract_amounts(text: str) -> list[dict[str, object]]:
+    values: list[dict[str, object]] = []
+    for match in AMOUNT_PATTERN.finditer(text):
+        values.append(
+            {
+                "value": match.group(1).replace(" ", ""),
+                "currency": match.group(2).upper().replace("€", "EUR"),
+                "confidence": 0.85,
+                "evidence": match.group(0)[:120],
+            }
+        )
+    return values[:100]
 
 
-def _summary(text: str) -> str:
-    if not text:
-        return "No extractable text."
-    return text[:360]
+def extract_event_candidates(text: str) -> list[EventCandidate]:
+    lowered = text.casefold()
+    candidates: list[EventCandidate] = []
+    for event_type, keywords in EVENT_KEYWORDS.items():
+        for keyword in keywords:
+            start = 0
+            while True:
+                index = lowered.find(keyword.casefold(), start)
+                if index < 0:
+                    break
+                window_start = max(0, index - 120)
+                window_end = min(len(text), index + len(keyword) + 160)
+                window = text[window_start:window_end]
+                date_value = None
+                evidence = None
+                for pattern in DATE_PATTERNS:
+                    match = pattern.search(window)
+                    if match:
+                        try:
+                            date_value = date(
+                                int(match.group("year")),
+                                int(match.group("month")),
+                                int(match.group("day")),
+                            ).isoformat()
+                        except ValueError:
+                            continue
+                        evidence = window.strip()[:240]
+                        break
+                if date_value is not None:
+                    candidates.append(EventCandidate(event_type, date_value, 0.82, evidence or keyword))
+                start = index + len(keyword)
+    unique: dict[tuple[str, str], EventCandidate] = {}
+    for candidate in candidates:
+        key = (candidate.event_type, candidate.date)
+        if key not in unique or candidate.confidence > unique[key].confidence:
+            unique[key] = candidate
+    return sorted(unique.values(), key=lambda item: (item.date, item.event_type))

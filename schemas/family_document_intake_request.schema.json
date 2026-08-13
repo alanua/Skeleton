@@ -1,14 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "skeleton.family_document_intake_request.v1",
+  "$id": "https://skeleton.local/schemas/family_document_intake_request.schema.json",
+  "title": "Private family document intake request",
   "type": "object",
-  "required": ["schema", "source_kind", "idempotency_key"],
   "additionalProperties": false,
+  "required": ["schema", "operation"],
   "properties": {
-    "schema": {"const": "skeleton.family_document_intake_request.v1"},
-    "source_kind": {"enum": ["mfp", "local_file"]},
-    "idempotency_key": {"type": "string", "minLength": 8},
-    "source_ref": {"type": "string"},
-    "dry_run": {"type": "boolean"}
+    "schema": {"const": "skeleton.family_document_intake.request.v1"},
+    "operation": {"enum": ["plan", "process", "reconcile", "status"]},
+    "source": {"type": "string", "maxLength": 4096},
+    "packet_path": {"type": "string", "maxLength": 4096}
   }
 }

@@ -1,19 +1,70 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "skeleton.family_document_record.v1",
+  "$id": "https://skeleton.local/schemas/family_document_record.schema.json",
+  "title": "Private family document record",
   "type": "object",
-  "required": ["schema", "document_id", "idempotency_key", "source_sha256", "version_cluster_id", "duplicate_cluster_key", "route", "summary", "event_candidates", "reason_codes"],
-  "additionalProperties": true,
+  "additionalProperties": false,
+  "required": [
+    "schema", "record_revision", "document_id", "binary_sha256", "byte_size", "source", "ocr",
+    "principal_subject", "all_subjects", "topic", "jurisdiction_country", "document_date",
+    "document_date_precision", "document_type", "issuer", "identifiers", "amounts", "deadlines",
+    "field_confidence", "field_evidence", "archive", "duplicate_relations", "version_relations",
+    "version_fingerprint", "event_candidates", "review", "projection"
+  ],
   "properties": {
     "schema": {"const": "skeleton.family_document_record.v1"},
-    "document_id": {"type": "string"},
-    "idempotency_key": {"type": "string"},
-    "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-    "version_cluster_id": {"type": "string"},
-    "duplicate_cluster_key": {"type": "string"},
-    "route": {"enum": ["ACCEPT", "REVIEW"]},
-    "summary": {"type": "string"},
-    "event_candidates": {"type": "array", "items": {"$ref": "skeleton.family_document_event.v1"}},
-    "reason_codes": {"type": "array", "items": {"type": "string"}}
+    "record_revision": {"type": "string", "minLength": 1, "maxLength": 128},
+    "document_id": {"type": "string", "pattern": "^document:[0-9a-f]{48}$"},
+    "binary_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "byte_size": {"type": "integer", "minimum": 1},
+    "source": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source_identity", "root_alias", "absolute_path", "relative_path", "mtime_ns", "byte_size"],
+      "properties": {
+        "source_identity": {"type": "string", "pattern": "^source:[0-9a-f]{48}$"},
+        "root_alias": {"type": "string", "minLength": 1, "maxLength": 128},
+        "absolute_path": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "relative_path": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "mtime_ns": {"type": "integer", "minimum": 0},
+        "byte_size": {"type": "integer", "minimum": 1}
+      }
+    },
+    "ocr": {
+      "type": "object", "additionalProperties": false,
+      "required": ["raw_text", "corrected_text", "providers", "source_sha256", "raw_text_sha256", "corrected_text_sha256"],
+      "properties": {
+        "raw_text": {"type": "string"}, "corrected_text": {"type": "string"},
+        "providers": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+        "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "raw_text_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "corrected_text_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "principal_subject": {"type": ["string", "null"]},
+    "all_subjects": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "topic": {"type": ["string", "null"]},
+    "jurisdiction_country": {"type": ["string", "null"]},
+    "document_date": {"type": ["string", "null"]},
+    "document_date_precision": {"enum": ["day", "month", "year", null]},
+    "document_type": {"type": ["string", "null"]},
+    "issuer": {"type": ["string", "null"]},
+    "identifiers": {"type": "array", "items": {"type": "object"}},
+    "amounts": {"type": "array", "items": {"type": "object"}},
+    "deadlines": {"type": "array", "items": {"type": "object"}},
+    "field_confidence": {"type": "object", "additionalProperties": {"type": "number", "minimum": 0, "maximum": 1}},
+    "field_evidence": {"type": "object"},
+    "archive": {
+      "type": "object", "required": ["relative_path", "sha256", "readback_verified"],
+      "properties": {
+        "relative_path": {"type": "string", "minLength": 1}, "absolute_path": {"type": "string"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "readback_verified": {"type": "boolean"}
+      }, "additionalProperties": false
+    },
+    "duplicate_relations": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "version_relations": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "version_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "event_candidates": {"type": "array", "items": {"$ref": "family_document_event.schema.json"}},
+    "review": {"type": "object", "additionalProperties": false, "required": ["required", "reason_codes"], "properties": {"required": {"type": "boolean"}, "reason_codes": {"type": "array", "items": {"type": "string"}}}},
+    "projection": {"type": "object", "required": ["status"], "properties": {"status": {"enum": ["PENDING", "DONE", "RETRY", "QUARANTINED"]}}}
   }
 }
