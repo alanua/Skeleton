@@ -1,0 +1,18 @@
+[Unit]
+Description=Skeleton local family document intake worker
+After=network.target
+
+[Service]
+Type=simple
+Environment=PYTHONPATH=/opt/skeleton
+ExecStart=/usr/bin/python3 /opt/skeleton/scripts/family_document_worker.py /etc/skeleton/family_document_runtime_config.json
+Restart=on-failure
+RestartSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/skeleton-family-document-intake
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.family_document_intake_request.v1",
+  "type": "object",
+  "required": ["schema", "source_kind", "idempotency_key"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "skeleton.family_document_intake_request.v1"},
+    "source_kind": {"enum": ["mfp", "local_file"]},
+    "idempotency_key": {"type": "string", "minLength": 8},
+    "source_ref": {"type": "string"},
+    "dry_run": {"type": "boolean"}
+  }
+}

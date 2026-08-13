@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.family_document_receipt.v1",
+  "type": "object",
+  "required": ["schema", "privacy", "aggregate_counts"],
+  "additionalProperties": true,
+  "properties": {
+    "schema": {"const": "skeleton.family_document_receipt.v1"},
+    "privacy": {"const": "aggregate_only"},
+    "status": {"type": "string"},
+    "aggregate_counts": {"type": "object"}
+  }
+}

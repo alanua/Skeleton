@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.family_document_record.v1",
+  "type": "object",
+  "required": ["schema", "document_id", "idempotency_key", "source_sha256", "version_cluster_id", "duplicate_cluster_key", "route", "summary", "event_candidates", "reason_codes"],
+  "additionalProperties": true,
+  "properties": {
+    "schema": {"const": "skeleton.family_document_record.v1"},
+    "document_id": {"type": "string"},
+    "idempotency_key": {"type": "string"},
+    "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "version_cluster_id": {"type": "string"},
+    "duplicate_cluster_key": {"type": "string"},
+    "route": {"enum": ["ACCEPT", "REVIEW"]},
+    "summary": {"type": "string"},
+    "event_candidates": {"type": "array", "items": {"$ref": "skeleton.family_document_event.v1"}},
+    "reason_codes": {"type": "array", "items": {"type": "string"}}
+  }
+}
