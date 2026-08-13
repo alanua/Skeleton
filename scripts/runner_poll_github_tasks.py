@@ -2192,6 +2192,32 @@ def get_ready_issues() -> list[dict[str, Any]]:
     )
 
 
+def get_running_issues() -> list[dict[str, Any]]:
+    code, output = run_command(
+        [
+            "gh",
+            "issue",
+            "list",
+            "--repo",
+            REPO,
+            "--label",
+            LABEL_RUNNING,
+            "--state",
+            "open",
+            "--search",
+            "is:issue",
+            "--json",
+            "number,title,body,state,url,closed,labels",
+        ]
+    )
+    if code != 0:
+        raise RuntimeError(f"gh issue list failed:\n{output}")
+    parsed = json.loads(output or "[]")
+    if not isinstance(parsed, list):
+        raise RuntimeError("gh issue list returned non-list JSON")
+    return [issue for issue in parsed if is_open_task_issue(issue)]
+
+
 def sort_ready_issues_by_priority(issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(issues, key=_ready_issue_priority_key)
 
@@ -10949,6 +10975,49 @@ def self_heal_run_now_queue_intake() -> int:
         return 0
 
 
+def recover_queue_idle_once() -> int:
+    try:
+        ready_issues = get_ready_issues()
+        if ready_issues:
+            return 0
+        running_issues = get_running_issues()
+        if running_issues:
+            return 0
+
+        candidate_issues = get_queue_replenisher_candidate_issues()
+        selection = _runner_queue_replenishment_selection(
+            ready_issues,
+            candidate_issues,
+            target_min_depth=1,
+            target_max_depth=1,
+        )
+        if not selection.selected:
+            return 0
+
+        current_ready_issues = get_ready_issues()
+        if current_ready_issues:
+            return 0
+        current_running_issues = get_running_issues()
+        if current_running_issues:
+            return 0
+
+        current_candidate_issues = get_queue_replenisher_candidate_issues()
+        current_selection = _runner_queue_replenishment_selection(
+            current_ready_issues,
+            current_candidate_issues,
+            target_min_depth=1,
+            target_max_depth=1,
+        )
+        selected = list(current_selection.selected)
+        if not selected:
+            return 0
+        for issue in selected:
+            _promote_queue_replenisher_issue(issue)
+        return len(selected)
+    except Exception:
+        return 0
+
+
 def _stale_clean_skeleton_worktree_quarantine_metadata(
     body: str,
 ) -> tuple[StaleCleanSkeletonWorktreeQuarantineRequest | None, str | None]:
@@ -15159,7 +15228,7 @@ def poll_once(workdir: str | None = None) -> int:
         reconcile_scheduler_on_poll()
     except Exception:
         pass
-    self_heal_run_now_queue_intake()
+    recover_queue_idle_once()
     issues = get_ready_issues()
     for issue in issues:
         process_issue(issue, workdir=workdir)
