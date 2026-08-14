@@ -31,7 +31,21 @@ REMOTE_FAILURE_REASON_TO_ERROR: Final = {
     "EFFECTS_MISSING": "REMOTE_EFFECTS_MISSING",
     "MALFORMED_REMOTE_REQUEST": "REMOTE_MALFORMED_REMOTE_REQUEST",
     "ARTIFACT_MISMATCH": "REMOTE_ARTIFACT_MISMATCH",
+    "ARTIFACT_READ_FAILED": "REMOTE_ARTIFACT_READ_FAILED",
+    "DEVICE_RESPONSE_MALFORMED": "REMOTE_DEVICE_RESPONSE_MALFORMED",
+    "BACKUP_STATE_FAILED": "REMOTE_BACKUP_STATE_FAILED",
     "REMOTE_ACTION_FAILED": "REMOTE_ACTION_FAILED",
+}
+REMOTE_FAILURE_STAGES: Final = {
+    "request_parse",
+    "artifact_verify",
+    "device_info",
+    "device_effects",
+    "device_config",
+    "backup_config",
+    "upload_request",
+    "reboot_wait",
+    "postflight_effects",
 }
 
 
@@ -239,24 +253,36 @@ def _public_remote_receipt(
 
 
 def _remote_failure_reason(output: str, request: FirmwareTransferRequest) -> str:
-    try:
-        parsed = json.loads(output[:4096])
-    except json.JSONDecodeError:
+    matches: list[Mapping[str, object]] = []
+    for line in output.splitlines():
+        if len(line) > 4096:
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, Mapping) and _is_valid_remote_failure_receipt(parsed, request):
+            matches.append(parsed)
+    if len(matches) != 1:
         return "REMOTE_ACTION_FAILED"
-    if not isinstance(parsed, Mapping):
-        return "REMOTE_ACTION_FAILED"
-    if parsed.get("schema") != REMOTE_FAILURE_SCHEMA:
-        return "REMOTE_ACTION_FAILED"
-    if parsed.get("target") != DEVICE_TARGET:
-        return "REMOTE_ACTION_FAILED"
-    if parsed.get("sha256") != request.sha256 or parsed.get("byte_size") != request.byte_size:
-        return "REMOTE_ACTION_FAILED"
-    if parsed.get("final_status") != "BLOCKED":
-        return "REMOTE_ACTION_FAILED"
-    reason = parsed.get("failure_reason")
+    reason = matches[0].get("failure_reason")
     if not isinstance(reason, str):
         return "REMOTE_ACTION_FAILED"
     return REMOTE_FAILURE_REASON_TO_ERROR.get(reason, "REMOTE_ACTION_FAILED")
+
+
+def _is_valid_remote_failure_receipt(parsed: Mapping[str, object], request: FirmwareTransferRequest) -> bool:
+    if parsed.get("schema") != REMOTE_FAILURE_SCHEMA:
+        return False
+    if parsed.get("target") != DEVICE_TARGET:
+        return False
+    if parsed.get("sha256") != request.sha256 or parsed.get("byte_size") != request.byte_size:
+        return False
+    if parsed.get("final_status") != "BLOCKED":
+        return False
+    if not isinstance(parsed.get("failure_reason"), str):
+        return False
+    return parsed.get("failure_stage") in REMOTE_FAILURE_STAGES
 
 
 def _safe_state(value: object) -> str:
@@ -286,6 +312,15 @@ class RemoteFailure(Exception):
 
 class ArtifactMismatch(RemoteFailure):
     reason = "ARTIFACT_MISMATCH"
+
+class ArtifactReadFailed(RemoteFailure):
+    reason = "ARTIFACT_READ_FAILED"
+
+class BackupStateFailed(RemoteFailure):
+    reason = "BACKUP_STATE_FAILED"
+
+class DeviceResponseMalformed(RemoteFailure):
+    reason = "DEVICE_RESPONSE_MALFORMED"
 
 class DeviceUnreachable(RemoteFailure):
     reason = "DEVICE_UNREACHABLE"
@@ -320,7 +355,7 @@ class UnclassifiedRemoteFailure(RemoteFailure):
 def out(payload):
     print(json.dumps(payload, sort_keys=True))
 
-def failure_receipt(payload, reason):
+def failure_receipt(payload, reason, stage):
     return {
         "schema": FAILURE_SCHEMA,
         "target": TARGET,
@@ -328,15 +363,33 @@ def failure_receipt(payload, reason):
         "byte_size": payload.get("byte_size", 0) if isinstance(payload, dict) else 0,
         "final_status": "BLOCKED",
         "failure_reason": reason,
+        "failure_stage": stage if stage in {
+            "request_parse",
+            "artifact_verify",
+            "device_info",
+            "device_effects",
+            "device_config",
+            "backup_config",
+            "upload_request",
+            "reboot_wait",
+            "postflight_effects",
+        } else "request_parse",
     }
 
-def get_json(path, timeout=10):
+def get_json(path, expected_type, timeout=10):
     req = request.Request("http://" + TARGET + path, method="GET")
     try:
         with request.urlopen(req, timeout=timeout) as response:
-            return json.loads(response.read(1024 * 512).decode("utf-8"))
+            parsed = json.loads(response.read(1024 * 512).decode("utf-8"))
     except (TimeoutError, socket.timeout, error.URLError, OSError):
         raise DeviceUnreachable()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise DeviceResponseMalformed()
+    if expected_type == "dict" and not isinstance(parsed, dict):
+        raise DeviceResponseMalformed()
+    if expected_type == "list" and not isinstance(parsed, list):
+        raise DeviceResponseMalformed()
+    return parsed
 
 def has_effect(effects, name):
     return any(item == name or (isinstance(item, list) and name in item) for item in effects)
@@ -361,6 +414,7 @@ def read_payload():
 
 payload = {}
 remote_path = Path(REMOTE_TMP_PATH)
+failure_stage = "request_parse"
 try:
     payload = read_payload()
     remote_path = Path(payload["remote_path"])
@@ -368,19 +422,31 @@ try:
     result = {"target": TARGET, "sha256": payload["sha256"], "byte_size": payload["byte_size"], "effects": {}, "final_status": "OTA_UNVERIFIED"}
     if payload.get("target") != TARGET:
         raise MalformedRemoteRequest()
-    data = remote_path.read_bytes()
+    failure_stage = "artifact_verify"
+    try:
+        data = remote_path.read_bytes()
+    except OSError:
+        raise ArtifactReadFailed()
     if len(data) != payload["byte_size"] or len(data) <= 0 or len(data) > MAX_BYTES:
         raise ArtifactMismatch()
     if hashlib.sha256(data).hexdigest() != payload["sha256"]:
         raise ArtifactMismatch()
-    info = get_json("/json/info")
-    effects = get_json("/json/eff")
-    cfg = get_json("/json/cfg")
-    state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    backup = state_dir / ("cfg-" + payload["sha256"][:12] + ".json")
-    fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        json.dump({"info": info, "cfg": cfg}, fh, sort_keys=True)
+    failure_stage = "device_info"
+    info = get_json("/json/info", "dict")
+    failure_stage = "device_effects"
+    effects = get_json("/json/eff", "list")
+    failure_stage = "device_config"
+    cfg = get_json("/json/cfg", "dict")
+    failure_stage = "backup_config"
+    try:
+        state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        backup = state_dir / ("cfg-" + payload["sha256"][:12] + ".json")
+        fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({"info": info, "cfg": cfg}, fh, sort_keys=True)
+    except OSError:
+        raise BackupStateFailed()
+    failure_stage = "device_config"
     if info.get("brand", "WLED") != "WLED" or info.get("arch") != "esp32" or cfg.get("hw", {}).get("led", {}).get("total") != 256:
         raise PreflightIdentityMismatch()
     result["preflight_state"] = "ok"
@@ -395,6 +461,7 @@ try:
     req = request.Request("http://" + TARGET + "/update", data=body, method="POST")
     req.add_header("Content-Type", "multipart/form-data; boundary=" + BOUNDARY)
     req.add_header("Content-Length", str(len(body)))
+    failure_stage = "upload_request"
     try:
         with opener.open(req, timeout=60) as response:
             if response.geturl().split("/")[2] != TARGET:
@@ -421,27 +488,30 @@ try:
         raise UploadTransportFailed()
     if result["ota_http_class"] != "2xx":
         raise OtaUpdateRejected()
+    failure_stage = "reboot_wait"
     deadline = time.time() + 180
     post_effects = None
     while time.time() < deadline:
         try:
-            get_json("/json/info", timeout=5)
-            post_effects = get_json("/json/eff", timeout=5)
+            get_json("/json/info", "dict", timeout=5)
+            failure_stage = "postflight_effects"
+            post_effects = get_json("/json/eff", "list", timeout=5)
             break
         except DeviceUnreachable:
             time.sleep(5)
     result["reboot_observed"] = post_effects is not None
     if post_effects is None:
         raise RebootTimeout()
+    failure_stage = "postflight_effects"
     result["effects"] = {name: has_effect(post_effects, name) for name in payload["postflight_effects"]}
     result["final_status"] = "DONE" if all(result["effects"].values()) else "OTA_UNVERIFIED"
     if result["final_status"] != "DONE":
         raise EffectsMissing()
 except RemoteFailure as exc:
-    out(failure_receipt(payload, exc.reason))
+    out(failure_receipt(payload, exc.reason, failure_stage))
     sys.exit(1)
 except Exception:
-    out(failure_receipt(payload, UnclassifiedRemoteFailure.reason))
+    out(failure_receipt(payload, UnclassifiedRemoteFailure.reason, failure_stage))
     sys.exit(1)
 finally:
     try:

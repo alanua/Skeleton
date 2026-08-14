@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -12,6 +13,8 @@ import pytest
 from core.home_edge.firmware_action import (
     DEVICE_TARGET,
     REMOTE_FAILURE_SCHEMA,
+    REMOTE_FAILURE_STAGES,
+    REMOTE_POSTFLIGHT_PYTHON_ACTION,
     REMOTE_PYTHON_ACTION,
     REMOTE_TMP_PATH,
     FirmwareTransferRequest,
@@ -50,7 +53,9 @@ def _secret_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("SKELETON_HOME_EDGE_01_SSH_KNOWN_HOSTS_FILE", str(known_hosts))
 
 
-def _failure_receipt(req: FirmwareTransferRequest, reason: str) -> str:
+def _failure_receipt(
+    req: FirmwareTransferRequest, reason: str, stage: str = "upload_request"
+) -> str:
     return json.dumps(
         {
             "schema": REMOTE_FAILURE_SCHEMA,
@@ -59,6 +64,7 @@ def _failure_receipt(req: FirmwareTransferRequest, reason: str) -> str:
             "byte_size": req.byte_size,
             "final_status": "BLOCKED",
             "failure_reason": reason,
+            "failure_stage": stage,
         }
     )
 
@@ -82,6 +88,11 @@ class _Response:
         return self._url
 
 
+class _ExplodingReadResponse(_Response):
+    def read(self, _size: int = -1) -> bytes:
+        raise RuntimeError("SECRET_EXCEPTION_TEXT")
+
+
 class _Opener:
     def __init__(self, outcome: object) -> None:
         self.outcome = outcome
@@ -102,6 +113,31 @@ def _http_error(status: int, body: bytes = b"") -> error.HTTPError:
     )
 
 
+def _assert_failure_receipt_is_sanitized(
+    receipt: dict[str, object], *, reason: str, stage: str
+) -> None:
+    assert set(receipt) == {
+        "schema",
+        "target",
+        "sha256",
+        "byte_size",
+        "final_status",
+        "failure_reason",
+        "failure_stage",
+    }
+    assert receipt["schema"] == REMOTE_FAILURE_SCHEMA
+    assert receipt["target"] == DEVICE_TARGET
+    assert receipt["final_status"] == "BLOCKED"
+    assert receipt["failure_reason"] == reason
+    assert receipt["failure_stage"] == stage
+    assert stage in REMOTE_FAILURE_STAGES
+    serialized = json.dumps(receipt)
+    assert "SECRET" not in serialized
+    assert "Exception" not in serialized
+    assert "private.local" not in serialized
+    assert "/tmp/private" not in serialized
+
+
 def _run_remote_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -112,9 +148,44 @@ def _run_remote_failure(
     upload_outcome: object | None = None,
     postflight_effects: object | None = None,
     stdin_payload: object | None = None,
+    stdin_read_error: bool = False,
+    artifact_read_exception: type[Exception] | None = None,
+    backup_open_exception: bool = False,
+    json_dump_exception: bool = False,
+    exploding_paths: set[str] | None = None,
+    exploding_path_counts: dict[str, int] | None = None,
 ) -> dict[str, object]:
     firmware = Path(REMOTE_TMP_PATH)
     firmware.write_bytes(b"firmware-image")
+    if artifact_read_exception is not None:
+        original_read_bytes = Path.read_bytes
+
+        def fake_read_bytes(path: Path) -> bytes:
+            if path == firmware:
+                raise artifact_read_exception("SECRET_EXCEPTION_TEXT")
+            return original_read_bytes(path)
+
+        monkeypatch.setattr(Path, "read_bytes", fake_read_bytes)
+    if backup_open_exception:
+        original_open = os.open
+
+        def fake_open(path: object, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+            if str(path).endswith(".json"):
+                raise OSError("SECRET_EXCEPTION_TEXT")
+            if dir_fd is None:
+                return original_open(path, flags, mode)
+            return original_open(path, flags, mode, dir_fd=dir_fd)
+
+        monkeypatch.setattr(os, "open", fake_open)
+    if json_dump_exception:
+        original_dump = json.dump
+
+        def fake_dump(obj: object, fp: object, *args: object, **kwargs: object) -> None:
+            if isinstance(obj, dict) and {"info", "cfg"} <= set(obj):
+                raise RuntimeError("SECRET_EXCEPTION_TEXT")
+            original_dump(obj, fp, *args, **kwargs)
+
+        monkeypatch.setattr(json, "dump", fake_dump)
     sha256 = "ec4d577ee88cfc72af6589309da85d67feaf32ffabc78e5e705d77c2a5712036"
     payload = stdin_payload or {
         "schema": "skeleton.home_edge.lavalamp_ota_request.v1",
@@ -134,9 +205,19 @@ def _run_remote_failure(
     if postflight_effects is not None:
         responses.extend([{"brand": "WLED", "arch": "esp32"}, postflight_effects])
 
+    path_hits: dict[str, int] = {}
+
     def fake_urlopen(req: object, timeout: int = 10) -> _Response:
         if isinstance(req, request.Request) and "/json/info" in req.full_url and info == "unreachable":
             raise error.URLError("http://private.local/body SECRET")
+        if isinstance(req, request.Request) and exploding_path_counts:
+            for path, target_count in exploding_path_counts.items():
+                if path in req.full_url:
+                    path_hits[path] = path_hits.get(path, 0) + 1
+                    if path_hits[path] == target_count:
+                        return _ExplodingReadResponse()
+        if isinstance(req, request.Request) and exploding_paths and any(path in req.full_url for path in exploding_paths):
+            return _ExplodingReadResponse()
         return _Response(responses.pop(0))
 
     monkeypatch.setattr(request, "urlopen", fake_urlopen)
@@ -145,7 +226,14 @@ def _run_remote_failure(
         "build_opener",
         lambda *_args: _Opener(upload_outcome or _Response(status=200)),
     )
-    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    if stdin_read_error:
+        class _ExplodingStdin:
+            def read(self) -> str:
+                raise RuntimeError("SECRET_EXCEPTION_TEXT")
+
+        monkeypatch.setattr(sys, "stdin", _ExplodingStdin())
+    else:
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
     stdout = io.StringIO()
     with pytest.raises(SystemExit) as exc, redirect_stdout(stdout):
         exec(REMOTE_PYTHON_ACTION, {})
@@ -334,6 +422,54 @@ def test_host_rejects_malformed_or_unknown_remote_failure_receipt(
     assert exc.value.reason_code == "REMOTE_ACTION_FAILED"
 
 
+def test_host_parses_one_failure_receipt_surrounded_by_stdout_noise(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _secret_env(monkeypatch, tmp_path)
+    req = _request(tmp_path)
+    output = "\n".join(
+        [
+            "starting remote action",
+            "{not-json",
+            _failure_receipt(req, "ARTIFACT_READ_FAILED", "artifact_verify"),
+            "done",
+        ]
+    )
+
+    def fake_run(args: list[str], stdin: str | bytes | None, timeout: int) -> tuple[int, str]:
+        if args[0] == "scp":
+            return 0, ""
+        return 1, output
+
+    with pytest.raises(HomeEdgeFirmwareActionError) as exc:
+        HomeEdgeFirmwareAction(profile_loader=_profile, run_command=fake_run).execute(req)
+
+    assert exc.value.reason_code == "REMOTE_ARTIFACT_READ_FAILED"
+
+
+def test_host_rejects_multiple_matching_failure_receipts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _secret_env(monkeypatch, tmp_path)
+    req = _request(tmp_path)
+    output = "\n".join(
+        [
+            _failure_receipt(req, "DEVICE_UNREACHABLE", "device_info"),
+            _failure_receipt(req, "DEVICE_UNREACHABLE", "device_info"),
+        ]
+    )
+
+    def fake_run(args: list[str], stdin: str | bytes | None, timeout: int) -> tuple[int, str]:
+        if args[0] == "scp":
+            return 0, ""
+        return 1, output
+
+    with pytest.raises(HomeEdgeFirmwareActionError) as exc:
+        HomeEdgeFirmwareAction(profile_loader=_profile, run_command=fake_run).execute(req)
+
+    assert exc.value.reason_code == "REMOTE_ACTION_FAILED"
+
+
 def test_remote_preflight_identity_mismatch_is_sanitized_and_cleans_temp(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -350,6 +486,7 @@ def test_remote_preflight_identity_mismatch_is_sanitized_and_cleans_temp(
         "byte_size": len(b"firmware-image"),
         "final_status": "BLOCKED",
         "failure_reason": "PREFLIGHT_IDENTITY_MISMATCH",
+        "failure_stage": "device_config",
     }
 
 
@@ -358,9 +495,45 @@ def test_remote_device_unreachable_is_sanitized_and_cleans_temp(
 ) -> None:
     receipt = _run_remote_failure(monkeypatch, tmp_path, info="unreachable")
 
-    assert receipt["failure_reason"] == "DEVICE_UNREACHABLE"
-    assert "private.local" not in json.dumps(receipt)
-    assert "SECRET" not in json.dumps(receipt)
+    _assert_failure_receipt_is_sanitized(receipt, reason="DEVICE_UNREACHABLE", stage="device_info")
+
+
+def test_remote_artifact_read_failure_is_classified_and_sanitized(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    receipt = _run_remote_failure(monkeypatch, tmp_path, artifact_read_exception=OSError)
+
+    _assert_failure_receipt_is_sanitized(
+        receipt, reason="ARTIFACT_READ_FAILED", stage="artifact_verify"
+    )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "stage"),
+    [
+        ({"info": "not-a-dict"}, "device_info"),
+        ({"effects": {"secret": "PRIVATE"}}, "device_effects"),
+        ({"cfg": []}, "device_config"),
+    ],
+)
+def test_remote_malformed_device_json_is_classified_and_sanitized(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, kwargs: dict[str, object], stage: str
+) -> None:
+    receipt = _run_remote_failure(monkeypatch, tmp_path, **kwargs)
+
+    _assert_failure_receipt_is_sanitized(
+        receipt, reason="DEVICE_RESPONSE_MALFORMED", stage=stage
+    )
+
+
+def test_remote_backup_state_write_failure_is_classified_and_sanitized(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    receipt = _run_remote_failure(monkeypatch, tmp_path, backup_open_exception=True)
+
+    _assert_failure_receipt_is_sanitized(
+        receipt, reason="BACKUP_STATE_FAILED", stage="backup_config"
+    )
 
 
 @pytest.mark.parametrize("status", [401, 403])
@@ -369,7 +542,9 @@ def test_remote_update_auth_or_lock_http_status_is_pin_required(
 ) -> None:
     receipt = _run_remote_failure(monkeypatch, tmp_path, upload_outcome=_http_error(status))
 
-    assert receipt["failure_reason"] == "OTA_LOCKED_OR_PIN_REQUIRED"
+    _assert_failure_receipt_is_sanitized(
+        receipt, reason="OTA_LOCKED_OR_PIN_REQUIRED", stage="upload_request"
+    )
 
 
 def test_remote_wled_compatibility_rejection_marker_does_not_leak_body(
@@ -381,8 +556,9 @@ def test_remote_wled_compatibility_rejection_marker_does_not_leak_body(
         upload_outcome=_http_error(500, b"firmware not compatible with hardware SECRET_BODY"),
     )
 
-    assert receipt["failure_reason"] == "OTA_COMPATIBILITY_VALIDATION_REJECTED"
-    assert "SECRET_BODY" not in json.dumps(receipt)
+    _assert_failure_receipt_is_sanitized(
+        receipt, reason="OTA_COMPATIBILITY_VALIDATION_REJECTED", stage="upload_request"
+    )
 
 
 def test_remote_other_http_500_is_update_rejected(
@@ -394,8 +570,9 @@ def test_remote_other_http_500_is_update_rejected(
         upload_outcome=_http_error(500, b"plain failure body"),
     )
 
-    assert receipt["failure_reason"] == "OTA_UPDATE_REJECTED"
-    assert "plain failure body" not in json.dumps(receipt)
+    _assert_failure_receipt_is_sanitized(
+        receipt, reason="OTA_UPDATE_REJECTED", stage="upload_request"
+    )
 
 
 def test_remote_redirect_mismatch_is_sanitized_and_cleans_temp(
@@ -407,7 +584,9 @@ def test_remote_redirect_mismatch_is_sanitized_and_cleans_temp(
         upload_outcome=_Response(status=200, url="http://192.168.1.99/update"),
     )
 
-    assert receipt["failure_reason"] == "REDIRECT_MISMATCH"
+    _assert_failure_receipt_is_sanitized(
+        receipt, reason="REDIRECT_MISMATCH", stage="upload_request"
+    )
     assert "192.168.1.99" not in json.dumps(receipt)
 
 
@@ -417,7 +596,7 @@ def test_remote_reboot_timeout_is_sanitized_and_cleans_temp(
     monkeypatch.setattr("time.time", iter([0, 181]).__next__)
     receipt = _run_remote_failure(monkeypatch, tmp_path)
 
-    assert receipt["failure_reason"] == "REBOOT_TIMEOUT"
+    _assert_failure_receipt_is_sanitized(receipt, reason="REBOOT_TIMEOUT", stage="reboot_wait")
 
 
 def test_remote_missing_effects_is_sanitized_and_cleans_temp(
@@ -425,7 +604,9 @@ def test_remote_missing_effects_is_sanitized_and_cleans_temp(
 ) -> None:
     receipt = _run_remote_failure(monkeypatch, tmp_path, postflight_effects=["CY Anemone"])
 
-    assert receipt["failure_reason"] == "EFFECTS_MISSING"
+    _assert_failure_receipt_is_sanitized(
+        receipt, reason="EFFECTS_MISSING", stage="postflight_effects"
+    )
 
 
 def test_remote_malformed_request_is_sanitized_and_cleans_temp(
@@ -438,16 +619,62 @@ def test_remote_malformed_request_is_sanitized_and_cleans_temp(
     )
 
     assert receipt["failure_reason"] == "MALFORMED_REMOTE_REQUEST"
+    assert receipt["failure_stage"] == "request_parse"
     assert receipt["sha256"] == ""
     assert receipt["byte_size"] == 0
     assert "PRIVATE" not in json.dumps(receipt)
     assert "/tmp/private-firmware.bin" not in json.dumps(receipt)
 
 
-def test_remote_unclassified_exception_is_sanitized_and_cleans_temp(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize(
+    ("stage", "kwargs", "expected_sha256", "expected_size"),
+    [
+        ("request_parse", {"stdin_read_error": True}, "", 0),
+        ("artifact_verify", {"artifact_read_exception": ValueError}, None, None),
+        ("device_info", {"exploding_paths": {"/json/info"}}, None, None),
+        ("device_effects", {"exploding_paths": {"/json/eff"}}, None, None),
+        ("device_config", {"exploding_paths": {"/json/cfg"}}, None, None),
+        ("backup_config", {"json_dump_exception": True}, None, None),
+        ("upload_request", {"upload_outcome": RuntimeError("SECRET_EXCEPTION_TEXT")}, None, None),
+        (
+            "reboot_wait",
+            {
+                "postflight_effects": ["CY Anemone", "CY Tidal Bloom"],
+                "exploding_path_counts": {"/json/info": 2},
+            },
+            None,
+            None,
+        ),
+        (
+            "postflight_effects",
+            {
+                "postflight_effects": ["CY Anemone", "CY Tidal Bloom"],
+                "exploding_path_counts": {"/json/eff": 2},
+            },
+            None,
+            None,
+        ),
+    ],
+)
+def test_remote_unexpected_exception_at_each_stage_is_sanitized(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    stage: str,
+    kwargs: dict[str, object],
+    expected_sha256: str | None,
+    expected_size: int | None,
 ) -> None:
-    receipt = _run_remote_failure(monkeypatch, tmp_path, cfg=[])
+    receipt = _run_remote_failure(monkeypatch, tmp_path, **kwargs)
 
-    assert receipt["failure_reason"] == "REMOTE_ACTION_FAILED"
-    assert "AttributeError" not in json.dumps(receipt)
+    _assert_failure_receipt_is_sanitized(
+        receipt, reason="REMOTE_ACTION_FAILED", stage=stage
+    )
+    if expected_sha256 is not None:
+        assert receipt["sha256"] == expected_sha256
+    if expected_size is not None:
+        assert receipt["byte_size"] == expected_size
+
+
+def test_embedded_remote_scripts_compile() -> None:
+    compile(REMOTE_PYTHON_ACTION, "<remote-lavalamp-ota>", "exec")
+    compile(REMOTE_POSTFLIGHT_PYTHON_ACTION, "<remote-lavalamp-postflight>", "exec")
