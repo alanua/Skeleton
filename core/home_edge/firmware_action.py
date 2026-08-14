@@ -18,6 +18,21 @@ REMOTE_TMP_PATH: Final = "/tmp/skeleton-lavalamp-c98acbf-firmware.bin"
 STATE_DIR: Final = ".local/state/skeleton/home-edge-01/lavalamp"
 REMOTE_TIMEOUT_SECONDS: Final = 600
 POSTFLIGHT_EFFECTS: Final = ("CY Anemone", "CY Tidal Bloom")
+REMOTE_FAILURE_SCHEMA: Final = "skeleton.home_edge.lavalamp_ota_failure.v1"
+REMOTE_FAILURE_REASON_TO_ERROR: Final = {
+    "PREFLIGHT_IDENTITY_MISMATCH": "REMOTE_PREFLIGHT_IDENTITY_MISMATCH",
+    "DEVICE_UNREACHABLE": "REMOTE_DEVICE_UNREACHABLE",
+    "OTA_LOCKED_OR_PIN_REQUIRED": "REMOTE_OTA_LOCKED_OR_PIN_REQUIRED",
+    "OTA_COMPATIBILITY_VALIDATION_REJECTED": "REMOTE_OTA_COMPATIBILITY_VALIDATION_REJECTED",
+    "OTA_UPDATE_REJECTED": "REMOTE_OTA_UPDATE_REJECTED",
+    "UPLOAD_TRANSPORT_FAILED": "REMOTE_UPLOAD_TRANSPORT_FAILED",
+    "REDIRECT_MISMATCH": "REMOTE_REDIRECT_MISMATCH",
+    "REBOOT_TIMEOUT": "REMOTE_REBOOT_TIMEOUT",
+    "EFFECTS_MISSING": "REMOTE_EFFECTS_MISSING",
+    "MALFORMED_REMOTE_REQUEST": "REMOTE_MALFORMED_REMOTE_REQUEST",
+    "ARTIFACT_MISMATCH": "REMOTE_ARTIFACT_MISMATCH",
+    "REMOTE_ACTION_FAILED": "REMOTE_ACTION_FAILED",
+}
 
 
 class HomeEdgeFirmwareActionError(RuntimeError):
@@ -97,7 +112,7 @@ class HomeEdgeFirmwareAction:
             REMOTE_TIMEOUT_SECONDS,
         )
         if code != 0:
-            raise HomeEdgeFirmwareActionError("REMOTE_ACTION_FAILED")
+            raise HomeEdgeFirmwareActionError(_remote_failure_reason(output, request))
         return _public_remote_receipt(output, request)
 
     def verify_postflight_only(self, request: FirmwareTransferRequest) -> dict[str, object]:
@@ -223,6 +238,27 @@ def _public_remote_receipt(
     }
 
 
+def _remote_failure_reason(output: str, request: FirmwareTransferRequest) -> str:
+    try:
+        parsed = json.loads(output[:4096])
+    except json.JSONDecodeError:
+        return "REMOTE_ACTION_FAILED"
+    if not isinstance(parsed, Mapping):
+        return "REMOTE_ACTION_FAILED"
+    if parsed.get("schema") != REMOTE_FAILURE_SCHEMA:
+        return "REMOTE_ACTION_FAILED"
+    if parsed.get("target") != DEVICE_TARGET:
+        return "REMOTE_ACTION_FAILED"
+    if parsed.get("sha256") != request.sha256 or parsed.get("byte_size") != request.byte_size:
+        return "REMOTE_ACTION_FAILED"
+    if parsed.get("final_status") != "BLOCKED":
+        return "REMOTE_ACTION_FAILED"
+    reason = parsed.get("failure_reason")
+    if not isinstance(reason, str):
+        return "REMOTE_ACTION_FAILED"
+    return REMOTE_FAILURE_REASON_TO_ERROR.get(reason, "REMOTE_ACTION_FAILED")
+
+
 def _safe_state(value: object) -> str:
     if isinstance(value, str) and value in {"ok", "blocked", "failed", "transferred", "skipped_verified_duplicate", "success", "2xx"}:
         return value
@@ -230,41 +266,113 @@ def _safe_state(value: object) -> str:
 
 
 REMOTE_PYTHON_ACTION: Final = r'''
-import hashlib, json, os, sys, time
+import hashlib, json, os, socket, sys, time
 from pathlib import Path
-from urllib import request
+from urllib import error, request
 
 TARGET = "192.168.1.164"
+REMOTE_TMP_PATH = "/tmp/skeleton-lavalamp-c98acbf-firmware.bin"
 MAX_BYTES = 4 * 1024 * 1024
 BOUNDARY = "skeleton-lavalamp-fixed-boundary"
+FAILURE_SCHEMA = "skeleton.home_edge.lavalamp_ota_failure.v1"
+WLED_COMPATIBILITY_REJECTION_MARKER = b"not compatible"
 
 class NoRedirect(request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise RuntimeError("redirect_mismatch")
+        raise RedirectMismatch()
+
+class RemoteFailure(Exception):
+    reason = "UPLOAD_TRANSPORT_FAILED"
+
+class ArtifactMismatch(RemoteFailure):
+    reason = "ARTIFACT_MISMATCH"
+
+class DeviceUnreachable(RemoteFailure):
+    reason = "DEVICE_UNREACHABLE"
+
+class EffectsMissing(RemoteFailure):
+    reason = "EFFECTS_MISSING"
+
+class MalformedRemoteRequest(RemoteFailure):
+    reason = "MALFORMED_REMOTE_REQUEST"
+
+class OtaLockedOrPinRequired(RemoteFailure):
+    reason = "OTA_LOCKED_OR_PIN_REQUIRED"
+
+class OtaUpdateRejected(RemoteFailure):
+    reason = "OTA_UPDATE_REJECTED"
+
+class PreflightIdentityMismatch(RemoteFailure):
+    reason = "PREFLIGHT_IDENTITY_MISMATCH"
+
+class RedirectMismatch(RemoteFailure):
+    reason = "REDIRECT_MISMATCH"
+
+class RebootTimeout(RemoteFailure):
+    reason = "REBOOT_TIMEOUT"
+
+class UploadTransportFailed(RemoteFailure):
+    reason = "UPLOAD_TRANSPORT_FAILED"
+
+class UnclassifiedRemoteFailure(RemoteFailure):
+    reason = "REMOTE_ACTION_FAILED"
 
 def out(payload):
     print(json.dumps(payload, sort_keys=True))
 
+def failure_receipt(payload, reason):
+    return {
+        "schema": FAILURE_SCHEMA,
+        "target": TARGET,
+        "sha256": payload.get("sha256", "") if isinstance(payload, dict) else "",
+        "byte_size": payload.get("byte_size", 0) if isinstance(payload, dict) else 0,
+        "final_status": "BLOCKED",
+        "failure_reason": reason,
+    }
+
 def get_json(path, timeout=10):
     req = request.Request("http://" + TARGET + path, method="GET")
-    with request.urlopen(req, timeout=timeout) as response:
-        return json.loads(response.read(1024 * 512).decode("utf-8"))
+    try:
+        with request.urlopen(req, timeout=timeout) as response:
+            return json.loads(response.read(1024 * 512).decode("utf-8"))
+    except (TimeoutError, socket.timeout, error.URLError, OSError):
+        raise DeviceUnreachable()
 
 def has_effect(effects, name):
     return any(item == name or (isinstance(item, list) and name in item) for item in effects)
 
-payload = json.loads(sys.stdin.read())
-remote_path = Path(payload["remote_path"])
-state_dir = Path.home() / payload["state_dir"]
-result = {"target": TARGET, "sha256": payload["sha256"], "byte_size": payload["byte_size"], "effects": {}, "final_status": "OTA_UNVERIFIED"}
+def read_payload():
+    try:
+        candidate = json.loads(sys.stdin.read())
+    except json.JSONDecodeError:
+        raise MalformedRemoteRequest()
+    if not isinstance(candidate, dict):
+        raise MalformedRemoteRequest()
+    for key in ("remote_path", "byte_size", "sha256", "target", "postflight_effects", "state_dir"):
+        if key not in candidate:
+            raise MalformedRemoteRequest()
+    if candidate.get("remote_path") != REMOTE_TMP_PATH:
+        raise MalformedRemoteRequest()
+    if not isinstance(candidate.get("byte_size"), int) or not isinstance(candidate.get("sha256"), str):
+        raise MalformedRemoteRequest()
+    if not isinstance(candidate.get("postflight_effects"), list) or not isinstance(candidate.get("state_dir"), str):
+        raise MalformedRemoteRequest()
+    return candidate
+
+payload = {}
+remote_path = Path(REMOTE_TMP_PATH)
 try:
+    payload = read_payload()
+    remote_path = Path(payload["remote_path"])
+    state_dir = Path.home() / payload["state_dir"]
+    result = {"target": TARGET, "sha256": payload["sha256"], "byte_size": payload["byte_size"], "effects": {}, "final_status": "OTA_UNVERIFIED"}
     if payload.get("target") != TARGET:
-        raise RuntimeError("target_mismatch")
+        raise MalformedRemoteRequest()
     data = remote_path.read_bytes()
     if len(data) != payload["byte_size"] or len(data) <= 0 or len(data) > MAX_BYTES:
-        raise RuntimeError("size_mismatch")
+        raise ArtifactMismatch()
     if hashlib.sha256(data).hexdigest() != payload["sha256"]:
-        raise RuntimeError("hash_mismatch")
+        raise ArtifactMismatch()
     info = get_json("/json/info")
     effects = get_json("/json/eff")
     cfg = get_json("/json/cfg")
@@ -274,7 +382,7 @@ try:
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         json.dump({"info": info, "cfg": cfg}, fh, sort_keys=True)
     if info.get("brand", "WLED") != "WLED" or info.get("arch") != "esp32" or cfg.get("hw", {}).get("led", {}).get("total") != 256:
-        raise RuntimeError("preflight_identity_mismatch")
+        raise PreflightIdentityMismatch()
     result["preflight_state"] = "ok"
     body = (
         ("--" + BOUNDARY + "\r\n").encode("ascii")
@@ -287,13 +395,32 @@ try:
     req = request.Request("http://" + TARGET + "/update", data=body, method="POST")
     req.add_header("Content-Type", "multipart/form-data; boundary=" + BOUNDARY)
     req.add_header("Content-Length", str(len(body)))
-    with opener.open(req, timeout=60) as response:
-        if response.geturl().split("/")[2] != TARGET:
-            raise RuntimeError("redirect_mismatch")
-        result["ota_http_status"] = int(response.status)
-        result["ota_http_class"] = "2xx" if 200 <= response.status < 300 else "failed"
+    try:
+        with opener.open(req, timeout=60) as response:
+            if response.geturl().split("/")[2] != TARGET:
+                raise RedirectMismatch()
+            result["ota_http_status"] = int(response.status)
+            result["ota_http_class"] = "2xx" if 200 <= response.status < 300 else "failed"
+    except error.HTTPError as exc:
+        status = int(exc.code)
+        result["ota_http_status"] = status
+        result["ota_http_class"] = "failed"
+        if status in (401, 403):
+            raise OtaLockedOrPinRequired()
+        if status == 500:
+            body_prefix = exc.read(2048)
+            if WLED_COMPATIBILITY_REJECTION_MARKER in body_prefix.lower():
+                failure = OtaUpdateRejected()
+                failure.reason = "OTA_COMPATIBILITY_VALIDATION_REJECTED"
+                raise failure
+            raise OtaUpdateRejected()
+        raise OtaUpdateRejected()
+    except RedirectMismatch:
+        raise
+    except (TimeoutError, socket.timeout, error.URLError, OSError):
+        raise UploadTransportFailed()
     if result["ota_http_class"] != "2xx":
-        raise RuntimeError("upload_failed")
+        raise OtaUpdateRejected()
     deadline = time.time() + 180
     post_effects = None
     while time.time() < deadline:
@@ -301,17 +428,25 @@ try:
             get_json("/json/info", timeout=5)
             post_effects = get_json("/json/eff", timeout=5)
             break
-        except Exception:
+        except DeviceUnreachable:
             time.sleep(5)
     result["reboot_observed"] = post_effects is not None
     if post_effects is None:
-        raise RuntimeError("reboot_timeout")
+        raise RebootTimeout()
     result["effects"] = {name: has_effect(post_effects, name) for name in payload["postflight_effects"]}
     result["final_status"] = "DONE" if all(result["effects"].values()) else "OTA_UNVERIFIED"
+    if result["final_status"] != "DONE":
+        raise EffectsMissing()
+except RemoteFailure as exc:
+    out(failure_receipt(payload, exc.reason))
+    sys.exit(1)
+except Exception:
+    out(failure_receipt(payload, UnclassifiedRemoteFailure.reason))
+    sys.exit(1)
 finally:
     try:
         remote_path.unlink()
-    except FileNotFoundError:
+    except OSError:
         pass
 out(result)
 '''
