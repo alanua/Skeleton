@@ -82,6 +82,23 @@ For queue-idle recovery, the lesson fingerprint remains stable across recurrence
 
 The learned queue path may invoke only the registered `queue_reactivate` action. That action delegates to the existing `replenish_runner_queue` primitive and never directly promotes labels from the learned path. Verification requires actual ready-depth progress after the action. No progress, exceptions, candidate races, or stale running rechecks are recorded as failed recovery/backoff. Routine queue recovery remains Telegram-silent.
 
+Ordinary polls also run a bounded reconciliation pass for historical terminal
+issue label pollution. Open issues carrying `runner:done` or `runner:blocked`
+and any active execution label (`queue:RUN_NOW`, `runner:ready`,
+`runner:running`) have only those active labels removed. The pass does not close
+issues, does not change PR review state, and is idempotent. Terminal, malformed,
+or stale `queue:RUN_NOW` issues are skipped during intake so they cannot prevent
+selection of another valid RUN_NOW candidate.
+
+When a successful codegen task reports a public GitHub PR, the Runner verifies
+that PR through GitHub metadata and creates or reuses one idempotent
+`validate_pr_branch` continuation bound to the exact PR number, head SHA, and
+recorded base SHA. The continuation is an ordinary public-safe `agent:task` with
+`queue:RUN_NOW` admission metadata and remains Telegram-silent. If the task
+contract declared `existing_pr` or `update_existing_pr`, a different produced PR
+is treated as a publication-contract failure; no validation continuation is
+created for the wrong PR.
+
 ## Operator Noise
 
 Retry, recovery, and success remain silent. Operator notification is reserved for true durable `NEEDS_OPERATOR` after bounded recovery is unavailable or exhausted.

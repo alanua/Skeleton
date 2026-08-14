@@ -1080,6 +1080,20 @@ class PrBranchValidationRequest:
 
 
 @dataclass(frozen=True)
+class ProducedPrValidationContinuation:
+    repository: str
+    pr_number: int
+    pr_url: str
+    head_sha: str
+    base_sha: str
+    base_ref: str
+    head_ref: str
+    idempotency_key: str
+    created: bool
+    issue_number: int | None = None
+
+
+@dataclass(frozen=True)
 class PreflightPrRefreshRequest:
     pr_number: int
     expected_head_sha: str | None
@@ -8959,6 +8973,282 @@ def _get_pr_branch_validation_state(
             raise RuntimeError("PR metadata unavailable") from exc
 
 
+def _produced_pr_url_from_report(report: str) -> str | None:
+    pr_url = extract_pr_url(report)
+    if pr_url is not None and _PUBLIC_GITHUB_PR_URL_RE.fullmatch(pr_url) is not None:
+        return pr_url
+    for key in ("draft_pr_url", "existing_pr_url", "pr_url"):
+        match = re.search(
+            rf"^\s*{re.escape(key)}=(?P<url>\S+)\s*$",
+            report or "",
+            re.MULTILINE,
+        )
+        if match is not None:
+            value = match.group("url")
+            if _PUBLIC_GITHUB_PR_URL_RE.fullmatch(value) is not None:
+                return value
+    return None
+
+
+def _declared_existing_pr_number(body: str) -> int | None:
+    task_fields = _shadow_task_block_mapping(body)
+    candidates: list[object] = []
+    for key in (
+        "update_existing_pr",
+        "existing_pr",
+        "existing_pr_url",
+        "pr_url",
+        "pull_request",
+        "pull_request_number",
+    ):
+        if key in task_fields:
+            candidates.append(task_fields[key])
+    metadata = _metadata_before_task(body)
+    for field in (
+        "Update Existing PR",
+        "Existing PR",
+        "Existing PR URL",
+        "Pull Request",
+    ):
+        value = _body_field(metadata, field)
+        if value is not None:
+            candidates.append(value)
+    for candidate in candidates:
+        if isinstance(candidate, bool) or candidate is None:
+            continue
+        if isinstance(candidate, int):
+            if candidate > 0:
+                return candidate
+            continue
+        if isinstance(candidate, str):
+            stripped = candidate.strip()
+            if re.fullmatch(r"[1-9]\d*", stripped):
+                return int(stripped)
+            number = extract_pr_number(stripped)
+            if number is not None:
+                return number
+    return None
+
+
+def _codegen_publication_contract_requires_existing_pr(body: str) -> bool:
+    task_fields = _shadow_task_block_mapping(body)
+    for key in ("update_existing_pr", "existing_pr"):
+        value = task_fields.get(key)
+        if value is True:
+            return True
+        if isinstance(value, str) and value.strip().lower() in {"true", "yes", "1"}:
+            return True
+    metadata = _metadata_before_task(body)
+    for field in ("Update Existing PR", "Existing PR"):
+        value = _body_field(metadata, field)
+        if isinstance(value, str) and value.strip().lower() in {"true", "yes", "1"}:
+            return True
+    return False
+
+
+def _continuation_issue_idempotency_key(
+    repository: str, pr_number: int, head_sha: str, base_sha: str
+) -> str:
+    payload = f"{repository}|{pr_number}|{head_sha}|{base_sha}".encode("utf-8")
+    digest = hashlib.sha256(payload).hexdigest()[:24]
+    return f"validate-pr-branch:{repository}:pr-{pr_number}:{digest}"
+
+
+def _validate_pr_branch_continuation_body(
+    *,
+    repository: str,
+    pr_number: int,
+    head_sha: str,
+    base_sha: str,
+    source_issue: int,
+    idempotency_key: str,
+) -> str:
+    return "\n".join(
+        (
+            "schema: skeleton.runner_task.v1",
+            "privacy_boundary: PUBLIC_SAFE_QUEUE_AND_PR_METADATA_ONLY",
+            f"idempotency_key: {idempotency_key}",
+            "allowed_files:",
+            "  - scripts/runner_poll_github_tasks.py",
+            "",
+            f"Mode: {RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {VALIDATE_PR_BRANCH}",
+            f"Repository: {repository}",
+            f"Pull Request: {pr_number}",
+            f"Expected Head SHA: {head_sha}",
+            f"Expected Base SHA: {base_sha}",
+            "Validation Profile: full_pytest",
+            f"Source Issue: {source_issue}",
+            "",
+            "```task",
+            "Validate the exact produced PR branch through the Runner validation route.",
+            "```",
+        )
+    )
+
+
+def _find_existing_validation_continuation_issue(
+    idempotency_key: str,
+) -> int | None:
+    code, output = run_command(
+        [
+            "gh",
+            "issue",
+            "list",
+            "--repo",
+            REPO,
+            "--label",
+            LABEL_AGENT_TASK,
+            "--state",
+            "open",
+            "--search",
+            idempotency_key,
+            "--json",
+            "number,body,labels",
+            "--limit",
+            "20",
+        ]
+    )
+    if code != 0:
+        raise RuntimeError("validation continuation lookup failed")
+    parsed = json.loads(output or "[]")
+    if not isinstance(parsed, list):
+        raise RuntimeError("validation continuation lookup returned non-list JSON")
+    matches: list[int] = []
+    for issue in parsed:
+        if not isinstance(issue, dict):
+            continue
+        if idempotency_key not in str(issue.get("body") or ""):
+            continue
+        labels = _issue_label_names(issue)
+        if LABEL_AGENT_TASK not in labels:
+            continue
+        number = _queue_replenisher_issue_number(issue)
+        if number is not None:
+            matches.append(number)
+    if len(matches) > 1:
+        raise RuntimeError("duplicate validation continuation issues")
+    return matches[0] if matches else None
+
+
+def _create_validation_continuation_issue(
+    *,
+    title: str,
+    body: str,
+) -> int | None:
+    code, output = run_command(
+        [
+            "gh",
+            "issue",
+            "create",
+            "--repo",
+            REPO,
+            "--title",
+            title,
+            "--body",
+            body,
+            "--label",
+            LABEL_AGENT_TASK,
+            "--label",
+            LABEL_RUN_NOW,
+            "--label",
+            LABEL_READY,
+        ]
+    )
+    if code != 0:
+        raise RuntimeError("validation continuation issue create failed")
+    created_url = output.strip()
+    match = re.search(r"/issues/(?P<number>[1-9]\d*)(?:/|$)", created_url)
+    return int(match.group("number")) if match is not None else None
+
+
+def ensure_codegen_pr_validation_continuation(
+    *,
+    source_issue: int,
+    issue_body: str,
+    report: str,
+) -> ProducedPrValidationContinuation | None:
+    if runner_report_status(report) != "DONE":
+        return None
+    pr_url = _produced_pr_url_from_report(report)
+    if pr_url is None:
+        return None
+    pr_number = extract_pr_number(pr_url)
+    if pr_number is None:
+        return None
+    declared_pr = _declared_existing_pr_number(issue_body)
+    if declared_pr is not None and declared_pr != pr_number:
+        raise RuntimeError("publication_contract_existing_pr_mismatch")
+    if declared_pr is None and _codegen_publication_contract_requires_existing_pr(issue_body):
+        raise RuntimeError("publication_contract_existing_pr_unverifiable")
+
+    pr_state, _source = _get_pr_branch_validation_state(REPO, pr_number)
+    if pr_state.get("state") != "OPEN":
+        raise RuntimeError("produced_pr_not_open")
+    head_sha = str(pr_state.get("headRefOid") or "").lower()
+    base_sha = str(pr_state.get("baseRefOid") or "").lower()
+    base_ref = str(pr_state.get("baseRefName") or "")
+    head_ref = str(pr_state.get("headRefName") or "")
+    if _HEAD_SHA_RE.fullmatch(head_sha) is None:
+        raise RuntimeError("produced_pr_head_sha_invalid")
+    if _HEAD_SHA_RE.fullmatch(base_sha) is None:
+        raise RuntimeError("produced_pr_base_sha_invalid")
+    report_commit, _files = extract_runner_report_pr_binding(report)
+    if report_commit is not None and report_commit.lower() != head_sha:
+        raise RuntimeError("produced_pr_head_sha_mismatch")
+    if declared_pr is not None and declared_pr == pr_number:
+        declared_head = _body_field(_metadata_before_task(issue_body), "Expected Head SHA")
+        if (
+            isinstance(declared_head, str)
+            and _HEAD_SHA_RE.fullmatch(declared_head) is not None
+            and declared_head.lower() != head_sha
+        ):
+            raise RuntimeError("declared_existing_pr_head_stale")
+
+    idempotency_key = _continuation_issue_idempotency_key(
+        REPO, pr_number, head_sha, base_sha
+    )
+    existing_issue = _find_existing_validation_continuation_issue(idempotency_key)
+    if existing_issue is not None:
+        return ProducedPrValidationContinuation(
+            repository=REPO,
+            pr_number=pr_number,
+            pr_url=pr_url,
+            head_sha=head_sha,
+            base_sha=base_sha,
+            base_ref=base_ref,
+            head_ref=head_ref,
+            idempotency_key=idempotency_key,
+            created=False,
+            issue_number=existing_issue,
+        )
+
+    body = _validate_pr_branch_continuation_body(
+        repository=REPO,
+        pr_number=pr_number,
+        head_sha=head_sha,
+        base_sha=base_sha,
+        source_issue=source_issue,
+        idempotency_key=idempotency_key,
+    )
+    issue_number = _create_validation_continuation_issue(
+        title=f"Validate PR #{pr_number} at {head_sha[:8]}",
+        body=body,
+    )
+    return ProducedPrValidationContinuation(
+        repository=REPO,
+        pr_number=pr_number,
+        pr_url=pr_url,
+        head_sha=head_sha,
+        base_sha=base_sha,
+        base_ref=base_ref,
+        head_ref=head_ref,
+        idempotency_key=idempotency_key,
+        created=True,
+        issue_number=issue_number,
+    )
+
+
 def _preflight_pr_refresh_metadata(
     body: str,
 ) -> tuple[PreflightPrRefreshRequest | None, str | None]:
@@ -10738,6 +11028,44 @@ def _queue_replenisher_issue_is_discoverable(issue: Mapping[str, Any]) -> bool:
     return _queue_replenisher_privacy_block_reason(issue) is None
 
 
+def _runner_issue_terminal_with_active_labels(issue: Mapping[str, Any]) -> bool:
+    labels = _issue_label_names(issue)
+    return bool(labels & TERMINAL_RUNNER_LABELS) and bool(labels & ACTIVE_EXECUTION_LABELS)
+
+
+def _reconcile_terminal_issue_active_labels(issue: Mapping[str, Any]) -> bool:
+    number = _queue_replenisher_issue_number(issue)
+    if number is None or not _runner_issue_terminal_with_active_labels(issue):
+        return False
+    labels = _issue_label_names(issue)
+    command = ["gh", "issue", "edit", str(number), "--repo", REPO]
+    for label in sorted(labels & ACTIVE_EXECUTION_LABELS):
+        command.extend(["--remove-label", label])
+    code, output = run_command(command)
+    if code != 0:
+        raise RuntimeError(f"gh issue edit failed:\n{output}")
+    return True
+
+
+def reconcile_terminal_issues_active_execution_labels(limit: int = 50) -> int:
+    reconciled = 0
+    seen: set[int] = set()
+    for terminal_label in sorted(TERMINAL_RUNNER_LABELS):
+        for issue in _queue_replenisher_issue_list_for_label(terminal_label):
+            number = _queue_replenisher_issue_number(issue)
+            if number is not None:
+                if number in seen:
+                    continue
+                seen.add(number)
+            if not _runner_issue_terminal_with_active_labels(issue):
+                continue
+            _reconcile_terminal_issue_active_labels(issue)
+            reconciled += 1
+            if reconciled >= limit:
+                return reconciled
+    return reconciled
+
+
 @dataclass(frozen=True)
 class RunnerQueueReplenishmentSelection:
     selected: tuple[dict[str, Any], ...]
@@ -10893,6 +11221,9 @@ def get_run_now_queue_intake_candidate_issues() -> list[dict[str, Any]]:
     discovered: dict[int, dict[str, Any]] = {}
     unnumbered: list[dict[str, Any]] = []
     for issue in _queue_replenisher_issue_list_for_label(LABEL_RUN_NOW):
+        labels = _issue_label_names(issue)
+        if labels & TERMINAL_RUNNER_LABELS:
+            continue
         number = _queue_replenisher_issue_number(issue)
         if number is None:
             unnumbered.append(issue)
@@ -10910,6 +11241,7 @@ def select_run_now_queue_intake_targets(
         for issue in candidate_issues
         if LABEL_RUN_NOW in _issue_label_names(issue)
         and LABEL_AGENT_TASK in _issue_label_names(issue)
+        and not (_issue_label_names(issue) & TERMINAL_RUNNER_LABELS)
         and LABEL_READY not in _issue_label_names(issue)
         and LABEL_WAITING_DEPENDENCY not in _issue_label_names(issue)
     ]
@@ -11045,7 +11377,12 @@ def _autonomous_queue_eligible_snapshot() -> tuple[
         if run_now_candidates
         else get_queue_replenisher_candidate_issues()
     )
-    if any(LABEL_RUNNING in _issue_label_names(issue) for issue in candidate_issues):
+    if any(
+        LABEL_RUNNING in _issue_label_names(issue)
+        and LABEL_AGENT_TASK in _issue_label_names(issue)
+        and not (_issue_label_names(issue) & TERMINAL_RUNNER_LABELS)
+        for issue in candidate_issues
+    ):
         return ready_issues, candidate_issues, candidate_issues, []
     if run_now_candidates:
         eligible = select_run_now_queue_intake_targets(ready_issues, candidate_issues)
@@ -14899,6 +15236,8 @@ def process_runtime_maintenance_issue(
         LABEL_DONE if status == "DONE" else LABEL_BLOCKED,
     )
     notify_task_finished(issue_number, status, report)
+    if task_id == VALIDATE_PR_BRANCH and status in {"DONE", "BLOCKED"}:
+        maybe_replenish_runner_queue_after_completion()
 
 
 def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
@@ -15411,6 +15750,49 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             report,
         )
         report = append_memory_warning(report, warning or pickup_memory_warning)
+        if status == "DONE":
+            try:
+                continuation = ensure_codegen_pr_validation_continuation(
+                    source_issue=issue_number,
+                    issue_body=issue_body,
+                    report=report,
+                )
+            except RuntimeError as exc:
+                reason = str(exc) or "publication_contract_failure"
+                status = "BLOCKED"
+                report = report_runner_lane(
+                    _maintenance_report(
+                        "BLOCKED",
+                        "codegen_publication_contract",
+                        [
+                            f"source_issue={issue_number}",
+                            f"reason={reason}",
+                            "telegram_notifications=0",
+                        ],
+                        "not_met",
+                    ),
+                    runner_task,
+                )
+                report = append_retry_fields(report, retry_decision)
+                warning = record_runner_executor_result(
+                    issue_number,
+                    runner_task.target_project if runner_task is not None else "skeleton",
+                    status,
+                    status,
+                    "codex",
+                    report,
+                )
+                report = append_memory_warning(report, warning or pickup_memory_warning)
+            else:
+                if continuation is not None:
+                    report = (
+                        f"{report.rstrip()}\n"
+                        f"validation_continuation={'created' if continuation.created else 'reused'}\n"
+                        f"validation_issue={continuation.issue_number or 'unknown'}\n"
+                        f"validation_pr={continuation.pr_number}\n"
+                        f"validation_head_sha={continuation.head_sha}\n"
+                        f"validation_base_sha={continuation.base_sha}"
+                    )
         post_issue_comment(issue_number, report)
         set_issue_label(
             issue_number,
@@ -15445,6 +15827,10 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
 def poll_once(workdir: str | None = None) -> int:
     try:
         reconcile_scheduler_on_poll()
+    except Exception:
+        pass
+    try:
+        reconcile_terminal_issues_active_execution_labels()
     except Exception:
         pass
     source_token = _QUEUE_RECOVERY_SOURCE.set("poll")

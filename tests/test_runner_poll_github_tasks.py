@@ -1349,6 +1349,84 @@ def test_run_now_intake_preserves_existing_holds_and_terminal_policy() -> None:
     assert selected == []
 
 
+def test_terminal_run_now_reconciliation_removes_active_labels_without_closing() -> None:
+    done_issue = _queue_candidate_issue(
+        2512,
+        allowed_files=("docs/done-pollution.md",),
+        labels=(runner.LABEL_DONE, runner.LABEL_RUN_NOW, runner.LABEL_READY),
+    )
+    blocked_issue = _queue_candidate_issue(
+        2513,
+        allowed_files=("docs/blocked-pollution.md",),
+        labels=(runner.LABEL_BLOCKED, runner.LABEL_RUNNING),
+    )
+
+    def issue_list(label: str) -> list[dict[str, object]]:
+        if label == runner.LABEL_DONE:
+            return [done_issue]
+        if label == runner.LABEL_BLOCKED:
+            return [blocked_issue]
+        return []
+
+    with mock.patch.object(
+        runner, "_queue_replenisher_issue_list_for_label", side_effect=issue_list
+    ), mock.patch.object(runner, "run_command", return_value=(0, "")) as run:
+        count = runner.reconcile_terminal_issues_active_execution_labels()
+
+    assert count == 2
+    commands = [call.args[0] for call in run.call_args_list]
+    done_command = next(command for command in commands if command[3] == "2512")
+    assert done_command[:6] == ["gh", "issue", "edit", "2512", "--repo", runner.REPO]
+    assert runner.LABEL_READY in done_command
+    assert runner.LABEL_RUN_NOW in done_command
+    assert "--add-label" not in done_command
+    assert [
+        "gh",
+        "issue",
+        "edit",
+        "2513",
+        "--repo",
+        runner.REPO,
+        "--remove-label",
+        runner.LABEL_RUNNING,
+    ] in commands
+    assert all("close" not in command for command in commands for command in command)
+
+
+def test_malformed_or_terminal_run_now_does_not_block_valid_candidate() -> None:
+    malformed_running = _queue_candidate_issue(
+        2514,
+        labels=(runner.LABEL_RUN_NOW, runner.LABEL_RUNNING),
+    )
+    terminal_running = _queue_candidate_issue(
+        2515,
+        labels=(
+            runner.LABEL_AGENT_TASK,
+            runner.LABEL_RUN_NOW,
+            runner.LABEL_RUNNING,
+            runner.LABEL_DONE,
+        ),
+    )
+    valid = _queue_candidate_issue(
+        2516,
+        allowed_files=("docs/valid-run-now.md",),
+        idempotency_key="valid-run-now",
+        labels=(runner.LABEL_AGENT_TASK, runner.LABEL_RUN_NOW),
+    )
+
+    with mock.patch.object(runner, "get_ready_issues", return_value=[]), mock.patch.object(
+        runner, "get_running_issues", return_value=[]
+    ), mock.patch.object(
+        runner,
+        "get_run_now_queue_intake_candidate_issues",
+        return_value=[malformed_running, terminal_running, valid],
+    ):
+        _ready, running, _candidates, eligible = runner._autonomous_queue_eligible_snapshot()
+
+    assert running == []
+    assert [issue["number"] for issue in eligible] == [2516]
+
+
 def test_run_now_intake_self_heals_missing_ready_label_idempotently(tmp_path: Path) -> None:
     labels = {runner.LABEL_AGENT_TASK, runner.LABEL_RUN_NOW}
     issue = _queue_candidate_issue(
@@ -1498,6 +1576,139 @@ def test_completion_path_invokes_replenishment_after_done_status(tmp_path: Path)
         runner, "maybe_replenish_runner_queue_after_completion", return_value=True
     ) as replenish:
         runner.process_issue(issue, workdir=str(tmp_path))
+
+    replenish.assert_called_once_with()
+
+
+def test_codegen_done_with_draft_pr_creates_exact_validation_continuation_once() -> None:
+    created_bodies: list[str] = []
+
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        del cwd
+        if command[:3] == ["gh", "issue", "list"]:
+            return 0, "[]"
+        if command[:3] == ["gh", "issue", "create"]:
+            created_bodies.append(command[command.index("--body") + 1])
+            return 0, "https://github.com/alanua/Skeleton/issues/3001\n"
+        return 2, "unexpected command"
+
+    with mock.patch.object(
+        runner, "_get_pr_branch_validation_state", return_value=(_pr_validation_state(), "gh")
+    ), mock.patch.object(runner, "run_command", side_effect=run):
+        first = runner.ensure_codegen_pr_validation_continuation(
+            source_issue=90,
+            issue_body="Expected Output: draft PR\n\n```task\nDo it\n```",
+            report=DONE_REPORT,
+        )
+        idempotency_key = first.idempotency_key
+        with mock.patch.object(
+            runner,
+            "_find_existing_validation_continuation_issue",
+            return_value=3001,
+        ):
+            second = runner.ensure_codegen_pr_validation_continuation(
+                source_issue=90,
+                issue_body="Expected Output: draft PR\n\n```task\nDo it\n```",
+                report=DONE_REPORT,
+            )
+
+    assert first is not None
+    assert first.created is True
+    assert first.pr_number == 123
+    assert first.head_sha == HEAD_SHA
+    assert first.base_sha == "b" * 40
+    assert first.issue_number == 3001
+    assert second is not None
+    assert second.created is False
+    assert second.idempotency_key == idempotency_key
+    assert len(created_bodies) == 1
+    body = created_bodies[0]
+    assert "Maintenance Task ID: validate_pr_branch" in body
+    assert f"Pull Request: 123" in body
+    assert f"Expected Head SHA: {HEAD_SHA}" in body
+    assert f"Expected Base SHA: {'b' * 40}" in body
+    assert "privacy_boundary: PUBLIC_SAFE_QUEUE_AND_PR_METADATA_ONLY" in body
+    assert f"idempotency_key: {idempotency_key}" in body
+
+
+def test_codegen_existing_pr_contract_rejects_parallel_pr_without_continuation() -> None:
+    body = "\n".join(
+        (
+            "Expected Output: update existing PR",
+            "",
+            "```task",
+            "update_existing_pr: 456",
+            "```",
+        )
+    )
+    with mock.patch.object(runner, "run_command") as run:
+        with pytest.raises(RuntimeError, match="publication_contract_existing_pr_mismatch"):
+            runner.ensure_codegen_pr_validation_continuation(
+                source_issue=91,
+                issue_body=body,
+                report=DONE_REPORT,
+            )
+
+    run.assert_not_called()
+
+
+def test_codegen_existing_pr_exact_head_update_targets_declared_pr() -> None:
+    report = DONE_REPORT.replace("/pull/123", "/pull/456")
+    body = "\n".join(
+        (
+            "Expected Output: update existing PR",
+            "",
+            "```task",
+            "update_existing_pr: 456",
+            "```",
+        )
+    )
+
+    with mock.patch.object(
+        runner,
+        "_get_pr_branch_validation_state",
+        return_value=(
+            _pr_validation_state(number=456, headRefOid=HEAD_SHA, baseRefOid="d" * 40),
+            "gh",
+        ),
+    ), mock.patch.object(
+        runner, "_find_existing_validation_continuation_issue", return_value=3002
+    ) as find, mock.patch.object(
+        runner, "_create_validation_continuation_issue"
+    ) as create:
+        continuation = runner.ensure_codegen_pr_validation_continuation(
+            source_issue=92,
+            issue_body=body,
+            report=report,
+        )
+
+    assert continuation is not None
+    assert continuation.created is False
+    assert continuation.pr_number == 456
+    assert continuation.head_sha == HEAD_SHA
+    assert continuation.base_sha == "d" * 40
+    find.assert_called_once()
+    create.assert_not_called()
+
+
+def test_validation_completion_invokes_replenishment_even_when_blocked() -> None:
+    with mock.patch.object(
+        runner, "dispatch_runtime_maintenance_task", return_value="BLOCKED: nope"
+    ), mock.patch.object(runner, "record_runner_executor_result", return_value=None), mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "maybe_replenish_runner_queue_after_completion", return_value=True
+    ) as replenish:
+        runner.process_runtime_maintenance_issue(
+            3003,
+            runner.VALIDATE_PR_BRANCH,
+            str(runner.ROOT),
+            _validate_pr_issue_body(),
+        )
 
     replenish.assert_called_once_with()
 
