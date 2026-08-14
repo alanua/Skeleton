@@ -6,12 +6,17 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import os
+import platform
 from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
+import tarfile
 import tempfile
 from typing import Any, Final
+import urllib.error
+import urllib.request
 
 from core.codex_runtime_recovery import (
     CodexRuntimeRecoveryError,
@@ -66,6 +71,16 @@ LAVALAMP_BUILD_TIMEOUT_SECONDS: Final = 3600
 LAVALAMP_EXECUTOR_SCHEMA: Final = (
     "skeleton.repository_maintenance.lavalamp_build_ota.v1"
 )
+LAVALAMP_PLATFORMIO_VERSION: Final = "6.1.19"
+LAVALAMP_NODE_URL: Final = (
+    "https://nodejs.org/dist/v20.20.2/node-v20.20.2-linux-x64.tar.xz"
+)
+LAVALAMP_NODE_SHA256: Final = (
+    "df770b2a6f130ed8627c9782c988fda9669fa23898329a61a871e32f965e007d"
+)
+LAVALAMP_NODE_ARCHIVE_MAX_BYTES: Final = 64 * 1024 * 1024
+LAVALAMP_TOOL_BOOTSTRAP_TIMEOUT_SECONDS: Final = 300
+LAVALAMP_NODE_DOWNLOAD_TIMEOUT_SECONDS: Final = 60
 _LAVALAMP_ALLOWED_CAPABILITY_SETS: Final = frozenset(
     {
         frozenset(("repository_read", "test_execution")),
@@ -444,16 +459,50 @@ class RepositoryMaintenanceExecutor:
             self._verify_lavalamp_source_snapshot(source_checkout, artifact_root)
             self._apply_lavalamp_overlay(source_checkout, wled_dir)
             self._verify_effect_registration(wled_dir)
-            command = _platformio_command(self.run_command)
-            env = {
+            tools_dir = temp_dir / "tools"
+            node_bin = _bootstrap_node_runtime(temp_dir, self.run_command)
+            platformio_target = tools_dir / "platformio"
+            platformio_env = _bootstrap_platformio(self.run_command, temp_dir, platformio_target)
+            build_env = {
+                **platformio_env,
+                "PATH": f"{node_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+                "HOME": str(temp_dir / "home"),
+                "NPM_CONFIG_CACHE": str(temp_dir / "npm-cache"),
+                "NPM_CONFIG_USERCONFIG": str(temp_dir / "npmrc"),
+                "NPM_CONFIG_GLOBALCONFIG": str(temp_dir / "npm-globalrc"),
+                "NPM_CONFIG_PREFIX": str(temp_dir / "npm-prefix"),
                 "PLATFORMIO_CORE_DIR": str(temp_dir / "pio-core"),
                 "PLATFORMIO_BUILD_CACHE_DIR": str(temp_dir / "pio-build-cache"),
                 "PLATFORMIO_GLOBALLIB_DIR": str(temp_dir / "pio-lib"),
                 "PLATFORMIO_PACKAGES_DIR": str(temp_dir / "pio-packages"),
             }
-            _ok(
-                self.run_command([*command, "run", "-e", LAVALAMP_PLATFORMIO_ENV], wled_dir, LAVALAMP_BUILD_TIMEOUT_SECONDS, env),
+            command = [sys.executable, "-m", "platformio"]
+            env = {
+                key: value
+                for key, value in build_env.items()
+                if key in {
+                    "PATH",
+                    "HOME",
+                    "PYTHONPATH",
+                    "PYTHONNOUSERSITE",
+                    "NPM_CONFIG_CACHE",
+                    "NPM_CONFIG_USERCONFIG",
+                    "NPM_CONFIG_GLOBALCONFIG",
+                    "NPM_CONFIG_PREFIX",
+                    "PLATFORMIO_CORE_DIR",
+                    "PLATFORMIO_BUILD_CACHE_DIR",
+                    "PLATFORMIO_GLOBALLIB_DIR",
+                    "PLATFORMIO_PACKAGES_DIR",
+                }
+            }
+            _ok_run(
+                self.run_command,
+                [*command, "run", "-e", LAVALAMP_PLATFORMIO_ENV],
+                wled_dir,
+                LAVALAMP_BUILD_TIMEOUT_SECONDS,
+                env,
                 "PLATFORMIO_BUILD_FAILED",
+                "PLATFORMIO_RUNTIME_UNAVAILABLE",
             )
             built = wled_dir / ".pio" / "build" / LAVALAMP_PLATFORMIO_ENV / LAVALAMP_FIRMWARE_NAME
             size, digest = self._verify_built_firmware(built)
@@ -584,12 +633,154 @@ def _ok(result: tuple[int, str], reason: str) -> None:
         raise RepositoryMaintenanceBlocked(reason)
 
 
-def _platformio_command(run_command: RepositoryRunCommand) -> list[str]:
-    for command in (["pio"], ["platformio"]):
-        code, _output = run_command([*command, "--version"], None, 30, None)
-        if code == 0:
-            return command
-    raise RepositoryMaintenanceBlocked("PLATFORMIO_UNAVAILABLE")
+def _ok_run(
+    run_command: RepositoryRunCommand,
+    args: list[str],
+    cwd: Path | None,
+    timeout: int | None,
+    env: Mapping[str, str] | None,
+    failure_reason: str,
+    missing_reason: str,
+) -> None:
+    try:
+        result = run_command(args, cwd, timeout, env)
+    except FileNotFoundError as exc:
+        raise RepositoryMaintenanceBlocked(missing_reason) from exc
+    except OSError as exc:
+        raise RepositoryMaintenanceBlocked(missing_reason) from exc
+    _ok(result, failure_reason)
+
+
+def _bootstrap_platformio(
+    run_command: RepositoryRunCommand,
+    temp_dir: Path,
+    target_dir: Path,
+) -> dict[str, str]:
+    cache_dir = temp_dir / "pip-cache"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    env = {
+        "PYTHONNOUSERSITE": "1",
+        "PIP_CACHE_DIR": str(cache_dir),
+        "PIP_TARGET": str(target_dir),
+        "HOME": str(temp_dir / "home"),
+    }
+    _ok_run(
+        run_command,
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--no-input",
+            "--target",
+            str(target_dir),
+            f"platformio=={LAVALAMP_PLATFORMIO_VERSION}",
+        ],
+        None,
+        LAVALAMP_TOOL_BOOTSTRAP_TIMEOUT_SECONDS,
+        env,
+        "PLATFORMIO_BOOTSTRAP_FAILED",
+        "PYTHON_PIP_UNAVAILABLE",
+    )
+    return {
+        "PYTHONPATH": str(target_dir),
+        "PYTHONNOUSERSITE": "1",
+    }
+
+
+def _bootstrap_node_runtime(temp_dir: Path, run_command: RepositoryRunCommand) -> Path:
+    if platform.system() != "Linux" or platform.machine().lower() not in {"x86_64", "amd64"}:
+        raise RepositoryMaintenanceBlocked("NODE_UNSUPPORTED_HOST")
+
+    archive = _download_verified_node_archive(temp_dir)
+    extract_root = temp_dir / "tools" / "node"
+    _safe_extract_tar_xz(archive, extract_root)
+    node_home = extract_root / "node-v20.20.2-linux-x64"
+    node_bin = node_home / "bin"
+    env = {
+        "PATH": f"{node_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+        "HOME": str(temp_dir / "home"),
+        "NPM_CONFIG_CACHE": str(temp_dir / "npm-cache"),
+        "NPM_CONFIG_USERCONFIG": str(temp_dir / "npmrc"),
+        "NPM_CONFIG_GLOBALCONFIG": str(temp_dir / "npm-globalrc"),
+        "NPM_CONFIG_PREFIX": str(temp_dir / "npm-prefix"),
+    }
+    _ok_run(
+        run_command,
+        [str(node_bin / "node"), "--version"],
+        None,
+        30,
+        env,
+        "NODE_RUNTIME_FAILED",
+        "NODE_RUNTIME_UNAVAILABLE",
+    )
+    _ok_run(
+        run_command,
+        [str(node_bin / "npm"), "--version"],
+        None,
+        30,
+        env,
+        "NODE_RUNTIME_FAILED",
+        "NODE_RUNTIME_UNAVAILABLE",
+    )
+    return node_bin
+
+
+def _download_verified_node_archive(temp_dir: Path) -> Path:
+    archive_path = temp_dir / "tools" / "downloads" / "node.tar.xz"
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        with urllib.request.urlopen(
+            LAVALAMP_NODE_URL,
+            timeout=LAVALAMP_NODE_DOWNLOAD_TIMEOUT_SECONDS,
+        ) as response:
+            with archive_path.open("wb") as output:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > LAVALAMP_NODE_ARCHIVE_MAX_BYTES:
+                        raise RepositoryMaintenanceBlocked("NODE_DOWNLOAD_TOO_LARGE")
+                    digest.update(chunk)
+                    output.write(chunk)
+    except RepositoryMaintenanceBlocked:
+        raise
+    except (OSError, urllib.error.URLError) as exc:
+        raise RepositoryMaintenanceBlocked("NODE_DOWNLOAD_FAILED") from exc
+    if digest.hexdigest() != LAVALAMP_NODE_SHA256:
+        raise RepositoryMaintenanceBlocked("NODE_CHECKSUM_MISMATCH")
+    return archive_path
+
+
+def _safe_extract_tar_xz(archive_path: Path, extract_root: Path) -> None:
+    extract_root.mkdir(parents=True, exist_ok=True)
+    resolved_root = extract_root.resolve()
+    try:
+        with tarfile.open(archive_path, mode="r:xz") as archive:
+            for member in archive.getmembers():
+                target = (extract_root / member.name).resolve()
+                try:
+                    target.relative_to(resolved_root)
+                except ValueError as exc:
+                    raise RepositoryMaintenanceBlocked("NODE_EXTRACTION_BLOCKED") from exc
+                if member.issym() or member.islnk():
+                    link_target = (target.parent / member.linkname).resolve()
+                    try:
+                        link_target.relative_to(resolved_root)
+                    except ValueError as exc:
+                        raise RepositoryMaintenanceBlocked("NODE_EXTRACTION_BLOCKED") from exc
+            try:
+                archive.extractall(extract_root, filter="fully_trusted")
+            except TypeError:
+                archive.extractall(extract_root)
+    except RepositoryMaintenanceBlocked:
+        raise
+    except (OSError, tarfile.TarError) as exc:
+        raise RepositoryMaintenanceBlocked("NODE_EXTRACTION_FAILED") from exc
 
 
 def _assert_not_repository_path(path: Path) -> None:
