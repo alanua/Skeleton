@@ -84,7 +84,22 @@ from core.runner_shadow_integration import (
 from core.runner_executor import CallableRunnerExecutor, RunnerExecutorError
 from core.runner_executor_registry import RunnerExecutorRegistry
 from core.runner_gate import ROUTE_REQUIRED_CAPABILITIES, RunnerGate
-from core.runner_repository_maintenance_executor import RegisteredMaintenanceExecutor
+from core.runner_repository_maintenance_executor import (
+    BUILD_AND_LOCAL_OTA_OPERATION,
+    LAVALAMP_APPROVAL_REFERENCE,
+    LAVALAMP_ARTIFACT_ROOT,
+    LAVALAMP_IDEMPOTENCY_KEY,
+    LAVALAMP_PLATFORMIO_ENV,
+    LAVALAMP_RELAY,
+    LAVALAMP_REPOSITORY,
+    LAVALAMP_REQUIRED_EFFECTS,
+    LAVALAMP_SOURCE_BRANCH,
+    LAVALAMP_SOURCE_SHA,
+    LAVALAMP_TARGET,
+    LAVALAMP_WLED_SHA,
+    RepositoryMaintenanceExecutor,
+    RegisteredMaintenanceExecutor,
+)
 from core.runner_loop_control_executor import (
     LOOP_ENGINE_PACKET,
     LOOP_STATE_DB_ENV,
@@ -128,6 +143,7 @@ from core.runner_retry_policy import (
     one_time_override_hash,
     parse_prior_blocked_reports,
 )
+from core.runner_task import RunnerTask as CoreRunnerTask
 from core.scheduler_engine import SchedulerEngine, production_scheduler_db_path
 from core.scheduler_models import ScheduleSpec, build_execution_proposal, stable_occurrence_id
 from core.scheduler_store import SchedulerStore
@@ -333,6 +349,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1,
         HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1,
         HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1,
+        BUILD_AND_LOCAL_OTA_OPERATION,
         PREPARE_PRIVATE_STATIC_SITE_HANDOFF,
         DEPLOY_PRIVATE_STATIC_SITE,
     )
@@ -2982,6 +2999,7 @@ def protected_runner_shadow_compatibility_bindings() -> RunnerShadowCompatibilit
     maintenance_task_kind_by_id.update(
         {task_id: "publish" for task_id in sorted(PUBLISH_ONLY_MAINTENANCE_TASK_IDS)}
     )
+    maintenance_task_kind_by_id[BUILD_AND_LOCAL_OTA_OPERATION] = "repository_maintenance"
     return RunnerShadowCompatibilityBindings(
         legacy_routes=frozenset(
             {
@@ -3238,6 +3256,15 @@ def build_universal_runner_executor_registry(
         return run_codex_task(task_content, issue_workdir, runner_task)
 
     def maintenance_handler(task: Any) -> str:
+        lavalamp_task = _lavalamp_build_and_local_ota_task_from_issue(task, issue_body)
+        if lavalamp_task is not None:
+            code, output = RepositoryMaintenanceExecutor().execute(lavalamp_task)
+            if code != 0:
+                raise RunnerExecutorError(
+                    "LAVALAMP_REPOSITORY_MAINTENANCE_EXECUTOR_FAILED",
+                    "deterministic Lavalamp executor returned a non-zero code",
+                )
+            return output
         payload = getattr(task, "payload", {})
         maintenance_task_id = (
             payload.get("maintenance_task_id") if isinstance(payload, Mapping) else None
@@ -3270,6 +3297,134 @@ def build_universal_runner_executor_registry(
             )
         )
     return RunnerExecutorRegistry(executors)
+
+
+def _lavalamp_build_and_local_ota_task_from_issue(
+    task: Any,
+    issue_body: str,
+) -> RunnerTask | None:
+    if not isinstance(task, CoreRunnerTask) or task.task_kind != "repository_maintenance":
+        return None
+    operation = _body_field_or_yaml_value(issue_body, "Operation", "operation")
+    if operation != BUILD_AND_LOCAL_OTA_OPERATION:
+        return None
+    payload = {
+        "operation": operation,
+        "project": _body_field_or_yaml_value(issue_body, "Project", "project"),
+        "repository": _body_field_or_yaml_value(issue_body, "Repository", "repository"),
+        "source_branch": _body_field_or_yaml_value(issue_body, "Source Branch", "source_branch"),
+        "source_sha": _body_field_or_yaml_value(issue_body, "Source SHA", "source_sha"),
+        "wled_commit": _body_field_or_yaml_value(issue_body, "WLED Commit", "wled_commit"),
+        "environment": _body_field_or_yaml_value(issue_body, "Environment", "environment"),
+        "artifact_root": _body_field_or_yaml_value(issue_body, "Artifact Root", "artifact_root"),
+        "relay": _body_field_or_yaml_value(issue_body, "Relay", "relay"),
+        "target": _body_field_or_yaml_value(issue_body, "Target", "target"),
+        "approval_reference": _body_field_or_yaml_value(
+            issue_body, "Approval Reference", "approval_reference"
+        ),
+        "idempotency_key": _body_field_or_yaml_value(issue_body, "Idempotency Key", "idempotency_key"),
+        "required_effects": list(
+            _lavalamp_sequence(
+                _body_field_or_yaml_value(issue_body, "Required Effects", "required_effects")
+            )
+        ),
+    }
+    if payload == {
+        "operation": BUILD_AND_LOCAL_OTA_OPERATION,
+        "project": "lavalamp",
+        "repository": LAVALAMP_REPOSITORY,
+        "source_branch": LAVALAMP_SOURCE_BRANCH,
+        "source_sha": LAVALAMP_SOURCE_SHA,
+        "wled_commit": LAVALAMP_WLED_SHA,
+        "environment": LAVALAMP_PLATFORMIO_ENV,
+        "artifact_root": str(LAVALAMP_ARTIFACT_ROOT),
+        "relay": LAVALAMP_RELAY,
+        "target": LAVALAMP_TARGET,
+        "approval_reference": LAVALAMP_APPROVAL_REFERENCE,
+        "idempotency_key": LAVALAMP_IDEMPOTENCY_KEY,
+        "required_effects": list(LAVALAMP_REQUIRED_EFFECTS),
+    }:
+        return CoreRunnerTask.from_mapping(
+            {
+                **task.to_mapping(),
+                "repo": LAVALAMP_REPOSITORY,
+                "branch": LAVALAMP_SOURCE_BRANCH,
+                "base_sha": LAVALAMP_SOURCE_SHA,
+                "payload": payload,
+                "allowed_files": ["firmware.bin", "manifest.json"],
+                "approval_reference": LAVALAMP_APPROVAL_REFERENCE,
+                "idempotency_key": LAVALAMP_IDEMPOTENCY_KEY,
+            }
+        )
+    return CoreRunnerTask.from_mapping({**task.to_mapping(), "payload": payload})
+
+
+def _runtime_maintenance_runner_task(task_id: str, issue_body: str) -> CoreRunnerTask:
+    return CoreRunnerTask.from_mapping(
+        {
+            "schema": "skeleton.runner_task.v1",
+            "repo": _body_field_or_yaml_value(issue_body, "Repository", "repository") or REPO,
+            "branch": _body_field_or_yaml_value(issue_body, "Source Branch", "source_branch")
+            or _body_field_or_yaml_value(issue_body, "Branch", "branch")
+            or "main",
+            "base_sha": _body_field_or_yaml_value(issue_body, "Source SHA", "source_sha")
+            or _body_field_or_yaml_value(issue_body, "Base SHA", "base_sha")
+            or ("0" * 40),
+            "task_kind": "repository_maintenance",
+            "payload": {"maintenance_task_id": task_id},
+            "requested_capabilities": list(
+                _lavalamp_sequence(
+                    _body_field_or_yaml_value(
+                        issue_body, "Requested Capabilities", "requested_capabilities"
+                    )
+                )
+                or ("repository_maintenance", "repository_read", "test_execution")
+            ),
+            "allowed_files": list(
+                _lavalamp_sequence(
+                    _body_field_or_yaml_value(issue_body, "Allowed Files", "allowed_files")
+                )
+                or ("firmware.bin", "manifest.json")
+            ),
+            "forbidden_actions": list(
+                _lavalamp_sequence(
+                    _body_field_or_yaml_value(issue_body, "Forbidden Actions", "forbidden_actions")
+                )
+                or ("no live firmware build in source validation",)
+            ),
+            "validation_commands": [["python3", "-m", "pytest", "-q"]],
+            "validation_timeout_seconds": int(
+                _body_field_or_yaml_value(
+                    issue_body,
+                    "Validation Timeout Seconds",
+                    "validation_timeout_seconds",
+                )
+                or 900
+            ),
+            "expected_output": list(
+                _lavalamp_sequence(
+                    _body_field_or_yaml_value(issue_body, "Expected Output", "expected_output")
+                )
+                or ("deterministic lavalamp executor",)
+            ),
+            "privacy_boundary": _body_field_or_yaml_value(
+                issue_body, "Privacy Boundary", "privacy_boundary"
+            )
+            or "PUBLIC_SAFE_REPOSITORY_ONLY",
+            "approval_reference": _body_field_or_yaml_value(
+                issue_body, "Approval Reference", "approval_reference"
+            )
+            or "MISSING_APPROVAL",
+            "idempotency_key": _body_field_or_yaml_value(
+                issue_body, "Idempotency Key", "idempotency_key"
+            )
+            or "missing-idempotency-key",
+        }
+    )
+
+
+def _lavalamp_sequence(value: object) -> tuple[str, ...]:
+    return tuple(item[2:].strip() if item.startswith("- ") else item for item in _shadow_csv_or_sequence(value))
 
 
 def evaluate_universal_runner_gate(
@@ -14945,6 +15100,25 @@ def dispatch_runtime_maintenance_task(
             "not_met",
         )
     try:
+        if task_id == BUILD_AND_LOCAL_OTA_OPERATION:
+            task = _lavalamp_build_and_local_ota_task_from_issue(
+                _runtime_maintenance_runner_task(task_id, body),
+                body,
+            )
+            if task is None:
+                return _maintenance_report(
+                    "BLOCKED",
+                    task_id,
+                    ["reason=lavalamp_build_and_local_ota_packet_mismatch"],
+                    "not_met",
+                )
+            code, output = RepositoryMaintenanceExecutor().execute(task)
+            return output if code == 0 else _maintenance_report(
+                "BLOCKED",
+                task_id,
+                ["reason=lavalamp_build_and_local_ota_executor_failed"],
+                "not_met",
+            )
         if task_id == SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME:
             return sync_telegram_callback_poller_runtime(workdir)
         if task_id == ENSURE_TELEGRAM_CALLBACK_LOCAL_CONFIG:
