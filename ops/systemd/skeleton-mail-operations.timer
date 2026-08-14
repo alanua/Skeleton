@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Skeleton Mail Operations under Scheduler-owned cadence
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Persistent=true
+Unit=skeleton-mail-operations.service
+
+[Install]
+WantedBy=timers.target
