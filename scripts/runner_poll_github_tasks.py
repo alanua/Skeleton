@@ -11005,7 +11005,11 @@ def _autonomous_queue_eligible_snapshot() -> tuple[
     if ready_issues or running_issues:
         return ready_issues, running_issues, [], []
 
-    run_now_candidates = get_run_now_queue_intake_candidate_issues()
+    run_now_candidates = [
+        issue
+        for issue in get_run_now_queue_intake_candidate_issues()
+        if LABEL_RUN_NOW in _issue_label_names(issue)
+    ]
     candidate_issues = (
         run_now_candidates
         if run_now_candidates
@@ -11013,7 +11017,12 @@ def _autonomous_queue_eligible_snapshot() -> tuple[
     )
     if any(LABEL_RUNNING in _issue_label_names(issue) for issue in candidate_issues):
         return ready_issues, candidate_issues, candidate_issues, []
-    eligible = select_runner_queue_replenishment_targets(ready_issues, candidate_issues)
+    if run_now_candidates:
+        eligible = select_run_now_queue_intake_targets(ready_issues, candidate_issues)
+    else:
+        eligible = select_runner_queue_replenishment_targets(
+            ready_issues, candidate_issues
+        )
     return ready_issues, running_issues, candidate_issues, eligible
 
 
@@ -11092,6 +11101,36 @@ def _autonomous_queue_blocked_report(reason: str) -> str:
     )
 
 
+def _record_autonomous_queue_exception() -> None:
+    try:
+        store = RecoveryStore(_autonomous_queue_store_path())
+        packet = _autonomous_queue_stable_packet()
+        packet["route_id"] = "runner_queue"
+        packet["failure_key"] = "control:queue-idle:exception"
+        packet["reason_class"] = "QUEUE_RECOVERY_EXCEPTION"
+        packet["fingerprint"] = derive_failure_fingerprint(
+            packet,
+            failure_class=FailureClass.QUEUE_IDLE_WITH_ELIGIBLE_WORK,
+        )
+
+        def run_action(action_id: str) -> str:
+            if action_id != "queue_reactivate":
+                return _autonomous_queue_blocked_report(
+                    "QUEUE_RECOVERY_ACTION_NOT_ALLOWLISTED"
+                )
+            return _autonomous_queue_blocked_report("QUEUE_RECOVERY_EXCEPTION")
+
+        execute_recovery_packet(
+            packet,
+            store=store,
+            now=int(time.time()),
+            action_executor=run_action,
+            canary_executor=None,
+        )
+    except Exception:
+        pass
+
+
 def _autonomous_queue_replenish_action(expected_key: str, generation: str) -> str:
     ready_before, running_before, candidate_issues, eligible = _autonomous_queue_eligible_snapshot()
     if ready_before:
@@ -11160,6 +11199,7 @@ def maybe_recover_idle_runner_queue() -> bool:
             return True
         return False
     except Exception:
+        _record_autonomous_queue_exception()
         return False
 
 
