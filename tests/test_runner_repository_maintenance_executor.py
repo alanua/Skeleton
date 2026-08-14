@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 from pathlib import Path
 import subprocess
+import sys
+import tarfile
 
 import pytest
 
@@ -341,6 +345,53 @@ def _project_tree(path: Path, checkout: Path) -> Path:
     return project_tree
 
 
+class FakeUrlOpenResponse:
+    def __init__(self, payload: bytes) -> None:
+        self.stream = io.BytesIO(payload)
+
+    def __enter__(self) -> "FakeUrlOpenResponse":
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+    def read(self, size: int = -1) -> bytes:
+        return self.stream.read(size)
+
+
+def _fake_node_archive() -> bytes:
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w:xz") as archive:
+        for name in ("node", "npm"):
+            data = b"#!/bin/sh\n"
+            member = tarfile.TarInfo(f"node-v20.20.2-linux-x64/bin/{name}")
+            member.mode = 0o755
+            member.size = len(data)
+            archive.addfile(member, io.BytesIO(data))
+    return stream.getvalue()
+
+
+def _install_fake_node_download(monkeypatch: pytest.MonkeyPatch, payload: bytes | None = None) -> bytes:
+    archive = payload if payload is not None else _fake_node_archive()
+    monkeypatch.setattr(
+        maintenance.urllib.request,
+        "urlopen",
+        lambda url, timeout: FakeUrlOpenResponse(archive),
+    )
+    monkeypatch.setattr(maintenance, "LAVALAMP_NODE_SHA256", hashlib.sha256(archive).hexdigest())
+    return archive
+
+
+def _path_traversal_node_archive() -> bytes:
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w:xz") as archive:
+        data = b"escape"
+        member = tarfile.TarInfo("../escaped-node-file")
+        member.size = len(data)
+        archive.addfile(member, io.BytesIO(data))
+    return stream.getvalue()
+
+
 class FakeFirmwareAction:
     def __init__(self) -> None:
         self.executions = 0
@@ -412,10 +463,24 @@ class FakeRepositoryRunner:
                 "cylinder_lava CY Anemone CY Tidal Bloom\n", encoding="utf-8"
             )
             return 0, ""
-        if args == ["pio", "--version"]:
-            return 0, "PlatformIO\n"
-        if args == ["pio", "run", "-e", LAVALAMP_PLATFORMIO_ENV]:
+        if args[:3] == [sys.executable, "-m", "pip"]:
+            assert env is not None
+            pip_target = Path(str(env["PIP_TARGET"]))
+            assert pip_target.parent.name == "tools"
+            assert pip_target.parent.parent.name.startswith("build-")
+            assert Path(str(env["PIP_CACHE_DIR"])).parent == pip_target.parent.parent
+            Path(str(env["PIP_TARGET"])).mkdir(parents=True, exist_ok=True)
+            return 0, ""
+        if Path(args[0]).name in {"node", "npm"}:
+            assert env is not None
+            assert "node-v20.20.2-linux-x64/bin" in str(env["PATH"]).split(":")[0]
+            return 0, "v20.20.2\n" if Path(args[0]).name == "node" else "10.8.2\n"
+        if args == [sys.executable, "-m", "platformio", "run", "-e", LAVALAMP_PLATFORMIO_ENV]:
             assert cwd is not None
+            assert env is not None
+            assert str(env["PYTHONPATH"]).startswith(str(cwd.parent / "tools" / "platformio"))
+            assert str(env["PATH"]).split(":")[0].startswith(str(cwd.parent / "tools" / "node"))
+            assert str(env["NPM_CONFIG_CACHE"]).startswith(str(cwd.parent))
             firmware = cwd / ".pio/build" / LAVALAMP_PLATFORMIO_ENV / LAVALAMP_FIRMWARE_NAME
             firmware.parent.mkdir(parents=True)
             firmware.write_bytes(b"firmware-image")
@@ -448,6 +513,7 @@ def test_lavalamp_build_retains_only_firmware_and_manifest(
     monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
     monkeypatch.setattr(maintenance, "LAVALAMP_APPROVED_ARTIFACT_PARENT", tmp_path / "artifacts/lavalamp")
     monkeypatch.setattr(maintenance, "LAVALAMP_ARTIFACT_ROOT", artifact_root)
+    _install_fake_node_download(monkeypatch)
     checkout = _source_checkout(tmp_path)
     fake = FakeRepositoryRunner()
     action = FakeFirmwareAction()
@@ -480,7 +546,13 @@ def test_lavalamp_build_retains_only_firmware_and_manifest(
         for call in fake.calls
     )
     assert any(call[0] == ["git", "fetch", "--depth", "1", "origin", LAVALAMP_WLED_SHA] for call in fake.calls)
-    assert any(call[0] == ["pio", "run", "-e", LAVALAMP_PLATFORMIO_ENV] for call in fake.calls)
+    build_calls = [
+        call for call in fake.calls
+        if call[0] == [sys.executable, "-m", "platformio", "run", "-e", LAVALAMP_PLATFORMIO_ENV]
+    ]
+    assert len(build_calls) == 1
+    assert str(build_calls[0][3]["PYTHONPATH"]).startswith(str(artifact_root))
+    assert str(build_calls[0][3]["PATH"]).split(":")[0].startswith(str(artifact_root))
     assert not any(path.name.startswith("build-") for path in artifact_root.iterdir())
 
 
@@ -491,6 +563,7 @@ def test_lavalamp_shared_checkout_head_is_not_historical_source_authority(
     monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
     monkeypatch.setattr(maintenance, "LAVALAMP_APPROVED_ARTIFACT_PARENT", tmp_path / "artifacts/lavalamp")
     monkeypatch.setattr(maintenance, "LAVALAMP_ARTIFACT_ROOT", artifact_root)
+    _install_fake_node_download(monkeypatch)
     shared_checkout = tmp_path / "registered-lavalamp"
     fake = FakeRepositoryRunner()
     action = FakeFirmwareAction()
@@ -513,6 +586,188 @@ def test_lavalamp_shared_checkout_head_is_not_historical_source_authority(
         )
         for call in fake.calls
     )
+
+
+def test_lavalamp_platformio_bootstrap_failure_returns_stable_reason_and_cleans_up(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    artifact_root = tmp_path / "artifacts/lavalamp/issue-1922-c98acbf"
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr(maintenance, "LAVALAMP_APPROVED_ARTIFACT_PARENT", tmp_path / "artifacts/lavalamp")
+    monkeypatch.setattr(maintenance, "LAVALAMP_ARTIFACT_ROOT", artifact_root)
+    _install_fake_node_download(monkeypatch)
+    checkout = _source_checkout(tmp_path)
+    fake = FakeRepositoryRunner()
+    action = FakeFirmwareAction()
+
+    def fail_pip(args: list[str], cwd: Path | None, timeout: int | None, env: object) -> tuple[int, str]:
+        if args[:3] == [sys.executable, "-m", "pip"]:
+            return 2, "synthetic pip failure"
+        return fake(args, cwd, timeout, env)
+
+    code, output = RepositoryMaintenanceExecutor(
+        project_tree_path=_project_tree(tmp_path, checkout),
+        run_command=fail_pip,
+        firmware_action=action,
+    ).execute(_lavalamp_task(payload__artifact_root=str(artifact_root)))
+
+    assert code == 0
+    assert "RESULT: BLOCKED" in output
+    assert '"reason": "PLATFORMIO_BOOTSTRAP_FAILED"' in output
+    assert action.executions == 0
+    assert not any(call[0] == [sys.executable, "-m", "platformio", "run", "-e", LAVALAMP_PLATFORMIO_ENV] for call in fake.calls)
+    assert not any(path.name.startswith("build-") for path in artifact_root.iterdir())
+
+
+def test_lavalamp_missing_pip_executable_returns_stable_reason(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    artifact_root = tmp_path / "artifacts/lavalamp/issue-1922-c98acbf"
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr(maintenance, "LAVALAMP_APPROVED_ARTIFACT_PARENT", tmp_path / "artifacts/lavalamp")
+    monkeypatch.setattr(maintenance, "LAVALAMP_ARTIFACT_ROOT", artifact_root)
+    _install_fake_node_download(monkeypatch)
+    checkout = _source_checkout(tmp_path)
+    fake = FakeRepositoryRunner()
+    action = FakeFirmwareAction()
+
+    def missing_pip(args: list[str], cwd: Path | None, timeout: int | None, env: object) -> tuple[int, str]:
+        if args[:3] == [sys.executable, "-m", "pip"]:
+            raise FileNotFoundError("python missing")
+        return fake(args, cwd, timeout, env)
+
+    _code, output = RepositoryMaintenanceExecutor(
+        project_tree_path=_project_tree(tmp_path, checkout),
+        run_command=missing_pip,
+        firmware_action=action,
+    ).execute(_lavalamp_task(payload__artifact_root=str(artifact_root)))
+
+    assert "RESULT: BLOCKED" in output
+    assert '"reason": "PYTHON_PIP_UNAVAILABLE"' in output
+    assert "REPOSITORY_MAINTENANCE_FAILED" not in output
+    assert action.executions == 0
+    assert not any(path.name.startswith("build-") for path in artifact_root.iterdir())
+
+
+def test_lavalamp_node_checksum_mismatch_blocks_before_build_or_home_edge(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    artifact_root = tmp_path / "artifacts/lavalamp/issue-1922-c98acbf"
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr(maintenance, "LAVALAMP_APPROVED_ARTIFACT_PARENT", tmp_path / "artifacts/lavalamp")
+    monkeypatch.setattr(maintenance, "LAVALAMP_ARTIFACT_ROOT", artifact_root)
+    monkeypatch.setattr(
+        maintenance.urllib.request,
+        "urlopen",
+        lambda url, timeout: FakeUrlOpenResponse(b"not the expected archive"),
+    )
+    monkeypatch.setattr(maintenance, "LAVALAMP_NODE_SHA256", "0" * 64)
+    checkout = _source_checkout(tmp_path)
+    fake = FakeRepositoryRunner()
+    action = FakeFirmwareAction()
+
+    _code, output = RepositoryMaintenanceExecutor(
+        project_tree_path=_project_tree(tmp_path, checkout),
+        run_command=fake,
+        firmware_action=action,
+    ).execute(_lavalamp_task(payload__artifact_root=str(artifact_root)))
+
+    assert "RESULT: BLOCKED" in output
+    assert '"reason": "NODE_CHECKSUM_MISMATCH"' in output
+    assert action.executions == 0
+    assert not any(call[0][:3] == [sys.executable, "-m", "pip"] for call in fake.calls)
+    assert not any(call[0] == [sys.executable, "-m", "platformio", "run", "-e", LAVALAMP_PLATFORMIO_ENV] for call in fake.calls)
+    assert not any(path.name.startswith("build-") for path in artifact_root.iterdir())
+
+
+def test_lavalamp_unsupported_node_host_blocks_before_download_build_or_ota(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    artifact_root = tmp_path / "artifacts/lavalamp/issue-1922-c98acbf"
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr(maintenance, "LAVALAMP_APPROVED_ARTIFACT_PARENT", tmp_path / "artifacts/lavalamp")
+    monkeypatch.setattr(maintenance, "LAVALAMP_ARTIFACT_ROOT", artifact_root)
+    monkeypatch.setattr(maintenance.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(maintenance.platform, "machine", lambda: "arm64")
+    downloads: list[str] = []
+    monkeypatch.setattr(
+        maintenance.urllib.request,
+        "urlopen",
+        lambda url, timeout: downloads.append(url) or FakeUrlOpenResponse(b""),
+    )
+    checkout = _source_checkout(tmp_path)
+    fake = FakeRepositoryRunner()
+    action = FakeFirmwareAction()
+
+    _code, output = RepositoryMaintenanceExecutor(
+        project_tree_path=_project_tree(tmp_path, checkout),
+        run_command=fake,
+        firmware_action=action,
+    ).execute(_lavalamp_task(payload__artifact_root=str(artifact_root)))
+
+    assert "RESULT: BLOCKED" in output
+    assert '"reason": "NODE_UNSUPPORTED_HOST"' in output
+    assert downloads == []
+    assert action.executions == 0
+    assert not any(call[0][:3] == [sys.executable, "-m", "pip"] for call in fake.calls)
+    assert not any(call[0] == [sys.executable, "-m", "platformio", "run", "-e", LAVALAMP_PLATFORMIO_ENV] for call in fake.calls)
+    assert not any(path.name.startswith("build-") for path in artifact_root.iterdir())
+
+
+def test_lavalamp_node_extraction_cannot_escape_artifact_temp(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    artifact_root = tmp_path / "artifacts/lavalamp/issue-1922-c98acbf"
+    archive = _path_traversal_node_archive()
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr(maintenance, "LAVALAMP_APPROVED_ARTIFACT_PARENT", tmp_path / "artifacts/lavalamp")
+    monkeypatch.setattr(maintenance, "LAVALAMP_ARTIFACT_ROOT", artifact_root)
+    _install_fake_node_download(monkeypatch, archive)
+    checkout = _source_checkout(tmp_path)
+    fake = FakeRepositoryRunner()
+    action = FakeFirmwareAction()
+
+    _code, output = RepositoryMaintenanceExecutor(
+        project_tree_path=_project_tree(tmp_path, checkout),
+        run_command=fake,
+        firmware_action=action,
+    ).execute(_lavalamp_task(payload__artifact_root=str(artifact_root)))
+
+    assert "RESULT: BLOCKED" in output
+    assert '"reason": "NODE_EXTRACTION_BLOCKED"' in output
+    assert not (artifact_root / "escaped-node-file").exists()
+    assert action.executions == 0
+    assert not any(path.name.startswith("build-") for path in artifact_root.iterdir())
+
+
+def test_lavalamp_node_runtime_filenotfound_returns_stable_reason(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    artifact_root = tmp_path / "artifacts/lavalamp/issue-1922-c98acbf"
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr(maintenance, "LAVALAMP_APPROVED_ARTIFACT_PARENT", tmp_path / "artifacts/lavalamp")
+    monkeypatch.setattr(maintenance, "LAVALAMP_ARTIFACT_ROOT", artifact_root)
+    _install_fake_node_download(monkeypatch)
+    checkout = _source_checkout(tmp_path)
+    fake = FakeRepositoryRunner()
+    action = FakeFirmwareAction()
+
+    def missing_node(args: list[str], cwd: Path | None, timeout: int | None, env: object) -> tuple[int, str]:
+        if args and Path(args[0]).name == "node":
+            raise FileNotFoundError("node missing")
+        return fake(args, cwd, timeout, env)
+
+    _code, output = RepositoryMaintenanceExecutor(
+        project_tree_path=_project_tree(tmp_path, checkout),
+        run_command=missing_node,
+        firmware_action=action,
+    ).execute(_lavalamp_task(payload__artifact_root=str(artifact_root)))
+
+    assert "RESULT: BLOCKED" in output
+    assert '"reason": "NODE_RUNTIME_UNAVAILABLE"' in output
+    assert "REPOSITORY_MAINTENANCE_FAILED" not in output
+    assert action.executions == 0
+    assert not any(path.name.startswith("build-") for path in artifact_root.iterdir())
 
 
 @pytest.mark.parametrize(
@@ -549,7 +804,7 @@ def test_lavalamp_bad_disposable_source_snapshot_blocks_before_overlay_build_or_
     assert reason in output
     assert action.executions == 0
     assert not any(call[0][:2] == ["git", "apply"] for call in fake.calls)
-    assert not any(call[0] == ["pio", "run", "-e", LAVALAMP_PLATFORMIO_ENV] for call in fake.calls)
+    assert not any(call[0] == [sys.executable, "-m", "platformio", "run", "-e", LAVALAMP_PLATFORMIO_ENV] for call in fake.calls)
     assert not any(path.name.startswith("build-") for path in artifact_root.iterdir())
 
 
@@ -670,4 +925,4 @@ def test_lavalamp_verified_completion_does_not_reflash(
     assert output.startswith("RESULT: DONE")
     assert action.executions == 0
     assert action.postflights == 1
-    assert not any(call[0] == ["pio", "run", "-e", LAVALAMP_PLATFORMIO_ENV] for call in fake.calls)
+    assert not any(call[0] == [sys.executable, "-m", "platformio", "run", "-e", LAVALAMP_PLATFORMIO_ENV] for call in fake.calls)
