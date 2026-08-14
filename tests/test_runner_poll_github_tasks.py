@@ -1385,6 +1385,90 @@ def test_run_now_intake_self_heals_missing_ready_label_idempotently(tmp_path: Pa
     promote_issue.assert_called_once()
 
 
+def test_run_now_idle_recovery_uses_run_now_admission_not_backlog_broadening(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "control_recovery.sqlite3"
+    labels = {runner.LABEL_RUN_NOW, runner.QUEUE_REPLENISHER_CANDIDATE_LABEL}
+    issue = _queue_candidate_issue(
+        2508,
+        allowed_files=("docs/run-now-backlog-no-agent.md",),
+        idempotency_key="run-now-backlog-no-agent",
+        labels=(),
+    )
+    promoted: list[int] = []
+
+    def issue_snapshot() -> dict[str, object]:
+        snapshot = dict(issue)
+        snapshot["labels"] = [{"name": label} for label in sorted(labels)]
+        return snapshot
+
+    monkeypatch.setattr(runner, "control_recovery_db_path", lambda: db_path)
+    monkeypatch.setattr(runner, "get_ready_issues", lambda: [])
+    monkeypatch.setattr(runner, "get_running_issues", lambda: [])
+    monkeypatch.setattr(
+        runner, "get_run_now_queue_intake_candidate_issues", lambda: [issue_snapshot()]
+    )
+    monkeypatch.setattr(
+        runner,
+        "_promote_queue_replenisher_issue",
+        lambda promoted_issue: promoted.append(int(promoted_issue["number"])),
+    )
+
+    assert runner.maybe_recover_idle_runner_queue() is False
+    assert promoted == []
+    assert not db_path.exists()
+
+
+def test_run_now_idle_recovery_preserves_blocked_and_protected_gates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "control_recovery.sqlite3"
+    candidates = [
+        _queue_candidate_issue(
+            2509,
+            allowed_files=("docs/waiting-run-now.md",),
+            idempotency_key="waiting-run-now",
+            labels=(
+                runner.LABEL_AGENT_TASK,
+                runner.LABEL_RUN_NOW,
+                runner.LABEL_WAITING_DEPENDENCY,
+            ),
+        ),
+        _queue_candidate_issue(
+            2510,
+            allowed_files=("docs/protected-run-now.md",),
+            idempotency_key="protected-run-now",
+            body_lines=("protected_files:\n  - docs/protected-run-now.md",),
+            labels=(runner.LABEL_AGENT_TASK, runner.LABEL_RUN_NOW),
+        ),
+        _queue_candidate_issue(
+            2511,
+            allowed_files=("docs/private-run-now.md",),
+            idempotency_key="private-run-now",
+            privacy_boundary="PRIVATE_PAYLOAD",
+            labels=(runner.LABEL_AGENT_TASK, runner.LABEL_RUN_NOW),
+        ),
+    ]
+    promoted: list[int] = []
+
+    monkeypatch.setattr(runner, "control_recovery_db_path", lambda: db_path)
+    monkeypatch.setattr(runner, "get_ready_issues", lambda: [])
+    monkeypatch.setattr(runner, "get_running_issues", lambda: [])
+    monkeypatch.setattr(
+        runner, "get_run_now_queue_intake_candidate_issues", lambda: candidates
+    )
+    monkeypatch.setattr(
+        runner,
+        "_promote_queue_replenisher_issue",
+        lambda issue: promoted.append(int(issue["number"])),
+    )
+
+    assert runner.maybe_recover_idle_runner_queue() is False
+    assert promoted == []
+    assert not db_path.exists()
+
+
 def test_completion_path_invokes_replenishment_after_done_status(tmp_path: Path) -> None:
     issue_path = tmp_path / "issue-90"
     issue = {
@@ -3233,6 +3317,83 @@ def test_poll_once_self_heals_run_now_missing_ready_and_does_not_duplicate_claim
     assert second_count == 0
     assert promote_issue.call_count == 1
     assert process_issue.call_count == 1
+    rows = _queue_recovery_rows(tmp_path / "control_recovery.sqlite3")
+    assert len(rows) == 1
+    evidence = json.loads(str(rows[0]["evidence_json"]))
+    assert evidence["evidence"]["actions"] == ["queue_reactivate"]
+
+
+def test_poll_once_run_now_only_runtime_maintenance_canary_reaches_done(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    labels = {runner.LABEL_AGENT_TASK, runner.LABEL_RUN_NOW}
+    issue = _queue_candidate_issue(
+        2512,
+        allowed_files=("scripts/runner_poll_github_tasks.py",),
+        idempotency_key="run-now-maintenance-canary",
+        body_lines=(
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {runner.SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME}",
+        ),
+        labels=(),
+    )
+    label_transitions: list[tuple[int, str, str]] = []
+
+    def issue_snapshot() -> dict[str, object]:
+        snapshot = dict(issue)
+        snapshot["labels"] = [{"name": label} for label in sorted(labels)]
+        return snapshot
+
+    def ready_issues() -> list[dict[str, object]]:
+        if runner.LABEL_READY in labels and runner.LABEL_RUNNING not in labels:
+            return [issue_snapshot()]
+        return []
+
+    def promote(promoted_issue: dict[str, object]) -> None:
+        assert promoted_issue["number"] == 2512
+        labels.add(runner.LABEL_READY)
+
+    def set_label(issue_number: int, remove_label: str, add_label: str) -> None:
+        label_transitions.append((issue_number, remove_label, add_label))
+        labels.discard(remove_label)
+        labels.add(add_label)
+
+    report = (
+        "DONE: Runner host maintenance task completed.\n"
+        f"maintenance_task_id={runner.SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME}\n"
+        "success_criteria=met"
+    )
+
+    monkeypatch.setattr(runner, "control_recovery_db_path", lambda: tmp_path / "control_recovery.sqlite3")
+    monkeypatch.setattr(runner, "get_ready_issues", ready_issues)
+    monkeypatch.setattr(runner, "get_running_issues", lambda: [])
+    monkeypatch.setattr(
+        runner,
+        "get_run_now_queue_intake_candidate_issues",
+        lambda: [issue_snapshot()],
+    )
+    monkeypatch.setattr(runner, "_promote_queue_replenisher_issue", promote)
+    monkeypatch.setattr(runner, "set_issue_label", set_label)
+    monkeypatch.setattr(runner, "ensure_clean_worktree", lambda *_args: (True, ""))
+    monkeypatch.setattr(runner, "post_issue_comment", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runner, "notify_task_finished", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runner, "maybe_replenish_runner_queue_after_completion", lambda: False)
+    monkeypatch.setattr(
+        runner,
+        "dispatch_runtime_maintenance_task",
+        lambda _task_id, _workdir, _body: report,
+    )
+    run_codex = mock.Mock()
+    monkeypatch.setattr(runner, "run_codex_task", run_codex)
+
+    assert runner.poll_once(workdir="/coordinator") == 1
+
+    assert runner.LABEL_DONE in labels
+    assert label_transitions == [
+        (2512, runner.LABEL_READY, runner.LABEL_RUNNING),
+        (2512, runner.LABEL_RUNNING, runner.LABEL_DONE),
+    ]
+    run_codex.assert_not_called()
 
 
 def test_poll_once_runs_passive_scheduler_reconciliation_before_queue_intake() -> None:
@@ -3319,7 +3480,8 @@ def test_idle_queue_recovery_uses_stable_lesson_and_new_occurrence_after_verifie
     monkeypatch.setattr(runner, "control_recovery_db_path", lambda: db_path)
     monkeypatch.setattr(runner, "get_ready_issues", ready_issues)
     monkeypatch.setattr(runner, "get_running_issues", lambda: [])
-    monkeypatch.setattr(runner, "get_run_now_queue_intake_candidate_issues", candidates)
+    monkeypatch.setattr(runner, "get_run_now_queue_intake_candidate_issues", lambda: [])
+    monkeypatch.setattr(runner, "get_queue_replenisher_candidate_issues", candidates)
     monkeypatch.setattr(runner, "_promote_queue_replenisher_issue", promote)
 
     assert runner.maybe_recover_idle_runner_queue() is True
@@ -3355,7 +3517,8 @@ def test_idle_queue_recovery_no_progress_records_failed_backoff(
     monkeypatch.setattr(runner, "control_recovery_db_path", lambda: db_path)
     monkeypatch.setattr(runner, "get_ready_issues", lambda: [])
     monkeypatch.setattr(runner, "get_running_issues", lambda: [])
-    monkeypatch.setattr(runner, "get_run_now_queue_intake_candidate_issues", lambda: [issue])
+    monkeypatch.setattr(runner, "get_run_now_queue_intake_candidate_issues", lambda: [])
+    monkeypatch.setattr(runner, "get_queue_replenisher_candidate_issues", lambda: [issue])
     monkeypatch.setattr(runner, "_promote_queue_replenisher_issue", lambda _issue: None)
 
     assert runner.maybe_recover_idle_runner_queue() is True
@@ -3366,6 +3529,31 @@ def test_idle_queue_recovery_no_progress_records_failed_backoff(
     evidence = json.loads(str(rows[0]["evidence_json"]))
     assert evidence["reason"] == "RECOVERY_ACTION_FAILED_QUEUE_RECOVERY_NO_PROGRESS"
     assert _queue_lesson_rows(db_path)[0]["status"] == "FAILED"
+
+
+def test_idle_queue_recovery_snapshot_exception_records_public_safe_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "control_recovery.sqlite3"
+
+    monkeypatch.setattr(runner, "control_recovery_db_path", lambda: db_path)
+    monkeypatch.setattr(
+        runner,
+        "get_ready_issues",
+        mock.Mock(side_effect=RuntimeError("PRIVATE_TOKEN=secret")),
+    )
+
+    assert runner.maybe_recover_idle_runner_queue() is False
+
+    rows = _queue_recovery_rows(db_path)
+    assert len(rows) == 1
+    assert rows[0]["failure_key"] == "control:queue-idle:exception"
+    assert rows[0]["status"] == "WAITING_RECOVERY"
+    evidence = json.loads(str(rows[0]["evidence_json"]))
+    assert evidence["reason"] == "RECOVERY_ACTION_FAILED_QUEUE_RECOVERY_EXCEPTION"
+    assert evidence["evidence"]["actions"] == ["queue_reactivate"]
+    assert "PRIVATE_TOKEN" not in str(evidence)
+    assert "secret" not in str(evidence)
 
 
 def test_idle_queue_recovery_running_depth_and_race_recheck_block_mutation(
@@ -3388,7 +3576,8 @@ def test_idle_queue_recovery_running_depth_and_race_recheck_block_mutation(
 
     monkeypatch.setattr(runner, "control_recovery_db_path", lambda: db_path)
     monkeypatch.setattr(runner, "get_ready_issues", lambda: [])
-    monkeypatch.setattr(runner, "get_run_now_queue_intake_candidate_issues", lambda: [candidate])
+    monkeypatch.setattr(runner, "get_run_now_queue_intake_candidate_issues", lambda: [])
+    monkeypatch.setattr(runner, "get_queue_replenisher_candidate_issues", lambda: [candidate])
     monkeypatch.setattr(runner, "_promote_queue_replenisher_issue", lambda issue: promoted.append(int(issue["number"])))
     monkeypatch.setattr(runner, "get_running_issues", lambda: [running_issue])
 
