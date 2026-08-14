@@ -78,6 +78,8 @@ Ordinary Runner codegen failures classified by the exact live metadata phrase en
 
 During each ordinary Runner poll, the single poller has one learned queue-idle path. It first requires the live global gate `runner:ready` depth `0` and `runner:running` depth `0`, then finds eligible public-safe queue work through the existing replenisher selection rules. Immediately before mutation it repeats the same ready/running/eligible recheck. Fresh running work suppresses recovery; running work that appears between snapshot and mutation records failed recovery/backoff and performs no mutation.
 
+Terminal Runner codegen completion also re-enters that same learned queue-idle path. After a codegen task is labeled `runner:done` or `runner:blocked`, including explicit blocked Codex output and finalization failures, the completed issue remains terminal while the poller re-evaluates the canonical queue for unrelated eligible work. The validation-continuation maintenance path uses the same terminal hook. The continuation does not add chat/manual-ready requirements, does not re-promote the terminal issue, and does not send Telegram noise.
+
 For queue-idle recovery, the lesson fingerprint remains stable across recurrences of the same public-safe failure class. The occurrence-specific failure key includes the eligible issue numbers and a verified-lesson generation. Retries and backoff within one idle episode reuse that occurrence key. After an actual recovery is VERIFIED, a later independent recurrence, including the same eligible set becoming eligible again, derives a new occurrence key and can reuse the verified lesson.
 
 The learned queue path may invoke only the registered `queue_reactivate` action. That action delegates to the existing `replenish_runner_queue` primitive and never directly promotes labels from the learned path. Verification requires actual ready-depth progress after the action. No progress, exceptions, candidate races, or stale running rechecks are recorded as failed recovery/backoff. Routine queue recovery remains Telegram-silent.
@@ -98,6 +100,13 @@ recorded base SHA. The continuation is an ordinary public-safe `agent:task` with
 contract declared `existing_pr` or `update_existing_pr`, a different produced PR
 is treated as a publication-contract failure; no validation continuation is
 created for the wrong PR.
+
+For codegen tasks that declare `existing_pr` or `update_existing_pr` with an
+exact expected PR head SHA, the issue worktree is materialized from that verified
+PR head branch before Codex starts. Metadata mismatch fails closed before any
+worktree mutation. The checkout preserves the complete PR-head tree, including
+files outside the task `allowed_files`; Codex remains restricted to editing only
+the declared allowed files.
 
 ## Operator Noise
 

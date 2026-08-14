@@ -1580,6 +1580,35 @@ def test_completion_path_invokes_replenishment_after_done_status(tmp_path: Path)
     replenish.assert_called_once_with()
 
 
+def test_codegen_blocked_completion_invokes_replenishment_after_terminal_label(
+    tmp_path: Path,
+) -> None:
+    issue_path = tmp_path / "issue-91"
+    issue = {
+        "number": 91,
+        "title": "Blocked task",
+        "body": "Expected Output: done\n\n```task\nDo it\n```",
+        "comments": [],
+    }
+
+    with mock.patch.object(runner, "set_issue_label"), mock.patch.object(
+        runner, "prepare_issue_branch", return_value=(0, "ready", issue_path)
+    ), mock.patch.object(runner, "cleanup_runtime_artifacts"), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, "BLOCKED: synthetic blocker")
+    ), mock.patch.object(runner, "post_issue_comment"), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "record_runner_task_picked_up", return_value=None
+    ), mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ), mock.patch.object(
+        runner, "maybe_replenish_runner_queue_after_completion", return_value=True
+    ) as replenish:
+        runner.process_issue(issue, workdir=str(tmp_path))
+
+    replenish.assert_called_once_with()
+
+
 def test_codegen_done_with_draft_pr_creates_exact_validation_continuation_once() -> None:
     created_bodies: list[str] = []
 
@@ -2099,6 +2128,114 @@ def test_prepare_issue_worktree_clones_workspace_with_writable_gitdir(
             ["git", "checkout", "-B", "runner/issue-139", "origin/main"], cwd=path
         ),
     ]
+
+
+def _prepare_existing_pr_head_seed(tmp_path: Path) -> tuple[Path, str, str]:
+    seed = tmp_path / "seed"
+    assert runner.run_command(["git", "init", str(seed)])[0] == 0
+    assert (
+        runner.run_command(["git", "config", "user.email", "runner@example.test"], cwd=seed)[0]
+        == 0
+    )
+    assert runner.run_command(["git", "config", "user.name", "Runner"], cwd=seed)[0] == 0
+    (seed / "README.md").write_text("main\n", encoding="utf-8")
+    assert runner.run_command(["git", "add", "README.md"], cwd=seed)[0] == 0
+    assert runner.run_command(["git", "commit", "-m", "main"], cwd=seed)[0] == 0
+    assert runner.run_command(["git", "branch", "-M", "main"], cwd=seed)[0] == 0
+    code, main_sha = runner.run_command(["git", "rev-parse", "HEAD"], cwd=seed)
+    assert code == 0
+    assert runner.run_command(["git", "checkout", "-b", "runner/issue-1638"], cwd=seed)[0] == 0
+    (seed / "scripts").mkdir()
+    (seed / "docs").mkdir()
+    (seed / "scripts" / "runner_poll_github_tasks.py").write_text(
+        "allowed change base\n", encoding="utf-8"
+    )
+    (seed / "docs" / "dependency.md").write_text("dependency from pr head\n", encoding="utf-8")
+    assert runner.run_command(["git", "add", "scripts", "docs"], cwd=seed)[0] == 0
+    assert runner.run_command(["git", "commit", "-m", "existing pr head"], cwd=seed)[0] == 0
+    code, head_sha = runner.run_command(["git", "rev-parse", "HEAD"], cwd=seed)
+    assert code == 0
+    assert runner.run_command(["git", "remote", "add", "origin", str(seed)], cwd=seed)[0] == 0
+    return seed, main_sha.strip(), head_sha.strip()
+
+
+def test_prepare_issue_worktree_from_existing_pr_head_preserves_pr_files(
+    tmp_path: Path,
+) -> None:
+    seed, main_sha, head_sha = _prepare_existing_pr_head_seed(tmp_path)
+    worktree_root = tmp_path / "worktrees"
+    pr_state = {
+        "number": 1638,
+        "state": "OPEN",
+        "baseRefName": "main",
+        "baseRefOid": main_sha,
+        "headRefName": "runner/issue-1638",
+        "headRefOid": head_sha,
+    }
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(worktree_root)}, clear=True
+    ), mock.patch.object(
+        runner, "_get_pr_branch_validation_state", return_value=(pr_state, "gh")
+    ):
+        code, output, path = runner.prepare_issue_worktree_from_existing_pr_head(
+            1640,
+            seed,
+            runner.CodegenExistingPrWorktreeRequest(
+                pr_number=1638,
+                expected_head_sha=head_sha,
+                expected_head_branch="runner/issue-1638",
+            ),
+        )
+
+    assert code == 0, output
+    assert path == worktree_root / "issue-1640"
+    assert (path / "scripts" / "runner_poll_github_tasks.py").read_text(
+        encoding="utf-8"
+    ) == "allowed change base\n"
+    assert (path / "docs" / "dependency.md").read_text(encoding="utf-8") == (
+        "dependency from pr head\n"
+    )
+    assert runner.run_command(["git", "rev-parse", "HEAD"], cwd=path) == (
+        0,
+        f"{head_sha}\n",
+    )
+    assert runner.run_command(["git", "status", "--short"], cwd=path) == (0, "")
+
+
+def test_prepare_issue_worktree_from_existing_pr_head_mismatch_before_mutation(
+    tmp_path: Path,
+) -> None:
+    worktree_root = tmp_path / "worktrees"
+    pr_state = {
+        "number": 1638,
+        "state": "OPEN",
+        "baseRefName": "main",
+        "baseRefOid": "a" * 40,
+        "headRefName": "runner/issue-1638",
+        "headRefOid": "b" * 40,
+    }
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(worktree_root)}, clear=True
+    ), mock.patch.object(
+        runner, "_get_pr_branch_validation_state", return_value=(pr_state, "gh")
+    ), mock.patch.object(runner, "run_command") as run:
+        code, output, path = runner.prepare_issue_worktree_from_existing_pr_head(
+            1640,
+            tmp_path,
+            runner.CodegenExistingPrWorktreeRequest(
+                pr_number=1638,
+                expected_head_sha="c" * 40,
+                expected_head_branch="runner/issue-1638",
+            ),
+        )
+
+    assert code == 1
+    assert "reason=pr_head_sha_mismatch" in output
+    assert path == worktree_root / "issue-1640"
+    assert not path.exists()
+    run.assert_not_called()
 
 
 def test_prepare_target_worktree_uses_explicit_safe_base_and_matching_sha(
