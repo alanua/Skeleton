@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.family_document_event.schema.json",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": ["schema", "notification_id", "phase", "receipt_type", "delivery", "canonical_document_ref_hash", "canonical_task_ref_hash", "stable_scan_ref_hash", "public_message", "retryable"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "skeleton.family_document.notification_record.v1"},
+        "notification_id": {"type": "string", "pattern": "^mfp-notify-[0-9a-f]{64}$"},
+        "phase": {"enum": ["intake", "terminal"]},
+        "receipt_type": {"enum": ["RECEIVED", "DONE", "REVIEW", "RETRY", "FAILED", "QUARANTINED"]},
+        "delivery": {"const": "telegram_private"},
+        "canonical_document_ref_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "canonical_task_ref_hash": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "stable_scan_ref_hash": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "public_message": {"type": "string", "minLength": 1, "maxLength": 160},
+        "retryable": {"type": "boolean"}
+      }
+    },
+    {
+      "type": "object",
+      "required": ["schema", "status", "notification"],
+      "additionalProperties": true,
+      "properties": {
+        "schema": {"enum": ["skeleton.family_document.intake_receipt.v1", "skeleton.family_document.runtime_receipt.v1"]},
+        "status": {"type": "string"},
+        "notification": {"type": "string"}
+      }
+    }
+  ]
+}
