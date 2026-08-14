@@ -16,6 +16,7 @@ MAIL_OPERATION_RECEIPT_SCHEMA: Final = "skeleton.mail_operations.receipt.v1"
 MAIL_OPERATOR_PACKET_SCHEMA: Final = "skeleton.mail_operations.operator_packet.v1"
 MAIL_SCHEDULER_CHECKPOINT_SCHEMA: Final = "skeleton.mail_operations.scheduler_checkpoint.v1"
 DRAFT_REVISION_SCHEMA: Final = "skeleton.mail_operations.semantic_draft_revision.v1"
+MAIL_POLICY_SCHEMA: Final = "skeleton.mail_operations.policy.v1"
 
 _SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -35,6 +36,10 @@ _IMPORTANT_TERMS = frozenset(
         "дедлайн",
         "строк",
     }
+)
+_INVOICE_TERMS = frozenset({"invoice", "rechnung", "payment due", "заборгованість", "рахунок"})
+_TECHNICAL_TERMS = frozenset(
+    {"incident", "outage", "error", "failure", "technical", "bug", "збій", "помилка"}
 )
 _PRIVATE_KEYS = frozenset(
     {
@@ -124,6 +129,25 @@ class NormalizedCorrespondence:
 
 
 @dataclass(frozen=True)
+class MailPolicyDecision:
+    policy_id: str
+    category: str
+    important: bool
+    action: str
+    reason: str
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            "schema": MAIL_POLICY_SCHEMA,
+            "policy_id": self.policy_id,
+            "category": self.category,
+            "important": self.important,
+            "action": self.action,
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
 class SemanticDraftRevision:
     draft_ref: str
     revision: int
@@ -196,8 +220,8 @@ def normalize_correspondence(
     correspondence_digest = _stable_hash(
         {"namespace": case_namespace, "message_hash": message_hash}
     )
-    text = mail.local_text.lower()
-    important = any(term in text for term in _IMPORTANT_TERMS)
+    policy = classify_mail_policy(mail)
+    important = policy.important
     if mail.importance_hint is not None:
         important = important or mail.importance_hint.lower() in {"important", "high", "urgent"}
     deadline_at = extract_deadline_epoch(mail.deadline_hint or mail.local_text)
@@ -208,6 +232,42 @@ def normalize_correspondence(
         source_language=source_language,
         important=important,
         deadline_at=deadline_at,
+    )
+
+
+def classify_mail_policy(envelope: MailEnvelope | Mapping[str, Any]) -> MailPolicyDecision:
+    mail = envelope if isinstance(envelope, MailEnvelope) else MailEnvelope.from_mapping(envelope)
+    text = mail.local_text.lower()
+    if any(term in text for term in _INVOICE_TERMS):
+        return MailPolicyDecision(
+            policy_id="mail.invoice.v1",
+            category="invoice",
+            important=True,
+            action="operator_review_required",
+            reason="INVOICE_MAIL_REVIEW_REQUIRED",
+        )
+    if any(term in text for term in _TECHNICAL_TERMS):
+        return MailPolicyDecision(
+            policy_id="mail.technical.v1",
+            category="technical",
+            important=True,
+            action="operator_review_required",
+            reason="TECHNICAL_MAIL_REVIEW_REQUIRED",
+        )
+    if any(term in text for term in _IMPORTANT_TERMS):
+        return MailPolicyDecision(
+            policy_id="mail.important.v1",
+            category="important",
+            important=True,
+            action="operator_review_required",
+            reason="IMPORTANT_MAIL_REVIEW_REQUIRED",
+        )
+    return MailPolicyDecision(
+        policy_id="mail.default.v1",
+        category="general",
+        important=False,
+        action="ignore",
+        reason="MAIL_NOT_IMPORTANT",
     )
 
 
@@ -376,6 +436,7 @@ def build_ukrainian_operator_packet(
     if scheduler_checkpoint is not None:
         actions.append({"id": "confirm_deadline", "label_uk": "Підтвердити дедлайн"})
     summary = _ukrainian_summary(normalized, mail)
+    policy = classify_mail_policy(mail)
     return {
         "schema": MAIL_OPERATOR_PACKET_SCHEMA,
         "language": "uk",
@@ -383,6 +444,7 @@ def build_ukrainian_operator_packet(
         "correspondence_ref": normalized.correspondence_ref,
         "source_language": normalized.source_language,
         "summary_uk": summary,
+        "policy": policy.to_mapping(),
         "explanation_uk": "Лист позначено як важливий локальними правилами. Жодних живих читань або відправок не виконано.",
         "telegram_reply_contract": {
             "actionable": True,

@@ -5,6 +5,7 @@ import pytest
 from core.mail_operations import (
     MailOperationError,
     build_scheduler_deadline_checkpoint,
+    classify_mail_policy,
     normalize_correspondence,
     process_important_mail,
     public_mail_operation_receipt,
@@ -112,3 +113,14 @@ def test_scheduler_checkpoint_is_valid_schedule_spec_mapping() -> None:
 
     round_trip = ScheduleSpec.from_mapping(checkpoint.to_mapping())
     assert round_trip.schedule_id == checkpoint.schedule_id
+
+
+def test_invoice_and_technical_mail_policy_is_explicit() -> None:
+    invoice = classify_mail_policy(_mail(subject_hint="Invoice for review"))
+    technical = classify_mail_policy(_mail(subject_hint="Technical outage report"))
+
+    assert invoice.to_mapping()["schema"] == "skeleton.mail_operations.policy.v1"
+    assert invoice.category == "invoice"
+    assert invoice.important is True
+    assert technical.category == "technical"
+    assert technical.reason == "TECHNICAL_MAIL_REVIEW_REQUIRED"

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Skeleton Mail Operations worker
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Unit=skeleton-mail-operations.service
+
+[Install]
+WantedBy=timers.target

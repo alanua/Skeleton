@@ -1,0 +1,16 @@
+[Unit]
+Description=Skeleton Mail Operations worker
+Documentation=file:/opt/skeleton-mail-operations/MAIL_OPERATIONS.md
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=agent
+Group=agent
+Environment=SKELETON_MAIL_ACCOUNT=/var/lib/skeleton/mail/account.json
+ExecStart=/usr/bin/python3 /opt/skeleton-mail-operations/mail_operations_worker.py --account ${SKELETON_MAIL_ACCOUNT} tick
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/skeleton /home/agent/.local/state/skeleton-runner
