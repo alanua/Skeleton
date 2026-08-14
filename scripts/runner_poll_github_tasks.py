@@ -42,6 +42,7 @@ from core.control_recovery import (
     CONTROL_RECOVERY_SCHEMA,
     FailureClass,
     RecoveryStore,
+    derive_failure_fingerprint,
     execute_recovery_packet,
     is_codegen_unknown_variant_max_failure,
     production_control_recovery_db_path,
@@ -263,6 +264,14 @@ INSPECT_PR_MERGEABILITY = "inspect_pr_mergeability"
 BACKFILL_SKELETON_MEMORY_RECENT = "backfill_skeleton_memory_recent"
 REPLENISH_RUNNER_QUEUE = "replenish_runner_queue"
 CONTROL_PLANE_SELF_HEALING_RECOVERY = "control_plane_self_healing_recovery"
+_QUEUE_RECOVERY_CANDIDATE_OVERRIDE: ContextVar[list[dict[str, Any]] | None] = ContextVar(
+    "skeleton_queue_recovery_candidate_override",
+    default=None,
+)
+_QUEUE_RECOVERY_SOURCE: ContextVar[str] = ContextVar(
+    "skeleton_queue_recovery_source",
+    default="compat",
+)
 INSPECT_ISSUE_WORKTREE_FOR_PUBLISH = "inspect_issue_worktree_for_publish"
 PUBLISH_ISSUE_WORKTREE_PR = "publish_issue_worktree_pr"
 PUBLISH_EXISTING_ISSUE_WORKTREE = "publish_existing_issue_worktree"
@@ -1911,6 +1920,36 @@ def control_recovery_db_path() -> Path:
     if ROOT != MODULE_ROOT:
         return ROOT / ".codex" / "control_recovery.sqlite3"
     return production_control_recovery_db_path()
+
+
+def public_safe_failure_packet(
+    *,
+    failure_class: FailureClass,
+    failure_key: str,
+    reason_class: str,
+    task_kind: str = "runner_task",
+    phase: str = "dispatch",
+    capability: str | None = None,
+    operation: str | None = None,
+) -> dict[str, object]:
+    packet: dict[str, object] = {
+        "schema": CONTROL_RECOVERY_SCHEMA,
+        "failure_class": failure_class.value,
+        "failure_key": failure_key,
+        "reason_class": reason_class,
+        "task_kind": task_kind,
+        "phase": phase,
+        "route_type": "runner",
+        "repository": REPO.replace("/", ":"),
+        "max_attempts": 2,
+        "backoff_seconds": 30,
+    }
+    if capability is not None:
+        packet["capability"] = capability
+    if operation is not None:
+        packet["operation"] = operation
+    packet["fingerprint"] = derive_failure_fingerprint(packet, failure_class=failure_class)
+    return packet
 
 
 def scheduler_db_path() -> Path:
@@ -10801,6 +10840,9 @@ def _queue_replenisher_issue_list_for_label(label: str) -> list[dict[str, Any]]:
 
 
 def get_queue_replenisher_candidate_issues() -> list[dict[str, Any]]:
+    override = _QUEUE_RECOVERY_CANDIDATE_OVERRIDE.get()
+    if override is not None:
+        return [dict(issue) for issue in override]
     discovered: dict[int, dict[str, Any]] = {}
     unnumbered: list[dict[str, Any]] = []
     for label in QUEUE_REPLENISHER_DISCOVERY_LABELS:
@@ -10811,6 +10853,10 @@ def get_queue_replenisher_candidate_issues() -> list[dict[str, Any]]:
                 continue
             discovered.setdefault(number, issue)
     return [*discovered.values(), *unnumbered]
+
+
+def get_running_issues() -> list[dict[str, Any]]:
+    return _queue_replenisher_issue_list_for_label(LABEL_RUNNING)
 
 
 def get_run_now_queue_intake_candidate_issues() -> list[dict[str, Any]]:
@@ -10927,26 +10973,198 @@ def replenish_runner_queue(body: str) -> str:
 
 
 def maybe_replenish_runner_queue_after_completion() -> bool:
+    return maybe_recover_idle_runner_queue()
+
+
+def _autonomous_queue_store_path() -> Path:
+    configured = control_recovery_db_path()
+    production = production_control_recovery_db_path()
+    if configured != production:
+        return configured
     try:
-        ready_depth = len(get_ready_issues())
-        if ready_depth >= QUEUE_REPLENISHER_TARGET_MIN_DEPTH:
+        projects = load_runner_project_tree().get("projects")
+        matches = [
+            Path(project["checkout_path"]).resolve(strict=False)
+            for project in (projects.values() if isinstance(projects, dict) else ())
+            if isinstance(project, dict)
+            and project.get("repo") == REPO
+            and isinstance(project.get("checkout_path"), str)
+        ]
+        if len(matches) == 1 and ROOT.resolve(strict=False) == matches[0]:
+            return configured
+    except Exception:
+        pass
+    return ROOT / ".codex" / "control_recovery.sqlite3"
+
+
+def _autonomous_queue_eligible_snapshot() -> tuple[
+    list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]
+]:
+    ready_issues = get_ready_issues()
+    running_issues = get_running_issues()
+    if ready_issues or running_issues:
+        return ready_issues, running_issues, [], []
+
+    run_now_candidates = get_run_now_queue_intake_candidate_issues()
+    candidate_issues = (
+        run_now_candidates
+        if run_now_candidates
+        else get_queue_replenisher_candidate_issues()
+    )
+    if any(LABEL_RUNNING in _issue_label_names(issue) for issue in candidate_issues):
+        return ready_issues, candidate_issues, candidate_issues, []
+    eligible = select_runner_queue_replenishment_targets(ready_issues, candidate_issues)
+    return ready_issues, running_issues, candidate_issues, eligible
+
+
+def _autonomous_queue_stable_packet() -> dict[str, object]:
+    return public_safe_failure_packet(
+        failure_class=FailureClass.QUEUE_IDLE_WITH_ELIGIBLE_WORK,
+        failure_key="control:queue-idle:episode",
+        reason_class="QUEUE_IDLE_WITH_ELIGIBLE_WORK",
+        task_kind="runner_poll",
+        phase="queue_intake",
+        capability="queue:label",
+        operation="replenish_runner_queue",
+    )
+
+
+def _autonomous_queue_verified_generation(store: RecoveryStore, fingerprint: str) -> str:
+    try:
+        store.initialize()
+        with store._connect() as connection:  # RecoveryStore owns this schema.
+            row = connection.execute(
+                "SELECT verification_json FROM failure_lessons WHERE fingerprint=?",
+                (fingerprint,),
+            ).fetchone()
+        if row is None:
+            return "initial"
+        parsed = json.loads(str(row["verification_json"]))
+        evidence_ref = parsed.get("evidence_ref") if isinstance(parsed, dict) else None
+        if not isinstance(evidence_ref, str) or not evidence_ref:
+            return "initial"
+        return hashlib.sha256(evidence_ref.encode("utf-8")).hexdigest()[:16]
+    except Exception:
+        return "initial"
+
+
+def _autonomous_queue_occurrence_key(
+    eligible: list[dict[str, Any]], generation: str
+) -> str:
+    numbers = sorted(
+        number
+        for issue in eligible
+        if (number := _queue_replenisher_issue_number(issue)) is not None
+    )
+    source = _QUEUE_RECOVERY_SOURCE.get()
+    payload = (
+        ",".join(str(number) for number in numbers)
+        + "|"
+        + generation
+        + "|"
+        + source
+    ).encode("ascii")
+    digest = hashlib.sha256(payload).hexdigest()[:20]
+    return f"control:queue-idle:{digest}"
+
+
+def _autonomous_queue_packet(
+    eligible: list[dict[str, Any]], store: RecoveryStore
+) -> dict[str, object]:
+    packet = _autonomous_queue_stable_packet()
+    packet["route_id"] = "runner_queue"
+    fingerprint = derive_failure_fingerprint(
+        packet,
+        failure_class=FailureClass.QUEUE_IDLE_WITH_ELIGIBLE_WORK,
+    )
+    packet["fingerprint"] = fingerprint
+    generation = _autonomous_queue_verified_generation(store, fingerprint)
+    packet["failure_key"] = _autonomous_queue_occurrence_key(eligible, generation)
+    return packet
+
+
+def _autonomous_queue_blocked_report(reason: str) -> str:
+    return _maintenance_report(
+        "BLOCKED",
+        REPLENISH_RUNNER_QUEUE,
+        [f"reason={reason}", "telegram_notifications=0"],
+        "not_met",
+    )
+
+
+def _autonomous_queue_replenish_action(expected_key: str, generation: str) -> str:
+    ready_before, running_before, candidate_issues, eligible = _autonomous_queue_eligible_snapshot()
+    if ready_before:
+        return _autonomous_queue_blocked_report("QUEUE_RECOVERY_READY_WORK_PRESENT")
+    if running_before:
+        return _autonomous_queue_blocked_report("QUEUE_RECOVERY_RUNNING_WORK_PRESENT")
+    if not eligible:
+        return _autonomous_queue_blocked_report("QUEUE_RECOVERY_NO_ELIGIBLE_WORK")
+    if _autonomous_queue_occurrence_key(eligible, generation) != expected_key:
+        return _autonomous_queue_blocked_report("QUEUE_RECOVERY_CANDIDATES_CHANGED")
+
+    token = _QUEUE_RECOVERY_CANDIDATE_OVERRIDE.set(candidate_issues)
+    try:
+        try:
+            report = replenish_runner_queue("")
+        except Exception:
+            return _autonomous_queue_blocked_report("QUEUE_RECOVERY_EXCEPTION")
+    finally:
+        _QUEUE_RECOVERY_CANDIDATE_OVERRIDE.reset(token)
+
+    ready_after = get_ready_issues()
+    if len(ready_after) <= len(ready_before):
+        return _autonomous_queue_blocked_report("QUEUE_RECOVERY_NO_PROGRESS")
+    if not maintenance_report_is_done(report):
+        return _autonomous_queue_blocked_report("QUEUE_RECOVERY_REPORT_NOT_DONE")
+    return report
+
+
+def maybe_recover_idle_runner_queue() -> bool:
+    try:
+        ready_before, running_before, _candidates, eligible = _autonomous_queue_eligible_snapshot()
+        if ready_before or running_before or not eligible:
             return False
-        replenish_runner_queue("")
-        return True
+        store = RecoveryStore(_autonomous_queue_store_path())
+        packet = _autonomous_queue_packet(eligible, store)
+        expected_key = str(packet["failure_key"])
+        fingerprint = str(packet["fingerprint"])
+        generation = _autonomous_queue_verified_generation(store, fingerprint)
+
+        def run_action(action_id: str) -> str:
+            if action_id != "queue_reactivate":
+                return _autonomous_queue_blocked_report(
+                    "QUEUE_RECOVERY_ACTION_NOT_ALLOWLISTED"
+                )
+            return _autonomous_queue_replenish_action(expected_key, generation)
+
+        receipt = execute_recovery_packet(
+            packet,
+            store=store,
+            now=int(time.time()),
+            action_executor=run_action,
+            canary_executor=None,
+        )
+        status = str(receipt.get("status") or "")
+        if status == "RECOVERED":
+            return bool(get_ready_issues())
+
+        reason = str(receipt.get("reason") or "")
+        actions = receipt.get("actions_executed")
+        attempted = isinstance(actions, list) and "queue_reactivate" in actions
+        if attempted and reason not in {
+            "RECOVERY_BACKOFF_ACTIVE",
+            "RECOVERY_ALREADY_DONE",
+            "RECOVERY_NEEDS_OPERATOR_DURABLE",
+        }:
+            return True
+        return False
     except Exception:
         return False
 
 
 def self_heal_run_now_queue_intake() -> int:
-    try:
-        ready_issues = get_ready_issues()
-        candidate_issues = get_run_now_queue_intake_candidate_issues()
-        selected = select_run_now_queue_intake_targets(ready_issues, candidate_issues)
-        for issue in selected:
-            _promote_queue_replenisher_issue(issue)
-        return len(selected)
-    except Exception:
-        return 0
+    return 1 if maybe_recover_idle_runner_queue() else 0
 
 
 def _stale_clean_skeleton_worktree_quarantine_metadata(
@@ -15159,7 +15377,11 @@ def poll_once(workdir: str | None = None) -> int:
         reconcile_scheduler_on_poll()
     except Exception:
         pass
-    self_heal_run_now_queue_intake()
+    source_token = _QUEUE_RECOVERY_SOURCE.set("poll")
+    try:
+        self_heal_run_now_queue_intake()
+    finally:
+        _QUEUE_RECOVERY_SOURCE.reset(source_token)
     issues = get_ready_issues()
     for issue in issues:
         process_issue(issue, workdir=workdir)
