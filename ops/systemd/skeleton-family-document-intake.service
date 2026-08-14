@@ -1,0 +1,17 @@
+[Unit]
+Description=Skeleton autonomous family document intake
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/skeleton/family-document-intake.env
+ExecStart=/usr/bin/python3 %h/.local/share/skeleton/current/scripts/family_document_worker.py --config %h/.config/skeleton/family-document-intake.json
+Restart=on-failure
+RestartSec=10
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
