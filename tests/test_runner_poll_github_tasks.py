@@ -1580,6 +1580,152 @@ def test_completion_path_invokes_replenishment_after_done_status(tmp_path: Path)
     replenish.assert_called_once_with()
 
 
+def test_codex_blocked_path_replenishes_unrelated_eligible_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    issue_path = tmp_path / "issue-90"
+    blocked_issue = {
+        "number": 90,
+        "title": "Blocked task",
+        "body": "Expected Output: done\n\n```task\nDo it\n```",
+        "comments": [],
+        "labels": [{"name": runner.LABEL_READY}],
+    }
+    candidate_labels = {runner.QUEUE_REPLENISHER_CANDIDATE_LABEL}
+    candidate = _queue_candidate_issue(
+        91,
+        allowed_files=("docs/unrelated.md",),
+        idempotency_key="unrelated-after-block",
+    )
+
+    def candidate_snapshot() -> dict[str, object]:
+        snapshot = dict(candidate)
+        snapshot["labels"] = [{"name": label} for label in sorted(candidate_labels)]
+        return snapshot
+
+    monkeypatch.setattr(
+        runner, "control_recovery_db_path", lambda: tmp_path / "control_recovery.sqlite3"
+    )
+    monkeypatch.setattr(
+        runner,
+        "get_ready_issues",
+        lambda: [candidate_snapshot()] if runner.LABEL_READY in candidate_labels else [],
+    )
+    monkeypatch.setattr(runner, "get_running_issues", lambda: [])
+    monkeypatch.setattr(runner, "get_run_now_queue_intake_candidate_issues", lambda: [])
+    monkeypatch.setattr(
+        runner, "get_queue_replenisher_candidate_issues", lambda: [candidate_snapshot()]
+    )
+
+    def promote(issue: dict[str, object]) -> None:
+        assert issue["number"] == 91
+        candidate_labels.add(runner.LABEL_READY)
+
+    with mock.patch.object(runner, "set_issue_label"), mock.patch.object(
+        runner, "prepare_issue_branch", return_value=(0, "ready", issue_path)
+    ), mock.patch.object(runner, "cleanup_runtime_artifacts"), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, "BLOCKED: cannot proceed")
+    ), mock.patch.object(runner, "post_issue_comment"), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "record_runner_task_picked_up", return_value=None
+    ), mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ), mock.patch.object(
+        runner, "_promote_queue_replenisher_issue", side_effect=promote
+    ) as promote_issue:
+        runner.process_issue(blocked_issue, workdir=str(tmp_path))
+        runner.process_issue(blocked_issue, workdir=str(tmp_path))
+
+    promote_issue.assert_called_once()
+    assert runner.LABEL_READY in candidate_labels
+
+
+def test_codex_blocked_path_with_no_eligible_work_has_no_queue_churn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    issue_path = tmp_path / "issue-92"
+    issue = {
+        "number": 92,
+        "title": "Blocked task",
+        "body": "Expected Output: done\n\n```task\nDo it\n```",
+        "comments": [],
+        "labels": [{"name": runner.LABEL_READY}],
+    }
+
+    monkeypatch.setattr(
+        runner, "control_recovery_db_path", lambda: tmp_path / "control_recovery.sqlite3"
+    )
+    monkeypatch.setattr(runner, "get_ready_issues", lambda: [])
+    monkeypatch.setattr(runner, "get_running_issues", lambda: [])
+    monkeypatch.setattr(runner, "get_run_now_queue_intake_candidate_issues", lambda: [])
+    monkeypatch.setattr(runner, "get_queue_replenisher_candidate_issues", lambda: [])
+
+    with mock.patch.object(runner, "set_issue_label"), mock.patch.object(
+        runner, "prepare_issue_branch", return_value=(0, "ready", issue_path)
+    ), mock.patch.object(runner, "cleanup_runtime_artifacts"), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, "BLOCKED: cannot proceed")
+    ), mock.patch.object(runner, "post_issue_comment"), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "record_runner_task_picked_up", return_value=None
+    ), mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ), mock.patch.object(runner, "_promote_queue_replenisher_issue") as promote_issue:
+        runner.process_issue(issue, workdir=str(tmp_path))
+
+    promote_issue.assert_not_called()
+
+
+def test_codex_blocked_path_suppresses_replenishment_when_other_task_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    issue_path = tmp_path / "issue-93"
+    issue = {
+        "number": 93,
+        "title": "Blocked task",
+        "body": "Expected Output: done\n\n```task\nDo it\n```",
+        "comments": [],
+        "labels": [{"name": runner.LABEL_READY}],
+    }
+    running = _queue_candidate_issue(
+        94,
+        allowed_files=("docs/running.md",),
+        idempotency_key="running-after-block",
+        labels=(runner.LABEL_AGENT_TASK, runner.LABEL_RUNNING),
+    )
+    candidate = _queue_candidate_issue(
+        95,
+        allowed_files=("docs/eligible.md",),
+        idempotency_key="eligible-after-block",
+    )
+
+    monkeypatch.setattr(
+        runner, "control_recovery_db_path", lambda: tmp_path / "control_recovery.sqlite3"
+    )
+    monkeypatch.setattr(runner, "get_ready_issues", lambda: [])
+    monkeypatch.setattr(runner, "get_running_issues", lambda: [running])
+    monkeypatch.setattr(runner, "get_run_now_queue_intake_candidate_issues", lambda: [])
+    monkeypatch.setattr(
+        runner, "get_queue_replenisher_candidate_issues", lambda: [candidate]
+    )
+
+    with mock.patch.object(runner, "set_issue_label"), mock.patch.object(
+        runner, "prepare_issue_branch", return_value=(0, "ready", issue_path)
+    ), mock.patch.object(runner, "cleanup_runtime_artifacts"), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, "BLOCKED: cannot proceed")
+    ), mock.patch.object(runner, "post_issue_comment"), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "record_runner_task_picked_up", return_value=None
+    ), mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ), mock.patch.object(runner, "_promote_queue_replenisher_issue") as promote_issue:
+        runner.process_issue(issue, workdir=str(tmp_path))
+
+    promote_issue.assert_not_called()
+
+
 def test_codegen_done_with_draft_pr_creates_exact_validation_continuation_once() -> None:
     created_bodies: list[str] = []
 
@@ -2168,6 +2314,106 @@ def test_prepare_target_worktree_uses_explicit_safe_base_and_matching_sha(
     commands = [call.args[0] for call in run_command.call_args_list]
     assert ["git", "fetch", "origin"] not in commands
     assert ["git", "checkout", "-B", "runner/issue-139", "origin/main"] not in commands
+
+
+def test_prepare_existing_pr_worktree_uses_exact_verified_head_and_preserves_dependency(
+    tmp_path: Path,
+) -> None:
+    origin = tmp_path / "origin.git"
+    coordinator = tmp_path / "coordinator"
+    worktree_path = tmp_path / "worktrees" / "issue-2640"
+
+    assert runner.run_command(["git", "init", "--bare", str(origin)])[0] == 0
+    assert runner.run_command(["git", "clone", str(origin), str(coordinator)])[0] == 0
+    assert runner.run_command(["git", "config", "user.email", "runner@example.invalid"], cwd=coordinator)[0] == 0
+    assert runner.run_command(["git", "config", "user.name", "Runner Test"], cwd=coordinator)[0] == 0
+    (coordinator / "docs").mkdir()
+    (coordinator / "docs" / "allowed.md").write_text("base\n")
+    assert runner.run_command(["git", "add", "docs/allowed.md"], cwd=coordinator)[0] == 0
+    assert runner.run_command(["git", "commit", "-m", "base"], cwd=coordinator)[0] == 0
+    assert runner.run_command(["git", "branch", "-M", "main"], cwd=coordinator)[0] == 0
+    assert runner.run_command(["git", "push", "origin", "main"], cwd=coordinator)[0] == 0
+    assert runner.run_command(["git", "checkout", "-B", "runner/existing-pr"], cwd=coordinator)[0] == 0
+    (coordinator / "core").mkdir()
+    (coordinator / "core" / "family_document_sources.py").write_text("VALUE = 1\n")
+    (coordinator / "docs" / "allowed.md").write_text("pr head\n")
+    assert runner.run_command(
+        ["git", "add", "core/family_document_sources.py", "docs/allowed.md"],
+        cwd=coordinator,
+    )[0] == 0
+    assert runner.run_command(["git", "commit", "-m", "existing pr"], cwd=coordinator)[0] == 0
+    code, output = runner.run_command(["git", "rev-parse", "HEAD"], cwd=coordinator)
+    assert code == 0
+    head_sha = output.strip().lower()
+    assert runner.run_command(["git", "push", "origin", "runner/existing-pr"], cwd=coordinator)[0] == 0
+
+    with mock.patch.object(
+        runner,
+        "_get_pr_branch_validation_state",
+        return_value=(
+            _pr_validation_state(
+                number=2640,
+                headRefName="runner/existing-pr",
+                headRefOid=head_sha,
+                baseRefOid="b" * 40,
+            ),
+            "gh",
+        ),
+    ):
+        code, output, path = runner.prepare_git_issue_worktree(
+            2640,
+            coordinator,
+            worktree_path,
+            existing_pr=runner.ExistingPrWorktreeRequest(
+                pr_number=2640,
+                expected_head_sha=head_sha,
+                expected_head_branch="runner/existing-pr",
+            ),
+        )
+
+    assert code == 0, output
+    assert path == worktree_path
+    assert (worktree_path / "core" / "family_document_sources.py").read_text() == "VALUE = 1\n"
+    code, output = runner.run_command(["git", "rev-parse", "HEAD"], cwd=worktree_path)
+    assert code == 0
+    assert output.strip().lower() == head_sha
+
+    (worktree_path / "docs" / "allowed.md").write_text("codex edit\n")
+    code, output = runner.run_command(["git", "diff", "--name-only", "HEAD", "--"], cwd=worktree_path)
+    assert code == 0
+    assert output.splitlines() == ["docs/allowed.md"]
+
+
+def test_prepare_existing_pr_worktree_head_mismatch_blocks_before_mutation(
+    tmp_path: Path,
+) -> None:
+    with mock.patch.object(
+        runner,
+        "_get_pr_branch_validation_state",
+        return_value=(
+            _pr_validation_state(
+                number=2640,
+                headRefName="runner/existing-pr",
+                headRefOid="c" * 40,
+            ),
+            "gh",
+        ),
+    ), mock.patch.object(runner, "run_command") as run_command:
+        code, output, path = runner.prepare_git_issue_worktree(
+            2640,
+            tmp_path / "coordinator",
+            tmp_path / "worktrees" / "issue-2640",
+            existing_pr=runner.ExistingPrWorktreeRequest(
+                pr_number=2640,
+                expected_head_sha="d" * 40,
+                expected_head_branch="runner/existing-pr",
+            ),
+        )
+
+    assert code == 1
+    assert path == tmp_path / "worktrees" / "issue-2640"
+    assert "reason=pr_head_sha_mismatch" in output
+    run_command.assert_not_called()
 
 
 def test_yaml_task_block_base_fields_are_normalized_for_target_worktree(
