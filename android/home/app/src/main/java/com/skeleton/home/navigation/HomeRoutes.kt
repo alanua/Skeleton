@@ -9,6 +9,11 @@ sealed class HomeRoute(val route: String, val label: String) {
     data object Devices : HomeRoute("devices", "Пристрої")
     data object Remote : HomeRoute("remote", "Пульт")
     data object OperatorHub : HomeRoute("operator-hub", "СК")
+
+    companion object {
+        fun fromRoute(route: String): HomeRoute =
+            AllRoutes.firstOrNull { it.route == route } ?: Home
+    }
 }
 
 val PrimaryBottomRoutes = listOf(
@@ -17,12 +22,22 @@ val PrimaryBottomRoutes = listOf(
     HomeRoute.Devices,
 )
 
+val OperatorBottomRoutes = PrimaryBottomRoutes + HomeRoute.OperatorHub
+
+private val AllRoutes = listOf(
+    HomeRoute.Home,
+    HomeRoute.Video,
+    HomeRoute.Devices,
+    HomeRoute.Remote,
+    HomeRoute.OperatorHub,
+)
+
 fun bottomRoutesFor(
     session: HomeSession,
     auth: AuthSessionProvider,
 ): List<HomeRoute> =
     if (auth.canAccessOperatorHub(session)) {
-        PrimaryBottomRoutes + HomeRoute.OperatorHub
+        OperatorBottomRoutes
     } else {
         PrimaryBottomRoutes
     }

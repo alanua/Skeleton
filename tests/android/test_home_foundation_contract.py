@@ -37,7 +37,9 @@ def test_bottom_navigation_contract_and_remote_contextual_route() -> None:
     nav = read("app/src/main/java/com/skeleton/home/navigation/HomeRoutes.kt")
     assert 'val PrimaryBottomRoutes = listOf(\n    HomeRoute.Home,\n    HomeRoute.Video,\n    HomeRoute.Devices,\n)' in nav
     assert "fun bottomRoutesFor(" in nav
-    assert "PrimaryBottomRoutes + HomeRoute.OperatorHub" in nav
+    assert "val OperatorBottomRoutes = PrimaryBottomRoutes + HomeRoute.OperatorHub" in nav
+    assert "OperatorBottomRoutes" in nav
+    assert "fun fromRoute(route: String): HomeRoute" in nav
     assert 'data object Remote : HomeRoute("remote", "Пульт")' in nav
     assert "HomeRoute.Remote" not in nav.split("val PrimaryBottomRoutes = listOf(", 1)[1].split(")", 1)[0]
     assert '"Головна"' in nav
@@ -64,6 +66,8 @@ def test_operator_hub_bottom_navigation_and_authorization() -> None:
     assert "MaterialHubIcon" in ui
     assert 'name = "MaterialHub"' in ui
     assert "HomeRoute.OperatorHub -> MaterialHubIcon" in ui
+    assert "rememberSaveable { mutableStateOf(initialRoute.route) }" in ui
+    assert "HomeRoute.fromRoute(currentRouteId)" in ui
     assert 'data object OperatorHub : HomeRoute("operator-hub", "СК")' in routes
     assert 'listOf("Головна", "Відео", "Пристрої", "СК")' in unit
     assert "directOperatorHubAuthorizationFailsClosedForNonOperators" in unit
@@ -110,4 +114,3 @@ def test_no_endpoint_secret_or_live_fixture_values() -> None:
     lowered = text.lower()
     for word in forbidden:
         assert word not in lowered
-    assert "Синтетичний режим" in text

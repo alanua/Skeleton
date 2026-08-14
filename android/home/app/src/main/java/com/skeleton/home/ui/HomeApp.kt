@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
@@ -30,6 +29,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -68,8 +68,9 @@ fun HomeShell(
     repository: SyntheticHomeRepository = SyntheticHomeRepository(),
 ) {
     val currentSession = session.currentSession()
-    val bottomRoutes = bottomRoutesFor(currentSession, session)
-    var currentRoute by remember { mutableStateOf(initialRoute) }
+    val bottomRoutes = remember(currentSession, session) { bottomRoutesFor(currentSession, session) }
+    var currentRouteId by rememberSaveable { mutableStateOf(initialRoute.route) }
+    val currentRoute = remember(currentRouteId) { HomeRoute.fromRoute(currentRouteId) }
 
     Scaffold(
         topBar = {
@@ -80,7 +81,7 @@ fun HomeShell(
                 bottomRoutes.forEach { route ->
                     NavigationBarItem(
                         selected = currentRoute == route,
-                        onClick = { currentRoute = route },
+                        onClick = { currentRouteId = route.route },
                         modifier = Modifier.semantics {
                             contentDescription = "bottom-nav-${route.route}"
                         },
@@ -94,7 +95,7 @@ fun HomeShell(
         when (currentRoute) {
             HomeRoute.Home -> HomeScreen(
                 padding = padding,
-                onRemote = { currentRoute = HomeRoute.Remote },
+                onRemote = { currentRouteId = HomeRoute.Remote.route },
             )
             HomeRoute.Video -> PlaceholderScreen("Відео", padding)
             HomeRoute.Devices -> PlaceholderScreen("Пристрої", padding)
@@ -123,10 +124,6 @@ fun HomeScreen(
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         Text("Головна", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
-        Text(
-            "Синтетичний режим. Живі значення, пристрої та дії очікують канонічне джерело.",
-            style = MaterialTheme.typography.bodyLarge,
-        )
         Seek15Controls()
         Button(onClick = onRemote) {
             Icon(Icons.Filled.SettingsRemote, contentDescription = "Пульт")
@@ -196,7 +193,6 @@ fun OperatorHubScreen(padding: PaddingValues) {
         Text("Огляд стану")
         Text("Зв'язок: ONLINE / DEGRADED / OFFLINE")
         Text("Дії: SENT / ACCEPTED / APPLIED / PHYSICALLY_VERIFIED")
-        Text("Операторський контур зарезервовано без живих підключень.")
     }
 }
 
@@ -224,8 +220,6 @@ fun PlaceholderScreen(title: String, padding: PaddingValues) {
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text(title, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
-        Text("Плейсхолдер без живих Home-даних.")
-        Spacer(modifier = Modifier.height(8.dp))
     }
 }
 
