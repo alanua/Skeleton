@@ -4,6 +4,7 @@ import csv
 import json
 import os
 import re
+import sqlite3
 import urllib.parse
 from pathlib import Path
 from unittest import mock
@@ -1348,32 +1349,40 @@ def test_run_now_intake_preserves_existing_holds_and_terminal_policy() -> None:
     assert selected == []
 
 
-def test_run_now_intake_self_heals_missing_ready_label_idempotently() -> None:
+def test_run_now_intake_self_heals_missing_ready_label_idempotently(tmp_path: Path) -> None:
+    labels = {runner.LABEL_AGENT_TASK, runner.LABEL_RUN_NOW}
     issue = _queue_candidate_issue(
         2502,
         allowed_files=("scripts/runner_poll_github_tasks.py",),
         idempotency_key="runner-run-now-auto-intake-2502",
-        labels=(runner.LABEL_AGENT_TASK, runner.LABEL_RUN_NOW),
+        labels=(),
     )
 
-    with mock.patch.object(runner, "get_ready_issues", return_value=[]), mock.patch.object(
-        runner, "get_run_now_queue_intake_candidate_issues", return_value=[issue]
-    ), mock.patch.object(runner, "run_command", return_value=(0, "")) as run:
+    def issue_snapshot() -> dict[str, object]:
+        snapshot = dict(issue)
+        snapshot["labels"] = [{"name": label} for label in sorted(labels)]
+        return snapshot
+
+    def ready_issues() -> list[dict[str, object]]:
+        return [issue_snapshot()] if runner.LABEL_READY in labels else []
+
+    def promote(promoted_issue: dict[str, object]) -> None:
+        assert promoted_issue["number"] == 2502
+        labels.add(runner.LABEL_READY)
+
+    with mock.patch.object(runner, "control_recovery_db_path", return_value=tmp_path / "control_recovery.sqlite3"), mock.patch.object(
+        runner, "get_ready_issues", side_effect=ready_issues
+    ), mock.patch.object(
+        runner, "get_running_issues", return_value=[]
+    ), mock.patch.object(
+        runner, "get_run_now_queue_intake_candidate_issues", side_effect=lambda: [issue_snapshot()]
+    ), mock.patch.object(runner, "_promote_queue_replenisher_issue", side_effect=promote) as promote_issue:
         promoted_count = runner.self_heal_run_now_queue_intake()
+        duplicate_count = runner.self_heal_run_now_queue_intake()
 
     assert promoted_count == 1
-    run.assert_called_once_with(
-        [
-            "gh",
-            "issue",
-            "edit",
-            "2502",
-            "--repo",
-            runner.REPO,
-            "--add-label",
-            runner.LABEL_READY,
-        ]
-    )
+    assert duplicate_count == 0
+    promote_issue.assert_called_once()
 
 
 def test_completion_path_invokes_replenishment_after_done_status(tmp_path: Path) -> None:
@@ -3172,7 +3181,9 @@ def test_poll_once_processes_issues_single_lane() -> None:
     ]
 
 
-def test_poll_once_self_heals_run_now_missing_ready_and_does_not_duplicate_claim() -> None:
+def test_poll_once_self_heals_run_now_missing_ready_and_does_not_duplicate_claim(
+    tmp_path: Path,
+) -> None:
     labels = {runner.LABEL_AGENT_TASK, runner.LABEL_RUN_NOW}
     issue = _queue_candidate_issue(
         2502,
@@ -3205,6 +3216,10 @@ def test_poll_once_self_heals_run_now_missing_ready_and_does_not_duplicate_claim
         labels.add(runner.LABEL_RUNNING)
 
     with mock.patch.object(runner, "get_ready_issues", side_effect=ready_issues), mock.patch.object(
+        runner, "get_running_issues", return_value=[]
+    ), mock.patch.object(
+        runner, "control_recovery_db_path", return_value=tmp_path / "control_recovery.sqlite3"
+    ), mock.patch.object(
         runner, "get_run_now_queue_intake_candidate_issues", side_effect=run_now_candidates
     ), mock.patch.object(
         runner, "_promote_queue_replenisher_issue", side_effect=promote
@@ -3235,11 +3250,162 @@ def test_poll_once_runs_passive_scheduler_reconciliation_before_queue_intake() -
         runner,
         "get_ready_issues",
         return_value=[],
+    ), mock.patch.object(
+        runner,
+        "get_running_issues",
+        return_value=[],
+    ), mock.patch.object(
+        runner,
+        "get_run_now_queue_intake_candidate_issues",
+        return_value=[],
     ):
         count = runner.poll_once(workdir="/coordinator")
 
     assert count == 0
     assert calls == ["reconcile", "intake"]
+
+
+def _queue_recovery_rows(db_path: Path) -> list[sqlite3.Row]:
+    connection = sqlite3.connect(db_path)
+    connection.row_factory = sqlite3.Row
+    try:
+        return connection.execute(
+            "SELECT failure_key, status, evidence_json FROM recovery_runs ORDER BY updated_at"
+        ).fetchall()
+    finally:
+        connection.close()
+
+
+def _queue_lesson_rows(db_path: Path) -> list[sqlite3.Row]:
+    connection = sqlite3.connect(db_path)
+    connection.row_factory = sqlite3.Row
+    try:
+        return connection.execute(
+            "SELECT fingerprint, status, preferred_response_class FROM failure_lessons"
+        ).fetchall()
+    finally:
+        connection.close()
+
+
+def test_idle_queue_recovery_uses_stable_lesson_and_new_occurrence_after_verified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "control_recovery.sqlite3"
+    labels = {runner.QUEUE_REPLENISHER_CANDIDATE_LABEL, runner.LABEL_AGENT_TASK}
+    issue = _queue_candidate_issue(
+        2607,
+        allowed_files=("docs/queue-recurrence.md",),
+        idempotency_key="queue-recurrence",
+        labels=(),
+    )
+    promoted: list[int] = []
+
+    def issue_snapshot() -> dict[str, object]:
+        snapshot = dict(issue)
+        snapshot["labels"] = [{"name": label} for label in sorted(labels)]
+        return snapshot
+
+    def ready_issues() -> list[dict[str, object]]:
+        return [issue_snapshot()] if runner.LABEL_READY in labels else []
+
+    def candidates() -> list[dict[str, object]]:
+        return [issue_snapshot()]
+
+    def promote(promoted_issue: dict[str, object]) -> None:
+        promoted.append(int(promoted_issue["number"]))
+        labels.discard(runner.QUEUE_REPLENISHER_CANDIDATE_LABEL)
+        labels.add(runner.LABEL_READY)
+
+    monkeypatch.setattr(runner, "control_recovery_db_path", lambda: db_path)
+    monkeypatch.setattr(runner, "get_ready_issues", ready_issues)
+    monkeypatch.setattr(runner, "get_running_issues", lambda: [])
+    monkeypatch.setattr(runner, "get_run_now_queue_intake_candidate_issues", candidates)
+    monkeypatch.setattr(runner, "_promote_queue_replenisher_issue", promote)
+
+    assert runner.maybe_recover_idle_runner_queue() is True
+    assert runner.maybe_recover_idle_runner_queue() is False
+
+    labels.discard(runner.LABEL_READY)
+    labels.add(runner.QUEUE_REPLENISHER_CANDIDATE_LABEL)
+    assert runner.maybe_recover_idle_runner_queue() is True
+
+    rows = _queue_recovery_rows(db_path)
+    lessons = _queue_lesson_rows(db_path)
+    assert promoted == [2607, 2607]
+    assert len(rows) == 2
+    assert rows[0]["failure_key"] != rows[1]["failure_key"]
+    assert {row["status"] for row in rows} == {"RECOVERED"}
+    assert len(lessons) == 1
+    assert lessons[0]["status"] == "VERIFIED"
+    assert lessons[0]["fingerprint"].startswith("failure-fp:")
+    assert runner.RecoveryStore(db_path).learning_metrics()["repeats_prevented"] == 1
+
+
+def test_idle_queue_recovery_no_progress_records_failed_backoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "control_recovery.sqlite3"
+    issue = _queue_candidate_issue(
+        2608,
+        allowed_files=("docs/no-progress.md",),
+        idempotency_key="queue-no-progress",
+        labels=(runner.QUEUE_REPLENISHER_CANDIDATE_LABEL, runner.LABEL_AGENT_TASK),
+    )
+
+    monkeypatch.setattr(runner, "control_recovery_db_path", lambda: db_path)
+    monkeypatch.setattr(runner, "get_ready_issues", lambda: [])
+    monkeypatch.setattr(runner, "get_running_issues", lambda: [])
+    monkeypatch.setattr(runner, "get_run_now_queue_intake_candidate_issues", lambda: [issue])
+    monkeypatch.setattr(runner, "_promote_queue_replenisher_issue", lambda _issue: None)
+
+    assert runner.maybe_recover_idle_runner_queue() is True
+
+    rows = _queue_recovery_rows(db_path)
+    assert len(rows) == 1
+    assert rows[0]["status"] == "WAITING_RECOVERY"
+    evidence = json.loads(str(rows[0]["evidence_json"]))
+    assert evidence["reason"] == "RECOVERY_ACTION_FAILED_QUEUE_RECOVERY_NO_PROGRESS"
+    assert _queue_lesson_rows(db_path)[0]["status"] == "FAILED"
+
+
+def test_idle_queue_recovery_running_depth_and_race_recheck_block_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "control_recovery.sqlite3"
+    candidate = _queue_candidate_issue(
+        2609,
+        allowed_files=("docs/race.md",),
+        idempotency_key="queue-race",
+        labels=(runner.QUEUE_REPLENISHER_CANDIDATE_LABEL, runner.LABEL_AGENT_TASK),
+    )
+    running_issue = _queue_candidate_issue(
+        2610,
+        allowed_files=("docs/running.md",),
+        idempotency_key="queue-running",
+        labels=(runner.LABEL_RUNNING,),
+    )
+    promoted: list[int] = []
+
+    monkeypatch.setattr(runner, "control_recovery_db_path", lambda: db_path)
+    monkeypatch.setattr(runner, "get_ready_issues", lambda: [])
+    monkeypatch.setattr(runner, "get_run_now_queue_intake_candidate_issues", lambda: [candidate])
+    monkeypatch.setattr(runner, "_promote_queue_replenisher_issue", lambda issue: promoted.append(int(issue["number"])))
+    monkeypatch.setattr(runner, "get_running_issues", lambda: [running_issue])
+
+    assert runner.maybe_recover_idle_runner_queue() is False
+    assert promoted == []
+    assert not db_path.exists()
+
+    calls = iter([[], [running_issue]])
+    monkeypatch.setattr(runner, "get_running_issues", lambda: next(calls))
+
+    assert runner.maybe_recover_idle_runner_queue() is True
+    assert promoted == []
+    rows = _queue_recovery_rows(db_path)
+    assert len(rows) == 1
+    assert rows[0]["status"] == "WAITING_RECOVERY"
+    evidence = json.loads(str(rows[0]["evidence_json"]))
+    assert evidence["reason"] == "RECOVERY_ACTION_FAILED_QUEUE_RECOVERY_RUNNING_WORK_PRESENT"
 
 
 def test_runner_task_defaults_to_default_lane() -> None:

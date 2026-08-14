@@ -13,6 +13,8 @@ Initial typed classes:
 - `GITHUB_ACTIONS_LANE_UNAVAILABLE_BUT_ISSUE_RUNNER_HEALTHY`
 - `QUEUE_LABEL_STATE_STUCK`
 - `CANARY_FAILED_AFTER_RECOVERY`
+- `QUEUE_IDLE_WITH_ELIGIBLE_WORK`
+- `AMBIGUOUS_MUTATING_RESULT`
 
 Unknown failures and unsafe payloads become `NEEDS_OPERATOR`.
 
@@ -49,6 +51,8 @@ After successful recovery, a local non-secret marker records the exact pinned ve
 
 `core.control_recovery.RecoveryStore` persists one row per failure key. Duplicate ticks and restarts observe the durable row, so a recovered failure does not execute again. Failed recovery moves to `WAITING_RECOVERY` with deterministic backoff. Exhaustion records exactly one durable `NEEDS_OPERATOR` notification flag.
 
+The same store also persists public-safe `failure_lessons` and aggregate learning metrics. A lesson is keyed by a stable bounded fingerprint derived from failure class and safe context fields, never from raw output, private paths, credentials, or a live candidate list. Each independent occurrence still gets its own failure key for retry/backoff and duplicate suppression.
+
 Scheduler dispatch uses durable single-owner claims. A pending occurrence is atomically moved to `running` with an attempt number, idempotency key, claim owner, lease expiry, and heartbeat timestamp. While the existing shared dispatcher is actively handling that occurrence, `SchedulerEngine` starts one bounded renewal thread for that claim only. The renewal extends the same owner lease before expiry and stops in a `finally` block when dispatch completes, fails, or is cancelled. A killed process naturally stops renewing, so the occurrence is recoverable only after the stored lease expires.
 
 Startup and ordinary Runner polls perform passive scheduler reconciliation without a dispatcher. Reconciliation first checks expired running occurrences for durable dispatch receipts. A successful receipt finalizes the occurrence as done without re-executing the dispatcher. A non-success receipt that reports external side effects becomes durable `NEEDS_OPERATOR` with reason `AMBIGUOUS_MUTATING_RECEIPT`; it is not replayed. Receipt-less expired work is retried only up to the bounded scheduler attempt limit, then escalates to `NEEDS_OPERATOR`.
@@ -72,7 +76,11 @@ Recoverable blocked consumers should wait on the recovery occurrence. Once recov
 
 Ordinary Runner codegen failures classified by the exact live metadata phrase enter the existing recovery route before terminal blocking. The issue is moved to `runner:waiting-dependency`, a durable recovery occurrence is recorded, and a same-issue consumer waits on it. After `codegen_runtime_recover` and the read-only Codex canary succeed, `queue_reactivate` removes `runner:waiting-dependency` from that same GitHub issue and adds `runner:ready`.
 
-During each ordinary Runner poll, the single poller also checks open `agent:task` issues marked `queue:RUN_NOW` that are missing `runner:ready`. Valid public-safe Skeleton task issues that are not running, waiting on dependencies, terminal, operator-held, duplicate, dependency-blocked, or otherwise excluded by the existing queue policy are idempotently promoted with `runner:ready` before normal ready-issue selection. This only restores eligibility for the existing Runner path; it does not add a second queue, bypass RunnerGate, or weaken route, privacy, approval, runtime, protected-file, secret, merge, or operator gates.
+During each ordinary Runner poll, the single poller has one learned queue-idle path. It first requires the live global gate `runner:ready` depth `0` and `runner:running` depth `0`, then finds eligible public-safe queue work through the existing replenisher selection rules. Immediately before mutation it repeats the same ready/running/eligible recheck. Fresh running work suppresses recovery; running work that appears between snapshot and mutation records failed recovery/backoff and performs no mutation.
+
+For queue-idle recovery, the lesson fingerprint remains stable across recurrences of the same public-safe failure class. The occurrence-specific failure key includes the eligible issue numbers and a verified-lesson generation. Retries and backoff within one idle episode reuse that occurrence key. After an actual recovery is VERIFIED, a later independent recurrence, including the same eligible set becoming eligible again, derives a new occurrence key and can reuse the verified lesson.
+
+The learned queue path may invoke only the registered `queue_reactivate` action. That action delegates to the existing `replenish_runner_queue` primitive and never directly promotes labels from the learned path. Verification requires actual ready-depth progress after the action. No progress, exceptions, candidate races, or stale running rechecks are recorded as failed recovery/backoff. Routine queue recovery remains Telegram-silent.
 
 ## Operator Noise
 
