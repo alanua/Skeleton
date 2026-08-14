@@ -3066,6 +3066,60 @@ def test_universal_runner_enforce_typed_maintenance_dispatches_registered_execut
     notify.assert_called_once_with(1722, "DONE", mock.ANY)
 
 
+def _lavalamp_build_and_local_ota_issue_body() -> str:
+    return "\n".join(
+        (
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {runner.BUILD_AND_LOCAL_OTA_OPERATION}",
+            "Operation: build_and_local_ota",
+            "Project: lavalamp",
+            "Repository: alanua/Lavalamp",
+            "Source Branch: main",
+            f"Source SHA: {runner.LAVALAMP_SOURCE_SHA}",
+            f"WLED Commit: {runner.LAVALAMP_WLED_SHA}",
+            f"Environment: {runner.LAVALAMP_PLATFORMIO_ENV}",
+            f"Artifact Root: {runner.LAVALAMP_ARTIFACT_ROOT}",
+            "Relay: home-edge-01",
+            "Target: 192.168.1.164",
+            f"Approval Reference: {runner.LAVALAMP_APPROVAL_REFERENCE}",
+            f"Idempotency Key: {runner.LAVALAMP_IDEMPOTENCY_KEY}",
+            "Required Effects: CY Anemone, CY Tidal Bloom",
+            f"Base SHA: {runner.LAVALAMP_SOURCE_SHA}",
+            "Allowed Files: firmware.bin, manifest.json",
+            "Requested Capabilities: repository_maintenance, repository_read, test_execution",
+            "Validation Timeout Seconds: 900",
+            "Privacy Boundary: PUBLIC_SAFE_REPOSITORY_ONLY",
+            "Expected Output: deterministic lavalamp executor",
+        )
+    )
+
+
+def test_lavalamp_build_and_local_ota_dispatch_bypasses_codegen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[object] = []
+
+    class FakeLavalampExecutor:
+        def execute(self, task: object) -> tuple[int, str]:
+            calls.append(task)
+            return 0, "RESULT: DONE\nModel providers called: 0"
+
+    body = _lavalamp_build_and_local_ota_issue_body()
+    task = runner._runtime_maintenance_runner_task(runner.BUILD_AND_LOCAL_OTA_OPERATION, body)
+
+    monkeypatch.setattr(runner, "RepositoryMaintenanceExecutor", FakeLavalampExecutor)
+    with mock.patch.object(runner, "run_codex_task") as codex:
+        report = runner.build_universal_runner_executor_registry(issue_body=body).dispatch(task)
+
+    assert report.startswith("RESULT: DONE")
+    assert "Model providers called: 0" in report
+    assert len(calls) == 1
+    dispatched = calls[0]
+    assert getattr(dispatched, "repo") == "alanua/Lavalamp"
+    assert getattr(dispatched, "base_sha") == runner.LAVALAMP_SOURCE_SHA
+    codex.assert_not_called()
+
+
 def test_universal_runner_enforce_executor_exception_fails_closed_without_legacy_side_effect(
     tmp_path: Path,
 ) -> None:

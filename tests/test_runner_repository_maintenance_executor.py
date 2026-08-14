@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import subprocess
 
@@ -7,10 +8,23 @@ import pytest
 
 import core.runner_repository_maintenance_executor as maintenance
 from core.runner_repository_maintenance_executor import (
+    BUILD_AND_LOCAL_OTA_OPERATION,
+    LAVALAMP_APPROVAL_REFERENCE,
+    LAVALAMP_FIRMWARE_NAME,
+    LAVALAMP_IDEMPOTENCY_KEY,
+    LAVALAMP_MANIFEST_NAME,
+    LAVALAMP_PLATFORMIO_ENV,
+    LAVALAMP_REPOSITORY,
+    LAVALAMP_SOURCE_BRANCH,
+    LAVALAMP_SOURCE_SHA,
+    LAVALAMP_WLED_REPOSITORY,
+    LAVALAMP_WLED_SHA,
+    RepositoryMaintenanceExecutor,
     RegisteredMaintenanceActionError,
     RegisteredMaintenanceExecutor,
     registered_maintenance_task_id,
 )
+from core.runner_task import RunnerTask
 from scripts import runner_poll_github_tasks as runner
 
 
@@ -234,3 +248,261 @@ def test_control_plane_recovery_wires_fixed_actions_without_hermes_substitution(
     assert "telegram_notifications=0" in report
     assert calls == ["codegen_runtime_recover", "codegen_read_only_canary", "queue_reactivate"]
     assert runner.HERMES_WORKER_PREFLIGHT not in calls
+
+
+def _lavalamp_task(**overrides: object) -> RunnerTask:
+    payload: dict[str, object] = {
+        "operation": BUILD_AND_LOCAL_OTA_OPERATION,
+        "project": "lavalamp",
+        "repository": LAVALAMP_REPOSITORY,
+        "source_branch": LAVALAMP_SOURCE_BRANCH,
+        "source_sha": LAVALAMP_SOURCE_SHA,
+        "wled_commit": LAVALAMP_WLED_SHA,
+        "environment": LAVALAMP_PLATFORMIO_ENV,
+        "artifact_root": str(maintenance.LAVALAMP_ARTIFACT_ROOT),
+        "relay": "home-edge-01",
+        "target": "192.168.1.164",
+        "approval_reference": LAVALAMP_APPROVAL_REFERENCE,
+        "idempotency_key": LAVALAMP_IDEMPOTENCY_KEY,
+        "required_effects": ["CY Anemone", "CY Tidal Bloom"],
+    }
+    mapping: dict[str, object] = {
+        "schema": "skeleton.runner_task.v1",
+        "repo": LAVALAMP_REPOSITORY,
+        "branch": LAVALAMP_SOURCE_BRANCH,
+        "base_sha": LAVALAMP_SOURCE_SHA,
+        "task_kind": "repository_maintenance",
+        "payload": payload,
+        "requested_capabilities": ["repository_maintenance", "repository_read", "test_execution"],
+        "allowed_files": [LAVALAMP_FIRMWARE_NAME, LAVALAMP_MANIFEST_NAME],
+        "forbidden_actions": ["no direct LAN OTA implementation"],
+        "validation_commands": [["python3", "-m", "pytest", "-q"]],
+        "validation_timeout_seconds": 900,
+        "expected_output": ["deterministic lavalamp executor"],
+        "privacy_boundary": "PUBLIC_SAFE_REPOSITORY_ONLY",
+        "approval_reference": LAVALAMP_APPROVAL_REFERENCE,
+        "idempotency_key": LAVALAMP_IDEMPOTENCY_KEY,
+    }
+    for key, value in overrides.items():
+        if key.startswith("payload__"):
+            payload[key.split("__", 1)[1]] = value
+        else:
+            mapping[key] = value
+    return RunnerTask.from_mapping(mapping)
+
+
+def _source_checkout(tmp_path: Path) -> Path:
+    checkout = tmp_path / "Lavalamp"
+    (checkout / "overlays/wled/usermods/cylinder_lava").mkdir(parents=True)
+    (checkout / "overlays/wled/platformio_override.ini").write_text(
+        "[env:cylinder_lava_esp32]\n", encoding="utf-8"
+    )
+    (checkout / "overlays/wled/usermods/cylinder_lava/mod.cpp").write_text(
+        "cylinder_lava CY Anemone CY Tidal Bloom\n", encoding="utf-8"
+    )
+    (checkout / "patches").mkdir()
+    (checkout / "patches/wled-usermods-list-cylinder-lava.patch").write_text(
+        "patch\n", encoding="utf-8"
+    )
+    return checkout
+
+
+def _project_tree(path: Path, checkout: Path) -> Path:
+    project_tree = path / "PROJECT_TREE.yaml"
+    project_tree.write_text(
+        "\n".join(
+            (
+                'version: "1.0.0"',
+                "default_project: lavalamp",
+                "projects:",
+                "  lavalamp:",
+                "    repo: alanua/Lavalamp",
+                f"    checkout_path: {checkout}",
+                f"    worktree_root: {path / 'worktrees'}",
+                "    public: true",
+                "    runner_enabled: true",
+                "    execution_modes:",
+                "      planning_only: false",
+                "      codex_issue_worktree: true",
+                "      live_cross_repo: false",
+                "    requires_explicit_approval_for_mode_change: true",
+                "    future_parallel_worktrees: true",
+                "    runtime_approval_required: true",
+                "    worktree_name_prefix: lavalamp",
+            )
+        ),
+        encoding="utf-8",
+    )
+    return project_tree
+
+
+class FakeFirmwareAction:
+    def __init__(self) -> None:
+        self.executions = 0
+        self.postflights = 0
+
+    def execute(self, request: object) -> dict[str, object]:
+        self.executions += 1
+        return {
+            "final_status": "DONE",
+            "effects": {"CY Anemone": True, "CY Tidal Bloom": True},
+        }
+
+    def verify_postflight_only(self, request: object) -> dict[str, object]:
+        self.postflights += 1
+        return {
+            "final_status": "DONE",
+            "effects": {"CY Anemone": True, "CY Tidal Bloom": True},
+        }
+
+
+class FakeRepositoryRunner:
+    def __init__(self) -> None:
+        self.calls: list[tuple[list[str], Path | None, int | None, object]] = []
+
+    def __call__(
+        self,
+        args: list[str],
+        cwd: Path | None,
+        timeout: int | None,
+        env: object,
+    ) -> tuple[int, str]:
+        self.calls.append((args, cwd, timeout, env))
+        if args[:3] == ["git", "config", "--get"]:
+            return 0, (
+                LAVALAMP_WLED_REPOSITORY + "\n"
+                if cwd and cwd.name == "WLED"
+                else "https://github.com/alanua/Lavalamp.git\n"
+            )
+        if args[:2] == ["git", "branch"]:
+            return 0, "main\n"
+        if args[:2] == ["git", "rev-parse"]:
+            return 0, (LAVALAMP_WLED_SHA if cwd and cwd.name == "WLED" else LAVALAMP_SOURCE_SHA) + "\n"
+        if args[:2] == ["git", "status"]:
+            return 0, ""
+        if args[:2] == ["git", "init"]:
+            Path(args[2]).mkdir(parents=True)
+            return 0, ""
+        if args[:3] == ["git", "remote", "add"] or args[:2] in (
+            ["git", "fetch"],
+            ["git", "checkout"],
+        ):
+            return 0, ""
+        if args[:2] == ["git", "apply"]:
+            assert cwd is not None
+            (cwd / "usermods_list.cpp").write_text(
+                "cylinder_lava CY Anemone CY Tidal Bloom\n", encoding="utf-8"
+            )
+            return 0, ""
+        if args == ["pio", "--version"]:
+            return 0, "PlatformIO\n"
+        if args == ["pio", "run", "-e", LAVALAMP_PLATFORMIO_ENV]:
+            assert cwd is not None
+            firmware = cwd / ".pio/build" / LAVALAMP_PLATFORMIO_ENV / LAVALAMP_FIRMWARE_NAME
+            firmware.parent.mkdir(parents=True)
+            firmware.write_bytes(b"firmware-image")
+            return 0, ""
+        return 1, "unexpected"
+
+
+def test_lavalamp_mismatch_blocks_before_commands(tmp_path: Path) -> None:
+    action = FakeFirmwareAction()
+    calls: list[list[str]] = []
+    executor = RepositoryMaintenanceExecutor(
+        project_tree_path=tmp_path / "missing.yaml",
+        run_command=lambda args, cwd, timeout, env: (calls.append(args) or (0, "")),
+        firmware_action=action,
+    )
+
+    code, output = executor.execute(_lavalamp_task(payload__source_sha="0" * 40))
+
+    assert code == 0
+    assert "RESULT: BLOCKED" in output
+    assert "SOURCE_SHA_MISMATCH" in output
+    assert calls == []
+    assert action.executions == 0
+
+
+def test_lavalamp_build_retains_only_firmware_and_manifest(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    artifact_root = tmp_path / "artifacts/lavalamp/issue-1922-c98acbf"
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr(maintenance, "LAVALAMP_APPROVED_ARTIFACT_PARENT", tmp_path / "artifacts/lavalamp")
+    monkeypatch.setattr(maintenance, "LAVALAMP_ARTIFACT_ROOT", artifact_root)
+    checkout = _source_checkout(tmp_path)
+    fake = FakeRepositoryRunner()
+    action = FakeFirmwareAction()
+
+    code, output = RepositoryMaintenanceExecutor(
+        project_tree_path=_project_tree(tmp_path, checkout),
+        run_command=fake,
+        firmware_action=action,
+    ).execute(_lavalamp_task(payload__artifact_root=str(artifact_root)))
+
+    assert code == 0
+    assert output.startswith("RESULT: DONE")
+    assert sorted(path.name for path in artifact_root.iterdir()) == [
+        LAVALAMP_FIRMWARE_NAME,
+        LAVALAMP_MANIFEST_NAME,
+    ]
+    manifest = json.loads((artifact_root / LAVALAMP_MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert manifest["source_sha"] == LAVALAMP_SOURCE_SHA
+    assert manifest["wled_commit"] == LAVALAMP_WLED_SHA
+    assert manifest["environment"] == LAVALAMP_PLATFORMIO_ENV
+    assert manifest["cleanup_status"] == "complete"
+    assert manifest["approval_reference"] == LAVALAMP_APPROVAL_REFERENCE
+    assert action.executions == 1
+    assert any(call[0] == ["git", "fetch", "--depth", "1", "origin", LAVALAMP_WLED_SHA] for call in fake.calls)
+    assert any(call[0] == ["pio", "run", "-e", LAVALAMP_PLATFORMIO_ENV] for call in fake.calls)
+
+
+def test_lavalamp_verified_completion_does_not_reflash(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    artifact_root = tmp_path / "artifacts/lavalamp/issue-1922-c98acbf"
+    artifact_root.mkdir(parents=True)
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr(maintenance, "LAVALAMP_APPROVED_ARTIFACT_PARENT", tmp_path / "artifacts/lavalamp")
+    monkeypatch.setattr(maintenance, "LAVALAMP_ARTIFACT_ROOT", artifact_root)
+    firmware = artifact_root / LAVALAMP_FIRMWARE_NAME
+    firmware.write_bytes(b"firmware-image")
+    digest = "ec4d577ee88cfc72af6589309da85d67feaf32ffabc78e5e705d77c2a5712036"
+    manifest = {
+        "schema": maintenance.LAVALAMP_EXECUTOR_SCHEMA,
+        "status": "DONE",
+        "operation": BUILD_AND_LOCAL_OTA_OPERATION,
+        "project": "lavalamp",
+        "repository": LAVALAMP_REPOSITORY,
+        "source_branch": LAVALAMP_SOURCE_BRANCH,
+        "source_sha": LAVALAMP_SOURCE_SHA,
+        "wled_commit": LAVALAMP_WLED_SHA,
+        "environment": LAVALAMP_PLATFORMIO_ENV,
+        "artifact_root": str(artifact_root),
+        "artifact_files": [LAVALAMP_FIRMWARE_NAME, LAVALAMP_MANIFEST_NAME],
+        "relay": "home-edge-01",
+        "target": "192.168.1.164",
+        "no_direct_controller_lan_ota": True,
+        "required_effects": ["CY Anemone", "CY Tidal Bloom"],
+        "approval_reference": LAVALAMP_APPROVAL_REFERENCE,
+        "idempotency_key": LAVALAMP_IDEMPOTENCY_KEY,
+        "byte_size": len(b"firmware-image"),
+        "sha256": digest,
+        "cleanup_status": "complete",
+        "ota": {"final_status": "DONE"},
+    }
+    (artifact_root / LAVALAMP_MANIFEST_NAME).write_text(json.dumps(manifest), encoding="utf-8")
+    checkout = _source_checkout(tmp_path)
+    fake = FakeRepositoryRunner()
+    action = FakeFirmwareAction()
+
+    _code, output = RepositoryMaintenanceExecutor(
+        project_tree_path=_project_tree(tmp_path, checkout),
+        run_command=fake,
+        firmware_action=action,
+    ).execute(_lavalamp_task(payload__artifact_root=str(artifact_root)))
+
+    assert output.startswith("RESULT: DONE")
+    assert action.executions == 0
+    assert action.postflights == 1
+    assert not any(call[0] == ["pio", "run", "-e", LAVALAMP_PLATFORMIO_ENV] for call in fake.calls)
