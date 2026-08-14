@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.family_document_runtime_config.schema.json",
+  "type": "object",
+  "required": ["schema", "inbox", "archive", "outbox_db"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "skeleton.family_document_runtime_config.v1"},
+    "inbox": {"type": "string"},
+    "archive": {"type": "string"},
+    "outbox_db": {"type": "string"},
+    "interval_seconds": {"type": "number", "minimum": 1}
+  }
+}
