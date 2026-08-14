@@ -30,8 +30,33 @@ data class HomePlaceholderState(
     val summary: String,
 )
 
+enum class OperatorDashboardFreshness {
+    CURRENT,
+    STALE,
+    OFFLINE,
+    DEGRADED,
+}
+
+data class OperatorDashboardSection(
+    val titleUk: String,
+    val emptyUk: String,
+    val rows: List<String>,
+)
+
+data class OperatorDashboardState(
+    val sourceChannel: String,
+    val refreshedAt: String?,
+    val freshness: OperatorDashboardFreshness,
+    val sections: List<OperatorDashboardSection>,
+    val error: String? = null,
+)
+
 interface CanonicalHomeApi {
     suspend fun loadPlaceholderState(session: HomeSession): HomePlaceholderState
+}
+
+interface OperatorDashboardApi {
+    suspend fun loadOperatorDashboard(session: HomeSession): OperatorDashboardState
 }
 
 interface AuthSessionProvider {

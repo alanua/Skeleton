@@ -1,7 +1,10 @@
 package com.skeleton.home
 
 import com.skeleton.home.auth.SyntheticSession
+import com.skeleton.home.data.freshnessLabel
+import com.skeleton.home.data.parseOperatorDashboard
 import com.skeleton.home.domain.ConnectivityStatus
+import com.skeleton.home.domain.OperatorDashboardFreshness
 import com.skeleton.home.domain.UserRole
 import com.skeleton.home.domain.VerifiedActionState
 import com.skeleton.home.navigation.HomeRoute
@@ -63,5 +66,80 @@ class HomeContractTest {
             listOf("SENT", "ACCEPTED", "APPLIED", "PHYSICALLY_VERIFIED"),
             VerifiedActionState.entries.map { it.name },
         )
+    }
+
+    @Test
+    fun operatorDashboardParsesSuccessiveLiveSnapshotsWithoutRebuild() {
+        val first = parseOperatorDashboard(
+            """
+            {
+              "schema": "skeleton.operator_live_state.v1",
+              "source_channel": "core.operator_overview.load_operator_overview",
+              "refreshed_at": "2026-08-14T10:00:00Z",
+              "freshness": "current",
+              "sections": [
+                {"title_uk": "Працює зараз", "empty_uk": "Немає", "rows": ["Перевіряє поточний запуск."]},
+                {"title_uk": "Будується зараз", "empty_uk": "Немає", "rows": ["Збирає перший зріз."]}
+              ]
+            }
+            """.trimIndent(),
+        )
+        val second = parseOperatorDashboard(
+            """
+            {
+              "schema": "skeleton.operator_live_state.v1",
+              "source_channel": "core.operator_overview.load_operator_overview",
+              "refreshed_at": "2026-08-14T10:01:00Z",
+              "freshness": "current",
+              "sections": [
+                {"title_uk": "Працює зараз", "empty_uk": "Немає", "rows": ["Перевіряє наступний запуск."]},
+                {"title_uk": "Будується зараз", "empty_uk": "Немає", "rows": ["Збирає live-екран."]}
+              ]
+            }
+            """.trimIndent(),
+        )
+
+        assertEquals(OperatorDashboardFreshness.CURRENT, first.freshness)
+        assertEquals("Оновлено щойно", freshnessLabel(first))
+        assertFalse(first.sections[0].rows == second.sections[0].rows)
+        assertFalse(first.sections[1].rows == second.sections[1].rows)
+    }
+
+    @Test
+    fun staleOperatorDashboardNeverRendersUpdatedJustNow() {
+        val stale = parseOperatorDashboard(
+            """
+            {
+              "schema": "skeleton.operator_live_state.v1",
+              "source_channel": "core.operator_overview.load_operator_overview",
+              "refreshed_at": "2026-08-14T09:30:00Z",
+              "freshness": "stale",
+              "sections": []
+            }
+            """.trimIndent(),
+        )
+
+        assertEquals(OperatorDashboardFreshness.STALE, stale.freshness)
+        assertFalse(freshnessLabel(stale).contains("Оновлено щойно"))
+    }
+
+    @Test
+    fun primaryOperatorDashboardRowsContainNoInternalNumbersOrRunnerLabels() {
+        val state = parseOperatorDashboard(
+            """
+            {
+              "schema": "skeleton.operator_live_state.v1",
+              "source_channel": "core.operator_overview.load_operator_overview",
+              "refreshed_at": "2026-08-14T10:00:00Z",
+              "freshness": "current",
+              "sections": [
+                {"title_uk": "Працює зараз", "empty_uk": "Немає", "rows": ["Черга Runner: технічне посилання і технічна мітка рухаються."]}
+              ]
+            }
+            """.trimIndent(),
+        )
+
+        val primary = state.sections.flatMap { it.rows }.joinToString(" ")
+        assertFalse(Regex("""(?i)(issue|pr|task)\s*#?\d+|#\d+|runner/[A-Za-z0-9._/-]+""").containsMatchIn(primary))
     }
 }
