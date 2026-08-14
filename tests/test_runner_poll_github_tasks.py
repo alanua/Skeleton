@@ -3323,6 +3323,61 @@ def test_poll_once_self_heals_run_now_missing_ready_and_does_not_duplicate_claim
     assert evidence["evidence"]["actions"] == ["queue_reactivate"]
 
 
+@pytest.mark.parametrize("terminal_label", (runner.LABEL_DONE, runner.LABEL_BLOCKED))
+def test_set_issue_label_terminal_labels_remove_active_execution_labels(
+    terminal_label: str,
+) -> None:
+    def run_command(command: list[str], **_kwargs: object) -> tuple[int, str]:
+        if command[:3] == ["gh", "issue", "view"]:
+            return (
+                0,
+                json.dumps(
+                    {
+                        "labels": [
+                            {"name": runner.LABEL_AGENT_TASK},
+                            {"name": runner.LABEL_RUN_NOW},
+                            {"name": runner.LABEL_READY},
+                            {"name": runner.LABEL_RUNNING},
+                        ]
+                    }
+                ),
+            )
+        return (0, "")
+
+    with mock.patch.object(runner, "run_command", side_effect=run_command) as mocked:
+        runner.set_issue_label(2502, runner.LABEL_RUNNING, terminal_label)
+
+    assert mocked.call_args_list[-1].args[0] == [
+        "gh",
+        "issue",
+        "edit",
+        "2502",
+        "--repo",
+        runner.REPO,
+        "--remove-label",
+        runner.LABEL_RUN_NOW,
+        "--remove-label",
+        runner.LABEL_READY,
+        "--remove-label",
+        runner.LABEL_RUNNING,
+        "--add-label",
+        terminal_label,
+    ]
+
+
+def test_set_issue_label_repeated_terminal_done_is_add_only_when_already_clean() -> None:
+    def run_command(command: list[str], **_kwargs: object) -> tuple[int, str]:
+        if command[:3] == ["gh", "issue", "view"]:
+            return (0, json.dumps({"labels": [{"name": runner.LABEL_DONE}]}))
+        return (0, "")
+
+    with mock.patch.object(runner, "run_command", side_effect=run_command) as mocked:
+        runner.set_issue_label(2502, runner.LABEL_RUNNING, runner.LABEL_DONE)
+
+    assert "--remove-label" not in mocked.call_args_list[-1].args[0]
+    assert mocked.call_args_list[-1].args[0][-2:] == ["--add-label", runner.LABEL_DONE]
+
+
 def test_poll_once_run_now_only_runtime_maintenance_canary_reaches_done(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3337,7 +3392,7 @@ def test_poll_once_run_now_only_runtime_maintenance_canary_reaches_done(
         ),
         labels=(),
     )
-    label_transitions: list[tuple[int, str, str]] = []
+    label_transitions: list[tuple[int, tuple[str, ...], tuple[str, ...]]] = []
 
     def issue_snapshot() -> dict[str, object]:
         snapshot = dict(issue)
@@ -3353,10 +3408,32 @@ def test_poll_once_run_now_only_runtime_maintenance_canary_reaches_done(
         assert promoted_issue["number"] == 2512
         labels.add(runner.LABEL_READY)
 
-    def set_label(issue_number: int, remove_label: str, add_label: str) -> None:
-        label_transitions.append((issue_number, remove_label, add_label))
-        labels.discard(remove_label)
-        labels.add(add_label)
+    def run_command(command: list[str], **_kwargs: object) -> tuple[int, str]:
+        if command[:3] == ["gh", "issue", "view"]:
+            return (
+                0,
+                json.dumps({"labels": [{"name": label} for label in sorted(labels)]}),
+            )
+        if command[:3] == ["gh", "issue", "edit"]:
+            remove_labels = [
+                command[index + 1]
+                for index, item in enumerate(command)
+                if item == "--remove-label"
+            ]
+            add_labels = [
+                command[index + 1]
+                for index, item in enumerate(command)
+                if item == "--add-label"
+            ]
+            for remove_label in remove_labels:
+                labels.discard(remove_label)
+            for add_label in add_labels:
+                labels.add(add_label)
+            label_transitions.append(
+                (int(command[3]), tuple(remove_labels), tuple(add_labels))
+            )
+            return (0, "")
+        return (0, "")
 
     report = (
         "DONE: Runner host maintenance task completed.\n"
@@ -3364,7 +3441,11 @@ def test_poll_once_run_now_only_runtime_maintenance_canary_reaches_done(
         "success_criteria=met"
     )
 
-    monkeypatch.setattr(runner, "control_recovery_db_path", lambda: tmp_path / "control_recovery.sqlite3")
+    monkeypatch.setattr(
+        runner,
+        "control_recovery_db_path",
+        lambda: tmp_path / "control_recovery.sqlite3",
+    )
     monkeypatch.setattr(runner, "get_ready_issues", ready_issues)
     monkeypatch.setattr(runner, "get_running_issues", lambda: [])
     monkeypatch.setattr(
@@ -3373,7 +3454,7 @@ def test_poll_once_run_now_only_runtime_maintenance_canary_reaches_done(
         lambda: [issue_snapshot()],
     )
     monkeypatch.setattr(runner, "_promote_queue_replenisher_issue", promote)
-    monkeypatch.setattr(runner, "set_issue_label", set_label)
+    monkeypatch.setattr(runner, "run_command", run_command)
     monkeypatch.setattr(runner, "ensure_clean_worktree", lambda *_args: (True, ""))
     monkeypatch.setattr(runner, "post_issue_comment", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(runner, "notify_task_finished", lambda *_args, **_kwargs: None)
@@ -3389,9 +3470,16 @@ def test_poll_once_run_now_only_runtime_maintenance_canary_reaches_done(
     assert runner.poll_once(workdir="/coordinator") == 1
 
     assert runner.LABEL_DONE in labels
+    assert runner.LABEL_RUN_NOW not in labels
+    assert runner.LABEL_READY not in labels
+    assert runner.LABEL_RUNNING not in labels
     assert label_transitions == [
-        (2512, runner.LABEL_READY, runner.LABEL_RUNNING),
-        (2512, runner.LABEL_RUNNING, runner.LABEL_DONE),
+        (2512, (runner.LABEL_READY,), (runner.LABEL_RUNNING,)),
+        (
+            2512,
+            (runner.LABEL_RUN_NOW, runner.LABEL_RUNNING),
+            (runner.LABEL_DONE,),
+        ),
     ]
     run_codex.assert_not_called()
 

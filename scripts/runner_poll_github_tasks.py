@@ -210,6 +210,8 @@ FINAL_LABELS_BY_STATUS = {
     "DONE": LABEL_DONE,
     "BLOCKED": LABEL_BLOCKED,
 }
+ACTIVE_EXECUTION_LABELS = frozenset((LABEL_READY, LABEL_RUN_NOW, LABEL_RUNNING))
+TERMINAL_RUNNER_LABELS = frozenset((LABEL_DONE, LABEL_BLOCKED))
 POLL_INTERVAL = 60
 DEFAULT_WORKDIR = Path(__file__).resolve().parents[1]
 DEFAULT_WORKTREE_ROOT = Path("/home/agent/agent-dev/worktrees/skeleton")
@@ -3620,21 +3622,49 @@ def unverifiable_retry_history_report(decision: RetryDecision) -> str:
     )
 
 
-def set_issue_label(issue_number: int, remove: str, add: str) -> None:
+def get_issue_labels(issue_number: int) -> frozenset[str]:
     code, output = run_command(
         [
             "gh",
             "issue",
-            "edit",
+            "view",
             str(issue_number),
             "--repo",
             REPO,
-            "--remove-label",
-            remove,
-            "--add-label",
-            add,
+            "--json",
+            "labels",
         ]
     )
+    if code != 0:
+        raise RuntimeError(f"gh issue label view failed:\n{output}")
+    parsed = json.loads(output or "{}")
+    if not isinstance(parsed, dict):
+        raise RuntimeError("gh issue label view returned non-object JSON")
+    return _issue_label_names(parsed)
+
+
+def set_issue_label(issue_number: int, remove: str, add: str) -> None:
+    if add in TERMINAL_RUNNER_LABELS and (
+        remove == LABEL_RUNNING or add == LABEL_BLOCKED
+    ):
+        remove_labels = set(get_issue_labels(issue_number) & ACTIVE_EXECUTION_LABELS)
+    else:
+        remove_labels = {remove}
+    remove_labels.discard(add)
+
+    command = [
+        "gh",
+        "issue",
+        "edit",
+        str(issue_number),
+        "--repo",
+        REPO,
+    ]
+    for label in sorted(remove_labels):
+        command.extend(["--remove-label", label])
+    command.extend(["--add-label", add])
+
+    code, output = run_command(command)
     if code != 0:
         raise RuntimeError(f"gh issue edit failed:\n{output}")
 
