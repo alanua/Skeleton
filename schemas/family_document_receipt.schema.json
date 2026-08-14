@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://skeleton.local/schemas/family_document_receipt.schema.json",
+  "title": "Family document receipt contracts",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "status", "reason_code", "counts"],
+      "properties": {
+        "schema": {"const": "skeleton.family_document_receipt.public.v1"},
+        "status": {"enum": ["DONE", "REVIEW", "BLOCKED", "DEGRADED"]},
+        "reason_code": {"type": "string", "pattern": "^[a-z0-9_]{1,96}$"},
+        "counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}}
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "privacy_boundary", "notification_channel", "transport_dependency",
+        "idempotency_key", "task_identity", "kind", "state", "reason_code",
+        "counts", "public_safe", "content"
+      ],
+      "properties": {
+        "schema": {"const": "skeleton.family_document_receipt.telegram_handoff.v1"},
+        "privacy_boundary": {"const": "PRIVATE_TELEGRAM_OPERATOR_RECEIPT"},
+        "notification_channel": {"const": "telegram_private"},
+        "transport_dependency": {"type": "string", "minLength": 1},
+        "idempotency_key": {"type": "string", "pattern": "^family-document-receipt:[a-f0-9]{64}$"},
+        "task_identity": {"type": "string", "pattern": "^source:[a-f0-9]{40}$"},
+        "kind": {"enum": ["INTAKE_ACCEPTED", "TERMINAL"]},
+        "state": {"enum": ["ACCEPTED", "DONE", "REVIEW", "RETRY", "FAILED", "QUARANTINED"]},
+        "reason_code": {"type": "string", "pattern": "^[a-z0-9_]{1,96}$"},
+        "counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+        "public_safe": {"const": false},
+        "content": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["template", "document_content_included", "source_path_included"],
+          "properties": {
+            "template": {"const": "family_document_receipt"},
+            "document_content_included": {"const": false},
+            "source_path_included": {"const": false}
+          }
+        },
+        "root_alias_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "relative_path_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      }
+    }
+  ]
+}
