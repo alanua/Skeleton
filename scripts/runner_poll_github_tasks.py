@@ -1031,6 +1031,13 @@ class RunnerTask:
 
 
 @dataclass(frozen=True)
+class ExistingPrWorktreeRequest:
+    pr_number: int
+    expected_head_sha: str
+    expected_head_branch: str | None = None
+
+
+@dataclass(frozen=True)
 class TelegramApprovedPrMergeRequest:
     pr_number: int
     approved_head_sha: str
@@ -1435,10 +1442,15 @@ def format_command_output(command: list[str], output: str) -> str:
 
 
 def prepare_issue_worktree(
-    issue_number: int, coordinator_workdir: str | Path
+    issue_number: int,
+    coordinator_workdir: str | Path,
+    *,
+    existing_pr: ExistingPrWorktreeRequest | None = None,
 ) -> tuple[int, str, Path]:
     path = ensure_safe_worktree_path(issue_worktree_path(issue_number))
-    return prepare_git_issue_worktree(issue_number, coordinator_workdir, path)
+    return prepare_git_issue_worktree(
+        issue_number, coordinator_workdir, path, existing_pr=existing_pr
+    )
 
 
 def prepare_target_repository_issue_worktree(
@@ -1447,6 +1459,7 @@ def prepare_target_repository_issue_worktree(
     *,
     base: str | None = None,
     base_sha: str | None = None,
+    existing_pr: ExistingPrWorktreeRequest | None = None,
 ) -> tuple[int, str, Path]:
     try:
         path = ensure_safe_target_repository_worktree_path(
@@ -1466,6 +1479,7 @@ def prepare_target_repository_issue_worktree(
         target_repository=target_repository,
         base=base,
         base_sha=base_sha,
+        existing_pr=existing_pr,
     )
 
 
@@ -1533,6 +1547,145 @@ def _format_base_preparation_failure(reason: str, base: str | None = None) -> st
     return "\n".join(lines)
 
 
+def _format_existing_pr_preparation_failure(reason: str) -> str:
+    return "\n".join(
+        ("Existing PR issue worktree validation failed.", f"reason={reason}")
+    )
+
+
+def _task_existing_pr_expected_head_sha(issue_body: str) -> str | None:
+    task_fields = _shadow_task_block_mapping(issue_body)
+    candidates: list[object] = []
+    for key in (
+        "expected_pr_head_sha",
+        "expected_head_sha",
+        "existing_pr_head_sha",
+        "head_sha",
+    ):
+        if key in task_fields:
+            candidates.append(task_fields[key])
+    metadata = _metadata_before_task(issue_body)
+    for field in (
+        "Expected PR Head SHA",
+        "Expected Head SHA",
+        "Existing PR Head SHA",
+        "Head SHA",
+    ):
+        value = _body_field(metadata, field)
+        if value is not None:
+            candidates.append(value)
+    for candidate in candidates:
+        if isinstance(candidate, str):
+            stripped = candidate.strip().lower()
+            if _HEAD_SHA_RE.fullmatch(stripped) is not None:
+                return stripped
+    return None
+
+
+def _task_existing_pr_head_sha_field_present(issue_body: str) -> bool:
+    task_fields = _shadow_task_block_mapping(issue_body)
+    if any(
+        key in task_fields
+        for key in (
+            "expected_pr_head_sha",
+            "expected_head_sha",
+            "existing_pr_head_sha",
+            "head_sha",
+        )
+    ):
+        return True
+    metadata = _metadata_before_task(issue_body)
+    return any(
+        _body_field(metadata, field) is not None
+        for field in (
+            "Expected PR Head SHA",
+            "Expected Head SHA",
+            "Existing PR Head SHA",
+            "Head SHA",
+        )
+    )
+
+
+def _task_existing_pr_expected_head_branch(issue_body: str) -> str | None:
+    task_fields = _shadow_task_block_mapping(issue_body)
+    candidates: list[object] = []
+    for key in (
+        "expected_pr_head_branch",
+        "expected_head_branch",
+        "existing_pr_head_branch",
+        "head_branch",
+    ):
+        if key in task_fields:
+            candidates.append(task_fields[key])
+    metadata = _metadata_before_task(issue_body)
+    for field in (
+        "Expected PR Head Branch",
+        "Expected Head Branch",
+        "Existing PR Head Branch",
+        "Head Branch",
+    ):
+        value = _body_field(metadata, field)
+        if value is not None:
+            candidates.append(value)
+    for candidate in candidates:
+        if isinstance(candidate, str):
+            stripped = candidate.strip()
+            if _safe_target_base_branch_name(stripped):
+                return stripped
+    return None
+
+
+def _codegen_existing_pr_worktree_request(
+    issue_body: str,
+) -> ExistingPrWorktreeRequest | None:
+    pr_number = _declared_existing_pr_number(issue_body)
+    if pr_number is None:
+        return None
+    expected_head_sha = _task_existing_pr_expected_head_sha(issue_body)
+    if expected_head_sha is None:
+        if _task_existing_pr_head_sha_field_present(issue_body):
+            raise RuntimeError("existing_pr_expected_head_sha_invalid")
+        return None
+    return ExistingPrWorktreeRequest(
+        pr_number=pr_number,
+        expected_head_sha=expected_head_sha,
+        expected_head_branch=_task_existing_pr_expected_head_branch(issue_body),
+    )
+
+
+def _verify_existing_pr_worktree_request(
+    *,
+    repository: str,
+    existing_pr: ExistingPrWorktreeRequest,
+    base: str | None,
+    base_sha: str | None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        pr_state, _source = _get_pr_branch_validation_state(
+            repository, existing_pr.pr_number
+        )
+    except RuntimeError:
+        return None, "pr_metadata_unavailable"
+    if pr_state.get("state") != "OPEN":
+        return None, "pr_not_open"
+    head_sha = str(pr_state.get("headRefOid") or "").lower()
+    head_branch = str(pr_state.get("headRefName") or "")
+    if head_sha != existing_pr.expected_head_sha:
+        return None, "pr_head_sha_mismatch"
+    if (
+        existing_pr.expected_head_branch is not None
+        and head_branch != existing_pr.expected_head_branch
+    ):
+        return None, "pr_head_branch_mismatch"
+    if not _safe_target_base_branch_name(head_branch):
+        return None, "pr_head_branch_unsafe"
+    if base is not None and pr_state.get("baseRefName") != base:
+        return None, "pr_base_branch_mismatch"
+    if base_sha is not None and str(pr_state.get("baseRefOid") or "").lower() != base_sha:
+        return None, "pr_base_sha_mismatch"
+    return pr_state, None
+
+
 def _fetch_and_verify_target_base(
     *,
     cwd: str | Path,
@@ -1568,13 +1721,28 @@ def prepare_git_issue_worktree(
     target_repository: str | None = None,
     base: str | None = None,
     base_sha: str | None = None,
+    existing_pr: ExistingPrWorktreeRequest | None = None,
 ) -> tuple[int, str, Path]:
     branch = issue_branch(issue_number)
     outputs: list[str] = []
     base_ref = base or "main"
+    repository = target_repository or QUEUE_REPOSITORY
     validation_failure = _target_base_validation_failure(base, base_sha)
     if validation_failure is not None:
         return 1, _format_base_preparation_failure(validation_failure, base), path
+    existing_pr_state: dict[str, Any] | None = None
+    existing_pr_head_ref: str | None = None
+    if existing_pr is not None:
+        existing_pr_state, existing_pr_reason = _verify_existing_pr_worktree_request(
+            repository=repository,
+            existing_pr=existing_pr,
+            base=base,
+            base_sha=base_sha,
+        )
+        if existing_pr_reason is not None:
+            return 1, _format_existing_pr_preparation_failure(existing_pr_reason), path
+        assert existing_pr_state is not None
+        existing_pr_head_ref = str(existing_pr_state["headRefName"])
 
     if path.exists():
         checks = (
@@ -1654,6 +1822,21 @@ def prepare_git_issue_worktree(
                     + "\n".join(outputs),
                     path,
                 )
+        if existing_pr is not None:
+            rev_parse_command = ["git", "rev-parse", "HEAD"]
+            code, output = run_command(rev_parse_command, cwd=path)
+            outputs.append(format_command_output(rev_parse_command, output))
+            current_head = output.strip().lower()
+            if code != 0 or current_head != existing_pr.expected_head_sha:
+                return (
+                    1,
+                    _format_existing_pr_preparation_failure(
+                        "existing_worktree_wrong_pr_head"
+                    )
+                    + "\n\n"
+                    + "\n".join(outputs),
+                    path,
+                )
         return 0, "\n".join(outputs), path
 
     try:
@@ -1673,6 +1856,95 @@ def prepare_git_issue_worktree(
         origin_url, target_repository
     ):
         return 1, _format_base_preparation_failure("source_repository_mismatch"), path
+
+    if existing_pr is not None:
+        assert existing_pr_head_ref is not None
+        commands = (
+            (
+                [
+                    "git",
+                    "fetch",
+                    "origin",
+                    f"refs/heads/{existing_pr_head_ref}:refs/remotes/origin/{existing_pr_head_ref}",
+                ],
+                coordinator_workdir,
+            ),
+            (
+                [
+                    "git",
+                    "rev-parse",
+                    f"refs/remotes/origin/{existing_pr_head_ref}",
+                ],
+                coordinator_workdir,
+            ),
+            (
+                [
+                    "git",
+                    "clone",
+                    "--local",
+                    "--no-hardlinks",
+                    "--no-checkout",
+                    str(Path(coordinator_workdir).resolve()),
+                    str(path),
+                ],
+                coordinator_workdir,
+            ),
+            (
+                [
+                    "git",
+                    "fetch",
+                    "origin",
+                    f"refs/heads/{existing_pr_head_ref}:refs/remotes/origin/{existing_pr_head_ref}",
+                ],
+                path,
+            ),
+            (
+                [
+                    "git",
+                    "rev-parse",
+                    f"refs/remotes/origin/{existing_pr_head_ref}",
+                ],
+                path,
+            ),
+            (
+                [
+                    "git",
+                    "checkout",
+                    "-B",
+                    branch,
+                    f"origin/{existing_pr_head_ref}",
+                ],
+                path,
+            ),
+            (["git", "rev-parse", "HEAD"], path),
+        )
+        for command, cwd in commands:
+            code, output = run_command(command, cwd=cwd)
+            outputs.append(format_command_output(command, output))
+            if code != 0:
+                return code, "\n".join(outputs), path
+            if command[1] == "clone":
+                config_code, config_output = run_command(
+                    ["git", "remote", "set-url", "origin", origin_url], cwd=path
+                )
+                outputs.append(
+                    "$ git remote set-url origin <coordinator-origin>\n" + config_output
+                )
+                if config_code != 0:
+                    return config_code, "\n".join(outputs), path
+            if command[1] == "rev-parse":
+                fetched_sha = output.strip().lower()
+                if fetched_sha != existing_pr.expected_head_sha:
+                    return (
+                        1,
+                        _format_existing_pr_preparation_failure(
+                            "fetched_pr_head_sha_mismatch"
+                        )
+                        + "\n\n"
+                        + "\n".join(outputs),
+                        path,
+                    )
+        return 0, "\n".join(outputs), path
 
     if base is None:
         commands = (
@@ -1778,8 +2050,15 @@ def prepare_git_issue_worktree(
 
 
 def prepare_issue_branch(
-    issue_number: int, coordinator_workdir: str | Path
+    issue_number: int,
+    coordinator_workdir: str | Path,
+    *,
+    existing_pr: ExistingPrWorktreeRequest | None = None,
 ) -> tuple[int, str, Path]:
+    if existing_pr is not None:
+        return prepare_issue_worktree(
+            issue_number, coordinator_workdir, existing_pr=existing_pr
+        )
     return prepare_issue_worktree(issue_number, coordinator_workdir)
 
 
@@ -4908,6 +5187,7 @@ def block_issue(
     post_issue_comment(issue_number, append_memory_warning(report, warning))
     set_issue_label(issue_number, remove_label, LABEL_BLOCKED)
     notify_task_finished(issue_number, "BLOCKED")
+    maybe_replenish_runner_queue_after_completion()
 
 
 def _maintenance_report(
@@ -15410,7 +15690,7 @@ def process_runtime_maintenance_issue(
         LABEL_DONE if status == "DONE" else LABEL_BLOCKED,
     )
     notify_task_finished(issue_number, status, report)
-    if task_id == VALIDATE_PR_BRANCH and status in {"DONE", "BLOCKED"}:
+    if status == "BLOCKED":
         maybe_replenish_runner_queue_after_completion()
 
 
@@ -15726,6 +16006,8 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                     LABEL_DONE if status == "DONE" else LABEL_BLOCKED,
                 )
                 notify_task_finished(issue_number, status, report)
+                if status == "BLOCKED":
+                    maybe_replenish_runner_queue_after_completion()
                 return
             if pickup_memory_warning:
                 process_runtime_maintenance_issue(
@@ -15759,28 +16041,56 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
         target_repository = (
             runner_task.target_repository if runner_task is not None else QUEUE_REPOSITORY
         )
+        try:
+            existing_pr_worktree = _codegen_existing_pr_worktree_request(issue_body)
+        except RuntimeError as exc:
+            block_issue(
+                issue_number,
+                f"Existing PR worktree contract is invalid: {exc}.",
+                remove_label=LABEL_RUNNING,
+                runner_task=runner_task,
+                retry_decision=retry_decision,
+            )
+            return
         local_target_worktree = target_repository != QUEUE_REPOSITORY
         if local_target_worktree:
             if runner_task is not None and runner_task.base is not None:
-                worktree_code, worktree_output, worktree_path = (
-                    prepare_target_repository_issue_worktree(
-                        target_repository,
-                        issue_number,
-                        base=runner_task.base,
-                        base_sha=runner_task.base_sha,
-                    )
+                prepare_kwargs: dict[str, object] = {
+                    "base": runner_task.base,
+                    "base_sha": runner_task.base_sha,
+                }
+                if existing_pr_worktree is not None:
+                    prepare_kwargs["existing_pr"] = existing_pr_worktree
+                worktree_code, worktree_output, worktree_path = prepare_target_repository_issue_worktree(
+                    target_repository,
+                    issue_number,
+                    **prepare_kwargs,
                 )
             else:
-                worktree_code, worktree_output, worktree_path = (
-                    prepare_target_repository_issue_worktree(
+                if existing_pr_worktree is not None:
+                    worktree_code, worktree_output, worktree_path = (
+                        prepare_target_repository_issue_worktree(
+                            target_repository,
+                            issue_number,
+                            existing_pr=existing_pr_worktree,
+                        )
+                    )
+                else:
+                    worktree_code, worktree_output, worktree_path = prepare_target_repository_issue_worktree(
                         target_repository,
                         issue_number,
                     )
-                )
         else:
-            worktree_code, worktree_output, worktree_path = prepare_issue_branch(
-                issue_number, coordinator_workdir
-            )
+            if existing_pr_worktree is not None:
+                worktree_code, worktree_output, worktree_path = prepare_issue_branch(
+                    issue_number,
+                    coordinator_workdir,
+                    existing_pr=existing_pr_worktree,
+                )
+            else:
+                worktree_code, worktree_output, worktree_path = prepare_issue_branch(
+                    issue_number, coordinator_workdir
+                )
         if worktree_code != 0:
             block_issue(
                 issue_number,
@@ -15887,6 +16197,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             post_issue_comment(issue_number, report)
             set_issue_label(issue_number, LABEL_RUNNING, LABEL_BLOCKED)
             notify_task_finished(issue_number, "BLOCKED", report)
+            maybe_replenish_runner_queue_after_completion()
             return
 
         if local_target_worktree and runner_task is not None:
@@ -15974,7 +16285,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             LABEL_DONE if status == "DONE" else LABEL_BLOCKED,
         )
         notify_task_finished(issue_number, status, report)
-        if status == "DONE":
+        if status in {"DONE", "BLOCKED"}:
             maybe_replenish_runner_queue_after_completion()
     except Exception as exc:
         if issue_workdir is not None:

@@ -82,6 +82,12 @@ For queue-idle recovery, the lesson fingerprint remains stable across recurrence
 
 The learned queue path may invoke only the registered `queue_reactivate` action. That action delegates to the existing `replenish_runner_queue` primitive and never directly promotes labels from the learned path. Verification requires actual ready-depth progress after the action. No progress, exceptions, candidate races, or stale running rechecks are recorded as failed recovery/backoff. Routine queue recovery remains Telegram-silent.
 
+After any terminal codegen or maintenance transition to `DONE` or `BLOCKED`,
+the Runner re-enters that same idle queue path once. The terminal issue remains
+terminal and retry policy is not bypassed; the recheck can only promote
+unrelated eligible work when the canonical ready and running depths are both
+zero.
+
 Ordinary polls also run a bounded reconciliation pass for historical terminal
 issue label pollution. Open issues carrying `runner:done` or `runner:blocked`
 and any active execution label (`queue:RUN_NOW`, `runner:ready`,
@@ -98,6 +104,14 @@ recorded base SHA. The continuation is an ordinary public-safe `agent:task` with
 contract declared `existing_pr` or `update_existing_pr`, a different produced PR
 is treated as a publication-contract failure; no validation continuation is
 created for the wrong PR.
+
+For codegen tasks that declare `existing_pr` or `update_existing_pr` with an
+exact expected PR head SHA, worktree preparation verifies the declared PR number,
+repository, branch, head SHA, and any declared base before Codex starts. A new
+issue worktree is checked out from that verified PR head branch, preserving every
+file present in the PR head even when a file is outside the task edit allowlist.
+The allowlist constrains edits only; mismatched PR identity or stale head
+metadata fails closed before worktree mutation.
 
 ## Operator Noise
 
