@@ -1,0 +1,24 @@
+{
+  "$id": "skeleton.mail_provider_account.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Skeleton Mail Provider Account",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "account_ref", "provider"],
+  "properties": {
+    "schema": {"const": "skeleton.mail_provider.account.v1"},
+    "account_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "provider": {"enum": ["gmail"]},
+    "poll_label": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "query": {"type": "string", "minLength": 1, "maxLength": 256},
+    "secret_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "kind"],
+      "properties": {
+        "ref": {"type": "string", "minLength": 1, "maxLength": 256},
+        "kind": {"enum": ["oauth_refresh_token", "oauth_access_token", "service_account"]}
+      }
+    }
+  }
+}

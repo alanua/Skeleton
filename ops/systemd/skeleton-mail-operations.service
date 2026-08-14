@@ -1,0 +1,28 @@
+[Unit]
+Description=Skeleton Mail Operations worker
+After=local-fs.target
+ConditionPathExists=@INSTALL_ROOT@/scripts/mail_operations_worker.py
+
+[Service]
+Type=oneshot
+User=@SERVICE_USER@
+Group=@SERVICE_GROUP@
+WorkingDirectory=@INSTALL_ROOT@
+ExecStart=/usr/bin/python3 @INSTALL_ROOT@/scripts/mail_operations_worker.py --config @STATE_ROOT@/accounts.json --state-db @STATE_ROOT@/mail.sqlite3 --scheduler-db @SCHEDULER_STATE_ROOT@/scheduler.sqlite3
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=@STATE_ROOT@ @SCHEDULER_STATE_ROOT@
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

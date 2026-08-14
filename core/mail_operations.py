@@ -437,8 +437,11 @@ def _ukrainian_summary(normalized: NormalizedCorrespondence, mail: MailEnvelope)
         if normalized.deadline_at is not None
         else "не виявлено"
     )
-    topic = _compact_topic(mail.subject_hint or mail.body_preview)
-    return f"Важлива кореспонденція: {topic}. Дедлайн: {deadline}."
+    return (
+        "Важлива кореспонденція потребує дії оператора. "
+        f"Case: {normalized.case_ref}. Correspondence: {normalized.correspondence_ref}. "
+        f"Дедлайн: {deadline}."
+    )
 
 
 def _compact_topic(text: str) -> str:
