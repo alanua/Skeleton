@@ -37,6 +37,7 @@ REGISTERED_ACTION_REPLENISH_RUNNER_QUEUE = "replenish_runner_queue"
 BUILD_AND_LOCAL_OTA_OPERATION: Final = "build_and_local_ota"
 LAVALAMP_PROJECT: Final = "lavalamp"
 LAVALAMP_REPOSITORY: Final = "alanua/Lavalamp"
+LAVALAMP_SOURCE_REPOSITORY: Final = "https://github.com/alanua/Lavalamp.git"
 LAVALAMP_SOURCE_BRANCH: Final = "main"
 LAVALAMP_SOURCE_SHA: Final = "c98acbf12c51492bee32e1ab07dd349752e4bee5"
 LAVALAMP_WLED_REPOSITORY: Final = "https://github.com/wled/WLED.git"
@@ -296,13 +297,13 @@ class RepositoryMaintenanceExecutor:
         try:
             validate_executor_task(self.task_kind, task)
             self._validate_lavalamp_packet(task)
-            source_checkout = self._verified_lavalamp_checkout()
+            self._verify_lavalamp_registry()
             artifact_root = self._validated_artifact_root()
             manifest_path = artifact_root / LAVALAMP_MANIFEST_NAME
             firmware_path = artifact_root / LAVALAMP_FIRMWARE_NAME
             manifest = self._verified_existing_manifest(manifest_path, firmware_path)
             if manifest is None:
-                manifest = self._build_lavalamp_artifact(source_checkout, artifact_root)
+                manifest = self._build_lavalamp_artifact(artifact_root)
 
             request = FirmwareTransferRequest(
                 firmware_path=firmware_path,
@@ -373,28 +374,13 @@ class RepositoryMaintenanceExecutor:
         if task.privacy_boundary != "PUBLIC_SAFE_REPOSITORY_ONLY":
             raise RepositoryMaintenanceBlocked("PRIVACY_BOUNDARY_MISMATCH")
 
-    def _verified_lavalamp_checkout(self) -> Path:
+    def _verify_lavalamp_registry(self) -> None:
         try:
             project = get_project(load_project_tree(self.project_tree_path), LAVALAMP_PROJECT)
         except Exception as exc:
             raise RepositoryMaintenanceBlocked("PROJECT_REGISTRY_UNAVAILABLE") from exc
         if project.get("repo") != LAVALAMP_REPOSITORY:
             raise RepositoryMaintenanceBlocked("PROJECT_REGISTRY_REPOSITORY_MISMATCH")
-        checkout = Path(str(project.get("checkout_path", ""))).resolve()
-        if not checkout.is_dir() or checkout.is_symlink():
-            raise RepositoryMaintenanceBlocked("SOURCE_CHECKOUT_UNAVAILABLE")
-        if _git(self.run_command, ["config", "--get", "remote.origin.url"], checkout) not in {
-            "git@github.com:alanua/Lavalamp.git",
-            "https://github.com/alanua/Lavalamp.git",
-        }:
-            raise RepositoryMaintenanceBlocked("SOURCE_ORIGIN_MISMATCH")
-        if _git(self.run_command, ["branch", "--show-current"], checkout) != LAVALAMP_SOURCE_BRANCH:
-            raise RepositoryMaintenanceBlocked("SOURCE_BRANCH_MISMATCH")
-        if _git(self.run_command, ["rev-parse", "HEAD"], checkout) != LAVALAMP_SOURCE_SHA:
-            raise RepositoryMaintenanceBlocked("SOURCE_SHA_MISMATCH")
-        if _git(self.run_command, ["status", "--porcelain=v1", "--untracked-files=all"], checkout):
-            raise RepositoryMaintenanceBlocked("SOURCE_CHECKOUT_DIRTY")
-        return checkout
 
     def _validated_artifact_root(self) -> Path:
         root = LAVALAMP_ARTIFACT_ROOT
@@ -430,10 +416,23 @@ class RepositoryMaintenanceExecutor:
         _assert_only_final_artifacts(manifest_path.parent)
         return manifest
 
-    def _build_lavalamp_artifact(self, source_checkout: Path, artifact_root: Path) -> dict[str, object]:
+    def _build_lavalamp_artifact(self, artifact_root: Path) -> dict[str, object]:
         temp_dir: Path | None = None
         try:
             temp_dir = Path(tempfile.mkdtemp(prefix="build-", dir=str(artifact_root))).resolve()
+            source_checkout = temp_dir / "Lavalamp-source"
+            _ok(self.run_command(["git", "init", str(source_checkout)], None, 30, None), "SOURCE_INIT_FAILED")
+            _ok(
+                self.run_command(["git", "remote", "add", "origin", LAVALAMP_SOURCE_REPOSITORY], source_checkout, 30, None),
+                "SOURCE_REMOTE_FAILED",
+            )
+            _ok(
+                self.run_command(["git", "fetch", "--depth", "1", "origin", LAVALAMP_SOURCE_SHA], source_checkout, 600, None),
+                "SOURCE_FETCH_FAILED",
+            )
+            _ok(self.run_command(["git", "checkout", "--detach", LAVALAMP_SOURCE_SHA], source_checkout, 30, None), "SOURCE_CHECKOUT_FAILED")
+            self._verify_lavalamp_source_snapshot(source_checkout, artifact_root)
+
             wled_dir = temp_dir / "WLED"
             _ok(self.run_command(["git", "init", str(wled_dir)], None, 30, None), "WLED_INIT_FAILED")
             _ok(self.run_command(["git", "remote", "add", "origin", LAVALAMP_WLED_REPOSITORY], wled_dir, 30, None), "WLED_REMOTE_FAILED")
@@ -442,6 +441,7 @@ class RepositoryMaintenanceExecutor:
             if _git(self.run_command, ["rev-parse", "HEAD"], wled_dir) != LAVALAMP_WLED_SHA:
                 raise RepositoryMaintenanceBlocked("WLED_HEAD_MISMATCH")
 
+            self._verify_lavalamp_source_snapshot(source_checkout, artifact_root)
             self._apply_lavalamp_overlay(source_checkout, wled_dir)
             self._verify_effect_registration(wled_dir)
             command = _platformio_command(self.run_command)
@@ -499,6 +499,24 @@ class RepositoryMaintenanceExecutor:
         finally:
             if temp_dir is not None:
                 shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def _verify_lavalamp_source_snapshot(self, source_checkout: Path, artifact_root: Path) -> None:
+        if source_checkout.is_symlink() or not source_checkout.is_dir():
+            raise RepositoryMaintenanceBlocked("SOURCE_SNAPSHOT_UNAVAILABLE")
+        resolved_root = artifact_root.resolve()
+        resolved_source = source_checkout.resolve()
+        try:
+            resolved_source.relative_to(resolved_root)
+        except ValueError as exc:
+            raise RepositoryMaintenanceBlocked("SOURCE_SNAPSHOT_OUTSIDE_ARTIFACT_ROOT") from exc
+        if _git(self.run_command, ["config", "--get", "remote.origin.url"], resolved_source) != LAVALAMP_SOURCE_REPOSITORY:
+            raise RepositoryMaintenanceBlocked("SOURCE_ORIGIN_MISMATCH")
+        if _git(self.run_command, ["branch", "--show-current"], resolved_source):
+            raise RepositoryMaintenanceBlocked("SOURCE_BRANCH_MISMATCH")
+        if _git(self.run_command, ["rev-parse", "HEAD"], resolved_source) != LAVALAMP_SOURCE_SHA:
+            raise RepositoryMaintenanceBlocked("SOURCE_SHA_MISMATCH")
+        if _git(self.run_command, ["status", "--porcelain=v1", "--untracked-files=all"], resolved_source):
+            raise RepositoryMaintenanceBlocked("SOURCE_CHECKOUT_DIRTY")
 
     def _apply_lavalamp_overlay(self, source_checkout: Path, wled_dir: Path) -> None:
         override = source_checkout / "overlays" / "wled" / "platformio_override.ini"

@@ -16,6 +16,7 @@ from core.runner_repository_maintenance_executor import (
     LAVALAMP_PLATFORMIO_ENV,
     LAVALAMP_REPOSITORY,
     LAVALAMP_SOURCE_BRANCH,
+    LAVALAMP_SOURCE_REPOSITORY,
     LAVALAMP_SOURCE_SHA,
     LAVALAMP_WLED_REPOSITORY,
     LAVALAMP_WLED_SHA,
@@ -293,6 +294,11 @@ def _lavalamp_task(**overrides: object) -> RunnerTask:
 
 def _source_checkout(tmp_path: Path) -> Path:
     checkout = tmp_path / "Lavalamp"
+    _populate_source_checkout(checkout)
+    return checkout
+
+
+def _populate_source_checkout(checkout: Path) -> None:
     (checkout / "overlays/wled/usermods/cylinder_lava").mkdir(parents=True)
     (checkout / "overlays/wled/platformio_override.ini").write_text(
         "[env:cylinder_lava_esp32]\n", encoding="utf-8"
@@ -304,7 +310,6 @@ def _source_checkout(tmp_path: Path) -> Path:
     (checkout / "patches/wled-usermods-list-cylinder-lava.patch").write_text(
         "patch\n", encoding="utf-8"
     )
-    return checkout
 
 
 def _project_tree(path: Path, checkout: Path) -> Path:
@@ -357,8 +362,15 @@ class FakeFirmwareAction:
 
 
 class FakeRepositoryRunner:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        source_origin: str = LAVALAMP_SOURCE_REPOSITORY,
+        source_head: str = LAVALAMP_SOURCE_SHA,
+    ) -> None:
         self.calls: list[tuple[list[str], Path | None, int | None, object]] = []
+        self.source_origin = source_origin
+        self.source_head = source_head
 
     def __call__(
         self,
@@ -372,21 +384,27 @@ class FakeRepositoryRunner:
             return 0, (
                 LAVALAMP_WLED_REPOSITORY + "\n"
                 if cwd and cwd.name == "WLED"
-                else "https://github.com/alanua/Lavalamp.git\n"
+                else self.source_origin + "\n"
             )
         if args[:2] == ["git", "branch"]:
-            return 0, "main\n"
+            return 0, "\n" if cwd and cwd.name == "Lavalamp-source" else "main\n"
         if args[:2] == ["git", "rev-parse"]:
-            return 0, (LAVALAMP_WLED_SHA if cwd and cwd.name == "WLED" else LAVALAMP_SOURCE_SHA) + "\n"
+            if cwd and cwd.name == "WLED":
+                return 0, LAVALAMP_WLED_SHA + "\n"
+            return 0, self.source_head + "\n"
         if args[:2] == ["git", "status"]:
             return 0, ""
         if args[:2] == ["git", "init"]:
             Path(args[2]).mkdir(parents=True)
             return 0, ""
-        if args[:3] == ["git", "remote", "add"] or args[:2] in (
-            ["git", "fetch"],
-            ["git", "checkout"],
-        ):
+        if args[:3] == ["git", "remote", "add"] or args[:2] == ["git", "fetch"]:
+            return 0, ""
+        if args[:2] == ["git", "checkout"]:
+            assert cwd is not None
+            if cwd.name == "Lavalamp-source":
+                _populate_source_checkout(cwd)
+            if cwd.name == "WLED":
+                (cwd / "usermods").mkdir(parents=True, exist_ok=True)
             return 0, ""
         if args[:2] == ["git", "apply"]:
             assert cwd is not None
@@ -453,8 +471,155 @@ def test_lavalamp_build_retains_only_firmware_and_manifest(
     assert manifest["cleanup_status"] == "complete"
     assert manifest["approval_reference"] == LAVALAMP_APPROVAL_REFERENCE
     assert action.executions == 1
+    assert not any(call[1] == checkout for call in fake.calls)
+    assert any(
+        call[0] == ["git", "fetch", "--depth", "1", "origin", LAVALAMP_SOURCE_SHA]
+        and call[1] is not None
+        and call[1].name == "Lavalamp-source"
+        and str(call[1]).startswith(str(artifact_root))
+        for call in fake.calls
+    )
     assert any(call[0] == ["git", "fetch", "--depth", "1", "origin", LAVALAMP_WLED_SHA] for call in fake.calls)
     assert any(call[0] == ["pio", "run", "-e", LAVALAMP_PLATFORMIO_ENV] for call in fake.calls)
+    assert not any(path.name.startswith("build-") for path in artifact_root.iterdir())
+
+
+def test_lavalamp_shared_checkout_head_is_not_historical_source_authority(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    artifact_root = tmp_path / "artifacts/lavalamp/issue-1922-c98acbf"
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr(maintenance, "LAVALAMP_APPROVED_ARTIFACT_PARENT", tmp_path / "artifacts/lavalamp")
+    monkeypatch.setattr(maintenance, "LAVALAMP_ARTIFACT_ROOT", artifact_root)
+    shared_checkout = tmp_path / "registered-lavalamp"
+    fake = FakeRepositoryRunner()
+    action = FakeFirmwareAction()
+
+    code, output = RepositoryMaintenanceExecutor(
+        project_tree_path=_project_tree(tmp_path, shared_checkout),
+        run_command=fake,
+        firmware_action=action,
+    ).execute(_lavalamp_task(payload__artifact_root=str(artifact_root)))
+
+    assert code == 0
+    assert output.startswith("RESULT: DONE")
+    assert action.executions == 1
+    assert not any(call[1] == shared_checkout for call in fake.calls)
+    assert not any(
+        call[1] == shared_checkout
+        and (
+            call[0][:2] == ["git", "checkout"]
+            or call[0][:2] in (["git", "reset"], ["git", "stash"], ["git", "clean"])
+        )
+        for call in fake.calls
+    )
+
+
+@pytest.mark.parametrize(
+    ("source_origin", "source_head", "reason"),
+    (
+        ("https://github.com/evil/Lavalamp.git", LAVALAMP_SOURCE_SHA, "SOURCE_ORIGIN_MISMATCH"),
+        (LAVALAMP_SOURCE_REPOSITORY, "0" * 40, "SOURCE_SHA_MISMATCH"),
+    ),
+)
+def test_lavalamp_bad_disposable_source_snapshot_blocks_before_overlay_build_or_ota(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    source_origin: str,
+    source_head: str,
+    reason: str,
+) -> None:
+    artifact_root = tmp_path / "artifacts/lavalamp/issue-1922-c98acbf"
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr(maintenance, "LAVALAMP_APPROVED_ARTIFACT_PARENT", tmp_path / "artifacts/lavalamp")
+    monkeypatch.setattr(maintenance, "LAVALAMP_ARTIFACT_ROOT", artifact_root)
+    fake = FakeRepositoryRunner(source_origin=source_origin, source_head=source_head)
+    action = FakeFirmwareAction()
+    registered_checkout = tmp_path / "registered-lavalamp"
+    registered_checkout.mkdir()
+
+    code, output = RepositoryMaintenanceExecutor(
+        project_tree_path=_project_tree(tmp_path, registered_checkout),
+        run_command=fake,
+        firmware_action=action,
+    ).execute(_lavalamp_task(payload__artifact_root=str(artifact_root)))
+
+    assert code == 0
+    assert "RESULT: BLOCKED" in output
+    assert reason in output
+    assert action.executions == 0
+    assert not any(call[0][:2] == ["git", "apply"] for call in fake.calls)
+    assert not any(call[0] == ["pio", "run", "-e", LAVALAMP_PLATFORMIO_ENV] for call in fake.calls)
+    assert not any(path.name.startswith("build-") for path in artifact_root.iterdir())
+
+
+def test_lavalamp_source_snapshot_symlink_blocks_and_cleans_up(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    artifact_root = tmp_path / "artifacts/lavalamp/issue-1922-c98acbf"
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr(maintenance, "LAVALAMP_APPROVED_ARTIFACT_PARENT", tmp_path / "artifacts/lavalamp")
+    monkeypatch.setattr(maintenance, "LAVALAMP_ARTIFACT_ROOT", artifact_root)
+    action = FakeFirmwareAction()
+    calls: list[tuple[list[str], Path | None, int | None, object]] = []
+
+    def fake(args: list[str], cwd: Path | None, timeout: int | None, env: object) -> tuple[int, str]:
+        calls.append((args, cwd, timeout, env))
+        if args[:2] == ["git", "init"]:
+            target = Path(args[2])
+            if target.name == "Lavalamp-source":
+                outside = tmp_path / "outside-source"
+                outside.mkdir()
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.symlink_to(outside, target_is_directory=True)
+            else:
+                target.mkdir(parents=True)
+            return 0, ""
+        if args[:3] == ["git", "remote", "add"] or args[:2] in (["git", "fetch"], ["git", "checkout"]):
+            return 0, ""
+        return 1, "unexpected"
+
+    registered_checkout = tmp_path / "registered-lavalamp"
+    registered_checkout.mkdir()
+    code, output = RepositoryMaintenanceExecutor(
+        project_tree_path=_project_tree(tmp_path, registered_checkout),
+        run_command=fake,
+        firmware_action=action,
+    ).execute(_lavalamp_task(payload__artifact_root=str(artifact_root)))
+
+    assert code == 0
+    assert "RESULT: BLOCKED" in output
+    assert "SOURCE_SNAPSHOT_UNAVAILABLE" in output
+    assert action.executions == 0
+    assert not any(call[0][:2] == ["git", "apply"] for call in calls)
+    assert not any(path.name.startswith("build-") for path in artifact_root.iterdir())
+
+
+def test_lavalamp_source_snapshot_outside_artifact_root_blocks_and_cleans_up(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    artifact_root = tmp_path / "artifacts/lavalamp/issue-1922-c98acbf"
+    outside_build = tmp_path / "outside-build"
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr(maintenance, "LAVALAMP_APPROVED_ARTIFACT_PARENT", tmp_path / "artifacts/lavalamp")
+    monkeypatch.setattr(maintenance, "LAVALAMP_ARTIFACT_ROOT", artifact_root)
+    monkeypatch.setattr(maintenance.tempfile, "mkdtemp", lambda **_kwargs: str(outside_build))
+    fake = FakeRepositoryRunner()
+    action = FakeFirmwareAction()
+    registered_checkout = tmp_path / "registered-lavalamp"
+    registered_checkout.mkdir()
+
+    code, output = RepositoryMaintenanceExecutor(
+        project_tree_path=_project_tree(tmp_path, registered_checkout),
+        run_command=fake,
+        firmware_action=action,
+    ).execute(_lavalamp_task(payload__artifact_root=str(artifact_root)))
+
+    assert code == 0
+    assert "RESULT: BLOCKED" in output
+    assert "SOURCE_SNAPSHOT_OUTSIDE_ARTIFACT_ROOT" in output
+    assert action.executions == 0
+    assert not outside_build.exists()
 
 
 def test_lavalamp_verified_completion_does_not_reflash(
