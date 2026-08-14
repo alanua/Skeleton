@@ -2,6 +2,9 @@ package com.skeleton.home
 
 import com.skeleton.home.auth.SyntheticSession
 import com.skeleton.home.domain.ConnectivityStatus
+import com.skeleton.home.domain.OperatorDashboardSections
+import com.skeleton.home.domain.OperatorDashboardState
+import com.skeleton.home.domain.OperatorLiveItem
 import com.skeleton.home.domain.UserRole
 import com.skeleton.home.domain.VerifiedActionState
 import com.skeleton.home.navigation.HomeRoute
@@ -63,5 +66,29 @@ class HomeContractTest {
             listOf("SENT", "ACCEPTED", "APPLIED", "PHYSICALLY_VERIFIED"),
             VerifiedActionState.entries.map { it.name },
         )
+    }
+
+    @Test
+    fun operatorDashboardSectionsUseSimpleUkrainianPrimaryLabels() {
+        val state = OperatorDashboardState(
+            connectivityStatus = ConnectivityStatus.ONLINE,
+            stale = false,
+            refreshedAt = 10L,
+            message = "Стан оновлено",
+            sections = OperatorDashboardSections(
+                workingNow = listOf(OperatorLiveItem("Працює", "Деталі", 10L)),
+                waiting = listOf(OperatorLiveItem("Чекає", "Деталі", 9L)),
+                needsAttention = listOf(OperatorLiveItem("Потрібна дія", "Деталі", 8L)),
+                recentlyDone = listOf(OperatorLiveItem("Готово", "Деталі", 7L)),
+                next = listOf(OperatorLiveItem("Далі", "Деталі", 6L)),
+            ),
+        )
+
+        assertEquals("Працює", state.sections.workingNow.single().title)
+        assertEquals("Чекає", state.sections.waiting.single().title)
+        assertEquals("Потрібна дія", state.sections.needsAttention.single().title)
+        assertEquals("Готово", state.sections.recentlyDone.single().title)
+        assertEquals("Далі", state.sections.next.single().title)
+        assertTrue(state.sections.workingNow.single().drillDown.isEmpty())
     }
 }

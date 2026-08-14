@@ -30,8 +30,35 @@ data class HomePlaceholderState(
     val summary: String,
 )
 
+data class OperatorLiveItem(
+    val title: String,
+    val detail: String,
+    val updatedAt: Long,
+    val drillDown: Map<String, String> = emptyMap(),
+)
+
+data class OperatorDashboardSections(
+    val workingNow: List<OperatorLiveItem> = emptyList(),
+    val waiting: List<OperatorLiveItem> = emptyList(),
+    val needsAttention: List<OperatorLiveItem> = emptyList(),
+    val recentlyDone: List<OperatorLiveItem> = emptyList(),
+    val next: List<OperatorLiveItem> = emptyList(),
+)
+
+data class OperatorDashboardState(
+    val connectivityStatus: ConnectivityStatus,
+    val stale: Boolean,
+    val refreshedAt: Long?,
+    val message: String,
+    val sections: OperatorDashboardSections = OperatorDashboardSections(),
+)
+
 interface CanonicalHomeApi {
     suspend fun loadPlaceholderState(session: HomeSession): HomePlaceholderState
+}
+
+interface OperatorDashboardRepository {
+    suspend fun loadDashboard(session: HomeSession): OperatorDashboardState
 }
 
 interface AuthSessionProvider {
