@@ -5,6 +5,7 @@ import com.skeleton.home.domain.ConnectivityStatus
 import com.skeleton.home.domain.UserRole
 import com.skeleton.home.domain.VerifiedActionState
 import com.skeleton.home.navigation.HomeRoute
+import com.skeleton.home.navigation.OperatorBottomRoutes
 import com.skeleton.home.navigation.PrimaryBottomRoutes
 import com.skeleton.home.navigation.bottomRoutesFor
 import com.skeleton.home.navigation.canNavigateTo
@@ -22,6 +23,7 @@ class HomeContractTest {
             listOf("Головна", "Відео", "Пристрої", "СК"),
             bottomRoutesFor(operator.currentSession(), operator).map { it.label },
         )
+        assertEquals(listOf(HomeRoute.Home, HomeRoute.Video, HomeRoute.Devices, HomeRoute.OperatorHub), OperatorBottomRoutes)
         assertFalse(bottomRoutesFor(operator.currentSession(), operator).contains(HomeRoute.Remote))
     }
 
@@ -63,5 +65,12 @@ class HomeContractTest {
             listOf("SENT", "ACCEPTED", "APPLIED", "PHYSICALLY_VERIFIED"),
             VerifiedActionState.entries.map { it.name },
         )
+    }
+
+    @Test
+    fun routeIdsRestoreStableDestinations() {
+        assertEquals(HomeRoute.Video, HomeRoute.fromRoute("video"))
+        assertEquals(HomeRoute.Devices, HomeRoute.fromRoute("devices"))
+        assertEquals(HomeRoute.Home, HomeRoute.fromRoute("missing"))
     }
 }
