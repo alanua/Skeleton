@@ -1,7 +1,9 @@
 package com.skeleton.home
 
 import com.skeleton.home.auth.SyntheticSession
+import com.skeleton.home.data.HomeEdgeEndpointConfig
 import com.skeleton.home.domain.ConnectivityStatus
+import com.skeleton.home.domain.OperatorLiveStateStatus
 import com.skeleton.home.domain.UserRole
 import com.skeleton.home.domain.VerifiedActionState
 import com.skeleton.home.navigation.HomeRoute
@@ -59,9 +61,17 @@ class HomeContractTest {
     fun roleAndStateEnumsPreserveFutureContractValues() {
         assertEquals(listOf("OPERATOR", "ORDINARY", "SPOUSE"), UserRole.entries.map { it.name })
         assertEquals(listOf("ONLINE", "DEGRADED", "OFFLINE"), ConnectivityStatus.entries.map { it.name })
+        assertEquals(listOf("CURRENT", "STALE", "OFFLINE"), OperatorLiveStateStatus.entries.map { it.name })
         assertEquals(
             listOf("SENT", "ACCEPTED", "APPLIED", "PHYSICALLY_VERIFIED"),
             VerifiedActionState.entries.map { it.name },
         )
+    }
+
+    @Test
+    fun operatorLiveStateEndpointUsesCanonicalPath() {
+        val config = HomeEdgeEndpointConfig("http://skeleton-cast.local:8100")
+
+        assertEquals("http://skeleton-cast.local:8100/api/operator/live-state", config.liveStateUrl)
     }
 }

@@ -30,6 +30,43 @@ data class HomePlaceholderState(
     val summary: String,
 )
 
+enum class OperatorLiveStateStatus {
+    CURRENT,
+    STALE,
+    OFFLINE,
+}
+
+data class OperatorDashboardSection(
+    val title: String,
+    val value: String,
+    val status: String,
+    val detail: String? = null,
+)
+
+data class OperatorLiveState(
+    val status: OperatorLiveStateStatus,
+    val observedAtEpochSeconds: Long?,
+    val checkedAtEpochSeconds: Long,
+    val staleAfterSeconds: Long,
+    val sections: List<OperatorDashboardSection>,
+    val offlineReason: String?,
+) {
+    companion object {
+        fun offline(
+            reason: String,
+            checkedAtEpochSeconds: Long,
+        ): OperatorLiveState =
+            OperatorLiveState(
+                status = OperatorLiveStateStatus.OFFLINE,
+                observedAtEpochSeconds = null,
+                checkedAtEpochSeconds = checkedAtEpochSeconds,
+                staleAfterSeconds = 60,
+                sections = emptyList(),
+                offlineReason = reason,
+            )
+    }
+}
+
 interface CanonicalHomeApi {
     suspend fun loadPlaceholderState(session: HomeSession): HomePlaceholderState
 }

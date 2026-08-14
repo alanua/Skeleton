@@ -24,6 +24,11 @@ import player
 import site_registry
 from resolver import BrowserChallengeError, OriginProtectedError, resolve_page
 
+try:
+    from core.operator_live_state import build_skeleton_cast_live_state
+except Exception:
+    build_skeleton_cast_live_state = None
+
 HOME = Path('/home/valertos08')
 BASE = HOME / '.local/lib/skeleton-cast'
 STATE = HOME / '.local/state/skeleton-cast'
@@ -1122,6 +1127,48 @@ def remote_keyboard() -> Response:
 def player_state() -> Response:
     _require()
     return jsonify(player.status())
+
+
+@app.get('/api/operator/live-state')
+def operator_live_state() -> Response:
+    _require()
+    providers = {
+        'player': player.status,
+        'mode': player.mode_status,
+        'volume': _volume_status,
+        'hyperion': _hyperion_status,
+        'game': _game_status,
+    }
+    if build_skeleton_cast_live_state is not None:
+        return jsonify(build_skeleton_cast_live_state(providers))
+    return jsonify(_fallback_operator_live_state(providers))
+
+
+def _fallback_operator_live_state(providers: dict) -> dict:
+    sections = []
+    for section_id, title, provider in (
+        ('player', 'Плеєр', providers['player']),
+        ('mode', 'Режим', providers['mode']),
+        ('volume', 'Гучність', providers['volume']),
+        ('hyperion', 'Підсвітка', providers['hyperion']),
+        ('game', 'Ігровий ввід', providers['game']),
+    ):
+        try:
+            payload = provider()
+            value = payload.get('label') or payload.get('state') or payload.get('status') or payload.get('level') or 'Дані отримано'
+            if isinstance(value, bool):
+                value = 'Увімкнено' if value else 'Вимкнено'
+            sections.append({'section_id': section_id, 'title_uk': title, 'value_uk': str(value), 'status': str(payload.get('status') or 'OK').upper()})
+        except Exception as exc:
+            sections.append({'section_id': section_id, 'title_uk': title, 'value_uk': 'Недоступно', 'status': 'UNAVAILABLE', 'detail_uk': str(exc).strip()[-160:]})
+    now = int(time.time())
+    return {
+        'schema': 'skeleton.operator.live_state.v1',
+        'observed_at_epoch_seconds': now,
+        'stale_after_seconds': 60,
+        'stale': False,
+        'sections': sections,
+    }
 
 
 @app.post('/api/seek')
