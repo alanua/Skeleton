@@ -18,6 +18,36 @@ Missing or unknown maintenance task ids are reported as `BLOCKED`.
 
 ## Current allowlist
 
+`home_edge_01_media_source_snapshot_signer_install_v1` is a fixed-purpose
+Runner maintenance task for installing or repairing the already-reviewed Home
+Edge media-source snapshot signer from exact current `main`.
+
+The issue controls only the maintenance task id. It does not control a command,
+path, argv, script, service, user, package, repository, checkout, or runtime
+variant. Command-looking issue text is ignored.
+
+The handler verifies the canonical registered Skeleton checkout for exact
+`Repository=alanua/Skeleton`, origin remote parity, clean `main`, exact
+current-main equality, and the current-main Git blobs for the installer,
+payload, wrapper, and contract. The protected installer path is parsed only
+from the reviewed installer bytes and must match the code-owned fixed path
+declared there.
+
+The only allowed mutating step is delegation to an already-reviewed fixed
+root-capable Runner maintenance primitive that copies the installer as inert
+bytes to the protected root-owned installer path and then runs only that
+protected installer with the fixed canonical repo-root/current-checkout
+binding. If that fixed primitive is absent, raises, or returns an ambiguous
+result, the task reports `NEEDS_OPERATOR`; it must not fall back to subprocess
+sudo, a shell, a generic command executor, or a broad sudoers grant.
+
+After the privileged primitive reports a precise success, the handler performs
+a read-only post-audit. `signer_state=CURRENT` is reported only when the
+installed payload, wrapper, and contract blobs match the installer pins and
+the canonical Runner identity has exact no-argv sudo authorization for the
+installed signer. Public output is limited to booleans, hashes, and enums, and
+routine success reports `telegram_notifications=0`.
+
 `replenish_runner_queue` promotes public-safe `agent:task` issues into
 `runner:ready` until the ready queue reaches deterministic target depth 3,
 bounded by maximum depth 6. `runner:backlog` remains supported as an optional

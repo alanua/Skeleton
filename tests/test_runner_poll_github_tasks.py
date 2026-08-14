@@ -452,10 +452,14 @@ def test_home_edge_media_source_snapshot_registry_exposes_only_exact_fixed_task_
     variants = {
         task_id
         for task_id in runner.RUNTIME_MAINTENANCE_TASK_IDS
-        if "media_source_snapshot" in task_id
+        if "media_source_snapshot" in task_id and "signer_install" not in task_id
     }
 
     assert variants == {runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1}
+    assert (
+        runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1
+        in runner.RUNTIME_MAINTENANCE_TASK_IDS
+    )
     assert (
         runner.dispatch_runtime_maintenance_task(
             "home_edge_01_media_source_snapshot_v1_extra",
@@ -18118,6 +18122,250 @@ def test_home_edge_audit_persist_runner_blocks_wrong_registry_metadata() -> None
     assert report.startswith("BLOCKED:")
     assert "audit_persist_status=blocked" in report
     assert "success_criteria=not_met" in report
+
+
+def _snapshot_signer_preflight() -> runner.HomeEdgeSnapshotSignerPreflight:
+    return runner.HomeEdgeSnapshotSignerPreflight(
+        checkout_path=runner.ROOT,
+        checkout_head_sha=HEAD_SHA,
+        installer_blob_sha="b" * 40,
+        protected_installer_path=(
+            "/usr/local/libexec/skeleton/home-edge/media-source-snapshot-installer/"
+            "install_home_edge_media_source_snapshot_signer.sh"
+        ),
+        installer_bytes=b"#!/usr/bin/env bash\n",
+        payload_blob_sha="c" * 40,
+        wrapper_blob_sha="d" * 40,
+        contract_blob_sha="e" * 40,
+        status_lines=[
+            "target_repository=alanua/Skeleton",
+            f"checkout_head_sha={HEAD_SHA}",
+            f"github_main_sha={HEAD_SHA}",
+            "checkout_sync_state=equal",
+            "installer_blob_sha=" + "b" * 40,
+            "source_installer_blob_sha=" + "b" * 40,
+            "payload_blob_sha=" + "c" * 40,
+            "wrapper_blob_sha=" + "d" * 40,
+            "contract_blob_sha=" + "e" * 40,
+        ],
+    )
+
+
+def test_snapshot_signer_install_task_is_explicitly_dispatched() -> None:
+    with mock.patch.object(
+        runner,
+        "home_edge_01_media_source_snapshot_signer_install_v1",
+        return_value="DONE: test",
+    ) as action:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1,
+            str(Path.cwd()),
+            "sudo reboot\n--repo-root /tmp/evil",
+        )
+
+    assert report == "DONE: test"
+    action.assert_called_once_with(str(Path.cwd()), "sudo reboot\n--repo-root /tmp/evil")
+
+
+def test_snapshot_signer_install_needs_operator_without_fixed_root_primitive() -> None:
+    with (
+        mock.patch.object(
+            runner,
+            "_home_edge_snapshot_signer_preflight",
+            return_value=(_snapshot_signer_preflight(), None),
+        ),
+        mock.patch.object(
+            runner,
+            "_fixed_home_edge_snapshot_signer_primitive",
+            return_value=None,
+        ),
+        mock.patch.object(runner, "run_command") as run_command,
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1,
+            str(Path.cwd()),
+            "sudo cp /tmp/evil /etc/sudoers.d/evil",
+        )
+
+    assert runner.maintenance_report_status(report) == "NEEDS_OPERATOR"
+    assert "privileged_primitive=unavailable" in report
+    assert "reason=missing_fixed_root_capable_primitive" in report
+    assert "sudo cp" not in report
+    run_command.assert_not_called()
+
+
+def test_snapshot_signer_install_preflight_block_stops_before_privileged_action() -> None:
+    blocked = runner._maintenance_report(
+        "BLOCKED",
+        runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1,
+        [
+            "target_repository=alanua/Skeleton",
+            "reason=checkout_dirty",
+        ],
+        "not_met",
+    )
+    primitive = mock.Mock()
+
+    with (
+        mock.patch.object(
+            runner,
+            "_home_edge_snapshot_signer_preflight",
+            return_value=(None, blocked),
+        ),
+        mock.patch.object(
+            runner,
+            "_fixed_home_edge_snapshot_signer_primitive",
+            return_value=primitive,
+        ),
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1,
+            str(Path.cwd()),
+            "git reset --hard\nsudo env",
+        )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "reason=checkout_dirty" in report
+    primitive.assert_not_called()
+
+
+def test_snapshot_signer_success_uses_fixed_handoff_and_post_audit() -> None:
+    preflight = _snapshot_signer_preflight()
+    calls: list[dict[str, object]] = []
+
+    def primitive(**kwargs: object) -> dict[str, object]:
+        calls.append(kwargs)
+        return {
+            "status": "DONE",
+            "protected_copy_verified": True,
+            "exact_installer_invoked": True,
+            "installer_exit_code": 0,
+        }
+
+    with (
+        mock.patch.object(
+            runner,
+            "_home_edge_snapshot_signer_preflight",
+            return_value=(preflight, None),
+        ),
+        mock.patch.object(
+            runner,
+            "_fixed_home_edge_snapshot_signer_primitive",
+            return_value=primitive,
+        ),
+        mock.patch.object(
+            runner,
+            "_home_edge_snapshot_signer_post_audit",
+            return_value=[
+                "post_audit_status=verified",
+                "signer_state=CURRENT",
+                "signer_sudo_authorization=exact_no_argv",
+            ],
+        ),
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1,
+            str(Path.cwd()),
+            (
+                "Installer Path: /tmp/evil.sh\n"
+                "User: root\n"
+                "Argv: --repo-root /tmp/evil\n"
+                "sudo /tmp/evil.sh"
+            ),
+        )
+
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert calls == [
+        {
+            "installer_bytes": preflight.installer_bytes,
+            "installer_blob_sha": preflight.installer_blob_sha,
+            "protected_installer_path": preflight.protected_installer_path,
+            "repo_root": str(preflight.checkout_path),
+            "checkout_head_sha": preflight.checkout_head_sha,
+        }
+    ]
+    assert "protected_copy_verified=true" in report
+    assert "exact_installer_invoked=true" in report
+    assert "signer_state=CURRENT" in report
+    assert "signer_sudo_authorization=exact_no_argv" in report
+    assert "telegram_notifications=0" in report
+    assert "/tmp/evil" not in report
+
+
+def test_snapshot_signer_ambiguous_installer_result_needs_operator() -> None:
+    with (
+        mock.patch.object(
+            runner,
+            "_home_edge_snapshot_signer_preflight",
+            return_value=(_snapshot_signer_preflight(), None),
+        ),
+        mock.patch.object(
+            runner,
+            "_fixed_home_edge_snapshot_signer_primitive",
+            return_value=lambda **_kwargs: {"status": "DONE"},
+        ),
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1,
+            str(Path.cwd()),
+        )
+
+    assert runner.maintenance_report_status(report) == "NEEDS_OPERATOR"
+    assert "installer_result=ambiguous" in report
+    assert "reason=installer_result_ambiguous" in report
+
+
+def test_snapshot_signer_post_audit_mismatch_never_reports_current() -> None:
+    with (
+        mock.patch.object(
+            runner,
+            "_home_edge_snapshot_signer_preflight",
+            return_value=(_snapshot_signer_preflight(), None),
+        ),
+        mock.patch.object(
+            runner,
+            "_fixed_home_edge_snapshot_signer_primitive",
+            return_value=lambda **_kwargs: {
+                "status": "DONE",
+                "protected_copy_verified": True,
+                "exact_installer_invoked": True,
+                "installer_exit_code": 0,
+            },
+        ),
+        mock.patch.object(
+            runner,
+            "_home_edge_snapshot_signer_post_audit",
+            return_value=None,
+        ),
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1,
+            str(Path.cwd()),
+        )
+
+    assert runner.maintenance_report_status(report) == "NEEDS_OPERATOR"
+    assert "post_audit_status=failed" in report
+    assert "signer_state=not_current" in report
+    assert "signer_state=CURRENT" not in report
+
+
+def test_snapshot_signer_installer_pin_parser_reads_fixed_path_and_blobs() -> None:
+    text = (runner.ROOT / runner.HOME_EDGE_SNAPSHOT_SIGNER_INSTALLER_REL).read_text(
+        encoding="utf-8"
+    )
+
+    protected_path, pins, reason = runner._parse_home_edge_snapshot_signer_installer(text)
+
+    assert reason is None
+    assert protected_path == (
+        "/usr/local/libexec/skeleton/home-edge/media-source-snapshot-installer/"
+        "install_home_edge_media_source_snapshot_signer.sh"
+    )
+    assert pins == {
+        "PAYLOAD": "2c34196722db3d8bd4596917576a5653166c5e9b",
+        "WRAPPER": "24620d9e9fe4f62c055113e6aeefb2d0984be2d5",
+        "CONTRACT": "d734fdf7350e0de355851d47c837f12ab68d0878",
+    }
 
 
 
