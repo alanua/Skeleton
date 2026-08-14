@@ -43,6 +43,21 @@ count, and `telegram_notifications=0`. After normal task completion, the
 Runner invokes the same replenishment path when ready depth falls below 3; ready
 depths 3 through 6 remain stable across repeated calls.
 
+Successful codegen publication now feeds the same queue instead of a separate
+control plane. When a `DONE` report contains a verified public PR, the Runner
+creates or reuses exactly one `validate_pr_branch` runtime-maintenance issue
+with `agent:task`, `queue:RUN_NOW`, exact expected head SHA, and exact expected
+base SHA. Repeated polls or restarts reuse the idempotency key for that PR
+head/base pair and do not create duplicate validation issues. Validation
+completion re-evaluates the queue through the existing replenisher path and
+does not auto-merge, mark a PR ready, or synthesize approval.
+
+If a codegen task contract declares `existing_pr` or `update_existing_pr`, the
+continuation can bind only to that declared PR identity. A successful report
+that points at a different parallel PR is treated as a bounded
+publication-contract failure for repair, and no validation continuation is
+created for the wrong PR.
+
 `prepare_private_static_site_handoff` prepares a durable encrypted handoff for a
 private static web package. It requires exact operator approval and an artifact
 id:
