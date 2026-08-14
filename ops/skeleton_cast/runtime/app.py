@@ -9,6 +9,7 @@ import os
 import re
 import socket
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -46,6 +47,7 @@ TV_MODE = HOME / '.local/bin/tv-mode'
 XDOTOOL = '/usr/bin/xdotool'
 CHROME_MEDIA = HOME / '.local/bin/home-edge-chrome-media'
 ANDROID_SERIAL = '192.168.240.112:5555'
+SKELETON_REPO_ROOT = Path(os.environ.get('SKELETON_REPO_ROOT', str(Path(__file__).resolve().parents[3])))
 ALLOWED = ('uakino.club', 'uakino.me', 'uakino.best', 'klon.fun', 'ashdi.vip')
 URL_RE = re.compile(r'https?://[^\s<>"\']+', re.I)
 
@@ -765,6 +767,15 @@ def _set_hyperion(enabled: bool) -> dict:
     return {**latest, 'unchanged': False}
 
 
+def _operator_live_state() -> dict:
+    repo_root = SKELETON_REPO_ROOT
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    from core.operator_live_state import load_operator_live_state
+
+    return load_operator_live_state(repo_root).as_dict()
+
+
 @app.after_request
 def headers(response: Response) -> Response:
     response.headers['X-Content-Type-Options'] = 'nosniff'
@@ -979,6 +990,20 @@ def hyperion_state() -> Response:
         return jsonify(_hyperion_status())
     except Exception as exc:
         return jsonify({'error': str(exc)}), 503
+
+
+@app.get('/api/operator/live-state')
+def operator_live_state() -> Response:
+    _require()
+    try:
+        return jsonify(_operator_live_state())
+    except Exception as exc:
+        return jsonify({
+            'schema': 'skeleton.operator_live_state.v1',
+            'freshness': 'offline',
+            'error': str(exc)[:500],
+            'sections': [],
+        }), 503
 
 
 @app.post('/api/hyperion')

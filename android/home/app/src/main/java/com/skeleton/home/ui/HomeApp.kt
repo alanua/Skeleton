@@ -10,6 +10,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.Home
@@ -27,6 +29,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -42,8 +45,13 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.skeleton.home.data.SyntheticHomeRepository
+import com.skeleton.home.data.HomeEdgeOperatorDashboardRepository
+import com.skeleton.home.data.freshnessLabel
+import com.skeleton.home.data.unavailableOperatorDashboard
 import com.skeleton.home.domain.AuthSessionProvider
+import com.skeleton.home.domain.HomeSession
+import com.skeleton.home.domain.OperatorDashboardApi
+import com.skeleton.home.domain.OperatorDashboardState
 import com.skeleton.home.navigation.HomeRoute
 import com.skeleton.home.navigation.bottomRoutesFor
 import com.skeleton.home.navigation.canNavigateTo
@@ -65,7 +73,7 @@ fun HomeApp(
 fun HomeShell(
     session: AuthSessionProvider,
     initialRoute: HomeRoute = HomeRoute.Home,
-    repository: SyntheticHomeRepository = SyntheticHomeRepository(),
+    operatorDashboard: OperatorDashboardApi = HomeEdgeOperatorDashboardRepository(),
 ) {
     val currentSession = session.currentSession()
     val bottomRoutes = bottomRoutesFor(currentSession, session)
@@ -101,7 +109,11 @@ fun HomeShell(
             HomeRoute.Remote -> PlaceholderScreen("Пульт", padding)
             HomeRoute.OperatorHub -> {
                 if (canNavigateTo(HomeRoute.OperatorHub, currentSession, session)) {
-                    OperatorHubScreen(padding)
+                    OperatorHubScreen(
+                        padding = padding,
+                        session = currentSession,
+                        operatorDashboard = operatorDashboard,
+                    )
                 } else {
                     AccessDeniedScreen("СК", padding)
                 }
@@ -177,11 +189,21 @@ private fun Seek15Button(
 }
 
 @Composable
-fun OperatorHubScreen(padding: PaddingValues) {
+fun OperatorHubScreen(
+    padding: PaddingValues,
+    session: HomeSession,
+    operatorDashboard: OperatorDashboardApi,
+) {
+    var state by remember { mutableStateOf<OperatorDashboardState?>(null) }
+    LaunchedEffect(session) {
+        state = operatorDashboard.loadOperatorDashboard(session)
+    }
+    val dashboard = state ?: unavailableOperatorDashboard("live_state_loading")
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(padding)
+            .verticalScroll(rememberScrollState())
             .padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
@@ -193,10 +215,18 @@ fun OperatorHubScreen(padding: PaddingValues) {
             Icon(MaterialHubIcon, contentDescription = "СК", modifier = Modifier.size(32.dp))
             Text("СК", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
         }
-        Text("Огляд стану")
-        Text("Зв'язок: ONLINE / DEGRADED / OFFLINE")
-        Text("Дії: SENT / ACCEPTED / APPLIED / PHYSICALLY_VERIFIED")
-        Text("Операторський контур зарезервовано без живих підключень.")
+        Text(freshnessLabel(dashboard), style = MaterialTheme.typography.bodyMedium)
+        dashboard.sections.forEach { section ->
+            Text(section.titleUk, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            val rows = section.rows.ifEmpty { listOf(section.emptyUk) }
+            rows.forEach { row ->
+                Text(row, style = MaterialTheme.typography.bodyLarge)
+            }
+        }
+        if (dashboard.sections.isEmpty()) {
+            Text("Живий стан СК недоступний.", style = MaterialTheme.typography.titleMedium)
+            Text("Поточний екран не підставляє вигадані рядки замість канонічного стану.")
+        }
     }
 }
 
