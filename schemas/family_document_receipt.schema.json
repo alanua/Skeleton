@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://skeleton.local/schemas/family_document_receipt.schema.json",
+  "title": "Public-safe family document receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "status", "reason_code", "counts"],
+  "properties": {
+    "schema": {"const": "skeleton.family_document_receipt.public.v1"},
+    "status": {"enum": ["DONE", "REVIEW", "BLOCKED", "DEGRADED"]},
+    "reason_code": {"type": "string", "pattern": "^[a-z0-9_]{1,96}$"},
+    "counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}}
+  }
+}
