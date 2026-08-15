@@ -55,6 +55,21 @@ If an index rebuild fails after a canonical mutation is committed, canonical SQL
 
 Graphify and MemPalace never write canonical SQLite directly.
 
+## Secret References
+
+`core.secret_reference.SecretReference` is public-safe metadata, not secret
+authority. A reference must carry the exact project, dataset, repo, branch, and
+task scope, and only allowlisted secret types are accepted. Plaintext secret
+values, local credential paths, environment-variable names, JSON-like payloads,
+and other credential material are rejected at the typed boundary.
+
+Secret resolution fails closed unless a private runner path injects an approved
+adapter result for the exact same typed reference. The approved result may carry
+only an ephemeral credential object for immediate use; the object is not logged,
+serialized, or persisted by the resolver. Codegen must not read Bitwarden,
+provider APIs, `GOOGLE_APPLICATION_CREDENTIALS`, local credential files, or any
+other fallback secret authority.
+
 The automatic cross-domain lifecycle is documented in `docs/memory_lifecycle.md`. It resolves operator/domain/scope before tasks, recalls bounded relevant context through `MemoryGateway`, classifies durable candidates after meaningful events, writes accepted candidates through typed gateway mutations, and returns private runtime results plus public-safe receipts.
 
 ## Status

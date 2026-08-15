@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import subprocess
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Protocol
+
+from core.secret_reference import (
+    ApprovedSecretResolution,
+    SecretReference,
+    SecretReferenceError,
+    resolve_secret_reference,
+)
 
 
 DEFAULT_TASK_DIR = Path("/home/agent/private_runner_inbox/contact_import")
@@ -82,7 +88,12 @@ class ContactImportResult:
         return {key: value for key, value in asdict(self).items() if value is not None}
 
 
-def check_auth(client_factory: Any | None = None) -> tuple[str, str | None]:
+def check_auth(
+    client_factory: Any | None = None,
+    *,
+    credentials_reference: SecretReference | None = None,
+    credentials_resolution: ApprovedSecretResolution | None = None,
+) -> tuple[str, str | None]:
     if client_factory is not None:
         try:
             client_factory()
@@ -92,14 +103,15 @@ def check_auth(client_factory: Any | None = None) -> tuple[str, str | None]:
             return AUTH_INVALID, f"Google Sheets auth probe failed: {type(exc).__name__}"
         return AUTH_READY, None
 
-    credentials_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
-    if credentials_path and not Path(credentials_path).is_file():
-        return AUTH_INVALID, "GOOGLE_APPLICATION_CREDENTIALS points to a missing file."
-
     try:
-        _build_google_sheets_client()
+        _build_google_sheets_client(
+            credentials_reference=credentials_reference,
+            credentials_resolution=credentials_resolution,
+        )
     except FileNotFoundError:
         return AUTH_MISSING, "Google Sheets credentials are not provisioned on this runner."
+    except SecretReferenceError:
+        return AUTH_INVALID, "Google Sheets credentials reference was not approved by the resolver boundary."
     except ImportError:
         return AUTH_INVALID, "Google Sheets client libraries are unavailable in this runtime."
     except Exception as exc:  # noqa: BLE001 - never include credential contents in blocker text.
@@ -116,11 +128,17 @@ def process_private_contact_import(
     dry_run: bool = False,
     sheets_client: SheetsClient | None = None,
     client_factory: Any | None = None,
+    credentials_reference: SecretReference | None = None,
+    credentials_resolution: ApprovedSecretResolution | None = None,
 ) -> ContactImportResult:
     result_root = Path(result_dir)
     result_root.mkdir(parents=True, exist_ok=True)
 
-    auth_status, auth_reason = check_auth(client_factory if sheets_client is None else (lambda: sheets_client))
+    auth_status, auth_reason = check_auth(
+        client_factory if sheets_client is None else (lambda: sheets_client),
+        credentials_reference=credentials_reference,
+        credentials_resolution=credentials_resolution,
+    )
     if auth_status != AUTH_READY:
         result = ContactImportResult(auth_status, None, None, None, 0, 0, None, auth_reason)
         return _write_result(result_root / "auth_check_result.json", result)
@@ -136,7 +154,10 @@ def process_private_contact_import(
 
     task = _load_task(selected_task_path)
     effective_mode = "dry_run" if dry_run else task.mode
-    client = sheets_client if sheets_client is not None else _build_google_sheets_client()
+    client = sheets_client if sheets_client is not None else _build_google_sheets_client(
+        credentials_reference=credentials_reference,
+        credentials_resolution=credentials_resolution,
+    )
 
     try:
         source_values = client.read_values(task.staging_sheet_id, task.staging_tab)
@@ -297,22 +318,23 @@ def post_safe_github_status_comment(
     return status
 
 
-def _build_google_sheets_client() -> SheetsClient:
-    credentials_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
-    if not credentials_path:
-        raise FileNotFoundError("GOOGLE_APPLICATION_CREDENTIALS is not set")
+def _build_google_sheets_client(
+    *,
+    credentials_reference: SecretReference | None = None,
+    credentials_resolution: ApprovedSecretResolution | None = None,
+) -> SheetsClient:
+    if credentials_reference is None:
+        raise FileNotFoundError("typed Google Sheets credentials reference is not set")
+    credentials = resolve_secret_reference(credentials_reference, credentials_resolution)
 
     try:
-        from google.oauth2 import service_account
         from googleapiclient.discovery import build
         from googleapiclient.errors import HttpError
     except ImportError:
         raise
 
-    credentials = service_account.Credentials.from_service_account_file(
-        credentials_path,
-        scopes=DEFAULT_SCOPES,
-    )
+    if hasattr(credentials, "with_scopes"):
+        credentials = credentials.with_scopes(DEFAULT_SCOPES)
     service = build("sheets", "v4", credentials=credentials, cache_discovery=False)
     return GoogleSheetsClient(service, HttpError)
 
