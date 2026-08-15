@@ -750,6 +750,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "next_retry_at",
         "next_action",
         "next_operator_action",
+        "operator_gate",
         "node_identity_status",
         "operation_id",
         "open_issues_count",
@@ -819,6 +820,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "recovery_snapshot_status",
         "reset_status",
         "replay_status",
+        "repair_issue",
         "removed_worktrees_count",
         "report_drawings",
         "report_mode",
@@ -830,6 +832,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "runtime_smoke_check_count",
         "runtime_smoke_decision",
         "runtime_smoke_stable_reason",
+        "runtime_sync_main_issue",
         "runtime_private_action",
         "semantic_record_count",
         "ram_bytes",
@@ -837,6 +840,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "reboot_guard_status",
         "reboot_performed",
         "refresh_count",
+        "refreshed_head_sha",
         "rollback_status",
         "rollback_applied",
         "rollback_ready",
@@ -923,6 +927,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "validation_changed_file",
         "validation_changed_files_count",
         "validation_checkout_head_sha",
+        "validation_continuation",
         "validation_command_index",
         "validation_command_text",
         "validation_error_summary",
@@ -930,6 +935,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "validation_final_status",
         "validation_failing_node",
         "validation_initial_status",
+        "validation_issue",
+        "validation_head_sha",
         "validation_output_tail",
         "version",
         "validation_profile",
@@ -1121,6 +1128,17 @@ class CodegenExistingPrWorktreeRequest:
 class PreflightPrRefreshRequest:
     pr_number: int
     expected_head_sha: str | None
+    successful_validation_head_sha: str | None
+    successful_validation_base_sha: str | None
+    risk: str | None
+    privacy_boundary: str | None
+    protected_files: frozenset[str]
+    unresolved_review_or_ci_failure: bool
+    dependency_or_overlap_hold: bool
+    high_risk_activation: bool
+    activation_plan_registered: bool
+    activation_plan_authorized: bool
+    activation_plan_policy_safe: bool
 
 
 @dataclass(frozen=True)
@@ -1209,6 +1227,7 @@ class RunnerQueueReplenisherCandidate:
     intent_key: str
     allowed_files: frozenset[str]
     dependencies: frozenset[int]
+    domain: str
 
 
 @dataclass(frozen=True)
@@ -9634,6 +9653,29 @@ def _preflight_pr_refresh_metadata(
     metadata = (body or "").split("```task", 1)[0]
     pr_number = _body_field(metadata, "Pull Request")
     expected_head_sha = _body_field(metadata, "Expected Head SHA")
+    successful_validation_head_sha = _body_field(
+        metadata, "Successful Validation Head SHA"
+    )
+    successful_validation_base_sha = _body_field(
+        metadata, "Successful Validation Base SHA"
+    )
+    risk = _body_field(metadata, "Risk")
+    privacy_boundary = _body_field(metadata, "Privacy Boundary")
+    protected_files = frozenset(_body_list_items(metadata, ("Protected Files",)) or ())
+    unresolved_review_or_ci_failure = _metadata_bool(
+        metadata, "Unresolved Review Or CI Failure"
+    )
+    dependency_or_overlap_hold = _metadata_bool(metadata, "Dependency Or Overlap Hold")
+    high_risk_activation = _metadata_bool(metadata, "High Risk Activation")
+    activation_plan_registered = _metadata_bool(
+        metadata, "Activation Plan Registered"
+    )
+    activation_plan_authorized = _metadata_bool(
+        metadata, "Activation Plan Authorized"
+    )
+    activation_plan_policy_safe = _metadata_bool(
+        metadata, "Activation Plan Policy Safe"
+    )
     if not isinstance(pr_number, str) or not re.fullmatch(r"[1-9]\d*", pr_number):
         return None, "missing_or_invalid_pull_request"
     if (
@@ -9641,6 +9683,12 @@ def _preflight_pr_refresh_metadata(
         and _HEAD_SHA_RE.fullmatch(expected_head_sha) is None
     ):
         return None, "invalid_expected_head_sha"
+    for value, reason in (
+        (successful_validation_head_sha, "invalid_successful_validation_head_sha"),
+        (successful_validation_base_sha, "invalid_successful_validation_base_sha"),
+    ):
+        if value is not None and _HEAD_SHA_RE.fullmatch(value) is None:
+            return None, reason
     return (
         PreflightPrRefreshRequest(
             pr_number=int(pr_number),
@@ -9649,9 +9697,37 @@ def _preflight_pr_refresh_metadata(
                 if isinstance(expected_head_sha, str)
                 else None
             ),
+            successful_validation_head_sha=(
+                successful_validation_head_sha.lower()
+                if isinstance(successful_validation_head_sha, str)
+                else None
+            ),
+            successful_validation_base_sha=(
+                successful_validation_base_sha.lower()
+                if isinstance(successful_validation_base_sha, str)
+                else None
+            ),
+            risk=risk.strip().lower() if isinstance(risk, str) else None,
+            privacy_boundary=(
+                privacy_boundary.strip()
+                if isinstance(privacy_boundary, str)
+                else None
+            ),
+            protected_files=protected_files,
+            unresolved_review_or_ci_failure=unresolved_review_or_ci_failure,
+            dependency_or_overlap_hold=dependency_or_overlap_hold,
+            high_risk_activation=high_risk_activation,
+            activation_plan_registered=activation_plan_registered,
+            activation_plan_authorized=activation_plan_authorized,
+            activation_plan_policy_safe=activation_plan_policy_safe,
         ),
         None,
     )
+
+
+def _metadata_bool(metadata: str, field: str) -> bool:
+    value = _body_field(metadata, field)
+    return isinstance(value, str) and value.strip().lower() in {"true", "yes", "1"}
 
 
 def _get_preflight_pr_refresh_state(pr_number: int) -> dict[str, Any]:
@@ -9666,7 +9742,7 @@ def _get_preflight_pr_refresh_state(pr_number: int) -> dict[str, Any]:
             "--json",
             (
                 "number,state,baseRefName,headRefName,headRefOid,"
-                "headRepository,headRepositoryOwner,files"
+                "baseRefOid,headRepository,headRepositoryOwner,files,isDraft,mergeable"
             ),
         ]
     )
@@ -9676,6 +9752,232 @@ def _get_preflight_pr_refresh_state(pr_number: int) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise RuntimeError("gh pr view returned non-object JSON")
     return parsed
+
+
+def _fetch_current_main_sha(cwd: Path = ROOT) -> tuple[str | None, str | None]:
+    code, _output = run_command(
+        ["git", "fetch", "origin", "main:refs/remotes/origin/main"],
+        cwd=cwd,
+    )
+    if code != 0:
+        return None, "fetch_current_main_failed"
+    code, output = run_command(["git", "rev-parse", "refs/remotes/origin/main"], cwd=cwd)
+    if code != 0:
+        return None, "current_main_unavailable"
+    lines = _git_status_path_lines(output)
+    current_main_sha = lines[0].lower() if lines else ""
+    if _HEAD_SHA_RE.fullmatch(current_main_sha) is None:
+        return None, "current_main_sha_invalid"
+    return current_main_sha, None
+
+
+def _preflight_refresh_branch(
+    request: PreflightPrRefreshRequest,
+    pr_state: dict[str, Any],
+    current_main_sha: str,
+) -> tuple[str | None, str | None]:
+    head_ref = str(pr_state.get("headRefName") or "")
+    old_head_sha = str(pr_state.get("headRefOid") or "").lower()
+    old_base_sha = str(pr_state.get("baseRefOid") or "").lower()
+    if (
+        not _safe_issue_publish_branch_name(head_ref)
+        or _HEAD_SHA_RE.fullmatch(old_head_sha) is None
+        or _HEAD_SHA_RE.fullmatch(old_base_sha) is None
+    ):
+        return None, "refresh_pr_state_invalid"
+    if request.expected_head_sha is not None and old_head_sha != request.expected_head_sha:
+        return None, "expected_head_sha_mismatch"
+    if (
+        request.successful_validation_head_sha is not None
+        and old_head_sha != request.successful_validation_head_sha
+    ):
+        return None, "successful_validation_head_mismatch"
+    if (
+        request.successful_validation_base_sha is not None
+        and old_base_sha != request.successful_validation_base_sha
+    ):
+        return None, "successful_validation_base_mismatch"
+
+    commands = (
+        ["git", "cat-file", "-e", f"{old_base_sha}^{{commit}}"],
+        ["git", "cat-file", "-e", f"{old_head_sha}^{{commit}}"],
+        ["git", "cat-file", "-e", f"{current_main_sha}^{{commit}}"],
+    )
+    for command in commands:
+        code, _output = run_command(command, cwd=ROOT)
+        if code != 0:
+            return None, "refresh_object_unavailable"
+    code, output = run_command(
+        ["git", "merge-tree", "--write-tree", current_main_sha, old_head_sha],
+        cwd=ROOT,
+    )
+    if code != 0:
+        return None, "semantic_replay_conflict"
+    if "<<<<<<<" in output or ">>>>>>>" in output or "\nchanged in both\n" in output:
+        return None, "semantic_replay_conflict"
+    tree_lines = _git_status_path_lines(output)
+    tree_sha = tree_lines[0].lower() if tree_lines else ""
+    if _HEAD_SHA_RE.fullmatch(tree_sha) is None:
+        return None, "semantic_replay_tree_invalid"
+    code, output = run_command(
+        [
+            "git",
+            "commit-tree",
+            tree_sha,
+            "-p",
+            current_main_sha,
+            "-p",
+            old_head_sha,
+            "-m",
+            f"Refresh PR #{request.pr_number} onto current main",
+        ],
+        cwd=ROOT,
+    )
+    if code != 0:
+        return None, "refresh_commit_failed"
+    lines = _git_status_path_lines(output)
+    new_head_sha = lines[0].lower() if lines else ""
+    if _HEAD_SHA_RE.fullmatch(new_head_sha) is None:
+        return None, "refresh_commit_sha_invalid"
+    code, _output = run_command(
+        [
+            "git",
+            "push",
+            "origin",
+            f"--force-with-lease={head_ref}:{old_head_sha}",
+            f"{new_head_sha}:refs/heads/{head_ref}",
+        ],
+        cwd=ROOT,
+    )
+    if code != 0:
+        return None, "refresh_push_failed"
+    return new_head_sha, None
+
+
+def _create_bounded_existing_pr_repair_issue(
+    *,
+    request: PreflightPrRefreshRequest,
+    head_sha: str,
+    current_main_sha: str,
+    changed_files: list[str],
+) -> int | None:
+    idempotency_key = (
+        f"update-existing-pr:{REPO}:pr-{request.pr_number}:"
+        f"{hashlib.sha256((head_sha + current_main_sha).encode('ascii')).hexdigest()[:24]}"
+    )
+    body = "\n".join(
+        (
+            "schema: skeleton.runner_task.v1",
+            "privacy_boundary: PUBLIC_SAFE_CONTROL_AND_REPOSITORY_ONLY",
+            f"idempotency_key: {idempotency_key}",
+            "allowed_files:",
+            *(f"  - {path}" for path in changed_files),
+            "",
+            "operation: update_existing_pr",
+            f"repository: {REPO}",
+            f"update_existing_pr: {request.pr_number}",
+            f"expected_pr_head_sha: {head_sha}",
+            f"base_sha: {current_main_sha}",
+            "",
+            "```task",
+            "Repair the existing PR against current main once. Preserve files outside allowed_files and fail closed on head mismatch.",
+            "```",
+        )
+    )
+    return _create_validation_continuation_issue(
+        title=f"Repair PR #{request.pr_number} against current main",
+        body=body,
+    )
+
+
+def _preflight_activation_can_continue(request: PreflightPrRefreshRequest) -> bool:
+    return (
+        request.activation_plan_registered
+        and request.activation_plan_authorized
+        and request.activation_plan_policy_safe
+        and not request.high_risk_activation
+    )
+
+
+def _preflight_auto_merge_block_reason(
+    request: PreflightPrRefreshRequest,
+    pr_state: dict[str, Any],
+    changed_files: list[str],
+) -> str | None:
+    privacy = (request.privacy_boundary or "").upper()
+    if not privacy.startswith("PUBLIC_SAFE"):
+        return "operator_gate=privacy_not_public_safe"
+    if request.risk != "green":
+        return "operator_gate=risk_not_green"
+    if request.protected_files or set(changed_files) & request.protected_files:
+        return "operator_gate=protected_files"
+    if request.unresolved_review_or_ci_failure:
+        return "operator_gate=unresolved_review_or_ci_failure"
+    if request.dependency_or_overlap_hold:
+        return "operator_gate=dependency_or_overlap_hold"
+    if request.high_risk_activation:
+        return "operator_gate=high_risk_activation"
+    if (
+        request.activation_plan_registered
+        or request.activation_plan_authorized
+        or request.activation_plan_policy_safe
+    ) and not _preflight_activation_can_continue(request):
+        return "operator_gate=activation_plan_not_explicitly_safe"
+    if pr_state.get("isDraft") not in {True, False}:
+        return "operator_gate=draft_state_unknown"
+    if str(pr_state.get("mergeable") or "").upper() not in {"MERGEABLE", "TRUE"}:
+        return "operator_gate=pr_not_mergeable"
+    return None
+
+
+def _ready_and_squash_merge_pr(pr_number: int, head_sha: str, was_draft: bool) -> str | None:
+    if was_draft:
+        code, _output = run_command(
+            ["gh", "pr", "ready", str(pr_number), "--repo", REPO]
+        )
+        if code != 0:
+            return "mark_ready_failed"
+    code, _output = run_command(
+        [
+            "gh",
+            "pr",
+            "merge",
+            str(pr_number),
+            "--repo",
+            REPO,
+            "--squash",
+            "--match-head-commit",
+            head_sha,
+        ]
+    )
+    if code != 0:
+        return "squash_merge_failed"
+    return None
+
+
+def _create_runtime_sync_main_continuation(source_pr: int) -> int | None:
+    body = "\n".join(
+        (
+            "schema: skeleton.runner_task.v1",
+            "privacy_boundary: PUBLIC_SAFE_CONTROL_AND_REPOSITORY_ONLY",
+            f"idempotency_key: runtime-sync-main-after-pr-{source_pr}",
+            "allowed_files:",
+            "  - scripts/runner_poll_github_tasks.py",
+            "",
+            f"Mode: {RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {RUNTIME_SYNC_MAIN}",
+            f"Repository: {REPO}",
+            f"Source PR: {source_pr}",
+            "",
+            "```task",
+            "Synchronize the long-lived Runner checkout to current main after a safe merge.",
+            "```",
+        )
+    )
+    return _create_validation_continuation_issue(
+        title=f"Runtime sync main after PR #{source_pr}",
+        body=body,
+    )
 
 
 def _get_preflight_compare_state(head_sha: str) -> dict[str, Any]:
@@ -9823,6 +10125,30 @@ def preflight_pr_refresh(body: str) -> str:
             "not_met",
         )
     status_lines.append(f"head_sha={head_sha}")
+    base_sha = str(pr_state.get("baseRefOid") or "").lower()
+    if _HEAD_SHA_RE.fullmatch(base_sha) is not None:
+        status_lines.append(f"base_sha={base_sha}")
+    if (
+        request.successful_validation_head_sha is not None
+        and request.successful_validation_head_sha != head_sha
+    ):
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=successful_validation_head_mismatch"],
+            "not_met",
+        )
+    if (
+        request.successful_validation_base_sha is not None
+        and base_sha
+        and request.successful_validation_base_sha != base_sha
+    ):
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=successful_validation_base_mismatch"],
+            "not_met",
+        )
 
     changed_files = _pr_file_paths(pr_state)
     status_lines.append(f"changed_files_count={len(changed_files)}")
@@ -9853,6 +10179,20 @@ def preflight_pr_refresh(body: str) -> str:
         changed_files=changed_files,
         files_on_main=files_on_main,
     )
+    has_successful_exact_head_validation = (
+        request.successful_validation_head_sha == head_sha
+        and request.successful_validation_base_sha == base_sha
+    )
+    if (
+        next_action == "manual_review_required"
+        and has_successful_exact_head_validation
+        and compare_state is not None
+        and int(compare_state.get("ahead_by") or 0) > 0
+        and int(compare_state.get("behind_by") or 0) > 0
+        and pr_state.get("baseRefName") == "main"
+        and _head_repository_name_with_owner(pr_state) == REPO
+    ):
+        next_action = "refresh_pr_branch"
     status_lines.extend(
         (
             f"pr_state={str(pr_state.get('state') or '').upper()}",
@@ -9862,6 +10202,108 @@ def preflight_pr_refresh(body: str) -> str:
             f"next_action={next_action}",
         )
     )
+    if (
+        next_action in {"validate_and_merge", "create_fresh_pr", "refresh_pr_branch"}
+        and has_successful_exact_head_validation
+    ):
+        current_main_sha, current_main_reason = _fetch_current_main_sha(ROOT)
+        if current_main_reason is not None or current_main_sha is None:
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [*status_lines, f"reason={current_main_reason or 'current_main_unavailable'}"],
+                "not_met",
+            )
+        status_lines.append(f"current_main_sha={current_main_sha}")
+
+        refreshed_head_sha = head_sha
+        if base_sha != current_main_sha:
+            refreshed_head_sha, refresh_reason = _preflight_refresh_branch(
+                request, pr_state, current_main_sha
+            )
+            if refresh_reason == "semantic_replay_conflict":
+                repair_issue = _create_bounded_existing_pr_repair_issue(
+                    request=request,
+                    head_sha=head_sha,
+                    current_main_sha=current_main_sha,
+                    changed_files=changed_files,
+                )
+                return _maintenance_report(
+                    "DONE",
+                    task_id,
+                    [
+                        *status_lines,
+                        "step=refresh_pr_branch status=conflict",
+                        "next_action=update_existing_pr_repair",
+                        f"repair_issue={repair_issue or 'unknown'}",
+                    ],
+                    "met",
+                )
+            if refresh_reason is not None or refreshed_head_sha is None:
+                return _maintenance_report(
+                    "BLOCKED",
+                    task_id,
+                    [
+                        *status_lines,
+                        "step=refresh_pr_branch status=failed",
+                        f"reason={refresh_reason or 'refresh_failed'}",
+                    ],
+                    "not_met",
+                )
+            status_lines.extend(
+                (
+                    "step=refresh_pr_branch status=done",
+                    f"refreshed_head_sha={refreshed_head_sha}",
+                )
+            )
+
+        validation = ensure_codegen_pr_validation_continuation(
+            source_issue=request.pr_number,
+            issue_body="",
+            report=(
+                "DONE: preflight refreshed PR\n"
+                f"Commit: {refreshed_head_sha}\n"
+                f"Draft PR: https://github.com/{REPO}/pull/{request.pr_number}"
+            ),
+        )
+        if validation is not None:
+            status_lines.extend(
+                (
+                    f"validation_continuation={'created' if validation.created else 'reused'}",
+                    f"validation_issue={validation.issue_number or 'unknown'}",
+                    f"validation_head_sha={validation.head_sha}",
+                    f"validation_base_sha={validation.base_sha}",
+                )
+            )
+
+        gate_reason = _preflight_auto_merge_block_reason(
+            request, pr_state, changed_files
+        )
+        if gate_reason is not None:
+            return _maintenance_report(
+                "NEEDS_OPERATOR",
+                task_id,
+                [*status_lines, gate_reason],
+                "not_met",
+            )
+        merge_reason = _ready_and_squash_merge_pr(
+            request.pr_number, refreshed_head_sha, pr_state.get("isDraft") is True
+        )
+        if merge_reason is not None:
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [*status_lines, f"reason={merge_reason}"],
+                "not_met",
+            )
+        runtime_sync_issue = _create_runtime_sync_main_continuation(request.pr_number)
+        status_lines.extend(
+            (
+                "step=auto_ready_and_squash_merge status=done",
+                f"merged_head_sha={refreshed_head_sha}",
+                f"runtime_sync_main_issue={runtime_sync_issue or 'unknown'}",
+            )
+        )
     return _maintenance_report("DONE", task_id, status_lines, "met")
 
 
@@ -11369,6 +11811,25 @@ def _queue_replenisher_intent_key(issue: Mapping[str, Any]) -> str:
     return " ".join(normalized.split())
 
 
+def _queue_replenisher_domain(issue: Mapping[str, Any]) -> str:
+    for public_field, typed_key in (
+        ("Domain", "domain"),
+        ("Project", "project"),
+        ("Operation", "operation"),
+    ):
+        value = _queue_replenisher_field(issue, public_field, typed_key)
+        if isinstance(value, str) and value.strip():
+            normalized = _QUEUE_REPLENISHER_INTENT_WORD_RE.sub(
+                "-", value.strip().lower()
+            ).strip("-")
+            if normalized:
+                return normalized
+    allowed_files = sorted(_queue_replenisher_allowed_files(issue))
+    if allowed_files:
+        return allowed_files[0].split("/", 1)[0]
+    return "general"
+
+
 def _queue_replenisher_candidate(
     issue: Mapping[str, Any],
 ) -> RunnerQueueReplenisherCandidate | None:
@@ -11384,6 +11845,7 @@ def _queue_replenisher_candidate(
         intent_key=intent_key,
         allowed_files=_queue_replenisher_allowed_files(issue),
         dependencies=_queue_replenisher_dependencies(issue),
+        domain=_queue_replenisher_domain(issue),
     )
 
 
@@ -11486,9 +11948,17 @@ def _runner_queue_replenishment_selection(
     occupied_files: set[str] = set(protected_files)
     for issue in ready_issues:
         occupied_files.update(_queue_replenisher_allowed_files(issue))
+    occupied_domains = {
+        candidate.domain
+        for issue in ready_issues
+        if (candidate := _queue_replenisher_candidate(issue)) is not None
+    }
     for issue in candidate_issues:
         if LABEL_RUNNING in _issue_label_names(issue):
             occupied_files.update(_queue_replenisher_allowed_files(issue))
+            candidate = _queue_replenisher_candidate(issue)
+            if candidate is not None:
+                occupied_domains.add(candidate.domain)
 
     selected: list[RunnerQueueReplenisherCandidate] = []
     waiting_dependency: list[RunnerQueueReplenisherCandidate] = []
@@ -11510,6 +11980,8 @@ def _runner_queue_replenishment_selection(
             continue
         if candidate.allowed_files & occupied_files:
             continue
+        if candidate.domain in occupied_domains:
+            continue
         protected_overlap = candidate.allowed_files & _queue_replenisher_protected_files(
             issue
         )
@@ -11523,6 +11995,7 @@ def _runner_queue_replenishment_selection(
             continue
         selected.append(candidate)
         occupied_files.update(candidate.allowed_files)
+        occupied_domains.add(candidate.domain)
 
     return RunnerQueueReplenishmentSelection(
         selected=tuple(candidate.issue for candidate in selected),
