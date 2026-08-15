@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.family_document_record.schema.json",
+  "type": "object",
+  "required": ["schema", "record_id", "source_kind", "source_id", "source_sha256", "ocr_text_hash", "record_hash"],
+  "additionalProperties": true,
+  "properties": {
+    "schema": {"const": "skeleton.family_document_record.v1"},
+    "record_id": {"type": "string"},
+    "source_kind": {"enum": ["mfp", "local_file", "drive"]},
+    "source_id": {"type": "string"},
+    "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "ocr_text_hash": {"type": "string"},
+    "record_hash": {"type": "string"},
+    "classification": {"type": "object"}
+  }
+}
