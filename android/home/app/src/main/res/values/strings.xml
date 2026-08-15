@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">Home</string>
+    <string name="operator_live_state_base_url">http://skeleton-cast.local:8100</string>
 </resources>

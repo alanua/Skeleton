@@ -27,12 +27,14 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathFillType
 import androidx.compose.ui.graphics.SolidColor
@@ -42,8 +44,12 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.skeleton.home.data.HomeEdgeEndpointConfig
+import com.skeleton.home.data.HomeEdgeOperatorDashboardRepository
 import com.skeleton.home.data.SyntheticHomeRepository
 import com.skeleton.home.domain.AuthSessionProvider
+import com.skeleton.home.domain.OperatorLiveState
+import com.skeleton.home.domain.OperatorLiveStateStatus
 import com.skeleton.home.navigation.HomeRoute
 import com.skeleton.home.navigation.bottomRoutesFor
 import com.skeleton.home.navigation.canNavigateTo
@@ -101,7 +107,11 @@ fun HomeShell(
             HomeRoute.Remote -> PlaceholderScreen("Пульт", padding)
             HomeRoute.OperatorHub -> {
                 if (canNavigateTo(HomeRoute.OperatorHub, currentSession, session)) {
-                    OperatorHubScreen(padding)
+                    val context = LocalContext.current
+                    val dashboardRepository = remember(context) {
+                        HomeEdgeOperatorDashboardRepository(HomeEdgeEndpointConfig.from(context))
+                    }
+                    OperatorHubScreen(padding, dashboardRepository)
                 } else {
                     AccessDeniedScreen("СК", padding)
                 }
@@ -177,7 +187,19 @@ private fun Seek15Button(
 }
 
 @Composable
-fun OperatorHubScreen(padding: PaddingValues) {
+fun OperatorHubScreen(
+    padding: PaddingValues,
+    repository: HomeEdgeOperatorDashboardRepository,
+) {
+    var refreshKey by remember { mutableStateOf(0) }
+    var liveState by remember {
+        mutableStateOf<OperatorLiveState?>(null)
+    }
+
+    LaunchedEffect(repository, refreshKey) {
+        liveState = repository.loadLiveState()
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -193,10 +215,48 @@ fun OperatorHubScreen(padding: PaddingValues) {
             Icon(MaterialHubIcon, contentDescription = "СК", modifier = Modifier.size(32.dp))
             Text("СК", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
         }
-        Text("Огляд стану")
-        Text("Зв'язок: ONLINE / DEGRADED / OFFLINE")
-        Text("Дії: SENT / ACCEPTED / APPLIED / PHYSICALLY_VERIFIED")
-        Text("Операторський контур зарезервовано без живих підключень.")
+        Button(onClick = { refreshKey += 1 }) {
+            Text("Оновити")
+        }
+        when (val state = liveState) {
+            null -> Text("Завантаження стану...")
+            else -> OperatorLiveStateContent(state)
+        }
+    }
+}
+
+@Composable
+private fun OperatorLiveStateContent(state: OperatorLiveState) {
+    when (state.status) {
+        OperatorLiveStateStatus.CURRENT -> {
+            Text("Стан: поточний")
+            Text("Оновлено: ${formatAge(state)}")
+        }
+        OperatorLiveStateStatus.STALE -> {
+            Text("Стан: застарілий")
+            Text("Останній живий зріз: ${formatAge(state)}")
+        }
+        OperatorLiveStateStatus.OFFLINE -> {
+            Text("Стан: OFFLINE")
+            Text("Причина: ${state.offlineReason ?: "маршрут недоступний"}")
+        }
+    }
+    state.sections.forEach { section ->
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(section.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Text(section.value)
+            section.detail?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
+        }
+    }
+}
+
+private fun formatAge(state: OperatorLiveState): String {
+    val observedAt = state.observedAtEpochSeconds ?: return "немає живого зрізу"
+    val ageSeconds = (state.checkedAtEpochSeconds - observedAt).coerceAtLeast(0)
+    return if (state.status == OperatorLiveStateStatus.CURRENT && ageSeconds < 5) {
+        "щойно"
+    } else {
+        "$ageSeconds с тому"
     }
 }
 

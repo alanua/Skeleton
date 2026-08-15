@@ -2,6 +2,8 @@
 
 `core/operator_overview.py` is a read-only public-safe read model for an operator overview.
 
+The Android Home operator dashboard consumes the separate canonical live projection at `/api/operator/live-state`, served by the existing Skeleton Cast/Home Edge authority on port `8100`. Android endpoint resolution is app-owned metadata/resource config, not JVM `System.getProperty`, and unreachable or stale responses are rendered as offline/stale instead of current.
+
 It derives the first view from existing repository metadata:
 
 - `CAPABILITY_REGISTRY.yaml`

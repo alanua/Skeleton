@@ -12,7 +12,9 @@ This worktree adds a source-independent native Android Home foundation under `an
 - `СК` is an operator-only Material hub destination in the bottom navigation, not a Home screen card.
 - Synthetic `OPERATOR` sessions can see and navigate to the internal native `СК` placeholder dashboard.
 - Synthetic `ORDINARY` and `SPOUSE` sessions do not render `СК` in bottom navigation, and direct navigation fails closed through `canNavigateTo`.
-- Placeholder state is synthetic only. There are no live Home values, endpoints, credentials, device identifiers, or Home Edge calls.
+- The operator-only `СК` dashboard reads the canonical Skeleton Cast/Home Edge projection at `/api/operator/live-state`.
+- The installed app resolves that projection from app-owned Android metadata/resource config, currently `http://skeleton-cast.local:8100`; it does not use JVM system properties, demo rows, credentials, or private IP literals.
+- Missing, unreachable, malformed, or stale live-state responses render `OFFLINE` or stale UI instead of fake current state.
 
 ## Interfaces Waiting For Canonical Live Source
 

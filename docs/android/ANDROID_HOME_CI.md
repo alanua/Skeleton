@@ -9,6 +9,7 @@ Security boundary:
 - Does not use repository or environment secrets.
 - Does not sign, deploy, publish, release, or upload to Play Store.
 - Does not use a self-hosted runner, `sudo`, root package installation, or Home/Home Edge/device/provider control.
+- Operator dashboard validation is contract-only in CI. It verifies the installed APK has an app-owned `/api/operator/live-state` endpoint config and offline/stale behavior without contacting a live Home Edge node.
 - Builds the exact pull request HEAD SHA. Manual `workflow_dispatch` has no ref input and is limited to current default-branch code.
 
 The workflow uses JDK 17, Gradle 8.9, and only the Android SDK already present on the pinned GitHub-hosted image. It fails before build if `ANDROID_HOME`, `ANDROID_SDK_ROOT`, platform `android-35`, or build-tools `34.0.0` are unavailable.

@@ -96,18 +96,28 @@ def test_future_interfaces_and_state_values_exist() -> None:
         assert name in contracts
     for value in ["ONLINE", "DEGRADED", "OFFLINE", "SENT", "ACCEPTED", "APPLIED", "PHYSICALLY_VERIFIED"]:
         assert value in contracts
+    for value in ["CURRENT", "STALE", "OFFLINE"]:
+        assert value in contracts
 
 
-def test_no_endpoint_secret_or_live_fixture_values() -> None:
+def test_operator_live_state_endpoint_has_no_private_address_or_jvm_property_dependency() -> None:
     text = "\n".join(
         path.read_text(encoding="utf-8")
         for path in ANDROID_HOME.rglob("*")
         if path.is_file() and path.suffix in {".kt", ".kts", ".xml", ".md"}
     )
-    urls = re.findall(r"https?://[^\"]+", text)
-    assert urls == ["http://schemas.android.com/apk/res/android"]
+    urls = re.findall(r'https?://[^"<\s]+', text)
+    assert set(urls) == {
+        "http://schemas.android.com/apk/res/android",
+        "http://skeleton-cast.local:8100",
+        "http://skeleton-cast.local:8100/api/operator/live-state",
+    }
+    assert "/api/operator/live-state" in text
+    assert "System.getProperty" not in text
+    assert "skeleton-cast.local" in text
+    assert not re.search(r"https?://(?:10|172\\.(?:1[6-9]|2\\d|3[0-1])|192\\.168)\\.", text)
     forbidden = ["api_key", "apikey", "secret", "token", "hmac", "ssh", "device_id"]
     lowered = text.lower()
     for word in forbidden:
         assert word not in lowered
-    assert "Синтетичний режим" in text
+    assert "Стан: OFFLINE" in text
