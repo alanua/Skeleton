@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Iterable, Protocol
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 
 import requests
 
@@ -196,6 +196,37 @@ class JsonReleaseSearchProvider:
         return tuple(_candidate_from_mapping(self.provider_id, item) for item in _candidate_items(payload))
 
 
+class HtmlReleaseSearchProvider:
+    """Generic HTML adapter for configured release indexes.
+
+    The adapter only extracts explicitly typed release metadata from a configured
+    search result page. It does not infer playable/demo URLs from titles.
+    """
+
+    def __init__(
+        self,
+        provider_id: str,
+        endpoint_template: str,
+        *,
+        timeout_seconds: float = DEFAULT_PROVIDER_TIMEOUT_SECONDS,
+        session: requests.Session | None = None,
+    ) -> None:
+        self.provider_id = _clean_provider_id(provider_id)
+        self.endpoint_template = endpoint_template
+        self.timeout_seconds = timeout_seconds
+        self.session = session or requests.Session()
+
+    def search(self, request: MediaSearchRequest) -> Iterable[SourceCandidate]:
+        query = request.identity.release_query()
+        url = self.endpoint_template.format(query=urlencode({"q": query})[2:])
+        response = self.session.get(url, timeout=self.timeout_seconds)
+        response.raise_for_status()
+        return tuple(
+            _candidate_from_mapping(self.provider_id, item)
+            for item in _candidate_items_from_html(response.text, base_url=response.url)
+        )
+
+
 class PageUrlReleaseProvider:
     def __init__(
         self,
@@ -241,19 +272,30 @@ def providers_from_environment(
     providers: list[MediaSearchProvider] = [PageUrlReleaseProvider(resolve_page)]
     raw = str(env.get("SKELETON_CAST_RELEASE_SEARCH_BACKENDS") or "").strip()
     if raw:
-        for item in json.loads(raw):
+        for item in _configured_backend_items(raw):
             if not isinstance(item, dict):
                 continue
             provider_id = str(item.get("id") or "").strip()
             endpoint_template = str(item.get("endpoint_template") or "").strip()
             if provider_id and endpoint_template:
-                providers.append(
-                    JsonReleaseSearchProvider(
-                        provider_id,
-                        endpoint_template,
-                        timeout_seconds=float(item.get("timeout_seconds") or DEFAULT_PROVIDER_TIMEOUT_SECONDS),
+                timeout_seconds = _positive_float(item.get("timeout_seconds"), DEFAULT_PROVIDER_TIMEOUT_SECONDS)
+                backend_type = str(item.get("type") or item.get("kind") or "json").strip().lower()
+                if backend_type == "html":
+                    providers.append(
+                        HtmlReleaseSearchProvider(
+                            provider_id,
+                            endpoint_template,
+                            timeout_seconds=timeout_seconds,
+                        )
                     )
-                )
+                else:
+                    providers.append(
+                        JsonReleaseSearchProvider(
+                            provider_id,
+                            endpoint_template,
+                            timeout_seconds=timeout_seconds,
+                        )
+                    )
     return tuple(providers)
 
 
@@ -393,7 +435,7 @@ def _result(
 
 
 def _candidate_from_mapping(provider_id: str, item: dict[str, Any]) -> SourceCandidate:
-    kind = CandidateKind(str(item.get("kind") or "release").lower())
+    kind = _candidate_kind(item.get("kind"))
     source_url = _optional_str(item.get("source_url") or item.get("url"))
     page_url = _optional_str(item.get("page_url"))
     title = _optional_str(item.get("title")) or "Реліз"
@@ -424,6 +466,39 @@ def _candidate_items(payload: Any) -> Iterable[dict[str, Any]]:
     else:
         items = payload
     return tuple(item for item in items if isinstance(item, dict))
+
+
+def _candidate_items_from_html(text: str, *, base_url: str) -> Iterable[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    link_re = re.compile(r"<a\b(?P<attrs>[^>]*)>(?P<label>.*?)</a>", re.I | re.S)
+    for match in link_re.finditer(text or ""):
+        attrs = _html_attrs(match.group("attrs"))
+        href = _optional_str(attrs.get("data-source-url") or attrs.get("data-url") or attrs.get("href"))
+        kind = _candidate_kind(attrs.get("data-kind") or attrs.get("data-type"))
+        if kind != CandidateKind.RELEASE:
+            continue
+        if href is None:
+            continue
+        title = _strip_tags(attrs.get("data-title") or match.group("label")) or "Реліз"
+        source_url = urljoin(base_url, href)
+        items.append(
+            {
+                "kind": kind.value,
+                "title": title,
+                "source_url": source_url,
+                "page_url": _optional_str(attrs.get("data-page-url")),
+                "quality": attrs.get("data-quality"),
+                "translation": attrs.get("data-translation") or attrs.get("data-voice"),
+                "season": attrs.get("data-season"),
+                "episode": attrs.get("data-episode"),
+                "audio_tracks": _split_meta(attrs.get("data-audio") or attrs.get("data-audio-tracks")),
+                "subtitles": _split_meta(attrs.get("data-subtitles")),
+                "height": attrs.get("data-height"),
+                "bitrate": attrs.get("data-bitrate") or attrs.get("data-tbr"),
+                "order": attrs.get("data-order"),
+            }
+        )
+    return tuple(items)
 
 
 def _public_candidate(candidate: SourceCandidate) -> dict[str, Any]:
@@ -475,7 +550,11 @@ def _norm_text(value: str | None) -> str:
 
 
 def _norm_url(value: str) -> str:
-    return value.strip()
+    parsed = urlparse(value.strip())
+    if not parsed.scheme or not parsed.netloc:
+        return value.strip()
+    query = urlencode(sorted(parse_qs(parsed.query, keep_blank_values=True).items()), doseq=True)
+    return parsed._replace(scheme=parsed.scheme.lower(), netloc=parsed.netloc.lower(), query=query, fragment="").geturl()
 
 
 def _sorted_text(values: Iterable[str]) -> tuple[str, ...]:
@@ -492,6 +571,56 @@ def _optional_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _positive_float(value: Any, default: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _configured_backend_items(raw: str) -> tuple[dict[str, Any], ...]:
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return ()
+    if not isinstance(payload, list):
+        return ()
+    return tuple(item for item in payload if isinstance(item, dict))
+
+
+def _candidate_kind(value: Any) -> CandidateKind:
+    try:
+        return CandidateKind(str(value or "release").strip().lower())
+    except ValueError:
+        return CandidateKind.TRAILER
+
+
+def _html_attrs(raw: str) -> dict[str, str]:
+    attrs: dict[str, str] = {}
+    for match in re.finditer(r"([:\w-]+)\s*=\s*(['\"])(.*?)\2", raw or "", re.S):
+        attrs[match.group(1).lower()] = html_unescape(match.group(3))
+    return attrs
+
+
+def _strip_tags(value: Any) -> str:
+    return re.sub(r"<[^>]+>", "", html_unescape(str(value or ""))).strip()
+
+
+def _split_meta(value: Any) -> tuple[str, ...]:
+    return tuple(part.strip() for part in re.split(r"[,|]", str(value or "")) if part.strip())
+
+
+def html_unescape(value: str) -> str:
+    return (
+        value.replace("&amp;", "&")
+        .replace("&quot;", '"')
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+    )
 
 
 def _episode_label(candidate: SourceCandidate) -> str:

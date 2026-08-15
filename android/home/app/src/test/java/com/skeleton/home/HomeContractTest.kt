@@ -6,6 +6,7 @@ import com.skeleton.home.domain.MediaSourceSearchStatus
 import com.skeleton.home.domain.MediaSourceSearchUiState
 import com.skeleton.home.domain.UserRole
 import com.skeleton.home.domain.VerifiedActionState
+import com.skeleton.home.domain.WorkDescriptionAutoScroll
 import com.skeleton.home.navigation.HomeRoute
 import com.skeleton.home.navigation.PrimaryBottomRoutes
 import com.skeleton.home.navigation.bottomRoutesFor
@@ -90,5 +91,34 @@ class HomeContractTest {
         assertEquals(MediaSourceSearchStatus.SEARCHING, secondRetry.status)
         assertEquals(1, retry.retryAttempt)
         assertEquals(2, secondRetry.retryAttempt)
+    }
+
+    @Test
+    fun workDescriptionAutoScrollMovesUpwardThenResetsDirectlyToTop() {
+        assertFalse(WorkDescriptionAutoScroll.shouldAnimate(contentHeight = 80, viewportHeight = 96))
+        assertTrue(WorkDescriptionAutoScroll.shouldAnimate(contentHeight = 220, viewportHeight = 96))
+
+        val offsets = mutableListOf<Int>()
+        var current = 0
+        repeat(6) {
+            val next = WorkDescriptionAutoScroll.nextOffset(current, maxOffset = 6)
+            assertFalse(next.resetToTop)
+            assertFalse(next.pausedAtEnd)
+            offsets += next.offset
+            current = next.offset
+        }
+
+        assertEquals(listOf(1, 2, 3, 4, 5, 6), offsets)
+        val paused = WorkDescriptionAutoScroll.nextOffset(current, maxOffset = 6, endPauseElapsedMillis = 0)
+        val reset = WorkDescriptionAutoScroll.nextOffset(
+            current,
+            maxOffset = 6,
+            endPauseElapsedMillis = WorkDescriptionAutoScroll.EndPauseMillis,
+        )
+
+        assertEquals(6, paused.offset)
+        assertTrue(paused.pausedAtEnd)
+        assertEquals(0, reset.offset)
+        assertTrue(reset.resetToTop)
     }
 }

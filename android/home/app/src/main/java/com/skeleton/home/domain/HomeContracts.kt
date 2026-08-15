@@ -98,6 +98,41 @@ data class MediaSourceSearchUiState(
     }
 }
 
+data class DescriptionAutoScrollStep(
+    val offset: Int,
+    val pausedAtEnd: Boolean = false,
+    val resetToTop: Boolean = false,
+)
+
+object WorkDescriptionAutoScroll {
+    const val IdleGraceMillis: Long = 1_200
+    const val EndPauseMillis: Long = 900
+
+    fun shouldAnimate(contentHeight: Int, viewportHeight: Int): Boolean =
+        contentHeight > viewportHeight && viewportHeight > 0
+
+    fun nextOffset(
+        currentOffset: Int,
+        maxOffset: Int,
+        stepPx: Int = 1,
+        endPauseElapsedMillis: Long = 0,
+    ): DescriptionAutoScrollStep {
+        if (maxOffset <= 0) {
+            return DescriptionAutoScrollStep(offset = 0)
+        }
+        if (currentOffset >= maxOffset) {
+            return if (endPauseElapsedMillis >= EndPauseMillis) {
+                DescriptionAutoScrollStep(offset = 0, resetToTop = true)
+            } else {
+                DescriptionAutoScrollStep(offset = maxOffset, pausedAtEnd = true)
+            }
+        }
+        return DescriptionAutoScrollStep(
+            offset = (currentOffset + stepPx.coerceAtLeast(1)).coerceAtMost(maxOffset),
+        )
+    }
+}
+
 interface AuthSessionProvider {
     fun currentSession(): HomeSession
     fun canAccessOperatorHub(session: HomeSession): Boolean

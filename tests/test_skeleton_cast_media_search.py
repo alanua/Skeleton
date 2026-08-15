@@ -12,6 +12,29 @@ sys.path.insert(0, str(CAST_RUNTIME))
 import media_search  # noqa: E402
 
 
+class FakeResponse:
+    def __init__(self, *, url: str, payload=None, text: str = "") -> None:
+        self.url = url
+        self.payload = payload
+        self.text = text
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self):
+        return self.payload
+
+
+class FakeSession:
+    def __init__(self, response: FakeResponse) -> None:
+        self.response = response
+        self.calls: list[tuple[str, float]] = []
+
+    def get(self, url: str, timeout: float):
+        self.calls.append((url, timeout))
+        return self.response
+
+
 class StaticProvider:
     def __init__(self, provider_id: str, candidates: tuple[media_search.SourceCandidate, ...], timeout_seconds: float = 0.1) -> None:
         self.provider_id = provider_id
@@ -166,3 +189,92 @@ def test_dedupe_and_metadata_facets_are_from_actual_release_candidates() -> None
     assert result.facets.translations == ("Оригінал", "Українська")
     assert result.facets.audio_tracks == ("en", "uk")
     assert result.facets.subtitles == ("en", "uk")
+
+
+def test_json_and_html_release_backends_can_contribute_through_canonical_abstraction() -> None:
+    json_provider = media_search.JsonReleaseSearchProvider(
+        "json-index",
+        "https://search.example/json?q={query}",
+        timeout_seconds=0.2,
+        session=FakeSession(
+            FakeResponse(
+                url="https://search.example/json",
+                payload={
+                    "candidates": [
+                        {
+                            "kind": "release",
+                            "title": "Known Show",
+                            "url": "https://cdn.example/show.m3u8?b=2&a=1",
+                            "quality": "1080p",
+                            "translation": "Українська",
+                            "season": 2,
+                            "episode": 5,
+                        }
+                    ]
+                },
+            )
+        ),
+    )
+    html_provider = media_search.HtmlReleaseSearchProvider(
+        "html-index",
+        "https://search.example/html?q={query}",
+        timeout_seconds=0.2,
+        session=FakeSession(
+            FakeResponse(
+                url="https://search.example/html",
+                text="""
+                    <a data-kind="trailer" data-source-url="/trailer.mp4" data-quality="1080p">Trailer</a>
+                    <a data-kind="release" data-source-url="/show-720.m3u8" data-quality="720p"
+                       data-translation="Оригінал" data-audio="en|uk" data-subtitles="uk,en"
+                       data-season="2" data-episode="5">Known Show</a>
+                """,
+            )
+        ),
+    )
+    request = media_search.MediaSearchRequest(media_search.MediaIdentity("Known Show", 2024, 2, 5))
+
+    result = media_search.search_media_sources(request, (json_provider, html_provider))
+
+    assert result.status == "ready"
+    assert {candidate.provider_id for candidate in result.candidates} == {"json-index", "html-index"}
+    assert result.facets.qualities == ("1080p", "720p")
+    assert result.facets.translations == ("Оригінал", "Українська")
+    assert result.facets.audio_tracks == ("en", "uk")
+    assert result.facets.subtitles == ("en", "uk")
+    assert all(candidate.kind == media_search.CandidateKind.RELEASE for candidate in result.candidates)
+
+
+def test_environment_provider_config_supports_independent_json_and_html_backends() -> None:
+    providers = media_search.providers_from_environment(
+        resolve_page=lambda url: {"title": url, "sources": []},
+        environment={
+            "SKELETON_CAST_RELEASE_SEARCH_BACKENDS": """
+            [
+              {"id": "json-index", "type": "json", "endpoint_template": "https://search.example/json?q={query}"},
+              {"id": "html-index", "type": "html", "endpoint_template": "https://search.example/html?q={query}"}
+            ]
+            """
+        },
+    )
+
+    assert [provider.provider_id for provider in providers] == [
+        "shared-page-resolver",
+        "json-index",
+        "html-index",
+    ]
+    assert isinstance(providers[1], media_search.JsonReleaseSearchProvider)
+    assert isinstance(providers[2], media_search.HtmlReleaseSearchProvider)
+
+
+def test_dedupe_normalizes_equivalent_release_urls_deterministically() -> None:
+    request = media_search.MediaSearchRequest(media_search.MediaIdentity("Known Show", 2024, 2, 5))
+
+    result = media_search.search_media_sources(
+        request,
+        (
+            StaticProvider("provider-a", (_release("provider-a", "slower", source_url="https://CDN.example/show.m3u8?b=2&a=1", order=4),)),
+            StaticProvider("provider-b", (_release("provider-b", "preferred", source_url="https://cdn.example/show.m3u8?a=1&b=2", order=0),)),
+        ),
+    )
+
+    assert [candidate.source_id for candidate in result.candidates] == ["preferred"]

@@ -68,4 +68,18 @@ class HomeShellUiTest {
         compose.onNodeWithContentDescription("media-search-retry").performClick()
         compose.onNodeWithText("Пошук релізу").assertIsDisplayed()
     }
+
+    @Test
+    fun videoControlsExposeDifferentSeriesSeasonAndEpisodeActions() {
+        compose.setContent {
+            HomeApp(
+                session = SyntheticSession.ordinary(),
+                initialRoute = HomeRoute.Video,
+            )
+        }
+
+        compose.onNodeWithContentDescription("media-series-season-control").assertIsDisplayed()
+        compose.onNodeWithContentDescription("media-episode-control").assertIsDisplayed()
+        compose.onNodeWithContentDescription("work-description-auto-scroll").assertIsDisplayed()
+    }
 }

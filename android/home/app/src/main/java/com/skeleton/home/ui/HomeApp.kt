@@ -1,5 +1,8 @@
 package com.skeleton.home.ui
 
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -27,10 +30,12 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -46,9 +51,11 @@ import com.skeleton.home.data.SyntheticHomeRepository
 import com.skeleton.home.domain.AuthSessionProvider
 import com.skeleton.home.domain.MediaSourceSearchStatus
 import com.skeleton.home.domain.MediaSourceSearchUiState
+import com.skeleton.home.domain.WorkDescriptionAutoScroll
 import com.skeleton.home.navigation.HomeRoute
 import com.skeleton.home.navigation.bottomRoutesFor
 import com.skeleton.home.navigation.canNavigateTo
+import kotlinx.coroutines.delay
 
 @Composable
 fun HomeApp(
@@ -126,6 +133,21 @@ fun VideoScreen(padding: PaddingValues) {
     ) {
         Text("Відео", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
         Text(searchState.message ?: "Пошук релізу")
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            MediaScopeButton(
+                contentDescription = "media-series-season-control",
+                icon = SeriesSeasonIcon,
+                label = "Сезон",
+            )
+            MediaScopeButton(
+                contentDescription = "media-episode-control",
+                icon = EpisodeIcon,
+                label = "Епізод",
+            )
+        }
+        WorkDescriptionText(
+            description = "Опис релізу прокручується вгору лише тоді, коли текст довший за область перегляду.",
+        )
         Button(
             onClick = { searchState = searchState.retry() },
             modifier = Modifier.semantics {
@@ -134,6 +156,68 @@ fun VideoScreen(padding: PaddingValues) {
         ) {
             Text("Спробувати ще раз")
         }
+    }
+}
+
+@Composable
+private fun MediaScopeButton(
+    contentDescription: String,
+    icon: ImageVector,
+    label: String,
+) {
+    OutlinedButton(
+        onClick = {},
+        modifier = Modifier.semantics {
+            this.contentDescription = contentDescription
+        },
+    ) {
+        Icon(icon, contentDescription = null)
+        Spacer(modifier = Modifier.size(8.dp))
+        Text(label)
+    }
+}
+
+@Composable
+fun WorkDescriptionText(
+    description: String,
+    modifier: Modifier = Modifier,
+) {
+    val scrollState = rememberScrollState()
+    LaunchedEffect(description, scrollState) {
+        var idleUntil = 0L
+        while (true) {
+            val now = withFrameMillis { it }
+            val maxOffset = scrollState.maxValue
+            if (!WorkDescriptionAutoScroll.shouldAnimate(maxOffset + 1, 1)) {
+                delay(160)
+                continue
+            }
+            if (scrollState.isScrollInProgress) {
+                idleUntil = now + WorkDescriptionAutoScroll.IdleGraceMillis
+                delay(80)
+                continue
+            }
+            if (now < idleUntil) {
+                delay(80)
+                continue
+            }
+            if (scrollState.value >= maxOffset) {
+                delay(WorkDescriptionAutoScroll.EndPauseMillis)
+                scrollState.scrollTo(0)
+                continue
+            }
+            val step = WorkDescriptionAutoScroll.nextOffset(scrollState.value, maxOffset)
+            scrollState.scrollTo(step.offset)
+            delay(40)
+        }
+    }
+    Box(
+        modifier = modifier
+            .height(96.dp)
+            .verticalScroll(scrollState)
+            .semantics { contentDescription = "work-description-auto-scroll" },
+    ) {
+        Text(description, style = MaterialTheme.typography.bodyMedium)
     }
 }
 
@@ -327,6 +411,72 @@ private val SeekForward15Icon: ImageVector by lazy {
             lineTo(20f, 8f)
             lineTo(13f, 2f)
             lineTo(13f, 4f)
+            close()
+        }
+    }.build()
+}
+
+private val SeriesSeasonIcon: ImageVector by lazy {
+    ImageVector.Builder(
+        name = "SeriesSeasonStack",
+        defaultWidth = 24.dp,
+        defaultHeight = 24.dp,
+        viewportWidth = 24f,
+        viewportHeight = 24f,
+    ).apply {
+        path(
+            fill = SolidColor(Color.Black),
+            pathFillType = PathFillType.NonZero,
+        ) {
+            moveTo(4f, 6f)
+            quadTo(4f, 4.9f, 4.9f, 4f)
+            lineTo(17f, 4f)
+            quadTo(18.1f, 4f, 19f, 4.9f)
+            lineTo(19f, 14f)
+            quadTo(19f, 15.1f, 18.1f, 16f)
+            lineTo(6f, 16f)
+            quadTo(4.9f, 16f, 4f, 15.1f)
+            close()
+            moveTo(7f, 18f)
+            lineTo(20f, 18f)
+            lineTo(20f, 7f)
+            lineTo(22f, 7f)
+            lineTo(22f, 18f)
+            quadTo(22f, 19.1f, 21.1f, 20f)
+            lineTo(7f, 20f)
+            close()
+            moveTo(7f, 7f)
+            lineTo(7f, 13f)
+            lineTo(16f, 10f)
+            close()
+        }
+    }.build()
+}
+
+private val EpisodeIcon: ImageVector by lazy {
+    ImageVector.Builder(
+        name = "EpisodeSinglePlay",
+        defaultWidth = 24.dp,
+        defaultHeight = 24.dp,
+        viewportWidth = 24f,
+        viewportHeight = 24f,
+    ).apply {
+        path(
+            fill = SolidColor(Color.Black),
+            pathFillType = PathFillType.NonZero,
+        ) {
+            moveTo(5f, 4f)
+            quadTo(3.9f, 4f, 3f, 4.9f)
+            lineTo(3f, 19.1f)
+            quadTo(3.9f, 20f, 5f, 20f)
+            lineTo(19f, 20f)
+            quadTo(20.1f, 20f, 21f, 19.1f)
+            lineTo(21f, 4.9f)
+            quadTo(20.1f, 4f, 19f, 4f)
+            close()
+            moveTo(10f, 8f)
+            lineTo(10f, 16f)
+            lineTo(16.5f, 12f)
             close()
         }
     }.build()
