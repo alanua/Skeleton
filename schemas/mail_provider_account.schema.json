@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.skeleton.local/mail_provider_account.schema.json",
+  "title": "Skeleton Mail Provider Account",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "account_ref",
+    "provider",
+    "poll_interval_seconds",
+    "max_messages_per_poll",
+    "query"
+  ],
+  "properties": {
+    "schema": { "const": "skeleton.mail_provider_account.v1" },
+    "account_ref": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/+,-]{0,255}$" },
+    "provider": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+    "poll_interval_seconds": { "type": "integer", "minimum": 1 },
+    "max_messages_per_poll": { "type": "integer", "minimum": 1, "maximum": 100 },
+    "query": { "type": "string", "maxLength": 512 }
+  }
+}
