@@ -253,7 +253,7 @@ def _inspect_pr_state(**updates: object) -> dict[str, object]:
     pr.update(updates.pop("pr", {}))
     state: dict[str, object] = {
         "pr": pr,
-        "files": [{"filename": "scripts/runner_poll_github_tasks.py"}],
+        "files": [{"filename": "docs/example.md"}],
         "compare": {"status": "ahead", "ahead_by": 1, "behind_by": 0},
         "combined_status": {
             "state": "success",
@@ -263,6 +263,52 @@ def _inspect_pr_state(**updates: object) -> dict[str, object]:
     }
     state.update(updates)
     return state
+
+
+def _validation_receipt_issue_json(
+    *,
+    pr_number: int = 123,
+    head_sha: str = HEAD_SHA,
+    base_sha: str = "b" * 40,
+    status: str = "DONE",
+    receipt_head_sha: str | None = None,
+    receipt_base_sha: str | None = None,
+) -> str:
+    idempotency_key = runner._continuation_issue_idempotency_key(
+        runner.REPO, pr_number, head_sha, base_sha
+    )
+    receipt = "\n".join(
+        (
+            f"{status}: Runner host maintenance task completed.",
+            f"maintenance_task_id={runner.VALIDATE_PR_BRANCH}",
+            f"pull_request={pr_number}",
+            f"validation_checkout_head_sha={receipt_head_sha or head_sha}",
+            f"validation_base_sha={receipt_base_sha or base_sha}",
+            "validation_final_status=clean",
+            "success_criteria=met" if status == "DONE" else "success_criteria=not_met",
+        )
+    )
+    return json.dumps(
+        [
+            {
+                "number": 3001,
+                "body": f"idempotency_key: {idempotency_key}",
+                "labels": [{"name": runner.LABEL_AGENT_TASK}],
+                "comments": [{"body": receipt}],
+            }
+        ]
+    )
+
+
+def _validation_receipt_issue_view_json(**kwargs: object) -> str:
+    issue = json.loads(_validation_receipt_issue_json(**kwargs))[0]
+    return json.dumps(
+        {
+            "body": issue["body"],
+            "labels": issue["labels"],
+            "comments": issue["comments"],
+        }
+    )
 
 
 def _telegram_response() -> mock.MagicMock:
@@ -17337,9 +17383,17 @@ def test_inspect_pr_mergeability_validation_missing_reports_next_action() -> Non
 
 
 def test_inspect_pr_mergeability_open_mergeable_pr_reports_ready_next_action() -> None:
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        del cwd
+        if command[:3] == ["gh", "issue", "list"]:
+            return 0, _validation_receipt_issue_json()
+        if command[:3] == ["gh", "issue", "view"]:
+            return 0, _validation_receipt_issue_view_json()
+        return 2, "unexpected command"
+
     with mock.patch.object(
         runner, "_get_pr_mergeability_state", return_value=_inspect_pr_state()
-    ):
+    ), mock.patch.object(runner, "run_command", side_effect=run):
         report = runner.inspect_pr_mergeability(_inspect_pr_issue_body())
 
     assert report.startswith("DONE:")
@@ -17349,10 +17403,69 @@ def test_inspect_pr_mergeability_open_mergeable_pr_reports_ready_next_action() -
     assert "base_branch=main" in report
     assert f"head_sha={HEAD_SHA}" in report
     assert "mergeable=true" in report
-    assert "changed_files=scripts/runner_poll_github_tasks.py" in report
+    assert "changed_files=docs/example.md" in report
+    assert "delegated_merge_verdict=AUTO_MERGE_ALLOWED" in report
+    assert "validation_receipt_issue=3001" in report
     assert "ahead_by=1" in report
     assert "behind_by=0" in report
     assert "next_action=mark_ready_or_merge" in report
+
+
+def test_inspect_pr_mergeability_stale_validation_head_fails_closed() -> None:
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        del cwd
+        if command[:3] == ["gh", "issue", "list"]:
+            return 0, _validation_receipt_issue_json(receipt_head_sha="c" * 40)
+        if command[:3] == ["gh", "issue", "view"]:
+            return 0, _validation_receipt_issue_view_json(receipt_head_sha="c" * 40)
+        return 2, "unexpected command"
+
+    with mock.patch.object(
+        runner, "_get_pr_mergeability_state", return_value=_inspect_pr_state()
+    ), mock.patch.object(runner, "run_command", side_effect=run):
+        report = runner.inspect_pr_mergeability(_inspect_pr_issue_body())
+
+    assert report.startswith("BLOCKED:")
+    assert "validation_state=not_success" in report
+    assert "reason=validation_not_success" in report
+    assert "next_action=wait_for_or_fix_validation" in report
+
+
+def test_inspect_pr_mergeability_stale_validation_base_fails_closed() -> None:
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        del cwd
+        if command[:3] == ["gh", "issue", "list"]:
+            return 0, _validation_receipt_issue_json(receipt_base_sha="c" * 40)
+        if command[:3] == ["gh", "issue", "view"]:
+            return 0, _validation_receipt_issue_view_json(receipt_base_sha="c" * 40)
+        return 2, "unexpected command"
+
+    with mock.patch.object(
+        runner, "_get_pr_mergeability_state", return_value=_inspect_pr_state()
+    ), mock.patch.object(runner, "run_command", side_effect=run):
+        report = runner.inspect_pr_mergeability(_inspect_pr_issue_body())
+
+    assert report.startswith("BLOCKED:")
+    assert "validation_state=not_success" in report
+    assert "reason=validation_not_success" in report
+
+
+def test_inspect_pr_mergeability_protected_actual_file_needs_operator() -> None:
+    with mock.patch.object(
+        runner,
+        "_get_pr_mergeability_state",
+        return_value=_inspect_pr_state(
+            files=[{"filename": "scripts/runner_poll_github_tasks.py"}]
+        ),
+    ), mock.patch.object(runner, "run_command") as run:
+        report = runner.inspect_pr_mergeability(_inspect_pr_issue_body())
+
+    assert report.startswith("NEEDS_OPERATOR:")
+    assert "changed_files=scripts/runner_poll_github_tasks.py" in report
+    assert "delegated_merge_verdict=OPERATOR_APPROVAL_REQUIRED" in report
+    assert "protected_changed_file=scripts/runner_poll_github_tasks.py" in report
+    assert "reason=delegated_merge_policy_requires_operator" in report
+    run.assert_not_called()
 
 
 def test_inspect_pr_mergeability_diverged_pr_reports_refresh_next_action() -> None:
@@ -17414,13 +17527,24 @@ def test_inspect_pr_mergeability_uses_github_api_only() -> None:
         assert isinstance(request, runner.urllib.request.Request)
         return _json_response(payloads[request.full_url])
 
-    with mock.patch.object(runner.urllib.request, "urlopen", side_effect=urlopen), mock.patch.object(
-        runner, "run_command"
-    ) as run:
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        del cwd
+        if command[:3] == ["gh", "issue", "list"]:
+            return 0, _validation_receipt_issue_json()
+        if command[:3] == ["gh", "issue", "view"]:
+            return 0, _validation_receipt_issue_view_json()
+        return 2, "unexpected command"
+
+    with mock.patch.object(
+        runner.urllib.request, "urlopen", side_effect=urlopen
+    ), mock.patch.object(runner, "run_command", side_effect=run) as run_mock:
         report = runner.inspect_pr_mergeability(_inspect_pr_issue_body())
 
     assert report.startswith("DONE:")
-    run.assert_not_called()
+    assert [call.args[0][:3] for call in run_mock.call_args_list] == [
+        ["gh", "issue", "list"],
+        ["gh", "issue", "view"],
+    ]
 
 
 def test_inspect_pr_mergeability_issue_body_does_not_execute_arbitrary_commands() -> None:
@@ -17448,13 +17572,21 @@ def test_inspect_pr_mergeability_issue_body_does_not_execute_arbitrary_commands(
     ), mock.patch.object(
         runner, "_get_pr_mergeability_state", return_value=_inspect_pr_state()
     ), mock.patch.object(
-        runner, "run_command"
+        runner,
+        "run_command",
+        side_effect=(
+            (0, _validation_receipt_issue_json()),
+            (0, _validation_receipt_issue_view_json()),
+        ),
     ) as run, mock.patch.object(
         runner, "run_codex_task"
     ) as run_codex:
         runner.process_issue(issue, workdir=str(runner.ROOT))
 
-    run.assert_not_called()
+    commands = [call.args[0] for call in run.call_args_list]
+    assert commands
+    assert all(command[:2] == ["gh", "issue"] for command in commands)
+    assert all(command[2] in {"list", "view"} for command in commands)
     run_codex.assert_not_called()
 
 
