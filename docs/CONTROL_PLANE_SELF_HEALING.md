@@ -80,6 +80,8 @@ During each ordinary Runner poll, the single poller has one learned queue-idle p
 
 Terminal Runner codegen completion also re-enters that same learned queue-idle path. After a codegen task is labeled `runner:done` or `runner:blocked`, including explicit blocked Codex output and finalization failures, the completed issue remains terminal while the poller re-evaluates the canonical queue for unrelated eligible work. The validation-continuation maintenance path uses the same terminal hook. The continuation does not add chat/manual-ready requirements, does not re-promote the terminal issue, and does not send Telegram noise.
 
+Acceptance note: the post-merge live canary on main `9d17100369b229c2ed0266a04f3a084952101cc0` was picked up autonomously from RUN_NOW-only queue admission.
+
 For queue-idle recovery, the lesson fingerprint remains stable across recurrences of the same public-safe failure class. The occurrence-specific failure key includes the eligible issue numbers and a verified-lesson generation. Retries and backoff within one idle episode reuse that occurrence key. After an actual recovery is VERIFIED, a later independent recurrence, including the same eligible set becoming eligible again, derives a new occurrence key and can reuse the verified lesson.
 
 The learned queue path may invoke only the registered `queue_reactivate` action. That action delegates to the existing `replenish_runner_queue` primitive and never directly promotes labels from the learned path. Verification requires actual ready-depth progress after the action. No progress, exceptions, candidate races, or stale running rechecks are recorded as failed recovery/backoff. Routine queue recovery remains Telegram-silent.
