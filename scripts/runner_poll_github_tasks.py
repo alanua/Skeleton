@@ -306,6 +306,10 @@ HOME_EDGE_AUDIT_PERSIST_V1 = "home_edge_audit_persist_v1"
 HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1 = "home_edge_01_debian_media_bootstrap_v1"
 HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1 = "home_edge_01_post_migration_reconcile_v1"
 HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1 = "home_edge_01_media_source_snapshot_v1"
+HOME_EDGE_01_SCREENSAVER_CURRENT_MEDIA_VERIFY_V1 = (
+    "home_edge_01_screensaver_current_media_verify_v1"
+)
+HOME_NATIVE_APK_CURRENT_VERIFY = "home_native_apk_current_verify"
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
         SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
@@ -349,6 +353,8 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1,
         HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1,
         HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1,
+        HOME_EDGE_01_SCREENSAVER_CURRENT_MEDIA_VERIFY_V1,
+        HOME_NATIVE_APK_CURRENT_VERIFY,
         BUILD_AND_LOCAL_OTA_OPERATION,
         PREPARE_PRIVATE_STATIC_SITE_HANDOFF,
         DEPLOY_PRIVATE_STATIC_SITE,
@@ -612,7 +618,9 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "blocked_write_status",
         "branch",
         "build_ms",
+        "byte_size",
         "canon_note",
+        "canonical_apk",
         "canonical_memory_post_step",
         "canaries_executed",
         "candidate_count",
@@ -664,6 +672,15 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "gateway_postcheck_status",
         "gateway_status",
         "gallery_status",
+        "gallery_schema_version",
+        "gallery_item_count",
+        "screen_fit_policy",
+        "cadence_seconds",
+        "transition",
+        "renderer_status",
+        "renderer_count",
+        "renderer_ids",
+        "failed_unit_count",
         "service_category_counts",
         "risk_flags",
         "usb_modem_health_requirement",
@@ -939,6 +956,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "video_route_present",
         "validation_pytest_version",
         "validation_real_writable_git_worktree",
+        "version_name",
+        "sha256",
         "wall_area_row_count",
         "warning_count",
         "watchdog_critical_count",
@@ -14944,6 +14963,72 @@ def home_edge_01_media_source_snapshot_v1(body: str) -> str:
         )
 
 
+def home_edge_01_screensaver_current_media_verify_v1() -> str:
+    task_id = HOME_EDGE_01_SCREENSAVER_CURRENT_MEDIA_VERIFY_V1
+    try:
+        from core.home_edge.current_media_verifiers import (
+            receipt_status_lines,
+            source_contract_receipt,
+        )
+
+        receipt = source_contract_receipt()
+        success = receipt.get("status") == "healthy"
+        return _maintenance_report(
+            "DONE" if success else "BLOCKED",
+            task_id,
+            [
+                *receipt_status_lines(receipt),
+                "supersedes=home-edge-screensaver-verify-v6,home-edge-screensaver-verify-v7,home-edge-screensaver-verify-v8,home-edge-screensaver-verify-v9",
+            ],
+            "met" if success else "not_met",
+        )
+    except Exception:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            ["reason=screensaver_current_media_verify_failed_closed"],
+            "not_met",
+        )
+
+
+def home_native_apk_current_verify() -> str:
+    task_id = HOME_NATIVE_APK_CURRENT_VERIFY
+    try:
+        from core.home_edge.android_home_release import (
+            METADATA_PATH,
+            load_release_metadata,
+            receipt_status_lines,
+            verify_android_home_release,
+        )
+
+        metadata_path = ROOT / METADATA_PATH
+        metadata = load_release_metadata(metadata_path)
+        artifact_root_value = metadata.get("artifact_root")
+        artifact_root = (
+            (metadata_path.parent / str(artifact_root_value)).resolve()
+            if isinstance(artifact_root_value, str) and artifact_root_value
+            else metadata_path.parent
+        )
+        receipt = verify_android_home_release(metadata, artifact_root)
+        success = receipt.get("status") == "healthy"
+        return _maintenance_report(
+            "DONE" if success else "BLOCKED",
+            task_id,
+            [
+                *receipt_status_lines(receipt),
+                "supersedes=home-native-apk-v134-verify",
+            ],
+            "met" if success else "not_met",
+        )
+    except Exception:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            ["reason=home_native_apk_current_verify_failed_closed"],
+            "not_met",
+        )
+
+
 def _read_exact_git_sha(ref: str) -> str:
     code, output = run_command(["git", "rev-parse", f"{ref}^{{commit}}"], cwd=ROOT)
     sha = output.strip().splitlines()[0] if output.strip() else ""
@@ -15427,6 +15512,10 @@ def dispatch_runtime_maintenance_task(
             return home_edge_01_post_migration_reconcile_v1(body)
         if task_id == HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1:
             return home_edge_01_media_source_snapshot_v1(body)
+        if task_id == HOME_EDGE_01_SCREENSAVER_CURRENT_MEDIA_VERIFY_V1:
+            return home_edge_01_screensaver_current_media_verify_v1()
+        if task_id == HOME_NATIVE_APK_CURRENT_VERIFY:
+            return home_native_apk_current_verify()
         if task_id == PREPARE_PRIVATE_STATIC_SITE_HANDOFF:
             return _execute_prepare_private_static_site_handoff(body)
         if task_id == DEPLOY_PRIVATE_STATIC_SITE:

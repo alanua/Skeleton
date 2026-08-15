@@ -30,9 +30,13 @@ UID `1000`, home `/home/oleksii`, `/run/user/1000`, the user D-Bus socket, and a
 stable boot ID. It validates fixed Home Edge helper executables before any owned
 file mutation.
 
-The screensaver verifier is run with no arguments. If it is already healthy,
-refresh is skipped. If degraded, the fixed gallery refresh helper runs once and
-the no-argument verifier must pass afterward.
+The current screensaver verifier
+`home-edge-screensaver-current-media-verify` is run with no arguments. If it is
+already healthy, refresh is skipped. If degraded, the fixed gallery refresh
+helper runs once and the current no-argument verifier must pass afterward. Older
+v6/v7/v8/v9 verifier contracts are superseded and must not require removed
+Debian xscreensaver renderers, failed WebGL experiments, or legacy gallery schema
+assumptions.
 
 Brother health is checked with the fixed verifier JSON, the current user service
 `brother-scan-key.service`, and guard timer `brother-scan-key-guard.timer`.
