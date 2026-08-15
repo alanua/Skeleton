@@ -110,6 +110,23 @@ worktree mutation. The checkout preserves the complete PR-head tree, including
 files outside the task `allowed_files`; Codex remains restricted to editing only
 the declared allowed files.
 
+Publishing back to an existing PR is same-PR only. The Runner verifies the PR
+number, draft/open state, head repository, exact head branch, and expected old
+head SHA before staging. The push targets that verified head branch with
+`--force-with-lease=<branch>:<expected-old-head>`, then re-reads the same PR and
+requires its post-push head SHA and changed-file set to match the bounded
+publication contract. It never silently creates a replacement branch or PR for
+an `update_existing_pr` path.
+
+Mergeability inspection is fail-closed on the actual PR file list. The canonical
+delegated merge policy is evaluated from GitHub's changed files, not issue
+metadata. Protected, review-required, private, red/yellow, dependency-held, or
+review-failed work remains `NEEDS_OPERATOR`. A public green unprotected PR may
+only be reported merge-ready after a trusted `validate_pr_branch` receipt exists
+for the exact current PR head SHA and exact current base SHA; stale head/base
+validation requires revalidation. Creating or reusing validation for a refreshed
+head returns without merging in that same pass.
+
 ## Operator Noise
 
 Retry, recovery, and success remain silent. Operator notification is reserved for true durable `NEEDS_OPERATOR` after bounded recovery is unavailable or exhausted.

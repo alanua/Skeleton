@@ -119,6 +119,10 @@ from core.runner_five_layer_memory_activation import (
     TASK_ID as ACTIVATE_FIVE_LAYER_PRIVATE_MEMORY,
     execute_five_layer_memory_activation,
 )
+from core.merge_policy_checker import (
+    AUTO_MERGE_ALLOWED,
+    DelegatedMergePolicyChecker,
+)
 from core.private_static_site_runtime import (
     DEPLOY_TASK_ID as DEPLOY_PRIVATE_STATIC_SITE,
     PRIVATE_KEY_MARKERS,
@@ -654,6 +658,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "decision_records_skipped",
         "decision_records_written",
         "decision",
+        "delegated_merge_verdict",
         "degraded",
         "diagnostic_count",
         "device_count",
@@ -803,6 +808,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "pre_push_pr_file_count",
         "public_safe",
         "protected_worktrees_count",
+        "protected_changed_file",
+        "protected_changed_files_count",
         "pushed_head_sha",
         "public_safe_report_ok",
         "quality_score",
@@ -934,6 +941,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "version",
         "validation_profile",
         "validation_state",
+        "validation_receipt_issue",
         "validation_pytest_totals",
         "vaapi_status",
         "video_route_present",
@@ -5004,6 +5012,164 @@ def finalize_success(issue: dict[str, Any], workdir: str, codex_output: str) -> 
         f"Pytest output:\n```\n{pytest_output.strip()}\n```\n\n"
         f"Commit: {commit_sha}\n"
         f"Draft PR: {pr_url}"
+    )
+
+
+def _codegen_publish_allowed_files(body: str) -> tuple[frozenset[str], str | None]:
+    return _issue_publish_allowed_files(_metadata_before_task(body))
+
+
+def _codegen_existing_pr_publish_preflight(
+    request: CodegenExistingPrWorktreeRequest,
+) -> tuple[str | None, dict[str, Any] | None, str | None]:
+    try:
+        pr_state, _metadata_source = _get_pr_branch_validation_state(
+            REPO, request.pr_number
+        )
+    except RuntimeError:
+        return None, None, "pr_metadata_unavailable"
+    if pr_state.get("state") != "OPEN":
+        return None, pr_state, "pr_not_open"
+    head_sha = str(pr_state.get("headRefOid") or "").lower()
+    if head_sha != request.expected_head_sha:
+        return None, pr_state, "pr_head_sha_mismatch"
+    head_branch = str(pr_state.get("headRefName") or "")
+    if (
+        request.expected_head_branch is not None
+        and head_branch != request.expected_head_branch
+    ):
+        return None, pr_state, "pr_head_branch_mismatch"
+    if not _safe_target_base_branch_name(head_branch):
+        return None, pr_state, "pr_head_branch_unsafe"
+    return head_branch, pr_state, None
+
+
+def finalize_existing_pr_success(
+    issue: dict[str, Any],
+    workdir: str,
+    codex_output: str,
+    issue_body: str,
+    request: CodegenExistingPrWorktreeRequest,
+) -> str:
+    issue_number = int(issue["number"])
+    allowed_files, allowed_reason = _codegen_publish_allowed_files(issue_body)
+    if allowed_reason is not None:
+        raise RuntimeError(
+            "Existing PR update requires exact safe allowed files: "
+            f"{allowed_reason}"
+        )
+
+    head_branch, _pr_state, preflight_reason = _codegen_existing_pr_publish_preflight(
+        request
+    )
+    if preflight_reason is not None or head_branch is None:
+        raise RuntimeError(
+            "Existing PR update preflight failed before mutation: "
+            f"{preflight_reason or 'pr_head_branch_unavailable'}"
+        )
+
+    files = changed_files(workdir)
+    if not files:
+        cleanup_runtime_artifacts(workdir)
+        return (
+            "DONE: Codex completed successfully with no file changes.\n\n"
+            "Runtime artifacts cleaned after Codex execution.\n\n"
+            f"Codex output:\n```\n{codex_output.strip()}\n```"
+        )
+    if not set(files) <= allowed_files:
+        raise RuntimeError("Existing PR update changed files outside allowed_files.")
+
+    checks: list[tuple[str, str]] = []
+    for command in (
+        ["git", "diff", "--check"],
+        ["python3", "-m", "pytest", "-q"],
+    ):
+        code, output = _run_finalization_validation_command(command, cwd=workdir)
+        checks.append((" ".join(command), output))
+        if code != 0:
+            raise RuntimeError(f"{' '.join(command)} failed:\n{output}")
+
+    cleanup_runtime_artifacts(workdir)
+    files = changed_files(workdir)
+    if not files:
+        return (
+            "DONE: Codex completed successfully with no file changes.\n\n"
+            "Runtime artifacts cleaned after Codex execution.\n\n"
+            f"Codex output:\n```\n{codex_output.strip()}\n```"
+        )
+    if not set(files) <= allowed_files:
+        raise RuntimeError("Existing PR update changed files outside allowed_files.")
+
+    for command in (
+        ["git", "add", "--", *files],
+        ["git", "diff", "--cached", "--check"],
+        ["git", "commit", "-m", f"runner: issue #{issue_number} update existing PR"],
+    ):
+        code, output = run_command(command, cwd=workdir)
+        checks.append((" ".join(command), output))
+        if code != 0:
+            raise RuntimeError(f"{' '.join(command)} failed:\n{output}")
+
+    cleanup_runtime_artifacts(workdir)
+    code, commit_sha = run_command(["git", "rev-parse", "HEAD"], cwd=workdir)
+    if code != 0:
+        raise RuntimeError(f"git rev-parse HEAD failed:\n{commit_sha}")
+    commit_sha = commit_sha.strip().lower()
+    if (
+        _HEAD_SHA_RE.fullmatch(commit_sha) is None
+        or commit_sha == request.expected_head_sha
+    ):
+        raise RuntimeError("Existing PR update produced invalid or unchanged head SHA.")
+
+    code, output = run_command(
+        [
+            "git",
+            "push",
+            "origin",
+            f"--force-with-lease={head_branch}:{request.expected_head_sha}",
+            f"HEAD:refs/heads/{head_branch}",
+        ],
+        cwd=workdir,
+    )
+    checks.append(("git push existing PR head", output))
+    if code != 0:
+        raise RuntimeError(f"git push existing PR head failed:\n{output}")
+
+    (
+        refreshed_head_branch,
+        post_state,
+        post_reason,
+    ) = _codegen_existing_pr_publish_preflight(
+        CodegenExistingPrWorktreeRequest(
+            pr_number=request.pr_number,
+            expected_head_sha=commit_sha,
+            expected_head_branch=head_branch,
+        )
+    )
+    if post_reason is not None or refreshed_head_branch != head_branch:
+        raise RuntimeError(
+            "Existing PR update post-push verification failed: "
+            f"{post_reason or 'pr_head_branch_mismatch'}"
+        )
+    pr_url = _existing_pr_publish_pr_url(post_state or {})
+    if pr_url is None:
+        raise RuntimeError("Existing PR update post-push PR URL unavailable.")
+
+    pytest_output = next(
+        output for command, output in checks if command == "python3 -m pytest -q"
+    )
+    return (
+        "DONE: Codex completed successfully and updated the existing PR.\n\n"
+        "Changed files:\n"
+        + "\n".join(f"- {file_name}" for file_name in files)
+        + "\n\n"
+        f"Pytest output:\n```\n{pytest_output.strip()}\n```\n\n"
+        f"Commit: {commit_sha}\n"
+        f"Existing PR: {pr_url}\n"
+        f"existing_pr_url={pr_url}\n"
+        f"existing_pr={request.pr_number}\n"
+        f"existing_pr_head_branch={head_branch}\n"
+        f"replacement_pr_created=false"
     )
 
 
@@ -9357,7 +9523,12 @@ def _declared_existing_pr_number(body: str) -> int | None:
 def _declared_existing_pr_expected_head_sha(body: str) -> str | None:
     task_fields = _shadow_task_block_mapping(body)
     candidates: list[object] = []
-    for key in ("expected_pr_head_sha", "expected_head_sha", "head_sha"):
+    for key in (
+        "expected_existing_pr_head_sha",
+        "expected_pr_head_sha",
+        "expected_head_sha",
+        "head_sha",
+    ):
         if key in task_fields:
             candidates.append(task_fields[key])
     metadata = _metadata_before_task(body)
@@ -9374,7 +9545,12 @@ def _declared_existing_pr_expected_head_sha(body: str) -> str | None:
 def _declared_existing_pr_expected_head_branch(body: str) -> str | None:
     task_fields = _shadow_task_block_mapping(body)
     candidates: list[object] = []
-    for key in ("expected_pr_head_branch", "expected_head_branch", "head_branch"):
+    for key in (
+        "expected_existing_pr_head_branch",
+        "expected_pr_head_branch",
+        "expected_head_branch",
+        "head_branch",
+    ):
         if key in task_fields:
             candidates.append(task_fields[key])
     metadata = _metadata_before_task(body)
@@ -10645,10 +10821,149 @@ def _validation_summary(
     return "not_success", "validation_not_success"
 
 
+def _actual_file_delegated_merge_policy(
+    changed_files: tuple[str, ...],
+) -> tuple[str, tuple[str, ...]]:
+    try:
+        decision = DelegatedMergePolicyChecker().check(
+            {
+                "changed_files": changed_files,
+                "clean_pr": True,
+                "evidence": {"present": True},
+                "risk_level": "green",
+                "triggers": (),
+            }
+        )
+    except Exception:
+        return "REVIEW_REQUIRED", ()
+    return decision.verdict, decision.protected_files_found
+
+
+def _trusted_validation_receipt_matches(
+    report: str,
+    *,
+    pr_number: int,
+    head_sha: str,
+    base_sha: str,
+) -> bool:
+    return (
+        runner_report_status(report) == "DONE"
+        and f"maintenance_task_id={VALIDATE_PR_BRANCH}" in report
+        and f"pull_request={pr_number}" in report
+        and f"validation_checkout_head_sha={head_sha}" in report
+        and f"validation_base_sha={base_sha}" in report
+        and "validation_final_status=clean" in report
+        and "success_criteria=met" in report
+    )
+
+
+def _trusted_pr_validation_receipt_state(
+    *,
+    repository: str,
+    pr_number: int,
+    head_sha: str,
+    base_sha: str,
+) -> tuple[str, str, int | None]:
+    idempotency_key = _continuation_issue_idempotency_key(
+        repository, pr_number, head_sha, base_sha
+    )
+    code, output = run_command(
+        [
+            "gh",
+            "issue",
+            "list",
+            "--repo",
+            repository,
+            "--label",
+            LABEL_AGENT_TASK,
+            "--state",
+            "all",
+            "--search",
+            idempotency_key,
+            "--json",
+            "number,body,labels",
+            "--limit",
+            "20",
+        ]
+    )
+    if code != 0:
+        return "unavailable", "validation_receipt_unavailable", None
+    try:
+        parsed = json.loads(output or "[]")
+    except json.JSONDecodeError:
+        return "unavailable", "validation_receipt_unavailable", None
+    if not isinstance(parsed, list):
+        return "unavailable", "validation_receipt_unavailable", None
+
+    matching_issues: list[tuple[int, list[str]]] = []
+    for issue in parsed:
+        if not isinstance(issue, dict):
+            continue
+        if LABEL_AGENT_TASK not in _issue_label_names(issue):
+            continue
+        bodies = [str(issue.get("body") or "")]
+        comments = issue.get("comments")
+        if isinstance(comments, list):
+            bodies.extend(
+                str(comment.get("body") or "")
+                for comment in comments
+                if isinstance(comment, dict)
+            )
+        if not any(idempotency_key in body for body in bodies):
+            continue
+        issue_number = _queue_replenisher_issue_number(issue)
+        if issue_number is None:
+            continue
+        view_code, view_output = run_command(
+            [
+                "gh",
+                "issue",
+                "view",
+                str(issue_number),
+                "--repo",
+                repository,
+                "--json",
+                "body,comments,labels",
+            ]
+        )
+        if view_code == 0:
+            try:
+                issue_view = json.loads(view_output or "{}")
+            except json.JSONDecodeError:
+                return "unavailable", "validation_receipt_unavailable", None
+            if not isinstance(issue_view, dict):
+                return "unavailable", "validation_receipt_unavailable", None
+            if LABEL_AGENT_TASK not in _issue_label_names(issue_view):
+                continue
+            bodies = [str(issue_view.get("body") or "")]
+            view_comments = issue_view.get("comments")
+            if isinstance(view_comments, list):
+                bodies.extend(
+                    str(comment.get("body") or "")
+                    for comment in view_comments
+                    if isinstance(comment, dict)
+                )
+        matching_issues.append((issue_number, bodies))
+
+    if len(matching_issues) > 1:
+        return "unavailable", "duplicate_validation_receipts", None
+    if not matching_issues:
+        return "missing", "validation_receipt_missing", None
+
+    issue_number, bodies = matching_issues[0]
+    for body in bodies:
+        if _trusted_validation_receipt_matches(
+            body, pr_number=pr_number, head_sha=head_sha, base_sha=base_sha
+        ):
+            return "success", "none", issue_number
+    return "not_success", "validation_receipt_not_success", issue_number
+
+
 def _pr_mergeability_next_action(
     pr: dict[str, Any],
     compare: dict[str, Any],
     validation_state: str,
+    delegated_merge_verdict: str,
     request: PrMergeabilityInspectionRequest,
 ) -> tuple[str, str, str]:
     state = str(pr.get("state") or "").upper()
@@ -10673,8 +10988,12 @@ def _pr_mergeability_next_action(
         return "BLOCKED", "branch_behind_or_diverged", "refresh_pr_branch"
     if mergeable is False or mergeable_state in {"dirty", "blocked"}:
         return "BLOCKED", "pr_has_merge_conflicts", "resolve_merge_conflicts"
+    if delegated_merge_verdict != AUTO_MERGE_ALLOWED:
+        return "NEEDS_OPERATOR", "delegated_merge_policy_requires_operator", "operator_review_required"
     if validation_state == "missing":
         return "BLOCKED", "validation_missing", "run_required_validation"
+    if validation_state == "unavailable":
+        return "BLOCKED", "validation_receipt_unavailable", "retry_validation_receipt_lookup"
     if validation_state != "success":
         return "BLOCKED", "validation_not_success", "wait_for_or_fix_validation"
     if mergeable is True:
@@ -10717,17 +11036,43 @@ def inspect_pr_mergeability(body: str) -> str:
             "not_met",
         )
 
-    validation_state, validation_reason = _validation_summary(
-        combined_status, check_runs
-    )
-    report_status, reason, next_action = _pr_mergeability_next_action(
-        pr, compare, validation_state, request
-    )
     changed_files = [
         str(file.get("filename"))
         for file in files
         if isinstance(file.get("filename"), str)
     ]
+    delegated_verdict, protected_files = _actual_file_delegated_merge_policy(
+        tuple(changed_files)
+    )
+    status_validation_state, status_validation_reason = _validation_summary(
+        combined_status, check_runs
+    )
+    receipt_issue: int | None = None
+    head_sha = str(head.get("sha") or "").lower()
+    base_sha = str(base.get("sha") or "").lower()
+    if (
+        delegated_verdict == AUTO_MERGE_ALLOWED
+        and status_validation_state == "success"
+        and _HEAD_SHA_RE.fullmatch(head_sha) is not None
+        and _HEAD_SHA_RE.fullmatch(base_sha) is not None
+        and isinstance(pr.get("number"), int)
+    ):
+        validation_state, validation_reason, receipt_issue = (
+            _trusted_pr_validation_receipt_state(
+                repository=REPO,
+                pr_number=int(pr["number"]),
+                head_sha=head_sha,
+                base_sha=base_sha,
+            )
+        )
+    else:
+        validation_state, validation_reason = (
+            status_validation_state,
+            status_validation_reason,
+        )
+    report_status, reason, next_action = _pr_mergeability_next_action(
+        pr, compare, validation_state, delegated_verdict, request
+    )
     mergeable = _github_bool_value(pr.get("mergeable"))
     mergeable_state = str(pr.get("mergeable_state") or "unknown")
     status_lines.extend(
@@ -10743,10 +11088,18 @@ def inspect_pr_mergeability(body: str) -> str:
             f"mergeable_state={mergeable_state}",
             f"changed_file_count={len(changed_files)}",
             f"changed_files={','.join(changed_files) if changed_files else '(none)'}",
+            f"delegated_merge_verdict={delegated_verdict}",
+            f"protected_changed_files_count={len(protected_files)}",
+            *(f"protected_changed_file={path}" for path in protected_files),
             f"compare_status={compare.get('status', 'unknown')}",
             f"ahead_by={compare.get('ahead_by', 'unknown')}",
             f"behind_by={compare.get('behind_by', 'unknown')}",
             f"validation_state={validation_state}",
+            *(
+                [f"validation_receipt_issue={receipt_issue}"]
+                if receipt_issue is not None
+                else []
+            ),
             f"reason={reason if reason != 'none' else validation_reason}",
             f"next_action={next_action}",
         )
@@ -16141,6 +16494,14 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
         if local_target_worktree and runner_task is not None:
             finalized_report = finalize_local_worktree_success(
                 issue_workdir, codex_output, runner_task
+            )
+        elif existing_pr_worktree_request is not None:
+            finalized_report = finalize_existing_pr_success(
+                issue,
+                issue_workdir,
+                codex_output,
+                issue_body,
+                existing_pr_worktree_request,
             )
         else:
             finalized_report = finalize_success(issue, issue_workdir, codex_output)
