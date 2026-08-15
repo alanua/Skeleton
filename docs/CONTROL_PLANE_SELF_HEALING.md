@@ -101,7 +101,18 @@ recorded base SHA. The continuation is an ordinary public-safe `agent:task` with
 `queue:RUN_NOW` admission metadata and remains Telegram-silent. If the task
 contract declared `existing_pr` or `update_existing_pr`, a different produced PR
 is treated as a publication-contract failure; no validation continuation is
-created for the wrong PR.
+created for the wrong PR. A refreshed existing-PR head only creates or reuses
+validation for that new exact head and current base; it is never merged in the
+same pass. A later deterministic pass may consider merge only after it observes
+a trusted successful validation receipt for the PR's current head and current
+base. Any head or base movement invalidates the receipt and forces
+revalidation/fail-closed handling.
+
+Autonomous mergeability inspection derives protected-file status from the actual
+PR changed-file list and the canonical delegated merge policy. Task metadata
+such as a `Protected Files` field is not authority for classifying a PR as safe:
+missing, empty, or false protected-file metadata cannot make a protected actual
+file auto-mergeable.
 
 For codegen tasks that declare `existing_pr` or `update_existing_pr` with an
 exact expected PR head SHA, the issue worktree is materialized from that verified
