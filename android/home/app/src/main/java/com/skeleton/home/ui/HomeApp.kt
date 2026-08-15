@@ -113,7 +113,7 @@ fun HomeShell(
                 onRemote = { currentRoute = HomeRoute.Remote },
             )
             HomeRoute.Video -> VideoScreen(padding)
-            HomeRoute.Devices -> PlaceholderScreen("Пристрої", padding)
+            HomeRoute.Devices -> DevicesScreen(padding, repository)
             HomeRoute.Remote -> PlaceholderScreen("Пульт", padding)
             HomeRoute.OperatorHub -> {
                 if (canNavigateTo(HomeRoute.OperatorHub, currentSession, session)) {
