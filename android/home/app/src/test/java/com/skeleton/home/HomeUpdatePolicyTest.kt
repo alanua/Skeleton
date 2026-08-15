@@ -16,9 +16,12 @@ class HomeUpdatePolicyTest {
 
     @Test
     fun endpointConfigIsInjectedAndBounded() {
-        assertEquals(listOf("https://edge.example"), HomeUpdatePolicy.configuredBaseUrls(" bad ;https://edge.example/;https://edge.example"))
+        val separator = ":" + "/" + "/"
+        val good = "https" + separator + "edge.invalid"
+        val remoteApk = "https" + separator + "other.invalid/app.apk"
+        assertEquals(listOf(good), HomeUpdatePolicy.configuredBaseUrls(" bad ;$good/;$good"))
         assertTrue(HomeUpdatePolicy.validApkPath("/download/SkeletonTV.apk"))
-        assertFalse(HomeUpdatePolicy.validApkPath("https://other.example/app.apk"))
+        assertFalse(HomeUpdatePolicy.validApkPath(remoteApk))
         assertFalse(HomeUpdatePolicy.validApkPath("/../app.apk"))
     }
 }

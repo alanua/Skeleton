@@ -1,5 +1,7 @@
 package com.skeleton.home.update
 
+import java.net.URI
+
 object HomeUpdatePolicy {
     const val ProductionPackage = "com.skeleton.home"
     const val UpdatePath = "/api/native/app-update"
@@ -14,8 +16,11 @@ object HomeUpdatePolicy {
     fun configuredBaseUrls(raw: String): List<String> =
         raw.split(';')
             .map { it.trim().trimEnd('/') }
-            .filter { it.startsWith("http://") || it.startsWith("https://") }
-            .filter { it.length <= 512 }
+            .filter { candidate ->
+                if (candidate.length > 512) return@filter false
+                val uri = runCatching { URI(candidate) }.getOrNull() ?: return@filter false
+                uri.scheme in setOf("http", "https") && !uri.host.isNullOrBlank() && uri.userInfo == null && uri.fragment == null
+            }
             .distinct()
 
     fun validApkPath(path: String): Boolean =
