@@ -1720,6 +1720,66 @@ def test_codegen_existing_pr_exact_head_update_targets_declared_pr() -> None:
     create.assert_not_called()
 
 
+def test_codegen_existing_pr_contract_accepts_expected_existing_pr_head_sha_key() -> None:
+    body = "\n".join(
+        (
+            "Expected Output: update existing PR",
+            "",
+            "```task",
+            "update_existing_pr: 456",
+            f"expected_existing_pr_head_sha: {HEAD_SHA}",
+            "```",
+        )
+    )
+
+    request, reason = runner._codegen_existing_pr_worktree_request(body)
+
+    assert reason is None
+    assert request is not None
+    assert request.pr_number == 456
+    assert request.expected_head_sha == HEAD_SHA
+
+
+def test_codegen_existing_pr_refreshed_head_queues_validation_without_stale_block() -> None:
+    refreshed_head = "d" * 40
+    report = DONE_REPORT.replace("/pull/123", "/pull/456").replace(HEAD_SHA, refreshed_head)
+    body = "\n".join(
+        (
+            "Expected Output: update existing PR",
+            "",
+            "```task",
+            "update_existing_pr: 456",
+            f"expected_existing_pr_head_sha: {HEAD_SHA}",
+            "```",
+        )
+    )
+
+    with mock.patch.object(
+        runner,
+        "_get_pr_branch_validation_state",
+        return_value=(
+            _pr_validation_state(number=456, headRefOid=refreshed_head, baseRefOid="e" * 40),
+            "gh",
+        ),
+    ), mock.patch.object(
+        runner, "_find_existing_validation_continuation_issue", return_value=3003
+    ), mock.patch.object(
+        runner, "_create_validation_continuation_issue"
+    ) as create:
+        continuation = runner.ensure_codegen_pr_validation_continuation(
+            source_issue=93,
+            issue_body=body,
+            report=report,
+        )
+
+    assert continuation is not None
+    assert continuation.created is False
+    assert continuation.pr_number == 456
+    assert continuation.head_sha == refreshed_head
+    assert continuation.base_sha == "e" * 40
+    create.assert_not_called()
+
+
 def test_validation_completion_invokes_replenishment_even_when_blocked() -> None:
     with mock.patch.object(
         runner, "dispatch_runtime_maintenance_task", return_value="BLOCKED: nope"
@@ -17336,13 +17396,13 @@ def test_inspect_pr_mergeability_validation_missing_reports_next_action() -> Non
     assert "next_action=run_required_validation" in report
 
 
-def test_inspect_pr_mergeability_open_mergeable_pr_reports_ready_next_action() -> None:
+def test_inspect_pr_mergeability_protected_actual_file_requires_operator() -> None:
     with mock.patch.object(
         runner, "_get_pr_mergeability_state", return_value=_inspect_pr_state()
     ):
         report = runner.inspect_pr_mergeability(_inspect_pr_issue_body())
 
-    assert report.startswith("DONE:")
+    assert report.startswith("NEEDS_OPERATOR:")
     assert f"repository={runner.REPO}" in report
     assert "pr_state=open" in report
     assert "draft=false" in report
@@ -17352,6 +17412,24 @@ def test_inspect_pr_mergeability_open_mergeable_pr_reports_ready_next_action() -
     assert "changed_files=scripts/runner_poll_github_tasks.py" in report
     assert "ahead_by=1" in report
     assert "behind_by=0" in report
+    assert "actual_file_policy_verdict=OPERATOR_APPROVAL_REQUIRED" in report
+    assert "actual_protected_files=scripts/runner_poll_github_tasks.py" in report
+    assert "reason=actual_file_policy_requires_operator" in report
+    assert "next_action=request_operator_review" in report
+
+
+def test_inspect_pr_mergeability_safe_unprotected_pr_reports_ready_next_action() -> None:
+    with mock.patch.object(
+        runner,
+        "_get_pr_mergeability_state",
+        return_value=_inspect_pr_state(files=[{"filename": "README.md"}]),
+    ):
+        report = runner.inspect_pr_mergeability(_inspect_pr_issue_body())
+
+    assert report.startswith("DONE:")
+    assert "changed_files=README.md" in report
+    assert "actual_file_policy_verdict=AUTO_MERGE_ALLOWED" in report
+    assert "actual_protected_files=(none)" in report
     assert "next_action=mark_ready_or_merge" in report
 
 
@@ -17388,19 +17466,18 @@ def test_inspect_pr_mergeability_non_mergeable_pr_reports_conflict_next_action()
 
 
 def test_inspect_pr_mergeability_uses_github_api_only() -> None:
+    inspect_state = _inspect_pr_state(files=[{"filename": "README.md"}])
     payloads = {
-        f"https://api.github.com/repos/{runner.REPO}/pulls/123": _inspect_pr_state()[
-            "pr"
-        ],
+        f"https://api.github.com/repos/{runner.REPO}/pulls/123": inspect_state["pr"],
         (
             f"https://api.github.com/repos/{runner.REPO}/pulls/123/files"
             "?per_page=100&page=1"
-        ): _inspect_pr_state()["files"],
+        ): inspect_state["files"],
         (
             f"https://api.github.com/repos/{runner.REPO}/compare/"
             f"{'b' * 40}...{HEAD_SHA}"
-        ): _inspect_pr_state()["compare"],
-        f"https://api.github.com/repos/{runner.REPO}/commits/{HEAD_SHA}/status": _inspect_pr_state()[
+        ): inspect_state["compare"],
+        f"https://api.github.com/repos/{runner.REPO}/commits/{HEAD_SHA}/status": inspect_state[
             "combined_status"
         ],
         (

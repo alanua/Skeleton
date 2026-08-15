@@ -57,6 +57,10 @@ from core.loop_controller import LoopPolicy
 from core.loop_engine import LoopEngine
 from core.loop_runner_adapter import run_loop_task_packet
 from core.loop_state_store import LoopStateStore
+from core.merge_policy_checker import (
+    AUTO_MERGE_ALLOWED,
+    DelegatedMergePolicyChecker,
+)
 from core.runner_diagnostic_executor import (
     MEMPALACE_SYNTHETIC_BENCHMARK_SCHEMA,
     MEMPALACE_SYNTHETIC_BENCHMARK_TIMEOUT_SECONDS,
@@ -595,6 +599,9 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "approved_override_hash",
         "approval_status",
         "approved_head_sha",
+        "actual_file_policy_reason",
+        "actual_file_policy_verdict",
+        "actual_protected_files",
         "artifact_count",
         "artifact_id",
         "actions_executed",
@@ -9357,11 +9364,21 @@ def _declared_existing_pr_number(body: str) -> int | None:
 def _declared_existing_pr_expected_head_sha(body: str) -> str | None:
     task_fields = _shadow_task_block_mapping(body)
     candidates: list[object] = []
-    for key in ("expected_pr_head_sha", "expected_head_sha", "head_sha"):
+    for key in (
+        "expected_existing_pr_head_sha",
+        "expected_pr_head_sha",
+        "expected_head_sha",
+        "head_sha",
+    ):
         if key in task_fields:
             candidates.append(task_fields[key])
     metadata = _metadata_before_task(body)
-    for field in ("Expected PR Head SHA", "Expected Head SHA", "Head SHA"):
+    for field in (
+        "Expected Existing PR Head SHA",
+        "Expected PR Head SHA",
+        "Expected Head SHA",
+        "Head SHA",
+    ):
         value = _body_field(metadata, field)
         if value is not None:
             candidates.append(value)
@@ -9576,13 +9593,12 @@ def ensure_codegen_pr_validation_continuation(
     if report_commit is not None and report_commit.lower() != head_sha:
         raise RuntimeError("produced_pr_head_sha_mismatch")
     if declared_pr is not None and declared_pr == pr_number:
-        declared_head = _body_field(_metadata_before_task(issue_body), "Expected Head SHA")
-        if (
-            isinstance(declared_head, str)
-            and _HEAD_SHA_RE.fullmatch(declared_head) is not None
-            and declared_head.lower() != head_sha
-        ):
-            raise RuntimeError("declared_existing_pr_head_stale")
+        declared_head = _declared_existing_pr_expected_head_sha(issue_body)
+        if declared_head is not None and declared_head != head_sha:
+            # A successful existing-PR update is expected to move the head. The
+            # fresh exact head is now the only validation target; merging waits
+            # for a later pass that finds this exact head/base receipt.
+            pass
 
     idempotency_key = _continuation_issue_idempotency_key(
         REPO, pr_number, head_sha, base_sha
@@ -10645,9 +10661,25 @@ def _validation_summary(
     return "not_success", "validation_not_success"
 
 
+def _actual_file_merge_policy(
+    changed_files: list[str],
+) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+    result = DelegatedMergePolicyChecker().check(
+        {
+            "changed_files": tuple(changed_files),
+            "clean_pr": True,
+            "evidence_present": True,
+            "risk_level": "green",
+            "triggers": (),
+        }
+    )
+    return result.verdict, result.protected_files_found, result.reasons
+
+
 def _pr_mergeability_next_action(
     pr: dict[str, Any],
     compare: dict[str, Any],
+    changed_files: list[str],
     validation_state: str,
     request: PrMergeabilityInspectionRequest,
 ) -> tuple[str, str, str]:
@@ -10677,6 +10709,15 @@ def _pr_mergeability_next_action(
         return "BLOCKED", "validation_missing", "run_required_validation"
     if validation_state != "success":
         return "BLOCKED", "validation_not_success", "wait_for_or_fix_validation"
+    policy_verdict, _protected_files, _policy_reasons = _actual_file_merge_policy(
+        changed_files
+    )
+    if policy_verdict != AUTO_MERGE_ALLOWED:
+        return (
+            "NEEDS_OPERATOR",
+            "actual_file_policy_requires_operator",
+            "request_operator_review",
+        )
     if mergeable is True:
         return "DONE", "none", "mark_ready_or_merge"
     return "BLOCKED", "mergeability_unknown", "refresh_mergeability_inspection"
@@ -10720,16 +10761,19 @@ def inspect_pr_mergeability(body: str) -> str:
     validation_state, validation_reason = _validation_summary(
         combined_status, check_runs
     )
-    report_status, reason, next_action = _pr_mergeability_next_action(
-        pr, compare, validation_state, request
-    )
     changed_files = [
         str(file.get("filename"))
         for file in files
         if isinstance(file.get("filename"), str)
     ]
+    report_status, reason, next_action = _pr_mergeability_next_action(
+        pr, compare, changed_files, validation_state, request
+    )
     mergeable = _github_bool_value(pr.get("mergeable"))
     mergeable_state = str(pr.get("mergeable_state") or "unknown")
+    policy_verdict, protected_files, policy_reasons = _actual_file_merge_policy(
+        changed_files
+    )
     status_lines.extend(
         (
             "step=read_pr_metadata status=done",
@@ -10747,10 +10791,13 @@ def inspect_pr_mergeability(body: str) -> str:
             f"ahead_by={compare.get('ahead_by', 'unknown')}",
             f"behind_by={compare.get('behind_by', 'unknown')}",
             f"validation_state={validation_state}",
+            f"actual_file_policy_verdict={policy_verdict}",
+            f"actual_protected_files={','.join(protected_files) if protected_files else '(none)'}",
             f"reason={reason if reason != 'none' else validation_reason}",
             f"next_action={next_action}",
         )
     )
+    status_lines.extend(f"actual_file_policy_reason={reason}" for reason in policy_reasons)
     return _maintenance_report(
         report_status,
         task_id,
