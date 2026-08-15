@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.family_document_runtime_config.schema.json",
+  "type": "object",
+  "required": ["transport", "bot_token", "chat_id"],
+  "additionalProperties": false,
+  "properties": {
+    "transport": {"const": "telegram"},
+    "bot_token": {
+      "type": "object",
+      "required": ["provider", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "provider": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},
+        "name": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"}
+      }
+    },
+    "chat_id": {
+      "type": "object",
+      "required": ["provider", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "provider": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},
+        "name": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"}
+      }
+    }
+  }
+}
