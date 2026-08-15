@@ -5007,6 +5007,164 @@ def finalize_success(issue: dict[str, Any], workdir: str, codex_output: str) -> 
     )
 
 
+def _codegen_publish_allowed_files(body: str) -> tuple[frozenset[str], str | None]:
+    return _issue_publish_allowed_files(_metadata_before_task(body))
+
+
+def _codegen_existing_pr_publish_preflight(
+    request: CodegenExistingPrWorktreeRequest,
+) -> tuple[str | None, dict[str, Any] | None, str | None]:
+    try:
+        pr_state, _metadata_source = _get_pr_branch_validation_state(
+            REPO, request.pr_number
+        )
+    except RuntimeError:
+        return None, None, "pr_metadata_unavailable"
+    if pr_state.get("state") != "OPEN":
+        return None, pr_state, "pr_not_open"
+    head_sha = str(pr_state.get("headRefOid") or "").lower()
+    if head_sha != request.expected_head_sha:
+        return None, pr_state, "pr_head_sha_mismatch"
+    head_branch = str(pr_state.get("headRefName") or "")
+    if (
+        request.expected_head_branch is not None
+        and head_branch != request.expected_head_branch
+    ):
+        return None, pr_state, "pr_head_branch_mismatch"
+    if not _safe_target_base_branch_name(head_branch):
+        return None, pr_state, "pr_head_branch_unsafe"
+    return head_branch, pr_state, None
+
+
+def finalize_existing_pr_success(
+    issue: dict[str, Any],
+    workdir: str,
+    codex_output: str,
+    issue_body: str,
+    request: CodegenExistingPrWorktreeRequest,
+) -> str:
+    issue_number = int(issue["number"])
+    allowed_files, allowed_reason = _codegen_publish_allowed_files(issue_body)
+    if allowed_reason is not None:
+        raise RuntimeError(
+            "Existing PR update requires exact safe allowed files: "
+            f"{allowed_reason}"
+        )
+
+    head_branch, _pr_state, preflight_reason = _codegen_existing_pr_publish_preflight(
+        request
+    )
+    if preflight_reason is not None or head_branch is None:
+        raise RuntimeError(
+            "Existing PR update preflight failed before mutation: "
+            f"{preflight_reason or 'pr_head_branch_unavailable'}"
+        )
+
+    files = changed_files(workdir)
+    if not files:
+        cleanup_runtime_artifacts(workdir)
+        return (
+            "DONE: Codex completed successfully with no file changes.\n\n"
+            "Runtime artifacts cleaned after Codex execution.\n\n"
+            f"Codex output:\n```\n{codex_output.strip()}\n```"
+        )
+    if not set(files) <= allowed_files:
+        raise RuntimeError("Existing PR update changed files outside allowed_files.")
+
+    checks: list[tuple[str, str]] = []
+    for command in (
+        ["git", "diff", "--check"],
+        ["python3", "-m", "pytest", "-q"],
+    ):
+        code, output = _run_finalization_validation_command(command, cwd=workdir)
+        checks.append((" ".join(command), output))
+        if code != 0:
+            raise RuntimeError(f"{' '.join(command)} failed:\n{output}")
+
+    cleanup_runtime_artifacts(workdir)
+    files = changed_files(workdir)
+    if not files:
+        return (
+            "DONE: Codex completed successfully with no file changes.\n\n"
+            "Runtime artifacts cleaned after Codex execution.\n\n"
+            f"Codex output:\n```\n{codex_output.strip()}\n```"
+        )
+    if not set(files) <= allowed_files:
+        raise RuntimeError("Existing PR update changed files outside allowed_files.")
+
+    for command in (
+        ["git", "add", "--", *files],
+        ["git", "diff", "--cached", "--check"],
+        ["git", "commit", "-m", f"runner: issue #{issue_number} update existing PR"],
+    ):
+        code, output = run_command(command, cwd=workdir)
+        checks.append((" ".join(command), output))
+        if code != 0:
+            raise RuntimeError(f"{' '.join(command)} failed:\n{output}")
+
+    cleanup_runtime_artifacts(workdir)
+    code, commit_sha = run_command(["git", "rev-parse", "HEAD"], cwd=workdir)
+    if code != 0:
+        raise RuntimeError(f"git rev-parse HEAD failed:\n{commit_sha}")
+    commit_sha = commit_sha.strip().lower()
+    if (
+        _HEAD_SHA_RE.fullmatch(commit_sha) is None
+        or commit_sha == request.expected_head_sha
+    ):
+        raise RuntimeError("Existing PR update produced invalid or unchanged head SHA.")
+
+    code, output = run_command(
+        [
+            "git",
+            "push",
+            "origin",
+            f"--force-with-lease={head_branch}:{request.expected_head_sha}",
+            f"HEAD:refs/heads/{head_branch}",
+        ],
+        cwd=workdir,
+    )
+    checks.append(("git push existing PR head", output))
+    if code != 0:
+        raise RuntimeError(f"git push existing PR head failed:\n{output}")
+
+    (
+        refreshed_head_branch,
+        post_state,
+        post_reason,
+    ) = _codegen_existing_pr_publish_preflight(
+        CodegenExistingPrWorktreeRequest(
+            pr_number=request.pr_number,
+            expected_head_sha=commit_sha,
+            expected_head_branch=head_branch,
+        )
+    )
+    if post_reason is not None or refreshed_head_branch != head_branch:
+        raise RuntimeError(
+            "Existing PR update post-push verification failed: "
+            f"{post_reason or 'pr_head_branch_mismatch'}"
+        )
+    pr_url = _existing_pr_publish_pr_url(post_state or {})
+    if pr_url is None:
+        raise RuntimeError("Existing PR update post-push PR URL unavailable.")
+
+    pytest_output = next(
+        output for command, output in checks if command == "python3 -m pytest -q"
+    )
+    return (
+        "DONE: Codex completed successfully and updated the existing PR.\n\n"
+        "Changed files:\n"
+        + "\n".join(f"- {file_name}" for file_name in files)
+        + "\n\n"
+        f"Pytest output:\n```\n{pytest_output.strip()}\n```\n\n"
+        f"Commit: {commit_sha}\n"
+        f"Existing PR: {pr_url}\n"
+        f"existing_pr_url={pr_url}\n"
+        f"existing_pr={request.pr_number}\n"
+        f"existing_pr_head_branch={head_branch}\n"
+        f"replacement_pr_created=false"
+    )
+
+
 def finalize_local_worktree_success(
     workdir: str, codex_output: str, runner_task: RunnerTask
 ) -> str:
@@ -9357,7 +9515,12 @@ def _declared_existing_pr_number(body: str) -> int | None:
 def _declared_existing_pr_expected_head_sha(body: str) -> str | None:
     task_fields = _shadow_task_block_mapping(body)
     candidates: list[object] = []
-    for key in ("expected_pr_head_sha", "expected_head_sha", "head_sha"):
+    for key in (
+        "expected_existing_pr_head_sha",
+        "expected_pr_head_sha",
+        "expected_head_sha",
+        "head_sha",
+    ):
         if key in task_fields:
             candidates.append(task_fields[key])
     metadata = _metadata_before_task(body)
@@ -9374,7 +9537,12 @@ def _declared_existing_pr_expected_head_sha(body: str) -> str | None:
 def _declared_existing_pr_expected_head_branch(body: str) -> str | None:
     task_fields = _shadow_task_block_mapping(body)
     candidates: list[object] = []
-    for key in ("expected_pr_head_branch", "expected_head_branch", "head_branch"):
+    for key in (
+        "expected_existing_pr_head_branch",
+        "expected_pr_head_branch",
+        "expected_head_branch",
+        "head_branch",
+    ):
         if key in task_fields:
             candidates.append(task_fields[key])
     metadata = _metadata_before_task(body)
@@ -16141,6 +16309,14 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
         if local_target_worktree and runner_task is not None:
             finalized_report = finalize_local_worktree_success(
                 issue_workdir, codex_output, runner_task
+            )
+        elif existing_pr_worktree_request is not None:
+            finalized_report = finalize_existing_pr_success(
+                issue,
+                issue_workdir,
+                codex_output,
+                issue_body,
+                existing_pr_worktree_request,
             )
         else:
             finalized_report = finalize_success(issue, issue_workdir, codex_output)

@@ -1720,6 +1720,229 @@ def test_codegen_existing_pr_exact_head_update_targets_declared_pr() -> None:
     create.assert_not_called()
 
 
+def _codegen_update_existing_pr_issue_body(
+    *,
+    pr_number: int = 2749,
+    expected_head_sha: str = HEAD_SHA,
+    allowed_files: tuple[str, ...] = ("scripts/runner_poll_github_tasks.py",),
+) -> str:
+    return "\n".join(
+        (
+            "Expected Output: update existing PR in place",
+            "allowed_files:",
+            *[f"  - {path}" for path in allowed_files],
+            "",
+            "```task",
+            "operation: update_existing_pr",
+            f"existing_pr: {pr_number}",
+            f"expected_existing_pr_head_sha: {expected_head_sha}",
+            "```",
+        )
+    )
+
+
+def test_codegen_existing_pr_schema_alias_materializes_exact_existing_head() -> None:
+    request, reason = runner._codegen_existing_pr_worktree_request(
+        _codegen_update_existing_pr_issue_body()
+    )
+
+    assert reason is None
+    assert request == runner.CodegenExistingPrWorktreeRequest(
+        pr_number=2749,
+        expected_head_sha=HEAD_SHA,
+        expected_head_branch=None,
+    )
+
+
+def test_update_existing_pr_process_publishes_same_pr_and_queues_validation(
+    tmp_path: Path,
+) -> None:
+    issue_path = tmp_path / "issue-2757"
+    post_head = "d" * 40
+    pr_url = "https://github.com/alanua/Skeleton/pull/2749"
+    issue = {
+        "number": 2757,
+        "title": "Refresh existing PR",
+        "body": _codegen_update_existing_pr_issue_body(
+            pr_number=2749,
+            allowed_files=(
+                "scripts/runner_poll_github_tasks.py",
+                "tests/test_runner_poll_github_tasks.py",
+            ),
+        ),
+        "comments": [],
+        "labels": [runner.LABEL_READY],
+    }
+    pre_pr_state = _pr_validation_state(
+        number=2749,
+        headRefName="runner/issue-2749",
+        headRefOid=HEAD_SHA,
+        baseRefOid="c" * 40,
+        url=pr_url,
+    )
+    post_pr_state = _pr_validation_state(
+        number=2749,
+        headRefName="runner/issue-2749",
+        headRefOid=post_head,
+        baseRefOid="c" * 40,
+        url=pr_url,
+    )
+
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        del cwd
+        if command in (
+            ["git", "diff", "--name-only"],
+            ["git", "diff", "--cached", "--name-only"],
+        ):
+            return (
+                0,
+                "scripts/runner_poll_github_tasks.py\n"
+                "tests/test_runner_poll_github_tasks.py\n",
+            )
+        if command == ["git", "ls-files", "--others", "--exclude-standard"]:
+            return 0, ""
+        if command == ["git", "diff", "--check"]:
+            return 0, ""
+        if command == ["python3", "-m", "pytest", "-q"]:
+            return 0, "700 passed\n"
+        if command == [
+            "git",
+            "add",
+            "--",
+            "scripts/runner_poll_github_tasks.py",
+            "tests/test_runner_poll_github_tasks.py",
+        ]:
+            return 0, ""
+        if command == ["git", "diff", "--cached", "--check"]:
+            return 0, ""
+        if command == [
+            "git",
+            "commit",
+            "-m",
+            "runner: issue #2757 update existing PR",
+        ]:
+            return 0, ""
+        if command == ["git", "rev-parse", "HEAD"]:
+            return 0, f"{post_head}\n"
+        if command == [
+            "git",
+            "push",
+            "origin",
+            f"--force-with-lease=runner/issue-2749:{HEAD_SHA}",
+            "HEAD:refs/heads/runner/issue-2749",
+        ]:
+            return 0, ""
+        if command[:3] == ["gh", "issue", "list"]:
+            return 0, "[]"
+        if command[:3] == ["gh", "issue", "create"]:
+            return 0, "https://github.com/alanua/Skeleton/issues/3004\n"
+        return 2, f"unexpected command: {command!r}"
+
+    with mock.patch.object(runner, "set_issue_label"), mock.patch.object(
+        runner,
+        "prepare_issue_worktree_from_existing_pr_head",
+        return_value=(0, "ready", issue_path),
+    ) as prepare, mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, "codex output")
+    ), mock.patch.object(
+        runner,
+        "_get_pr_branch_validation_state",
+        side_effect=[
+            (pre_pr_state, "gh"),
+            (post_pr_state, "gh"),
+            (post_pr_state, "gh"),
+        ],
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run
+    ) as run_command, mock.patch.object(
+        runner, "cleanup_issue_worktree", return_value=(0, "")
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ) as post, mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "record_runner_task_picked_up", return_value=None
+    ), mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ), mock.patch.object(
+        runner, "maybe_replenish_runner_queue_after_completion", return_value=True
+    ):
+        runner.process_issue(issue, workdir=str(tmp_path))
+
+    prepare.assert_called_once()
+    assert prepare.call_args.args[2] == runner.CodegenExistingPrWorktreeRequest(
+        pr_number=2749,
+        expected_head_sha=HEAD_SHA,
+        expected_head_branch=None,
+    )
+    commands = [call.args[0] for call in run_command.call_args_list]
+    assert [
+        "git",
+        "push",
+        "origin",
+        f"--force-with-lease=runner/issue-2749:{HEAD_SHA}",
+        "HEAD:refs/heads/runner/issue-2749",
+    ] in commands
+    assert all(command[:3] != ["gh", "pr", "create"] for command in commands)
+    assert all(command[:3] != ["gh", "pr", "merge"] for command in commands)
+    report = post.call_args.args[1]
+    assert "Existing PR: https://github.com/alanua/Skeleton/pull/2749" in report
+    assert "replacement_pr_created=false" in report
+    assert "validation_continuation=created" in report
+    assert "validation_pr=2749" in report
+    assert f"validation_head_sha={post_head}" in report
+
+
+def test_update_existing_pr_head_mismatch_blocks_before_publish_or_new_pr(
+    tmp_path: Path,
+) -> None:
+    issue = {
+        "number": 2757,
+        "title": "Refresh existing PR",
+        "body": _codegen_update_existing_pr_issue_body(pr_number=2749),
+        "comments": [],
+        "labels": [runner.LABEL_READY],
+    }
+
+    with mock.patch.object(runner, "set_issue_label"), mock.patch.object(
+        runner,
+        "_get_pr_branch_validation_state",
+        return_value=(
+            _pr_validation_state(
+                number=2749,
+                headRefName="runner/issue-2749",
+                headRefOid="e" * 40,
+            ),
+            "gh",
+        ),
+    ), mock.patch.object(
+        runner, "run_command"
+    ) as run_command, mock.patch.object(
+        runner, "run_codex_task"
+    ) as run_codex, mock.patch.object(
+        runner, "finalize_success"
+    ) as finalize, mock.patch.object(
+        runner, "post_issue_comment"
+    ) as post, mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "record_runner_task_picked_up", return_value=None
+    ), mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ):
+        runner.process_issue(issue, workdir=str(tmp_path))
+
+    run_codex.assert_not_called()
+    finalize.assert_not_called()
+    commands = [call.args[0] for call in run_command.call_args_list]
+    assert all(command[:2] != ["git", "push"] for command in commands)
+    assert all(command[:3] != ["gh", "pr", "create"] for command in commands)
+    report = post.call_args.args[1]
+    assert "pr_head_sha_mismatch" in report
+
+
 def test_validation_completion_invokes_replenishment_even_when_blocked() -> None:
     with mock.patch.object(
         runner, "dispatch_runtime_maintenance_task", return_value="BLOCKED: nope"
