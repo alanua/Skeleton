@@ -14,3 +14,14 @@ Security boundary:
 The workflow uses JDK 17, Gradle 8.9, and only the Android SDK already present on the pinned GitHub-hosted image. It fails before build if `ANDROID_HOME`, `ANDROID_SDK_ROOT`, platform `android-35`, or build-tools `34.0.0` are unavailable.
 
 Artifacts include only `app-debug.apk` and a public-safe metadata text file containing source SHA, APK SHA-256, byte size, and artifact scope. Stable distribution is intentionally out of scope; issue #2480 owns release/latest publishing after build proof.
+
+The operator dashboard lives under `android/home/**`, so pull requests touching it automatically request the same Android Home CI path. Local repository validation remains:
+
+The dashboard endpoint contract is source-topology sensitive: canonical GitHub/control-plane Runner queue snapshot first, Scheduler occurrences supplementary only, and stale/offline response on missing or partial live state.
+
+```bash
+pytest tests/android
+git diff --check
+```
+
+When Android tooling is unavailable locally, the path-triggered CI is the canonical Android build/unit validation route.
