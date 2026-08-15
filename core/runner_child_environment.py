@@ -14,6 +14,7 @@ from core.codex_runtime_recovery import (
     is_canonical_systemd_runner_context,
     pinned_codex_recovery_marker_present,
     pinned_codex_runtime_path,
+    should_attempt_codex_runtime_recovery,
 )
 
 
