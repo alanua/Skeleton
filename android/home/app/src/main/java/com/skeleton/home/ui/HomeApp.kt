@@ -55,16 +55,19 @@ import com.skeleton.home.domain.WorkDescriptionAutoScroll
 import com.skeleton.home.navigation.HomeRoute
 import com.skeleton.home.navigation.bottomRoutesFor
 import com.skeleton.home.navigation.canNavigateTo
+import com.skeleton.home.update.HomeUpdateAction
+import com.skeleton.home.update.HomeUpdateManager
 import kotlinx.coroutines.delay
 
 @Composable
 fun HomeApp(
     session: AuthSessionProvider,
     initialRoute: HomeRoute = HomeRoute.Home,
+    updateManager: HomeUpdateManager? = null,
 ) {
     MaterialTheme {
         Surface(color = MaterialTheme.colorScheme.background) {
-            HomeShell(session = session, initialRoute = initialRoute)
+            HomeShell(session = session, initialRoute = initialRoute, updateManager = updateManager)
         }
     }
 }
@@ -75,6 +78,7 @@ fun HomeShell(
     session: AuthSessionProvider,
     initialRoute: HomeRoute = HomeRoute.Home,
     repository: SyntheticHomeRepository = SyntheticHomeRepository(),
+    updateManager: HomeUpdateManager? = null,
 ) {
     val currentSession = session.currentSession()
     val bottomRoutes = bottomRoutesFor(currentSession, session)
@@ -82,7 +86,10 @@ fun HomeShell(
 
     Scaffold(
         topBar = {
-            TopAppBar(title = { Text("Home") })
+            TopAppBar(
+                title = { Text("Home") },
+                actions = { updateManager?.let { HomeUpdateAction(it) } },
+            )
         },
         bottomBar = {
             NavigationBar {

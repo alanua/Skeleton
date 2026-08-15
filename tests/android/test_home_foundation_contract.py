@@ -143,3 +143,33 @@ def test_no_endpoint_secret_or_live_fixture_values() -> None:
     for word in forbidden:
         assert word not in lowered
     assert "Синтетичний режим" in text
+
+def test_existing_production_self_update_contract_is_preserved() -> None:
+    gradle = read("app/build.gradle.kts")
+    manifest = read("app/src/main/AndroidManifest.xml")
+    main = read("app/src/main/java/com/skeleton/home/MainActivity.kt")
+    ui = read("app/src/main/java/com/skeleton/home/update/HomeUpdateUi.kt")
+    manager = read("app/src/main/java/com/skeleton/home/update/HomeUpdateManager.kt")
+    policy = read("app/src/main/java/com/skeleton/home/update/HomeUpdatePolicy.kt")
+    assert 'applicationId = "com.skeleton.home"' in gradle
+    assert 'applicationIdSuffix = ".preview"' in gradle
+    assert 'versionCode = 31' in gradle
+    assert 'versionName = "1.3.17"' in gradle
+    assert 'HOME_EDGE_BASE_URLS' in gradle
+    assert 'android.permission.REQUEST_INSTALL_PACKAGES' in manifest
+    assert 'android.permission.INTERNET' in manifest
+    assert 'HomeUpdateInstallStatusReceiver' in manifest
+    assert 'HomeUpdateManager(this)' in main
+    assert 'homeUpdateManager.onResume()' in main
+    assert 'Оновити застосунок' in ui
+    assert 'LaunchedEffect(manager)' in ui
+    assert '/api/native/app-update' in policy
+    assert 'remoteVersionCode > installedVersionCode' in policy
+    assert 'DownloadManager' in manager
+    assert 'MessageDigest.getInstance("SHA-256")' in manager
+    assert 'PackageInstaller.SessionParams' in manager
+    assert 'ACTION_MANAGE_UNKNOWN_APP_SOURCES' in manager
+    assert 'Preview build cannot install production updates' in manager
+    assert '192.168.' not in manager
+    assert '.ts.net' not in manager
+

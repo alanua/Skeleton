@@ -21,6 +21,7 @@ import yaml
 from flask import Flask, Response, abort, jsonify, request, send_from_directory
 
 import media_search
+import native_app_update_manifest
 import player
 import site_registry
 from resolver import BrowserChallengeError, OriginProtectedError, resolve_page
@@ -28,6 +29,7 @@ from resolver import BrowserChallengeError, OriginProtectedError, resolve_page
 HOME = Path('/home/valertos08')
 BASE = HOME / '.local/lib/skeleton-cast'
 STATE = HOME / '.local/state/skeleton-cast'
+HOME_NATIVE_RELEASE = STATE / 'home-native-release.json'
 JOBS = STATE / 'jobs'
 STATIC = BASE / 'static'
 POSTERS = STATE / 'posters'
@@ -861,6 +863,15 @@ def install() -> str:
 def apk():
     _require()
     return send_from_directory(STATIC, 'SkeletonTV.apk', as_attachment=True, download_name='Home.apk')
+
+
+@app.get('/api/native/app-update')
+def native_app_update() -> Response:
+    _require()
+    try:
+        return jsonify(native_app_update_manifest.build_update_manifest(STATIC, HOME_NATIVE_RELEASE))
+    except native_app_update_manifest.NativeAppUpdateUnavailable:
+        return jsonify({'error': 'Маніфест оновлення Home ще не готовий.'}), 503
 
 
 @app.post('/api/share')
