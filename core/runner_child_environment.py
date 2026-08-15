@@ -14,7 +14,6 @@ from core.codex_runtime_recovery import (
     is_canonical_systemd_runner_context,
     pinned_codex_recovery_marker_present,
     pinned_codex_runtime_path,
-    should_attempt_codex_runtime_recovery,
 )
 
 
@@ -32,6 +31,7 @@ from pathlib import Path
 import subprocess
 import sys
 
+_DEFAULT_CODEX_MODEL = "gpt-5.6"
 _MARKERS = (
     "usage limit",
     "rate limit",
@@ -73,6 +73,13 @@ def _task(argv: list[str], stdin_text: str) -> str:
     return "Complete the bounded Runner task in the current worktree and run its required validation."
 
 
+def _codex_args(argv: list[str]) -> list[str]:
+    args = list(argv)
+    if args and args[0] == "exec" and "--model" not in args:
+        args[1:1] = ["--model", _DEFAULT_CODEX_MODEL]
+    return args
+
+
 def main() -> int:
     real_codex = os.environ.get("SKELETON_REAL_CODEX_BIN", "")
     openhands = os.environ.get("SKELETON_OPENHANDS_BIN", "")
@@ -83,7 +90,7 @@ def main() -> int:
     child_env = dict(os.environ)
     child_env["PATH"] = original_path
     codex = subprocess.run(
-        [real_codex, *sys.argv[1:]],
+        [real_codex, *_codex_args(sys.argv[1:])],
         input=stdin_text,
         text=True,
         stdout=subprocess.PIPE,
@@ -92,6 +99,7 @@ def main() -> int:
         check=False,
     )
     if codex.returncode == 0:
+        sys.stdout.write("SKELETON_CODEGEN_PROVIDER=codex\n")
         sys.stdout.write(codex.stdout)
         sys.stderr.write(codex.stderr)
         return 0
@@ -110,7 +118,9 @@ def main() -> int:
         check=False,
     )
     if fallback.returncode == 0:
-        sys.stdout.write("SKELETON_CODEGEN_PROVIDER=openhands\nRESULT: OK\n")
+        sys.stdout.write("SKELETON_CODEGEN_PROVIDER=openhands\n")
+        sys.stdout.write("SKELETON_CODEGEN_PRIMARY_FAILURE=quota_or_provider_outage\n")
+        sys.stdout.write("RESULT: OK\n")
         return 0
     sys.stderr.write("SKELETON_CODEGEN_FALLBACK_FAILED\n")
     return fallback.returncode or codex.returncode
