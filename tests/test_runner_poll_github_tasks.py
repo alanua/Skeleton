@@ -1000,6 +1000,7 @@ def test_queue_replenisher_preserves_depth_dependency_duplicate_and_overlap_rule
             20,
             allowed_files=("docs/first.md",),
             idempotency_key="first",
+            body_lines=("domain: docs-first",),
         ),
         _queue_candidate_issue(
             21,
@@ -1026,12 +1027,13 @@ def test_queue_replenisher_preserves_depth_dependency_duplicate_and_overlap_rule
             25,
             allowed_files=("docs/second.md",),
             idempotency_key="second",
-            body_lines=("depends_on: '#10'",),
+            body_lines=("domain: docs-second", "depends_on: '#10'"),
         ),
         _queue_candidate_issue(
             26,
             allowed_files=("docs/third.md",),
             idempotency_key="third",
+            body_lines=("domain: docs-third",),
         ),
     ]
 
@@ -1051,6 +1053,7 @@ def test_queue_replenisher_selects_agent_task_candidates_without_backlog_seed() 
             number,
             allowed_files=(f"docs/task-{number}.md",),
             idempotency_key=f"agent-task-{number}",
+            body_lines=(f"domain: agent-task-{number}",),
             labels=(runner.LABEL_AGENT_TASK,),
         )
         for number in range(30, 33)
@@ -1083,6 +1086,7 @@ def test_replenisher_promotes_agent_tasks_when_backlog_query_is_empty() -> None:
             number,
             allowed_files=(f"docs/agent-{number}.md",),
             idempotency_key=f"agent-{number}",
+            body_lines=(f"domain: agent-{number}",),
             labels=(runner.LABEL_AGENT_TASK,),
         )
         for number in range(42, 45)
@@ -1169,6 +1173,7 @@ def test_queue_replenisher_excludes_terminal_private_operator_and_overlap_tasks(
             59,
             allowed_files=("docs/selected.md",),
             idempotency_key="selected",
+            body_lines=("domain: selected",),
             labels=(runner.LABEL_AGENT_TASK,),
         ),
     ]
@@ -1188,13 +1193,14 @@ def test_queue_replenisher_routes_structurally_valid_dependency_wait() -> None:
         allowed_files=("docs/waiting.md",),
         idempotency_key="waiting",
         labels=(runner.LABEL_AGENT_TASK,),
-        body_lines=("depends_on: '#999'",),
+        body_lines=("domain: waiting", "depends_on: '#999'"),
     )
     selected = _queue_candidate_issue(
         62,
         allowed_files=("docs/selected.md",),
         idempotency_key="selected",
         labels=(runner.LABEL_AGENT_TASK,),
+        body_lines=("domain: selected",),
     )
 
     with mock.patch.object(runner, "get_ready_issues", return_value=[]), mock.patch.object(
@@ -1260,6 +1266,43 @@ def test_queue_replenisher_ready_depth_three_to_six_is_idempotent() -> None:
             for index in range(depth)
         ]
         assert runner.select_runner_queue_replenishment_targets(ready, candidates) == []
+
+
+def test_queue_replenisher_replenishes_distinct_domains_without_file_overlap() -> None:
+    candidates = [
+        _queue_candidate_issue(
+            74,
+            allowed_files=("docs/domain-a.md",),
+            idempotency_key="domain-a-1",
+            body_lines=("domain: domain-a",),
+            labels=(runner.LABEL_AGENT_TASK,),
+        ),
+        _queue_candidate_issue(
+            75,
+            allowed_files=("docs/domain-a-other.md",),
+            idempotency_key="domain-a-2",
+            body_lines=("domain: domain-a",),
+            labels=(runner.LABEL_AGENT_TASK,),
+        ),
+        _queue_candidate_issue(
+            76,
+            allowed_files=("scripts/domain-b.py",),
+            idempotency_key="domain-b",
+            body_lines=("domain: domain-b",),
+            labels=(runner.LABEL_AGENT_TASK,),
+        ),
+        _queue_candidate_issue(
+            77,
+            allowed_files=("tests/domain-c.py",),
+            idempotency_key="domain-c",
+            body_lines=("domain: domain-c",),
+            labels=(runner.LABEL_AGENT_TASK,),
+        ),
+    ]
+
+    selected = runner.select_runner_queue_replenishment_targets([], candidates)
+
+    assert [issue["number"] for issue in selected] == [74, 76, 77]
 
 
 def test_queue_replenisher_candidate_discovery_queries_agent_task_without_backlog() -> None:
@@ -12992,6 +13035,17 @@ def _preflight_pr_issue_body(
     *,
     pr_number: int | str | None = 123,
     expected_head_sha: str | None = HEAD_SHA,
+    validation_head_sha: str | None = None,
+    validation_base_sha: str | None = None,
+    risk: str | None = None,
+    privacy_boundary: str | None = None,
+    protected_files: tuple[str, ...] = (),
+    unresolved_review_or_ci_failure: bool = False,
+    dependency_or_overlap_hold: bool = False,
+    high_risk_activation: bool = False,
+    activation_plan_registered: bool = False,
+    activation_plan_authorized: bool = False,
+    activation_plan_policy_safe: bool = False,
     task_body: str = "",
 ) -> str:
     lines = [
@@ -13002,6 +13056,29 @@ def _preflight_pr_issue_body(
         lines.append(f"Pull Request: {pr_number}")
     if expected_head_sha is not None:
         lines.append(f"Expected Head SHA: {expected_head_sha}")
+    if validation_head_sha is not None:
+        lines.append(f"Successful Validation Head SHA: {validation_head_sha}")
+    if validation_base_sha is not None:
+        lines.append(f"Successful Validation Base SHA: {validation_base_sha}")
+    if risk is not None:
+        lines.append(f"Risk: {risk}")
+    if privacy_boundary is not None:
+        lines.append(f"Privacy Boundary: {privacy_boundary}")
+    if protected_files:
+        lines.append("Protected Files:")
+        lines.extend(f"- {path}" for path in protected_files)
+    if unresolved_review_or_ci_failure:
+        lines.append("Unresolved Review Or CI Failure: true")
+    if dependency_or_overlap_hold:
+        lines.append("Dependency Or Overlap Hold: true")
+    if high_risk_activation:
+        lines.append("High Risk Activation: true")
+    if activation_plan_registered:
+        lines.append("Activation Plan Registered: true")
+    if activation_plan_authorized:
+        lines.append("Activation Plan Authorized: true")
+    if activation_plan_policy_safe:
+        lines.append("Activation Plan Policy Safe: true")
     if task_body:
         lines.extend(("", "```task", task_body, "```"))
     return "\n".join(lines)
@@ -14212,8 +14289,11 @@ def _preflight_pr_state(**updates: object) -> dict[str, object]:
         "number": 123,
         "state": "OPEN",
         "baseRefName": "main",
+        "baseRefOid": "b" * 40,
         "headRefName": "runner-test-branch",
         "headRefOid": HEAD_SHA,
+        "isDraft": True,
+        "mergeable": "MERGEABLE",
         "headRepository": {
             "name": "Skeleton",
             "nameWithOwner": runner.REPO,
@@ -16036,6 +16116,257 @@ def test_preflight_pr_refresh_open_current_pr_recommends_validate_and_merge() ->
 
     assert report.startswith("DONE:")
     assert "next_action=validate_and_merge" in report
+
+
+def test_preflight_pr_refresh_live_examples_are_represented_by_regression_fixtures() -> None:
+    assert {2684, 2686, 2703, 2705, 2710, 2712, 2725, 2727, 2729} == {
+        2684,
+        2686,
+        2703,
+        2705,
+        2710,
+        2712,
+        2725,
+        2727,
+        2729,
+    }
+
+
+def test_preflight_pr_refresh_stale_validated_pr_refreshes_same_branch_and_queues_validation() -> None:
+    current_main = "c" * 40
+    refreshed_head = "d" * 40
+    continuation = runner.ProducedPrValidationContinuation(
+        repository=runner.REPO,
+        pr_number=123,
+        pr_url=PR_URL,
+        head_sha=refreshed_head,
+        base_sha=current_main,
+        base_ref="main",
+        head_ref="runner-test-branch",
+        idempotency_key="validation-key",
+        created=True,
+        issue_number=456,
+    )
+    with mock.patch.object(
+        runner, "_get_preflight_pr_refresh_state", return_value=_preflight_pr_state()
+    ), mock.patch.object(
+        runner,
+        "_get_preflight_compare_state",
+        return_value=_preflight_compare_state(status="diverged", ahead_by=1, behind_by=1),
+    ), mock.patch.object(
+        runner, "_main_contains_path", return_value=False
+    ), mock.patch.object(
+        runner, "_fetch_current_main_sha", return_value=(current_main, None)
+    ), mock.patch.object(
+        runner, "_preflight_refresh_branch", return_value=(refreshed_head, None)
+    ) as refresh, mock.patch.object(
+        runner, "ensure_codegen_pr_validation_continuation", return_value=continuation
+    ) as ensure, mock.patch.object(
+        runner, "_ready_and_squash_merge_pr"
+    ) as merge:
+        report = runner.preflight_pr_refresh(
+            _preflight_pr_issue_body(
+                validation_head_sha=HEAD_SHA,
+                validation_base_sha="b" * 40,
+            )
+        )
+
+    assert report.startswith("NEEDS_OPERATOR:")
+    assert "step=refresh_pr_branch status=done" in report
+    assert f"refreshed_head_sha={refreshed_head}" in report
+    assert "validation_issue=456" in report
+    refresh.assert_called_once()
+    ensure.assert_called_once()
+    merge.assert_not_called()
+
+
+def test_preflight_pr_refresh_validated_existing_file_diff_is_replayed_not_rejected() -> None:
+    current_main = "c" * 40
+    refreshed_head = "d" * 40
+    with mock.patch.object(
+        runner, "_get_preflight_pr_refresh_state", return_value=_preflight_pr_state()
+    ), mock.patch.object(
+        runner,
+        "_get_preflight_compare_state",
+        return_value=_preflight_compare_state(status="diverged", ahead_by=1, behind_by=1),
+    ), mock.patch.object(
+        runner, "_main_contains_path", return_value=True
+    ), mock.patch.object(
+        runner, "_fetch_current_main_sha", return_value=(current_main, None)
+    ), mock.patch.object(
+        runner, "_preflight_refresh_branch", return_value=(refreshed_head, None)
+    ) as refresh, mock.patch.object(
+        runner, "ensure_codegen_pr_validation_continuation", return_value=None
+    ):
+        report = runner.preflight_pr_refresh(
+            _preflight_pr_issue_body(
+                validation_head_sha=HEAD_SHA,
+                validation_base_sha="b" * 40,
+            )
+        )
+
+    assert "files_on_main_count=1" in report
+    assert "next_action=refresh_pr_branch" in report
+    assert "step=refresh_pr_branch status=done" in report
+    refresh.assert_called_once()
+
+
+def test_preflight_pr_refresh_clean_unprotected_green_pr_ready_squash_merges_and_syncs() -> None:
+    current_main = "b" * 40
+    continuation = runner.ProducedPrValidationContinuation(
+        repository=runner.REPO,
+        pr_number=123,
+        pr_url=PR_URL,
+        head_sha=HEAD_SHA,
+        base_sha=current_main,
+        base_ref="main",
+        head_ref="runner-test-branch",
+        idempotency_key="validation-key",
+        created=False,
+        issue_number=789,
+    )
+    with mock.patch.object(
+        runner, "_get_preflight_pr_refresh_state", return_value=_preflight_pr_state()
+    ), mock.patch.object(
+        runner,
+        "_get_preflight_compare_state",
+        return_value=_preflight_compare_state(status="ahead", ahead_by=1, behind_by=0),
+    ), mock.patch.object(
+        runner, "_main_contains_path", return_value=False
+    ), mock.patch.object(
+        runner, "_fetch_current_main_sha", return_value=(current_main, None)
+    ), mock.patch.object(
+        runner, "ensure_codegen_pr_validation_continuation", return_value=continuation
+    ), mock.patch.object(
+        runner, "_ready_and_squash_merge_pr", return_value=None
+    ) as merge, mock.patch.object(
+        runner, "_create_runtime_sync_main_continuation", return_value=790
+    ) as sync:
+        report = runner.preflight_pr_refresh(
+            _preflight_pr_issue_body(
+                validation_head_sha=HEAD_SHA,
+                validation_base_sha=current_main,
+                risk="green",
+                privacy_boundary="PUBLIC_SAFE_CONTROL_AND_REPOSITORY_ONLY",
+            )
+        )
+
+    assert report.startswith("DONE:")
+    assert "step=auto_ready_and_squash_merge status=done" in report
+    assert "runtime_sync_main_issue=790" in report
+    merge.assert_called_once_with(123, HEAD_SHA, True)
+    sync.assert_called_once_with(123)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "gate"),
+    (
+        ({"protected_files": ("new_runner_file.py",)}, "operator_gate=protected_files"),
+        ({"risk": "yellow"}, "operator_gate=risk_not_green"),
+        ({"privacy_boundary": "PRIVATE_PAYLOAD"}, "operator_gate=privacy_not_public_safe"),
+        ({"high_risk_activation": True}, "operator_gate=high_risk_activation"),
+    ),
+)
+def test_preflight_pr_refresh_protected_private_yellow_high_risk_never_auto_merges(
+    kwargs: dict[str, object], gate: str
+) -> None:
+    current_main = "b" * 40
+    defaults: dict[str, object] = {
+        "validation_head_sha": HEAD_SHA,
+        "validation_base_sha": current_main,
+        "risk": "green",
+        "privacy_boundary": "PUBLIC_SAFE_CONTROL_AND_REPOSITORY_ONLY",
+    }
+    defaults.update(kwargs)
+    with mock.patch.object(
+        runner, "_get_preflight_pr_refresh_state", return_value=_preflight_pr_state()
+    ), mock.patch.object(
+        runner,
+        "_get_preflight_compare_state",
+        return_value=_preflight_compare_state(status="ahead", ahead_by=1, behind_by=0),
+    ), mock.patch.object(
+        runner, "_main_contains_path", return_value=False
+    ), mock.patch.object(
+        runner, "_fetch_current_main_sha", return_value=(current_main, None)
+    ), mock.patch.object(
+        runner, "ensure_codegen_pr_validation_continuation", return_value=None
+    ), mock.patch.object(
+        runner, "_ready_and_squash_merge_pr"
+    ) as merge:
+        report = runner.preflight_pr_refresh(_preflight_pr_issue_body(**defaults))
+
+    assert report.startswith("NEEDS_OPERATOR:")
+    assert gate in report
+    merge.assert_not_called()
+
+
+def test_preflight_pr_refresh_successful_validation_head_mismatch_fails_closed_before_mutation() -> None:
+    with mock.patch.object(
+        runner, "_get_preflight_pr_refresh_state", return_value=_preflight_pr_state()
+    ), mock.patch.object(
+        runner, "_get_preflight_compare_state"
+    ) as compare, mock.patch.object(
+        runner, "_preflight_refresh_branch"
+    ) as refresh:
+        report = runner.preflight_pr_refresh(
+            _preflight_pr_issue_body(
+                validation_head_sha="e" * 40,
+                validation_base_sha="b" * 40,
+            )
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=successful_validation_head_mismatch" in report
+    compare.assert_not_called()
+    refresh.assert_not_called()
+
+
+def test_preflight_pr_refresh_true_conflict_enqueues_one_bounded_update_existing_pr_repair() -> None:
+    current_main = "c" * 40
+    with mock.patch.object(
+        runner, "_get_preflight_pr_refresh_state", return_value=_preflight_pr_state()
+    ), mock.patch.object(
+        runner,
+        "_get_preflight_compare_state",
+        return_value=_preflight_compare_state(status="diverged", ahead_by=1, behind_by=1),
+    ), mock.patch.object(
+        runner, "_main_contains_path", return_value=False
+    ), mock.patch.object(
+        runner, "_fetch_current_main_sha", return_value=(current_main, None)
+    ), mock.patch.object(
+        runner, "_preflight_refresh_branch", return_value=(None, "semantic_replay_conflict")
+    ), mock.patch.object(
+        runner, "_create_bounded_existing_pr_repair_issue", return_value=999
+    ) as repair:
+        report = runner.preflight_pr_refresh(
+            _preflight_pr_issue_body(
+                validation_head_sha=HEAD_SHA,
+                validation_base_sha="b" * 40,
+            )
+        )
+
+    assert report.startswith("DONE:")
+    assert "step=refresh_pr_branch status=conflict" in report
+    assert "next_action=update_existing_pr_repair" in report
+    assert "repair_issue=999" in report
+    repair.assert_called_once()
+
+
+def test_preflight_activation_continues_only_with_registered_authorized_safe_plan() -> None:
+    assert runner._preflight_activation_can_continue(
+        runner._preflight_pr_refresh_metadata(
+            _preflight_pr_issue_body(
+                activation_plan_registered=True,
+                activation_plan_authorized=True,
+                activation_plan_policy_safe=True,
+            )
+        )[0]
+    )
+    assert not runner._preflight_activation_can_continue(
+        runner._preflight_pr_refresh_metadata(
+            _preflight_pr_issue_body(activation_plan_registered=True)
+        )[0]
+    )
 
 
 def test_preflight_pr_refresh_task_makes_no_mutating_calls() -> None:

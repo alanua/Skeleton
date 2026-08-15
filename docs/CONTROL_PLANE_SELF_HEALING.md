@@ -103,12 +103,36 @@ contract declared `existing_pr` or `update_existing_pr`, a different produced PR
 is treated as a publication-contract failure; no validation continuation is
 created for the wrong PR.
 
+When a Runner-produced PR already has successful exact-head validation but its
+recorded base is behind current `main`, the canonical `preflight_pr_refresh`
+maintenance route re-checks the live PR number, head SHA, recorded validation
+head, and recorded validation base before any mutation. A clean semantic replay
+refreshes the same PR branch with `--force-with-lease` and queues exact-head
+validation for the refreshed head. A real content conflict creates one bounded
+`update_existing_pr` repair task against the verified old head and current main;
+it does not create a replacement PR. Validation metadata mismatch fails closed.
+
+Only public-safe, risk:green, unprotected PRs with no review or CI failure, no
+dependency or overlap hold, and no high-risk activation may be transitioned from
+draft to ready and squash-merged automatically with an exact head match. Private,
+yellow, red, protected, or high-risk work emits a `NEEDS_OPERATOR` gate instead.
+After an automatic merge, the Runner enqueues `runtime_sync_main` so the
+long-lived checkout cannot remain stale. Device, provider, deployment, finance,
+or legal activation continues only when the task already contains an explicit
+registered, authorized, policy-safe activation plan.
+
 For codegen tasks that declare `existing_pr` or `update_existing_pr` with an
 exact expected PR head SHA, the issue worktree is materialized from that verified
 PR head branch before Codex starts. Metadata mismatch fails closed before any
 worktree mutation. The checkout preserves the complete PR-head tree, including
 files outside the task `allowed_files`; Codex remains restricted to editing only
 the declared allowed files.
+
+Queue replenishment still targets a depth of three to six ready tasks, but
+selection now also treats an explicit `domain`, then `project`, then operation
+or first path segment as an occupancy key. Ready and running work reserve their
+domains, terminal and superseded tasks stay ineligible, and selected tasks must
+remain public-safe with non-overlapping `allowed_files`.
 
 ## Operator Noise
 
