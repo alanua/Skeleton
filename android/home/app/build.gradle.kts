@@ -1,3 +1,6 @@
+val homeEdgeBaseUrls = providers.gradleProperty("homeEdgeBaseUrls").orElse("").get()
+val escapedHomeEdgeBaseUrls = homeEdgeBaseUrls.replace("\\", "\\\\").replace("\"", "\\\"")
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -12,8 +15,9 @@ android {
         applicationId = "com.skeleton.home"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 31
+        versionName = "1.3.17"
+        buildConfigField("String", "HOME_EDGE_BASE_URLS", "\"$escapedHomeEdgeBaseUrls\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -39,6 +43,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 

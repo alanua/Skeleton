@@ -84,6 +84,38 @@ def test_home_seek_15_controls_use_local_dependency_free_icons() -> None:
     assert 'label = "15 с"' in ui
 
 
+def test_series_season_and_episode_controls_use_distinct_vectors() -> None:
+    ui = read("app/src/main/java/com/skeleton/home/ui/HomeApp.kt")
+    assert 'contentDescription = "media-series-season-control"' in ui
+    assert 'contentDescription = "media-episode-control"' in ui
+    assert "SeriesSeasonIcon" in ui
+    assert "EpisodeIcon" in ui
+    assert 'name = "SeriesSeasonStack"' in ui
+    assert 'name = "EpisodeSinglePlay"' in ui
+    series_path = ui.split('name = "SeriesSeasonStack"', 1)[1].split("}.build()", 1)[0]
+    episode_path = ui.split('name = "EpisodeSinglePlay"', 1)[1].split("}.build()", 1)[0]
+    assert series_path != episode_path
+    assert "lineTo(22f, 18f)" in series_path
+    assert "quadTo(20.1f, 20f, 21f, 19.1f)" in episode_path
+
+
+def test_work_description_autoscroll_is_upward_only_with_direct_reset() -> None:
+    contracts = read("app/src/main/java/com/skeleton/home/domain/HomeContracts.kt")
+    ui = read("app/src/main/java/com/skeleton/home/ui/HomeApp.kt")
+    unit = read("app/src/test/java/com/skeleton/home/HomeContractTest.kt")
+    android_test = read("app/src/androidTest/java/com/skeleton/home/HomeShellUiTest.kt")
+    assert "object WorkDescriptionAutoScroll" in contracts
+    assert "currentOffset + stepPx.coerceAtLeast(1)" in contracts
+    assert "DescriptionAutoScrollStep(offset = 0, resetToTop = true)" in contracts
+    assert "shouldAnimate(contentHeight: Int, viewportHeight: Int)" in contracts
+    assert "fun WorkDescriptionText(" in ui
+    assert "scrollState.scrollTo(0)" in ui
+    assert "animateScrollTo" not in ui
+    assert "workDescriptionAutoScrollMovesUpwardThenResetsDirectlyToTop" in unit
+    assert 'contentDescription = "work-description-auto-scroll"' in ui
+    assert "work-description-auto-scroll" in android_test
+
+
 def test_future_interfaces_and_state_values_exist() -> None:
     contracts = read("app/src/main/java/com/skeleton/home/domain/HomeContracts.kt")
     for name in [
@@ -111,3 +143,33 @@ def test_no_endpoint_secret_or_live_fixture_values() -> None:
     for word in forbidden:
         assert word not in lowered
     assert "Синтетичний режим" in text
+
+def test_existing_production_self_update_contract_is_preserved() -> None:
+    gradle = read("app/build.gradle.kts")
+    manifest = read("app/src/main/AndroidManifest.xml")
+    main = read("app/src/main/java/com/skeleton/home/MainActivity.kt")
+    ui = read("app/src/main/java/com/skeleton/home/update/HomeUpdateUi.kt")
+    manager = read("app/src/main/java/com/skeleton/home/update/HomeUpdateManager.kt")
+    policy = read("app/src/main/java/com/skeleton/home/update/HomeUpdatePolicy.kt")
+    assert 'applicationId = "com.skeleton.home"' in gradle
+    assert 'applicationIdSuffix = ".preview"' in gradle
+    assert 'versionCode = 31' in gradle
+    assert 'versionName = "1.3.17"' in gradle
+    assert 'HOME_EDGE_BASE_URLS' in gradle
+    assert 'android.permission.REQUEST_INSTALL_PACKAGES' in manifest
+    assert 'android.permission.INTERNET' in manifest
+    assert 'HomeUpdateInstallStatusReceiver' in manifest
+    assert 'HomeUpdateManager(this)' in main
+    assert 'homeUpdateManager.onResume()' in main
+    assert 'Оновити застосунок' in ui
+    assert 'LaunchedEffect(manager)' in ui
+    assert '/api/native/app-update' in policy
+    assert 'remoteVersionCode > installedVersionCode' in policy
+    assert 'DownloadManager' in manager
+    assert 'MessageDigest.getInstance("SHA-256")' in manager
+    assert 'PackageInstaller.SessionParams' in manager
+    assert 'ACTION_MANAGE_UNKNOWN_APP_SOURCES' in manager
+    assert 'Preview build cannot install production updates' in manager
+    assert '192.168.' not in manager
+    assert '.ts.net' not in manager
+
