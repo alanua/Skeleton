@@ -15,3 +15,19 @@ The module does not create a scheduler, runner loop, database, deployment path, 
 Progress is rendered as a percentage only when explicit acceptance gates are present. Otherwise the read model returns `Немає надійної оцінки`.
 
 Stale or contradictory source state is not resolved silently. It renders as `Потребує перевірки` and is surfaced as operator attention.
+
+## Live Operator Dashboard
+
+`core/operator_live_state.py` is the canonical public-safe live read boundary for the current operator dashboard. It reads the existing Scheduler occurrence store directly and does not create a second Runner, Scheduler, queue, database, registry, or state store.
+
+The primary sections are intentionally simple Ukrainian:
+
+- `Працює зараз`
+- `Чекає`
+- `Потрібна моя увага`
+- `Щойно завершено`
+- `Далі`
+
+Running, ready, dependency-waiting, operator-needed, failed, and recently completed items come from actual Scheduler occurrence state. Terminal items do not appear in active sections. Technical occurrence and schedule IDs are available only when drill-down is explicitly requested; primary labels suppress issue, PR, SHA, Runner, and GitHub-looking references.
+
+`refreshed_at` is stamped only after a successful live read. If the read fails, the Home Edge API returns stale/offline state rather than presenting cached content as fresh.
