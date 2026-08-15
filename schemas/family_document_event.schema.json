@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://skeleton.local/schemas/family_document_event.schema.json",
+  "title": "Private family document calendar event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "event_id", "event_type", "date", "principal_subject", "document_id", "confidence", "evidence_hash", "privacy", "attendees", "conference"],
+  "properties": {
+    "schema": {"const": "skeleton.family_document_event.v1"},
+    "event_id": {"type": "string", "pattern": "^family-document-event:[0-9a-f]{48}$"},
+    "event_type": {"enum": ["appointment", "deadline", "expiration", "renewal", "hearing", "booked_travel"]},
+    "date": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$"},
+    "principal_subject": {"type": "string", "minLength": 1},
+    "document_id": {"type": "string", "pattern": "^document:[0-9a-f]{48}$"},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "evidence_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "privacy": {"const": "private"},
+    "attendees": {"type": "array", "maxItems": 0},
+    "conference": {"type": "null"}
+  }
+}
