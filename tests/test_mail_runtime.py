@@ -6,6 +6,7 @@ from core.mail_state import MailStateStore
 from core.scheduler_engine import SchedulerEngine, SchedulerEngineConfig
 from core.scheduler_store import SchedulerStore
 from integrations.mail_scheduler import build_mail_poll_schedule
+from scripts.mail_operations_worker import _provider
 
 
 def _account() -> MailProviderAccount:
@@ -17,6 +18,19 @@ def _account() -> MailProviderAccount:
             "poll_interval_seconds": 60,
             "max_messages_per_poll": 10,
             "query": "synthetic",
+        }
+    )
+
+
+def _gmail_account() -> MailProviderAccount:
+    return MailProviderAccount.from_mapping(
+        {
+            "schema": "skeleton.mail_provider_account.v1",
+            "account_ref": "acct:gmail-primary",
+            "provider": "gmail",
+            "poll_interval_seconds": 60,
+            "max_messages_per_poll": 10,
+            "query": "label:important",
         }
     )
 
@@ -75,3 +89,38 @@ def test_scheduler_dispatches_mail_poll_route_without_second_authority(tmp_path)
     assert receipt["dispatch"]["done"] == 1
     occurrences = scheduler_store.list_occurrences("mail.poll.acct:static")
     assert [item.state for item in occurrences].count("done") == 1
+
+
+def test_worker_provider_selects_gmail_without_fixture() -> None:
+    provider = _provider(_gmail_account(), None)
+
+    assert provider.provider == "gmail"
+
+
+def test_worker_provider_fixture_mode_remains_static(tmp_path) -> None:
+    fixture = tmp_path / "messages.json"
+    fixture.write_text('{"messages":[]}', encoding="utf-8")
+
+    provider = _provider(_gmail_account(), fixture)
+
+    assert provider.provider == "static"
+
+
+def test_mail_runtime_blocks_public_safe_when_gmail_credentials_missing(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("SKELETON_GMAIL_CREDENTIAL_ROOT", str(tmp_path / "missing"))
+    account = _gmail_account()
+    runtime = MailRuntime(
+        state_store=MailStateStore(tmp_path / "mail.sqlite3"),
+        providers={"gmail": _provider(account, None)},
+        clock=lambda: 1786400010,
+    )
+
+    receipt = runtime.process_poll_packet(build_mail_poll_payload(account)["task_packet"])
+
+    assert receipt["status"] == "BLOCKED"
+    assert receipt["reason"] == "GMAIL_CREDENTIAL_MISSING"
+    assert receipt["public_safe"] is True
+    assert receipt["private_payloads_included"] is False
+    assert receipt["external_side_effects_executed"] is False

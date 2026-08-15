@@ -4,6 +4,7 @@ from collections.abc import Mapping
 import base64
 from typing import Any
 
+from adapters.gmail_oauth_client import GmailOAuthReadOnlyClient
 from core.mail_operations import MailEnvelope, MailOperationError
 from core.mail_provider import MailProviderAccount, MailProviderBatch, MailProviderCursor
 
@@ -26,7 +27,7 @@ class GmailMailProvider:
         if cursor.account_ref != account.account_ref:
             raise MailOperationError("MAIL_CURSOR_ACCOUNT_MISMATCH", "cursor account mismatch")
 
-        rows = self._list_messages(account.query, max_messages=max_messages)
+        rows = self._list_messages(account, max_messages=max_messages)
         envelopes = tuple(self._message_to_envelope(row) for row in rows)
         next_cursor = envelopes[-1].provider_message_ref if envelopes else cursor.cursor_ref
         return MailProviderBatch(
@@ -36,13 +37,16 @@ class GmailMailProvider:
             next_cursor_ref=next_cursor,
         )
 
-    def _list_messages(self, query: str, *, max_messages: int) -> tuple[Mapping[str, Any], ...]:
-        if hasattr(self._client, "list_messages"):
-            return tuple(self._client.list_messages(query=query, max_results=max_messages))
-        users = self._client.users()
+    def _list_messages(
+        self, account: MailProviderAccount, *, max_messages: int
+    ) -> tuple[Mapping[str, Any], ...]:
+        client = self._client or GmailOAuthReadOnlyClient(account_ref=account.account_ref)
+        if hasattr(client, "list_messages"):
+            return tuple(client.list_messages(query=account.query, max_results=max_messages))
+        users = client.users()
         response = (
             users.messages()
-            .list(userId="me", q=query, maxResults=max_messages)
+            .list(userId="me", q=account.query, maxResults=max_messages)
             .execute()
         )
         ids = [item["id"] for item in response.get("messages", []) if isinstance(item, Mapping)]

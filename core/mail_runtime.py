@@ -61,7 +61,11 @@ class MailRuntime:
 
         self.state_store.initialize()
         cursor = MailProviderCursor(account.account_ref, self.state_store.get_cursor(account.account_ref))
-        batch = provider.poll(account, cursor, max_messages=account.max_messages_per_poll)
+        try:
+            batch = provider.poll(account, cursor, max_messages=account.max_messages_per_poll)
+        except Exception as exc:
+            reason = getattr(exc, "reason_code", None) or "MAIL_PROVIDER_POLL_BLOCKED"
+            return _receipt("BLOCKED", str(reason), account, now=now)
         processed = ignored = operator = replayed = failed = 0
         message_receipts: list[dict[str, Any]] = []
 
