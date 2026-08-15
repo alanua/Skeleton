@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.family_document_event.schema.json",
+  "type": "object",
+  "required": ["schema", "event_type", "record_id", "record_hash"],
+  "additionalProperties": true,
+  "properties": {
+    "schema": {"const": "skeleton.family_document_event.v1"},
+    "event_type": {"type": "string"},
+    "record_id": {"type": "string"},
+    "record_hash": {"type": "string"}
+  }
+}

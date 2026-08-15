@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.family_document_intake_request.schema.json",
+  "type": "object",
+  "required": ["schema", "source_id", "source_sha256", "ocr_text", "source_kind"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "skeleton.family_document_intake_request.v1"},
+    "source_id": {"type": "string"},
+    "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "ocr_text": {"type": "string"},
+    "source_kind": {"enum": ["mfp", "local_file", "drive"]},
+    "page_count": {"type": "integer", "minimum": 1},
+    "mime_type": {"type": "string"}
+  }
+}
