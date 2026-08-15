@@ -20,6 +20,7 @@ from urllib.request import Request, urlopen
 import yaml
 from flask import Flask, Response, abort, jsonify, request, send_from_directory
 
+from core.operator_live_state import load_operator_live_state, stale_operator_live_state
 import player
 import site_registry
 from resolver import BrowserChallengeError, OriginProtectedError, resolve_page
@@ -42,6 +43,8 @@ GAME_INPUT = '/usr/local/sbin/home-edge-game-input'
 GAME_STATE = HOME / '.local/state/home-edge-games/state.json'
 GAME_INPUT_SOCKET = Path('/run/skeleton/home-edge-game-input.sock')
 POINTER_INPUT_SOCKET = Path('/run/user/1000/skeleton-pointer.sock')
+SCHEDULER_DB = Path(os.environ.get('SKELETON_SCHEDULER_DB', '/home/agent/.local/state/skeleton-runner/scheduler/scheduler.sqlite3'))
+RUNNER_QUEUE_SNAPSHOT = Path(os.environ.get('SKELETON_RUNNER_QUEUE_SNAPSHOT', '/home/agent/.local/state/skeleton-runner/operator_queue_snapshot.json'))
 TV_MODE = HOME / '.local/bin/tv-mode'
 XDOTOOL = '/usr/bin/xdotool'
 CHROME_MEDIA = HOME / '.local/bin/home-edge-chrome-media'
@@ -58,6 +61,8 @@ _REMOTE_IME_CACHE: dict[str, object] = {'at': 0.0, 'shown': False, 'context': No
 _REMOTE_POINTER_LOCK = threading.Lock()
 _REMOTE_DRAG_TIMER: threading.Timer | None = None
 _REMOTE_DRAG_MODE: str | None = None
+_OPERATOR_LIVE_STATE_LOCK = threading.Lock()
+_OPERATOR_LIVE_STATE_CACHE: dict[str, object] = {'refreshed_at': None}
 _ANDROID_POINTER = [960, 540]
 _ANDROID_SIZE_CACHE: dict[str, object] = {'at': 0.0, 'size': (1920, 1080)}
 _DESKTOP_TARGET_LOCK = threading.Lock()
@@ -792,6 +797,27 @@ def poster_file(filename: str):
 @app.get('/health')
 def health() -> Response:
     return jsonify({'service': 'skeleton-cast', 'status': 'ok', 'player': player.status()})
+
+
+@app.get('/api/operator/live-state')
+def operator_live_state() -> Response:
+    _require()
+    include_drilldown = request.args.get('drilldown') == '1'
+    try:
+        runner_queue_snapshot = json.loads(RUNNER_QUEUE_SNAPSHOT.read_text(encoding='utf-8'))
+        state = load_operator_live_state(
+            runner_queue_snapshot,
+            SCHEDULER_DB,
+            now=int(time.time()),
+            include_drilldown=include_drilldown,
+        )
+        with _OPERATOR_LIVE_STATE_LOCK:
+            _OPERATOR_LIVE_STATE_CACHE['refreshed_at'] = state.get('refreshed_at')
+        return jsonify(state)
+    except Exception:
+        with _OPERATOR_LIVE_STATE_LOCK:
+            refreshed_at = _OPERATOR_LIVE_STATE_CACHE.get('refreshed_at')
+        return jsonify(stale_operator_live_state(refreshed_at=refreshed_at if isinstance(refreshed_at, int) else None)), 503
 
 
 @app.get('/')

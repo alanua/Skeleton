@@ -88,26 +88,58 @@ def test_future_interfaces_and_state_values_exist() -> None:
     contracts = read("app/src/main/java/com/skeleton/home/domain/HomeContracts.kt")
     for name in [
         "interface CanonicalHomeApi",
+        "interface OperatorDashboardRepository",
         "interface AuthSessionProvider",
         "interface ConnectivityMonitor",
         "interface SecureStorage",
         "interface VerifiedActionStateStore",
+        "data class OperatorDashboardState",
+        "data class OperatorDashboardSections",
+        "data class OperatorLiveItem",
     ]:
         assert name in contracts
     for value in ["ONLINE", "DEGRADED", "OFFLINE", "SENT", "ACCEPTED", "APPLIED", "PHYSICALLY_VERIFIED"]:
         assert value in contracts
 
 
-def test_no_endpoint_secret_or_live_fixture_values() -> None:
+def test_operator_dashboard_uses_home_edge_live_state_boundary() -> None:
+    manifest = read("app/src/main/AndroidManifest.xml")
+    config = read("app/src/main/java/com/skeleton/home/data/HomeEdgeEndpointConfig.kt")
+    repo = read("app/src/main/java/com/skeleton/home/data/HomeEdgeOperatorDashboardRepository.kt")
+    ui = read("app/src/main/java/com/skeleton/home/ui/HomeApp.kt")
+    network = read("app/src/main/res/xml/network_security_config.xml")
+    assert "android.permission.INTERNET" in manifest
+    assert 'android:networkSecurityConfig="@xml/network_security_config"' in manifest
+    assert "192.168.1.54" in config
+    assert "/api/operator/live-state" in config
+    assert "HomeEdgeOperatorDashboardRepository" in repo
+    assert "offlineDashboard()" in repo
+    assert "SKELETON_RUNNER_QUEUE_SNAPSHOT" in (
+        ROOT / "ops" / "skeleton_cast" / "runtime" / "app.py"
+    ).read_text(encoding="utf-8")
+    assert "Працює зараз" in ui
+    assert "Чекає" in ui
+    assert "Потрібна моя увага" in ui
+    assert "Щойно завершено" in ui
+    assert "Далі" in ui
+    assert "Стан застарів або офлайн" in ui
+    assert "cleartextTrafficPermitted=\"true\"" in network
+
+
+def test_no_endpoint_secret_or_private_payload_values() -> None:
     text = "\n".join(
         path.read_text(encoding="utf-8")
         for path in ANDROID_HOME.rglob("*")
         if path.is_file() and path.suffix in {".kt", ".kts", ".xml", ".md"}
     )
-    urls = re.findall(r"https?://[^\"]+", text)
-    assert urls == ["http://schemas.android.com/apk/res/android"]
+    urls = sorted(re.findall(r"https?://[^\"]+", text))
+    assert urls == [
+        "http://192.168.1.54:8100",
+        "http://schemas.android.com/apk/res/android",
+    ]
     forbidden = ["api_key", "apikey", "secret", "token", "hmac", "ssh", "device_id"]
     lowered = text.lower()
     for word in forbidden:
         assert word not in lowered
-    assert "Синтетичний режим" in text
+    assert "api.github.com" not in lowered
+    assert "githubusercontent" not in lowered

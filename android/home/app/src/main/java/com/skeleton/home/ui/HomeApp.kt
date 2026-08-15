@@ -10,6 +10,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.Home
@@ -27,6 +29,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -42,8 +45,14 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.skeleton.home.data.HomeEdgeOperatorDashboardRepository
 import com.skeleton.home.data.SyntheticHomeRepository
 import com.skeleton.home.domain.AuthSessionProvider
+import com.skeleton.home.domain.ConnectivityStatus
+import com.skeleton.home.domain.HomeSession
+import com.skeleton.home.domain.OperatorDashboardRepository
+import com.skeleton.home.domain.OperatorDashboardState
+import com.skeleton.home.domain.OperatorLiveItem
 import com.skeleton.home.navigation.HomeRoute
 import com.skeleton.home.navigation.bottomRoutesFor
 import com.skeleton.home.navigation.canNavigateTo
@@ -66,6 +75,7 @@ fun HomeShell(
     session: AuthSessionProvider,
     initialRoute: HomeRoute = HomeRoute.Home,
     repository: SyntheticHomeRepository = SyntheticHomeRepository(),
+    operatorRepository: OperatorDashboardRepository = HomeEdgeOperatorDashboardRepository(),
 ) {
     val currentSession = session.currentSession()
     val bottomRoutes = bottomRoutesFor(currentSession, session)
@@ -101,7 +111,11 @@ fun HomeShell(
             HomeRoute.Remote -> PlaceholderScreen("Пульт", padding)
             HomeRoute.OperatorHub -> {
                 if (canNavigateTo(HomeRoute.OperatorHub, currentSession, session)) {
-                    OperatorHubScreen(padding)
+                    OperatorHubScreen(
+                        padding = padding,
+                        session = currentSession,
+                        repository = operatorRepository,
+                    )
                 } else {
                     AccessDeniedScreen("СК", padding)
                 }
@@ -177,12 +191,27 @@ private fun Seek15Button(
 }
 
 @Composable
-fun OperatorHubScreen(padding: PaddingValues) {
+fun OperatorHubScreen(
+    padding: PaddingValues,
+    session: HomeSession,
+    repository: OperatorDashboardRepository,
+) {
+    var dashboard by remember { mutableStateOf<OperatorDashboardState?>(null) }
+    LaunchedEffect(session) {
+        dashboard = repository.loadDashboard(session)
+    }
+    val state = dashboard ?: OperatorDashboardState(
+        connectivityStatus = ConnectivityStatus.DEGRADED,
+        stale = true,
+        refreshedAt = null,
+        message = "Оновлення стану...",
+    )
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(padding)
-            .padding(20.dp),
+            .padding(20.dp)
+            .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Row(
@@ -193,10 +222,30 @@ fun OperatorHubScreen(padding: PaddingValues) {
             Icon(MaterialHubIcon, contentDescription = "СК", modifier = Modifier.size(32.dp))
             Text("СК", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
         }
-        Text("Огляд стану")
-        Text("Зв'язок: ONLINE / DEGRADED / OFFLINE")
-        Text("Дії: SENT / ACCEPTED / APPLIED / PHYSICALLY_VERIFIED")
-        Text("Операторський контур зарезервовано без живих підключень.")
+        Text(if (state.stale) "Стан застарів або офлайн" else "Стан оновлено")
+        Text(state.message)
+        DashboardSection("Працює зараз", state.sections.workingNow)
+        DashboardSection("Чекає", state.sections.waiting)
+        DashboardSection("Потрібна моя увага", state.sections.needsAttention)
+        DashboardSection("Щойно завершено", state.sections.recentlyDone)
+        DashboardSection("Далі", state.sections.next)
+    }
+}
+
+@Composable
+private fun DashboardSection(title: String, items: List<OperatorLiveItem>) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        if (items.isEmpty()) {
+            Text("Немає")
+        } else {
+            items.forEach { item ->
+                Text(item.title, fontWeight = FontWeight.Medium)
+                if (item.detail.isNotBlank()) {
+                    Text(item.detail, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
     }
 }
 
