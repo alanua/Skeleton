@@ -5,6 +5,7 @@ import androidx.compose.ui.test.assertDoesNotExist
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import com.skeleton.home.auth.SyntheticSession
 import com.skeleton.home.navigation.HomeRoute
 import com.skeleton.home.ui.HomeApp
@@ -51,5 +52,20 @@ class HomeShellUiTest {
         compose.onNodeWithText("Доступ до розділу відхилено для цього синтетичного профілю.")
             .assertIsDisplayed()
         compose.onNodeWithContentDescription("bottom-nav-operator-hub").assertDoesNotExist()
+    }
+
+    @Test
+    fun videoSearchRetryActionIsVisibleAndClickable() {
+        compose.setContent {
+            HomeApp(
+                session = SyntheticSession.ordinary(),
+                initialRoute = HomeRoute.Video,
+            )
+        }
+
+        compose.onNodeWithText("Відео").assertIsDisplayed()
+        compose.onNodeWithContentDescription("media-search-retry").assertIsDisplayed()
+        compose.onNodeWithContentDescription("media-search-retry").performClick()
+        compose.onNodeWithText("Пошук релізу").assertIsDisplayed()
     }
 }

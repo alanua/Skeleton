@@ -44,6 +44,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.skeleton.home.data.SyntheticHomeRepository
 import com.skeleton.home.domain.AuthSessionProvider
+import com.skeleton.home.domain.MediaSourceSearchStatus
+import com.skeleton.home.domain.MediaSourceSearchUiState
 import com.skeleton.home.navigation.HomeRoute
 import com.skeleton.home.navigation.bottomRoutesFor
 import com.skeleton.home.navigation.canNavigateTo
@@ -96,7 +98,7 @@ fun HomeShell(
                 padding = padding,
                 onRemote = { currentRoute = HomeRoute.Remote },
             )
-            HomeRoute.Video -> PlaceholderScreen("Відео", padding)
+            HomeRoute.Video -> VideoScreen(padding)
             HomeRoute.Devices -> PlaceholderScreen("Пристрої", padding)
             HomeRoute.Remote -> PlaceholderScreen("Пульт", padding)
             HomeRoute.OperatorHub -> {
@@ -106,6 +108,31 @@ fun HomeShell(
                     AccessDeniedScreen("СК", padding)
                 }
             }
+        }
+    }
+}
+
+@Composable
+fun VideoScreen(padding: PaddingValues) {
+    var searchState by remember {
+        mutableStateOf(MediaSourceSearchUiState(status = MediaSourceSearchStatus.IDLE))
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(padding)
+            .padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text("Відео", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
+        Text(searchState.message ?: "Пошук релізу")
+        Button(
+            onClick = { searchState = searchState.retry() },
+            modifier = Modifier.semantics {
+                contentDescription = "media-search-retry"
+            },
+        ) {
+            Text("Спробувати ще раз")
         }
     }
 }

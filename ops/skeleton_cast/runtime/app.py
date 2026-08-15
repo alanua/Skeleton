@@ -20,6 +20,7 @@ from urllib.request import Request, urlopen
 import yaml
 from flask import Flask, Response, abort, jsonify, request, send_from_directory
 
+import media_search
 import player
 import site_registry
 from resolver import BrowserChallengeError, OriginProtectedError, resolve_page
@@ -64,6 +65,8 @@ _DESKTOP_TARGET_LOCK = threading.Lock()
 _DESKTOP_TARGET_CACHE: dict[str, object] = {'at': 0.0, 'mode': None, 'env': None, 'window': None}
 _REMOTE_STATUS_CACHE_LOCK = threading.Lock()
 _REMOTE_STATUS_CACHE: dict[str, object] = {'at': 0.0, 'mode': None, 'data': None, 'refreshing': False}
+_MEDIA_SEARCH_BREAKER = media_search.CircuitBreaker()
+_MEDIA_RELEASE_TRACKING = media_search.ReleaseTrackingStore()
 
 
 def _atomic(path: Path, value: dict) -> None:
@@ -891,6 +894,72 @@ def get_job(job_id: str) -> Response:
             'User-Agent': bool(source.get('headers', {}).get('User-Agent')),
         }
     return jsonify(safe)
+
+
+def _media_identity_from_payload(data: dict) -> media_search.MediaIdentity:
+    original_title = str(data.get('original_title') or data.get('title') or data.get('query') or '').strip()
+    if not original_title:
+        raise ValueError('Вкажіть назву релізу.')
+    return media_search.MediaIdentity(
+        original_title=original_title,
+        year=_optional_int(data.get('year')),
+        season=_optional_int(data.get('season')),
+        episode=_optional_int(data.get('episode')),
+    )
+
+
+def _optional_int(value: object) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+@app.post('/api/media/search')
+def media_source_search() -> Response:
+    _require()
+    data = request.get_json(silent=True) or request.form.to_dict() or {}
+    try:
+        identity = _media_identity_from_payload(data)
+    except ValueError as exc:
+        return jsonify({'status': 'error', 'message': str(exc), 'sources': []}), 400
+    search_request = media_search.MediaSearchRequest(
+        identity=identity,
+        include_trailers=False,
+        release_tracking=str(data.get('release_tracking') or '').lower() in {'1', 'true', 'yes'},
+    )
+    providers = media_search.providers_from_environment(resolve_page=resolve_page)
+    result = media_search.search_media_sources(
+        search_request,
+        providers,
+        circuit_breaker=_MEDIA_SEARCH_BREAKER,
+        tracking_store=_MEDIA_RELEASE_TRACKING,
+    )
+    payload = media_search.public_result_payload(result)
+    if result.playable_candidates:
+        job_id = uuid.uuid4().hex[:16]
+        job = {
+            'job_id': job_id,
+            'status': 'ready',
+            'page_url': '',
+            'site_host': 'media-search',
+            'site_status': 'confirmed',
+            'title': identity.release_query(),
+            'sources': [media_search.source_to_job_source(candidate) for candidate in result.playable_candidates],
+            'created_at': int(time.time()),
+            'resolved_at': int(time.time()),
+            'media_identity': {
+                'original_title': identity.original_title,
+                'year': identity.year,
+                'season': identity.season,
+                'episode': identity.episode,
+            },
+        }
+        _save(job)
+        payload['job_id'] = job_id
+        payload['select_url'] = f'http://{LAN_HOST}:{PORT}/select/{job_id}'
+    status_code = 200 if result.status in {'ready', 'empty'} else 503
+    return jsonify(payload), status_code
 
 
 @app.post('/api/jobs/<job_id>/refresh')
