@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import signal
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -28,25 +29,42 @@ OCRMY_PDF = "/usr/bin/ocrmypdf"
 
 
 def _run(argv: Sequence[str], *, timeout: int = 120, max_output: int = 2_000_000) -> str:
-    try:
-        completed = subprocess.run(
-            list(argv),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            shell=False,
-            start_new_session=True,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise LocalDocumentOcrError("local OCR timeout") from exc
-    output = completed.stdout or ""
-    error = completed.stderr or ""
-    if len(output.encode("utf-8", errors="ignore")) + len(error.encode("utf-8", errors="ignore")) > max_output:
-        raise LocalDocumentOcrError("local OCR output limit exceeded")
-    if completed.returncode != 0:
-        raise LocalDocumentOcrError("local OCR provider failed")
-    return output
+    if not argv or not Path(argv[0]).is_absolute():
+        raise LocalDocumentOcrError("local OCR executable is not absolute")
+    with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
+        try:
+            process = subprocess.Popen(
+                list(argv),
+                stdin=subprocess.DEVNULL,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                shell=False,
+                start_new_session=True,
+                close_fds=True,
+            )
+        except OSError as exc:
+            raise LocalDocumentOcrError("local OCR provider unavailable") from exc
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+            raise LocalDocumentOcrError("local OCR timeout") from exc
+
+        stdout_file.seek(0, os.SEEK_END)
+        stdout_size = stdout_file.tell()
+        stderr_file.seek(0, os.SEEK_END)
+        stderr_size = stderr_file.tell()
+        if stdout_size + stderr_size > max_output:
+            raise LocalDocumentOcrError("local OCR output limit exceeded")
+        stdout_file.seek(0)
+        output = stdout_file.read(max_output + 1).decode("utf-8", errors="replace")
+        if process.returncode != 0:
+            raise LocalDocumentOcrError("local OCR provider failed")
+        return output
 
 
 def _pdf_page_count(path: Path) -> int:
@@ -97,7 +115,11 @@ def read_local_document(path: Path, *, max_bytes: int = 50_000_000) -> OcrResult
         raise LocalDocumentOcrError("document is empty")
     if stat.st_size > max_bytes:
         raise LocalDocumentOcrError("document exceeds local OCR byte limit")
-    data_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    data_hash = digest.hexdigest()
     suffix = path.suffix.lower()
     if suffix == ".pdf":
         text = _pdf_text(path)
@@ -107,13 +129,15 @@ def read_local_document(path: Path, *, max_bytes: int = 50_000_000) -> OcrResult
         text = _image_text(path)
         pages = 1
         mime_type = "image/tiff" if suffix in {".tif", ".tiff"} else f"image/{'jpeg' if suffix in {'.jpg', '.jpeg'} else 'png'}"
-    else:
+    elif suffix == ".txt":
         data = path.read_bytes()
         text = data.decode("utf-8", errors="ignore").strip()
         pages = 1
         mime_type = "text/plain"
         if not text:
             raise LocalDocumentOcrError("document produced no text")
+    else:
+        raise LocalDocumentOcrError("document type is not approved for local OCR")
     return OcrResult(text=text[:24000], page_count=pages, mime_type=mime_type, source_sha256=data_hash)
 
 
