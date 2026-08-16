@@ -1439,6 +1439,43 @@ def test_terminal_run_now_reconciliation_removes_active_labels_without_closing()
     assert all("close" not in command for command in commands for command in command)
 
 
+def test_ineligible_run_now_pool_falls_back_to_general_replenisher_candidates() -> None:
+    waiting_run_now = _queue_candidate_issue(
+        2517,
+        allowed_files=("docs/waiting-run-now-fallback.md",),
+        idempotency_key="waiting-run-now-fallback",
+        labels=(
+            runner.LABEL_AGENT_TASK,
+            runner.LABEL_RUN_NOW,
+            runner.LABEL_WAITING_DEPENDENCY,
+        ),
+    )
+    general_candidate = _queue_candidate_issue(
+        2518,
+        allowed_files=("docs/general-fallback.md",),
+        idempotency_key="general-fallback",
+        labels=(runner.LABEL_AGENT_TASK,),
+    )
+
+    with mock.patch.object(runner, "get_ready_issues", return_value=[]), mock.patch.object(
+        runner, "get_running_issues", return_value=[]
+    ), mock.patch.object(
+        runner,
+        "get_run_now_queue_intake_candidate_issues",
+        return_value=[waiting_run_now],
+    ), mock.patch.object(
+        runner,
+        "get_queue_replenisher_candidate_issues",
+        return_value=[general_candidate],
+    ):
+        ready, running, candidates, eligible = runner._autonomous_queue_eligible_snapshot()
+
+    assert ready == []
+    assert running == []
+    assert [issue["number"] for issue in candidates] == [2518]
+    assert [issue["number"] for issue in eligible] == [2518]
+
+
 def test_malformed_or_terminal_run_now_does_not_block_valid_candidate() -> None:
     malformed_running = _queue_candidate_issue(
         2514,
@@ -1509,88 +1546,83 @@ def test_run_now_intake_self_heals_missing_ready_label_idempotently(tmp_path: Pa
     promote_issue.assert_called_once()
 
 
-def test_run_now_idle_recovery_uses_run_now_admission_not_backlog_broadening(
+def test_run_now_idle_recovery_prefers_eligible_run_now_before_general_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    db_path = tmp_path / "control_recovery.sqlite3"
-    labels = {runner.LABEL_RUN_NOW, runner.QUEUE_REPLENISHER_CANDIDATE_LABEL}
-    issue = _queue_candidate_issue(
-        2508,
-        allowed_files=("docs/run-now-backlog-no-agent.md",),
-        idempotency_key="run-now-backlog-no-agent",
-        labels=(),
+    del tmp_path, monkeypatch
+    run_now = _queue_candidate_issue(
+        2519,
+        allowed_files=("docs/run-now-priority.md",),
+        idempotency_key="run-now-priority",
+        labels=(runner.LABEL_AGENT_TASK, runner.LABEL_RUN_NOW),
     )
-    promoted: list[int] = []
-
-    def issue_snapshot() -> dict[str, object]:
-        snapshot = dict(issue)
-        snapshot["labels"] = [{"name": label} for label in sorted(labels)]
-        return snapshot
-
-    monkeypatch.setattr(runner, "control_recovery_db_path", lambda: db_path)
-    monkeypatch.setattr(runner, "get_ready_issues", lambda: [])
-    monkeypatch.setattr(runner, "get_running_issues", lambda: [])
-    monkeypatch.setattr(
-        runner, "get_run_now_queue_intake_candidate_issues", lambda: [issue_snapshot()]
-    )
-    monkeypatch.setattr(
-        runner,
-        "_promote_queue_replenisher_issue",
-        lambda promoted_issue: promoted.append(int(promoted_issue["number"])),
+    general = _queue_candidate_issue(
+        2520,
+        allowed_files=("docs/general-after-run-now.md",),
+        idempotency_key="general-after-run-now",
+        labels=(runner.LABEL_AGENT_TASK,),
     )
 
-    assert runner.maybe_recover_idle_runner_queue() is False
-    assert promoted == []
-    assert not db_path.exists()
+    with mock.patch.object(runner, "get_ready_issues", return_value=[]), mock.patch.object(
+        runner, "get_running_issues", return_value=[]
+    ), mock.patch.object(
+        runner, "get_run_now_queue_intake_candidate_issues", return_value=[run_now]
+    ), mock.patch.object(
+        runner, "get_queue_replenisher_candidate_issues", return_value=[general]
+    ) as general_candidates:
+        ready, running, candidates, eligible = runner._autonomous_queue_eligible_snapshot()
+
+    assert ready == []
+    assert running == []
+    assert [issue["number"] for issue in candidates] == [2519]
+    assert [issue["number"] for issue in eligible] == [2519]
+    general_candidates.assert_not_called()
+
 
 
 def test_run_now_idle_recovery_preserves_blocked_and_protected_gates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    db_path = tmp_path / "control_recovery.sqlite3"
-    candidates = [
-        _queue_candidate_issue(
-            2509,
-            allowed_files=("docs/waiting-run-now.md",),
-            idempotency_key="waiting-run-now",
-            labels=(
-                runner.LABEL_AGENT_TASK,
-                runner.LABEL_RUN_NOW,
-                runner.LABEL_WAITING_DEPENDENCY,
-            ),
-        ),
-        _queue_candidate_issue(
-            2510,
-            allowed_files=("docs/protected-run-now.md",),
-            idempotency_key="protected-run-now",
-            body_lines=("protected_files:\n  - docs/protected-run-now.md",),
-            labels=(runner.LABEL_AGENT_TASK, runner.LABEL_RUN_NOW),
-        ),
-        _queue_candidate_issue(
-            2511,
-            allowed_files=("docs/private-run-now.md",),
-            idempotency_key="private-run-now",
-            privacy_boundary="PRIVATE_PAYLOAD",
-            labels=(runner.LABEL_AGENT_TASK, runner.LABEL_RUN_NOW),
-        ),
-    ]
-    promoted: list[int] = []
-
-    monkeypatch.setattr(runner, "control_recovery_db_path", lambda: db_path)
-    monkeypatch.setattr(runner, "get_ready_issues", lambda: [])
-    monkeypatch.setattr(runner, "get_running_issues", lambda: [])
-    monkeypatch.setattr(
-        runner, "get_run_now_queue_intake_candidate_issues", lambda: candidates
+    del tmp_path, monkeypatch
+    blocked = _queue_candidate_issue(
+        2521,
+        allowed_files=("docs/blocked-run-now.md",),
+        idempotency_key="blocked-run-now",
+        labels=(runner.LABEL_AGENT_TASK, runner.LABEL_RUN_NOW, runner.LABEL_BLOCKED),
     )
-    monkeypatch.setattr(
+    protected = _queue_candidate_issue(
+        2522,
+        allowed_files=("core/gate_engine.py",),
+        idempotency_key="protected-run-now",
+        labels=(runner.LABEL_AGENT_TASK, runner.LABEL_RUN_NOW),
+    )
+    protected["body"] = str(protected.get("body") or "") + (
+        "\nProtected Files:\n- core/gate_engine.py\n"
+    )
+    general = _queue_candidate_issue(
+        2523,
+        allowed_files=("docs/general-safe-fallback.md",),
+        idempotency_key="general-safe-fallback",
+        labels=(runner.LABEL_AGENT_TASK,),
+    )
+
+    with mock.patch.object(runner, "get_ready_issues", return_value=[]), mock.patch.object(
+        runner, "get_running_issues", return_value=[]
+    ), mock.patch.object(
         runner,
-        "_promote_queue_replenisher_issue",
-        lambda issue: promoted.append(int(issue["number"])),
-    )
+        "get_run_now_queue_intake_candidate_issues",
+        return_value=[blocked, protected],
+    ), mock.patch.object(
+        runner, "get_queue_replenisher_candidate_issues", return_value=[general]
+    ):
+        ready, running, candidates, eligible = runner._autonomous_queue_eligible_snapshot()
 
-    assert runner.maybe_recover_idle_runner_queue() is False
-    assert promoted == []
-    assert not db_path.exists()
+    assert ready == []
+    assert running == []
+    assert [issue["number"] for issue in candidates] == [2523]
+    assert [issue["number"] for issue in eligible] == [2523]
+    assert all(issue["number"] not in {2521, 2522} for issue in eligible)
+
 
 
 def test_completion_path_invokes_replenishment_after_done_status(tmp_path: Path) -> None:
