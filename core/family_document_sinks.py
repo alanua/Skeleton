@@ -72,7 +72,10 @@ class MemoryGatewayFamilyDocumentArchive:
 class VerifiedMemoryGatewayFamilyDocumentArchive:
     """Production sink: immutable original readback precedes canonical mutation."""
 
-    _ALLOWED_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".txt"}
+    _ALLOWED_SUFFIXES = {
+        ".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".txt",
+        ".doc", ".docx", ".odt", ".rtf",
+    }
 
     def __init__(self, original_root: Path, gateway: MemoryGateway) -> None:
         self.original_root = original_root.expanduser().resolve()
