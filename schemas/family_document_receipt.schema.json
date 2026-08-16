@@ -2,15 +2,24 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "skeleton.family_document_receipt.schema.json",
   "type": "object",
-  "required": ["schema", "receipt_key", "receipt_type", "record_id"],
+  "required": ["schema", "receipt_key", "receipt_type"],
   "additionalProperties": true,
   "properties": {
     "schema": {"const": "skeleton.family_document_receipt.v1"},
-    "receipt_key": {"type": "string"},
-    "receipt_type": {"enum": ["intake", "terminal"]},
+    "receipt_key": {"type": "string", "minLength": 1},
+    "receipt_type": {"enum": ["intake", "terminal", "package_report"]},
     "intake_id": {"type": "string"},
     "record_id": {"type": "string"},
     "record_hash": {"type": "string"},
-    "status": {"type": "string"}
-  }
+    "status": {"type": "string"},
+    "message": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "part": {"type": "integer", "minimum": 1}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"receipt_type": {"const": "package_report"}}},
+      "then": {"required": ["message", "part"]},
+      "else": {"required": ["record_id"]}
+    }
+  ]
 }
