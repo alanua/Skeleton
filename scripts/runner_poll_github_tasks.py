@@ -12104,11 +12104,21 @@ def _autonomous_queue_eligible_snapshot() -> tuple[
         for issue in get_run_now_queue_intake_candidate_issues()
         if LABEL_RUN_NOW in _issue_label_names(issue)
     ]
-    candidate_issues = (
-        run_now_candidates
-        if run_now_candidates
-        else get_queue_replenisher_candidate_issues()
-    )
+    if run_now_candidates:
+        if any(
+            LABEL_RUNNING in _issue_label_names(issue)
+            and LABEL_AGENT_TASK in _issue_label_names(issue)
+            and not (_issue_label_names(issue) & TERMINAL_RUNNER_LABELS)
+            for issue in run_now_candidates
+        ):
+            return ready_issues, run_now_candidates, run_now_candidates, []
+        run_now_eligible = select_run_now_queue_intake_targets(
+            ready_issues, run_now_candidates
+        )
+        if run_now_eligible:
+            return ready_issues, running_issues, run_now_candidates, run_now_eligible
+
+    candidate_issues = get_queue_replenisher_candidate_issues()
     if any(
         LABEL_RUNNING in _issue_label_names(issue)
         and LABEL_AGENT_TASK in _issue_label_names(issue)
@@ -12116,12 +12126,9 @@ def _autonomous_queue_eligible_snapshot() -> tuple[
         for issue in candidate_issues
     ):
         return ready_issues, candidate_issues, candidate_issues, []
-    if run_now_candidates:
-        eligible = select_run_now_queue_intake_targets(ready_issues, candidate_issues)
-    else:
-        eligible = select_runner_queue_replenishment_targets(
-            ready_issues, candidate_issues
-        )
+    eligible = select_runner_queue_replenishment_targets(
+        ready_issues, candidate_issues
+    )
     return ready_issues, running_issues, candidate_issues, eligible
 
 
