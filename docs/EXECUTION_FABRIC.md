@@ -1,27 +1,49 @@
-# Execution Fabric — model evidence slice
+# Execution Fabric — atomic binding core
 
-This document records the non-protected discovery/measured-model layer used by Execution Fabric.
+Execution Fabric separates execution authority from model capability. Executors and models live in separate registries; routing combines them only into already-compatible immutable `ExecutionBinding` candidates.
 
-Executors and models remain separate authority dimensions. The model roster answers only whether a registered model has evidence for a required capability class. It does not grant repository, merge, deploy, device, finance, legal, or governance authority.
+Canonical flow:
 
-## Discovery before routing
+`typed task contract -> TaskProfile -> policy/privacy/capability gates -> ExecutionBindings -> deterministic order -> RouteLease -> attempt -> DeliverableValidation -> DONE | REJECTED | NEEDS_OPERATOR`
 
-Candidate discovery is deliberately outside routing authority. Public model catalogs/rankings such as OpenRouter, official provider metadata, and external leaderboards can create `DiscoverySignal` records and order a bounded canary shortlist. Advertised capability/tool support, context, privacy, provider policy, availability, and bounded cost are filters before canary spend. No discovery source can directly create an eligible production route.
+## TaskProfile authority
 
-Promotion is per capability:
+`TaskProfile` is derived only from typed task fields plus code-owned policy. Free-form issue prose, prompt text, model/provider/executor names, endpoint strings and caller-supplied budget language are not routing authority.
 
-`DISCOVERED -> CANARY_ONLY -> ELIGIBLE -> LIVE`
+The profile carries the task class and operation, required executor capabilities, required model capability thresholds, privacy/data/risk/side-effect classes, deliverable and validation contracts, and bounded budget/token/timeout/retry policy references.
 
-A Skeleton canary PASS produces `ELIGIBLE`, not `LIVE`. `LIVE` is reserved for a later explicit production activation through the integrated Execution Fabric gates. Hard failures are not averaged away.
+## Separate registries, atomic bindings
 
-The model selector therefore has two concepts:
-- evaluation/task-fit eligibility: `ELIGIBLE` or `LIVE` capability evidence may be ranked;
-- production eligibility: `production_only` requires explicit `LIVE` promotion for every required capability.
+`EXECUTOR_REGISTRY.yaml` describes executor facts: supported task/capability classes, locality, privacy and side-effect classes, credential aliases, health, timeout/concurrency, completion evidence and allowed model binding kinds.
 
-A future `ExecutionBinding` may reference one model record only after executor compatibility, task capability, privacy, policy, credential, health, budget, and production-promotion gates all pass together. Final evidence/health identity is the tuple `(executor_id, model_id, capability_id)`; this slice keeps model evidence isolated by `(model_id, capability_id)` until executor compatibility is integrated.
+`MODEL_REGISTRY.yaml` remains the measured model evidence roster. External discovery/rankings can propose candidates but never enter production binding authority. Production external-model bindings require explicit `LIVE` promotion for every required model capability; `ELIGIBLE` challengers remain evaluation-only.
 
-Response-only success does not imply tool-use or repository-edit eligibility. A required artifact missing or tool-use failure is hard failure evidence for that capability.
+Binding kinds are explicit:
 
-The deterministic selector consumes a code-owned `TaskFitRequest` containing required capability thresholds and privacy class. It has no field for caller-provided provider/model/endpoint authority. Given the same request and registry snapshot it returns the same ranking.
+- `NO_MODEL`: deterministic maintenance/validation work without an LLM.
+- `EMBEDDED_MODEL`: a harness such as Codex whose model is embedded in the executor contract; no fake external model identity is invented.
+- `EXTERNAL_MODEL`: an executor such as OpenHands paired with one exact compatible registered model. Provider compatibility, privacy and capability gates must already pass.
 
-This slice does not create or dispatch bindings and does not modify the live Runner route. Next phase under #2809 integrates the roster into atomic executor+model `ExecutionBinding`, immutable `RouteLease`, periodic bounded discovery/canary scheduling, and explicit LIVE activation. Any protected Runner integration requires exact-head operator approval.
+An executor and model are never chosen independently and stitched together after routing. The atomic binding is the route candidate.
+
+## RouteLease
+
+`RouteLease` is a minimal immutable execution authorization record. It carries the exact TaskProfile hash, binding id, permissions, validation id, bounded cost/token/timeout/attempt limits and expiry. It does not contain prompt text, raw private context or secret material. Same profile, binding and fixed expiry produce the same lease hash.
+
+## DeliverableValidation owns DONE
+
+Executor return code is attempt evidence only. It never owns completion.
+
+Examples:
+
+- `rc=0` plus a code-generation contract requiring changed files, but zero changed files -> `DELIVERABLE_MISSING`, `REJECTED`, never DONE.
+- required tests or validation missing/failing -> `VALIDATION_FAILED`.
+- required artifact absent -> `DELIVERABLE_MISSING`.
+- all deterministic deliverable evidence satisfied -> DONE, independent of executor rc classification.
+- protected/high-risk final action with otherwise valid evidence -> `NEEDS_OPERATOR` until exact operator approval.
+
+Stable failure classes live in `core/failure_taxonomy.py`; transient provider/executor failures must not be averaged into successful deliverable evidence.
+
+## Current phase boundary
+
+This core does not change the live Runner route and does not resolve credentials or call model providers. The protected next phase under #2809 wires `scripts/runner_poll_github_tasks.py` to these contracts, replaces the hidden Codex-to-OpenHands switch with explicit bindings, persists route/deliverable receipts, and makes zero-deliverable false-DONE impossible in the live conveyor. That protected integration requires exact-head operator approval before merge.

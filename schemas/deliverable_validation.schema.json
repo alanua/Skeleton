@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.deliverable_validation.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["accepted", "completion_status", "failure_class", "reason_codes", "evidence_hash"],
+  "properties": {
+    "accepted": {"type": "boolean"},
+    "completion_status": {"enum": ["DONE", "REJECTED", "NEEDS_OPERATOR"]},
+    "failure_class": {
+      "type": ["string", "null"],
+      "enum": [null, "EXECUTOR_UNAVAILABLE", "EXECUTOR_AUTH_UNAVAILABLE", "MODEL_QUOTA", "MODEL_PROVIDER_OUTAGE", "MODEL_UNSUPPORTED", "TOOLCHAIN_CAPABILITY_MISMATCH", "NO_PROGRESS", "DELIVERABLE_MISSING", "VALIDATION_FAILED", "TRANSIENT_IO", "POLICY_DENIED", "BUDGET_EXHAUSTED", "PRIVACY_DENIED", "AMBIGUOUS_SIDE_EFFECT"]
+    },
+    "reason_codes": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "evidence_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}
