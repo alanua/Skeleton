@@ -108,8 +108,11 @@ def _broker(
         adapters={
             "in_process": InProcessCredentialAdapter(consumers),
         },
-        runtime_contexts=runtime_contexts
-        or {binding.service_id: _runtime_context(binding.service_id) for binding in bindings},
+        runtime_contexts=(
+            runtime_contexts
+            if runtime_contexts is not None
+            else {binding.service_id: _runtime_context(binding.service_id) for binding in bindings}
+        ),
     )
 
 
