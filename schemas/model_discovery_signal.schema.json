@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://skeleton.local/schemas/model_discovery_signal.schema.json",
+  "title": "Skeleton Model Discovery Signal",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "evidence_id",
+    "model_id",
+    "provider_family",
+    "source_kind",
+    "available",
+    "external_score",
+    "capabilities",
+    "context_window_tokens",
+    "tool_use_advertised",
+    "privacy_classes",
+    "cost_rank",
+    "latency_rank"
+  ],
+  "properties": {
+    "evidence_id": {"type": "string", "minLength": 1},
+    "model_id": {"type": "string", "minLength": 1},
+    "provider_family": {"type": "string", "minLength": 1},
+    "source_kind": {
+      "enum": ["openrouter_catalog", "openrouter_ranking", "official_metadata", "external_benchmark"]
+    },
+    "available": {"type": "boolean"},
+    "external_score": {"type": "number", "minimum": 0, "maximum": 1},
+    "capabilities": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    },
+    "context_window_tokens": {"type": "integer", "minimum": 0},
+    "tool_use_advertised": {"type": "boolean"},
+    "privacy_classes": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    },
+    "cost_rank": {"type": "integer", "minimum": 0},
+    "latency_rank": {"type": "integer", "minimum": 0}
+  }
+}
