@@ -5,6 +5,24 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+DEFAULT_DOCUMENT_SUFFIXES = (
+    ".txt",
+    ".pdf",
+    ".tif",
+    ".tiff",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".doc",
+    ".docx",
+    ".odt",
+    ".rtf",
+    ".xls",
+    ".xlsx",
+    ".ods",
+)
+
+
 @dataclass(frozen=True)
 class StableDocument:
     path: Path
@@ -38,7 +56,7 @@ class StableFileGate:
 
 
 class LocalDirectoryDocumentSource:
-    def __init__(self, root: Path, *, suffixes: tuple[str, ...] = (".txt", ".pdf")) -> None:
+    def __init__(self, root: Path, *, suffixes: tuple[str, ...] = DEFAULT_DOCUMENT_SUFFIXES) -> None:
         self.root = root
         self.suffixes = tuple(suffix.lower() for suffix in suffixes)
         self.gate = StableFileGate()
@@ -47,7 +65,7 @@ class LocalDirectoryDocumentSource:
         self.root.mkdir(parents=True, exist_ok=True)
         documents: list[StableDocument] = []
         for path in sorted(self.root.iterdir()):
-            if not path.is_file() or path.suffix.lower() not in self.suffixes:
+            if path.is_symlink() or not path.is_file() or path.suffix.lower() not in self.suffixes:
                 continue
             observed = self.gate.observe(path)
             if observed.stable:
