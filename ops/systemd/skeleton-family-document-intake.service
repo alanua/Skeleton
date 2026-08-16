@@ -1,10 +1,12 @@
 [Unit]
 Description=Skeleton family-document intake worker
-After=network-online.target
+After=network-online.target skeleton-local-inference.service
+Wants=skeleton-local-inference.service
 
 [Service]
 Type=simple
 EnvironmentFile=-/etc/skeleton-family-document-intake.env
+EnvironmentFile=-/etc/skeleton/local-inference.env
 WorkingDirectory=/home/agent/agent-dev/Skeleton
 ExecStart=/usr/bin/python3 scripts/family_document_worker.py --inbox ${SKELETON_FAMILY_DOCUMENT_INBOX} --archive ${SKELETON_FAMILY_DOCUMENT_ARCHIVE} --outbox-db ${SKELETON_FAMILY_DOCUMENT_OUTBOX_DB} --private-memory-root ${SKELETON_PRIVATE_MEMORY_ROOT}
 Restart=on-failure
