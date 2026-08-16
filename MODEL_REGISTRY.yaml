@@ -1,0 +1,114 @@
+{
+  "schema": "skeleton.model_registry.v1",
+  "models": [
+    {
+      "model_id": "local-small",
+      "provider_family": "local",
+      "locality": "LOCAL",
+      "policy_approved": true,
+      "health": "LIVE",
+      "privacy_classes": ["PUBLIC", "PRIVATE_LOCAL"],
+      "latency_rank": 1,
+      "cost_rank": 0,
+      "capabilities": {
+        "reasoning": {
+          "status": "LIVE",
+          "score": 0.55,
+          "canary_passed": true,
+          "evidence_ids": ["synthetic-local-reasoning-canary"]
+        },
+        "repository_edit": {
+          "status": "DEGRADED",
+          "score": 0.35,
+          "canary_passed": false,
+          "evidence_ids": ["synthetic-local-edit-baseline"]
+        },
+        "tool_use": {
+          "status": "UNSUPPORTED",
+          "score": 0.20,
+          "canary_passed": false
+        }
+      }
+    },
+    {
+      "model_id": "openrouter-glm-free-challenger",
+      "provider_family": "openrouter",
+      "locality": "CLOUD",
+      "policy_approved": true,
+      "health": "DEGRADED",
+      "privacy_classes": ["PUBLIC"],
+      "latency_rank": 2,
+      "cost_rank": 0,
+      "capabilities": {
+        "reasoning": {
+          "status": "LIVE",
+          "score": 0.72,
+          "canary_passed": true,
+          "evidence_ids": ["pr2814-response-canary"]
+        },
+        "repository_edit": {
+          "status": "UNSUPPORTED",
+          "score": 0.62,
+          "canary_passed": false,
+          "hard_failures": ["DELIVERABLE_MISSING"],
+          "evidence_ids": ["pr2814-artifact-canary-fail"]
+        },
+        "tool_use": {
+          "status": "UNSUPPORTED",
+          "score": 0.60,
+          "canary_passed": false,
+          "hard_failures": ["TOOL_USE_FAILED"],
+          "evidence_ids": ["pr2814-artifact-canary-fail"]
+        }
+      }
+    },
+    {
+      "model_id": "openrouter-kimi-k2-challenger",
+      "provider_family": "openrouter",
+      "locality": "CLOUD",
+      "policy_approved": true,
+      "health": "LIVE",
+      "privacy_classes": ["PUBLIC"],
+      "latency_rank": 3,
+      "cost_rank": 2,
+      "capabilities": {
+        "reasoning": {
+          "status": "LIVE",
+          "score": 0.82,
+          "canary_passed": true,
+          "evidence_ids": ["pr2814-kimi-tool-canary"]
+        },
+        "repository_edit": {
+          "status": "LIVE",
+          "score": 0.85,
+          "canary_passed": true,
+          "evidence_ids": ["pr2814-kimi-tool-canary"]
+        },
+        "tool_use": {
+          "status": "LIVE",
+          "score": 0.88,
+          "canary_passed": true,
+          "evidence_ids": ["pr2814-kimi-tool-canary"]
+        }
+      }
+    },
+    {
+      "model_id": "external-benchmark-only",
+      "provider_family": "external-example",
+      "locality": "CLOUD",
+      "policy_approved": false,
+      "health": "DEGRADED",
+      "privacy_classes": ["PUBLIC"],
+      "latency_rank": 1,
+      "cost_rank": 1,
+      "capabilities": {
+        "reasoning": {
+          "status": "DEGRADED",
+          "score": 0.99,
+          "canary_passed": false,
+          "evidence_ids": ["external-ranking-only"]
+        }
+      }
+    }
+  ]
+}

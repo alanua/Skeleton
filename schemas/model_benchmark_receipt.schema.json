@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://skeleton.local/schemas/model_benchmark_receipt.schema.json",
+  "title": "Skeleton Model Benchmark Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["evidence_id", "model_id", "capability_id", "source_kind", "passed", "quality_score"],
+  "properties": {
+    "evidence_id": {"type": "string", "minLength": 1},
+    "model_id": {"type": "string", "minLength": 1},
+    "capability_id": {"type": "string", "minLength": 1},
+    "source_kind": {"enum": ["skeleton_canary", "external_benchmark"]},
+    "passed": {"type": "boolean"},
+    "quality_score": {"type": "number", "minimum": 0, "maximum": 1},
+    "hard_failures": {
+      "type": "array",
+      "items": {
+        "enum": ["DELIVERABLE_MISSING", "TOOL_USE_FAILED", "SCOPE_VIOLATION", "PRIVACY_VIOLATION", "VALIDATION_FAILED"]
+      },
+      "uniqueItems": true
+    }
+  }
+}

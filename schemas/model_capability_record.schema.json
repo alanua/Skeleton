@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://skeleton.local/schemas/model_capability_record.schema.json",
+  "title": "Skeleton Model Capability Record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["capability_id", "status", "score", "canary_passed"],
+  "properties": {
+    "capability_id": {"type": "string", "minLength": 1},
+    "status": {"enum": ["LIVE", "DEGRADED", "COOLDOWN", "DISABLED", "UNSUPPORTED"]},
+    "score": {"type": "number", "minimum": 0, "maximum": 1},
+    "canary_passed": {"type": "boolean"},
+    "hard_failures": {
+      "type": "array",
+      "items": {"type": "string"},
+      "uniqueItems": true
+    },
+    "evidence_ids": {
+      "type": "array",
+      "items": {"type": "string"},
+      "uniqueItems": true
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "LIVE"}}, "required": ["status"]},
+      "then": {
+        "properties": {
+          "canary_passed": {"const": true},
+          "hard_failures": {"maxItems": 0}
+        }
+      }
+    }
+  ]
+}
