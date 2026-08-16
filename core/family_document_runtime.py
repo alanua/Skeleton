@@ -41,6 +41,7 @@ class ArchiveSink(Protocol):
         record: Mapping[str, Any],
         *,
         source_path: Path | None = None,
+        private_context: Mapping[str, Any] | None = None,
     ) -> Mapping[str, Any]:
         ...
 
@@ -361,7 +362,11 @@ class FamilyDocumentRuntime:
             else:
                 classification = self.classifier(request)
             record = build_family_document_record(request, classification)
-            archive_receipt = self.archive_sink.archive(record, source_path=document.path)
+            archive_receipt = self.archive_sink.archive(
+                record,
+                source_path=document.path,
+                private_context={"ocr_text": request.ocr_text},
+            )
             if archive_receipt.get("status") != "DONE":
                 raise FamilyDocumentRuntimeError("family_document_archive_incomplete")
             record_id = str(record["record_id"])
