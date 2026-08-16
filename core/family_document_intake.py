@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from core.family_document_sinks import FAMILY_DOCUMENT_RECORD_SCHEMA
-from core.local_document_ocr import read_local_document_text
+from core.local_document_ocr import LocalDocumentOcr, read_local_document
 from core.private_memory_history import content_hash
 
 
@@ -22,14 +22,24 @@ class FamilyDocumentIntakeRequest:
     source_kind: str = "mfp"
     page_count: int = 1
     mime_type: str = "text/plain"
+    ocr_providers: tuple[str, ...] = ()
 
 
-def build_intake_request(path: Path, *, source_id: str, source_sha256: str) -> FamilyDocumentIntakeRequest:
+def build_intake_request(
+    path: Path,
+    *,
+    source_id: str,
+    source_sha256: str,
+    ocr: LocalDocumentOcr | None = None,
+) -> FamilyDocumentIntakeRequest:
+    result = read_local_document(path, ocr=ocr)
     return FamilyDocumentIntakeRequest(
         source_id=source_id,
         source_sha256=source_sha256,
-        ocr_text=read_local_document_text(path),
-        mime_type="application/pdf" if path.suffix.lower() == ".pdf" else "text/plain",
+        ocr_text=result.text,
+        page_count=result.page_count,
+        mime_type=result.mime_type,
+        ocr_providers=result.providers,
     )
 
 
@@ -38,7 +48,7 @@ def build_family_document_record(
     classification: Mapping[str, Any] | None = None,
 ) -> dict[str, object]:
     classification_payload = dict(classification or {})
-    record_id = _record_id(request.source_sha256)
+    record_id = record_id_for_source_sha256(request.source_sha256)
     record = {
         "schema": FAMILY_DOCUMENT_RECORD_SCHEMA,
         "record_id": record_id,
@@ -46,6 +56,7 @@ def build_family_document_record(
         "source_id": request.source_id,
         "source_sha256": request.source_sha256,
         "ocr_text_hash": content_hash({"ocr_text": request.ocr_text}),
+        "ocr_providers": list(request.ocr_providers),
         "page_count": request.page_count,
         "mime_type": request.mime_type,
         "classification": _public_classification(classification_payload),
@@ -54,7 +65,7 @@ def build_family_document_record(
     return record
 
 
-def _record_id(source_sha256: str) -> str:
+def record_id_for_source_sha256(source_sha256: str) -> str:
     digest = hashlib.sha256(source_sha256.encode("ascii")).hexdigest()
     return f"doc-{digest[:32]}"
 
@@ -62,6 +73,7 @@ def _record_id(source_sha256: str) -> str:
 def _public_classification(value: Mapping[str, Any]) -> dict[str, object]:
     allowed = {
         "route",
+        "title",
         "principal_subject_alias",
         "linked_subject_aliases",
         "topic_alias",
@@ -72,6 +84,9 @@ def _public_classification(value: Mapping[str, Any]) -> dict[str, object]:
         "issuer",
         "summary",
         "confidence",
+        "review_required",
+        "review_reason",
+        "storage_label",
         "event_candidates",
         "reason_codes",
     }
