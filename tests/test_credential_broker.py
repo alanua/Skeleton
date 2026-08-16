@@ -58,6 +58,20 @@ class FakeStore:
         return ResolvedSecret(value)
 
 
+def _runtime_context(
+    service_id: str,
+    *,
+    machine_identity: str = "skeleton-host-01",
+    audience: str | None = None,
+    task_kind: str = "service_runtime",
+) -> SecretResolutionContext:
+    return SecretResolutionContext(
+        machine_identity=machine_identity,
+        audience=audience or f"service:{service_id}",
+        task_kind=task_kind,
+    )
+
+
 def _binding(
     service_id: str,
     reference_id: str,
@@ -72,11 +86,7 @@ def _binding(
         service_id=service_id,
         alias=alias,
         reference=SecretReference(provider="bitwarden", reference_id=reference_id),
-        context=SecretResolutionContext(
-            machine_identity="skeleton-host-01",
-            audience=f"service:{service_id}",
-            task_kind="service_runtime",
-        ),
+        context=_runtime_context(service_id),
         action_id=action_id,
         adapter_id=adapter_id,
         target_id=target_id or service_id,
@@ -89,6 +99,8 @@ def _broker(
     store: FakeStore,
     bindings: list[ServiceCredentialBinding],
     consumers: dict[str, object],
+    *,
+    runtime_contexts: dict[str, SecretResolutionContext] | None = None,
 ) -> CredentialBroker:
     return CredentialBroker(
         catalog=ServiceCredentialCatalog(bindings),
@@ -96,6 +108,8 @@ def _broker(
         adapters={
             "in_process": InProcessCredentialAdapter(consumers),
         },
+        runtime_contexts=runtime_contexts
+        or {binding.service_id: _runtime_context(binding.service_id) for binding in bindings},
     )
 
 
@@ -144,6 +158,43 @@ def test_unregistered_action_is_rejected_before_secret_resolution() -> None:
 
     with pytest.raises(CredentialRequestError, match="credential_action_not_registered_for_binding"):
         broker.use(service_id="service-a", alias="api", action_id="arbitrary_shell")
+
+    assert store.calls == []
+
+
+def test_trusted_runtime_context_mismatch_is_blocked_before_provider() -> None:
+    store = FakeStore({"ref-a": SYNTHETIC_SECRET_A})
+    binding = _binding("service-a", "ref-a")
+    broker = _broker(
+        store,
+        [binding],
+        {"service-a": lambda _material, _binding: None},
+        runtime_contexts={
+            "service-a": _runtime_context(
+                "service-a",
+                machine_identity="wrong-host",
+            )
+        },
+    )
+
+    receipt = broker.probe(service_id="service-a", alias="api")
+
+    assert receipt.status == "BLOCKED"
+    assert receipt.reason_class == "SECRET_OUT_OF_SCOPE"
+    assert store.calls == []
+
+
+def test_missing_trusted_runtime_context_rejects_request_before_provider() -> None:
+    store = FakeStore({"ref-a": SYNTHETIC_SECRET_A})
+    broker = _broker(
+        store,
+        [_binding("service-a", "ref-a")],
+        {"service-a": lambda _material, _binding: None},
+        runtime_contexts={},
+    )
+
+    with pytest.raises(CredentialRequestError, match="trusted_runtime_context_unavailable"):
+        broker.probe(service_id="service-a", alias="api")
 
     assert store.calls == []
 
@@ -248,6 +299,7 @@ def test_process_adapter_uses_only_registered_target_and_discards_output() -> No
                 base_environment={},
             )
         },
+        runtime_contexts={"process-service": _runtime_context("process-service")},
     )
 
     receipt = broker.use(
