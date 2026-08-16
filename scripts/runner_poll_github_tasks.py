@@ -1286,7 +1286,10 @@ def _validation_command_environment(
     environment: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     source = os.environ if environment is None else environment
-    return sanitize_codegen_child_environment(source)
+    return sanitize_codegen_child_environment(
+        source,
+        authority_environment={},
+    )
 
 
 def _run_validation_profile_command(

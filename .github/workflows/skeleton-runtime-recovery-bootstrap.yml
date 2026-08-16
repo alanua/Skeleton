@@ -1,99 +1,174 @@
-name: Temporary 2832 Branch Patcher
+name: Skeleton Runtime Recovery Bootstrap
 
-"on":
+on:
+  issues:
+    types: [labeled]
+  schedule:
+    - cron: '*/5 * * * *'
   pull_request:
     types: [opened, reopened, synchronize]
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: temporary-2832-${{ github.event.pull_request.number }}
+  group: skeleton-runtime-recovery-bootstrap
   cancel-in-progress: false
 
 jobs:
-  patch-branch:
+  recover-runtime-checkout:
+    name: Recover registered Skeleton runtime checkout
+    # Repository changed-file enforcement is performed by Runner's PR allowlist.
+    # This workflow stays inert except for exact hardcoded authorized recovery routes.
     if: >-
       github.repository == 'alanua/Skeleton' &&
+      (github.event_name == 'schedule' ||
+      (github.event_name == 'issues' &&
+      github.event.action == 'labeled' &&
+      github.event.issue.number == 2124 &&
+      github.event.issue.state == 'open' &&
+      github.event.label.name == 'risk:green' &&
+      github.event.issue.user.login == 'alanua' &&
+      contains(github.event.issue.body, 'Authorization Marker: EXPLICIT_RUNTIME_RECOVERY_BOOTSTRAP_20260802')) ||
+      (github.event_name == 'pull_request' &&
+      (github.event.action == 'opened' ||
+      github.event.action == 'reopened' ||
+      github.event.action == 'synchronize') &&
       github.event.pull_request.base.ref == 'main' &&
-      github.event.pull_request.head.ref == 'runner/validation-secret-isolation-github-v2' &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      github.event.pull_request.user.login == 'alanua'
-    runs-on: ubuntu-latest
+      github.event.pull_request.head.ref == 'runner/issue-2145' &&
+      github.event.pull_request.user.login == 'alanua' &&
+      contains(github.event.pull_request.body, 'Authorization Marker: EXPLICIT_RUNTIME_RECOVERY_CLEANUP_TRIGGER_20260803')))
+    runs-on:
+      - self-hosted
+      - Linux
+      - X64
     timeout-minutes: 15
+    env:
+      CANONICAL_REPOSITORY: alanua/Skeleton
+      EXPECTED_SOURCE_BASE_SHA: f75c8961d480f6d93b514691e6be6613ffa364f5
+      PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      TARGET_CHECKOUT: /home/agent/agent-dev/repos/Skeleton
+      RECOVERY_ROOT: /home/agent/agent-dev/private-recovery/skeleton
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: runner/validation-secret-isolation-github-v2
-          fetch-depth: 0
-      - name: Apply exact validation secret-isolation patch
+      - name: Repair checkout after verified preservation
         shell: bash
         run: |
           set -euo pipefail
-          git fetch --quiet origin main
-          test "$(git rev-parse origin/main)" = "89843be0c8e67e3a048fd473bdf293b464da7590"
-          python3 - <<'PY'
-          from pathlib import Path
 
-          runner_path = Path('scripts/runner_poll_github_tasks.py')
-          source = runner_path.read_text(encoding='utf-8')
-          old = '''def _validation_command_environment(
-              environment: Mapping[str, str] | None = None,
-          ) -> dict[str, str]:
-              source = os.environ if environment is None else environment
-              return sanitize_codegen_child_environment(source)
-          '''
-          new = '''def _validation_command_environment(
-              environment: Mapping[str, str] | None = None,
-          ) -> dict[str, str]:
-              source = os.environ if environment is None else environment
-              return sanitize_codegen_child_environment(
-                  source,
-                  authority_environment={},
-              )
-          '''
-          if source.count(old) != 1:
-              raise SystemExit('runner_patch_preimage_mismatch')
-          runner_path.write_text(source.replace(old, new, 1), encoding='utf-8')
+          repository_verified=false
+          dirty_state_preserved=false
+          bundle_verified=false
+          final_branch=unknown
+          final_sha=unknown
+          final_clean_state=false
+          status=BLOCKED
 
-          test_path = Path('tests/test_runner_poll_github_tasks.py')
-          tests = test_path.read_text(encoding='utf-8')
-          test_name = 'test_validation_command_environment_does_not_bind_codegen_fallback_authority'
-          if test_name not in tests:
-              test = r'''
+          write_summary() {
+            {
+              echo "repository_verified=${repository_verified}"
+              echo "dirty_state_preserved=${dirty_state_preserved}"
+              echo "bundle_verified=${bundle_verified}"
+              echo "final_branch=${final_branch}"
+              echo "final_sha=${final_sha}"
+              echo "final_clean_state=${final_clean_state}"
+              echo "status=${status}"
+            } >> "${GITHUB_STEP_SUMMARY}"
+          }
+          trap write_summary EXIT
 
-          def test_validation_command_environment_does_not_bind_codegen_fallback_authority() -> None:
-              source = {
-                  "PATH": "/usr/bin",
-                  "SAFE_SETTING": "kept",
-                  "SKELETON_OPENROUTER_FALLBACK_API_KEY": "synthetic-fallback-key",
-                  "SKELETON_OPENROUTER_FALLBACK_MODEL": "openrouter/synthetic/model",
-                  "SKELETON_OPENHANDS_OPENROUTER_REQUIRED": "1",
-                  "OPENROUTER_API_KEY": "synthetic-openrouter-key",
-                  "BWS_ACCESS_TOKEN": "synthetic-bws-token",
-                  "CREDENTIALS_DIRECTORY": "/synthetic/credentials",
-                  "LLM_API_KEY": "synthetic-llm-key",
-                  "LLM_MODEL": "synthetic/model",
-                  "LLM_BASE_URL": "https://invalid.example",
-                  "MAX_BUDGET_PER_TASK": "999",
-                  "MAX_ITERATIONS": "999",
-                  "LLM_NUM_RETRIES": "99",
-              }
+          test "${GITHUB_REPOSITORY}" = "${CANONICAL_REPOSITORY}"
 
-              sanitized = runner._validation_command_environment(source)
+          test "${TARGET_CHECKOUT}" = "/home/agent/agent-dev/repos/Skeleton"
+          test -d "${TARGET_CHECKOUT}"
+          test -d "${TARGET_CHECKOUT}/.git"
 
-              assert sanitized == {"PATH": "/usr/bin", "SAFE_SETTING": "kept"}
-          '''
-              test_path.write_text(tests.rstrip() + test.rstrip() + '\n', encoding='utf-8')
-          PY
-          git checkout origin/main -- .github/workflows/skeleton-runtime-recovery-bootstrap.yml
-          expected="$(printf '%s\n' scripts/runner_poll_github_tasks.py tests/test_runner_poll_github_tasks.py | sort)"
-          actual="$(git diff --name-only | sort)"
-          test "${actual}" = "${expected}"
-          python3 -m py_compile scripts/runner_poll_github_tasks.py tests/test_runner_poll_github_tasks.py
-          git diff --check
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add -- scripts/runner_poll_github_tasks.py tests/test_runner_poll_github_tasks.py .github/workflows/skeleton-runtime-recovery-bootstrap.yml
-          git commit -m "Isolate validation from codegen secret authority (#2832)"
-          git push origin HEAD:runner/validation-secret-isolation-github-v2
+          origin_url="$(git -C "${TARGET_CHECKOUT}" remote get-url origin)"
+          case "${origin_url}" in
+            https://github.com/alanua/Skeleton|https://github.com/alanua/Skeleton.git)
+              repository_verified=true
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
+
+          git -C "${TARGET_CHECKOUT}" fetch --quiet --prune origin main
+          origin_main_sha="$(git -C "${TARGET_CHECKOUT}" rev-parse origin/main)"
+          if [[ ! "${origin_main_sha}" =~ ^[0-9a-f]{40}$ ]]; then
+            exit 1
+          fi
+          case "${GITHUB_EVENT_NAME}" in
+            pull_request)
+              if [[ -z "${PR_BASE_SHA:-}" ]]; then
+                exit 1
+              fi
+              if [[ ! "${PR_BASE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+                exit 1
+              fi
+              test "${PR_BASE_SHA}" = "${origin_main_sha}"
+              target_sha="${PR_BASE_SHA}"
+              ;;
+            *)
+              if [[ -z "${GITHUB_SHA:-}" ]]; then
+                exit 1
+              fi
+              test "${GITHUB_SHA}" = "${origin_main_sha}"
+              target_sha="${GITHUB_SHA}"
+              ;;
+          esac
+          git -C "${TARGET_CHECKOUT}" rev-list --first-parent "${target_sha}" \
+            | grep -Fx "${EXPECTED_SOURCE_BASE_SHA}" >/dev/null
+
+          poller_quiet=false
+          for _attempt in $(seq 1 30); do
+            if ! pgrep -f '(^|/)runner_poll_github_tasks[.]py([[:space:]]|$)' >/dev/null; then
+              poller_quiet=true
+              break
+            fi
+            sleep 2
+          done
+          test "${poller_quiet}" = "true"
+
+          status_file="$(mktemp "${RUNNER_TEMP}/skeleton-runtime-status.XXXXXX")"
+          git -C "${TARGET_CHECKOUT}" status --porcelain --untracked-files=all > "${status_file}"
+          if [[ -s "${status_file}" ]]; then
+            git -C "${TARGET_CHECKOUT}" stash push --include-untracked \
+              -m "skeleton-runtime-recovery-bootstrap" >/dev/null 2>&1
+            dirty_state_preserved=true
+
+            stash_sha="$(git -C "${TARGET_CHECKOUT}" rev-parse refs/stash)"
+            if [[ ! "${stash_sha}" =~ ^[0-9a-f]{40}$ ]]; then
+              exit 1
+            fi
+            recovery_ref="refs/skeleton-runtime-bootstrap/pending-recovery/${stash_sha}"
+            git -C "${TARGET_CHECKOUT}" update-ref "${recovery_ref}" "${stash_sha}"
+
+            install -d -m 700 "${RECOVERY_ROOT}"
+            bundle_name="skeleton-checkout-${stash_sha}.bundle"
+            bundle_path="${RECOVERY_ROOT}/${bundle_name}"
+            sha_path="${RECOVERY_ROOT}/${bundle_name}.sha256"
+            git -C "${TARGET_CHECKOUT}" bundle create "${bundle_path}" \
+              "${recovery_ref}" >/dev/null 2>&1
+            git -C "${TARGET_CHECKOUT}" bundle verify "${bundle_path}" >/dev/null 2>&1
+            (
+              cd "${RECOVERY_ROOT}"
+              sha256sum "${bundle_name}" > "${bundle_name}.sha256"
+              sha256sum --check "${bundle_name}.sha256" >/dev/null
+            )
+            test -s "${sha_path}"
+            bundle_verified=true
+          fi
+          rm -f "${status_file}"
+
+          git -C "${TARGET_CHECKOUT}" checkout -B main "${target_sha}" >/dev/null 2>&1
+          git -C "${TARGET_CHECKOUT}" reset --hard "${target_sha}" >/dev/null 2>&1
+          git -C "${TARGET_CHECKOUT}" clean -fd >/dev/null 2>&1
+
+          final_branch="$(git -C "${TARGET_CHECKOUT}" rev-parse --abbrev-ref HEAD)"
+          final_sha="$(git -C "${TARGET_CHECKOUT}" rev-parse HEAD)"
+          final_status="$(git -C "${TARGET_CHECKOUT}" status --porcelain --untracked-files=all)"
+          test "${final_branch}" = "main"
+          test "${final_sha}" = "${target_sha}"
+          test -z "${final_status}"
+          final_clean_state=true
+          status=DONE

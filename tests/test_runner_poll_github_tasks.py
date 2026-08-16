@@ -19180,3 +19180,25 @@ def test_local_target_finalization_validation_helper_uses_sanitized_environment(
     child_environment = subprocess_run.call_args.kwargs["env"]
     assert "SKELETON_HOME_EDGE_01_HOSTNAME" not in child_environment
     assert child_environment["SKELETON_RUNNER_MEMORY_DB"] == "/private/runner.sqlite"
+
+def test_validation_command_environment_does_not_bind_codegen_fallback_authority() -> None:
+    source = {
+        "PATH": "/usr/bin",
+        "SAFE_SETTING": "kept",
+        "SKELETON_OPENROUTER_FALLBACK_API_KEY": "synthetic-fallback-key",
+        "SKELETON_OPENROUTER_FALLBACK_MODEL": "openrouter/synthetic/model",
+        "SKELETON_OPENHANDS_OPENROUTER_REQUIRED": "1",
+        "OPENROUTER_API_KEY": "synthetic-openrouter-key",
+        "BWS_ACCESS_TOKEN": "synthetic-bws-token",
+        "CREDENTIALS_DIRECTORY": "/synthetic/credentials",
+        "LLM_API_KEY": "synthetic-llm-key",
+        "LLM_MODEL": "synthetic/model",
+        "LLM_BASE_URL": "https://invalid.example",
+        "MAX_BUDGET_PER_TASK": "999",
+        "MAX_ITERATIONS": "999",
+        "LLM_NUM_RETRIES": "99",
+    }
+
+    sanitized = runner._validation_command_environment(source)
+
+    assert sanitized == {"PATH": "/usr/bin", "SAFE_SETTING": "kept"}
