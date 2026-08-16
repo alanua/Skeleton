@@ -49,10 +49,17 @@ class BenchmarkReceipt:
 
 
 def summarize_capability(
+    model_id: str,
     capability_id: str,
     receipts: Iterable[BenchmarkReceipt],
 ) -> CapabilityRecord:
-    relevant = tuple(receipt for receipt in receipts if receipt.capability_id == capability_id)
+    if not model_id or not capability_id:
+        raise ModelBenchmarkError("benchmark_identity_required")
+    relevant = tuple(
+        receipt
+        for receipt in receipts
+        if receipt.model_id == model_id and receipt.capability_id == capability_id
+    )
     if not relevant:
         return CapabilityRecord(capability_id, "UNSUPPORTED", 0.0, False)
 
