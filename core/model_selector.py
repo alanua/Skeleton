@@ -16,6 +16,7 @@ class TaskFitRequest:
     required_capabilities: Mapping[str, float]
     privacy_class: str
     prefer_local: bool = True
+    production_only: bool = False
 
     def __post_init__(self) -> None:
         if not self.task_class:
@@ -44,7 +45,12 @@ def _eligible(model: ModelRecord, request: TaskFitRequest) -> bool:
         return False
     for capability_id, minimum_score in request.required_capabilities.items():
         capability = model.capability(capability_id)
-        if capability is None or not capability.eligible(float(minimum_score)):
+        if capability is None:
+            return False
+        if request.production_only:
+            if not capability.production_eligible(float(minimum_score)):
+                return False
+        elif not capability.eligible(float(minimum_score)):
             return False
     return True
 
@@ -55,8 +61,9 @@ def rank_models(
 ) -> tuple[ModelRecord, ...]:
     """Deterministically rank only policy- and evidence-eligible models.
 
-    Required capability quality is authoritative. Privacy is a hard gate. Locality,
-    verified health, latency and cost are tie-break dimensions in that order.
+    External discovery scores never enter this function. Required capability quality and
+    privacy are hard gates. For production_only requests every required capability must
+    also have explicit LIVE promotion. Locality, health, latency and cost are tie-breaks.
     """
     eligible = [model for model in models if _eligible(model, request)]
 
