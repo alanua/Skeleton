@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from core.family_document_runtime import FamilyDocumentReceiptOutbox, FamilyDocumentRuntime
+from core.family_document_runtime import (
+    FamilyDocumentReceiptOutbox,
+    FamilyDocumentRuntime,
+    LOCAL_INFERENCE_OCR_LIMIT,
+    _inference_excerpt,
+)
 from core.family_document_sinks import FileFamilyDocumentArchive
 from core.family_document_sources import LocalDirectoryDocumentSource
 
@@ -30,7 +35,8 @@ def test_no_notification_before_stable_file_gate(tmp_path) -> None:
 
 
 def test_success_archives_then_sends_one_rich_package_report(tmp_path) -> None:
-    def classify(_text):
+    def classify(text):
+        assert text == "synthetic document"
         return {
             "route": "ACCEPT",
             "title": "Synthetic letter",
@@ -97,8 +103,20 @@ def test_replay_restart_does_not_duplicate_successful_sends_or_ocr(tmp_path) -> 
 
     assert len(sent) == 1
     assert len(calls) == 1
+    assert calls == ["synthetic document"]
     assert result["skipped_processed"] == 1
     assert restarted.outbox.state_counts() == {"DONE": 1}
+
+
+def test_local_inference_excerpt_stays_within_adapter_limit_and_keeps_both_ends() -> None:
+    text = "A" * 20_000 + "MIDDLE" + "Z" * 20_000
+
+    excerpt = _inference_excerpt(text)
+
+    assert len(excerpt) <= LOCAL_INFERENCE_OCR_LIMIT
+    assert excerpt.startswith("A" * 100)
+    assert excerpt.endswith("Z" * 100)
+    assert "скорочено" in excerpt
 
 
 def test_outbox_missing_credentials_routes_retry(tmp_path, monkeypatch) -> None:
