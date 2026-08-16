@@ -16,6 +16,16 @@ from core.codex_runtime_recovery import (
     pinned_codex_runtime_path,
     should_attempt_codex_runtime_recovery,
 )
+from core.secret_store import (
+    SecretAccessPolicy,
+    SecretResolutionContext,
+    SecretResolutionError,
+    SecretStoreGate,
+)
+from integrations.bitwarden_secret_store import (
+    BwsCliSecretsManagerStore,
+    bitwarden_reference_from_systemd_credential,
+)
 
 
 HOME_EDGE_ENV_PREFIX = "SKELETON_HOME_EDGE_01_"
@@ -24,6 +34,30 @@ _FALLBACK_BIN_ENV = "SKELETON_CODEGEN_FALLBACK_BIN"
 _REAL_CODEX_ENV = "SKELETON_REAL_CODEX_BIN"
 _OPENHANDS_ENV = "SKELETON_OPENHANDS_BIN"
 _ORIGINAL_PATH_ENV = "SKELETON_CODEGEN_ORIGINAL_PATH"
+_OPENROUTER_REQUIRED_ENV = "SKELETON_OPENHANDS_OPENROUTER_REQUIRED"
+_OPENROUTER_FALLBACK_KEY_ENV = "SKELETON_OPENROUTER_FALLBACK_API_KEY"
+_OPENROUTER_FALLBACK_MODEL_ENV = "SKELETON_OPENROUTER_FALLBACK_MODEL"
+_OPENROUTER_SECRET_REF_CREDENTIAL = "openrouter-secret-ref"
+_OPENROUTER_FREE_MODEL = "openrouter/z-ai/glm-4.5-air:free"
+_RUNNER_MACHINE_IDENTITY = "hetzner-agent-runner-1"
+_OPENROUTER_AUDIENCE = "openhands-openrouter"
+_OPENROUTER_TASK_KIND = "code_generation"
+_PROVIDER_OVERRIDE_ENV = frozenset(
+    {
+        "OPENROUTER_API_KEY",
+        "BWS_ACCESS_TOKEN",
+        "CREDENTIALS_DIRECTORY",
+        "LLM_API_KEY",
+        "LLM_MODEL",
+        "LLM_BASE_URL",
+        "MAX_BUDGET_PER_TASK",
+        "MAX_ITERATIONS",
+        "LLM_NUM_RETRIES",
+        _OPENROUTER_REQUIRED_ENV,
+        _OPENROUTER_FALLBACK_KEY_ENV,
+        _OPENROUTER_FALLBACK_MODEL_ENV,
+    }
+)
 
 _WRAPPER = r'''#!/usr/bin/env python3
 from __future__ import annotations
@@ -85,11 +119,29 @@ def main() -> int:
     real_codex = os.environ.get("SKELETON_REAL_CODEX_BIN", "")
     openhands = os.environ.get("SKELETON_OPENHANDS_BIN", "")
     original_path = os.environ.get("SKELETON_CODEGEN_ORIGINAL_PATH", os.environ.get("PATH", ""))
+    openrouter_required = os.environ.get("SKELETON_OPENHANDS_OPENROUTER_REQUIRED") == "1"
+    openrouter_key = os.environ.get("SKELETON_OPENROUTER_FALLBACK_API_KEY", "")
+    openrouter_model = os.environ.get("SKELETON_OPENROUTER_FALLBACK_MODEL", "")
     if not real_codex or not Path(real_codex).is_file():
         return 127
     stdin_text = sys.stdin.read()
     child_env = dict(os.environ)
     child_env["PATH"] = original_path
+    for name in (
+        "SKELETON_OPENROUTER_FALLBACK_API_KEY",
+        "SKELETON_OPENROUTER_FALLBACK_MODEL",
+        "SKELETON_OPENHANDS_OPENROUTER_REQUIRED",
+        "OPENROUTER_API_KEY",
+        "BWS_ACCESS_TOKEN",
+        "CREDENTIALS_DIRECTORY",
+        "LLM_API_KEY",
+        "LLM_MODEL",
+        "LLM_BASE_URL",
+        "MAX_BUDGET_PER_TASK",
+        "MAX_ITERATIONS",
+        "LLM_NUM_RETRIES",
+    ):
+        child_env.pop(name, None)
     codex = subprocess.run(
         [real_codex, *_codex_args(sys.argv[1:])],
         input=stdin_text,
@@ -109,13 +161,32 @@ def main() -> int:
         sys.stdout.write(codex.stdout)
         sys.stderr.write(codex.stderr)
         return codex.returncode
+    if openrouter_required and (
+        not openrouter_key or not openrouter_model.startswith("openrouter/")
+    ):
+        sys.stderr.write("SKELETON_CODEGEN_FALLBACK_CONFIG_UNAVAILABLE\n")
+        return codex.returncode
+    fallback_env = dict(child_env)
+    if openrouter_required:
+        fallback_env["LLM_API_KEY"] = openrouter_key
+        fallback_env["LLM_MODEL"] = openrouter_model
+        fallback_env["MAX_BUDGET_PER_TASK"] = "0.50"
+        fallback_env["MAX_ITERATIONS"] = "20"
+        fallback_env["LLM_NUM_RETRIES"] = "1"
     fallback = subprocess.run(
-        [openhands, "--headless", "--json", "-t", _task(sys.argv[1:], stdin_text)],
+        [
+            openhands,
+            "--headless",
+            "--json",
+            "--override-with-envs",
+            "-t",
+            _task(sys.argv[1:], stdin_text),
+        ],
         cwd=_workdir(sys.argv[1:]),
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env=child_env,
+        env=fallback_env,
         check=False,
     )
     if fallback.returncode == 0:
@@ -140,6 +211,46 @@ def _without_home_edge_credentials(environment: Mapping[str, str]) -> dict[str, 
     }
 
 
+def _without_codegen_secret_sources(environment: Mapping[str, str]) -> dict[str, str]:
+    return {key: value for key, value in environment.items() if key not in _PROVIDER_OVERRIDE_ENV}
+
+
+def _bind_trusted_openrouter(
+    environment: dict[str, str],
+    authority_environment: Mapping[str, str],
+) -> bool:
+    for name in _PROVIDER_OVERRIDE_ENV:
+        environment.pop(name, None)
+    try:
+        reference = bitwarden_reference_from_systemd_credential(
+            authority_environment,
+            _OPENROUTER_SECRET_REF_CREDENTIAL,
+        )
+        store = BwsCliSecretsManagerStore.from_systemd_credentials(authority_environment)
+        context = SecretResolutionContext(
+            machine_identity=_RUNNER_MACHINE_IDENTITY,
+            audience=_OPENROUTER_AUDIENCE,
+            task_kind=_OPENROUTER_TASK_KIND,
+        )
+        policy = SecretAccessPolicy(
+            allowed_machine_identities=frozenset({_RUNNER_MACHINE_IDENTITY}),
+            allowed_audiences=frozenset({_OPENROUTER_AUDIENCE}),
+            allowed_task_kinds=frozenset({_OPENROUTER_TASK_KIND}),
+        )
+        gate = SecretStoreGate(
+            stores={"bitwarden": store},
+            policies={(reference.provider, reference.reference_id): policy},
+        )
+        material = gate.resolve(reference, context)
+        bound = material.inject(environment, _OPENROUTER_FALLBACK_KEY_ENV)
+    except SecretResolutionError:
+        return False
+    environment.clear()
+    environment.update(bound)
+    environment[_OPENROUTER_FALLBACK_MODEL_ENV] = _OPENROUTER_FREE_MODEL
+    return True
+
+
 def _install_fallback_wrapper(
     environment: dict[str, str],
     authority_environment: Mapping[str, str],
@@ -159,6 +270,9 @@ def _install_fallback_wrapper(
     if not trusted_home or not Path(trusted_home).is_absolute():
         return
     openhands = shutil.which("openhands", path=trusted_path)
+    if openhands:
+        _bind_trusted_openrouter(environment, authority_environment)
+        environment[_OPENROUTER_REQUIRED_ENV] = "1"
     root = Path(trusted_home) / ".local" / "state" / "skeleton-runner" / "codegen-fallback-bin"
     wrapper = root / "codex"
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -186,7 +300,7 @@ def sanitize_codegen_child_environment(
     authority_environment: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """Return a child environment while keeping runtime authority in canonical Runner."""
-    sanitized = _without_home_edge_credentials(environment)
+    sanitized = _without_codegen_secret_sources(_without_home_edge_credentials(environment))
     authority = _without_home_edge_credentials(
         os.environ if authority_environment is None else authority_environment
     )
