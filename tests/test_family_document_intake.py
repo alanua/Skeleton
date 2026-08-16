@@ -5,6 +5,7 @@ import hashlib
 import pytest
 
 from core.family_document_intake import build_family_document_record, build_intake_request
+from core.family_document_taxonomy import classify_family_document_text
 
 
 def test_intake_record_excludes_raw_ocr_text_and_paths(tmp_path) -> None:
@@ -30,3 +31,24 @@ def test_intake_rejects_source_changed_after_stable_file_gate(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="source changed after stable-file gate"):
         build_intake_request(path, source_id="source-1", source_sha256=stable_sha256)
+
+
+def test_local_classifier_accepts_only_unambiguous_evidence() -> None:
+    classification = classify_family_document_text(
+        "Finanzamt Bescheid Steuer für Person-A. Sehr geehrte Person-A, Entscheidung zur Steuer.",
+        ("Person-A", "Person-B", "Person-C"),
+    )
+    assert classification["route"] == "ACCEPT"
+    assert classification["principal_subject_alias"] == "Person-A"
+    assert classification["issuer"] == "Finanzamt"
+    assert classification["document_type"] == "Bescheid"
+    assert classification["topic_alias"] == "04 work_tax_and_business"
+
+
+def test_local_classifier_routes_ambiguous_owner_to_review() -> None:
+    classification = classify_family_document_text(
+        "Jobcenter Bescheid Bürgergeld für Person-A und Person-B.",
+        ("Person-A", "Person-B", "Person-C"),
+    )
+    assert classification["route"] == "REVIEW"
+    assert "OWNER_AMBIGUOUS" in classification["reason_codes"]
