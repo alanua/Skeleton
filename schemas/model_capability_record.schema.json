@@ -4,12 +4,15 @@
   "title": "Skeleton Model Capability Record",
   "type": "object",
   "additionalProperties": false,
-  "required": ["capability_id", "status", "score", "canary_passed"],
+  "required": ["capability_id", "status", "score", "canary_passed", "promotion_stage"],
   "properties": {
     "capability_id": {"type": "string", "minLength": 1},
     "status": {"enum": ["LIVE", "DEGRADED", "COOLDOWN", "DISABLED", "UNSUPPORTED"]},
     "score": {"type": "number", "minimum": 0, "maximum": 1},
     "canary_passed": {"type": "boolean"},
+    "promotion_stage": {
+      "enum": ["DISCOVERED", "CANARY_ONLY", "ELIGIBLE", "LIVE", "DEGRADED", "UNSUPPORTED", "BLOCKED"]
+    },
     "hard_failures": {
       "type": "array",
       "items": {"type": "string"},
@@ -23,13 +26,18 @@
   },
   "allOf": [
     {
-      "if": {"properties": {"status": {"const": "LIVE"}}, "required": ["status"]},
+      "if": {"properties": {"promotion_stage": {"enum": ["ELIGIBLE", "LIVE"]}}, "required": ["promotion_stage"]},
       "then": {
         "properties": {
+          "status": {"const": "LIVE"},
           "canary_passed": {"const": true},
           "hard_failures": {"maxItems": 0}
         }
       }
+    },
+    {
+      "if": {"properties": {"promotion_stage": {"enum": ["DISCOVERED", "CANARY_ONLY"]}}, "required": ["promotion_stage"]},
+      "then": {"properties": {"canary_passed": {"const": false}}}
     }
   ]
 }
