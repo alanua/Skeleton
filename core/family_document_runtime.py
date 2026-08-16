@@ -18,7 +18,7 @@ FAMILY_DOCUMENT_RUNTIME_CONFIG_SCHEMA = "skeleton.family_document_runtime_config
 
 
 class ArchiveSink(Protocol):
-    def archive(self, record: Mapping[str, Any]) -> Mapping[str, Any]:
+    def archive(self, record: Mapping[str, Any], *, source_path: Path | None = None) -> Mapping[str, Any]:
         ...
 
 
@@ -72,25 +72,21 @@ class FamilyDocumentReceiptOutbox:
             ).fetchall()
             for row in rows:
                 payload = json.loads(str(row["payload_json"]))
+                message = payload.get("message")
+                if not isinstance(message, str) or not message.strip():
+                    legacy_messages = render_package_report(payload.get("records", []))
+                    if len(legacy_messages) != 1:
+                        self._mark_retry(connection, str(row["receipt_key"]), "invalid_outbox_payload")
+                        retry += 1
+                        continue
+                    message = legacy_messages[0]
                 try:
-                    messages = render_package_report(payload.get("records", []))
-                    if not messages:
-                        raise ValueError("empty family document report")
-                    for message in messages:
-                        sender(message)
+                    sender(message)
                 except Exception as exc:
                     reason = type(exc).__name__
                     if isinstance(exc, TelegramNotificationError):
                         reason = str(exc) or reason
-                    with connection:
-                        connection.execute(
-                            """
-                            UPDATE family_document_receipts
-                            SET state = 'RETRY', attempts = attempts + 1, last_error = ?
-                            WHERE receipt_key = ? AND state != 'DONE'
-                            """,
-                            (reason[:160], row["receipt_key"]),
-                        )
+                    self._mark_retry(connection, str(row["receipt_key"]), reason[:160])
                     retry += 1
                     continue
                 with connection:
@@ -104,6 +100,18 @@ class FamilyDocumentReceiptOutbox:
                     )
                 sent += 1
         return {"schema": "skeleton.family_document_outbox_drain.v1", "sent": sent, "retry": retry}
+
+    @staticmethod
+    def _mark_retry(connection: sqlite3.Connection, receipt_key: str, reason: str) -> None:
+        with connection:
+            connection.execute(
+                """
+                UPDATE family_document_receipts
+                SET state = 'RETRY', attempts = attempts + 1, last_error = ?
+                WHERE receipt_key = ? AND state != 'DONE'
+                """,
+                (reason, receipt_key),
+            )
 
     def state_counts(self) -> dict[str, int]:
         with closing(sqlite3.connect(str(self.db_path))) as connection:
@@ -167,9 +175,9 @@ class FamilyDocumentRuntime:
         records: list[dict[str, object]] = []
         for document in self.source.scan():
             request = build_intake_request(document.path, source_id=document.source_id, source_sha256=document.sha256)
-            classification = self.classifier(request.ocr_text) if self.classifier else None
+            classification = self.classifier(request.ocr_text) if self.classifier else {"route": "REVIEW", "reason_codes": ["CLASSIFIER_NOT_CONFIGURED"]}
             record = build_family_document_record(request, classification)
-            archive_receipt = self.archive_sink.archive(record)
+            archive_receipt = self.archive_sink.archive(record, source_path=document.path)
             report_record = dict(record)
             report_record["storage_label"] = archive_receipt.get("storage_label") or "Сімейний архів"
             records.append(report_record)
@@ -186,12 +194,17 @@ class FamilyDocumentRuntime:
     def _enqueue_package_report(self, records: list[Mapping[str, Any]]) -> None:
         identities = sorted(str(record["record_id"]) for record in records)
         package_key = content_hash({"records": identities})[:32]
-        self.outbox.enqueue(
-            {
-                "schema": FAMILY_DOCUMENT_RECEIPT_SCHEMA,
-                "receipt_type": "package",
-                "receipt_key": f"package:{package_key}",
-                "status": "DONE",
-                "records": [dict(record) for record in records],
-            }
-        )
+        messages = render_package_report(records)
+        for index, message in enumerate(messages, start=1):
+            self.outbox.enqueue(
+                {
+                    "schema": FAMILY_DOCUMENT_RECEIPT_SCHEMA,
+                    "receipt_type": "package_part",
+                    "receipt_key": f"package:{package_key}:{index:04d}",
+                    "package_key": package_key,
+                    "part_index": index,
+                    "part_count": len(messages),
+                    "status": "DONE",
+                    "message": message,
+                }
+            )
