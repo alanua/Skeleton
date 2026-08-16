@@ -1,0 +1,55 @@
+{
+  "schema": "skeleton.executor_registry.v1",
+  "executors": [
+    {
+      "executor_id": "deterministic-maintenance",
+      "family": "registered-maintenance",
+      "supported_task_classes": ["repository_validation", "repository_maintenance"],
+      "capabilities": ["repository_read", "test_execution", "registered_maintenance"],
+      "locality": "LOCAL",
+      "privacy_classes": ["PUBLIC", "PRIVATE_LOCAL"],
+      "binding_kinds": ["NO_MODEL"],
+      "side_effect_classes": ["READ_ONLY", "BOUNDED_MAINTENANCE"],
+      "credential_aliases": [],
+      "health": "LIVE",
+      "timeout_seconds": 1800,
+      "max_concurrency": 2,
+      "completion_evidence": ["registered_operation_receipt", "validation_result"],
+      "priority_rank": 0
+    },
+    {
+      "executor_id": "codex-cli",
+      "family": "codex",
+      "supported_task_classes": ["code_generation", "code_review"],
+      "capabilities": ["repository_read", "repository_write", "test_execution", "tool_use"],
+      "locality": "HYBRID",
+      "privacy_classes": ["PUBLIC"],
+      "binding_kinds": ["EMBEDDED_MODEL"],
+      "side_effect_classes": ["REPOSITORY_WRITE"],
+      "credential_aliases": ["codegen-primary"],
+      "health": "LIVE",
+      "timeout_seconds": 3600,
+      "max_concurrency": 1,
+      "completion_evidence": ["changed_files", "test_result", "deliverable_validation"],
+      "embedded_model_capabilities": {"reasoning": 0.85, "repository_edit": 0.85, "tool_use": 0.85},
+      "priority_rank": 10
+    },
+    {
+      "executor_id": "openhands-cli",
+      "family": "openhands",
+      "supported_task_classes": ["code_generation", "code_review"],
+      "capabilities": ["repository_read", "repository_write", "test_execution", "tool_use"],
+      "locality": "LOCAL",
+      "privacy_classes": ["PUBLIC"],
+      "binding_kinds": ["EXTERNAL_MODEL"],
+      "side_effect_classes": ["REPOSITORY_WRITE"],
+      "credential_aliases": ["openhands-provider"],
+      "health": "DEGRADED",
+      "timeout_seconds": 3600,
+      "max_concurrency": 1,
+      "completion_evidence": ["changed_files", "test_result", "deliverable_validation"],
+      "compatible_model_provider_families": ["openrouter", "local"],
+      "priority_rank": 20
+    }
+  ]
+}
