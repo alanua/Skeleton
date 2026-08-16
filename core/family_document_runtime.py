@@ -27,6 +27,7 @@ from core.telegram_notifications import TelegramNotificationError, send_telegram
 
 FAMILY_DOCUMENT_RECEIPT_SCHEMA = "skeleton.family_document_receipt.v1"
 FAMILY_DOCUMENT_RUNTIME_CONFIG_SCHEMA = "skeleton.family_document_runtime_config.v1"
+LOCAL_INFERENCE_OCR_LIMIT = 24_000
 
 
 class FamilyDocumentRuntimeError(RuntimeError):
@@ -75,7 +76,7 @@ class QueuedLocalInferenceClassifier:
 
     def __call__(self, request: FamilyDocumentIntakeRequest) -> Mapping[str, Any]:
         raw_payload = {
-            "ocr_text": request.ocr_text,
+            "ocr_text": _inference_excerpt(request.ocr_text),
             "source_kind": request.source_kind,
             "page_count": request.page_count,
             "mime_type": request.mime_type,
@@ -326,7 +327,7 @@ class FamilyDocumentRuntime:
         source: LocalDirectoryDocumentSource,
         archive_sink: ArchiveSink,
         outbox: FamilyDocumentReceiptOutbox,
-        classifier: Callable[[FamilyDocumentIntakeRequest], Mapping[str, Any]] | None = None,
+        classifier: Callable[[object], Mapping[str, Any]] | None = None,
     ) -> None:
         self.source = source
         self.archive_sink = archive_sink
@@ -359,8 +360,10 @@ class FamilyDocumentRuntime:
                     "review_required": True,
                     "review_reason": "локальний класифікатор не підключений",
                 }
-            else:
+            elif isinstance(self.classifier, QueuedLocalInferenceClassifier):
                 classification = self.classifier(request)
+            else:
+                classification = self.classifier(request.ocr_text)
             record = build_family_document_record(request, classification)
             archive_receipt = self.archive_sink.archive(
                 record,
@@ -435,3 +438,12 @@ def _message_for_payload(payload: Mapping[str, Any]) -> str:
 def _package_key(records: Sequence[Mapping[str, Any]]) -> str:
     parts = [f"{record.get('record_id')}:{record.get('record_hash')}" for record in records]
     return hashlib.sha256("\x1f".join(sorted(parts)).encode("utf-8")).hexdigest()[:32]
+
+
+def _inference_excerpt(text: str) -> str:
+    if len(text) <= LOCAL_INFERENCE_OCR_LIMIT:
+        return text
+    separator = "\n\n[… скорочено для локальної класифікації …]\n\n"
+    tail_size = 7_900
+    head_size = LOCAL_INFERENCE_OCR_LIMIT - len(separator) - tail_size
+    return f"{text[:head_size]}{separator}{text[-tail_size:]}"
