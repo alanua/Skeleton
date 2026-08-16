@@ -44,7 +44,7 @@ def _document_block(index: int, record: Mapping[str, Any]) -> str:
     topic = _clean_text(classification.get("topic_alias"), limit=120)
     summary = _clean_text(classification.get("summary"), limit=DEFAULT_SUMMARY_LIMIT)
     storage_label = _clean_text(classification.get("storage_label"), limit=180)
-    review_reason = _clean_text(classification.get("review_reason"), limit=220)
+    review_reason = _review_reason(classification)
     page_count = _positive_int(record.get("page_count"), default=1)
     confidence = _confidence_text(classification.get("confidence"))
     needs_review = _needs_review(record)
@@ -74,18 +74,31 @@ def _document_block(index: int, record: Mapping[str, Any]) -> str:
 
 def _needs_review(record: Mapping[str, Any]) -> bool:
     classification = record.get("classification")
-    if not isinstance(classification, Mapping):
+    if not isinstance(classification, Mapping) or not classification:
         return True
     explicit = classification.get("review_required")
     if explicit is True:
         return True
     route = str(classification.get("route", "")).strip().upper()
-    if route and route not in {"ACCEPT", "DONE", "AUTO_ACCEPT"}:
+    if not route or route not in {"ACCEPT", "DONE", "AUTO_ACCEPT"}:
         return True
     confidence = classification.get("confidence")
+    if isinstance(confidence, Mapping):
+        confidence = confidence.get("overall")
     if isinstance(confidence, (int, float)) and not isinstance(confidence, bool):
         return float(confidence) < 0.70
     return False
+
+
+def _review_reason(classification: Mapping[str, Any]) -> str:
+    explicit = _clean_text(classification.get("review_reason"), limit=220)
+    if explicit:
+        return explicit
+    codes = classification.get("reason_codes")
+    if not isinstance(codes, Sequence) or isinstance(codes, (str, bytes)):
+        return ""
+    parts = [_clean_text(value, limit=80) for value in codes]
+    return ", ".join(value for value in parts if value)[:220]
 
 
 def _pack_blocks(header: str, blocks: Sequence[str], *, max_chars: int) -> list[str]:
@@ -145,6 +158,8 @@ def _positive_int(value: object, *, default: int) -> int:
 
 
 def _confidence_text(value: object) -> str:
+    if isinstance(value, Mapping):
+        value = value.get("overall")
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return ""
     confidence = min(max(float(value), 0.0), 1.0)
