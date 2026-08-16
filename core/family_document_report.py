@@ -9,6 +9,18 @@ def _text(value: object) -> str:
     return str(value).strip() if value is not None else ""
 
 
+def _confidence_text(value: object) -> str:
+    if isinstance(value, Mapping):
+        value = value.get("overall")
+    if isinstance(value, bool):
+        return ""
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+        if 0 <= numeric <= 1:
+            return f"{round(numeric * 100)}%"
+    return ""
+
+
 def _document_title(classification: Mapping[str, Any]) -> str:
     parts = [
         _text(classification.get("document_type")),
@@ -29,12 +41,14 @@ def render_document_section(record: Mapping[str, Any]) -> str:
         ("Тип", classification.get("document_type")),
         ("Тема", classification.get("topic_alias")),
         ("Сторінок", record.get("page_count")),
-        ("Впевненість", classification.get("confidence")),
     )
     for label, value in fields:
         value_text = _text(value)
         if value_text:
             lines.append(f"{label}: {value_text}")
+    confidence = _confidence_text(classification.get("confidence"))
+    if confidence:
+        lines.append(f"Впевненість: {confidence}")
     summary = _text(classification.get("summary"))
     if summary:
         lines.append(f"Коротко: {summary[:900]}")
