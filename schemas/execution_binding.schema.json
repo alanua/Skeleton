@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.execution_binding.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["binding_id", "executor_id", "model_binding_kind", "model_id", "model_alias", "validation_id", "privacy_class", "side_effect_class", "permissions", "credential_aliases", "max_cost_usd", "max_tokens", "timeout_seconds", "max_attempts"],
+  "properties": {
+    "binding_id": {"type": "string", "pattern": "^binding-[0-9a-f]{32}$"},
+    "executor_id": {"type": "string", "minLength": 1},
+    "model_binding_kind": {"enum": ["NO_MODEL", "EMBEDDED_MODEL", "EXTERNAL_MODEL"]},
+    "model_id": {"type": ["string", "null"]},
+    "model_alias": {"type": ["string", "null"]},
+    "validation_id": {"type": "string", "minLength": 1},
+    "privacy_class": {"type": "string", "minLength": 1},
+    "side_effect_class": {"type": "string", "minLength": 1},
+    "permissions": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "credential_aliases": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "max_cost_usd": {"type": "number", "minimum": 0},
+    "max_tokens": {"type": "integer", "minimum": 0},
+    "timeout_seconds": {"type": "integer", "minimum": 1},
+    "max_attempts": {"type": "integer", "minimum": 1}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"model_binding_kind": {"const": "NO_MODEL"}}},
+      "then": {"properties": {"model_id": {"type": "null"}, "model_alias": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"model_binding_kind": {"const": "EMBEDDED_MODEL"}}},
+      "then": {"properties": {"model_id": {"type": "null"}, "model_alias": {"type": "string", "minLength": 1}}}
+    },
+    {
+      "if": {"properties": {"model_binding_kind": {"const": "EXTERNAL_MODEL"}}},
+      "then": {"properties": {"model_id": {"type": "string", "minLength": 1}, "model_alias": {"type": "null"}}}
+    }
+  ]
+}
