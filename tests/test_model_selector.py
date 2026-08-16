@@ -25,6 +25,19 @@ def test_tool_use_coding_excludes_response_only_glm_route() -> None:
     assert ranked[0] == "openrouter-kimi-k2-challenger"
 
 
+def test_kimi_can_rank_for_evaluation_but_not_production_before_live_promotion() -> None:
+    records = load_model_registry(REGISTRY)
+    evaluation = TaskFitRequest("coding", {"repository_edit": 0.70, "tool_use": 0.70}, "PUBLIC")
+    production = TaskFitRequest(
+        "coding",
+        {"repository_edit": 0.70, "tool_use": 0.70},
+        "PUBLIC",
+        production_only=True,
+    )
+    assert select_model(records, evaluation).model_id == "openrouter-kimi-k2-challenger"
+    assert select_model(records, production) is None
+
+
 def test_model_can_be_reasoning_eligible_but_repo_edit_ineligible() -> None:
     records = load_model_registry(REGISTRY)
     reasoning = TaskFitRequest("analysis", {"reasoning": 0.70}, "PUBLIC")
