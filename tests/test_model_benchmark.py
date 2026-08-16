@@ -5,6 +5,7 @@ from core.model_benchmark import BenchmarkReceipt, summarize_capability
 
 def test_external_benchmark_alone_cannot_mark_live() -> None:
     record = summarize_capability(
+        "candidate",
         "reasoning",
         [
             BenchmarkReceipt(
@@ -23,6 +24,7 @@ def test_external_benchmark_alone_cannot_mark_live() -> None:
 
 def test_skeleton_canary_pass_marks_capability_live() -> None:
     record = summarize_capability(
+        "candidate",
         "reasoning",
         [
             BenchmarkReceipt(
@@ -41,6 +43,7 @@ def test_skeleton_canary_pass_marks_capability_live() -> None:
 
 def test_hard_failure_is_not_averaged_away() -> None:
     record = summarize_capability(
+        "candidate",
         "repository_edit",
         [
             BenchmarkReceipt(
@@ -64,3 +67,34 @@ def test_hard_failure_is_not_averaged_away() -> None:
     )
     assert record.status == "UNSUPPORTED"
     assert "DELIVERABLE_MISSING" in record.hard_failures
+
+
+def test_evidence_is_isolated_by_model_identity() -> None:
+    receipts = [
+        BenchmarkReceipt(
+            "model-a-pass",
+            "model-a",
+            "repository_edit",
+            "skeleton_canary",
+            True,
+            0.90,
+        ),
+        BenchmarkReceipt(
+            "model-b-fail",
+            "model-b",
+            "repository_edit",
+            "skeleton_canary",
+            False,
+            0.70,
+            ("DELIVERABLE_MISSING",),
+        ),
+    ]
+    model_a = summarize_capability("model-a", "repository_edit", receipts)
+    model_b = summarize_capability("model-b", "repository_edit", receipts)
+
+    assert model_a.status == "LIVE"
+    assert model_a.hard_failures == ()
+    assert model_a.evidence_ids == ("model-a-pass",)
+    assert model_b.status == "UNSUPPORTED"
+    assert model_b.hard_failures == ("DELIVERABLE_MISSING",)
+    assert model_b.evidence_ids == ("model-b-fail",)
