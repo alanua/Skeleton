@@ -15,7 +15,7 @@ from core.secret_store import (
     SecretMissing,
     SecretOutOfScope,
     SecretProviderUnavailable,
-    SecretReference,
+    SecretResolutionContext,
     SecretResolutionError,
     SecretRevoked,
     SecretStore,
@@ -161,30 +161,45 @@ class ProcessCredentialAdapter:
 
 
 class CredentialBroker:
+    """Provider-neutral broker using trusted runtime identity, never caller-supplied policy context."""
+
     def __init__(
         self,
         *,
         catalog: ServiceCredentialCatalog,
         stores: Mapping[str, SecretStore],
         adapters: Mapping[str, CredentialDeliveryAdapter],
+        runtime_contexts: Mapping[str, SecretResolutionContext],
     ) -> None:
         if not isinstance(catalog, ServiceCredentialCatalog):
             raise CredentialBrokerError("typed_service_credential_catalog_required")
         self._catalog = catalog
         self._stores = dict(stores)
         self._adapters = dict(adapters)
+        self._runtime_contexts = dict(runtime_contexts)
         for provider, store in self._stores.items():
             if not isinstance(provider, str) or not provider or getattr(store, "provider", None) != provider:
                 raise CredentialBrokerError("secret_store_registry_contract_mismatch")
         for adapter_id, adapter in self._adapters.items():
             if not isinstance(adapter_id, str) or getattr(adapter, "adapter_id", None) != adapter_id:
                 raise CredentialBrokerError("credential_adapter_registry_contract_mismatch")
+        for service_id, context in self._runtime_contexts.items():
+            if not isinstance(service_id, str) or not service_id:
+                raise CredentialBrokerError("invalid_runtime_service_identity")
+            if not isinstance(context, SecretResolutionContext):
+                raise CredentialBrokerError("typed_runtime_context_required")
 
     def _binding(self, service_id: str, alias: str) -> ServiceCredentialBinding:
         try:
             return self._catalog.get(service_id, alias)
         except ServiceCredentialBindingError:
             raise CredentialRequestError("service_credential_binding_unavailable") from None
+
+    def _runtime_context(self, service_id: str) -> SecretResolutionContext:
+        context = self._runtime_contexts.get(service_id)
+        if context is None:
+            raise CredentialRequestError("trusted_runtime_context_unavailable")
+        return context
 
     def _resolve(self, binding: ServiceCredentialBinding) -> ResolvedSecret:
         policy = SecretAccessPolicy(
@@ -196,7 +211,7 @@ class CredentialBroker:
             stores=self._stores,
             policies={(binding.reference.provider, binding.reference.reference_id): policy},
         )
-        return gate.resolve(binding.reference, binding.context)
+        return gate.resolve(binding.reference, self._runtime_context(binding.service_id))
 
     @staticmethod
     def _resolution_reason(exc: SecretResolutionError) -> str:
@@ -238,6 +253,8 @@ class CredentialBroker:
         binding = self._binding(service_id, alias)
         try:
             self._resolve(binding)
+        except CredentialRequestError:
+            raise
         except SecretResolutionError as exc:
             return self._receipt(
                 operation="credential_probe",
@@ -267,6 +284,8 @@ class CredentialBroker:
             raise CredentialRequestError("credential_delivery_adapter_unavailable")
         try:
             material = self._resolve(binding)
+        except CredentialRequestError:
+            raise
         except SecretResolutionError as exc:
             return self._receipt(
                 operation="credential_use",
