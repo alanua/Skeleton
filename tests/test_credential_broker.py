@@ -298,38 +298,42 @@ def test_backend_can_change_without_consumer_or_binding_change() -> None:
     assert observed == [SYNTHETIC_SECRET_A, SYNTHETIC_SECRET_B]
 
 
-def test_control_adapter_never_returns_secret_or_arbitrary_request_details() -> None:
+def test_control_adapter_is_bound_to_one_service_and_never_returns_secret() -> None:
     store = FakeStore({"ref-a": SYNTHETIC_SECRET_A})
     broker = _broker(
         store,
         [_binding("service-a", "ref-a")],
         {"service-a": lambda _material, _binding: None},
     )
-    control = CredentialControlAdapter(broker)
+    control = CredentialControlAdapter(broker, service_id="service-a")
 
-    probe = control.invoke("credential_probe", {"service_id": "service-a", "alias": "api"})
+    probe = control.invoke("credential_probe", {"alias": "api"})
     used = control.invoke(
         "credential_use",
-        {"service_id": "service-a", "alias": "api", "action_id": "use_api"},
+        {"alias": "api", "action_id": "use_api"},
+    )
+    spoofed = control.invoke(
+        "credential_use",
+        {"service_id": "service-b", "alias": "api", "action_id": "use_api"},
     )
     rejected = control.invoke(
         "credential_use",
-        {
-            "service_id": "service-a",
-            "alias": "api",
-            "action_id": "use_api",
-            "command": "/bin/sh",
-        },
+        {"alias": "api", "action_id": "use_api", "command": "/bin/sh"},
     )
 
+    assert control.service_id == "service-a"
+    assert probe["service_id"] == "service-a"
     assert probe["result"]["status"] == "AVAILABLE"
     assert used["result"]["status"] == "USED"
-    assert rejected == {
+    assert spoofed == {
         "schema": "skeleton.credential_control.v1",
+        "service_id": "service-a",
         "result": {"status": "BLOCKED", "reason_class": "UNKNOWN_FIELDS"},
     }
-    combined = json.dumps([probe, used, rejected], sort_keys=True)
+    assert rejected == spoofed
+    combined = json.dumps([probe, used, spoofed, rejected], sort_keys=True)
     assert SYNTHETIC_SECRET_A not in combined
+    assert "service-b" not in combined
     assert "/bin/sh" not in combined
 
 
