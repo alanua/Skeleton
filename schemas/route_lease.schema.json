@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.route_lease.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["lease_id", "task_profile_hash", "binding_id", "permissions", "validation_id", "max_cost_usd", "max_tokens", "timeout_seconds", "max_attempts", "expires_at_epoch", "lease_hash"],
+  "properties": {
+    "lease_id": {"type": "string", "pattern": "^lease-[0-9a-f]{32}$"},
+    "task_profile_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "binding_id": {"type": "string", "pattern": "^binding-[0-9a-f]{32}$"},
+    "permissions": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "validation_id": {"type": "string", "minLength": 1},
+    "max_cost_usd": {"type": "number", "minimum": 0},
+    "max_tokens": {"type": "integer", "minimum": 0},
+    "timeout_seconds": {"type": "integer", "minimum": 1},
+    "max_attempts": {"type": "integer", "minimum": 1},
+    "expires_at_epoch": {"type": "integer", "minimum": 1},
+    "lease_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}
