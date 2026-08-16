@@ -25,12 +25,29 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Focused SecretStore validation and workflow cleanup
+      - name: Repair test helper, validate SecretStore, clean workflow
         shell: bash
         run: |
           set -euo pipefail
           git fetch --quiet origin main
           test "$(git rev-parse origin/main)" = "89843be0c8e67e3a048fd473bdf293b464da7590"
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('tests/test_credential_broker.py')
+          text = path.read_text(encoding='utf-8')
+          old = '''        runtime_contexts=runtime_contexts
+                  or {binding.service_id: _runtime_context(binding.service_id) for binding in bindings},
+          '''
+          new = '''        runtime_contexts=(
+                      runtime_contexts
+                      if runtime_contexts is not None
+                      else {binding.service_id: _runtime_context(binding.service_id) for binding in bindings}
+                  ),
+          '''
+          if text.count(old) != 1:
+              raise SystemExit('test_helper_preimage_mismatch')
+          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
           python -m pip install --quiet 'pytest>=8,<10'
           env \
             -u BWS_ACCESS_TOKEN \
@@ -58,6 +75,6 @@ jobs:
           git diff --check
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add .github/workflows/skeleton-runtime-recovery-bootstrap.yml
-          git commit -m "Remove temporary SecretStore validator"
+          git add -- tests/test_credential_broker.py .github/workflows/skeleton-runtime-recovery-bootstrap.yml
+          git commit -m "Fix trusted runtime context regression helper"
           git push origin HEAD:runner/universal-bitwarden-service-secretstore-v2
