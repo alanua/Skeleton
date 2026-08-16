@@ -3,7 +3,7 @@ from __future__ import annotations
 from core.model_benchmark import BenchmarkReceipt, summarize_capability
 
 
-def test_external_benchmark_alone_cannot_mark_live() -> None:
+def test_external_benchmark_alone_stays_discovered() -> None:
     record = summarize_capability(
         "candidate",
         "reasoning",
@@ -20,9 +20,10 @@ def test_external_benchmark_alone_cannot_mark_live() -> None:
     )
     assert record.status == "DEGRADED"
     assert record.canary_passed is False
+    assert record.promotion_stage == "DISCOVERED"
 
 
-def test_skeleton_canary_pass_marks_capability_live() -> None:
+def test_skeleton_canary_pass_marks_capability_eligible_not_live_authority() -> None:
     record = summarize_capability(
         "candidate",
         "reasoning",
@@ -39,6 +40,27 @@ def test_skeleton_canary_pass_marks_capability_live() -> None:
     )
     assert record.status == "LIVE"
     assert record.canary_passed is True
+    assert record.promotion_stage == "ELIGIBLE"
+    assert not record.production_eligible(0.0)
+
+
+def test_failed_nonhard_canary_remains_canary_only() -> None:
+    record = summarize_capability(
+        "candidate",
+        "reasoning",
+        [
+            BenchmarkReceipt(
+                "canary-fail",
+                "candidate",
+                "reasoning",
+                "skeleton_canary",
+                False,
+                0.40,
+            )
+        ],
+    )
+    assert record.status == "DEGRADED"
+    assert record.promotion_stage == "CANARY_ONLY"
 
 
 def test_hard_failure_is_not_averaged_away() -> None:
@@ -66,6 +88,7 @@ def test_hard_failure_is_not_averaged_away() -> None:
         ],
     )
     assert record.status == "UNSUPPORTED"
+    assert record.promotion_stage == "UNSUPPORTED"
     assert "DELIVERABLE_MISSING" in record.hard_failures
 
 
@@ -93,6 +116,7 @@ def test_evidence_is_isolated_by_model_identity() -> None:
     model_b = summarize_capability("model-b", "repository_edit", receipts)
 
     assert model_a.status == "LIVE"
+    assert model_a.promotion_stage == "ELIGIBLE"
     assert model_a.hard_failures == ()
     assert model_a.evidence_ids == ("model-a-pass",)
     assert model_b.status == "UNSUPPORTED"
