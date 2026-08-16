@@ -16,15 +16,9 @@ from core.codex_runtime_recovery import (
     pinned_codex_runtime_path,
     should_attempt_codex_runtime_recovery,
 )
-from core.secret_store import (
-    SecretAccessPolicy,
-    SecretResolutionContext,
-    SecretResolutionError,
-    SecretStoreGate,
-)
-from integrations.bitwarden_secret_store import (
-    BwsCliSecretsManagerStore,
-    bitwarden_reference_from_systemd_credential,
+from integrations.credential_runtime import (
+    RegisteredCredentialRuntimeError,
+    bind_registered_environment_credential,
 )
 
 
@@ -37,11 +31,10 @@ _ORIGINAL_PATH_ENV = "SKELETON_CODEGEN_ORIGINAL_PATH"
 _OPENROUTER_REQUIRED_ENV = "SKELETON_OPENHANDS_OPENROUTER_REQUIRED"
 _OPENROUTER_FALLBACK_KEY_ENV = "SKELETON_OPENROUTER_FALLBACK_API_KEY"
 _OPENROUTER_FALLBACK_MODEL_ENV = "SKELETON_OPENROUTER_FALLBACK_MODEL"
-_OPENROUTER_SECRET_REF_CREDENTIAL = "openrouter-secret-ref"
 _OPENROUTER_FREE_MODEL = "openrouter/z-ai/glm-4.5-air:free"
-_RUNNER_MACHINE_IDENTITY = "hetzner-agent-runner-1"
-_OPENROUTER_AUDIENCE = "openhands-openrouter"
-_OPENROUTER_TASK_KIND = "code_generation"
+_RUNNER_CREDENTIAL_SERVICE = "runner-openhands"
+_RUNNER_OPENROUTER_ALIAS = "openrouter-api"
+_RUNNER_OPENROUTER_ACTION = "bind-openrouter-fallback"
 _PROVIDER_OVERRIDE_ENV = frozenset(
     {
         "OPENROUTER_API_KEY",
@@ -222,31 +215,18 @@ def _bind_trusted_openrouter(
     for name in _PROVIDER_OVERRIDE_ENV:
         environment.pop(name, None)
     try:
-        reference = bitwarden_reference_from_systemd_credential(
-            authority_environment,
-            _OPENROUTER_SECRET_REF_CREDENTIAL,
+        receipt = bind_registered_environment_credential(
+            service_id=_RUNNER_CREDENTIAL_SERVICE,
+            alias=_RUNNER_OPENROUTER_ALIAS,
+            action_id=_RUNNER_OPENROUTER_ACTION,
+            environment=environment,
+            authority_environment=authority_environment,
         )
-        store = BwsCliSecretsManagerStore.from_systemd_credentials(authority_environment)
-        context = SecretResolutionContext(
-            machine_identity=_RUNNER_MACHINE_IDENTITY,
-            audience=_OPENROUTER_AUDIENCE,
-            task_kind=_OPENROUTER_TASK_KIND,
-        )
-        policy = SecretAccessPolicy(
-            allowed_machine_identities=frozenset({_RUNNER_MACHINE_IDENTITY}),
-            allowed_audiences=frozenset({_OPENROUTER_AUDIENCE}),
-            allowed_task_kinds=frozenset({_OPENROUTER_TASK_KIND}),
-        )
-        gate = SecretStoreGate(
-            stores={"bitwarden": store},
-            policies={(reference.provider, reference.reference_id): policy},
-        )
-        material = gate.resolve(reference, context)
-        bound = material.inject(environment, _OPENROUTER_FALLBACK_KEY_ENV)
-    except SecretResolutionError:
+    except RegisteredCredentialRuntimeError:
         return False
-    environment.clear()
-    environment.update(bound)
+    result = receipt.get("result")
+    if not isinstance(result, Mapping) or result.get("status") != "USED":
+        return False
     environment[_OPENROUTER_FALLBACK_MODEL_ENV] = _OPENROUTER_FREE_MODEL
     return True
 

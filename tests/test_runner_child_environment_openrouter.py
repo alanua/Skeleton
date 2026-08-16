@@ -42,25 +42,47 @@ def test_codegen_child_environment_scrubs_all_secret_sources(monkeypatch) -> Non
     assert environment["BWS_ACCESS_TOKEN"] == "must-not-reach-codex"
 
 
-def test_trusted_openrouter_binding_uses_exact_bitwarden_reference_and_code_owned_policy(monkeypatch) -> None:
-    reference = SecretReference(provider="bitwarden", reference_id="11111111-2222-3333-4444-555555555555")
+def test_trusted_openrouter_binding_uses_registered_shared_credential_path(monkeypatch) -> None:
+    observed = {}
+
+    def fake_bind_registered_environment_credential(
+        *,
+        service_id,
+        alias,
+        action_id,
+        environment,
+        authority_environment,
+    ):
+        observed["service_id"] = service_id
+        observed["alias"] = alias
+        observed["action_id"] = action_id
+        observed["authority_environment"] = dict(authority_environment)
+        environment["SKELETON_OPENROUTER_FALLBACK_API_KEY"] = "synthetic-openrouter-key"
+        return {"result": {"status": "USED"}}
+
     monkeypatch.setattr(
         child_env,
-        "bitwarden_reference_from_systemd_credential",
-        lambda authority, name: reference,
+        "bind_registered_environment_credential",
+        fake_bind_registered_environment_credential,
     )
-    monkeypatch.setattr(
-        child_env.BwsCliSecretsManagerStore,
-        "from_systemd_credentials",
-        classmethod(lambda cls, authority: FakeBitwardenStore()),
-    )
+
     environment = {
         "SAFE": "1",
         "OPENROUTER_API_KEY": "overlay-secret",
         "LLM_MODEL": "attacker/model",
     }
 
-    assert child_env._bind_trusted_openrouter(environment, {"PATH": "/trusted/bin"}) is True
+    assert child_env._bind_trusted_openrouter(
+        environment,
+        {"PATH": "/trusted/bin"},
+    ) is True
+
+    assert observed == {
+        "service_id": "runner-openhands",
+        "alias": "openrouter-api",
+        "action_id": "bind-openrouter-fallback",
+        "authority_environment": {"PATH": "/trusted/bin"},
+    }
     assert environment["SAFE"] == "1"
     assert environment["SKELETON_OPENROUTER_FALLBACK_API_KEY"] == "synthetic-openrouter-key"
     assert environment["SKELETON_OPENROUTER_FALLBACK_MODEL"] == "openrouter/z-ai/glm-4.5-air:free"
