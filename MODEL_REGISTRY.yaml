@@ -15,18 +15,21 @@
           "status": "LIVE",
           "score": 0.55,
           "canary_passed": true,
+          "promotion_stage": "LIVE",
           "evidence_ids": ["synthetic-local-reasoning-canary"]
         },
         "repository_edit": {
           "status": "DEGRADED",
           "score": 0.35,
           "canary_passed": false,
+          "promotion_stage": "DISCOVERED",
           "evidence_ids": ["synthetic-local-edit-baseline"]
         },
         "tool_use": {
           "status": "UNSUPPORTED",
           "score": 0.20,
-          "canary_passed": false
+          "canary_passed": false,
+          "promotion_stage": "UNSUPPORTED"
         }
       }
     },
@@ -44,12 +47,14 @@
           "status": "LIVE",
           "score": 0.72,
           "canary_passed": true,
+          "promotion_stage": "LIVE",
           "evidence_ids": ["pr2814-response-canary"]
         },
         "repository_edit": {
           "status": "UNSUPPORTED",
           "score": 0.62,
           "canary_passed": false,
+          "promotion_stage": "UNSUPPORTED",
           "hard_failures": ["DELIVERABLE_MISSING"],
           "evidence_ids": ["pr2814-artifact-canary-fail"]
         },
@@ -57,6 +62,7 @@
           "status": "UNSUPPORTED",
           "score": 0.60,
           "canary_passed": false,
+          "promotion_stage": "UNSUPPORTED",
           "hard_failures": ["TOOL_USE_FAILED"],
           "evidence_ids": ["pr2814-artifact-canary-fail"]
         }
@@ -76,18 +82,21 @@
           "status": "LIVE",
           "score": 0.82,
           "canary_passed": true,
+          "promotion_stage": "ELIGIBLE",
           "evidence_ids": ["pr2814-kimi-tool-canary"]
         },
         "repository_edit": {
           "status": "LIVE",
           "score": 0.85,
           "canary_passed": true,
+          "promotion_stage": "ELIGIBLE",
           "evidence_ids": ["pr2814-kimi-tool-canary"]
         },
         "tool_use": {
           "status": "LIVE",
           "score": 0.88,
           "canary_passed": true,
+          "promotion_stage": "ELIGIBLE",
           "evidence_ids": ["pr2814-kimi-tool-canary"]
         }
       }
@@ -106,6 +115,7 @@
           "status": "DEGRADED",
           "score": 0.99,
           "canary_passed": false,
+          "promotion_stage": "DISCOVERED",
           "evidence_ids": ["external-ranking-only"]
         }
       }
