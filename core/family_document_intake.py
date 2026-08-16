@@ -59,7 +59,7 @@ def build_family_document_record(
         "ocr_providers": list(request.ocr_providers),
         "page_count": request.page_count,
         "mime_type": request.mime_type,
-        "classification": _public_classification(classification_payload),
+        "classification": _private_classification(classification_payload),
     }
     record["record_hash"] = content_hash(record)
     return record
@@ -70,7 +70,7 @@ def record_id_for_source_sha256(source_sha256: str) -> str:
     return f"doc-{digest[:32]}"
 
 
-def _public_classification(value: Mapping[str, Any]) -> dict[str, object]:
+def _private_classification(value: Mapping[str, Any]) -> dict[str, object]:
     allowed = {
         "route",
         "title",
@@ -84,6 +84,7 @@ def _public_classification(value: Mapping[str, Any]) -> dict[str, object]:
         "issuer",
         "summary",
         "confidence",
+        "evidence",
         "review_required",
         "review_reason",
         "storage_label",
