@@ -55,9 +55,7 @@ class FileFamilyDocumentArchive:
         if source_path is not None:
             original_sha256, archive_label = self._archive_original(record_id, record, source_path)
 
-        records = self.root / "records"
-        records.mkdir(mode=0o700, parents=True, exist_ok=True)
-        path = records / f"{record_id}.json"
+        path = self.root / f"{record_id}.json"
         payload = canonical_json(record)
         if path.exists() and path.read_text(encoding="utf-8") == payload:
             state = "DUPLICATE_IDENTICAL"
