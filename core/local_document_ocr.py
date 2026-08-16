@@ -26,6 +26,7 @@ PDFTOTEXT = "/usr/bin/pdftotext"
 PDFINFO = "/usr/bin/pdfinfo"
 TESSERACT = "/usr/bin/tesseract"
 OCRMY_PDF = "/usr/bin/ocrmypdf"
+LIBREOFFICE = "/usr/bin/libreoffice"
 
 
 def _run(argv: Sequence[str], *, timeout: int = 120, max_output: int = 2_000_000) -> str:
@@ -109,6 +110,22 @@ def _image_text(path: Path) -> str:
     return text
 
 
+def _office_text(path: Path) -> tuple[str, int]:
+    if not Path(LIBREOFFICE).is_file():
+        raise LocalDocumentOcrError("office converter unavailable")
+    with tempfile.TemporaryDirectory(prefix="skeleton-mfp-office-") as tmp:
+        output_root = Path(tmp)
+        _run(
+            (LIBREOFFICE, "--headless", "--convert-to", "pdf", "--outdir", str(output_root), str(path)),
+            timeout=180,
+            max_output=512_000,
+        )
+        converted = output_root / f"{path.stem}.pdf"
+        if not converted.is_file():
+            raise LocalDocumentOcrError("office conversion produced no PDF")
+        return _pdf_text(converted), _pdf_page_count(converted)
+
+
 def read_local_document(path: Path, *, max_bytes: int = 50_000_000) -> OcrResult:
     stat = path.stat()
     if stat.st_size <= 0:
@@ -129,6 +146,9 @@ def read_local_document(path: Path, *, max_bytes: int = 50_000_000) -> OcrResult
         text = _image_text(path)
         pages = 1
         mime_type = "image/tiff" if suffix in {".tif", ".tiff"} else f"image/{'jpeg' if suffix in {'.jpg', '.jpeg'} else 'png'}"
+    elif suffix in {".doc", ".docx", ".odt", ".rtf"}:
+        text, pages = _office_text(path)
+        mime_type = "application/vnd.skeleton.office-document"
     elif suffix == ".txt":
         data = path.read_bytes()
         text = data.decode("utf-8", errors="ignore").strip()
