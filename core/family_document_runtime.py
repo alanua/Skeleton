@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
 from core.family_document_intake import build_family_document_record, build_intake_request
+from core.family_document_report import render_package_report
 from core.family_document_sources import LocalDirectoryDocumentSource
 from core.private_memory_history import canonical_json, content_hash
 from core.telegram_notifications import TelegramNotificationError, send_telegram_notification
@@ -72,7 +73,11 @@ class FamilyDocumentReceiptOutbox:
             for row in rows:
                 payload = json.loads(str(row["payload_json"]))
                 try:
-                    sender(render_receipt_message(payload))
+                    messages = render_package_report(payload.get("records", []))
+                    if not messages:
+                        raise ValueError("empty family document report")
+                    for message in messages:
+                        sender(message)
                 except Exception as exc:
                     reason = type(exc).__name__
                     if isinstance(exc, TelegramNotificationError):
@@ -159,46 +164,34 @@ class FamilyDocumentRuntime:
         self.classifier = classifier
 
     def scan_once(self, *, drain: bool = True, sender: Callable[[str], None] = send_telegram_notification) -> dict[str, object]:
-        completed = 0
+        records: list[dict[str, object]] = []
         for document in self.source.scan():
             request = build_intake_request(document.path, source_id=document.source_id, source_sha256=document.sha256)
             classification = self.classifier(request.ocr_text) if self.classifier else None
             record = build_family_document_record(request, classification)
             archive_receipt = self.archive_sink.archive(record)
-            self._enqueue_completed_receipts(record, archive_receipt)
-            completed += 1
+            report_record = dict(record)
+            report_record["storage_label"] = archive_receipt.get("storage_label") or "Сімейний архів"
+            records.append(report_record)
+        if records:
+            self._enqueue_package_report(records)
         drain_result = self.outbox.drain(sender=sender) if drain else {"sent": 0, "retry": 0}
         return {
             "schema": "skeleton.family_document_runtime_scan.v1",
-            "completed_intakes": completed,
+            "completed_intakes": len(records),
             "outbox": self.outbox.state_counts(),
             "drain": drain_result,
         }
 
-    def _enqueue_completed_receipts(
-        self,
-        record: Mapping[str, Any],
-        archive_receipt: Mapping[str, Any],
-    ) -> None:
-        intake_id = str(record["record_id"])
-        base = {
-            "schema": FAMILY_DOCUMENT_RECEIPT_SCHEMA,
-            "intake_id": intake_id,
-            "record_id": record["record_id"],
-            "record_hash": record["record_hash"],
-            "archive_status": archive_receipt.get("status"),
-            "canonical_revision": archive_receipt.get("canonical_revision"),
-        }
-        self.outbox.enqueue({**base, "receipt_type": "intake", "receipt_key": f"intake:{intake_id}"})
-        self.outbox.enqueue({**base, "receipt_type": "terminal", "receipt_key": f"terminal:{intake_id}", "status": "DONE"})
-
-
-def render_receipt_message(receipt: Mapping[str, Any]) -> str:
-    return "\n".join(
-        [
-            "Family document intake",
-            f"Receipt: {receipt.get('receipt_type')}",
-            f"Record: {receipt.get('record_id')}",
-            f"Status: {receipt.get('status', receipt.get('archive_status'))}",
-        ]
-    )
+    def _enqueue_package_report(self, records: list[Mapping[str, Any]]) -> None:
+        identities = sorted(str(record["record_id"]) for record in records)
+        package_key = content_hash({"records": identities})[:32]
+        self.outbox.enqueue(
+            {
+                "schema": FAMILY_DOCUMENT_RECEIPT_SCHEMA,
+                "receipt_type": "package",
+                "receipt_key": f"package:{package_key}",
+                "status": "DONE",
+                "records": [dict(record) for record in records],
+            }
+        )
