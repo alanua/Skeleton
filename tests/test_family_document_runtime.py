@@ -30,7 +30,7 @@ def test_no_notification_before_stable_file_gate(tmp_path) -> None:
 
 
 def test_success_archives_then_sends_one_rich_package_report(tmp_path) -> None:
-    def classify(_request):
+    def classify(_text):
         return {
             "route": "ACCEPT",
             "title": "Synthetic letter",
@@ -76,8 +76,8 @@ def test_telegram_failure_does_not_roll_back_archive_and_marks_retry(tmp_path) -
 def test_replay_restart_does_not_duplicate_successful_sends_or_ocr(tmp_path) -> None:
     calls = []
 
-    def classify(request):
-        calls.append(request.source_sha256)
+    def classify(text):
+        calls.append(text)
         return {"route": "ACCEPT", "summary": "Synthetic", "confidence": 0.9}
 
     rt, inbox = runtime(tmp_path, classifier=classify)
