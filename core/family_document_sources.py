@@ -38,7 +38,12 @@ class StableFileGate:
 
 
 class LocalDirectoryDocumentSource:
-    def __init__(self, root: Path, *, suffixes: tuple[str, ...] = (".txt", ".pdf")) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        suffixes: tuple[str, ...] = (".txt", ".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".doc", ".docx", ".odt", ".rtf"),
+    ) -> None:
         self.root = root
         self.suffixes = tuple(suffix.lower() for suffix in suffixes)
         self.gate = StableFileGate()
@@ -47,7 +52,7 @@ class LocalDirectoryDocumentSource:
         self.root.mkdir(parents=True, exist_ok=True)
         documents: list[StableDocument] = []
         for path in sorted(self.root.iterdir()):
-            if not path.is_file() or path.suffix.lower() not in self.suffixes:
+            if not path.is_file() or path.is_symlink() or path.suffix.lower() not in self.suffixes:
                 continue
             observed = self.gate.observe(path)
             if observed.stable:
