@@ -130,6 +130,7 @@ def classify_family_document_text(text: str, subject_aliases: Sequence[str]) -> 
     document_type, type_score = _unique_best(normalized, _DOCUMENT_TYPES)
     issuer_matches = [issuer for issuer in _ISSUERS if issuer.casefold() in normalized]
     issuer = issuer_matches[0] if len(issuer_matches) == 1 else None
+    event_candidates = _calendar_candidates(text, document_type, issuer)
 
     reason_codes: list[str] = []
     if principal is None:
@@ -140,6 +141,8 @@ def classify_family_document_text(text: str, subject_aliases: Sequence[str]) -> 
         reason_codes.append("DOCUMENT_TYPE_AMBIGUOUS")
     if issuer is None:
         reason_codes.append("ISSUER_AMBIGUOUS")
+    if document_type == "Termin/Einladung" and not event_candidates:
+        reason_codes.append("CALENDAR_EVENT_AMBIGUOUS")
 
     confidence = min(
         0.99,
@@ -160,5 +163,5 @@ def classify_family_document_text(text: str, subject_aliases: Sequence[str]) -> 
         "summary": _summary(text),
         "confidence": round(confidence, 2),
         "reason_codes": reason_codes,
-        "event_candidates": _calendar_candidates(text, document_type, issuer),
+        "event_candidates": event_candidates,
     }
