@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.deliverable_validation.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["accepted", "failure_class", "final_action", "changed_files_count", "artifact_count"],
+  "properties": {
+    "accepted": {"type": "boolean"},
+    "failure_class": {"type": ["string", "null"]},
+    "final_action": {"enum": ["DONE", "NEEDS_OPERATOR", "RETRY_OR_ESCALATE"]},
+    "changed_files_count": {"type": "integer", "minimum": 0},
+    "artifact_count": {"type": "integer", "minimum": 0}
+  }
+}
