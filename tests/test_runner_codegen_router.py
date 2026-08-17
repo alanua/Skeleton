@@ -13,6 +13,7 @@ from core.runner_codegen_router import (
     openhands_secondary_command,
     prepare_openhands_secondary_environment,
     select_openhands_secondary_route,
+    task_contract_allows_cloud_secondary,
 )
 
 
@@ -25,6 +26,28 @@ def test_only_availability_failures_allow_secondary() -> None:
     assert not codex_failure_allows_secondary(0, "usage limit reached")
     assert not codex_failure_allows_secondary(1, "tests failed")
     assert not codex_failure_allows_secondary(1, "validation failed")
+
+
+def test_cloud_secondary_requires_public_repository_write_contract() -> None:
+    assert task_contract_allows_cloud_secondary(
+        """
+requested_capabilities: [repository_read, repository_write, test_execution]
+privacy_boundary: PUBLIC_SAFE_REPOSITORY_ONLY
+"""
+    )
+    assert not task_contract_allows_cloud_secondary(
+        """
+requested_capabilities: [repository_read]
+privacy_boundary: PUBLIC_SAFE_READ_ONLY
+"""
+    )
+    assert not task_contract_allows_cloud_secondary(
+        """
+requested_capabilities: [repository_read, repository_write]
+privacy_boundary: PRIVATE_LOCAL_ONLY
+"""
+    )
+    assert not task_contract_allows_cloud_secondary("not: [valid")
 
 
 def test_production_route_selects_openhands_with_canary_passed_kimi() -> None:
