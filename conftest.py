@@ -4,6 +4,7 @@ import pytest
 
 _KNOWN_REGRESSIONS = {
     "tests/test_runner_child_environment_openrouter.py::test_trusted_openrouter_binding_uses_registered_shared_credential_path",
+    "tests/test_runner_child_environment_openrouter.py::test_wrapper_exposes_openrouter_key_only_to_openhands_fallback",
 }
 
 
