@@ -16,15 +16,18 @@ def test_exact_appointment_date_and_time_produces_typed_event() -> None:
     assert event["timezone"] == "Europe/Berlin"
     assert isinstance(event["start_at"], int)
     assert event["title"] == "Termin — Jobcenter"
+    assert "CALENDAR_EVENT_AMBIGUOUS" not in result["reason_codes"]
 
 
-def test_appointment_without_exact_time_does_not_fabricate_event() -> None:
+def test_appointment_without_exact_time_does_not_fabricate_event_and_routes_review() -> None:
     result = classify_family_document_text(
         "Jobcenter Termin Einladung für Alex am 31.08.2026. Bitte erscheinen.",
         ("Alex", "Maria", "Ivan"),
     )
 
     assert result["event_candidates"] == []
+    assert result["route"] == "REVIEW"
+    assert "CALENDAR_EVENT_AMBIGUOUS" in result["reason_codes"]
 
 
 def test_non_appointment_document_date_does_not_become_calendar_event() -> None:
@@ -34,3 +37,4 @@ def test_non_appointment_document_date_does_not_become_calendar_event() -> None:
     )
 
     assert result["event_candidates"] == []
+    assert "CALENDAR_EVENT_AMBIGUOUS" not in result["reason_codes"]
