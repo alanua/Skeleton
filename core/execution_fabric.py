@@ -86,10 +86,7 @@ _TYPED_PROFILE_FIELDS = frozenset(
 
 
 def task_profile_from_contract(contract: Mapping[str, object]) -> TaskProfile:
-    """Build authority only from the typed contract, never from free-form prose.
-
-    Model/provider/executor IDs are deliberately not accepted profile fields.
-    """
+    """Build authority only from the typed contract, never from free-form prose."""
     unknown = set(contract) - _TYPED_PROFILE_FIELDS
     if unknown:
         raise ExecutionFabricError("unknown_task_profile_authority_field")
@@ -178,6 +175,7 @@ def build_execution_bindings(
         if not model_required and executor.supports(
             task_class=profile.task_class,
             capabilities=profile.required_executor_capabilities,
+            privacy_class=profile.privacy_class,
             side_effect_class=profile.side_effect_class,
             binding_kind="NO_MODEL",
         ):
@@ -198,6 +196,7 @@ def build_execution_bindings(
         if model_required and executor.supports(
             task_class=profile.task_class,
             capabilities=profile.required_executor_capabilities,
+            privacy_class=profile.privacy_class,
             side_effect_class=profile.side_effect_class,
             binding_kind="EMBEDDED_MODEL",
         ) and all(capability in executor.embedded_model_capabilities for capability in profile.model_capability_map):
@@ -219,6 +218,7 @@ def build_execution_bindings(
         if model_required and executor.supports(
             task_class=profile.task_class,
             capabilities=profile.required_executor_capabilities,
+            privacy_class=profile.privacy_class,
             side_effect_class=profile.side_effect_class,
             binding_kind="EXTERNAL_MODEL",
         ):
