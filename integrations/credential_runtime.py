@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, MutableMapping
+from collections.abc import Callable, Mapping, MutableMapping
 from dataclasses import dataclass
+from typing import TypeVar
 
 from core.credential_broker import (
     CredentialBrokerError,
@@ -42,6 +43,16 @@ class RegisteredEnvironmentCredential:
     environment_variable: str
 
 
+@dataclass(frozen=True, slots=True)
+class RegisteredMaterialCredential:
+    service_id: str
+    alias: str
+    reference_credential_name: str
+    context: SecretResolutionContext
+    action_id: str
+    target_id: str
+
+
 _RUNNER_OPENHANDS = RegisteredEnvironmentCredential(
     service_id="runner-openhands",
     alias="openrouter-api",
@@ -56,8 +67,38 @@ _RUNNER_OPENHANDS = RegisteredEnvironmentCredential(
     environment_variable="SKELETON_OPENROUTER_FALLBACK_API_KEY",
 )
 
+_GMAIL_PRIMARY = RegisteredMaterialCredential(
+    service_id="mail-gmail",
+    alias="acct:gmail-primary",
+    reference_credential_name="gmail-primary-oauth-secret-ref",
+    context=SecretResolutionContext(
+        machine_identity="hetzner-agent-runner-1",
+        audience="mail-gmail-readonly",
+        task_kind="mail_poll",
+    ),
+    action_id="use-gmail-readonly-oauth",
+    target_id="mail-gmail-primary-oauth-consumer",
+)
+
+_GMAIL_SECONDARY = RegisteredMaterialCredential(
+    service_id="mail-gmail",
+    alias="acct:gmail-secondary",
+    reference_credential_name="gmail-secondary-oauth-secret-ref",
+    context=SecretResolutionContext(
+        machine_identity="hetzner-agent-runner-1",
+        audience="mail-gmail-readonly",
+        task_kind="mail_poll",
+    ),
+    action_id="use-gmail-readonly-oauth",
+    target_id="mail-gmail-secondary-oauth-consumer",
+)
+
 _REGISTERED_ENVIRONMENT_CREDENTIALS = {
     (_RUNNER_OPENHANDS.service_id, _RUNNER_OPENHANDS.alias): _RUNNER_OPENHANDS,
+}
+_REGISTERED_MATERIAL_CREDENTIALS = {
+    (_GMAIL_PRIMARY.service_id, _GMAIL_PRIMARY.alias): _GMAIL_PRIMARY,
+    (_GMAIL_SECONDARY.service_id, _GMAIL_SECONDARY.alias): _GMAIL_SECONDARY,
 }
 
 
@@ -74,6 +115,19 @@ def _registered_environment_credential(
     return spec
 
 
+def _registered_material_credential(
+    service_id: str,
+    alias: str,
+    action_id: str,
+) -> RegisteredMaterialCredential:
+    spec = _REGISTERED_MATERIAL_CREDENTIALS.get((service_id, alias))
+    if spec is None:
+        raise RegisteredCredentialRuntimeError("registered_credential_unavailable")
+    if action_id != spec.action_id:
+        raise RegisteredCredentialRuntimeError("registered_credential_action_mismatch")
+    return spec
+
+
 def bind_registered_environment_credential(
     *,
     service_id: str,
@@ -82,12 +136,7 @@ def bind_registered_environment_credential(
     environment: MutableMapping[str, str],
     authority_environment: Mapping[str, str],
 ) -> dict[str, object]:
-    """Resolve one code-registered credential and bind it to its fixed trusted target.
-
-    Consumers select only service + logical alias + registered action. Provider details,
-    reference credential name, target id, environment variable, and policy context are
-    code-owned. The returned object is the public-safe CredentialControl receipt only.
-    """
+    """Resolve one code-registered credential and bind it to its fixed trusted target."""
 
     spec = _registered_environment_credential(service_id, alias, action_id)
     staged_environment: dict[str, str] | None = None
@@ -102,48 +151,16 @@ def bind_registered_environment_credential(
             spec.environment_variable,
         )
 
-    try:
-        reference = bitwarden_reference_from_systemd_credential(
-            authority_environment,
-            spec.reference_credential_name,
-        )
-        binding = ServiceCredentialBinding(
-            service_id=spec.service_id,
-            alias=spec.alias,
-            reference=reference,
-            context=spec.context,
-            action_id=spec.action_id,
-            adapter_id="in_process",
-            target_id=spec.target_id,
-            required=True,
-            reload_mode="per_use",
-        )
-        runtime = build_bitwarden_credential_runtime(
-            catalog=ServiceCredentialCatalog([binding]),
-            registrations=(
-                CredentialRuntimeRegistration(spec.service_id, spec.context),
-            ),
-            adapters={
-                "in_process": InProcessCredentialAdapter(
-                    {spec.target_id: consume}
-                )
-            },
-            authority_environment=authority_environment,
-        )
-        receipt = runtime.control_for(spec.service_id).invoke(
-            "credential_use",
-            {"alias": spec.alias, "action_id": spec.action_id},
-        )
-    except (
-        CredentialBrokerError,
-        CredentialRuntimeRegistrationError,
-        SecretResolutionError,
-        ServiceCredentialBindingError,
-    ):
-        raise RegisteredCredentialRuntimeError(
-            "registered_credential_resolution_failed"
-        ) from None
-
+    receipt = _invoke_registered_binding(
+        service_id=spec.service_id,
+        alias=spec.alias,
+        reference_credential_name=spec.reference_credential_name,
+        context=spec.context,
+        action_id=spec.action_id,
+        target_id=spec.target_id,
+        consumer=consume,
+        authority_environment=authority_environment,
+    )
     public = receipt.get("result")
     if (
         isinstance(public, Mapping)
@@ -155,18 +172,115 @@ def bind_registered_environment_credential(
     return receipt
 
 
+T = TypeVar("T")
+
+
+def consume_registered_material_credential(
+    *,
+    service_id: str,
+    alias: str,
+    action_id: str,
+    consumer: Callable[[str], None],
+    authority_environment: Mapping[str, str],
+) -> dict[str, object]:
+    """Deliver a code-registered secret only to an in-process bounded consumer.
+
+    The broker never returns plaintext. Provider/reference/context/target are code-owned;
+    the caller may select only a registered service + logical alias + action.
+    """
+
+    spec = _registered_material_credential(service_id, alias, action_id)
+
+    def consume_material(
+        material: ResolvedSecret,
+        _binding: ServiceCredentialBinding,
+    ) -> None:
+        ephemeral = material.inject({}, "SKELETON_EPHEMERAL_REGISTERED_MATERIAL")
+        value = ephemeral.pop("SKELETON_EPHEMERAL_REGISTERED_MATERIAL")
+        consumer(value)
+
+    return _invoke_registered_binding(
+        service_id=spec.service_id,
+        alias=spec.alias,
+        reference_credential_name=spec.reference_credential_name,
+        context=spec.context,
+        action_id=spec.action_id,
+        target_id=spec.target_id,
+        consumer=consume_material,
+        authority_environment=authority_environment,
+    )
+
+
+def _invoke_registered_binding(
+    *,
+    service_id: str,
+    alias: str,
+    reference_credential_name: str,
+    context: SecretResolutionContext,
+    action_id: str,
+    target_id: str,
+    consumer: Callable[[ResolvedSecret, ServiceCredentialBinding], None],
+    authority_environment: Mapping[str, str],
+) -> dict[str, object]:
+    try:
+        reference = bitwarden_reference_from_systemd_credential(
+            authority_environment,
+            reference_credential_name,
+        )
+        binding = ServiceCredentialBinding(
+            service_id=service_id,
+            alias=alias,
+            reference=reference,
+            context=context,
+            action_id=action_id,
+            adapter_id="in_process",
+            target_id=target_id,
+            required=True,
+            reload_mode="per_use",
+        )
+        runtime = build_bitwarden_credential_runtime(
+            catalog=ServiceCredentialCatalog([binding]),
+            registrations=(CredentialRuntimeRegistration(service_id, context),),
+            adapters={
+                "in_process": InProcessCredentialAdapter({target_id: consumer})
+            },
+            authority_environment=authority_environment,
+        )
+        return runtime.control_for(service_id).invoke(
+            "credential_use",
+            {"alias": alias, "action_id": action_id},
+        )
+    except (
+        CredentialBrokerError,
+        CredentialRuntimeRegistrationError,
+        SecretResolutionError,
+        ServiceCredentialBindingError,
+    ):
+        raise RegisteredCredentialRuntimeError(
+            "registered_credential_resolution_failed"
+        ) from None
+
+
 def registered_credential_capabilities() -> tuple[dict[str, str], ...]:
     """Return non-secret registration metadata for control-plane discovery."""
 
-    return tuple(
-        {
-            "service_id": spec.service_id,
-            "alias": spec.alias,
-            "action_id": spec.action_id,
-            "delivery": "registered_in_process",
-        }
-        for spec in sorted(
-            _REGISTERED_ENVIRONMENT_CREDENTIALS.values(),
-            key=lambda item: (item.service_id, item.alias),
+    values: list[dict[str, str]] = []
+    for spec in _REGISTERED_ENVIRONMENT_CREDENTIALS.values():
+        values.append(
+            {
+                "service_id": spec.service_id,
+                "alias": spec.alias,
+                "action_id": spec.action_id,
+                "delivery": "registered_environment",
+            }
         )
-    )
+    for spec in _REGISTERED_MATERIAL_CREDENTIALS.values():
+        values.append(
+            {
+                "service_id": spec.service_id,
+                "alias": spec.alias,
+                "action_id": spec.action_id,
+                "delivery": "registered_in_process",
+            }
+        )
+    return tuple(sorted(values, key=lambda item: (item["service_id"], item["alias"])))
