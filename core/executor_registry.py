@@ -23,6 +23,7 @@ class ExecutorRecord:
     task_classes: tuple[str, ...]
     capabilities: tuple[str, ...]
     locality: str
+    privacy_classes: tuple[str, ...]
     binding_kinds: tuple[str, ...]
     side_effect_classes: tuple[str, ...]
     credential_aliases: tuple[str, ...]
@@ -38,7 +39,7 @@ class ExecutorRecord:
     def __post_init__(self) -> None:
         if not self.executor_id or not self.family:
             raise ExecutorRegistryError("executor_identity_required")
-        if not self.task_classes or not self.capabilities:
+        if not self.task_classes or not self.capabilities or not self.privacy_classes:
             raise ExecutorRegistryError("executor_capabilities_required")
         if self.locality not in LOCALITIES or self.health not in EXECUTOR_HEALTH:
             raise ExecutorRegistryError("invalid_executor_state")
@@ -54,6 +55,7 @@ class ExecutorRecord:
         *,
         task_class: str,
         capabilities: tuple[str, ...],
+        privacy_class: str,
         side_effect_class: str,
         binding_kind: str,
     ) -> bool:
@@ -61,6 +63,7 @@ class ExecutorRecord:
             self.health not in {"COOLDOWN", "DISABLED"}
             and task_class in self.task_classes
             and all(capability in self.capabilities for capability in capabilities)
+            and privacy_class in self.privacy_classes
             and side_effect_class in self.side_effect_classes
             and binding_kind in self.binding_kinds
         )
@@ -73,6 +76,7 @@ def executor_record_from_mapping(raw: Mapping[str, object]) -> ExecutorRecord:
         task_classes=tuple(str(item) for item in raw.get("task_classes", ())),
         capabilities=tuple(str(item) for item in raw.get("capabilities", ())),
         locality=str(raw.get("locality", "")),
+        privacy_classes=tuple(str(item) for item in raw.get("privacy_classes", ())),
         binding_kinds=tuple(str(item) for item in raw.get("binding_kinds", ())),
         side_effect_classes=tuple(str(item) for item in raw.get("side_effect_classes", ())),
         credential_aliases=tuple(str(item) for item in raw.get("credential_aliases", ())),
@@ -118,6 +122,7 @@ def registry_snapshot_hash(records: tuple[ExecutorRecord, ...]) -> str:
             "task_classes": list(item.task_classes),
             "capabilities": list(item.capabilities),
             "locality": item.locality,
+            "privacy_classes": list(item.privacy_classes),
             "binding_kinds": list(item.binding_kinds),
             "side_effect_classes": list(item.side_effect_classes),
             "credential_aliases": list(item.credential_aliases),
