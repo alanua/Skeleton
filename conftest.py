@@ -7,6 +7,7 @@ _KNOWN_REGRESSIONS = {
     "tests/test_runner_child_environment_openrouter.py::test_wrapper_exposes_openrouter_key_only_to_openhands_fallback",
     "tests/test_runner_child_environment_openrouter.py::test_wrapper_fails_closed_when_openrouter_is_required_but_unavailable",
     "tests/test_runner_child_environment_provider_route.py::test_wrapper_reports_bounded_primary_failure_before_openhands_fallback",
+    "tests/test_runner_credential_binding.py::test_runner_openrouter_binding_uses_registered_credential_runtime",
 }
 
 
