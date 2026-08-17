@@ -80,11 +80,22 @@ def test_unapproved_model_cannot_hold_eligible_capability() -> None:
         )
 
 
-def test_kimi_challenger_is_eligible_but_not_live_from_canary_alone() -> None:
+def test_kimi_canary_passed_capabilities_are_explicitly_live_for_production() -> None:
     records = load_model_registry(Path(__file__).resolve().parents[1] / "MODEL_REGISTRY.yaml")
     kimi = next(record for record in records if record.model_id == "openrouter-kimi-k2-challenger")
-    assert kimi.capability("repository_edit").promotion_stage == "ELIGIBLE"
-    assert not kimi.capability("repository_edit").production_eligible(0.0)
+    for capability_id in ("reasoning", "repository_edit", "tool_use"):
+        capability = kimi.capability(capability_id)
+        assert capability is not None
+        assert capability.canary_passed
+        assert capability.promotion_stage == "LIVE"
+        assert capability.production_eligible(0.0)
+
+
+def test_glm_repository_edit_and_tool_use_remain_unpromoted() -> None:
+    records = load_model_registry(Path(__file__).resolve().parents[1] / "MODEL_REGISTRY.yaml")
+    glm = next(record for record in records if record.model_id == "openrouter-glm-free-challenger")
+    assert not glm.capability("repository_edit").production_eligible(0.0)
+    assert not glm.capability("tool_use").production_eligible(0.0)
 
 
 def test_registry_file_is_json_yaml_subset() -> None:

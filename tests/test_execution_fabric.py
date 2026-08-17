@@ -56,13 +56,26 @@ def test_no_model_task_selects_deterministic_no_model_binding() -> None:
     assert bindings[0].model_id is None
 
 
-def test_kimi_eligible_is_evaluation_only_not_production() -> None:
+def test_kimi_live_is_production_eligible_for_openhands() -> None:
     executors, models = registries()
     prod = build_execution_bindings(profile(), executors, models, production=True)
     evaluation = build_execution_bindings(profile(), executors, models, production=False)
-    assert all(binding.model_id != "openrouter-kimi-k2-challenger" for binding in prod)
-    assert any(binding.model_id == "openrouter-kimi-k2-challenger" for binding in evaluation)
-    assert any(binding.model_binding_kind == "EMBEDDED_MODEL" and binding.executor_id == "codex-embedded" for binding in prod)
+    assert any(
+        binding.executor_id == "openhands-external"
+        and binding.model_binding_kind == "EXTERNAL_MODEL"
+        and binding.model_id == "openrouter-kimi-k2-challenger"
+        for binding in prod
+    )
+    assert any(
+        binding.executor_id == "openhands-external"
+        and binding.model_id == "openrouter-kimi-k2-challenger"
+        for binding in evaluation
+    )
+    assert any(
+        binding.model_binding_kind == "EMBEDDED_MODEL"
+        and binding.executor_id == "codex-embedded"
+        for binding in prod
+    )
 
 
 def test_promoted_live_external_model_forms_atomic_openhands_binding() -> None:

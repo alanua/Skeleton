@@ -132,6 +132,14 @@ from core.private_static_site_runtime import (
 )
 from core.project_tree import get_project, get_project_by_repo, load_project_tree
 from core.runner_child_environment import sanitize_codegen_child_environment
+from core.runner_codegen_router import (
+    CodegenRouteError,
+    codex_failure_allows_secondary,
+    openhands_secondary_command,
+    prepare_openhands_secondary_environment,
+    select_openhands_secondary_route,
+    task_contract_allows_cloud_secondary,
+)
 from core.runner_retry_policy import (
     BLOCK_REPEATED_REASON,
     NEEDS_OPERATOR,
@@ -3876,16 +3884,84 @@ def run_codex_task(
     ) as task_file:
         task_file.write(task_content)
         task_file.flush()
-        token = _RUN_COMMAND_ENV_OVERRIDE.set(
-            sanitize_codegen_child_environment(os.environ)
-        )
+        base_codegen_environment = sanitize_codegen_child_environment(os.environ)
+        token = _RUN_COMMAND_ENV_OVERRIDE.set(base_codegen_environment)
         try:
-            return run_command(
+            codex_code, codex_output = run_command(
                 codex_exec_command(task_content, workdir, task),
                 cwd=workdir,
             )
         finally:
             _RUN_COMMAND_ENV_OVERRIDE.reset(token)
+
+        if not codex_failure_allows_secondary(codex_code, codex_output):
+            return codex_code, codex_output
+        if not task_contract_allows_cloud_secondary(task_content):
+            return codex_code, codex_output
+
+        handoff_status_code, handoff_status_output = run_command(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=workdir,
+        )
+        if handoff_status_code != 0 or handoff_status_output.strip():
+            return (
+                1,
+                codex_output
+                + "\nSKELETON_CODEGEN_SECONDARY_FAILURE=PRIMARY_LEFT_WORKTREE_DIRTY\n",
+            )
+
+        try:
+            secondary_route = select_openhands_secondary_route()
+            openhands_environment, route_receipt = prepare_openhands_secondary_environment(
+                authority_environment=os.environ,
+                base_environment=base_codegen_environment,
+                route=secondary_route,
+            )
+        except CodegenRouteError:
+            return codex_code, codex_output
+
+        openhands_bin = shutil.which(
+            "openhands", path=openhands_environment.get("PATH")
+        )
+        if openhands_bin is None:
+            return codex_code, codex_output
+
+        token = _RUN_COMMAND_ENV_OVERRIDE.set(openhands_environment)
+        try:
+            openhands_code, openhands_output = run_command(
+                openhands_secondary_command(
+                    task_content, executable=openhands_bin
+                ),
+                cwd=workdir,
+                timeout=secondary_route.binding.timeout_seconds,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return codex_code, codex_output
+        finally:
+            _RUN_COMMAND_ENV_OVERRIDE.reset(token)
+
+        route_marker = (
+            "SKELETON_CODEGEN_EXECUTOR=openhands\n"
+            f"SKELETON_CODEGEN_MODEL={route_receipt['model_id']}\n"
+            f"SKELETON_CODEGEN_BINDING={route_receipt['binding_id']}\n"
+            f"SKELETON_CODEGEN_LEASE={route_receipt['lease_hash']}\n"
+            "SKELETON_CODEGEN_PRIMARY_FAILURE=quota_or_provider_outage\n"
+        )
+        if openhands_code != 0:
+            return openhands_code, route_marker + openhands_output
+
+        status_code, status_output = run_command(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=workdir,
+        )
+        if status_code != 0 or not status_output.strip():
+            return (
+                1,
+                route_marker
+                + "SKELETON_CODEGEN_SECONDARY_FAILURE=DELIVERABLE_MISSING\n"
+                + openhands_output,
+            )
+        return 0, route_marker + openhands_output
 
 
 def post_issue_comment(issue_number: int, body: str) -> None:
