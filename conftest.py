@@ -20,11 +20,5 @@ def pytest_runtest_makereport(item, call):
     report = outcome.get_result()
     if report.when == "call" and report.failed and _FAILED_NODEID is None:
         _FAILED_NODEID = item.nodeid
-        # Preserve failed outcome; suppress traceback/private values only.
-        report.longrepr = "AssertionError: diagnostic_nodeid_redacted"
-
-
-def pytest_terminal_summary(terminalreporter, exitstatus, config):
-    if _FAILED_NODEID is not None:
-        # Match the canonical validator's existing safe nodeid parser.
-        terminalreporter.write_line(f"{_FAILED_NODEID} FAILED")
+        # Preserve failed outcome; expose only the public-safe test nodeid.
+        report.longrepr = f"AssertionError: {item.nodeid} FAILED"
