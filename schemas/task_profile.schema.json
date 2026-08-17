@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.task_profile.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["operation", "task_class", "required_executor_capabilities", "required_model_capabilities", "privacy_class", "side_effect_class", "deliverable_contract", "validation_id", "budget_ref", "timeout_seconds", "retry_policy_ref", "permissions"],
+  "properties": {
+    "operation": {"type": "string", "minLength": 1},
+    "task_class": {"type": "string", "minLength": 1},
+    "required_executor_capabilities": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "required_model_capabilities": {"type": "object", "additionalProperties": {"type": "number", "minimum": 0, "maximum": 1}},
+    "privacy_class": {"type": "string", "minLength": 1},
+    "side_effect_class": {"type": "string", "minLength": 1},
+    "deliverable_contract": {"type": "object"},
+    "validation_id": {"type": "string", "minLength": 1},
+    "budget_ref": {"type": "string", "minLength": 1},
+    "timeout_seconds": {"type": "integer", "minimum": 1},
+    "retry_policy_ref": {"type": "string", "minLength": 1},
+    "permissions": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "max_attempts": {"type": "integer", "minimum": 1},
+    "max_tokens": {"type": "integer", "minimum": 0},
+    "requires_operator": {"type": "boolean"}
+  }
+}
