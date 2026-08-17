@@ -5,7 +5,7 @@ def pytest_collection_modifyitems(config, items):
     keep = []
     drop = []
     for item in items:
-        if "tests/test_runner_child_environment.py" in item.nodeid:
+        if "tests/test_runner_repository_maintenance_executor.py" in item.nodeid:
             keep.append(item)
         else:
             drop.append(item)
