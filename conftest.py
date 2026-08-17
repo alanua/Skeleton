@@ -9,6 +9,8 @@ def pytest_runtest_logreport(report):
         report.longrepr = f"SKELETON_DIAGNOSTIC_FAILED_NODEID={report.nodeid}"
 
 
-def pytest_sessionfinish(session, exitstatus):
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
     if _FAILED_NODEIDS:
-        print("SKELETON_DIAGNOSTIC_FAILED_NODEIDS=" + "|".join(_FAILED_NODEIDS))
+        terminalreporter.write_line(
+            "SKELETON_DIAGNOSTIC_FAILED_NODEIDS=" + "|".join(_FAILED_NODEIDS)
+        )
