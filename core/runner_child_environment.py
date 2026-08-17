@@ -4,7 +4,6 @@ from collections.abc import Mapping
 import hashlib
 import os
 from pathlib import Path
-import shutil
 import stat
 import subprocess
 
@@ -16,25 +15,13 @@ from core.codex_runtime_recovery import (
     pinned_codex_runtime_path,
     should_attempt_codex_runtime_recovery,
 )
-from integrations.credential_runtime import (
-    RegisteredCredentialRuntimeError,
-    bind_registered_environment_credential,
-)
 
 
 HOME_EDGE_ENV_PREFIX = "SKELETON_HOME_EDGE_01_"
 HOME_EDGE_EXEC_HMAC_SECRET_ENV = "SKELETON_HOME_EDGE_EXEC_HMAC_SECRET"
 _FALLBACK_BIN_ENV = "SKELETON_CODEGEN_FALLBACK_BIN"
 _REAL_CODEX_ENV = "SKELETON_REAL_CODEX_BIN"
-_OPENHANDS_ENV = "SKELETON_OPENHANDS_BIN"
 _ORIGINAL_PATH_ENV = "SKELETON_CODEGEN_ORIGINAL_PATH"
-_OPENROUTER_REQUIRED_ENV = "SKELETON_OPENHANDS_OPENROUTER_REQUIRED"
-_OPENROUTER_FALLBACK_KEY_ENV = "SKELETON_OPENROUTER_FALLBACK_API_KEY"
-_OPENROUTER_FALLBACK_MODEL_ENV = "SKELETON_OPENROUTER_FALLBACK_MODEL"
-_OPENROUTER_FREE_MODEL = "openrouter/z-ai/glm-4.5-air:free"
-_RUNNER_CREDENTIAL_SERVICE = "runner-openhands"
-_RUNNER_OPENROUTER_ALIAS = "openrouter-api"
-_RUNNER_OPENROUTER_ACTION = "bind-openrouter-fallback"
 _PROVIDER_OVERRIDE_ENV = frozenset(
     {
         "OPENROUTER_API_KEY",
@@ -46,9 +33,13 @@ _PROVIDER_OVERRIDE_ENV = frozenset(
         "MAX_BUDGET_PER_TASK",
         "MAX_ITERATIONS",
         "LLM_NUM_RETRIES",
-        _OPENROUTER_REQUIRED_ENV,
-        _OPENROUTER_FALLBACK_KEY_ENV,
-        _OPENROUTER_FALLBACK_MODEL_ENV,
+        "SKELETON_OPENHANDS_BIN",
+        "SKELETON_OPENHANDS_OPENROUTER_REQUIRED",
+        "SKELETON_OPENROUTER_FALLBACK_API_KEY",
+        "SKELETON_OPENROUTER_FALLBACK_MODEL",
+        _FALLBACK_BIN_ENV,
+        _REAL_CODEX_ENV,
+        _ORIGINAL_PATH_ENV,
     }
 )
 
@@ -60,45 +51,6 @@ import subprocess
 import sys
 
 _DEFAULT_CODEX_MODEL = "gpt-5.6"
-_MARKERS = (
-    "usage limit",
-    "rate limit",
-    "quota",
-    "insufficient_quota",
-    "provider unavailable",
-    "temporarily unavailable",
-    "service unavailable",
-    "try again at",
-)
-
-
-def _quota_or_provider_outage(text: str) -> bool:
-    lowered = text.lower()
-    return any(marker in lowered for marker in _MARKERS)
-
-
-def _fallback_allowed(text: str) -> bool:
-    return _quota_or_provider_outage(text)
-
-
-def _workdir(argv: list[str]) -> str:
-    if "--cd" in argv:
-        index = argv.index("--cd")
-        if index + 1 < len(argv):
-            candidate = Path(argv[index + 1]).resolve(strict=False)
-            if candidate.is_dir():
-                return str(candidate)
-    return os.getcwd()
-
-
-def _task(argv: list[str], stdin_text: str) -> str:
-    text = stdin_text.strip()
-    if text and text != "-":
-        return text
-    for item in reversed(argv):
-        if item != "-" and not item.startswith("-") and item not in {"workspace-write", "read-only"}:
-            return item
-    return "Complete the bounded Runner task in the current worktree and run its required validation."
 
 
 def _codex_args(argv: list[str]) -> list[str]:
@@ -110,17 +62,17 @@ def _codex_args(argv: list[str]) -> list[str]:
 
 def main() -> int:
     real_codex = os.environ.get("SKELETON_REAL_CODEX_BIN", "")
-    openhands = os.environ.get("SKELETON_OPENHANDS_BIN", "")
-    original_path = os.environ.get("SKELETON_CODEGEN_ORIGINAL_PATH", os.environ.get("PATH", ""))
-    openrouter_required = os.environ.get("SKELETON_OPENHANDS_OPENROUTER_REQUIRED") == "1"
-    openrouter_key = os.environ.get("SKELETON_OPENROUTER_FALLBACK_API_KEY", "")
-    openrouter_model = os.environ.get("SKELETON_OPENROUTER_FALLBACK_MODEL", "")
+    original_path = os.environ.get(
+        "SKELETON_CODEGEN_ORIGINAL_PATH", os.environ.get("PATH", "")
+    )
     if not real_codex or not Path(real_codex).is_file():
         return 127
+
     stdin_text = sys.stdin.read()
     child_env = dict(os.environ)
     child_env["PATH"] = original_path
     for name in (
+        "SKELETON_OPENHANDS_BIN",
         "SKELETON_OPENROUTER_FALLBACK_API_KEY",
         "SKELETON_OPENROUTER_FALLBACK_MODEL",
         "SKELETON_OPENHANDS_OPENROUTER_REQUIRED",
@@ -135,6 +87,7 @@ def main() -> int:
         "LLM_NUM_RETRIES",
     ):
         child_env.pop(name, None)
+
     codex = subprocess.run(
         [real_codex, *_codex_args(sys.argv[1:])],
         input=stdin_text,
@@ -146,49 +99,9 @@ def main() -> int:
     )
     if codex.returncode == 0:
         sys.stdout.write("SKELETON_CODEGEN_PROVIDER=codex\n")
-        sys.stdout.write(codex.stdout)
-        sys.stderr.write(codex.stderr)
-        return 0
-    combined = f"{codex.stdout}\n{codex.stderr}"
-    if not _fallback_allowed(combined) or not openhands or not Path(openhands).is_file():
-        sys.stdout.write(codex.stdout)
-        sys.stderr.write(codex.stderr)
-        return codex.returncode
-    if openrouter_required and (
-        not openrouter_key or not openrouter_model.startswith("openrouter/")
-    ):
-        sys.stderr.write("SKELETON_CODEGEN_FALLBACK_CONFIG_UNAVAILABLE\n")
-        return codex.returncode
-    fallback_env = dict(child_env)
-    if openrouter_required:
-        fallback_env["LLM_API_KEY"] = openrouter_key
-        fallback_env["LLM_MODEL"] = openrouter_model
-        fallback_env["MAX_BUDGET_PER_TASK"] = "0.50"
-        fallback_env["MAX_ITERATIONS"] = "20"
-        fallback_env["LLM_NUM_RETRIES"] = "1"
-    fallback = subprocess.run(
-        [
-            openhands,
-            "--headless",
-            "--json",
-            "--override-with-envs",
-            "-t",
-            _task(sys.argv[1:], stdin_text),
-        ],
-        cwd=_workdir(sys.argv[1:]),
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=fallback_env,
-        check=False,
-    )
-    if fallback.returncode == 0:
-        sys.stdout.write("SKELETON_CODEGEN_PROVIDER=openhands\n")
-        sys.stdout.write("SKELETON_CODEGEN_PRIMARY_FAILURE=quota_or_provider_outage\n")
-        sys.stdout.write("RESULT: OK\n")
-        return 0
-    sys.stderr.write("SKELETON_CODEGEN_FALLBACK_FAILED\n")
-    return fallback.returncode or codex.returncode
+    sys.stdout.write(codex.stdout)
+    sys.stderr.write(codex.stderr)
+    return codex.returncode
 
 
 if __name__ == "__main__":
@@ -208,34 +121,16 @@ def _without_codegen_secret_sources(environment: Mapping[str, str]) -> dict[str,
     return {key: value for key, value in environment.items() if key not in _PROVIDER_OVERRIDE_ENV}
 
 
-def _bind_trusted_openrouter(
-    environment: dict[str, str],
-    authority_environment: Mapping[str, str],
-) -> bool:
-    for name in _PROVIDER_OVERRIDE_ENV:
-        environment.pop(name, None)
-    try:
-        receipt = bind_registered_environment_credential(
-            service_id=_RUNNER_CREDENTIAL_SERVICE,
-            alias=_RUNNER_OPENROUTER_ALIAS,
-            action_id=_RUNNER_OPENROUTER_ACTION,
-            environment=environment,
-            authority_environment=authority_environment,
-        )
-    except RegisteredCredentialRuntimeError:
-        return False
-    result = receipt.get("result")
-    if not isinstance(result, Mapping) or result.get("status") != "USED":
-        return False
-    environment[_OPENROUTER_FALLBACK_MODEL_ENV] = _OPENROUTER_FREE_MODEL
-    return True
-
-
 def _install_fallback_wrapper(
     environment: dict[str, str],
     authority_environment: Mapping[str, str],
 ) -> None:
-    """Bind child codegen only from the canonical recovered Runner runtime."""
+    """Bind the Codex-only child wrapper from canonical recovered Runner authority.
+
+    The historical helper/path name is retained for compatibility, but this wrapper
+    has no executor/provider fallback. External executors require an explicit
+    ExecutionBinding/RouteLease outside this environment shim.
+    """
     if not is_canonical_systemd_runner_context(authority_environment):
         return
     if not pinned_codex_recovery_marker_present(authority_environment):
@@ -249,10 +144,7 @@ def _install_fallback_wrapper(
     trusted_path = authority_environment.get("PATH", "")
     if not trusted_home or not Path(trusted_home).is_absolute():
         return
-    openhands = shutil.which("openhands", path=trusted_path)
-    if openhands:
-        _bind_trusted_openrouter(environment, authority_environment)
-        environment[_OPENROUTER_REQUIRED_ENV] = "1"
+
     root = Path(trusted_home) / ".local" / "state" / "skeleton-runner" / "codegen-fallback-bin"
     wrapper = root / "codex"
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -268,7 +160,6 @@ def _install_fallback_wrapper(
 
     environment["HOME"] = trusted_home
     environment[_REAL_CODEX_ENV] = str(Path(real_codex).resolve(strict=False))
-    environment[_OPENHANDS_ENV] = str(Path(openhands).resolve(strict=False)) if openhands else ""
     environment[_ORIGINAL_PATH_ENV] = trusted_path
     environment[_FALLBACK_BIN_ENV] = str(root)
     environment["PATH"] = f"{root}:{trusted_path}" if trusted_path else str(root)

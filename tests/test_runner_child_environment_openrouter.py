@@ -5,19 +5,7 @@ from pathlib import Path
 import subprocess
 
 import core.runner_child_environment as child_env
-from core.secret_store import ResolvedSecret, SecretReference
 from core.runner_child_environment import sanitize_codegen_child_environment
-
-
-class FakeBitwardenStore:
-    provider = "bitwarden"
-
-    def resolve(self, reference, context):
-        assert reference == SecretReference(provider="bitwarden", reference_id="11111111-2222-3333-4444-555555555555")
-        assert context.machine_identity == "hetzner-agent-runner-1"
-        assert context.audience == "openhands-openrouter"
-        assert context.task_kind == "code_generation"
-        return ResolvedSecret("synthetic-openrouter-key")
 
 
 def test_codegen_child_environment_scrubs_all_secret_sources(monkeypatch) -> None:
@@ -42,52 +30,12 @@ def test_codegen_child_environment_scrubs_all_secret_sources(monkeypatch) -> Non
     assert environment["BWS_ACCESS_TOKEN"] == "must-not-reach-codex"
 
 
-def test_trusted_openrouter_binding_uses_registered_shared_credential_path(monkeypatch) -> None:
-    observed = {}
-
-    def fake_bind_registered_environment_credential(
-        *,
-        service_id,
-        alias,
-        action_id,
-        environment,
-        authority_environment,
-    ):
-        observed["service_id"] = service_id
-        observed["alias"] = alias
-        observed["action_id"] = action_id
-        observed["authority_environment"] = dict(authority_environment)
-        environment["SKELETON_OPENROUTER_FALLBACK_API_KEY"] = "synthetic-openrouter-key"
-        return {"result": {"status": "USED"}}
-
-    monkeypatch.setattr(
-        child_env,
-        "bind_registered_environment_credential",
-        fake_bind_registered_environment_credential,
-    )
-
-    environment = {
-        "SAFE": "1",
-        "OPENROUTER_API_KEY": "overlay-secret",
-        "LLM_MODEL": "attacker/model",
-    }
-
-    assert child_env._bind_trusted_openrouter(
-        environment,
-        {"PATH": "/trusted/bin"},
-    ) is True
-
-    assert observed == {
-        "service_id": "runner-openhands",
-        "alias": "openrouter-api",
-        "action_id": "bind-openrouter-fallback",
-        "authority_environment": {"PATH": "/trusted/bin"},
-    }
-    assert environment["SAFE"] == "1"
-    assert environment["SKELETON_OPENROUTER_FALLBACK_API_KEY"] == "synthetic-openrouter-key"
-    assert environment["SKELETON_OPENROUTER_FALLBACK_MODEL"] == "openrouter/z-ai/glm-4.5-air:free"
-    assert "OPENROUTER_API_KEY" not in environment
-    assert "LLM_MODEL" not in environment
+def test_child_environment_has_no_implicit_openrouter_binding() -> None:
+    source = Path(child_env.__file__).read_text(encoding="utf-8")
+    assert not hasattr(child_env, "_bind_trusted_openrouter")
+    assert "bind_registered_environment_credential" not in source
+    assert "runner-openhands" not in source
+    assert "bind-openrouter-fallback" not in source
 
 
 def _write_executable(path: Path, body: str) -> None:
@@ -95,7 +43,11 @@ def _write_executable(path: Path, body: str) -> None:
     path.chmod(0o700)
 
 
-def test_wrapper_exposes_openrouter_key_only_to_openhands_fallback(tmp_path: Path) -> None:
+def _run_quota_wrapper(
+    tmp_path: Path,
+    *,
+    include_fallback_key: bool,
+) -> tuple[subprocess.CompletedProcess[str], Path]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     workdir = tmp_path / "work"
@@ -104,6 +56,7 @@ def test_wrapper_exposes_openrouter_key_only_to_openhands_fallback(tmp_path: Pat
     openhands = bin_dir / "openhands-real"
     wrapper = bin_dir / "codex"
     marker = tmp_path / "openhands-called"
+
     _write_executable(
         codex,
         "#!/bin/sh\n"
@@ -117,31 +70,28 @@ def test_wrapper_exposes_openrouter_key_only_to_openhands_fallback(tmp_path: Pat
     _write_executable(
         openhands,
         "#!/bin/sh\n"
-        "test \"${LLM_API_KEY:-}\" = 'synthetic-openrouter-key' || exit 31\n"
-        "test \"${LLM_MODEL:-}\" = 'openrouter/z-ai/glm-4.5-air:free' || exit 32\n"
-        "test -z \"${BWS_ACCESS_TOKEN:-}\" || exit 33\n"
-        "test -z \"${CREDENTIALS_DIRECTORY:-}\" || exit 34\n"
-        "test -z \"${OPENROUTER_API_KEY:-}\" || exit 35\n"
         "printf '%s\\n' called > \"$OPENHANDS_MARKER\"\n"
         "exit 0\n",
     )
     _write_executable(wrapper, child_env._WRAPPER)
+
     environment = dict(os.environ)
     environment.update(
         {
             "PATH": environment.get("PATH", "/usr/bin:/bin"),
             "SKELETON_REAL_CODEX_BIN": str(codex),
-            "SKELETON_OPENHANDS_BIN": str(openhands),
             "SKELETON_CODEGEN_ORIGINAL_PATH": environment.get("PATH", "/usr/bin:/bin"),
+            "SKELETON_OPENHANDS_BIN": str(openhands),
             "SKELETON_OPENHANDS_OPENROUTER_REQUIRED": "1",
-            "SKELETON_OPENROUTER_FALLBACK_API_KEY": "synthetic-openrouter-key",
-            "SKELETON_OPENROUTER_FALLBACK_MODEL": "openrouter/z-ai/glm-4.5-air:free",
+            "SKELETON_OPENROUTER_FALLBACK_MODEL": "openrouter/synthetic",
             "OPENROUTER_API_KEY": "must-not-leak",
             "BWS_ACCESS_TOKEN": "must-not-leak",
             "CREDENTIALS_DIRECTORY": "/must/not/leak",
             "OPENHANDS_MARKER": str(marker),
         }
     )
+    if include_fallback_key:
+        environment["SKELETON_OPENROUTER_FALLBACK_API_KEY"] = "synthetic-openrouter-key"
 
     result = subprocess.run(
         [str(wrapper), "exec", "--cd", str(workdir), "-"],
@@ -152,47 +102,24 @@ def test_wrapper_exposes_openrouter_key_only_to_openhands_fallback(tmp_path: Pat
         env=environment,
         check=False,
     )
+    return result, marker
 
-    assert result.returncode == 0
-    assert marker.read_text(encoding="utf-8").strip() == "called"
+
+def test_wrapper_never_exposes_openrouter_key_or_calls_openhands_on_quota(tmp_path: Path) -> None:
+    result, marker = _run_quota_wrapper(tmp_path, include_fallback_key=True)
+    assert result.returncode == 1
+    assert "usage limit reached" in result.stderr
     assert "synthetic-openrouter-key" not in result.stdout
     assert "synthetic-openrouter-key" not in result.stderr
-    assert "SKELETON_CODEGEN_PROVIDER=openhands" in result.stdout
+    assert "SKELETON_CODEGEN_PROVIDER=openhands" not in result.stdout
+    assert "RESULT: OK" not in result.stdout
+    assert not marker.exists()
 
 
-def test_wrapper_fails_closed_when_openrouter_is_required_but_unavailable(tmp_path: Path) -> None:
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    workdir = tmp_path / "work"
-    workdir.mkdir()
-    codex = bin_dir / "codex-real"
-    openhands = bin_dir / "openhands-real"
-    wrapper = bin_dir / "codex"
-    marker = tmp_path / "openhands-called"
-    _write_executable(codex, "#!/bin/sh\nprintf '%s\\n' 'usage limit reached' >&2\nexit 1\n")
-    _write_executable(openhands, "#!/bin/sh\nprintf '%s\\n' called > \"$OPENHANDS_MARKER\"\nexit 0\n")
-    _write_executable(wrapper, child_env._WRAPPER)
-    environment = dict(os.environ)
-    environment.update(
-        {
-            "SKELETON_REAL_CODEX_BIN": str(codex),
-            "SKELETON_OPENHANDS_BIN": str(openhands),
-            "SKELETON_CODEGEN_ORIGINAL_PATH": environment.get("PATH", "/usr/bin:/bin"),
-            "SKELETON_OPENHANDS_OPENROUTER_REQUIRED": "1",
-            "OPENHANDS_MARKER": str(marker),
-        }
-    )
-
-    result = subprocess.run(
-        [str(wrapper), "exec", "--cd", str(workdir), "-"],
-        input="synthetic bounded task",
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=environment,
-        check=False,
-    )
-
+def test_wrapper_ignores_obsolete_openrouter_required_toggle_and_preserves_codex_failure(tmp_path: Path) -> None:
+    result, marker = _run_quota_wrapper(tmp_path, include_fallback_key=False)
     assert result.returncode == 1
-    assert "SKELETON_CODEGEN_FALLBACK_CONFIG_UNAVAILABLE" in result.stderr
+    assert "usage limit reached" in result.stderr
+    assert "SKELETON_CODEGEN_FALLBACK_CONFIG_UNAVAILABLE" not in result.stderr
+    assert "SKELETON_CODEGEN_PROVIDER=openhands" not in result.stdout
     assert not marker.exists()

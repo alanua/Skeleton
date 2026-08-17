@@ -94,13 +94,14 @@ def test_wrapper_preserves_explicit_trusted_model(tmp_path: Path) -> None:
     assert "gpt-5.6-sol" in args
 
 
-def test_wrapper_reports_bounded_primary_failure_before_openhands_fallback(tmp_path: Path) -> None:
+def test_wrapper_preserves_primary_failure_without_external_fallback(tmp_path: Path) -> None:
     result, _codex_argv, fallback_marker = _run_wrapper(
         tmp_path,
         codex_body="#!/bin/sh\nprintf '%s\\n' 'usage limit reached' >&2\nexit 1\n",
     )
-    assert result.returncode == 0
-    assert "SKELETON_CODEGEN_PROVIDER=openhands" in result.stdout
-    assert "SKELETON_CODEGEN_PRIMARY_FAILURE=quota_or_provider_outage" in result.stdout
-    assert "RESULT: OK" in result.stdout
-    assert fallback_marker.read_text(encoding="utf-8").strip() == "called"
+    assert result.returncode == 1
+    assert "usage limit reached" in result.stderr
+    assert "SKELETON_CODEGEN_PROVIDER=openhands" not in result.stdout
+    assert "SKELETON_CODEGEN_PRIMARY_FAILURE" not in result.stdout
+    assert "RESULT: OK" not in result.stdout
+    assert not fallback_marker.exists()
