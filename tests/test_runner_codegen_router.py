@@ -91,6 +91,13 @@ def test_missing_registered_credential_fails_closed(monkeypatch: pytest.MonkeyPa
 
 def test_openhands_command_is_fixed_except_task_text() -> None:
     command = openhands_secondary_command("bounded task")
-    assert command == ["openhands", "--headless", "--json", "-t", "bounded task"]
+    assert command == [
+        "openhands",
+        "--headless",
+        "--json",
+        "--override-with-envs",
+        "-t",
+        "bounded task",
+    ]
     assert "moonshot" not in " ".join(command)
     assert "openrouter" not in " ".join(command)
