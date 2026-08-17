@@ -4,8 +4,13 @@ from collections.abc import Mapping
 import base64
 from typing import Any
 
+from adapters.gmail_oauth_client import GmailOAuthBundle, GmailOAuthClient, GmailOAuthError, Transport
 from core.mail_operations import MailEnvelope, MailOperationError
 from core.mail_provider import MailProviderAccount, MailProviderBatch, MailProviderCursor
+from integrations.credential_runtime import (
+    RegisteredCredentialRuntimeError,
+    consume_registered_material_credential,
+)
 
 
 class GmailMailProvider:
@@ -39,21 +44,7 @@ class GmailMailProvider:
     def _list_messages(self, query: str, *, max_messages: int) -> tuple[Mapping[str, Any], ...]:
         if hasattr(self._client, "list_messages"):
             return tuple(self._client.list_messages(query=query, max_results=max_messages))
-        users = self._client.users()
-        response = (
-            users.messages()
-            .list(userId="me", q=query, maxResults=max_messages)
-            .execute()
-        )
-        ids = [item["id"] for item in response.get("messages", []) if isinstance(item, Mapping)]
-        fetched = []
-        for message_id in ids:
-            fetched.append(
-                users.messages()
-                .get(userId="me", id=message_id, format="metadata")
-                .execute()
-            )
-        return tuple(fetched)
+        raise MailOperationError("GMAIL_CLIENT_CONTRACT_INVALID", "gmail client is not read-only capable")
 
     @staticmethod
     def _message_to_envelope(value: Mapping[str, Any]) -> MailEnvelope:
@@ -84,6 +75,42 @@ class GmailMailProvider:
         )
 
 
+def build_registered_gmail_provider(
+    *,
+    account_ref: str,
+    authority_environment: Mapping[str, str],
+    transport: Transport | None = None,
+) -> GmailMailProvider:
+    """Build one Gmail provider from a code-owned registered OAuth binding.
+
+    No provider/reference/path/host is accepted from the caller. Secret material is
+    consumed in memory and never returned by the credential runtime.
+    """
+
+    holder: dict[str, GmailMailProvider] = {}
+
+    def consume(raw: str) -> None:
+        bundle = GmailOAuthBundle.from_json(raw)
+        holder["provider"] = GmailMailProvider(GmailOAuthClient(bundle, transport=transport))
+
+    try:
+        receipt = consume_registered_material_credential(
+            service_id="mail-gmail",
+            alias=account_ref,
+            action_id="use-gmail-readonly-oauth",
+            consumer=consume,
+            authority_environment=authority_environment,
+        )
+    except RegisteredCredentialRuntimeError as exc:
+        raise MailOperationError("GMAIL_CREDENTIAL_UNAVAILABLE", "registered Gmail credential unavailable") from exc
+    except GmailOAuthError as exc:
+        raise MailOperationError(exc.reason_code, "Gmail OAuth bundle rejected") from exc
+    result = receipt.get("result")
+    if not isinstance(result, Mapping) or result.get("status") != "USED" or "provider" not in holder:
+        raise MailOperationError("GMAIL_CREDENTIAL_UNAVAILABLE", "registered Gmail credential unavailable")
+    return holder["provider"]
+
+
 def _headers(value: Mapping[str, Any]) -> dict[str, str]:
     payload = value.get("payload")
     if not isinstance(payload, Mapping):
@@ -108,7 +135,7 @@ def _payload_preview(payload: Any) -> str | None:
     if isinstance(body, Mapping) and isinstance(body.get("data"), str):
         try:
             decoded = base64.urlsafe_b64decode(body["data"] + "==").decode("utf-8", "replace")
-        except ValueError:
+        except (ValueError, UnicodeDecodeError):
             decoded = ""
         preview = " ".join(decoded.split())
         return preview[:4096] if preview else None
