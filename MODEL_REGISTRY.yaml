@@ -82,21 +82,21 @@
           "status": "LIVE",
           "score": 0.82,
           "canary_passed": true,
-          "promotion_stage": "ELIGIBLE",
+          "promotion_stage": "LIVE",
           "evidence_ids": ["pr2814-kimi-tool-canary"]
         },
         "repository_edit": {
           "status": "LIVE",
           "score": 0.85,
           "canary_passed": true,
-          "promotion_stage": "ELIGIBLE",
+          "promotion_stage": "LIVE",
           "evidence_ids": ["pr2814-kimi-tool-canary"]
         },
         "tool_use": {
           "status": "LIVE",
           "score": 0.88,
           "canary_passed": true,
-          "promotion_stage": "ELIGIBLE",
+          "promotion_stage": "LIVE",
           "evidence_ids": ["pr2814-kimi-tool-canary"]
         }
       }
