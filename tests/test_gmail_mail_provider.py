@@ -78,6 +78,19 @@ def test_oauth_bundle_requires_readonly_scope() -> None:
         GmailOAuthBundle.from_json(raw)
 
 
+def test_oauth_bundle_rejects_extra_scope_even_with_readonly() -> None:
+    raw = json.dumps(
+        {
+            "client_id": "client",
+            "client_secret": "secret",
+            "refresh_token": "refresh",
+            "scopes": [GMAIL_READONLY_SCOPE, "https://www.googleapis.com/auth/gmail.modify"],
+        }
+    )
+    with pytest.raises(GmailOAuthError, match="GMAIL_OAUTH_SCOPE_INSUFFICIENT"):
+        GmailOAuthBundle.from_json(raw)
+
+
 def test_oauth_client_refreshes_then_uses_get_only_for_gmail() -> None:
     calls: list[tuple[str, str, bytes | None, dict[str, str]]] = []
 
