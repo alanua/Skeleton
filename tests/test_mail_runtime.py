@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import json
+
+import pytest
+
 from core.mail_provider import MailProviderAccount, StaticMailProvider
 from core.mail_runtime import MailRuntime, build_mail_dispatcher, build_mail_poll_payload
 from core.mail_state import MailStateStore
 from core.scheduler_engine import SchedulerEngine, SchedulerEngineConfig
 from core.scheduler_store import SchedulerStore
 from integrations.mail_scheduler import build_mail_poll_schedule
+from scripts import mail_operations_worker
 
 
 def _account() -> MailProviderAccount:
@@ -17,6 +22,19 @@ def _account() -> MailProviderAccount:
             "poll_interval_seconds": 60,
             "max_messages_per_poll": 10,
             "query": "synthetic",
+        }
+    )
+
+
+def _gmail_account() -> MailProviderAccount:
+    return MailProviderAccount.from_mapping(
+        {
+            "schema": "skeleton.mail_provider_account.v1",
+            "account_ref": "acct:gmail-primary",
+            "provider": "gmail",
+            "poll_interval_seconds": 300,
+            "max_messages_per_poll": 10,
+            "query": "newer_than:7d",
         }
     )
 
@@ -75,3 +93,23 @@ def test_scheduler_dispatches_mail_poll_route_without_second_authority(tmp_path)
     assert receipt["dispatch"]["done"] == 1
     occurrences = scheduler_store.list_occurrences("mail.poll.acct:static")
     assert [item.state for item in occurrences].count("done") == 1
+
+
+def test_production_gmail_missing_registered_credential_does_not_fall_back(monkeypatch) -> None:
+    account = _gmail_account()
+
+    def blocked(**_kwargs):
+        raise RuntimeError("registered credential missing")
+
+    monkeypatch.setattr(mail_operations_worker, "build_registered_gmail_provider", blocked)
+    with pytest.raises(RuntimeError, match="registered credential missing"):
+        mail_operations_worker._provider(account, None)
+
+
+def test_explicit_fixture_mode_remains_offline_and_deterministic(tmp_path) -> None:
+    fixture = tmp_path / "fixture.json"
+    fixture.write_text(json.dumps({"messages": [_message(provider="gmail")]}), encoding="utf-8")
+
+    provider = mail_operations_worker._provider(_gmail_account(), fixture)
+
+    assert isinstance(provider, StaticMailProvider)
