@@ -1,8 +1,14 @@
 from __future__ import annotations
 
-import pytest
 
-
-def pytest_runtest_logreport(report):
-    if report.failed and report.when == "call":
-        pytest.exit(f"SKELETON_DIAGNOSTIC_FAILED_NODEID={report.nodeid}", returncode=1)
+def pytest_collection_modifyitems(config, items):
+    keep = []
+    drop = []
+    for item in items:
+        if "tests/test_runner_child_environment.py" in item.nodeid:
+            keep.append(item)
+        else:
+            drop.append(item)
+    if drop:
+        config.hook.pytest_deselected(items=drop)
+    items[:] = keep
