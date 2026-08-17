@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.execution_binding.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["binding_id", "executor_id", "model_binding_kind", "model_id", "validation_id", "privacy_class", "side_effect_class", "budget_ref", "timeout_seconds", "credential_aliases"],
+  "properties": {
+    "binding_id": {"type": "string", "minLength": 1},
+    "executor_id": {"type": "string", "minLength": 1},
+    "model_binding_kind": {"enum": ["NO_MODEL", "EMBEDDED_MODEL", "EXTERNAL_MODEL"]},
+    "model_id": {"type": ["string", "null"]},
+    "validation_id": {"type": "string", "minLength": 1},
+    "privacy_class": {"type": "string", "minLength": 1},
+    "side_effect_class": {"type": "string", "minLength": 1},
+    "budget_ref": {"type": "string", "minLength": 1},
+    "timeout_seconds": {"type": "integer", "minimum": 1},
+    "credential_aliases": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+  }
+}
