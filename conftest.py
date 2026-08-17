@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-_FIRST_FAILURE: str | None = None
+_FAILED_NODEIDS: list[str] = []
 
 
 def pytest_runtest_logreport(report):
-    global _FIRST_FAILURE
-    if _FIRST_FAILURE is None and report.failed and report.when == "call":
-        _FIRST_FAILURE = report.nodeid
+    if report.failed and report.when == "call":
+        _FAILED_NODEIDS.append(report.nodeid)
         report.longrepr = f"SKELETON_DIAGNOSTIC_FAILED_NODEID={report.nodeid}"
+
+
+def pytest_sessionfinish(session, exitstatus):
+    if _FAILED_NODEIDS:
+        print("SKELETON_DIAGNOSTIC_FAILED_NODEIDS=" + "|".join(_FAILED_NODEIDS))
