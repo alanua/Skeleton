@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime
 import re
 from typing import Final, Mapping, Sequence
+from zoneinfo import ZoneInfo
 
 
 FAMILY_DOCUMENT_TOPICS: Final[tuple[str, ...]] = (
@@ -52,6 +54,9 @@ _ISSUERS: Final[tuple[str, ...]] = (
     "Deutsche Bahn",
 )
 
+_DATE_RE: Final = re.compile(r"(?<!\d)(?P<day>0?[1-9]|[12]\d|3[01])[.](?P<month>0?[1-9]|1[0-2])[.](?P<year>20\d{2})(?!\d)")
+_TIME_RE: Final = re.compile(r"(?<!\d)(?P<hour>[01]?\d|2[0-3])[:.](?P<minute>[0-5]\d)(?!\d)")
+
 
 def _score(text: str, keywords: Sequence[str]) -> int:
     return sum(1 for keyword in keywords if keyword.casefold() in text)
@@ -73,6 +78,43 @@ def _summary(raw_text: str) -> str:
     sentences = re.split(r"(?<=[.!?])\s+", compact)
     summary = " ".join(sentences[:2]).strip()
     return summary[:600] or compact[:600]
+
+
+def _calendar_candidates(raw_text: str, document_type: str | None, issuer: str | None) -> list[dict[str, object]]:
+    if document_type != "Termin/Einladung":
+        return []
+    dates = list(_DATE_RE.finditer(raw_text))
+    if len(dates) != 1:
+        return []
+    date = dates[0]
+    local_tail = raw_text[date.end(): date.end() + 80]
+    times = list(_TIME_RE.finditer(local_tail))
+    if len(times) != 1:
+        return []
+    time_match = times[0]
+    try:
+        when = datetime(
+            int(date.group("year")),
+            int(date.group("month")),
+            int(date.group("day")),
+            int(time_match.group("hour")),
+            int(time_match.group("minute")),
+            tzinfo=ZoneInfo("Europe/Berlin"),
+        )
+    except ValueError:
+        return []
+    title = "Termin"
+    if issuer:
+        title = f"Termin — {issuer}"
+    return [
+        {
+            "event_type": "appointment",
+            "title": title,
+            "start_at": int(when.timestamp()),
+            "end_at": None,
+            "timezone": "Europe/Berlin",
+        }
+    ]
 
 
 def classify_family_document_text(text: str, subject_aliases: Sequence[str]) -> dict[str, object]:
@@ -118,5 +160,5 @@ def classify_family_document_text(text: str, subject_aliases: Sequence[str]) -> 
         "summary": _summary(text),
         "confidence": round(confidence, 2),
         "reason_codes": reason_codes,
-        "event_candidates": [],
+        "event_candidates": _calendar_candidates(text, document_type, issuer),
     }
