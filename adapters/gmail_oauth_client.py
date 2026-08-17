@@ -59,6 +59,18 @@ class GmailOAuthBundle:
 Transport = Callable[[str, str, bytes | None, Mapping[str, str]], Mapping[str, Any]]
 
 
+def _decode_json_response(raw: bytes) -> Mapping[str, Any]:
+    if len(raw) > 2_000_000:
+        raise GmailOAuthError("GMAIL_PROVIDER_RESPONSE_TOO_LARGE")
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise GmailOAuthError("GMAIL_PROVIDER_RESPONSE_MALFORMED") from exc
+    if not isinstance(value, Mapping):
+        raise GmailOAuthError("GMAIL_PROVIDER_RESPONSE_MALFORMED")
+    return value
+
+
 def _network_transport(
     method: str,
     url: str,
@@ -69,17 +81,22 @@ def _network_transport(
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
             raw = response.read(2_000_001)
+    except urllib.error.HTTPError as exc:
+        raw = exc.read(2_000_001)
+        if url == GOOGLE_TOKEN_URL:
+            try:
+                value = _decode_json_response(raw)
+            except GmailOAuthError:
+                raise GmailOAuthError("GMAIL_OAUTH_REFRESH_FAILED") from None
+            if value.get("error") == "invalid_grant":
+                return {"error": "invalid_grant"}
+            raise GmailOAuthError("GMAIL_OAUTH_REFRESH_FAILED") from None
+        if exc.code in {401, 403}:
+            raise GmailOAuthError("GMAIL_AUTHORIZATION_FAILED") from None
+        raise GmailOAuthError("GMAIL_PROVIDER_REQUEST_FAILED") from None
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise GmailOAuthError("GMAIL_PROVIDER_UNAVAILABLE") from exc
-    if len(raw) > 2_000_000:
-        raise GmailOAuthError("GMAIL_PROVIDER_RESPONSE_TOO_LARGE")
-    try:
-        value = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise GmailOAuthError("GMAIL_PROVIDER_RESPONSE_MALFORMED") from exc
-    if not isinstance(value, Mapping):
-        raise GmailOAuthError("GMAIL_PROVIDER_RESPONSE_MALFORMED")
-    return value
+    return _decode_json_response(raw)
 
 
 class GmailOAuthClient:
@@ -106,8 +123,7 @@ class GmailOAuthClient:
         )
         token = response.get("access_token")
         if not isinstance(token, str) or not token:
-            error = response.get("error")
-            if error == "invalid_grant":
+            if response.get("error") == "invalid_grant":
                 raise GmailOAuthError("GMAIL_OAUTH_REVOKED")
             raise GmailOAuthError("GMAIL_OAUTH_REFRESH_FAILED")
         return token
