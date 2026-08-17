@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
 import time
@@ -11,7 +12,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from core.mail_provider import MailProviderAccount, StaticMailProvider
+from adapters.gmail_mail_provider import build_registered_gmail_provider
+from core.mail_provider import MailProvider, MailProviderAccount, StaticMailProvider
 from core.mail_runtime import MailRuntime, build_mail_dispatcher
 from core.mail_state import MailStateStore
 from core.scheduler_engine import SchedulerEngine, SchedulerEngineConfig
@@ -57,7 +59,7 @@ def main() -> int:
         else:
             runtime = MailRuntime(
                 state_store=MailStateStore(args.mail_state_db),
-                providers={account.provider: _provider(account.provider, args.provider_fixture)},
+                providers={account.provider: _provider(account, args.provider_fixture)},
                 clock=lambda: now,
             )
             config = SchedulerEngineConfig(max_dispatches_per_tick=args.max_dispatches)
@@ -87,12 +89,19 @@ def main() -> int:
         return 2
 
 
-def _provider(provider: str, fixture: Path | None) -> StaticMailProvider:
-    if fixture is None:
+def _provider(account: MailProviderAccount, fixture: Path | None) -> MailProvider:
+    if fixture is not None:
+        raw = json.loads(fixture.read_text(encoding="utf-8"))
+        messages = raw.get("messages", raw) if isinstance(raw, dict) else raw
+        return StaticMailProvider(messages)
+    if account.provider == "gmail":
+        return build_registered_gmail_provider(
+            account_ref=account.account_ref,
+            authority_environment=os.environ,
+        )
+    if account.provider == "static":
         return StaticMailProvider(())
-    raw = json.loads(fixture.read_text(encoding="utf-8"))
-    messages = raw.get("messages", raw) if isinstance(raw, dict) else raw
-    return StaticMailProvider(messages)
+    raise ValueError("MAIL_PROVIDER_NOT_CONFIGURED")
 
 
 if __name__ == "__main__":
