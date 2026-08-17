@@ -25,7 +25,7 @@ def test_tool_use_coding_excludes_response_only_glm_route() -> None:
     assert ranked[0] == "openrouter-kimi-k2-challenger"
 
 
-def test_kimi_can_rank_for_evaluation_but_not_production_before_live_promotion() -> None:
+def test_kimi_is_selected_for_production_coding_after_explicit_live_promotion() -> None:
     records = load_model_registry(REGISTRY)
     evaluation = TaskFitRequest("coding", {"repository_edit": 0.70, "tool_use": 0.70}, "PUBLIC")
     production = TaskFitRequest(
@@ -35,7 +35,7 @@ def test_kimi_can_rank_for_evaluation_but_not_production_before_live_promotion()
         production_only=True,
     )
     assert select_model(records, evaluation).model_id == "openrouter-kimi-k2-challenger"
-    assert select_model(records, production) is None
+    assert select_model(records, production).model_id == "openrouter-kimi-k2-challenger"
 
 
 def test_model_can_be_reasoning_eligible_but_repo_edit_ineligible() -> None:
@@ -52,6 +52,18 @@ def test_hard_coding_task_does_not_select_weak_local_for_cost() -> None:
     selected = select_model(records, request)
     assert selected is not None
     assert selected.model_id == "openrouter-kimi-k2-challenger"
+
+
+def test_production_hard_coding_task_does_not_select_glm_or_weak_local() -> None:
+    records = load_model_registry(REGISTRY)
+    request = TaskFitRequest(
+        "hard-coding",
+        {"repository_edit": 0.80, "tool_use": 0.80},
+        "PUBLIC",
+        production_only=True,
+    )
+    ranked = [model.model_id for model in rank_models(records, request)]
+    assert ranked == ["openrouter-kimi-k2-challenger"]
 
 
 def test_private_task_excludes_cloud_candidates() -> None:
