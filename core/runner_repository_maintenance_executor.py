@@ -126,6 +126,8 @@ def _repository_run_command(
 
 RUNNER_SERVICE = "skeleton-runner-poll.service"
 RUNNER_TIMER = "skeleton-runner-poll.timer"
+_SUDO_BIN = "/usr/bin/sudo"
+_SYSTEMCTL_BIN = "/usr/bin/systemctl"
 HOME_EDGE_ENV_PREFIX = "SKELETON_HOME_EDGE_01_"
 HOME_EDGE_EXEC_HMAC_SECRET_ENV = "SKELETON_HOME_EDGE_EXEC_HMAC_SECRET"
 _FIXED_LOCAL_ACTIONS = frozenset(
@@ -180,11 +182,16 @@ def _run_fixed(argv: list[str], *, timeout: int = 60, cwd: str | None = None) ->
 
 
 def _recover_runner_timer() -> str:
+    # The canonical production Runner is the fixed system-level oneshot timer.
+    # Use only absolute code-owned binaries and unit names. Never try user scope
+    # or an alternate fallback authority.
     for argv in (
-        ["systemctl", "--user", "daemon-reload"],
-        ["systemctl", "--user", "reset-failed", RUNNER_SERVICE],
-        ["systemctl", "--user", "start", RUNNER_TIMER],
-        ["systemctl", "--user", "is-active", "--quiet", RUNNER_TIMER],
+        [_SUDO_BIN, "-n", _SYSTEMCTL_BIN, "daemon-reload"],
+        [_SUDO_BIN, "-n", _SYSTEMCTL_BIN, "reset-failed", RUNNER_SERVICE],
+        [_SUDO_BIN, "-n", _SYSTEMCTL_BIN, "reset-failed", RUNNER_TIMER],
+        [_SUDO_BIN, "-n", _SYSTEMCTL_BIN, "restart", RUNNER_TIMER],
+        [_SUDO_BIN, "-n", _SYSTEMCTL_BIN, "is-enabled", "--quiet", RUNNER_TIMER],
+        [_SUDO_BIN, "-n", _SYSTEMCTL_BIN, "is-active", "--quiet", RUNNER_TIMER],
     ):
         result = _run_fixed(argv)
         if result.returncode != 0:
