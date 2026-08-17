@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.route_lease.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["binding_id", "task_profile_hash", "permissions", "validation_id", "budget_ref", "max_tokens", "timeout_seconds", "max_attempts", "expires_at", "lease_hash"],
+  "properties": {
+    "binding_id": {"type": "string", "minLength": 1},
+    "task_profile_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "permissions": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "validation_id": {"type": "string", "minLength": 1},
+    "budget_ref": {"type": "string", "minLength": 1},
+    "max_tokens": {"type": "integer", "minimum": 0},
+    "timeout_seconds": {"type": "integer", "minimum": 1},
+    "max_attempts": {"type": "integer", "minimum": 1},
+    "expires_at": {"type": "string", "minLength": 1},
+    "lease_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}
