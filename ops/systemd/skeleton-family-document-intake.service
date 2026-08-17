@@ -1,16 +1,21 @@
 [Unit]
 Description=Skeleton family-document intake worker
 After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=-/etc/skeleton-family-document-intake.env
-WorkingDirectory=/home/agent/agent-dev/Skeleton
-ExecStart=/usr/bin/python3 scripts/family_document_worker.py --inbox ${SKELETON_FAMILY_DOCUMENT_INBOX} --archive ${SKELETON_FAMILY_DOCUMENT_ARCHIVE} --outbox-db ${SKELETON_FAMILY_DOCUMENT_OUTBOX_DB}
+User=oleksii
+Group=oleksii
+EnvironmentFile=/etc/skeleton-family-document-intake.env
+WorkingDirectory=/opt/skeleton/family-document/current
+ExecStart=/usr/bin/python3 /opt/skeleton/family-document/current/scripts/family_document_worker.py --inbox ${SKELETON_FAMILY_DOCUMENT_INBOX} --archive ${SKELETON_FAMILY_DOCUMENT_ARCHIVE} --outbox-db ${SKELETON_FAMILY_DOCUMENT_OUTBOX_DB}
 Restart=on-failure
 RestartSec=15
 NoNewPrivileges=true
 PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
 
 [Install]
 WantedBy=multi-user.target
