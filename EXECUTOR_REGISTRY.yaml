@@ -1,0 +1,53 @@
+{
+  "schema": "skeleton.executor_registry.v1",
+  "executors": [
+    {
+      "executor_id": "deterministic-maintenance",
+      "family": "skeleton-maintenance",
+      "task_classes": ["repository_maintenance", "runtime_maintenance", "read_only"],
+      "capabilities": ["repository_read", "repository_maintenance", "test_execution"],
+      "locality": "LOCAL",
+      "binding_kinds": ["NO_MODEL"],
+      "side_effect_classes": ["READ_ONLY", "REPOSITORY_MUTATION", "RUNTIME_BOUNDED"],
+      "credential_aliases": [],
+      "health": "LIVE",
+      "max_timeout_seconds": 1800,
+      "max_concurrency": 2,
+      "required_completion_evidence": ["deliverable_validation"],
+      "preference_rank": 0
+    },
+    {
+      "executor_id": "codex-embedded",
+      "family": "codex",
+      "task_classes": ["code_generation", "code_review"],
+      "capabilities": ["repository_read", "repository_write", "test_execution"],
+      "locality": "CLOUD",
+      "binding_kinds": ["EMBEDDED_MODEL"],
+      "side_effect_classes": ["REPOSITORY_MUTATION"],
+      "credential_aliases": [],
+      "health": "LIVE",
+      "max_timeout_seconds": 1800,
+      "max_concurrency": 1,
+      "required_completion_evidence": ["changed_files", "deliverable_validation"],
+      "embedded_model_alias": "codex-managed-model",
+      "embedded_model_capabilities": ["reasoning", "repository_edit", "tool_use"],
+      "preference_rank": 10
+    },
+    {
+      "executor_id": "openhands-external",
+      "family": "openhands",
+      "task_classes": ["code_generation", "code_review"],
+      "capabilities": ["repository_read", "repository_write", "test_execution"],
+      "locality": "HYBRID",
+      "binding_kinds": ["EXTERNAL_MODEL"],
+      "side_effect_classes": ["REPOSITORY_MUTATION"],
+      "credential_aliases": ["openrouter"],
+      "health": "DEGRADED",
+      "max_timeout_seconds": 1800,
+      "max_concurrency": 1,
+      "required_completion_evidence": ["changed_files", "deliverable_validation"],
+      "supported_model_provider_families": ["openrouter", "local"],
+      "preference_rank": 20
+    }
+  ]
+}
