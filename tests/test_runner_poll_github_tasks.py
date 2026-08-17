@@ -19238,17 +19238,21 @@ privacy_boundary: PUBLIC_SAFE_REPOSITORY_ONLY
     )
     calls: list[list[str]] = []
 
+    status_calls = 0
+
     def fake_run(args, cwd=None, **_kwargs):
+        nonlocal status_calls
         calls.append(list(args))
         if args[0] == "codex":
             return 1, "usage limit reached"
+        if args[:3] == ["git", "status", "--porcelain"]:
+            status_calls += 1
+            return (0, "" if status_calls == 1 else " M core/example.py\n")
         if args[0] == "/usr/bin/openhands":
             environment = runner._RUN_COMMAND_ENV_OVERRIDE.get()
             assert environment is not None
             assert environment["LLM_MODEL"] == "openrouter/moonshotai/kimi-k2"
             return 0, "DONE: OpenHands completed the bounded task."
-        if args[:3] == ["git", "status", "--porcelain"]:
-            return 0, " M core/example.py\n"
         raise AssertionError(args)
 
     monkeypatch.setattr(runner, "run_command", fake_run)
@@ -19257,7 +19261,7 @@ privacy_boundary: PUBLIC_SAFE_REPOSITORY_ONLY
     assert "SKELETON_CODEGEN_EXECUTOR=openhands" in output
     assert "SKELETON_CODEGEN_MODEL=openrouter-kimi-k2-challenger" in output
     assert "synthetic-secret-marker" not in output
-    assert [call[0] for call in calls] == ["codex", "/usr/bin/openhands", "git"]
+    assert [call[0] for call in calls] == ["codex", "git", "/usr/bin/openhands", "git"]
 
 
 def test_run_codex_task_does_not_reroute_ordinary_failure(
@@ -19315,10 +19319,10 @@ privacy_boundary: PUBLIC_SAFE_REPOSITORY_ONLY
     def fake_run(args, cwd=None, **_kwargs):
         if args[0] == "codex":
             return 1, "quota exceeded"
-        if args[0] == "/usr/bin/openhands":
-            return 0, "RESULT: OK"
         if args[:3] == ["git", "status", "--porcelain"]:
             return 0, ""
+        if args[0] == "/usr/bin/openhands":
+            return 0, "RESULT: OK"
         raise AssertionError(args)
 
     monkeypatch.setattr(runner, "run_command", fake_run)
@@ -19349,3 +19353,32 @@ privacy_boundary: PRIVATE_LOCAL_ONLY
     code, _output = runner.run_codex_task(task_content, str(tmp_path))
     assert code == 1
     assert calls == [["codex"]]
+
+
+
+def test_run_codex_task_does_not_handoff_dirty_primary_worktree(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    task_content = """requested_capabilities: [repository_read, repository_write, test_execution]
+privacy_boundary: PUBLIC_SAFE_REPOSITORY_ONLY
+"""
+    monkeypatch.setattr(runner, "private_memory_bootstrap_request", lambda *_args: None)
+    monkeypatch.setattr(
+        runner, "sanitize_codegen_child_environment", lambda _env: {"PATH": "/usr/bin"}
+    )
+    monkeypatch.setattr(runner, "codex_exec_command", lambda *_args: ["codex"])
+    calls: list[list[str]] = []
+
+    def fake_run(args, cwd=None, **_kwargs):
+        calls.append(list(args))
+        if args[0] == "codex":
+            return 1, "quota exceeded"
+        if args[:3] == ["git", "status", "--porcelain"]:
+            return 0, " M core/partial.py\n"
+        raise AssertionError(args)
+
+    monkeypatch.setattr(runner, "run_command", fake_run)
+    code, output = runner.run_codex_task(task_content, str(tmp_path))
+    assert code == 1
+    assert "PRIMARY_LEFT_WORKTREE_DIRTY" in output
+    assert [call[0] for call in calls] == ["codex", "git"]

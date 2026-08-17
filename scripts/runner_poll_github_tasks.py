@@ -3899,6 +3899,17 @@ def run_codex_task(
         if not task_contract_allows_cloud_secondary(task_content):
             return codex_code, codex_output
 
+        handoff_status_code, handoff_status_output = run_command(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=workdir,
+        )
+        if handoff_status_code != 0 or handoff_status_output.strip():
+            return (
+                1,
+                codex_output
+                + "\nSKELETON_CODEGEN_SECONDARY_FAILURE=PRIMARY_LEFT_WORKTREE_DIRTY\n",
+            )
+
         try:
             secondary_route = select_openhands_secondary_route()
             openhands_environment, route_receipt = prepare_openhands_secondary_environment(
