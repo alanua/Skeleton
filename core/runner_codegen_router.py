@@ -169,5 +169,12 @@ def prepare_openhands_secondary_environment(
     return dict(environment), public_receipt
 
 
-def openhands_secondary_command(task_content: str) -> list[str]:
-    return ["openhands", "--headless", "--json", "-t", task_content]
+def openhands_secondary_command(task_content: str, *, executable: str = "openhands") -> list[str]:
+    return [
+        executable,
+        "--headless",
+        "--json",
+        "--override-with-envs",
+        "-t",
+        task_content,
+    ]
