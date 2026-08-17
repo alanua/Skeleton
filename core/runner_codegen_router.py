@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 from typing import Mapping, MutableMapping
 
+import yaml
+
 from core.execution_fabric import (
     DeliverableContract,
     ExecutionBinding,
@@ -68,6 +70,26 @@ def codex_failure_allows_secondary(exit_code: int, output: str) -> bool:
         return False
     lowered = (output or "").lower()
     return any(marker in lowered for marker in _QUOTA_OR_PROVIDER_MARKERS)
+
+
+def task_contract_allows_cloud_secondary(task_content: str) -> bool:
+    """Permit cloud secondary execution only for typed public repository-edit tasks."""
+    try:
+        raw = yaml.safe_load(task_content)
+    except yaml.YAMLError:
+        return False
+    if not isinstance(raw, Mapping):
+        return False
+    requested = raw.get("requested_capabilities", ())
+    if not isinstance(requested, (list, tuple)):
+        return False
+    requested_capabilities = {str(item) for item in requested}
+    if "repository_write" not in requested_capabilities:
+        return False
+    privacy = str(raw.get("privacy_boundary", "")).upper()
+    if not privacy or "PRIVATE" in privacy:
+        return False
+    return "PUBLIC" in privacy
 
 
 def _production_codegen_profile() -> TaskProfile:
@@ -142,7 +164,7 @@ def prepare_openhands_secondary_environment(
     authority = os.environ if authority_environment is None else authority_environment
     environment: MutableMapping[str, str] = dict(base_environment or {})
     try:
-        receipt = bind_registered_environment_credential(
+        bind_registered_environment_credential(
             service_id=OPENROUTER_CREDENTIAL_SERVICE,
             alias=OPENROUTER_CREDENTIAL_ALIAS,
             action_id=OPENROUTER_CREDENTIAL_ACTION,
