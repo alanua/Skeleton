@@ -5,12 +5,11 @@ import pytest
 _KNOWN_REGRESSIONS = {
     "tests/test_runner_child_environment_openrouter.py::test_trusted_openrouter_binding_uses_registered_shared_credential_path",
     "tests/test_runner_child_environment_openrouter.py::test_wrapper_exposes_openrouter_key_only_to_openhands_fallback",
+    "tests/test_runner_child_environment_openrouter.py::test_wrapper_fails_closed_when_openrouter_is_required_but_unavailable",
 }
 
 
 def pytest_configure(config):
-    # Diagnostic-only disposable branch: skip only already identified regressions
-    # and stop after the next natural failure.
     config.option.maxfail = 1
     config.option.tbstyle = "short"
 
