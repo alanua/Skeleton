@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from core.family_document_calendar import SchedulerFamilyDocumentCalendar
 from core.family_document_local_inference import load_exact_subject_aliases
 from core.family_document_runtime import FamilyDocumentReceiptOutbox, FamilyDocumentRuntime
 from core.family_document_sinks import VerifiedMemoryGatewayFamilyDocumentArchive
@@ -15,6 +16,10 @@ from core.family_document_taxonomy import classify_family_document_text
 from core.memory_gateway import MemoryGateway, capability_token
 from core.memory_gateway_storage import PrivateMemoryGatewayStorage
 from core.private_memory_stack import PrivateMemoryStack
+from core.scheduler_store import SchedulerStore
+
+
+_DEFAULT_SCHEDULER_DB = "/var/lib/skeleton/scheduler/scheduler.sqlite3"
 
 
 def _classifier() -> Callable[[str], Mapping[str, Any]] | None:
@@ -35,6 +40,13 @@ def _gateway() -> MemoryGateway:
     )
 
 
+def _calendar() -> SchedulerFamilyDocumentCalendar:
+    path = Path(os.environ.get("SKELETON_SCHEDULER_DB", _DEFAULT_SCHEDULER_DB)).expanduser()
+    if not path.is_file():
+        raise SystemExit("canonical_scheduler_unavailable")
+    return SchedulerFamilyDocumentCalendar(SchedulerStore(path))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run one local family-document intake scan.")
     parser.add_argument("--inbox", required=True)
@@ -48,6 +60,7 @@ def main() -> int:
         archive_sink=VerifiedMemoryGatewayFamilyDocumentArchive(Path(args.archive), _gateway()),
         outbox=FamilyDocumentReceiptOutbox(Path(args.outbox_db)),
         classifier=_classifier(),
+        calendar=_calendar(),
     )
     print(json.dumps(runtime.scan_once(drain=not args.no_drain), sort_keys=True))
     return 0
