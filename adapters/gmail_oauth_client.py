@@ -46,7 +46,7 @@ class GmailOAuthBundle:
         if not isinstance(scopes, list) or not scopes or not all(isinstance(item, str) and item for item in scopes):
             raise GmailOAuthError("GMAIL_OAUTH_BUNDLE_MALFORMED")
         normalized_scopes = tuple(sorted(set(scopes)))
-        if GMAIL_READONLY_SCOPE not in normalized_scopes:
+        if normalized_scopes != (GMAIL_READONLY_SCOPE,):
             raise GmailOAuthError("GMAIL_OAUTH_SCOPE_INSUFFICIENT")
         return cls(
             client_id=client_id,
