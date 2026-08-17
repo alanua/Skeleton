@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from core.family_document_sinks import FAMILY_DOCUMENT_RECORD_SCHEMA
-from core.local_document_ocr import read_local_document_text
+from core.local_document_ocr import read_local_document
 from core.private_memory_history import content_hash
 
 
@@ -25,11 +25,15 @@ class FamilyDocumentIntakeRequest:
 
 
 def build_intake_request(path: Path, *, source_id: str, source_sha256: str) -> FamilyDocumentIntakeRequest:
+    result = read_local_document(path)
+    if result.source_sha256 != source_sha256:
+        raise ValueError("source changed after stable-file gate")
     return FamilyDocumentIntakeRequest(
         source_id=source_id,
         source_sha256=source_sha256,
-        ocr_text=read_local_document_text(path),
-        mime_type="application/pdf" if path.suffix.lower() == ".pdf" else "text/plain",
+        ocr_text=result.text,
+        page_count=result.page_count,
+        mime_type=result.mime_type,
     )
 
 

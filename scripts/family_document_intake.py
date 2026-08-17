@@ -3,11 +3,36 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
+from typing import Any, Callable, Mapping
 
+from core.family_document_local_inference import load_exact_subject_aliases
 from core.family_document_runtime import FamilyDocumentReceiptOutbox, FamilyDocumentRuntime
-from core.family_document_sinks import FileFamilyDocumentArchive
+from core.family_document_sinks import VerifiedMemoryGatewayFamilyDocumentArchive
 from core.family_document_sources import LocalDirectoryDocumentSource
+from core.family_document_taxonomy import classify_family_document_text
+from core.memory_gateway import MemoryGateway, capability_token
+from core.memory_gateway_storage import PrivateMemoryGatewayStorage
+from core.private_memory_stack import PrivateMemoryStack
+
+
+def _classifier() -> Callable[[str], Mapping[str, Any]] | None:
+    aliases_file = os.environ.get("SKELETON_FAMILY_SUBJECT_ALIASES_FILE", "").strip()
+    if not aliases_file:
+        return None
+    aliases = load_exact_subject_aliases(aliases_file)
+    return lambda text: classify_family_document_text(text, aliases)
+
+
+def _gateway() -> MemoryGateway:
+    stack = PrivateMemoryStack()
+    if not stack.paths.db.is_file():
+        raise SystemExit("canonical_private_memory_unavailable")
+    return MemoryGateway(
+        capability_token(namespaces=("skeleton",), public_mode=False),
+        private_memory_storage=PrivateMemoryGatewayStorage(stack),
+    )
 
 
 def main() -> int:
@@ -20,8 +45,9 @@ def main() -> int:
 
     runtime = FamilyDocumentRuntime(
         source=LocalDirectoryDocumentSource(Path(args.inbox)),
-        archive_sink=FileFamilyDocumentArchive(Path(args.archive)),
+        archive_sink=VerifiedMemoryGatewayFamilyDocumentArchive(Path(args.archive), _gateway()),
         outbox=FamilyDocumentReceiptOutbox(Path(args.outbox_db)),
+        classifier=_classifier(),
     )
     print(json.dumps(runtime.scan_once(drain=not args.no_drain), sort_keys=True))
     return 0
