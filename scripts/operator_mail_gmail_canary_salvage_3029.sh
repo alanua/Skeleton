@@ -60,6 +60,24 @@ grep -F 'run_gmail_readonly_canary' "$runner" >/dev/null || { echo 'BLOCKED=miss
 grep -F 'blocked_gmail_readonly_receipt' "$runner" >/dev/null || { echo 'BLOCKED=missing_blocked_receipt'; exit 13; }
 grep -F 'test_gmail_readonly_canary_task_is_registered' "$tests" >/dev/null || { echo 'BLOCKED=missing_registration_test'; exit 14; }
 
+echo '=== REPAIR BOUNDED GMAIL RECEIPT RENDERING ==='
+python3 - <<'PY'
+from pathlib import Path
+
+path = Path('scripts/runner_poll_github_tasks.py')
+src = path.read_text(encoding='utf-8')
+start_marker = 'def _gmail_readonly_canary_receipt_report(\n'
+end_marker = '\ndef _gmail_readonly_canary_preflight(\n'
+start = src.find(start_marker)
+end = src.find(end_marker, start + 1)
+if start < 0 or end < 0:
+    raise SystemExit('BLOCKED=gmail_receipt_function_anchor_missing')
+
+replacement = '''def _gmail_readonly_canary_receipt_report(\n    receipt: Mapping[str, object],\n    *,\n    preflight_passed: bool,\n) -> str:\n    task_id = MAIL_GMAIL_READONLY_CANARY_TASK_ID\n    allowed_aliases = frozenset(allowed_gmail_canary_accounts())\n    blocked_reasons = frozenset(\n        (\n            "GMAIL_OAUTH_REVOKED",\n            "GMAIL_OAUTH_SCOPE_INVALID",\n            "GMAIL_CREDENTIAL_UNAVAILABLE",\n            "GMAIL_ACCOUNT_ALIAS_NOT_ALLOWED",\n            "GMAIL_READONLY_BOUNDS_VIOLATION",\n            "GMAIL_READONLY_PROVIDER_FAILURE",\n            "GMAIL_HTTP_ERROR",\n            "GMAIL_TOKEN_REFRESH_FAILED",\n        )\n    )\n\n    account_alias = receipt.get("account_alias")\n    credential_status = receipt.get("credential_binding_status")\n    oauth_status = receipt.get("oauth_refresh_status")\n    gmail_status = receipt.get("gmail_readonly_status")\n    count = receipt.get("probed_message_count")\n    mutation_attempted = receipt.get("mutation_attempted")\n    content_exposed = receipt.get("content_exposed")\n    stable_reason = receipt.get("stable_reason")\n    criteria = receipt.get("success_criteria")\n    success = criteria == "met"\n\n    common_valid = (\n        receipt.get("maintenance_task_id") == task_id\n        and isinstance(account_alias, str)\n        and account_alias in (allowed_aliases | {"UNREGISTERED"})\n        and isinstance(count, int)\n        and not isinstance(count, bool)\n        and count in {0, 1}\n        and mutation_attempted is False\n        and content_exposed is False\n    )\n    if success:\n        receipt_valid = (\n            common_valid\n            and account_alias in allowed_aliases\n            and credential_status == "USED"\n            and oauth_status == "PASS"\n            and gmail_status == "PASS"\n            and stable_reason == "OK"\n        )\n    else:\n        receipt_valid = (\n            common_valid\n            and credential_status == "BLOCKED"\n            and oauth_status == "BLOCKED"\n            and gmail_status == "BLOCKED"\n            and stable_reason in blocked_reasons\n            and criteria == "not_met"\n        )\n\n    if not receipt_valid:\n        receipt = blocked_gmail_readonly_receipt(\n            account_alias="UNREGISTERED",\n            reason_code="GMAIL_READONLY_PROVIDER_FAILURE",\n        )\n        account_alias = receipt["account_alias"]\n        credential_status = receipt["credential_binding_status"]\n        oauth_status = receipt["oauth_refresh_status"]\n        gmail_status = receipt["gmail_readonly_status"]\n        count = receipt["probed_message_count"]\n        mutation_attempted = receipt["mutation_attempted"]\n        content_exposed = receipt["content_exposed"]\n        stable_reason = receipt["stable_reason"]\n        success = False\n\n    base_report = _maintenance_report(\n        "DONE" if success else "BLOCKED",\n        task_id,\n        [],\n        "met" if success else "not_met",\n    )\n    bounded_lines = [\n        "preflight_status=PASS" if preflight_passed else "preflight_status=NOT_RUN",\n        f"account_alias={account_alias}",\n        f"credential_binding_status={credential_status}",\n        f"oauth_refresh_status={oauth_status}",\n        f"gmail_readonly_status={gmail_status}",\n        f"probed_message_count={count}",\n        "mutation_attempted=false",\n        "content_exposed=false",\n        f"stable_reason={stable_reason}",\n    ]\n    if preflight_passed:\n        bounded_lines.insert(1, "expected_main_sha_match=true")\n    return base_report + "\\n" + "\\n".join(bounded_lines)\n\n'''
+
+path.write_text(src[:start] + replacement + src[end + 1 :], encoding='utf-8')
+PY
+
 echo '=== VALIDATE DIRTY DELIVERABLE ==='
 python3 -m py_compile "$runner" "$tests"
 git diff --check
