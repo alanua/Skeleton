@@ -12047,15 +12047,20 @@ def select_run_now_queue_intake_targets(
     ready_issues: list[dict[str, Any]],
     candidate_issues: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    candidates = [
-        issue
-        for issue in candidate_issues
-        if LABEL_RUN_NOW in _issue_label_names(issue)
-        and LABEL_AGENT_TASK in _issue_label_names(issue)
-        and not (_issue_label_names(issue) & TERMINAL_RUNNER_LABELS)
-        and LABEL_READY not in _issue_label_names(issue)
-        and LABEL_WAITING_DEPENDENCY not in _issue_label_names(issue)
-    ]
+    candidates: list[dict[str, Any]] = []
+    for issue in candidate_issues:
+        labels = _issue_label_names(issue)
+        if LABEL_RUN_NOW not in labels or LABEL_AGENT_TASK not in labels:
+            continue
+        if labels & TERMINAL_RUNNER_LABELS:
+            continue
+        if LABEL_READY in labels or LABEL_RUNNING in labels:
+            continue
+        if LABEL_WAITING_DEPENDENCY in labels:
+            continue
+        if labels & QUEUE_REPLENISHER_NEEDS_OPERATOR_LABELS:
+            continue
+        candidates.append(issue)
 
     maintenance_candidates: list[dict[str, Any]] = []
     generic_candidates: list[dict[str, Any]] = []
@@ -12079,10 +12084,24 @@ def select_run_now_queue_intake_targets(
         target_max_depth=len(ready_issues) + len(generic_candidates),
     )
     generic_selected = list(selection.selected)
+
+    used_intents = {
+        intent_key
+        for issue in (*ready_issues, *generic_selected)
+        if (intent_key := _queue_replenisher_intent_key(issue))
+    }
+    maintenance_selected: list[dict[str, Any]] = []
+    for issue in maintenance_candidates:
+        intent_key = _queue_replenisher_intent_key(issue)
+        if not intent_key or intent_key in used_intents:
+            continue
+        used_intents.add(intent_key)
+        maintenance_selected.append(issue)
+
     return [
         issue
         for issue in candidates
-        if issue in maintenance_candidates or issue in generic_selected
+        if issue in maintenance_selected or issue in generic_selected
     ]
 
 
