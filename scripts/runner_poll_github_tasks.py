@@ -12056,13 +12056,34 @@ def select_run_now_queue_intake_targets(
         and LABEL_READY not in _issue_label_names(issue)
         and LABEL_WAITING_DEPENDENCY not in _issue_label_names(issue)
     ]
+
+    maintenance_candidates: list[dict[str, Any]] = []
+    generic_candidates: list[dict[str, Any]] = []
+    for issue in candidates:
+        maintenance_mode, maintenance_task_id = extract_runtime_maintenance_task_id(
+            str(issue.get("body") or "")
+        )
+        if (
+            maintenance_mode
+            and maintenance_task_id in RUNTIME_MAINTENANCE_TASK_IDS
+            and is_open_task_issue(dict(issue))
+        ):
+            maintenance_candidates.append(issue)
+            continue
+        generic_candidates.append(issue)
+
     selection = _runner_queue_replenishment_selection(
         ready_issues,
-        candidates,
-        target_min_depth=len(ready_issues) + len(candidates),
-        target_max_depth=len(ready_issues) + len(candidates),
+        generic_candidates,
+        target_min_depth=len(ready_issues) + len(generic_candidates),
+        target_max_depth=len(ready_issues) + len(generic_candidates),
     )
-    return list(selection.selected)
+    generic_selected = list(selection.selected)
+    return [
+        issue
+        for issue in candidates
+        if issue in maintenance_candidates or issue in generic_selected
+    ]
 
 
 def _promote_queue_replenisher_issue(issue: Mapping[str, Any]) -> None:

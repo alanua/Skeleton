@@ -19382,3 +19382,58 @@ privacy_boundary: PUBLIC_SAFE_REPOSITORY_ONLY
     assert code == 1
     assert "PRIMARY_LEFT_WORKTREE_DIRTY" in output
     assert [call[0] for call in calls] == ["codex", "git"]
+
+
+
+def test_run_now_intake_selects_registered_runtime_maintenance_without_codegen_contract() -> None:
+    issue = {
+        "number": 2997,
+        "state": "OPEN",
+        "title": "maintenance run now",
+        "body": "\n".join(
+            (
+                f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+                f"Maintenance Task ID: {runner.CHECK_SKELETON_FRESHNESS}",
+                f"Repository: {runner.REPO}",
+                f"Expected Main SHA: {HEAD_SHA}",
+                "Privacy Boundary: PUBLIC_SAFE_REPOSITORY_ONLY",
+            )
+        ),
+        "labels": [
+            {"name": runner.LABEL_AGENT_TASK},
+            {"name": runner.LABEL_RUN_NOW},
+            {"name": "risk:green"},
+            {"name": runner.LABEL_PRIORITY_1},
+        ],
+    }
+
+    assert runner._queue_replenisher_allowed_files(issue) == frozenset()
+    assert not runner._queue_replenisher_issue_is_discoverable(issue)
+
+    selected = runner.select_run_now_queue_intake_targets([], [issue])
+
+    assert [item["number"] for item in selected] == [2997]
+
+
+def test_run_now_intake_does_not_bypass_unknown_maintenance_task() -> None:
+    issue = {
+        "number": 3997,
+        "state": "OPEN",
+        "title": "unknown maintenance run now",
+        "body": "\n".join(
+            (
+                f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+                "Maintenance Task ID: unknown_queue_repair_task",
+                f"Repository: {runner.REPO}",
+                "Privacy Boundary: PUBLIC_SAFE_REPOSITORY_ONLY",
+            )
+        ),
+        "labels": [
+            {"name": runner.LABEL_AGENT_TASK},
+            {"name": runner.LABEL_RUN_NOW},
+        ],
+    }
+
+    selected = runner.select_run_now_queue_intake_targets([], [issue])
+
+    assert selected == []
