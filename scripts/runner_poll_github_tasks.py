@@ -12367,14 +12367,41 @@ def _autonomous_queue_replenish_action(expected_key: str, generation: str) -> st
     if _autonomous_queue_occurrence_key(eligible, generation) != expected_key:
         return _autonomous_queue_blocked_report("QUEUE_RECOVERY_CANDIDATES_CHANGED")
 
-    token = _QUEUE_RECOVERY_CANDIDATE_OVERRIDE.set(candidate_issues)
-    try:
+    run_now_selected = bool(eligible) and all(
+        LABEL_RUN_NOW in _issue_label_names(issue) for issue in eligible
+    )
+    if run_now_selected:
         try:
-            report = replenish_runner_queue("")
+            for issue in eligible:
+                _promote_queue_replenisher_issue(issue)
         except Exception:
             return _autonomous_queue_blocked_report("QUEUE_RECOVERY_EXCEPTION")
-    finally:
-        _QUEUE_RECOVERY_CANDIDATE_OVERRIDE.reset(token)
+        selected_numbers = [
+            str(number)
+            for issue in eligible
+            if (number := _queue_replenisher_issue_number(issue)) is not None
+        ]
+        report = _maintenance_report(
+            "DONE",
+            REPLENISH_RUNNER_QUEUE,
+            [
+                f"ready_depth_before={len(ready_before)}",
+                f"selected_count={len(selected_numbers)}",
+                "selected_issues=" + (",".join(selected_numbers) or "none"),
+                "waiting_dependency_count=0",
+                "telegram_notifications=0",
+            ],
+            "met",
+        )
+    else:
+        token = _QUEUE_RECOVERY_CANDIDATE_OVERRIDE.set(candidate_issues)
+        try:
+            try:
+                report = replenish_runner_queue("")
+            except Exception:
+                return _autonomous_queue_blocked_report("QUEUE_RECOVERY_EXCEPTION")
+        finally:
+            _QUEUE_RECOVERY_CANDIDATE_OVERRIDE.reset(token)
 
     ready_after = get_ready_issues()
     if len(ready_after) <= len(ready_before):
