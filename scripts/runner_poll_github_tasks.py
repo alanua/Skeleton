@@ -57,6 +57,13 @@ from core.loop_controller import LoopPolicy
 from core.loop_engine import LoopEngine
 from core.loop_runner_adapter import run_loop_task_packet
 from core.loop_state_store import LoopStateStore
+from core.mail_gmail_production_canary import (
+    GmailReadonlyCanaryError,
+    MAIL_GMAIL_READONLY_CANARY_TASK_ID,
+    allowed_gmail_canary_accounts,
+    blocked_gmail_readonly_receipt,
+    run_gmail_readonly_canary,
+)
 from core.runner_diagnostic_executor import (
     MEMPALACE_SYNTHETIC_BENCHMARK_SCHEMA,
     MEMPALACE_SYNTHETIC_BENCHMARK_TIMEOUT_SECONDS,
@@ -320,6 +327,7 @@ HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1 = "home_edge_01_post_migration_reconcil
 HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1 = "home_edge_01_media_source_snapshot_v1"
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
+        MAIL_GMAIL_READONLY_CANARY_TASK_ID,
         SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
         ENSURE_TELEGRAM_CALLBACK_LOCAL_CONFIG,
         CHECK_PROJECT_CHECKOUT,
@@ -15819,6 +15827,267 @@ def control_plane_self_healing_recovery(body: str, workdir: str) -> str:
     return _maintenance_report(report_status, task_id, status_lines, success)
 
 
+
+_GMAIL_READONLY_CANARY_INPUT_FIELDS = frozenset(
+    (
+        "Mode",
+        "Maintenance Task ID",
+        "Repository",
+        "Expected Main SHA",
+        "Account Alias",
+    )
+)
+_GMAIL_READONLY_CANARY_REQUIRED_FIELDS = _GMAIL_READONLY_CANARY_INPUT_FIELDS
+_GMAIL_READONLY_CANARY_PUBLIC_RECEIPT_FIELDS = (
+    "maintenance_task_id",
+    "account_alias",
+    "credential_binding_status",
+    "oauth_refresh_status",
+    "gmail_readonly_status",
+    "probed_message_count",
+    "mutation_attempted",
+    "content_exposed",
+    "stable_reason",
+    "success_criteria",
+)
+
+
+def _gmail_readonly_canary_input(
+    body: str,
+) -> tuple[dict[str, str] | None, str | None]:
+    metadata = (body or "").strip()
+    if "```" in metadata:
+        return None, "gmail_readonly_canary_fenced_input_not_allowed"
+
+    parsed: dict[str, str] = {}
+    for raw_line in metadata.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = re.fullmatch(
+            r"(?P<field>[A-Za-z][A-Za-z0-9 ]*):\s*(?P<value>\S(?:.*\S)?)",
+            line,
+        )
+        if match is None:
+            return None, "gmail_readonly_canary_noncanonical_input"
+        field = match.group("field")
+        if field not in _GMAIL_READONLY_CANARY_INPUT_FIELDS:
+            return None, "gmail_readonly_canary_unknown_input_field"
+        if field in parsed:
+            return None, "gmail_readonly_canary_duplicate_input_field"
+        parsed[field] = match.group("value")
+
+    if set(parsed) != _GMAIL_READONLY_CANARY_REQUIRED_FIELDS:
+        return None, "gmail_readonly_canary_required_input_missing"
+    if parsed["Mode"] != RUNTIME_MAINTENANCE_MODE:
+        return None, "gmail_readonly_canary_mode_mismatch"
+    if parsed["Maintenance Task ID"] != MAIL_GMAIL_READONLY_CANARY_TASK_ID:
+        return None, "gmail_readonly_canary_task_id_mismatch"
+    if parsed["Repository"] != REPO:
+        return None, "gmail_readonly_canary_repository_mismatch"
+    if _HEAD_SHA_RE.fullmatch(parsed["Expected Main SHA"]) is None:
+        return None, "gmail_readonly_canary_expected_main_sha_invalid"
+    return parsed, None
+
+
+def _gmail_readonly_canary_receipt_report(
+    receipt: Mapping[str, object],
+    *,
+    preflight_passed: bool,
+) -> str:
+    task_id = MAIL_GMAIL_READONLY_CANARY_TASK_ID
+    allowed_aliases = frozenset(allowed_gmail_canary_accounts())
+    blocked_reasons = frozenset(
+        (
+            "GMAIL_OAUTH_REVOKED",
+            "GMAIL_OAUTH_SCOPE_INVALID",
+            "GMAIL_CREDENTIAL_UNAVAILABLE",
+            "GMAIL_ACCOUNT_ALIAS_NOT_ALLOWED",
+            "GMAIL_READONLY_BOUNDS_VIOLATION",
+            "GMAIL_READONLY_PROVIDER_FAILURE",
+            "GMAIL_HTTP_ERROR",
+            "GMAIL_TOKEN_REFRESH_FAILED",
+        )
+    )
+
+    account_alias = receipt.get("account_alias")
+    credential_status = receipt.get("credential_binding_status")
+    oauth_status = receipt.get("oauth_refresh_status")
+    gmail_status = receipt.get("gmail_readonly_status")
+    count = receipt.get("probed_message_count")
+    mutation_attempted = receipt.get("mutation_attempted")
+    content_exposed = receipt.get("content_exposed")
+    stable_reason = receipt.get("stable_reason")
+    criteria = receipt.get("success_criteria")
+    success = criteria == "met"
+
+    common_valid = (
+        receipt.get("maintenance_task_id") == task_id
+        and isinstance(account_alias, str)
+        and account_alias in (allowed_aliases | {"UNREGISTERED"})
+        and isinstance(count, int)
+        and not isinstance(count, bool)
+        and count in {0, 1}
+        and mutation_attempted is False
+        and content_exposed is False
+    )
+    if success:
+        receipt_valid = (
+            common_valid
+            and account_alias in allowed_aliases
+            and credential_status == "USED"
+            and oauth_status == "PASS"
+            and gmail_status == "PASS"
+            and stable_reason == "OK"
+        )
+    else:
+        receipt_valid = (
+            common_valid
+            and credential_status == "BLOCKED"
+            and oauth_status == "BLOCKED"
+            and gmail_status == "BLOCKED"
+            and stable_reason in blocked_reasons
+            and criteria == "not_met"
+        )
+
+    if not receipt_valid:
+        receipt = blocked_gmail_readonly_receipt(
+            account_alias="UNREGISTERED",
+            reason_code="GMAIL_READONLY_PROVIDER_FAILURE",
+        )
+        account_alias = receipt["account_alias"]
+        credential_status = receipt["credential_binding_status"]
+        oauth_status = receipt["oauth_refresh_status"]
+        gmail_status = receipt["gmail_readonly_status"]
+        count = receipt["probed_message_count"]
+        mutation_attempted = receipt["mutation_attempted"]
+        content_exposed = receipt["content_exposed"]
+        stable_reason = receipt["stable_reason"]
+        success = False
+
+    base_report = _maintenance_report(
+        "DONE" if success else "BLOCKED",
+        task_id,
+        [],
+        "met" if success else "not_met",
+    )
+    bounded_lines = [
+        "preflight_status=PASS" if preflight_passed else "preflight_status=NOT_RUN",
+        f"account_alias={account_alias}",
+        f"credential_binding_status={credential_status}",
+        f"oauth_refresh_status={oauth_status}",
+        f"gmail_readonly_status={gmail_status}",
+        f"probed_message_count={count}",
+        "mutation_attempted=false",
+        "content_exposed=false",
+        f"stable_reason={stable_reason}",
+    ]
+    if preflight_passed:
+        bounded_lines.insert(1, "expected_main_sha_match=true")
+    return base_report + "\n" + "\n".join(bounded_lines)
+
+def _gmail_readonly_canary_preflight(
+    expected_main_sha: str,
+) -> str | None:
+    task_id = MAIL_GMAIL_READONLY_CANARY_TASK_ID
+    registered_checkout, status_lines, report = _mempalace_runtime_smoke_preflight(
+        task_id
+    )
+    if report is not None or registered_checkout is None:
+        return report or _maintenance_report(
+            "BLOCKED",
+            task_id,
+            ["reason=registered_skeleton_checkout_unavailable"],
+            "not_met",
+        )
+
+    checkout_path = registered_checkout.checkout_path
+
+    head_sha, failure_report = _read_skeleton_sha(
+        task_id,
+        checkout_path,
+        "HEAD",
+        status_lines,
+        "gmail_readonly_read_checkout_head",
+    )
+    if failure_report is not None or head_sha is None:
+        return failure_report or _maintenance_report(
+            "BLOCKED",
+            task_id,
+            ["reason=gmail_readonly_checkout_head_unavailable"],
+            "not_met",
+        )
+
+    origin_main_sha, failure_report = _read_skeleton_sha(
+        task_id,
+        checkout_path,
+        "origin/main",
+        status_lines,
+        "gmail_readonly_read_origin_main",
+    )
+    if failure_report is not None or origin_main_sha is None:
+        return failure_report or _maintenance_report(
+            "BLOCKED",
+            task_id,
+            ["reason=gmail_readonly_origin_main_unavailable"],
+            "not_met",
+        )
+
+    expected = expected_main_sha.lower()
+    if head_sha.lower() != expected or origin_main_sha.lower() != expected:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            ["reason=gmail_readonly_expected_main_sha_mismatch"],
+            "not_met",
+        )
+    return None
+
+
+def mail_gmail_readonly_canary_v1(body: str) -> str:
+    task_id = MAIL_GMAIL_READONLY_CANARY_TASK_ID
+    parsed, reason = _gmail_readonly_canary_input(body)
+    if reason is not None or parsed is None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [f"reason={reason or 'gmail_readonly_canary_invalid_input'}"],
+            "not_met",
+        )
+
+    account_alias = parsed["Account Alias"]
+    if account_alias not in allowed_gmail_canary_accounts():
+        return _gmail_readonly_canary_receipt_report(
+            blocked_gmail_readonly_receipt(
+                account_alias=account_alias,
+                reason_code="GMAIL_ACCOUNT_ALIAS_NOT_ALLOWED",
+            ),
+            preflight_passed=False,
+        )
+
+    preflight_report = _gmail_readonly_canary_preflight(
+        parsed["Expected Main SHA"]
+    )
+    if preflight_report is not None:
+        return preflight_report
+
+    try:
+        receipt = run_gmail_readonly_canary(
+            account_alias=account_alias,
+            authority_environment=os.environ,
+        )
+    except GmailReadonlyCanaryError as exc:
+        receipt = blocked_gmail_readonly_receipt(
+            account_alias=account_alias,
+            reason_code=exc.reason_code,
+        )
+
+    return _gmail_readonly_canary_receipt_report(
+        receipt,
+        preflight_passed=True,
+    )
+
+
 def dispatch_runtime_maintenance_task(
     task_id: str, workdir: str, body: str = ""
 ) -> str:
@@ -15830,6 +16099,8 @@ def dispatch_runtime_maintenance_task(
             "not_met",
         )
     try:
+        if task_id == MAIL_GMAIL_READONLY_CANARY_TASK_ID:
+            return mail_gmail_readonly_canary_v1(body)
         if task_id == BUILD_AND_LOCAL_OTA_OPERATION:
             task = _lavalamp_build_and_local_ota_task_from_issue(
                 _runtime_maintenance_runner_task(task_id, body),

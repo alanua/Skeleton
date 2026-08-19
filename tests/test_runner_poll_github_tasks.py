@@ -19580,3 +19580,243 @@ def test_autonomous_queue_replenish_action_keeps_generic_replenisher_path(
 
     assert calls == [""]
     assert report.startswith("DONE:")
+def _gmail_readonly_canary_body(
+    *,
+    expected_main_sha: str = HEAD_SHA,
+    account_alias: str = "acct:gmail-primary",
+) -> str:
+    return "\n".join(
+        (
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {runner.MAIL_GMAIL_READONLY_CANARY_TASK_ID}",
+            f"Repository: {runner.REPO}",
+            f"Expected Main SHA: {expected_main_sha}",
+            f"Account Alias: {account_alias}",
+        )
+    )
+
+
+def _gmail_readonly_success_receipt(
+    account_alias: str,
+    probed_message_count: int,
+) -> dict[str, object]:
+    return {
+        "maintenance_task_id": runner.MAIL_GMAIL_READONLY_CANARY_TASK_ID,
+        "account_alias": account_alias,
+        "credential_binding_status": "USED",
+        "oauth_refresh_status": "PASS",
+        "gmail_readonly_status": "PASS",
+        "probed_message_count": probed_message_count,
+        "mutation_attempted": False,
+        "content_exposed": False,
+        "stable_reason": "OK",
+        "success_criteria": "met",
+    }
+
+
+def _gmail_readonly_preflight_patches(expected_main_sha: str):
+    checkout = mock.Mock(
+        checkout_path=Path("/synthetic/skeleton"),
+        status_lines=[],
+    )
+
+    def read_sha(_task_id, _path, ref, _status_lines, _step):
+        assert ref in {"HEAD", "origin/main"}
+        return expected_main_sha, None
+
+    return (
+        mock.patch.object(
+            runner,
+            "_mempalace_runtime_smoke_preflight",
+            return_value=(
+                checkout,
+                ["registered_checkout_current_main=true"],
+                None,
+            ),
+        ),
+        mock.patch.object(
+            runner,
+            "_read_skeleton_sha",
+            side_effect=read_sha,
+        ),
+    )
+
+
+def test_gmail_readonly_canary_task_is_registered() -> None:
+    assert (
+        runner.MAIL_GMAIL_READONLY_CANARY_TASK_ID
+        in runner.RUNTIME_MAINTENANCE_TASK_IDS
+    )
+
+
+def test_gmail_readonly_canary_rejects_near_miss_alias_before_preflight() -> None:
+    with (
+        mock.patch.object(
+            runner,
+            "_mempalace_runtime_smoke_preflight",
+        ) as preflight,
+        mock.patch.object(
+            runner,
+            "run_gmail_readonly_canary",
+        ) as canary,
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.MAIL_GMAIL_READONLY_CANARY_TASK_ID,
+            "/synthetic",
+            _gmail_readonly_canary_body(
+                account_alias="acct:gmail-primary-near-miss"
+            ),
+        )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "preflight_status=NOT_RUN" in report
+    assert "account_alias=UNREGISTERED" in report
+    assert "stable_reason=GMAIL_ACCOUNT_ALIAS_NOT_ALLOWED" in report
+    preflight.assert_not_called()
+    canary.assert_not_called()
+
+
+def test_gmail_readonly_canary_rejects_unknown_input_before_preflight() -> None:
+    body = _gmail_readonly_canary_body() + "\nQuery: in:anywhere"
+    with (
+        mock.patch.object(
+            runner,
+            "_mempalace_runtime_smoke_preflight",
+        ) as preflight,
+        mock.patch.object(
+            runner,
+            "run_gmail_readonly_canary",
+        ) as canary,
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.MAIL_GMAIL_READONLY_CANARY_TASK_ID,
+            "/synthetic",
+            body,
+        )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "reason=gmail_readonly_canary_unknown_input_field" in report
+    preflight.assert_not_called()
+    canary.assert_not_called()
+
+
+def test_gmail_readonly_canary_blocks_expected_main_sha_mismatch_before_provider() -> None:
+    checkout = mock.Mock(
+        checkout_path=Path("/synthetic/skeleton"),
+        status_lines=[],
+    )
+    with (
+        mock.patch.object(
+            runner,
+            "_mempalace_runtime_smoke_preflight",
+            return_value=(
+                checkout,
+                ["registered_checkout_current_main=true"],
+                None,
+            ),
+        ),
+        mock.patch.object(
+            runner,
+            "_read_skeleton_sha",
+            side_effect=[
+                ("b" * 40, None),
+                ("b" * 40, None),
+            ],
+        ),
+        mock.patch.object(
+            runner,
+            "run_gmail_readonly_canary",
+        ) as canary,
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.MAIL_GMAIL_READONLY_CANARY_TASK_ID,
+            "/synthetic",
+            _gmail_readonly_canary_body(
+                expected_main_sha="a" * 40
+            ),
+        )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "reason=gmail_readonly_expected_main_sha_mismatch" in report
+    canary.assert_not_called()
+
+
+@pytest.mark.parametrize("probed_message_count", [0, 1])
+def test_gmail_readonly_canary_success_is_bounded_and_invoked_once(
+    probed_message_count: int,
+) -> None:
+    preflight_patch, sha_patch = _gmail_readonly_preflight_patches(HEAD_SHA)
+    with (
+        preflight_patch,
+        sha_patch,
+        mock.patch.object(
+            runner,
+            "run_gmail_readonly_canary",
+            return_value=_gmail_readonly_success_receipt(
+                "acct:gmail-primary",
+                probed_message_count,
+            ),
+        ) as canary,
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.MAIL_GMAIL_READONLY_CANARY_TASK_ID,
+            "/synthetic",
+            _gmail_readonly_canary_body(),
+        )
+
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert f"probed_message_count={probed_message_count}" in report
+    assert "mutation_attempted=false" in report
+    assert "content_exposed=false" in report
+    assert canary.call_count == 1
+    assert canary.call_args.kwargs["account_alias"] == "acct:gmail-primary"
+    assert canary.call_args.kwargs["authority_environment"] is os.environ
+
+
+def test_gmail_readonly_canary_maps_known_error_to_public_blocked_receipt() -> None:
+    preflight_patch, sha_patch = _gmail_readonly_preflight_patches(HEAD_SHA)
+    with (
+        preflight_patch,
+        sha_patch,
+        mock.patch.object(
+            runner,
+            "run_gmail_readonly_canary",
+            side_effect=runner.GmailReadonlyCanaryError(
+                "GMAIL_CREDENTIAL_UNAVAILABLE"
+            ),
+        ) as canary,
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.MAIL_GMAIL_READONLY_CANARY_TASK_ID,
+            "/synthetic",
+            _gmail_readonly_canary_body(),
+        )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "stable_reason=GMAIL_CREDENTIAL_UNAVAILABLE" in report
+    assert "mutation_attempted=false" in report
+    assert "content_exposed=false" in report
+    assert canary.call_count == 1
+
+
+def test_gmail_readonly_canary_does_not_expose_unexpected_exception_text() -> None:
+    sentinel = "PRIVATE_MAIL_SENTINEL_DO_NOT_EXPOSE"
+    preflight_patch, sha_patch = _gmail_readonly_preflight_patches(HEAD_SHA)
+    with (
+        preflight_patch,
+        sha_patch,
+        mock.patch.object(
+            runner,
+            "run_gmail_readonly_canary",
+            side_effect=RuntimeError(sentinel),
+        ),
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.MAIL_GMAIL_READONLY_CANARY_TASK_ID,
+            "/synthetic",
+            _gmail_readonly_canary_body(),
+        )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "reason=maintenance_step_raised" in report
+    assert sentinel not in report
