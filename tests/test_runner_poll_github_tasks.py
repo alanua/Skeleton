@@ -19489,3 +19489,94 @@ def test_run_now_maintenance_route_preserves_running_needs_operator_and_intent_g
         [ready_duplicate], [candidate_duplicate]
     )
     assert selected == []
+
+
+
+def test_autonomous_queue_replenish_action_promotes_run_now_without_generic_reselection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issue = {
+        "number": 3010,
+        "state": "OPEN",
+        "title": "fresh run now maintenance",
+        "body": "\n".join(
+            (
+                f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+                f"Maintenance Task ID: {runner.CHECK_SKELETON_FRESHNESS}",
+                "Idempotency Key: action-route-test",
+            )
+        ),
+        "labels": [
+            {"name": runner.LABEL_AGENT_TASK},
+            {"name": runner.LABEL_RUN_NOW},
+        ],
+    }
+    generation = "initial"
+    expected_key = runner._autonomous_queue_occurrence_key([issue], generation)
+    promoted: list[int] = []
+
+    monkeypatch.setattr(
+        runner,
+        "_autonomous_queue_eligible_snapshot",
+        lambda: ([], [], [issue], [issue]),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_promote_queue_replenisher_issue",
+        lambda item: promoted.append(int(item["number"])),
+    )
+    monkeypatch.setattr(runner, "get_ready_issues", lambda: [issue])
+
+    def forbidden_generic_replenish(_body: str) -> str:
+        raise AssertionError("RUN_NOW eligible set must not be generically reselected")
+
+    monkeypatch.setattr(runner, "replenish_runner_queue", forbidden_generic_replenish)
+
+    report = runner._autonomous_queue_replenish_action(expected_key, generation)
+
+    assert promoted == [3010]
+    assert report.startswith("DONE:")
+    assert "selected_issues=3010" in report
+
+
+def test_autonomous_queue_replenish_action_keeps_generic_replenisher_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issue = {
+        "number": 5010,
+        "state": "OPEN",
+        "title": "generic backlog task",
+        "body": "schema: skeleton.runner_task.v1\nIdempotency Key: generic-route-test",
+        "labels": [{"name": runner.LABEL_AGENT_TASK}],
+    }
+    generation = "initial"
+    expected_key = runner._autonomous_queue_occurrence_key([issue], generation)
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        runner,
+        "_autonomous_queue_eligible_snapshot",
+        lambda: ([], [], [issue], [issue]),
+    )
+    monkeypatch.setattr(runner, "get_ready_issues", lambda: [issue])
+
+    def fake_replenish(body: str) -> str:
+        calls.append(body)
+        return runner._maintenance_report(
+            "DONE",
+            runner.REPLENISH_RUNNER_QUEUE,
+            ["ready_depth_before=0", "selected_count=1", "selected_issues=5010"],
+            "met",
+        )
+
+    monkeypatch.setattr(runner, "replenish_runner_queue", fake_replenish)
+    monkeypatch.setattr(
+        runner,
+        "_promote_queue_replenisher_issue",
+        lambda _issue: (_ for _ in ()).throw(AssertionError("generic path must stay unchanged")),
+    )
+
+    report = runner._autonomous_queue_replenish_action(expected_key, generation)
+
+    assert calls == [""]
+    assert report.startswith("DONE:")
