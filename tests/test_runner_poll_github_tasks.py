@@ -19382,3 +19382,110 @@ privacy_boundary: PUBLIC_SAFE_REPOSITORY_ONLY
     assert code == 1
     assert "PRIMARY_LEFT_WORKTREE_DIRTY" in output
     assert [call[0] for call in calls] == ["codex", "git"]
+
+
+
+def test_run_now_intake_selects_registered_runtime_maintenance_without_codegen_contract() -> None:
+    issue = {
+        "number": 2997,
+        "state": "OPEN",
+        "title": "maintenance run now",
+        "body": "\n".join(
+            (
+                f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+                f"Maintenance Task ID: {runner.CHECK_SKELETON_FRESHNESS}",
+                f"Repository: {runner.REPO}",
+                f"Expected Main SHA: {HEAD_SHA}",
+                "Privacy Boundary: PUBLIC_SAFE_REPOSITORY_ONLY",
+            )
+        ),
+        "labels": [
+            {"name": runner.LABEL_AGENT_TASK},
+            {"name": runner.LABEL_RUN_NOW},
+            {"name": "risk:green"},
+            {"name": runner.LABEL_PRIORITY_1},
+        ],
+    }
+
+    assert runner._queue_replenisher_allowed_files(issue) == frozenset()
+    assert not runner._queue_replenisher_issue_is_discoverable(issue)
+
+    selected = runner.select_run_now_queue_intake_targets([], [issue])
+
+    assert [item["number"] for item in selected] == [2997]
+
+
+def test_run_now_intake_does_not_bypass_unknown_maintenance_task() -> None:
+    issue = {
+        "number": 3997,
+        "state": "OPEN",
+        "title": "unknown maintenance run now",
+        "body": "\n".join(
+            (
+                f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+                "Maintenance Task ID: unknown_queue_repair_task",
+                f"Repository: {runner.REPO}",
+                "Privacy Boundary: PUBLIC_SAFE_REPOSITORY_ONLY",
+            )
+        ),
+        "labels": [
+            {"name": runner.LABEL_AGENT_TASK},
+            {"name": runner.LABEL_RUN_NOW},
+        ],
+    }
+
+    selected = runner.select_run_now_queue_intake_targets([], [issue])
+
+    assert selected == []
+
+
+
+def _run_now_maintenance_issue_for_guard_test(
+    number: int,
+    *,
+    labels: tuple[str, ...] = (),
+    idempotency_key: str = "maintenance-guard-intent",
+) -> dict[str, object]:
+    return {
+        "number": number,
+        "state": "OPEN",
+        "title": "maintenance guard test",
+        "body": "\n".join(
+            (
+                f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+                f"Maintenance Task ID: {runner.CHECK_SKELETON_FRESHNESS}",
+                f"Repository: {runner.REPO}",
+                f"Expected Main SHA: {HEAD_SHA}",
+                "Privacy Boundary: PUBLIC_SAFE_REPOSITORY_ONLY",
+                f"Idempotency Key: {idempotency_key}",
+            )
+        ),
+        "labels": [
+            {"name": runner.LABEL_AGENT_TASK},
+            {"name": runner.LABEL_RUN_NOW},
+            *({"name": label} for label in labels),
+        ],
+    }
+
+
+def test_run_now_maintenance_route_preserves_running_needs_operator_and_intent_guards() -> None:
+    running = _run_now_maintenance_issue_for_guard_test(4101, labels=(runner.LABEL_RUNNING,))
+    needs_operator = _run_now_maintenance_issue_for_guard_test(
+        4102, labels=("runner:needs-operator",)
+    )
+    selected = runner.select_run_now_queue_intake_targets([], [running, needs_operator])
+    assert selected == []
+
+    ready_duplicate = _run_now_maintenance_issue_for_guard_test(
+        4103,
+        labels=(runner.LABEL_READY,),
+        idempotency_key="same-maintenance-intent",
+    )
+    candidate_duplicate = _run_now_maintenance_issue_for_guard_test(
+        4104,
+        idempotency_key="same-maintenance-intent",
+    )
+    selected = runner.select_run_now_queue_intake_targets(
+        [ready_duplicate], [candidate_duplicate]
+    )
+    assert selected == []
