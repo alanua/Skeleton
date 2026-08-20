@@ -1,0 +1,27 @@
+{
+  "schema": "skeleton.machine_identity_public_manifest.v1",
+  "identities": [
+    {
+      "machine_id": "home_edge_01",
+      "key_id": "ssh-ed25519-v1",
+      "public_fingerprint": "SHA256:Y3wuinZp2flzSczqdMEsY57xkubEVMDnbUFB0kOgVRM",
+      "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINO5r5+C7u6FznU76MVAt5C0X3Fu4tV4yx8XlZELjZ47 skeleton-machine:home_edge_01:v1",
+      "trust_state": "TRUSTED_OVERLAP"
+    },
+    {
+      "machine_id": "hetzner_runner",
+      "key_id": "ssh-ed25519-v1",
+      "public_fingerprint": "SHA256:Tyex7rc0023EzfGkwq2xwl+MiWCWFwSKEBDt2zf2+wM",
+      "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAzECloV/LCAKnA7npCM7lcrV9BAPFk8UrNtQs4MM7JF skeleton-machine:hetzner_runner:v1",
+      "trust_state": "TRUSTED_OVERLAP"
+    },
+    {
+      "machine_id": "redmi_12",
+      "key_id": "ssh-ed25519-v1",
+      "public_fingerprint": "SHA256:dlYqaZJb0Isja1JYO0jUskEKDr0/oeZgXSI9t7dFTmU",
+      "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMmAurqjAZ+QHvwk1hE6flXbDBun4CaT2sE5MGZEiA23 skeleton-machine:redmi_12:v1",
+      "trust_state": "TRUSTED_OVERLAP"
+    }
+  ],
+  "private_material": false
+}
