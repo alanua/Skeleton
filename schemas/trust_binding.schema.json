@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.skeleton.local/trust_binding.schema.json",
+  "title": "Skeleton Trust Binding",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["identity", "trust_state", "allowed_transports", "allowed_capabilities", "state_changed_at"],
+  "properties": {
+    "identity": {"$ref": "machine_identity.schema.json"},
+    "trust_state": {"enum": ["PENDING", "TRUSTED", "REVOKED", "ROTATING"]},
+    "allowed_transports": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[a-z][a-z0-9_.:-]{1,95}$"}
+    },
+    "allowed_capabilities": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[a-z][a-z0-9_.:-]{1,95}$"}
+    },
+    "state_changed_at": {"type": "string", "format": "date-time"}
+  }
+}
