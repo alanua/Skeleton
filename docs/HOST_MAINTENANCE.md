@@ -29,6 +29,8 @@ Supported commands:
 - `worktree_quarantine_clean_stale`
 - `worktree_prune`
 - `poller_status`
+- `windows_bootstrap_audit`
+- `windows_bootstrap_prepare_one_link`
 
 The packet repository must be `alanua/Skeleton`. The default worktree root is
 `/home/agent/agent-dev/worktrees/skeleton`, and candidate paths must resolve to
@@ -55,6 +57,31 @@ Host-changing commands require `apply: true` in the packet, and that guard lives
 in `host_maintenance.py`. The transport does not add another execution surface:
 it only reads one packet, calls the bounded executor, writes JSON, and moves the
 packet to `done/` or `failed/`.
+
+Windows bootstrap starts with `windows_bootstrap_audit`. That command is always
+read-only, ignores `apply: true`, creates no private artifact, and reports only
+that owner approval is required for a one-link enrollment handoff.
+
+`windows_bootstrap_prepare_one_link` is the protected runtime action for
+preparing one private HTTPS enrollment link. It requires:
+
+```yaml
+command: windows_bootstrap_prepare_one_link
+repository: alanua/Skeleton
+apply: true
+owner_approval: windows_bootstrap_one_link_v1
+enrollment_id: win-target-01
+```
+
+The command writes the actual HTTPS link only to a `0600` private runtime
+artifact under the configured private host-maintenance root. The public JSON
+report contains only the enrollment id, private artifact reference, SHA-256
+hashes, expiry time, status tokens, and `target_enrolled: false`. It must not
+include the HTTPS link, the one-use code, target host identifiers, passwords,
+keys, browser bypass instructions, SSH exposure, or any shell command supplied
+by an issue. The owner must manually open the private HTTPS link on the intended
+Windows target and verify the target fingerprint out of band before enrollment
+is considered complete.
 
 Candidates are skipped when they are missing, are not Git checkouts, have a
 wrong `origin`, are dirty, or are not stale. Git inspection is limited to fixed
@@ -84,6 +111,13 @@ The transport returns exit code 0 for `done` and `no-op`, and exit code 2 for
 python -m tools.skeleton_core.host_maintenance_transport \
   --transport-root /home/agent/agent-dev/host_maintenance \
   --worktree-root /home/agent/agent-dev/worktrees/skeleton
+```
+
+The one-link command additionally accepts an explicit private HTTPS base URL:
+
+```bash
+python -m tools.skeleton_core.host_maintenance_transport \
+  --windows-bootstrap-base-url https://your-private-tailnet-name/windows
 ```
 
 This executor must not run `sudo`, accept arbitrary shell commands, remove

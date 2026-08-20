@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
+import secrets
 import subprocess
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
@@ -15,6 +17,9 @@ import yaml
 DEFAULT_REPOSITORY = "alanua/Skeleton"
 DEFAULT_WORKTREE_ROOT = Path("/home/agent/agent-dev/worktrees/skeleton")
 DEFAULT_REPORT_PATH = Path("var/host_maintenance_report.json")
+DEFAULT_PRIVATE_RUNTIME_ROOT = Path("/home/agent/.local/share/skeleton/host-maintenance")
+WINDOWS_BOOTSTRAP_APPROVAL = "windows_bootstrap_one_link_v1"
+WINDOWS_BOOTSTRAP_BASE_URL = "https://skeleton-private-enroll.example.invalid/windows"
 QUARANTINE_DIRNAME = ".quarantine"
 ALLOWED_COMMANDS = frozenset(
     {
@@ -22,10 +27,15 @@ ALLOWED_COMMANDS = frozenset(
         "worktree_quarantine_clean_stale",
         "worktree_prune",
         "poller_status",
+        "windows_bootstrap_audit",
+        "windows_bootstrap_prepare_one_link",
     }
 )
-ALLOWED_PACKET_FIELDS = frozenset({"command", "repository", "apply", "stale_days", "candidates"})
+ALLOWED_PACKET_FIELDS = frozenset(
+    {"command", "repository", "apply", "stale_days", "candidates", "enrollment_id", "owner_approval"}
+)
 PACKET_SUFFIXES = frozenset({".yaml", ".yml", ".json"})
+SAFE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{2,63}$")
 BLOCKED_TEXT = (
     "secret",
     "password",
@@ -71,9 +81,12 @@ def process_host_maintenance(
     *,
     report_path: str | Path = DEFAULT_REPORT_PATH,
     worktree_root: str | Path = DEFAULT_WORKTREE_ROOT,
+    private_runtime_root: str | Path = DEFAULT_PRIVATE_RUNTIME_ROOT,
+    windows_bootstrap_base_url: str = WINDOWS_BOOTSTRAP_BASE_URL,
     now: datetime | None = None,
 ) -> HostMaintenanceReport:
     root = Path(worktree_root)
+    private_root = Path(private_runtime_root)
     report_file = Path(report_path)
     try:
         packet = _load_packet(Path(packet_path))
@@ -96,6 +109,9 @@ def process_host_maintenance(
             apply,
             root,
             candidates,
+            packet=packet,
+            private_runtime_root=private_root,
+            windows_bootstrap_base_url=windows_bootstrap_base_url,
             stale_days=stale_days,
             now=now or datetime.now(UTC),
         )
@@ -150,6 +166,13 @@ def _optional_int(packet: dict[str, Any], key: str, default: int) -> int:
     return value
 
 
+def _optional_safe_id(packet: dict[str, Any], key: str, default: str) -> str:
+    value = packet.get(key, default)
+    if not isinstance(value, str) or not SAFE_ID_RE.fullmatch(value):
+        raise HostMaintenanceError(f"{key} must match {SAFE_ID_RE.pattern}")
+    return value
+
+
 def _candidate_paths(packet: dict[str, Any], worktree_root: Path) -> list[Path]:
     raw_candidates = packet.get("candidates")
     if raw_candidates is None:
@@ -199,6 +222,9 @@ def _execute_command(
     worktree_root: Path,
     candidates: list[Path],
     *,
+    packet: dict[str, Any],
+    private_runtime_root: Path,
+    windows_bootstrap_base_url: str,
     stale_days: int,
     now: datetime,
 ) -> HostMaintenanceReport:
@@ -211,6 +237,37 @@ def _execute_command(
             worktree_root=str(worktree_root),
             candidates=[],
             actions=[{"action": "poller_status", "status": "not_configured"}],
+        )
+    if command == "windows_bootstrap_audit":
+        enrollment_id = _optional_safe_id(packet, "enrollment_id", "windows-bootstrap")
+        return HostMaintenanceReport(
+            status="ok",
+            command=command,
+            repository=repository,
+            apply=False,
+            worktree_root=str(worktree_root),
+            candidates=[],
+            actions=[
+                {
+                    "action": "windows_bootstrap_audit",
+                    "status": "read_only_ok",
+                    "enrollment_id": enrollment_id,
+                    "next_action": "owner_approval_required_for_one_link",
+                    "transport": "private_https_one_link",
+                    "runtime_mutation": False,
+                }
+            ],
+        )
+    if command == "windows_bootstrap_prepare_one_link":
+        return _prepare_windows_bootstrap_one_link(
+            command,
+            repository,
+            apply,
+            worktree_root,
+            packet,
+            private_runtime_root=private_runtime_root,
+            base_url=windows_bootstrap_base_url,
+            now=now,
         )
 
     inspected = [_inspect_candidate(path, repository, stale_days=stale_days, now=now) for path in candidates]
@@ -230,6 +287,77 @@ def _execute_command(
 
     actions = _quarantine_actions(worktree_root, inspected, apply)
     return HostMaintenanceReport("ok", command, repository, apply, str(worktree_root), inspected, actions)
+
+
+def _prepare_windows_bootstrap_one_link(
+    command: str,
+    repository: str,
+    apply: bool,
+    worktree_root: Path,
+    packet: dict[str, Any],
+    *,
+    private_runtime_root: Path,
+    base_url: str,
+    now: datetime,
+) -> HostMaintenanceReport:
+    if apply is not True:
+        raise HostMaintenanceError("windows bootstrap one-link generation requires apply=true")
+    owner_approval = _require_string(packet, "owner_approval")
+    if owner_approval != WINDOWS_BOOTSTRAP_APPROVAL:
+        raise HostMaintenanceError("owner_approval is not valid for windows bootstrap one-link generation")
+    enrollment_id = _optional_safe_id(packet, "enrollment_id", "windows-bootstrap")
+    base_url = _validate_private_https_base_url(base_url)
+
+    nonce = secrets.token_urlsafe(32)
+    link = f"{base_url.rstrip('/')}/{enrollment_id}?code={nonce}"
+    artifact_root = private_runtime_root / "windows-bootstrap" / enrollment_id
+    _ensure_private_directory(artifact_root)
+    artifact_path = _unique_private_artifact(artifact_root / "one-link.json")
+    created_at = now.isoformat().replace("+00:00", "Z")
+    expires_at = (now + timedelta(minutes=30)).isoformat().replace("+00:00", "Z")
+    link_hash = _sha256_text(link)
+    code_hash = _sha256_text(nonce)
+    artifact = {
+        "schema": "skeleton.windows_bootstrap_one_link.private.v1",
+        "status": "prepared_not_enrolled",
+        "enrollment_id": enrollment_id,
+        "created_at": created_at,
+        "expires_at": expires_at,
+        "owner_approval": owner_approval,
+        "private_https_link": link,
+        "link_sha256": link_hash,
+        "code_sha256": code_hash,
+        "instructions": [
+            "Open this HTTPS link manually on the intended Windows target.",
+            "Do not paste the link into public issues, repository files, logs, or PR receipts.",
+            "Enrollment is not complete until the owner verifies the target fingerprint out of band.",
+        ],
+    }
+    _write_private_artifact(artifact_path, artifact)
+    return HostMaintenanceReport(
+        status="ok",
+        command=command,
+        repository=repository,
+        apply=apply,
+        worktree_root=str(worktree_root),
+        candidates=[],
+        actions=[
+            {
+                "action": "windows_bootstrap_prepare_one_link",
+                "status": "prepared_not_enrolled",
+                "enrollment_id": enrollment_id,
+                "owner_approval": owner_approval,
+                "private_artifact_ref": f"windows-bootstrap/{enrollment_id}/{artifact_path.name}",
+                "link_sha256": link_hash,
+                "code_sha256": code_hash,
+                "expires_at": expires_at,
+                "transport": "private_https_one_link",
+                "public_receipt_contains_link": False,
+                "target_enrolled": False,
+                "next_action": "owner_open_link_on_target_and_verify_fingerprint",
+            }
+        ],
+    )
 
 
 def _inspect_candidate(
@@ -332,6 +460,45 @@ def _unique_destination(destination: Path) -> Path:
         if not candidate.exists():
             return candidate
     raise HostMaintenanceError(f"could not allocate quarantine destination for {destination.name}")
+
+
+def _validate_private_https_base_url(base_url: str) -> str:
+    if not isinstance(base_url, str) or not base_url.startswith("https://"):
+        raise HostMaintenanceError("windows bootstrap base URL must be HTTPS")
+    lowered = base_url.lower()
+    if any(blocked in lowered for blocked in ("localhost", "127.0.0.1", "0.0.0.0", "http://")):
+        raise HostMaintenanceError("windows bootstrap base URL must be a private HTTPS route, not loopback or HTTP")
+    if any(separator in base_url for separator in (" ", "\n", "\r", "\t")):
+        raise HostMaintenanceError("windows bootstrap base URL contains unsafe whitespace")
+    return base_url
+
+
+def _unique_private_artifact(destination: Path) -> Path:
+    if not destination.exists():
+        return destination
+    for index in range(1, 1000):
+        candidate = destination.with_name(f"{destination.stem}-{index}{destination.suffix}")
+        if not candidate.exists():
+            return candidate
+    raise HostMaintenanceError(f"could not allocate private artifact destination for {destination.name}")
+
+
+def _write_private_artifact(artifact_path: Path, artifact: dict[str, Any]) -> None:
+    _ensure_private_directory(artifact_path.parent)
+    artifact_path.write_text(json.dumps(artifact, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    artifact_path.chmod(0o600)
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _ensure_private_directory(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    try:
+        path.chmod(0o700)
+    except FileNotFoundError as exc:
+        raise HostMaintenanceError(f"private artifact directory is unavailable: {path}") from exc
 
 
 def _without_none(value: dict[str, Any]) -> dict[str, Any]:
