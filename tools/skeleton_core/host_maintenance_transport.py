@@ -11,6 +11,7 @@ from tools.skeleton_core.host_maintenance import HostMaintenanceReport, process_
 
 DEFAULT_TRANSPORT_ROOT = Path("/home/agent/agent-dev/host_maintenance")
 DEFAULT_WORKTREE_ROOT = Path("/home/agent/agent-dev/worktrees/skeleton")
+DEFAULT_PRIVATE_RUNTIME_ROOT = Path("/home/agent/.local/share/skeleton/host-maintenance")
 INBOX_DIRNAME = "inbox"
 DONE_DIRNAME = "done"
 FAILED_DIRNAME = "failed"
@@ -45,6 +46,8 @@ def poll_once(
     transport_root: str | Path = DEFAULT_TRANSPORT_ROOT,
     *,
     worktree_root: str | Path = DEFAULT_WORKTREE_ROOT,
+    private_runtime_root: str | Path = DEFAULT_PRIVATE_RUNTIME_ROOT,
+    windows_bootstrap_base_url: str | None = None,
     report_path: str | Path | None = None,
 ) -> HostMaintenanceTransportReport:
     root = Path(transport_root)
@@ -79,6 +82,8 @@ def poll_once(
             packet,
             report_path=report_file,
             worktree_root=worktree_root,
+            private_runtime_root=private_runtime_root,
+            **({"windows_bootstrap_base_url": windows_bootstrap_base_url} if windows_bootstrap_base_url else {}),
         )
         destination_dir = done_dir if processor_report.status == "ok" else failed_dir
         status = "done" if processor_report.status == "ok" else "failed"
@@ -144,10 +149,26 @@ def main(argv: list[str] | None = None) -> int:
         default=str(DEFAULT_WORKTREE_ROOT),
         help="Skeleton issue worktree root. Defaults to /home/agent/agent-dev/worktrees/skeleton.",
     )
+    parser.add_argument(
+        "--private-runtime-root",
+        default=str(DEFAULT_PRIVATE_RUNTIME_ROOT),
+        help="Private host-maintenance artifact root. Defaults under /home/agent/.local/share/skeleton.",
+    )
+    parser.add_argument(
+        "--windows-bootstrap-base-url",
+        default=None,
+        help="Private HTTPS enrollment base URL for owner-approved Windows one-link preparation.",
+    )
     parser.add_argument("--report-path", default=None, help="Optional compact JSON report path.")
     args = parser.parse_args(argv)
 
-    report = poll_once(args.transport_root, worktree_root=args.worktree_root, report_path=args.report_path)
+    report = poll_once(
+        args.transport_root,
+        worktree_root=args.worktree_root,
+        private_runtime_root=args.private_runtime_root,
+        windows_bootstrap_base_url=args.windows_bootstrap_base_url,
+        report_path=args.report_path,
+    )
     print(json.dumps(report.compact(), sort_keys=True, separators=(",", ":")))
     return 0 if report.status in {"done", "no-op"} else 2
 

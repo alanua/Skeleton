@@ -221,3 +221,114 @@ def test_poller_status_is_bounded_read_only_report(tmp_path: Path) -> None:
     assert report.status == "ok"
     assert report.actions == [{"action": "poller_status", "status": "not_configured"}]
     assert read_report(report_path)["actions"] == [{"action": "poller_status", "status": "not_configured"}]
+
+
+def test_windows_bootstrap_audit_is_read_only_first_step(tmp_path: Path) -> None:
+    packet_path = write_packet(
+        tmp_path,
+        command="windows_bootstrap_audit",
+        apply=True,
+        enrollment_id="win-target-01",
+    )
+
+    report = process_host_maintenance(
+        packet_path,
+        report_path=tmp_path / "report.json",
+        worktree_root=tmp_path / "worktrees" / "skeleton",
+        private_runtime_root=tmp_path / "private",
+        now=NOW,
+    )
+
+    assert report.status == "ok"
+    assert report.apply is False
+    assert report.actions == [
+        {
+            "action": "windows_bootstrap_audit",
+            "status": "read_only_ok",
+            "enrollment_id": "win-target-01",
+            "next_action": "owner_approval_required_for_one_link",
+            "transport": "private_https_one_link",
+            "runtime_mutation": False,
+        }
+    ]
+    assert not (tmp_path / "private").exists()
+
+
+def test_windows_bootstrap_one_link_requires_exact_owner_approval(tmp_path: Path) -> None:
+    packet_path = write_packet(
+        tmp_path,
+        command="windows_bootstrap_prepare_one_link",
+        apply=True,
+        enrollment_id="win-target-01",
+        owner_approval="wrong",
+    )
+
+    report = process_host_maintenance(
+        packet_path,
+        report_path=tmp_path / "report.json",
+        worktree_root=tmp_path / "worktrees" / "skeleton",
+        private_runtime_root=tmp_path / "private",
+        now=NOW,
+    )
+
+    assert report.status == "blocked"
+    assert "owner_approval is not valid" in str(report.blocked_reason)
+    assert not (tmp_path / "private").exists()
+
+
+def test_windows_bootstrap_one_link_writes_private_artifact_and_redacted_public_report(tmp_path: Path) -> None:
+    packet_path = write_packet(
+        tmp_path,
+        command="windows_bootstrap_prepare_one_link",
+        apply=True,
+        enrollment_id="win-target-01",
+        owner_approval="windows_bootstrap_one_link_v1",
+    )
+    report_path = tmp_path / "report.json"
+
+    report = process_host_maintenance(
+        packet_path,
+        report_path=report_path,
+        worktree_root=tmp_path / "worktrees" / "skeleton",
+        private_runtime_root=tmp_path / "private",
+        windows_bootstrap_base_url="https://tailnet.example.invalid/windows",
+        now=NOW,
+    )
+
+    assert report.status == "ok"
+    action = report.actions[0]
+    assert action["status"] == "prepared_not_enrolled"
+    assert action["public_receipt_contains_link"] is False
+    assert action["target_enrolled"] is False
+    public_report = read_report(report_path)
+    public_blob = json.dumps(public_report, sort_keys=True)
+    assert "tailnet.example.invalid" not in public_blob
+    assert "private_https_link" not in public_blob
+
+    artifact = tmp_path / "private" / action["private_artifact_ref"]
+    private_payload = json.loads(artifact.read_text(encoding="utf-8"))
+    assert private_payload["private_https_link"].startswith("https://tailnet.example.invalid/windows/win-target-01?code=")
+    assert private_payload["link_sha256"] == action["link_sha256"]
+    assert private_payload["status"] == "prepared_not_enrolled"
+    assert oct(artifact.stat().st_mode & 0o777) == "0o600"
+
+
+def test_windows_bootstrap_one_link_blocks_without_apply(tmp_path: Path) -> None:
+    packet_path = write_packet(
+        tmp_path,
+        command="windows_bootstrap_prepare_one_link",
+        apply=False,
+        enrollment_id="win-target-01",
+        owner_approval="windows_bootstrap_one_link_v1",
+    )
+
+    report = process_host_maintenance(
+        packet_path,
+        report_path=tmp_path / "report.json",
+        worktree_root=tmp_path / "worktrees" / "skeleton",
+        private_runtime_root=tmp_path / "private",
+        now=NOW,
+    )
+
+    assert report.status == "blocked"
+    assert "requires apply=true" in str(report.blocked_reason)
