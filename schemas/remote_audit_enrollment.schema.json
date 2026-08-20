@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://skeleton.local/schemas/remote_audit_enrollment.schema.json",
+  "title": "Skeleton Remote Audit Enrollment",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "node_id",
+    "audit_user",
+    "transport",
+    "machine_identity_public_key",
+    "machine_identity_fingerprint",
+    "registered_at"
+  ],
+  "properties": {
+    "schema": { "const": "skeleton.home_edge.remote_audit_enrollment.v1" },
+    "node_id": { "const": "home-edge-01" },
+    "audit_user": { "const": "skeleton-audit" },
+    "transport": { "const": "tailscale_openssh" },
+    "machine_identity_public_key": {
+      "type": "string",
+      "pattern": "^ssh-ed25519 [A-Za-z0-9+/=]+( .*)?$"
+    },
+    "machine_identity_fingerprint": {
+      "type": "string",
+      "pattern": "^SHA256:[A-Za-z0-9+/=]{20,80}$"
+    },
+    "registered_at": { "type": "string", "format": "date-time" },
+    "controller_known_hosts_ref": {
+      "type": "string",
+      "description": "Private controller-side reference only; never a public target address."
+    }
+  }
+}
