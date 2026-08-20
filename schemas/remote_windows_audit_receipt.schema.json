@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://skeleton.local/schemas/remote_windows_audit_receipt.schema.json",
+  "title": "Skeleton Remote Windows Audit Public Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "operation",
+    "node_id",
+    "machine_identity_hash",
+    "status",
+    "verdict",
+    "confidence",
+    "reasons",
+    "evidence",
+    "collected_at",
+    "executor_receipt_hash",
+    "private_evidence_sha256",
+    "privacy_boundary"
+  ],
+  "properties": {
+    "schema": { "const": "skeleton.home_edge.remote_windows_audit.receipt.v1" },
+    "operation": { "const": "read_only_system_audit_v1" },
+    "node_id": { "const": "home-edge-01" },
+    "machine_identity_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "status": { "enum": ["ok", "failed", "timeout", "cancelled", "blocked"] },
+    "verdict": { "enum": ["KEEP", "UPGRADE", "REINSTALL", "REPAIR", "RETIRE"] },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "reasons": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string" }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["windows_family", "build_number", "architecture", "collection_scope", "excluded_scope"],
+      "properties": {
+        "windows_family": { "enum": ["Windows 10", "Windows 11", "unsupported_or_unknown"] },
+        "build_number": { "type": ["string", "integer", "null"] },
+        "architecture": { "type": ["string", "null"] },
+        "memory_gb": { "type": "number", "minimum": 0 },
+        "secure_boot": { "type": ["boolean", "null"] },
+        "tpm_present": { "type": ["boolean", "null"] },
+        "defender_enabled": { "type": ["boolean", "null"] },
+        "openssh_status": { "type": ["string", "null"] },
+        "tailscale_status": { "type": ["string", "null"] },
+        "collection_scope": { "type": "array", "items": { "type": "string" } },
+        "excluded_scope": {
+          "type": "array",
+          "contains": { "const": "personal_files" },
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "collected_at": { "type": ["string", "null"], "format": "date-time" },
+    "executor_receipt_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "private_evidence_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "privacy_boundary": {
+      "const": "PUBLIC_SAFE_BOOTSTRAP_CODE / PRIVATE_NODE_IDENTITY_AND_EVIDENCE_ONLY"
+    }
+  }
+}
