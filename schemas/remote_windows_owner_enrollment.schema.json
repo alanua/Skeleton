@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://skeleton.local/schemas/remote_windows_owner_enrollment.schema.json",
+  "title": "Skeleton Remote Windows Owner Enrollment Payload",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "enrollment_id",
+    "audit_user",
+    "transport",
+    "controller_public_key"
+  ],
+  "properties": {
+    "schema": { "const": "skeleton.home_edge.remote_windows_audit.owner_enrollment.v1" },
+    "enrollment_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{2,63}$"
+    },
+    "audit_user": { "const": "skeleton-audit" },
+    "transport": { "const": "tailscale_openssh" },
+    "controller_public_key": {
+      "type": "string",
+      "pattern": "^ssh-ed25519 [A-Za-z0-9+/=]+( .*)?$"
+    },
+    "token_lifecycle": {
+      "const": "no_automatic_expiry_manual_rotation_or_successful_enrollment_only"
+    },
+    "link_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  }
+}

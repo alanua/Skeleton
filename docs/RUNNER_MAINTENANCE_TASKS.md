@@ -89,6 +89,28 @@ OpenSSL parsing and rejection of private-key PEM markers. The report must never
 include the private key, private filesystem paths, environment values, host
 addresses, unrelated configuration, or probe plaintext.
 
+`windows_bootstrap_audit` and `windows_bootstrap_prepare_one_link` are the
+bounded host-maintenance commands for remote Windows bootstrap preparation.
+The audit command is the mandatory read-only first step and creates no private
+artifact. The one-link command is the protected runtime action and requires
+`apply: true` plus exact owner approval:
+
+```text
+Owner Approval: windows_bootstrap_one_link_v1
+```
+
+It prepares one private HTTPS enrollment link for Viber/private-channel owner
+handoff in a `0600` private runtime artifact and reports only redacted public
+metadata: enrollment id, private artifact reference, SHA-256 hashes,
+no-automatic-expiry lifecycle marker, delivery-channel token,
+`prepared_not_enrolled`, `target_enrolled=false`, and next-action tokens. The
+private HTTPS endpoint must serve the owner enrollment
+payload described by `schemas/remote_windows_owner_enrollment.schema.json`.
+It must not enroll a live target by itself, include the link or enrollment code
+in public receipts, add automatic expiry/TTL/`EXPIRED` semantics, expose SSH,
+use password SSH, bypass browser security, accept issue-supplied shell, or
+perform silent execution on the Windows target.
+
 `deploy_private_static_site` receives, decrypts, validates, and publishes the
 private static site package for one prepared artifact. It requires:
 
