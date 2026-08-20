@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.gewerbe_bauclock_public_projection.schema.json",
+  "title": "Gewerbe BauClock Public-Safe Projection",
+  "type": "object",
+  "required": [
+    "schema",
+    "namespace",
+    "source_system",
+    "canonical_ref",
+    "canonical_revision",
+    "source_hash",
+    "freshness",
+    "aggregate_counts",
+    "period_buckets",
+    "source_hashes",
+    "authoritative",
+    "projection_hash"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "skeleton.finance.gewerbe_bauclock_public_projection.v1"},
+    "namespace": {"const": "gewerbe"},
+    "source_system": {"const": "bauclock"},
+    "canonical_ref": {"$ref": "#/$defs/safe_token"},
+    "canonical_revision": {"type": "integer", "minimum": 1, "maximum": 1000000000},
+    "source_hash": {"$ref": "#/$defs/sha256"},
+    "freshness": {"$ref": "#/$defs/freshness"},
+    "aggregate_counts": {"$ref": "#/$defs/aggregate_counts"},
+    "period_buckets": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "items": {"$ref": "#/$defs/period_bucket"}
+    },
+    "source_hashes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 257,
+      "items": {"$ref": "#/$defs/sha256"}
+    },
+    "authoritative": {"const": false},
+    "projection_hash": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "safe_token": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 256000000
+    },
+    "token_counts": {
+      "type": "object",
+      "propertyNames": {"$ref": "#/$defs/safe_token"},
+      "additionalProperties": {"$ref": "#/$defs/count"}
+    },
+    "freshness": {
+      "type": "object",
+      "required": ["generated_at", "fresh_until", "stale"],
+      "additionalProperties": false,
+      "properties": {
+        "generated_at": {"$ref": "#/$defs/timestamp"},
+        "fresh_until": {"$ref": "#/$defs/timestamp"},
+        "stale": {"type": "boolean"}
+      }
+    },
+    "aggregate_counts": {
+      "type": "object",
+      "required": ["period_bucket_count", "record_count", "document_link_count"],
+      "additionalProperties": false,
+      "properties": {
+        "period_bucket_count": {"type": "integer", "minimum": 1, "maximum": 256},
+        "record_count": {"$ref": "#/$defs/count"},
+        "document_link_count": {"$ref": "#/$defs/count"}
+      }
+    },
+    "period_bucket": {
+      "type": "object",
+      "required": [
+        "period_bucket",
+        "category_counts",
+        "status_counts",
+        "record_count",
+        "document_link_count",
+        "source_hashes"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "period_bucket": {"type": "string", "pattern": "^20[0-9]{2}-(0[1-9]|1[0-2])$"},
+        "category_counts": {"$ref": "#/$defs/token_counts"},
+        "status_counts": {"$ref": "#/$defs/token_counts"},
+        "record_count": {"$ref": "#/$defs/count"},
+        "document_link_count": {"$ref": "#/$defs/count"},
+        "source_hashes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 257,
+          "items": {"$ref": "#/$defs/sha256"}
+        }
+      }
+    }
+  }
+}
