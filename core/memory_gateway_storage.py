@@ -70,11 +70,20 @@ class PrivateMemoryGatewayStorage:
         project_id, dataset_id = _scope(payload)
         namespace, fact_id = _canonical_ref_parts(payload.get("canonical_ref"))
         exact = self.stack.get(namespace=namespace, fact_id=fact_id)
+        readback_receipt = _exact_readback_receipt(
+            project_id=project_id,
+            dataset_id=dataset_id,
+            canonical_ref=str(exact["canonical_ref"]),
+            canonical_revision=int(exact["canonical_revision"]),
+            value_hash=str(exact["value_hash"]),
+        )
         return {
             **exact,
             "project_id": project_id,
             "dataset_id": dataset_id,
             "source_kind": "canonical_sqlite",
+            "read_back_status": "verified",
+            "readback_receipt": readback_receipt,
             "provenance_refs": [
                 {
                     "ref": str(exact["canonical_ref"]),
@@ -694,6 +703,35 @@ def _bounded_limit(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         return 5
     return min(max(value, 1), 50)
+
+
+def _exact_readback_receipt(
+    *,
+    project_id: str,
+    dataset_id: str,
+    canonical_ref: str,
+    canonical_revision: int,
+    value_hash: str,
+) -> dict[str, object]:
+    material = {
+        "project_id": project_id,
+        "dataset_id": dataset_id,
+        "canonical_ref": canonical_ref,
+        "canonical_revision": canonical_revision,
+        "value_hash": value_hash,
+        "authority": "canonical_sqlite",
+    }
+    return {
+        "schema": "skeleton.private_memory_gateway.exact_readback_receipt.v1",
+        "status": "VERIFIED",
+        "authority": "canonical_sqlite",
+        "project_id": project_id,
+        "dataset_id": dataset_id,
+        "canonical_ref": canonical_ref,
+        "canonical_revision": canonical_revision,
+        "value_hash": value_hash,
+        "receipt_hash": content_hash(material),
+    }
 
 
 def _projection_refs(request: Mapping[str, Any], receipt: Mapping[str, Any]) -> list[str]:

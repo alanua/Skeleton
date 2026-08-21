@@ -547,6 +547,9 @@ def test_private_memory_gateway_put_is_idempotent_and_exact_readback_is_authorit
     revision_after_first = stack.status()["canonical_sqlite"]["canonical_revision"]
     second = gw.execute(request("skeleton", "memory.private_mutate", mutation))["payload"]
     exact = stack.get(namespace="skeleton.notes", fact_id="gateway_note")
+    gateway_exact = gw.execute(
+        request("skeleton", "memory.private_read_exact", {"canonical_ref": "skeleton.notes:gateway_note"})
+    )["payload"]
 
     assert first["operation"] == "put"
     assert first["idempotency_classification"] == "NEW_MUTATION"
@@ -556,6 +559,23 @@ def test_private_memory_gateway_put_is_idempotent_and_exact_readback_is_authorit
     assert exact["authoritative"] is True
     assert exact["canonical_revision"] == first["canonical_revision"]
     assert exact["value"]["summary"] == "gateway exact readback"
+    assert gateway_exact["authoritative"] is True
+    assert gateway_exact["source_kind"] == "canonical_sqlite"
+    assert gateway_exact["read_back_status"] == "verified"
+    assert gateway_exact["readback_receipt"] == {
+        "schema": "skeleton.private_memory_gateway.exact_readback_receipt.v1",
+        "status": "VERIFIED",
+        "authority": "canonical_sqlite",
+        "project_id": "skeleton",
+        "dataset_id": "default",
+        "canonical_ref": "skeleton.notes:gateway_note",
+        "canonical_revision": first["canonical_revision"],
+        "value_hash": exact["value_hash"],
+        "receipt_hash": gateway_exact["readback_receipt"]["receipt_hash"],
+    }
+    assert gateway_exact["readback_receipt"]["receipt_hash"] == gw.execute(
+        request("skeleton", "memory.private_read_exact", {"canonical_ref": "skeleton.notes:gateway_note"})
+    )["payload"]["readback_receipt"]["receipt_hash"]
     serialized = json.dumps([first, second], sort_keys=True)
     assert "gateway exact readback" not in serialized
     assert str(tmp_path) not in serialized
