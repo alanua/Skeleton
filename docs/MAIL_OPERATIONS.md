@@ -28,13 +28,25 @@ list secrets, export vault data, or read unrelated values. The actual OAuth
 bundle remains in Bitwarden and is delivered only ephemerally to the Gmail
 provider.
 
+The metadata bootstrap is a fixed Bitwarden SDK v2.1.0 helper installed into an
+isolated runtime by `scripts/install_bitwarden_sdk_runtime.sh`. The canonical
+Runner invokes the helper through its pinned interpreter
+(`/opt/skeleton-bitwarden-sdk-runtime/venv/bin/python` by default), not through
+the Runner/system Python. Discovery is bounded to access-token login,
+`get_access_token_organization`, and SDK secret identifier listing for that
+organization. It matches only the code-owned identifier
+`skeleton/mail-gmail/acct:gmail-primary/oauth-readonly`, requires exactly one
+match, and writes only that opaque UUID into the encrypted
+`skeleton-secret-reference-index` credential. Public receipts contain only
+status, match count, persisted, and reason enums.
+
 Installing the worker copies code and units but leaves
 `skeleton-mail-operations.timer` disabled. Activation is a separate registered
 maintenance operation, `mail_gmail_primary_registered_activation_v1`, after
 operator-reviewed exact-main runtime sync. It performs exact-main preflight,
-binds the registered opaque reference, runs exactly one read-only Gmail canary,
-and only on canary pass enables/starts the canonical worker timer and verifies
-bounded systemd health.
+performs the metadata bootstrap, rereads the registered opaque reference, runs
+exactly one read-only Gmail canary, and only on canary pass enables/starts the
+canonical worker timer and verifies bounded systemd health.
 
 ## Operator Handoff
 

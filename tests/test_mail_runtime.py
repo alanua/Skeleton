@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -113,3 +114,18 @@ def test_explicit_fixture_mode_remains_offline_and_deterministic(tmp_path) -> No
     provider = mail_operations_worker._provider(_gmail_account(), fixture)
 
     assert isinstance(provider, StaticMailProvider)
+
+
+def test_mail_worker_systemd_unit_loads_restart_safe_encrypted_credentials() -> None:
+    unit = Path("ops/systemd/skeleton-mail-operations.service").read_text(encoding="utf-8")
+
+    assert (
+        "LoadCredentialEncrypted=bitwarden-access-token:/etc/credstore.encrypted/bitwarden-access-token"
+        in unit
+    )
+    assert (
+        "LoadCredentialEncrypted=skeleton-secret-reference-index:/etc/credstore.encrypted/skeleton-secret-reference-index"
+        in unit
+    )
+    assert "Environment=BITWARDEN_ACCESS_TOKEN" not in unit
+    assert "Environment=SKELETON_SECRET_REFERENCE_INDEX" not in unit

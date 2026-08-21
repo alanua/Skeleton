@@ -3,12 +3,17 @@ from __future__ import annotations
 from collections.abc import Mapping
 import json
 from pathlib import Path
+import re
 
 from core.secret_store import InvalidSecretReference, SecretProviderUnavailable, SecretReference
 
 
 REFERENCE_INDEX_CREDENTIAL_NAME = "skeleton-secret-reference-index"
 REFERENCE_BOOTSTRAP_REQUIRED = "REFERENCE_BOOTSTRAP_REQUIRED"
+_BITWARDEN_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
 
 
 class SecretReferenceRegistrationError(ValueError):
@@ -83,9 +88,9 @@ def _read_index_reference(
         if item.get("provider") != "bitwarden":
             raise SecretReferenceRegistrationError("REFERENCE_PROVIDER_UNSUPPORTED")
         reference_id = item.get("reference_id")
-        if not isinstance(reference_id, str):
+        if not isinstance(reference_id, str) or not _BITWARDEN_UUID_RE.fullmatch(reference_id):
             raise SecretReferenceRegistrationError("REFERENCE_INDEX_INVALID")
-        matches.append(reference_id)
+        matches.append(reference_id.lower())
 
     if not matches:
         raise SecretReferenceRegistrationError(REFERENCE_BOOTSTRAP_REQUIRED)
