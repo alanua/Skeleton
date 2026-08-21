@@ -5,12 +5,17 @@ After=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=-/etc/skeleton-family-document-intake.env
-WorkingDirectory=/home/agent/agent-dev/Skeleton
-ExecStart=/usr/bin/python3 scripts/family_document_worker.py --inbox ${SKELETON_FAMILY_DOCUMENT_INBOX} --archive ${SKELETON_FAMILY_DOCUMENT_ARCHIVE} --outbox-db ${SKELETON_FAMILY_DOCUMENT_OUTBOX_DB}
+WorkingDirectory=/opt/skeleton/current
+ExecStart=/usr/bin/python3 /opt/skeleton/current/scripts/family_document_worker.py --inbox ${SKELETON_FAMILY_DOCUMENT_INBOX} --archive ${SKELETON_FAMILY_DOCUMENT_ARCHIVE} --outbox-db ${SKELETON_FAMILY_DOCUMENT_OUTBOX_DB}
 Restart=on-failure
 RestartSec=15
 NoNewPrivileges=true
 PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/skeleton /var/log/skeleton /run/skeleton
+ProtectHome=read-only
+LockPersonality=true
+MemoryDenyWriteExecute=true
 
 [Install]
 WantedBy=multi-user.target
