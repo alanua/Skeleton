@@ -8,6 +8,8 @@ Type=oneshot
 User=agent
 Group=agent
 Environment=SKELETON_MAIL_ACCOUNT=/var/lib/skeleton/mail/account.json
+LoadCredentialEncrypted=bitwarden-access-token:/etc/skeleton/credentials/bitwarden-access-token.credential
+LoadCredentialEncrypted=skeleton-secret-reference-index:/etc/skeleton/credentials/skeleton-secret-reference-index.credential
 ExecStart=/usr/bin/python3 /opt/skeleton-mail-operations/mail_operations_worker.py --account ${SKELETON_MAIL_ACCOUNT} tick
 NoNewPrivileges=true
 PrivateTmp=true
