@@ -17,6 +17,25 @@ Gmail is the first active adapter, implemented at `adapters/gmail_mail_provider.
 The adapter normalizes Gmail message metadata and snippets; it does not send,
 delete, label, archive, or schedule mail.
 
+Gmail OAuth material is resolved only through the provider-neutral
+`CredentialBroker` with the Bitwarden backend. For `acct:gmail-primary`, runtime
+must first provide exactly one opaque Bitwarden reference in the encrypted
+systemd credential `skeleton-secret-reference-index` using schema
+`skeleton.secret_reference_index.v1`. If that registration is absent or
+ambiguous, credential resolution fails closed with `REFERENCE_BOOTSTRAP_REQUIRED`
+or `REFERENCE_REGISTRATION_AMBIGUOUS`; the worker must not query vault projects,
+list secrets, export vault data, or read unrelated values. The actual OAuth
+bundle remains in Bitwarden and is delivered only ephemerally to the Gmail
+provider.
+
+Installing the worker copies code and units but leaves
+`skeleton-mail-operations.timer` disabled. Activation is a separate registered
+maintenance operation, `mail_gmail_primary_registered_activation_v1`, after
+operator-reviewed exact-main runtime sync. It performs exact-main preflight,
+binds the registered opaque reference, runs exactly one read-only Gmail canary,
+and only on canary pass enables/starts the canonical worker timer and verifies
+bounded systemd health.
+
 ## Operator Handoff
 
 Important mail produces a Ukrainian operator packet. Telegram handoff is kept

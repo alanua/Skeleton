@@ -12,6 +12,11 @@ from core.secret_store import (
     ResolvedSecret,
     SecretResolutionContext,
     SecretResolutionError,
+    SecretProviderUnavailable,
+)
+from core.secret_reference import (
+    SecretReferenceRegistrationError,
+    registered_bitwarden_reference_from_systemd_index,
 )
 from core.service_credentials import (
     ServiceCredentialBinding,
@@ -41,6 +46,7 @@ class RegisteredEnvironmentCredential:
     action_id: str
     target_id: str
     environment_variable: str
+    bootstrap_required: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +57,7 @@ class RegisteredMaterialCredential:
     context: SecretResolutionContext
     action_id: str
     target_id: str
+    bootstrap_required: bool = False
 
 
 _RUNNER_OPENHANDS = RegisteredEnvironmentCredential(
@@ -78,6 +85,7 @@ _GMAIL_PRIMARY = RegisteredMaterialCredential(
     ),
     action_id="use-gmail-readonly-oauth",
     target_id="mail-gmail-primary-oauth-consumer",
+    bootstrap_required=True,
 )
 
 _GMAIL_SECONDARY = RegisteredMaterialCredential(
@@ -160,6 +168,7 @@ def bind_registered_environment_credential(
         target_id=spec.target_id,
         consumer=consume,
         authority_environment=authority_environment,
+        bootstrap_required=spec.bootstrap_required,
     )
     public = receipt.get("result")
     if (
@@ -208,6 +217,7 @@ def consume_registered_material_credential(
         target_id=spec.target_id,
         consumer=consume_material,
         authority_environment=authority_environment,
+        bootstrap_required=spec.bootstrap_required,
     )
 
 
@@ -221,12 +231,22 @@ def _invoke_registered_binding(
     target_id: str,
     consumer: Callable[[ResolvedSecret, ServiceCredentialBinding], None],
     authority_environment: Mapping[str, str],
+    bootstrap_required: bool,
 ) -> dict[str, object]:
     try:
-        reference = bitwarden_reference_from_systemd_credential(
-            authority_environment,
-            reference_credential_name,
-        )
+        try:
+            reference = registered_bitwarden_reference_from_systemd_index(
+                authority_environment,
+                service_id=service_id,
+                alias=alias,
+                bootstrap_required=bootstrap_required,
+                fallback_credential_name=reference_credential_name,
+            )
+        except SecretProviderUnavailable:
+            reference = bitwarden_reference_from_systemd_credential(
+                authority_environment,
+                reference_credential_name,
+            )
         binding = ServiceCredentialBinding(
             service_id=service_id,
             alias=alias,
@@ -250,6 +270,8 @@ def _invoke_registered_binding(
             "credential_use",
             {"alias": alias, "action_id": action_id},
         )
+    except SecretReferenceRegistrationError as exc:
+        raise RegisteredCredentialRuntimeError(str(exc)) from None
     except (
         CredentialBrokerError,
         CredentialRuntimeRegistrationError,
