@@ -9,6 +9,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $AuditUser = "skeleton-audit"
+$SupportUser = "skeleton-support"
 $Root = Join-Path $env:ProgramData "Skeleton\RemoteAudit"
 $IdentityRoot = Join-Path $Root "identity"
 $SshRoot = Join-Path $env:ProgramData "ssh"
@@ -114,6 +115,13 @@ function Read-OwnerEnrollment {
   if ($record.schema -ne $OwnerEnrollmentSchema) { Fail "enrollment_schema_mismatch" }
   if ($record.audit_user -and $record.audit_user -ne $AuditUser) { Fail "enrollment_audit_user_mismatch" }
   if ($record.transport -and $record.transport -ne "tailscale_openssh") { Fail "enrollment_transport_mismatch" }
+  if ($record.support_role -and $record.support_role -notin @("read_only_audit", "admin_support")) {
+    Fail "enrollment_support_role_mismatch"
+  }
+  if ($record.support_role -eq "admin_support" -and
+      $record.admin_capability_ack -ne "owner_approved_admin_capable_support_over_private_tailscale_only") {
+    Fail "admin_support_owner_ack_required"
+  }
   if (-not $record.controller_public_key) { Fail "controller_public_key_required" }
   if ($record.controller_public_key -notmatch "^ssh-ed25519\s+[A-Za-z0-9+/=]+(\s+.*)?$") {
     Fail "controller_public_key_required"
@@ -132,6 +140,12 @@ function Read-ControllerPublicKey {
   }
   $value = Read-Host "Paste the Skeleton controller ssh-ed25519 public key"
   return $value.Trim()
+}
+
+function Read-SupportRole {
+  $record = Read-OwnerEnrollment
+  if ($record -and $record.support_role) { return $record.support_role }
+  return "read_only_audit"
 }
 
 function Configure-SshPolicy {
@@ -156,6 +170,43 @@ Match User $AuditUser
 "@
   $existing = if (Test-Path -LiteralPath $config) { Get-Content -LiteralPath $config -Raw } else { "" }
   $clean = $existing -replace "(?ms)\r?\n?Match User skeleton-audit\r?\n.*?(?=\r?\nMatch |\z)", ""
+  ($clean.TrimEnd() + $block + "`r`n") | Out-File -FilePath $config -Encoding ascii -Force
+  Restart-Service -Name sshd
+}
+
+function Ensure-SupportUser {
+  $existing = Get-LocalUser -Name $SupportUser -ErrorAction SilentlyContinue
+  if (-not $existing) {
+    $password = [Convert]::ToBase64String((1..32 | ForEach-Object { Get-Random -Minimum 0 -Maximum 256 }))
+    $secure = ConvertTo-SecureString $password -AsPlainText -Force
+    New-LocalUser -Name $SupportUser -Password $secure -Description "Skeleton owner-approved admin-capable support account" -PasswordNeverExpires:$true | Out-Null
+  }
+  net user $SupportUser /active:yes | Out-Null
+  Add-LocalGroupMember -Group "Administrators" -Member $SupportUser -ErrorAction SilentlyContinue
+}
+
+function Configure-AdminSupportSshPolicy {
+  $publicKey = Read-ControllerPublicKey
+  if ($publicKey -notmatch "^ssh-ed25519\s+[A-Za-z0-9+/=]+(\s+.*)?$") {
+    Fail "controller_public_key_required"
+  }
+  $supportKeys = Join-Path $SshRoot "skeleton_support_authorized_keys"
+  $publicKey | Out-File -FilePath $supportKeys -Encoding ascii -Force
+  icacls $supportKeys /inheritance:r /grant:r "SYSTEM:(F)" "Administrators:(F)" | Out-Null
+  $config = Join-Path $SshRoot "sshd_config"
+  $block = @"
+
+Match User $SupportUser
+    PubkeyAuthentication yes
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+    AuthorizedKeysFile __PROGRAMDATA__/ssh/skeleton_support_authorized_keys
+    AllowTcpForwarding no
+    X11Forwarding no
+    PermitTunnel no
+"@
+  $existing = if (Test-Path -LiteralPath $config) { Get-Content -LiteralPath $config -Raw } else { "" }
+  $clean = $existing -replace "(?ms)\r?\n?Match User skeleton-support\r?\n.*?(?=\r?\nMatch |\z)", ""
   ($clean.TrimEnd() + $block + "`r`n") | Out-File -FilePath $config -Encoding ascii -Force
   Restart-Service -Name sshd
 }
@@ -195,6 +246,7 @@ function Uninstall-SkeletonAudit {
     Restart-Service -Name sshd -ErrorAction SilentlyContinue
   }
   Disable-LocalUser -Name $AuditUser -ErrorAction SilentlyContinue
+  Disable-LocalUser -Name $SupportUser -ErrorAction SilentlyContinue
   Write-Host "Skeleton audit access revoked. Tailscale and OpenSSH were left installed."
 }
 
@@ -210,6 +262,10 @@ Ensure-OpenSsh
 Ensure-AuditUser
 Ensure-MachineIdentity
 Configure-SshPolicy
+if ((Read-SupportRole) -eq "admin_support") {
+  Ensure-SupportUser
+  Configure-AdminSupportSshPolicy
+}
 Write-EnrollmentReceipt
 Restrict-PublicInternetSsh
 Write-Host "Skeleton Remote Audit node is ready for private fingerprint verification and registration."

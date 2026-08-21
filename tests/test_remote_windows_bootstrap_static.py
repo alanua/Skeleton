@@ -10,7 +10,11 @@ PS1 = Path("ops/remote_node/windows/bootstrap.ps1")
 def test_one_click_cmd_downloads_public_bootstrap_and_elevates_only_powershell() -> None:
     text = CMD.read_text(encoding="utf-8")
 
-    assert "raw.githubusercontent.com/alanua/Skeleton/main/ops/remote_node/windows/bootstrap.ps1" in text
+    assert (
+        "raw.githubusercontent.com/alanua/Skeleton/"
+        "9330095a1849eb5fbe342fdb3caa5bb3b265efd0/ops/remote_node/windows/bootstrap.ps1"
+    ) in text
+    assert "raw.githubusercontent.com/alanua/Skeleton/main/" not in text
     assert "Start-Process -FilePath powershell.exe -Verb RunAs" in text
     assert "SKELETON_REMOTE_AUDIT_ENROLLMENT_URL" in text
     assert "'-EnrollmentUrl',$url" in text
@@ -73,6 +77,21 @@ def test_owner_enrollment_schema_has_no_automatic_expiry() -> None:
     assert "expired" not in lowered
     assert "ttl" not in lowered
     assert "no_automatic_expiry_manual_rotation_or_successful_enrollment_only" in text
+
+
+def test_admin_support_requires_private_owner_ack_payload() -> None:
+    text = PS1.read_text(encoding="utf-8")
+    schema = Path("schemas/remote_windows_owner_enrollment.schema.json").read_text(encoding="utf-8")
+
+    assert "support_role" in schema
+    assert "admin_support" in schema
+    assert "admin_capability_ack" in schema
+    assert "owner_approved_admin_capable_support_over_private_tailscale_only" in schema
+    assert "$SupportUser = \"skeleton-support\"" in text
+    assert "admin_support_owner_ack_required" in text
+    assert "Add-LocalGroupMember -Group \"Administrators\" -Member $SupportUser" in text
+    assert "PasswordAuthentication no" in text
+    assert "AuthorizedKeysFile __PROGRAMDATA__/ssh/skeleton_support_authorized_keys" in text
 
 
 def test_machine_identity_fingerprint_is_normalized_for_controller_matching() -> None:

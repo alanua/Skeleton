@@ -19,7 +19,12 @@ DEFAULT_WORKTREE_ROOT = Path("/home/agent/agent-dev/worktrees/skeleton")
 DEFAULT_REPORT_PATH = Path("var/host_maintenance_report.json")
 DEFAULT_PRIVATE_RUNTIME_ROOT = Path("/home/agent/.local/share/skeleton/host-maintenance")
 WINDOWS_BOOTSTRAP_APPROVAL = "windows_bootstrap_one_link_v1"
+WINDOWS_SUPPORT_DIRECT_LINK_APPROVAL = "windows_support_direct_link_v1"
 WINDOWS_BOOTSTRAP_BASE_URL = "https://skeleton-private-enroll.example.invalid/windows"
+WINDOWS_BOOTSTRAP_RAW_URL = (
+    "https://raw.githubusercontent.com/alanua/Skeleton/"
+    "9330095a1849eb5fbe342fdb3caa5bb3b265efd0/ops/remote_node/windows/bootstrap.ps1"
+)
 QUARANTINE_DIRNAME = ".quarantine"
 ALLOWED_COMMANDS = frozenset(
     {
@@ -29,6 +34,7 @@ ALLOWED_COMMANDS = frozenset(
         "poller_status",
         "windows_bootstrap_audit",
         "windows_bootstrap_prepare_one_link",
+        "windows_support_prepare_direct_link",
     }
 )
 ALLOWED_PACKET_FIELDS = frozenset(
@@ -269,6 +275,17 @@ def _execute_command(
             base_url=windows_bootstrap_base_url,
             now=now,
         )
+    if command == "windows_support_prepare_direct_link":
+        return _prepare_windows_support_direct_link(
+            command,
+            repository,
+            apply,
+            worktree_root,
+            packet,
+            private_runtime_root=private_runtime_root,
+            base_url=windows_bootstrap_base_url,
+            now=now,
+        )
 
     inspected = [_inspect_candidate(path, repository, stale_days=stale_days, now=now) for path in candidates]
     if command == "worktree_audit":
@@ -360,6 +377,86 @@ def _prepare_windows_bootstrap_one_link(
                 "public_receipt_contains_link": False,
                 "target_enrolled": False,
                 "next_action": "owner_open_link_on_target_and_verify_fingerprint",
+            }
+        ],
+    )
+
+
+def _prepare_windows_support_direct_link(
+    command: str,
+    repository: str,
+    apply: bool,
+    worktree_root: Path,
+    packet: dict[str, Any],
+    *,
+    private_runtime_root: Path,
+    base_url: str,
+    now: datetime,
+) -> HostMaintenanceReport:
+    if apply is not True:
+        raise HostMaintenanceError("windows support direct-link generation requires apply=true")
+    owner_approval = _require_string(packet, "owner_approval")
+    if owner_approval != WINDOWS_SUPPORT_DIRECT_LINK_APPROVAL:
+        raise HostMaintenanceError("owner_approval is not valid for windows support direct-link generation")
+    enrollment_id = _optional_safe_id(packet, "enrollment_id", "windows-support")
+    base_url = _validate_private_https_base_url(base_url)
+
+    nonce = secrets.token_urlsafe(32)
+    direct_link = f"{base_url.rstrip('/')}/support/{enrollment_id}?code={nonce}"
+    artifact_root = private_runtime_root / "windows-support-direct-link" / enrollment_id
+    _ensure_private_directory(artifact_root)
+    artifact_path = _unique_private_artifact(artifact_root / "runtime-handoff.json")
+    created_at = now.isoformat().replace("+00:00", "Z")
+    link_hash = _sha256_text(direct_link)
+    code_hash = _sha256_text(nonce)
+    artifact = {
+        "schema": "skeleton.windows_support_runtime_handoff.private.v1",
+        "status": "prepared_not_enrolled",
+        "enrollment_id": enrollment_id,
+        "created_at": created_at,
+        "delivery_channel": "private_direct_https_link",
+        "owner_flow": "open_direct_link_on_windows_target_and_approve_uac",
+        "support_role": "admin_support",
+        "admin_capability_ack": "owner_approved_admin_capable_support_over_private_tailscale_only",
+        "private_direct_link": direct_link,
+        "link_sha256": link_hash,
+        "code_sha256": code_hash,
+        "bootstrap_raw_url": WINDOWS_BOOTSTRAP_RAW_URL,
+        "bootstrap_source_policy": "immutable_commit_pinned_no_mutable_main_download",
+        "endpoint_payload_schema": "skeleton.home_edge.remote_windows_audit.owner_enrollment.v1",
+        "runtime_handoff_schema": "skeleton.windows_support_runtime_handoff.private.v1",
+        "instructions": [
+            "Deliver this HTTPS link only over the private owner channel.",
+            "The owner must open the link manually on the intended Windows target and approve the normal UAC prompt.",
+            "The endpoint must serve an owner enrollment payload with support_role=admin_support and the admin capability acknowledgement.",
+            "Do not paste the link, code, hostnames, tokens, or controller private material into public issues, repository files, logs, or PR receipts.",
+            "Enrollment is not complete until the owner verifies the target fingerprint out of band.",
+        ],
+    }
+    _write_private_artifact(artifact_path, artifact)
+    return HostMaintenanceReport(
+        status="ok",
+        command=command,
+        repository=repository,
+        apply=apply,
+        worktree_root=str(worktree_root),
+        candidates=[],
+        actions=[
+            {
+                "action": "windows_support_prepare_direct_link",
+                "status": "prepared_not_enrolled",
+                "enrollment_id": enrollment_id,
+                "owner_approval": owner_approval,
+                "private_artifact_ref": f"windows-support-direct-link/{enrollment_id}/{artifact_path.name}",
+                "link_sha256": link_hash,
+                "code_sha256": code_hash,
+                "delivery_channel": "private_direct_https_link",
+                "support_role": "admin_support",
+                "admin_capable": True,
+                "bootstrap_source_policy": "immutable_commit_pinned_no_mutable_main_download",
+                "public_receipt_contains_link": False,
+                "target_enrolled": False,
+                "next_action": "owner_open_direct_link_on_target_approve_uac_and_verify_fingerprint",
             }
         ],
     )

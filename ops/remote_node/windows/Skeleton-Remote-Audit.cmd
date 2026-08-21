@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions
 
-set "SCRIPT_URL=https://raw.githubusercontent.com/alanua/Skeleton/main/ops/remote_node/windows/bootstrap.ps1"
+set "SCRIPT_URL=https://raw.githubusercontent.com/alanua/Skeleton/9330095a1849eb5fbe342fdb3caa5bb3b265efd0/ops/remote_node/windows/bootstrap.ps1"
 set "WORK=%ProgramData%\Skeleton\RemoteAudit\bootstrap"
 set "SCRIPT=%WORK%\bootstrap.ps1"
 set "ENROLLMENT_URL=%~1"

@@ -6,7 +6,7 @@ This is the public-safe one-click bootstrap for a non-technical Windows owner. I
 
 1. The protected host-maintenance runtime prepares one private HTTPS enrollment link.
 2. Send that HTTPS link to the owner over Viber or another private channel.
-3. The owner opens the HTTPS link on the intended Windows target. The private endpoint serves the public-safe `Skeleton-Remote-Audit.cmd` wrapper with the enrollment URL bound as its first argument, or asks the owner to run the wrapper with `SKELETON_REMOTE_AUDIT_ENROLLMENT_URL` set.
+3. The owner opens the HTTPS link on the intended Windows target. The private endpoint serves the public-safe `Skeleton-Remote-Audit.cmd` wrapper with the enrollment URL bound as its first argument, or asks the owner to run the wrapper with `SKELETON_REMOTE_AUDIT_ENROLLMENT_URL` set. The wrapper downloads the PowerShell bootstrap from an immutable Git commit, not mutable `main`.
 4. Double-click the wrapper and approve the Windows UAC prompt.
 5. Sign in to Tailscale only if the official Tailscale client asks for normal interactive sign-in.
 6. Verify the generated machine identity fingerprint with the controller out of band before marking enrollment complete.
@@ -23,6 +23,14 @@ The bootstrap installs or enables only:
 It creates a dedicated local `skeleton-audit` account, configures public-key-only SSH for that account, disables password and keyboard-interactive SSH for that account, limits forwarding, and restricts the Windows OpenSSH firewall rule to the Private profile to avoid public-Internet SSH exposure. Machine identity is generated locally under `ProgramData\Skeleton\RemoteAudit\identity`; the private key stays on the target.
 
 When `-EnrollmentUrl` is provided, the bootstrap fetches exactly one HTTPS owner enrollment payload matching `schemas/remote_windows_owner_enrollment.schema.json`. That payload supplies the controller `ssh-ed25519` public key. The enrollment token has no automatic expiry, TTL, or `EXPIRED` state; the controller must rotate or revoke it manually after successful enrollment or cancellation. If no enrollment URL is provided, the script falls back to an interactive controller public-key prompt for controlled manual testing.
+
+For owner-approved admin support, the private endpoint may set
+`support_role: admin_support` plus
+`admin_capability_ack: owner_approved_admin_capable_support_over_private_tailscale_only`.
+Only then does the bootstrap create the `skeleton-support` account, place it in
+the local Administrators group, and configure public-key-only OpenSSH for that
+account over the private Tailscale route. This path still requires the owner to
+open the direct link manually and approve the normal Windows UAC prompt.
 
 Run the PowerShell bootstrap again with `-RotateMachineIdentity` to rotate the machine identity. Run it with `-Uninstall` to revoke Skeleton audit access and disable the audit account. Tailscale and OpenSSH are left installed because they may be owner-managed system components.
 

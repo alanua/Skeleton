@@ -29,6 +29,12 @@
     "link_sha256": {
       "type": "string",
       "pattern": "^[a-f0-9]{64}$"
+    },
+    "support_role": {
+      "enum": ["read_only_audit", "admin_support"]
+    },
+    "admin_capability_ack": {
+      "const": "owner_approved_admin_capable_support_over_private_tailscale_only"
     }
   }
 }
