@@ -49,6 +49,8 @@ MAINTENANCE_TASK_KIND_BY_ID: Final = MappingProxyType(
         "sync_telegram_callback_poller_runtime": "repository_maintenance",
         "home_edge_01_lan_inventory_read_only": "diagnostic",
         "home_edge_01_read_only_diagnostic": "diagnostic",
+        "home_edge_01_screensaver_current_media_verify_v1": "diagnostic",
+        "home_native_apk_current_verify": "diagnostic",
         "hermes_worker_preflight": "diagnostic",
         "inspect_pr_mergeability": "diagnostic",
         "mempalace_synthetic_runtime_smoke": "diagnostic",

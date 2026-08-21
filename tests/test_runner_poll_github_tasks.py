@@ -14,6 +14,8 @@ import pytest
 from scripts import runner_poll_github_tasks as runner
 from scripts import telegram_callback_poller as callback_poller
 from core.home_edge import debian_media_bootstrap as media_bootstrap
+from core.home_edge import current_media_verifiers
+from core.home_edge import android_home_release
 from core.home_edge import media_source_snapshot
 from core.home_edge import post_migration_reconcile
 
@@ -524,6 +526,78 @@ def test_home_edge_media_source_snapshot_malformed_input_blocks(
 
     assert report.startswith("BLOCKED:")
     assert "reason=unknown_runtime_input_field" in report
+
+
+def test_home_edge_current_screensaver_verify_is_single_registered_contract() -> None:
+    screensaver_tasks = {
+        task_id
+        for task_id in runner.RUNTIME_MAINTENANCE_TASK_IDS
+        if "screensaver" in task_id
+    }
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_01_SCREENSAVER_CURRENT_MEDIA_VERIFY_V1,
+        str(runner.ROOT),
+        "",
+    )
+
+    assert screensaver_tasks == {runner.HOME_EDGE_01_SCREENSAVER_CURRENT_MEDIA_VERIFY_V1}
+    assert report.startswith("DONE:")
+    assert (
+        f"operation_id={current_media_verifiers.CURRENT_SCREENSAVER_VERIFY_OPERATION}"
+        in report
+    )
+    assert "gallery_schema_version=8" in report
+    assert "gallery_item_count=48" in report
+    assert "screen_fit_policy=landscape_screen_fit" in report
+    assert "renderer_count=4" in report
+    assert "failed_unit_count=0" in report
+    for superseded in current_media_verifiers.SUPERSEDED_SCREENSAVER_VERIFY_OPERATIONS:
+        assert superseded not in runner.RUNTIME_MAINTENANCE_TASK_IDS
+
+
+def test_home_native_apk_current_verify_uses_metadata_not_historical_134(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt = {
+        "operation_id": android_home_release.CURRENT_ANDROID_HOME_VERIFY_OPERATION,
+        "status": "healthy",
+        "version_name": "1.3.16",
+        "canonical_apk": "Home-1.3.16.apk",
+        "sha256": "d" * 64,
+        "byte_size": 123,
+    }
+
+    monkeypatch.setattr(
+        android_home_release,
+        "load_release_metadata",
+        lambda _path: {
+            "version_name": "1.3.16",
+            "canonical_apk": "Home-1.3.16.apk",
+            "production_aliases": ["Home.apk", "SkeletonTV.apk"],
+            "sha256": "d" * 64,
+        },
+    )
+    monkeypatch.setattr(
+        android_home_release,
+        "verify_android_home_release",
+        lambda _metadata, _root: receipt,
+    )
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_NATIVE_APK_CURRENT_VERIFY,
+        str(runner.ROOT),
+        "",
+    )
+
+    assert report.startswith("DONE:")
+    assert "operation_id=home_native_apk_current_verify" in report
+    assert "version_name=1.3.16" in report
+    assert "canonical_apk=Home-1.3.16.apk" in report
+    assert "Home.apk" not in report
+    assert "SkeletonTV.apk" not in report
+    assert "1.3.4" not in report
+    assert "home-native-apk-v134-verify" not in runner.RUNTIME_MAINTENANCE_TASK_IDS
 
 
 def _plain_done_message(issue_number: int = 129) -> str:

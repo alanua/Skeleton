@@ -19,7 +19,7 @@ from core.home_edge.executor import (
 
 SHA = "a" * 40
 SECRET = "test-home-edge-secret"
-RECONCILE_SCRIPT_SHA256 = "158771ad724894612b27961b8c4ac20ab926193409640012d5fca9e4b4aaba9d"
+RECONCILE_SCRIPT_SHA256 = "052dbc6bb0e5e1919a010bbc3ea76ff0c5bd95de14fb575856535e3196f7c1ef"
 
 
 def issue_body(**updates: str) -> str:
