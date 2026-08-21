@@ -140,6 +140,9 @@ from core.private_static_site_runtime import (
 from core.project_tree import get_project, get_project_by_repo, load_project_tree
 from core.runner_child_environment import sanitize_codegen_child_environment
 from core.secret_reference import (
+    BitwardenIdentifier,
+    ReferenceBootstrapResult,
+    bootstrap_gmail_primary_reference_index,
     SecretReferenceRegistrationError,
     registered_bitwarden_reference_from_systemd_index,
 )
@@ -168,6 +171,10 @@ from core.runner_retry_policy import (
 )
 from core.runner_task import RunnerTask as CoreRunnerTask
 from core.scheduler_engine import SchedulerEngine, production_scheduler_db_path
+from integrations.bitwarden_secret_store import (
+    BitwardenSdkIdentifierDiscoveryError,
+    BitwardenSdkIdentifiersAdapter,
+)
 from core.scheduler_models import ScheduleSpec, build_execution_proposal, stable_occurrence_id
 from core.scheduler_store import SchedulerStore
 from core.shared_dispatch import PRIVACY_PUBLIC_SAFE, SharedDispatcher
@@ -620,6 +627,7 @@ _MAINTENANCE_FORBIDDEN_STATUS_KEYS = frozenset(
 _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
     {
         "accepted",
+        "account_alias",
         "action",
         "ahead_by",
         "allowed_files_count",
@@ -777,6 +785,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "missing_dependency_module",
         "mode",
         "model_credentials_removed_from_smoke",
+        "match_count_class",
         "mutation_mode",
         "durable_handoff_status",
         "network_disabled",
@@ -835,6 +844,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "project_state_existing",
         "project_state_written",
         "pre_push_pr_changed_files_count",
+        "persisted",
         "pre_push_pr_file_count",
         "public_safe",
         "protected_worktrees_count",
@@ -16219,12 +16229,36 @@ def mail_gmail_primary_registered_activation_v1(body: str) -> str:
             bootstrap_required=True,
         )
     except SecretReferenceRegistrationError as exc:
-        return _maintenance_report(
-            "BLOCKED",
-            task_id,
-            [*status_lines, f"step=reference_bind status=failed reason={str(exc)}"],
-            "not_met",
-        )
+        reason = str(exc)
+        if reason != "REFERENCE_BOOTSTRAP_REQUIRED":
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [*status_lines, f"step=reference_bind status=failed reason={reason}"],
+                "not_met",
+            )
+        bootstrap_report = _mail_gmail_primary_metadata_bootstrap(task_id, status_lines)
+        if bootstrap_report is not None:
+            return bootstrap_report
+        try:
+            registered_bitwarden_reference_from_systemd_index(
+                os.environ,
+                service_id="mail-gmail",
+                alias="acct:gmail-primary",
+                bootstrap_required=True,
+            )
+        except SecretReferenceRegistrationError as reread_exc:
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [
+                    *status_lines,
+                    "step=reference_reread status=failed",
+                    f"reason={_mail_gmail_bootstrap_reason(str(reread_exc))}",
+                ],
+                "not_met",
+            )
+        status_lines.append("step=reference_reread status=done")
     status_lines.append("step=reference_bind status=done")
 
     try:
@@ -16284,6 +16318,79 @@ def mail_gmail_primary_registered_activation_v1(body: str) -> str:
     if report is not None:
         return report
     return _maintenance_report("DONE", task_id, status_lines, "met")
+
+
+def _mail_gmail_primary_metadata_bootstrap(
+    task_id: str,
+    status_lines: list[str],
+) -> str | None:
+    try:
+        identifiers = BitwardenSdkIdentifiersAdapter.from_systemd_credentials(
+            os.environ,
+        ).discover_identifiers()
+        bootstrap = bootstrap_gmail_primary_reference_index(
+            os.environ,
+            identifiers=identifiers,
+        )
+    except BitwardenSdkIdentifierDiscoveryError as exc:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                *status_lines,
+                "step=reference_bootstrap status=failed",
+                "match_count_class=unknown",
+                f"reason={_mail_gmail_bootstrap_reason(str(exc))}",
+            ],
+            "not_met",
+        )
+    except SecretReferenceRegistrationError as exc:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                *status_lines,
+                "step=reference_bootstrap status=failed",
+                "match_count_class=unknown",
+                f"reason={_mail_gmail_bootstrap_reason(str(exc))}",
+            ],
+            "not_met",
+        )
+    receipt = bootstrap.public_receipt()
+    status_lines.append(
+        "step=reference_bootstrap "
+        f"status={receipt['status']} "
+        f"match_count_class={receipt['match_count_class']} "
+        f"persisted={str(receipt['persisted']).lower()} "
+        f"reason={receipt['reason']}"
+    )
+    if receipt["status"] != "PASS":
+        return _maintenance_report("BLOCKED", task_id, status_lines, "not_met")
+    return None
+
+
+def _mail_gmail_bootstrap_reason(reason: str) -> str:
+    allowed = {
+        "AMBIGUOUS_IDENTIFIER",
+        "NO_ELIGIBLE_IDENTIFIER",
+        "REFERENCE_INDEX_INVALID",
+        "REFERENCE_PROVIDER_UNSUPPORTED",
+        "SYSTEMD_CREDENTIAL_ENCRYPT_FAILED",
+        "bitwarden_identifier_discovery_failed",
+        "bitwarden_identifier_response_invalid",
+        "bitwarden_organization_id_unavailable",
+        "bitwarden_sdk_access_token_login_unavailable",
+        "bitwarden_sdk_auth_unavailable",
+        "bitwarden_sdk_client_unavailable",
+        "bitwarden_sdk_identifiers_list_unavailable",
+        "bitwarden_sdk_secrets_unavailable",
+        "bitwarden_sdk_unavailable",
+        "bitwarden_sdk_version_mismatch",
+        "systemd_credential_empty",
+        "systemd_credential_read_failed",
+        "systemd_credentials_directory_unavailable",
+    }
+    return reason if reason in allowed else "REFERENCE_BOOTSTRAP_FAILED"
 
 
 def dispatch_runtime_maintenance_task(
