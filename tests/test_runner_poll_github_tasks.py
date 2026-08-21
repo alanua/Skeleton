@@ -19740,6 +19740,22 @@ def _gmail_primary_activation_body(
     )
 
 
+def _gmail_primary_bootstrap_body(
+    *,
+    expected_main_sha: str = HEAD_SHA,
+    account_alias: str = "acct:gmail-primary",
+) -> str:
+    return "\n".join(
+        (
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {runner.MAIL_GMAIL_PRIMARY_BITWARDEN_BOOTSTRAP}",
+            f"Repository: {runner.REPO}",
+            f"Expected Main SHA: {expected_main_sha}",
+            f"Account Alias: {account_alias}",
+        )
+    )
+
+
 def _gmail_readonly_success_receipt(
     account_alias: str,
     probed_message_count: int,
@@ -19796,6 +19812,13 @@ def test_gmail_readonly_canary_task_is_registered() -> None:
 def test_gmail_primary_activation_task_is_registered() -> None:
     assert (
         runner.MAIL_GMAIL_PRIMARY_REGISTERED_ACTIVATION
+        in runner.RUNTIME_MAINTENANCE_TASK_IDS
+    )
+
+
+def test_gmail_primary_bitwarden_bootstrap_task_is_registered() -> None:
+    assert (
+        runner.MAIL_GMAIL_PRIMARY_BITWARDEN_BOOTSTRAP
         in runner.RUNTIME_MAINTENANCE_TASK_IDS
     )
 
@@ -19976,6 +19999,7 @@ def test_gmail_readonly_canary_does_not_expose_unexpected_exception_text() -> No
 def test_gmail_primary_activation_blocks_before_reference_without_sync_approval() -> None:
     with (
         mock.patch.object(runner, "_mempalace_runtime_smoke_preflight") as preflight,
+        mock.patch.object(runner, "_mail_gmail_bootstrap_reference_index") as bootstrap,
         mock.patch.object(runner, "registered_bitwarden_reference_from_systemd_index") as bind,
         mock.patch.object(runner, "run_gmail_readonly_canary") as canary,
         mock.patch.object(runner, "run_command") as command,
@@ -19989,21 +20013,32 @@ def test_gmail_primary_activation_blocks_before_reference_without_sync_approval(
     assert runner.maintenance_report_status(report) == "BLOCKED"
     assert "reason=mail_gmail_activation_runtime_sync_approval_missing" in report
     preflight.assert_not_called()
+    bootstrap.assert_not_called()
     bind.assert_not_called()
     canary.assert_not_called()
     command.assert_not_called()
 
 
-def test_gmail_primary_activation_blocks_on_reference_bootstrap_before_canary() -> None:
+def test_gmail_primary_activation_blocks_on_bootstrap_before_reread(tmp_path, monkeypatch) -> None:
     preflight_patch, sha_patch = _gmail_readonly_preflight_patches(HEAD_SHA)
+    credentials = tmp_path / "credentials"
+    credentials.mkdir()
+    (credentials / "bitwarden-access-token").write_text("token\n", encoding="utf-8")
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(credentials))
     with (
         preflight_patch,
         sha_patch,
         mock.patch.object(
             runner,
-            "registered_bitwarden_reference_from_systemd_index",
-            side_effect=runner.SecretReferenceRegistrationError("REFERENCE_BOOTSTRAP_REQUIRED"),
-        ) as bind,
+            "_mail_gmail_bootstrap_reference_index",
+            return_value=runner._maintenance_report(
+                "BLOCKED",
+                runner.MAIL_GMAIL_PRIMARY_BITWARDEN_BOOTSTRAP,
+                ["step=bootstrap_reference_index status=failed reason=REFERENCE_MATCH_NONE"],
+                "not_met",
+            ),
+        ) as bootstrap,
+        mock.patch.object(runner, "registered_bitwarden_reference_from_systemd_index") as bind,
         mock.patch.object(runner, "run_gmail_readonly_canary") as canary,
         mock.patch.object(runner, "run_command") as command,
     ):
@@ -20014,38 +20049,91 @@ def test_gmail_primary_activation_blocks_on_reference_bootstrap_before_canary() 
         )
 
     assert runner.maintenance_report_status(report) == "BLOCKED"
-    assert "step=reference_bind status=failed reason=REFERENCE_BOOTSTRAP_REQUIRED" in report
-    assert bind.call_count == 1
+    assert "step=bootstrap_reference_index status=failed reason=REFERENCE_MATCH_NONE" in report
+    assert bootstrap.call_count == 1
+    bind.assert_not_called()
     canary.assert_not_called()
     command.assert_not_called()
 
 
-def test_gmail_primary_activation_enables_worker_only_after_canary_passes() -> None:
+def test_gmail_primary_activation_enables_worker_only_after_bootstrap_reread_and_canary_pass(
+    tmp_path,
+    monkeypatch,
+) -> None:
     preflight_patch, sha_patch = _gmail_readonly_preflight_patches(HEAD_SHA)
     calls: list[str] = []
+    order: list[str] = []
+    credentials = tmp_path / "credentials"
+    credentials.mkdir()
+    (credentials / "bitwarden-access-token").write_text("token\n", encoding="utf-8")
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(credentials))
 
     def fake_command(command, cwd=None):
         del cwd
+        order.append("systemd")
         calls.append(" ".join(command))
         if command[:4] == ["sudo", "-n", "systemctl", "show"]:
             return 0, "success\n"
         return 0, ""
+
+    def fake_bootstrap(*, status_lines, plaintext_index_copy=None):
+        order.append("bootstrap")
+        assert plaintext_index_copy is not None
+        plaintext_index_copy.write_text(
+            json.dumps(
+                {
+                    "schema": "skeleton.secret_reference_index.v1",
+                    "registrations": [
+                        {
+                            "service_id": "mail-gmail",
+                            "alias": "acct:gmail-primary",
+                            "provider": "bitwarden",
+                            "reference_id": "11111111-2222-3333-4444-555555555555",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        status_lines.append("step=bootstrap_reference_index status=done")
+        return None
+
+    def fake_reference(authority, **kwargs):
+        order.append("reread")
+        assert Path(authority["CREDENTIALS_DIRECTORY"]).name == "credentials"
+        assert kwargs == {
+            "service_id": "mail-gmail",
+            "alias": "acct:gmail-primary",
+            "bootstrap_required": True,
+        }
+        return SecretReference(
+            provider="bitwarden",
+            reference_id="11111111-2222-3333-4444-555555555555",
+        )
+
+    def fake_canary(**kwargs):
+        order.append("canary")
+        assert kwargs["account_alias"] == "acct:gmail-primary"
+        assert Path(kwargs["authority_environment"]["CREDENTIALS_DIRECTORY"]).name == "credentials"
+        return _gmail_readonly_success_receipt("acct:gmail-primary", 0)
 
     with (
         preflight_patch,
         sha_patch,
         mock.patch.object(
             runner,
+            "_mail_gmail_bootstrap_reference_index",
+            side_effect=fake_bootstrap,
+        ) as bootstrap,
+        mock.patch.object(
+            runner,
             "registered_bitwarden_reference_from_systemd_index",
-            return_value=SecretReference(
-                provider="bitwarden",
-                reference_id="11111111-2222-3333-4444-555555555555",
-            ),
+            side_effect=fake_reference,
         ) as bind,
         mock.patch.object(
             runner,
             "run_gmail_readonly_canary",
-            return_value=_gmail_readonly_success_receipt("acct:gmail-primary", 0),
+            side_effect=fake_canary,
         ) as canary,
         mock.patch.object(runner, "run_command", side_effect=fake_command),
     ):
@@ -20056,10 +20144,23 @@ def test_gmail_primary_activation_enables_worker_only_after_canary_passes() -> N
         )
 
     assert runner.maintenance_report_status(report) == "DONE"
-    assert "step=reference_bind status=done" in report
+    assert "step=bootstrap_reference_index status=done" in report
+    assert "step=reference_reread status=done" in report
     assert "step=gmail_readonly_canary status=done" in report
+    assert bootstrap.call_count == 1
     assert bind.call_count == 1
     assert canary.call_count == 1
+    assert order == [
+        "bootstrap",
+        "reread",
+        "canary",
+        "systemd",
+        "systemd",
+        "systemd",
+        "systemd",
+        "systemd",
+        "systemd",
+    ]
     assert calls == [
         "sudo -n systemctl daemon-reload",
         "sudo -n systemctl enable skeleton-mail-operations.timer",
