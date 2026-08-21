@@ -32,9 +32,26 @@ Installing the worker copies code and units but leaves
 `skeleton-mail-operations.timer` disabled. Activation is a separate registered
 maintenance operation, `mail_gmail_primary_registered_activation_v1`, after
 operator-reviewed exact-main runtime sync. It performs exact-main preflight,
-binds the registered opaque reference, runs exactly one read-only Gmail canary,
-and only on canary pass enables/starts the canonical worker timer and verifies
-bounded systemd health.
+validates the isolated Bitwarden SDK runtime, runs the fixed bootstrap helper at
+`/opt/skeleton-mail-operations/bitwarden_gmail_reference_bootstrap.py`, rereads
+the encrypted systemd credential boundary, runs exactly one read-only Gmail
+canary, and only on canary pass enables/starts the canonical worker timer and
+verifies bounded systemd health.
+
+The bootstrap helper accepts only the documented Bitwarden Secrets Manager
+machine-token shape `0.<client_id>.<client_secret>:<encryption_key>`. The
+identity request is fixed to `https://identity.bitwarden.com/connect/token` and
+receives only `client_id` and `client_secret`; the encryption key is never sent,
+persisted, or logged by Skeleton code. The complete original machine token is
+passed only to the official `bitwarden-sdk==2.1.0` `login_access_token` entry so
+the SDK owns decryption state. Discovery remains metadata-only:
+identity JWT organization claim, SDK login, and `secrets().list(organization_id)`.
+It never calls SDK secret value APIs and never shells out to `bws secret list`.
+
+The canonical Gmail match is exactly one Bitwarden secret metadata item with key
+`GMAIL_PRIMARY_OAUTH_BUNDLE`. Its opaque UUID is piped directly to
+`systemd-creds encrypt` as `skeleton-secret-reference-index`; no plaintext
+reference index is written.
 
 ## Operator Handoff
 
