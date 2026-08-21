@@ -309,6 +309,14 @@ _QUEUE_RECOVERY_SOURCE: ContextVar[str] = ContextVar(
     "skeleton_queue_recovery_source",
     default="compat",
 )
+_CURRENT_MAINTENANCE_TASK_ID: ContextVar[str | None] = ContextVar(
+    "skeleton_current_maintenance_task_id",
+    default=None,
+)
+_CURRENT_MAINTENANCE_ISSUE_NUMBER: ContextVar[int | None] = ContextVar(
+    "skeleton_current_maintenance_issue_number",
+    default=None,
+)
 INSPECT_ISSUE_WORKTREE_FOR_PUBLISH = "inspect_issue_worktree_for_publish"
 PUBLISH_ISSUE_WORKTREE_PR = "publish_issue_worktree_pr"
 PUBLISH_EXISTING_ISSUE_WORKTREE = "publish_existing_issue_worktree"
@@ -12135,6 +12143,25 @@ def _promote_queue_replenisher_issue(issue: Mapping[str, Any]) -> None:
         raise RuntimeError(f"gh issue edit failed:\n{output}")
 
 
+def _current_replenisher_self_issue_number() -> int | None:
+    if _CURRENT_MAINTENANCE_TASK_ID.get() != REPLENISH_RUNNER_QUEUE:
+        return None
+    return _CURRENT_MAINTENANCE_ISSUE_NUMBER.get()
+
+
+def _without_current_replenisher_self(
+    issues: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    self_issue_number = _current_replenisher_self_issue_number()
+    if self_issue_number is None:
+        return issues
+    return [
+        issue
+        for issue in issues
+        if _queue_replenisher_issue_number(issue) != self_issue_number
+    ]
+
+
 def _route_queue_replenisher_dependency_wait(issue: Mapping[str, Any]) -> None:
     number = _queue_replenisher_issue_number(issue)
     if number is None or LABEL_WAITING_DEPENDENCY in _issue_label_names(issue):
@@ -12161,8 +12188,10 @@ def replenish_runner_queue(body: str) -> str:
     protected_files = frozenset(
         _body_list_items(metadata, ("Protected Files",)) or ()
     )
-    ready_issues = get_ready_issues()
-    candidate_issues = get_queue_replenisher_candidate_issues()
+    ready_issues = _without_current_replenisher_self(get_ready_issues())
+    candidate_issues = _without_current_replenisher_self(
+        get_queue_replenisher_candidate_issues()
+    )
     selection = _runner_queue_replenishment_selection(
         ready_issues,
         candidate_issues,
@@ -12379,14 +12408,18 @@ def _autonomous_queue_replenish_action(expected_key: str, generation: str) -> st
         LABEL_RUN_NOW in _issue_label_names(issue) for issue in eligible
     )
     if run_now_selected:
+        selected = sorted(
+            eligible,
+            key=lambda issue: _queue_replenisher_issue_number(issue) or 0,
+        )[:1]
         try:
-            for issue in eligible:
+            for issue in selected:
                 _promote_queue_replenisher_issue(issue)
         except Exception:
             return _autonomous_queue_blocked_report("QUEUE_RECOVERY_EXCEPTION")
         selected_numbers = [
             str(number)
-            for issue in eligible
+            for issue in selected
             if (number := _queue_replenisher_issue_number(issue)) is not None
         ]
         report = _maintenance_report(
@@ -16391,7 +16424,13 @@ def process_runtime_maintenance_issue(
     memory_warning: str | None = None,
     retry_decision: RetryDecision | None = None,
 ) -> None:
-    report = dispatch_runtime_maintenance_task(task_id, workdir, body)
+    task_token = _CURRENT_MAINTENANCE_TASK_ID.set(task_id)
+    issue_token = _CURRENT_MAINTENANCE_ISSUE_NUMBER.set(issue_number)
+    try:
+        report = dispatch_runtime_maintenance_task(task_id, workdir, body)
+    finally:
+        _CURRENT_MAINTENANCE_ISSUE_NUMBER.reset(issue_token)
+        _CURRENT_MAINTENANCE_TASK_ID.reset(task_token)
     status = maintenance_report_status(report)
     if status != "DONE" and retry_decision is not None:
         report = append_retry_fields(report, retry_decision)

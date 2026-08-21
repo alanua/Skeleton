@@ -4294,6 +4294,131 @@ def test_idle_queue_recovery_uses_stable_lesson_and_new_occurrence_after_verifie
     assert runner.RecoveryStore(db_path).learning_metrics()["repeats_prevented"] == 1
 
 
+def test_idle_run_now_recovery_promotes_next_task_after_later_idle_episode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "control_recovery.sqlite3"
+    issue_labels = {
+        2611: {runner.LABEL_AGENT_TASK, runner.LABEL_RUN_NOW},
+        2612: {runner.LABEL_AGENT_TASK, runner.LABEL_RUN_NOW},
+    }
+    issues = {
+        number: _queue_candidate_issue(
+            number,
+            allowed_files=(f"docs/run-now-{number}.md",),
+            idempotency_key=f"run-now-{number}",
+            labels=(),
+        )
+        for number in issue_labels
+    }
+    promoted: list[int] = []
+
+    def issue_snapshot(number: int) -> dict[str, object]:
+        snapshot = dict(issues[number])
+        snapshot["labels"] = [
+            {"name": label} for label in sorted(issue_labels[number])
+        ]
+        return snapshot
+
+    def ready_issues() -> list[dict[str, object]]:
+        return [
+            issue_snapshot(number)
+            for number, labels in issue_labels.items()
+            if runner.LABEL_READY in labels and runner.LABEL_RUNNING not in labels
+        ]
+
+    def run_now_candidates() -> list[dict[str, object]]:
+        return [issue_snapshot(number) for number in sorted(issue_labels)]
+
+    def promote(promoted_issue: dict[str, object]) -> None:
+        number = int(promoted_issue["number"])
+        promoted.append(number)
+        issue_labels[number].add(runner.LABEL_READY)
+
+    monkeypatch.setattr(runner, "control_recovery_db_path", lambda: db_path)
+    monkeypatch.setattr(runner, "get_ready_issues", ready_issues)
+    monkeypatch.setattr(runner, "get_running_issues", lambda: [])
+    monkeypatch.setattr(runner, "get_run_now_queue_intake_candidate_issues", run_now_candidates)
+    monkeypatch.setattr(runner, "get_queue_replenisher_candidate_issues", lambda: [])
+    monkeypatch.setattr(runner, "_promote_queue_replenisher_issue", promote)
+
+    assert runner.maybe_recover_idle_runner_queue() is True
+    assert promoted == [2611]
+    assert runner.maybe_recover_idle_runner_queue() is False
+
+    issue_labels[2611].discard(runner.LABEL_READY)
+    issue_labels[2611].discard(runner.LABEL_RUN_NOW)
+    issue_labels[2611].add(runner.LABEL_DONE)
+
+    assert runner.maybe_recover_idle_runner_queue() is True
+    assert promoted == [2611, 2612]
+
+    rows = _queue_recovery_rows(db_path)
+    assert len(rows) == 2
+    assert rows[0]["failure_key"] != rows[1]["failure_key"]
+    assert {row["status"] for row in rows} == {"RECOVERED"}
+
+
+def test_replenisher_maintenance_invocation_ignores_own_ready_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    self_issue = _queue_candidate_issue(
+        2620,
+        allowed_files=("docs/self.md",),
+        idempotency_key="replenisher-self",
+        labels=(runner.LABEL_AGENT_TASK, runner.LABEL_READY),
+    )
+    ready_peer_a = _queue_candidate_issue(
+        2621,
+        allowed_files=("docs/ready-a.md",),
+        idempotency_key="ready-a",
+        labels=(runner.LABEL_AGENT_TASK, runner.LABEL_READY),
+    )
+    ready_peer_b = _queue_candidate_issue(
+        2622,
+        allowed_files=("docs/ready-b.md",),
+        idempotency_key="ready-b",
+        labels=(runner.LABEL_AGENT_TASK, runner.LABEL_READY),
+    )
+    external = _queue_candidate_issue(
+        2623,
+        allowed_files=("docs/external.md",),
+        idempotency_key="external-work",
+        labels=(runner.LABEL_AGENT_TASK,),
+    )
+
+    monkeypatch.setattr(
+        runner,
+        "get_ready_issues",
+        lambda: [self_issue, ready_peer_a, ready_peer_b],
+    )
+    monkeypatch.setattr(
+        runner,
+        "get_queue_replenisher_candidate_issues",
+        lambda: [self_issue, ready_peer_a, ready_peer_b, external],
+    )
+
+    commands: list[list[str]] = []
+
+    def run_command(command: list[str], **_kwargs: object) -> tuple[int, str]:
+        commands.append(command)
+        return 0, ""
+
+    monkeypatch.setattr(runner, "run_command", run_command)
+    task_token = runner._CURRENT_MAINTENANCE_TASK_ID.set(runner.REPLENISH_RUNNER_QUEUE)
+    issue_token = runner._CURRENT_MAINTENANCE_ISSUE_NUMBER.set(2620)
+    try:
+        report = runner.replenish_runner_queue("")
+    finally:
+        runner._CURRENT_MAINTENANCE_ISSUE_NUMBER.reset(issue_token)
+        runner._CURRENT_MAINTENANCE_TASK_ID.reset(task_token)
+
+    assert "ready_depth_before=2" in report
+    assert "selected_count=1" in report
+    assert "selected_issues=2623" in report
+    assert any(command[:4] == ["gh", "issue", "edit", "2623"] for command in commands)
+
+
 def test_idle_queue_recovery_no_progress_records_failed_backoff(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
