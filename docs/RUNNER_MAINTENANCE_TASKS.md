@@ -1212,6 +1212,43 @@ issue text.
 The allowlist does not permit rebooting the host, package upgrades, arbitrary
 commands or config values from issue text, or unrelated services.
 
+`home_edge_01_media_source_snapshot_signer_install_v1` installs or repairs only
+the already-reviewed Home Edge media-source snapshot signer. It accepts only:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: home_edge_01_media_source_snapshot_signer_install_v1
+Repository: alanua/Skeleton
+Expected Main SHA: <40 lowercase hex chars>
+Operator Approval: EXACT_HEAD_OPERATOR_APPROVAL_THEN_RUNTIME_SYNC_SIGNER_INSTALL_AND_READ_ONLY_SNAPSHOT
+Target: home-edge-01
+```
+
+Optional metadata is limited to `Privacy Boundary` and `Idempotency Key`. No
+command, path, argv, script, service, package, user, environment variable, or
+host name may be supplied by the issue.
+
+Before any privileged handoff, the Runner verifies the registered canonical
+Skeleton checkout, clean exact current-main parity, the expected main SHA, the
+current-main installer blob, and the installer-pinned payload, wrapper, and
+contract blobs. The handler does not execute checkout Python as root and does
+not change installer, payload, wrapper, or contract bytes.
+
+Privilege is allowed only through an already-existing reviewed fixed
+root-capable Runner primitive that copies the installer as inert bytes to the
+installer-owned protected path and executes exactly that protected installer
+with the fixed repository root binding. If that primitive is missing or its
+receipt is ambiguous, the task returns `NEEDS_OPERATOR`; it must not fall back
+to generic sudo, shell, SSH, or issue-controlled execution.
+
+After exact installer success, the Runner performs a read-only post-audit. It
+reports `CURRENT` only when the installed payload, wrapper, and contract blobs
+match the pinned blobs and canonical Runner sudo authorization allows exactly
+the no-argv signer invocation while rejecting an added argv. The public receipt
+contains only safe booleans, hashes, and enum-style status values. Ordinary
+`DONE` and `BLOCKED` outcomes remain Telegram-silent under the current
+maintenance notification policy.
+
 ## Reporting
 
 Each maintenance report must state `DONE` or `BLOCKED` accurately with safe

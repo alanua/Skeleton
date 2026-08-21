@@ -150,6 +150,22 @@ def _media_source_snapshot_issue_body(expected_sha: str = HEAD_SHA) -> str:
     )
 
 
+def _media_source_snapshot_signer_install_issue_body(
+    expected_sha: str = HEAD_SHA,
+    approval: str = runner.HOME_EDGE_SNAPSHOT_SIGNER_INSTALL_APPROVAL,
+) -> str:
+    return "\n".join(
+        (
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1}",
+            f"Repository: {runner.REPO}",
+            f"Expected Main SHA: {expected_sha}",
+            f"Operator Approval: {approval}",
+            "Target: home-edge-01",
+        )
+    )
+
+
 def _media_source_snapshot_receipt() -> dict[str, object]:
     return {
         "maintenance_task_id": runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1,
@@ -502,7 +518,10 @@ def test_home_edge_media_source_snapshot_registry_exposes_only_exact_fixed_task_
         if "media_source_snapshot" in task_id
     }
 
-    assert variants == {runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1}
+    assert variants == {
+        runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1,
+        runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1,
+    }
     assert (
         runner.dispatch_runtime_maintenance_task(
             "home_edge_01_media_source_snapshot_v1_extra",
@@ -525,6 +544,201 @@ def test_home_edge_media_source_snapshot_malformed_input_blocks(
 
     assert report.startswith("BLOCKED:")
     assert "reason=unknown_runtime_input_field" in report
+
+
+def _signer_checkout() -> mock.Mock:
+    return mock.Mock(
+        checkout_path=Path("/synthetic/skeleton"),
+        status_lines=["target_repository=alanua/Skeleton"],
+    )
+
+
+def _signer_preflight_patches(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    expected_sha: str = HEAD_SHA,
+) -> None:
+    monkeypatch.setattr(
+        runner,
+        "_mempalace_runtime_smoke_preflight",
+        lambda _task_id: (_signer_checkout(), ["target_repository=alanua/Skeleton"], None),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_read_skeleton_sha",
+        lambda *_args: (expected_sha, None),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_read_github_main_sha",
+        lambda _checkout_path: expected_sha,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_read_current_main_blob_sha",
+        lambda _checkout_path, relative_path: dict(
+            runner.HOME_EDGE_SNAPSHOT_SIGNER_SOURCE_BLOBS
+        )[next(
+            label
+            for label, (path, _blob) in runner.HOME_EDGE_SNAPSHOT_SIGNER_SOURCE_BLOBS.items()
+            if path == relative_path
+        )][1],
+    )
+
+
+def test_home_edge_media_source_snapshot_signer_install_is_registered_and_dispatches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _signer_preflight_patches(monkeypatch)
+    monkeypatch.setattr(
+        runner,
+        "_home_edge_snapshot_signer_install_privileged_primitive",
+        lambda **_kwargs: None,
+    )
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1,
+        str(runner.ROOT),
+        _media_source_snapshot_signer_install_issue_body(),
+    )
+
+    assert runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1 in runner.RUNTIME_MAINTENANCE_TASK_IDS
+    assert runner.maintenance_report_status(report) == "NEEDS_OPERATOR"
+    assert "maintenance_task_id=home_edge_01_media_source_snapshot_signer_install_v1" in report
+    assert "preflight_status=PASS" in report
+    assert "reason=missing_privileged_primitive" in report
+
+
+def test_home_edge_media_source_snapshot_signer_install_rejects_command_text_before_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    preflight = mock.Mock()
+    monkeypatch.setattr(runner, "_mempalace_runtime_smoke_preflight", preflight)
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1,
+        str(runner.ROOT),
+        _media_source_snapshot_signer_install_issue_body() + "\nCommand: sudo evil",
+    )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "reason=unsupported_signer_install_issue_field" in report
+    assert "sudo evil" not in report
+    preflight.assert_not_called()
+
+
+def test_home_edge_media_source_snapshot_signer_install_blocks_stale_main_before_privilege(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _signer_preflight_patches(monkeypatch, expected_sha="b" * 40)
+    primitive = mock.Mock()
+    monkeypatch.setattr(
+        runner,
+        "_home_edge_snapshot_signer_install_privileged_primitive",
+        primitive,
+    )
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1,
+        str(runner.ROOT),
+        _media_source_snapshot_signer_install_issue_body(expected_sha=HEAD_SHA),
+    )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "reason=expected_head_sha_mismatch" in report
+    primitive.assert_not_called()
+
+
+def test_home_edge_media_source_snapshot_signer_install_blocks_blob_mismatch_before_privilege(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _signer_preflight_patches(monkeypatch)
+    monkeypatch.setattr(
+        runner,
+        "_read_current_main_blob_sha",
+        lambda _checkout_path, _relative_path: "b" * 40,
+    )
+    primitive = mock.Mock()
+    monkeypatch.setattr(
+        runner,
+        "_home_edge_snapshot_signer_install_privileged_primitive",
+        primitive,
+    )
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1,
+        str(runner.ROOT),
+        _media_source_snapshot_signer_install_issue_body(),
+    )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "reason=installer_current_main_blob_mismatch" in report
+    primitive.assert_not_called()
+
+
+def test_home_edge_media_source_snapshot_signer_install_ambiguous_result_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _signer_preflight_patches(monkeypatch)
+    monkeypatch.setattr(
+        runner,
+        "_home_edge_snapshot_signer_install_privileged_primitive",
+        lambda **_kwargs: {"status": "DONE"},
+    )
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1,
+        str(runner.ROOT),
+        _media_source_snapshot_signer_install_issue_body(),
+    )
+
+    assert runner.maintenance_report_status(report) == "NEEDS_OPERATOR"
+    assert "reason=ambiguous_installer_result" in report
+
+
+def test_home_edge_media_source_snapshot_signer_install_success_requires_post_audit_current(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _signer_preflight_patches(monkeypatch)
+    monkeypatch.setattr(
+        runner,
+        "_home_edge_snapshot_signer_install_privileged_primitive",
+        lambda **_kwargs: {
+            "status": "DONE",
+            "protected_installer_blob_sha": runner.HOME_EDGE_SNAPSHOT_SIGNER_SOURCE_BLOBS["installer"][1],
+            "protected_installer_path_status": "protected",
+            "executed_installer": "protected_fixed",
+            "repo_root_binding": "fixed",
+        },
+    )
+    monkeypatch.setattr(runner, "_installed_blob_matches", lambda *_args: True)
+    calls: list[list[str]] = []
+
+    def fake_run(command, cwd=None):
+        del cwd
+        calls.append(list(command))
+        if command[-1] == "":
+            return 0, "allowed"
+        if command[-1] == "--unexpected-arg":
+            return 1, "denied"
+        raise AssertionError(command)
+
+    monkeypatch.setattr(runner, "run_command", fake_run)
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1,
+        str(runner.ROOT),
+        _media_source_snapshot_signer_install_issue_body(),
+    )
+
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert "post_audit_status=CURRENT" in report
+    assert "exact_sudo_authorization=true" in report
+    assert "extra_arg_sudo_authorization=false" in report
+    assert "success_criteria=met" in report
+    assert all(call[:3] == ["sudo", "-n", "-l"] for call in calls)
+    assert calls[0][-1] == ""
+    assert calls[1][-1] == "--unexpected-arg"
 
 
 def _plain_done_message(issue_number: int = 129) -> str:

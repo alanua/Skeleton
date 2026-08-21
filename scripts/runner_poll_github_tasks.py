@@ -337,6 +337,9 @@ HOME_EDGE_AUDIT_PERSIST_V1 = "home_edge_audit_persist_v1"
 HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1 = "home_edge_01_debian_media_bootstrap_v1"
 HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1 = "home_edge_01_post_migration_reconcile_v1"
 HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1 = "home_edge_01_media_source_snapshot_v1"
+HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1 = (
+    "home_edge_01_media_source_snapshot_signer_install_v1"
+)
 MAIL_GMAIL_PRIMARY_REGISTERED_ACTIVATION = "mail_gmail_primary_registered_activation_v1"
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
@@ -383,6 +386,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1,
         HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1,
         HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1,
+        HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1,
         BUILD_AND_LOCAL_OTA_OPERATION,
         PREPARE_PRIVATE_STATIC_SITE_HANDOFF,
         DEPLOY_PRIVATE_STATIC_SITE,
@@ -740,6 +744,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "github_main_sha",
         "github_main_source_of_truth",
         "graphify_version",
+        "installer_blob_sha",
         "head_branch",
         "head_ref",
         "head_repository",
@@ -808,6 +813,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "pr_title",
         "pr_url",
         "payload_hash",
+        "payload_blob_sha",
         "publish_override_hash",
         "private_memory_db_configured",
         "private_memory_db_openable",
@@ -818,6 +824,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "private_memory_writable_when_requested",
         "private_memory_write_requested",
         "private_report_sha256",
+        "privileged_primitive",
         "project_handoff_candidate_count",
         "private_workspace",
         "package_status",
@@ -828,6 +835,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "physical_video_status",
         "pipewire_status",
         "pointer_status",
+        "post_audit_status",
+        "preflight_status",
         "profile_backup_item_count",
         "profile_backup_private",
         "profile_backup_status",
@@ -840,6 +849,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "protected_worktrees_count",
         "protected_changed_file",
         "protected_changed_files_count",
+        "protected_installer_blob_sha",
+        "protected_installer_path_status",
         "pushed_head_sha",
         "public_safe_report_ok",
         "quality_score",
@@ -875,6 +886,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "reboot_performed",
         "refresh_count",
         "rollback_status",
+        "contract_blob_sha",
+        "wrapper_blob_sha",
         "rollback_applied",
         "rollback_ready",
         "room_area_row_count",
@@ -923,6 +936,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "stale_after_count",
         "stale_before_count",
         "success_criteria",
+        "exact_sudo_authorization",
+        "extra_arg_sudo_authorization",
         "synthetic_corpus_status",
         "live_private_ingestion",
         "loop_state",
@@ -15497,6 +15512,360 @@ def home_edge_01_media_source_snapshot_v1(body: str) -> str:
         )
 
 
+HOME_EDGE_SNAPSHOT_SIGNER_INSTALL_APPROVAL = (
+    "EXACT_HEAD_OPERATOR_APPROVAL_THEN_RUNTIME_SYNC_SIGNER_INSTALL_AND_READ_ONLY_SNAPSHOT"
+)
+HOME_EDGE_SNAPSHOT_SIGNER_INSTALL_TARGET = "home-edge-01"
+HOME_EDGE_SNAPSHOT_SIGNER_PROTECTED_INSTALLER = Path(
+    "/usr/local/libexec/skeleton/home-edge/media-source-snapshot-installer/"
+    "install_home_edge_media_source_snapshot_signer.sh"
+)
+HOME_EDGE_SNAPSHOT_SIGNER_INSTALL_ROOT = Path(
+    "/usr/local/lib/skeleton/home-edge/media-source-snapshot"
+)
+HOME_EDGE_SNAPSHOT_SIGNER_EXEC_ROOT = Path(
+    "/usr/local/libexec/skeleton/home-edge/media-source-snapshot"
+)
+HOME_EDGE_SNAPSHOT_SIGNER_PAYLOAD_INSTALL = (
+    HOME_EDGE_SNAPSHOT_SIGNER_INSTALL_ROOT / "signer_payload.py"
+)
+HOME_EDGE_SNAPSHOT_SIGNER_CONTRACT_INSTALL = (
+    HOME_EDGE_SNAPSHOT_SIGNER_INSTALL_ROOT / "contract_source.py"
+)
+HOME_EDGE_SNAPSHOT_SIGNER_WRAPPER_INSTALL = (
+    HOME_EDGE_SNAPSHOT_SIGNER_EXEC_ROOT / "signer"
+)
+HOME_EDGE_SNAPSHOT_SIGNER_SOURCE_BLOBS = {
+    "installer": (
+        Path("scripts/install_home_edge_media_source_snapshot_signer.sh"),
+        "7164529d2f037aea372aa87ed6a62cdb6c4142bb",
+    ),
+    "payload": (
+        Path("scripts/home_edge_media_source_snapshot_signer_payload.py"),
+        "2c34196722db3d8bd4596917576a5653166c5e9b",
+    ),
+    "wrapper": (
+        Path("scripts/home_edge_media_source_snapshot_signer"),
+        "24620d9e9fe4f62c055113e6aeefb2d0984be2d5",
+    ),
+    "contract": (
+        Path("core/home_edge/media_source_snapshot.py"),
+        "d734fdf7350e0de355851d47c837f12ab68d0878",
+    ),
+}
+
+
+def _git_blob_sha_for_bytes(data: bytes) -> str:
+    return hashlib.sha1(b"blob " + str(len(data)).encode("ascii") + b"\0" + data).hexdigest()
+
+
+def _read_local_blob_sha(path: Path) -> str | None:
+    try:
+        resolved = path.resolve(strict=True)
+        if not _path_is_relative_to(resolved, ROOT):
+            return None
+        stat_result = resolved.stat()
+        if not stat.S_ISREG(stat_result.st_mode) or stat_result.st_size <= 0:
+            return None
+        if stat_result.st_size > 512 * 1024:
+            return None
+        return _git_blob_sha_for_bytes(resolved.read_bytes())
+    except OSError:
+        return None
+
+
+def _read_current_main_blob_sha(checkout_path: Path, relative_path: Path) -> str | None:
+    code, output = run_command(
+        ["git", "-C", str(checkout_path), "rev-parse", f"origin/main:{relative_path.as_posix()}"]
+    )
+    blob_sha = output.strip().splitlines()[0] if output.strip() else ""
+    if code != 0 or _HEAD_SHA_RE.fullmatch(blob_sha) is None:
+        return None
+    return blob_sha.lower()
+
+
+def _read_github_main_sha(checkout_path: Path) -> str | None:
+    code, output = run_command(
+        ["git", "-C", str(checkout_path), "ls-remote", "origin", "refs/heads/main"]
+    )
+    parts = output.strip().split()
+    if (
+        code != 0
+        or len(parts) != 2
+        or parts[1] != "refs/heads/main"
+        or _HEAD_SHA_RE.fullmatch(parts[0]) is None
+    ):
+        return None
+    return parts[0].lower()
+
+
+def _home_edge_snapshot_signer_install_metadata_report(body: str) -> str | None:
+    task_id = HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1
+    metadata = (body or "").split("```task", 1)[0]
+    allowed_fields = {
+        "Mode",
+        "Maintenance Task ID",
+        "Repository",
+        "Expected Main SHA",
+        "Operator Approval",
+        "Target",
+        "Privacy Boundary",
+        "Idempotency Key",
+    }
+    for line in metadata.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        field, separator, _value = stripped.partition(":")
+        if not separator or field not in allowed_fields:
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                ["reason=unsupported_signer_install_issue_field"],
+                "not_met",
+            )
+    if _body_field(metadata, "Repository") != REPO:
+        return _maintenance_report(
+            "BLOCKED", task_id, ["reason=repository_mismatch"], "not_met"
+        )
+    if (
+        _body_field(metadata, "Operator Approval")
+        != HOME_EDGE_SNAPSHOT_SIGNER_INSTALL_APPROVAL
+    ):
+        return _maintenance_report(
+            "BLOCKED", task_id, ["reason=operator_approval_missing"], "not_met"
+        )
+    if _body_field(metadata, "Target") != HOME_EDGE_SNAPSHOT_SIGNER_INSTALL_TARGET:
+        return _maintenance_report(
+            "BLOCKED", task_id, ["reason=target_mismatch"], "not_met"
+        )
+    return None
+
+
+def _home_edge_snapshot_signer_preflight(
+    body: str,
+) -> tuple[RegisteredProjectCheckout | None, list[str], str | None]:
+    task_id = HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1
+    metadata_report = _home_edge_snapshot_signer_install_metadata_report(body)
+    if metadata_report is not None:
+        return None, ["preflight_status=NOT_RUN"], metadata_report
+
+    expected_head_sha = _body_field((body or "").split("```task", 1)[0], "Expected Main SHA")
+    if expected_head_sha is None or _HEAD_SHA_RE.fullmatch(expected_head_sha) is None:
+        return None, [], _maintenance_report(
+            "BLOCKED", task_id, ["reason=invalid_expected_main_sha"], "not_met"
+        )
+
+    checkout, status_lines, report = _mempalace_runtime_smoke_preflight(task_id)
+    if report is not None or checkout is None:
+        return None, status_lines, report
+
+    head_sha, report = _read_skeleton_sha(
+        task_id, checkout.checkout_path, "HEAD", status_lines, "read_exact_head"
+    )
+    if report is not None or head_sha is None:
+        return None, status_lines, report
+    if head_sha != expected_head_sha.lower():
+        return None, status_lines, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, f"checkout_head_sha={head_sha}", "reason=expected_head_sha_mismatch"],
+            "not_met",
+        )
+    github_main_sha = _read_github_main_sha(checkout.checkout_path)
+    if github_main_sha != head_sha:
+        return None, status_lines, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, f"checkout_head_sha={head_sha}", "reason=github_main_sha_mismatch"],
+            "not_met",
+        )
+
+    for label, (relative_path, expected_blob) in HOME_EDGE_SNAPSHOT_SIGNER_SOURCE_BLOBS.items():
+        local_blob = _read_local_blob_sha(ROOT / relative_path)
+        if local_blob != expected_blob:
+            return None, status_lines, _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [*status_lines, f"reason={label}_local_blob_mismatch"],
+                "not_met",
+            )
+        main_blob = _read_current_main_blob_sha(checkout.checkout_path, relative_path)
+        if main_blob != expected_blob:
+            return None, status_lines, _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [*status_lines, f"reason={label}_current_main_blob_mismatch"],
+                "not_met",
+            )
+
+    status_lines.extend(
+        (
+            f"checkout_head_sha={head_sha}",
+            f"github_main_sha={github_main_sha}",
+            "checkout_sync_state=equal",
+            "installer_blob_sha=7164529d2f037aea372aa87ed6a62cdb6c4142bb",
+            "payload_blob_sha=2c34196722db3d8bd4596917576a5653166c5e9b",
+            "wrapper_blob_sha=24620d9e9fe4f62c055113e6aeefb2d0984be2d5",
+            "contract_blob_sha=d734fdf7350e0de355851d47c837f12ab68d0878",
+            "preflight_status=PASS",
+        )
+    )
+    return checkout, status_lines, None
+
+
+def _home_edge_snapshot_signer_install_privileged_primitive(
+    *,
+    checkout_path: Path,
+    installer_blob_sha: str,
+) -> dict[str, object] | None:
+    del checkout_path, installer_blob_sha
+    return None
+
+
+def _home_edge_snapshot_signer_handoff_report(
+    checkout: RegisteredProjectCheckout,
+    status_lines: list[str],
+) -> str | None:
+    task_id = HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1
+    receipt = _home_edge_snapshot_signer_install_privileged_primitive(
+        checkout_path=checkout.checkout_path,
+        installer_blob_sha=HOME_EDGE_SNAPSHOT_SIGNER_SOURCE_BLOBS["installer"][1],
+    )
+    if receipt is None:
+        return _maintenance_report(
+            "NEEDS_OPERATOR",
+            task_id,
+            [*status_lines, "privileged_primitive=missing", "reason=missing_privileged_primitive"],
+            "not_met",
+        )
+    if not isinstance(receipt, dict):
+        return _maintenance_report(
+            "NEEDS_OPERATOR",
+            task_id,
+            [*status_lines, "privileged_primitive=ambiguous", "reason=ambiguous_installer_result"],
+            "not_met",
+        )
+    if (
+        receipt.get("status") != "DONE"
+        or receipt.get("protected_installer_blob_sha")
+        != HOME_EDGE_SNAPSHOT_SIGNER_SOURCE_BLOBS["installer"][1]
+        or receipt.get("protected_installer_path_status") != "protected"
+        or receipt.get("executed_installer") != "protected_fixed"
+        or receipt.get("repo_root_binding") != "fixed"
+    ):
+        return _maintenance_report(
+            "NEEDS_OPERATOR",
+            task_id,
+            [*status_lines, "privileged_primitive=ambiguous", "reason=ambiguous_installer_result"],
+            "not_met",
+        )
+    status_lines.extend(
+        (
+            "privileged_primitive=fixed_protected_installer",
+            f"protected_installer_blob_sha={HOME_EDGE_SNAPSHOT_SIGNER_SOURCE_BLOBS['installer'][1]}",
+            "protected_installer_path_status=protected",
+        )
+    )
+    return None
+
+
+def _installed_blob_matches(path: Path, expected_blob: str) -> bool:
+    try:
+        if path.is_symlink() or not path.is_file():
+            return False
+        return _git_blob_sha_for_bytes(path.read_bytes()) == expected_blob
+    except OSError:
+        return False
+
+
+def _home_edge_snapshot_signer_post_audit(status_lines: list[str]) -> str | None:
+    task_id = HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1
+    if not _installed_blob_matches(
+        HOME_EDGE_SNAPSHOT_SIGNER_PAYLOAD_INSTALL,
+        HOME_EDGE_SNAPSHOT_SIGNER_SOURCE_BLOBS["payload"][1],
+    ):
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "post_audit_status=failed", "reason=payload_blob_mismatch"], "not_met"
+        )
+    if not _installed_blob_matches(
+        HOME_EDGE_SNAPSHOT_SIGNER_WRAPPER_INSTALL,
+        HOME_EDGE_SNAPSHOT_SIGNER_SOURCE_BLOBS["wrapper"][1],
+    ):
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "post_audit_status=failed", "reason=wrapper_blob_mismatch"], "not_met"
+        )
+    if not _installed_blob_matches(
+        HOME_EDGE_SNAPSHOT_SIGNER_CONTRACT_INSTALL,
+        HOME_EDGE_SNAPSHOT_SIGNER_SOURCE_BLOBS["contract"][1],
+    ):
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "post_audit_status=failed", "reason=contract_blob_mismatch"], "not_met"
+        )
+
+    code, _output = run_command(
+        [
+            "sudo",
+            "-n",
+            "-l",
+            str(HOME_EDGE_SNAPSHOT_SIGNER_WRAPPER_INSTALL),
+            "",
+        ]
+    )
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "post_audit_status=failed", "exact_sudo_authorization=false"],
+            "not_met",
+        )
+    code, _output = run_command(
+        [
+            "sudo",
+            "-n",
+            "-l",
+            str(HOME_EDGE_SNAPSHOT_SIGNER_WRAPPER_INSTALL),
+            "--unexpected-arg",
+        ]
+    )
+    if code == 0:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "post_audit_status=failed", "extra_arg_sudo_authorization=true"],
+            "not_met",
+        )
+    status_lines.extend(
+        (
+            "post_audit_status=CURRENT",
+            "payload_blob_sha=2c34196722db3d8bd4596917576a5653166c5e9b",
+            "wrapper_blob_sha=24620d9e9fe4f62c055113e6aeefb2d0984be2d5",
+            "contract_blob_sha=d734fdf7350e0de355851d47c837f12ab68d0878",
+            "exact_sudo_authorization=true",
+            "extra_arg_sudo_authorization=false",
+        )
+    )
+    return None
+
+
+def home_edge_01_media_source_snapshot_signer_install_v1(body: str) -> str:
+    task_id = HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1
+    checkout, status_lines, report = _home_edge_snapshot_signer_preflight(body)
+    if report is not None or checkout is None:
+        return report or _maintenance_report(
+            "BLOCKED", task_id, ["reason=preflight_failed_closed"], "not_met"
+        )
+
+    report = _home_edge_snapshot_signer_handoff_report(checkout, status_lines)
+    if report is not None:
+        return report
+
+    report = _home_edge_snapshot_signer_post_audit(status_lines)
+    if report is not None:
+        return report
+    return _maintenance_report("DONE", task_id, status_lines, "met")
+
+
 def _read_exact_git_sha(ref: str) -> str:
     code, output = run_command(["git", "rev-parse", f"{ref}^{{commit}}"], cwd=ROOT)
     sha = output.strip().splitlines()[0] if output.strip() else ""
@@ -16404,6 +16773,8 @@ def dispatch_runtime_maintenance_task(
             return home_edge_01_post_migration_reconcile_v1(body)
         if task_id == HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1:
             return home_edge_01_media_source_snapshot_v1(body)
+        if task_id == HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1:
+            return home_edge_01_media_source_snapshot_signer_install_v1(body)
         if task_id == PREPARE_PRIVATE_STATIC_SITE_HANDOFF:
             return _execute_prepare_private_static_site_handoff(body)
         if task_id == DEPLOY_PRIVATE_STATIC_SITE:
