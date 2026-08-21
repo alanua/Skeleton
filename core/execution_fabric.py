@@ -284,6 +284,10 @@ class AttemptEvidence:
     artifact_count: int = 0
     tests_passed: bool = False
     validation_passed: bool = False
+    validation_head_sha: str | None = None
+    current_head_sha: str | None = None
+    protected_changed_files: tuple[str, ...] = ()
+    high_risk: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,6 +297,34 @@ class DeliverableValidation:
     final_action: str
     changed_files_count: int
     artifact_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalSuccessFinalization:
+    status: str
+    reason: str
+    project_done_label: bool
+
+
+def finalize_terminal_success(validation: DeliverableValidation, evidence: AttemptEvidence) -> TerminalSuccessFinalization:
+    """Canonical terminal-success boundary.
+
+    This is the only control-plane decision that can produce canonical DONE.
+    It requires an accepted deliverable validation receipt bound to the exact
+    current head. Protected or high-risk accepted deliverables stop at operator
+    review instead of being projected as DONE.
+    """
+    if not validation.accepted:
+        return TerminalSuccessFinalization("BLOCKED", validation.failure_class or "validation_not_accepted", False)
+    if not evidence.validation_head_sha or not evidence.current_head_sha:
+        return TerminalSuccessFinalization("BLOCKED", "exact_head_validation_missing", False)
+    if evidence.validation_head_sha.lower() != evidence.current_head_sha.lower():
+        return TerminalSuccessFinalization("BLOCKED", "stale_validation_head", False)
+    if validation.final_action == "NEEDS_OPERATOR" or evidence.protected_changed_files or evidence.high_risk:
+        return TerminalSuccessFinalization("NEEDS_OPERATOR", "operator_review_required", False)
+    if validation.final_action != "DONE":
+        return TerminalSuccessFinalization("BLOCKED", "unsupported_final_action", False)
+    return TerminalSuccessFinalization("DONE", "accepted_exact_head", True)
 
 
 def validate_deliverable(profile: TaskProfile, evidence: AttemptEvidence) -> DeliverableValidation:

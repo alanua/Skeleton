@@ -7,6 +7,7 @@ import pytest
 from core.execution_fabric import (
     AttemptEvidence,
     ExecutionFabricError,
+    finalize_terminal_success,
     build_execution_bindings,
     build_route_lease,
     task_profile_from_contract,
@@ -141,13 +142,43 @@ def test_rc_zero_without_required_edit_is_deliverable_missing_not_done() -> None
 
 
 def test_success_requires_deliverable_and_validation_and_protected_needs_operator() -> None:
+    evidence = AttemptEvidence(
+        rc=0,
+        changed_files=("core/example.py",),
+        tests_passed=True,
+        validation_passed=True,
+        validation_head_sha="a" * 40,
+        current_head_sha="a" * 40,
+        protected_changed_files=("core/example.py",),
+    )
     result = validate_deliverable(
         profile(operator=True),
-        AttemptEvidence(rc=0, changed_files=("core/example.py",), tests_passed=True, validation_passed=True),
+        evidence,
     )
+    finalization = finalize_terminal_success(result, evidence)
     assert result.accepted is True
     assert result.failure_class is None
     assert result.final_action == "NEEDS_OPERATOR"
+    assert finalization.status == "NEEDS_OPERATOR"
+    assert finalization.project_done_label is False
+
+
+def test_terminal_success_requires_exact_validation_head() -> None:
+    evidence = AttemptEvidence(
+        rc=0,
+        changed_files=("core/example.py",),
+        tests_passed=True,
+        validation_passed=True,
+        validation_head_sha="a" * 40,
+        current_head_sha="b" * 40,
+    )
+    result = validate_deliverable(profile(), evidence)
+    finalization = finalize_terminal_success(result, evidence)
+
+    assert result.accepted is True
+    assert finalization.status == "BLOCKED"
+    assert finalization.reason == "stale_validation_head"
+    assert finalization.project_done_label is False
 
 
 def test_binding_order_and_lease_hash_are_deterministic() -> None:

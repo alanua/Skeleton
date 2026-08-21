@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import csv
 import json
 import os
@@ -44,6 +45,30 @@ CALLBACK_DIGEST = runner.hmac.new(
 ).hexdigest()[:12]
 HOME_EDGE_EXEC_HMAC_ENV = "SKELETON_HOME_EDGE_EXEC_HMAC_SECRET"
 SYNTHETIC_HOME_EDGE_EXEC_HMAC = "synthetic-home-edge-exec-hmac-marker"
+
+
+def test_static_runner_done_label_projection_has_single_canonical_writer() -> None:
+    source = (runner.ROOT / "scripts" / "runner_poll_github_tasks.py").read_text()
+    tree = ast.parse(source)
+    parent: dict[ast.AST, ast.AST] = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parent[child] = node
+
+    writers: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Name) or node.func.id != "set_issue_label":
+            continue
+        if "LABEL_DONE" not in ast.unparse(node):
+            continue
+        owner = parent.get(node)
+        while owner is not None and not isinstance(owner, ast.FunctionDef):
+            owner = parent.get(owner)
+        writers.append(owner.name if isinstance(owner, ast.FunctionDef) else "<module>")
+
+    assert writers == ["apply_canonical_terminal_state"]
 
 
 def _media_bootstrap_issue_body(expected_sha: str = HEAD_SHA) -> str:
@@ -4704,7 +4729,7 @@ def test_process_issue_runs_target_project_bauclock_in_local_worktree(
         runner, "post_issue_comment"
     ) as comment, mock.patch.object(
         runner, "set_issue_label"
-    ), mock.patch.object(
+    ) as set_label, mock.patch.object(
         runner, "notify_task_finished"
     ):
         runner.process_issue(issue)
@@ -4721,7 +4746,13 @@ def test_process_issue_runs_target_project_bauclock_in_local_worktree(
     finalize_success.assert_not_called()
     finalize_local.assert_called_once_with(str(issue_path), "codex output", expected_task)
     cleanup_target.assert_called_once_with("alanua/bauclock", 146)
-    assert comment.call_args.args[1] == "DONE local report\nTarget Project: bauclock"
+    report = comment.call_args.args[1]
+    assert report.startswith("BLOCKED: Runner did not mark this task complete.")
+    assert "Reason: runner report did not meet completion criteria." in report
+    assert "Target Project: bauclock" in report
+    assert set_label.call_args_list[-1] == mock.call(
+        146, runner.LABEL_RUNNING, runner.LABEL_BLOCKED
+    )
 
 
 def test_process_issue_runs_target_project_lavalamp_when_project_tree_enables_worktree(
@@ -4957,7 +4988,7 @@ def test_process_issue_runs_target_project_skeleton_normally(tmp_path: Path) -> 
         runner, "post_issue_comment"
     ) as comment, mock.patch.object(
         runner, "set_issue_label"
-    ), mock.patch.object(
+    ) as set_label, mock.patch.object(
         runner, "notify_task_finished"
     ), mock.patch.object(
         runner, "cleanup_issue_worktree", return_value=(0, "")
@@ -4975,7 +5006,13 @@ def test_process_issue_runs_target_project_skeleton_normally(tmp_path: Path) -> 
             target_repository="alanua/Skeleton",
         ),
     )
-    assert comment.call_args.args[1] == "DONE report\nTarget Project: skeleton"
+    report = comment.call_args.args[1]
+    assert report.startswith("BLOCKED: Runner did not mark this task complete.")
+    assert "Reason: runner report did not meet completion criteria." in report
+    assert "Target Project: skeleton" in report
+    assert set_label.call_args_list[-1] == mock.call(
+        148, runner.LABEL_RUNNING, runner.LABEL_BLOCKED
+    )
 
 
 def test_process_issue_runs_target_repository_lavalamp_in_registered_worktree(

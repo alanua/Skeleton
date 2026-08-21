@@ -103,6 +103,14 @@ contract declared `existing_pr` or `update_existing_pr`, a different produced PR
 is treated as a publication-contract failure; no validation continuation is
 created for the wrong PR.
 
+The codegen issue is finalized only after the canonical terminal-success
+boundary accepts exact-head deliverable evidence. Direct label mutation, child
+process exit code, tests, model/provider text, `RESULT:OK`, or pre-existing
+labels cannot create canonical `DONE`. Accepted protected or high-risk
+deliverables are left as `NEEDS_OPERATOR` with no `runner:done` projection, so
+operator review is the next action even when a draft PR and validation
+continuation were produced.
+
 For codegen tasks that declare `existing_pr` or `update_existing_pr` with an
 exact expected PR head SHA, the issue worktree is materialized from that verified
 PR head branch before Codex starts. Metadata mismatch fails closed before any

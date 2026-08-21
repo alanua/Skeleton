@@ -37,6 +37,13 @@ if str(ROOT) not in sys.path:
 
 from core.audit_ledger import AuditLedger, validate_public_safe_payload
 from core.aufmass_source_pack import validate_source_pack_manifest
+from core.execution_fabric import (
+    AttemptEvidence,
+    DeliverableContract,
+    TaskProfile,
+    finalize_terminal_success,
+    validate_deliverable,
+)
 from core.control_recovery import (
     CODEGEN_UNKNOWN_VARIANT_MAX_MESSAGE,
     CONTROL_RECOVERY_SCHEMA,
@@ -5330,6 +5337,166 @@ def block_issue(
     set_issue_label(issue_number, remove_label, LABEL_BLOCKED)
     notify_task_finished(issue_number, "BLOCKED")
     maybe_replenish_runner_queue_after_completion()
+
+
+def _terminal_receipt_head(report: str) -> str:
+    return hashlib.sha256(report.encode("utf-8")).hexdigest()
+
+
+def _terminal_profile(
+    *,
+    operation: str,
+    require_changed_files: bool,
+    requires_operator: bool = False,
+) -> TaskProfile:
+    return TaskProfile(
+        operation=operation,
+        task_class="code_generation" if require_changed_files else "repository_maintenance",
+        required_executor_capabilities=("repository_read", "repository_write", "test_execution"),
+        required_model_capabilities=(),
+        privacy_class="PUBLIC",
+        side_effect_class="REPOSITORY_MUTATION",
+        deliverable_contract=DeliverableContract(
+            require_changed_files=require_changed_files,
+            minimum_changed_files=1 if require_changed_files else 0,
+            minimum_artifacts=0 if require_changed_files else 1,
+            require_tests_passed=require_changed_files,
+        ),
+        validation_id="canonical-terminal-success-v1",
+        budget_ref="runner-terminal-finalization",
+        timeout_seconds=60,
+        retry_policy_ref="terminal-success-single-writer-v1",
+        permissions=("repository_read", "repository_write", "test_execution"),
+        requires_operator=requires_operator,
+    )
+
+
+def _maintenance_terminal_validation(report: str, status: str) -> tuple[str, str]:
+    receipt_head = _terminal_receipt_head(report)
+    evidence = AttemptEvidence(
+        rc=0,
+        artifact_count=1 if status == "DONE" and "success_criteria=met" in report else 0,
+        validation_passed=status == "DONE" and "success_criteria=met" in report,
+        validation_head_sha=receipt_head,
+        current_head_sha=receipt_head,
+    )
+    validation = validate_deliverable(
+        _terminal_profile(operation="registered_maintenance_receipt", require_changed_files=False),
+        evidence,
+    )
+    finalization = finalize_terminal_success(validation, evidence)
+    return finalization.status, finalization.reason
+
+
+def _changed_files_from_local_worktree_report(report: str) -> tuple[str, ...]:
+    match = re.search(
+        r"(?ms)^Local worktree changed files:\n(?P<files>(?:- .+\n?)+)",
+        report,
+    )
+    if match is None:
+        return ()
+    return tuple(
+        line[2:].strip()
+        for line in match.group("files").splitlines()
+        if line.startswith("- ") and line[2:].strip()
+    )
+
+
+def _codegen_terminal_validation(report: str, *, local_target_worktree: bool) -> tuple[str, str]:
+    head_sha, changed = extract_runner_report_pr_binding(report)
+    if local_target_worktree:
+        changed = _changed_files_from_local_worktree_report(report)
+        head_sha = _terminal_receipt_head(report)
+    protected_files: tuple[str, ...] = ()
+    if changed:
+        verdict, protected_files = _actual_file_delegated_merge_policy(tuple(changed))
+        requires_operator = verdict != AUTO_MERGE_ALLOWED
+    else:
+        requires_operator = False
+    evidence = AttemptEvidence(
+        rc=0,
+        changed_files=tuple(changed),
+        tests_passed="Pytest output:" in report or local_target_worktree,
+        validation_passed=head_sha is not None,
+        validation_head_sha=head_sha,
+        current_head_sha=head_sha,
+        protected_changed_files=protected_files,
+        high_risk=requires_operator,
+    )
+    validation = validate_deliverable(
+        _terminal_profile(
+            operation="codegen_deliverable_receipt",
+            require_changed_files=True,
+            requires_operator=requires_operator,
+        ),
+        evidence,
+    )
+    finalization = finalize_terminal_success(validation, evidence)
+    return finalization.status, finalization.reason
+
+
+def canonical_terminal_status(
+    report: str,
+    *,
+    route: str,
+    local_target_worktree: bool = False,
+    strict_codegen_receipt: bool = True,
+) -> tuple[str, str]:
+    status = runner_report_status(report) if route == ROUTE_CODE_GENERATION else maintenance_report_status(report)
+    if status != "DONE":
+        return status, "not_terminal_success"
+    if route == ROUTE_CODE_GENERATION:
+        if not strict_codegen_receipt:
+            receipt_head = _terminal_receipt_head(report)
+            evidence = AttemptEvidence(
+                rc=0,
+                artifact_count=1,
+                validation_passed=True,
+                validation_head_sha=receipt_head,
+                current_head_sha=receipt_head,
+            )
+            validation = validate_deliverable(
+                _terminal_profile(
+                    operation="legacy_untyped_codegen_receipt",
+                    require_changed_files=False,
+                ),
+                evidence,
+            )
+            finalization = finalize_terminal_success(validation, evidence)
+            reason = (
+                "legacy_untyped_codegen_success"
+                if finalization.status == "DONE"
+                else finalization.reason
+            )
+            return finalization.status, reason
+        return _codegen_terminal_validation(report, local_target_worktree=local_target_worktree)
+    return _maintenance_terminal_validation(report, status)
+
+
+def _terminal_report_with_finalization(report: str, status: str, reason: str) -> str:
+    if reason in {"not_terminal_success", "legacy_untyped_codegen_success"}:
+        return report
+    if status != "DONE" and report.startswith("DONE:"):
+        report = re.sub(r"^DONE:", f"{status}:", report, count=1)
+    return (
+        f"{report.rstrip()}\n"
+        f"canonical_final_status={status}\n"
+        f"canonical_final_reason={reason}\n"
+        f"runner_done_projected={str(status == 'DONE').lower()}"
+    )
+
+
+def apply_canonical_terminal_state(
+    issue_number: int,
+    *,
+    remove_label: str,
+    status: str,
+) -> None:
+    set_issue_label(
+        issue_number,
+        remove_label,
+        LABEL_DONE if status == "DONE" else LABEL_BLOCKED,
+    )
 
 
 def _maintenance_report(
@@ -16363,6 +16530,8 @@ def process_telegram_approved_pr_merge_issue(
 ) -> None:
     report = execute_telegram_approved_pr_merge(request)
     status = "DONE" if report.startswith("DONE:") else "BLOCKED"
+    status, final_reason = canonical_terminal_status(report, route=ROUTE_RUNTIME_ONLY)
+    report = _terminal_report_with_finalization(report, status, final_reason)
     if status != "DONE" and retry_decision is not None:
         report = append_retry_fields(report, retry_decision)
     warning = record_runner_executor_result(
@@ -16375,10 +16544,10 @@ def process_telegram_approved_pr_merge_issue(
     )
     report = append_memory_warning(report, warning or memory_warning)
     post_issue_comment(issue_number, report)
-    set_issue_label(
+    apply_canonical_terminal_state(
         issue_number,
-        LABEL_RUNNING,
-        LABEL_DONE if status == "DONE" else LABEL_BLOCKED,
+        remove_label=LABEL_RUNNING,
+        status=status,
     )
     notify_task_finished(issue_number, status, report)
 
@@ -16393,6 +16562,8 @@ def process_runtime_maintenance_issue(
 ) -> None:
     report = dispatch_runtime_maintenance_task(task_id, workdir, body)
     status = maintenance_report_status(report)
+    status, final_reason = canonical_terminal_status(report, route=ROUTE_RUNTIME_ONLY)
+    report = _terminal_report_with_finalization(report, status, final_reason)
     if status != "DONE" and retry_decision is not None:
         report = append_retry_fields(report, retry_decision)
     warning = record_runner_executor_result(
@@ -16405,10 +16576,10 @@ def process_runtime_maintenance_issue(
     )
     report = append_memory_warning(report, warning or memory_warning)
     post_issue_comment(issue_number, report)
-    set_issue_label(
+    apply_canonical_terminal_state(
         issue_number,
-        LABEL_RUNNING,
-        LABEL_DONE if status == "DONE" else LABEL_BLOCKED,
+        remove_label=LABEL_RUNNING,
+        status=status,
     )
     notify_task_finished(issue_number, status, report)
     if task_id == VALIDATE_PR_BRANCH and status in {"DONE", "BLOCKED"}:
@@ -16709,6 +16880,12 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                     )
                     return
                 status = maintenance_report_status(report)
+                status, final_reason = canonical_terminal_status(
+                    report, route=ROUTE_RUNTIME_ONLY
+                )
+                report = _terminal_report_with_finalization(
+                    report, status, final_reason
+                )
                 if status != "DONE":
                     report = append_retry_fields(report, retry_decision)
                 warning = record_runner_executor_result(
@@ -16721,10 +16898,10 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                 )
                 report = append_memory_warning(report, warning or pickup_memory_warning)
                 post_issue_comment(issue_number, report)
-                set_issue_label(
+                apply_canonical_terminal_state(
                     issue_number,
-                    LABEL_RUNNING,
-                    LABEL_DONE if status == "DONE" else LABEL_BLOCKED,
+                    remove_label=LABEL_RUNNING,
+                    status=status,
                 )
                 notify_task_finished(issue_number, status, report)
                 return
@@ -16945,20 +17122,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                 "Issue workspace cleanup failed:\n"
                 f"{cleanup_output.strip() or f'exit code {cleanup_code}'}"
             )
-        status = runner_report_status(report)
-        if status == "BLOCKED":
-            report = blocked_final_report(report)
-            report = append_retry_fields(report, retry_decision)
-        warning = record_runner_executor_result(
-            issue_number,
-            runner_task.target_project if runner_task is not None else "skeleton",
-            status,
-            status,
-            "codex",
-            report,
-        )
-        report = append_memory_warning(report, warning or pickup_memory_warning)
-        if status == "DONE":
+        if runner_report_status(report) == "DONE":
             try:
                 continuation = ensure_codegen_pr_validation_continuation(
                     source_issue=issue_number,
@@ -16967,7 +17131,6 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                 )
             except RuntimeError as exc:
                 reason = str(exc) or "publication_contract_failure"
-                status = "BLOCKED"
                 report = report_runner_lane(
                     _maintenance_report(
                         "BLOCKED",
@@ -16982,15 +17145,6 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                     runner_task,
                 )
                 report = append_retry_fields(report, retry_decision)
-                warning = record_runner_executor_result(
-                    issue_number,
-                    runner_task.target_project if runner_task is not None else "skeleton",
-                    status,
-                    status,
-                    "codex",
-                    report,
-                )
-                report = append_memory_warning(report, warning or pickup_memory_warning)
             else:
                 if continuation is not None:
                     report = (
@@ -17001,11 +17155,34 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                         f"validation_head_sha={continuation.head_sha}\n"
                         f"validation_base_sha={continuation.base_sha}"
                     )
-        post_issue_comment(issue_number, report)
-        set_issue_label(
+        status, final_reason = canonical_terminal_status(
+            report,
+            route=ROUTE_CODE_GENERATION,
+            local_target_worktree=local_target_worktree,
+            strict_codegen_receipt=(
+                _requires_expected_output(_metadata_before_task(issue_body))
+                or local_target_worktree
+                or existing_pr_worktree_request is not None
+            ),
+        )
+        report = _terminal_report_with_finalization(report, status, final_reason)
+        if status == "BLOCKED":
+            report = blocked_final_report(report)
+            report = append_retry_fields(report, retry_decision)
+        warning = record_runner_executor_result(
             issue_number,
-            LABEL_RUNNING,
-            LABEL_DONE if status == "DONE" else LABEL_BLOCKED,
+            runner_task.target_project if runner_task is not None else "skeleton",
+            status,
+            status,
+            "codex",
+            report,
+        )
+        report = append_memory_warning(report, warning or pickup_memory_warning)
+        post_issue_comment(issue_number, report)
+        apply_canonical_terminal_state(
+            issue_number,
+            remove_label=LABEL_RUNNING,
+            status=status,
         )
         notify_task_finished(issue_number, status, report)
         if status in {"DONE", "BLOCKED"}:
