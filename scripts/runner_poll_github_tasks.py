@@ -139,6 +139,10 @@ from core.private_static_site_runtime import (
 )
 from core.project_tree import get_project, get_project_by_repo, load_project_tree
 from core.runner_child_environment import sanitize_codegen_child_environment
+from core.secret_reference import (
+    SecretReferenceRegistrationError,
+    registered_bitwarden_reference_from_systemd_index,
+)
 from core.runner_codegen_router import (
     CodegenRouteError,
     codex_failure_allows_secondary,
@@ -333,9 +337,11 @@ HOME_EDGE_AUDIT_PERSIST_V1 = "home_edge_audit_persist_v1"
 HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1 = "home_edge_01_debian_media_bootstrap_v1"
 HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1 = "home_edge_01_post_migration_reconcile_v1"
 HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1 = "home_edge_01_media_source_snapshot_v1"
+MAIL_GMAIL_PRIMARY_REGISTERED_ACTIVATION = "mail_gmail_primary_registered_activation_v1"
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
         MAIL_GMAIL_READONLY_CANARY_TASK_ID,
+        MAIL_GMAIL_PRIMARY_REGISTERED_ACTIVATION,
         SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
         ENSURE_TELEGRAM_CALLBACK_LOCAL_CONFIG,
         CHECK_PROJECT_CHECKOUT,
@@ -16121,6 +16127,165 @@ def mail_gmail_readonly_canary_v1(body: str) -> str:
     )
 
 
+_MAIL_GMAIL_ACTIVATION_INPUT_FIELDS = frozenset(
+    (
+        "Mode",
+        "Maintenance Task ID",
+        "Repository",
+        "Expected Main SHA",
+        "Account Alias",
+        "Runtime Sync Approval",
+    )
+)
+_MAIL_GMAIL_ACTIVATION_REQUIRED_FIELDS = _MAIL_GMAIL_ACTIVATION_INPUT_FIELDS
+_MAIL_GMAIL_ACTIVATION_APPROVAL = (
+    "EXACT_HEAD_OPERATOR_REVIEW_THEN_RUNTIME_SYNC_APPROVED"
+)
+_MAIL_GMAIL_SERVICE = "skeleton-mail-operations.service"
+_MAIL_GMAIL_TIMER = "skeleton-mail-operations.timer"
+
+
+def _mail_gmail_activation_input(
+    body: str,
+) -> tuple[dict[str, str] | None, str | None]:
+    parsed, reason = _gmail_readonly_canary_input(
+        "\n".join(
+            line
+            for line in (body or "").splitlines()
+            if not line.strip().startswith("Runtime Sync Approval:")
+            and not line.strip().startswith("Maintenance Task ID:")
+        )
+        + f"\nMaintenance Task ID: {MAIL_GMAIL_READONLY_CANARY_TASK_ID}"
+    )
+    if reason is not None:
+        return None, reason.replace("gmail_readonly_canary", "mail_gmail_activation")
+
+    metadata = (body or "").strip()
+    parsed_activation: dict[str, str] = {}
+    for raw_line in metadata.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = re.fullmatch(
+            r"(?P<field>[A-Za-z][A-Za-z0-9 ]*):\s*(?P<value>\S(?:.*\S)?)",
+            line,
+        )
+        if match is None:
+            return None, "mail_gmail_activation_noncanonical_input"
+        field = match.group("field")
+        if field not in _MAIL_GMAIL_ACTIVATION_INPUT_FIELDS:
+            return None, "mail_gmail_activation_unknown_input_field"
+        if field in parsed_activation:
+            return None, "mail_gmail_activation_duplicate_input_field"
+        parsed_activation[field] = match.group("value")
+    if set(parsed_activation) != _MAIL_GMAIL_ACTIVATION_REQUIRED_FIELDS:
+        return None, "mail_gmail_activation_required_input_missing"
+    if parsed_activation["Maintenance Task ID"] != MAIL_GMAIL_PRIMARY_REGISTERED_ACTIVATION:
+        return None, "mail_gmail_activation_task_id_mismatch"
+    if parsed_activation["Account Alias"] != "acct:gmail-primary":
+        return None, "mail_gmail_activation_account_alias_mismatch"
+    if parsed_activation["Runtime Sync Approval"] != _MAIL_GMAIL_ACTIVATION_APPROVAL:
+        return None, "mail_gmail_activation_runtime_sync_approval_missing"
+    return parsed_activation, None
+
+
+def mail_gmail_primary_registered_activation_v1(body: str) -> str:
+    task_id = MAIL_GMAIL_PRIMARY_REGISTERED_ACTIVATION
+    parsed, reason = _mail_gmail_activation_input(body)
+    if reason is not None or parsed is None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [f"reason={reason or 'mail_gmail_activation_invalid_input'}"],
+            "not_met",
+        )
+
+    preflight_report = _gmail_readonly_canary_preflight(parsed["Expected Main SHA"])
+    if preflight_report is not None:
+        return preflight_report.replace(
+            f"maintenance_task_id={MAIL_GMAIL_READONLY_CANARY_TASK_ID}",
+            f"maintenance_task_id={task_id}",
+        )
+
+    status_lines = [
+        "step=exact_main_preflight status=done",
+        "account_alias=acct:gmail-primary",
+    ]
+    try:
+        registered_bitwarden_reference_from_systemd_index(
+            os.environ,
+            service_id="mail-gmail",
+            alias="acct:gmail-primary",
+            bootstrap_required=True,
+        )
+    except SecretReferenceRegistrationError as exc:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, f"step=reference_bind status=failed reason={str(exc)}"],
+            "not_met",
+        )
+    status_lines.append("step=reference_bind status=done")
+
+    try:
+        receipt = run_gmail_readonly_canary(
+            account_alias="acct:gmail-primary",
+            authority_environment=os.environ,
+        )
+    except GmailReadonlyCanaryError as exc:
+        receipt = blocked_gmail_readonly_receipt(
+            account_alias="acct:gmail-primary",
+            reason_code=exc.reason_code,
+        )
+    canary_report = _gmail_readonly_canary_receipt_report(
+        receipt,
+        preflight_passed=True,
+    )
+    if not maintenance_report_is_done(canary_report):
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                *status_lines,
+                "step=gmail_readonly_canary status=failed",
+                f"stable_reason={receipt.get('stable_reason', 'GMAIL_READONLY_PROVIDER_FAILURE')}",
+            ],
+            "not_met",
+        )
+    status_lines.append("step=gmail_readonly_canary status=done")
+
+    for step, command in (
+        ("systemd_daemon_reload", _non_interactive_sudo("systemctl", "daemon-reload")),
+        ("enable_mail_timer", _non_interactive_sudo("systemctl", "enable", _MAIL_GMAIL_TIMER)),
+        ("start_mail_timer", _non_interactive_sudo("systemctl", "start", _MAIL_GMAIL_TIMER)),
+        ("start_mail_worker_once", _non_interactive_sudo("systemctl", "start", _MAIL_GMAIL_SERVICE)),
+        (
+            "verify_mail_timer_active",
+            _non_interactive_sudo("systemctl", "is-active", "--quiet", _MAIL_GMAIL_TIMER),
+        ),
+    ):
+        report = _run_maintenance_command(task_id, step, command, status_lines)
+        if report is not None:
+            return report
+
+    report = _verify_maintenance_command_output(
+        task_id,
+        "verify_mail_worker_result",
+        _non_interactive_sudo(
+            "systemctl",
+            "show",
+            "--property=Result",
+            "--value",
+            _MAIL_GMAIL_SERVICE,
+        ),
+        "success",
+        status_lines,
+    )
+    if report is not None:
+        return report
+    return _maintenance_report("DONE", task_id, status_lines, "met")
+
+
 def dispatch_runtime_maintenance_task(
     task_id: str, workdir: str, body: str = ""
 ) -> str:
@@ -16132,6 +16297,8 @@ def dispatch_runtime_maintenance_task(
             "not_met",
         )
     try:
+        if task_id == MAIL_GMAIL_PRIMARY_REGISTERED_ACTIVATION:
+            return mail_gmail_primary_registered_activation_v1(body)
         if task_id == MAIL_GMAIL_READONLY_CANARY_TASK_ID:
             return mail_gmail_readonly_canary_v1(body)
         if task_id == BUILD_AND_LOCAL_OTA_OPERATION:

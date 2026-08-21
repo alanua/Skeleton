@@ -13,4 +13,4 @@ install -m 0644 ops/systemd/skeleton-mail-operations.service /etc/systemd/system
 install -m 0644 ops/systemd/skeleton-mail-operations.timer /etc/systemd/system/skeleton-mail-operations.timer
 
 systemctl daemon-reload
-systemctl enable skeleton-mail-operations.timer
+systemctl disable skeleton-mail-operations.timer >/dev/null 2>&1 || true
