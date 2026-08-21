@@ -22,6 +22,23 @@ A future `ExecutionBinding` may reference one model record only after executor c
 
 Response-only success does not imply tool-use or repository-edit eligibility. A required artifact missing or tool-use failure is hard failure evidence for that capability.
 
+## Terminal Success Authority
+
+For codegen that publishes or updates a PR, terminal success is not inferred
+from a single Runner/Codex report, return code, labels, model text, or local
+tests. The source task queues an exact-head `validate_pr_branch` continuation
+and remains non-DONE while that validation is pending. The continuation receipt
+is authoritative only when it is typed as `validate_pr_branch`, reports
+`success_criteria=met`, and carries the exact PR number, validation head SHA,
+base SHA, and clean final worktree status.
+
+Canonical finalization reads the current PR metadata again and compares that
+live PR/head/base identity with the validation receipt before emitting `DONE`
+or protected `NEEDS_OPERATOR`. A validated head A with current head B is
+`stale_validation_head` and cannot become `DONE`. Protected or high-risk
+accepted work remains `NEEDS_OPERATOR` after the exact receipt matches, and
+that state is not projected as `runner:done` or `runner:blocked`.
+
 The deterministic selector consumes a code-owned `TaskFitRequest` containing required capability thresholds and privacy class. It has no field for caller-provided provider/model/endpoint authority. Given the same request and registry snapshot it returns the same ranking.
 
 This slice does not create or dispatch bindings and does not modify the live Runner route. Next phase under #2809 integrates the roster into atomic executor+model `ExecutionBinding`, immutable `RouteLease`, periodic bounded discovery/canary scheduling, and explicit LIVE activation. Any protected Runner integration requires exact-head operator approval.

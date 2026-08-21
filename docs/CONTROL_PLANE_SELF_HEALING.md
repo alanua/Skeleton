@@ -78,7 +78,7 @@ Ordinary Runner codegen failures classified by the exact live metadata phrase en
 
 During each ordinary Runner poll, the single poller has one learned queue-idle path. It first requires the live global gate `runner:ready` depth `0` and `runner:running` depth `0`, then finds eligible public-safe queue work through the existing replenisher selection rules. Immediately before mutation it repeats the same ready/running/eligible recheck. Fresh running work suppresses recovery; running work that appears between snapshot and mutation records failed recovery/backoff and performs no mutation.
 
-Terminal Runner codegen completion also re-enters that same learned queue-idle path. After a codegen task is labeled `runner:done` or `runner:blocked`, including explicit blocked Codex output and finalization failures, the completed issue remains terminal while the poller re-evaluates the canonical queue for unrelated eligible work. The validation-continuation maintenance path uses the same terminal hook. The continuation does not add chat/manual-ready requirements, does not re-promote the terminal issue, and does not send Telegram noise.
+Terminal Runner codegen completion also re-enters that same learned queue-idle path. A codegen task that publishes a PR is not labeled `runner:done` from the Codex report itself. It creates or reuses an exact-head `validate_pr_branch` continuation and remains `runner:blocked` with `validation_pending` until that independently produced receipt exists. Finalization then compares the receipt PR number, head SHA, and base SHA with the live current PR metadata before reporting terminal success. The validation-continuation maintenance path uses the same terminal hook. The continuation does not add chat/manual-ready requirements, does not re-promote the terminal issue, and does not send Telegram noise.
 
 Acceptance note: the post-merge live canary on main `9d17100369b229c2ed0266a04f3a084952101cc0` was picked up autonomously from RUN_NOW-only queue admission.
 
@@ -120,12 +120,14 @@ an `update_existing_pr` path.
 
 Mergeability inspection is fail-closed on the actual PR file list. The canonical
 delegated merge policy is evaluated from GitHub's changed files, not issue
-metadata. Protected, review-required, private, red/yellow, dependency-held, or
-review-failed work remains `NEEDS_OPERATOR`. A public green unprotected PR may
-only be reported merge-ready after a trusted `validate_pr_branch` receipt exists
-for the exact current PR head SHA and exact current base SHA; stale head/base
-validation requires revalidation. Creating or reusing validation for a refreshed
-head returns without merging in that same pass.
+metadata. A public green unprotected PR may only be reported merge-ready after a
+trusted `validate_pr_branch` receipt exists for the exact current PR number,
+head SHA, and base SHA. Stale head/base validation reports
+`stale_validation_head` or `stale_validation_base` and never reports `DONE`.
+Protected, review-required, private, red/yellow, dependency-held, or
+review-failed work remains `NEEDS_OPERATOR` only after the same exact-head
+receipt matches. `NEEDS_OPERATOR` is not projected as `runner:done` or
+`runner:blocked`.
 
 ## Operator Noise
 

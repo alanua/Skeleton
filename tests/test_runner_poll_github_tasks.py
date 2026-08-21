@@ -311,6 +311,72 @@ def _validation_receipt_issue_view_json(**kwargs: object) -> str:
     )
 
 
+def test_trusted_validation_receipt_state_reports_stale_head_against_current_pr_head() -> None:
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        del cwd
+        if command[:3] == ["gh", "issue", "list"]:
+            return 0, _validation_receipt_issue_json(
+                head_sha="b" * 40,
+                receipt_head_sha="a" * 40,
+            )
+        if command[:3] == ["gh", "issue", "view"]:
+            return 0, _validation_receipt_issue_view_json(
+                head_sha="b" * 40,
+                receipt_head_sha="a" * 40,
+            )
+        return 2, "unexpected command"
+
+    with mock.patch.object(runner, "run_command", side_effect=run):
+        state, reason, receipt = runner._trusted_pr_validation_receipt_state(
+            repository=runner.REPO,
+            pr_number=123,
+            head_sha="b" * 40,
+            base_sha="b" * 40,
+        )
+
+    assert state == "not_success"
+    assert reason == "stale_validation_head"
+    assert receipt is not None
+    assert receipt.head_sha == "a" * 40
+
+
+def test_untyped_legacy_done_text_is_not_validation_receipt_authority() -> None:
+    report = "\n".join(
+        (
+            "DONE: Codex completed successfully with no file changes.",
+            "pull_request=123",
+            f"validation_checkout_head_sha={HEAD_SHA}",
+            f"validation_base_sha={'b' * 40}",
+            "validation_final_status=clean",
+            "success_criteria=met",
+        )
+    )
+
+    receipt = runner._trusted_validation_receipt_from_report(
+        report, issue_number=3001
+    )
+
+    assert receipt is None
+
+
+def test_codegen_terminal_success_has_one_typed_validation_authority() -> None:
+    source = Path(runner.__file__).read_text(encoding="utf-8")
+    codegen_writer = (
+        "warning = record_runner_executor_result(\n"
+        "            issue_number,\n"
+        "            runner_task.target_project if runner_task is not None else \"skeleton\",\n"
+        "            status,\n"
+        "            status,\n"
+        "            \"codex\",\n"
+        "            report,\n"
+        "        )"
+    )
+
+    assert source.count(codegen_writer) == 1
+    assert "strict_codegen_receipt=False" not in source
+    assert "_trusted_validation_receipt_matches" not in source
+
+
 def _telegram_response() -> mock.MagicMock:
     response = mock.MagicMock()
     response.__enter__.return_value = response
@@ -1966,8 +2032,8 @@ def test_update_existing_pr_process_publishes_same_pr_and_queues_validation(
     assert all(command[:3] != ["gh", "pr", "create"] for command in commands)
     assert all(command[:3] != ["gh", "pr", "merge"] for command in commands)
     report = post.call_args.args[1]
-    assert "Existing PR: https://github.com/alanua/Skeleton/pull/2749" in report
-    assert "replacement_pr_created=false" in report
+    assert report.startswith("BLOCKED:")
+    assert "reason=validation_pending" in report
     assert "validation_continuation=created" in report
     assert "validation_pr=2749" in report
     assert f"validation_head_sha={post_head}" in report
@@ -2041,6 +2107,59 @@ def test_validation_completion_invokes_replenishment_even_when_blocked() -> None
         )
 
     replenish.assert_called_once_with()
+
+
+def test_needs_operator_maintenance_completion_removes_active_labels_without_terminal_projection() -> None:
+    label_commands: list[list[str]] = []
+
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        del cwd
+        if command[:3] == ["gh", "issue", "view"]:
+            return 0, json.dumps({"labels": [{"name": runner.LABEL_RUNNING}]})
+        if command[:3] == ["gh", "issue", "edit"]:
+            label_commands.append(command)
+            return 0, ""
+        return 2, "unexpected command"
+
+    with mock.patch.object(
+        runner,
+        "dispatch_runtime_maintenance_task",
+        return_value=runner._maintenance_report(
+            "NEEDS_OPERATOR",
+            runner.INSPECT_PR_MERGEABILITY,
+            ["reason=delegated_merge_policy_requires_operator"],
+            "not_met",
+        ),
+    ), mock.patch.object(runner, "record_runner_executor_result", return_value=None), mock.patch.object(
+        runner, "post_issue_comment"
+    ) as post, mock.patch.object(
+        runner, "notify_task_finished"
+    ) as notify, mock.patch.object(
+        runner, "run_command", side_effect=run
+    ):
+        runner.process_runtime_maintenance_issue(
+            3005,
+            runner.INSPECT_PR_MERGEABILITY,
+            str(runner.ROOT),
+            _inspect_pr_issue_body(),
+        )
+
+    assert post.call_args.args[1].startswith("NEEDS_OPERATOR:")
+    notify.assert_called_once_with(3005, "NEEDS_OPERATOR", mock.ANY)
+    assert label_commands == [
+        [
+            "gh",
+            "issue",
+            "edit",
+            "3005",
+            "--repo",
+            runner.REPO,
+            "--remove-label",
+            runner.LABEL_RUNNING,
+        ]
+    ]
+    assert all(runner.LABEL_DONE not in command for command in label_commands)
+    assert all(runner.LABEL_BLOCKED not in command for command in label_commands)
 
 
 def test_process_issue_routes_exact_unknown_variant_max_to_recovery_wait(
@@ -12908,6 +13027,17 @@ def test_needs_operator_maintenance_output_records_and_notifies_exact_status() -
         "reason=missing_operator_approval\n"
         "success_criteria=not_met"
     )
+    label_commands: list[list[str]] = []
+
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        del cwd
+        if command[:3] == ["gh", "issue", "view"]:
+            return 0, json.dumps({"labels": [{"name": runner.LABEL_RUNNING}]})
+        if command[:3] == ["gh", "issue", "edit"]:
+            label_commands.append(command)
+            return 0, ""
+        return 2, "unexpected command"
+
     with mock.patch.object(
         runner, "dispatch_runtime_maintenance_task", return_value=report
     ), mock.patch.object(
@@ -12916,9 +13046,7 @@ def test_needs_operator_maintenance_output_records_and_notifies_exact_status() -
         runner, "post_issue_comment"
     ), mock.patch.object(
         runner, "notify_task_finished"
-    ) as notify, mock.patch.object(
-        runner, "set_issue_label"
-    ) as set_label:
+    ) as notify, mock.patch.object(runner, "run_command", side_effect=run):
         runner.process_runtime_maintenance_issue(
             145, runner.PUBLISH_EXISTING_ISSUE_WORKTREE, str(runner.ROOT)
         )
@@ -12931,7 +13059,18 @@ def test_needs_operator_maintenance_output_records_and_notifies_exact_status() -
         "maintenance",
         report,
     )
-    set_label.assert_called_once_with(145, runner.LABEL_RUNNING, runner.LABEL_BLOCKED)
+    assert label_commands == [
+        [
+            "gh",
+            "issue",
+            "edit",
+            "145",
+            "--repo",
+            runner.REPO,
+            "--remove-label",
+            runner.LABEL_RUNNING,
+        ]
+    ]
     notify.assert_called_once_with(145, "NEEDS_OPERATOR", report)
 
 
@@ -17682,7 +17821,7 @@ def test_inspect_pr_mergeability_stale_validation_head_fails_closed() -> None:
 
     assert report.startswith("BLOCKED:")
     assert "validation_state=not_success" in report
-    assert "reason=validation_not_success" in report
+    assert "reason=stale_validation_head" in report
     assert "next_action=wait_for_or_fix_validation" in report
 
 
@@ -17702,25 +17841,55 @@ def test_inspect_pr_mergeability_stale_validation_base_fails_closed() -> None:
 
     assert report.startswith("BLOCKED:")
     assert "validation_state=not_success" in report
-    assert "reason=validation_not_success" in report
+    assert "reason=stale_validation_base" in report
 
 
 def test_inspect_pr_mergeability_protected_actual_file_needs_operator() -> None:
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        del cwd
+        if command[:3] == ["gh", "issue", "list"]:
+            return 0, _validation_receipt_issue_json()
+        if command[:3] == ["gh", "issue", "view"]:
+            return 0, _validation_receipt_issue_view_json()
+        return 2, "unexpected command"
+
     with mock.patch.object(
         runner,
         "_get_pr_mergeability_state",
         return_value=_inspect_pr_state(
             files=[{"filename": "scripts/runner_poll_github_tasks.py"}]
         ),
-    ), mock.patch.object(runner, "run_command") as run:
+    ), mock.patch.object(runner, "run_command", side_effect=run):
         report = runner.inspect_pr_mergeability(_inspect_pr_issue_body())
 
     assert report.startswith("NEEDS_OPERATOR:")
     assert "changed_files=scripts/runner_poll_github_tasks.py" in report
     assert "delegated_merge_verdict=OPERATOR_APPROVAL_REQUIRED" in report
     assert "protected_changed_file=scripts/runner_poll_github_tasks.py" in report
+    assert "validation_state=success" in report
+    assert "validation_receipt_issue=3001" in report
     assert "reason=delegated_merge_policy_requires_operator" in report
-    run.assert_not_called()
+
+
+def test_inspect_pr_mergeability_protected_without_receipt_blocks_not_operator() -> None:
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        del cwd
+        if command[:3] == ["gh", "issue", "list"]:
+            return 0, "[]"
+        return 2, "unexpected command"
+
+    with mock.patch.object(
+        runner,
+        "_get_pr_mergeability_state",
+        return_value=_inspect_pr_state(
+            files=[{"filename": "scripts/runner_poll_github_tasks.py"}]
+        ),
+    ), mock.patch.object(runner, "run_command", side_effect=run):
+        report = runner.inspect_pr_mergeability(_inspect_pr_issue_body())
+
+    assert report.startswith("BLOCKED:")
+    assert "validation_state=missing" in report
+    assert "reason=validation_missing" in report
 
 
 def test_inspect_pr_mergeability_diverged_pr_reports_refresh_next_action() -> None:

@@ -957,7 +957,14 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "version",
         "validation_profile",
         "validation_state",
+        "validation_continuation",
+        "validation_issue",
+        "validation_pr",
+        "validation_head_sha",
         "validation_receipt_issue",
+        "validation_receipt_pr",
+        "validation_receipt_head_sha",
+        "validation_receipt_base_sha",
         "validation_pytest_totals",
         "vaapi_status",
         "video_route_present",
@@ -1132,6 +1139,15 @@ class ProducedPrValidationContinuation:
     idempotency_key: str
     created: bool
     issue_number: int | None = None
+
+
+@dataclass(frozen=True)
+class TrustedPrValidationReceipt:
+    issue_number: int
+    pr_number: int
+    head_sha: str
+    base_sha: str
+    status: str
 
 
 @dataclass(frozen=True)
@@ -4096,6 +4112,29 @@ def set_issue_label(issue_number: int, remove: str, add: str) -> None:
         command.extend(["--remove-label", label])
     command.extend(["--add-label", add])
 
+    code, output = run_command(command)
+    if code != 0:
+        raise RuntimeError(f"gh issue edit failed:\n{output}")
+
+
+def set_issue_terminal_status_label(issue_number: int, remove: str, status: str) -> None:
+    if status == "DONE":
+        set_issue_label(issue_number, remove, LABEL_DONE)
+        return
+    if status == "BLOCKED":
+        set_issue_label(issue_number, remove, LABEL_BLOCKED)
+        return
+
+    remove_labels = set(
+        get_issue_labels(issue_number)
+        & (ACTIVE_EXECUTION_LABELS | TERMINAL_RUNNER_LABELS)
+    )
+    remove_labels.add(remove)
+    command = ["gh", "issue", "edit", str(issue_number), "--repo", REPO]
+    for label in sorted(remove_labels):
+        command.extend(["--remove-label", label])
+    if len(command) == 6:
+        return
     code, output = run_command(command)
     if code != 0:
         raise RuntimeError(f"gh issue edit failed:\n{output}")
@@ -10926,21 +10965,44 @@ def _actual_file_delegated_merge_policy(
     return decision.verdict, decision.protected_files_found
 
 
-def _trusted_validation_receipt_matches(
+def _report_field_value(report: str, key: str) -> str | None:
+    prefix = f"{key}="
+    for line in _without_fenced_blocks(report or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith(prefix):
+            return stripped[len(prefix) :].strip()
+    return None
+
+
+def _trusted_validation_receipt_from_report(
     report: str,
     *,
-    pr_number: int,
-    head_sha: str,
-    base_sha: str,
-) -> bool:
-    return (
-        runner_report_status(report) == "DONE"
-        and f"maintenance_task_id={VALIDATE_PR_BRANCH}" in report
-        and f"pull_request={pr_number}" in report
-        and f"validation_checkout_head_sha={head_sha}" in report
-        and f"validation_base_sha={base_sha}" in report
-        and "validation_final_status=clean" in report
-        and "success_criteria=met" in report
+    issue_number: int,
+) -> TrustedPrValidationReceipt | None:
+    if runner_report_status(report) != "DONE":
+        return None
+    if _report_field_value(report, "maintenance_task_id") != VALIDATE_PR_BRANCH:
+        return None
+    pr_text = _report_field_value(report, "pull_request")
+    head_sha = (_report_field_value(report, "validation_checkout_head_sha") or "").lower()
+    base_sha = (_report_field_value(report, "validation_base_sha") or "").lower()
+    if (
+        pr_text is None
+        or not pr_text.isdigit()
+        or _HEAD_SHA_RE.fullmatch(head_sha) is None
+        or _HEAD_SHA_RE.fullmatch(base_sha) is None
+    ):
+        return None
+    if _report_field_value(report, "validation_final_status") != "clean":
+        return None
+    if _report_field_value(report, "success_criteria") != "met":
+        return None
+    return TrustedPrValidationReceipt(
+        issue_number=issue_number,
+        pr_number=int(pr_text),
+        head_sha=head_sha,
+        base_sha=base_sha,
+        status="DONE",
     )
 
 
@@ -10950,7 +11012,7 @@ def _trusted_pr_validation_receipt_state(
     pr_number: int,
     head_sha: str,
     base_sha: str,
-) -> tuple[str, str, int | None]:
+) -> tuple[str, str, TrustedPrValidationReceipt | None]:
     idempotency_key = _continuation_issue_idempotency_key(
         repository, pr_number, head_sha, base_sha
     )
@@ -11039,11 +11101,19 @@ def _trusted_pr_validation_receipt_state(
 
     issue_number, bodies = matching_issues[0]
     for body in bodies:
-        if _trusted_validation_receipt_matches(
-            body, pr_number=pr_number, head_sha=head_sha, base_sha=base_sha
-        ):
-            return "success", "none", issue_number
-    return "not_success", "validation_receipt_not_success", issue_number
+        receipt = _trusted_validation_receipt_from_report(
+            body, issue_number=issue_number
+        )
+        if receipt is None:
+            continue
+        if receipt.pr_number != pr_number:
+            return "not_success", "stale_validation_pr", receipt
+        if receipt.head_sha != head_sha:
+            return "not_success", "stale_validation_head", receipt
+        if receipt.base_sha != base_sha:
+            return "not_success", "stale_validation_base", receipt
+        return "success", "none", receipt
+    return "not_success", "validation_receipt_not_success", None
 
 
 def _pr_mergeability_next_action(
@@ -11075,14 +11145,14 @@ def _pr_mergeability_next_action(
         return "BLOCKED", "branch_behind_or_diverged", "refresh_pr_branch"
     if mergeable is False or mergeable_state in {"dirty", "blocked"}:
         return "BLOCKED", "pr_has_merge_conflicts", "resolve_merge_conflicts"
-    if delegated_merge_verdict != AUTO_MERGE_ALLOWED:
-        return "NEEDS_OPERATOR", "delegated_merge_policy_requires_operator", "operator_review_required"
     if validation_state == "missing":
         return "BLOCKED", "validation_missing", "run_required_validation"
     if validation_state == "unavailable":
         return "BLOCKED", "validation_receipt_unavailable", "retry_validation_receipt_lookup"
     if validation_state != "success":
-        return "BLOCKED", "validation_not_success", "wait_for_or_fix_validation"
+        return "BLOCKED", "none", "wait_for_or_fix_validation"
+    if delegated_merge_verdict != AUTO_MERGE_ALLOWED:
+        return "NEEDS_OPERATOR", "delegated_merge_policy_requires_operator", "operator_review_required"
     if mergeable is True:
         return "DONE", "none", "mark_ready_or_merge"
     return "BLOCKED", "mergeability_unknown", "refresh_mergeability_inspection"
@@ -11134,17 +11204,16 @@ def inspect_pr_mergeability(body: str) -> str:
     status_validation_state, status_validation_reason = _validation_summary(
         combined_status, check_runs
     )
-    receipt_issue: int | None = None
+    validation_receipt: TrustedPrValidationReceipt | None = None
     head_sha = str(head.get("sha") or "").lower()
     base_sha = str(base.get("sha") or "").lower()
     if (
-        delegated_verdict == AUTO_MERGE_ALLOWED
-        and status_validation_state == "success"
+        status_validation_state == "success"
         and _HEAD_SHA_RE.fullmatch(head_sha) is not None
         and _HEAD_SHA_RE.fullmatch(base_sha) is not None
         and isinstance(pr.get("number"), int)
     ):
-        validation_state, validation_reason, receipt_issue = (
+        validation_state, validation_reason, validation_receipt = (
             _trusted_pr_validation_receipt_state(
                 repository=REPO,
                 pr_number=int(pr["number"]),
@@ -11183,8 +11252,13 @@ def inspect_pr_mergeability(body: str) -> str:
             f"behind_by={compare.get('behind_by', 'unknown')}",
             f"validation_state={validation_state}",
             *(
-                [f"validation_receipt_issue={receipt_issue}"]
-                if receipt_issue is not None
+                [
+                    f"validation_receipt_issue={validation_receipt.issue_number}",
+                    f"validation_receipt_pr={validation_receipt.pr_number}",
+                    f"validation_receipt_head_sha={validation_receipt.head_sha}",
+                    f"validation_receipt_base_sha={validation_receipt.base_sha}",
+                ]
+                if validation_receipt is not None
                 else []
             ),
             f"reason={reason if reason != 'none' else validation_reason}",
@@ -16375,11 +16449,7 @@ def process_telegram_approved_pr_merge_issue(
     )
     report = append_memory_warning(report, warning or memory_warning)
     post_issue_comment(issue_number, report)
-    set_issue_label(
-        issue_number,
-        LABEL_RUNNING,
-        LABEL_DONE if status == "DONE" else LABEL_BLOCKED,
-    )
+    set_issue_terminal_status_label(issue_number, LABEL_RUNNING, status)
     notify_task_finished(issue_number, status, report)
 
 
@@ -16405,11 +16475,7 @@ def process_runtime_maintenance_issue(
     )
     report = append_memory_warning(report, warning or memory_warning)
     post_issue_comment(issue_number, report)
-    set_issue_label(
-        issue_number,
-        LABEL_RUNNING,
-        LABEL_DONE if status == "DONE" else LABEL_BLOCKED,
-    )
+    set_issue_terminal_status_label(issue_number, LABEL_RUNNING, status)
     notify_task_finished(issue_number, status, report)
     if task_id == VALIDATE_PR_BRANCH and status in {"DONE", "BLOCKED"}:
         maybe_replenish_runner_queue_after_completion()
@@ -16721,11 +16787,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                 )
                 report = append_memory_warning(report, warning or pickup_memory_warning)
                 post_issue_comment(issue_number, report)
-                set_issue_label(
-                    issue_number,
-                    LABEL_RUNNING,
-                    LABEL_DONE if status == "DONE" else LABEL_BLOCKED,
-                )
+                set_issue_terminal_status_label(issue_number, LABEL_RUNNING, status)
                 notify_task_finished(issue_number, status, report)
                 return
             if pickup_memory_warning:
@@ -16949,16 +17011,7 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
         if status == "BLOCKED":
             report = blocked_final_report(report)
             report = append_retry_fields(report, retry_decision)
-        warning = record_runner_executor_result(
-            issue_number,
-            runner_task.target_project if runner_task is not None else "skeleton",
-            status,
-            status,
-            "codex",
-            report,
-        )
-        report = append_memory_warning(report, warning or pickup_memory_warning)
-        if status == "DONE":
+        elif status == "DONE":
             try:
                 continuation = ensure_codegen_pr_validation_continuation(
                     source_issue=issue_number,
@@ -16982,31 +17035,39 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                     runner_task,
                 )
                 report = append_retry_fields(report, retry_decision)
-                warning = record_runner_executor_result(
-                    issue_number,
-                    runner_task.target_project if runner_task is not None else "skeleton",
-                    status,
-                    status,
-                    "codex",
-                    report,
-                )
-                report = append_memory_warning(report, warning or pickup_memory_warning)
             else:
                 if continuation is not None:
-                    report = (
-                        f"{report.rstrip()}\n"
-                        f"validation_continuation={'created' if continuation.created else 'reused'}\n"
-                        f"validation_issue={continuation.issue_number or 'unknown'}\n"
-                        f"validation_pr={continuation.pr_number}\n"
-                        f"validation_head_sha={continuation.head_sha}\n"
-                        f"validation_base_sha={continuation.base_sha}"
+                    status = "BLOCKED"
+                    report = report_runner_lane(
+                        _maintenance_report(
+                            "BLOCKED",
+                            "codegen_exact_head_validation",
+                            [
+                                f"source_issue={issue_number}",
+                                "reason=validation_pending",
+                                f"produced_pr={continuation.pr_url}",
+                                f"validation_continuation={'created' if continuation.created else 'reused'}",
+                                f"validation_issue={continuation.issue_number or 'unknown'}",
+                                f"validation_pr={continuation.pr_number}",
+                                f"validation_head_sha={continuation.head_sha}",
+                                f"validation_base_sha={continuation.base_sha}",
+                                "next_action=wait_for_exact_head_validation",
+                            ],
+                            "not_met",
+                        ),
+                        runner_task,
                     )
-        post_issue_comment(issue_number, report)
-        set_issue_label(
+        warning = record_runner_executor_result(
             issue_number,
-            LABEL_RUNNING,
-            LABEL_DONE if status == "DONE" else LABEL_BLOCKED,
+            runner_task.target_project if runner_task is not None else "skeleton",
+            status,
+            status,
+            "codex",
+            report,
         )
+        report = append_memory_warning(report, warning or pickup_memory_warning)
+        post_issue_comment(issue_number, report)
+        set_issue_terminal_status_label(issue_number, LABEL_RUNNING, status)
         notify_task_finished(issue_number, status, report)
         if status in {"DONE", "BLOCKED"}:
             maybe_replenish_runner_queue_after_completion()
