@@ -6,10 +6,17 @@ from types import SimpleNamespace
 
 import pytest
 
+from core.secret_reference import (
+    BitwardenIdentifier,
+    bootstrap_gmail_primary_reference_index,
+    match_gmail_primary_bitwarden_identifiers,
+)
 import integrations.bitwarden_secret_store as bitwarden
 from core.secret_store import SecretProviderUnavailable, SecretReference, SecretResolutionContext
 from integrations.bitwarden_secret_store import (
     BwsCliSecretsManagerStore,
+    BitwardenSdkIdentifierDiscoveryError,
+    BitwardenSdkIdentifiersAdapter,
     bitwarden_reference_from_systemd_credential,
 )
 
@@ -126,3 +133,181 @@ def test_bws_cli_rejects_reference_mismatch_and_nonzero_exit(tmp_path: Path, mon
     )
     with pytest.raises(SecretProviderUnavailable, match="secret_get_failed"):
         store.resolve(reference, context)
+
+
+def test_gmail_primary_identifier_matcher_accepts_unique_and_rejects_decoys() -> None:
+    identifiers = (
+        BitwardenIdentifier(
+            id="11111111-2222-3333-4444-555555555555",
+            key="skeleton/gmail/primary/oauth",
+        ),
+        BitwardenIdentifier(
+            id="22222222-3333-4444-5555-666666666666",
+            key="skeleton/gmail/secondary/oauth",
+        ),
+        BitwardenIdentifier(
+            id="33333333-4444-5555-6666-777777777777",
+            key="test gmail primary oauth",
+        ),
+        BitwardenIdentifier(
+            id="44444444-5555-6666-7777-888888888888",
+            key="old gmail primary oauth",
+        ),
+    )
+
+    assert match_gmail_primary_bitwarden_identifiers(identifiers) == (identifiers[0],)
+
+
+def test_gmail_primary_bootstrap_fails_closed_on_none_and_ambiguous(tmp_path: Path) -> None:
+    calls: list[object] = []
+
+    none = bootstrap_gmail_primary_reference_index(
+        {"CREDENTIALS_DIRECTORY": str(tmp_path / "missing")},
+        identifiers=(),
+        run=lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+    assert none.public_receipt()["status"] == "BLOCKED"
+    assert none.public_receipt()["match_count_class"] == "zero"
+    assert none.public_receipt()["reason"] == "NO_ELIGIBLE_IDENTIFIER"
+
+    ambiguous = bootstrap_gmail_primary_reference_index(
+        {"CREDENTIALS_DIRECTORY": str(tmp_path / "missing")},
+        identifiers=(
+            BitwardenIdentifier(
+                id="11111111-2222-3333-4444-555555555555",
+                key="skeleton gmail primary oauth",
+            ),
+            BitwardenIdentifier(
+                id="66666666-7777-8888-9999-000000000000",
+                key="prod gmail primary oauth bundle",
+            ),
+        ),
+        run=lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+    assert ambiguous.public_receipt()["status"] == "BLOCKED"
+    assert ambiguous.public_receipt()["match_count_class"] == "many"
+    assert ambiguous.public_receipt()["reason"] == "AMBIGUOUS_IDENTIFIER"
+    assert calls == []
+
+
+def test_gmail_primary_bootstrap_persists_only_encrypted_reference_index(tmp_path: Path) -> None:
+    credentials = tmp_path / "credentials"
+    credentials.mkdir()
+    observed: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):
+        observed["argv"] = list(argv)
+        observed["input"] = kwargs["input"]
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    result = bootstrap_gmail_primary_reference_index(
+        {"CREDENTIALS_DIRECTORY": str(credentials)},
+        identifiers=(
+            BitwardenIdentifier(
+                id="11111111-2222-3333-4444-555555555555",
+                key="skeleton gmail primary oauth",
+            ),
+        ),
+        encrypted_credential_dir=str(tmp_path / "credstore.encrypted"),
+        run=fake_run,
+    )
+
+    assert result.public_receipt() == {
+        "schema": "skeleton.reference_bootstrap_receipt.v1",
+        "status": "PASS",
+        "match_count_class": "one",
+        "persisted": True,
+        "public_safe": True,
+        "private_payloads_included": False,
+        "reason": "OK",
+    }
+    assert observed["argv"][:5] == [
+        "sudo",
+        "-n",
+        "systemd-creds",
+        "encrypt",
+        "--name=skeleton-secret-reference-index",
+    ]
+    assert json.loads(observed["input"]) == {
+        "schema": "skeleton.secret_reference_index.v1",
+        "registrations": [
+            {
+                "service_id": "mail-gmail",
+                "alias": "acct:gmail-primary",
+                "provider": "bitwarden",
+                "reference_id": "11111111-2222-3333-4444-555555555555",
+            }
+        ],
+    }
+
+
+def test_sdk_identifier_adapter_lists_identifiers_without_value_methods(monkeypatch, tmp_path: Path) -> None:
+    authority, _bws, _ref_file = _authority(tmp_path)
+    calls: list[str] = []
+
+    class SecretIdentifiersRequest:
+        def __init__(self, *, organization_id):
+            self.organization_id = organization_id
+
+    class Auth:
+        def login_access_token(self, token):
+            calls.append("login")
+            assert token == "synthetic-machine-token"
+            return SimpleNamespace(organization_id="99999999-aaaa-bbbb-cccc-dddddddddddd")
+
+    class Secrets:
+        def list(self, request):
+            calls.append(f"list:{request.organization_id}")
+            return SimpleNamespace(
+                data=[
+                    SimpleNamespace(
+                        id="11111111-2222-3333-4444-555555555555",
+                        key="skeleton gmail primary oauth",
+                    )
+                ]
+            )
+
+        def get(self, _reference_id):
+            raise AssertionError("value-bearing get must not be called")
+
+        def get_by_ids(self, _reference_ids):
+            raise AssertionError("value-bearing get_by_ids must not be called")
+
+    class Client:
+        def auth(self):
+            return Auth()
+
+        def secrets(self):
+            return Secrets()
+
+    sdk_module = SimpleNamespace(
+        BitwardenClient=lambda _settings: Client(),
+        ClientSettings=lambda: SimpleNamespace(),
+        SecretIdentifiersRequest=SecretIdentifiersRequest,
+    )
+    monkeypatch.setattr(bitwarden.importlib_metadata, "version", lambda _package: "2.1.0")
+    monkeypatch.setattr(bitwarden, "import_module", lambda _name: sdk_module)
+
+    adapter = BitwardenSdkIdentifiersAdapter.from_systemd_credentials(authority)
+    assert adapter.discover_identifiers() == (
+        BitwardenIdentifier(
+            id="11111111-2222-3333-4444-555555555555",
+            key="skeleton gmail primary oauth",
+        ),
+    )
+    assert calls == ["login", "list:99999999-aaaa-bbbb-cccc-dddddddddddd"]
+
+
+def test_sdk_identifier_adapter_fails_before_discovery_on_unpinned_dependency(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    authority, _bws, _ref_file = _authority(tmp_path)
+    imported: list[str] = []
+    monkeypatch.setattr(bitwarden.importlib_metadata, "version", lambda _package: "2.0.0")
+    monkeypatch.setattr(bitwarden, "import_module", lambda name: imported.append(name))
+
+    with pytest.raises(BitwardenSdkIdentifierDiscoveryError, match="version_mismatch"):
+        BitwardenSdkIdentifiersAdapter.from_systemd_credentials(authority)
+
+    assert imported == []

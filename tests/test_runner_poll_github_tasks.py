@@ -20004,6 +20004,11 @@ def test_gmail_primary_activation_blocks_on_reference_bootstrap_before_canary() 
             "registered_bitwarden_reference_from_systemd_index",
             side_effect=runner.SecretReferenceRegistrationError("REFERENCE_BOOTSTRAP_REQUIRED"),
         ) as bind,
+        mock.patch.object(
+            runner.BitwardenSdkIdentifiersAdapter,
+            "from_systemd_credentials",
+            side_effect=runner.BitwardenSdkIdentifierDiscoveryError("bitwarden_sdk_unavailable"),
+        ) as bootstrap,
         mock.patch.object(runner, "run_gmail_readonly_canary") as canary,
         mock.patch.object(runner, "run_command") as command,
     ):
@@ -20014,10 +20019,120 @@ def test_gmail_primary_activation_blocks_on_reference_bootstrap_before_canary() 
         )
 
     assert runner.maintenance_report_status(report) == "BLOCKED"
-    assert "step=reference_bind status=failed reason=REFERENCE_BOOTSTRAP_REQUIRED" in report
+    assert "step=reference_bootstrap status=failed" in report
+    assert "reason=bitwarden_sdk_unavailable" in report
     assert bind.call_count == 1
+    assert bootstrap.call_count == 1
     canary.assert_not_called()
     command.assert_not_called()
+
+
+def test_gmail_primary_activation_bootstraps_then_rereads_before_canary() -> None:
+    preflight_patch, sha_patch = _gmail_readonly_preflight_patches(HEAD_SHA)
+    calls: list[str] = []
+
+    def fake_command(command, cwd=None):
+        del cwd
+        calls.append(" ".join(command))
+        if command[:4] == ["sudo", "-n", "systemctl", "show"]:
+            return 0, "success\n"
+        return 0, ""
+
+    class Adapter:
+        def discover_identifiers(self):
+            calls.append("identifier_list")
+            return (
+                runner.BitwardenIdentifier(
+                    id="11111111-2222-3333-4444-555555555555",
+                    key="skeleton gmail primary oauth",
+                ),
+            )
+
+    with (
+        preflight_patch,
+        sha_patch,
+        mock.patch.object(
+            runner,
+            "registered_bitwarden_reference_from_systemd_index",
+            side_effect=[
+                runner.SecretReferenceRegistrationError("REFERENCE_BOOTSTRAP_REQUIRED"),
+                SecretReference(
+                    provider="bitwarden",
+                    reference_id="11111111-2222-3333-4444-555555555555",
+                ),
+            ],
+        ) as bind,
+        mock.patch.object(
+            runner.BitwardenSdkIdentifiersAdapter,
+            "from_systemd_credentials",
+            return_value=Adapter(),
+        ),
+        mock.patch.object(
+            runner,
+            "bootstrap_gmail_primary_reference_index",
+            return_value=runner.ReferenceBootstrapResult(
+                status="PASS",
+                match_count_class="one",
+                persisted=True,
+                reason="OK",
+            ),
+        ) as bootstrap,
+        mock.patch.object(
+            runner,
+            "run_gmail_readonly_canary",
+            return_value=_gmail_readonly_success_receipt("acct:gmail-primary", 0),
+        ) as canary,
+        mock.patch.object(runner, "run_command", side_effect=fake_command),
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.MAIL_GMAIL_PRIMARY_REGISTERED_ACTIVATION,
+            "/synthetic",
+            _gmail_primary_activation_body(),
+        )
+
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert "step=reference_bootstrap status=PASS match_count_class=one persisted=true reason=OK" in report
+    assert "step=reference_reread status=done" in report
+    assert bind.call_count == 2
+    assert bootstrap.call_count == 1
+    assert canary.call_count == 1
+    assert calls == [
+        "identifier_list",
+        "sudo -n systemctl daemon-reload",
+        "sudo -n systemctl enable skeleton-mail-operations.timer",
+        "sudo -n systemctl start skeleton-mail-operations.timer",
+        "sudo -n systemctl start skeleton-mail-operations.service",
+        "sudo -n systemctl is-active --quiet skeleton-mail-operations.timer",
+        "sudo -n systemctl show --property=Result --value skeleton-mail-operations.service",
+    ]
+
+
+def test_gmail_primary_activation_public_receipt_hides_private_sentinels() -> None:
+    preflight_patch, sha_patch = _gmail_readonly_preflight_patches(HEAD_SHA)
+    private = "SECRET_VALUE_SENTINEL_PRIVATE"
+    with (
+        preflight_patch,
+        sha_patch,
+        mock.patch.object(
+            runner,
+            "registered_bitwarden_reference_from_systemd_index",
+            side_effect=runner.SecretReferenceRegistrationError("REFERENCE_BOOTSTRAP_REQUIRED"),
+        ),
+        mock.patch.object(
+            runner.BitwardenSdkIdentifiersAdapter,
+            "from_systemd_credentials",
+            side_effect=runner.BitwardenSdkIdentifierDiscoveryError(private),
+        ),
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.MAIL_GMAIL_PRIMARY_REGISTERED_ACTIVATION,
+            "/synthetic",
+            _gmail_primary_activation_body(),
+        )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert private not in report
+    assert "reason=REFERENCE_BOOTSTRAP_FAILED" in report
 
 
 def test_gmail_primary_activation_enables_worker_only_after_canary_passes() -> None:

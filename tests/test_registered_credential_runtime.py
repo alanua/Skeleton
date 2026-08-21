@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -348,3 +349,28 @@ def test_registration_metadata_is_public_safe() -> None:
     assert "gmail-primary-oauth-secret-ref" not in serialized
     assert "gmail-secondary-oauth-secret-ref" not in serialized
     assert "SKELETON_OPENROUTER_FALLBACK_API_KEY" not in serialized
+
+
+def test_mail_operations_systemd_service_uses_only_credential_boundary() -> None:
+    service = Path("ops/systemd/skeleton-mail-operations.service").read_text(
+        encoding="utf-8"
+    )
+
+    assert "LoadCredentialEncrypted=bitwarden-access-token:" in service
+    assert "LoadCredentialEncrypted=skeleton-secret-reference-index:" in service
+    assert "BWS_ACCESS_TOKEN=" not in service
+    assert "gmail-primary-oauth" not in service
+    assert "Environment=BITWARDEN" not in service
+
+
+def test_bitwarden_sdk_install_is_pinned_isolated_and_version_checked() -> None:
+    installer = Path("scripts/install_bitwarden_sdk_runtime.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "-m venv" in installer
+    assert "bitwarden-sdk==${PINNED_VERSION}" in installer
+    assert "--only-binary=:all:" in installer
+    assert "metadata.version(\"bitwarden-sdk\")" in installer
+    assert "sudo" not in installer
+    assert "pip install bitwarden-sdk" not in installer

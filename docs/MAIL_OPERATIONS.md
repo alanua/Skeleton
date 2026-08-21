@@ -28,13 +28,23 @@ list secrets, export vault data, or read unrelated values. The actual OAuth
 bundle remains in Bitwarden and is delivered only ephemerally to the Gmail
 provider.
 
+When the primary Gmail registration is absent, the registered activation may run
+one bounded metadata-only Bitwarden SDK discovery. That path authenticates with
+the private systemd `bitwarden-access-token`, calls only the official SDK secret
+identifiers/list API, applies the code-owned Gmail-primary matcher, and persists
+only the resulting opaque UUID through `systemd-creds encrypt` back into
+`skeleton-secret-reference-index`. Public receipts expose only status booleans,
+match-count class, and stable reason enums.
+
 Installing the worker copies code and units but leaves
 `skeleton-mail-operations.timer` disabled. Activation is a separate registered
 maintenance operation, `mail_gmail_primary_registered_activation_v1`, after
 operator-reviewed exact-main runtime sync. It performs exact-main preflight,
-binds the registered opaque reference, runs exactly one read-only Gmail canary,
-and only on canary pass enables/starts the canonical worker timer and verifies
-bounded systemd health.
+binds or bootstraps and re-reads the registered opaque reference, runs exactly
+one read-only Gmail canary, and only on canary pass enables/starts the canonical
+worker timer and verifies bounded systemd health. The service unit loads the
+Bitwarden machine token and encrypted reference index only through systemd
+credentials, keeping restart/timer execution on the same credential boundary.
 
 ## Operator Handoff
 
