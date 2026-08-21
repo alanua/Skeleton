@@ -129,6 +129,7 @@ from core.runner_five_layer_memory_activation import (
 from core.merge_policy_checker import (
     AUTO_MERGE_ALLOWED,
     DelegatedMergePolicyChecker,
+    OPERATOR_APPROVAL_REQUIRED,
 )
 from core.private_static_site_runtime import (
     DEPLOY_TASK_ID as DEPLOY_PRIVATE_STATIC_SITE,
@@ -687,6 +688,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "gallery_status",
         "service_category_counts",
         "risk_flags",
+        "risk_level",
         "usb_modem_health_requirement",
         "internet_path_expectation",
         "gateway_modem_internals",
@@ -754,6 +756,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "manifest_candidate_count",
         "model_credentials_used",
         "merge_action",
+        "merge_policy_triggers",
         "mergeable",
         "mergeable_state",
         "memory_events_existing",
@@ -1151,6 +1154,8 @@ class PreflightPrRefreshRequest:
 class PrMergeabilityInspectionRequest:
     pr_number: int
     expected_head_sha: str | None
+    risk_level: str = "green"
+    triggers: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -10779,6 +10784,8 @@ def _pr_mergeability_inspection_metadata(
     repository = _body_field(metadata, "Repository")
     pr_number = _body_field(metadata, "Pull Request")
     expected_head_sha = _body_field(metadata, "Expected Head SHA")
+    risk_level = _mergeability_metadata_risk_level(metadata)
+    triggers = _mergeability_metadata_triggers(metadata)
     if repository is not None and repository != REPO:
         return None, "unsupported_repository"
     if not isinstance(pr_number, str) or not re.fullmatch(r"[1-9]\d*", pr_number):
@@ -10796,9 +10803,47 @@ def _pr_mergeability_inspection_metadata(
                 if isinstance(expected_head_sha, str)
                 else None
             ),
+            risk_level=risk_level,
+            triggers=triggers,
         ),
         None,
     )
+
+
+def _mergeability_metadata_risk_level(metadata: str) -> str:
+    value = _body_field_or_yaml_value(metadata, "Risk", "risk")
+    if value is None:
+        value = _body_field_or_yaml_value(metadata, "Risk Level", "risk_level")
+    if not isinstance(value, str):
+        return "green"
+    normalized = value.strip().lower()
+    risk_prefix = "risk" + "-"
+    if normalized.startswith(risk_prefix):
+        normalized = normalized[len(risk_prefix) :]
+    return normalized or "green"
+
+
+def _mergeability_metadata_triggers(metadata: str) -> tuple[str, ...]:
+    values: list[str] = []
+    for field, key in (
+        ("Review", "review"),
+        ("Merge Intent", "merge_intent"),
+        ("Task Intent", "task_intent"),
+        ("Expected Output", "expected_output"),
+    ):
+        value = _body_field_or_yaml_value(metadata, field, key)
+        if isinstance(value, str):
+            values.append(value)
+        elif isinstance(value, list):
+            values.extend(item for item in value if isinstance(item, str))
+
+    joined = "\n".join(values).lower()
+    triggers: list[str] = []
+    if "review" in joined:
+        triggers.append("needs_human_review")
+    if "no-merge" in joined or "no merge" in joined or "do not merge" in joined:
+        triggers.append("autonomous_merge")
+    return tuple(dict.fromkeys(triggers))
 
 
 def _github_api_json(path: str, query: dict[str, str] | None = None) -> object:
@@ -10910,15 +10955,21 @@ def _validation_summary(
 
 def _actual_file_delegated_merge_policy(
     changed_files: tuple[str, ...],
+    *,
+    risk_level: str = "green",
+    triggers: tuple[str, ...] = (),
 ) -> tuple[str, tuple[str, ...]]:
+    normalized_risk = (risk_level or "green").strip().lower()
+    if normalized_risk == "yellow":
+        return OPERATOR_APPROVAL_REQUIRED, ()
     try:
         decision = DelegatedMergePolicyChecker().check(
             {
                 "changed_files": changed_files,
                 "clean_pr": True,
                 "evidence": {"present": True},
-                "risk_level": "green",
-                "triggers": (),
+                "risk_level": normalized_risk,
+                "triggers": triggers,
             }
         )
     except Exception:
@@ -11076,7 +11127,11 @@ def _pr_mergeability_next_action(
     if mergeable is False or mergeable_state in {"dirty", "blocked"}:
         return "BLOCKED", "pr_has_merge_conflicts", "resolve_merge_conflicts"
     if delegated_merge_verdict != AUTO_MERGE_ALLOWED:
-        return "NEEDS_OPERATOR", "delegated_merge_policy_requires_operator", "operator_review_required"
+        return (
+            "NEEDS_OPERATOR",
+            "delegated_merge_policy_requires_operator",
+            "CLOSE_PR_FOR_CONTAINMENT_THEN_EXACT_HEAD_REVIEW_AND_OPERATOR_APPROVAL",
+        )
     if validation_state == "missing":
         return "BLOCKED", "validation_missing", "run_required_validation"
     if validation_state == "unavailable":
@@ -11129,7 +11184,9 @@ def inspect_pr_mergeability(body: str) -> str:
         if isinstance(file.get("filename"), str)
     ]
     delegated_verdict, protected_files = _actual_file_delegated_merge_policy(
-        tuple(changed_files)
+        tuple(changed_files),
+        risk_level=request.risk_level,
+        triggers=request.triggers,
     )
     status_validation_state, status_validation_reason = _validation_summary(
         combined_status, check_runs
@@ -11175,6 +11232,8 @@ def inspect_pr_mergeability(body: str) -> str:
             f"mergeable_state={mergeable_state}",
             f"changed_file_count={len(changed_files)}",
             f"changed_files={','.join(changed_files) if changed_files else '(none)'}",
+            f"risk_level={request.risk_level}",
+            f"merge_policy_triggers={','.join(request.triggers) if request.triggers else '(none)'}",
             f"delegated_merge_verdict={delegated_verdict}",
             f"protected_changed_files_count={len(protected_files)}",
             *(f"protected_changed_file={path}" for path in protected_files),
@@ -16271,6 +16330,7 @@ def telegram_approve_audit_matches_request(
 
     expected_lines = (
         "Operator event record (Telegram callback stage 1)",
+        f"Repository: {REPO}",
         f"Pull request: #{request.pr_number}",
         "Action: telegram_approve",
         f"Head marker: {request.approved_head_sha[:8]}",
@@ -16281,8 +16341,18 @@ def telegram_approve_audit_matches_request(
     )
     for comment in comments:
         body = comment.get("body") if isinstance(comment, dict) else None
-        if isinstance(body, str) and all(line in body.splitlines() for line in expected_lines):
-            return True
+        if not isinstance(body, str):
+            continue
+        lines = body.splitlines()
+        if not all(line in lines for line in expected_lines):
+            continue
+        merge_action = _body_field(body, "Merge Action")
+        if merge_action is not None and merge_action != request.action:
+            continue
+        approval_source = _body_field(body, "Approval Source")
+        if approval_source is not None and approval_source != "signed_telegram_callback":
+            continue
+        return True
     return False
 
 

@@ -223,6 +223,7 @@ def _inspect_pr_issue_body(
     pr_number: int | str | None = 123,
     expected_head_sha: str | None = HEAD_SHA,
     repository: str | None = runner.REPO,
+    extra_metadata: tuple[str, ...] = (),
 ) -> str:
     lines = [
         f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
@@ -233,6 +234,7 @@ def _inspect_pr_issue_body(
         lines.append(f"Pull Request: {pr_number}")
     if expected_head_sha is not None:
         lines.append(f"Expected Head SHA: {expected_head_sha}")
+    lines.extend(extra_metadata)
     return "\n".join(lines)
 
 
@@ -5262,6 +5264,98 @@ def test_executes_only_head_matched_squash_merge_for_approved_pr() -> None:
             HEAD_SHA,
         ]
     )
+
+
+def test_exact_operator_approval_must_match_repository_action_pr_and_head() -> None:
+    request = runner.TelegramApprovedPrMergeRequest(123, HEAD_SHA, CALLBACK_DIGEST)
+    bad_comments = _merge_comments()
+    bad_comments[0]["body"] = bad_comments[0]["body"].replace(
+        f"Repository: {runner.REPO}", "Repository: alanua/Other"
+    )
+
+    with mock.patch.dict(
+        os.environ, {runner.TELEGRAM_CALLBACK_HMAC_ENV: CALLBACK_HMAC_SECRET}, clear=True
+    ), mock.patch.object(
+        runner, "get_pr_merge_state", return_value=_merge_pr_state(comments=bad_comments)
+    ), mock.patch.object(runner, "run_command") as run:
+        report = runner.execute_telegram_approved_pr_merge(request)
+
+    assert report.startswith("BLOCKED:")
+    assert "Signed Telegram approve audit" in report
+    run.assert_not_called()
+
+    action_comments = _merge_comments()
+    action_comments[0]["body"] += "Merge Action: merge\n"
+    with mock.patch.dict(
+        os.environ, {runner.TELEGRAM_CALLBACK_HMAC_ENV: CALLBACK_HMAC_SECRET}, clear=True
+    ), mock.patch.object(
+        runner,
+        "get_pr_merge_state",
+        return_value=_merge_pr_state(comments=action_comments),
+    ), mock.patch.object(runner, "run_command") as run:
+        report = runner.execute_telegram_approved_pr_merge(request)
+
+    assert report.startswith("BLOCKED:")
+    assert "Signed Telegram approve audit" in report
+    run.assert_not_called()
+
+
+def test_head_movement_invalidates_prior_operator_approval() -> None:
+    request = runner.TelegramApprovedPrMergeRequest(123, HEAD_SHA, CALLBACK_DIGEST)
+    current_head = "b" * 40
+
+    with mock.patch.dict(
+        os.environ, {runner.TELEGRAM_CALLBACK_HMAC_ENV: CALLBACK_HMAC_SECRET}, clear=True
+    ), mock.patch.object(
+        runner, "get_pr_merge_state", return_value=_merge_pr_state(headRefOid=current_head)
+    ), mock.patch.object(runner, "run_command") as run:
+        report = runner.execute_telegram_approved_pr_merge(request)
+
+    assert report == "BLOCKED: Approved PR head does not match the Telegram button head."
+    run.assert_not_called()
+
+
+def test_source_or_parent_approval_cannot_authorize_new_head() -> None:
+    request = runner.TelegramApprovedPrMergeRequest(123, HEAD_SHA, CALLBACK_DIGEST)
+    parent_comment = {
+        "body": (
+            "Repository: alanua/Skeleton\n"
+            "Pull request: #123\n"
+            "Approval Source: parent_issue\n"
+            "Operator Approval: approved\n"
+            f"Approved Head SHA: {'c' * 40}\n"
+        )
+    }
+
+    with mock.patch.dict(
+        os.environ, {runner.TELEGRAM_CALLBACK_HMAC_ENV: CALLBACK_HMAC_SECRET}, clear=True
+    ), mock.patch.object(
+        runner,
+        "get_pr_merge_state",
+        return_value=_merge_pr_state(comments=[parent_comment]),
+    ), mock.patch.object(runner, "run_command") as run:
+        report = runner.execute_telegram_approved_pr_merge(request)
+
+    assert report.startswith("BLOCKED:")
+    assert "Signed Telegram approve audit" in report
+    run.assert_not_called()
+
+
+def test_approved_exact_head_merges_once_through_canonical_continuation() -> None:
+    request = runner.TelegramApprovedPrMergeRequest(123, HEAD_SHA, CALLBACK_DIGEST)
+    states = [_merge_pr_state(), _merge_pr_state(state="CLOSED")]
+
+    with mock.patch.dict(
+        os.environ, {runner.TELEGRAM_CALLBACK_HMAC_ENV: CALLBACK_HMAC_SECRET}, clear=True
+    ), mock.patch.object(
+        runner, "get_pr_merge_state", side_effect=states
+    ), mock.patch.object(runner, "run_command", return_value=(0, "merged")) as run:
+        first = runner.execute_telegram_approved_pr_merge(request)
+        second = runner.execute_telegram_approved_pr_merge(request)
+
+    assert first.startswith("DONE:")
+    assert second == "BLOCKED: Approved PR is not open."
+    run.assert_called_once()
 
 
 def test_blocks_telegram_approved_merge_when_callback_digest_is_not_signed() -> None:
@@ -17720,6 +17814,62 @@ def test_inspect_pr_mergeability_protected_actual_file_needs_operator() -> None:
     assert "delegated_merge_verdict=OPERATOR_APPROVAL_REQUIRED" in report
     assert "protected_changed_file=scripts/runner_poll_github_tasks.py" in report
     assert "reason=delegated_merge_policy_requires_operator" in report
+    assert (
+        "next_action=CLOSE_PR_FOR_CONTAINMENT_THEN_EXACT_HEAD_REVIEW_AND_OPERATOR_APPROVAL"
+        in report
+    )
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("extra_metadata", "expected_verdict", "expected_trigger"),
+    (
+        (("Risk: yellow",), "OPERATOR_APPROVAL_REQUIRED", "(none)"),
+        (("Review: REVIEW",), "REVIEW_REQUIRED", "needs_human_review"),
+        (("Expected Output: NO-MERGE",), "NEVER_AUTO", "autonomous_merge"),
+    ),
+)
+def test_validation_pass_with_risk_review_or_no_merge_metadata_needs_operator_only(
+    extra_metadata: tuple[str, ...],
+    expected_verdict: str,
+    expected_trigger: str,
+) -> None:
+    with mock.patch.object(
+        runner, "_get_pr_mergeability_state", return_value=_inspect_pr_state()
+    ), mock.patch.object(runner, "run_command") as run:
+        report = runner.inspect_pr_mergeability(
+            _inspect_pr_issue_body(extra_metadata=extra_metadata)
+        )
+
+    assert report.startswith("NEEDS_OPERATOR:")
+    assert "validation_state=success" in report
+    assert f"delegated_merge_verdict={expected_verdict}" in report
+    assert f"merge_policy_triggers={expected_trigger}" in report
+    assert "approved_head_sha" not in report
+    assert "user_approved" not in report
+    assert (
+        "next_action=CLOSE_PR_FOR_CONTAINMENT_THEN_EXACT_HEAD_REVIEW_AND_OPERATOR_APPROVAL"
+        in report
+    )
+    run.assert_not_called()
+
+
+def test_validation_pass_alone_does_not_create_protected_approval_state() -> None:
+    with mock.patch.object(
+        runner,
+        "_get_pr_mergeability_state",
+        return_value=_inspect_pr_state(
+            files=[{"filename": "scripts/runner_poll_github_tasks.py"}]
+        ),
+    ), mock.patch.object(runner, "run_command") as run:
+        report = runner.inspect_pr_mergeability(_inspect_pr_issue_body())
+
+    assert report.startswith("NEEDS_OPERATOR:")
+    assert "validation_state=success" in report
+    assert "delegated_merge_verdict=OPERATOR_APPROVAL_REQUIRED" in report
+    assert "approved_head_sha" not in report
+    assert "user_approved" not in report
+    assert "approval_status=verified" not in report
     run.assert_not_called()
 
 
