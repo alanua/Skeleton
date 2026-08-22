@@ -148,8 +148,10 @@ from core.runner_codegen_router import (
     codex_failure_allows_secondary,
     openhands_secondary_command,
     prepare_openhands_secondary_environment,
+    production_qa_route_receipt,
     select_openhands_secondary_route,
     task_contract_allows_cloud_secondary,
+    validate_task_spec_before_codegen,
 )
 from core.runner_retry_policy import (
     BLOCK_REPEATED_REASON,
@@ -5009,7 +5011,12 @@ def changed_files(workdir: str) -> list[str]:
     return sorted(files)
 
 
-def finalize_success(issue: dict[str, Any], workdir: str, codex_output: str) -> str:
+def finalize_success(
+    issue: dict[str, Any],
+    workdir: str,
+    codex_output: str,
+    task_content: str | None = None,
+) -> str:
     issue_number = int(issue["number"])
     files = changed_files(workdir)
     if not files:
@@ -5113,11 +5120,64 @@ def finalize_success(issue: dict[str, Any], workdir: str, codex_output: str) -> 
         f"Pytest output:\n```\n{pytest_output.strip()}\n```\n\n"
         f"Commit: {commit_sha}\n"
         f"Draft PR: {pr_url}"
+        + _production_qa_footer(
+            task_content=task_content or "",
+            commit_sha=commit_sha,
+            files=files,
+        )
     )
 
 
 def _codegen_publish_allowed_files(body: str) -> tuple[frozenset[str], str | None]:
     return _issue_publish_allowed_files(_metadata_before_task(body))
+
+
+def _codegen_task_spec_block_reason(task_content: str) -> str | None:
+    if "schema:" not in (task_content or ""):
+        return None
+    try:
+        validate_task_spec_before_codegen(task_content)
+    except Exception as exc:
+        reason = getattr(exc, "reason_code", None) or str(exc) or "invalid_task_spec"
+        return f"TaskSpec validation failed before codegen: {reason}"
+    return None
+
+
+def _production_qa_footer(
+    *,
+    task_content: str,
+    commit_sha: str,
+    files: list[str],
+    author_identity: str = "runner-codegen",
+) -> str:
+    if "schema:" not in (task_content or ""):
+        return ""
+    try:
+        receipt = production_qa_route_receipt(
+            task_content=task_content,
+            head_sha=commit_sha,
+            changed_files=tuple(files),
+            author_identity=author_identity,
+            declared_tests_green=True,
+        )
+    except Exception as exc:
+        reason = getattr(exc, "reason_code", None) or str(exc) or "production_qa_failed"
+        return (
+            "\n\nProduction QA receipt: rejected\n"
+            f"production_qa_reason={reason}\n"
+            "production_qa_state=REJECTED\n"
+            "runtime_proven=false"
+        )
+    return (
+        "\n\nProduction QA receipt:\n"
+        f"production_qa_state={receipt.state}\n"
+        f"production_qa_impact={receipt.impact_level}\n"
+        f"production_qa_exact_head={commit_sha.lower()}\n"
+        f"production_qa_files={','.join(files)}\n"
+        f"production_qa_reasons={','.join(receipt.reasons)}\n"
+        f"next_action={receipt.next_action}\n"
+        "runtime_proven=false"
+    )
 
 
 def _codegen_existing_pr_publish_preflight(
@@ -5151,6 +5211,7 @@ def finalize_existing_pr_success(
     codex_output: str,
     issue_body: str,
     request: CodegenExistingPrWorktreeRequest,
+    task_content: str | None = None,
 ) -> str:
     issue_number = int(issue["number"])
     allowed_files, allowed_reason = _codegen_publish_allowed_files(issue_body)
@@ -5271,6 +5332,11 @@ def finalize_existing_pr_success(
         f"existing_pr={request.pr_number}\n"
         f"existing_pr_head_branch={head_branch}\n"
         f"replacement_pr_created=false"
+        + _production_qa_footer(
+            task_content=task_content or "",
+            commit_sha=commit_sha,
+            files=files,
+        )
     )
 
 
@@ -17026,6 +17092,16 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
         issue_workdir = str(worktree_path)
 
         cleanup_runtime_artifacts(issue_workdir)
+        task_spec_reason = _codegen_task_spec_block_reason(task_content)
+        if task_spec_reason is not None:
+            block_issue(
+                issue_number,
+                task_spec_reason + issue_workspace_review_note(issue_workdir),
+                remove_label=LABEL_RUNNING,
+                runner_task=runner_task,
+                retry_decision=retry_decision,
+            )
+            return
         if (
             mode_decision.mode == RUNNER_MODE_ENFORCE
             and universal_gate_result is not None
@@ -17132,9 +17208,15 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                 codex_output,
                 issue_body,
                 existing_pr_worktree_request,
+                task_content,
             )
         else:
-            finalized_report = finalize_success(issue, issue_workdir, codex_output)
+            if "schema:" in (task_content or ""):
+                finalized_report = finalize_success(
+                    issue, issue_workdir, codex_output, task_content
+                )
+            else:
+                finalized_report = finalize_success(issue, issue_workdir, codex_output)
         report = report_runner_lane(finalized_report, runner_task)
         cleanup_runtime_artifacts(issue_workdir)
         if local_target_worktree:

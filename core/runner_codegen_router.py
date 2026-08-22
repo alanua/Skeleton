@@ -8,6 +8,10 @@ from typing import Mapping, MutableMapping
 
 import yaml
 
+from core.architecture_invariants import evaluate_architecture_invariants
+from core.capability_diff import observed_diff_impact
+from core.claim_reconciliation import reconcile_claims
+from core.evidence_authenticity import ExactHeadReceipt
 from core.execution_fabric import (
     DeliverableContract,
     ExecutionBinding,
@@ -18,6 +22,9 @@ from core.execution_fabric import (
 )
 from core.executor_registry import load_executor_registry
 from core.model_registry import load_model_registry
+from core.quality_evidence import NEEDS_OPERATOR, PRODUCTION_READY, production_qa_receipt
+from core.review_gate import route_adversarial_review
+from core.task_quality_gate import TaskSpec, normalize_task_spec
 from integrations.credential_runtime import (
     RegisteredCredentialRuntimeError,
     bind_registered_environment_credential,
@@ -61,6 +68,16 @@ class OpenHandsSecondaryRoute:
     runtime_model: str
 
 
+@dataclass(frozen=True, slots=True)
+class ProductionQaRouteReceipt:
+    task: TaskSpec
+    claim_receipt: ExactHeadReceipt
+    state: str
+    next_action: str
+    impact_level: str
+    reasons: tuple[str, ...]
+
+
 def codex_failure_allows_secondary(exit_code: int, output: str) -> bool:
     """Allow a secondary executor only for bounded availability failures.
 
@@ -75,21 +92,88 @@ def codex_failure_allows_secondary(exit_code: int, output: str) -> bool:
 def task_contract_allows_cloud_secondary(task_content: str) -> bool:
     """Permit cloud secondary execution only for typed public repository-edit tasks."""
     try:
-        raw = yaml.safe_load(task_content)
-    except yaml.YAMLError:
-        return False
-    if not isinstance(raw, Mapping):
-        return False
-    requested = raw.get("requested_capabilities", ())
-    if not isinstance(requested, (list, tuple)):
-        return False
-    requested_capabilities = {str(item) for item in requested}
+        task = normalize_task_spec(task_content)
+    except Exception:
+        try:
+            raw = yaml.safe_load(task_content)
+        except yaml.YAMLError:
+            return False
+        if not isinstance(raw, Mapping):
+            return False
+        requested = raw.get("requested_capabilities", ())
+        if not isinstance(requested, (list, tuple)):
+            return False
+        requested_capabilities = {str(item) for item in requested}
+        privacy = str(raw.get("privacy_boundary", "")).upper()
+    else:
+        requested_capabilities = set(task.requested_capabilities)
+        privacy = task.privacy_boundary
     if "repository_write" not in requested_capabilities:
         return False
-    privacy = str(raw.get("privacy_boundary", "")).upper()
     if not privacy or "PRIVATE" in privacy:
         return False
     return "PUBLIC" in privacy
+
+
+def validate_task_spec_before_codegen(task_content: str) -> TaskSpec:
+    return normalize_task_spec(task_content)
+
+
+def production_qa_route_receipt(
+    *,
+    task_content: str,
+    head_sha: str,
+    changed_files: tuple[str, ...],
+    author_identity: str,
+    declared_tests_green: bool,
+    declared_impact: str | None = None,
+    evidence_labels: tuple[str, ...] = (),
+) -> ProductionQaRouteReceipt:
+    task = validate_task_spec_before_codegen(task_content)
+    observed = observed_diff_impact(changed_files)
+    reconciliation = reconcile_claims(
+        task.predicted_impact,
+        observed,
+        declared_tests_green=declared_tests_green,
+        declared_impact=declared_impact,
+    )
+    invariants = evaluate_architecture_invariants(
+        task,
+        observed,
+        evidence_labels=evidence_labels,
+    )
+    review = route_adversarial_review(
+        reconciliation,
+        invariants,
+        author_identity=author_identity,
+        head_sha=head_sha,
+    )
+    state = (
+        NEEDS_OPERATOR
+        if review.operator_required and review.state != PRODUCTION_READY
+        else review.state
+    )
+    receipt = production_qa_receipt(
+        exact_head_sha=head_sha,
+        changed_files=changed_files,
+        impact_level=reconciliation.level,
+        reasons=review.reasons,
+        state=state,
+    )
+    return ProductionQaRouteReceipt(
+        task=task,
+        claim_receipt=ExactHeadReceipt(
+            kind="codegen_claim",
+            head_sha=head_sha,
+            author_identity=author_identity,
+            issued_at="exact-head",
+            files=tuple(sorted(changed_files)),
+        ),
+        state=receipt.state,
+        next_action=receipt.next_action,
+        impact_level=receipt.impact_level.value,
+        reasons=receipt.reasons,
+    )
 
 
 def _production_codegen_profile() -> TaskProfile:

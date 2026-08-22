@@ -19326,6 +19326,53 @@ def test_validation_command_environment_does_not_bind_codegen_fallback_authority
     assert sanitized == {"PATH": "/usr/bin", "SAFE_SETTING": "kept"}
 
 
+def test_codegen_taskspec_block_reason_rejects_malformed_spec_before_codegen() -> None:
+    reason = runner._codegen_task_spec_block_reason(
+        """
+schema: skeleton.runner_task.v1
+repo: alanua/Skeleton
+branch: runner/x
+task_kind: code_generation
+payload: {}
+requested_capabilities: [repository_read]
+allowed_files: ["**/*.py"]
+forbidden_actions: []
+validation: []
+expected_output: []
+privacy_boundary: PUBLIC_SAFE_REPOSITORY_ONLY
+idempotency_key: x
+"""
+    )
+
+    assert reason is not None
+    assert "TaskSpec validation failed before codegen" in reason
+
+
+def test_production_qa_footer_binds_exact_head_and_never_runtime_proven() -> None:
+    footer = runner._production_qa_footer(
+        task_content="""
+schema: skeleton.runner_task.v1
+repo: alanua/Skeleton
+branch: runner/x
+task_kind: code_generation
+payload: {}
+requested_capabilities: [repository_read, repository_write, test_execution]
+allowed_files: [tests/test_review_gate.py]
+forbidden_actions: []
+validation: [python3 -m pytest -q]
+expected_output: [NO MERGE]
+privacy_boundary: PUBLIC_SAFE_REPOSITORY_ONLY
+idempotency_key: x
+""",
+        commit_sha="A" * 40,
+        files=["tests/test_review_gate.py"],
+    )
+
+    assert "production_qa_exact_head=" + "a" * 40 in footer
+    assert "next_action=EXACT_HEAD_OPERATOR_REVIEW_THEN_PHASE5_RUNTIME_PROOF" in footer
+    assert "runtime_proven=false" in footer
+
+
 
 def test_run_codex_task_explicitly_reroutes_quota_to_openhands(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
