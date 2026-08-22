@@ -130,6 +130,18 @@ _SUDO_BIN = "/usr/bin/sudo"
 _SYSTEMCTL_BIN = "/usr/bin/systemctl"
 HOME_EDGE_ENV_PREFIX = "SKELETON_HOME_EDGE_01_"
 HOME_EDGE_EXEC_HMAC_SECRET_ENV = "SKELETON_HOME_EDGE_EXEC_HMAC_SECRET"
+HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_TASK_ID: Final = (
+    "home_edge_01_media_source_snapshot_signer_install_v1"
+)
+HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALLER_REL: Final = Path(
+    "scripts/install_home_edge_media_source_snapshot_signer.sh"
+)
+HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PROTECTED_INSTALLER: Final = Path(
+    "/usr/local/libexec/skeleton/home-edge/media-source-snapshot-installer/"
+    "install_home_edge_media_source_snapshot_signer.sh"
+)
+HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_TIMEOUT_SECONDS: Final = 120
+HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALLER_TIMEOUT_SECONDS: Final = 300
 _FIXED_LOCAL_ACTIONS = frozenset(
     {
         "long_lived_poller_reload",
@@ -179,6 +191,129 @@ def _run_fixed(argv: list[str], *, timeout: int = 60, cwd: str | None = None) ->
         timeout=timeout,
         check=False,
     )
+
+
+def _home_edge_signer_install_blocked(reason: str) -> dict[str, object]:
+    return {
+        "installer_status": "blocked",
+        "protected_installer_status": "unverified",
+        "snapshot_invoked": False,
+        "stable_reason": reason,
+        "success_criteria": "not_met",
+    }
+
+
+def _home_edge_signer_install_ok(
+    *,
+    installer_sha256: str,
+    protected_installer_sha256: str,
+) -> dict[str, object]:
+    return {
+        "installer_status": "done",
+        "installer_sha256": installer_sha256,
+        "protected_installer_status": "verified",
+        "protected_installer_sha256": protected_installer_sha256,
+        "snapshot_invoked": False,
+        "stable_reason": "completed",
+        "success_criteria": "met",
+    }
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _git_blob_hash(path: Path) -> str:
+    return hashlib.sha1(f"blob {path.stat().st_size}\0".encode("ascii") + path.read_bytes()).hexdigest()
+
+
+def install_home_edge_media_source_snapshot_signer_primitive(
+    repo_root: Path,
+    *,
+    run_fixed: Callable[..., subprocess.CompletedProcess[str]] = _run_fixed,
+) -> dict[str, object]:
+    """Install the reviewed snapshot signer through the fixed protected installer."""
+    try:
+        canonical_root = repo_root.resolve(strict=True)
+        source = canonical_root / HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALLER_REL
+        if source.is_symlink() or not source.is_file():
+            return _home_edge_signer_install_blocked("installer_source_unavailable")
+        installer_sha256 = _sha256_file(source)
+        installer_blob = _git_blob_hash(source)
+
+        with tempfile.TemporaryDirectory(
+            prefix="skeleton-home-edge-snapshot-signer-install-"
+        ) as raw_staging:
+            staging_dir = Path(raw_staging)
+            staging = staging_dir / source.name
+            shutil.copy2(source, staging)
+            staging.chmod(0o555)
+            if _sha256_file(staging) != installer_sha256 or _git_blob_hash(staging) != installer_blob:
+                return _home_edge_signer_install_blocked("staged_installer_hash_mismatch")
+
+            install_parent = str(HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PROTECTED_INSTALLER.parent)
+            protected = str(HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PROTECTED_INSTALLER)
+            for argv, timeout, reason in (
+                (
+                    [_SUDO_BIN, "-n", "/usr/bin/install", "-d", "-o", "root", "-g", "root", "-m", "0755", install_parent],
+                    HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_TIMEOUT_SECONDS,
+                    "protected_installer_parent_install_failed",
+                ),
+                (
+                    [_SUDO_BIN, "-n", "/usr/bin/install", "-o", "root", "-g", "root", "-m", "0555", str(staging), protected],
+                    HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_TIMEOUT_SECONDS,
+                    "protected_installer_copy_failed",
+                ),
+            ):
+                result = run_fixed(argv, timeout=timeout)
+                if result.returncode != 0:
+                    return _home_edge_signer_install_blocked(reason)
+
+            verify = run_fixed(
+                [_SUDO_BIN, "-n", "/usr/bin/stat", "-c", "%u:%g:%a", protected],
+                timeout=HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_TIMEOUT_SECONDS,
+            )
+            if verify.returncode != 0 or verify.stdout.strip() != "0:0:555":
+                return _home_edge_signer_install_blocked("protected_installer_mode_unverified")
+
+            protected_hash = run_fixed(
+                [_SUDO_BIN, "-n", "/usr/bin/sha256sum", protected],
+                timeout=HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_TIMEOUT_SECONDS,
+            )
+            protected_installer_sha256 = protected_hash.stdout.strip().split(maxsplit=1)[0] if protected_hash.stdout.strip() else ""
+            if protected_hash.returncode != 0 or protected_installer_sha256 != installer_sha256:
+                return _home_edge_signer_install_blocked("protected_installer_hash_mismatch")
+
+            installed = run_fixed(
+                [
+                    _SUDO_BIN,
+                    "-n",
+                    protected,
+                    "--repo-root",
+                    str(canonical_root),
+                ],
+                timeout=HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALLER_TIMEOUT_SECONDS,
+            )
+            if installed.returncode != 0:
+                return _home_edge_signer_install_blocked("protected_installer_failed")
+
+            post_hash = run_fixed(
+                [_SUDO_BIN, "-n", "/usr/bin/sha256sum", protected],
+                timeout=HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_TIMEOUT_SECONDS,
+            )
+            post_installer_sha256 = post_hash.stdout.strip().split(maxsplit=1)[0] if post_hash.stdout.strip() else ""
+            if post_hash.returncode != 0 or post_installer_sha256 != installer_sha256:
+                return _home_edge_signer_install_blocked("post_audit_hash_mismatch")
+            return _home_edge_signer_install_ok(
+                installer_sha256=installer_sha256,
+                protected_installer_sha256=post_installer_sha256,
+            )
+    except (OSError, ValueError):
+        return _home_edge_signer_install_blocked("signer_install_failed_closed")
 
 
 def _recover_runner_timer() -> str:

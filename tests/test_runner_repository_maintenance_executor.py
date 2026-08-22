@@ -221,6 +221,149 @@ def test_codegen_canary_fails_closed_when_pinned_runtime_cannot_be_verified(monk
     assert "reason=CODEX_CANARY_RUNTIME_UNVERIFIED" in report
 
 
+def _snapshot_signer_installer_repo(tmp_path: Path) -> tuple[Path, str]:
+    repo_root = tmp_path / "repo"
+    installer = repo_root / maintenance.HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALLER_REL
+    installer.parent.mkdir(parents=True)
+    installer.write_text("#!/usr/bin/env bash\nprintf 'DONE\\n'\n", encoding="utf-8")
+    installer.chmod(0o555)
+    return repo_root, hashlib.sha256(installer.read_bytes()).hexdigest()
+
+
+def test_home_edge_snapshot_signer_install_primitive_uses_fixed_copy_verify_and_installer_argv(
+    tmp_path: Path,
+) -> None:
+    repo_root, installer_sha256 = _snapshot_signer_installer_repo(tmp_path)
+    protected = str(maintenance.HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PROTECTED_INSTALLER)
+    protected_parent = str(
+        maintenance.HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PROTECTED_INSTALLER.parent
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], *, timeout: int = 60, cwd: str | None = None):
+        calls.append(argv)
+        assert cwd is None
+        if argv == [
+            "/usr/bin/sudo",
+            "-n",
+            "/usr/bin/install",
+            "-d",
+            "-o",
+            "root",
+            "-g",
+            "root",
+            "-m",
+            "0755",
+            protected_parent,
+        ]:
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if argv[:9] == [
+            "/usr/bin/sudo",
+            "-n",
+            "/usr/bin/install",
+            "-o",
+            "root",
+            "-g",
+            "root",
+            "-m",
+            "0555",
+        ]:
+            assert argv[10] == protected
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if argv == ["/usr/bin/sudo", "-n", "/usr/bin/stat", "-c", "%u:%g:%a", protected]:
+            return subprocess.CompletedProcess(argv, 0, "0:0:555\n", "")
+        if argv == ["/usr/bin/sudo", "-n", "/usr/bin/sha256sum", protected]:
+            return subprocess.CompletedProcess(argv, 0, f"{installer_sha256}  {protected}\n", "")
+        if argv == [
+            "/usr/bin/sudo",
+            "-n",
+            protected,
+            "--repo-root",
+            str(repo_root.resolve()),
+        ]:
+            return subprocess.CompletedProcess(argv, 0, "DONE\n", "")
+        raise AssertionError(argv)
+
+    receipt = maintenance.install_home_edge_media_source_snapshot_signer_primitive(
+        repo_root,
+        run_fixed=fake_run,
+    )
+
+    assert receipt["success_criteria"] == "met"
+    assert receipt["installer_status"] == "done"
+    assert receipt["installer_sha256"] == installer_sha256
+    assert receipt["protected_installer_status"] == "verified"
+    assert receipt["snapshot_invoked"] is False
+    assert calls[-2] == [
+        "/usr/bin/sudo",
+        "-n",
+        protected,
+        "--repo-root",
+        str(repo_root.resolve()),
+    ]
+    assert not any("sh" in argv[0] or "bash" in argv[0] for argv in calls)
+
+
+def test_home_edge_snapshot_signer_install_primitive_fails_closed_when_privilege_unavailable(
+    tmp_path: Path,
+) -> None:
+    repo_root, _installer_sha256 = _snapshot_signer_installer_repo(tmp_path)
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], *, timeout: int = 60, cwd: str | None = None):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 1, "", "sudo unavailable")
+
+    receipt = maintenance.install_home_edge_media_source_snapshot_signer_primitive(
+        repo_root,
+        run_fixed=fake_run,
+    )
+
+    assert receipt["success_criteria"] == "not_met"
+    assert receipt["stable_reason"] == "protected_installer_parent_install_failed"
+    assert len(calls) == 1
+
+
+def test_home_edge_snapshot_signer_install_primitive_fails_closed_without_retry(
+    tmp_path: Path,
+) -> None:
+    repo_root, installer_sha256 = _snapshot_signer_installer_repo(tmp_path)
+    protected = str(maintenance.HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PROTECTED_INSTALLER)
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], *, timeout: int = 60, cwd: str | None = None):
+        calls.append(argv)
+        if argv[:3] == ["/usr/bin/sudo", "-n", "/usr/bin/install"]:
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if argv[:4] == ["/usr/bin/sudo", "-n", "/usr/bin/stat", "-c"]:
+            return subprocess.CompletedProcess(argv, 0, "0:0:555\n", "")
+        if argv == ["/usr/bin/sudo", "-n", "/usr/bin/sha256sum", protected]:
+            return subprocess.CompletedProcess(argv, 0, f"{installer_sha256}  {protected}\n", "")
+        if argv == [
+            "/usr/bin/sudo",
+            "-n",
+            protected,
+            "--repo-root",
+            str(repo_root.resolve()),
+        ]:
+            return subprocess.CompletedProcess(argv, 2, "", "failed")
+        raise AssertionError(argv)
+
+    receipt = maintenance.install_home_edge_media_source_snapshot_signer_primitive(
+        repo_root,
+        run_fixed=fake_run,
+    )
+
+    installer_invocations = [
+        argv for argv in calls if argv[:3] == ["/usr/bin/sudo", "-n", protected]
+    ]
+    assert receipt["success_criteria"] == "not_met"
+    assert receipt["stable_reason"] == "protected_installer_failed"
+    assert installer_invocations == [
+        ["/usr/bin/sudo", "-n", protected, "--repo-root", str(repo_root.resolve())]
+    ]
+
+
 def test_control_plane_recovery_wires_fixed_actions_without_hermes_substitution(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     calls: list[str] = []
 

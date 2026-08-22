@@ -1212,6 +1212,38 @@ issue text.
 The allowlist does not permit rebooting the host, package upgrades, arbitrary
 commands or config values from issue text, or unrelated services.
 
+## Home Edge Media Source Snapshot Signer Install
+
+`home_edge_01_media_source_snapshot_signer_install_v1` is a protected
+maintenance task for installing only the fixed Home Edge media source snapshot
+signer runtime on `home-edge-01`. It is separate from
+`home_edge_01_media_source_snapshot_v1`; successful signer install reports safe
+status only and does not automatically run a media source snapshot.
+
+Required metadata:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: home_edge_01_media_source_snapshot_signer_install_v1
+Repository: alanua/Skeleton
+Expected Main SHA: <exact current main sha>
+Operator Approval: EXACT_HEAD_OPERATOR_APPROVAL_THEN_RUNTIME_SYNC_SIGNER_INSTALL_AND_READ_ONLY_SNAPSHOT
+Target: home-edge-01
+Privacy Boundary: PRIVATE_PRIVILEGE_STATE_LOCAL_ONLY / PUBLIC_SAFE_HASH_STATUS_ONLY
+Idempotency Key: <optional stable public idempotency key>
+```
+
+The handler rejects unknown fields and wrong approval, repository, target, or
+stale main SHA before privilege. It accepts no command, path, argv, user,
+service, host, or package metadata from issue text.
+
+The only privileged primitive is fixed-purpose: verify current-main installer
+bytes, copy them through private staging, run exact non-interactive sudo install
+to the protected installer path, verify protected hash/ownership/mode, invoke
+the protected installer with only `--repo-root` for the canonical checkout, and
+perform a post-audit hash check. There is no shell, SSH, generic sudo API,
+fallback, or retry.
+
 ## Reporting
 
 Each maintenance report must state `DONE` or `BLOCKED` accurately with safe

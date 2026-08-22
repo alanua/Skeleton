@@ -150,6 +150,27 @@ def _media_source_snapshot_issue_body(expected_sha: str = HEAD_SHA) -> str:
     )
 
 
+def _media_source_snapshot_signer_install_issue_body(
+    *,
+    expected_sha: str = HEAD_SHA,
+    repository: str = runner.REPO,
+    approval: str = runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_APPROVAL,
+    target: str = "home-edge-01",
+) -> str:
+    return "\n".join(
+        (
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1}",
+            f"Repository: {repository}",
+            f"Expected Main SHA: {expected_sha}",
+            f"Operator Approval: {approval}",
+            f"Target: {target}",
+            "Privacy Boundary: PRIVATE_PRIVILEGE_STATE_LOCAL_ONLY / PUBLIC_SAFE_HASH_STATUS_ONLY",
+            "Idempotency Key: home-edge-separate-signer-install-47320dab-20260822-v1",
+        )
+    )
+
+
 def _media_source_snapshot_receipt() -> dict[str, object]:
     return {
         "maintenance_task_id": runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1,
@@ -467,6 +488,11 @@ def test_home_edge_media_source_snapshot_is_allowlisted_and_dispatches_sanitized
         "execute_media_source_snapshot_task",
         fake_execute,
     )
+    monkeypatch.setattr(
+        runner,
+        "install_home_edge_media_source_snapshot_signer_primitive",
+        lambda *_args, **_kwargs: pytest.fail("snapshot must not install signer"),
+    )
 
     report = runner.dispatch_runtime_maintenance_task(
         runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1,
@@ -502,7 +528,10 @@ def test_home_edge_media_source_snapshot_registry_exposes_only_exact_fixed_task_
         if "media_source_snapshot" in task_id
     }
 
-    assert variants == {runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1}
+    assert variants == {
+        runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1,
+        runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1,
+    }
     assert (
         runner.dispatch_runtime_maintenance_task(
             "home_edge_01_media_source_snapshot_v1_extra",
@@ -525,6 +554,122 @@ def test_home_edge_media_source_snapshot_malformed_input_blocks(
 
     assert report.startswith("BLOCKED:")
     assert "reason=unknown_runtime_input_field" in report
+
+
+def test_home_edge_media_source_snapshot_signer_install_is_allowlisted_and_does_not_run_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    primitive_calls: list[Path] = []
+
+    def fake_read_sha(ref: str) -> str:
+        assert ref in {"main", "origin/main"}
+        return HEAD_SHA
+
+    def fake_primitive(repo_root: Path) -> dict[str, object]:
+        primitive_calls.append(repo_root)
+        return {
+            "installer_status": "done",
+            "installer_sha256": "d" * 64,
+            "protected_installer_status": "verified",
+            "protected_installer_sha256": "d" * 64,
+            "snapshot_invoked": False,
+            "stable_reason": "completed",
+            "success_criteria": "met",
+        }
+
+    monkeypatch.setattr(runner, "_read_exact_git_sha", fake_read_sha)
+    monkeypatch.setattr(
+        runner,
+        "install_home_edge_media_source_snapshot_signer_primitive",
+        fake_primitive,
+    )
+    monkeypatch.setattr(
+        media_source_snapshot,
+        "execute_media_source_snapshot_task",
+        lambda *_args, **_kwargs: pytest.fail("signer install must not run snapshot"),
+    )
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1,
+        str(runner.ROOT),
+        _media_source_snapshot_signer_install_issue_body(),
+    )
+
+    assert runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1 in runner.RUNTIME_MAINTENANCE_TASK_IDS
+    assert runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1 in runner.PROTECTED_MAINTENANCE_TASK_IDS
+    assert report.startswith("DONE:")
+    assert "maintenance_task_id=home_edge_01_media_source_snapshot_signer_install_v1" in report
+    assert "installer_status=done" in report
+    assert "protected_installer_status=verified" in report
+    assert "snapshot_invoked=False" in report
+    assert primitive_calls == [runner.ROOT]
+
+
+@pytest.mark.parametrize(
+    ("body", "reason"),
+    (
+        (
+            _media_source_snapshot_signer_install_issue_body(approval="PENDING"),
+            "operator_approval_mismatch",
+        ),
+        (
+            _media_source_snapshot_signer_install_issue_body(repository="wrong/repo"),
+            "repository_mismatch",
+        ),
+        (
+            _media_source_snapshot_signer_install_issue_body(target="wrong-target"),
+            "target_mismatch",
+        ),
+        (
+            _media_source_snapshot_signer_install_issue_body() + "\nCommand: sudo reboot",
+            "unknown_runtime_input_field",
+        ),
+        (
+            _media_source_snapshot_signer_install_issue_body() + "\nsudo reboot",
+            "unknown_runtime_input_field",
+        ),
+    ),
+)
+def test_home_edge_media_source_snapshot_signer_install_rejects_bad_input_before_privilege(
+    monkeypatch: pytest.MonkeyPatch,
+    body: str,
+    reason: str,
+) -> None:
+    monkeypatch.setattr(runner, "_read_exact_git_sha", lambda _ref: HEAD_SHA)
+    monkeypatch.setattr(
+        runner,
+        "install_home_edge_media_source_snapshot_signer_primitive",
+        lambda *_args, **_kwargs: pytest.fail("privilege must not be reached"),
+    )
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1,
+        str(runner.ROOT),
+        body,
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert f"reason={reason}" in report
+
+
+def test_home_edge_media_source_snapshot_signer_install_rejects_stale_main_before_privilege(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runner, "_read_exact_git_sha", lambda _ref: "b" * 40)
+    monkeypatch.setattr(
+        runner,
+        "install_home_edge_media_source_snapshot_signer_primitive",
+        lambda *_args, **_kwargs: pytest.fail("privilege must not be reached"),
+    )
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1,
+        str(runner.ROOT),
+        _media_source_snapshot_signer_install_issue_body(),
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=expected_main_sha_stale" in report
 
 
 def _plain_done_message(issue_number: int = 129) -> str:

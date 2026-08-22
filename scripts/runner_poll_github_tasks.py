@@ -93,6 +93,7 @@ from core.runner_executor_registry import RunnerExecutorRegistry
 from core.runner_gate import ROUTE_REQUIRED_CAPABILITIES, RunnerGate
 from core.runner_repository_maintenance_executor import (
     BUILD_AND_LOCAL_OTA_OPERATION,
+    HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_TASK_ID,
     LAVALAMP_APPROVAL_REFERENCE,
     LAVALAMP_ARTIFACT_ROOT,
     LAVALAMP_IDEMPOTENCY_KEY,
@@ -106,6 +107,7 @@ from core.runner_repository_maintenance_executor import (
     LAVALAMP_WLED_SHA,
     RepositoryMaintenanceExecutor,
     RegisteredMaintenanceExecutor,
+    install_home_edge_media_source_snapshot_signer_primitive,
 )
 from core.runner_loop_control_executor import (
     LOOP_ENGINE_PACKET,
@@ -337,6 +339,12 @@ HOME_EDGE_AUDIT_PERSIST_V1 = "home_edge_audit_persist_v1"
 HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1 = "home_edge_01_debian_media_bootstrap_v1"
 HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1 = "home_edge_01_post_migration_reconcile_v1"
 HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1 = "home_edge_01_media_source_snapshot_v1"
+HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1 = (
+    HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_TASK_ID
+)
+HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_APPROVAL = (
+    "EXACT_HEAD_OPERATOR_APPROVAL_THEN_RUNTIME_SYNC_SIGNER_INSTALL_AND_READ_ONLY_SNAPSHOT"
+)
 MAIL_GMAIL_PRIMARY_REGISTERED_ACTIVATION = "mail_gmail_primary_registered_activation_v1"
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
@@ -383,6 +391,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1,
         HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1,
         HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1,
+        HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1,
         BUILD_AND_LOCAL_OTA_OPERATION,
         PREPARE_PRIVATE_STATIC_SITE_HANDOFF,
         DEPLOY_PRIVATE_STATIC_SITE,
@@ -445,6 +454,7 @@ PROTECTED_MAINTENANCE_TASK_IDS = frozenset(
         BUILD_AUFMASS_PRIVATE_AREA_SCHEDULE,
         QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES,
         REPLENISH_RUNNER_QUEUE,
+        HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1,
     )
 )
 CONTAINER_VALIDATION_SOURCE_ISSUE = 1667
@@ -754,6 +764,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "input_row_count",
         "input_table_count",
         "installed_skill_platform_count",
+        "installer_sha256",
+        "installer_status",
         "inventory_schema",
         "issue_number",
         "issue_worktree",
@@ -832,6 +844,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "profile_backup_private",
         "profile_backup_status",
         "project_id",
+        "protected_installer_sha256",
+        "protected_installer_status",
         "project_state_existing",
         "project_state_written",
         "pre_push_pr_changed_files_count",
@@ -887,6 +901,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "selected_source_count",
         "services_disabled",
         "services_enabled",
+        "snapshot_invoked",
         "sqlite_history_count",
         "sqlite_metadata_count",
         "sqlite_state_count",
@@ -15497,6 +15512,104 @@ def home_edge_01_media_source_snapshot_v1(body: str) -> str:
         )
 
 
+_HOME_EDGE_SIGNER_INSTALL_ALLOWED_FIELDS = frozenset(
+    (
+        "Mode",
+        "Maintenance Task ID",
+        "Repository",
+        "Expected Main SHA",
+        "Operator Approval",
+        "Target",
+        "Privacy Boundary",
+        "Idempotency Key",
+    )
+)
+
+
+def _home_edge_signer_install_runtime_fields(body: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    duplicates: set[str] = set()
+    for line in _metadata_before_task(body).splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        match = re.match(r"^\s*(?P<field>[A-Za-z][A-Za-z0-9 ]*):\s*(?P<value>\S(?:.*\S)?)\s*$", line)
+        if match is None:
+            raise ValueError("unknown_runtime_input_field")
+        field = match.group("field").strip()
+        value = match.group("value").strip()
+        if field in fields:
+            duplicates.add(field)
+        fields[field] = value
+    if duplicates:
+        raise ValueError("duplicate_runtime_input_field")
+    if sorted(set(fields) - _HOME_EDGE_SIGNER_INSTALL_ALLOWED_FIELDS):
+        raise ValueError("unknown_runtime_input_field")
+    return fields
+
+
+def _validate_home_edge_signer_install_runtime_fields(body: str) -> dict[str, str]:
+    fields = _home_edge_signer_install_runtime_fields(body)
+    if fields.get("Mode") != RUNTIME_MAINTENANCE_MODE:
+        raise ValueError("runtime_mode_mismatch")
+    if fields.get("Maintenance Task ID") != HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1:
+        raise ValueError("maintenance_task_id_mismatch")
+    if fields.get("Repository") != REPO:
+        raise ValueError("repository_mismatch")
+    expected_sha = fields.get("Expected Main SHA", "")
+    if _HEAD_SHA_RE.fullmatch(expected_sha) is None:
+        raise ValueError("expected_main_sha_malformed")
+    if fields.get("Operator Approval") != HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_APPROVAL:
+        raise ValueError("operator_approval_mismatch")
+    if fields.get("Target") != "home-edge-01":
+        raise ValueError("target_mismatch")
+    privacy_boundary = fields.get("Privacy Boundary")
+    if privacy_boundary is not None and privacy_boundary != (
+        "PRIVATE_PRIVILEGE_STATE_LOCAL_ONLY / PUBLIC_SAFE_HASH_STATUS_ONLY"
+    ):
+        raise ValueError("privacy_boundary_mismatch")
+    idempotency_key = fields.get("Idempotency Key")
+    if idempotency_key is not None and not re.fullmatch(r"[A-Za-z0-9._:-]{8,160}", idempotency_key):
+        raise ValueError("idempotency_key_malformed")
+    return fields
+
+
+def home_edge_01_media_source_snapshot_signer_install_v1(body: str) -> str:
+    task_id = HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1
+    try:
+        fields = _validate_home_edge_signer_install_runtime_fields(body)
+        registered_sha = _read_exact_git_sha("main")
+        github_sha = _read_exact_git_sha("origin/main")
+        if registered_sha != fields["Expected Main SHA"] or github_sha != fields["Expected Main SHA"]:
+            raise ValueError("expected_main_sha_stale")
+        receipt = install_home_edge_media_source_snapshot_signer_primitive(ROOT)
+        success = receipt.get("success_criteria") == "met"
+        status_lines = [
+            f"{key}={value}"
+            for key, value in receipt.items()
+            if key != "success_criteria"
+        ]
+        return _maintenance_report(
+            "DONE" if success else "BLOCKED",
+            task_id,
+            status_lines,
+            "met" if success else "not_met",
+        )
+    except ValueError as exc:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [f"reason={exc}"],
+            "not_met",
+        )
+    except Exception:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            ["reason=signer_install_failed_closed"],
+            "not_met",
+        )
+
+
 def _read_exact_git_sha(ref: str) -> str:
     code, output = run_command(["git", "rev-parse", f"{ref}^{{commit}}"], cwd=ROOT)
     sha = output.strip().splitlines()[0] if output.strip() else ""
@@ -16404,6 +16517,8 @@ def dispatch_runtime_maintenance_task(
             return home_edge_01_post_migration_reconcile_v1(body)
         if task_id == HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1:
             return home_edge_01_media_source_snapshot_v1(body)
+        if task_id == HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1:
+            return home_edge_01_media_source_snapshot_signer_install_v1(body)
         if task_id == PREPARE_PRIVATE_STATIC_SITE_HANDOFF:
             return _execute_prepare_private_static_site_handoff(body)
         if task_id == DEPLOY_PRIVATE_STATIC_SITE:
