@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.skeleton.local/self_knowledge_receipt.schema.json",
+  "title": "Skeleton Self Knowledge Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "status",
+    "fact_type",
+    "lookup_key",
+    "resolved_ref",
+    "value_class",
+    "selected_fact_ref",
+    "candidate_fact_refs",
+    "stale_fact_refs",
+    "superseded_fact_refs",
+    "provenance_refs",
+    "freshness_class",
+    "verified_revision",
+    "verified_at",
+    "checked_at",
+    "reason"
+  ],
+  "properties": {
+    "schema": {"const": "skeleton.self_knowledge_receipt.v1"},
+    "status": {"enum": ["RESOLVED", "NEEDS_VERIFICATION", "NOT_FOUND", "STALE", "SUPERSEDED"]},
+    "fact_type": {"enum": ["host", "repository", "runtime", "entrypoint"]},
+    "lookup_key": {"type": "string"},
+    "resolved_ref": {"type": ["string", "null"]},
+    "value_class": {
+      "type": ["string", "null"],
+      "enum": [
+        "MACHINE_ID",
+        "PROJECT_ID",
+        "RUNTIME_ID",
+        "ENTRYPOINT_ID",
+        "PUBLIC_FINGERPRINT",
+        "OPAQUE_PRIVATE_REF",
+        null
+      ]
+    },
+    "selected_fact_ref": {"type": ["string", "null"]},
+    "candidate_fact_refs": {"type": "array", "items": {"type": "string"}},
+    "stale_fact_refs": {"type": "array", "items": {"type": "string"}},
+    "superseded_fact_refs": {"type": "array", "items": {"type": "string"}},
+    "provenance_refs": {"type": "array", "items": {"type": "string"}},
+    "freshness_class": {"enum": ["CURRENT", "STALE", "UNKNOWN"]},
+    "verified_revision": {"type": ["integer", "null"], "minimum": 1},
+    "verified_at": {"type": ["string", "null"], "format": "date-time"},
+    "checked_at": {"type": "string", "format": "date-time"},
+    "reason": {"type": "string"}
+  }
+}
