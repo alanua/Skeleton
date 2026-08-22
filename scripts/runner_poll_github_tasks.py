@@ -1066,6 +1066,7 @@ class RunnerTask:
     has_target_repository_metadata: bool = False
     base: str | None = None
     base_sha: str | None = None
+    allowed_files: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1143,6 +1144,20 @@ class ProducedPrValidationContinuation:
     base_sha: str
     base_ref: str
     head_ref: str
+    idempotency_key: str
+    created: bool
+    issue_number: int | None = None
+
+
+@dataclass(frozen=True)
+class TargetPublicationContinuation:
+    repository: str
+    target_project: str
+    source_issue: int
+    output_branch: str
+    base_branch: str
+    base_sha: str
+    changed_files: tuple[str, ...]
     idempotency_key: str
     created: bool
     issue_number: int | None = None
@@ -2593,6 +2608,66 @@ def _target_repository_metadata_field(metadata: str) -> tuple[str | None, str | 
     return None, None
 
 
+def _safe_runner_declared_allowed_path(path: str) -> bool:
+    if path.endswith("/**"):
+        prefix = path.removesuffix("/**")
+        return _safe_issue_publish_file_path(prefix + "/placeholder")
+    return _safe_issue_publish_file_path(path)
+
+
+def _runner_task_declared_allowed_paths(body: str) -> tuple[str, ...]:
+    metadata = _metadata_before_task(body)
+    value = _metadata_yaml_value(metadata, "allowed_files")
+    raw_paths: list[str] = []
+    if isinstance(value, list):
+        raw_paths.extend(path for path in value if isinstance(path, str))
+    elif value is None:
+        for index, line in enumerate(metadata.splitlines()):
+            if not re.fullmatch(r"\s*(?:Allowed Files|allowed_files):\s*", line):
+                continue
+            for candidate in metadata.splitlines()[index + 1 :]:
+                stripped = candidate.strip()
+                if not stripped:
+                    break
+                if not stripped.startswith("- "):
+                    break
+                raw_paths.append(stripped[2:].strip())
+            break
+    return tuple(
+        path
+        for path in raw_paths
+        if isinstance(path, str)
+        and path
+        and path == path.strip()
+        and _safe_runner_declared_allowed_path(path)
+    )
+
+
+def _changed_file_within_declared_scope(path: str, declared: str) -> bool:
+    if declared.endswith("/**"):
+        prefix = declared.removesuffix("/**").rstrip("/")
+        return path.startswith(prefix + "/") and path != prefix + "/"
+    return path == declared
+
+
+def _verify_actual_changed_files_against_runner_task(
+    changed: tuple[str, ...], runner_task: RunnerTask
+) -> tuple[tuple[str, ...] | None, str | None]:
+    if not changed:
+        return None, "no_actual_changed_files"
+    if not runner_task.allowed_files:
+        return None, "missing_runner_task_allowed_files"
+    if any(not _safe_issue_publish_file_path(path) for path in changed):
+        return None, "actual_changed_file_path_unsafe"
+    for path in changed:
+        if not any(
+            _changed_file_within_declared_scope(path, declared)
+            for declared in runner_task.allowed_files
+        ):
+            return None, "actual_changed_files_outside_declared_scope"
+    return tuple(sorted(dict.fromkeys(changed))), None
+
+
 def resolve_target_project_metadata(
     body: str,
 ) -> tuple[str | None, str | None, str | None]:
@@ -2701,6 +2776,7 @@ def extract_runner_task(body: str) -> tuple[RunnerTask | None, str | None]:
         ),
         base=base,
         base_sha=base_sha,
+        allowed_files=_runner_task_declared_allowed_paths(body),
     ), None
 
 
@@ -9710,6 +9786,31 @@ def _continuation_issue_idempotency_key(
     return f"validate-pr-branch:{repository}:pr-{pr_number}:{digest}"
 
 
+def _target_publication_continuation_idempotency_key(
+    *,
+    target_project: str,
+    repository: str,
+    source_issue: int,
+    output_branch: str,
+    base_sha: str,
+    changed_files: tuple[str, ...],
+) -> str:
+    payload = json.dumps(
+        {
+            "target_project": target_project,
+            "repository": repository,
+            "source_issue": source_issue,
+            "output_branch": output_branch,
+            "base_sha": base_sha,
+            "changed_files": list(changed_files),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    digest = hashlib.sha256(payload).hexdigest()[:24]
+    return f"publish-target-worktree:{repository}:issue-{source_issue}:{digest}"
+
+
 def _validate_pr_branch_continuation_body(
     *,
     repository: str,
@@ -9738,6 +9839,41 @@ def _validate_pr_branch_continuation_body(
             "",
             "```task",
             "Validate the exact produced PR branch through the Runner validation route.",
+            "```",
+        )
+    )
+
+
+def _target_publication_continuation_body(
+    *,
+    target_project: str,
+    repository: str,
+    source_issue: int,
+    output_branch: str,
+    base_sha: str,
+    changed_files: tuple[str, ...],
+    idempotency_key: str,
+) -> str:
+    return "\n".join(
+        (
+            "schema: skeleton.runner_task.v1",
+            "privacy_boundary: PUBLIC_SAFE_QUEUE_AND_DELIVERY_METADATA_ONLY",
+            f"idempotency_key: {idempotency_key}",
+            "allowed_files:",
+            *[f"  - {path}" for path in changed_files],
+            "",
+            f"Mode: {RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR}",
+            f"Target Project: {target_project}",
+            f"Target Repository: {repository}",
+            f"Source Issue: {source_issue}",
+            "Base Branch: main",
+            f"Base SHA: {base_sha}",
+            f"Output Branch: {output_branch}",
+            "Draft PR: true",
+            "",
+            "```task",
+            "Publish the retained target project issue worktree using only the verified exact changed files.",
             "```",
         )
     )
@@ -9787,6 +9923,49 @@ def _find_existing_validation_continuation_issue(
     return matches[0] if matches else None
 
 
+def _find_existing_target_publication_continuation_issue(
+    idempotency_key: str,
+) -> int | None:
+    code, output = run_command(
+        [
+            "gh",
+            "issue",
+            "list",
+            "--repo",
+            REPO,
+            "--label",
+            LABEL_AGENT_TASK,
+            "--state",
+            "open",
+            "--search",
+            idempotency_key,
+            "--json",
+            "number,body,labels",
+            "--limit",
+            "20",
+        ]
+    )
+    if code != 0:
+        raise RuntimeError("publication continuation lookup failed")
+    parsed = json.loads(output or "[]")
+    if not isinstance(parsed, list):
+        raise RuntimeError("publication continuation lookup returned non-list JSON")
+    matches: list[int] = []
+    for issue in parsed:
+        if not isinstance(issue, dict):
+            continue
+        if idempotency_key not in str(issue.get("body") or ""):
+            continue
+        if LABEL_AGENT_TASK not in _issue_label_names(issue):
+            continue
+        number = _queue_replenisher_issue_number(issue)
+        if number is not None:
+            matches.append(number)
+    if len(matches) > 1:
+        raise RuntimeError("duplicate publication continuation issues")
+    return matches[0] if matches else None
+
+
 def _create_validation_continuation_issue(
     *,
     title: str,
@@ -9816,6 +9995,73 @@ def _create_validation_continuation_issue(
     created_url = output.strip()
     match = re.search(r"/issues/(?P<number>[1-9]\d*)(?:/|$)", created_url)
     return int(match.group("number")) if match is not None else None
+
+
+def ensure_target_publication_continuation(
+    *,
+    source_issue: int,
+    runner_task: RunnerTask,
+    changed_files: tuple[str, ...],
+) -> TargetPublicationContinuation:
+    if runner_task.target_repository == QUEUE_REPOSITORY:
+        raise RuntimeError("target_publication_requires_external_target")
+    if runner_task.base_sha is None or _HEAD_SHA_RE.fullmatch(runner_task.base_sha) is None:
+        raise RuntimeError("target_publication_missing_exact_base_sha")
+    verified_files, reason = _verify_actual_changed_files_against_runner_task(
+        changed_files, runner_task
+    )
+    if reason is not None or verified_files is None:
+        raise RuntimeError(reason or "actual_changed_files_unverified")
+    output_branch = f"runner/issue-{source_issue}"
+    idempotency_key = _target_publication_continuation_idempotency_key(
+        target_project=runner_task.target_project,
+        repository=runner_task.target_repository,
+        source_issue=source_issue,
+        output_branch=output_branch,
+        base_sha=runner_task.base_sha.lower(),
+        changed_files=verified_files,
+    )
+    existing_issue = _find_existing_target_publication_continuation_issue(
+        idempotency_key
+    )
+    if existing_issue is not None:
+        return TargetPublicationContinuation(
+            repository=runner_task.target_repository,
+            target_project=runner_task.target_project,
+            source_issue=source_issue,
+            output_branch=output_branch,
+            base_branch="main",
+            base_sha=runner_task.base_sha.lower(),
+            changed_files=verified_files,
+            idempotency_key=idempotency_key,
+            created=False,
+            issue_number=existing_issue,
+        )
+    body = _target_publication_continuation_body(
+        target_project=runner_task.target_project,
+        repository=runner_task.target_repository,
+        source_issue=source_issue,
+        output_branch=output_branch,
+        base_sha=runner_task.base_sha.lower(),
+        changed_files=verified_files,
+        idempotency_key=idempotency_key,
+    )
+    issue_number = _create_validation_continuation_issue(
+        title=f"Publish {runner_task.target_project} issue #{source_issue}",
+        body=body,
+    )
+    return TargetPublicationContinuation(
+        repository=runner_task.target_repository,
+        target_project=runner_task.target_project,
+        source_issue=source_issue,
+        output_branch=output_branch,
+        base_branch="main",
+        base_sha=runner_task.base_sha.lower(),
+        changed_files=verified_files,
+        idempotency_key=idempotency_key,
+        created=True,
+        issue_number=issue_number,
+    )
 
 
 def ensure_codegen_pr_validation_continuation(
@@ -10956,6 +11202,249 @@ def _trusted_validation_receipt_matches(
         and "validation_final_status=clean" in report
         and "success_criteria=met" in report
     )
+
+
+def _receipt_key_values(report: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in (report or "").splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if key:
+            values[key] = value
+    return values
+
+
+def _trusted_comment_author(comment: Mapping[str, Any]) -> bool:
+    author = comment.get("author")
+    login = None
+    if isinstance(author, Mapping):
+        login = author.get("login")
+    elif isinstance(comment.get("user"), Mapping):
+        login = comment["user"].get("login")  # type: ignore[index]
+    return isinstance(login, str) and login.lower() in trusted_runner_comment_authors()
+
+
+def _trusted_target_publication_receipt_matches(
+    report: str,
+    *,
+    source_issue: int,
+    target_project: str,
+    repository: str,
+    output_branch: str,
+    base_sha: str,
+    changed_files: tuple[str, ...],
+) -> bool:
+    values = _receipt_key_values(report)
+    pr_url = values.get("draft_pr_url") or values.get("existing_pr_url")
+    pushed_head = values.get("pushed_head_sha")
+    actual_files = tuple(
+        path.strip()
+        for path in values.get("validated_publish_files", "").split(",")
+        if path.strip() and path.strip() != "(none)"
+    )
+    return (
+        runner_report_status(report) == "DONE"
+        and values.get("maintenance_task_id") == PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR
+        and values.get("target_project") == target_project
+        and values.get("repository") == repository
+        and values.get("source_issue") == str(source_issue)
+        and values.get("expected_branch") == output_branch
+        and values.get("verified_base_sha") == base_sha
+        and isinstance(pushed_head, str)
+        and _HEAD_SHA_RE.fullmatch(pushed_head) is not None
+        and isinstance(pr_url, str)
+        and _PUBLIC_GITHUB_PR_URL_RE.fullmatch(pr_url) is not None
+        and tuple(sorted(actual_files)) == tuple(sorted(changed_files))
+        and "success_criteria=met" in report
+    )
+
+
+def trusted_target_publication_receipt_state(
+    continuation: TargetPublicationContinuation,
+) -> tuple[str, str, int | None]:
+    code, output = run_command(
+        [
+            "gh",
+            "issue",
+            "view",
+            str(continuation.issue_number or 0),
+            "--repo",
+            REPO,
+            "--json",
+            "body,comments,labels",
+        ]
+    )
+    if code != 0:
+        return "unavailable", "publication_receipt_unavailable", continuation.issue_number
+    try:
+        issue_view = json.loads(output or "{}")
+    except json.JSONDecodeError:
+        return "unavailable", "publication_receipt_unavailable", continuation.issue_number
+    if not isinstance(issue_view, dict):
+        return "unavailable", "publication_receipt_unavailable", continuation.issue_number
+    if LABEL_AGENT_TASK not in _issue_label_names(issue_view):
+        return "missing", "publication_receipt_missing", continuation.issue_number
+    comments = issue_view.get("comments")
+    if not isinstance(comments, list):
+        return "missing", "publication_receipt_missing", continuation.issue_number
+    trusted_reports = [
+        str(comment.get("body") or "")
+        for comment in comments
+        if isinstance(comment, dict) and _trusted_comment_author(comment)
+    ]
+    for report in trusted_reports:
+        if _trusted_target_publication_receipt_matches(
+            report,
+            source_issue=continuation.source_issue,
+            target_project=continuation.target_project,
+            repository=continuation.repository,
+            output_branch=continuation.output_branch,
+            base_sha=continuation.base_sha,
+            changed_files=continuation.changed_files,
+        ):
+            return "success", "none", continuation.issue_number
+    if trusted_reports:
+        return "not_success", "publication_receipt_not_success", continuation.issue_number
+    return "missing", "publication_receipt_missing", continuation.issue_number
+
+
+def _target_publication_continuation_from_report(
+    report: str,
+) -> TargetPublicationContinuation | None:
+    values = _receipt_key_values(report)
+    issue_text = values.get("publication_issue")
+    source_text = values.get("source_issue")
+    if source_text is None:
+        match = re.search(r"^source_issue=(?P<issue>[1-9]\d*)$", report, re.MULTILINE)
+        source_text = match.group("issue") if match is not None else None
+    changed_files = tuple(
+        path.strip()
+        for path in values.get("publication_actual_changed_files", "").split(",")
+        if path.strip()
+    )
+    if (
+        issue_text is None
+        or not re.fullmatch(r"[1-9]\d*|unknown", issue_text)
+        or source_text is None
+        or not re.fullmatch(r"[1-9]\d*", source_text)
+        or not changed_files
+        or any(not _safe_issue_publish_file_path(path) for path in changed_files)
+    ):
+        return None
+    base_sha = values.get("publication_base_sha")
+    if not isinstance(base_sha, str) or _HEAD_SHA_RE.fullmatch(base_sha) is None:
+        return None
+    repository = values.get("publication_target_repository")
+    target_project = values.get("publication_target_project")
+    output_branch = values.get("publication_output_branch")
+    idempotency_key = values.get("publication_idempotency_key")
+    if (
+        not isinstance(repository, str)
+        or repository not in ALLOWED_TARGET_REPOSITORIES
+        or not isinstance(target_project, str)
+        or not isinstance(output_branch, str)
+        or not _safe_issue_publish_branch_name(output_branch)
+        or not isinstance(idempotency_key, str)
+        or not idempotency_key.startswith("publish-target-worktree:")
+    ):
+        return None
+    return TargetPublicationContinuation(
+        repository=repository,
+        target_project=target_project,
+        source_issue=int(source_text),
+        output_branch=output_branch,
+        base_branch="main",
+        base_sha=base_sha.lower(),
+        changed_files=tuple(sorted(dict.fromkeys(changed_files))),
+        idempotency_key=idempotency_key,
+        created=False,
+        issue_number=None if issue_text == "unknown" else int(issue_text),
+    )
+
+
+def _source_publication_continuation(issue_number: int) -> TargetPublicationContinuation | None:
+    code, output = run_command(
+        [
+            "gh",
+            "issue",
+            "view",
+            str(issue_number),
+            "--repo",
+            REPO,
+            "--json",
+            "body,comments,labels",
+        ]
+    )
+    if code != 0:
+        return None
+    try:
+        issue_view = json.loads(output or "{}")
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(issue_view, dict):
+        return None
+    comments = issue_view.get("comments")
+    if not isinstance(comments, list):
+        return None
+    for comment in reversed(comments):
+        if not isinstance(comment, dict) or not _trusted_comment_author(comment):
+            continue
+        continuation = _target_publication_continuation_from_report(
+            str(comment.get("body") or "")
+        )
+        if continuation is not None and continuation.source_issue == issue_number:
+            return continuation
+    return None
+
+
+def complete_trusted_target_publication_dependency(issue_number: int) -> bool:
+    continuation = _source_publication_continuation(issue_number)
+    if continuation is None or continuation.issue_number is None:
+        return False
+    state, reason, receipt_issue = trusted_target_publication_receipt_state(continuation)
+    if state != "success":
+        return False
+    cleanup_code, cleanup_output = cleanup_target_repository_issue_worktree(
+        continuation.repository, issue_number
+    )
+    if cleanup_code != 0:
+        raise RuntimeError(
+            "Target issue workspace cleanup failed:\n"
+            f"{cleanup_output.strip() or f'exit code {cleanup_code}'}"
+        )
+    report = _maintenance_report(
+        "DONE",
+        "target_publication_dependency",
+        [
+            f"source_issue={issue_number}",
+            f"publication_issue={receipt_issue}",
+            f"target_project={continuation.target_project}",
+            f"target_repository={continuation.repository}",
+            f"output_branch={continuation.output_branch}",
+            f"verified_base_sha={continuation.base_sha}",
+            "actual_changed_files=" + ",".join(continuation.changed_files),
+            f"receipt_state={state}",
+            f"reason={reason}",
+            "cleanup=done",
+        ],
+        "met",
+    )
+    warning = record_runner_executor_result(
+        issue_number,
+        continuation.target_project,
+        "DONE",
+        "DONE",
+        "publication_dependency",
+        report,
+    )
+    post_issue_comment(issue_number, append_memory_warning(report, warning))
+    set_issue_label(issue_number, LABEL_WAITING_DEPENDENCY, LABEL_DONE)
+    notify_task_finished(issue_number, "DONE", report)
+    maybe_replenish_runner_queue_after_completion()
+    return True
 
 
 def _trusted_pr_validation_receipt_state(
@@ -16628,6 +17117,8 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
         return
     labels = _issue_label_names(issue)
     if LABEL_WAITING_DEPENDENCY in labels and LABEL_READY not in labels:
+        if complete_trusted_target_publication_dependency(issue_number):
+            return
         run_due_codegen_recovery_for_issue(issue_number)
         return
 
@@ -17137,6 +17628,81 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             finalized_report = finalize_success(issue, issue_workdir, codex_output)
         report = report_runner_lane(finalized_report, runner_task)
         cleanup_runtime_artifacts(issue_workdir)
+        if (
+            local_target_worktree
+            and runner_task is not None
+            and runner_task.base_sha is not None
+            and runner_task.allowed_files
+            and runner_report_status(report) == "DONE"
+        ):
+            try:
+                actual_changed_files = tuple(changed_files(issue_workdir))
+                continuation = ensure_target_publication_continuation(
+                    source_issue=issue_number,
+                    runner_task=runner_task,
+                    changed_files=actual_changed_files,
+                )
+            except RuntimeError as exc:
+                reason = str(exc) or "target_publication_contract_failure"
+                report = report_runner_lane(
+                    _maintenance_report(
+                        "BLOCKED",
+                        "target_publication_contract",
+                        [
+                            f"source_issue={issue_number}",
+                            f"target_project={runner_task.target_project}",
+                            f"target_repository={runner_task.target_repository}",
+                            f"reason={reason}",
+                            "telegram_notifications=0",
+                        ],
+                        "not_met",
+                    ),
+                    runner_task,
+                )
+                report = append_retry_fields(report, retry_decision)
+                warning = record_runner_executor_result(
+                    issue_number,
+                    runner_task.target_project,
+                    "BLOCKED",
+                    "BLOCKED",
+                    "codex",
+                    report,
+                )
+                post_issue_comment(
+                    issue_number,
+                    append_memory_warning(report, warning or pickup_memory_warning),
+                )
+                set_issue_label(issue_number, LABEL_RUNNING, LABEL_BLOCKED)
+                maybe_replenish_runner_queue_after_completion()
+                return
+            report = (
+                f"{report.rstrip()}\n"
+                f"publication_continuation={'created' if continuation.created else 'reused'}\n"
+                f"publication_issue={continuation.issue_number or 'unknown'}\n"
+                f"publication_idempotency_key={continuation.idempotency_key}\n"
+                f"publication_target_project={continuation.target_project}\n"
+                f"publication_target_repository={continuation.repository}\n"
+                f"publication_output_branch={continuation.output_branch}\n"
+                f"publication_base_sha={continuation.base_sha}\n"
+                "publication_actual_changed_files="
+                f"{','.join(continuation.changed_files)}\n"
+                "issue_state=waiting_dependency\n"
+                "telegram_notifications=0"
+            )
+            warning = record_runner_executor_result(
+                issue_number,
+                runner_task.target_project,
+                "WAITING_DEPENDENCY",
+                "WAITING_DEPENDENCY",
+                "codex",
+                report,
+            )
+            post_issue_comment(
+                issue_number,
+                append_memory_warning(report, warning or pickup_memory_warning),
+            )
+            set_issue_label(issue_number, LABEL_RUNNING, LABEL_WAITING_DEPENDENCY)
+            return
         if local_target_worktree:
             cleanup_code, cleanup_output = cleanup_target_repository_issue_worktree(
                 target_repository,

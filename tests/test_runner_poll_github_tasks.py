@@ -1799,6 +1799,194 @@ def test_codegen_existing_pr_exact_head_update_targets_declared_pr() -> None:
     create.assert_not_called()
 
 
+def _cross_project_runner_task_body() -> str:
+    return "\n".join(
+        (
+            "Selected Project: generative_visuals",
+            "Selected Repository: alanua/LumenFlow",
+            f"Base SHA: {'b' * 40}",
+            "allowed_files:",
+            "  - home_edge/generative_visuals/**",
+            "  - tests/**",
+            "  - README.md",
+            "",
+            "```task",
+            "Implement the #3166-style target project change.",
+            "```",
+        )
+    )
+
+
+def test_cross_project_publication_continuation_uses_exact_changed_files() -> None:
+    body = _cross_project_runner_task_body()
+    with mock.patch.object(
+        runner,
+        "resolve_target_project_metadata",
+        return_value=("generative_visuals", "alanua/LumenFlow", None),
+    ):
+        task, reason = runner.extract_runner_task(body)
+    assert reason is None
+    assert task is not None
+
+    created_bodies: list[str] = []
+
+    def create_issue(*, title: str, body: str) -> int:
+        del title
+        created_bodies.append(body)
+        return 4001
+
+    changed = (
+        "home_edge/generative_visuals/app.mjs",
+        "tests/generative_visuals.test.mjs",
+    )
+    with mock.patch.object(
+        runner, "_find_existing_target_publication_continuation_issue", return_value=None
+    ), mock.patch.object(
+        runner, "_create_validation_continuation_issue", side_effect=create_issue
+    ):
+        continuation = runner.ensure_target_publication_continuation(
+            source_issue=3166,
+            runner_task=task,
+            changed_files=changed,
+        )
+
+    assert continuation.created is True
+    assert continuation.changed_files == tuple(sorted(changed))
+    assert len(created_bodies) == 1
+    publication_body = created_bodies[0]
+    assert f"Maintenance Task ID: {runner.PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR}" in publication_body
+    assert "Target Project: generative_visuals" in publication_body
+    assert "Target Repository: alanua/LumenFlow" in publication_body
+    assert f"Base SHA: {'b' * 40}" in publication_body
+    assert "  - home_edge/generative_visuals/app.mjs" in publication_body
+    assert "  - tests/generative_visuals.test.mjs" in publication_body
+    assert "home_edge/generative_visuals/**" not in publication_body
+    assert "README.md" not in publication_body
+
+
+def test_cross_project_publication_changed_file_outside_declared_scope_fails_closed() -> None:
+    body = _cross_project_runner_task_body()
+    with mock.patch.object(
+        runner,
+        "resolve_target_project_metadata",
+        return_value=("generative_visuals", "alanua/LumenFlow", None),
+    ):
+        task, reason = runner.extract_runner_task(body)
+    assert reason is None
+    assert task is not None
+
+    with mock.patch.object(
+        runner, "_find_existing_target_publication_continuation_issue"
+    ) as find, mock.patch.object(
+        runner, "_create_validation_continuation_issue"
+    ) as create:
+        with pytest.raises(
+            RuntimeError, match="actual_changed_files_outside_declared_scope"
+        ):
+            runner.ensure_target_publication_continuation(
+                source_issue=3166,
+                runner_task=task,
+                changed_files=("secrets.env",),
+            )
+
+    find.assert_not_called()
+    create.assert_not_called()
+
+
+def _target_publication_continuation() -> runner.TargetPublicationContinuation:
+    return runner.TargetPublicationContinuation(
+        repository="alanua/LumenFlow",
+        target_project="generative_visuals",
+        source_issue=3166,
+        output_branch="runner/issue-3166",
+        base_branch="main",
+        base_sha="b" * 40,
+        changed_files=(
+            "home_edge/generative_visuals/app.mjs",
+            "tests/generative_visuals.test.mjs",
+        ),
+        idempotency_key="publish-target-worktree:alanua/LumenFlow:issue-3166:test",
+        created=False,
+        issue_number=4001,
+    )
+
+
+def _target_publication_receipt(**updates: str) -> str:
+    fields = {
+        "maintenance_task_id": runner.PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR,
+        "target_project": "generative_visuals",
+        "repository": "alanua/LumenFlow",
+        "source_issue": "3166",
+        "expected_branch": "runner/issue-3166",
+        "verified_base_sha": "b" * 40,
+        "validated_publish_files": (
+            "home_edge/generative_visuals/app.mjs,"
+            "tests/generative_visuals.test.mjs"
+        ),
+        "draft_pr_url": "https://github.com/alanua/LumenFlow/pull/55",
+        "pushed_head_sha": "c" * 40,
+    }
+    fields.update(updates)
+    return (
+        "DONE: Runner maintenance task completed.\n"
+        + "\n".join(f"{key}={value}" for key, value in fields.items())
+        + "\nsuccess_criteria=met"
+    )
+
+
+def test_target_publication_receipt_requires_trusted_author_and_exact_binding() -> None:
+    continuation = _target_publication_continuation()
+
+    def issue_view(author: str, body: str) -> str:
+        return json.dumps(
+            {
+                "labels": [{"name": runner.LABEL_AGENT_TASK}],
+                "body": _target_publication_receipt(),
+                "comments": [{"author": {"login": author}, "body": body}],
+            }
+        )
+
+    with mock.patch.object(
+        runner, "run_command", return_value=(0, issue_view("attacker", _target_publication_receipt()))
+    ):
+        state, reason, issue_number = runner.trusted_target_publication_receipt_state(
+            continuation
+        )
+    assert (state, reason, issue_number) == (
+        "missing",
+        "publication_receipt_missing",
+        4001,
+    )
+
+    with mock.patch.object(
+        runner,
+        "run_command",
+        return_value=(
+            0,
+            issue_view(
+                "alanua",
+                _target_publication_receipt(repository="alanua/Skeleton"),
+            ),
+        ),
+    ):
+        state, reason, issue_number = runner.trusted_target_publication_receipt_state(
+            continuation
+        )
+    assert (state, reason, issue_number) == (
+        "not_success",
+        "publication_receipt_not_success",
+        4001,
+    )
+
+    with mock.patch.object(
+        runner, "run_command", return_value=(0, issue_view("alanua", _target_publication_receipt()))
+    ):
+        state, reason, issue_number = runner.trusted_target_publication_receipt_state(
+            continuation
+        )
+    assert (state, reason, issue_number) == ("success", "none", 4001)
+
+
 def _codegen_update_existing_pr_issue_body(
     *,
     pr_number: int = 2749,
