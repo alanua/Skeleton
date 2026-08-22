@@ -342,3 +342,94 @@ def test_windows_bootstrap_one_link_blocks_without_apply(tmp_path: Path) -> None
 
     assert report.status == "blocked"
     assert "requires apply=true" in str(report.blocked_reason)
+
+
+def test_windows_support_direct_link_writes_private_admin_handoff_and_redacted_report(tmp_path: Path) -> None:
+    packet_path = write_packet(
+        tmp_path,
+        command="windows_support_prepare_direct_link",
+        apply=True,
+        enrollment_id="win-target-01",
+        owner_approval="windows_support_direct_link_v1",
+    )
+    report_path = tmp_path / "report.json"
+
+    report = process_host_maintenance(
+        packet_path,
+        report_path=report_path,
+        worktree_root=tmp_path / "worktrees" / "skeleton",
+        private_runtime_root=tmp_path / "private",
+        windows_bootstrap_base_url="https://tailnet.example.invalid/windows",
+        now=NOW,
+    )
+
+    assert report.status == "ok"
+    action = report.actions[0]
+    assert action["action"] == "windows_support_prepare_direct_link"
+    assert action["status"] == "prepared_not_enrolled"
+    assert action["delivery_channel"] == "private_direct_https_link"
+    assert action["support_role"] == "admin_support"
+    assert action["admin_capable"] is True
+    assert action["bootstrap_source_policy"] == "immutable_commit_pinned_no_mutable_main_download"
+    assert action["public_receipt_contains_link"] is False
+    assert action["target_enrolled"] is False
+
+    public_blob = json.dumps(read_report(report_path), sort_keys=True)
+    assert "tailnet.example.invalid" not in public_blob
+    assert "private_direct_link" not in public_blob
+    assert "raw.githubusercontent.com" not in public_blob
+    assert "9330095a1849eb5fbe342fdb3caa5bb3b265efd0" not in public_blob
+
+    artifact = tmp_path / "private" / action["private_artifact_ref"]
+    private_payload = json.loads(artifact.read_text(encoding="utf-8"))
+    assert private_payload["schema"] == "skeleton.windows_support_runtime_handoff.private.v1"
+    assert private_payload["private_direct_link"].startswith("https://tailnet.example.invalid/windows/support/win-target-01?code=")
+    assert private_payload["link_sha256"] == action["link_sha256"]
+    assert private_payload["support_role"] == "admin_support"
+    assert private_payload["admin_capability_ack"] == "owner_approved_admin_capable_support_over_private_tailscale_only"
+    assert private_payload["bootstrap_source_policy"] == "immutable_commit_pinned_no_mutable_main_download"
+    assert "/main/" not in private_payload["bootstrap_raw_url"]
+    assert "9330095a1849eb5fbe342fdb3caa5bb3b265efd0" in private_payload["bootstrap_raw_url"]
+    assert oct(artifact.stat().st_mode & 0o777) == "0o600"
+
+
+def test_windows_support_direct_link_requires_exact_owner_approval_and_apply(tmp_path: Path) -> None:
+    wrong_approval = write_packet(
+        tmp_path,
+        command="windows_support_prepare_direct_link",
+        apply=True,
+        enrollment_id="win-target-01",
+        owner_approval="windows_bootstrap_one_link_v1",
+    )
+
+    report = process_host_maintenance(
+        wrong_approval,
+        report_path=tmp_path / "wrong-approval.json",
+        worktree_root=tmp_path / "worktrees" / "skeleton",
+        private_runtime_root=tmp_path / "private",
+        now=NOW,
+    )
+
+    assert report.status == "blocked"
+    assert "owner_approval is not valid" in str(report.blocked_reason)
+    assert not (tmp_path / "private").exists()
+
+    missing_apply = write_packet(
+        tmp_path,
+        command="windows_support_prepare_direct_link",
+        apply=False,
+        enrollment_id="win-target-01",
+        owner_approval="windows_support_direct_link_v1",
+    )
+
+    report = process_host_maintenance(
+        missing_apply,
+        report_path=tmp_path / "missing-apply.json",
+        worktree_root=tmp_path / "worktrees" / "skeleton",
+        private_runtime_root=tmp_path / "private",
+        now=NOW,
+    )
+
+    assert report.status == "blocked"
+    assert "requires apply=true" in str(report.blocked_reason)
+    assert not (tmp_path / "private").exists()

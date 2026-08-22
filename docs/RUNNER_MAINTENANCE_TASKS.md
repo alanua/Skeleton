@@ -89,8 +89,9 @@ OpenSSL parsing and rejection of private-key PEM markers. The report must never
 include the private key, private filesystem paths, environment values, host
 addresses, unrelated configuration, or probe plaintext.
 
-`windows_bootstrap_audit` and `windows_bootstrap_prepare_one_link` are the
-bounded host-maintenance commands for remote Windows bootstrap preparation.
+`windows_bootstrap_audit`, `windows_bootstrap_prepare_one_link`, and
+`windows_support_prepare_direct_link` are the bounded host-maintenance commands
+for remote Windows bootstrap preparation.
 The audit command is the mandatory read-only first step and creates no private
 artifact. The one-link command is the protected runtime action and requires
 `apply: true` plus exact owner approval:
@@ -110,6 +111,24 @@ It must not enroll a live target by itself, include the link or enrollment code
 in public receipts, add automatic expiry/TTL/`EXPIRED` semantics, expose SSH,
 use password SSH, bypass browser security, accept issue-supplied shell, or
 perform silent execution on the Windows target.
+
+`windows_support_prepare_direct_link` is the final protected builder for an
+admin-capable Windows support runtime handoff. It requires `apply: true` and:
+
+```text
+Owner Approval: windows_support_direct_link_v1
+```
+
+It writes the actual direct HTTPS link only to a `0600` private runtime
+artifact and reports only the enrollment id, private artifact reference, hashes,
+`support_role=admin_support`, immutable commit-pinned bootstrap policy,
+`prepared_not_enrolled`, and `target_enrolled=false`. The endpoint payload must
+explicitly request admin support and include the owner acknowledgement from
+`schemas/remote_windows_owner_enrollment.schema.json`. The owner must open the
+link manually on the Windows target and approve the normal UAC prompt; the
+builder must not perform enrollment, expose the link publicly, use a mutable
+`main` bootstrap download, bypass browser or UAC controls, expose public
+Internet SSH, or accept issue-supplied shell.
 
 `deploy_private_static_site` receives, decrypts, validates, and publishes the
 private static site package for one prepared artifact. It requires:

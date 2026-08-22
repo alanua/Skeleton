@@ -143,3 +143,36 @@ def test_owner_approved_windows_one_link_packet_moves_done_with_redacted_report(
     assert action["delivery_channel"] == "viber_https_link"
     assert action["public_receipt_contains_link"] is False
     assert (tmp_path / "private" / action["private_artifact_ref"]).is_file()
+
+
+def test_owner_approved_windows_support_direct_link_packet_moves_done_with_redacted_report(tmp_path: Path) -> None:
+    transport_root = tmp_path / "transport"
+    packet_path = write_packet(
+        transport_root,
+        command="windows_support_prepare_direct_link",
+        apply=True,
+        enrollment_id="win-target-01",
+        owner_approval="windows_support_direct_link_v1",
+    )
+
+    report = poll_once(
+        transport_root,
+        worktree_root=tmp_path / "worktrees" / "skeleton",
+        private_runtime_root=tmp_path / "private",
+        windows_bootstrap_base_url="https://tailnet.example.invalid/windows",
+    )
+
+    done_packet = transport_root / "done" / packet_path.name
+    assert report.status == "done"
+    assert done_packet.is_file()
+    written_report = read_report(transport_root)
+    public_blob = json.dumps(written_report, sort_keys=True)
+    assert "tailnet.example.invalid" not in public_blob
+    assert "private_direct_link" not in public_blob
+    action = written_report["processor"]["actions"][0]
+    assert action["status"] == "prepared_not_enrolled"
+    assert action["delivery_channel"] == "private_direct_https_link"
+    assert action["support_role"] == "admin_support"
+    assert action["bootstrap_source_policy"] == "immutable_commit_pinned_no_mutable_main_download"
+    assert action["public_receipt_contains_link"] is False
+    assert (tmp_path / "private" / action["private_artifact_ref"]).is_file()

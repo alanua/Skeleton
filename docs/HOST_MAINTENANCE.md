@@ -31,6 +31,7 @@ Supported commands:
 - `poller_status`
 - `windows_bootstrap_audit`
 - `windows_bootstrap_prepare_one_link`
+- `windows_support_prepare_direct_link`
 
 The packet repository must be `alanua/Skeleton`. The default worktree root is
 `/home/agent/agent-dev/worktrees/skeleton`, and candidate paths must resolve to
@@ -89,6 +90,27 @@ keys, browser bypass instructions, SSH exposure, or any shell command supplied
 by an issue. The owner must manually open the private HTTPS link on the intended
 Windows target and verify the target fingerprint out of band before enrollment
 is considered complete.
+
+`windows_support_prepare_direct_link` is the final protected builder for an
+admin-capable Windows support handoff. It requires:
+
+```yaml
+command: windows_support_prepare_direct_link
+repository: alanua/Skeleton
+apply: true
+owner_approval: windows_support_direct_link_v1
+enrollment_id: win-target-01
+```
+
+The command writes the actual direct HTTPS support link only to a `0600`
+private artifact. Public output contains only hashes, the private artifact
+reference, `support_role: admin_support`, the immutable bootstrap-source policy,
+and `target_enrolled: false`. The owner must open the direct link manually on
+the Windows target and approve the normal UAC prompt. The endpoint payload must
+request `support_role: admin_support` and include
+`owner_approved_admin_capable_support_over_private_tailscale_only`; the public
+CMD wrapper is pinned to an immutable Git commit and does not download from
+mutable `main`.
 
 Candidates are skipped when they are missing, are not Git checkouts, have a
 wrong `origin`, are dirty, or are not stale. Git inspection is limited to fixed
