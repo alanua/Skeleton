@@ -1212,6 +1212,50 @@ issue text.
 The allowlist does not permit rebooting the host, package upgrades, arbitrary
 commands or config values from issue text, or unrelated services.
 
+`home_edge_01_media_source_snapshot_signer_install_v1` is the protected
+installer route for the Home Edge media source snapshot signer. It is separate
+from `home_edge_01_media_source_snapshot_v1`; the read-only snapshot route never
+installs, and a successful installer run never auto-runs a snapshot.
+
+It requires:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: home_edge_01_media_source_snapshot_signer_install_v1
+Repository: alanua/Skeleton
+Expected Main SHA: <40 lowercase hex SHA>
+Runtime Sync Approval: EXACT_HEAD_OPERATOR_APPROVAL_THEN_RUNTIME_SYNC_SIGNER_INSTALL_AND_READ_ONLY_SNAPSHOT
+Target: home-edge-01
+```
+
+The runtime approval token must match exactly before any Git, blob, memfd,
+sudo, or protected-file side effect. The next-action string
+`SEMANTIC_EXACT_HEAD_REVIEW_THEN_FULL_VALIDATION_THEN_OPERATOR_APPROVAL`, stale
+tokens such as
+`EXPLICIT_MINIMAL_HOME_EDGE_SNAPSHOT_ACCESS_REPAIR_2026_08_09`, and arbitrary
+values are rejected before side effects.
+
+After approval, the route requires `main` and `origin/main` to match
+`Expected Main SHA`, resolves only
+`scripts/install_home_edge_media_source_snapshot_signer.sh` from that exact
+commit, requires the Git tree mode to be `100755`, reads the Git blob as bytes,
+and recomputes the blob identity and SHA-256. It materializes those exact bytes
+into a sealing memfd with a complete-write loop. Zero or error writes fail
+closed. Before adding seals, it requires `fstat` size equality, reads back the
+whole descriptor, rejects truncation/addition/mismatch, and requires the
+readback SHA-256 to equal the trusted blob bytes. Only after that proof are the
+four required kernel seals added: seal, shrink, grow, and write.
+
+Privileged copy uses the parent-owned `/proc/<runner-pid>/fd/<fd>` descriptor
+path only as the source for a fixed protected installer copy. The route then
+verifies the protected installer is `root:root` mode `0555` with the exact
+SHA-256 before and after invoking the fixed protected installer path with
+`--repo-root` set to the canonical Skeleton checkout. It must not use mutable
+worktree or temp paths as privileged sources, depend on sudo fd inheritance,
+accept issue-controlled commands or paths, create new sudoers preserve-fd
+grants, change signer payload/wrapper/installer content, or run live snapshot
+execution.
+
 ## Reporting
 
 Each maintenance report must state `DONE` or `BLOCKED` accurately with safe
