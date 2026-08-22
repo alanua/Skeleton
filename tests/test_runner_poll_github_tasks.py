@@ -728,6 +728,114 @@ evidence text for recovery handling. Those words are not the final result.
     assert result == runner.CodexTaskResult("DONE")
 
 
+def test_codex_task_result_accepts_provider_prefix_result_done_regression_3163() -> None:
+    output = """SKELETON_CODEGEN_PROVIDER=codex
+RESULT: DONE
+
+Changed files:
+- scripts/runner_poll_github_tasks.py
+
+Validation:
+- python3 -m pytest -q
+"""
+
+    result = runner.classify_codex_task_result(output, 0)
+
+    assert result == runner.CodexTaskResult("DONE")
+
+
+def test_codex_task_result_blocks_provider_prefix_result_blocked_regression_3163() -> None:
+    output = """SKELETON_CODEGEN_PROVIDER=codex
+RESULT: BLOCKED
+
+reason=validation_failed
+details=pytest failed
+"""
+
+    result = runner.classify_codex_task_result(output, 0)
+
+    assert result == runner.CodexTaskResult("BLOCKED", "BLOCKED")
+
+
+def test_codex_task_result_uses_middle_explicit_result_marker() -> None:
+    output = """Changed files:
+- scripts/runner_poll_github_tasks.py
+
+RESULT: DONE
+
+Validation:
+- python3 -m pytest -q
+"""
+
+    result = runner.classify_codex_task_result(output, 0)
+
+    assert result == runner.CodexTaskResult("DONE")
+
+
+def test_codex_task_result_ignores_fenced_result_example_before_real_done() -> None:
+    output = """Implementation notes:
+```text
+RESULT: BLOCKED
+reason=example only
+```
+
+RESULT: DONE
+
+Validation passed.
+"""
+
+    result = runner.classify_codex_task_result(output, 0)
+
+    assert result == runner.CodexTaskResult("DONE")
+
+
+def test_codex_task_result_ignores_echoed_prompt_result_markers() -> None:
+    output = """Reading additional input from stdin...
+OpenAI Codex v0.125.0
+--------
+user
+Return RESULT: BLOCKED if the task cannot be completed.
+--------
+assistant
+RESULT: DONE
+
+Validation passed.
+"""
+
+    result = runner.classify_codex_task_result(output, 0)
+
+    assert result == runner.CodexTaskResult("DONE")
+
+
+def test_codex_task_result_conflicting_explicit_results_fail_closed() -> None:
+    output = """SKELETON_CODEGEN_PROVIDER=codex
+RESULT: DONE
+
+Validation passed.
+
+RESULT: BLOCKED
+reason=late blocker
+"""
+
+    result = runner.classify_codex_task_result(output, 0)
+
+    assert result == runner.CodexTaskResult(
+        "BLOCKED", runner._FINAL_RESULT_AMBIGUITY_MARKER
+    )
+
+
+def test_codex_task_result_explicit_result_overrides_legacy_heading() -> None:
+    output = """DONE: legacy heading from wrapper
+
+RESULT: BLOCKED
+reason=bounded final answer blocked
+"""
+
+    result = runner.classify_codex_task_result(output, 0)
+
+    assert result == runner.CodexTaskResult("BLOCKED", "BLOCKED")
+
+
 def test_private_memory_run_codex_preserves_safe_result_done_output(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -4848,6 +4956,66 @@ def test_process_issue_runs_target_project_bauclock_in_local_worktree(
     finalize_local.assert_called_once_with(str(issue_path), "codex output", expected_task)
     cleanup_target.assert_called_once_with("alanua/bauclock", 146)
     assert comment.call_args.args[1] == "DONE local report\nTarget Project: bauclock"
+
+
+def test_process_issue_explicit_result_blocked_stops_before_local_success(
+    tmp_path: Path,
+) -> None:
+    issue_path = tmp_path / "bauclock" / "issue-148"
+    issue = {
+        "number": 148,
+        "title": "Target project bauclock blocked",
+        "body": "Target Project: bauclock\nExpected Output: done\n\n```task\nDo it\n```",
+        "comments": [],
+    }
+    codex_output = """SKELETON_CODEGEN_PROVIDER=codex
+RESULT: BLOCKED
+
+reason=validation_failed
+"""
+
+    with mock.patch.object(
+        runner, "verify_target_repository_checkout", return_value=None
+    ), mock.patch.object(
+        runner,
+        "prepare_target_repository_issue_worktree",
+        return_value=(0, "ready", issue_path),
+    ), mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, codex_output)
+    ), mock.patch.object(
+        runner, "finalize_local_worktree_success"
+    ) as finalize_local, mock.patch.object(
+        runner, "finalize_success"
+    ) as finalize_success, mock.patch.object(
+        runner, "cleanup_target_repository_issue_worktree"
+    ) as cleanup_target, mock.patch.object(
+        runner, "ensure_codegen_pr_validation_continuation"
+    ) as continuation, mock.patch.object(
+        runner, "post_issue_comment"
+    ) as comment, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(
+        runner, "notify_task_finished"
+    ) as notify, mock.patch.object(
+        runner, "record_runner_task_picked_up", return_value=None
+    ), mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ), mock.patch.object(
+        runner, "maybe_replenish_runner_queue_after_completion", return_value=True
+    ):
+        runner.process_issue(issue)
+
+    finalize_local.assert_not_called()
+    finalize_success.assert_not_called()
+    cleanup_target.assert_not_called()
+    continuation.assert_not_called()
+    report = comment.call_args.args[1]
+    assert report.startswith("BLOCKED: Codex output reported a blocked deliverable.")
+    assert "Blocked marker: BLOCKED" in report
+    set_label.assert_any_call(148, runner.LABEL_RUNNING, runner.LABEL_BLOCKED)
+    notify.assert_called_once_with(148, "BLOCKED", report)
 
 
 def test_process_issue_runs_target_project_lavalamp_when_project_tree_enables_worktree(
