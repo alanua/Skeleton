@@ -1088,7 +1088,157 @@ def test_queue_replenisher_preserves_depth_dependency_duplicate_and_overlap_rule
         protected_files=frozenset(("docs/protected.md",)),
     )
 
-    assert [issue["number"] for issue in selected] == [20, 25]
+    assert [issue["number"] for issue in selected] == [20, 26]
+
+
+def test_queue_replenisher_dependency_aliases_are_deterministic() -> None:
+    upper = _queue_candidate_issue(
+        101,
+        body_lines=("Depends On: #100",),
+    )
+    lower = _queue_candidate_issue(
+        102,
+        body_lines=("Depends on: #100",),
+    )
+    typed = _queue_candidate_issue(
+        103,
+        body_lines=("depends_on: [\"#100\", \"#101\"]",),
+    )
+    typed_task_block = _queue_candidate_issue(
+        104,
+        body_lines=("```task", "depends_on: [\"#100\", \"#101\"]", "```"),
+    )
+
+    assert runner._queue_replenisher_dependencies(upper) == frozenset((100,))
+    assert runner._queue_replenisher_dependencies(lower) == frozenset((100,))
+    assert runner._queue_replenisher_dependencies(typed) == frozenset((100, 101))
+    assert runner._queue_replenisher_dependencies(typed_task_block) == frozenset(
+        (100, 101)
+    )
+
+
+def test_queue_replenisher_malformed_dependency_metadata_waits_closed() -> None:
+    malformed = _queue_candidate_issue(
+        105,
+        allowed_files=("docs/malformed.md",),
+        idempotency_key="malformed",
+        body_lines=("depends_on: accepted by predecessor prose",),
+    )
+    unsupported_alias = _queue_candidate_issue(
+        106,
+        allowed_files=("docs/unsupported-alias.md",),
+        idempotency_key="unsupported-alias",
+        body_lines=("Dependencies: #100",),
+    )
+    valid = _queue_candidate_issue(
+        107,
+        allowed_files=("docs/valid.md",),
+        idempotency_key="valid",
+    )
+
+    selection = runner._runner_queue_replenishment_selection(
+        [],
+        [malformed, unsupported_alias, valid],
+        target_min_depth=3,
+        target_max_depth=3,
+    )
+
+    assert [issue["number"] for issue in selection.selected] == [107]
+    assert [issue["number"] for issue in selection.waiting_dependency] == [105, 106]
+
+
+@pytest.mark.parametrize(
+    ("predecessor_labels", "selected_numbers", "waiting_numbers"),
+    (
+        ((runner.LABEL_READY,), [], [111]),
+        ((runner.LABEL_RUN_NOW,), [], [111]),
+        ((runner.LABEL_RUNNING,), [], [111]),
+        ((runner.LABEL_DONE,), [111], []),
+    ),
+)
+def test_queue_replenisher_dependencies_require_runner_done(
+    predecessor_labels: tuple[str, ...],
+    selected_numbers: list[int],
+    waiting_numbers: list[int],
+) -> None:
+    predecessor = _queue_candidate_issue(
+        110,
+        labels=predecessor_labels,
+    )
+    dependent = _queue_candidate_issue(
+        111,
+        allowed_files=("docs/dependent.md",),
+        idempotency_key="dependent",
+        body_lines=("Depends On: #110",),
+    )
+
+    selection = runner._runner_queue_replenishment_selection(
+        [predecessor] if runner.LABEL_READY in predecessor_labels else [],
+        [predecessor, dependent],
+        target_min_depth=3,
+        target_max_depth=3,
+    )
+
+    assert [issue["number"] for issue in selection.selected] == selected_numbers
+    assert [issue["number"] for issue in selection.waiting_dependency] == waiting_numbers
+
+
+def test_queue_replenisher_multiple_dependencies_all_must_be_done() -> None:
+    done = _queue_candidate_issue(120, labels=(runner.LABEL_DONE,))
+    missing = _queue_candidate_issue(121, labels=(runner.LABEL_READY,))
+    dependent = _queue_candidate_issue(
+        122,
+        allowed_files=("docs/multi-dependent.md",),
+        idempotency_key="multi-dependent",
+        body_lines=("depends_on: [\"#120\", \"#121\"]",),
+    )
+
+    selection = runner._runner_queue_replenishment_selection(
+        [missing],
+        [done, missing, dependent],
+        target_min_depth=3,
+        target_max_depth=3,
+    )
+    assert [issue["number"] for issue in selection.selected] == []
+    assert [issue["number"] for issue in selection.waiting_dependency] == [122]
+
+    done_missing = dict(missing)
+    done_missing["labels"] = [{"name": runner.LABEL_DONE}]
+    selection = runner._runner_queue_replenishment_selection(
+        [],
+        [done, done_missing, dependent],
+        target_min_depth=3,
+        target_max_depth=3,
+    )
+    assert [issue["number"] for issue in selection.selected] == [122]
+    assert selection.waiting_dependency == ()
+
+
+def test_queue_replenisher_3157_depends_on_chain_waits_until_prerequisite_done() -> None:
+    prerequisite = _queue_candidate_issue(
+        3156,
+        allowed_files=("docs/prerequisite.md",),
+        idempotency_key="incident-prerequisite",
+        labels=(runner.LABEL_AGENT_TASK, runner.LABEL_READY),
+        body_lines=("Depends On: #3155",),
+    )
+    incident = _queue_candidate_issue(
+        3157,
+        allowed_files=("docs/incident.md",),
+        idempotency_key="incident-dependent",
+        labels=(runner.LABEL_AGENT_TASK,),
+        body_lines=("Depends on: #3156",),
+    )
+
+    selection = runner._runner_queue_replenishment_selection(
+        [prerequisite],
+        [prerequisite, incident],
+        target_min_depth=3,
+        target_max_depth=3,
+    )
+
+    assert selection.selected == ()
+    assert [issue["number"] for issue in selection.waiting_dependency] == [3157]
 
 
 def test_queue_replenisher_selects_agent_task_candidates_without_backlog_seed() -> None:
@@ -1392,6 +1542,26 @@ def test_run_now_intake_preserves_existing_holds_and_terminal_policy() -> None:
     ]
 
     selected = runner.select_run_now_queue_intake_targets([], issues)
+
+    assert selected == []
+
+
+def test_run_now_generic_intake_does_not_bypass_dependency_wait() -> None:
+    prerequisite = _queue_candidate_issue(
+        2601,
+        allowed_files=("docs/run-now-prerequisite.md",),
+        idempotency_key="run-now-prerequisite",
+        labels=(runner.LABEL_AGENT_TASK, runner.LABEL_READY),
+    )
+    dependent = _queue_candidate_issue(
+        2602,
+        allowed_files=("docs/run-now-dependent.md",),
+        idempotency_key="run-now-dependent",
+        labels=(runner.LABEL_AGENT_TASK, runner.LABEL_RUN_NOW),
+        body_lines=("Depends on: #2601",),
+    )
+
+    selected = runner.select_run_now_queue_intake_targets([prerequisite], [dependent])
 
     assert selected == []
 

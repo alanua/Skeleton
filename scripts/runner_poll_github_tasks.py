@@ -1247,6 +1247,7 @@ class RunnerQueueReplenisherCandidate:
     intent_key: str
     allowed_files: frozenset[str]
     dependencies: frozenset[int]
+    dependencies_valid: bool = True
 
 
 @dataclass(frozen=True)
@@ -11791,19 +11792,72 @@ def _queue_replenisher_protected_files(issue: Mapping[str, Any]) -> frozenset[st
     return frozenset(files)
 
 
+_QUEUE_REPLENISHER_DEPENDENCY_FIELDS = ("Depends On", "Depends on", "depends_on")
+_QUEUE_REPLENISHER_UNSUPPORTED_DEPENDENCY_FIELDS = ("Dependencies",)
+
+
+def _queue_replenisher_dependency_value(issue: Mapping[str, Any]) -> object:
+    task_fields = _queue_replenisher_task_fields(issue)
+    if "depends_on" in task_fields:
+        return task_fields["depends_on"]
+    metadata = _queue_replenisher_metadata(issue)
+    for field in _QUEUE_REPLENISHER_DEPENDENCY_FIELDS:
+        multiline = _metadata_multiline_value(metadata, field)
+        if multiline is not None:
+            return multiline
+        match = re.search(
+            rf"^[^\S\r\n]*{re.escape(field)}:[^\S\r\n]*"
+            r"(?P<value>\S(?:[^\r\n]*\S)?)[^\S\r\n]*$",
+            metadata,
+            re.MULTILINE,
+        )
+        if match is not None:
+            return match.group("value")
+    return _metadata_yaml_value(metadata, "depends_on")
+
+
+def _queue_replenisher_dependency_field_present(issue: Mapping[str, Any]) -> bool:
+    task_fields = _queue_replenisher_task_fields(issue)
+    if "depends_on" in task_fields:
+        return True
+    metadata = _queue_replenisher_metadata(issue)
+    return any(
+        _metadata_has_field(metadata, field)
+        for field in (
+            *_QUEUE_REPLENISHER_DEPENDENCY_FIELDS,
+            *_QUEUE_REPLENISHER_UNSUPPORTED_DEPENDENCY_FIELDS,
+        )
+    ) or _metadata_yaml_value(metadata, "depends_on") is not None
+
+
 def _queue_replenisher_dependencies(issue: Mapping[str, Any]) -> frozenset[int]:
-    value = _queue_replenisher_field(issue, "Depends On", "depends_on")
+    valid, dependencies = _queue_replenisher_dependency_parse(issue)
+    return dependencies if valid else frozenset()
+
+
+def _queue_replenisher_dependency_parse(
+    issue: Mapping[str, Any],
+) -> tuple[bool, frozenset[int]]:
+    value = _queue_replenisher_dependency_value(issue)
+    if isinstance(value, str) and value.strip().startswith("["):
+        try:
+            loaded_value = yaml.safe_load(value)
+        except yaml.YAMLError:
+            loaded_value = value
+        if isinstance(loaded_value, list):
+            value = loaded_value
     dependencies = list(_shadow_csv_or_sequence(value))
     if not dependencies:
-        listed = _body_list_items(
-            _queue_replenisher_metadata(issue), ("Depends On", "Dependencies")
-        )
-        dependencies.extend(listed or ())
+        if _queue_replenisher_dependency_field_present(issue):
+            return False, frozenset()
+        return True, frozenset()
     numbers: set[int] = set()
     for dependency in dependencies:
-        for match in re.finditer(r"#?(?P<number>[1-9]\d*)", dependency):
-            numbers.add(int(match.group("number")))
-    return frozenset(numbers)
+        match = re.fullmatch(r"#(?P<number>[1-9]\d*)", dependency.strip())
+        if match is None:
+            return False, frozenset()
+        numbers.add(int(match.group("number")))
+    return True, frozenset(numbers)
 
 
 _QUEUE_REPLENISHER_INTENT_WORD_RE = re.compile(r"[^a-z0-9]+")
@@ -11832,12 +11886,14 @@ def _queue_replenisher_candidate(
     intent_key = _queue_replenisher_intent_key(issue)
     if not intent_key:
         return None
+    dependencies_valid, dependencies = _queue_replenisher_dependency_parse(issue)
     return RunnerQueueReplenisherCandidate(
         issue=dict(issue),
         number=number,
         intent_key=intent_key,
         allowed_files=_queue_replenisher_allowed_files(issue),
-        dependencies=_queue_replenisher_dependencies(issue),
+        dependencies=dependencies,
+        dependencies_valid=dependencies_valid,
     )
 
 
@@ -11923,11 +11979,6 @@ def _runner_queue_replenishment_selection(
         if (number := _queue_replenisher_issue_number(issue)) is not None
         and LABEL_DONE in _issue_label_names(issue)
     }
-    ready_numbers = {
-        number
-        for issue in ready_issues
-        if (number := _queue_replenisher_issue_number(issue)) is not None
-    }
     used_intents = {
         candidate.intent_key
         for issue in (*ready_issues, *candidate_issues)
@@ -11970,7 +12021,7 @@ def _runner_queue_replenishment_selection(
         if protected_overlap:
             continue
         used_intents.add(candidate.intent_key)
-        if candidate.dependencies - done_numbers - ready_numbers:
+        if not candidate.dependencies_valid or candidate.dependencies - done_numbers:
             waiting_dependency.append(candidate)
             continue
         if len(selected) >= slots:
