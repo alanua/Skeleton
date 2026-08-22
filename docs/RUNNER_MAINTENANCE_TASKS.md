@@ -416,6 +416,40 @@ Public reports include only `target_project`, `target_repository`, and
 the registered checkout path remains internal to validation and bounded Git
 commands.
 
+`home_edge_01_install_media_source_snapshot_signer_v1` is the approval-gated
+protected installer replacement for the Home Edge media-source snapshot signer.
+It requires:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: home_edge_01_install_media_source_snapshot_signer_v1
+Repository: alanua/Skeleton
+Expected Main SHA: <exact current main sha>
+Operator Approval: EXPLICIT_MINIMAL_HOME_EDGE_SNAPSHOT_ACCESS_REPAIR_2026_08_09
+Target: home-edge-01
+```
+
+The runner must verify that `main` and `origin/main` equal `Expected Main SHA`,
+resolve only
+`scripts/install_home_edge_media_source_snapshot_signer.sh` at that exact commit,
+and require a Git `blob` entry with mode `100755`. The approved bytes are
+materialized only into a sealed Linux memfd; the runner verifies the Git blob
+identity and SHA-256 from the descriptor, applies write/grow/shrink/seal seals,
+and proves those seals reject mutation before any privileged command. If memfd
+creation, sealing, descriptor verification, or the seal probe is unavailable or
+fails, the task blocks before `sudo`.
+
+The privileged copy step may consume only the runner-owned descriptor source
+`/proc/<runner-pid>/fd/<sealed-fd>` via `/usr/bin/install`, producing the fixed
+root-owned `0555` protected installer path under
+`/usr/local/libexec/skeleton/home-edge/media-source-snapshot-installer/`. It must
+never install from the worktree path or an ordinary mutable temporary pathname.
+The runner audits the protected installer owner, mode, and SHA-256 before and
+after invoking that protected installer with only `--repo-root` set to the
+canonical Skeleton checkout. The read-only
+`home_edge_01_media_source_snapshot_v1` route remains separate and never invokes
+this installer.
+
 `ensure_project_checkout` prepares only a missing registered project checkout and
 must include target project metadata:
 

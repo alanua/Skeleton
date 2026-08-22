@@ -150,6 +150,24 @@ def _media_source_snapshot_issue_body(expected_sha: str = HEAD_SHA) -> str:
     )
 
 
+def _media_source_snapshot_signer_install_body(
+    *,
+    expected_sha: str = HEAD_SHA,
+    approval: str = "EXPLICIT_MINIMAL_HOME_EDGE_SNAPSHOT_ACCESS_REPAIR_2026_08_09",
+    repository: str = runner.REPO,
+) -> str:
+    return "\n".join(
+        (
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {runner.HOME_EDGE_01_INSTALL_MEDIA_SOURCE_SNAPSHOT_SIGNER_V1}",
+            f"Repository: {repository}",
+            f"Expected Main SHA: {expected_sha}",
+            f"Operator Approval: {approval}",
+            "Target: home-edge-01",
+        )
+    )
+
+
 def _media_source_snapshot_receipt() -> dict[str, object]:
     return {
         "maintenance_task_id": runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1,
@@ -502,7 +520,10 @@ def test_home_edge_media_source_snapshot_registry_exposes_only_exact_fixed_task_
         if "media_source_snapshot" in task_id
     }
 
-    assert variants == {runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1}
+    assert variants == {
+        runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1,
+        runner.HOME_EDGE_01_INSTALL_MEDIA_SOURCE_SNAPSHOT_SIGNER_V1,
+    }
     assert (
         runner.dispatch_runtime_maintenance_task(
             "home_edge_01_media_source_snapshot_v1_extra",
@@ -525,6 +546,239 @@ def test_home_edge_media_source_snapshot_malformed_input_blocks(
 
     assert report.startswith("BLOCKED:")
     assert "reason=unknown_runtime_input_field" in report
+
+
+def test_home_edge_signer_install_rejects_stale_approval_before_git_or_sudo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        runner,
+        "_read_exact_git_sha",
+        lambda _ref: pytest.fail("stale approval must block before git"),
+    )
+    monkeypatch.setattr(
+        runner,
+        "run_command",
+        lambda _command, **_kwargs: pytest.fail("stale approval must block before sudo"),
+    )
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_01_INSTALL_MEDIA_SOURCE_SNAPSHOT_SIGNER_V1,
+        str(runner.ROOT),
+        _media_source_snapshot_signer_install_body(approval="STALE_APPROVAL"),
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=home_edge_signer_install_operator_approval_missing" in report
+
+
+def test_home_edge_signer_install_uses_sealed_descriptor_for_privileged_install(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    approved = b"#!/usr/bin/env bash\nexit 0\n"
+    blob_sha = runner._git_blob_sha1_bytes(approved)
+    commands: list[list[str]] = []
+    seal_events: list[str] = []
+
+    def fake_run_command(command: list[str], **_kwargs):
+        commands.append(command)
+        assert command[:2] == ["sudo", "-n"]
+        return 0, ""
+
+    original_probe = runner._home_edge_prove_sealed_fd_immutable
+
+    def prove(fd: int, size: int) -> bool:
+        ok = original_probe(fd, size)
+        seal_events.append("proved")
+        return ok
+
+    monkeypatch.setattr(runner, "_read_exact_git_sha", lambda _ref: HEAD_SHA)
+    monkeypatch.setattr(
+        runner,
+        "_home_edge_signer_expected_blob",
+        lambda _sha: (blob_sha, None),
+    )
+    monkeypatch.setattr(runner, "_home_edge_signer_blob_bytes", lambda _blob: approved)
+    monkeypatch.setattr(runner, "_home_edge_prove_sealed_fd_immutable", prove)
+    monkeypatch.setattr(runner, "_protected_installer_audit", lambda _sha: None)
+    monkeypatch.setattr(runner, "run_command", fake_run_command)
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_01_INSTALL_MEDIA_SOURCE_SNAPSHOT_SIGNER_V1,
+        str(runner.ROOT),
+        _media_source_snapshot_signer_install_body(),
+    )
+
+    assert report.startswith("DONE:")
+    assert seal_events == ["proved"]
+    assert commands[0][:9] == [
+        "sudo",
+        "-n",
+        "/usr/bin/install",
+        "-D",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        "-m",
+    ]
+    assert commands[0][9] == "0555"
+    assert commands[0][10].startswith(f"/proc/{runner.os.getpid()}/fd/")
+    assert "/scripts/install_home_edge_media_source_snapshot_signer.sh" not in commands[0][10]
+    assert not commands[0][10].startswith("/tmp/")
+    assert commands[0][11] == str(runner._HOME_EDGE_SIGNER_PROTECTED_INSTALLER)
+    assert commands[1] == [
+        "sudo",
+        "-n",
+        str(runner._HOME_EDGE_SIGNER_PROTECTED_INSTALLER),
+        "--repo-root",
+        str(runner.ROOT.resolve()),
+    ]
+    assert f"head_sha={blob_sha}" in report
+    assert f"source_sha256={runner.hashlib.sha256(approved).hexdigest()}" in report
+
+
+def test_home_edge_signer_install_blocks_unsealed_descriptor_before_sudo(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    approved = b"#!/usr/bin/env bash\nexit 0\n"
+    blob_sha = runner._git_blob_sha1_bytes(approved)
+    unsealed = tmp_path / "unsealed"
+    unsealed.write_bytes(approved)
+    fd = runner.os.open(unsealed, runner.os.O_RDWR)
+
+    monkeypatch.setattr(runner, "_read_exact_git_sha", lambda _ref: HEAD_SHA)
+    monkeypatch.setattr(
+        runner,
+        "_home_edge_signer_expected_blob",
+        lambda _sha: (blob_sha, None),
+    )
+    monkeypatch.setattr(runner, "_home_edge_signer_blob_bytes", lambda _blob: approved)
+    monkeypatch.setattr(
+        runner,
+        "_home_edge_create_sealed_blob_fd",
+        lambda _blob, *, expected_blob_sha: (fd, None),
+    )
+    monkeypatch.setattr(
+        runner,
+        "run_command",
+        lambda _command, **_kwargs: pytest.fail("unsealed descriptor must block before sudo"),
+    )
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_01_INSTALL_MEDIA_SOURCE_SNAPSHOT_SIGNER_V1,
+        str(runner.ROOT),
+        _media_source_snapshot_signer_install_body(),
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=home_edge_signer_install_seal_probe_failed" in report
+
+
+def test_home_edge_signer_install_blocks_missing_memfd_before_sudo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    approved = b"#!/usr/bin/env bash\nexit 0\n"
+    blob_sha = runner._git_blob_sha1_bytes(approved)
+
+    monkeypatch.setattr(runner, "_read_exact_git_sha", lambda _ref: HEAD_SHA)
+    monkeypatch.setattr(
+        runner,
+        "_home_edge_signer_expected_blob",
+        lambda _sha: (blob_sha, None),
+    )
+    monkeypatch.setattr(runner, "_home_edge_signer_blob_bytes", lambda _blob: approved)
+    monkeypatch.setattr(
+        runner,
+        "_home_edge_create_sealed_blob_fd",
+        lambda _blob, *, expected_blob_sha: (
+            None,
+            "home_edge_signer_install_memfd_unavailable",
+        ),
+    )
+    monkeypatch.setattr(
+        runner,
+        "run_command",
+        lambda _command, **_kwargs: pytest.fail("missing memfd must block before sudo"),
+    )
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_01_INSTALL_MEDIA_SOURCE_SNAPSHOT_SIGNER_V1,
+        str(runner.ROOT),
+        _media_source_snapshot_signer_install_body(),
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=home_edge_signer_install_memfd_unavailable" in report
+
+
+def test_home_edge_signer_install_uses_approved_blob_after_worktree_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    approved = b"#!/usr/bin/env bash\nexit 0\n"
+    mutated = b"#!/usr/bin/env bash\nexit 99\n"
+    blob_sha = runner._git_blob_sha1_bytes(approved)
+    fake_root = tmp_path / "checkout"
+    installer = fake_root / "scripts" / "install_home_edge_media_source_snapshot_signer.sh"
+    installer.parent.mkdir(parents=True)
+    installer.write_bytes(approved)
+    installed_sources: list[bytes] = []
+
+    def blob_bytes(_blob: str) -> bytes:
+        installer.write_bytes(mutated)
+        return approved
+
+    def fake_run_command(command: list[str], **_kwargs):
+        if command[:3] == ["sudo", "-n", "/usr/bin/install"]:
+            installed_sources.append(Path(command[10]).read_bytes())
+        return 0, ""
+
+    monkeypatch.setattr(runner, "ROOT", fake_root)
+    monkeypatch.setattr(runner, "_read_exact_git_sha", lambda _ref: HEAD_SHA)
+    monkeypatch.setattr(
+        runner,
+        "_home_edge_signer_expected_blob",
+        lambda _sha: (blob_sha, None),
+    )
+    monkeypatch.setattr(runner, "_home_edge_signer_blob_bytes", blob_bytes)
+    monkeypatch.setattr(runner, "_protected_installer_audit", lambda _sha: None)
+    monkeypatch.setattr(runner, "run_command", fake_run_command)
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_01_INSTALL_MEDIA_SOURCE_SNAPSHOT_SIGNER_V1,
+        str(fake_root),
+        _media_source_snapshot_signer_install_body(),
+    )
+
+    assert report.startswith("DONE:")
+    assert installer.read_bytes() == mutated
+    assert installed_sources == [approved]
+
+
+def test_home_edge_media_source_snapshot_readonly_route_never_invokes_install(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runner, "_read_exact_git_sha", lambda _ref: HEAD_SHA)
+    monkeypatch.setattr(
+        media_source_snapshot,
+        "execute_media_source_snapshot_task",
+        lambda *_args, **_kwargs: _media_source_snapshot_receipt(),
+    )
+    monkeypatch.setattr(
+        runner,
+        "home_edge_01_install_media_source_snapshot_signer_v1",
+        lambda _body: pytest.fail("snapshot route must not auto-run install"),
+    )
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1,
+        str(runner.ROOT),
+        _media_source_snapshot_issue_body(),
+    )
+
+    assert report.startswith("DONE:")
 
 
 def _plain_done_message(issue_number: int = 129) -> str:
