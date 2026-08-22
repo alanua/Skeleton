@@ -249,6 +249,7 @@ FINAL_LABELS_BY_STATUS = {
     "DONE": LABEL_DONE,
     "BLOCKED": LABEL_BLOCKED,
 }
+ATTENTION_NOTIFICATION_STATUSES = frozenset(("NEEDS_OPERATOR", "OPERATOR_ATTENTION"))
 ACTIVE_EXECUTION_LABELS = frozenset((LABEL_READY, LABEL_RUN_NOW, LABEL_RUNNING))
 TERMINAL_RUNNER_LABELS = frozenset((LABEL_DONE, LABEL_BLOCKED))
 POLL_INTERVAL = 60
@@ -562,16 +563,18 @@ _BLOCKED_OUTPUT_MARKER_RES = tuple(
     for marker in _BLOCKED_OUTPUT_MARKERS
 )
 _FINAL_STATUS_LINE_RE = re.compile(
-    r"^\s*(DONE|BLOCKED|NEEDS_OPERATOR)\b:?", re.IGNORECASE
+    r"^\s*(DONE|BLOCKED|NEEDS_OPERATOR|OPERATOR_ATTENTION)\b:?", re.IGNORECASE
 )
 _FINAL_STATUS_DELIVERY_LINE_RE = re.compile(
-    r"^\s*(DONE|BLOCKED|NEEDS_OPERATOR)\s*:", re.IGNORECASE
+    r"^\s*(DONE|BLOCKED|NEEDS_OPERATOR|OPERATOR_ATTENTION)\s*:", re.IGNORECASE
 )
 _FINAL_RESULT_LINE_RE = re.compile(
-    r"^\s*RESULT:\s*(?P<result>DONE|BLOCKED|NEEDS_OPERATOR)\b", re.IGNORECASE
+    r"^\s*RESULT:\s*(?P<result>DONE|BLOCKED|NEEDS_OPERATOR|OPERATOR_ATTENTION)\b",
+    re.IGNORECASE,
 )
 _REPORT_OPERATOR_REQUIRED_RE = re.compile(
-    r"^\s*(?:RESULT:\s*)?NEEDS_OPERATOR\b:?", re.IGNORECASE | re.MULTILINE
+    r"^\s*(?:RESULT:\s*)?(?:NEEDS_OPERATOR|OPERATOR_ATTENTION)\b:?",
+    re.IGNORECASE | re.MULTILINE,
 )
 _LOCAL_WORKTREE_DONE_PREFIX = (
     "DONE: Codex completed successfully in the local target-project worktree."
@@ -4860,6 +4863,21 @@ def build_done_pr_ready_card_payload(
         )
 
 
+def _has_exact_head_pr_approval_actions(card_payload: dict[str, Any]) -> bool:
+    head_sha = card_payload.get("head_sha")
+    changed_files = card_payload.get("changed_files")
+    if not isinstance(head_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", head_sha):
+        return False
+    if not isinstance(changed_files, list) or not changed_files:
+        return False
+    actions = {
+        str(button.get("action") or "")
+        for button in card_payload.get("buttons", [])
+        if isinstance(button, dict)
+    }
+    return {"approve", "reject"} <= actions
+
+
 def send_telegram_notification(
     message: str, reply_markup: dict[str, Any] | None = None
 ) -> None:
@@ -4912,7 +4930,10 @@ def get_notification_issue(issue_number: int) -> dict[str, Any]:
 
 
 def notification_task_issue(issue_number: int, status: str) -> dict[str, Any] | None:
+    status = status.upper()
     expected_label = FINAL_LABELS_BY_STATUS.get(status)
+    if expected_label is None and status in ATTENTION_NOTIFICATION_STATUSES:
+        expected_label = LABEL_BLOCKED
     if expected_label is None:
         return None
 
@@ -4928,7 +4949,10 @@ def notification_task_issue(issue_number: int, status: str) -> dict[str, Any] | 
 
 
 def should_notify_task_finished(issue_number: int, status: str) -> bool:
-    return notification_task_issue(issue_number, status) is not None
+    return (
+        status.upper() in ATTENTION_NOTIFICATION_STATUSES
+        and notification_task_issue(issue_number, status) is not None
+    )
 
 
 def notification_target_repository(issue: dict[str, Any]) -> str:
@@ -4945,9 +4969,11 @@ def notify_task_finished(
     issue_number: int, status: str, report: str | None = None
 ) -> None:
     try:
-        if not should_notify_task_finished(issue_number, status):
+        status = status.upper()
+        issue = notification_task_issue(issue_number, status)
+        if issue is None:
             return
-        issue = _NOTIFICATION_ISSUE_CACHE.pop((issue_number, status), None)
+        issue = _NOTIFICATION_ISSUE_CACHE.pop((issue_number, status), issue)
         target_repository = (
             notification_target_repository(issue) if issue is not None else REPO
         )
@@ -4957,8 +4983,10 @@ def notify_task_finished(
         plain_message = build_telegram_message(
             issue_number, status, report, plain_target_repository
         )
-        if status != "DONE" or not report:
+        if status in ATTENTION_NOTIFICATION_STATUSES:
             send_telegram_notification(plain_message)
+            return
+        if status != "DONE" or not report:
             return
 
         try:
@@ -4968,11 +4996,9 @@ def notify_task_finished(
                 source_issue_number=issue_number,
             )
         except Exception:
-            send_telegram_notification(plain_message)
             return
 
-        if card_payload is None:
-            send_telegram_notification(plain_message)
+        if card_payload is None or not _has_exact_head_pr_approval_actions(card_payload):
             return
 
         try:
@@ -4981,7 +5007,7 @@ def notify_task_finished(
                 card_payload_to_inline_keyboard(card_payload),
             )
         except Exception:
-            send_telegram_notification(plain_message)
+            return
     except Exception:
         return
 
@@ -17117,7 +17143,12 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             report = append_memory_warning(report, warning or pickup_memory_warning)
             post_issue_comment(issue_number, report)
             set_issue_label(issue_number, LABEL_RUNNING, LABEL_BLOCKED)
-            notify_task_finished(issue_number, "BLOCKED", report)
+            notify_status = (
+                codex_result.marker
+                if codex_result.marker in ATTENTION_NOTIFICATION_STATUSES
+                else "BLOCKED"
+            )
+            notify_task_finished(issue_number, notify_status, report)
             maybe_replenish_runner_queue_after_completion()
             return
 

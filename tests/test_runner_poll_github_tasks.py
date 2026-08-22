@@ -842,6 +842,20 @@ RESULT: NEEDS_OPERATOR
     assert result == runner.CodexTaskResult("BLOCKED", "NEEDS_OPERATOR")
 
 
+def test_codex_task_result_blocks_structured_operator_attention_result() -> None:
+    output = """Changed files:
+- none
+
+The task needs explicit operator attention.
+
+RESULT: OPERATOR_ATTENTION
+"""
+
+    result = runner.classify_codex_task_result(output, 0)
+
+    assert result == runner.CodexTaskResult("BLOCKED", "OPERATOR_ATTENTION")
+
+
 def test_codex_task_result_blocks_failure_final_report() -> None:
     blocked = "BLOCK" + "ED"
     output = f"""{blocked}: missing capability
@@ -5737,11 +5751,24 @@ def test_send_telegram_notification_without_env_makes_no_network_call() -> None:
 
 
 def test_done_pr_card_success_sends_reply_markup() -> None:
-    card = {"text": "PR ready card", "buttons": []}
+    card = {
+        "text": "PR ready card",
+        "head_sha": HEAD_SHA,
+        "changed_files": ["scripts/runner_poll_github_tasks.py"],
+        "buttons": [{"action": "approve"}, {"action": "reject"}],
+    }
     reply_markup = {"inline_keyboard": []}
 
     with mock.patch.object(
-        runner, "should_notify_task_finished", return_value=True
+        runner,
+        "notification_task_issue",
+        return_value={
+            "number": 129,
+            "body": "```task\nDo it\n```",
+            "state": "open",
+            "closed": False,
+            "labels": [{"name": runner.LABEL_DONE}],
+        },
     ), mock.patch.object(
         runner, "build_done_pr_ready_card_payload", return_value=card
     ), mock.patch.object(
@@ -5752,7 +5779,7 @@ def test_done_pr_card_success_sends_reply_markup() -> None:
     send.assert_called_once_with("PR ready card", reply_markup)
 
 
-def test_done_pr_card_uses_target_repository_from_issue_body() -> None:
+def test_cross_project_done_pr_details_only_card_does_not_notify() -> None:
     issue = {
         "number": 129,
         "body": "Target Repository: alanua/bauclock\nExpected Output: done\n\n```task\nDo it\n```",
@@ -5766,21 +5793,10 @@ def test_done_pr_card_uses_target_repository_from_issue_body() -> None:
     ), mock.patch.object(runner, "send_telegram_notification") as send:
         runner.notify_task_finished(129, "DONE", DONE_REPORT)
 
-    assert send.call_count == 1
-    text = send.call_args.args[0]
-    reply_markup = send.call_args.args[1]
-    assert "Проєкт: bauclock" in text
-    assert "Репозиторій: alanua/bauclock" in text
-    assert "Задача: #129" in text
-    assert "Repository: alanua/Skeleton" not in text
-    assert "target_repo" not in text
-    assert [row[0]["text"] for row in reply_markup["inline_keyboard"]] == [
-        "Деталі",
-        "Відкрити PR",
-    ]
+    send.assert_not_called()
 
 
-def test_cross_project_blocked_status_uses_target_repository_from_issue_body() -> None:
+def test_cross_project_blocked_status_does_not_notify() -> None:
     issue = {
         "number": 999,
         "body": (
@@ -5798,17 +5814,20 @@ def test_cross_project_blocked_status_uses_target_repository_from_issue_body() -
     ), mock.patch.object(runner, "send_telegram_notification") as send:
         runner.notify_task_finished(999, "BLOCKED")
 
-    send.assert_called_once_with(
-        "Проєкт: LumenFlow\n"
-        "Репозиторій: alanua/LumenFlow\n"
-        "Задача: #999\n"
-        "Статус: BLOCKED"
-    )
+    send.assert_not_called()
 
 
-def test_done_pr_card_build_failure_falls_back_to_plain_done() -> None:
+def test_done_pr_card_build_failure_does_not_fall_back_to_plain_done() -> None:
     with mock.patch.object(
-        runner, "should_notify_task_finished", return_value=True
+        runner,
+        "notification_task_issue",
+        return_value={
+            "number": 129,
+            "body": "```task\nDo it\n```",
+            "state": "open",
+            "closed": False,
+            "labels": [{"name": runner.LABEL_DONE}],
+        },
     ), mock.patch.object(
         runner,
         "build_done_pr_ready_card_payload",
@@ -5816,16 +5835,28 @@ def test_done_pr_card_build_failure_falls_back_to_plain_done() -> None:
     ), mock.patch.object(runner, "send_telegram_notification") as send:
         runner.notify_task_finished(129, "DONE", DONE_REPORT)
 
-    send.assert_called_once_with(_plain_done_message())
-    assert "telegram-bot-token-must-not-leak" not in send.call_args.args[0]
+    send.assert_not_called()
 
 
-def test_done_pr_reply_markup_send_failure_falls_back_to_plain_done() -> None:
-    card = {"text": "PR ready card", "buttons": []}
+def test_done_pr_reply_markup_send_failure_does_not_fall_back_to_plain_done() -> None:
+    card = {
+        "text": "PR ready card",
+        "head_sha": HEAD_SHA,
+        "changed_files": ["scripts/runner_poll_github_tasks.py"],
+        "buttons": [{"action": "approve"}, {"action": "reject"}],
+    }
     reply_markup = {"inline_keyboard": []}
 
     with mock.patch.object(
-        runner, "should_notify_task_finished", return_value=True
+        runner,
+        "notification_task_issue",
+        return_value={
+            "number": 129,
+            "body": "```task\nDo it\n```",
+            "state": "open",
+            "closed": False,
+            "labels": [{"name": runner.LABEL_DONE}],
+        },
     ), mock.patch.object(
         runner, "build_done_pr_ready_card_payload", return_value=card
     ), mock.patch.object(
@@ -5837,16 +5868,26 @@ def test_done_pr_reply_markup_send_failure_falls_back_to_plain_done() -> None:
     ) as send:
         runner.notify_task_finished(129, "DONE", DONE_REPORT)
 
-    assert send.call_args_list == [
-        mock.call("PR ready card", reply_markup),
-        mock.call(_plain_done_message()),
-    ]
+    send.assert_called_once_with("PR ready card", reply_markup)
 
 
 def test_pr_card_build_does_not_execute_merge_or_reject_side_effects() -> None:
-    card = {"text": "PR ready card", "buttons": []}
+    card = {
+        "text": "PR ready card",
+        "head_sha": HEAD_SHA,
+        "changed_files": ["scripts/runner_poll_github_tasks.py"],
+        "buttons": [{"action": "approve"}, {"action": "reject"}],
+    }
     with mock.patch.object(
-        runner, "should_notify_task_finished", return_value=True
+        runner,
+        "notification_task_issue",
+        return_value={
+            "number": 129,
+            "body": "```task\nDo it\n```",
+            "state": "open",
+            "closed": False,
+            "labels": [{"name": runner.LABEL_DONE}],
+        },
     ), mock.patch.object(
         runner, "build_done_pr_ready_card_payload", return_value=card
     ), mock.patch.object(runner, "run_command") as run_command, mock.patch.object(
@@ -6889,6 +6930,33 @@ def test_maintenance_task_bypasses_codex() -> None:
         mock.call(145, runner.LABEL_READY, runner.LABEL_RUNNING),
         mock.call(145, runner.LABEL_RUNNING, runner.LABEL_DONE),
     ]
+
+
+def test_process_issue_routes_typed_operator_attention_notification() -> None:
+    issue = {
+        "number": 451,
+        "title": "Attention",
+        "body": "Expected Output: done\n\n```task\nDo it\n```",
+        "comments": [],
+    }
+    codex_output = "RESULT: OPERATOR_ATTENTION\n"
+
+    with mock.patch.object(
+        runner, "ensure_clean_worktree", return_value=(True, "")
+    ), mock.patch.object(
+        runner, "prepare_issue_branch", return_value=(0, "", "runner/issue-451")
+    ), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, codex_output)
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ) as notify:
+        runner.process_issue(issue, workdir="/repo")
+
+    notify.assert_called_once_with(451, "OPERATOR_ATTENTION", mock.ANY)
 
 
 def test_process_issue_dirty_clean_worktree_does_not_block_recover_skeleton_checkout() -> None:
