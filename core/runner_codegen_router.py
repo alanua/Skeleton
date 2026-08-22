@@ -27,6 +27,7 @@ from integrations.credential_runtime import (
 ROOT = Path(__file__).resolve().parents[1]
 EXECUTOR_REGISTRY_PATH = ROOT / "EXECUTOR_REGISTRY.yaml"
 MODEL_REGISTRY_PATH = ROOT / "MODEL_REGISTRY.yaml"
+CODEX_EXECUTOR_ID = "codex-embedded"
 OPENHANDS_EXECUTOR_ID = "openhands-external"
 OPENROUTER_CREDENTIAL_SERVICE = "runner-openhands"
 OPENROUTER_CREDENTIAL_ALIAS = "openrouter-api"
@@ -38,6 +39,7 @@ _OPENHANDS_RUNTIME_MODEL_BY_MODEL_ID = {
     "openrouter-kimi-k2-challenger": "openrouter/moonshotai/kimi-k2",
 }
 
+# Markers for availability/provider failures that allow secondary executor fallback
 _QUOTA_OR_PROVIDER_MARKERS = (
     "usage limit",
     "rate limit",
@@ -49,9 +51,17 @@ _QUOTA_OR_PROVIDER_MARKERS = (
     "try again at",
 )
 
+# Marker for timeout failures that allow secondary executor fallback
+_TIMEOUT_FAILURE_MARKER = "SKELETON_CODEGEN_PRIMARY_TIMEOUT"
+
 
 class CodegenRouteError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class CodexPrimaryRoute:
+    binding: ExecutionBinding
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,11 +75,17 @@ def codex_failure_allows_secondary(exit_code: int, output: str) -> bool:
     """Allow a secondary executor only for bounded availability failures.
 
     Ordinary implementation/test/validation failures are not executor-fallback authority.
+    Timeout failures are normalized into the stable failure taxonomy and allow secondary.
     """
     if exit_code == 0:
         return False
-    lowered = (output or "").lower()
-    return any(marker in lowered for marker in _QUOTA_OR_PROVIDER_MARKERS)
+    output_str = output or ""
+    lowered = output_str.lower()
+    # Check for quota/provider availability markers
+    if any(marker in lowered for marker in _QUOTA_OR_PROVIDER_MARKERS):
+        return True
+    # Check for normalized timeout failure marker
+    return _TIMEOUT_FAILURE_MARKER in output_str
 
 
 def task_contract_allows_cloud_secondary(task_content: str) -> bool:
@@ -122,6 +138,31 @@ def _production_codegen_profile() -> TaskProfile:
         max_tokens=0,
         requires_operator=False,
     )
+
+
+def select_codex_primary_route(
+    *,
+    executor_registry_path: str | Path = EXECUTOR_REGISTRY_PATH,
+    model_registry_path: str | Path = MODEL_REGISTRY_PATH,
+) -> CodexPrimaryRoute:
+    """Select the primary Codex executor route with binding-derived timeout.
+
+    The timeout is sourced from the ExecutionBinding, which is derived from the
+    min(profile.timeout_seconds, executor.max_timeout_seconds) in the registry.
+    This ensures the primary Codex invocation uses the approved binding/registry
+    authority instead of an unbounded run_command.
+    """
+    profile = _production_codegen_profile()
+    executors = load_executor_registry(executor_registry_path)
+    models = load_model_registry(model_registry_path)
+    bindings = build_execution_bindings(profile, executors, models, production=True)
+    binding = next(
+        (candidate for candidate in bindings if candidate.executor_id == CODEX_EXECUTOR_ID),
+        None,
+    )
+    if binding is None:
+        raise CodegenRouteError("no_eligible_codex_primary_binding")
+    return CodexPrimaryRoute(binding=binding)
 
 
 def select_openhands_secondary_route(

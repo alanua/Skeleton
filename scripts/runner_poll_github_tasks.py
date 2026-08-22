@@ -148,6 +148,7 @@ from core.runner_codegen_router import (
     codex_failure_allows_secondary,
     openhands_secondary_command,
     prepare_openhands_secondary_environment,
+    select_codex_primary_route,
     select_openhands_secondary_route,
     task_contract_allows_cloud_secondary,
 )
@@ -3901,6 +3902,15 @@ def run_codex_task(
         if receipt.get("status") == "DONE" and isinstance(receipt.get("safe_output"), str):
             return 0, str(receipt["safe_output"])
         return 0, _bootstrap_receipt_output(receipt)
+
+    # Select primary Codex route to get binding-derived timeout from registry
+    try:
+        primary_route = select_codex_primary_route()
+        primary_timeout = primary_route.binding.timeout_seconds
+    except CodegenRouteError:
+        # Fallback to profile timeout if binding selection fails
+        primary_timeout = 1800
+
     with tempfile.NamedTemporaryFile(
         mode="w", encoding="utf-8", prefix="runnerjob-", delete=True
     ) as task_file:
@@ -3912,7 +3922,12 @@ def run_codex_task(
             codex_code, codex_output = run_command(
                 codex_exec_command(task_content, workdir, task),
                 cwd=workdir,
+                timeout=primary_timeout,
             )
+        except subprocess.TimeoutExpired:
+            # Normalize timeout into stable failure taxonomy for secondary eligibility
+            codex_code = 1
+            codex_output = "SKELETON_CODEGEN_PRIMARY_TIMEOUT"
         finally:
             _RUN_COMMAND_ENV_OVERRIDE.reset(token)
 
