@@ -3,10 +3,10 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from contextvars import ContextVar
 import csv
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import hmac
 import json
@@ -26,7 +26,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import AbstractSet, Any
 
 import yaml
 
@@ -1066,6 +1066,7 @@ class RunnerTask:
     has_target_repository_metadata: bool = False
     base: str | None = None
     base_sha: str | None = None
+    declared_allowed_files: frozenset[str] = field(default_factory=frozenset)
 
 
 @dataclass(frozen=True)
@@ -1536,6 +1537,51 @@ def _task_base_metadata(issue_body: str) -> tuple[str | None, str | None]:
         _shadow_field(issue_body, task_fields, "Base SHA", "base_sha")
     )
     return base, base_sha.lower() if base_sha is not None else None
+
+
+def _safe_issue_publish_scope(path: str) -> bool:
+    if not path.endswith("/**"):
+        return _safe_issue_publish_file_path(path)
+    prefix = path[:-3]
+    return (
+        prefix != ""
+        and _safe_issue_publish_file_path(f"{prefix}/_")
+    )
+
+
+def _issue_publish_path_matches_declared_scope(path: str, scope: str) -> bool:
+    if scope.endswith("/**"):
+        prefix = scope[:-3]
+        return path.startswith(f"{prefix}/")
+    return path == scope
+
+
+def _issue_publish_files_within_declared_scopes(
+    paths: Iterable[str], scopes: AbstractSet[str]
+) -> bool:
+    return all(
+        any(_issue_publish_path_matches_declared_scope(path, scope) for scope in scopes)
+        for path in paths
+    )
+
+
+def _runner_task_declared_allowed_files(body: str) -> tuple[frozenset[str], str | None]:
+    task_fields = _shadow_task_block_mapping(body)
+    if "allowed_files" not in task_fields:
+        return frozenset(), None
+    value = task_fields["allowed_files"]
+    if not isinstance(value, list):
+        return frozenset(), "invalid_allowed_files"
+    allowed_files: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not _safe_issue_publish_scope(item):
+            return frozenset(), "invalid_allowed_files"
+        allowed_files.append(item)
+    if not allowed_files:
+        return frozenset(), "missing_allowed_files"
+    if len(set(allowed_files)) != len(allowed_files):
+        return frozenset(), "invalid_allowed_files"
+    return frozenset(allowed_files), None
 
 
 def _safe_target_base_branch_name(base: str) -> bool:
@@ -2685,6 +2731,11 @@ def extract_runner_task(body: str) -> tuple[RunnerTask | None, str | None]:
     if target_project is None or target_repository is None:
         return None, target_reason
     base, base_sha = _task_base_metadata(body)
+    declared_allowed_files, declared_allowed_files_reason = (
+        _runner_task_declared_allowed_files(body)
+    )
+    if declared_allowed_files_reason is not None:
+        return None, declared_allowed_files_reason
     return RunnerTask(
         content=content,
         lane=lane,
@@ -2702,6 +2753,7 @@ def extract_runner_task(body: str) -> tuple[RunnerTask | None, str | None]:
         ),
         base=base,
         base_sha=base_sha,
+        declared_allowed_files=declared_allowed_files,
     ), None
 
 
@@ -11233,7 +11285,7 @@ def _issue_publish_allowed_files(metadata: str) -> tuple[frozenset[str], str | N
             return frozenset(), "invalid_allowed_files"
         allowed_files_from_yaml: list[str] = []
         for allowed_path in yaml_allowed_files:
-            if not isinstance(allowed_path, str) or not _safe_issue_publish_file_path(
+            if not isinstance(allowed_path, str) or not _safe_issue_publish_scope(
                 allowed_path
             ):
                 return frozenset(), "invalid_allowed_files"
@@ -11259,7 +11311,7 @@ def _issue_publish_allowed_files(metadata: str) -> tuple[frozenset[str], str | N
                         return frozenset(), "invalid_allowed_files"
                     continue
                 allowed_path = match.group("path")
-                if not _safe_issue_publish_file_path(allowed_path):
+                if not _safe_issue_publish_scope(allowed_path):
                     return frozenset(), "invalid_allowed_files"
                 allowed_files.append(allowed_path)
             if not allowed_files:
@@ -11403,7 +11455,21 @@ def _issue_worktree_publish_inspection_metadata(
     draft_pr, draft_pr_reason = _issue_publish_bool_field(
         metadata, "Draft PR", default=True
     )
-    allowed_files, allowed_files_reason = _issue_publish_allowed_files(metadata)
+    declared_allowed_files = frozenset()
+    declared_allowed_files_reason = None
+    if target_project_route:
+        declared_allowed_files, declared_allowed_files_reason = (
+            _runner_task_declared_allowed_files(body)
+        )
+    if declared_allowed_files_reason is not None:
+        allowed_files, allowed_files_reason = (
+            frozenset(),
+            declared_allowed_files_reason,
+        )
+    elif declared_allowed_files:
+        allowed_files, allowed_files_reason = declared_allowed_files, None
+    else:
+        allowed_files, allowed_files_reason = _issue_publish_allowed_files(metadata)
 
     if not target_project_route and require_repository and repository != REPO:
         return None, "unsupported_repository"
@@ -14271,15 +14337,21 @@ def overlay_registered_worktree_to_existing_pr(body: str) -> str:
             "BLOCKED", task_id, [*status_lines, "reason=untracked_file_path_unsafe"], "not_met"
         )
     unexpected_untracked_files = [
-        path for path in untracked_files if not _is_ignored_issue_publish_untracked_path(path) and path not in allowed_files
+        path
+        for path in untracked_files
+        if not _is_ignored_issue_publish_untracked_path(path)
+        and not _issue_publish_files_within_declared_scopes((path,), allowed_files)
     ]
     allowed_untracked_files = [
-        path for path in untracked_files if not _is_ignored_issue_publish_untracked_path(path) and path in allowed_files
+        path
+        for path in untracked_files
+        if not _is_ignored_issue_publish_untracked_path(path)
+        and _issue_publish_files_within_declared_scopes((path,), allowed_files)
     ]
     if unexpected_untracked_files:
         return _maintenance_report("BLOCKED", task_id, [*status_lines, "reason=unexpected_untracked_files"], "not_met")
     validated_files = tuple(dict.fromkeys([*changed_tracked_files, *allowed_untracked_files]))
-    if not set(validated_files) <= allowed_files:
+    if not _issue_publish_files_within_declared_scopes(validated_files, allowed_files):
         return _maintenance_report("BLOCKED", task_id, [*status_lines, "reason=changed_files_outside_allowlist"], "not_met")
     if not validated_files:
         return _maintenance_report("BLOCKED", task_id, [*status_lines, "reason=no_publishable_changes"], "not_met")
@@ -14355,7 +14427,7 @@ def overlay_registered_worktree_to_existing_pr(body: str) -> str:
     code, diff_files = _git_changed_files_between(packet.target_head_sha, new_commit_sha, source_path)
     if code != 0:
         return _maintenance_report("BLOCKED", task_id, [*status_lines, "reason=commit_diff_verification_failed"], "not_met")
-    if not diff_files <= allowed_files:
+    if not _issue_publish_files_within_declared_scopes(diff_files, allowed_files):
         return _maintenance_report("BLOCKED", task_id, [*status_lines, "reason=commit_diff_outside_allowlist"], "not_met")
     code, pr_diff_files = _git_changed_files_between(base_ref_oid, new_commit_sha, source_path)
     if code != 0:
@@ -14393,7 +14465,7 @@ def overlay_registered_worktree_to_existing_pr(body: str) -> str:
     if not pre_push_pr_files <= post_push_pr_files:
         return _maintenance_report("BLOCKED", task_id, [*status_lines, "reason=pre_existing_pr_files_missing"], "not_met")
     newly_introduced_files = post_push_pr_files - pre_push_pr_files
-    if not newly_introduced_files <= allowed_files:
+    if not _issue_publish_files_within_declared_scopes(newly_introduced_files, allowed_files):
         return _maintenance_report("BLOCKED", task_id, [*status_lines, "reason=new_pr_files_outside_allowlist"], "not_met")
     status_lines.extend(
         (
@@ -14549,20 +14621,24 @@ def publish_issue_worktree_to_existing_pr(body: str) -> str:
         path
         for path in untracked_files
         if not _is_ignored_issue_publish_untracked_path(path)
-        and path not in request.allowed_files
+        and not _issue_publish_files_within_declared_scopes(
+            (path,), request.allowed_files
+        )
     ]
     allowed_untracked_files = [
         path
         for path in untracked_files
         if not _is_ignored_issue_publish_untracked_path(path)
-        and path in request.allowed_files
+        and _issue_publish_files_within_declared_scopes((path,), request.allowed_files)
     ]
     if unexpected_untracked_files:
         return _maintenance_report(
             "BLOCKED", task_id, [*status_lines, "reason=unexpected_untracked_files"], "not_met"
         )
     validated_publish_files = [*changed_tracked_files, *allowed_untracked_files]
-    if not set(validated_publish_files) <= set(request.allowed_files):
+    if not _issue_publish_files_within_declared_scopes(
+        validated_publish_files, request.allowed_files
+    ):
         return _maintenance_report(
             "BLOCKED",
             task_id,
@@ -14660,7 +14736,9 @@ def publish_issue_worktree_to_existing_pr(body: str) -> str:
             "not_met",
         )
     newly_introduced_files = post_push_pr_files - pre_push_pr_files
-    if not newly_introduced_files <= set(request.allowed_files):
+    if not _issue_publish_files_within_declared_scopes(
+        newly_introduced_files, request.allowed_files
+    ):
         return _maintenance_report(
             "BLOCKED",
             task_id,
@@ -14841,7 +14919,9 @@ def _issue_worktree_publish_validated_report(
                 [*status_lines, "reason=exact_base_changed_file_path_unsafe"],
                 "not_met",
             )
-        if not set(exact_base_changed_files) <= set(request.allowed_files):
+        if not _issue_publish_files_within_declared_scopes(
+            exact_base_changed_files, request.allowed_files
+        ):
             return _maintenance_report(
                 "BLOCKED",
                 task_id,
@@ -14898,13 +14978,15 @@ def _issue_worktree_publish_validated_report(
         path
         for path in untracked_files
         if not _is_ignored_issue_publish_untracked_path(path)
-        and path not in request.allowed_files
+        and not _issue_publish_files_within_declared_scopes(
+            (path,), request.allowed_files
+        )
     ]
     allowed_untracked_files = [
         path
         for path in untracked_files
         if not _is_ignored_issue_publish_untracked_path(path)
-        and path in request.allowed_files
+        and _issue_publish_files_within_declared_scopes((path,), request.allowed_files)
     ]
     status_lines.extend(
         (
@@ -14926,7 +15008,9 @@ def _issue_worktree_publish_validated_report(
         )
 
     validated_publish_files = [*changed_tracked_files, *allowed_untracked_files]
-    changed_files_allowed = set(validated_publish_files) <= set(request.allowed_files)
+    changed_files_allowed = _issue_publish_files_within_declared_scopes(
+        validated_publish_files, request.allowed_files
+    )
     status_lines.append(
         f"tracked_files_match_allowlist={str(changed_files_allowed).lower()}"
     )
