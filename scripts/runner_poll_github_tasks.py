@@ -16194,6 +16194,75 @@ _MAIL_GMAIL_ACTIVATION_APPROVAL = (
 )
 _MAIL_GMAIL_SERVICE = "skeleton-mail-operations.service"
 _MAIL_GMAIL_TIMER = "skeleton-mail-operations.timer"
+_BITWARDEN_SDK_RUNTIME_PYTHON = "/opt/skeleton-bitwarden-sdk-runtime/venv/bin/python"
+_BITWARDEN_GMAIL_REFERENCE_HELPER = (
+    "/opt/skeleton-mail-operations/bitwarden_gmail_reference_helper.py"
+)
+_BITWARDEN_REFERENCE_INDEX_CREDENTIAL = "skeleton-secret-reference-index"
+_BITWARDEN_REFERENCE_INDEX_ENCRYPTED_PATH = (
+    "/etc/skeleton/credentials/skeleton-secret-reference-index.credential"
+)
+
+
+def _bitwarden_gmail_reference_helper_command() -> list[str]:
+    return [
+        _BITWARDEN_SDK_RUNTIME_PYTHON,
+        _BITWARDEN_GMAIL_REFERENCE_HELPER,
+        "bootstrap-gmail-primary-index",
+    ]
+
+
+def _write_bootstrapped_reference_index(
+    authority_environment: Mapping[str, str],
+    encoded: str,
+) -> None:
+    directory = authority_environment.get("CREDENTIALS_DIRECTORY", "").strip()
+    if not directory or not Path(directory).is_absolute():
+        raise SecretReferenceRegistrationError("REFERENCE_INDEX_BOOTSTRAP_TARGET_UNAVAILABLE")
+    path = Path(directory) / _BITWARDEN_REFERENCE_INDEX_CREDENTIAL
+    path.write_text(encoded + "\n", encoding="utf-8")
+
+
+def _persist_encrypted_reference_index(encoded: str) -> None:
+    code, _output = run_command(
+        _non_interactive_sudo(
+            "systemd-creds",
+            "encrypt",
+            f"--name={_BITWARDEN_REFERENCE_INDEX_CREDENTIAL}",
+            "-",
+            _BITWARDEN_REFERENCE_INDEX_ENCRYPTED_PATH,
+        ),
+        input=encoded + "\n",
+    )
+    if code != 0:
+        raise SecretReferenceRegistrationError("REFERENCE_INDEX_ENCRYPT_FAILED")
+
+
+def _bootstrap_mail_gmail_primary_reference_index(
+    status_lines: list[str],
+    authority_environment: Mapping[str, str],
+) -> None:
+    code, output = run_command(_bitwarden_gmail_reference_helper_command())
+    if code != 0:
+        status_lines.append("step=reference_bootstrap status=failed")
+        raise SecretReferenceRegistrationError("REFERENCE_INDEX_BOOTSTRAP_FAILED")
+    try:
+        receipt = json.loads(output)
+    except json.JSONDecodeError as exc:
+        status_lines.append("step=reference_bootstrap status=failed")
+        raise SecretReferenceRegistrationError("REFERENCE_INDEX_BOOTSTRAP_INVALID") from exc
+    if not isinstance(receipt, Mapping) or receipt.get("status") != "DONE":
+        status_lines.append("step=reference_bootstrap status=failed")
+        raise SecretReferenceRegistrationError("REFERENCE_INDEX_BOOTSTRAP_FAILED")
+    index = receipt.get("index")
+    if not isinstance(index, Mapping):
+        status_lines.append("step=reference_bootstrap status=failed")
+        raise SecretReferenceRegistrationError("REFERENCE_INDEX_BOOTSTRAP_INVALID")
+    encoded = json.dumps(index, separators=(",", ":"), sort_keys=True)
+    _persist_encrypted_reference_index(encoded)
+    status_lines.append("step=reference_index_encrypt status=done")
+    _write_bootstrapped_reference_index(authority_environment, encoded)
+    status_lines.append("step=reference_bootstrap status=done")
 
 
 def _mail_gmail_activation_input(
@@ -16263,12 +16332,23 @@ def mail_gmail_primary_registered_activation_v1(body: str) -> str:
         "account_alias=acct:gmail-primary",
     ]
     try:
-        registered_bitwarden_reference_from_systemd_index(
-            os.environ,
-            service_id="mail-gmail",
-            alias="acct:gmail-primary",
-            bootstrap_required=True,
-        )
+        try:
+            registered_bitwarden_reference_from_systemd_index(
+                os.environ,
+                service_id="mail-gmail",
+                alias="acct:gmail-primary",
+                bootstrap_required=True,
+            )
+        except SecretReferenceRegistrationError as exc:
+            if str(exc) != "REFERENCE_BOOTSTRAP_REQUIRED":
+                raise
+            _bootstrap_mail_gmail_primary_reference_index(status_lines, os.environ)
+            registered_bitwarden_reference_from_systemd_index(
+                os.environ,
+                service_id="mail-gmail",
+                alias="acct:gmail-primary",
+                bootstrap_required=True,
+            )
     except SecretReferenceRegistrationError as exc:
         return _maintenance_report(
             "BLOCKED",
