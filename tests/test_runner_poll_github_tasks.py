@@ -4850,6 +4850,192 @@ def test_process_issue_runs_target_project_bauclock_in_local_worktree(
     assert comment.call_args.args[1] == "DONE local report\nTarget Project: bauclock"
 
 
+def test_process_issue_target_project_done_with_changed_files_waits_for_publication(
+    tmp_path: Path,
+) -> None:
+    issue_path = tmp_path / "bauclock" / "issue-3166"
+    issue = {
+        "number": 3166,
+        "title": "Target project delivery",
+        "body": (
+            "Target Project: bauclock\n"
+            "Base SHA: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+            "Allowed Files:\n"
+            "- README.md\n"
+            "expected_output:\n"
+            "- one protected draft PR\n\n"
+            "```task\nDo it\n```"
+        ),
+    }
+    expected_task = runner.RunnerTask(
+        content="Do it",
+        target_project="bauclock",
+        has_target_project_metadata=True,
+        target_repository="alanua/bauclock",
+        base_sha="a" * 40,
+    )
+    continuation = runner.TargetProjectPublicationContinuation(
+        target_project="bauclock",
+        repository="alanua/bauclock",
+        source_issue=3166,
+        output_branch="runner/issue-3166",
+        base_branch="main",
+        base_sha="a" * 40,
+        changed_files=("README.md",),
+        idempotency_key="target-project-publish-test",
+        created=True,
+        issue_number=9001,
+    )
+
+    with mock.patch.object(
+        runner, "verify_target_repository_checkout", return_value=None
+    ), mock.patch.object(
+        runner,
+        "prepare_target_repository_issue_worktree",
+        return_value=(0, "ready", issue_path),
+    ), mock.patch.object(runner, "cleanup_runtime_artifacts"), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, "RESULT: DONE")
+    ), mock.patch.object(
+        runner, "finalize_local_worktree_success", return_value="DONE local report"
+    ), mock.patch.object(
+        runner, "changed_files", return_value=["README.md"]
+    ), mock.patch.object(
+        runner,
+        "ensure_target_project_publication_continuation",
+        return_value=continuation,
+    ) as ensure_publication, mock.patch.object(
+        runner, "cleanup_target_repository_issue_worktree"
+    ) as cleanup_target, mock.patch.object(
+        runner, "post_issue_comment"
+    ) as comment, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(
+        runner, "notify_task_finished"
+    ) as notify:
+        runner.process_issue(issue)
+
+    ensure_publication.assert_called_once_with(
+        source_issue=3166,
+        issue_body=issue["body"],
+        workdir=str(issue_path),
+        runner_task=expected_task,
+        changed_file_names=("README.md",),
+    )
+    cleanup_target.assert_not_called()
+    notify.assert_not_called()
+    set_label.assert_any_call(
+        3166, runner.LABEL_RUNNING, runner.LABEL_WAITING_DEPENDENCY
+    )
+    report = comment.call_args.args[1]
+    assert "maintenance_task_id=target_project_delivery_handoff" in report
+    assert "publication_authority=publish_target_project_issue_worktree_pr" in report
+    assert "issue_state=waiting_dependency" in report
+    assert "cleanup_deferred=true" in report
+    assert "terminal_done=false" in report
+
+
+def test_process_issue_target_project_no_code_gap_finishes_without_publication(
+    tmp_path: Path,
+) -> None:
+    issue_path = tmp_path / "bauclock" / "issue-3167"
+    issue = {
+        "number": 3167,
+        "title": "Target project no code",
+        "body": (
+            "Target Project: bauclock\n"
+            "Allowed Files:\n"
+            "- README.md\n"
+            "expected_output:\n"
+            "- NO_CODE_GAP\n\n"
+            "```task\nVerify only\n```"
+        ),
+    }
+
+    with mock.patch.object(
+        runner, "verify_target_repository_checkout", return_value=None
+    ), mock.patch.object(
+        runner,
+        "prepare_target_repository_issue_worktree",
+        return_value=(0, "ready", issue_path),
+    ), mock.patch.object(runner, "cleanup_runtime_artifacts"), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, "RESULT: DONE")
+    ), mock.patch.object(
+        runner, "finalize_local_worktree_success", return_value="DONE local report"
+    ), mock.patch.object(
+        runner, "changed_files", return_value=[]
+    ), mock.patch.object(
+        runner, "ensure_target_project_publication_continuation"
+    ) as ensure_publication, mock.patch.object(
+        runner, "cleanup_target_repository_issue_worktree", return_value=(0, "")
+    ) as cleanup_target, mock.patch.object(
+        runner, "post_issue_comment"
+    ) as comment, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(
+        runner, "notify_task_finished"
+    ):
+        runner.process_issue(issue)
+
+    ensure_publication.assert_not_called()
+    cleanup_target.assert_called_once_with("alanua/bauclock", 3167)
+    set_label.assert_any_call(3167, runner.LABEL_RUNNING, runner.LABEL_DONE)
+    report = comment.call_args.args[1]
+    assert "maintenance_task_id=target_project_no_code_gap" in report
+    assert "no_code_receipt=NO_CODE_GAP" in report
+    assert "publication_required=false" in report
+
+
+def test_process_issue_target_project_zero_changes_pr_expected_is_not_done(
+    tmp_path: Path,
+) -> None:
+    issue_path = tmp_path / "bauclock" / "issue-3168"
+    issue = {
+        "number": 3168,
+        "title": "Target project no changes missing PR",
+        "body": (
+            "Target Project: bauclock\n"
+            "Allowed Files:\n"
+            "- README.md\n"
+            "expected_output:\n"
+            "- one protected draft PR\n\n"
+            "```task\nDo it\n```"
+        ),
+    }
+
+    with mock.patch.object(
+        runner, "verify_target_repository_checkout", return_value=None
+    ), mock.patch.object(
+        runner,
+        "prepare_target_repository_issue_worktree",
+        return_value=(0, "ready", issue_path),
+    ), mock.patch.object(runner, "cleanup_runtime_artifacts"), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, "RESULT: DONE")
+    ), mock.patch.object(
+        runner, "finalize_local_worktree_success", return_value="DONE local report"
+    ), mock.patch.object(
+        runner, "changed_files", return_value=[]
+    ), mock.patch.object(
+        runner, "ensure_target_project_publication_continuation"
+    ) as ensure_publication, mock.patch.object(
+        runner, "cleanup_target_repository_issue_worktree"
+    ) as cleanup_target, mock.patch.object(
+        runner, "post_issue_comment"
+    ) as comment, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(
+        runner, "notify_task_finished"
+    ) as notify:
+        runner.process_issue(issue)
+
+    ensure_publication.assert_not_called()
+    cleanup_target.assert_not_called()
+    set_label.assert_any_call(3168, runner.LABEL_RUNNING, runner.LABEL_BLOCKED)
+    notify.assert_called_once()
+    report = comment.call_args.args[1]
+    assert "reason=no_publishable_changes" in report
+    assert "terminal_done=false" in report
+
+
 def test_process_issue_runs_target_project_lavalamp_when_project_tree_enables_worktree(
     tmp_path: Path,
 ) -> None:
@@ -12021,6 +12207,100 @@ def test_publish_target_project_issue_worktree_pr_ignores_codex_noise_and_reuses
     assert not any(".codex/session.json" in command for command in commands)
     assert all(command[:3] != ["gh", "pr", "create"] for command in commands)
     assert all(command[:2] != ["git", "push"] for command in commands)
+
+
+def test_target_project_publication_continuation_reuses_existing_issue() -> None:
+    task = runner.RunnerTask(
+        content="Do it",
+        target_project="lumenflow",
+        target_repository="alanua/LumenFlow",
+        base_sha="a" * 40,
+    )
+    body = (
+        "Target Project: lumenflow\n"
+        "Target Repository: alanua/LumenFlow\n"
+        "Allowed Files:\n"
+        "- README.md\n\n"
+        "```task\nDo it\n```"
+    )
+    existing = [
+        {
+            "number": 8123,
+            "body": "target-project-publish-",
+            "labels": [{"name": runner.LABEL_AGENT_TASK}],
+        }
+    ]
+
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        if command[:4] == ["gh", "issue", "list", "--repo"]:
+            key = command[command.index("--search") + 1]
+            existing[0]["body"] = f"idempotency={key}"
+            return 0, json.dumps(existing)
+        raise AssertionError(f"unexpected command: {command!r}")
+
+    with mock.patch.object(runner, "run_command", side_effect=run), mock.patch.object(
+        runner, "_create_validation_continuation_issue"
+    ) as create:
+        continuation = runner.ensure_target_project_publication_continuation(
+            source_issue=123,
+            issue_body=body,
+            workdir="/tmp/worktree",
+            runner_task=task,
+            changed_file_names=("README.md",),
+        )
+
+    create.assert_not_called()
+    assert continuation.created is False
+    assert continuation.issue_number == 8123
+    assert continuation.repository == "alanua/LumenFlow"
+    assert continuation.base_sha == "a" * 40
+    assert continuation.changed_files == ("README.md",)
+
+
+def test_target_project_publication_receipt_requires_exact_binding() -> None:
+    task = runner.RunnerTask(
+        content="Do it",
+        target_project="lumenflow",
+        target_repository="alanua/LumenFlow",
+    )
+    report = runner._maintenance_report(
+        "DONE",
+        runner.PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR,
+        [
+            "target_project=lumenflow",
+            "repository=alanua/LumenFlow",
+            "source_issue=123",
+            "base_branch=main",
+            "expected_branch=runner/issue-123",
+            f"verified_base_sha={'a' * 40}",
+            "validated_publish_files=README.md",
+            f"pushed_head_sha={'b' * 40}",
+            "draft_pr_url=https://github.com/alanua/LumenFlow/pull/55",
+        ],
+        "met",
+    )
+
+    receipt = runner.verified_target_project_publication_receipt(
+        report=report,
+        runner_task=task,
+        source_issue=123,
+        expected_base_branch="main",
+        expected_base_sha="a" * 40,
+        expected_changed_files=("README.md",),
+    )
+    mismatch = runner.verified_target_project_publication_receipt(
+        report=report.replace("repository=alanua/LumenFlow", "repository=alanua/Skeleton"),
+        runner_task=task,
+        source_issue=123,
+        expected_base_branch="main",
+        expected_base_sha="a" * 40,
+        expected_changed_files=("README.md",),
+    )
+
+    assert receipt is not None
+    assert receipt.head_sha == "b" * 40
+    assert receipt.pr_url == "https://github.com/alanua/LumenFlow/pull/55"
+    assert mismatch is None
 
 
 def test_issue_worktree_publish_inspection_valid_metadata_reports_done(

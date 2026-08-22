@@ -1167,6 +1167,23 @@ checkout path, resolved worktree root, and absolute source worktree path remain
 internal validation and Git-command inputs and must not be printed in `DONE`,
 `BLOCKED`, or `NEEDS_OPERATOR` reports.
 
+Cross-project source issue finalization is a two-step delivery state machine:
+
+| Codex result | Target worktree changes | Expected output | Source issue state | Cleanup |
+| --- | --- | --- | --- | --- |
+| `RESULT:BLOCKED` | any | any | terminal `runner:blocked`; no publication handoff | no durable-delivery cleanup |
+| `RESULT:DONE` | changed allowed files | PR or durable target artifact required | `runner:waiting-dependency` with one `publish_target_project_issue_worktree_pr` continuation, keyed by source issue, target repo, exact base SHA, output branch, and changed files | deferred until verified target PR/head receipt |
+| `RESULT:DONE` | changed files outside allowlist or unsafe metadata | any publication-required output | fail closed before handoff | no cleanup that could discard work |
+| `RESULT:DONE` | zero relevant changes | explicit `NO_CODE_GAP` allowed | terminal typed no-code receipt; no target publication | allowed |
+| `RESULT:DONE` | zero relevant changes | PR or durable target artifact required, no `NO_CODE_GAP` | not `DONE`; reported as no publishable changes | no target worktree cleanup from the false-success path |
+| target publish receipt | verified target project, repository, source issue, output branch, exact base SHA, head SHA, PR URL, and changed-file allowlist | PR or durable target artifact required | source may become terminal `DONE` | allowed |
+| target publish receipt | missing, ambiguous, failed, or target/base/head mismatch | PR or durable target artifact required | non-terminal or blocked recovery state; never blind `DONE` | deferred |
+
+Routine waiting-delivery transitions must not send Telegram notifications. The
+notification path is reserved for verified terminal outcomes and operator review
+cards. The target PR must remain unmerged until the normal semantic exact-head
+review, full validation, and operator approval path completes.
+
 `quarantine_stale_clean_skeleton_worktrees` removes only explicitly listed
 clean Skeleton issue worktrees and must include explicit worktree id metadata:
 

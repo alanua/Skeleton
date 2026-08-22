@@ -756,6 +756,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "installed_skill_platform_count",
         "inventory_schema",
         "issue_number",
+        "issue_state",
         "issue_worktree",
         "issue_worktree_id",
         "kernel_release",
@@ -785,6 +786,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "next_retry_at",
         "next_action",
         "next_operator_action",
+        "no_code_receipt",
         "node_identity_status",
         "operation_id",
         "open_issues_count",
@@ -809,6 +811,10 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "pr_url",
         "payload_hash",
         "publish_override_hash",
+        "publication_authority",
+        "publication_continuation",
+        "publication_issue",
+        "publication_required",
         "private_memory_db_configured",
         "private_memory_db_openable",
         "private_memory_heartbeat_ok",
@@ -916,6 +922,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "serve_private",
         "verification_status",
         "cleanup_status",
+        "cleanup_deferred",
         "status_count_approved",
         "status_count_needs_review",
         "step",
@@ -947,6 +954,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "truncation_evidence",
         "target_branch",
         "target_head_sha",
+        "terminal_done",
         "unexpected_untracked_files",
         "unexpected_untracked_files_count",
         "new_pr_changed_files_count",
@@ -1146,6 +1154,33 @@ class ProducedPrValidationContinuation:
     idempotency_key: str
     created: bool
     issue_number: int | None = None
+
+
+@dataclass(frozen=True)
+class TargetProjectPublicationContinuation:
+    target_project: str
+    repository: str
+    source_issue: int
+    output_branch: str
+    base_branch: str
+    base_sha: str
+    changed_files: tuple[str, ...]
+    idempotency_key: str
+    created: bool
+    issue_number: int | None = None
+
+
+@dataclass(frozen=True)
+class TargetProjectPublicationReceipt:
+    target_project: str
+    repository: str
+    source_issue: int
+    output_branch: str
+    base_branch: str
+    base_sha: str
+    head_sha: str
+    pr_url: str
+    changed_files: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -9905,6 +9940,328 @@ def ensure_codegen_pr_validation_continuation(
     )
 
 
+def _expected_output_allows_no_code_gap(issue_body: str) -> bool:
+    expected_output = _expected_output_value(issue_body)
+    return "NO_CODE_GAP" in json.dumps(expected_output, sort_keys=True).upper()
+
+
+def _expected_output_requires_target_publication(issue_body: str) -> bool:
+    expected_output = _expected_output_value(issue_body)
+    if expected_output is None:
+        return False
+    text = json.dumps(expected_output, sort_keys=True).upper()
+    durable_markers = (
+        " PR",
+        "PR ",
+        "DRAFT PR",
+        "PULL REQUEST",
+        "ARTIFACT",
+        "DURABLE",
+    )
+    return any(marker in text for marker in durable_markers)
+
+
+def _target_project_publication_base_sha(
+    workdir: str | Path, base_branch: str, configured_base_sha: str | None
+) -> tuple[str | None, str | None]:
+    if configured_base_sha is not None:
+        normalized = configured_base_sha.lower()
+        if _HEAD_SHA_RE.fullmatch(normalized) is None:
+            return None, "invalid_base_sha"
+        return normalized, None
+    code, output = run_command(
+        ["git", "rev-parse", f"refs/remotes/origin/{base_branch}"],
+        cwd=workdir,
+    )
+    base_sha = output.strip().lower()
+    if code != 0 or _HEAD_SHA_RE.fullmatch(base_sha) is None:
+        return None, "target_base_sha_unavailable"
+    return base_sha, None
+
+
+def _target_project_publication_idempotency_key(
+    *,
+    repository: str,
+    source_issue: int,
+    output_branch: str,
+    base_branch: str,
+    base_sha: str,
+    changed_files: tuple[str, ...],
+) -> str:
+    payload = json.dumps(
+        {
+            "action": PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR,
+            "repository": repository,
+            "source_issue": source_issue,
+            "output_branch": output_branch,
+            "base_branch": base_branch,
+            "base_sha": base_sha,
+            "changed_files": list(changed_files),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "target-project-publish-" + hashlib.sha256(payload).hexdigest()[:24]
+
+
+def _target_project_publication_body(
+    *,
+    runner_task: RunnerTask,
+    source_issue: int,
+    base_branch: str,
+    base_sha: str,
+    changed_files: tuple[str, ...],
+    idempotency_key: str,
+) -> str:
+    metadata = [
+        f"Mode: {RUNTIME_MAINTENANCE_MODE}",
+        f"Maintenance Task ID: {PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR}",
+        f"Target Project: {runner_task.target_project}",
+        f"Target Repository: {runner_task.target_repository}",
+        f"Source Issue: {source_issue}",
+        f"Base Branch: {base_branch}",
+        f"Base SHA: {base_sha}",
+        f"Output Branch: {issue_branch(source_issue)}",
+        "Draft PR: true",
+        f"Idempotency Key: {idempotency_key}",
+        "Allowed Files:",
+    ]
+    metadata.extend(f"- {path}" for path in changed_files)
+    return "\n".join(metadata)
+
+
+def _find_existing_target_project_publication_issue(idempotency_key: str) -> int | None:
+    code, output = run_command(
+        [
+            "gh",
+            "issue",
+            "list",
+            "--repo",
+            REPO,
+            "--state",
+            "all",
+            "--search",
+            idempotency_key,
+            "--json",
+            "number,body,labels",
+            "--limit",
+            "20",
+        ]
+    )
+    if code != 0:
+        raise RuntimeError("target publication continuation lookup failed")
+    parsed = json.loads(output or "[]")
+    if not isinstance(parsed, list):
+        raise RuntimeError("target publication continuation lookup returned non-list JSON")
+    matches: list[int] = []
+    for issue in parsed:
+        if not isinstance(issue, dict):
+            continue
+        if idempotency_key not in str(issue.get("body") or ""):
+            continue
+        labels = _issue_label_names(issue)
+        if LABEL_AGENT_TASK not in labels:
+            continue
+        number = _queue_replenisher_issue_number(issue)
+        if number is not None:
+            matches.append(number)
+    if len(matches) > 1:
+        raise RuntimeError("duplicate target publication continuation issues")
+    return matches[0] if matches else None
+
+
+def ensure_target_project_publication_continuation(
+    *,
+    source_issue: int,
+    issue_body: str,
+    workdir: str | Path,
+    runner_task: RunnerTask,
+    changed_file_names: tuple[str, ...],
+) -> TargetProjectPublicationContinuation:
+    allowed_files, allowed_reason = _issue_publish_allowed_files(
+        _metadata_before_task(issue_body)
+    )
+    if allowed_reason is not None:
+        raise RuntimeError(f"target_publication_allowed_files_invalid:{allowed_reason}")
+    if not changed_file_names:
+        raise RuntimeError("target_publication_requires_changed_files")
+    if not set(changed_file_names) <= set(allowed_files):
+        raise RuntimeError("target_publication_changed_files_outside_allowlist")
+    base_branch = runner_task.base or "main"
+    if not _safe_target_base_branch_name(base_branch):
+        raise RuntimeError("target_publication_base_branch_unsafe")
+    base_sha, base_reason = _target_project_publication_base_sha(
+        workdir, base_branch, runner_task.base_sha
+    )
+    if base_reason is not None or base_sha is None:
+        raise RuntimeError(base_reason or "target_publication_base_sha_unavailable")
+
+    changed_files_tuple = tuple(changed_file_names)
+    idempotency_key = _target_project_publication_idempotency_key(
+        repository=runner_task.target_repository,
+        source_issue=source_issue,
+        output_branch=issue_branch(source_issue),
+        base_branch=base_branch,
+        base_sha=base_sha,
+        changed_files=changed_files_tuple,
+    )
+    existing_issue = _find_existing_target_project_publication_issue(idempotency_key)
+    if existing_issue is not None:
+        return TargetProjectPublicationContinuation(
+            target_project=runner_task.target_project,
+            repository=runner_task.target_repository,
+            source_issue=source_issue,
+            output_branch=issue_branch(source_issue),
+            base_branch=base_branch,
+            base_sha=base_sha,
+            changed_files=changed_files_tuple,
+            idempotency_key=idempotency_key,
+            created=False,
+            issue_number=existing_issue,
+        )
+
+    body = _target_project_publication_body(
+        runner_task=runner_task,
+        source_issue=source_issue,
+        base_branch=base_branch,
+        base_sha=base_sha,
+        changed_files=changed_files_tuple,
+        idempotency_key=idempotency_key,
+    )
+    issue_number = _create_validation_continuation_issue(
+        title=(
+            f"Publish {runner_task.target_project} issue #{source_issue} "
+            f"at {base_sha[:8]}"
+        ),
+        body=body,
+    )
+    return TargetProjectPublicationContinuation(
+        target_project=runner_task.target_project,
+        repository=runner_task.target_repository,
+        source_issue=source_issue,
+        output_branch=issue_branch(source_issue),
+        base_branch=base_branch,
+        base_sha=base_sha,
+        changed_files=changed_files_tuple,
+        idempotency_key=idempotency_key,
+        created=True,
+        issue_number=issue_number,
+    )
+
+
+def _maintenance_status_value(report: str, key: str) -> str | None:
+    pattern = re.compile(rf"^{re.escape(key)}=(?P<value>\S.*)$", re.MULTILINE)
+    match = pattern.search(report or "")
+    return match.group("value").strip() if match is not None else None
+
+
+def verified_target_project_publication_receipt(
+    *,
+    report: str,
+    runner_task: RunnerTask,
+    source_issue: int,
+    expected_base_branch: str,
+    expected_base_sha: str,
+    expected_changed_files: tuple[str, ...],
+) -> TargetProjectPublicationReceipt | None:
+    if maintenance_report_status(report) != "DONE":
+        return None
+    if _maintenance_status_value(report, "maintenance_task_id") != PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR:
+        return None
+    if _maintenance_status_value(report, "target_project") != runner_task.target_project:
+        return None
+    if _maintenance_status_value(report, "repository") != runner_task.target_repository:
+        return None
+    if _maintenance_status_value(report, "source_issue") != str(source_issue):
+        return None
+    if _maintenance_status_value(report, "expected_branch") != issue_branch(source_issue):
+        return None
+    if _maintenance_status_value(report, "base_branch") != expected_base_branch:
+        return None
+    if _maintenance_status_value(report, "verified_base_sha") != expected_base_sha:
+        return None
+    published_files = _maintenance_status_value(report, "validated_publish_files")
+    if published_files is None:
+        return None
+    changed_files = (
+        ()
+        if published_files == "(none)"
+        else tuple(path for path in published_files.split(",") if path)
+    )
+    if tuple(sorted(changed_files)) != tuple(sorted(expected_changed_files)):
+        return None
+    head_sha = (
+        _maintenance_status_value(report, "pushed_head_sha")
+        or _maintenance_status_value(report, "head_sha")
+    )
+    if head_sha is None or _HEAD_SHA_RE.fullmatch(head_sha) is None:
+        return None
+    pr_url = (
+        _maintenance_status_value(report, "draft_pr_url")
+        or _maintenance_status_value(report, "existing_pr_url")
+    )
+    if pr_url is None or extract_pr_number(pr_url) is None:
+        return None
+    return TargetProjectPublicationReceipt(
+        target_project=runner_task.target_project,
+        repository=runner_task.target_repository,
+        source_issue=source_issue,
+        output_branch=issue_branch(source_issue),
+        base_branch=expected_base_branch,
+        base_sha=expected_base_sha,
+        head_sha=head_sha.lower(),
+        pr_url=pr_url,
+        changed_files=changed_files,
+    )
+
+
+def target_project_delivery_waiting_report(
+    *,
+    continuation: TargetProjectPublicationContinuation,
+    local_report: str,
+) -> str:
+    return _maintenance_report(
+        "BLOCKED",
+        "target_project_delivery_handoff",
+        [
+            f"source_issue={continuation.source_issue}",
+            f"target_project={continuation.target_project}",
+            f"repository={continuation.repository}",
+            f"output_branch={continuation.output_branch}",
+            f"base_branch={continuation.base_branch}",
+            f"base_sha={continuation.base_sha}",
+            f"changed_files_count={len(continuation.changed_files)}",
+            "changed_files=" + ",".join(continuation.changed_files),
+            f"publication_continuation={'created' if continuation.created else 'reused'}",
+            f"publication_issue={continuation.issue_number or 'unknown'}",
+            f"publication_authority={PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR}",
+            "issue_state=waiting_dependency",
+            "terminal_done=false",
+            "cleanup_deferred=true",
+            "telegram_notifications=0",
+        ],
+        "waiting_dependency",
+    ) + "\n\nLocal target finalization report:\n```\n" + sanitize_public_report(local_report).strip() + "\n```"
+
+
+def target_project_no_code_receipt(
+    *, source_issue: int, runner_task: RunnerTask, local_report: str
+) -> str:
+    return _maintenance_report(
+        "DONE",
+        "target_project_no_code_gap",
+        [
+            f"source_issue={source_issue}",
+            f"target_project={runner_task.target_project}",
+            f"repository={runner_task.target_repository}",
+            "changed_files_count=0",
+            "no_code_receipt=NO_CODE_GAP",
+            "publication_required=false",
+        ],
+        "met",
+    ) + "\n\nLocal target finalization report:\n```\n" + sanitize_public_report(local_report).strip() + "\n```"
+
+
 def _preflight_pr_refresh_metadata(
     body: str,
 ) -> tuple[PreflightPrRefreshRequest | None, str | None]:
@@ -17125,6 +17482,87 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             finalized_report = finalize_local_worktree_success(
                 issue_workdir, codex_output, runner_task
             )
+            target_publication_required = _expected_output_requires_target_publication(
+                issue_body
+            )
+            no_code_gap_allowed = _expected_output_allows_no_code_gap(issue_body)
+            local_changed_files = (
+                tuple(changed_files(issue_workdir))
+                if target_publication_required or no_code_gap_allowed
+                else ()
+            )
+            if local_changed_files and target_publication_required:
+                continuation = ensure_target_project_publication_continuation(
+                    source_issue=issue_number,
+                    issue_body=issue_body,
+                    workdir=issue_workdir,
+                    runner_task=runner_task,
+                    changed_file_names=local_changed_files,
+                )
+                report = report_runner_lane(
+                    target_project_delivery_waiting_report(
+                        continuation=continuation,
+                        local_report=finalized_report,
+                    ),
+                    runner_task,
+                )
+                warning = record_runner_executor_result(
+                    issue_number,
+                    runner_task.target_project,
+                    "WAITING_DEPENDENCY",
+                    "WAITING_DEPENDENCY",
+                    "codex",
+                    report,
+                )
+                post_issue_comment(
+                    issue_number,
+                    append_memory_warning(report, warning or pickup_memory_warning),
+                )
+                set_issue_label(
+                    issue_number, LABEL_RUNNING, LABEL_WAITING_DEPENDENCY
+                )
+                return
+            if not local_changed_files and no_code_gap_allowed:
+                finalized_report = target_project_no_code_receipt(
+                    source_issue=issue_number,
+                    runner_task=runner_task,
+                    local_report=finalized_report,
+                )
+            elif not local_changed_files and target_publication_required:
+                report = report_runner_lane(
+                    _maintenance_report(
+                        "BLOCKED",
+                        "target_project_delivery_handoff",
+                        [
+                            f"source_issue={issue_number}",
+                            f"target_project={runner_task.target_project}",
+                            f"repository={runner_task.target_repository}",
+                            "changed_files_count=0",
+                            "reason=no_publishable_changes",
+                            "no_code_receipt=missing",
+                            "terminal_done=false",
+                        ],
+                        "not_met",
+                    ),
+                    runner_task,
+                )
+                report = append_retry_fields(report, retry_decision)
+                warning = record_runner_executor_result(
+                    issue_number,
+                    runner_task.target_project,
+                    "BLOCKED",
+                    "BLOCKED",
+                    "codex",
+                    report,
+                )
+                post_issue_comment(
+                    issue_number,
+                    append_memory_warning(report, warning or pickup_memory_warning),
+                )
+                set_issue_label(issue_number, LABEL_RUNNING, LABEL_BLOCKED)
+                notify_task_finished(issue_number, "BLOCKED", report)
+                maybe_replenish_runner_queue_after_completion()
+                return
         elif existing_pr_worktree_request is not None:
             finalized_report = finalize_existing_pr_success(
                 issue,
