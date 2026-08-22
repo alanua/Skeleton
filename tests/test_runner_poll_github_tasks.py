@@ -4831,6 +4831,51 @@ def test_runner_task_accepts_matching_target_project_and_repository() -> None:
     )
 
 
+def test_runner_task_retains_verbatim_fenced_task_allowed_file_scopes() -> None:
+    body = "\n".join(
+        (
+            "Target Project: lumenflow",
+            "Target Repository: alanua/LumenFlow",
+            "",
+            "```task",
+            "schema: skeleton.runner_task.v1",
+            "allowed_files:",
+            "  - home_edge/generative_visuals/**",
+            "  - tests/**",
+            "  - README.md",
+            "payload:",
+            "  operation: repair",
+            "```",
+        )
+    )
+
+    task, reason = runner.extract_runner_task(body)
+
+    assert reason is None
+    assert task is not None
+    assert task.declared_allowed_files == frozenset(
+        (
+            "home_edge/generative_visuals/**",
+            "tests/**",
+            "README.md",
+        )
+    )
+
+
+def test_runner_task_top_level_allowed_files_do_not_become_fenced_declaration() -> None:
+    task, reason = runner.extract_runner_task(
+        "Allowed Files:\n"
+        "- home_edge/generative_visuals/**\n"
+        "- tests/**\n"
+        "- README.md\n\n"
+        "```task\nschema: skeleton.runner_task.v1\npayload:\n  operation: repair\n```"
+    )
+
+    assert reason is None
+    assert task is not None
+    assert task.declared_allowed_files == frozenset()
+
+
 def test_runner_task_ignores_lane_text_inside_task_fence() -> None:
     task, reason = runner.extract_runner_task("```task\nLane: deploy\nKeep it as prose.\n```")
 
@@ -11716,6 +11761,71 @@ def test_publish_target_project_issue_worktree_pr_uses_project_tree_and_target_r
     assert all("--force" not in command for command in commands)
 
 
+def test_publish_target_project_issue_worktree_pr_uses_fenced_task_allowed_scopes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_root = tmp_path / "lumenflow"
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    worktree_path = _prepare_issue_publish_worktree(target_root)
+    body = _maintenance_issue(
+        runner.PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR,
+        metadata="\n".join(
+            (
+                "Target Project: lumenflow",
+                "Target Repository: alanua/LumenFlow",
+                "Source Issue: 123",
+                "Base Branch: main",
+                "Output Branch: runner/issue-123",
+                "Draft PR: true",
+            )
+        ),
+        task_body="\n".join(
+            (
+                "schema: skeleton.runner_task.v1",
+                "allowed_files:",
+                "  - home_edge/generative_visuals/**",
+                "  - tests/**",
+                "  - README.md",
+                "payload:",
+                "  operation: repair",
+            )
+        ),
+    )
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=_target_project_tree(target_root)
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            repository="alanua/LumenFlow",
+            remote_url="https://github.com/alanua/LumenFlow.git",
+            changed_files=(
+                "home_edge/generative_visuals/app.mjs",
+                "tests/generative_visuals.test.mjs",
+            ),
+            commit_message="Publish target project issue #123 worktree",
+        ),
+    ) as run:
+        report = runner.publish_target_project_issue_worktree_pr(str(body["body"]))
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert "allowed_files_count=3" in report
+    assert "validated_publish_files_count=2" in report
+    assert [
+        "git",
+        "add",
+        "--",
+        "home_edge/generative_visuals/app.mjs",
+        "tests/generative_visuals.test.mjs",
+    ] in commands
+    assert all("home_edge/generative_visuals/**" not in command for command in commands)
+    assert all("tests/**" not in command for command in commands)
+
+
 def test_publish_target_project_issue_worktree_pr_explicit_main_base_sha_succeeds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -12157,6 +12267,59 @@ def test_publish_target_project_issue_worktree_pr_enforces_allowed_files(
     assert str(tmp_path) not in report
     assert all(command[:2] != ["git", "add"] for command in commands)
     assert all(command[:2] != ["git", "push"] for command in commands)
+
+
+def test_publish_target_project_issue_worktree_pr_blocks_fenced_scope_escape(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_root = tmp_path / "lumenflow"
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    worktree_path = _prepare_issue_publish_worktree(target_root)
+    body = _maintenance_issue(
+        runner.PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR,
+        metadata="\n".join(
+            (
+                "Target Project: lumenflow",
+                "Target Repository: alanua/LumenFlow",
+                "Source Issue: 123",
+                "Base Branch: main",
+                "Output Branch: runner/issue-123",
+                "Draft PR: true",
+            )
+        ),
+        task_body="\n".join(
+            (
+                "schema: skeleton.runner_task.v1",
+                "allowed_files:",
+                "  - home_edge/generative_visuals/**",
+                "  - tests/**",
+                "  - README.md",
+            )
+        ),
+    )
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=_target_project_tree(target_root)
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            repository="alanua/LumenFlow",
+            remote_url="https://github.com/alanua/LumenFlow.git",
+            changed_files=("home_edge/secret.env",),
+            commit_message="Publish target project issue #123 worktree",
+        ),
+    ) as run:
+        report = runner.publish_target_project_issue_worktree_pr(str(body["body"]))
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("BLOCKED:")
+    assert "reason=changed_tracked_files_outside_allowlist" in report
+    assert all(command[:2] != ["git", "add"] for command in commands)
+    assert all(command[:2] != ["git", "push"] for command in commands)
+    assert all(command[:3] != ["gh", "pr", "create"] for command in commands)
 
 
 def test_publish_target_project_issue_worktree_pr_ignores_codex_noise_and_reuses_existing_pr(
