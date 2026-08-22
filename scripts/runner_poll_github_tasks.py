@@ -252,6 +252,9 @@ FINAL_LABELS_BY_STATUS = {
 ACTIVE_EXECUTION_LABELS = frozenset((LABEL_READY, LABEL_RUN_NOW, LABEL_RUNNING))
 TERMINAL_RUNNER_LABELS = frozenset((LABEL_DONE, LABEL_BLOCKED))
 POLL_INTERVAL = 60
+RUNNER_POLLER_STALE_AFTER_SECONDS = POLL_INTERVAL * 3
+RUNNER_POLLER_TIMER = "skeleton-runner-poll.timer"
+RUNNER_POLLER_SERVICE = "skeleton-runner-poll.service"
 DEFAULT_WORKDIR = Path(__file__).resolve().parents[1]
 DEFAULT_WORKTREE_ROOT = Path("/home/agent/agent-dev/worktrees/skeleton")
 PROJECT_TREE_PATH = ROOT / "PROJECT_TREE.yaml"
@@ -12506,6 +12509,130 @@ def self_heal_run_now_queue_intake() -> int:
     return 1 if maybe_recover_idle_runner_queue() else 0
 
 
+def _parse_systemctl_show(output: str) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for line in output.splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key:
+            parsed[key] = value
+    return parsed
+
+
+def _systemd_usec_to_epoch_seconds(value: str | None) -> int | None:
+    if value is None or value in {"", "0", "n/a"}:
+        return None
+    try:
+        return int(value) // 1_000_000
+    except ValueError:
+        return None
+
+
+def runner_poller_liveness_is_stale(*, now: int | None = None) -> bool:
+    current = int(time.time()) if now is None else now
+    code, timer_output = run_command(
+        [
+            "systemctl",
+            "show",
+            "--property=ActiveState",
+            "--property=SubState",
+            "--property=LastTriggerUSec",
+            "--property=NextElapseUSecRealtime",
+            RUNNER_POLLER_TIMER,
+        ],
+        timeout=10,
+    )
+    if code != 0:
+        return False
+    timer = _parse_systemctl_show(timer_output)
+    timer_active = timer.get("ActiveState") == "active"
+    timer_waiting = timer.get("SubState") == "waiting"
+    last_trigger = _systemd_usec_to_epoch_seconds(timer.get("LastTriggerUSec"))
+    next_elapse = _systemd_usec_to_epoch_seconds(timer.get("NextElapseUSecRealtime"))
+
+    code, service_output = run_command(
+        [
+            "systemctl",
+            "show",
+            "--property=ActiveState",
+            "--property=SubState",
+            RUNNER_POLLER_SERVICE,
+        ],
+        timeout=10,
+    )
+    if code != 0:
+        return False
+    service = _parse_systemctl_show(service_output)
+    service_state = service.get("ActiveState")
+    if service_state in {"active", "activating"}:
+        return False
+
+    if timer_active and timer_waiting:
+        if last_trigger is not None and current - last_trigger <= RUNNER_POLLER_STALE_AFTER_SECONDS:
+            return False
+        if next_elapse is not None and next_elapse >= current:
+            return False
+    elif timer_active:
+        return False
+
+    if last_trigger is None:
+        return not timer_active or service_state == "failed"
+    return current - last_trigger > RUNNER_POLLER_STALE_AFTER_SECONDS
+
+
+def _stale_poller_packet() -> dict[str, object]:
+    return public_safe_failure_packet(
+        failure_class=FailureClass.LONG_LIVED_POLLER_STALE,
+        failure_key="control:long-lived-poller:canonical-timer",
+        reason_class="LONG_LIVED_POLLER_STALE",
+        task_kind="runner_poll",
+        phase="ready_consumer_liveness",
+        capability="systemd:fixed-runner-timer",
+        operation="long_lived_poller_reload",
+    )
+
+
+def maybe_recover_stale_runner_consumer(
+    ready_issues: list[dict[str, Any]], *, now: int | None = None, workdir: str | None = None
+) -> bool:
+    if not ready_issues:
+        return False
+    try:
+        if get_running_issues():
+            return False
+        current = int(time.time()) if now is None else now
+        if not runner_poller_liveness_is_stale(now=current):
+            return False
+        executor = RegisteredMaintenanceExecutor(
+            dispatch_runtime_maintenance_task, workdir or str(ROOT)
+        )
+
+        def run_action(action_id: str) -> str:
+            if action_id == "queue_reactivate":
+                return _maintenance_report(
+                    "DONE",
+                    action_id,
+                    ["reason=ready_work_preserved", "telegram_notifications=0"],
+                    "met",
+                )
+            return executor.run(action_id, "")
+
+        def run_canary(canary_id: str) -> bool:
+            if canary_id != "registered_checkout_freshness_canary":
+                return False
+            return maintenance_report_is_done(run_action(canary_id))
+
+        execute_recovery_packet(
+            _stale_poller_packet(),
+            store=RecoveryStore(_autonomous_queue_store_path()),
+            now=current,
+            action_executor=run_action,
+            canary_executor=run_canary,
+        )
+        return True
+    except Exception:
+        return False
+
+
 def _stale_clean_skeleton_worktree_quarantine_metadata(
     body: str,
 ) -> tuple[StaleCleanSkeletonWorktreeQuarantineRequest | None, str | None]:
@@ -17253,6 +17380,7 @@ def poll_once(workdir: str | None = None) -> int:
     finally:
         _QUEUE_RECOVERY_SOURCE.reset(source_token)
     issues = get_ready_issues()
+    maybe_recover_stale_runner_consumer(issues, workdir=workdir)
     for issue in issues:
         process_issue(issue, workdir=workdir)
     return len(issues)

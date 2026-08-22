@@ -43,6 +43,15 @@ count, and `telegram_notifications=0`. After normal task completion, the
 Runner invokes the same replenishment path when ready depth falls below 3; ready
 depths 3 through 6 remain stable across repeated calls.
 
+When ready work is already present, the Runner may recover only a demonstrably
+stale canonical consumer: `runner:ready` depth is greater than zero,
+`runner:running` depth is zero, and the fixed `skeleton-runner-poll` systemd
+timer/service is inactive, failed, or overdue beyond the poll schedule
+threshold. A healthy timer between normal ticks is not recovery input. The
+recovery is the existing `LONG_LIVED_POLLER_STALE` plan with fixed
+`long_lived_poller_reload`; it leaves ready labels intact for the ordinary claim
+path and does not create a fake `runner:running` label.
+
 Successful codegen publication now feeds the same queue instead of a separate
 control plane. When a `DONE` report contains a verified public PR, the Runner
 creates or reuses exactly one `validate_pr_branch` runtime-maintenance issue

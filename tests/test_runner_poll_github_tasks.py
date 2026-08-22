@@ -3959,6 +3959,8 @@ def test_poll_once_processes_issues_single_lane() -> None:
     issues = [{"number": 139}, {"number": 140}]
     with mock.patch.object(runner, "self_heal_run_now_queue_intake", return_value=0), mock.patch.object(
         runner, "get_ready_issues", return_value=issues
+    ), mock.patch.object(
+        runner, "maybe_recover_stale_runner_consumer", return_value=False
     ), mock.patch.object(runner, "process_issue") as process_issue:
         count = runner.poll_once(workdir="/coordinator")
 
@@ -3967,6 +3969,167 @@ def test_poll_once_processes_issues_single_lane() -> None:
         mock.call(issues[0], workdir="/coordinator"),
         mock.call(issues[1], workdir="/coordinator"),
     ]
+
+
+def test_runner_poller_liveness_treats_recent_waiting_timer_as_healthy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def run_command(command: list[str], **_kwargs: object) -> tuple[int, str]:
+        if command[-1] == runner.RUNNER_POLLER_TIMER:
+            return (
+                0,
+                "\n".join(
+                    (
+                        "ActiveState=active",
+                        "SubState=waiting",
+                        "LastTriggerUSec=1000000000",
+                        "NextElapseUSecRealtime=1090000000",
+                    )
+                ),
+            )
+        if command[-1] == runner.RUNNER_POLLER_SERVICE:
+            return (0, "ActiveState=inactive\nSubState=dead")
+        raise AssertionError(command)
+
+    monkeypatch.setattr(runner, "run_command", run_command)
+
+    assert runner.runner_poller_liveness_is_stale(now=1030) is False
+
+
+def test_runner_poller_liveness_detects_inactive_overdue_timer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def run_command(command: list[str], **_kwargs: object) -> tuple[int, str]:
+        if command[-1] == runner.RUNNER_POLLER_TIMER:
+            return (
+                0,
+                "\n".join(
+                    (
+                        "ActiveState=inactive",
+                        "SubState=dead",
+                        "LastTriggerUSec=1000000000",
+                        "NextElapseUSecRealtime=0",
+                    )
+                ),
+            )
+        if command[-1] == runner.RUNNER_POLLER_SERVICE:
+            return (0, "ActiveState=inactive\nSubState=dead")
+        raise AssertionError(command)
+
+    monkeypatch.setattr(runner, "run_command", run_command)
+
+    assert runner.runner_poller_liveness_is_stale(now=1300) is True
+
+
+def test_poll_once_ready_work_with_healthy_consumer_does_not_recover(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issue = {"number": 2516, "labels": [{"name": runner.LABEL_READY}]}
+    process_issue = mock.Mock()
+    recovery = mock.Mock()
+
+    monkeypatch.setattr(runner, "self_heal_run_now_queue_intake", lambda: 0)
+    monkeypatch.setattr(runner, "get_ready_issues", lambda: [issue])
+    monkeypatch.setattr(runner, "get_running_issues", lambda: [])
+    monkeypatch.setattr(runner, "runner_poller_liveness_is_stale", lambda **_kwargs: False)
+    monkeypatch.setattr(runner, "execute_recovery_packet", recovery)
+    monkeypatch.setattr(runner, "process_issue", process_issue)
+
+    assert runner.poll_once(workdir="/coordinator") == 1
+
+    recovery.assert_not_called()
+    process_issue.assert_called_once_with(issue, workdir="/coordinator")
+
+
+def test_poll_once_ready_work_with_stale_consumer_recovers_then_claims(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    issue = {"number": 2517, "labels": [{"name": runner.LABEL_READY}]}
+    actions: list[str] = []
+    process_issue = mock.Mock()
+
+    class FakeRegisteredMaintenanceExecutor:
+        def __init__(self, _dispatch: object, _workdir: str) -> None:
+            pass
+
+        def run(self, action_id: str, body: str = "") -> str:
+            assert body == ""
+            actions.append(action_id)
+            return (
+                "DONE: Runner host maintenance task completed.\n"
+                f"maintenance_task_id={action_id}\n"
+                "reason=OK\n"
+                "success_criteria=met"
+            )
+
+    monkeypatch.setattr(runner, "control_recovery_db_path", lambda: tmp_path / "control_recovery.sqlite3")
+    monkeypatch.setattr(runner, "self_heal_run_now_queue_intake", lambda: 0)
+    monkeypatch.setattr(runner, "get_ready_issues", lambda: [issue])
+    monkeypatch.setattr(runner, "get_running_issues", lambda: [])
+    monkeypatch.setattr(runner, "runner_poller_liveness_is_stale", lambda **_kwargs: True)
+    monkeypatch.setattr(runner, "RegisteredMaintenanceExecutor", FakeRegisteredMaintenanceExecutor)
+    monkeypatch.setattr(runner, "process_issue", process_issue)
+
+    assert runner.poll_once(workdir="/coordinator") == 1
+
+    assert actions == ["long_lived_poller_reload", "registered_checkout_freshness_canary"]
+    process_issue.assert_called_once_with(issue, workdir="/coordinator")
+    rows = _queue_recovery_rows(tmp_path / "control_recovery.sqlite3")
+    assert len(rows) == 1
+    assert rows[0]["status"] == "RECOVERED"
+    evidence = json.loads(str(rows[0]["evidence_json"]))
+    assert evidence["evidence"]["actions"] == [
+        "long_lived_poller_reload",
+        "queue_reactivate",
+    ]
+    assert evidence["evidence"]["canaries"] == ["registered_checkout_freshness_canary"]
+
+
+def test_stale_consumer_recovery_uses_existing_backoff_budget_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    issue = {"number": 2518, "labels": [{"name": runner.LABEL_READY}]}
+    db_path = tmp_path / "control_recovery.sqlite3"
+    actions: list[str] = []
+
+    class FailingRegisteredMaintenanceExecutor:
+        def __init__(self, _dispatch: object, _workdir: str) -> None:
+            pass
+
+        def run(self, action_id: str, body: str = "") -> str:
+            actions.append(action_id)
+            return (
+                "BLOCKED: Runner host maintenance task completed.\n"
+                f"maintenance_task_id={action_id}\n"
+                "reason=RUNNER_TIMER_RECOVERY_FAILED\n"
+                "success_criteria=not_met"
+            )
+
+    monkeypatch.setattr(runner, "control_recovery_db_path", lambda: db_path)
+    monkeypatch.setattr(runner, "get_running_issues", lambda: [])
+    monkeypatch.setattr(runner, "runner_poller_liveness_is_stale", lambda **_kwargs: True)
+    monkeypatch.setattr(
+        runner, "RegisteredMaintenanceExecutor", FailingRegisteredMaintenanceExecutor
+    )
+
+    assert runner.maybe_recover_stale_runner_consumer([issue], now=100) is True
+    assert runner.maybe_recover_stale_runner_consumer([issue], now=101) is True
+    assert runner.maybe_recover_stale_runner_consumer([issue], now=130) is True
+    assert runner.maybe_recover_stale_runner_consumer([issue], now=160) is True
+
+    assert actions == ["long_lived_poller_reload", "long_lived_poller_reload"]
+    rows = _queue_recovery_rows(db_path)
+    assert len(rows) == 1
+    assert rows[0]["status"] == "NEEDS_OPERATOR"
+    connection = sqlite3.connect(db_path)
+    try:
+        emitted = connection.execute(
+            "SELECT needs_operator_emitted FROM recovery_runs WHERE failure_key=?",
+            ("control:long-lived-poller:canonical-timer",),
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert emitted == 1
 
 
 def test_poll_once_self_heals_run_now_missing_ready_and_does_not_duplicate_claim(

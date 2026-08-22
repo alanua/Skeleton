@@ -86,6 +86,21 @@ For queue-idle recovery, the lesson fingerprint remains stable across recurrence
 
 The learned queue path may invoke only the registered `queue_reactivate` action. For ordinary replenisher backlog work, that action delegates to the existing `replenish_runner_queue` primitive. For `queue:RUN_NOW` intake, the same occurrence snapshot is used for duplicate suppression, but only the first stable eligible RUN_NOW issue is promoted in that idle episode. After that issue completes and the queue is idle again, the remaining RUN_NOW issue set produces a new occurrence and can be promoted without chat/manual relabeling. Verification requires actual ready-depth progress after the action. No progress, exceptions, candidate races, or stale running rechecks are recorded as failed recovery/backoff. Routine queue recovery remains Telegram-silent.
 
+Ready-consumer liveness is checked only after the canonical queue intake pass has
+completed and the poller has read the current `runner:ready` queue. The check
+never runs for an empty ready queue, never uses absence of `runner:running` by
+itself as proof of failure, and treats unknown timer status as healthy. Recovery
+requires `runner:ready` depth greater than zero, `runner:running` depth zero,
+and demonstrably stale fixed `skeleton-runner-poll.timer` /
+`skeleton-runner-poll.service` state beyond the schedule threshold. A healthy
+waiting timer, a recent last trigger, a future next elapse, or an active service
+means no recovery action and normal claim continues unchanged. A stale or failed
+canonical timer/service state uses the existing durable
+`LONG_LIVED_POLLER_STALE` plan, bounded attempts/backoff, and fixed
+`long_lived_poller_reload` action. The successful branch preserves ready labels;
+it does not synthesize `runner:running`, call codegen directly, or send Telegram
+noise. The same poll then lets the ordinary claim path own `runner:running`.
+
 When the canonical `replenish_runner_queue` maintenance task is itself executing, the replenisher excludes that maintenance issue's own ready/candidate projection from ready-depth and selection accounting. Its own recovery execution cannot satisfy useful external queue depth or make a `selected_count=0` report look successful while external eligible queue work exists.
 
 Ordinary polls also run a bounded reconciliation pass for historical terminal
