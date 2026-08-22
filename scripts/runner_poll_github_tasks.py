@@ -16277,6 +16277,7 @@ def mail_gmail_primary_registered_activation_v1(body: str) -> str:
             "not_met",
         )
     status_lines.append("step=reference_bind status=done")
+    status_lines.append("step=reference_reload status=done")
 
     try:
         receipt = run_gmail_readonly_canary(

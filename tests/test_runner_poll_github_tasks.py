@@ -20227,6 +20227,7 @@ def test_gmail_primary_activation_enables_worker_only_after_canary_passes() -> N
 
     assert runner.maintenance_report_status(report) == "DONE"
     assert "step=reference_bind status=done" in report
+    assert "step=reference_reload status=done" in report
     assert "step=gmail_readonly_canary status=done" in report
     assert bind.call_count == 1
     assert canary.call_count == 1
@@ -20238,3 +20239,24 @@ def test_gmail_primary_activation_enables_worker_only_after_canary_passes() -> N
         "sudo -n systemctl is-active --quiet skeleton-mail-operations.timer",
         "sudo -n systemctl show --property=Result --value skeleton-mail-operations.service",
     ]
+
+
+def test_bitwarden_sdk_runtime_installer_is_hash_locked_and_no_self_upgrade() -> None:
+    installer = (runner.ROOT / "scripts" / "install_bitwarden_sdk_runtime.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "bitwarden-sdk==2.1.0" in installer
+    assert "--require-hashes" in installer
+    assert "--no-deps" in installer
+    assert "pip install --upgrade pip" not in installer
+    assert "bitwarden-sdk>=" not in installer
+
+
+def test_mail_operations_unit_loads_canonical_encrypted_credentials() -> None:
+    unit = (
+        runner.ROOT / "ops" / "systemd" / "skeleton-mail-operations.service"
+    ).read_text(encoding="utf-8")
+
+    assert "LoadCredentialEncrypted=bitwarden-access-token" in unit
+    assert "LoadCredentialEncrypted=skeleton-secret-reference-index" in unit

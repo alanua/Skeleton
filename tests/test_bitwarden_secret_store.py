@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,7 +10,11 @@ import pytest
 import integrations.bitwarden_secret_store as bitwarden
 from core.secret_store import SecretProviderUnavailable, SecretReference, SecretResolutionContext
 from integrations.bitwarden_secret_store import (
+    BitwardenReferenceDiscoveryError,
     BwsCliSecretsManagerStore,
+    derive_bitwarden_organization_id_from_machine_token,
+    discover_gmail_primary_reference_with_sdk,
+    public_reference_discovery_receipt,
     bitwarden_reference_from_systemd_credential,
 )
 
@@ -126,3 +131,138 @@ def test_bws_cli_rejects_reference_mismatch_and_nonzero_exit(tmp_path: Path, mon
     )
     with pytest.raises(SecretProviderUnavailable, match="secret_get_failed"):
         store.resolve(reference, context)
+
+
+def _jwt_with_claims(claims: dict[str, object]) -> str:
+    payload = base64.urlsafe_b64encode(
+        json.dumps(claims, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii").rstrip("=")
+    return f"header.{payload}.signature"
+
+
+def test_identity_exchange_derives_org_id_from_fixed_endpoint(monkeypatch) -> None:
+    org_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    observed: dict[str, object] = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return json.dumps(
+                {"access_token": _jwt_with_claims({"accesssecretsmanager": org_id})}
+            ).encode("utf-8")
+
+    def fake_urlopen(request, *, timeout):
+        observed["url"] = request.full_url
+        observed["data"] = request.data.decode("ascii")
+        observed["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr(bitwarden.urllib.request, "urlopen", fake_urlopen)
+
+    assert (
+        derive_bitwarden_organization_id_from_machine_token(
+            "0.synthetic-client.synthetic-secret"
+        )
+        == org_id
+    )
+    assert observed["url"] == "https://identity.bitwarden.com/connect/token"
+    assert "synthetic-secret" not in observed["url"]
+    assert "client_id=synthetic-client" in observed["data"]
+
+
+def test_identity_exchange_rejects_untrusted_endpoint() -> None:
+    with pytest.raises(BitwardenReferenceDiscoveryError, match="identity_endpoint_untrusted"):
+        derive_bitwarden_organization_id_from_machine_token(
+            "0.client.secret",
+            identity_url="https://example.com",
+        )
+
+
+def test_sdk_identifier_discovery_uses_isolated_pinned_list_only(monkeypatch) -> None:
+    observed: dict[str, object] = {}
+    selected = "11111111-2222-3333-4444-555555555555"
+
+    def fake_run(argv, **kwargs):
+        observed["argv"] = list(argv)
+        observed["env"] = dict(kwargs["env"])
+        observed["script"] = argv[-1]
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"matches": [selected]}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(bitwarden.subprocess, "run", fake_run)
+
+    assert discover_gmail_primary_reference_with_sdk(
+        sdk_python="/opt/skeleton-bitwarden-sdk/venv/bin/python3",
+        access_token="0.client.secret",
+        organization_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    ) == selected
+    assert observed["argv"][:3] == ["/opt/skeleton-bitwarden-sdk/venv/bin/python3", "-I", "-c"]
+    assert "0.client.secret" not in " ".join(observed["argv"])
+    assert observed["env"]["BWS_ACCESS_TOKEN"] == "0.client.secret"
+    assert 'version("bitwarden-sdk") != EXPECTED_VERSION' in observed["script"]
+    assert "secrets_client.list(organization_id)" in observed["script"]
+    assert "secrets_client.get" not in observed["script"]
+    assert "get_by_ids" not in observed["script"]
+    assert "sync(" not in observed["script"]
+
+
+@pytest.mark.parametrize(
+    ("matches", "reason"),
+    [
+        ([], "gmail_primary_reference_zero_matches"),
+        (
+            [
+                "11111111-2222-3333-4444-555555555555",
+                "66666666-7777-8888-9999-000000000000",
+            ],
+            "gmail_primary_reference_many_matches",
+        ),
+    ],
+)
+def test_sdk_identifier_discovery_fails_closed_for_zero_or_many(
+    matches: list[str],
+    reason: str,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        bitwarden.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"matches": matches}),
+            stderr="",
+        ),
+    )
+
+    with pytest.raises(BitwardenReferenceDiscoveryError, match=reason):
+        discover_gmail_primary_reference_with_sdk(
+            sdk_python="/opt/skeleton-bitwarden-sdk/venv/bin/python3",
+            access_token="0.client.secret",
+            organization_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        )
+
+
+def test_public_reference_discovery_receipt_has_only_public_match_state() -> None:
+    receipt = public_reference_discovery_receipt(
+        status="PASS",
+        reason="OK",
+        match_count=1,
+    )
+
+    assert receipt == {
+        "status": "PASS",
+        "reason": "OK",
+        "zero_matches": False,
+        "one_match": True,
+        "many_matches": False,
+        "secret_values_exposed": False,
+        "credential_directory_written": False,
+    }
