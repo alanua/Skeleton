@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://skeleton.local/schemas/provider_route_receipt.schema.json",
+  "title": "Provider route receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "route_class",
+    "provider_alias",
+    "model_alias",
+    "reason_code",
+    "latency_class",
+    "cost_class",
+    "considered_route_classes"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "SELECTED",
+        "NO_LLM_REQUIRED",
+        "NEEDS_OPERATOR"
+      ]
+    },
+    "route_class": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "DETERMINISTIC",
+        "LOCAL_LOW_COST",
+        "STRONG_CODING",
+        "SECONDARY_CODING",
+        "CLOUD_STRONG_REVIEW",
+        null
+      ]
+    },
+    "provider_alias": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "model_alias": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "reason_code": {
+      "type": "string",
+      "enum": [
+        "DETERMINISTIC_NO_LLM",
+        "ROUTE_SELECTED",
+        "NO_ELIGIBLE_BOUNDED_ROUTE"
+      ]
+    },
+    "latency_class": {
+      "type": "string",
+      "enum": [
+        "NONE",
+        "LOW",
+        "MEDIUM",
+        "HIGH"
+      ]
+    },
+    "cost_class": {
+      "type": "string",
+      "enum": [
+        "NONE",
+        "LOW",
+        "MEDIUM",
+        "HIGH"
+      ]
+    },
+    "considered_route_classes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "DETERMINISTIC",
+          "LOCAL_LOW_COST",
+          "STRONG_CODING",
+          "SECONDARY_CODING",
+          "CLOUD_STRONG_REVIEW"
+        ]
+      }
+    }
+  }
+}
