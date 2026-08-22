@@ -1212,6 +1212,37 @@ issue text.
 The allowlist does not permit rebooting the host, package upgrades, arbitrary
 commands or config values from issue text, or unrelated services.
 
+`home_edge_signer_sealed_blob_install_v1` installs only the reviewed Home Edge
+media-source snapshot signer installer from the exact current main commit. The
+only accepted approval value is:
+
+```text
+EXACT_HEAD_OPERATOR_APPROVAL_THEN_RUNTIME_SYNC_SIGNER_INSTALL_AND_READ_ONLY_SNAPSHOT
+```
+
+The stale value
+`EXPLICIT_MINIMAL_HOME_EDGE_SNAPSHOT_ACCESS_REPAIR_2026_08_09` and every other
+noncanonical approval value must be rejected during input validation before any
+Git subprocess, blob read, memfd creation, sudo command, installer invocation,
+or protected-file access. The route then requires `Expected Main SHA` to match
+both local `main` and `origin/main`, resolves
+`scripts/install_home_edge_media_source_snapshot_signer.sh` as an executable
+`100755` blob at that exact SHA, verifies the blob bytes, writes those bytes to
+a sealed memfd, and confirms write, shrink, and grow attempts fail under kernel
+seals before sudo.
+
+The protected copy source must be descriptor-backed sealed data only
+(`/proc/self/fd/<sealed-fd>`). The protected installer copy must verify as
+`root:root` `0555` with the approved SHA-256 before and after the fixed
+invocation:
+
+```text
+sudo -n /usr/local/libexec/skeleton/home-edge/media-source-snapshot-installer/install_home_edge_media_source_snapshot_signer.sh --repo-root <canonical Skeleton checkout>
+```
+
+The read-only media-source snapshot route never installs the signer, and a
+successful signer install never auto-runs the snapshot task.
+
 ## Reporting
 
 Each maintenance report must state `DONE` or `BLOCKED` accurately with safe

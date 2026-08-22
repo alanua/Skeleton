@@ -168,6 +168,23 @@ def _media_source_snapshot_receipt() -> dict[str, object]:
     }
 
 
+def _home_edge_signer_install_body(
+    *,
+    expected_sha: str = HEAD_SHA,
+    approval: str = runner.HOME_EDGE_SIGNER_SEALED_BLOB_APPROVAL,
+) -> str:
+    return "\n".join(
+        (
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {runner.HOME_EDGE_SIGNER_SEALED_BLOB_INSTALL_V1}",
+            f"Repository: {runner.REPO}",
+            f"Expected Main SHA: {expected_sha}",
+            f"Operator Approval: {approval}",
+            "Target: home-edge-01",
+        )
+    )
+
+
 def _merge_issue_body(
     *,
     pr_number: int = 123,
@@ -525,6 +542,215 @@ def test_home_edge_media_source_snapshot_malformed_input_blocks(
 
     assert report.startswith("BLOCKED:")
     assert "reason=unknown_runtime_input_field" in report
+
+
+def test_home_edge_signer_sealed_blob_install_accepts_only_canonical_token_and_descriptor_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    blob = b"#!/usr/bin/env bash\necho signer installer\n"
+    blob_sha1 = runner._git_blob_sha1(blob)
+    blob_sha256 = runner.hashlib.sha256(blob).hexdigest()
+    commands: list[list[str]] = []
+    sealed_fd_checks: list[str] = []
+    protected_stats = [("0:0", "0555", blob_sha256), ("0:0", "0555", blob_sha256)]
+
+    def fake_read_sha(ref: str) -> str:
+        assert ref in {"main", "origin/main"}
+        return HEAD_SHA
+
+    def fake_run_command(
+        args: list[str],
+        cwd: str | Path | None = None,
+        *,
+        timeout: int | None = None,
+        input: str | None = None,
+    ) -> tuple[int, str]:
+        commands.append(args)
+        assert cwd == runner.ROOT
+        assert timeout is None
+        assert input is None
+        if args[:2] == ["git", "ls-tree"]:
+            assert args == ["git", "ls-tree", HEAD_SHA, runner.HOME_EDGE_SIGNER_INSTALLER_REL]
+            return 0, f"100755 blob {blob_sha1}\t{runner.HOME_EDGE_SIGNER_INSTALLER_REL}\n"
+        if args[:2] == ["git", "show"]:
+            assert args == ["git", "show", f"{HEAD_SHA}:{runner.HOME_EDGE_SIGNER_INSTALLER_REL}"]
+            return 0, blob.decode("utf-8")
+        raise AssertionError(f"unexpected run_command: {args!r}")
+
+    def fake_run_pass_fds(args: list[str], *, pass_fds: tuple[int, ...]) -> tuple[int, str]:
+        commands.append(args)
+        assert len(pass_fds) == 1
+        fd = pass_fds[0]
+        assert f"/proc/self/fd/{fd}" in args
+        assert args == [
+            "sudo",
+            "-n",
+            "install",
+            "-D",
+            "-o",
+            "root",
+            "-g",
+            "root",
+            "-m",
+            "0555",
+            f"/proc/self/fd/{fd}",
+            str(runner.HOME_EDGE_SIGNER_PROTECTED_INSTALLER),
+        ]
+        for action in (lambda: os.write(fd, b"x"), lambda: os.ftruncate(fd, 0), lambda: os.ftruncate(fd, len(blob) + 1)):
+            with pytest.raises(OSError):
+                action()
+        sealed_fd_checks.append("kernel_seals_enforced_before_sudo")
+        return 0, ""
+
+    def fake_protected_stat() -> tuple[str, str, str] | None:
+        return protected_stats.pop(0)
+
+    def fake_invoke() -> tuple[int, str]:
+        commands.append(
+            [
+                "sudo",
+                "-n",
+                str(runner.HOME_EDGE_SIGNER_PROTECTED_INSTALLER),
+                "--repo-root",
+                str(runner.HOME_EDGE_SIGNER_CANONICAL_REPO_ROOT),
+            ]
+        )
+        return 0, ""
+
+    monkeypatch.setattr(runner, "_read_exact_git_sha", fake_read_sha)
+    monkeypatch.setattr(runner, "run_command", fake_run_command)
+    monkeypatch.setattr(runner, "_run_command_pass_fds", fake_run_pass_fds)
+    monkeypatch.setattr(runner, "_home_edge_signer_protected_stat", fake_protected_stat)
+    monkeypatch.setattr(runner, "_run_home_edge_signer_install_sudo", fake_invoke)
+    monkeypatch.setattr(
+        media_source_snapshot,
+        "execute_media_source_snapshot_task",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("install DONE must not auto-run snapshot")
+        ),
+    )
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_SIGNER_SEALED_BLOB_INSTALL_V1,
+        str(runner.ROOT),
+        _home_edge_signer_install_body(),
+    )
+
+    assert runner.HOME_EDGE_SIGNER_SEALED_BLOB_INSTALL_V1 in runner.RUNTIME_MAINTENANCE_TASK_IDS
+    assert report.startswith("DONE:")
+    assert "approval_status=verified" in report
+    assert "file_on_main=verified" in report
+    assert "source_mode=100755" in report
+    assert f"source_sha256={blob_sha256}" in report
+    assert "sealed_source=memfd" in report
+    assert "seal_status=active" in report
+    assert "write_blocked=true" in report
+    assert "truncate_blocked=true" in report
+    assert "grow_blocked=true" in report
+    assert "step=install_protected_copy status=done" in report
+    assert "protected_installer_owner=0:0" in report
+    assert "protected_installer_mode=0555" in report
+    assert f"protected_installer_sha256={blob_sha256}" in report
+    assert "step=invoke_protected_installer status=done" in report
+    assert "next_action=SEMANTIC_EXACT_HEAD_REVIEW_THEN_FULL_VALIDATION_THEN_OPERATOR_APPROVAL" in report
+    assert sealed_fd_checks == ["kernel_seals_enforced_before_sudo"]
+    assert protected_stats == []
+    assert commands[-1] == [
+        "sudo",
+        "-n",
+        str(runner.HOME_EDGE_SIGNER_PROTECTED_INSTALLER),
+        "--repo-root",
+        str(runner.HOME_EDGE_SIGNER_CANONICAL_REPO_ROOT),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("approval", "reason"),
+    (
+        (
+            runner.HOME_EDGE_SIGNER_STALE_APPROVAL,
+            "home_edge_signer_stale_operator_approval_rejected",
+        ),
+        ("APPROVED", "home_edge_signer_operator_approval_missing"),
+    ),
+)
+def test_home_edge_signer_rejects_noncanonical_approval_before_side_effects(
+    monkeypatch: pytest.MonkeyPatch,
+    approval: str,
+    reason: str,
+) -> None:
+    def fail_side_effect(*args: object, **kwargs: object) -> object:
+        raise AssertionError("side effect should not run before approval validation")
+
+    monkeypatch.setattr(runner, "_read_exact_git_sha", fail_side_effect)
+    monkeypatch.setattr(runner, "_home_edge_signer_memfd_create", fail_side_effect)
+    monkeypatch.setattr(runner, "_install_home_edge_signer_protected_copy", fail_side_effect)
+    monkeypatch.setattr(runner, "_home_edge_signer_protected_stat", fail_side_effect)
+    monkeypatch.setattr(runner, "_run_home_edge_signer_install_sudo", fail_side_effect)
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_SIGNER_SEALED_BLOB_INSTALL_V1,
+        str(runner.ROOT),
+        _home_edge_signer_install_body(approval=approval),
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert f"reason={reason}" in report
+    assert "success_criteria=not_met" in report
+
+
+def test_home_edge_signer_expected_main_must_match_main_and_origin_before_privileged_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reads: list[str] = []
+
+    def fake_read_sha(ref: str) -> str:
+        reads.append(ref)
+        return HEAD_SHA if ref == "main" else "b" * 40
+
+    def fail_side_effect(*args: object, **kwargs: object) -> object:
+        raise AssertionError("privileged or descriptor side effect should not run")
+
+    monkeypatch.setattr(runner, "_read_exact_git_sha", fake_read_sha)
+    monkeypatch.setattr(runner, "_home_edge_signer_memfd_create", fail_side_effect)
+    monkeypatch.setattr(runner, "_install_home_edge_signer_protected_copy", fail_side_effect)
+    monkeypatch.setattr(runner, "_run_home_edge_signer_install_sudo", fail_side_effect)
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_SIGNER_SEALED_BLOB_INSTALL_V1,
+        str(runner.ROOT),
+        _home_edge_signer_install_body(),
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=home_edge_signer_expected_main_sha_mismatch" in report
+    assert reads == ["main", "origin/main"]
+
+
+def test_home_edge_signer_read_only_snapshot_route_never_installs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_install(*args: object, **kwargs: object) -> object:
+        raise AssertionError("snapshot route must not install signer")
+
+    monkeypatch.setattr(runner, "_install_home_edge_signer_protected_copy", fail_install)
+    monkeypatch.setattr(runner, "_run_home_edge_signer_install_sudo", fail_install)
+    monkeypatch.setattr(runner, "_read_exact_git_sha", lambda _ref: HEAD_SHA)
+    monkeypatch.setattr(
+        media_source_snapshot,
+        "execute_media_source_snapshot_task",
+        lambda body, *, registered_clean_main_sha, github_main_sha: _media_source_snapshot_receipt(),
+    )
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1,
+        str(runner.ROOT),
+        _media_source_snapshot_issue_body(),
+    )
+
+    assert report.startswith("DONE:")
+    assert "maintenance_task_id=home_edge_01_media_source_snapshot_v1" in report
+    assert runner.HOME_EDGE_SIGNER_SEALED_BLOB_INSTALL_V1 not in report
 
 
 def _plain_done_message(issue_number: int = 129) -> str:

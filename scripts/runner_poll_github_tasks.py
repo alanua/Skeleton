@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import fcntl
 from collections.abc import Mapping
 from contextvars import ContextVar
 import csv
@@ -337,6 +338,19 @@ HOME_EDGE_AUDIT_PERSIST_V1 = "home_edge_audit_persist_v1"
 HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1 = "home_edge_01_debian_media_bootstrap_v1"
 HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1 = "home_edge_01_post_migration_reconcile_v1"
 HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1 = "home_edge_01_media_source_snapshot_v1"
+HOME_EDGE_SIGNER_SEALED_BLOB_INSTALL_V1 = "home_edge_signer_sealed_blob_install_v1"
+HOME_EDGE_SIGNER_SEALED_BLOB_APPROVAL = (
+    "EXACT_HEAD_OPERATOR_APPROVAL_THEN_RUNTIME_SYNC_SIGNER_INSTALL_AND_READ_ONLY_SNAPSHOT"
+)
+HOME_EDGE_SIGNER_STALE_APPROVAL = (
+    "EXPLICIT_MINIMAL_HOME_EDGE_SNAPSHOT_ACCESS_REPAIR_2026_08_09"
+)
+HOME_EDGE_SIGNER_INSTALLER_REL = "scripts/install_home_edge_media_source_snapshot_signer.sh"
+HOME_EDGE_SIGNER_PROTECTED_INSTALLER = Path(
+    "/usr/local/libexec/skeleton/home-edge/media-source-snapshot-installer/"
+    "install_home_edge_media_source_snapshot_signer.sh"
+)
+HOME_EDGE_SIGNER_CANONICAL_REPO_ROOT = ROOT
 MAIL_GMAIL_PRIMARY_REGISTERED_ACTIVATION = "mail_gmail_primary_registered_activation_v1"
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
@@ -383,6 +397,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1,
         HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1,
         HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1,
+        HOME_EDGE_SIGNER_SEALED_BLOB_INSTALL_V1,
         BUILD_AND_LOCAL_OTA_OPERATION,
         PREPARE_PRIVATE_STATIC_SITE_HANDOFF,
         DEPLOY_PRIVATE_STATIC_SITE,
@@ -721,6 +736,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "existing_pr_url",
         "expected_branch",
         "expected_head_sha",
+        "expected_main_sha",
         "expected_pr_head_branch",
         "expected_pr_head_sha",
         "expected_source_branch",
@@ -740,6 +756,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "github_main_sha",
         "github_main_source_of_truth",
         "graphify_version",
+        "grow_blocked",
         "head_branch",
         "head_ref",
         "head_repository",
@@ -840,6 +857,9 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "protected_worktrees_count",
         "protected_changed_file",
         "protected_changed_files_count",
+        "protected_installer_mode",
+        "protected_installer_owner",
+        "protected_installer_sha256",
         "pushed_head_sha",
         "public_safe_report_ok",
         "quality_score",
@@ -887,6 +907,9 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "selected_source_count",
         "services_disabled",
         "services_enabled",
+        "seal_status",
+        "sealed_source",
+        "sealed_source_sha256",
         "sqlite_history_count",
         "sqlite_metadata_count",
         "sqlite_state_count",
@@ -902,6 +925,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "source_pack_warning_count",
         "source_sha256",
         "source_version_marker",
+        "source_mode",
         "source_token_count",
         "sourcepack_note",
         "schema",
@@ -945,6 +969,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "tracked_files_match_allowlist",
         "truncated_root_count",
         "truncation_evidence",
+        "truncate_blocked",
         "target_branch",
         "target_head_sha",
         "unexpected_untracked_files",
@@ -982,6 +1007,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "watchdog_critical_count",
         "watchdog_status",
         "watchdog_warning_count",
+        "write_blocked",
         "worktree",
         "worktree_id",
         "worktree_ids",
@@ -15497,6 +15523,318 @@ def home_edge_01_media_source_snapshot_v1(body: str) -> str:
         )
 
 
+_HOME_EDGE_SIGNER_INPUT_FIELDS = frozenset(
+    (
+        "Mode",
+        "Maintenance Task ID",
+        "Repository",
+        "Expected Main SHA",
+        "Operator Approval",
+        "Target",
+    )
+)
+
+
+def _home_edge_signer_install_input(
+    body: str,
+) -> tuple[dict[str, str] | None, str | None]:
+    parsed: dict[str, str] = {}
+    for raw_line in (body or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = re.fullmatch(
+            r"(?P<field>[A-Za-z][A-Za-z0-9 ]*):\s*(?P<value>\S(?:.*\S)?)",
+            line,
+        )
+        if match is None:
+            return None, "home_edge_signer_noncanonical_input"
+        field = match.group("field")
+        if field not in _HOME_EDGE_SIGNER_INPUT_FIELDS:
+            return None, "home_edge_signer_unknown_input_field"
+        if field in parsed:
+            return None, "home_edge_signer_duplicate_input_field"
+        parsed[field] = match.group("value")
+    if set(parsed) != _HOME_EDGE_SIGNER_INPUT_FIELDS:
+        return None, "home_edge_signer_required_input_missing"
+    if parsed["Mode"] != RUNTIME_MAINTENANCE_MODE:
+        return None, "home_edge_signer_mode_mismatch"
+    if parsed["Maintenance Task ID"] != HOME_EDGE_SIGNER_SEALED_BLOB_INSTALL_V1:
+        return None, "home_edge_signer_task_id_mismatch"
+    if parsed["Repository"] != REPO:
+        return None, "home_edge_signer_repository_mismatch"
+    if _HEAD_SHA_RE.fullmatch(parsed["Expected Main SHA"]) is None:
+        return None, "home_edge_signer_expected_main_sha_invalid"
+    if parsed["Target"] != "home-edge-01":
+        return None, "home_edge_signer_target_mismatch"
+    if parsed["Operator Approval"] != HOME_EDGE_SIGNER_SEALED_BLOB_APPROVAL:
+        if parsed["Operator Approval"] == HOME_EDGE_SIGNER_STALE_APPROVAL:
+            return None, "home_edge_signer_stale_operator_approval_rejected"
+        return None, "home_edge_signer_operator_approval_missing"
+    return parsed, None
+
+
+def _git_blob_sha1(data: bytes) -> str:
+    return hashlib.sha1(
+        b"blob " + str(len(data)).encode("ascii") + b"\0" + data,
+        usedforsecurity=False,
+    ).hexdigest()
+
+
+def _home_edge_signer_read_exact_blob(
+    expected_main_sha: str,
+) -> tuple[bytes | None, list[str], str | None]:
+    status_lines = [f"expected_main_sha={expected_main_sha}"]
+    main_sha = _read_exact_git_sha("main")
+    origin_main_sha = _read_exact_git_sha("origin/main")
+    status_lines.extend(
+        [
+            f"head_sha={main_sha}",
+            f"github_main_sha={origin_main_sha}",
+        ]
+    )
+    if main_sha != expected_main_sha or origin_main_sha != expected_main_sha:
+        return None, status_lines, "home_edge_signer_expected_main_sha_mismatch"
+
+    tree_code, tree_output = run_command(
+        ["git", "ls-tree", expected_main_sha, HOME_EDGE_SIGNER_INSTALLER_REL],
+        cwd=ROOT,
+    )
+    tree_parts = tree_output.strip().split()
+    if (
+        tree_code != 0
+        or len(tree_parts) < 4
+        or tree_parts[0] != "100755"
+        or tree_parts[1] != "blob"
+        or re.fullmatch(r"[0-9a-f]{40}", tree_parts[2]) is None
+    ):
+        return None, status_lines, "home_edge_signer_installer_blob_not_executable"
+
+    blob_code, blob_output = run_command(
+        ["git", "show", f"{expected_main_sha}:{HOME_EDGE_SIGNER_INSTALLER_REL}"],
+        cwd=ROOT,
+    )
+    blob_bytes = blob_output.encode("utf-8")
+    if blob_code != 0 or not blob_bytes:
+        return None, status_lines, "home_edge_signer_installer_blob_unavailable"
+    if _git_blob_sha1(blob_bytes) != tree_parts[2]:
+        return None, status_lines, "home_edge_signer_installer_blob_changed"
+
+    status_lines.extend(
+        [
+            "file_on_main=verified",
+            "source_mode=100755",
+            f"source_bytes={len(blob_bytes)}",
+            f"source_sha256={hashlib.sha256(blob_bytes).hexdigest()}",
+        ]
+    )
+    return blob_bytes, status_lines, None
+
+
+def _home_edge_signer_memfd_create() -> int:
+    return os.memfd_create(
+        "skeleton-home-edge-signer-installer",
+        os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING,
+    )
+
+
+def _home_edge_signer_seal_blob(blob_bytes: bytes) -> tuple[int, list[str]]:
+    fd = _home_edge_signer_memfd_create()
+    try:
+        written = os.write(fd, blob_bytes)
+        if written != len(blob_bytes):
+            raise OSError("short sealed signer write")
+        os.lseek(fd, 0, os.SEEK_SET)
+        if os.read(fd, len(blob_bytes)) != blob_bytes:
+            raise OSError("sealed signer readback mismatch")
+        os.lseek(fd, 0, os.SEEK_SET)
+        seals = (
+            fcntl.F_SEAL_WRITE
+            | fcntl.F_SEAL_GROW
+            | fcntl.F_SEAL_SHRINK
+            | fcntl.F_SEAL_SEAL
+        )
+        fcntl.fcntl(fd, fcntl.F_ADD_SEALS, seals)
+        active_seals = fcntl.fcntl(fd, fcntl.F_GET_SEALS)
+        if active_seals & seals != seals:
+            raise OSError("sealed signer memfd missing required seals")
+        status_lines = [
+            "sealed_source=memfd",
+            "seal_status=active",
+            f"sealed_source_sha256={hashlib.sha256(blob_bytes).hexdigest()}",
+        ]
+        return fd, status_lines
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _home_edge_signer_verify_kernel_seals(fd: int, size: int) -> list[str]:
+    checks: list[tuple[str, object]] = [
+        ("write_blocked", lambda: os.write(fd, b"x")),
+        ("truncate_blocked", lambda: os.ftruncate(fd, 0)),
+        ("grow_blocked", lambda: os.ftruncate(fd, size + 1)),
+    ]
+    status_lines: list[str] = []
+    for key, action in checks:
+        try:
+            action()
+        except OSError:
+            status_lines.append(f"{key}=true")
+        else:
+            raise OSError(f"{key} check unexpectedly succeeded")
+    os.lseek(fd, 0, os.SEEK_SET)
+    return status_lines
+
+
+def _home_edge_signer_protected_stat() -> tuple[str, str, str] | None:
+    path = HOME_EDGE_SIGNER_PROTECTED_INSTALLER
+    if path.is_symlink() or not path.is_file():
+        return None
+    info = path.stat()
+    owner = f"{info.st_uid}:{info.st_gid}"
+    mode = stat.S_IMODE(info.st_mode)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    return owner, f"{mode:04o}", digest
+
+
+def _install_home_edge_signer_protected_copy(fd: int) -> tuple[int, str]:
+    return _run_command_pass_fds(
+        _non_interactive_sudo(
+            "install",
+            "-D",
+            "-o",
+            "root",
+            "-g",
+            "root",
+            "-m",
+            "0555",
+            f"/proc/self/fd/{fd}",
+            str(HOME_EDGE_SIGNER_PROTECTED_INSTALLER),
+        ),
+        pass_fds=(fd,),
+    )
+
+
+def _run_home_edge_signer_install_sudo() -> tuple[int, str]:
+    return run_command(
+        _non_interactive_sudo(
+            str(HOME_EDGE_SIGNER_PROTECTED_INSTALLER),
+            "--repo-root",
+            str(HOME_EDGE_SIGNER_CANONICAL_REPO_ROOT),
+        ),
+        cwd=ROOT,
+    )
+
+
+def _run_command_pass_fds(
+    args: list[str],
+    *,
+    pass_fds: tuple[int, ...],
+) -> tuple[int, str]:
+    result = subprocess.run(
+        args,
+        cwd=str(ROOT),
+        check=False,
+        capture_output=True,
+        text=True,
+        pass_fds=pass_fds,
+    )
+    return result.returncode, result.stdout + result.stderr
+
+
+def home_edge_signer_sealed_blob_install_v1(body: str) -> str:
+    task_id = HOME_EDGE_SIGNER_SEALED_BLOB_INSTALL_V1
+    parsed, reason = _home_edge_signer_install_input(body)
+    if reason is not None or parsed is None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [f"reason={reason or 'home_edge_signer_invalid_input'}"],
+            "not_met",
+        )
+
+    fd: int | None = None
+    try:
+        blob_bytes, status_lines, reason = _home_edge_signer_read_exact_blob(
+            parsed["Expected Main SHA"]
+        )
+        status_lines.insert(0, "approval_status=verified")
+        if reason is not None or blob_bytes is None:
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [*status_lines, f"reason={reason or 'home_edge_signer_blob_unavailable'}"],
+                "not_met",
+            )
+        fd, seal_lines = _home_edge_signer_seal_blob(blob_bytes)
+        status_lines.extend(seal_lines)
+        status_lines.extend(_home_edge_signer_verify_kernel_seals(fd, len(blob_bytes)))
+
+        code, _output = _install_home_edge_signer_protected_copy(fd)
+        if code != 0:
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [*status_lines, f"step=install_protected_copy status=failed exit_code={code}"],
+                "not_met",
+            )
+        status_lines.append("step=install_protected_copy status=done")
+
+        protected = _home_edge_signer_protected_stat()
+        approved_sha256 = hashlib.sha256(blob_bytes).hexdigest()
+        if protected != ("0:0", "0555", approved_sha256):
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [*status_lines, "reason=home_edge_signer_protected_installer_mismatch"],
+                "not_met",
+            )
+        status_lines.extend(
+            [
+                "protected_installer_owner=0:0",
+                "protected_installer_mode=0555",
+                f"protected_installer_sha256={approved_sha256}",
+            ]
+        )
+
+        code, _output = _run_home_edge_signer_install_sudo()
+        if code != 0:
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [*status_lines, f"step=invoke_protected_installer status=failed exit_code={code}"],
+                "not_met",
+            )
+        status_lines.append("step=invoke_protected_installer status=done")
+
+        protected_after = _home_edge_signer_protected_stat()
+        if protected_after != ("0:0", "0555", approved_sha256):
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [*status_lines, "reason=home_edge_signer_protected_installer_changed"],
+                "not_met",
+            )
+        status_lines.extend(
+            [
+                "step=verify_protected_installer_after status=done",
+                "next_action=SEMANTIC_EXACT_HEAD_REVIEW_THEN_FULL_VALIDATION_THEN_OPERATOR_APPROVAL",
+            ]
+        )
+        return _maintenance_report("DONE", task_id, status_lines, "met")
+    except Exception:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            ["reason=home_edge_signer_failed_closed"],
+            "not_met",
+        )
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
 def _read_exact_git_sha(ref: str) -> str:
     code, output = run_command(["git", "rev-parse", f"{ref}^{{commit}}"], cwd=ROOT)
     sha = output.strip().splitlines()[0] if output.strip() else ""
@@ -16404,6 +16742,8 @@ def dispatch_runtime_maintenance_task(
             return home_edge_01_post_migration_reconcile_v1(body)
         if task_id == HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1:
             return home_edge_01_media_source_snapshot_v1(body)
+        if task_id == HOME_EDGE_SIGNER_SEALED_BLOB_INSTALL_V1:
+            return home_edge_signer_sealed_blob_install_v1(body)
         if task_id == PREPARE_PRIVATE_STATIC_SITE_HANDOFF:
             return _execute_prepare_private_static_site_handoff(body)
         if task_id == DEPLOY_PRIVATE_STATIC_SITE:
