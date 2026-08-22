@@ -196,6 +196,10 @@ class OccurrenceRecord:
     idempotency_key: str | None = None
     parent_occurrence_id: str | None = None
     parent_receipt_id: str | None = None
+    retry_after_at: int | None = None
+    wait_dependency_id: str | None = None
+    wait_dependency_state: str | None = None
+    wait_dependency_updated_at: int | None = None
 
     def public_receipt(self) -> dict[str, Any]:
         return {
@@ -210,6 +214,9 @@ class OccurrenceRecord:
             "idempotency_key": self.idempotency_key,
             "parent_occurrence_id": self.parent_occurrence_id,
             "parent_receipt_id": self.parent_receipt_id,
+            "retry_after_at": self.retry_after_at,
+            "wait_dependency_id": self.wait_dependency_id,
+            "wait_dependency_state": self.wait_dependency_state,
             "public_safe": True,
             "payload_included": False,
         }

@@ -592,6 +592,105 @@ def test_recoverable_failure_retries_and_then_succeeds(tmp_path) -> None:
     assert store.list_occurrences("test.retry")[0].state == "done"
 
 
+def test_retry_backoff_is_durable_and_unrelated_work_continues(tmp_path) -> None:
+    store = SchedulerStore(tmp_path / "scheduler.sqlite3")
+    store.initialize()
+    store.register(_loop_once("test.retry.backoff", 100, _loop_packet("create")), now=50)
+    store.register(
+        _loop_once("test.unrelated.progress", 100, _loop_packet("create", run_id="run-ok")),
+        now=50,
+    )
+
+    class RetryOnceDispatcher:
+        def dispatch(self, request: SharedDispatchRequest) -> SharedDispatchResult:
+            run_id = request.payload["task_packet"]["run_id"]
+            if run_id == "run-1" and request.attempt == 1:
+                return SharedDispatchResult(
+                    "failed",
+                    "SYNTHETIC_RETRYABLE",
+                    {
+                        "status": "BLOCKED",
+                        "accepted": False,
+                        "reason": "SYNTHETIC_RETRYABLE",
+                        "public_safe": True,
+                        "external_side_effects_executed": False,
+                    },
+                    "synthetic:retryable",
+                    retryable=True,
+                )
+            return SharedDispatchResult(
+                "done",
+                "SYNTHETIC_DONE",
+                {
+                    "status": "DONE",
+                    "accepted": True,
+                    "reason": "SYNTHETIC_DONE",
+                    "public_safe": True,
+                    "external_side_effects_executed": False,
+                },
+                "synthetic:done",
+            )
+
+    engine = SchedulerEngine(
+        store,
+        SchedulerEngineConfig(retry_backoff_seconds=10, max_retry_backoff_seconds=10),
+    )
+    first = engine.tick(now=100, dispatcher=RetryOnceDispatcher())
+
+    retry_occurrence = store.list_occurrences("test.retry.backoff")[0]
+    assert first["dispatch"]["retried"] == 1
+    assert first["dispatch"]["done"] == 1
+    assert retry_occurrence.state == "pending"
+    assert retry_occurrence.retry_after_at == 110
+    assert store.list_occurrences("test.unrelated.progress")[0].state == "done"
+
+    blocked = engine.tick(now=109, dispatcher=RetryOnceDispatcher())
+    resumed = engine.tick(now=110, dispatcher=RetryOnceDispatcher())
+
+    assert blocked["dispatch"]["claimed"] == 0
+    assert resumed["dispatch"]["done"] == 1
+    assert store.list_occurrences("test.retry.backoff")[0].state == "done"
+
+
+def test_retry_exhaustion_moves_to_operator_without_regressing_terminal(tmp_path) -> None:
+    store = SchedulerStore(tmp_path / "scheduler.sqlite3")
+    store.initialize()
+    store.register(_loop_once("test.retry.exhaust", 100, _loop_packet("create")), now=50)
+
+    class AlwaysRetryableDispatcher:
+        def dispatch(self, request: SharedDispatchRequest) -> SharedDispatchResult:
+            return SharedDispatchResult(
+                "failed",
+                "SYNTHETIC_RETRYABLE",
+                {
+                    "status": "BLOCKED",
+                    "accepted": False,
+                    "reason": "SYNTHETIC_RETRYABLE",
+                    "public_safe": True,
+                    "external_side_effects_executed": False,
+                },
+                "synthetic:retryable",
+                retryable=True,
+            )
+
+    engine = SchedulerEngine(
+        store,
+        SchedulerEngineConfig(max_attempts=2, retry_backoff_seconds=1),
+    )
+    first = engine.tick(now=100, dispatcher=AlwaysRetryableDispatcher())
+    second = engine.tick(now=101, dispatcher=AlwaysRetryableDispatcher())
+
+    occurrence = store.list_occurrences("test.retry.exhaust")[0]
+    assert first["dispatch"]["retried"] == 1
+    assert second["dispatch"]["needs_operator"] == 1
+    assert occurrence.state == "needs_operator"
+    assert occurrence.reason == "DISPATCH_AUTOMATIC_PATHS_EXHAUSTED"
+
+    third = engine.tick(now=102, dispatcher=AlwaysRetryableDispatcher())
+    assert third["dispatch"]["claimed"] == 0
+    assert store.list_occurrences("test.retry.exhaust")[0].state == "needs_operator"
+
+
 def test_waiting_dependency_resumes_after_dependency_done(tmp_path) -> None:
     store = SchedulerStore(tmp_path / "scheduler.sqlite3")
     loop_db = tmp_path / "loop.sqlite3"
@@ -619,6 +718,9 @@ def test_waiting_dependency_resumes_after_dependency_done(tmp_path) -> None:
 
     first = engine.dispatch_pending(dispatcher=dispatcher, now=100)
     assert first["waiting_dependency"] == 1
+    unchanged = engine.tick(now=101, dispatcher=dispatcher)
+    assert unchanged["resumed_waiting_dependencies"] == 0
+    assert store.get_occurrence(wait_id).state == "waiting_dependency"  # type: ignore[union-attr]
     dep_proposal = build_execution_proposal(dependency, occurrence_id=dep_id, scheduled_for=100)
     store.create_occurrence(
         occurrence_id=dep_id,
@@ -627,9 +729,9 @@ def test_waiting_dependency_resumes_after_dependency_done(tmp_path) -> None:
         state="done",
         reason="DISPATCH_DONE",
         proposal=dep_proposal,
-        now=101,
+        now=102,
     )
-    resumed = engine.tick(now=102, dispatcher=dispatcher)
+    resumed = engine.tick(now=103, dispatcher=dispatcher)
 
     assert resumed["resumed_waiting_dependencies"] == 1
     assert store.get_occurrence(wait_id).state == "done"  # type: ignore[union-attr]
