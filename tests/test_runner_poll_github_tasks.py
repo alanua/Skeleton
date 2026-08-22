@@ -19970,6 +19970,17 @@ def test_gmail_primary_activation_task_is_registered() -> None:
     )
 
 
+def test_runner_does_not_import_bitwarden_sdk_in_long_running_python() -> None:
+    runner_source = Path(runner.__file__).read_text(encoding="utf-8")
+    store_source = Path("integrations/bitwarden_secret_store.py").read_text(encoding="utf-8")
+
+    assert "import bitwarden_sdk" not in runner_source
+    assert "from bitwarden_sdk" not in runner_source
+    assert "import bitwarden_sdk" not in store_source
+    assert "from bitwarden_sdk" not in store_source
+    assert "scripts/bitwarden_secret_identifier_helper.py" not in runner_source
+
+
 def test_gmail_readonly_canary_rejects_near_miss_alias_before_preflight() -> None:
     with (
         mock.patch.object(
@@ -20171,6 +20182,15 @@ def test_gmail_primary_activation_blocks_on_reference_bootstrap_before_canary() 
         sha_patch,
         mock.patch.object(
             runner,
+            "bootstrap_registered_bitwarden_reference_index",
+            return_value={
+                "status": "BLOCKED",
+                "reason": "IDENTIFIER_MATCH_ZERO",
+                "match_status": "ZERO",
+            },
+        ) as bootstrap,
+        mock.patch.object(
+            runner,
             "registered_bitwarden_reference_from_systemd_index",
             side_effect=runner.SecretReferenceRegistrationError("REFERENCE_BOOTSTRAP_REQUIRED"),
         ) as bind,
@@ -20184,8 +20204,10 @@ def test_gmail_primary_activation_blocks_on_reference_bootstrap_before_canary() 
         )
 
     assert runner.maintenance_report_status(report) == "BLOCKED"
-    assert "step=reference_bind status=failed reason=REFERENCE_BOOTSTRAP_REQUIRED" in report
-    assert bind.call_count == 1
+    assert "step=identifier_bootstrap status=failed reason=IDENTIFIER_MATCH_ZERO" in report
+    assert "candidate_count=zero" in report
+    assert bootstrap.call_count == 1
+    bind.assert_not_called()
     canary.assert_not_called()
     command.assert_not_called()
 
@@ -20204,6 +20226,11 @@ def test_gmail_primary_activation_enables_worker_only_after_canary_passes() -> N
     with (
         preflight_patch,
         sha_patch,
+        mock.patch.object(
+            runner,
+            "bootstrap_registered_bitwarden_reference_index",
+            return_value={"status": "DONE", "reason": "OK", "match_status": "ONE"},
+        ) as bootstrap,
         mock.patch.object(
             runner,
             "registered_bitwarden_reference_from_systemd_index",
@@ -20226,8 +20253,10 @@ def test_gmail_primary_activation_enables_worker_only_after_canary_passes() -> N
         )
 
     assert runner.maintenance_report_status(report) == "DONE"
+    assert "step=identifier_bootstrap status=done candidate_count=one" in report
     assert "step=reference_bind status=done" in report
     assert "step=gmail_readonly_canary status=done" in report
+    assert bootstrap.call_count == 1
     assert bind.call_count == 1
     assert canary.call_count == 1
     assert calls == [
@@ -20238,3 +20267,33 @@ def test_gmail_primary_activation_enables_worker_only_after_canary_passes() -> N
         "sudo -n systemctl is-active --quiet skeleton-mail-operations.timer",
         "sudo -n systemctl show --property=Result --value skeleton-mail-operations.service",
     ]
+
+
+def test_gmail_primary_activation_redacts_identifier_bootstrap_exception() -> None:
+    sentinel = "TOKEN_SECRET_UUID_KEY_SENTINEL_DO_NOT_EXPOSE"
+    preflight_patch, sha_patch = _gmail_readonly_preflight_patches(HEAD_SHA)
+    with (
+        preflight_patch,
+        sha_patch,
+        mock.patch.object(
+            runner,
+            "bootstrap_registered_bitwarden_reference_index",
+            side_effect=RuntimeError(sentinel),
+        ) as bootstrap,
+        mock.patch.object(runner, "registered_bitwarden_reference_from_systemd_index") as bind,
+        mock.patch.object(runner, "run_gmail_readonly_canary") as canary,
+        mock.patch.object(runner, "run_command") as command,
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.MAIL_GMAIL_PRIMARY_REGISTERED_ACTIVATION,
+            "/synthetic",
+            _gmail_primary_activation_body(),
+        )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "step=identifier_bootstrap status=failed reason=IDENTIFIER_BOOTSTRAP_FAILED" in report
+    assert sentinel not in report
+    assert bootstrap.call_count == 1
+    bind.assert_not_called()
+    canary.assert_not_called()
+    command.assert_not_called()

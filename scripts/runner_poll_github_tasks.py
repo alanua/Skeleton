@@ -143,6 +143,9 @@ from core.secret_reference import (
     SecretReferenceRegistrationError,
     registered_bitwarden_reference_from_systemd_index,
 )
+from integrations.bitwarden_secret_store import (
+    bootstrap_registered_bitwarden_reference_index,
+)
 from core.runner_codegen_router import (
     CodegenRouteError,
     codex_failure_allows_secondary,
@@ -16262,6 +16265,39 @@ def mail_gmail_primary_registered_activation_v1(body: str) -> str:
         "step=exact_main_preflight status=done",
         "account_alias=acct:gmail-primary",
     ]
+    try:
+        bootstrap_receipt = bootstrap_registered_bitwarden_reference_index(
+            os.environ,
+            service_id="mail-gmail",
+            alias="acct:gmail-primary",
+        )
+    except Exception:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "step=identifier_bootstrap status=failed reason=IDENTIFIER_BOOTSTRAP_FAILED"],
+            "not_met",
+        )
+    if bootstrap_receipt.get("status") != "DONE":
+        reason = bootstrap_receipt.get("reason")
+        if not isinstance(reason, str):
+            reason = "IDENTIFIER_BOOTSTRAP_FAILED"
+        match_status = bootstrap_receipt.get("match_status")
+        extra = []
+        if match_status in {"ZERO", "MANY"}:
+            extra.append(f"candidate_count={str(match_status).lower()}")
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                *status_lines,
+                f"step=identifier_bootstrap status=failed reason={reason}",
+                *extra,
+            ],
+            "not_met",
+        )
+    status_lines.append("step=identifier_bootstrap status=done candidate_count=one")
+
     try:
         registered_bitwarden_reference_from_systemd_index(
             os.environ,
