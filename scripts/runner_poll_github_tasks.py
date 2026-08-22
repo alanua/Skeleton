@@ -916,6 +916,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "serve_private",
         "verification_status",
         "cleanup_status",
+        "deferred_cleanup_status",
+        "durable_publication_status",
         "status_count_approved",
         "status_count_needs_review",
         "step",
@@ -934,6 +936,14 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "system",
         "system_failed_unit_count",
         "target_project",
+        "target_publication_base_branch",
+        "target_publication_base_sha",
+        "target_publication_changed_files",
+        "target_publication_continuation_issue",
+        "target_publication_idempotency_key",
+        "target_publication_output_branch",
+        "target_publication_project",
+        "target_publication_repository",
         "task_id",
         "target_project_route",
         "target_repository",
@@ -1066,6 +1076,7 @@ class RunnerTask:
     has_target_repository_metadata: bool = False
     base: str | None = None
     base_sha: str | None = None
+    allowed_files: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1143,6 +1154,20 @@ class ProducedPrValidationContinuation:
     base_sha: str
     base_ref: str
     head_ref: str
+    idempotency_key: str
+    created: bool
+    issue_number: int | None = None
+
+
+@dataclass(frozen=True)
+class ProducedCodegenPublicationContinuation:
+    target_project: str
+    repository: str
+    source_issue: int
+    output_branch: str
+    base_branch: str
+    base_sha: str
+    changed_files: tuple[str, ...]
     idempotency_key: str
     created: bool
     issue_number: int | None = None
@@ -2685,6 +2710,7 @@ def extract_runner_task(body: str) -> tuple[RunnerTask | None, str | None]:
     if target_project is None or target_repository is None:
         return None, target_reason
     base, base_sha = _task_base_metadata(body)
+    allowed_files = _task_spec_allowed_files(body)
     return RunnerTask(
         content=content,
         lane=lane,
@@ -2702,6 +2728,7 @@ def extract_runner_task(body: str) -> tuple[RunnerTask | None, str | None]:
         ),
         base=base,
         base_sha=base_sha,
+        allowed_files=allowed_files,
     ), None
 
 
@@ -4284,6 +4311,25 @@ def extract_runner_memory_changed_files(report: str) -> list[str]:
             if safe_file is not None and safe_file not in files:
                 files.append(safe_file)
     return files
+
+
+def _extract_report_changed_file_lines(report: str) -> tuple[str, ...]:
+    patterns = (
+        r"^Changed files:\s*\n(?P<files>(?:- [^\n]+\n?)+)",
+        r"^Local worktree changed files:\s*\n(?P<files>(?:- [^\n]+\n?)+)",
+    )
+    files: list[str] = []
+    for pattern in patterns:
+        match = re.search(pattern, report or "", re.MULTILINE)
+        if match is None:
+            continue
+        for line in match.group("files").splitlines():
+            if not line.startswith("- "):
+                continue
+            path = line.removeprefix("- ").strip()
+            if path and path not in files:
+                files.append(path)
+    return tuple(files)
 
 
 def extract_runner_memory_test_summary(report: str) -> str | None:
@@ -9906,6 +9952,384 @@ def ensure_codegen_pr_validation_continuation(
     )
 
 
+def _codegen_publication_continuation_idempotency_key(
+    repository: str,
+    source_issue: int,
+    output_branch: str,
+    base_sha: str,
+    changed_files: tuple[str, ...],
+) -> str:
+    payload = "|".join(
+        (repository, str(source_issue), output_branch, base_sha, ",".join(changed_files))
+    ).encode("utf-8")
+    digest = hashlib.sha256(payload).hexdigest()[:24]
+    return f"publish-target-project:{repository}:issue-{source_issue}:{digest}"
+
+
+def _codegen_publication_continuation_body(
+    *,
+    target_project: str,
+    repository: str,
+    source_issue: int,
+    output_branch: str,
+    base_branch: str,
+    base_sha: str,
+    changed_files: tuple[str, ...],
+    idempotency_key: str,
+) -> str:
+    return "\n".join(
+        (
+            "schema: skeleton.runner_task.v1",
+            "privacy_boundary: PUBLIC_SAFE_QUEUE_AND_DELIVERY_METADATA_ONLY",
+            f"idempotency_key: {idempotency_key}",
+            f"Target Project: {target_project}",
+            f"Target Repository: {repository}",
+            f"Source Issue: {source_issue}",
+            f"Base Branch: {base_branch}",
+            f"Base SHA: {base_sha}",
+            f"Output Branch: {output_branch}",
+            "Draft PR: true",
+            "Allowed Files:",
+            *(f"- {path}" for path in changed_files),
+            "",
+            f"Mode: {RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR}",
+            "",
+            "```task",
+            "Publish the exact retained target-project issue worktree changes through the registered publisher.",
+            "```",
+        )
+    )
+
+
+def _find_existing_codegen_publication_continuation_issue(
+    idempotency_key: str,
+) -> int | None:
+    code, output = run_command(
+        [
+            "gh",
+            "issue",
+            "list",
+            "--repo",
+            REPO,
+            "--label",
+            LABEL_AGENT_TASK,
+            "--state",
+            "open",
+            "--search",
+            idempotency_key,
+            "--json",
+            "number,body,labels",
+            "--limit",
+            "20",
+        ]
+    )
+    if code != 0:
+        raise RuntimeError("publication continuation lookup failed")
+    parsed = json.loads(output or "[]")
+    if not isinstance(parsed, list):
+        raise RuntimeError("publication continuation lookup returned non-list JSON")
+    matches: list[int] = []
+    for issue in parsed:
+        if not isinstance(issue, dict):
+            continue
+        if idempotency_key not in str(issue.get("body") or ""):
+            continue
+        if LABEL_AGENT_TASK not in _issue_label_names(issue):
+            continue
+        number = _queue_replenisher_issue_number(issue)
+        if number is not None:
+            matches.append(number)
+    if len(matches) > 1:
+        raise RuntimeError("duplicate publication continuation issues")
+    return matches[0] if matches else None
+
+
+def ensure_codegen_target_publication_continuation(
+    *,
+    source_issue: int,
+    runner_task: RunnerTask,
+    report: str,
+) -> ProducedCodegenPublicationContinuation | None:
+    if runner_report_status(report) != "DONE":
+        return None
+    if runner_task.target_repository == QUEUE_REPOSITORY:
+        return None
+    changed_files = _extract_report_changed_file_lines(report)
+    if not changed_files:
+        return None
+    if not runner_task.allowed_files:
+        raise RuntimeError("target_publication_allowed_files_missing")
+    if not all(_safe_issue_publish_file_path(path) for path in changed_files):
+        raise RuntimeError("target_publication_changed_file_path_unsafe")
+    if not _issue_publish_paths_within_allowed_scopes(
+        changed_files, runner_task.allowed_files
+    ):
+        raise RuntimeError("target_publication_changed_files_outside_allowed_scopes")
+    base_branch = runner_task.base or "main"
+    base_sha = (runner_task.base_sha or "").lower()
+    if _HEAD_SHA_RE.fullmatch(base_sha) is None:
+        raise RuntimeError("target_publication_exact_base_sha_missing")
+    output_branch = issue_branch(source_issue)
+    idempotency_key = _codegen_publication_continuation_idempotency_key(
+        runner_task.target_repository,
+        source_issue,
+        output_branch,
+        base_sha,
+        changed_files,
+    )
+    existing_issue = _find_existing_codegen_publication_continuation_issue(
+        idempotency_key
+    )
+    if existing_issue is not None:
+        return ProducedCodegenPublicationContinuation(
+            target_project=runner_task.target_project,
+            repository=runner_task.target_repository,
+            source_issue=source_issue,
+            output_branch=output_branch,
+            base_branch=base_branch,
+            base_sha=base_sha,
+            changed_files=changed_files,
+            idempotency_key=idempotency_key,
+            created=False,
+            issue_number=existing_issue,
+        )
+    body = _codegen_publication_continuation_body(
+        target_project=runner_task.target_project,
+        repository=runner_task.target_repository,
+        source_issue=source_issue,
+        output_branch=output_branch,
+        base_branch=base_branch,
+        base_sha=base_sha,
+        changed_files=changed_files,
+        idempotency_key=idempotency_key,
+    )
+    issue_number = _create_validation_continuation_issue(
+        title=f"Publish {runner_task.target_project} issue #{source_issue}",
+        body=body,
+    )
+    return ProducedCodegenPublicationContinuation(
+        target_project=runner_task.target_project,
+        repository=runner_task.target_repository,
+        source_issue=source_issue,
+        output_branch=output_branch,
+        base_branch=base_branch,
+        base_sha=base_sha,
+        changed_files=changed_files,
+        idempotency_key=idempotency_key,
+        created=True,
+        issue_number=issue_number,
+    )
+
+
+def _report_status_fields(report: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for line in (report or "").splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if _MAINTENANCE_ASSIGNMENT_KEY_RE.fullmatch(key):
+            fields[key] = value
+    return fields
+
+
+def _trusted_comment_bodies(
+    comments: list[dict[str, Any]] | None,
+) -> tuple[str, ...] | None:
+    if comments is None:
+        return None
+    trusted_authors = trusted_runner_comment_authors()
+    bodies: list[str] = []
+    for comment in comments:
+        author = _normalized_login(_comment_author_login(comment))
+        if author not in trusted_authors:
+            continue
+        body = comment.get("body")
+        if isinstance(body, str):
+            bodies.append(body)
+    return tuple(bodies)
+
+
+def _trusted_source_publication_state(
+    comments: list[dict[str, Any]] | None,
+) -> dict[str, str] | None:
+    trusted_bodies = _trusted_comment_bodies(comments)
+    if trusted_bodies is None:
+        return None
+    for body in reversed(trusted_bodies):
+        fields = _report_status_fields(body)
+        if fields.get("durable_publication_status") == "done":
+            return fields
+        if (
+            fields.get("target_publication_continuation_issue")
+            and fields.get("target_publication_idempotency_key")
+            and fields.get("target_publication_changed_files")
+        ):
+            return fields
+    return {}
+
+
+def _fetch_issue_comments_with_author_metadata(
+    issue_number: int,
+) -> tuple[dict[str, Any] | None, str | None]:
+    code, output = run_command(
+        [
+            "gh",
+            "issue",
+            "view",
+            str(issue_number),
+            "--repo",
+            REPO,
+            "--json",
+            "body,comments,labels,state",
+        ]
+    )
+    if code != 0:
+        return None, "continuation_lookup_unavailable"
+    try:
+        parsed = json.loads(output or "{}")
+    except json.JSONDecodeError:
+        return None, "continuation_lookup_unavailable"
+    if not isinstance(parsed, dict):
+        return None, "continuation_lookup_unavailable"
+    return parsed, None
+
+
+def _trusted_publication_receipt_matches(
+    report: str,
+    *,
+    target_project: str,
+    repository: str,
+    source_issue: int,
+    output_branch: str,
+    base_branch: str,
+    base_sha: str,
+    changed_files: tuple[str, ...],
+) -> bool:
+    fields = _report_status_fields(report)
+    pr_url = fields.get("draft_pr_url") or fields.get("pr_url")
+    pushed_head = fields.get("pushed_head_sha")
+    return (
+        maintenance_report_status(report) == "DONE"
+        and fields.get("maintenance_task_id") == PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR
+        and fields.get("target_project") == target_project
+        and fields.get("repository") == repository
+        and fields.get("source_issue") == str(source_issue)
+        and fields.get("base_branch") == base_branch
+        and fields.get("expected_branch") == output_branch
+        and fields.get("verified_base_sha") == base_sha
+        and fields.get("validated_publish_files_count") == str(len(changed_files))
+        and fields.get("validated_publish_files") == ",".join(changed_files)
+        and isinstance(pr_url, str)
+        and pr_url.startswith(f"https://github.com/{repository}/pull/")
+        and _PUBLIC_GITHUB_PR_URL_RE.fullmatch(pr_url) is not None
+        and isinstance(pushed_head, str)
+        and _HEAD_SHA_RE.fullmatch(pushed_head) is not None
+        and fields.get("success_criteria") == "met"
+    )
+
+
+def reconcile_codegen_publication_dependency(issue: dict[str, Any]) -> bool:
+    issue_number = int(issue["number"])
+    comments = get_issue_comments(issue)
+    source_state = _trusted_source_publication_state(comments)
+    if source_state is None:
+        return False
+    if source_state.get("durable_publication_status") == "done":
+        return True
+    if not source_state:
+        return False
+
+    continuation_issue = source_state.get("target_publication_continuation_issue", "")
+    if not continuation_issue.isdecimal():
+        return False
+    changed_files = tuple(
+        path
+        for path in source_state.get("target_publication_changed_files", "").split(",")
+        if path
+    )
+    if not changed_files:
+        return False
+    continuation, reason = _fetch_issue_comments_with_author_metadata(
+        int(continuation_issue)
+    )
+    if reason is not None or continuation is None:
+        return False
+    trusted_bodies = _trusted_comment_bodies(
+        [
+            comment
+            for comment in continuation.get("comments", [])
+            if isinstance(comment, dict)
+        ]
+        if isinstance(continuation.get("comments"), list)
+        else []
+    )
+    if trusted_bodies is None:
+        return False
+    receipt_ok = any(
+        _trusted_publication_receipt_matches(
+            body,
+            target_project=source_state.get("target_publication_project", ""),
+            repository=source_state.get("target_publication_repository", ""),
+            source_issue=issue_number,
+            output_branch=source_state.get("target_publication_output_branch", ""),
+            base_branch=source_state.get("target_publication_base_branch", ""),
+            base_sha=source_state.get("target_publication_base_sha", ""),
+            changed_files=changed_files,
+        )
+        for body in trusted_bodies
+    )
+    if not receipt_ok:
+        return False
+
+    repository = source_state.get("target_publication_repository", "")
+    cleanup_code, cleanup_output = cleanup_target_repository_issue_worktree(
+        repository,
+        issue_number,
+    )
+    if cleanup_code != 0:
+        report = _maintenance_report(
+            "BLOCKED",
+            "codegen_publication_reconciliation",
+            [
+                f"source_issue={issue_number}",
+                f"target_publication_continuation_issue={continuation_issue}",
+                "reason=deferred_cleanup_failed",
+            ],
+            "not_met",
+        )
+        if cleanup_output.strip():
+            report = f"{report}\ncleanup_status=failed"
+        post_issue_comment(issue_number, report)
+        set_issue_label(issue_number, LABEL_WAITING_DEPENDENCY, LABEL_BLOCKED)
+        notify_task_finished(issue_number, "BLOCKED", report)
+        return True
+
+    report = _maintenance_report(
+        "DONE",
+        "codegen_publication_reconciliation",
+        [
+            f"source_issue={issue_number}",
+            f"target_publication_continuation_issue={continuation_issue}",
+            f"target_publication_repository={repository}",
+            f"target_publication_output_branch={source_state.get('target_publication_output_branch', '')}",
+            f"target_publication_base_sha={source_state.get('target_publication_base_sha', '')}",
+            f"target_publication_changed_files={','.join(changed_files)}",
+            "durable_publication_status=done",
+            "deferred_cleanup_status=done",
+            "reason=trusted_publication_receipt_verified",
+        ],
+        "met",
+    )
+    post_issue_comment(issue_number, report)
+    set_issue_label(issue_number, LABEL_WAITING_DEPENDENCY, LABEL_DONE)
+    notify_task_finished(issue_number, "DONE", report)
+    maybe_replenish_runner_queue_after_completion()
+    return True
+
+
 def _preflight_pr_refresh_metadata(
     body: str,
 ) -> tuple[PreflightPrRefreshRequest | None, str | None]:
@@ -11224,6 +11648,60 @@ def _safe_issue_publish_file_path(path: str) -> bool:
         and ".." not in relative_path.parts
         and _SAFE_CHANGED_FILE_RE.fullmatch(path) is not None
     )
+
+
+def _safe_issue_publish_allowed_scope(scope: str) -> bool:
+    if scope.endswith("/**"):
+        prefix = scope[:-3]
+        return (
+            prefix
+            and not prefix.endswith("/")
+            and _safe_issue_publish_file_path(f"{prefix}/__scope_marker__")
+        )
+    return _safe_issue_publish_file_path(scope)
+
+
+def _issue_publish_path_matches_allowed_scope(path: str, scope: str) -> bool:
+    if scope.endswith("/**"):
+        prefix = scope[:-3]
+        return path.startswith(f"{prefix}/") and path != f"{prefix}/"
+    return path == scope
+
+
+def _issue_publish_paths_within_allowed_scopes(
+    paths: tuple[str, ...] | list[str],
+    scopes: tuple[str, ...] | frozenset[str],
+) -> bool:
+    return all(
+        any(_issue_publish_path_matches_allowed_scope(path, scope) for scope in scopes)
+        for path in paths
+    )
+
+
+def _task_spec_allowed_files(body: str) -> tuple[str, ...]:
+    task_block = extract_task_block(body)
+    if task_block is None:
+        return ()
+    try:
+        parsed = yaml.safe_load(task_block)
+    except yaml.YAMLError:
+        return ()
+    if not isinstance(parsed, Mapping):
+        return ()
+    allowed_files = parsed.get("allowed_files")
+    if not isinstance(allowed_files, list):
+        return ()
+    scopes: list[str] = []
+    for item in allowed_files:
+        if not isinstance(item, str):
+            return ()
+        item = item.strip()
+        if not item or not _safe_issue_publish_allowed_scope(item):
+            return ()
+        scopes.append(item)
+    if len(set(scopes)) != len(scopes):
+        return ()
+    return tuple(scopes)
 
 
 def _issue_publish_allowed_files(metadata: str) -> tuple[frozenset[str], str | None]:
@@ -16679,6 +17157,8 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
         return
     labels = _issue_label_names(issue)
     if LABEL_WAITING_DEPENDENCY in labels and LABEL_READY not in labels:
+        if reconcile_codegen_publication_dependency(issue):
+            return
         run_due_codegen_recovery_for_issue(issue_number)
         return
 
@@ -17187,25 +17667,25 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
         else:
             finalized_report = finalize_success(issue, issue_workdir, codex_output)
         report = report_runner_lane(finalized_report, runner_task)
-        cleanup_runtime_artifacts(issue_workdir)
-        if local_target_worktree:
-            cleanup_code, cleanup_output = cleanup_target_repository_issue_worktree(
-                target_repository,
-                issue_number,
-            )
-        else:
-            cleanup_code, cleanup_output = cleanup_issue_worktree(
-                issue_number, coordinator_workdir
-            )
-        if cleanup_code != 0:
-            raise RuntimeError(
-                "Issue workspace cleanup failed:\n"
-                f"{cleanup_output.strip() or f'exit code {cleanup_code}'}"
-            )
         status = runner_report_status(report)
         if status == "BLOCKED":
             report = blocked_final_report(report)
             report = append_retry_fields(report, retry_decision)
+            cleanup_runtime_artifacts(issue_workdir)
+            if local_target_worktree:
+                cleanup_code, cleanup_output = cleanup_target_repository_issue_worktree(
+                    target_repository,
+                    issue_number,
+                )
+            else:
+                cleanup_code, cleanup_output = cleanup_issue_worktree(
+                    issue_number, coordinator_workdir
+                )
+            if cleanup_code != 0:
+                raise RuntimeError(
+                    "Issue workspace cleanup failed:\n"
+                    f"{cleanup_output.strip() or f'exit code {cleanup_code}'}"
+                )
         warning = record_runner_executor_result(
             issue_number,
             runner_task.target_project if runner_task is not None else "skeleton",
@@ -17216,48 +17696,138 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
         )
         report = append_memory_warning(report, warning or pickup_memory_warning)
         if status == "DONE":
-            try:
-                continuation = ensure_codegen_pr_validation_continuation(
-                    source_issue=issue_number,
-                    issue_body=issue_body,
-                    report=report,
-                )
-            except RuntimeError as exc:
-                reason = str(exc) or "publication_contract_failure"
-                status = "BLOCKED"
-                report = report_runner_lane(
-                    _maintenance_report(
-                        "BLOCKED",
-                        "codegen_publication_contract",
-                        [
-                            f"source_issue={issue_number}",
-                            f"reason={reason}",
-                            "telegram_notifications=0",
-                        ],
-                        "not_met",
-                    ),
-                    runner_task,
-                )
-                report = append_retry_fields(report, retry_decision)
-                warning = record_runner_executor_result(
-                    issue_number,
-                    runner_task.target_project if runner_task is not None else "skeleton",
-                    status,
-                    status,
-                    "codex",
-                    report,
-                )
-                report = append_memory_warning(report, warning or pickup_memory_warning)
-            else:
-                if continuation is not None:
-                    report = (
-                        f"{report.rstrip()}\n"
-                        f"validation_continuation={'created' if continuation.created else 'reused'}\n"
-                        f"validation_issue={continuation.issue_number or 'unknown'}\n"
-                        f"validation_pr={continuation.pr_number}\n"
-                        f"validation_head_sha={continuation.head_sha}\n"
-                        f"validation_base_sha={continuation.base_sha}"
+            if local_target_worktree and runner_task is not None:
+                try:
+                    publication = ensure_codegen_target_publication_continuation(
+                        source_issue=issue_number,
+                        runner_task=runner_task,
+                        report=report,
                     )
+                except RuntimeError as exc:
+                    reason = str(exc) or "publication_contract_failure"
+                    status = "BLOCKED"
+                    report = report_runner_lane(
+                        _maintenance_report(
+                            "BLOCKED",
+                            "codegen_publication_contract",
+                            [
+                                f"source_issue={issue_number}",
+                                f"reason={reason}",
+                                "telegram_notifications=0",
+                            ],
+                            "not_met",
+                        ),
+                        runner_task,
+                    )
+                    report = append_retry_fields(report, retry_decision)
+                    warning = record_runner_executor_result(
+                        issue_number,
+                        runner_task.target_project,
+                        status,
+                        status,
+                        "codex",
+                        report,
+                    )
+                    report = append_memory_warning(report, warning or pickup_memory_warning)
+                else:
+                    if publication is not None:
+                        report = (
+                            f"{report.rstrip()}\n"
+                            f"target_publication_continuation={'created' if publication.created else 'reused'}\n"
+                            f"target_publication_continuation_issue={publication.issue_number or 'unknown'}\n"
+                            f"target_publication_idempotency_key={publication.idempotency_key}\n"
+                            f"target_publication_project={publication.target_project}\n"
+                            f"target_publication_repository={publication.repository}\n"
+                            f"target_publication_output_branch={publication.output_branch}\n"
+                            f"target_publication_base_branch={publication.base_branch}\n"
+                            f"target_publication_base_sha={publication.base_sha}\n"
+                            f"target_publication_changed_files={','.join(publication.changed_files)}\n"
+                            "durable_publication_status=waiting_dependency"
+                        )
+                        warning = record_runner_executor_result(
+                            issue_number,
+                            publication.target_project,
+                            "WAITING_DEPENDENCY",
+                            "WAITING_DEPENDENCY",
+                            "codex",
+                            report,
+                        )
+                        report = append_memory_warning(report, warning)
+                        post_issue_comment(issue_number, report)
+                        set_issue_label(
+                            issue_number,
+                            LABEL_RUNNING,
+                            LABEL_WAITING_DEPENDENCY,
+                        )
+                        return
+                    cleanup_runtime_artifacts(issue_workdir)
+                    cleanup_code, cleanup_output = cleanup_target_repository_issue_worktree(
+                        target_repository,
+                        issue_number,
+                    )
+                    if cleanup_code != 0:
+                        raise RuntimeError(
+                            "Issue workspace cleanup failed:\n"
+                            f"{cleanup_output.strip() or f'exit code {cleanup_code}'}"
+                        )
+            else:
+                cleanup_runtime_artifacts(issue_workdir)
+                if local_target_worktree:
+                    cleanup_code, cleanup_output = cleanup_target_repository_issue_worktree(
+                        target_repository,
+                        issue_number,
+                    )
+                else:
+                    cleanup_code, cleanup_output = cleanup_issue_worktree(
+                        issue_number, coordinator_workdir
+                    )
+                if cleanup_code != 0:
+                    raise RuntimeError(
+                        "Issue workspace cleanup failed:\n"
+                        f"{cleanup_output.strip() or f'exit code {cleanup_code}'}"
+                    )
+                try:
+                    continuation = ensure_codegen_pr_validation_continuation(
+                        source_issue=issue_number,
+                        issue_body=issue_body,
+                        report=report,
+                    )
+                except RuntimeError as exc:
+                    reason = str(exc) or "publication_contract_failure"
+                    status = "BLOCKED"
+                    report = report_runner_lane(
+                        _maintenance_report(
+                            "BLOCKED",
+                            "codegen_publication_contract",
+                            [
+                                f"source_issue={issue_number}",
+                                f"reason={reason}",
+                                "telegram_notifications=0",
+                            ],
+                            "not_met",
+                        ),
+                        runner_task,
+                    )
+                    report = append_retry_fields(report, retry_decision)
+                    warning = record_runner_executor_result(
+                        issue_number,
+                        runner_task.target_project if runner_task is not None else "skeleton",
+                        status,
+                        status,
+                        "codex",
+                        report,
+                    )
+                    report = append_memory_warning(report, warning or pickup_memory_warning)
+                else:
+                    if continuation is not None:
+                        report = (
+                            f"{report.rstrip()}\n"
+                            f"validation_continuation={'created' if continuation.created else 'reused'}\n"
+                            f"validation_issue={continuation.issue_number or 'unknown'}\n"
+                            f"validation_pr={continuation.pr_number}\n"
+                            f"validation_head_sha={continuation.head_sha}\n"
+                            f"validation_base_sha={continuation.base_sha}"
+                        )
         post_issue_comment(issue_number, report)
         set_issue_label(
             issue_number,

@@ -105,6 +105,29 @@ contract declared `existing_pr` or `update_existing_pr`, a different produced PR
 is treated as a publication-contract failure; no validation continuation is
 created for the wrong PR.
 
+Cross-project codegen completion is also durable, but it waits on publication
+instead of PR validation. The source Codex issue keeps the target worktree and
+enters `runner:waiting-dependency` after a single idempotent
+`publish_target_project_issue_worktree_pr` continuation is created or reused.
+The continuation is bound to the selected target project/repository, source
+issue, output branch, exact base SHA, and exact actual changed files derived
+from the retained target worktree. Fenced `TaskSpec` scopes such as
+`home_edge/generative_visuals/**` and `tests/**` are accepted only for
+containment; the publisher receives exact paths only.
+
+Poll reconciliation consumes this dependency through trusted GitHub comments,
+not issue-controlled text. It locates the continuation from the trusted source
+report, reads continuation comments with author metadata, accepts evidence only
+from `trusted_runner_comment_authors()`, and requires the maintenance `DONE`
+receipt to match the target project, repository, source issue, output branch,
+base branch, base SHA, pushed head, target PR URL, and exact changed-file list.
+Pending, `BLOCKED`, malformed, untrusted, or mismatched receipts are quiet and
+non-terminal, so the existing retry/backoff policy on the maintenance
+continuation remains the recovery path. After a trusted exact match, cleanup is
+performed once and the source issue is marked `runner:done`; repeated
+reconciliation observes the terminal receipt and performs no duplicate
+continuation, PR, cleanup, DONE transition, or comment.
+
 For codegen tasks that declare `existing_pr` or `update_existing_pr` with an
 exact expected PR head SHA, the issue worktree is materialized from that verified
 PR head branch before Codex starts. Metadata mismatch fails closed before any

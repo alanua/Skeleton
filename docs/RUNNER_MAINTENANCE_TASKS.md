@@ -58,6 +58,31 @@ that points at a different parallel PR is treated as a bounded
 publication-contract failure for repair, and no validation continuation is
 created for the wrong PR.
 
+Cross-project codegen uses the existing registered target-project publisher; it
+does not add a second queue, scheduler, store, daemon, or direct Codex
+publication authority. The fenced `TaskSpec` `allowed_files` list is retained
+on the parsed Runner task and may contain exact safe paths plus bounded
+directory scopes ending in `/**`. After Codex returns a genuine `RESULT:DONE`
+with target-project worktree changes, the Runner reads the actual changed-file
+list from the retained worktree/report, proves every exact file is contained in
+the declared scopes, and creates or reuses exactly one
+`publish_target_project_issue_worktree_pr` continuation. That continuation
+receives only the exact actual changed files as `Allowed Files`; declared
+scopes such as `tests/**` are never represented as actual changed-file receipt
+content.
+
+The source issue is moved to `runner:waiting-dependency` after that publication
+continuation is created or reused. The target-project worktree is retained and
+the source is not marked `runner:done` at this point. Ordinary poll
+reconciliation locates the exact continuation, reads comments with author
+metadata, accepts only comments from `trusted_runner_comment_authors()`, and
+requires a `DONE` maintenance receipt bound to the exact target project,
+repository, source issue, output branch, base branch, base SHA, pushed head,
+target PR URL, and exact changed-file list. Pending, blocked, malformed,
+untrusted, or mismatched evidence leaves the source non-terminal and
+recoverable. Only after a trusted matching receipt does the Runner perform the
+deferred target worktree cleanup once and mark the source `runner:done`.
+
 `prepare_private_static_site_handoff` prepares a durable encrypted handoff for a
 private static web package. It requires exact operator approval and an artifact
 id:

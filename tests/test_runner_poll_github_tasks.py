@@ -1909,6 +1909,125 @@ def test_codegen_done_with_draft_pr_creates_exact_validation_continuation_once()
     assert f"idempotency_key: {idempotency_key}" in body
 
 
+def _target_codegen_issue_body(
+    *,
+    base_sha: str = HEAD_SHA,
+    allowed_files: tuple[str, ...] = (
+        "home_edge/generative_visuals/**",
+        "tests/**",
+        "README.md",
+    ),
+) -> str:
+    return "\n".join(
+        (
+            "Target Project: lumenflow",
+            "Selected Repository: alanua/LumenFlow",
+            "Base Branch: main",
+            f"Base SHA: {base_sha}",
+            "Expected Output: durable target publication",
+            "",
+            "```task",
+            "schema: skeleton.runner_task.v1",
+            "task_kind: code_generation",
+            "allowed_files:",
+            *[f"  - {path}" for path in allowed_files],
+            "payload:",
+            "  task: implement visuals",
+            "```",
+        )
+    )
+
+
+def test_fenced_task_spec_allowed_scopes_are_retained_without_top_level_duplicate() -> None:
+    task, reason = runner.extract_runner_task(_target_codegen_issue_body())
+
+    assert reason is None
+    assert task is not None
+    assert task.allowed_files == (
+        "home_edge/generative_visuals/**",
+        "tests/**",
+        "README.md",
+    )
+
+
+def test_target_publication_continuation_uses_exact_actual_changed_files() -> None:
+    task, _reason = runner.extract_runner_task(_target_codegen_issue_body())
+    assert task is not None
+    created_bodies: list[str] = []
+    report = (
+        f"{runner._LOCAL_WORKTREE_DONE_PREFIX}\n\n"
+        f"{runner._LOCAL_WORKTREE_BOUNDED_FINALIZATION_EVIDENCE}\n"
+        "Selected Project: lumenflow\n"
+        "Selected Repository: alanua/LumenFlow\n"
+        "Issue worktree: `/tmp/issue-3228`\n"
+        "Target-repo output: not created.\n\n"
+        "Local worktree changed files:\n"
+        "- home_edge/generative_visuals/app.mjs\n"
+        "- tests/generative_visuals.test.mjs\n\n"
+        "Local worktree git diff: none\n\n"
+        "Codex output:\n```\nRESULT: DONE\n```"
+    )
+
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        del cwd
+        if command[:3] == ["gh", "issue", "list"]:
+            return 0, "[]"
+        if command[:3] == ["gh", "issue", "create"]:
+            created_bodies.append(command[command.index("--body") + 1])
+            return 0, "https://github.com/alanua/Skeleton/issues/4001\n"
+        return 2, f"unexpected command: {command!r}"
+
+    with mock.patch.object(runner, "run_command", side_effect=run):
+        continuation = runner.ensure_codegen_target_publication_continuation(
+            source_issue=3228,
+            runner_task=task,
+            report=report,
+        )
+
+    assert continuation is not None
+    assert continuation.created is True
+    assert continuation.changed_files == (
+        "home_edge/generative_visuals/app.mjs",
+        "tests/generative_visuals.test.mjs",
+    )
+    body = created_bodies[0]
+    assert "Allowed Files:\n- home_edge/generative_visuals/app.mjs\n- tests/generative_visuals.test.mjs" in body
+    assert "home_edge/generative_visuals/**" not in body
+    assert f"Base SHA: {HEAD_SHA}" in body
+    assert f"Output Branch: runner/issue-3228" in body
+
+
+def test_target_publication_containment_blocks_before_continuation() -> None:
+    task, _reason = runner.extract_runner_task(_target_codegen_issue_body())
+    assert task is not None
+    report = (
+        f"{runner._LOCAL_WORKTREE_DONE_PREFIX}\n\n"
+        f"{runner._LOCAL_WORKTREE_BOUNDED_FINALIZATION_EVIDENCE}\n"
+        "Selected Project: lumenflow\n"
+        "Selected Repository: alanua/LumenFlow\n"
+        "Issue worktree: `/tmp/issue-3228`\n"
+        "Target-repo output: not created.\n\n"
+        "Local worktree changed files:\n"
+        "- home_edge/generative_visuals/app.mjs\n"
+        "- secrets.env\n\n"
+        "Local worktree git diff: none\n\n"
+        "Codex output:\n```\nRESULT: DONE\n```"
+    )
+
+    with mock.patch.object(runner, "run_command") as run:
+        with pytest.raises(
+            RuntimeError,
+            match="target_publication_changed_files_outside_allowed_scopes",
+        ):
+            runner.ensure_codegen_target_publication_continuation(
+                source_issue=3228,
+                runner_task=task,
+                report=report,
+            )
+
+    run.assert_not_called()
+
+
 def test_codegen_existing_pr_contract_rejects_parallel_pr_without_continuation() -> None:
     body = "\n".join(
         (
@@ -2142,6 +2261,231 @@ def test_update_existing_pr_process_publishes_same_pr_and_queues_validation(
     assert "validation_continuation=created" in report
     assert "validation_pr=2749" in report
     assert f"validation_head_sha={post_head}" in report
+
+
+def test_target_codegen_done_with_changes_waits_for_publication_without_cleanup(
+    tmp_path: Path,
+) -> None:
+    issue_path = tmp_path / "issue-3228"
+    issue = {
+        "number": 3228,
+        "title": "Cross project visuals",
+        "body": _target_codegen_issue_body(),
+        "comments": [],
+        "labels": [runner.LABEL_READY],
+    }
+    local_report = (
+        f"{runner._LOCAL_WORKTREE_DONE_PREFIX}\n\n"
+        f"{runner._LOCAL_WORKTREE_BOUNDED_FINALIZATION_EVIDENCE}\n"
+        "Selected Project: lumenflow\n"
+        "Selected Repository: alanua/LumenFlow\n"
+        f"Issue worktree: `{issue_path}`\n"
+        "Target-repo output: not created.\n\n"
+        "Local worktree changed files:\n"
+        "- home_edge/generative_visuals/app.mjs\n"
+        "- tests/generative_visuals.test.mjs\n\n"
+        "Local worktree git diff: none\n\n"
+        "Codex output:\n```\nRESULT: DONE\n```"
+    )
+
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        del cwd
+        if command[:3] == ["gh", "issue", "list"]:
+            return 0, "[]"
+        if command[:3] == ["gh", "issue", "create"]:
+            return 0, "https://github.com/alanua/Skeleton/issues/4001\n"
+        return 2, f"unexpected command: {command!r}"
+
+    with mock.patch.object(runner, "set_issue_label") as set_label, mock.patch.object(
+        runner,
+        "verify_target_repository_checkout",
+        return_value=None,
+    ), mock.patch.object(
+        runner,
+        "prepare_target_repository_issue_worktree",
+        return_value=(0, "ready", issue_path),
+    ), mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, "RESULT: DONE")
+    ), mock.patch.object(
+        runner, "finalize_local_worktree_success", return_value=local_report
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run
+    ), mock.patch.object(
+        runner, "cleanup_target_repository_issue_worktree", return_value=(0, "")
+    ) as cleanup_target, mock.patch.object(
+        runner, "post_issue_comment"
+    ) as post, mock.patch.object(
+        runner, "notify_task_finished"
+    ) as notify, mock.patch.object(
+        runner, "record_runner_task_picked_up", return_value=None
+    ), mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ):
+        runner.process_issue(issue, workdir=str(tmp_path))
+
+    cleanup_target.assert_not_called()
+    set_label.assert_any_call(3228, runner.LABEL_RUNNING, runner.LABEL_WAITING_DEPENDENCY)
+    notify.assert_not_called()
+    report = post.call_args.args[1]
+    assert "target_publication_continuation=created" in report
+    assert "target_publication_changed_files=home_edge/generative_visuals/app.mjs,tests/generative_visuals.test.mjs" in report
+    assert "durable_publication_status=waiting_dependency" in report
+
+
+def _trusted_comment(body: str, author: str = "github-actions[bot]") -> dict[str, object]:
+    return {"body": body, "author": {"login": author}}
+
+
+def _source_publication_wait_report(
+    *,
+    continuation_issue: int = 4001,
+    changed_files: str = "home_edge/generative_visuals/app.mjs,tests/generative_visuals.test.mjs",
+) -> str:
+    return "\n".join(
+        (
+            "DONE: source waiting for durable publication",
+            f"target_publication_continuation_issue={continuation_issue}",
+            "target_publication_idempotency_key=publish-target-project:alanua/LumenFlow:issue-3228:abc",
+            "target_publication_project=lumenflow",
+            "target_publication_repository=alanua/LumenFlow",
+            "target_publication_output_branch=runner/issue-3228",
+            "target_publication_base_branch=main",
+            f"target_publication_base_sha={HEAD_SHA}",
+            f"target_publication_changed_files={changed_files}",
+            "durable_publication_status=waiting_dependency",
+        )
+    )
+
+
+def _publication_done_receipt(**updates: str) -> str:
+    fields = {
+        "maintenance_task_id": runner.PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR,
+        "target_project": "lumenflow",
+        "repository": "alanua/LumenFlow",
+        "source_issue": "3228",
+        "base_branch": "main",
+        "expected_branch": "runner/issue-3228",
+        "verified_base_sha": HEAD_SHA,
+        "validated_publish_files_count": "2",
+        "validated_publish_files": "home_edge/generative_visuals/app.mjs,tests/generative_visuals.test.mjs",
+        "draft_pr_url": "https://github.com/alanua/LumenFlow/pull/77",
+        "pushed_head_sha": "b" * 40,
+        "success_criteria": "met",
+    }
+    fields.update(updates)
+    return "DONE: Runner host maintenance task completed.\n" + "\n".join(
+        f"{key}={value}" for key, value in fields.items()
+    )
+
+
+def test_reconcile_trusted_publication_receipt_marks_source_done_after_cleanup() -> None:
+    issue = {
+        "number": 3228,
+        "comments": [_trusted_comment(_source_publication_wait_report())],
+    }
+    continuation = {
+        "body": "continuation",
+        "labels": [{"name": runner.LABEL_AGENT_TASK}],
+        "comments": [_trusted_comment(_publication_done_receipt())],
+    }
+
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        del cwd
+        if command[:3] == ["gh", "issue", "view"]:
+            return 0, json.dumps(continuation)
+        return 2, f"unexpected command: {command!r}"
+
+    with mock.patch.object(runner, "run_command", side_effect=run), mock.patch.object(
+        runner, "cleanup_target_repository_issue_worktree", return_value=(0, "")
+    ) as cleanup, mock.patch.object(runner, "post_issue_comment") as post, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(
+        runner, "notify_task_finished"
+    ) as notify, mock.patch.object(
+        runner, "maybe_replenish_runner_queue_after_completion", return_value=True
+    ):
+        handled = runner.reconcile_codegen_publication_dependency(issue)
+
+    assert handled is True
+    cleanup.assert_called_once_with("alanua/LumenFlow", 3228)
+    set_label.assert_called_once_with(3228, runner.LABEL_WAITING_DEPENDENCY, runner.LABEL_DONE)
+    notify.assert_called_once()
+    assert "durable_publication_status=done" in post.call_args.args[1]
+
+
+def test_reconcile_untrusted_perfect_publication_receipt_is_ignored() -> None:
+    issue = {
+        "number": 3228,
+        "comments": [_trusted_comment(_source_publication_wait_report())],
+    }
+    continuation = {
+        "body": "continuation",
+        "labels": [{"name": runner.LABEL_AGENT_TASK}],
+        "comments": [_trusted_comment(_publication_done_receipt(), author="mallory")],
+    }
+
+    with mock.patch.object(
+        runner,
+        "run_command",
+        return_value=(0, json.dumps(continuation)),
+    ), mock.patch.object(
+        runner, "cleanup_target_repository_issue_worktree"
+    ) as cleanup, mock.patch.object(
+        runner, "post_issue_comment"
+    ) as post, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label:
+        handled = runner.reconcile_codegen_publication_dependency(issue)
+
+    assert handled is False
+    cleanup.assert_not_called()
+    post.assert_not_called()
+    set_label.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "updates",
+    (
+        {"repository": "alanua/Other"},
+        {"source_issue": "9999"},
+        {"verified_base_sha": "c" * 40},
+        {"expected_branch": "runner/issue-9999"},
+        {"pushed_head_sha": "not-a-sha"},
+        {"validated_publish_files": "home_edge/generative_visuals/app.mjs"},
+    ),
+)
+def test_reconcile_mismatched_trusted_publication_receipt_is_rejected(
+    updates: dict[str, str],
+) -> None:
+    issue = {
+        "number": 3228,
+        "comments": [_trusted_comment(_source_publication_wait_report())],
+    }
+    continuation = {
+        "body": "continuation",
+        "labels": [{"name": runner.LABEL_AGENT_TASK}],
+        "comments": [_trusted_comment(_publication_done_receipt(**updates))],
+    }
+
+    with mock.patch.object(
+        runner,
+        "run_command",
+        return_value=(0, json.dumps(continuation)),
+    ), mock.patch.object(
+        runner, "cleanup_target_repository_issue_worktree"
+    ) as cleanup, mock.patch.object(
+        runner, "post_issue_comment"
+    ) as post, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label:
+        handled = runner.reconcile_codegen_publication_dependency(issue)
+
+    assert handled is False
+    cleanup.assert_not_called()
+    post.assert_not_called()
+    set_label.assert_not_called()
 
 
 def test_update_existing_pr_head_mismatch_blocks_before_publish_or_new_pr(
