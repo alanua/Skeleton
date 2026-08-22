@@ -10,6 +10,7 @@ import platform
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -127,9 +128,67 @@ def _repository_run_command(
 RUNNER_SERVICE = "skeleton-runner-poll.service"
 RUNNER_TIMER = "skeleton-runner-poll.timer"
 _SUDO_BIN = "/usr/bin/sudo"
+_INSTALL_BIN = "/usr/bin/install"
+_GIT_BIN = "/usr/bin/git"
 _SYSTEMCTL_BIN = "/usr/bin/systemctl"
 HOME_EDGE_ENV_PREFIX = "SKELETON_HOME_EDGE_01_"
 HOME_EDGE_EXEC_HMAC_SECRET_ENV = "SKELETON_HOME_EDGE_EXEC_HMAC_SECRET"
+HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_TASK_ID = "home_edge_01_media_source_snapshot_v1"
+HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_REPOSITORY = "alanua/Skeleton"
+HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_TARGET = "home-edge-01"
+HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_INSTALLER_REL = Path(
+    "scripts/install_home_edge_media_source_snapshot_signer.sh"
+)
+HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PAYLOAD_REL = Path(
+    "scripts/home_edge_media_source_snapshot_signer_payload.py"
+)
+HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_WRAPPER_REL = Path(
+    "scripts/home_edge_media_source_snapshot_signer"
+)
+HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_CONTRACT_REL = Path(
+    "core/home_edge/media_source_snapshot.py"
+)
+HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_INSTALLER_BLOB_SHA = (
+    "7164529d2f037aea372aa87ed6a62cdb6c4142bb"
+)
+HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PAYLOAD_BLOB_SHA = (
+    "2c34196722db3d8bd4596917576a5653166c5e9b"
+)
+HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_WRAPPER_BLOB_SHA = (
+    "24620d9e9fe4f62c055113e6aeefb2d0984be2d5"
+)
+HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_CONTRACT_BLOB_SHA = (
+    "d734fdf7350e0de355851d47c837f12ab68d0878"
+)
+HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PROTECTED_INSTALLER = Path(
+    "/usr/local/libexec/skeleton/home-edge/media-source-snapshot-installer/"
+    "install_home_edge_media_source_snapshot_signer.sh"
+)
+HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PROTECTED_SIGNER = Path(
+    "/usr/local/libexec/skeleton/home-edge/media-source-snapshot/signer"
+)
+HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PROTECTED_PAYLOAD = Path(
+    "/usr/local/lib/skeleton/home-edge/media-source-snapshot/signer_payload.py"
+)
+HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PROTECTED_CONTRACT = Path(
+    "/usr/local/lib/skeleton/home-edge/media-source-snapshot/contract_source.py"
+)
+HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_INSTALL_TIMEOUT_SECONDS = 30
+HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_EXECUTE_TIMEOUT_SECONDS = 120
+HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_SIGNER_GATE_TIMEOUT_SECONDS = 10
+HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_MAX_INSTALLER_BYTES = 256 * 1024
+HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_MAX_PAYLOAD_BYTES = 128 * 1024
+HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_MAX_WRAPPER_BYTES = 16 * 1024
+HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_MAX_CONTRACT_BYTES = 256 * 1024
+_HOME_EDGE_SNAPSHOT_ALLOWED_FIELDS: Final = frozenset(
+    {
+        "Mode",
+        "Maintenance Task ID",
+        "Repository",
+        "Expected Main SHA",
+        "Target",
+    }
+)
 _FIXED_LOCAL_ACTIONS = frozenset(
     {
         "long_lived_poller_reload",
@@ -148,6 +207,12 @@ REGISTERED_REPOSITORY_MAINTENANCE_ACTIONS: Mapping[str, str] = {
 
 class RegisteredMaintenanceActionError(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class HomeEdgeSnapshotSignerInstallResult:
+    status: str
+    reason: str
 
 
 def _report(status: str, action_id: str, reason: str) -> str:
@@ -179,6 +244,121 @@ def _run_fixed(argv: list[str], *, timeout: int = 60, cwd: str | None = None) ->
         timeout=timeout,
         check=False,
     )
+
+
+def _git_blob_sha1(data: bytes) -> str:
+    header = f"blob {len(data)}\0".encode("ascii")
+    return hashlib.sha1(header + data, usedforsecurity=False).hexdigest()
+
+
+def _public_reason(reason: str) -> str:
+    return re.sub(r"[^A-Z0-9_]+", "_", reason.upper()).strip("_") or "BLOCKED"
+
+
+def _metadata_fields(body: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    duplicates: set[str] = set()
+    for raw_line in body.splitlines():
+        match = re.match(r"^\s*([A-Za-z][A-Za-z0-9 _-]{0,80}):\s*(.*?)\s*$", raw_line)
+        if match is None:
+            continue
+        field = match.group(1).strip()
+        value = match.group(2).strip()
+        if not value:
+            continue
+        if field in fields:
+            duplicates.add(field)
+        fields[field] = value
+    if duplicates:
+        raise RepositoryMaintenanceBlocked("DUPLICATE_RUNTIME_INPUT_FIELD")
+    unknown = sorted(set(fields) - _HOME_EDGE_SNAPSHOT_ALLOWED_FIELDS)
+    if unknown:
+        raise RepositoryMaintenanceBlocked("UNKNOWN_RUNTIME_INPUT_FIELD")
+    return fields
+
+
+def _expected_home_edge_snapshot_main_sha(body: str) -> str:
+    fields = _metadata_fields(body)
+    if fields.get("Mode") != "RUNTIME_MAINTENANCE_TASK":
+        raise RepositoryMaintenanceBlocked("RUNTIME_MODE_MISMATCH")
+    if fields.get("Maintenance Task ID") != HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_TASK_ID:
+        raise RepositoryMaintenanceBlocked("MAINTENANCE_TASK_ID_MISMATCH")
+    if fields.get("Repository") != HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_REPOSITORY:
+        raise RepositoryMaintenanceBlocked("REPOSITORY_MISMATCH")
+    if fields.get("Target") != HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_TARGET:
+        raise RepositoryMaintenanceBlocked("TARGET_MISMATCH")
+    expected = fields.get("Expected Main SHA", "")
+    if re.fullmatch(r"[0-9a-f]{40}", expected) is None:
+        raise RepositoryMaintenanceBlocked("EXPECTED_MAIN_SHA_MALFORMED")
+    return expected
+
+
+def _safe_source_bytes(path: Path, *, expected_blob: str, max_bytes: int) -> bytes:
+    try:
+        st_l = path.lstat()
+    except OSError as exc:
+        raise RepositoryMaintenanceBlocked("SOURCE_BLOB_UNAVAILABLE") from exc
+    if stat.S_ISLNK(st_l.st_mode) or not stat.S_ISREG(st_l.st_mode):
+        raise RepositoryMaintenanceBlocked("SOURCE_BLOB_UNSAFE")
+    if st_l.st_size <= 0 or st_l.st_size > max_bytes:
+        raise RepositoryMaintenanceBlocked("SOURCE_BLOB_SIZE_UNSAFE")
+    if stat.S_IMODE(st_l.st_mode) & 0o022:
+        raise RepositoryMaintenanceBlocked("SOURCE_BLOB_WRITABLE")
+    try:
+        data = path.read_bytes()
+        st_after = path.lstat()
+    except OSError as exc:
+        raise RepositoryMaintenanceBlocked("SOURCE_BLOB_UNAVAILABLE") from exc
+    if _file_stat_id(st_l) != _file_stat_id(st_after):
+        raise RepositoryMaintenanceBlocked("SOURCE_BLOB_CHANGED")
+    if _git_blob_sha1(data) != expected_blob:
+        raise RepositoryMaintenanceBlocked("SOURCE_BLOB_MISMATCH")
+    return data
+
+
+def _file_stat_id(st: os.stat_result) -> tuple[int, int | None, int | None, int | None, int | None, int, int]:
+    return (
+        st.st_mode,
+        getattr(st, "st_dev", None),
+        getattr(st, "st_ino", None),
+        getattr(st, "st_uid", None),
+        getattr(st, "st_gid", None),
+        st.st_size,
+        getattr(st, "st_mtime_ns", int(st.st_mtime * 1_000_000_000)),
+    )
+
+
+def _verify_protected_regular_file(
+    path: Path,
+    *,
+    expected_blob: str,
+    max_bytes: int,
+    executable: bool,
+) -> None:
+    try:
+        st_l = path.lstat()
+    except OSError as exc:
+        raise RepositoryMaintenanceBlocked("PROTECTED_COPY_UNAVAILABLE") from exc
+    mode = stat.S_IMODE(st_l.st_mode)
+    if stat.S_ISLNK(st_l.st_mode) or not stat.S_ISREG(st_l.st_mode):
+        raise RepositoryMaintenanceBlocked("PROTECTED_COPY_UNSAFE")
+    if getattr(st_l, "st_uid", None) != 0 or getattr(st_l, "st_gid", None) != 0:
+        raise RepositoryMaintenanceBlocked("PROTECTED_COPY_OWNERSHIP_MISMATCH")
+    if mode & 0o022:
+        raise RepositoryMaintenanceBlocked("PROTECTED_COPY_WRITABLE")
+    if executable and not (mode & 0o111):
+        raise RepositoryMaintenanceBlocked("PROTECTED_COPY_NOT_EXECUTABLE")
+    if st_l.st_size <= 0 or st_l.st_size > max_bytes:
+        raise RepositoryMaintenanceBlocked("PROTECTED_COPY_SIZE_UNSAFE")
+    try:
+        data = path.read_bytes()
+        st_after = path.lstat()
+    except OSError as exc:
+        raise RepositoryMaintenanceBlocked("PROTECTED_COPY_UNAVAILABLE") from exc
+    if _file_stat_id(st_l) != _file_stat_id(st_after):
+        raise RepositoryMaintenanceBlocked("PROTECTED_COPY_CHANGED")
+    if _git_blob_sha1(data) != expected_blob:
+        raise RepositoryMaintenanceBlocked("PROTECTED_COPY_BLOB_MISMATCH")
 
 
 def _recover_runner_timer() -> str:
@@ -925,6 +1105,193 @@ class RegisteredMaintenanceExecutor:
         if task_id is None:
             raise RegisteredMaintenanceActionError("REGISTERED_ACTION_NOT_ALLOWLISTED")
         return self.dispatch(task_id, self.workdir, body)
+
+    def install_home_edge_media_source_snapshot_signer(
+        self,
+        body: str,
+    ) -> HomeEdgeSnapshotSignerInstallResult:
+        try:
+            expected_main_sha = _expected_home_edge_snapshot_main_sha(body)
+            repo_root = self._verified_home_edge_snapshot_checkout(expected_main_sha)
+            installer_bytes = self._verified_home_edge_snapshot_source_blobs(repo_root)
+            staged = self._stage_home_edge_snapshot_installer(installer_bytes)
+            try:
+                copy = _run_fixed(
+                    [
+                        _SUDO_BIN,
+                        "-n",
+                        _INSTALL_BIN,
+                        "-D",
+                        "-o",
+                        "root",
+                        "-g",
+                        "root",
+                        "-m",
+                        "0555",
+                        str(staged),
+                        str(HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PROTECTED_INSTALLER),
+                    ],
+                    timeout=HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_INSTALL_TIMEOUT_SECONDS,
+                )
+                if copy.returncode != 0:
+                    return HomeEdgeSnapshotSignerInstallResult(
+                        "NEEDS_OPERATOR", "PRIVILEGE_UNAVAILABLE"
+                    )
+                _verify_protected_regular_file(
+                    HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PROTECTED_INSTALLER,
+                    expected_blob=HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_INSTALLER_BLOB_SHA,
+                    max_bytes=HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_MAX_INSTALLER_BYTES,
+                    executable=True,
+                )
+                execute = _run_fixed(
+                    [
+                        _SUDO_BIN,
+                        "-n",
+                        str(HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PROTECTED_INSTALLER),
+                        "--repo-root",
+                        str(repo_root),
+                    ],
+                    timeout=HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_EXECUTE_TIMEOUT_SECONDS,
+                )
+                if execute.returncode != 0:
+                    return HomeEdgeSnapshotSignerInstallResult(
+                        "NEEDS_OPERATOR", "INSTALLER_NEEDS_OPERATOR"
+                    )
+                self._verify_home_edge_snapshot_protected_runtime()
+                extra_argv = _run_fixed(
+                    [
+                        _SUDO_BIN,
+                        "-n",
+                        str(HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PROTECTED_SIGNER),
+                        "--unexpected-argv",
+                    ],
+                    timeout=HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_SIGNER_GATE_TIMEOUT_SECONDS,
+                )
+                if extra_argv.returncode == 0:
+                    return HomeEdgeSnapshotSignerInstallResult(
+                        "NEEDS_OPERATOR", "SIGNER_EXTRA_ARGV_ACCEPTED"
+                    )
+                return HomeEdgeSnapshotSignerInstallResult("DONE", "SIGNER_INSTALL_READY")
+            finally:
+                staged_parent = staged.parent
+                try:
+                    staged.unlink()
+                except FileNotFoundError:
+                    pass
+                try:
+                    staged_parent.rmdir()
+                except OSError:
+                    pass
+        except subprocess.TimeoutExpired:
+            return HomeEdgeSnapshotSignerInstallResult("NEEDS_OPERATOR", "PRIVILEGE_TIMEOUT")
+        except RepositoryMaintenanceBlocked as exc:
+            return HomeEdgeSnapshotSignerInstallResult("BLOCKED", _public_reason(exc.reason_code))
+        except Exception:
+            return HomeEdgeSnapshotSignerInstallResult("BLOCKED", "SIGNER_INSTALL_FAILED_CLOSED")
+
+    def _verified_home_edge_snapshot_checkout(self, expected_main_sha: str) -> Path:
+        workdir = Path(self.workdir)
+        if workdir.is_symlink():
+            raise RepositoryMaintenanceBlocked("CANONICAL_CHECKOUT_UNAVAILABLE")
+        repo_root = workdir.resolve()
+        if repo_root.is_symlink() or not (repo_root / ".git").exists():
+            raise RepositoryMaintenanceBlocked("CANONICAL_CHECKOUT_UNAVAILABLE")
+
+        def git(args: list[str]) -> str:
+            result = _run_fixed([_GIT_BIN, *args], timeout=30, cwd=str(repo_root))
+            if result.returncode != 0:
+                raise RepositoryMaintenanceBlocked("GIT_COMMAND_FAILED")
+            return result.stdout.strip()
+
+        origin = git(["config", "--get", "remote.origin.url"])
+        if origin not in {
+            "git@github.com:alanua/Skeleton.git",
+            "https://github.com/alanua/Skeleton.git",
+            "https://github.com/alanua/Skeleton",
+        }:
+            raise RepositoryMaintenanceBlocked("CANONICAL_ORIGIN_MISMATCH")
+        if git(["branch", "--show-current"]) != "main":
+            raise RepositoryMaintenanceBlocked("CANONICAL_BRANCH_MISMATCH")
+        head = git(["rev-parse", "HEAD^{commit}"])
+        main = git(["rev-parse", "main^{commit}"])
+        origin_main = git(["rev-parse", "origin/main^{commit}"])
+        if head != expected_main_sha or main != expected_main_sha or origin_main != expected_main_sha:
+            raise RepositoryMaintenanceBlocked("CANONICAL_MAIN_SHA_MISMATCH")
+        if git(["status", "--porcelain=v1", "--untracked-files=all"]):
+            raise RepositoryMaintenanceBlocked("CANONICAL_CHECKOUT_DIRTY")
+        return repo_root
+
+    def _verified_home_edge_snapshot_source_blobs(self, repo_root: Path) -> bytes:
+        installer = _safe_source_bytes(
+            repo_root / HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_INSTALLER_REL,
+            expected_blob=HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_INSTALLER_BLOB_SHA,
+            max_bytes=HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_MAX_INSTALLER_BYTES,
+        )
+        _safe_source_bytes(
+            repo_root / HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PAYLOAD_REL,
+            expected_blob=HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PAYLOAD_BLOB_SHA,
+            max_bytes=HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_MAX_PAYLOAD_BYTES,
+        )
+        _safe_source_bytes(
+            repo_root / HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_WRAPPER_REL,
+            expected_blob=HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_WRAPPER_BLOB_SHA,
+            max_bytes=HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_MAX_WRAPPER_BYTES,
+        )
+        _safe_source_bytes(
+            repo_root / HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_CONTRACT_REL,
+            expected_blob=HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_CONTRACT_BLOB_SHA,
+            max_bytes=HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_MAX_CONTRACT_BYTES,
+        )
+        return installer
+
+    def _stage_home_edge_snapshot_installer(self, installer_bytes: bytes) -> Path:
+        staging_dir = Path(tempfile.mkdtemp(prefix="skeleton-home-edge-snapshot-signer-"))
+        os.chmod(staging_dir, 0o700)
+        staged = staging_dir / HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_INSTALLER_REL.name
+        fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(installer_bytes)
+        except Exception:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
+        try:
+            st = staged.lstat()
+            if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+                raise RepositoryMaintenanceBlocked("STAGED_INSTALLER_UNSAFE")
+            if hasattr(os, "getuid") and getattr(st, "st_uid", None) != os.getuid():
+                raise RepositoryMaintenanceBlocked("STAGED_INSTALLER_OWNER_MISMATCH")
+            if stat.S_IMODE(st.st_mode) & 0o077:
+                raise RepositoryMaintenanceBlocked("STAGED_INSTALLER_MODE_MISMATCH")
+            if _git_blob_sha1(staged.read_bytes()) != HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_INSTALLER_BLOB_SHA:
+                raise RepositoryMaintenanceBlocked("STAGED_INSTALLER_BLOB_MISMATCH")
+            return staged
+        except Exception:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            raise
+
+    def _verify_home_edge_snapshot_protected_runtime(self) -> None:
+        _verify_protected_regular_file(
+            HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PROTECTED_PAYLOAD,
+            expected_blob=HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PAYLOAD_BLOB_SHA,
+            max_bytes=HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_MAX_PAYLOAD_BYTES,
+            executable=True,
+        )
+        _verify_protected_regular_file(
+            HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PROTECTED_SIGNER,
+            expected_blob=HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_WRAPPER_BLOB_SHA,
+            max_bytes=HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_MAX_WRAPPER_BYTES,
+            executable=True,
+        )
+        _verify_protected_regular_file(
+            HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PROTECTED_CONTRACT,
+            expected_blob=HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_CONTRACT_BLOB_SHA,
+            max_bytes=HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_MAX_CONTRACT_BYTES,
+            executable=False,
+        )
 
 
 def registered_maintenance_task_id(action_id: str) -> str:

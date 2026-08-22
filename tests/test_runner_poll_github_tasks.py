@@ -13,6 +13,7 @@ import pytest
 
 from scripts import runner_poll_github_tasks as runner
 from scripts import telegram_callback_poller as callback_poller
+import core.runner_repository_maintenance_executor as maintenance
 from core.secret_store import SecretReference
 from core.home_edge import debian_media_bootstrap as media_bootstrap
 from core.home_edge import media_source_snapshot
@@ -450,6 +451,7 @@ def test_home_edge_media_source_snapshot_is_allowlisted_and_dispatches_sanitized
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
+    install_bodies: list[str] = []
 
     def fake_read_sha(ref: str) -> str:
         assert ref in {"main", "origin/main"}
@@ -461,6 +463,15 @@ def test_home_edge_media_source_snapshot_is_allowlisted_and_dispatches_sanitized
         captured["github_main_sha"] = github_main_sha
         return _media_source_snapshot_receipt()
 
+    def fake_install(self: object, body: str):
+        install_bodies.append(body)
+        return maintenance.HomeEdgeSnapshotSignerInstallResult("DONE", "SIGNER_INSTALL_READY")
+
+    monkeypatch.setattr(
+        runner.RegisteredMaintenanceExecutor,
+        "install_home_edge_media_source_snapshot_signer",
+        fake_install,
+    )
     monkeypatch.setattr(runner, "_read_exact_git_sha", fake_read_sha)
     monkeypatch.setattr(
         media_source_snapshot,
@@ -490,6 +501,7 @@ def test_home_edge_media_source_snapshot_is_allowlisted_and_dispatches_sanitized
     assert "success_criteria=met" in report
     assert captured["registered_clean_main_sha"] == HEAD_SHA
     assert captured["github_main_sha"] == HEAD_SHA
+    assert install_bodies == [_media_source_snapshot_issue_body()]
     assert "/opt/skeleton/cast/app.py" not in report
     assert "private_source_b64" not in report
     assert "10.44.55.66" not in report
@@ -524,7 +536,35 @@ def test_home_edge_media_source_snapshot_malformed_input_blocks(
     )
 
     assert report.startswith("BLOCKED:")
-    assert "reason=unknown_runtime_input_field" in report
+    assert "reason=UNKNOWN_RUNTIME_INPUT_FIELD" in report
+
+
+def test_home_edge_media_source_snapshot_privilege_unavailable_skips_post_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_install(self: object, body: str):
+        return maintenance.HomeEdgeSnapshotSignerInstallResult("NEEDS_OPERATOR", "PRIVILEGE_UNAVAILABLE")
+
+    monkeypatch.setattr(
+        runner.RegisteredMaintenanceExecutor,
+        "install_home_edge_media_source_snapshot_signer",
+        fake_install,
+    )
+    monkeypatch.setattr(
+        media_source_snapshot,
+        "execute_media_source_snapshot_task",
+        lambda *_args, **_kwargs: pytest.fail("post-audit must not run without privilege"),
+    )
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1,
+        str(runner.ROOT),
+        _media_source_snapshot_issue_body(),
+    )
+
+    assert report.startswith("NEEDS_OPERATOR:")
+    assert "reason=PRIVILEGE_UNAVAILABLE" in report
+    assert "success_criteria=not_met" in report
 
 
 def _plain_done_message(issue_number: int = 129) -> str:

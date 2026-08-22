@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -33,6 +35,9 @@ from core.runner_task import RunnerTask
 from scripts import runner_poll_github_tasks as runner
 
 
+ROOT = Path(__file__).resolve().parents[1]
+
+
 def test_registered_executor_maps_only_fixed_actions() -> None:
     calls: list[tuple[str, str, str]] = []
     executor = RegisteredMaintenanceExecutor(
@@ -47,6 +52,302 @@ def test_registered_executor_maps_only_fixed_actions() -> None:
 def test_unregistered_action_fails_closed() -> None:
     with pytest.raises(RegisteredMaintenanceActionError):
         registered_maintenance_task_id("shell:rm")
+
+
+def _snapshot_issue_body(expected_sha: str = "a" * 40, *, extra: str = "") -> str:
+    lines = [
+        "Mode: RUNTIME_MAINTENANCE_TASK",
+        f"Maintenance Task ID: {maintenance.HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_TASK_ID}",
+        f"Repository: {maintenance.HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_REPOSITORY}",
+        f"Expected Main SHA: {expected_sha}",
+        f"Target: {maintenance.HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_TARGET}",
+    ]
+    if extra:
+        lines.append(extra)
+    return "\n".join(lines)
+
+
+def _snapshot_repo(tmp_path: Path, *, installer: bytes | None = None) -> Path:
+    repo = tmp_path / "Skeleton"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    for relative in (
+        maintenance.HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_INSTALLER_REL,
+        maintenance.HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PAYLOAD_REL,
+        maintenance.HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_WRAPPER_REL,
+        maintenance.HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_CONTRACT_REL,
+    ):
+        source = ROOT / relative
+        destination = repo / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if relative == maintenance.HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_INSTALLER_REL and installer is not None:
+            destination.write_bytes(installer)
+            os.chmod(destination, 0o755)
+        else:
+            shutil.copy2(source, destination)
+            os.chmod(destination, 0o755 if os.access(source, os.X_OK) else 0o644)
+    return repo
+
+
+def _install_git_and_sudo_runner(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    expected_sha: str = "a" * 40,
+    copy_returncode: int = 0,
+    execute_returncode: int = 0,
+    extra_argv_returncode: int = 2,
+) -> list[list[str]]:
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], *, timeout: int = 60, cwd: str | None = None):
+        calls.append(argv)
+        if argv[:2] == [maintenance._GIT_BIN, "config"]:
+            return subprocess.CompletedProcess(argv, 0, "https://github.com/alanua/Skeleton.git\n", "")
+        if argv[:2] == [maintenance._GIT_BIN, "branch"]:
+            return subprocess.CompletedProcess(argv, 0, "main\n", "")
+        if argv[:2] == [maintenance._GIT_BIN, "rev-parse"]:
+            return subprocess.CompletedProcess(argv, 0, expected_sha + "\n", "")
+        if argv[:2] == [maintenance._GIT_BIN, "status"]:
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if argv[:3] == [maintenance._SUDO_BIN, "-n", maintenance._INSTALL_BIN]:
+            staged = Path(argv[-2])
+            assert staged.is_file()
+            assert not staged.is_symlink()
+            assert maintenance._git_blob_sha1(staged.read_bytes()) == (
+                maintenance.HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_INSTALLER_BLOB_SHA
+            )
+            assert (staged.stat().st_mode & 0o777) == 0o600
+            return subprocess.CompletedProcess(argv, copy_returncode, "", "")
+        if argv[:3] == [
+            maintenance._SUDO_BIN,
+            "-n",
+            str(maintenance.HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PROTECTED_INSTALLER),
+        ]:
+            return subprocess.CompletedProcess(argv, execute_returncode, "DONE\n", "")
+        if argv[:3] == [
+            maintenance._SUDO_BIN,
+            "-n",
+            str(maintenance.HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PROTECTED_SIGNER),
+        ]:
+            return subprocess.CompletedProcess(argv, extra_argv_returncode, "", "")
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(maintenance, "_run_fixed", fake_run)
+    return calls
+
+
+def test_home_edge_snapshot_signer_primitive_uses_exact_copy_and_execute_argv(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repo = _snapshot_repo(tmp_path)
+    calls = _install_git_and_sudo_runner(monkeypatch)
+    protected_checks: list[Path] = []
+    monkeypatch.setattr(
+        maintenance,
+        "_verify_protected_regular_file",
+        lambda path, **_kwargs: protected_checks.append(path),
+    )
+
+    result = RegisteredMaintenanceExecutor(lambda *_args: "BLOCKED", str(repo)).install_home_edge_media_source_snapshot_signer(
+        _snapshot_issue_body()
+    )
+
+    assert result == maintenance.HomeEdgeSnapshotSignerInstallResult("DONE", "SIGNER_INSTALL_READY")
+    copy_calls = [call for call in calls if call[:3] == [maintenance._SUDO_BIN, "-n", maintenance._INSTALL_BIN]]
+    assert len(copy_calls) == 1
+    assert copy_calls[0][3:9] == ["-D", "-o", "root", "-g", "root", "-m"]
+    assert copy_calls[0][9] == "0555"
+    assert copy_calls[0][-1] == str(maintenance.HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PROTECTED_INSTALLER)
+    staged = Path(copy_calls[0][-2])
+    assert not staged.exists()
+    assert not staged.parent.exists()
+    assert [
+        maintenance._SUDO_BIN,
+        "-n",
+        str(maintenance.HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PROTECTED_INSTALLER),
+        "--repo-root",
+        str(repo),
+    ] in calls
+    assert [
+        maintenance._SUDO_BIN,
+        "-n",
+        str(maintenance.HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PROTECTED_SIGNER),
+        "--unexpected-argv",
+    ] in calls
+    assert protected_checks == [
+        maintenance.HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PROTECTED_INSTALLER,
+        maintenance.HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PROTECTED_PAYLOAD,
+        maintenance.HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PROTECTED_SIGNER,
+        maintenance.HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PROTECTED_CONTRACT,
+    ]
+
+
+def test_home_edge_snapshot_signer_rejects_arbitrary_fields_before_sudo(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repo = _snapshot_repo(tmp_path)
+    calls = _install_git_and_sudo_runner(monkeypatch)
+
+    result = RegisteredMaintenanceExecutor(lambda *_args: "BLOCKED", str(repo)).install_home_edge_media_source_snapshot_signer(
+        _snapshot_issue_body(extra="Path: /tmp/evil")
+    )
+
+    assert result.status == "BLOCKED"
+    assert result.reason == "UNKNOWN_RUNTIME_INPUT_FIELD"
+    assert not any(call[0] == maintenance._SUDO_BIN for call in calls)
+
+
+@pytest.mark.parametrize(
+    ("git_status", "reason"),
+    [
+        ("wrong_branch", "CANONICAL_BRANCH_MISMATCH"),
+        ("wrong_main", "CANONICAL_MAIN_SHA_MISMATCH"),
+        ("dirty", "CANONICAL_CHECKOUT_DIRTY"),
+    ],
+)
+def test_home_edge_snapshot_signer_blocks_stale_or_dirty_checkout_before_sudo(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, git_status: str, reason: str
+) -> None:
+    repo = _snapshot_repo(tmp_path)
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], *, timeout: int = 60, cwd: str | None = None):
+        calls.append(argv)
+        if argv[:2] == [maintenance._GIT_BIN, "config"]:
+            return subprocess.CompletedProcess(argv, 0, "https://github.com/alanua/Skeleton.git\n", "")
+        if argv[:2] == [maintenance._GIT_BIN, "branch"]:
+            branch = "runner/issue" if git_status == "wrong_branch" else "main"
+            return subprocess.CompletedProcess(argv, 0, branch + "\n", "")
+        if argv[:2] == [maintenance._GIT_BIN, "rev-parse"]:
+            sha = "b" * 40 if git_status == "wrong_main" else "a" * 40
+            return subprocess.CompletedProcess(argv, 0, sha + "\n", "")
+        if argv[:2] == [maintenance._GIT_BIN, "status"]:
+            output = " M file\n" if git_status == "dirty" else ""
+            return subprocess.CompletedProcess(argv, 0, output, "")
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(maintenance, "_run_fixed", fake_run)
+    result = RegisteredMaintenanceExecutor(lambda *_args: "BLOCKED", str(repo)).install_home_edge_media_source_snapshot_signer(
+        _snapshot_issue_body()
+    )
+
+    assert result == maintenance.HomeEdgeSnapshotSignerInstallResult("BLOCKED", reason)
+    assert not any(call[0] == maintenance._SUDO_BIN for call in calls)
+
+
+def test_home_edge_snapshot_signer_blocks_blob_mismatch_before_sudo(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repo = _snapshot_repo(tmp_path, installer=b"tampered\n")
+    calls = _install_git_and_sudo_runner(monkeypatch)
+
+    result = RegisteredMaintenanceExecutor(lambda *_args: "BLOCKED", str(repo)).install_home_edge_media_source_snapshot_signer(
+        _snapshot_issue_body()
+    )
+
+    assert result.status == "BLOCKED"
+    assert result.reason == "SOURCE_BLOB_MISMATCH"
+    assert not any(call[0] == maintenance._SUDO_BIN for call in calls)
+
+
+def test_home_edge_snapshot_signer_blocks_source_symlink_before_sudo(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repo = _snapshot_repo(tmp_path)
+    installer = repo / maintenance.HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_INSTALLER_REL
+    installer.unlink()
+    installer.symlink_to(ROOT / maintenance.HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_INSTALLER_REL)
+    calls = _install_git_and_sudo_runner(monkeypatch)
+
+    result = RegisteredMaintenanceExecutor(lambda *_args: "BLOCKED", str(repo)).install_home_edge_media_source_snapshot_signer(
+        _snapshot_issue_body()
+    )
+
+    assert result.status == "BLOCKED"
+    assert result.reason == "SOURCE_BLOB_UNSAFE"
+    assert not any(call[0] == maintenance._SUDO_BIN for call in calls)
+
+
+def test_home_edge_snapshot_signer_copy_unavailable_does_not_execute_installer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repo = _snapshot_repo(tmp_path)
+    calls = _install_git_and_sudo_runner(monkeypatch, copy_returncode=1)
+
+    result = RegisteredMaintenanceExecutor(lambda *_args: "BLOCKED", str(repo)).install_home_edge_media_source_snapshot_signer(
+        _snapshot_issue_body()
+    )
+
+    assert result == maintenance.HomeEdgeSnapshotSignerInstallResult("NEEDS_OPERATOR", "PRIVILEGE_UNAVAILABLE")
+    assert not any(
+        call[:3]
+        == [
+            maintenance._SUDO_BIN,
+            "-n",
+            str(maintenance.HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PROTECTED_INSTALLER),
+        ]
+        for call in calls
+    )
+
+
+def test_home_edge_snapshot_signer_protected_hash_mismatch_does_not_execute_installer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repo = _snapshot_repo(tmp_path)
+    calls = _install_git_and_sudo_runner(monkeypatch)
+
+    def fake_protected(_path: Path, **_kwargs: object) -> None:
+        raise maintenance.RepositoryMaintenanceBlocked("PROTECTED_COPY_BLOB_MISMATCH")
+
+    monkeypatch.setattr(maintenance, "_verify_protected_regular_file", fake_protected)
+    result = RegisteredMaintenanceExecutor(lambda *_args: "BLOCKED", str(repo)).install_home_edge_media_source_snapshot_signer(
+        _snapshot_issue_body()
+    )
+
+    assert result == maintenance.HomeEdgeSnapshotSignerInstallResult("BLOCKED", "PROTECTED_COPY_BLOB_MISMATCH")
+    assert not any(
+        call[:3]
+        == [
+            maintenance._SUDO_BIN,
+            "-n",
+            str(maintenance.HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PROTECTED_INSTALLER),
+        ]
+        for call in calls
+    )
+
+
+def test_home_edge_snapshot_signer_installer_failure_has_no_retry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repo = _snapshot_repo(tmp_path)
+    calls = _install_git_and_sudo_runner(monkeypatch, execute_returncode=2)
+    monkeypatch.setattr(maintenance, "_verify_protected_regular_file", lambda _path, **_kwargs: None)
+
+    result = RegisteredMaintenanceExecutor(lambda *_args: "BLOCKED", str(repo)).install_home_edge_media_source_snapshot_signer(
+        _snapshot_issue_body()
+    )
+
+    assert result == maintenance.HomeEdgeSnapshotSignerInstallResult("NEEDS_OPERATOR", "INSTALLER_NEEDS_OPERATOR")
+    execute_calls = [
+        call
+        for call in calls
+        if call[:3]
+        == [
+            maintenance._SUDO_BIN,
+            "-n",
+            str(maintenance.HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PROTECTED_INSTALLER),
+        ]
+    ]
+    assert len(execute_calls) == 1
+    assert not any(
+        call[:3]
+        == [
+            maintenance._SUDO_BIN,
+            "-n",
+            str(maintenance.HOME_EDGE_MEDIA_SOURCE_SNAPSHOT_PROTECTED_SIGNER),
+        ]
+        for call in calls
+    )
 
 
 def test_codegen_runtime_recovery_pins_and_verifies_exact_version(monkeypatch) -> None:

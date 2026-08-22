@@ -15467,6 +15467,16 @@ def home_edge_01_media_source_snapshot_v1(body: str) -> str:
             success_criteria_met,
         )
 
+        install_result = RegisteredMaintenanceExecutor(
+            dispatch_runtime_maintenance_task, str(ROOT)
+        ).install_home_edge_media_source_snapshot_signer(body)
+        if install_result.status != "DONE":
+            return _maintenance_report(
+                install_result.status,
+                task_id,
+                [f"reason={install_result.reason}"],
+                "not_met",
+            )
         registered_sha = _read_exact_git_sha("main")
         github_sha = _read_exact_git_sha("origin/main")
         receipt = execute_media_source_snapshot_task(

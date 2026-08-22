@@ -217,6 +217,40 @@ environment values, or OpenSSL/Tailscale diagnostic output.
 Every privileged host command uses non-interactive `sudo -n`; the Runner must
 block instead of waiting for operator input.
 
+`home_edge_01_media_source_snapshot_v1` first performs a fixed signer
+installation preflight before the existing read-only snapshot audit. The
+preflight accepts only the task's allowlisted metadata fields and independently
+verifies the canonical `alanua/Skeleton` checkout is clean, on exact current
+`main`, and matches `origin/main` plus the issue's expected main SHA. It then
+verifies the exact reviewed Git blobs for the installer, signer payload, signer
+wrapper, and Python contract.
+
+The only privileged copy is the fixed non-shell argv:
+
+```text
+/usr/bin/sudo -n /usr/bin/install -D -o root -g root -m 0555 <private-verified-staged-installer> /usr/local/libexec/skeleton/home-edge/media-source-snapshot-installer/install_home_edge_media_source_snapshot_signer.sh
+```
+
+The staged installer is a private agent-owned regular file containing only the
+verified installer bytes and is removed after the attempt. If sudo policy does
+not permit the exact copy, the task reports `NEEDS_OPERATOR` with
+`PRIVILEGE_UNAVAILABLE` and performs no fallback.
+
+After copying, the Runner re-reads the protected installer and requires
+root:root ownership, no group/world write bit, regular-file type, and the exact
+approved installer blob before executing exactly:
+
+```text
+/usr/bin/sudo -n /usr/local/libexec/skeleton/home-edge/media-source-snapshot-installer/install_home_edge_media_source_snapshot_signer.sh --repo-root <verified-canonical-checkout>
+```
+
+There is no generic sudo, shell, SSH, command, argv, path, user, service, host,
+or package interface. Timeout, nonzero, or ambiguous privileged results fail
+closed without automatic retry. After installer success, the Runner re-verifies
+the protected payload, wrapper, and contract pins, verifies the signer rejects
+extra argv, and then reuses the existing read-only snapshot post-audit before
+reporting `DONE`.
+
 `ensure_telegram_callback_local_config` may only:
 
 1. Create `/etc/skeleton-runner.env` if it is missing without reading config
