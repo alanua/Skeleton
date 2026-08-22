@@ -3,49 +3,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import time
-from pathlib import Path
-from typing import Callable, Mapping, Any
 
-from core.family_document_calendar import SchedulerFamilyDocumentCalendar
-from core.family_document_local_inference import load_exact_subject_aliases
-from core.family_document_runtime import FamilyDocumentReceiptOutbox, FamilyDocumentRuntime
-from core.family_document_sinks import VerifiedMemoryGatewayFamilyDocumentArchive
-from core.family_document_sources import LocalDirectoryDocumentSource
-from core.family_document_taxonomy import classify_family_document_text
-from core.memory_gateway import MemoryGateway, capability_token
-from core.memory_gateway_storage import PrivateMemoryGatewayStorage
-from core.private_memory_stack import PrivateMemoryStack
-from core.scheduler_store import SchedulerStore
-
-
-_DEFAULT_SCHEDULER_DB = "/var/lib/skeleton/scheduler/scheduler.sqlite3"
-
-
-def _local_classifier() -> Callable[[str], Mapping[str, Any]] | None:
-    aliases_file = os.environ.get("SKELETON_FAMILY_SUBJECT_ALIASES_FILE", "").strip()
-    if not aliases_file:
-        return None
-    aliases = load_exact_subject_aliases(aliases_file)
-    return lambda text: classify_family_document_text(text, aliases)
-
-
-def _canonical_gateway() -> MemoryGateway:
-    stack = PrivateMemoryStack()
-    if not stack.paths.db.is_file():
-        raise SystemExit("canonical_private_memory_unavailable")
-    return MemoryGateway(
-        capability_token(namespaces=("skeleton",), public_mode=False),
-        private_memory_storage=PrivateMemoryGatewayStorage(stack),
-    )
-
-
-def _canonical_calendar() -> SchedulerFamilyDocumentCalendar:
-    path = Path(os.environ.get("SKELETON_SCHEDULER_DB", _DEFAULT_SCHEDULER_DB)).expanduser()
-    if not path.is_file():
-        raise SystemExit("canonical_scheduler_unavailable")
-    return SchedulerFamilyDocumentCalendar(SchedulerStore(path))
+from core.home_edge.family_document_production import (
+    build_family_document_production_runtime,
+    config_from_args,
+)
 
 
 def main() -> int:
@@ -57,12 +20,8 @@ def main() -> int:
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
 
-    runtime = FamilyDocumentRuntime(
-        source=LocalDirectoryDocumentSource(Path(args.inbox)),
-        archive_sink=VerifiedMemoryGatewayFamilyDocumentArchive(Path(args.archive), _canonical_gateway()),
-        outbox=FamilyDocumentReceiptOutbox(Path(args.outbox_db)),
-        classifier=_local_classifier(),
-        calendar=_canonical_calendar(),
+    runtime = build_family_document_production_runtime(
+        config_from_args(inbox=args.inbox, archive=args.archive, outbox_db=args.outbox_db)
     )
     while True:
         print(json.dumps(runtime.scan_once(), sort_keys=True), flush=True)

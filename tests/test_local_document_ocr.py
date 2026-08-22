@@ -64,6 +64,23 @@ def test_office_uses_local_conversion_path(tmp_path, monkeypatch) -> None:
     assert result.page_count == 4
 
 
+def test_dependency_preflight_reports_missing_provider(monkeypatch) -> None:
+    monkeypatch.setattr(ocr, "PDFTOTEXT", sys.executable)
+    monkeypatch.setattr(ocr, "PDFINFO", "/missing/pdfinfo")
+    monkeypatch.setattr(ocr, "OCRMY_PDF", "/missing/ocrmypdf")
+
+    status = ocr.local_ocr_dependency_status(suffixes=(".pdf",))
+
+    assert status["status"] == "MISSING"
+    assert status["missing"] == ["ocrmypdf", "pdfinfo"]
+
+
+def test_dependency_preflight_accepts_text_without_external_provider() -> None:
+    status = ocr.require_local_ocr_dependencies(suffixes=(".txt",))
+
+    assert status["status"] == "READY"
+
+
 def test_bounded_provider_nonzero_fails_closed() -> None:
     with pytest.raises(LocalDocumentOcrError, match="provider failed"):
         ocr._run((sys.executable, "-c", "raise SystemExit(3)"), timeout=5, max_output=1024)
