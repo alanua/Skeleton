@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from contextvars import ContextVar
 import csv
 from dataclasses import dataclass
+import fcntl
 import hashlib
 import hmac
 import json
@@ -337,6 +338,9 @@ HOME_EDGE_AUDIT_PERSIST_V1 = "home_edge_audit_persist_v1"
 HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1 = "home_edge_01_debian_media_bootstrap_v1"
 HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1 = "home_edge_01_post_migration_reconcile_v1"
 HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1 = "home_edge_01_media_source_snapshot_v1"
+HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1 = (
+    "home_edge_01_media_source_snapshot_signer_install_v1"
+)
 MAIL_GMAIL_PRIMARY_REGISTERED_ACTIVATION = "mail_gmail_primary_registered_activation_v1"
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
@@ -383,6 +387,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1,
         HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1,
         HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1,
+        HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1,
         BUILD_AND_LOCAL_OTA_OPERATION,
         PREPARE_PRIVATE_STATIC_SITE_HANDOFF,
         DEPLOY_PRIVATE_STATIC_SITE,
@@ -445,6 +450,7 @@ PROTECTED_MAINTENANCE_TASK_IDS = frozenset(
         BUILD_AUFMASS_PRIVATE_AREA_SCHEDULE,
         QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES,
         REPLENISH_RUNNER_QUEUE,
+        HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1,
     )
 )
 CONTAINER_VALIDATION_SOURCE_ISSUE = 1667
@@ -716,11 +722,13 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "excluded_secret_like_count",
         "external_side_effects_executed",
         "exact_base_changed_files_count",
+        "exact_main_sha",
         "evidence_ref",
         "existing_pr_lookup",
         "existing_pr_url",
         "expected_branch",
         "expected_head_sha",
+        "expected_main_sha_match",
         "expected_pr_head_branch",
         "expected_pr_head_sha",
         "expected_source_branch",
@@ -754,7 +762,11 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "input_row_count",
         "input_table_count",
         "installed_skill_platform_count",
+        "install_done_auto_snapshot",
         "inventory_schema",
+        "installer_blob_mode",
+        "installer_blob_sha",
+        "installer_sha256",
         "issue_number",
         "issue_worktree",
         "issue_worktree_id",
@@ -777,6 +789,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "missing_dependency_module",
         "mode",
         "model_credentials_removed_from_smoke",
+        "merge_status",
         "mutation_mode",
         "durable_handoff_status",
         "network_disabled",
@@ -840,6 +853,10 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "protected_worktrees_count",
         "protected_changed_file",
         "protected_changed_files_count",
+        "protected_installer_post_sha256_match",
+        "protected_installer_pre_sha256_match",
+        "protected_invocation",
+        "privileged_source",
         "pushed_head_sha",
         "public_safe_report_ok",
         "quality_score",
@@ -848,6 +865,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "recovery_packet",
         "python_version",
         "python_parse_status",
+        "pr_3183",
         "reason",
         "recovery_artifact_status",
         "recovery_ref_status",
@@ -901,10 +919,13 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "source_pack_id",
         "source_pack_warning_count",
         "source_sha256",
+        "snapshot_route",
         "source_version_marker",
         "source_token_count",
         "sourcepack_note",
         "schema",
+        "sealed_memfd_mutation_attempts",
+        "sealed_memfd_status",
         "status",
         "status_token",
         "ciphertext_sha256_match",
@@ -969,6 +990,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "validation_initial_status",
         "validation_output_tail",
         "version",
+        "descriptor_harness",
+        "descriptor_lifetime_after_parent_close",
         "validation_profile",
         "validation_state",
         "validation_receipt_issue",
@@ -5419,6 +5442,8 @@ def _sanitize_maintenance_status_lines(status_lines: list[str]) -> list[str]:
 
 
 def _maintenance_status_value_is_safe(key: str, value: str) -> bool:
+    if key == "privileged_source":
+        return re.fullmatch(r"/proc/[1-9][0-9]*/fd/[0-9]+", value) is not None
     if (
         not value
         or "=" in value
@@ -15497,6 +15522,335 @@ def home_edge_01_media_source_snapshot_v1(body: str) -> str:
         )
 
 
+_SIGNER_INSTALL_APPROVAL = "SEMANTIC_EXACT_HEAD_REVIEW_THEN_FULL_VALIDATION_THEN_OPERATOR_APPROVAL"
+_SIGNER_INSTALLER_REL = "scripts/install_home_edge_media_source_snapshot_signer.sh"
+_SIGNER_PROTECTED_INSTALLER = Path(
+    "/usr/local/libexec/skeleton/home-edge/media-source-snapshot-installer/"
+    "install_home_edge_media_source_snapshot_signer.sh"
+)
+_SIGNER_INSTALL_INPUT_FIELDS = frozenset(
+    (
+        "Mode",
+        "Maintenance Task ID",
+        "Repository",
+        "Expected Main SHA",
+        "Operator Approval",
+    )
+)
+_SIGNER_INSTALL_SEAL_FLAGS = (
+    fcntl.F_SEAL_WRITE
+    | fcntl.F_SEAL_GROW
+    | fcntl.F_SEAL_SHRINK
+    | fcntl.F_SEAL_SEAL
+)
+
+
+def _run_binary_command(
+    args: list[str],
+    cwd: str | Path | None = None,
+    *,
+    timeout: int | None = None,
+) -> tuple[int, bytes, bytes]:
+    result = subprocess.run(
+        args,
+        cwd=str(cwd) if cwd is not None else None,
+        check=False,
+        capture_output=True,
+        text=False,
+        timeout=timeout,
+    )
+    return result.returncode, result.stdout, result.stderr
+
+
+def _git_blob_sha_from_bytes(data: bytes) -> str:
+    header = b"blob " + str(len(data)).encode("ascii") + b"\0"
+    return hashlib.sha1(header + data, usedforsecurity=False).hexdigest()
+
+
+def _home_edge_signer_install_input(
+    body: str,
+) -> tuple[dict[str, str] | None, str | None]:
+    metadata = (body or "").strip()
+    if "```" in metadata:
+        return None, "signer_install_fenced_input_not_allowed"
+    parsed: dict[str, str] = {}
+    for raw_line in metadata.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = re.fullmatch(
+            r"(?P<field>[A-Za-z][A-Za-z0-9 ]*):\s*(?P<value>\S(?:.*\S)?)",
+            line,
+        )
+        if match is None:
+            return None, "signer_install_noncanonical_input"
+        field = match.group("field")
+        if field not in _SIGNER_INSTALL_INPUT_FIELDS:
+            return None, "signer_install_unknown_input_field"
+        if field in parsed:
+            return None, "signer_install_duplicate_input_field"
+        parsed[field] = match.group("value")
+
+    if set(parsed) != _SIGNER_INSTALL_INPUT_FIELDS:
+        return None, "signer_install_required_input_missing"
+    if parsed["Mode"] != RUNTIME_MAINTENANCE_MODE:
+        return None, "signer_install_mode_mismatch"
+    if parsed["Maintenance Task ID"] != HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1:
+        return None, "signer_install_task_id_mismatch"
+    if parsed["Repository"] != REPO:
+        return None, "signer_install_repository_mismatch"
+    if _HEAD_SHA_RE.fullmatch(parsed["Expected Main SHA"]) is None:
+        return None, "signer_install_expected_main_sha_invalid"
+    if parsed["Operator Approval"] != _SIGNER_INSTALL_APPROVAL:
+        return None, "signer_install_operator_approval_missing"
+    return parsed, None
+
+
+def _signer_installer_blob_at_exact_main(expected_main_sha: str) -> tuple[str, str]:
+    head_sha = _read_exact_git_sha("main")
+    origin_main_sha = _read_exact_git_sha("origin/main")
+    if head_sha != expected_main_sha or origin_main_sha != expected_main_sha:
+        raise ValueError("expected_main_sha_mismatch")
+
+    code, output = run_command(
+        ["git", "ls-tree", expected_main_sha, _SIGNER_INSTALLER_REL],
+        cwd=ROOT,
+    )
+    line = output.strip()
+    match = re.fullmatch(
+        rf"(?P<mode>100755) blob (?P<blob>[0-9a-f]{{40}})\t{re.escape(_SIGNER_INSTALLER_REL)}",
+        line,
+    )
+    if code != 0 or match is None:
+        raise ValueError("protected_installer_blob_not_exact_executable")
+    return head_sha, match.group("blob")
+
+
+def _read_verified_git_blob_bytes(blob_sha: str) -> tuple[bytes, str]:
+    code, stdout, _stderr = _run_binary_command(
+        ["git", "cat-file", "blob", blob_sha],
+        cwd=ROOT,
+    )
+    if code != 0 or not stdout:
+        raise ValueError("installer_blob_unavailable")
+    if _git_blob_sha_from_bytes(stdout) != blob_sha:
+        raise ValueError("installer_blob_identity_mismatch")
+    return stdout, hashlib.sha256(stdout).hexdigest()
+
+
+def _sealed_memfd_from_bytes(data: bytes) -> tuple[int, str]:
+    fd = os.memfd_create(
+        "skeleton-home-edge-snapshot-signer-installer",
+        os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING,
+    )
+    try:
+        os.write(fd, data)
+        os.lseek(fd, 0, os.SEEK_SET)
+        fcntl.fcntl(fd, fcntl.F_ADD_SEALS, _SIGNER_INSTALL_SEAL_FLAGS)
+        active = fcntl.fcntl(fd, fcntl.F_GET_SEALS)
+        if (active & _SIGNER_INSTALL_SEAL_FLAGS) != _SIGNER_INSTALL_SEAL_FLAGS:
+            raise ValueError("sealed_descriptor_missing_required_seals")
+        return fd, f"/proc/{os.getpid()}/fd/{fd}"
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _sealed_memfd_mutation_attempts_fail(fd: int, size: int) -> bool:
+    failures = 0
+    for attempt in (
+        lambda: os.write(fd, b"x"),
+        lambda: os.ftruncate(fd, max(0, size - 1)),
+        lambda: os.ftruncate(fd, size + 1),
+    ):
+        try:
+            attempt()
+        except OSError:
+            failures += 1
+    os.lseek(fd, 0, os.SEEK_SET)
+    return failures == 3
+
+
+def _prove_parent_owned_descriptor_lifetime(
+    fd: int,
+    descriptor_path: str,
+    expected_sha256: str,
+) -> bool:
+    child_code = (
+        "import hashlib, os, sys\n"
+        "path, expected = sys.argv[1], sys.argv[2]\n"
+        "with open(path, 'rb', closefd=True) as handle:\n"
+        "    data = handle.read()\n"
+        "if hashlib.sha256(data).hexdigest() != expected:\n"
+        "    raise SystemExit(3)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", child_code, descriptor_path, expected_sha256],
+        check=False,
+        close_fds=True,
+        pass_fds=(),
+        capture_output=True,
+        text=False,
+    )
+    if result.returncode != 0:
+        return False
+
+    duplicate = os.dup(fd)
+    try:
+        os.close(fd)
+        try:
+            with open(descriptor_path, "rb"):
+                return False
+        except OSError:
+            return True
+    finally:
+        os.dup2(duplicate, fd)
+        os.close(duplicate)
+
+
+def _signer_protected_sha256() -> str:
+    code, output = run_command(
+        _non_interactive_sudo("/usr/bin/sha256sum", str(_SIGNER_PROTECTED_INSTALLER))
+    )
+    digest = output.strip().split(maxsplit=1)[0] if output.strip() else ""
+    if code != 0 or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise ValueError("protected_installer_sha256_unavailable")
+    return digest
+
+
+def _verify_signer_protected_copy(expected_sha256: str) -> None:
+    code, output = run_command(
+        _non_interactive_sudo(
+            "/usr/bin/stat",
+            "-c",
+            "%u:%g:%a",
+            str(_SIGNER_PROTECTED_INSTALLER),
+        )
+    )
+    if code != 0 or output.strip() != "0:0:555":
+        raise ValueError("protected_installer_ownership_or_mode_mismatch")
+    if _signer_protected_sha256() != expected_sha256:
+        raise ValueError("protected_installer_sha256_mismatch")
+
+
+def home_edge_01_media_source_snapshot_signer_install_v1(body: str) -> str:
+    task_id = HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1
+    parsed, reason = _home_edge_signer_install_input(body)
+    if reason is not None or parsed is None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [f"reason={reason or 'signer_install_invalid_input'}"],
+            "not_met",
+        )
+
+    status_lines: list[str] = []
+    fd: int | None = None
+    try:
+        expected_main_sha = parsed["Expected Main SHA"].lower()
+        exact_main_sha, blob_sha = _signer_installer_blob_at_exact_main(expected_main_sha)
+        status_lines.extend(
+            [
+                f"exact_main_sha={exact_main_sha}",
+                "expected_main_sha_match=true",
+                f"installer_blob_sha={blob_sha}",
+                "installer_blob_mode=100755",
+            ]
+        )
+        blob_bytes, blob_sha256 = _read_verified_git_blob_bytes(blob_sha)
+        status_lines.append(f"installer_sha256={blob_sha256}")
+        fd, descriptor_path = _sealed_memfd_from_bytes(blob_bytes)
+        if descriptor_path.startswith("/proc/self/fd/"):
+            raise ValueError("parent_owned_descriptor_path_required")
+        status_lines.append("sealed_memfd_status=active")
+        if not _sealed_memfd_mutation_attempts_fail(fd, len(blob_bytes)):
+            raise ValueError("sealed_memfd_mutation_attempt_succeeded")
+        status_lines.append("sealed_memfd_mutation_attempts=failed")
+        if not _prove_parent_owned_descriptor_lifetime(fd, descriptor_path, blob_sha256):
+            raise ValueError("parent_owned_descriptor_lifetime_proof_failed")
+        status_lines.extend(
+            [
+                f"privileged_source={descriptor_path}",
+                "descriptor_harness=open_read_hash_without_fd_inheritance",
+                "descriptor_lifetime_after_parent_close=unusable",
+            ]
+        )
+
+        install_dir = str(_SIGNER_PROTECTED_INSTALLER.parent)
+        protected_path = str(_SIGNER_PROTECTED_INSTALLER)
+        for step, command in (
+            (
+                "protected_installer_dir",
+                _non_interactive_sudo(
+                    "/usr/bin/install",
+                    "-d",
+                    "-o",
+                    "root",
+                    "-g",
+                    "root",
+                    "-m",
+                    "0755",
+                    install_dir,
+                ),
+            ),
+            (
+                "protected_installer_copy",
+                _non_interactive_sudo(
+                    "/usr/bin/install",
+                    "-o",
+                    "root",
+                    "-g",
+                    "root",
+                    "-m",
+                    "0555",
+                    descriptor_path,
+                    protected_path,
+                ),
+            ),
+        ):
+            report = _run_maintenance_command(task_id, step, command, status_lines)
+            if report is not None:
+                return report
+
+        _verify_signer_protected_copy(blob_sha256)
+        status_lines.append("protected_installer_pre_sha256_match=true")
+        report = _run_maintenance_command(
+            task_id,
+            "protected_installer_invoke",
+            _non_interactive_sudo(
+                protected_path,
+                "--repo-root",
+                str(ROOT.resolve(strict=True)),
+            ),
+            status_lines,
+        )
+        if report is not None:
+            return report
+        _verify_signer_protected_copy(blob_sha256)
+        status_lines.append("protected_installer_post_sha256_match=true")
+        status_lines.extend(
+            [
+                "protected_invocation=repo_root_canonical_checkout",
+                "snapshot_route=read_only_no_install",
+                "install_done_auto_snapshot=false",
+                "pr_3183=DO_NOT_MERGE",
+                "merge_status=NO_MERGE",
+                "next_action=SEMANTIC_EXACT_HEAD_REVIEW_THEN_FULL_VALIDATION_THEN_OPERATOR_APPROVAL",
+            ]
+        )
+        return _maintenance_report("DONE", task_id, status_lines, "met")
+    except ValueError as exc:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, f"reason={exc}"],
+            "not_met",
+        )
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
 def _read_exact_git_sha(ref: str) -> str:
     code, output = run_command(["git", "rev-parse", f"{ref}^{{commit}}"], cwd=ROOT)
     sha = output.strip().splitlines()[0] if output.strip() else ""
@@ -16404,6 +16758,8 @@ def dispatch_runtime_maintenance_task(
             return home_edge_01_post_migration_reconcile_v1(body)
         if task_id == HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1:
             return home_edge_01_media_source_snapshot_v1(body)
+        if task_id == HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1:
+            return home_edge_01_media_source_snapshot_signer_install_v1(body)
         if task_id == PREPARE_PRIVATE_STATIC_SITE_HANDOFF:
             return _execute_prepare_private_static_site_handoff(body)
         if task_id == DEPLOY_PRIVATE_STATIC_SITE:

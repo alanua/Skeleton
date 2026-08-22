@@ -58,6 +58,39 @@ that points at a different parallel PR is treated as a bounded
 publication-contract failure for repair, and no validation continuation is
 created for the wrong PR.
 
+`home_edge_01_media_source_snapshot_signer_install_v1` is the protected
+maintenance route for installing the Home Edge media-source snapshot signer. It
+requires exact current `main`/`origin/main` binding and the canonical approval
+token:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: home_edge_01_media_source_snapshot_signer_install_v1
+Repository: alanua/Skeleton
+Expected Main SHA: <40 lowercase hex chars>
+Operator Approval: SEMANTIC_EXACT_HEAD_REVIEW_THEN_FULL_VALIDATION_THEN_OPERATOR_APPROVAL
+```
+
+The Runner rejects stale or arbitrary approval before Git, memfd, or sudo side
+effects. After approval, it resolves
+`scripts/install_home_edge_media_source_snapshot_signer.sh` only as a `100755`
+Git blob at the exact expected main SHA, reads that blob with `git cat-file
+blob` as bytes, recomputes the Git blob identity and SHA-256, and seals those
+exact bytes in a memfd with write, grow, shrink, and further-seal seals active.
+The privileged copy source is only a parent-owned descriptor reference such as
+`/proc/<runner-pid>/fd/<fd>` while the Runner parent keeps the sealed memfd
+open. It is not `/proc/self/fd`, not a worktree path, not a temp path, and not
+dependent on sudo preserving inherited file descriptors.
+
+The route first installs a protected root-owned `0555` copy at the fixed
+installer path, verifies protected SHA-256 before and after invocation, then
+invokes the fixed protected installer with `--repo-root` set to the canonical
+checkout. It does not run the read-only snapshot route, and successful signer
+installation does not auto-run a snapshot. Public receipts are limited to safe
+hashes, fixed status tokens, the parent-owned descriptor proof, `PR #3183
+DO_NOT_MERGE`, `NO_MERGE`, and
+`next_action=SEMANTIC_EXACT_HEAD_REVIEW_THEN_FULL_VALIDATION_THEN_OPERATOR_APPROVAL`.
+
 `prepare_private_static_site_handoff` prepares a durable encrypted handoff for a
 private static web package. It requires exact operator approval and an artifact
 id:

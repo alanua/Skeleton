@@ -168,6 +168,22 @@ def _media_source_snapshot_receipt() -> dict[str, object]:
     }
 
 
+def _media_source_snapshot_signer_install_body(
+    *,
+    expected_sha: str = HEAD_SHA,
+    approval: str = runner._SIGNER_INSTALL_APPROVAL,
+) -> str:
+    return "\n".join(
+        (
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1}",
+            f"Repository: {runner.REPO}",
+            f"Expected Main SHA: {expected_sha}",
+            f"Operator Approval: {approval}",
+        )
+    )
+
+
 def _merge_issue_body(
     *,
     pr_number: int = 123,
@@ -502,7 +518,10 @@ def test_home_edge_media_source_snapshot_registry_exposes_only_exact_fixed_task_
         if "media_source_snapshot" in task_id
     }
 
-    assert variants == {runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1}
+    assert variants == {
+        runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1,
+        runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1,
+    }
     assert (
         runner.dispatch_runtime_maintenance_task(
             "home_edge_01_media_source_snapshot_v1_extra",
@@ -525,6 +544,176 @@ def test_home_edge_media_source_snapshot_malformed_input_blocks(
 
     assert report.startswith("BLOCKED:")
     assert "reason=unknown_runtime_input_field" in report
+
+
+def test_home_edge_media_source_snapshot_signer_install_rejects_stale_token_before_side_effects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    read_sha = mock.Mock(side_effect=AssertionError("git ref read must not run"))
+    run_command = mock.Mock(side_effect=AssertionError("command must not run"))
+    run_binary = mock.Mock(side_effect=AssertionError("binary command must not run"))
+    memfd = mock.Mock(side_effect=AssertionError("memfd must not be created"))
+    monkeypatch.setattr(runner, "_read_exact_git_sha", read_sha)
+    monkeypatch.setattr(runner, "run_command", run_command)
+    monkeypatch.setattr(runner, "_run_binary_command", run_binary)
+    monkeypatch.setattr(runner, "_sealed_memfd_from_bytes", memfd)
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1,
+        str(runner.ROOT),
+        _media_source_snapshot_signer_install_body(approval="approved"),
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=signer_install_operator_approval_missing" in report
+    read_sha.assert_not_called()
+    run_command.assert_not_called()
+    run_binary.assert_not_called()
+    memfd.assert_not_called()
+
+
+def test_home_edge_media_source_snapshot_signer_install_uses_binary_blob_and_parent_fd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    blob_bytes = b"#!/usr/bin/env bash\nprintf '\\xff\\n'\n"
+    blob_sha = runner._git_blob_sha_from_bytes(blob_bytes)
+    blob_sha256 = runner.hashlib.sha256(blob_bytes).hexdigest()
+    commands: list[list[str]] = []
+    binary_commands: list[list[str]] = []
+
+    def fake_read_sha(ref: str) -> str:
+        assert ref in {"main", "origin/main"}
+        return HEAD_SHA
+
+    def fake_binary(command: list[str], **_kwargs: object) -> tuple[int, bytes, bytes]:
+        binary_commands.append(command)
+        assert command == ["git", "cat-file", "blob", blob_sha]
+        return 0, blob_bytes, b""
+
+    def fake_run_command(
+        command: list[str],
+        **_kwargs: object,
+    ) -> tuple[int, str]:
+        commands.append(command)
+        if command == [
+            "git",
+            "ls-tree",
+            HEAD_SHA,
+            runner._SIGNER_INSTALLER_REL,
+        ]:
+            return 0, f"100755 blob {blob_sha}\t{runner._SIGNER_INSTALLER_REL}\n"
+        if command[:3] == ["sudo", "-n", "/usr/bin/stat"]:
+            return 0, "0:0:555\n"
+        if command[:3] == ["sudo", "-n", "/usr/bin/sha256sum"]:
+            return 0, f"{blob_sha256}  {runner._SIGNER_PROTECTED_INSTALLER}\n"
+        if command[:3] == ["sudo", "-n", "/usr/bin/install"]:
+            return 0, ""
+        if command[:2] == ["sudo", "-n"] and command[2] == str(
+            runner._SIGNER_PROTECTED_INSTALLER
+        ):
+            assert command == [
+                "sudo",
+                "-n",
+                str(runner._SIGNER_PROTECTED_INSTALLER),
+                "--repo-root",
+                str(runner.ROOT.resolve(strict=True)),
+            ]
+            return 0, "DONE: Home Edge media source snapshot signer installed\n"
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(runner, "_read_exact_git_sha", fake_read_sha)
+    monkeypatch.setattr(runner, "_run_binary_command", fake_binary)
+    monkeypatch.setattr(runner, "run_command", fake_run_command)
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1,
+        str(runner.ROOT),
+        _media_source_snapshot_signer_install_body(),
+    )
+
+    assert report.startswith("DONE:")
+    assert "expected_main_sha_match=true" in report
+    assert f"installer_blob_sha={blob_sha}" in report
+    assert f"installer_sha256={blob_sha256}" in report
+    assert "sealed_memfd_status=active" in report
+    assert "sealed_memfd_mutation_attempts=failed" in report
+    assert "descriptor_harness=open_read_hash_without_fd_inheritance" in report
+    assert "descriptor_lifetime_after_parent_close=unusable" in report
+    assert "protected_installer_pre_sha256_match=true" in report
+    assert "protected_installer_post_sha256_match=true" in report
+    assert "protected_invocation=repo_root_canonical_checkout" in report
+    assert "snapshot_route=read_only_no_install" in report
+    assert "install_done_auto_snapshot=false" in report
+    assert "pr_3183=DO_NOT_MERGE" in report
+    assert "merge_status=NO_MERGE" in report
+    assert "next_action=SEMANTIC_EXACT_HEAD_REVIEW_THEN_FULL_VALIDATION_THEN_OPERATOR_APPROVAL" in report
+    privileged_source = next(
+        line.split("=", 1)[1]
+        for line in report.splitlines()
+        if line.startswith("privileged_source=")
+    )
+    assert re.fullmatch(r"/proc/\d+/fd/\d+", privileged_source)
+    assert not privileged_source.startswith("/proc/self/fd/")
+    assert binary_commands == [["git", "cat-file", "blob", blob_sha]]
+    install_copy = [
+        command for command in commands if command[:3] == ["sudo", "-n", "/usr/bin/install"]
+    ][1]
+    assert install_copy[-2] == privileged_source
+    assert install_copy[-1] == str(runner._SIGNER_PROTECTED_INSTALLER)
+    assert "/tmp/" not in install_copy[-2]
+    assert str(runner.ROOT) not in install_copy[-2]
+
+
+def test_home_edge_media_source_snapshot_signer_install_rejects_text_reconstructed_blob(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trusted = b"binary-safe-\xff\n"
+    trusted_blob = runner._git_blob_sha_from_bytes(trusted)
+    reconstructed = trusted.decode("latin-1").encode("utf-8")
+
+    monkeypatch.setattr(runner, "_read_exact_git_sha", lambda _ref: HEAD_SHA)
+    monkeypatch.setattr(
+        runner,
+        "run_command",
+        lambda command, **_kwargs: (
+            0,
+            f"100755 blob {trusted_blob}\t{runner._SIGNER_INSTALLER_REL}\n",
+        ),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_run_binary_command",
+        lambda command, **_kwargs: (0, reconstructed, b""),
+    )
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1,
+        str(runner.ROOT),
+        _media_source_snapshot_signer_install_body(),
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=installer_blob_identity_mismatch" in report
+
+
+def test_home_edge_media_source_snapshot_signer_parent_descriptor_lifetime_real_subprocess() -> None:
+    data = b"sealed parent descriptor evidence\n"
+    fd, descriptor_path = runner._sealed_memfd_from_bytes(data)
+    try:
+        assert re.fullmatch(r"/proc/\d+/fd/\d+", descriptor_path)
+        assert not descriptor_path.startswith("/proc/self/fd/")
+        assert runner._sealed_memfd_mutation_attempts_fail(fd, len(data))
+        assert runner._prove_parent_owned_descriptor_lifetime(
+            fd,
+            descriptor_path,
+            runner.hashlib.sha256(data).hexdigest(),
+        )
+        with open(descriptor_path, "rb") as handle:
+            assert handle.read() == data
+    finally:
+        os.close(fd)
+    with pytest.raises(OSError):
+        open(descriptor_path, "rb").close()
 
 
 def _plain_done_message(issue_number: int = 129) -> str:
