@@ -4850,6 +4850,337 @@ def test_process_issue_runs_target_project_bauclock_in_local_worktree(
     assert comment.call_args.args[1] == "DONE local report\nTarget Project: bauclock"
 
 
+def _cross_project_publication_source_issue(
+    *,
+    issue_number: int = 3210,
+    base_sha: str = "b" * 40,
+    comments: list[dict[str, str]] | None = None,
+    labels: list[dict[str, str]] | None = None,
+) -> dict[str, object]:
+    return {
+        "number": issue_number,
+        "title": "Cross project publication",
+        "body": "\n".join(
+            (
+                "Target Project: bauclock",
+                "Selected Repository: alanua/bauclock",
+                "Expected Output: protected replacement draft PR",
+                "Publication contract: draft PR required",
+                "allowed_files:",
+                "  - README.md",
+                "",
+                "```task",
+                "base: main",
+                f"base_sha: {base_sha}",
+                "instructions: Do it",
+                "```",
+            )
+        ),
+        "comments": comments or [],
+        "labels": labels or [],
+    }
+
+
+def _target_publication_receipt(
+    *,
+    repository: str = "alanua/bauclock",
+    target_project: str = "bauclock",
+    source_issue: int = 3210,
+    output_branch: str = "runner/issue-3210",
+    base_sha: str = "b" * 40,
+    pushed_head_sha: str = HEAD_SHA,
+    changed_files: str = "README.md",
+    status: str = "DONE",
+) -> str:
+    return "\n".join(
+        (
+            f"{status}: Runner host maintenance task completed.",
+            f"maintenance_task_id={runner.PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR}",
+            f"target_project={target_project}",
+            f"repository={repository}",
+            f"source_issue={source_issue}",
+            "base_branch=main",
+            f"expected_branch={output_branch}",
+            "draft_pr=true",
+            "allowed_files_count=1",
+            "target_project_route=bauclock:alanua/bauclock",
+            "issue_worktree_id=issue-3210",
+            "step=fetch_verified_base status=done",
+            "verified_base_branch=main",
+            f"verified_base_sha={base_sha}",
+            "step=read_exact_base_diff status=done",
+            "exact_base_changed_files_count=1",
+            "validated_publish_files_count=1",
+            f"validated_publish_files={changed_files}",
+            "step=push_expected_branch status=done",
+            "step=create_draft_pr status=done",
+            "draft_pr_url=https://github.com/alanua/bauclock/pull/77",
+            f"pushed_head_sha={pushed_head_sha}",
+            "step=post_push_read_pr_metadata status=done",
+            "success_criteria=met" if status == "DONE" else "success_criteria=not_met",
+        )
+    )
+
+
+def test_cross_project_publication_creation_waits_and_retains_target_worktree(
+    tmp_path: Path,
+) -> None:
+    issue_path = tmp_path / "bauclock" / "issue-3210"
+    issue = _cross_project_publication_source_issue()
+
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        del cwd
+        if command[:3] == ["gh", "issue", "list"]:
+            return 0, "[]"
+        if command[:3] == ["gh", "issue", "create"]:
+            body = command[command.index("--body") + 1]
+            assert "Maintenance Task ID: publish_target_project_issue_worktree_pr" in body
+            assert "Target Repository: alanua/bauclock" in body
+            assert "Base SHA: " + "b" * 40 in body
+            assert "Output Branch: runner/issue-3210" in body
+            return 0, "https://github.com/alanua/Skeleton/issues/4001\n"
+        return 2, "unexpected command"
+
+    with mock.patch.object(
+        runner,
+        "prepare_target_repository_issue_worktree",
+        return_value=(0, "ready", issue_path),
+    ), mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, "codex output")
+    ), mock.patch.object(
+        runner, "changed_files", return_value=["README.md"]
+    ), mock.patch.object(
+        runner, "local_worktree_recovery_diff", return_value="Local worktree git diff: safe"
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run
+    ), mock.patch.object(
+        runner, "cleanup_target_repository_issue_worktree"
+    ) as cleanup_target, mock.patch.object(
+        runner, "post_issue_comment"
+    ) as comment, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(
+        runner, "notify_task_finished"
+    ) as notify, mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ):
+        runner.process_issue(issue, workdir=str(tmp_path))
+
+    cleanup_target.assert_not_called()
+    notify.assert_not_called()
+    assert set_label.call_args_list[-1].args == (
+        3210, runner.LABEL_RUNNING, runner.LABEL_WAITING_DEPENDENCY
+    )
+    report = comment.call_args.args[1]
+    assert "publication_continuation=created" in report
+    assert "publication_issue=4001" in report
+    assert "publication_dependency=waiting" in report
+    assert "terminal_done=false" in report
+
+
+def test_cross_project_publication_receipt_consumption_marks_done_and_cleans_once(
+    tmp_path: Path,
+) -> None:
+    continuation = runner.ProducedTargetPublicationContinuation(
+        repository="alanua/bauclock",
+        target_project="bauclock",
+        source_issue=3210,
+        output_branch="runner/issue-3210",
+        base_sha="b" * 40,
+        allowed_files=("README.md",),
+        idempotency_key=runner._target_publication_continuation_idempotency_key(
+            "alanua/bauclock", 3210, "runner/issue-3210", "b" * 40, ("README.md",)
+        ),
+        created=False,
+        issue_number=4001,
+    )
+    source_report = "\n".join(
+        (
+            "DONE local report",
+            "publication_continuation=created",
+            "publication_issue=4001",
+            "publication_repository=alanua/bauclock",
+            "publication_target_project=bauclock",
+            "publication_source_issue=3210",
+            "publication_output_branch=runner/issue-3210",
+            "publication_base_sha=" + "b" * 40,
+            "publication_allowed_files=README.md",
+            f"publication_idempotency_key={continuation.idempotency_key}",
+        )
+    )
+    issue = _cross_project_publication_source_issue(
+        comments=[{"body": source_report}],
+        labels=[{"name": runner.LABEL_WAITING_DEPENDENCY}],
+    )
+
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        del cwd
+        if command[:3] == ["gh", "issue", "view"]:
+            return 0, json.dumps(
+                {
+                    "body": f"idempotency_key: {continuation.idempotency_key}",
+                    "labels": [{"name": runner.LABEL_AGENT_TASK}],
+                    "comments": [{"body": _target_publication_receipt()}],
+                }
+            )
+        return 0, ""
+
+    with mock.patch.object(
+        runner, "run_command", side_effect=run
+    ), mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "cleanup_target_repository_issue_worktree", return_value=(0, "")
+    ) as cleanup_target, mock.patch.object(
+        runner, "post_issue_comment"
+    ) as comment, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(
+        runner, "notify_task_finished"
+    ) as notify, mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ), mock.patch.object(
+        runner, "maybe_replenish_runner_queue_after_completion"
+    ):
+        runner.process_issue(issue, workdir=str(tmp_path))
+
+    cleanup_target.assert_called_once_with("alanua/bauclock", 3210)
+    set_label.assert_called_once_with(
+        3210, runner.LABEL_WAITING_DEPENDENCY, runner.LABEL_DONE
+    )
+    notify.assert_called_once()
+    assert "DONE: Cross-project publication receipt verified." in comment.call_args.args[1]
+
+
+def test_cross_project_publication_done_label_is_idempotent(tmp_path: Path) -> None:
+    issue = _cross_project_publication_source_issue(
+        labels=[
+            {"name": runner.LABEL_DONE},
+            {"name": runner.LABEL_WAITING_DEPENDENCY},
+        ]
+    )
+
+    with mock.patch.object(runner, "run_command") as run, mock.patch.object(
+        runner, "cleanup_target_repository_issue_worktree"
+    ) as cleanup_target, mock.patch.object(
+        runner, "post_issue_comment"
+    ) as comment, mock.patch.object(
+        runner, "notify_task_finished"
+    ) as notify:
+        runner.process_issue(issue, workdir=str(tmp_path))
+
+    run.assert_not_called()
+    cleanup_target.assert_not_called()
+    comment.assert_not_called()
+    notify.assert_not_called()
+
+
+def test_cross_project_publication_pending_receipt_is_quiet(tmp_path: Path) -> None:
+    key = runner._target_publication_continuation_idempotency_key(
+        "alanua/bauclock", 3210, "runner/issue-3210", "b" * 40, ("README.md",)
+    )
+    issue = _cross_project_publication_source_issue(
+        comments=[
+            {
+                "body": "\n".join(
+                    (
+                        "publication_issue=4001",
+                        "publication_repository=alanua/bauclock",
+                        "publication_target_project=bauclock",
+                        "publication_source_issue=3210",
+                        "publication_output_branch=runner/issue-3210",
+                        "publication_base_sha=" + "b" * 40,
+                        "publication_allowed_files=README.md",
+                        f"publication_idempotency_key={key}",
+                    )
+                )
+            }
+        ],
+        labels=[{"name": runner.LABEL_WAITING_DEPENDENCY}],
+    )
+
+    with mock.patch.object(
+        runner,
+        "run_command",
+        return_value=(
+            0,
+            json.dumps(
+                {
+                    "body": f"idempotency_key: {key}",
+                    "labels": [{"name": runner.LABEL_AGENT_TASK}],
+                    "comments": [],
+                }
+            ),
+        ),
+    ), mock.patch.object(runner, "post_issue_comment") as comment, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(runner, "notify_task_finished") as notify:
+        runner.process_issue(issue, workdir=str(tmp_path))
+
+    comment.assert_not_called()
+    set_label.assert_not_called()
+    notify.assert_not_called()
+
+
+def test_cross_project_publication_mismatched_receipt_stays_nonterminal(
+    tmp_path: Path,
+) -> None:
+    key = runner._target_publication_continuation_idempotency_key(
+        "alanua/bauclock", 3210, "runner/issue-3210", "b" * 40, ("README.md",)
+    )
+    issue = _cross_project_publication_source_issue(
+        comments=[
+            {
+                "body": "\n".join(
+                    (
+                        "publication_issue=4001",
+                        "publication_repository=alanua/bauclock",
+                        "publication_target_project=bauclock",
+                        "publication_source_issue=3210",
+                        "publication_output_branch=runner/issue-3210",
+                        "publication_base_sha=" + "b" * 40,
+                        "publication_allowed_files=README.md",
+                        f"publication_idempotency_key={key}",
+                    )
+                )
+            }
+        ],
+        labels=[{"name": runner.LABEL_WAITING_DEPENDENCY}],
+    )
+
+    with mock.patch.object(
+        runner,
+        "run_command",
+        return_value=(
+            0,
+            json.dumps(
+                {
+                    "body": f"idempotency_key: {key}",
+                    "labels": [{"name": runner.LABEL_AGENT_TASK}],
+                    "comments": [
+                        {
+                            "body": _target_publication_receipt(
+                                repository="alanua/wrong"
+                            )
+                        }
+                    ],
+                }
+            ),
+        ),
+    ), mock.patch.object(runner, "post_issue_comment") as comment, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(runner, "notify_task_finished") as notify:
+        runner.process_issue(issue, workdir=str(tmp_path))
+
+    report = comment.call_args.args[1]
+    assert report.startswith("BLOCKED:")
+    assert "terminal_block=false" in report
+    set_label.assert_not_called()
+    notify.assert_not_called()
+
+
 def test_process_issue_runs_target_project_lavalamp_when_project_tree_enables_worktree(
     tmp_path: Path,
 ) -> None:

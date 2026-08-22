@@ -105,6 +105,18 @@ contract declared `existing_pr` or `update_existing_pr`, a different produced PR
 is treated as a publication-contract failure; no validation continuation is
 created for the wrong PR.
 
+For cross-project codegen tasks that require draft PR publication, durable
+delivery is split from source completion. A successful changed target-project
+worktree creates or reuses one `publish_target_project_issue_worktree_pr`
+continuation, records the source as `runner:waiting-dependency`, and retains the
+target worktree. The same issue's waiting-dependency consumer later reads the
+exact continuation and accepts only a trusted Runner maintenance receipt whose
+target project, repository, source issue, output branch, base SHA, pushed head,
+PR URL, and changed files match the recorded contract. Pending continuations do
+nothing noisy. Failed, malformed, missing, or mismatched receipts remain
+recoverable and never synthesize source `DONE`; target cleanup occurs only after
+a verified receipt. Neither the target PR nor a Skeleton PR is auto-merged.
+
 For codegen tasks that declare `existing_pr` or `update_existing_pr` with an
 exact expected PR head SHA, the issue worktree is materialized from that verified
 PR head branch before Codex starts. Metadata mismatch fails closed before any

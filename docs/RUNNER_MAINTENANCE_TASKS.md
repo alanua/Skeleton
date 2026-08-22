@@ -52,6 +52,19 @@ head/base pair and do not create duplicate validation issues. Validation
 completion re-evaluates the queue through the existing replenisher path and
 does not auto-merge, mark a PR ready, or synthesize approval.
 
+Cross-project codegen publication uses a second bounded continuation before the
+source issue may finish. When a target-project task with changed allowed files
+requires a draft PR and declares exact `base: main` plus `base_sha`, the source
+issue is moved to `runner:waiting-dependency` after creating or reusing exactly
+one `publish_target_project_issue_worktree_pr` continuation. The target
+worktree is retained. A later poll reads only that continuation's Runner
+maintenance report and verifies the exact target project, repository, source
+issue, output branch, base SHA, pushed head, PR URL, and changed-file contract.
+Only that verified receipt marks the source issue `runner:done`; cleanup of the
+target worktree is deferred until after verification. Pending continuations are
+silent, and failed, missing, malformed, or mismatched receipts stay
+non-terminal.
+
 If a codegen task contract declares `existing_pr` or `update_existing_pr`, the
 continuation can bind only to that declared PR identity. A successful report
 that points at a different parallel PR is treated as a bounded
