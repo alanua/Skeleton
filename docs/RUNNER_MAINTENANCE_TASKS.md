@@ -18,6 +18,37 @@ Missing or unknown maintenance task ids are reported as `BLOCKED`.
 
 ## Current allowlist
 
+`install_home_edge_signer_from_immutable_exact_git_blob` is the protected Home
+Edge signer installer replacement route. It must include only this exact
+metadata:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: install_home_edge_signer_from_immutable_exact_git_blob
+Repository: alanua/Skeleton
+Expected Main SHA: <40 lowercase hex>
+Target: home-edge-01
+Runtime Sync Approval: EXACT_HEAD_OPERATOR_APPROVAL_THEN_RUNTIME_SYNC_SIGNER_INSTALL_AND_READ_ONLY_SNAPSHOT
+```
+
+The Runner validates the metadata, requires `Expected Main SHA` to match both
+registered `main` and `origin/main`, resolves only
+`scripts/install_home_edge_media_source_snapshot_signer.sh` at that commit, and
+requires one regular executable Git blob (`100755 blob`). It materializes the
+payload bytes from that exact Git object into a private `/tmp` staging file,
+verifies the staged bytes against the Git blob id and SHA-256, then uses only
+fixed non-interactive sudo argv to install that staged file as `root:root`
+mode `0555` at the protected installer path. The privileged copy source must
+never be the mutable checkout path.
+
+After installation, the Runner verifies protected-installer owner, mode, and
+hash, invokes only the protected installer with fixed `--repo-root` pointing at
+the canonical checkout, and performs a post-audit of the protected installer
+hash plus final signer owner/mode. The task reports only safe status/hash
+metadata, fails closed on lookup, staging, hash, privilege, or audit ambiguity,
+and does not run `home_edge_01_media_source_snapshot_v1` or any read-only
+snapshot automatically.
+
 `replenish_runner_queue` promotes public-safe `agent:task` issues into
 `runner:ready` until the ready queue reaches deterministic target depth 3,
 bounded by maximum depth 6. `runner:backlog` remains supported as an optional

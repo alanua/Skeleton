@@ -150,6 +150,26 @@ def _media_source_snapshot_issue_body(expected_sha: str = HEAD_SHA) -> str:
     )
 
 
+def _home_edge_signer_install_body(
+    *,
+    expected_sha: str = HEAD_SHA,
+    approval: str = runner._HOME_EDGE_SIGNER_INSTALL_APPROVAL,
+    task_id: str = runner.INSTALL_HOME_EDGE_SIGNER_FROM_IMMUTABLE_EXACT_GIT_BLOB,
+    repository: str = runner.REPO,
+    target: str = "home-edge-01",
+) -> str:
+    return "\n".join(
+        (
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {task_id}",
+            f"Repository: {repository}",
+            f"Expected Main SHA: {expected_sha}",
+            f"Target: {target}",
+            f"Runtime Sync Approval: {approval}",
+        )
+    )
+
+
 def _media_source_snapshot_receipt() -> dict[str, object]:
     return {
         "maintenance_task_id": runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1,
@@ -525,6 +545,229 @@ def test_home_edge_media_source_snapshot_malformed_input_blocks(
 
     assert report.startswith("BLOCKED:")
     assert "reason=unknown_runtime_input_field" in report
+
+
+def test_home_edge_signer_install_rejects_stale_approval_before_git_or_sudo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        runner,
+        "run_command",
+        lambda *_args, **_kwargs: pytest.fail("git/sudo must not run"),
+    )
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.INSTALL_HOME_EDGE_SIGNER_FROM_IMMUTABLE_EXACT_GIT_BLOB,
+        str(runner.ROOT),
+        _home_edge_signer_install_body(
+            approval="EXACT_HEAD_OPERATOR_REVIEW_THEN_RUNTIME_SYNC_APPROVED"
+        ),
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=home_edge_signer_install_approval_mismatch" in report
+
+
+def test_home_edge_signer_install_uses_staged_exact_blob_after_worktree_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checkout = tmp_path / "checkout"
+    worktree_installer = checkout / runner._HOME_EDGE_SIGNER_INSTALLER_RELATIVE
+    worktree_installer.parent.mkdir(parents=True)
+    worktree_installer.write_bytes(b"mutable checkout bytes\n")
+    approved = b"#!/usr/bin/env bash\nprintf approved\\n\n"
+    blob_sha = runner._git_blob_sha1(approved)
+    approved_sha256 = runner.hashlib.sha256(approved).hexdigest()
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(runner, "ROOT", checkout)
+    monkeypatch.setattr(runner, "_git_blob_bytes", lambda _commit, _blob: approved)
+    monkeypatch.setattr(
+        media_source_snapshot,
+        "execute_media_source_snapshot_task",
+        lambda *_args, **_kwargs: pytest.fail("snapshot task must not auto-run"),
+    )
+
+    def fake_run_command(command, cwd=None, *, timeout=None, input=None):
+        del cwd, timeout, input
+        commands.append(list(command))
+        if command[:3] == ["git", "rev-parse", "main^{commit}"]:
+            return 0, HEAD_SHA + "\n"
+        if command[:3] == ["git", "rev-parse", "origin/main^{commit}"]:
+            return 0, HEAD_SHA + "\n"
+        if command[:3] == ["git", "ls-tree", "-z"]:
+            return (
+                0,
+                f"100755 blob {blob_sha}\t{runner._HOME_EDGE_SIGNER_INSTALLER_RELATIVE}\0",
+            )
+        if command[:3] == ["git", "cat-file", "-t"]:
+            return 0, "blob\n"
+        if command[:3] == ["git", "cat-file", "-s"]:
+            return 0, str(len(approved)) + "\n"
+        if command[:3] == ["/usr/bin/sudo", "-n", "/usr/bin/install"]:
+            if "-d" in command:
+                return 0, ""
+            worktree_installer.write_bytes(b"attacker replacement\n")
+            source = Path(command[-2])
+            assert source != worktree_installer
+            assert source.read_bytes() == approved
+            return 0, ""
+        if command[:3] == ["/usr/bin/sudo", "-n", "/usr/bin/stat"]:
+            return 0, "0:0:555\n"
+        if command[:3] == ["/usr/bin/sudo", "-n", "/usr/bin/sha256sum"]:
+            assert command[-1] == runner._HOME_EDGE_SIGNER_INSTALLER_PROTECTED_PATH
+            return 0, f"{approved_sha256}  {command[-1]}\n"
+        if command[:2] == ["/usr/bin/sudo", "-n"] and command[2] == runner._HOME_EDGE_SIGNER_INSTALLER_PROTECTED_PATH:
+            assert command == [
+                "/usr/bin/sudo",
+                "-n",
+                runner._HOME_EDGE_SIGNER_INSTALLER_PROTECTED_PATH,
+                "--repo-root",
+                str(checkout.resolve(strict=True)),
+            ]
+            return 0, "safe_status=installed\n"
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(runner, "run_command", fake_run_command)
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.INSTALL_HOME_EDGE_SIGNER_FROM_IMMUTABLE_EXACT_GIT_BLOB,
+        str(checkout),
+        _home_edge_signer_install_body(),
+    )
+
+    assert report.startswith("DONE:")
+    assert f"installer_blob_sha={blob_sha}" in report
+    assert f"staged_payload_sha256={approved_sha256}" in report
+    assert "post_audit_status=verified" in report
+    install_sources = [
+        command[-2]
+        for command in commands
+        if command[:3] == ["/usr/bin/sudo", "-n", "/usr/bin/install"]
+        and "-d" not in command
+    ]
+    assert install_sources
+    assert str(worktree_installer) not in install_sources
+
+
+def test_home_edge_signer_install_staged_tamper_blocks_before_sudo(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    approved = b"approved installer\n"
+    blob_sha = runner._git_blob_sha1(approved)
+    staged = tmp_path / "tampered-installer.sh"
+    staged.write_bytes(b"tampered installer\n")
+    staged.chmod(0o500)
+
+    monkeypatch.setattr(runner, "ROOT", tmp_path)
+    monkeypatch.setattr(runner, "_read_exact_git_sha", lambda _ref: HEAD_SHA)
+    monkeypatch.setattr(
+        runner,
+        "_resolve_home_edge_signer_installer_blob",
+        lambda _sha: (blob_sha, None),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_materialize_home_edge_signer_installer_blob",
+        lambda *_args, **_kwargs: (
+            staged,
+            runner.hashlib.sha256(approved).hexdigest(),
+            None,
+        ),
+    )
+
+    def fake_run_command(command, *args, **kwargs):
+        del args, kwargs
+        if command[:2] == ["/usr/bin/sudo", "-n"]:
+            pytest.fail("sudo must not run after staged tamper")
+        return 0, ""
+
+    monkeypatch.setattr(runner, "run_command", fake_run_command)
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.INSTALL_HOME_EDGE_SIGNER_FROM_IMMUTABLE_EXACT_GIT_BLOB,
+        str(tmp_path),
+        _home_edge_signer_install_body(),
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=home_edge_signer_install_staged_blob_mismatch" in report
+
+
+@pytest.mark.parametrize(
+    ("body", "reason"),
+    (
+        (
+            _home_edge_signer_install_body(repository="alanua/Other"),
+            "home_edge_signer_install_repository_mismatch",
+        ),
+        (
+            _home_edge_signer_install_body(target="home-edge-02"),
+            "home_edge_signer_install_target_mismatch",
+        ),
+        (
+            _home_edge_signer_install_body() + "\nRuntime Sync Approval: duplicate",
+            "home_edge_signer_install_duplicate_input_field",
+        ),
+        (
+            _home_edge_signer_install_body() + "\nPath: /tmp/evil",
+            "home_edge_signer_install_unknown_input_field",
+        ),
+    ),
+)
+def test_home_edge_signer_install_bad_metadata_blocks_before_side_effect(
+    monkeypatch: pytest.MonkeyPatch,
+    body: str,
+    reason: str,
+) -> None:
+    monkeypatch.setattr(
+        runner,
+        "run_command",
+        lambda *_args, **_kwargs: pytest.fail("git/sudo must not run"),
+    )
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.INSTALL_HOME_EDGE_SIGNER_FROM_IMMUTABLE_EXACT_GIT_BLOB,
+        str(runner.ROOT),
+        body,
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert f"reason={reason}" in report
+
+
+def test_home_edge_signer_install_blocks_wrong_blob_mode_before_sudo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    blob_sha = "b" * 40
+
+    def fake_run_command(command, *args, **kwargs):
+        del args, kwargs
+        if command[:3] == ["git", "rev-parse", "main^{commit}"]:
+            return 0, HEAD_SHA + "\n"
+        if command[:3] == ["git", "rev-parse", "origin/main^{commit}"]:
+            return 0, HEAD_SHA + "\n"
+        if command[:3] == ["git", "ls-tree", "-z"]:
+            return (
+                0,
+                f"100644 blob {blob_sha}\t{runner._HOME_EDGE_SIGNER_INSTALLER_RELATIVE}\0",
+            )
+        if command[:2] == ["/usr/bin/sudo", "-n"]:
+            pytest.fail("sudo must not run for wrong blob mode")
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(runner, "run_command", fake_run_command)
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.INSTALL_HOME_EDGE_SIGNER_FROM_IMMUTABLE_EXACT_GIT_BLOB,
+        str(runner.ROOT),
+        _home_edge_signer_install_body(),
+    )
+
+    assert report.startswith("BLOCKED:")
+    assert "reason=home_edge_signer_install_blob_type_or_mode_mismatch" in report
 
 
 def _plain_done_message(issue_number: int = 129) -> str:
