@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 import re
@@ -146,6 +147,27 @@ def _media_source_snapshot_issue_body(expected_sha: str = HEAD_SHA) -> str:
             f"Repository: {runner.REPO}",
             f"Expected Main SHA: {expected_sha}",
             "Target: home-edge-01",
+        )
+    )
+
+
+def _media_source_snapshot_signer_install_issue_body(
+    *,
+    expected_sha: str = HEAD_SHA,
+    task_id: str | None = None,
+    repository: str | None = None,
+    approval: str = "EXPLICIT_MINIMAL_HOME_EDGE_SNAPSHOT_ACCESS_REPAIR_2026_08_09",
+    target: str = "home-edge-01",
+) -> str:
+    return "\n".join(
+        (
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            "Maintenance Task ID: "
+            f"{task_id or runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1}",
+            f"Repository: {repository or runner.REPO}",
+            f"Expected Main SHA: {expected_sha}",
+            f"Operator Approval: {approval}",
+            f"Target: {target}",
         )
     )
 
@@ -502,7 +524,10 @@ def test_home_edge_media_source_snapshot_registry_exposes_only_exact_fixed_task_
         if "media_source_snapshot" in task_id
     }
 
-    assert variants == {runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1}
+    assert variants == {
+        runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1,
+        runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1,
+    }
     assert (
         runner.dispatch_runtime_maintenance_task(
             "home_edge_01_media_source_snapshot_v1_extra",
@@ -525,6 +550,250 @@ def test_home_edge_media_source_snapshot_malformed_input_blocks(
 
     assert report.startswith("BLOCKED:")
     assert "reason=unknown_runtime_input_field" in report
+
+
+def test_home_edge_media_source_snapshot_readonly_route_never_dispatches_signer_install(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runner, "_read_exact_git_sha", lambda _ref: HEAD_SHA)
+    monkeypatch.setattr(
+        media_source_snapshot,
+        "execute_media_source_snapshot_task",
+        lambda *_args, **_kwargs: _media_source_snapshot_receipt(),
+    )
+    install = mock.Mock(
+        side_effect=AssertionError("read-only snapshot must not install signer")
+    )
+    monkeypatch.setattr(
+        runner,
+        "home_edge_01_media_source_snapshot_signer_install_v1",
+        install,
+    )
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1,
+        str(runner.ROOT),
+        _media_source_snapshot_issue_body(),
+    )
+
+    assert report.startswith("DONE:")
+    install.assert_not_called()
+
+
+def test_home_edge_media_source_snapshot_signer_install_binds_exact_blob_before_privilege(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installer_rel = runner._HOME_EDGE_SNAPSHOT_SIGNER_INSTALLER_REL
+    installer_sha256 = hashlib.sha256(
+        (runner.ROOT / installer_rel).read_bytes()
+    ).hexdigest()
+    blob_sha = "b" * 40
+    commands: list[list[str]] = []
+
+    def fake_run(command, cwd=None, **_kwargs):
+        commands.append(list(command))
+        if command == ["git", "rev-parse", "main^{commit}"]:
+            return 0, HEAD_SHA + "\n"
+        if command == ["git", "rev-parse", "origin/main^{commit}"]:
+            return 0, HEAD_SHA + "\n"
+        if command == ["git", "ls-tree", HEAD_SHA, "--", installer_rel]:
+            assert cwd == runner.ROOT
+            return 0, f"100755 blob {blob_sha}\t{installer_rel}\n"
+        if command == ["git", "hash-object", "--", installer_rel]:
+            assert cwd == runner.ROOT
+            return 0, blob_sha + "\n"
+        if command[:2] == ["sudo", "-n"]:
+            if command[2:4] == ["install", "-d"]:
+                return 0, ""
+            if command[2:4] == ["install", "-o"]:
+                assert command[-1] == runner._HOME_EDGE_SNAPSHOT_SIGNER_PROTECTED_INSTALLER
+                return 0, ""
+            if command[2:5] == ["stat", "-c", "%U:%G:%a"]:
+                if command[-1] == runner._HOME_EDGE_SNAPSHOT_SIGNER_PROTECTED_INSTALLER:
+                    return 0, "root:root:755\n"
+                if command[-1] == runner._HOME_EDGE_SNAPSHOT_SIGNER_EXEC:
+                    return 0, "root:root:555\n"
+            if command[2] == "sha256sum":
+                return (
+                    0,
+                    f"{installer_sha256}  "
+                    f"{runner._HOME_EDGE_SNAPSHOT_SIGNER_PROTECTED_INSTALLER}\n",
+                )
+            if command[2] == runner._HOME_EDGE_SNAPSHOT_SIGNER_PROTECTED_INSTALLER:
+                assert command[3:] == ["--repo-root", str(runner.ROOT)]
+                return 0, "DONE: Home Edge media source snapshot signer installed\n"
+        raise AssertionError(command)
+
+    monkeypatch.setattr(runner, "run_command", fake_run)
+    snapshot = mock.Mock(
+        side_effect=AssertionError("install DONE must not auto-run snapshot")
+    )
+    monkeypatch.setattr(runner, "home_edge_01_media_source_snapshot_v1", snapshot)
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1,
+        str(runner.ROOT),
+        _media_source_snapshot_signer_install_issue_body(),
+    )
+
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert "installer_blob_binding=exact_expected_main" in report
+    assert commands[:4] == [
+        ["git", "rev-parse", "main^{commit}"],
+        ["git", "rev-parse", "origin/main^{commit}"],
+        ["git", "ls-tree", HEAD_SHA, "--", installer_rel],
+        ["git", "hash-object", "--", installer_rel],
+    ]
+    assert [command[:2] for command in commands[4:]] == [["sudo", "-n"]] * 6
+    snapshot.assert_not_called()
+
+
+def test_home_edge_media_source_snapshot_signer_install_blocks_dirty_worktree_before_sudo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installer_rel = runner._HOME_EDGE_SNAPSHOT_SIGNER_INSTALLER_REL
+    commands: list[list[str]] = []
+
+    def fake_run(command, cwd=None, **_kwargs):
+        del cwd
+        commands.append(list(command))
+        if command == ["git", "rev-parse", "main^{commit}"]:
+            return 0, HEAD_SHA + "\n"
+        if command == ["git", "rev-parse", "origin/main^{commit}"]:
+            return 0, HEAD_SHA + "\n"
+        if command == ["git", "ls-tree", HEAD_SHA, "--", installer_rel]:
+            return 0, f"100755 blob {'b' * 40}\t{installer_rel}\n"
+        if command == ["git", "hash-object", "--", installer_rel]:
+            return 0, "c" * 40 + "\n"
+        raise AssertionError(command)
+
+    monkeypatch.setattr(runner, "run_command", fake_run)
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1,
+        str(runner.ROOT),
+        _media_source_snapshot_signer_install_issue_body(),
+    )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "reason=snapshot_signer_install_worktree_blob_mismatch" in report
+    assert all(command[:2] != ["sudo", "-n"] for command in commands)
+
+
+@pytest.mark.parametrize(
+    ("ls_tree_output", "reason"),
+    [
+        ("", "snapshot_signer_install_expected_blob_lookup_failed"),
+        (
+            "100644 blob "
+            f"{'b' * 40}\t{runner._HOME_EDGE_SNAPSHOT_SIGNER_INSTALLER_REL}\n",
+            "snapshot_signer_install_expected_blob_malformed",
+        ),
+        (
+            f"100755 blob {'b' * 40}\tscripts/other.sh\n",
+            "snapshot_signer_install_expected_blob_path_mismatch",
+        ),
+    ],
+)
+def test_home_edge_media_source_snapshot_signer_install_blocks_bad_blob_lookup_before_sudo(
+    monkeypatch: pytest.MonkeyPatch,
+    ls_tree_output: str,
+    reason: str,
+) -> None:
+    installer_rel = runner._HOME_EDGE_SNAPSHOT_SIGNER_INSTALLER_REL
+    commands: list[list[str]] = []
+
+    def fake_run(command, cwd=None, **_kwargs):
+        del cwd
+        commands.append(list(command))
+        if command == ["git", "rev-parse", "main^{commit}"]:
+            return 0, HEAD_SHA + "\n"
+        if command == ["git", "rev-parse", "origin/main^{commit}"]:
+            return 0, HEAD_SHA + "\n"
+        if command == ["git", "ls-tree", HEAD_SHA, "--", installer_rel]:
+            return 0, ls_tree_output
+        raise AssertionError(command)
+
+    monkeypatch.setattr(runner, "run_command", fake_run)
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1,
+        str(runner.ROOT),
+        _media_source_snapshot_signer_install_issue_body(),
+    )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert f"reason={reason}" in report
+    assert all(command[:2] != ["sudo", "-n"] for command in commands)
+
+
+@pytest.mark.parametrize(
+    ("body", "reason"),
+    [
+        (
+            _media_source_snapshot_signer_install_issue_body(approval="WRONG"),
+            "snapshot_signer_install_operator_approval_mismatch",
+        ),
+        (
+            _media_source_snapshot_signer_install_issue_body(repository="other/repo"),
+            "snapshot_signer_install_repository_mismatch",
+        ),
+        (
+            _media_source_snapshot_signer_install_issue_body(target="other-host"),
+            "snapshot_signer_install_target_mismatch",
+        ),
+        (
+            _media_source_snapshot_signer_install_issue_body() + "\nCommand: sudo env",
+            "snapshot_signer_install_unknown_input_field",
+        ),
+    ],
+)
+def test_home_edge_media_source_snapshot_signer_install_rejects_bad_input_before_sudo(
+    monkeypatch: pytest.MonkeyPatch,
+    body: str,
+    reason: str,
+) -> None:
+    command = mock.Mock(
+        side_effect=AssertionError("must reject before command execution")
+    )
+    monkeypatch.setattr(runner, "run_command", command)
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1,
+        str(runner.ROOT),
+        body,
+    )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert f"reason={reason}" in report
+    command.assert_not_called()
+
+
+def test_home_edge_media_source_snapshot_signer_install_rejects_stale_main_before_privilege(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[list[str]] = []
+
+    def fake_run(command, cwd=None, **_kwargs):
+        del cwd
+        commands.append(list(command))
+        if command == ["git", "rev-parse", "main^{commit}"]:
+            return 0, "b" * 40 + "\n"
+        if command == ["git", "rev-parse", "origin/main^{commit}"]:
+            return 0, HEAD_SHA + "\n"
+        raise AssertionError(command)
+
+    monkeypatch.setattr(runner, "run_command", fake_run)
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_SIGNER_INSTALL_V1,
+        str(runner.ROOT),
+        _media_source_snapshot_signer_install_issue_body(),
+    )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "reason=snapshot_signer_install_expected_main_sha_mismatch" in report
+    assert all(command[:2] != ["sudo", "-n"] for command in commands)
 
 
 def _plain_done_message(issue_number: int = 129) -> str:

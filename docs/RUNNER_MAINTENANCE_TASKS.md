@@ -1212,6 +1212,22 @@ issue text.
 The allowlist does not permit rebooting the host, package upgrades, arbitrary
 commands or config values from issue text, or unrelated services.
 
+`home_edge_01_media_source_snapshot_v1` is a read-only Home Edge snapshot task.
+It must not install or stage the snapshot signer and must not call the signer
+installer task as a side effect.
+
+`home_edge_01_media_source_snapshot_signer_install_v1` is the only registered
+maintenance task that may install the Home Edge media source snapshot signer.
+It accepts only the fixed repository, target, expected main SHA, and operator
+approval fields. Before any privileged command, the Runner must require
+`main`, `origin/main`, and `Expected Main SHA` to match, resolve
+`scripts/install_home_edge_media_source_snapshot_signer.sh` as a `100755 blob`
+at that exact commit, and require the working-tree installer object ID to match
+that exact blob. Blob lookup failures, malformed tree entries, path/type
+mismatches, stale SHA, working-tree/blob mismatches, unknown fields, wrong
+approval, wrong repository, or wrong target all fail closed before sudo.
+Successful signer installation must not auto-run the snapshot task.
+
 ## Reporting
 
 Each maintenance report must state `DONE` or `BLOCKED` accurately with safe
