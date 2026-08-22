@@ -568,8 +568,9 @@ _FINAL_STATUS_DELIVERY_LINE_RE = re.compile(
     r"^\s*(DONE|BLOCKED|NEEDS_OPERATOR)\s*:", re.IGNORECASE
 )
 _FINAL_RESULT_LINE_RE = re.compile(
-    r"^\s*RESULT:\s*(?P<result>DONE|BLOCKED|NEEDS_OPERATOR)\b", re.IGNORECASE
+    r"^\s*RESULT:\s*(?P<result>DONE|BLOCKED|NEEDS_OPERATOR)\s*$", re.IGNORECASE
 )
+_FINAL_RESULT_AMBIGUITY_MARKER = "ambiguous RESULT markers"
 _REPORT_OPERATOR_REQUIRED_RE = re.compile(
     r"^\s*(?:RESULT:\s*)?NEEDS_OPERATOR\b:?", re.IGNORECASE | re.MULTILINE
 )
@@ -2101,6 +2102,34 @@ def _without_fenced_blocks(text: str) -> str:
     return "\n".join(kept)
 
 
+def _bounded_codex_final_answer_for_result_markers(output: str) -> str:
+    text = _ANSI_ESCAPE_RE.sub("", output or "")
+
+    transcript_tail = _CODEX_TRANSCRIPT_TAIL_RE.search(text)
+    workdir_boundary = text.find("\n--------\nworkdir:")
+    prefix_cuts: list[int] = []
+    if transcript_tail is not None:
+        prefix_cuts.append(transcript_tail.start())
+    if workdir_boundary != -1:
+        prefix_cuts.append(workdir_boundary)
+    if prefix_cuts:
+        prefix = text[: min(prefix_cuts)].strip()
+        if prefix:
+            return prefix
+
+    assistant_marker = "\n--------\nassistant\n"
+    assistant_index = text.rfind(assistant_marker)
+    if assistant_index != -1:
+        text = text[assistant_index + len(assistant_marker) :]
+
+    transcript_tail = _CODEX_TRANSCRIPT_TAIL_RE.search(text)
+    cut = transcript_tail.start() if transcript_tail else len(text)
+    workdir_boundary = text.find("\n--------\nworkdir:")
+    if workdir_boundary != -1:
+        cut = min(cut, workdir_boundary)
+    return text[:cut].strip()
+
+
 def _first_final_status(output: str) -> str | None:
     result_status = _final_result_status(output)
     if result_status is not None:
@@ -2121,17 +2150,26 @@ def _first_final_status(output: str) -> str | None:
 
 
 def _final_result_status(output: str) -> str | None:
-    final_answer = _without_fenced_blocks(final_codex_answer(output))
-    lines = [line for line in final_answer.splitlines() if line.strip()]
-    if not lines:
+    results = _final_result_markers(output)
+    if not results:
         return None
-    for line in (lines[0], lines[-1]):
+    unique_results = set(results)
+    if len(unique_results) != 1:
+        return "BLOCKED"
+    return results[0]
+
+
+def _final_result_markers(output: str) -> list[str]:
+    final_answer = _without_fenced_blocks(
+        _bounded_codex_final_answer_for_result_markers(output)
+    )
+    results: list[str] = []
+    for line in final_answer.splitlines():
         match = _FINAL_RESULT_LINE_RE.match(line)
         if match is None:
             continue
-        result = match.group("result").upper()
-        return result
-    return None
+        results.append(match.group("result").upper())
+    return results
 
 
 def blocked_output_marker(output: str) -> str | None:
@@ -2145,6 +2183,16 @@ def blocked_output_marker(output: str) -> str | None:
 def classify_codex_task_result(output: str, exit_code: int) -> CodexTaskResult:
     if exit_code != 0:
         return CodexTaskResult("BLOCKED", f"exit code {exit_code}")
+
+    result_markers = _final_result_markers(output)
+    if result_markers:
+        unique_results = set(result_markers)
+        if len(unique_results) != 1:
+            return CodexTaskResult("BLOCKED", _FINAL_RESULT_AMBIGUITY_MARKER)
+        status = result_markers[0]
+        if status == "DONE":
+            return CodexTaskResult("DONE")
+        return CodexTaskResult("BLOCKED", status)
 
     status = _first_final_status(output)
     if status is not None:
