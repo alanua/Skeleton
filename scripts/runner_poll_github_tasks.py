@@ -248,6 +248,8 @@ RUNNER_LANE_LABEL_DESCRIPTIONS = {
 FINAL_LABELS_BY_STATUS = {
     "DONE": LABEL_DONE,
     "BLOCKED": LABEL_BLOCKED,
+    "NEEDS_OPERATOR": LABEL_BLOCKED,
+    "OPERATOR_ATTENTION": LABEL_BLOCKED,
 }
 ACTIVE_EXECUTION_LABELS = frozenset((LABEL_READY, LABEL_RUN_NOW, LABEL_RUNNING))
 TERMINAL_RUNNER_LABELS = frozenset((LABEL_DONE, LABEL_BLOCKED))
@@ -4663,6 +4665,61 @@ TELEGRAM_CALLBACK_REPO_KEYS = {
 _NOTIFICATION_ISSUE_CACHE: dict[tuple[int, str], dict[str, Any]] = {}
 
 
+@dataclass(frozen=True)
+class TelegramNotificationPolicy:
+    action: str
+    reason: str
+
+    @property
+    def should_send(self) -> bool:
+        return self.action != "suppress"
+
+
+def _report_has_exact_head_pr_approval_card(
+    report: str | None, target_repository: str
+) -> bool:
+    del target_repository
+    if not report:
+        return False
+    if extract_pr_url(report) is None:
+        return False
+    head_sha, changed_files = extract_runner_report_pr_binding(report)
+    return head_sha is not None and bool(changed_files)
+
+
+def telegram_terminal_notification_policy(
+    status: str,
+    report: str | None = None,
+    target_repository: str = REPO,
+    issue_body: str | None = None,
+) -> TelegramNotificationPolicy:
+    normalized_status = status.strip().upper()
+    if normalized_status in {"NEEDS_OPERATOR", "OPERATOR_ATTENTION"}:
+        return TelegramNotificationPolicy(
+            "plain_attention",
+            "explicit_operator_attention_status",
+        )
+    if _report_has_exact_head_pr_approval_card(report, target_repository):
+        return TelegramNotificationPolicy(
+            "pr_approval_card",
+            "exact_head_pr_approval_required",
+        )
+    if (
+        normalized_status == "DONE"
+        and issue_body is not None
+        and "Expected Output:" not in issue_body
+        and "expected_output:" not in issue_body
+    ):
+        return TelegramNotificationPolicy(
+            "plain_attention",
+            "legacy_task_without_terminal_contract",
+        )
+    return TelegramNotificationPolicy(
+        "suppress",
+        "ordinary_terminal_status",
+    )
+
+
 def _telegram_callback_data(button: dict[str, Any]) -> str:
     callback_payload = button.get("callback_payload")
     payload = callback_payload if isinstance(callback_payload, dict) else {}
@@ -4928,8 +4985,18 @@ def notification_task_issue(issue_number: int, status: str) -> dict[str, Any] | 
     return issue
 
 
-def should_notify_task_finished(issue_number: int, status: str) -> bool:
-    return notification_task_issue(issue_number, status) is not None
+def should_notify_task_finished(
+    issue_number: int, status: str, report: str | None = None
+) -> bool:
+    issue = notification_task_issue(issue_number, status)
+    if issue is None:
+        return False
+    return telegram_terminal_notification_policy(
+        status,
+        report,
+        notification_target_repository(issue),
+        str(issue.get("body") or ""),
+    ).should_send
 
 
 def notification_target_repository(issue: dict[str, Any]) -> str:
@@ -4946,19 +5013,27 @@ def notify_task_finished(
     issue_number: int, status: str, report: str | None = None
 ) -> None:
     try:
-        if not should_notify_task_finished(issue_number, status):
+        if not should_notify_task_finished(issue_number, status, report):
             return
         issue = _NOTIFICATION_ISSUE_CACHE.pop((issue_number, status), None)
         target_repository = (
             notification_target_repository(issue) if issue is not None else REPO
         )
+        policy = telegram_terminal_notification_policy(
+            status,
+            report,
+            target_repository,
+            str(issue.get("body") or "") if issue is not None else None,
+        )
+        if policy.action == "suppress":
+            return
         plain_target_repository = (
             target_repository if target_repository != REPO else None
         )
         plain_message = build_telegram_message(
             issue_number, status, report, plain_target_repository
         )
-        if status != "DONE" or not report:
+        if policy.action == "plain_attention":
             send_telegram_notification(plain_message)
             return
 
@@ -4969,11 +5044,9 @@ def notify_task_finished(
                 source_issue_number=issue_number,
             )
         except Exception:
-            send_telegram_notification(plain_message)
             return
 
         if card_payload is None:
-            send_telegram_notification(plain_message)
             return
 
         try:
@@ -4982,7 +5055,7 @@ def notify_task_finished(
                 card_payload_to_inline_keyboard(card_payload),
             )
         except Exception:
-            send_telegram_notification(plain_message)
+            return
     except Exception:
         return
 
