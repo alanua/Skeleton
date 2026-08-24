@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://alanua.github.io/skeleton/schemas/gpt_5_6_eval_case.schema.json",
+  "title": "Skeleton GPT-5.6 Evaluation Case",
+  "type": "array",
+  "minItems": 1,
+  "maxItems": 50,
+  "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "case_id",
+      "source_refs",
+      "task_kind",
+      "prompt",
+      "bounded_context_excerpt",
+      "forbidden_actions",
+      "required_findings",
+      "hard_gates",
+      "scoring_rubric",
+      "expected_terminal_outcome"
+    ],
+    "anyOf": [
+      {
+        "required": [
+          "allowed_files"
+        ]
+      },
+      {
+        "required": [
+          "allowed_actions"
+        ]
+      }
+    ],
+    "properties": {
+      "case_id": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9-]{2,80}$"
+      },
+      "source_refs": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 8,
+        "items": {
+          "type": "string",
+          "maxLength": 120
+        }
+      },
+      "task_kind": {
+        "type": "string",
+        "enum": [
+          "bug_diagnosis",
+          "review_verification",
+          "route_selection",
+          "safety_hardening",
+          "implementation_planning"
+        ]
+      },
+      "prompt": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2000
+      },
+      "bounded_context_excerpt": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2500
+      },
+      "allowed_files": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 20,
+        "items": {
+          "type": "string",
+          "maxLength": 160
+        }
+      },
+      "allowed_actions": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 20,
+        "items": {
+          "type": "string",
+          "maxLength": 160
+        }
+      },
+      "forbidden_actions": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 20,
+        "items": {
+          "type": "string",
+          "maxLength": 160
+        }
+      },
+      "required_findings": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 20,
+        "items": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]{2,80}$"
+        }
+      },
+      "hard_gates": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 20,
+        "items": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]{2,80}$"
+        }
+      },
+      "scoring_rubric": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "correctness",
+          "scope_safety",
+          "evidence_quality",
+          "efficiency"
+        ],
+        "properties": {
+          "correctness": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "scope_safety": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "evidence_quality": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "efficiency": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100
+          }
+        }
+      },
+      "expected_terminal_outcome": {
+        "type": "string",
+        "enum": [
+          "PASS",
+          "CAUTION",
+          "REJECT"
+        ]
+      }
+    }
+  }
+}
