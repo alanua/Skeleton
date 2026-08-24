@@ -20,6 +20,10 @@ DEFAULT_REPORT_PATH = Path("var/host_maintenance_report.json")
 DEFAULT_PRIVATE_RUNTIME_ROOT = Path("/home/agent/.local/share/skeleton/host-maintenance")
 WINDOWS_BOOTSTRAP_APPROVAL = "windows_bootstrap_one_link_v1"
 WINDOWS_BOOTSTRAP_BASE_URL = "https://skeleton-private-enroll.example.invalid/windows"
+ESP_LAB_STAGE_B_HOST_INSTALL_APPROVAL = "esp_lab_stage_b_host_install_v1"
+ESP_LAB_STAGE_B_VERSION = "v1.1.18"
+ESP_LAB_STAGE_B_TAG_COMMIT = "77c79a01786881206ad9b3ccbe3db2ddb08f2989"
+ESP_LAB_STAGE_B_REPOSITORY = "thelastoutpostworkshop/ESPConnect"
 QUARANTINE_DIRNAME = ".quarantine"
 ALLOWED_COMMANDS = frozenset(
     {
@@ -29,10 +33,20 @@ ALLOWED_COMMANDS = frozenset(
         "poller_status",
         "windows_bootstrap_audit",
         "windows_bootstrap_prepare_one_link",
+        "esp_lab_stage_b_host_install",
     }
 )
 ALLOWED_PACKET_FIELDS = frozenset(
-    {"command", "repository", "apply", "stale_days", "candidates", "enrollment_id", "owner_approval"}
+    {
+        "command",
+        "repository",
+        "apply",
+        "stale_days",
+        "candidates",
+        "enrollment_id",
+        "owner_approval",
+        "host_install_id",
+    }
 )
 PACKET_SUFFIXES = frozenset({".yaml", ".yml", ".json"})
 SAFE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{2,63}$")
@@ -269,6 +283,16 @@ def _execute_command(
             base_url=windows_bootstrap_base_url,
             now=now,
         )
+    if command == "esp_lab_stage_b_host_install":
+        return _prepare_esp_lab_stage_b_host_install(
+            command,
+            repository,
+            apply,
+            worktree_root,
+            packet,
+            private_runtime_root=private_runtime_root,
+            now=now,
+        )
 
     inspected = [_inspect_candidate(path, repository, stale_days=stale_days, now=now) for path in candidates]
     if command == "worktree_audit":
@@ -287,6 +311,85 @@ def _execute_command(
 
     actions = _quarantine_actions(worktree_root, inspected, apply)
     return HostMaintenanceReport("ok", command, repository, apply, str(worktree_root), inspected, actions)
+
+
+def _prepare_esp_lab_stage_b_host_install(
+    command: str,
+    repository: str,
+    apply: bool,
+    worktree_root: Path,
+    packet: dict[str, Any],
+    *,
+    private_runtime_root: Path,
+    now: datetime,
+) -> HostMaintenanceReport:
+    if apply is not True:
+        raise HostMaintenanceError("ESP Lab Stage B host-install preparation requires apply=true")
+    owner_approval = _require_string(packet, "owner_approval")
+    if owner_approval != ESP_LAB_STAGE_B_HOST_INSTALL_APPROVAL:
+        raise HostMaintenanceError("owner_approval is not valid for ESP Lab Stage B host-install preparation")
+    host_install_id = _optional_safe_id(packet, "host_install_id", "de-pc-workstation")
+    artifact_root = private_runtime_root / "esp-lab-stage-b" / host_install_id
+    _ensure_private_directory(artifact_root)
+    artifact_path = _unique_private_artifact(artifact_root / "host-install.json")
+    created_at = now.isoformat().replace("+00:00", "Z")
+    fixed_command = (
+        "powershell -NoProfile -ExecutionPolicy Bypass "
+        "-File .\\scripts\\espconnect_windows_stage_b_install.ps1 -Apply"
+    )
+    command_hash = _sha256_text(fixed_command)
+    artifact = {
+        "schema": "skeleton.esp_lab.stage_b.host_install.private.v1",
+        "status": "prepared_not_installed",
+        "host_install_id": host_install_id,
+        "target_node": "de-pc-workstation",
+        "created_at": created_at,
+        "owner_approval": owner_approval,
+        "operator_flow": "run_fixed_current_main_installer_on_de_pc_after_review",
+        "fixed_command": fixed_command,
+        "fixed_command_sha256": command_hash,
+        "install_script_public_ref": "scripts/espconnect_windows_stage_b_install.ps1",
+        "serve_script_public_ref": "scripts/espconnect_windows_stage_b_serve.ps1",
+        "upstream_repository": ESP_LAB_STAGE_B_REPOSITORY,
+        "upstream_version": ESP_LAB_STAGE_B_VERSION,
+        "expected_tag_commit": ESP_LAB_STAGE_B_TAG_COMMIT,
+        "package_asset": "dist.zip",
+        "execution_boundary": "operator_manual_de_pc_only_no_remote_shell_no_service_no_firmware_write",
+        "instructions": [
+            "Run only from a current main checkout after reviewing the plan.",
+            "The installer is plan-only unless -Apply is explicit.",
+            "Do not use ESPConnect destructive operations during Stage B.",
+            "Serve the installed UI on 127.0.0.1 only with the Stage B serve helper.",
+        ],
+    }
+    _write_private_artifact(artifact_path, artifact)
+    return HostMaintenanceReport(
+        status="ok",
+        command=command,
+        repository=repository,
+        apply=apply,
+        worktree_root=str(worktree_root),
+        candidates=[],
+        actions=[
+            {
+                "action": "esp_lab_stage_b_host_install",
+                "status": "prepared_not_installed",
+                "host_install_id": host_install_id,
+                "target_node": "de-pc-workstation",
+                "owner_approval": owner_approval,
+                "private_artifact_ref": f"esp-lab-stage-b/{host_install_id}/{artifact_path.name}",
+                "fixed_command_sha256": command_hash,
+                "install_script_public_ref": "scripts/espconnect_windows_stage_b_install.ps1",
+                "upstream_repository": ESP_LAB_STAGE_B_REPOSITORY,
+                "upstream_version": ESP_LAB_STAGE_B_VERSION,
+                "expected_tag_commit": ESP_LAB_STAGE_B_TAG_COMMIT,
+                "runtime_mutation": False,
+                "target_installed": False,
+                "public_receipt_contains_command": False,
+                "next_action": "operator_run_fixed_current_main_installer_on_de_pc",
+            }
+        ],
+    )
 
 
 def _prepare_windows_bootstrap_one_link(

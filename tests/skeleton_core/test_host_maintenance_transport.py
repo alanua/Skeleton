@@ -143,3 +143,33 @@ def test_owner_approved_windows_one_link_packet_moves_done_with_redacted_report(
     assert action["delivery_channel"] == "viber_https_link"
     assert action["public_receipt_contains_link"] is False
     assert (tmp_path / "private" / action["private_artifact_ref"]).is_file()
+
+
+def test_esp_lab_stage_b_host_install_packet_moves_done_with_redacted_report(tmp_path: Path) -> None:
+    transport_root = tmp_path / "transport"
+    packet_path = write_packet(
+        transport_root,
+        command="esp_lab_stage_b_host_install",
+        apply=True,
+        host_install_id="de-pc-workstation",
+        owner_approval="esp_lab_stage_b_host_install_v1",
+    )
+
+    report = poll_once(
+        transport_root,
+        worktree_root=tmp_path / "worktrees" / "skeleton",
+        private_runtime_root=tmp_path / "private",
+    )
+
+    done_packet = transport_root / "done" / packet_path.name
+    assert report.status == "done"
+    assert done_packet.is_file()
+    written_report = read_report(transport_root)
+    public_blob = json.dumps(written_report, sort_keys=True)
+    assert "espconnect_windows_stage_b_install.ps1 -Apply" not in public_blob
+    action = written_report["processor"]["actions"][0]
+    assert action["status"] == "prepared_not_installed"
+    assert action["target_node"] == "de-pc-workstation"
+    assert action["runtime_mutation"] is False
+    assert action["public_receipt_contains_command"] is False
+    assert (tmp_path / "private" / action["private_artifact_ref"]).is_file()

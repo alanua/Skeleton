@@ -112,6 +112,33 @@ def test_builds_fixed_signed_read_only_home_edge_request() -> None:
     assert "browser" in home_edge_request.argv[-1]
 
 
+def test_current_main_workstation_transport_rejects_non_fixed_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    parsed = audit.RemoteAuditEnrollment.from_mapping(enrollment())
+    request = audit.build_read_only_system_audit_request(
+        parsed,
+        request_id="fixed",
+        hmac_secret=SECRET,
+    )
+    captured: list[Mapping[str, Any]] = []
+
+    def fake_execute(outbound: Mapping[str, Any]) -> HomeEdgeExecReceipt:
+        captured.append(outbound)
+        return receipt(json.dumps(evidence()))
+
+    transport = audit.CurrentMainWorkstationNodeTransport()
+    monkeypatch.setattr(audit, "execute_home_edge_request", fake_execute)
+
+    assert transport(request).status == "ok"
+    with pytest.raises(Exception, match="fixed current-main audit operation"):
+        transport({**request, "argv": ["powershell.exe", "-Command", "Get-ChildItem"]})
+    with pytest.raises(Exception, match="idempotency"):
+        transport({**request, "idempotency_key": "other"})
+    with pytest.raises(Exception, match="signed current-main"):
+        transport({key: value for key, value in request.items() if key != "signature"})
+
+    assert captured == [request]
+
+
 def test_rejects_behavior_changing_enrollment_fields() -> None:
     with pytest.raises(ValueError, match="node_id"):
         audit.RemoteAuditEnrollment.from_mapping(enrollment(node_id="private-host"))

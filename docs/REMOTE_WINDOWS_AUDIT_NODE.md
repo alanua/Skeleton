@@ -30,7 +30,23 @@ Run the PowerShell bootstrap again with `-RotateMachineIdentity` to rotate the m
 
 The downstream operation is `read_only_system_audit_v1` in `core.home_edge.remote_windows_audit`. It builds a fixed, signed `read_only` Home Edge executor request with no issue-supplied command, shell, user, host, or path. The remote collection is limited to OS, hardware, disk capacity, TPM/Secure Boot, Defender, OpenSSH, and Tailscale status needed for a deterministic `KEEP`, `UPGRADE`, `REINSTALL`, `REPAIR`, or `RETIRE` verdict.
 
+`CurrentMainWorkstationNodeTransport` is the bounded current-main WorkstationNode transport for this operation. It accepts only the exact signed `read_only_system_audit_v1` request shape, the fixed idempotency key, the dedicated desktop user, the canonical node id, and the embedded PowerShell audit script. Any changed argv, timeout, stdin, cwd, environment, lane, user, idempotency key, or node binding is rejected before transport.
+
 It never scans personal files, messages, browser history, photos, or document content.
+
+## ESP Lab Stage B Host-Install Handoff
+
+The fixed host-maintenance operation for the DE-PC ESPConnect install handoff is `esp_lab_stage_b_host_install`. It requires:
+
+```yaml
+command: esp_lab_stage_b_host_install
+repository: alanua/Skeleton
+apply: true
+owner_approval: esp_lab_stage_b_host_install_v1
+host_install_id: de-pc-workstation
+```
+
+The operation does not install software, enroll a target, launch PowerShell, open a listener, flash firmware, or create a service. It writes one private `0600` artifact under the protected host-maintenance runtime root with the fixed current-main install command for `scripts/espconnect_windows_stage_b_install.ps1 -Apply`, the pinned ESPConnect release `v1.1.18`, and tag commit `77c79a01786881206ad9b3ccbe3db2ddb08f2989`. The public receipt contains only the private artifact reference, hashes, pinned public metadata, and `target_installed: false`.
 
 ## Public/Private Boundary
 
@@ -41,6 +57,7 @@ Public GitHub-safe material:
 - schemas
 - public receipt hash and summarized non-identifying evidence
 - deterministic verdict, confidence, and observed-evidence reasons
+- Stage B host-install public metadata and fixed-command hash
 
 Private controller or target material:
 
@@ -49,6 +66,7 @@ Private controller or target material:
 - Tailscale identity and login state
 - hostnames, IP addresses, serial numbers, known-hosts entries
 - full private evidence JSON
+- Stage B private operator handoff artifact and exact install command
 
 The public receipt includes only `machine_identity_hash` and `private_evidence_sha256`. Full evidence must be stored outside the repository.
 
@@ -60,3 +78,4 @@ The public receipt includes only `machine_identity_hash` and `private_evidence_s
 4. Verify the displayed machine-identity fingerprint out of band.
 5. Register the node with `schemas/remote_audit_enrollment.schema.json` in private controller storage.
 6. Run the first `read_only_system_audit_v1` audit and store private evidence outside GitHub.
+7. For ESP Lab Stage B, generate the private handoff with `esp_lab_stage_b_host_install`, then run the fixed installer manually on DE-PC only after owner/operator approval.

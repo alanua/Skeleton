@@ -342,3 +342,80 @@ def test_windows_bootstrap_one_link_blocks_without_apply(tmp_path: Path) -> None
 
     assert report.status == "blocked"
     assert "requires apply=true" in str(report.blocked_reason)
+
+
+def test_esp_lab_stage_b_host_install_writes_private_handoff_and_redacted_public_report(tmp_path: Path) -> None:
+    packet_path = write_packet(
+        tmp_path,
+        command="esp_lab_stage_b_host_install",
+        apply=True,
+        host_install_id="de-pc-workstation",
+        owner_approval="esp_lab_stage_b_host_install_v1",
+    )
+    report_path = tmp_path / "report.json"
+
+    report = process_host_maintenance(
+        packet_path,
+        report_path=report_path,
+        worktree_root=tmp_path / "worktrees" / "skeleton",
+        private_runtime_root=tmp_path / "private",
+        now=NOW,
+    )
+
+    assert report.status == "ok"
+    action = report.actions[0]
+    assert action["action"] == "esp_lab_stage_b_host_install"
+    assert action["status"] == "prepared_not_installed"
+    assert action["runtime_mutation"] is False
+    assert action["target_installed"] is False
+    assert action["public_receipt_contains_command"] is False
+    assert action["upstream_version"] == "v1.1.18"
+    assert action["expected_tag_commit"] == "77c79a01786881206ad9b3ccbe3db2ddb08f2989"
+    public_blob = json.dumps(read_report(report_path), sort_keys=True)
+    assert "espconnect_windows_stage_b_install.ps1 -Apply" not in public_blob
+    artifact = tmp_path / "private" / action["private_artifact_ref"]
+    private_payload = json.loads(artifact.read_text(encoding="utf-8"))
+    assert private_payload["status"] == "prepared_not_installed"
+    assert private_payload["fixed_command"].endswith("espconnect_windows_stage_b_install.ps1 -Apply")
+    assert private_payload["fixed_command_sha256"] == action["fixed_command_sha256"]
+    assert private_payload["execution_boundary"] == "operator_manual_de_pc_only_no_remote_shell_no_service_no_firmware_write"
+    assert oct(artifact.stat().st_mode & 0o777) == "0o600"
+
+
+def test_esp_lab_stage_b_host_install_requires_exact_owner_approval_and_apply(tmp_path: Path) -> None:
+    missing_apply = write_packet(
+        tmp_path,
+        command="esp_lab_stage_b_host_install",
+        apply=False,
+        owner_approval="esp_lab_stage_b_host_install_v1",
+    )
+
+    report = process_host_maintenance(
+        missing_apply,
+        report_path=tmp_path / "report-1.json",
+        worktree_root=tmp_path / "worktrees" / "skeleton",
+        private_runtime_root=tmp_path / "private",
+        now=NOW,
+    )
+
+    assert report.status == "blocked"
+    assert "requires apply=true" in str(report.blocked_reason)
+
+    wrong_approval = write_packet(
+        tmp_path,
+        command="esp_lab_stage_b_host_install",
+        apply=True,
+        owner_approval="wrong",
+    )
+
+    report = process_host_maintenance(
+        wrong_approval,
+        report_path=tmp_path / "report-2.json",
+        worktree_root=tmp_path / "worktrees" / "skeleton",
+        private_runtime_root=tmp_path / "private",
+        now=NOW,
+    )
+
+    assert report.status == "blocked"
+    assert "owner_approval is not valid" in str(report.blocked_reason)
+    assert not (tmp_path / "private").exists()

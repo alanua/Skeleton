@@ -32,6 +32,7 @@ TARGET_NODE = DEFAULT_NODE_ID
 IDEMPOTENCY_KEY = "remote-windows-audit-read-only-system-audit-v1"
 AUDIT_USER = "skeleton-audit"
 DEFAULT_TIMEOUT_SECONDS = 180
+WORKSTATION_TRANSPORT_NAME = "current_main_workstation_node"
 PUBLIC_RECEIPT_FIELDS = (
     "schema",
     "operation",
@@ -147,6 +148,17 @@ $payload | ConvertTo-Json -Depth 8 -Compress
 
 class RemoteWindowsAuditTransport(Protocol):
     def __call__(self, request: Mapping[str, Any]) -> HomeEdgeExecReceipt: ...
+
+
+@dataclass(frozen=True)
+class CurrentMainWorkstationNodeTransport:
+    """Bound the workstation transport to the single current-main audit request."""
+
+    adapter_name: str = WORKSTATION_TRANSPORT_NAME
+
+    def __call__(self, request: Mapping[str, Any]) -> HomeEdgeExecReceipt:
+        _validate_current_main_workstation_request(request)
+        return execute_home_edge_request(request)
 
 
 @dataclass(frozen=True)
@@ -353,6 +365,36 @@ def _decode_private_evidence(receipt: HomeEdgeExecReceipt) -> dict[str, Any]:
     if decoded.get("operation") != OPERATION:
         raise HomeEdgeExecError("remote evidence operation mismatch")
     return decoded
+
+
+def _validate_current_main_workstation_request(request: Mapping[str, Any]) -> None:
+    parsed = HomeEdgeExecRequest.from_mapping(request)
+    if not parsed.signature:
+        raise HomeEdgeExecError("workstation transport requires a signed current-main audit request")
+    if parsed.node_id != TARGET_NODE:
+        raise HomeEdgeExecError("workstation transport is bound to the current-main Home Edge node")
+    if parsed.execution_lane is not ExecutionLane.READ_ONLY:
+        raise HomeEdgeExecError("workstation transport only accepts read_only requests")
+    if parsed.run_as is not ExecutionUser.DESKTOP_USER:
+        raise HomeEdgeExecError("workstation transport only runs as desktop-user")
+    if parsed.idempotency_key != IDEMPOTENCY_KEY:
+        raise HomeEdgeExecError("workstation transport idempotency key mismatch")
+    if parsed.timeout_seconds != DEFAULT_TIMEOUT_SECONDS:
+        raise HomeEdgeExecError("workstation transport timeout mismatch")
+    if parsed.max_output_bytes != 128_000:
+        raise HomeEdgeExecError("workstation transport output bound mismatch")
+    if parsed.cwd is not None or parsed.environment or parsed.stdin_text is not None or parsed.stdin_base64 is not None:
+        raise HomeEdgeExecError("workstation transport request contains unsupported execution fields")
+    expected_prefix = (
+        "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+    )
+    if parsed.argv[:6] != expected_prefix or len(parsed.argv) != 7 or parsed.argv[6] != READ_ONLY_SYSTEM_AUDIT_SCRIPT:
+        raise HomeEdgeExecError("workstation transport request is not the fixed current-main audit operation")
 
 
 def _validate_evidence_boundary(evidence: Mapping[str, Any]) -> None:
