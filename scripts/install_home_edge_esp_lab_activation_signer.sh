@@ -11,7 +11,7 @@ SUDOERS_PATH="/etc/sudoers.d/skeleton-home-edge-esp-lab-stage1-signer"
 PAYLOAD_REL="scripts/home_edge_esp_lab_activation_signer_payload.py"
 WRAPPER_REL="scripts/home_edge_esp_lab_activation_signer"
 INSTALLER_REL="scripts/install_home_edge_esp_lab.sh"
-SOURCE_SHA="725dfc3aedbce194c7afcc229eb44b1eec4f463a"
+TRUSTED_ANCESTOR_SHA="725dfc3aedbce194c7afcc229eb44b1eec4f463a"
 PAYLOAD_BLOB_SHA="7c86372f8eaacc9e4100070eee07336bf2703249"
 WRAPPER_BLOB_SHA="d248088477a7c59219a9c19c47bcfc464c6dcd27"
 INSTALLER_BLOB_SHA="1527705a28127a88cf24199706a75fd77a79894c"
@@ -85,8 +85,24 @@ if [[ "$actual_runner_user" != "$RUNNER_USER" ]]; then
   printf 'BLOCKED: live Runner service user does not match canonical agent account\n' >&2
   exit 2
 fi
-if [[ "$(/usr/bin/git -C "$REPO_ROOT" rev-parse HEAD)" != "$SOURCE_SHA" ]]; then
-  printf 'BLOCKED: reviewed source checkout is stale\n' >&2
+if ! CURRENT_HEAD="$(/usr/bin/git -C "$REPO_ROOT" rev-parse --verify "HEAD^{commit}")"; then
+  printf 'BLOCKED: reviewed source checkout HEAD is invalid\n' >&2
+  exit 2
+fi
+if [[ ! "$CURRENT_HEAD" =~ ^[0-9a-f]{40}$ ]]; then
+  printf 'BLOCKED: reviewed source checkout HEAD is invalid\n' >&2
+  exit 2
+fi
+if ! REPO_STATUS="$(/usr/bin/git -C "$REPO_ROOT" status --porcelain)"; then
+  printf 'BLOCKED: reviewed source checkout status is unavailable\n' >&2
+  exit 2
+fi
+if [[ -n "$REPO_STATUS" ]]; then
+  printf 'BLOCKED: reviewed source checkout is dirty\n' >&2
+  exit 2
+fi
+if ! /usr/bin/git -C "$REPO_ROOT" merge-base --is-ancestor "$TRUSTED_ANCESTOR_SHA" "$CURRENT_HEAD"; then
+  printf 'BLOCKED: trusted Stage1B source is not an ancestor of reviewed checkout\n' >&2
   exit 2
 fi
 
@@ -99,7 +115,16 @@ reviewed_blob_sha() {
 }
 
 validate_source_file() {
-  local path="$1" max_bytes="$2" expected_blob="$3" size mode actual_blob
+  local path="$1" rel_path="$2" max_bytes="$3" expected_blob="$4" expected_mode="$5" size mode actual_blob tree_entry tree_mode tree_type tree_blob tree_path
+  if ! tree_entry="$(/usr/bin/git -C "$REPO_ROOT" ls-tree HEAD -- "$rel_path")"; then
+    printf 'BLOCKED: reviewed signer source tree entry is unavailable\n' >&2
+    exit 2
+  fi
+  read -r tree_mode tree_type tree_blob tree_path <<< "$tree_entry"
+  if [[ -z "$tree_entry" || "$tree_mode" != "$expected_mode" || "$tree_type" != "blob" || "$tree_blob" != "$expected_blob" || "$tree_path" != "$rel_path" ]]; then
+    printf 'BLOCKED: reviewed signer source tree entry does not match approved blob\n' >&2
+    exit 2
+  fi
   if [[ -L "$path" || ! -f "$path" || ! -r "$path" ]]; then
     printf 'BLOCKED: reviewed signer source is not a readable regular file\n' >&2
     exit 2
@@ -121,9 +146,9 @@ validate_source_file() {
   fi
 }
 
-validate_source_file "$PAYLOAD_SRC" $((128 * 1024)) "$PAYLOAD_BLOB_SHA"
-validate_source_file "$WRAPPER_SRC" $((16 * 1024)) "$WRAPPER_BLOB_SHA"
-validate_source_file "$INSTALLER_SRC" $((256 * 1024)) "$INSTALLER_BLOB_SHA"
+validate_source_file "$PAYLOAD_SRC" "$PAYLOAD_REL" $((128 * 1024)) "$PAYLOAD_BLOB_SHA" "100644"
+validate_source_file "$WRAPPER_SRC" "$WRAPPER_REL" $((16 * 1024)) "$WRAPPER_BLOB_SHA" "100755"
+validate_source_file "$INSTALLER_SRC" "$INSTALLER_REL" $((256 * 1024)) "$INSTALLER_BLOB_SHA" "100755"
 for path in /etc/skeleton /etc/skeleton/home-edge-01.env /etc/skeleton/home-edge-executor-controller.env; do
   if [[ -L "$path" || ! -e "$path" ]]; then
     printf 'BLOCKED: controller boundary metadata is unavailable\n' >&2

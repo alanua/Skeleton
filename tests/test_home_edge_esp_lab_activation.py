@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import subprocess
+import textwrap
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping
@@ -18,7 +19,12 @@ ROOT = Path(__file__).resolve().parents[1]
 PAYLOAD_PATH = ROOT / "scripts/home_edge_esp_lab_activation_signer_payload.py"
 WRAPPER_PATH = ROOT / "scripts/home_edge_esp_lab_activation_signer"
 INSTALLER_PATH = ROOT / "scripts/install_home_edge_esp_lab_activation_signer.sh"
+STAGE1_INSTALLER_PATH = ROOT / "scripts/install_home_edge_esp_lab.sh"
 SECRET = "synthetic-esp-lab-stage1-key"
+SIGNER_TRUSTED_ANCESTOR_SHA = "725dfc3aedbce194c7afcc229eb44b1eec4f463a"
+SIGNER_PAYLOAD_BLOB_SHA = "7c86372f8eaacc9e4100070eee07336bf2703249"
+SIGNER_WRAPPER_BLOB_SHA = "d248088477a7c59219a9c19c47bcfc464c6dcd27"
+SIGNER_STAGE1_INSTALLER_BLOB_SHA = "1527705a28127a88cf24199706a75fd77a79894c"
 
 
 def _load_payload():
@@ -41,6 +47,126 @@ def _esp_module_bytes() -> bytes:
         ["git", "show", f"{activation.APPROVED_SOURCE_SHA}:{activation.ESP_MODULE_REPO_PATH}"],
         cwd=ROOT,
     )
+
+
+def _git_blob(path: Path) -> str:
+    return subprocess.check_output(["git", "hash-object", "--no-filters", str(path)], cwd=ROOT).decode().strip()
+
+
+def _git_tree_blob(path: str) -> str:
+    return subprocess.check_output(["git", "ls-tree", "HEAD", "--", path], cwd=ROOT).decode().split()[2]
+
+
+def _make_signer_installer_preflight_fixture(
+    tmp_path: Path,
+    *,
+    missing_signer_files: bool = False,
+    payload_bytes: bytes | None = None,
+    wrapper_bytes: bytes | None = None,
+    installer_bytes: bytes | None = None,
+) -> tuple[Path, Path]:
+    repo = tmp_path / "repo"
+    scripts = repo / "scripts"
+    scripts.mkdir(parents=True)
+    if not missing_signer_files:
+        (scripts / "home_edge_esp_lab_activation_signer_payload.py").write_bytes(
+            payload_bytes if payload_bytes is not None else PAYLOAD_PATH.read_bytes()
+        )
+        wrapper = scripts / "home_edge_esp_lab_activation_signer"
+        wrapper.write_bytes(wrapper_bytes if wrapper_bytes is not None else WRAPPER_PATH.read_bytes())
+        wrapper.chmod(0o755)
+    stage1 = scripts / "install_home_edge_esp_lab.sh"
+    stage1.write_bytes(installer_bytes if installer_bytes is not None else STAGE1_INSTALLER_PATH.read_bytes())
+    stage1.chmod(0o755)
+
+    protected = tmp_path / "protected-installer.sh"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_git = tmp_path / "fake-git"
+    fake_systemctl = tmp_path / "fake-systemctl"
+    (fake_bin / "getent").write_text("#!/usr/bin/env sh\nexit 0\n", encoding="utf-8")
+    (fake_bin / "visudo").write_text("#!/usr/bin/env sh\nexit 0\n", encoding="utf-8")
+    fake_systemctl.write_text("#!/usr/bin/env sh\nprintf 'agent\\n'\n", encoding="utf-8")
+    fake_git.write_text(
+        textwrap.dedent(
+            f"""\
+            #!/usr/bin/env sh
+            if [ "$1" = "-C" ]; then
+              shift 2
+            fi
+            if [ "$1" = "rev-parse" ] && [ "$2" = "--verify" ] && [ "$3" = "HEAD^{{commit}}" ]; then
+              printf '%s\\n' "${{FAKE_HEAD:-06eb2d97d38b9fab0985c47e163070034a0a4611}}"
+              exit 0
+            fi
+            if [ "$1" = "status" ] && [ "$2" = "--porcelain" ]; then
+              printf '%s' "${{FAKE_STATUS:-}}"
+              exit 0
+            fi
+            if [ "$1" = "merge-base" ] && [ "$2" = "--is-ancestor" ]; then
+              [ "${{FAKE_ANCESTOR_OK:-1}}" = "1" ]
+              exit $?
+            fi
+            if [ "$1" = "ls-tree" ] && [ "$2" = "HEAD" ] && [ "$3" = "--" ]; then
+                case "$4" in
+                  scripts/home_edge_esp_lab_activation_signer_payload.py)
+                    [ "${{FAKE_OLD_CHECKOUT:-0}}" = "1" ] && exit 0
+                    printf '100644 blob %s\\t%s\\n' "${{FAKE_PAYLOAD_TREE_BLOB:-{SIGNER_PAYLOAD_BLOB_SHA}}}" "$4"
+                    exit 0
+                    ;;
+                  scripts/home_edge_esp_lab_activation_signer)
+                    [ "${{FAKE_OLD_CHECKOUT:-0}}" = "1" ] && exit 0
+                    printf '100755 blob %s\\t%s\\n' "${{FAKE_WRAPPER_TREE_BLOB:-{SIGNER_WRAPPER_BLOB_SHA}}}" "$4"
+                    exit 0
+                    ;;
+                  scripts/install_home_edge_esp_lab.sh)
+                    printf '100755 blob %s\\t%s\\n' "${{FAKE_INSTALLER_TREE_BLOB:-{SIGNER_STAGE1_INSTALLER_BLOB_SHA}}}" "$4"
+                    exit 0
+                    ;;
+                esac
+            fi
+            if [ "$1" = "hash-object" ] && [ "$2" = "--no-filters" ] && [ "$3" = "--stdin" ]; then
+              exec /usr/bin/git hash-object --no-filters --stdin
+            fi
+            printf 'unexpected git argv: %s\\n' "$*" >&2
+            exit 99
+            """
+        ),
+        encoding="utf-8",
+    )
+    for executable in (fake_bin / "getent", fake_bin / "visudo", fake_git, fake_systemctl):
+        executable.chmod(0o755)
+
+    text = INSTALLER_PATH.read_text(encoding="utf-8")
+    text = text.replace(
+        'PROTECTED_INSTALLER_PATH="/usr/local/libexec/skeleton/home-edge/esp-lab-stage1-installer/install_home_edge_esp_lab_activation_signer.sh"',
+        f'PROTECTED_INSTALLER_PATH="{protected}"',
+    )
+    text = text.replace(
+        'INSTALL_ROOT="/usr/local/lib/skeleton/home-edge/esp-lab-stage1"',
+        f'INSTALL_ROOT="{tmp_path / "install-root"}"',
+    )
+    text = text.replace(
+        'EXEC_ROOT="/usr/local/libexec/skeleton/home-edge/esp-lab-stage1"',
+        f'EXEC_ROOT="{tmp_path / "exec-root"}"',
+    )
+    text = text.replace(
+        'SUDOERS_PATH="/etc/sudoers.d/skeleton-home-edge-esp-lab-stage1-signer"',
+        f'SUDOERS_PATH="{tmp_path / "sudoers"}"',
+    )
+    text = text.replace('/usr/bin/systemctl', str(fake_systemctl))
+    text = text.replace('/usr/bin/git', str(fake_git))
+    text = text.replace('if [[ ${EUID:-$(id -u)} -ne 0 ]]; then', 'if [[ 0 -ne 0 ]]; then')
+    text = text.replace(
+        'if [[ "$protected_uid" != "0" || "$protected_gid" != "0" || $((8#$protected_mode & 8#022)) -ne 0 ]]; then',
+        'if [[ $((8#$protected_mode & 8#022)) -ne 0 ]]; then',
+    )
+    text = text.replace(
+        'validate_source_file "$INSTALLER_SRC" "$INSTALLER_REL" $((256 * 1024)) "$INSTALLER_BLOB_SHA" "100755"\n',
+        'validate_source_file "$INSTALLER_SRC" "$INSTALLER_REL" $((256 * 1024)) "$INSTALLER_BLOB_SHA" "100755"\nprintf \'PREFLIGHT_OK\\n\'\nexit 0\n',
+    )
+    protected.write_text(text, encoding="utf-8")
+    protected.chmod(0o755)
+    return protected, repo
 
 
 def _signed(unsigned: Mapping[str, Any]) -> HomeEdgeExecRequest:
@@ -521,6 +647,121 @@ def test_installer_static_fixed_paths_sudoers_visudo_rollback_and_no_generic_sud
     assert "ALL=(ALL)" not in text
     assert "NOPASSWD: ALL" not in text
     assert "*" not in text.split("NOPASSWD:", 1)[1].split("\n", 1)[0]
+
+
+def test_signer_installer_static_stage1_sha_is_ancestor_boundary_not_exact_head() -> None:
+    text = INSTALLER_PATH.read_text(encoding="utf-8")
+
+    assert f'TRUSTED_ANCESTOR_SHA="{SIGNER_TRUSTED_ANCESTOR_SHA}"' in text
+    assert 'rev-parse --verify "HEAD^{commit}"' in text
+    assert "status --porcelain" in text
+    assert 'merge-base --is-ancestor "$TRUSTED_ANCESTOR_SHA" "$CURRENT_HEAD"' in text
+    assert 'rev-parse HEAD)" !=' not in text
+    assert 'CURRENT_HEAD" != "$TRUSTED_ANCESTOR_SHA"' not in text
+    assert 'SOURCE_SHA="' not in text
+
+
+def test_current_pr_head_signer_payload_wrapper_and_stage1_installer_blobs_match_constants() -> None:
+    assert _git_tree_blob("scripts/home_edge_esp_lab_activation_signer_payload.py") == SIGNER_PAYLOAD_BLOB_SHA
+    assert _git_tree_blob("scripts/home_edge_esp_lab_activation_signer") == SIGNER_WRAPPER_BLOB_SHA
+    assert _git_tree_blob("scripts/install_home_edge_esp_lab.sh") == SIGNER_STAGE1_INSTALLER_BLOB_SHA
+    assert _git_blob(PAYLOAD_PATH) == SIGNER_PAYLOAD_BLOB_SHA
+    assert _git_blob(WRAPPER_PATH) == SIGNER_WRAPPER_BLOB_SHA
+    assert _git_blob(STAGE1_INSTALLER_PATH) == SIGNER_STAGE1_INSTALLER_BLOB_SHA
+
+
+def _run_signer_installer_preflight(
+    tmp_path: Path,
+    *,
+    env: Mapping[str, str] | None = None,
+    missing_signer_files: bool = False,
+    payload_bytes: bytes | None = None,
+    wrapper_bytes: bytes | None = None,
+    installer_bytes: bytes | None = None,
+) -> subprocess.CompletedProcess[str]:
+    protected, repo = _make_signer_installer_preflight_fixture(
+        tmp_path,
+        missing_signer_files=missing_signer_files,
+        payload_bytes=payload_bytes,
+        wrapper_bytes=wrapper_bytes,
+        installer_bytes=installer_bytes,
+    )
+    run_env = os.environ.copy()
+    run_env["PATH"] = f"{tmp_path / 'bin'}:{run_env['PATH']}"
+    if env:
+        run_env.update(env)
+    return subprocess.run(
+        [str(protected), "--repo-root", str(repo)],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=run_env,
+        check=False,
+    )
+
+
+def test_signer_installer_preflight_accepts_clean_descendant_with_exact_blobs(tmp_path: Path) -> None:
+    result = _run_signer_installer_preflight(tmp_path)
+
+    assert result.returncode == 0
+    assert result.stdout == "PREFLIGHT_OK\n"
+    assert result.stderr == ""
+
+
+def test_signer_installer_preflight_rejects_exact_old_stage1_checkout_without_signer_files(tmp_path: Path) -> None:
+    result = _run_signer_installer_preflight(
+        tmp_path,
+        missing_signer_files=True,
+        env={"FAKE_HEAD": SIGNER_TRUSTED_ANCESTOR_SHA, "FAKE_OLD_CHECKOUT": "1"},
+    )
+
+    assert result.returncode == 2
+    assert "reviewed signer source tree entry does not match approved blob" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("env", "updates", "message"),
+    [
+        ({"FAKE_ANCESTOR_OK": "0"}, {}, "trusted Stage1B source is not an ancestor"),
+        ({"FAKE_STATUS": " M scripts/home_edge_esp_lab_activation_signer_payload.py\n"}, {}, "reviewed source checkout is dirty"),
+        ({}, {"payload_bytes": b"wrong payload\n"}, "reviewed signer source bytes do not match approved blob"),
+        ({"FAKE_WRAPPER_TREE_BLOB": "0" * 40}, {}, "reviewed signer source tree entry does not match approved blob"),
+        ({"FAKE_INSTALLER_TREE_BLOB": "1" * 40}, {}, "reviewed signer source tree entry does not match approved blob"),
+    ],
+)
+def test_signer_installer_preflight_rejects_bad_provenance_before_activation(
+    tmp_path: Path,
+    env: Mapping[str, str],
+    updates: Mapping[str, bytes],
+    message: str,
+) -> None:
+    result = _run_signer_installer_preflight(tmp_path, env=env, **updates)
+
+    assert result.returncode == 2
+    assert message in result.stderr
+    assert "PREFLIGHT_OK" not in result.stdout
+
+
+def test_signer_installer_preflight_rejects_symlink_or_nonregular_source(tmp_path: Path) -> None:
+    protected, repo = _make_signer_installer_preflight_fixture(tmp_path)
+    payload = repo / "scripts/home_edge_esp_lab_activation_signer_payload.py"
+    payload.unlink()
+    payload.symlink_to(repo / "scripts/install_home_edge_esp_lab.sh")
+    run_env = os.environ.copy()
+    run_env["PATH"] = f"{tmp_path / 'bin'}:{run_env['PATH']}"
+
+    result = subprocess.run(
+        [str(protected), "--repo-root", str(repo)],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=run_env,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "reviewed signer source is not a readable regular file" in result.stderr
+    assert "PREFLIGHT_OK" not in result.stdout
 
 
 def test_installer_allowed_argv_only() -> None:
