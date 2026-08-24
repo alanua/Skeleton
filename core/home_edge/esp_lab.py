@@ -803,3 +803,7 @@ def _public_node_id(value: object) -> str:
     if not isinstance(value, str):
         return "unknown-node"
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+
+
+if __name__ == "__main__":
+    raise SystemExit(cli())
