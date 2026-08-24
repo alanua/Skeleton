@@ -169,6 +169,7 @@ HOME_EDGE_ESP_LAB_STAGE1_SIGNER_PROTECTED_INSTALLER = Path(
     "/usr/local/libexec/skeleton/home-edge/esp-lab-stage1-installer/"
     "install_home_edge_esp_lab_activation_signer.sh"
 )
+HOME_EDGE_ESP_LAB_STAGE1_SIGNER_PROTECTED_PARENT_MODE = 0o755
 HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLED_ARTIFACTS: Mapping[Path, tuple[str, int]] = {
     Path("/usr/local/libexec/skeleton/home-edge/esp-lab-stage1/signer"): (
         HOME_EDGE_ESP_LAB_STAGE1_SIGNER_WRAPPER_BLOB,
@@ -519,6 +520,34 @@ def _git_exact_sha(
     return sha
 
 
+def _git_fresh_remote_main_sha(
+    run_command: RepositoryRunCommand,
+    checkout_path: Path,
+) -> str:
+    code, output = run_command(
+        ["git", "ls-remote", "--exit-code", "origin", "refs/heads/main"],
+        checkout_path,
+        30,
+        None,
+    )
+    lines = output.splitlines()
+    if code != 0 or len(lines) != 1:
+        raise RepositoryMaintenanceBlocked("REMOTE_MAIN_UNAVAILABLE")
+    match = re.fullmatch(r"([0-9a-f]{40})\trefs/heads/main", lines[0])
+    if match is None:
+        raise RepositoryMaintenanceBlocked("REMOTE_MAIN_MALFORMED")
+    return match.group(1)
+
+
+def _verify_fresh_remote_main(
+    run_command: RepositoryRunCommand,
+    checkout_path: Path,
+    expected_main_sha: str,
+) -> None:
+    if _git_fresh_remote_main_sha(run_command, checkout_path) != expected_main_sha:
+        raise RepositoryMaintenanceBlocked("REMOTE_MAIN_SHA_MISMATCH")
+
+
 def _verify_clean_trusted_checkout(
     run_command: RepositoryRunCommand,
     checkout_path: Path,
@@ -626,6 +655,22 @@ def _verify_regular_file(
             raise RepositoryMaintenanceBlocked("FILE_CONTENT_MISMATCH")
 
 
+def _verify_protected_installer_parent(*, allow_absent: bool = False) -> None:
+    parent = HOME_EDGE_ESP_LAB_STAGE1_SIGNER_PROTECTED_INSTALLER.parent
+    try:
+        stat_result = os.lstat(parent)
+    except FileNotFoundError:
+        if allow_absent:
+            return
+        raise RepositoryMaintenanceBlocked("PROTECTED_PARENT_ABSENT")
+    if stat.S_ISLNK(stat_result.st_mode) or not stat.S_ISDIR(stat_result.st_mode):
+        raise RepositoryMaintenanceBlocked("PROTECTED_PARENT_NOT_DIRECTORY")
+    if stat_result.st_uid != 0 or stat_result.st_gid != 0:
+        raise RepositoryMaintenanceBlocked("PROTECTED_PARENT_OWNERSHIP_MISMATCH")
+    if stat.S_IMODE(stat_result.st_mode) != HOME_EDGE_ESP_LAB_STAGE1_SIGNER_PROTECTED_PARENT_MODE:
+        raise RepositoryMaintenanceBlocked("PROTECTED_PARENT_MODE_MISMATCH")
+
+
 def _git_blob_sha256(
     run_command: RepositoryRunCommand,
     checkout_path: Path,
@@ -668,6 +713,7 @@ def execute_home_edge_esp_lab_stage1_signer_install(
             checkout_head_sha=live_head_sha,
             checkout_origin_main_sha=live_origin_main_sha,
         )
+        _verify_fresh_remote_main(run_command, checkout_path, expected_main_sha)
         data = _git_blob_bytes(
             run_command,
             checkout_path,
@@ -686,11 +732,13 @@ def execute_home_edge_esp_lab_stage1_signer_install(
             owner_uid=os.getuid(),
             group_gid=os.getgid(),
         )
+        _verify_protected_installer_parent(allow_absent=True)
 
         install_argv = [
             _SUDO_BIN,
             "-n",
             _INSTALL_BIN,
+            "-D",
             "-o",
             "root",
             "-g",
@@ -707,6 +755,7 @@ def execute_home_edge_esp_lab_stage1_signer_install(
         if code != 0:
             return _protected_blocked("PRIVILEGE_UNAVAILABLE", installer_sha256)
 
+        _verify_protected_installer_parent()
         _verify_regular_file(
             HOME_EDGE_ESP_LAB_STAGE1_SIGNER_PROTECTED_INSTALLER,
             installer_sha256,
@@ -732,6 +781,7 @@ def execute_home_edge_esp_lab_stage1_signer_install(
             checkout_head_sha=live_head_sha,
             checkout_origin_main_sha=live_origin_main_sha,
         )
+        _verify_fresh_remote_main(run_command, checkout_path, expected_main_sha)
         exec_argv = [
             _SUDO_BIN,
             "-n",
