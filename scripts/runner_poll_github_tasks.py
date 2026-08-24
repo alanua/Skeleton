@@ -337,6 +337,7 @@ HOME_EDGE_AUDIT_PERSIST_V1 = "home_edge_audit_persist_v1"
 HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1 = "home_edge_01_debian_media_bootstrap_v1"
 HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1 = "home_edge_01_post_migration_reconcile_v1"
 HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1 = "home_edge_01_media_source_snapshot_v1"
+HOME_EDGE_ESP_LAB_STAGE1_ACTIVATION_V2 = "home_edge_esp_lab_stage1_activation_v2"
 MAIL_GMAIL_PRIMARY_REGISTERED_ACTIVATION = "mail_gmail_primary_registered_activation_v1"
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
@@ -383,6 +384,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1,
         HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1,
         HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1,
+        HOME_EDGE_ESP_LAB_STAGE1_ACTIVATION_V2,
         BUILD_AND_LOCAL_OTA_OPERATION,
         PREPARE_PRIVATE_STATIC_SITE_HANDOFF,
         DEPLOY_PRIVATE_STATIC_SITE,
@@ -685,15 +687,19 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "current_branch",
         "current_brother_guard_timer_status",
         "current_brother_service_status",
+        "controller_schema",
         "decision_records_skipped",
         "decision_records_written",
         "decision",
         "delegated_merge_verdict",
+        "deferred_capability_count",
         "degraded",
         "diagnostic_count",
         "device_count",
+        "destructive_esp_operation",
         "document_candidate_count",
         "display_manager_status",
+        "dispatch_proof",
         "responsive_count",
         "gateway_presence",
         "gateway_postcheck_status",
@@ -705,6 +711,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "internet_path_expectation",
         "gateway_modem_internals",
         "private_details",
+        "private_device_evidence",
         "disk_bytes",
         "draft",
         "draft_pr",
@@ -760,6 +767,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "issue_worktree_id",
         "kernel_release",
         "ledger_events_written",
+        "limited_capability_count",
         "listed_worktrees_count",
         "machine",
         "maintenance_task_id",
@@ -923,6 +931,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "stale_after_count",
         "stale_before_count",
         "success_criteria",
+        "supported_capability_count",
         "synthetic_corpus_status",
         "live_private_ingestion",
         "loop_state",
@@ -949,6 +958,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "target_head_sha",
         "unexpected_untracked_files",
         "unexpected_untracked_files_count",
+        "unavailable_capability_count",
         "new_pr_changed_files_count",
         "post_push_pr_changed_files_count",
         "validated_publish_files",
@@ -15548,6 +15558,16 @@ def home_edge_01_media_source_snapshot_v1(body: str) -> str:
         )
 
 
+def home_edge_esp_lab_stage1_activation_v2(body: str) -> str:
+    from core.home_edge.esp_lab_activation import execute_stage1_activation_task
+
+    return execute_stage1_activation_task(
+        body,
+        maintenance_report=_maintenance_report,
+        execute_read_only=True,
+    )
+
+
 def _read_exact_git_sha(ref: str) -> str:
     code, output = run_command(["git", "rev-parse", f"{ref}^{{commit}}"], cwd=ROOT)
     sha = output.strip().splitlines()[0] if output.strip() else ""
@@ -16455,6 +16475,8 @@ def dispatch_runtime_maintenance_task(
             return home_edge_01_post_migration_reconcile_v1(body)
         if task_id == HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1:
             return home_edge_01_media_source_snapshot_v1(body)
+        if task_id == HOME_EDGE_ESP_LAB_STAGE1_ACTIVATION_V2:
+            return home_edge_esp_lab_stage1_activation_v2(body)
         if task_id == PREPARE_PRIVATE_STATIC_SITE_HANDOFF:
             return _execute_prepare_private_static_site_handoff(body)
         if task_id == DEPLOY_PRIVATE_STATIC_SITE:

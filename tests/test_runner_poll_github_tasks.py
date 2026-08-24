@@ -15,6 +15,7 @@ from scripts import runner_poll_github_tasks as runner
 from scripts import telegram_callback_poller as callback_poller
 from core.secret_store import SecretReference
 from core.home_edge import debian_media_bootstrap as media_bootstrap
+from core.home_edge import esp_lab_activation
 from core.home_edge import media_source_snapshot
 from core.home_edge import post_migration_reconcile
 
@@ -146,6 +147,33 @@ def _media_source_snapshot_issue_body(expected_sha: str = HEAD_SHA) -> str:
             f"Repository: {runner.REPO}",
             f"Expected Main SHA: {expected_sha}",
             "Target: home-edge-01",
+        )
+    )
+
+
+def _esp_lab_activation_issue_body() -> str:
+    return "\n".join(
+        (
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {runner.HOME_EDGE_ESP_LAB_STAGE1_ACTIVATION_V2}",
+            "```task",
+            json.dumps(
+                {
+                    "schema": esp_lab_activation.ACTIVATION_SCHEMA,
+                    "operation_id": esp_lab_activation.TASK_ID,
+                    "node_id": "media-pc",
+                    "endpoint_kind": "home_edge_local_linux",
+                    "adapter_kind": "linux_tty",
+                    "operation": "identify_chip",
+                    "device_ref": "/dev/ttyUSB0",
+                    "timeout_seconds": 5,
+                    "idempotency_key": "esp-stage1-runner",
+                    "execution_mode": "plan",
+                    "private_salt": "synthetic-private-salt",
+                },
+                sort_keys=True,
+            ),
+            "```",
         )
     )
 
@@ -525,6 +553,68 @@ def test_home_edge_media_source_snapshot_malformed_input_blocks(
 
     assert report.startswith("BLOCKED:")
     assert "reason=unknown_runtime_input_field" in report
+
+
+def test_home_edge_esp_lab_stage1_activation_is_allowlisted_and_dispatches_public_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_execute(body: str, *, maintenance_report, execute_read_only: bool = True) -> str:
+        captured["body"] = body
+        captured["execute_read_only"] = execute_read_only
+        return maintenance_report(
+            "DONE",
+            esp_lab_activation.TASK_ID,
+            [
+                "operation_id=home_edge_esp_lab_stage1_activation_v2",
+                "controller_schema=esp_lab_activation_v2",
+                "dispatch_proof=signed_windows_connector",
+                "aggregate=PASS",
+                "private_device_evidence=private_runtime_artifact_only",
+                "destructive_esp_operation=not_permitted",
+            ],
+            "met",
+        )
+
+    monkeypatch.setattr(
+        esp_lab_activation,
+        "execute_stage1_activation_task",
+        fake_execute,
+    )
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.HOME_EDGE_ESP_LAB_STAGE1_ACTIVATION_V2,
+        str(runner.ROOT),
+        _esp_lab_activation_issue_body(),
+    )
+
+    assert runner.HOME_EDGE_ESP_LAB_STAGE1_ACTIVATION_V2 in runner.RUNTIME_MAINTENANCE_TASK_IDS
+    assert report.startswith("DONE:")
+    assert "maintenance_task_id=home_edge_esp_lab_stage1_activation_v2" in report
+    assert "dispatch_proof=signed_windows_connector" in report
+    assert "destructive_esp_operation=not_permitted" in report
+    assert captured["body"] == _esp_lab_activation_issue_body()
+    assert captured["execute_read_only"] is True
+    assert "/dev/ttyUSB0" not in report
+    assert "synthetic-private-salt" not in report
+
+
+def test_home_edge_esp_lab_stage1_activation_registry_exposes_only_exact_fixed_task_id() -> None:
+    variants = {
+        task_id
+        for task_id in runner.RUNTIME_MAINTENANCE_TASK_IDS
+        if "esp_lab_stage1_activation" in task_id
+    }
+
+    assert variants == {runner.HOME_EDGE_ESP_LAB_STAGE1_ACTIVATION_V2}
+    report = runner.dispatch_runtime_maintenance_task(
+        "home_edge_esp_lab_stage1_activation_v2_extra",
+        str(runner.ROOT),
+        _esp_lab_activation_issue_body(),
+    )
+    assert report.startswith("BLOCKED:")
+    assert "reason=maintenance_task_id_not_allowlisted" in report
 
 
 def _plain_done_message(issue_number: int = 129) -> str:
