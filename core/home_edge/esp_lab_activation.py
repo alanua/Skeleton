@@ -8,6 +8,7 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping
+from uuid import uuid4
 
 from core.home_edge.executor import HomeEdgeExecError, HomeEdgeExecRequest
 from core.home_edge.executor_gateway import execute_home_edge_request
@@ -31,9 +32,9 @@ ESP_MODULE_GIT_BLOB_SHA = "82a9a007b880eb591f13618216fb9fd3a97d926e"
 ESP_MODULE_SHA256 = "4a499602f4602b425ae4227cb297e685f072c8a4cef56d23d1dd2e3c91333fcb"
 PAYLOAD_SCHEMA = "skeleton.home_edge.esp_lab_stage1_payload.v1"
 RESULT_SCHEMA = "skeleton.home_edge.esp_lab_stage1_activation_result.v1"
-IDEMPOTENCY_KEY = f"home-edge-01-esp-lab-stage1-activation-{APPROVED_SOURCE_SHA}"
-REQUEST_ID = f"{TASK_ID}-{APPROVED_SOURCE_SHA}"
-NONCE = f"{TASK_ID}-{APPROVED_SOURCE_SHA}"
+REQUEST_ID_PREFIX = f"{TASK_ID}-{APPROVED_SOURCE_SHA}-attempt-"
+NONCE_PREFIX = f"{TASK_ID}:{APPROVED_SOURCE_SHA}:attempt:"
+IDEMPOTENCY_KEY_PREFIX = f"home-edge-01-esp-lab-stage1-activation-{APPROVED_SOURCE_SHA}-attempt-"
 INSTALLED_SIGNER_EXECUTABLE = Path("/usr/local/libexec/skeleton/home-edge/esp-lab-stage1/signer")
 INSTALLED_SIGNER_PAYLOAD = Path("/usr/local/lib/skeleton/home-edge/esp-lab-stage1/signer_payload.py")
 INSTALLED_INSTALLER_SOURCE = Path("/usr/local/lib/skeleton/home-edge/esp-lab-stage1/install_home_edge_esp_lab.sh")
@@ -42,6 +43,7 @@ SIGNER_TIMEOUT_SECONDS = 10
 SIGNER_STDIN_MAX_BYTES = 256 * 1024
 PUBLIC_VALUE_RE = re.compile(r"^[A-Za-z0-9_.:=-]+$")
 SOURCE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+ATTEMPT_TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
 def activate_esp_lab_stage1(*, repo_root: Path | None = None) -> dict[str, object]:
@@ -100,25 +102,38 @@ def build_activation_request(*, installer_script: bytes, esp_module: bytes) -> H
     stdin_text = json.dumps(payload, sort_keys=False, separators=(",", ":"))
     if len(stdin_text.encode("utf-8")) > 230_000:
         raise ValueError("activation_payload_oversize")
+    attempt_token = uuid4().hex
     return HomeEdgeExecRequest.from_mapping(
         {
-            "request_id": REQUEST_ID,
+            "request_id": _request_id(attempt_token),
             "node_id": TARGET_NODE,
             "execution_lane": EXECUTION_LANE,
             "timeout_seconds": REQUEST_TIMEOUT_SECONDS,
             "operator_approval_ref": OPERATOR_APPROVAL_REF,
-            "idempotency_key": IDEMPOTENCY_KEY,
+            "idempotency_key": _idempotency_key(attempt_token),
             "run_as": RUN_AS,
             "mode": "script",
             "script": script_text,
             "script_interpreter": "bash",
             "stdin_text": stdin_text,
             "timestamp": datetime.now(UTC).isoformat(),
-            "nonce": NONCE,
+            "nonce": _nonce(attempt_token),
             "max_output_bytes": MAX_EXECUTOR_OUTPUT_BYTES,
             "public": False,
         }
     )
+
+
+def _request_id(attempt_token: str) -> str:
+    return f"{REQUEST_ID_PREFIX}{attempt_token}"
+
+
+def _nonce(attempt_token: str) -> str:
+    return f"{NONCE_PREFIX}{attempt_token}"
+
+
+def _idempotency_key(attempt_token: str) -> str:
+    return f"{IDEMPOTENCY_KEY_PREFIX}{attempt_token}"
 
 
 def build_stage1_payload(*, esp_module: bytes) -> dict[str, Any]:
@@ -217,13 +232,12 @@ def _validate_activation_authority(request: Mapping[str, Any], *, include_signat
         raise ValueError("activation_signer_authority_mismatch")
     if request["schema"] != "skeleton.home_edge.exec_request.v1":
         raise ValueError("activation_signer_authority_mismatch")
-    if request["request_id"] != REQUEST_ID or request["nonce"] != NONCE:
-        raise ValueError("activation_signer_authority_mismatch")
+    attempt_token = _attempt_token_from_authority(request)
     if request["node_id"] != TARGET_NODE or request["execution_lane"] != EXECUTION_LANE:
         raise ValueError("activation_signer_authority_mismatch")
     if request["operator_approval_ref"] != OPERATOR_APPROVAL_REF:
         raise ValueError("activation_signer_operator_approval_mismatch")
-    if request["idempotency_key"] != IDEMPOTENCY_KEY:
+    if request["idempotency_key"] != _idempotency_key(attempt_token):
         raise ValueError("activation_signer_authority_mismatch")
     if request["run_as"] != RUN_AS or request["mode"] != "script":
         raise ValueError("activation_signer_authority_mismatch")
@@ -236,12 +250,39 @@ def _validate_activation_authority(request: Mapping[str, Any], *, include_signat
     if not isinstance(request["script"], str) or _git_blob_sha1(request["script"].encode("utf-8")) != INSTALLER_GIT_BLOB_SHA:
         raise ValueError("activation_signer_authority_mismatch")
     _validate_stage1_payload_text(request["stdin_text"])
+    _validate_timestamp(request["timestamp"])
     if include_signature and (
         not isinstance(request["signature"], str)
         or not request["signature"].startswith("sha256=")
         or len(request["signature"]) != len("sha256=") + 64
     ):
         raise ValueError("activation_signer_authority_mismatch")
+
+
+def _attempt_token_from_authority(request: Mapping[str, Any]) -> str:
+    request_id = request.get("request_id")
+    nonce = request.get("nonce")
+    if not isinstance(request_id, str) or not request_id.startswith(REQUEST_ID_PREFIX):
+        raise ValueError("activation_signer_authority_mismatch")
+    attempt_token = request_id.removeprefix(REQUEST_ID_PREFIX)
+    if ATTEMPT_TOKEN_RE.fullmatch(attempt_token) is None:
+        raise ValueError("activation_signer_authority_mismatch")
+    if nonce != _nonce(attempt_token):
+        raise ValueError("activation_signer_authority_mismatch")
+    return attempt_token
+
+
+def _validate_timestamp(value: Any) -> None:
+    if not isinstance(value, str):
+        raise ValueError("activation_signer_timestamp_invalid")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError("activation_signer_timestamp_invalid") from None
+    if parsed.tzinfo is None:
+        raise ValueError("activation_signer_timestamp_invalid")
+    if abs((datetime.now(UTC) - parsed.astimezone(UTC)).total_seconds()) > 300:
+        raise ValueError("activation_signer_timestamp_stale")
 
 
 def _validate_stage1_payload_text(stdin_text: Any) -> None:
@@ -342,11 +383,7 @@ def _reviewed_git_blob(
     expected_source_sha: str,
     expected_blob_sha: str,
 ) -> bytes:
-    if _git(repo_root, "rev-parse", "HEAD").decode().strip() != expected_source_sha:
-        raise ValueError("approved_source_sha_mismatch")
-    dirty = _git(repo_root, "status", "--porcelain", "--", repo_path).decode().strip()
-    if dirty:
-        raise ValueError("reviewed_source_dirty")
+    _validate_trusted_checkout(repo_root, expected_source_sha=expected_source_sha)
     blob = _git(repo_root, "ls-tree", expected_source_sha, "--", repo_path).decode().split()
     if len(blob) < 3 or blob[2] != expected_blob_sha:
         raise ValueError("reviewed_source_blob_mismatch")
@@ -354,6 +391,24 @@ def _reviewed_git_blob(
     if _git_blob_sha1(data) != expected_blob_sha:
         raise ValueError("reviewed_source_blob_mismatch")
     return data
+
+
+def _validate_trusted_checkout(repo_root: Path, *, expected_source_sha: str) -> None:
+    head = _git(repo_root, "rev-parse", "--verify", "HEAD^{commit}").decode().strip()
+    if SOURCE_SHA_RE.fullmatch(head) is None:
+        raise ValueError("current_head_unavailable")
+    dirty = _git(repo_root, "status", "--porcelain").decode().strip()
+    if dirty:
+        raise ValueError("reviewed_checkout_dirty")
+    try:
+        subprocess.check_call(
+            ["git", "merge-base", "--is-ancestor", expected_source_sha, "HEAD"],
+            cwd=repo_root,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        raise ValueError("approved_source_not_ancestor") from None
 
 
 def _git(repo_root: Path, *args: str) -> bytes:

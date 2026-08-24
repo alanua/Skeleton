@@ -9,6 +9,7 @@ import os
 import re
 import stat
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -29,9 +30,9 @@ ESP_MODULE_REPO_PATH = "core/home_edge/esp_lab.py"
 ESP_MODULE_GIT_BLOB_SHA = "82a9a007b880eb591f13618216fb9fd3a97d926e"
 ESP_MODULE_SHA256 = "4a499602f4602b425ae4227cb297e685f072c8a4cef56d23d1dd2e3c91333fcb"
 PAYLOAD_SCHEMA = "skeleton.home_edge.esp_lab_stage1_payload.v1"
-IDEMPOTENCY_KEY = f"home-edge-01-esp-lab-stage1-activation-{APPROVED_SOURCE_SHA}"
-REQUEST_ID = f"{TASK_ID}-{APPROVED_SOURCE_SHA}"
-NONCE = f"{TASK_ID}-{APPROVED_SOURCE_SHA}"
+REQUEST_ID_PREFIX = f"{TASK_ID}-{APPROVED_SOURCE_SHA}-attempt-"
+NONCE_PREFIX = f"{TASK_ID}:{APPROVED_SOURCE_SHA}:attempt:"
+IDEMPOTENCY_KEY_PREFIX = f"home-edge-01-esp-lab-stage1-activation-{APPROVED_SOURCE_SHA}-attempt-"
 EXEC_HMAC_SECRET_ENV = "SKELETON_HOME_EDGE_EXEC_HMAC_SECRET"
 EXEC_HMAC_SECRET_CONFIG_DIR = Path("/etc/skeleton")
 EXEC_HMAC_SECRET_PROFILE_METADATA_PATH = Path("/etc/skeleton/home-edge-01.env")
@@ -42,6 +43,8 @@ MAX_INSTALLER_SOURCE_BYTES = 256 * 1024
 SIGNER_STDIN_MAX_BYTES = 256 * 1024
 CONFIG_ASSIGNMENT_RE = re.compile(r"^(?:export[ \t]+)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)=(?P<value>.*)$")
 AUTH_CONFIG_REASON_RE = re.compile(r"^executor_auth_config_(?:missing|unsafe|invalid)$")
+ATTEMPT_TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
+FRESHNESS_SECONDS = 300
 
 
 def fail(reason: str = "activation_signer_rejected") -> None:
@@ -250,13 +253,13 @@ def validate_authority(request: dict[str, Any]) -> None:
         fail()
     if request.get("schema") != "skeleton.home_edge.exec_request.v1":
         fail()
-    if request.get("request_id") != REQUEST_ID or request.get("nonce") != NONCE:
-        fail()
+    attempt_token = _attempt_token_from_authority(request)
+    validate_timestamp(request.get("timestamp"))
     if request.get("node_id") != TARGET_NODE or request.get("execution_lane") != EXECUTION_LANE:
         fail()
     if request.get("operator_approval_ref") != OPERATOR_APPROVAL_REF:
         fail()
-    if request.get("idempotency_key") != IDEMPOTENCY_KEY:
+    if request.get("idempotency_key") != _idempotency_key(attempt_token):
         fail()
     if request.get("run_as") != RUN_AS or request.get("mode") != "script":
         fail()
@@ -267,7 +270,43 @@ def validate_authority(request: dict[str, Any]) -> None:
     if request.get("argv") != [] or request.get("environment") != {} or request.get("public") is not False:
         fail()
     validate_payload_text(request.get("stdin_text"))
-    if not isinstance(request.get("timestamp"), str) or not request["timestamp"]:
+
+
+def _request_id(attempt_token: str) -> str:
+    return f"{REQUEST_ID_PREFIX}{attempt_token}"
+
+
+def _nonce(attempt_token: str) -> str:
+    return f"{NONCE_PREFIX}{attempt_token}"
+
+
+def _idempotency_key(attempt_token: str) -> str:
+    return f"{IDEMPOTENCY_KEY_PREFIX}{attempt_token}"
+
+
+def _attempt_token_from_authority(request: dict[str, Any]) -> str:
+    request_id = request.get("request_id")
+    nonce = request.get("nonce")
+    if not isinstance(request_id, str) or not request_id.startswith(REQUEST_ID_PREFIX):
+        fail()
+    attempt_token = request_id.removeprefix(REQUEST_ID_PREFIX)
+    if ATTEMPT_TOKEN_RE.fullmatch(attempt_token) is None:
+        fail()
+    if nonce != _nonce(attempt_token):
+        fail()
+    return attempt_token
+
+
+def validate_timestamp(value: Any) -> None:
+    if not isinstance(value, str):
+        fail()
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        fail()
+    if parsed.tzinfo is None:
+        fail()
+    if abs((datetime.now(UTC) - parsed.astimezone(UTC)).total_seconds()) > FRESHNESS_SECONDS:
         fail()
 
 

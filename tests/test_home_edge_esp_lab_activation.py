@@ -4,7 +4,7 @@ import importlib.util
 import json
 import os
 import subprocess
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -30,11 +30,17 @@ def _load_payload():
 
 
 def _installer_bytes() -> bytes:
-    return subprocess.check_output(["git", "show", f"HEAD:{activation.INSTALLER_REPO_PATH}"], cwd=ROOT)
+    return subprocess.check_output(
+        ["git", "show", f"{activation.APPROVED_SOURCE_SHA}:{activation.INSTALLER_REPO_PATH}"],
+        cwd=ROOT,
+    )
 
 
 def _esp_module_bytes() -> bytes:
-    return subprocess.check_output(["git", "show", f"HEAD:{activation.ESP_MODULE_REPO_PATH}"], cwd=ROOT)
+    return subprocess.check_output(
+        ["git", "show", f"{activation.APPROVED_SOURCE_SHA}:{activation.ESP_MODULE_REPO_PATH}"],
+        cwd=ROOT,
+    )
 
 
 def _signed(unsigned: Mapping[str, Any]) -> HomeEdgeExecRequest:
@@ -42,11 +48,22 @@ def _signed(unsigned: Mapping[str, Any]) -> HomeEdgeExecRequest:
     return HomeEdgeExecRequest.from_mapping({**dict(unsigned), "signature": sign_request(request, SECRET)})
 
 
+def _simulate_clean_checkout(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_git = activation._git
+
+    def fake_git(repo_root: Path, *args: str) -> bytes:
+        if args == ("status", "--porcelain"):
+            return b""
+        return real_git(repo_root, *args)
+
+    monkeypatch.setattr(activation, "_git", fake_git)
+
+
 def _ok_receipt(stdout: str) -> HomeEdgeExecReceipt:
     now = datetime.now(UTC).isoformat()
     return HomeEdgeExecReceipt(
         status="ok",
-        request_id=activation.REQUEST_ID,
+        request_id="synthetic-esp-lab-request",
         node_id=activation.TARGET_NODE,
         execution_lane=activation.EXECUTION_LANE,
         exit_code=0,
@@ -75,6 +92,7 @@ def _result(**updates: Any) -> str:
 
 
 def test_controller_builds_exact_request_calls_fixed_signer_and_executor_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    _simulate_clean_checkout(monkeypatch)
     signer_calls: list[Mapping[str, Any]] = []
     executor_calls: list[Mapping[str, Any]] = []
 
@@ -105,7 +123,10 @@ def test_controller_builds_exact_request_calls_fixed_signer_and_executor_once(mo
     assert unsigned["max_output_bytes"] == 8192
     assert unsigned["public"] is False
     assert unsigned["operator_approval_ref"] == activation.OPERATOR_APPROVAL_REF
-    assert unsigned["idempotency_key"] == activation.IDEMPOTENCY_KEY
+    assert _attempt_token(unsigned["request_id"]) is not None
+    attempt_token = _attempt_token(unsigned["request_id"])
+    assert unsigned["nonce"] == activation._nonce(attempt_token)
+    assert unsigned["idempotency_key"] == activation._idempotency_key(attempt_token)
     assert unsigned["script"].encode("utf-8") == _installer_bytes()
     activation._validate_stage1_payload_text(unsigned["stdin_text"])
     assert executor_calls[0]["signature"].startswith("sha256=")
@@ -138,10 +159,21 @@ def test_payload_uses_zero_byte_init_and_never_reads_repo_init(monkeypatch: pyte
     assert payload["files"][1]["path"] == "core/home_edge/esp_lab.py"
 
 
-def test_installer_and_esp_module_pins_match_reviewed_head() -> None:
-    assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT).decode().strip() == activation.APPROVED_SOURCE_SHA
-    assert subprocess.check_output(["git", "hash-object", "--no-filters", activation.INSTALLER_REPO_PATH], cwd=ROOT).decode().strip() == activation.INSTALLER_GIT_BLOB_SHA
-    assert subprocess.check_output(["git", "hash-object", "--no-filters", activation.ESP_MODULE_REPO_PATH], cwd=ROOT).decode().strip() == activation.ESP_MODULE_GIT_BLOB_SHA
+def _attempt_token(request_id: Any) -> str:
+    assert isinstance(request_id, str)
+    assert request_id.startswith(activation.REQUEST_ID_PREFIX)
+    token = request_id.removeprefix(activation.REQUEST_ID_PREFIX)
+    assert activation.ATTEMPT_TOKEN_RE.fullmatch(token) is not None
+    return token
+
+
+def test_pr_validation_descendant_head_reads_approved_commit_objects(monkeypatch: pytest.MonkeyPatch) -> None:
+    _simulate_clean_checkout(monkeypatch)
+    head = subprocess.check_output(["git", "rev-parse", "--verify", "HEAD^{commit}"], cwd=ROOT).decode().strip()
+    assert head != activation.APPROVED_SOURCE_SHA
+    subprocess.run(["git", "merge-base", "--is-ancestor", activation.APPROVED_SOURCE_SHA, "HEAD"], cwd=ROOT, check=True)
+    assert subprocess.check_output(["git", "ls-tree", activation.APPROVED_SOURCE_SHA, "--", activation.INSTALLER_REPO_PATH], cwd=ROOT).decode().split()[2] == activation.INSTALLER_GIT_BLOB_SHA
+    assert subprocess.check_output(["git", "ls-tree", activation.APPROVED_SOURCE_SHA, "--", activation.ESP_MODULE_REPO_PATH], cwd=ROOT).decode().split()[2] == activation.ESP_MODULE_GIT_BLOB_SHA
     assert activation._reviewed_git_blob(ROOT, activation.INSTALLER_REPO_PATH, expected_source_sha=activation.APPROVED_SOURCE_SHA, expected_blob_sha=activation.INSTALLER_GIT_BLOB_SHA) == _installer_bytes()
     assert activation._reviewed_git_blob(ROOT, activation.ESP_MODULE_REPO_PATH, expected_source_sha=activation.APPROVED_SOURCE_SHA, expected_blob_sha=activation.ESP_MODULE_GIT_BLOB_SHA) == _esp_module_bytes()
 
@@ -149,12 +181,12 @@ def test_installer_and_esp_module_pins_match_reviewed_head() -> None:
 @pytest.mark.parametrize(
     ("command", "output"),
     [
-        (("rev-parse", "HEAD"), b"b" * 40 + b"\n"),
-        (("status", "--porcelain", "--", activation.INSTALLER_REPO_PATH), b" M scripts/install_home_edge_esp_lab.sh\n"),
+        (("rev-parse", "--verify", "HEAD^{commit}"), b"not-a-commit\n"),
+        (("status", "--porcelain"), b" M scripts/install_home_edge_esp_lab.sh\n"),
         (("ls-tree", activation.APPROVED_SOURCE_SHA, "--", activation.INSTALLER_REPO_PATH), b"100755 blob bad\tpath\n"),
     ],
 )
-def test_wrong_sha_dirty_or_blob_mismatch_blocks_before_signer(
+def test_bad_head_dirty_or_blob_mismatch_blocks_before_signer(
     monkeypatch: pytest.MonkeyPatch,
     command: tuple[str, ...],
     output: bytes,
@@ -175,6 +207,68 @@ def test_wrong_sha_dirty_or_blob_mismatch_blocks_before_signer(
 
     assert public["status"] == "BLOCKED"
     assert calls
+
+
+def test_non_descendant_blocks_before_signer(monkeypatch: pytest.MonkeyPatch) -> None:
+    _simulate_clean_checkout(monkeypatch)
+
+    def fake_check_call(*args: Any, **kwargs: Any) -> int:
+        raise subprocess.CalledProcessError(1, args[0])
+
+    monkeypatch.setattr(activation.subprocess, "check_call", fake_check_call)
+    monkeypatch.setattr(activation, "_sign_activation_request_with_installed_signer", lambda _: pytest.fail("signer must not run"))
+
+    public = activation.activate_esp_lab_stage1(repo_root=ROOT)
+
+    assert public["status"] == "BLOCKED"
+    assert public["reason"] == "approved_source_not_ancestor"
+
+
+def test_mutated_worktree_source_blocks_but_approved_object_bytes_remain(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_git = activation._git
+
+    def fake_git(repo_root: Path, *args: str) -> bytes:
+        if args == ("status", "--porcelain"):
+            return b" M core/home_edge/esp_lab.py\n"
+        return real_git(repo_root, *args)
+
+    monkeypatch.setattr(activation, "_git", fake_git)
+    monkeypatch.setattr(activation, "_sign_activation_request_with_installed_signer", lambda _: pytest.fail("signer must not run"))
+
+    assert activation._git_blob_sha1(_esp_module_bytes()) == activation.ESP_MODULE_GIT_BLOB_SHA
+    public = activation.activate_esp_lab_stage1(repo_root=ROOT)
+
+    assert public["status"] == "BLOCKED"
+    assert public["reason"] == "reviewed_checkout_dirty"
+
+
+def test_future_descendant_head_reads_pinned_objects_not_head_or_worktree(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_head_installer = b"#!/usr/bin/env bash\necho changed\n"
+    fake_head_module = b"changed = True\n"
+    seen: list[tuple[str, ...]] = []
+    real_git = activation._git
+
+    def fake_git(repo_root: Path, *args: str) -> bytes:
+        seen.append(args)
+        if args == ("rev-parse", "--verify", "HEAD^{commit}"):
+            return b"f" * 40 + b"\n"
+        if args == ("status", "--porcelain"):
+            return b""
+        if args == ("show", f"HEAD:{activation.INSTALLER_REPO_PATH}"):
+            return fake_head_installer
+        if args == ("show", f"HEAD:{activation.ESP_MODULE_REPO_PATH}"):
+            return fake_head_module
+        return real_git(repo_root, *args)
+
+    monkeypatch.setattr(activation, "_git", fake_git)
+
+    installer = activation._reviewed_git_blob(ROOT, activation.INSTALLER_REPO_PATH, expected_source_sha=activation.APPROVED_SOURCE_SHA, expected_blob_sha=activation.INSTALLER_GIT_BLOB_SHA)
+    module = activation._reviewed_git_blob(ROOT, activation.ESP_MODULE_REPO_PATH, expected_source_sha=activation.APPROVED_SOURCE_SHA, expected_blob_sha=activation.ESP_MODULE_GIT_BLOB_SHA)
+
+    assert installer == _installer_bytes()
+    assert module == _esp_module_bytes()
+    assert ("show", f"HEAD:{activation.INSTALLER_REPO_PATH}") not in seen
+    assert ("show", f"HEAD:{activation.ESP_MODULE_REPO_PATH}") not in seen
 
 
 @pytest.mark.parametrize(
@@ -207,6 +301,113 @@ def test_signer_rejects_authority_mutations_before_secret_read(
     monkeypatch.setattr(payload, "read_secret", lambda: pytest.fail("credential must not be read"))
     request = activation.build_activation_request(installer_script=_installer_bytes(), esp_module=_esp_module_bytes()).to_mapping(include_signature=False)
     request[field] = value
+
+    with pytest.raises(SystemExit) as exc:
+        payload.validate_authority(request)
+
+    assert exc.value.code == 2
+
+
+def test_two_fresh_attempts_keep_source_payload_but_change_executor_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _simulate_clean_checkout(monkeypatch)
+    first = activation.build_activation_request(installer_script=_installer_bytes(), esp_module=_esp_module_bytes()).to_mapping(include_signature=False)
+    second = activation.build_activation_request(installer_script=_installer_bytes(), esp_module=_esp_module_bytes()).to_mapping(include_signature=False)
+
+    first_token = _attempt_token(first["request_id"])
+    second_token = _attempt_token(second["request_id"])
+    assert first_token != second_token
+    assert first["nonce"] == activation._nonce(first_token)
+    assert second["nonce"] == activation._nonce(second_token)
+    assert first["idempotency_key"] == activation._idempotency_key(first_token)
+    assert second["idempotency_key"] == activation._idempotency_key(second_token)
+    assert first["timestamp"] != second["timestamp"]
+    assert first["script"] == second["script"]
+    assert json.loads(first["stdin_text"]) == json.loads(second["stdin_text"])
+
+    signer_calls: list[Mapping[str, Any]] = []
+    executor_calls: list[Mapping[str, Any]] = []
+
+    def signer(unsigned: Mapping[str, Any]) -> HomeEdgeExecRequest:
+        signer_calls.append(dict(unsigned))
+        return _signed(unsigned)
+
+    def executor(request: Mapping[str, Any]) -> HomeEdgeExecReceipt:
+        executor_calls.append(dict(request))
+        reuse = len(executor_calls) == 2
+        return _ok_receipt(_result(idempotent_reuse=reuse))
+
+    monkeypatch.setattr(activation, "_sign_activation_request_with_installed_signer", signer)
+    monkeypatch.setattr(activation, "execute_home_edge_request", executor)
+
+    first_public = activation.activate_esp_lab_stage1(repo_root=ROOT)
+    second_public = activation.activate_esp_lab_stage1(repo_root=ROOT)
+
+    assert first_public["status"] == "DONE"
+    assert first_public["idempotent_reuse"] is False
+    assert second_public["status"] == "DONE"
+    assert second_public["idempotent_reuse"] is True
+    assert len(signer_calls) == 2
+    assert len(executor_calls) == 2
+    assert signer_calls[0]["idempotency_key"] != signer_calls[1]["idempotency_key"]
+    assert json.loads(signer_calls[0]["stdin_text"]) == json.loads(signer_calls[1]["stdin_text"])
+
+
+def test_signer_rejects_cross_mixed_attempt_identifiers_before_secret_read(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    payload = _load_payload()
+    installer = tmp_path / "install_home_edge_esp_lab.sh"
+    installer.write_bytes(_installer_bytes())
+    installer.chmod(0o644)
+    monkeypatch.setattr(payload, "INSTALLED_INSTALLER_SOURCE", installer)
+    monkeypatch.setattr(payload, "_safe_regular", lambda st, *, max_bytes, require_root=False, allow_empty=False: payload.stat.S_ISREG(st.st_mode) and st.st_size <= max_bytes)
+    monkeypatch.setattr(payload, "read_secret", lambda: pytest.fail("credential must not be read"))
+    first = activation.build_activation_request(installer_script=_installer_bytes(), esp_module=_esp_module_bytes()).to_mapping(include_signature=False)
+    second = activation.build_activation_request(installer_script=_installer_bytes(), esp_module=_esp_module_bytes()).to_mapping(include_signature=False)
+
+    cases = []
+    mixed_nonce = dict(first)
+    mixed_nonce["nonce"] = second["nonce"]
+    cases.append(mixed_nonce)
+    mixed_idempotency = dict(first)
+    mixed_idempotency["idempotency_key"] = second["idempotency_key"]
+    cases.append(mixed_idempotency)
+    caller_selected = dict(first)
+    caller_selected["request_id"] = f"{activation.TASK_ID}-{activation.APPROVED_SOURCE_SHA}"
+    cases.append(caller_selected)
+
+    for bad in cases:
+        with pytest.raises(SystemExit) as exc:
+            payload.validate_authority(bad)
+        assert exc.value.code == 2
+
+
+@pytest.mark.parametrize(
+    "timestamp",
+    [
+        "not-a-timestamp",
+        datetime.now(UTC).replace(tzinfo=None).isoformat(),
+        (datetime.now(UTC) - timedelta(days=1)).isoformat(),
+        (datetime.now(UTC) + timedelta(days=1)).isoformat(),
+    ],
+)
+def test_signer_rejects_bad_timestamp_before_secret_read(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    timestamp: str,
+) -> None:
+    payload = _load_payload()
+    installer = tmp_path / "install_home_edge_esp_lab.sh"
+    installer.write_bytes(_installer_bytes())
+    installer.chmod(0o644)
+    monkeypatch.setattr(payload, "INSTALLED_INSTALLER_SOURCE", installer)
+    monkeypatch.setattr(payload, "_safe_regular", lambda st, *, max_bytes, require_root=False, allow_empty=False: payload.stat.S_ISREG(st.st_mode) and st.st_size <= max_bytes)
+    monkeypatch.setattr(payload, "read_secret", lambda: pytest.fail("credential must not be read"))
+    request = activation.build_activation_request(installer_script=_installer_bytes(), esp_module=_esp_module_bytes()).to_mapping(include_signature=False)
+    request["timestamp"] = timestamp
 
     with pytest.raises(SystemExit) as exc:
         payload.validate_authority(request)
@@ -273,6 +474,8 @@ def test_signer_returns_envelope_only_and_never_executes_transport(monkeypatch: 
 
 
 def test_controller_rejects_altered_signed_authority_before_transport(monkeypatch: pytest.MonkeyPatch) -> None:
+    _simulate_clean_checkout(monkeypatch)
+
     def signer(unsigned: Mapping[str, Any]) -> HomeEdgeExecRequest:
         altered = dict(unsigned)
         altered["timeout_seconds"] = 299
