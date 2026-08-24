@@ -53,6 +53,10 @@ from core.hermes_private_memory import (
     write_hermes_private_memory_heartbeat,
 )
 from core.hermes_worker import run_hermes_memory_task_packet
+from core.home_edge.esp_lab_activation import (
+    TASK_ID as HOME_EDGE_ESP_LAB_STAGE1_ACTIVATION_V1,
+    execute_stage1_activation,
+)
 from core.loop_controller import LoopPolicy
 from core.loop_engine import LoopEngine
 from core.loop_runner_adapter import run_loop_task_packet
@@ -383,6 +387,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1,
         HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1,
         HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1,
+        HOME_EDGE_ESP_LAB_STAGE1_ACTIVATION_V1,
         BUILD_AND_LOCAL_OTA_OPERATION,
         PREPARE_PRIVATE_STATIC_SITE_HANDOFF,
         DEPLOY_PRIVATE_STATIC_SITE,
@@ -445,6 +450,7 @@ PROTECTED_MAINTENANCE_TASK_IDS = frozenset(
         BUILD_AUFMASS_PRIVATE_AREA_SCHEDULE,
         QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES,
         REPLENISH_RUNNER_QUEUE,
+        HOME_EDGE_ESP_LAB_STAGE1_ACTIVATION_V1,
     )
 )
 CONTAINER_VALIDATION_SOURCE_ISSUE = 1667
@@ -675,6 +681,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "certificate_sha256_fingerprint",
         "command_unavailable_reason",
         "content_files_read",
+        "contract_check_count",
         "compare_ahead_by",
         "compare_behind_by",
         "compare_state",
@@ -691,6 +698,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "delegated_merge_verdict",
         "degraded",
         "diagnostic_count",
+        "destructive_operations_enabled",
         "device_count",
         "document_candidate_count",
         "display_manager_status",
@@ -705,6 +713,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "internet_path_expectation",
         "gateway_modem_internals",
         "private_details",
+        "private_evidence_exported",
         "disk_bytes",
         "draft",
         "draft_pr",
@@ -849,6 +858,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "python_version",
         "python_parse_status",
         "reason",
+        "read_only_operation_count",
         "recovery_artifact_status",
         "recovery_ref_status",
         "recovery_restore_status",
@@ -925,6 +935,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "success_criteria",
         "synthetic_corpus_status",
         "live_private_ingestion",
+        "live_device_mutation_attempted",
         "loop_state",
         "symlink_count",
         "symlink_traversal",
@@ -16455,6 +16466,12 @@ def dispatch_runtime_maintenance_task(
             return home_edge_01_post_migration_reconcile_v1(body)
         if task_id == HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1:
             return home_edge_01_media_source_snapshot_v1(body)
+        if task_id == HOME_EDGE_ESP_LAB_STAGE1_ACTIVATION_V1:
+            return execute_stage1_activation(
+                body,
+                workdir=workdir,
+                maintenance_report=_maintenance_report,
+            )
         if task_id == PREPARE_PRIVATE_STATIC_SITE_HANDOFF:
             return _execute_prepare_private_static_site_handoff(body)
         if task_id == DEPLOY_PRIVATE_STATIC_SITE:

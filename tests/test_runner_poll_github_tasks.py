@@ -19970,6 +19970,57 @@ def test_gmail_primary_activation_task_is_registered() -> None:
     )
 
 
+def test_home_edge_esp_lab_stage1_activation_task_is_registered() -> None:
+    assert (
+        runner.HOME_EDGE_ESP_LAB_STAGE1_ACTIVATION_V1
+        in runner.RUNTIME_MAINTENANCE_TASK_IDS
+    )
+    assert (
+        runner.HOME_EDGE_ESP_LAB_STAGE1_ACTIVATION_V1
+        in runner.PROTECTED_MAINTENANCE_TASK_IDS
+    )
+
+
+def test_home_edge_esp_lab_stage1_activation_dispatches_public_safe_done() -> None:
+    body = "\n".join(
+        (
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {runner.HOME_EDGE_ESP_LAB_STAGE1_ACTIVATION_V1}",
+            f"Repository: {runner.REPO}",
+            f"Expected Main SHA: {HEAD_SHA}",
+            "Operator Approval: EXACT_HEAD_HOME_EDGE_ESP_LAB_STAGE1_ACTIVATION_APPROVED",
+        )
+    )
+
+    with mock.patch.object(
+        runner,
+        "execute_stage1_activation",
+        return_value=runner._maintenance_report(
+            "DONE",
+            runner.HOME_EDGE_ESP_LAB_STAGE1_ACTIVATION_V1,
+            [
+                "stage=stage1_read_only_connector",
+                "destructive_operations_enabled=false",
+                "live_device_mutation_attempted=false",
+                "private_evidence_exported=false",
+            ],
+            "met",
+        ),
+    ) as activation:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HOME_EDGE_ESP_LAB_STAGE1_ACTIVATION_V1,
+            "/synthetic",
+            body,
+        )
+
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert "destructive_operations_enabled=false" in report
+    assert "live_device_mutation_attempted=false" in report
+    assert "private_evidence_exported=false" in report
+    assert activation.call_count == 1
+    assert activation.call_args.kwargs["workdir"] == "/synthetic"
+
+
 def test_gmail_readonly_canary_rejects_near_miss_alias_before_preflight() -> None:
     with (
         mock.patch.object(

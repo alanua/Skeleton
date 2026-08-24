@@ -121,6 +121,19 @@ must be represented explicitly rather than reported as generic failures.
 - authenticated LAN/Tailscale dispatch;
 - private observation and public receipt.
 
+Stage 1 activation is the registered maintenance task
+`home_edge_esp_lab_stage1_activation_v1`. It is bounded to contract and helper
+activation only: it verifies the exact reviewed Skeleton head, confirms the
+read-only Linux and Windows connector surfaces, confirms the transactional helper
+installer `scripts/install_home_edge_esp_lab.sh`, and emits
+`skeleton.home_edge.esp_lab_stage1_activation_receipt.v1`.
+
+The activation task does not flash, erase, back up, read flash contents, open a
+live board session, create a second control plane, or start a new listener or
+service. Any board interaction after activation must be a separate explicitly
+approved read-only ESP Lab job, with private raw evidence retained locally and
+only public-safe aggregates published.
+
 ### Stage 2 — non-destructive deep inspection
 
 - partition map;

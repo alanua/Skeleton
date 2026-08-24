@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/alanua/Skeleton/schemas/home_edge_esp_lab_activation_receipt.schema.json",
+  "title": "Home Edge ESP Lab Stage 1 Activation Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "maintenance_task_id",
+    "repository",
+    "source_sha",
+    "stage",
+    "status",
+    "checks",
+    "supported_operations",
+    "privacy_boundary",
+    "private_evidence_exported",
+    "public_safe_aggregate_only",
+    "live_device_mutation_attempted",
+    "destructive_operations_enabled",
+    "next_operator_action",
+    "success_criteria"
+  ],
+  "properties": {
+    "schema": {
+      "const": "skeleton.home_edge.esp_lab_stage1_activation_receipt.v1"
+    },
+    "maintenance_task_id": {
+      "const": "home_edge_esp_lab_stage1_activation_v1"
+    },
+    "repository": {
+      "const": "alanua/Skeleton"
+    },
+    "source_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "stage": {
+      "const": "stage1_read_only_connector"
+    },
+    "status": {
+      "enum": [
+        "DONE",
+        "BLOCKED"
+      ]
+    },
+    "checks": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "boolean"
+      },
+      "required": [
+        "stage1_read_only_contract",
+        "linux_tty_adapter",
+        "windows_com_adapter",
+        "authenticated_connector",
+        "public_receipt_schema",
+        "activation_receipt_schema",
+        "installer_present",
+        "destructive_operations_enabled",
+        "live_device_mutation_attempted",
+        "second_executor_created"
+      ],
+      "properties": {
+        "stage1_read_only_contract": {"type": "boolean"},
+        "linux_tty_adapter": {"type": "boolean"},
+        "windows_com_adapter": {"type": "boolean"},
+        "authenticated_connector": {"type": "boolean"},
+        "public_receipt_schema": {"type": "boolean"},
+        "activation_receipt_schema": {"type": "boolean"},
+        "installer_present": {"type": "boolean"},
+        "destructive_operations_enabled": {"const": false},
+        "live_device_mutation_attempted": {"const": false},
+        "second_executor_created": {"const": false}
+      }
+    },
+    "supported_operations": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "discover_serial_candidates",
+          "identify_chip",
+          "inspect_flash_identity",
+          "observe_serial_bounded"
+        ]
+      },
+      "minItems": 4,
+      "maxItems": 4,
+      "uniqueItems": true
+    },
+    "privacy_boundary": {
+      "const": "PRIVATE_LOCAL_DEVICE_EVIDENCE_PUBLIC_SAFE_AGGREGATES_ONLY"
+    },
+    "private_evidence_exported": {
+      "const": false
+    },
+    "public_safe_aggregate_only": {
+      "const": true
+    },
+    "live_device_mutation_attempted": {
+      "const": false
+    },
+    "destructive_operations_enabled": {
+      "const": false
+    },
+    "next_operator_action": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+    },
+    "success_criteria": {
+      "enum": [
+        "met",
+        "not_met"
+      ]
+    }
+  }
+}
