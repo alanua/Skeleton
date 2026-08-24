@@ -59,9 +59,24 @@ BASE_CREATED=0
 BASE_WIDENED=0
 BASE_MODE=""
 WRAPPER_BACKUP=""
+WRAPPER_EXISTED_START=0
 WRAPPER_REPLACED=0
+WRAPPER_CREATED_BY_OPERATION=0
+WRAPPER_OPERATION_SHA=""
+WRAPPER_OPERATION_UID=""
+WRAPPER_OPERATION_GID=""
+WRAPPER_OPERATION_MODE=""
+DEPENDENCY_AVAILABLE_START=0
 DEPENDENCY_INSTALLED=0
 COMMITTED=0
+
+wrapper_matches_operation_created() {
+  [[ $WRAPPER_CREATED_BY_OPERATION -eq 1 ]] || return 1
+  [[ -n "$WRAPPER_OPERATION_SHA" && -n "$WRAPPER_OPERATION_UID" && -n "$WRAPPER_OPERATION_GID" && -n "$WRAPPER_OPERATION_MODE" ]] || return 1
+  [[ -f "$WRAPPER_PATH" && ! -L "$WRAPPER_PATH" ]] || return 1
+  [[ "$(sha256sum -- "$WRAPPER_PATH" 2>/dev/null | awk '{print $1}')" == "$WRAPPER_OPERATION_SHA" ]] || return 1
+  [[ "$(stat -c '%a:%u:%g' -- "$WRAPPER_PATH" 2>/dev/null)" == "$WRAPPER_OPERATION_MODE:$WRAPPER_OPERATION_UID:$WRAPPER_OPERATION_GID" ]] || return 1
+}
 
 cleanup() {
   local rc=$?
@@ -69,6 +84,8 @@ cleanup() {
   if [[ $COMMITTED -ne 1 ]]; then
     if [[ $WRAPPER_REPLACED -eq 1 && -n "$WRAPPER_BACKUP" && -f "$WRAPPER_BACKUP" ]]; then
       cp -p -- "$WRAPPER_BACKUP" "$WRAPPER_PATH" 2>/dev/null || true
+    elif wrapper_matches_operation_created; then
+      rm -f -- "$WRAPPER_PATH" 2>/dev/null || true
     fi
     if [[ $TARGET_CREATED -eq 1 ]]; then
       if [[ $TEST_MODE -eq 1 && -d "$RUNTIME_BASE" && ! -L "$RUNTIME_BASE" ]]; then
@@ -80,8 +97,8 @@ cleanup() {
       fi
       rm -rf -- "$TARGET_ROOT"
     fi
-    if [[ $DEPENDENCY_INSTALLED -eq 1 && $TEST_MODE -eq 1 ]]; then
-      rm -f -- "$TEST_ROOT/usr/bin/esptool"
+    if [[ $DEPENDENCY_INSTALLED -eq 1 && $DEPENDENCY_AVAILABLE_START -eq 0 ]]; then
+      DEBIAN_FRONTEND=noninteractive "$APT_GET" remove -y esptool 2>/dev/null || true
     fi
   fi
   if [[ $BASE_WIDENED -eq 1 && -n "$BASE_MODE" && -d "$RUNTIME_BASE" && ! -L "$RUNTIME_BASE" ]]; then
@@ -282,15 +299,16 @@ if [[ -e "$TARGET_ROOT" || -L "$TARGET_ROOT" ]]; then
 fi
 
 WRAPPER_VALID_START=0
+expected_wrapper="$(mktemp "$WORK_DIR/wrapper.expected.XXXXXX")"
+{
+  printf '#!/usr/bin/env bash\n'
+  printf 'set -Eeuo pipefail\n'
+  printf 'cd /tmp\n'
+  printf 'PYTHONPATH=%q exec /usr/bin/python3 -m core.home_edge.esp_lab "$@"\n' "$TARGET_ROOT"
+} > "$expected_wrapper"
 if [[ -e "$WRAPPER_PATH" || -L "$WRAPPER_PATH" ]]; then
+  WRAPPER_EXISTED_START=1
   [[ -f "$WRAPPER_PATH" && ! -L "$WRAPPER_PATH" ]] || fail "existing wrapper is unsafe"
-  expected_wrapper="$(mktemp "$WORK_DIR/wrapper.expected.XXXXXX")"
-  {
-    printf '#!/usr/bin/env bash\n'
-    printf 'set -Eeuo pipefail\n'
-    printf 'cd /tmp\n'
-    printf 'PYTHONPATH=%q exec /usr/bin/python3 -m core.home_edge.esp_lab "$@"\n' "$TARGET_ROOT"
-  } > "$expected_wrapper"
   if cmp -s "$WRAPPER_PATH" "$expected_wrapper"; then
     wrapper_mode="$(stat -c '%a' -- "$WRAPPER_PATH")"
     if [[ "$wrapper_mode" == "755" ]]; then
@@ -310,13 +328,17 @@ if [[ $TEST_MODE -eq 1 ]]; then
   [[ -x "$APT_GET" && ! -L "$APT_GET" ]] || fail "test apt is unavailable"
 fi
 if [[ $TEST_MODE -eq 0 ]]; then
-  if ! command -v esptool >/dev/null 2>&1; then
+  if command -v esptool >/dev/null 2>&1; then
+    DEPENDENCY_AVAILABLE_START=1
+  else
     "$APT_GET" update
     DEBIAN_FRONTEND=noninteractive "$APT_GET" install -y --no-install-recommends esptool
     DEPENDENCY_INSTALLED=1
   fi
 else
-  if [[ ! -x "$TEST_ROOT/usr/bin/esptool" ]]; then
+  if [[ -x "$TEST_ROOT/usr/bin/esptool" ]]; then
+    DEPENDENCY_AVAILABLE_START=1
+  else
     "$APT_GET" update
     DEBIAN_FRONTEND=noninteractive "$APT_GET" install -y --no-install-recommends esptool
     DEPENDENCY_INSTALLED=1
@@ -365,6 +387,13 @@ if [[ $WRAPPER_VALID_START -eq 0 ]]; then
   if [[ $TEST_MODE -eq 0 ]]; then chown root:root "$wrapper_tmp"; fi
   mv -f -- "$wrapper_tmp" "$WRAPPER_PATH"
   WRAPPER_REPLACED=1
+  if [[ $WRAPPER_EXISTED_START -eq 0 ]]; then
+    WRAPPER_CREATED_BY_OPERATION=1
+    WRAPPER_OPERATION_SHA="$(sha256sum -- "$WRAPPER_PATH" | awk '{print $1}')"
+    WRAPPER_OPERATION_MODE="$(stat -c '%a' -- "$WRAPPER_PATH")"
+    WRAPPER_OPERATION_UID="$(stat -c '%u' -- "$WRAPPER_PATH")"
+    WRAPPER_OPERATION_GID="$(stat -c '%g' -- "$WRAPPER_PATH")"
+  fi
 fi
 
 CANARY_STDOUT="$WORK_DIR/canary.stdout"

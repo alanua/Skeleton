@@ -66,8 +66,12 @@ def _make_root(tmp_path: Path) -> Path:
         "set -Eeuo pipefail\n"
         "printf '%s\\n' \"$*\" >> \"$SKELETON_ESP_LAB_TEST_ROOT/apt.log\"\n"
         "if [[ \"$1\" == install ]]; then\n"
+        "  [[ \"$*\" == 'install -y --no-install-recommends esptool' ]]\n"
         "  printf '#!/usr/bin/env bash\\nexit 0\\n' > \"$SKELETON_ESP_LAB_TEST_ROOT/usr/bin/esptool\"\n"
         "  chmod 0755 \"$SKELETON_ESP_LAB_TEST_ROOT/usr/bin/esptool\"\n"
+        "elif [[ \"$1\" == remove ]]; then\n"
+        "  [[ \"$*\" == 'remove -y esptool' ]]\n"
+        "  rm -f -- \"$SKELETON_ESP_LAB_TEST_ROOT/usr/bin/esptool\"\n"
         "fi\n",
         encoding="utf-8",
     )
@@ -176,6 +180,7 @@ def test_first_install_exact_tree_manifest_modes_and_real_wrapper_outside_repo(t
     )
     assert wrapped.returncode == 0
     assert json.loads(wrapped.stdout) == []
+    assert (root / "usr/bin/esptool").is_file()
 
 
 def test_candidate_count_only_and_canary_argv_semantics(tmp_path: Path) -> None:
@@ -278,7 +283,31 @@ def test_broken_or_nonregular_wrapper_blocked_before_apt_and_target(tmp_path: Pa
         assert not (root / "opt/skeleton/esp-lab").exists()
 
 
-def test_canary_failure_rolls_back_actual_module_install(tmp_path: Path) -> None:
+def test_first_install_canary_failure_removes_operation_created_wrapper_and_target_only(tmp_path: Path) -> None:
+    root = _make_root(tmp_path)
+    base = root / "opt/skeleton/esp-lab"
+    base.mkdir(parents=True)
+    base.chmod(0o555)
+    unrelated = base / ("f" * 40)
+    base.chmod(0o755)
+    unrelated.mkdir()
+    base.chmod(0o555)
+    before_base = base.stat()
+    shutil.rmtree(root / "sys/class/tty")
+    (root / "sys/class").mkdir(exist_ok=True)
+    (root / "sys/class/tty").write_text("not a directory", encoding="utf-8")
+    completed = _run_once(root)
+    assert completed.returncode != 0
+    assert not _runtime(root).exists()
+    assert unrelated.exists()
+    assert not (root / "usr/local/bin/skeleton-esp-lab").exists()
+    assert not (root / "usr/bin/esptool").exists()
+    assert (root / "apt.log").read_text(encoding="utf-8").splitlines()[-1] == "remove -y esptool"
+    after_base = base.stat()
+    assert stat.S_IMODE(after_base.st_mode) == stat.S_IMODE(before_base.st_mode)
+
+
+def test_canary_failure_restores_prior_regular_wrapper_and_module_install(tmp_path: Path) -> None:
     root = _make_root(tmp_path)
     base = root / "opt/skeleton/esp-lab"
     base.mkdir(parents=True)
@@ -307,6 +336,21 @@ def test_canary_failure_rolls_back_actual_module_install(tmp_path: Path) -> None
     assert after_wrapper.st_mtime_ns == before_wrapper.st_mtime_ns
     after_base = base.stat()
     assert stat.S_IMODE(after_base.st_mode) == stat.S_IMODE(before_base.st_mode)
+
+
+def test_canary_failure_preserves_preexisting_esptool_without_apt_churn(tmp_path: Path) -> None:
+    root = _make_root(tmp_path)
+    esptool = root / "usr/bin/esptool"
+    esptool.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    esptool.chmod(0o755)
+    shutil.rmtree(root / "sys/class/tty")
+    (root / "sys/class").mkdir(exist_ok=True)
+    (root / "sys/class/tty").write_text("not a directory", encoding="utf-8")
+    completed = _run_once(root)
+    assert completed.returncode != 0
+    assert esptool.exists()
+    assert not (root / "apt.log").exists()
+    assert not (root / "usr/local/bin/skeleton-esp-lab").exists()
 
 
 def test_test_root_guard_and_argv_fail_before_stdin(tmp_path: Path) -> None:
@@ -371,5 +415,9 @@ def test_installer_source_static_contract() -> None:
     ]
     assert all(token not in source for token in forbidden)
     assert "pip install" not in source
+    assert 'DEBIAN_FRONTEND=noninteractive "$APT_GET" remove -y esptool' in source
+    assert "apt-get remove -y" not in source
+    assert "autoremove" not in source
+    assert "purge" not in source
     assert "CHECK_OWNERSHIP=1" in source
     assert 'stat -c \'%u:%g\'' in source
