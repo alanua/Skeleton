@@ -267,6 +267,41 @@ def test_discovery_reads_sysfs_only_and_filters_candidates(tmp_path: Path) -> No
     ]
 
 
+def test_module_execution_discover_uses_sysfs_only(tmp_path: Path) -> None:
+    tty = tmp_path / "ttyACM0"
+    tty.mkdir()
+    (tty / "product").write_text("ESP32-C3 Bridge", encoding="utf-8")
+    completed = subprocess.run(
+        [
+            "/usr/bin/python3",
+            "-m",
+            "core.home_edge.esp_lab",
+            "discover",
+            "--sysfs-root",
+            str(tmp_path),
+        ],
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0
+    assert json.loads(completed.stdout) == [
+        {
+            "adapter_kind": "linux_tty",
+            "device_ref": "/dev/ttyACM0",
+            "driver": None,
+            "endpoint_kind": "home_edge_local_linux",
+            "pid": None,
+            "product": "ESP32-C3 Bridge",
+            "vid": None,
+        }
+    ]
+    assert completed.stderr == ""
+
+
 def test_missing_esptool_returns_unsupported_dependency() -> None:
     job = linux_job()
     job["execution_mode"] = "read_only"
