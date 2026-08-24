@@ -19,6 +19,10 @@ from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 
 import requests
 import site_registry
+try:
+    from capability_adapter import active_resolver_capabilities
+except ImportError:  # pragma: no cover - package import path used by tests.
+    from ops.skeleton_cast.runtime.capability_adapter import active_resolver_capabilities
 from lxml import html as lxml_html
 
 YTDLP = "/home/valertos08/.local/bin/yt-dlp"
@@ -34,6 +38,7 @@ UA = (
 ASHDI = re.compile(r"https?:\\?/\\?/(?:www\.)?ashdi\.vip\\?/vod\\?/\d+", re.I)
 DIRECT = re.compile(r"\.(?:m3u8|mpd|mp4)(?:$|[?#])", re.I)
 EDIT_TIME = re.compile(r"var\s+dle_edittime\s*=\s*['\"]?(\d+)", re.I)
+ACTIVE_RESOLVER_CAPABILITIES = active_resolver_capabilities()
 
 
 class OriginProtectedError(RuntimeError):
