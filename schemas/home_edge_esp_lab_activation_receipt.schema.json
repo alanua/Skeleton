@@ -13,6 +13,7 @@
     "status",
     "checks",
     "supported_operations",
+    "linux_runtime_bundle",
     "privacy_boundary",
     "private_evidence_exported",
     "public_safe_aggregate_only",
@@ -57,6 +58,9 @@
         "public_receipt_schema",
         "activation_receipt_schema",
         "installer_present",
+        "existing_executor_dispatch",
+        "self_contained_linux_runtime",
+        "immutable_linux_runtime",
         "destructive_operations_enabled",
         "live_device_mutation_attempted",
         "second_executor_created"
@@ -69,6 +73,9 @@
         "public_receipt_schema": {"type": "boolean"},
         "activation_receipt_schema": {"type": "boolean"},
         "installer_present": {"type": "boolean"},
+        "existing_executor_dispatch": {"type": "boolean"},
+        "self_contained_linux_runtime": {"type": "boolean"},
+        "immutable_linux_runtime": {"type": "boolean"},
         "destructive_operations_enabled": {"const": false},
         "live_device_mutation_attempted": {"const": false},
         "second_executor_created": {"const": false}
@@ -87,6 +94,60 @@
       "minItems": 4,
       "maxItems": 4,
       "uniqueItems": true
+    },
+    "linux_runtime_bundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "install_root",
+        "entrypoints",
+        "module_roots",
+        "mutation_surface",
+        "service_or_listener_created",
+        "uses_existing_executor_dispatch",
+        "immutable_after_install"
+      ],
+      "properties": {
+        "install_root": {
+          "const": "/opt/skeleton-home-edge-esp-lab/stage1"
+        },
+        "entrypoints": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "/usr/local/bin/skeleton-home-edge-esp-lab",
+              "/usr/local/bin/skeleton-home-edge-esp-lab-windows-connector"
+            ]
+          },
+          "minItems": 2,
+          "maxItems": 2,
+          "uniqueItems": true
+        },
+        "module_roots": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "core/home_edge/esp_lab.py",
+              "core/home_edge/esp_lab_connector.py"
+            ]
+          },
+          "minItems": 2,
+          "maxItems": 2,
+          "uniqueItems": true
+        },
+        "mutation_surface": {
+          "const": "none"
+        },
+        "service_or_listener_created": {
+          "const": false
+        },
+        "uses_existing_executor_dispatch": {
+          "const": true
+        },
+        "immutable_after_install": {
+          "const": true
+        }
+      }
     },
     "privacy_boundary": {
       "const": "PRIVATE_LOCAL_DEVICE_EVIDENCE_PUBLIC_SAFE_AGGREGATES_ONLY"

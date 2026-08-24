@@ -14,6 +14,9 @@ REPOSITORY = "alanua/Skeleton"
 STAGE = "stage1_read_only_connector"
 PRIVACY_BOUNDARY = "PRIVATE_LOCAL_DEVICE_EVIDENCE_PUBLIC_SAFE_AGGREGATES_ONLY"
 INSTALLER = "scripts/install_home_edge_esp_lab.sh"
+LINUX_RUNTIME_ROOT = "/opt/skeleton-home-edge-esp-lab/stage1"
+LINUX_ENTRYPOINT = "/usr/local/bin/skeleton-home-edge-esp-lab"
+WINDOWS_CONNECTOR_ENTRYPOINT = "/usr/local/bin/skeleton-home-edge-esp-lab-windows-connector"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SAFE_LINE_RE = re.compile(r"^[A-Za-z0-9_.:/=,+-]{1,240}$")
 
@@ -127,6 +130,13 @@ def activation_receipt(*, source_sha: str, checkout: str | Path) -> dict[str, ob
         "public_receipt_schema": (root / "schemas/home_edge_esp_lab_receipt.schema.json").is_file(),
         "activation_receipt_schema": (root / "schemas/home_edge_esp_lab_activation_receipt.schema.json").is_file(),
         "installer_present": (root / INSTALLER).is_file(),
+        "existing_executor_dispatch": _contains(
+            root / "scripts/runner_poll_github_tasks.py",
+            "execute_stage1_activation(",
+        ),
+        "self_contained_linux_runtime": _contains(root / INSTALLER, LINUX_RUNTIME_ROOT)
+        and _contains(root / INSTALLER, "PYTHONPATH=\"$RUNTIME_ROOT\""),
+        "immutable_linux_runtime": _contains(root / INSTALLER, "chmod -R a-w \"$RUNTIME_ROOT\""),
         "destructive_operations_enabled": False,
         "live_device_mutation_attempted": False,
         "second_executor_created": False,
@@ -163,6 +173,21 @@ def activation_receipt(*, source_sha: str, checkout: str | Path) -> dict[str, ob
         "status": "DONE" if check_passed else "BLOCKED",
         "checks": checks,
         "supported_operations": supported_operations,
+        "linux_runtime_bundle": {
+            "install_root": LINUX_RUNTIME_ROOT,
+            "entrypoints": [
+                LINUX_ENTRYPOINT,
+                WINDOWS_CONNECTOR_ENTRYPOINT,
+            ],
+            "module_roots": [
+                "core/home_edge/esp_lab.py",
+                "core/home_edge/esp_lab_connector.py",
+            ],
+            "mutation_surface": "none",
+            "service_or_listener_created": False,
+            "uses_existing_executor_dispatch": True,
+            "immutable_after_install": True,
+        },
         "privacy_boundary": PRIVACY_BOUNDARY,
         "private_evidence_exported": False,
         "public_safe_aggregate_only": True,
@@ -201,6 +226,26 @@ def validate_activation_receipt(
             continue
         if value is not True:
             return "esp_lab_activation_receipt_checks_failed"
+    bundle = receipt.get("linux_runtime_bundle")
+    if not isinstance(bundle, Mapping):
+        return "esp_lab_activation_runtime_bundle_invalid"
+    if bundle.get("install_root") != LINUX_RUNTIME_ROOT:
+        return "esp_lab_activation_runtime_root_invalid"
+    if bundle.get("entrypoints") != [LINUX_ENTRYPOINT, WINDOWS_CONNECTOR_ENTRYPOINT]:
+        return "esp_lab_activation_entrypoints_invalid"
+    if bundle.get("module_roots") != [
+        "core/home_edge/esp_lab.py",
+        "core/home_edge/esp_lab_connector.py",
+    ]:
+        return "esp_lab_activation_module_roots_invalid"
+    if bundle.get("mutation_surface") != "none":
+        return "esp_lab_activation_mutation_surface_invalid"
+    if bundle.get("service_or_listener_created") is not False:
+        return "esp_lab_activation_service_created"
+    if bundle.get("uses_existing_executor_dispatch") is not True:
+        return "esp_lab_activation_executor_dispatch_invalid"
+    if bundle.get("immutable_after_install") is not True:
+        return "esp_lab_activation_runtime_mutable"
     if receipt.get("private_evidence_exported") is not False:
         return "esp_lab_activation_private_leak_detected"
     if receipt.get("public_safe_aggregate_only") is not True:
@@ -219,8 +264,14 @@ def receipt_status_lines(receipt: Mapping[str, object]) -> list[str]:
     check_count = len(checks) if isinstance(checks, Mapping) else 0
     operations = receipt.get("supported_operations")
     operation_count = len(operations) if isinstance(operations, list) else 0
+    bundle = receipt.get("linux_runtime_bundle")
+    install_root = bundle.get("install_root") if isinstance(bundle, Mapping) else None
     lines = [
         "step=verify_stage1_contract status=done",
+        "executor_dispatch=existing_runner_dispatch",
+        f"linux_runtime_root={install_root}",
+        "linux_runtime_immutable=true",
+        "linux_runtime_self_contained=true",
         f"read_only_operation_count={operation_count}",
         f"contract_check_count={check_count}",
         "destructive_operations_enabled=false",

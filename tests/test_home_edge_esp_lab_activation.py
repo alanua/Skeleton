@@ -83,6 +83,24 @@ def test_activation_receipt_is_public_safe_and_schema_valid() -> None:
         "inspect_flash_identity",
         "observe_serial_bounded",
     ]
+    assert receipt["checks"]["existing_executor_dispatch"] is True
+    assert receipt["checks"]["self_contained_linux_runtime"] is True
+    assert receipt["checks"]["immutable_linux_runtime"] is True
+    assert receipt["linux_runtime_bundle"] == {
+        "entrypoints": [
+            "/usr/local/bin/skeleton-home-edge-esp-lab",
+            "/usr/local/bin/skeleton-home-edge-esp-lab-windows-connector",
+        ],
+        "immutable_after_install": True,
+        "install_root": "/opt/skeleton-home-edge-esp-lab/stage1",
+        "module_roots": [
+            "core/home_edge/esp_lab.py",
+            "core/home_edge/esp_lab_connector.py",
+        ],
+        "mutation_surface": "none",
+        "service_or_listener_created": False,
+        "uses_existing_executor_dispatch": True,
+    }
     public = json.dumps(receipt, sort_keys=True)
     for token in ("COM42", "/dev/ttyUSB0", "aa:bb:cc:dd:ee:ff", "192.168."):
         assert token not in public
@@ -111,6 +129,10 @@ def test_execute_stage1_activation_returns_bounded_done_report() -> None:
     assert report.startswith("DONE:")
     assert f"maintenance_task_id={TASK_ID}" in report
     assert "read_only_operation_count=4" in report
+    assert "executor_dispatch=existing_runner_dispatch" in report
+    assert "linux_runtime_root=/opt/skeleton-home-edge-esp-lab/stage1" in report
+    assert "linux_runtime_immutable=true" in report
+    assert "linux_runtime_self_contained=true" in report
     assert "destructive_operations_enabled=false" in report
     assert "live_device_mutation_attempted=false" in report
     assert "private_evidence_exported=false" in report
@@ -159,6 +181,23 @@ def test_install_script_has_no_runtime_service_or_destructive_esp_path() -> None
     assert "/home/agent/agent-dev/repos/Skeleton" not in source
     assert "skeleton-home-edge-esp-lab" in source
     assert "live_device_mutation_attempted=false" in source
+
+
+def test_install_script_builds_immutable_self_contained_runtime() -> None:
+    source = (ROOT / "scripts/install_home_edge_esp_lab.sh").read_text(encoding="utf-8")
+
+    assert 'RUNTIME_ROOT="/opt/skeleton-home-edge-esp-lab/stage1"' in source
+    assert 'install -o root -g root -m 0644 "$REPO_ROOT/core/home_edge/esp_lab.py"' in source
+    assert 'install -o root -g root -m 0644 "$REPO_ROOT/core/home_edge/esp_lab_connector.py"' in source
+    assert 'PYTHONPATH="$RUNTIME_ROOT" exec python3 -m core.home_edge.esp_lab "$@"' in source
+    assert (
+        'PYTHONPATH="$RUNTIME_ROOT" exec python3 -m core.home_edge.esp_lab_connector "$@"'
+        in source
+    )
+    assert 'find "$RUNTIME_ROOT" -type d -exec chmod 0555 {} +' in source
+    assert 'find "$RUNTIME_ROOT" -type f -exec chmod 0444 {} +' in source
+    assert 'chmod -R a-w "$RUNTIME_ROOT"' in source
+    assert "systemctl" not in source
 
 
 def test_activation_cli_emits_valid_receipt(capsys: object) -> None:

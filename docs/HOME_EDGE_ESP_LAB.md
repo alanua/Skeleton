@@ -128,6 +128,16 @@ read-only Linux and Windows connector surfaces, confirms the transactional helpe
 installer `scripts/install_home_edge_esp_lab.sh`, and emits
 `skeleton.home_edge.esp_lab_stage1_activation_receipt.v1`.
 
+Activation is dispatched through the existing Runner maintenance executor. It
+does not register a separate executor, transport, service, listener, remote
+shell or control plane. On Home Edge Linux, the installer publishes an immutable
+self-contained Stage 1 runtime at `/opt/skeleton-home-edge-esp-lab/stage1` and
+stable launchers at `/usr/local/bin/skeleton-home-edge-esp-lab` and
+`/usr/local/bin/skeleton-home-edge-esp-lab-windows-connector`. The launchers run
+the bundled `core.home_edge.esp_lab` and `core.home_edge.esp_lab_connector`
+modules via `PYTHONPATH` pointed at that frozen runtime, so later checkout edits
+do not alter the installed helper until the installer is run again.
+
 The activation task does not flash, erase, back up, read flash contents, open a
 live board session, create a second control plane, or start a new listener or
 service. Any board interaction after activation must be a separate explicitly
