@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -219,6 +220,190 @@ def test_codegen_canary_fails_closed_when_pinned_runtime_cannot_be_verified(monk
     )
     report = maintenance._codegen_read_only_canary()
     assert "reason=CODEX_CANARY_RUNTIME_UNVERIFIED" in report
+
+
+def _esp_signer_git_runner(blob_bytes: bytes):
+    def run_command(args, cwd, timeout, env):
+        del cwd, timeout, env
+        if args[:2] == ["git", "ls-tree"]:
+            return (
+                0,
+                "100755 blob "
+                f"{maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_BLOB}\t"
+                f"{maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_SOURCE_PATH}\n",
+            )
+        if args == [
+            "git",
+            "cat-file",
+            "-t",
+            maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_BLOB,
+        ]:
+            return 0, "blob\n"
+        if args == [
+            "git",
+            "cat-file",
+            "-s",
+            maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_BLOB,
+        ]:
+            return 0, f"{len(blob_bytes)}\n"
+        if args == [
+            "git",
+            "cat-file",
+            "-p",
+            maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_BLOB,
+        ]:
+            return 0, blob_bytes.decode("utf-8")
+        if args[:3] == ["git", "cat-file", "-s"]:
+            return 0, "12\n"
+        if args[:3] == ["git", "cat-file", "-p"]:
+            return 0, "artifact-ok\n"
+        raise AssertionError(args)
+
+    return run_command
+
+
+def _execute_esp_signer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    blob_bytes: bytes = b"#!/bin/sh\necho installer\n",
+    protected_run=None,
+    before_protected_copy=None,
+    expected_main_sha: str | None = None,
+):
+    protected = tmp_path / "protected-installer.sh"
+    artifact = tmp_path / "signer"
+    monkeypatch.setattr(
+        maintenance,
+        "HOME_EDGE_ESP_LAB_STAGE1_SIGNER_PROTECTED_INSTALLER",
+        protected,
+    )
+    monkeypatch.setattr(
+        maintenance,
+        "HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLED_ARTIFACTS",
+        {artifact: ("d248088477a7c59219a9c19c47bcfc464c6dcd27", 0o555)},
+    )
+    expected = expected_main_sha or maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA
+    return maintenance.execute_home_edge_esp_lab_stage1_signer_install(
+        expected_main_sha=expected,
+        registered_clean_main_sha=maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA,
+        github_main_sha=maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA,
+        checkout_path=tmp_path,
+        checkout_head_sha=maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA,
+        checkout_origin_main_sha=maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA,
+        run_command=_esp_signer_git_runner(blob_bytes),
+        protected_run_command=protected_run or (lambda _argv, _timeout: (1, "")),
+        before_protected_copy=before_protected_copy,
+    )
+
+
+def test_esp_lab_stage1_signer_wrong_expected_main_sha_uses_zero_sudo(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    sudo_calls: list[list[str]] = []
+    code, report = _execute_esp_signer(
+        tmp_path,
+        monkeypatch,
+        expected_main_sha="0" * 40,
+        protected_run=lambda argv, _timeout: sudo_calls.append(argv) or (0, ""),
+    )
+    assert code == 0
+    assert "RESULT: NEEDS_OPERATOR" in report
+    assert "EXPECTED_MAIN_SHA_MISMATCH" in report
+    assert sudo_calls == []
+
+
+def test_esp_lab_stage1_signer_uses_git_blob_not_worktree_and_fixed_install_argv(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    blob_bytes = b"#!/bin/sh\ntrusted blob\n"
+    (tmp_path / maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_SOURCE_PATH).parent.mkdir()
+    (tmp_path / maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_SOURCE_PATH).write_text(
+        "mutated worktree\n", encoding="utf-8"
+    )
+    calls: list[list[str]] = []
+
+    def fake_verify(path: Path, expected_sha256: str | None, expected_mode: int, **kwargs):
+        del kwargs
+        if path.name == "install_home_edge_esp_lab_activation_signer.sh":
+            assert path.read_bytes() == blob_bytes
+        assert expected_mode in {0o500, 0o555}
+        if expected_sha256 is not None and path.exists():
+            assert hashlib.sha256(path.read_bytes()).hexdigest() == expected_sha256
+
+    def protected_run(argv: list[str], _timeout: int | None):
+        calls.append(argv)
+        if argv[:3] == ["/usr/bin/sudo", "-n", "/usr/bin/install"]:
+            Path(argv[-1]).write_bytes(Path(argv[-2]).read_bytes())
+            return 0, ""
+        return 1, ""
+
+    monkeypatch.setattr(maintenance, "_verify_regular_file", fake_verify)
+    _code, report = _execute_esp_signer(
+        tmp_path, monkeypatch, blob_bytes=blob_bytes, protected_run=protected_run
+    )
+    assert "RESULT: NEEDS_OPERATOR" in report
+    assert calls[0][:8] == [
+        "/usr/bin/sudo",
+        "-n",
+        "/usr/bin/install",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        "-m",
+    ]
+    assert calls[0][8] == "0555"
+    assert calls[0][-1].endswith("protected-installer.sh")
+    assert calls[1] == [
+        "/usr/bin/sudo",
+        "-n",
+        str(tmp_path / "protected-installer.sh"),
+        "--repo-root",
+        str(tmp_path),
+    ]
+
+
+def test_esp_lab_stage1_signer_private_staging_tamper_blocks_before_sudo(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    sudo_calls: list[list[str]] = []
+
+    def tamper(staged: Path) -> None:
+        staged.chmod(0o700)
+        staged.write_text("tampered\n", encoding="utf-8")
+        staged.chmod(0o500)
+
+    _code, report = _execute_esp_signer(
+        tmp_path,
+        monkeypatch,
+        protected_run=lambda argv, _timeout: sudo_calls.append(argv) or (0, ""),
+        before_protected_copy=tamper,
+    )
+    assert "RESULT: NEEDS_OPERATOR" in report
+    assert "FILE_CONTENT_MISMATCH" in report
+    assert sudo_calls == []
+
+
+def test_esp_lab_stage1_signer_success_audits_fixed_artifacts_and_does_not_activate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_verify(path: Path, _expected_sha256: str | None, expected_mode: int, **kwargs):
+        del kwargs
+        assert expected_mode in {0o500, 0o555}
+
+    def protected_run(argv: list[str], _timeout: int | None):
+        calls.append(argv)
+        return 0, ""
+
+    monkeypatch.setattr(maintenance, "_verify_regular_file", fake_verify)
+    _code, report = _execute_esp_signer(tmp_path, monkeypatch, protected_run=protected_run)
+    assert "RESULT: DONE" in report
+    assert '"installed_artifacts_verified": true' in report
+    assert '"activation_executed": false' in report
+    assert len(calls) == 2
 
 
 def test_control_plane_recovery_wires_fixed_actions_without_hermes_substitution(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

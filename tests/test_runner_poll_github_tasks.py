@@ -168,6 +168,27 @@ def _media_source_snapshot_receipt() -> dict[str, object]:
     }
 
 
+def _esp_lab_stage1_signer_install_body(
+    *,
+    expected_main_sha: str = runner.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA,
+    repository: str = runner.REPO,
+    target: str = "runner-controller",
+    approval: str = runner.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_OPERATOR_APPROVAL,
+    extra: tuple[str, ...] = (),
+) -> str:
+    return "\n".join(
+        (
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {runner.HOME_EDGE_01_ESP_LAB_STAGE1_SIGNER_INSTALL_V1}",
+            f"Repository: {repository}",
+            f"Expected Main SHA: {expected_main_sha}",
+            f"Target: {target}",
+            f"Operator Approval: {approval}",
+            *extra,
+        )
+    )
+
+
 def _merge_issue_body(
     *,
     pr_number: int = 123,
@@ -510,6 +531,179 @@ def test_home_edge_media_source_snapshot_registry_exposes_only_exact_fixed_task_
             _media_source_snapshot_issue_body(),
         ).startswith("BLOCKED:")
     )
+
+
+def _esp_signer_preflight_patches(expected_sha: str):
+    checkout = mock.Mock(
+        checkout_path=Path("/synthetic/skeleton"),
+        status_lines=["registered_checkout_current_main=true"],
+    )
+
+    def read_sha(_task_id, _path, ref, _status_lines, _step):
+        assert ref in {"HEAD", "origin/main"}
+        return expected_sha, None
+
+    return (
+        mock.patch.object(
+            runner,
+            "_mempalace_runtime_smoke_preflight",
+            return_value=(checkout, ["registered_checkout_current_main=true"], None),
+        ),
+        mock.patch.object(runner, "_read_skeleton_sha", side_effect=read_sha),
+        mock.patch.object(runner, "_read_exact_git_sha", return_value=expected_sha),
+    )
+
+
+def test_esp_lab_stage1_signer_install_is_allowlisted() -> None:
+    assert (
+        runner.HOME_EDGE_01_ESP_LAB_STAGE1_SIGNER_INSTALL_V1
+        in runner.RUNTIME_MAINTENANCE_TASK_IDS
+    )
+
+
+@pytest.mark.parametrize(
+    ("body", "reason"),
+    (
+        (
+            _esp_lab_stage1_signer_install_body(repository="alanua/Skeleton2"),
+            "signer_install_repository_mismatch",
+        ),
+        (
+            _esp_lab_stage1_signer_install_body(target="home-edge-01"),
+            "signer_install_target_mismatch",
+        ),
+        (
+            _esp_lab_stage1_signer_install_body(approval="NEAR_MATCH"),
+            "signer_install_operator_approval_mismatch",
+        ),
+        (
+            _esp_lab_stage1_signer_install_body(extra=("Command: sudo sh",)),
+            "signer_install_unknown_input_field",
+        ),
+        (
+            _esp_lab_stage1_signer_install_body()
+            + "\nOperator Approval: "
+            + runner.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_OPERATOR_APPROVAL,
+            "signer_install_duplicate_input_field",
+        ),
+    ),
+)
+def test_esp_lab_stage1_signer_install_rejects_bad_metadata_before_privilege(
+    body: str,
+    reason: str,
+) -> None:
+    with (
+        mock.patch.object(runner, "_mempalace_runtime_smoke_preflight") as preflight,
+        mock.patch.object(
+            runner,
+            "_execute_home_edge_esp_lab_stage1_signer_install",
+        ) as execute,
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HOME_EDGE_01_ESP_LAB_STAGE1_SIGNER_INSTALL_V1,
+            str(runner.ROOT),
+            body,
+        )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert f"reason={reason}" in report
+    preflight.assert_not_called()
+    execute.assert_not_called()
+
+
+def test_esp_lab_stage1_signer_install_blocks_stale_registered_main_before_executor() -> None:
+    executor_report = (
+        "RESULT: NEEDS_OPERATOR\n"
+        "Receipt:\n"
+        + json.dumps(
+            {
+                "maintenance_task_id": runner.HOME_EDGE_01_ESP_LAB_STAGE1_SIGNER_INSTALL_V1,
+                "status": "NEEDS_OPERATOR",
+                "reason": "REGISTERED_MAIN_SHA_MISMATCH",
+                "repository": runner.REPO,
+                "expected_main_sha": runner.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA,
+                "target": "runner-controller",
+                "source_blob": runner.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_BLOB,
+                "installer_sha256": "a" * 64,
+                "protected_copy_verified": False,
+                "installed_artifacts_verified": False,
+                "activation_executed": False,
+                "private_evidence_exposed": False,
+            }
+        )
+    )
+    preflight_patch, sha_patch, exact_git_patch = _esp_signer_preflight_patches("b" * 40)
+    with (
+        preflight_patch,
+        sha_patch,
+        exact_git_patch,
+        mock.patch.object(
+            runner,
+            "_execute_home_edge_esp_lab_stage1_signer_install",
+            return_value=(0, executor_report),
+        ) as execute,
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HOME_EDGE_01_ESP_LAB_STAGE1_SIGNER_INSTALL_V1,
+            str(runner.ROOT),
+            _esp_lab_stage1_signer_install_body(),
+        )
+
+    assert runner.maintenance_report_status(report) == "NEEDS_OPERATOR"
+    assert "REGISTERED_MAIN_SHA_MISMATCH" in report
+    execute.assert_called_once()
+
+
+def test_esp_lab_stage1_signer_install_success_receipt_is_public_safe() -> None:
+    expected_sha = runner.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA
+    executor_report = (
+        "RESULT: DONE\n"
+        "Executor: repository_maintenance.home_edge_esp_lab_stage1_signer_install\n"
+        "Model providers called: 0\n"
+        "Receipt:\n"
+        + json.dumps(
+            {
+                "maintenance_task_id": runner.HOME_EDGE_01_ESP_LAB_STAGE1_SIGNER_INSTALL_V1,
+                "status": "DONE",
+                "reason": "SIGNER_INSTALLATION_VERIFIED",
+                "repository": runner.REPO,
+                "expected_main_sha": expected_sha,
+                "target": "runner-controller",
+                "source_blob": runner.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_BLOB,
+                "installer_sha256": "a" * 64,
+                "protected_copy_verified": True,
+                "installed_artifacts_verified": True,
+                "activation_executed": False,
+                "private_evidence_exposed": False,
+                "private_path": "/root/secret",
+            }
+        )
+    )
+    preflight_patch, sha_patch, exact_git_patch = _esp_signer_preflight_patches(expected_sha)
+    with (
+        preflight_patch,
+        sha_patch,
+        exact_git_patch,
+        mock.patch.object(
+            runner,
+            "_execute_home_edge_esp_lab_stage1_signer_install",
+            return_value=(0, executor_report),
+        ) as execute,
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HOME_EDGE_01_ESP_LAB_STAGE1_SIGNER_INSTALL_V1,
+            str(runner.ROOT),
+            _esp_lab_stage1_signer_install_body(),
+        )
+
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert "protected_copy_verified=true" in report
+    assert "installed_artifacts_verified=true" in report
+    assert "activation_executed=false" in report
+    assert "private_evidence_exposed=false" in report
+    assert "/root/secret" not in report
+    assert "HMAC" not in report
+    assert execute.call_args.kwargs["checkout_path"] == Path("/synthetic/skeleton")
 
 
 def test_home_edge_media_source_snapshot_malformed_input_blocks(
