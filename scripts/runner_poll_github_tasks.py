@@ -15608,8 +15608,8 @@ def _home_edge_esp_lab_stage1_signer_input(
         return None, "signer_install_task_id_mismatch"
     if parsed["Repository"] != REPO:
         return None, "signer_install_repository_mismatch"
-    if parsed["Expected Main SHA"] != HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA:
-        return None, "signer_install_expected_main_sha_mismatch"
+    if re.fullmatch(r"[0-9a-f]{40}", parsed["Expected Main SHA"]) is None:
+        return None, "signer_install_expected_main_sha_invalid"
     if parsed["Target"] != "runner-controller":
         return None, "signer_install_target_mismatch"
     if parsed["Operator Approval"] != HOME_EDGE_ESP_LAB_STAGE1_SIGNER_OPERATOR_APPROVAL:
@@ -15642,8 +15642,8 @@ def _home_edge_esp_lab_stage1_signer_receipt_valid(
         receipt.get("maintenance_task_id")
         != HOME_EDGE_01_ESP_LAB_STAGE1_SIGNER_INSTALL_V1
         or receipt.get("repository") != REPO
-        or receipt.get("expected_main_sha")
-        != HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA
+        or not isinstance(receipt.get("expected_main_sha"), str)
+        or re.fullmatch(r"[0-9a-f]{40}", str(receipt.get("expected_main_sha"))) is None
         or receipt.get("target") != "runner-controller"
         or receipt.get("source_blob") != HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_BLOB
         or receipt.get("activation_executed") is not False

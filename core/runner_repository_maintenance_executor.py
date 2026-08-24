@@ -4,6 +4,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
+import errno
 import json
 import os
 import platform
@@ -139,6 +140,9 @@ HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID = (
 HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA = (
     "8e049eb631f63d81ab932eac6ab0cf3d3d5a5949"
 )
+HOME_EDGE_ESP_LAB_STAGE1_SIGNER_TRUSTED_SOURCE_ANCESTOR_SHA = (
+    HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA
+)
 HOME_EDGE_ESP_LAB_STAGE1_SIGNER_SOURCE_PATH = (
     "scripts/install_home_edge_esp_lab_activation_signer.sh"
 )
@@ -154,6 +158,9 @@ HOME_EDGE_ESP_LAB_STAGE1_SIGNER_WRAPPER_BLOB = (
 )
 HOME_EDGE_ESP_LAB_STAGE1_INSTALLER_BLOB = (
     "1527705a28127a88cf24199706a75fd77a79894c"
+)
+HOME_EDGE_ESP_LAB_STAGE1_SIGNER_SUDOERS_SHA256 = (
+    "b7e0c12abca7dd59238f285dff3c83b4f8c6bbf26235154c45e54c8a705f34a4"
 )
 HOME_EDGE_ESP_LAB_STAGE1_SIGNER_OPERATOR_APPROVAL = (
     "EXACT_HEAD_HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_APPROVED"
@@ -176,7 +183,7 @@ HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLED_ARTIFACTS: Mapping[Path, tuple[str, in
         0o444,
     ),
     Path("/etc/sudoers.d/skeleton-home-edge-esp-lab-stage1-signer"): (
-        "",
+        HOME_EDGE_ESP_LAB_STAGE1_SIGNER_SUDOERS_SHA256,
         0o440,
     ),
 }
@@ -371,6 +378,7 @@ def _protected_receipt(
     status: str,
     reason: str,
     *,
+    expected_main_sha: str | None = None,
     installer_sha256: str | None = None,
     artifacts_ok: bool = False,
 ) -> dict[str, object]:
@@ -379,7 +387,8 @@ def _protected_receipt(
         "status": status,
         "reason": re.sub(r"[^A-Z0-9_]+", "_", reason.upper()).strip("_") or "BLOCKED",
         "repository": "alanua/Skeleton",
-        "expected_main_sha": HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA,
+        "expected_main_sha": expected_main_sha
+        or HOME_EDGE_ESP_LAB_STAGE1_SIGNER_TRUSTED_SOURCE_ANCESTOR_SHA,
         "target": "runner-controller",
         "source_blob": HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_BLOB,
         "protected_copy_verified": status == "DONE",
@@ -402,10 +411,20 @@ def _protected_result(status: str, receipt: Mapping[str, object]) -> str:
     )
 
 
-def _protected_blocked(reason: str, installer_sha256: str | None = None) -> tuple[int, str]:
+def _protected_blocked(
+    reason: str,
+    installer_sha256: str | None = None,
+    *,
+    expected_main_sha: str | None = None,
+) -> tuple[int, str]:
     return 0, _protected_result(
         "NEEDS_OPERATOR",
-        _protected_receipt("NEEDS_OPERATOR", reason, installer_sha256=installer_sha256),
+        _protected_receipt(
+            "NEEDS_OPERATOR",
+            reason,
+            expected_main_sha=expected_main_sha,
+            installer_sha256=installer_sha256,
+        ),
     )
 
 
@@ -432,12 +451,13 @@ def _git_blob_bytes(
 def _verify_signer_installer_tree_entry(
     run_command: RepositoryRunCommand,
     checkout_path: Path,
+    main_sha: str,
 ) -> None:
     code, output = run_command(
         [
             "git",
             "ls-tree",
-            HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA,
+            main_sha,
             HOME_EDGE_ESP_LAB_STAGE1_SIGNER_SOURCE_PATH,
         ],
         checkout_path,
@@ -471,16 +491,69 @@ def _verify_exact_main_inputs(
     checkout_head_sha: str,
     checkout_origin_main_sha: str,
 ) -> None:
-    approved = HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA
-    if expected_main_sha != approved:
-        raise RepositoryMaintenanceBlocked("EXPECTED_MAIN_SHA_MISMATCH")
+    if re.fullmatch(r"[0-9a-f]{40}", expected_main_sha or "") is None:
+        raise RepositoryMaintenanceBlocked("EXPECTED_MAIN_SHA_INVALID")
     if (
-        registered_clean_main_sha != approved
-        or github_main_sha != approved
-        or checkout_head_sha != approved
-        or checkout_origin_main_sha != approved
+        registered_clean_main_sha != expected_main_sha
+        or github_main_sha != expected_main_sha
+        or checkout_head_sha != expected_main_sha
+        or checkout_origin_main_sha != expected_main_sha
     ):
-        raise RepositoryMaintenanceBlocked("REGISTERED_MAIN_SHA_MISMATCH")
+        raise RepositoryMaintenanceBlocked("EXPECTED_MAIN_SHA_MISMATCH")
+
+
+def _git_exact_sha(
+    run_command: RepositoryRunCommand,
+    checkout_path: Path,
+    ref: str,
+) -> str:
+    code, output = run_command(
+        ["git", "rev-parse", "--verify", f"{ref}^{{commit}}"],
+        checkout_path,
+        30,
+        None,
+    )
+    sha = output.strip().splitlines()[0] if output.strip() else ""
+    if code != 0 or re.fullmatch(r"[0-9a-f]{40}", sha) is None:
+        raise RepositoryMaintenanceBlocked("CHECKOUT_AUTHORITY_UNAVAILABLE")
+    return sha
+
+
+def _verify_clean_trusted_checkout(
+    run_command: RepositoryRunCommand,
+    checkout_path: Path,
+    expected_main_sha: str,
+) -> tuple[str, str]:
+    head_sha = _git_exact_sha(run_command, checkout_path, "HEAD")
+    origin_main_sha = _git_exact_sha(run_command, checkout_path, "origin/main")
+    if head_sha != expected_main_sha or origin_main_sha != expected_main_sha:
+        raise RepositoryMaintenanceBlocked("CHECKOUT_MAIN_SHA_MISMATCH")
+    code, output = run_command(
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        checkout_path,
+        30,
+        None,
+    )
+    if code != 0:
+        raise RepositoryMaintenanceBlocked("CHECKOUT_STATUS_UNAVAILABLE")
+    if output.strip():
+        raise RepositoryMaintenanceBlocked("CHECKOUT_DIRTY")
+    code, _output = run_command(
+        [
+            "git",
+            "merge-base",
+            "--is-ancestor",
+            HOME_EDGE_ESP_LAB_STAGE1_SIGNER_TRUSTED_SOURCE_ANCESTOR_SHA,
+            expected_main_sha,
+        ],
+        checkout_path,
+        30,
+        None,
+    )
+    if code != 0:
+        raise RepositoryMaintenanceBlocked("TRUSTED_SOURCE_ANCESTOR_MISSING")
+    _verify_signer_installer_tree_entry(run_command, checkout_path, expected_main_sha)
+    return head_sha, origin_main_sha
 
 
 def _materialize_private_staging_file(data: bytes) -> tuple[Path, str]:
@@ -512,8 +585,8 @@ def _verify_regular_file(
     owner_uid: int = 0,
     group_gid: int = 0,
 ) -> None:
-    stat_result = path.stat()
-    if not stat.S_ISREG(stat_result.st_mode):
+    stat_result = os.lstat(path)
+    if stat.S_ISLNK(stat_result.st_mode) or not stat.S_ISREG(stat_result.st_mode):
         raise RepositoryMaintenanceBlocked("FILE_NOT_REGULAR")
     if stat_result.st_uid != owner_uid or stat_result.st_gid != group_gid:
         raise RepositoryMaintenanceBlocked("FILE_OWNERSHIP_MISMATCH")
@@ -523,7 +596,33 @@ def _verify_regular_file(
         size = stat_result.st_size
         if size <= 0 or size > HOME_EDGE_ESP_LAB_STAGE1_SIGNER_MAX_INSTALLER_BYTES:
             raise RepositoryMaintenanceBlocked("FILE_SIZE_UNSAFE")
-        if hashlib.sha256(path.read_bytes()).hexdigest() != expected_sha256:
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            fd = os.open(path, flags)
+        except OSError as exc:
+            if getattr(exc, "errno", None) in {errno.ELOOP, errno.ENXIO}:
+                raise RepositoryMaintenanceBlocked("FILE_NOT_REGULAR") from exc
+            raise
+        try:
+            open_stat = os.fstat(fd)
+            if (
+                stat.S_ISLNK(open_stat.st_mode)
+                or not stat.S_ISREG(open_stat.st_mode)
+                or open_stat.st_dev != stat_result.st_dev
+                or open_stat.st_ino != stat_result.st_ino
+            ):
+                raise RepositoryMaintenanceBlocked("FILE_NOT_REGULAR")
+            digest = hashlib.sha256()
+            with os.fdopen(fd, "rb") as handle:
+                fd = -1
+                for chunk in iter(lambda: handle.read(65536), b""):
+                    digest.update(chunk)
+        finally:
+            if fd != -1:
+                os.close(fd)
+        if digest.hexdigest() != expected_sha256:
             raise RepositoryMaintenanceBlocked("FILE_CONTENT_MISMATCH")
 
 
@@ -557,7 +656,18 @@ def execute_home_edge_esp_lab_stage1_signer_install(
             checkout_head_sha=checkout_head_sha,
             checkout_origin_main_sha=checkout_origin_main_sha,
         )
-        _verify_signer_installer_tree_entry(run_command, checkout_path)
+        live_head_sha, live_origin_main_sha = _verify_clean_trusted_checkout(
+            run_command,
+            checkout_path,
+            expected_main_sha,
+        )
+        _verify_exact_main_inputs(
+            expected_main_sha=expected_main_sha,
+            registered_clean_main_sha=registered_clean_main_sha,
+            github_main_sha=github_main_sha,
+            checkout_head_sha=live_head_sha,
+            checkout_origin_main_sha=live_origin_main_sha,
+        )
         data = _git_blob_bytes(
             run_command,
             checkout_path,
@@ -610,6 +720,18 @@ def execute_home_edge_esp_lab_stage1_signer_install(
             checkout_head_sha=checkout_head_sha,
             checkout_origin_main_sha=checkout_origin_main_sha,
         )
+        live_head_sha, live_origin_main_sha = _verify_clean_trusted_checkout(
+            run_command,
+            checkout_path,
+            expected_main_sha,
+        )
+        _verify_exact_main_inputs(
+            expected_main_sha=expected_main_sha,
+            registered_clean_main_sha=registered_clean_main_sha,
+            github_main_sha=github_main_sha,
+            checkout_head_sha=live_head_sha,
+            checkout_origin_main_sha=live_origin_main_sha,
+        )
         exec_argv = [
             _SUDO_BIN,
             "-n",
@@ -626,20 +748,31 @@ def execute_home_edge_esp_lab_stage1_signer_install(
 
         for path, (blob_sha, mode) in HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLED_ARTIFACTS.items():
             expected_hash = (
-                None if not blob_sha else _git_blob_sha256(run_command, checkout_path, blob_sha)
+                blob_sha
+                if re.fullmatch(r"[0-9a-f]{64}", blob_sha)
+                else _git_blob_sha256(run_command, checkout_path, blob_sha)
             )
             _verify_regular_file(path, expected_hash, mode)
         receipt = _protected_receipt(
             "DONE",
             "SIGNER_INSTALLATION_VERIFIED",
+            expected_main_sha=expected_main_sha,
             installer_sha256=installer_sha256,
             artifacts_ok=True,
         )
         return 0, _protected_result("DONE", receipt)
     except RepositoryMaintenanceBlocked as exc:
-        return _protected_blocked(exc.reason_code, installer_sha256)
+        return _protected_blocked(
+            exc.reason_code,
+            installer_sha256,
+            expected_main_sha=expected_main_sha,
+        )
     except (OSError, subprocess.SubprocessError):
-        return _protected_blocked("PRIVILEGE_UNAVAILABLE", installer_sha256)
+        return _protected_blocked(
+            "PRIVILEGE_UNAVAILABLE",
+            installer_sha256,
+            expected_main_sha=expected_main_sha,
+        )
     finally:
         if staged is not None:
             shutil.rmtree(staged.parent, ignore_errors=True)

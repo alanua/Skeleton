@@ -222,14 +222,32 @@ def test_codegen_canary_fails_closed_when_pinned_runtime_cannot_be_verified(monk
     assert "reason=CODEX_CANARY_RUNTIME_UNVERIFIED" in report
 
 
-def _esp_signer_git_runner(blob_bytes: bytes):
+def _esp_signer_git_runner(
+    blob_bytes: bytes,
+    *,
+    current_main_sha: str | None = None,
+    dirty: bool = False,
+    ancestor_ok: bool = True,
+    source_blob: str | None = None,
+):
+    current_main_sha = (
+        current_main_sha or maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA
+    )
+    source_blob = source_blob or maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_BLOB
+
     def run_command(args, cwd, timeout, env):
         del cwd, timeout, env
+        if args[:3] == ["git", "rev-parse", "--verify"]:
+            return 0, f"{current_main_sha}\n"
+        if args == ["git", "status", "--porcelain", "--untracked-files=all"]:
+            return 0, " M scripts/install_home_edge_esp_lab_activation_signer.sh\n" if dirty else ""
+        if args[:4] == ["git", "merge-base", "--is-ancestor", maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_TRUSTED_SOURCE_ANCESTOR_SHA]:
+            return (0 if ancestor_ok else 1), ""
         if args[:2] == ["git", "ls-tree"]:
             return (
                 0,
                 "100755 blob "
-                f"{maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_BLOB}\t"
+                f"{source_blob}\t"
                 f"{maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_SOURCE_PATH}\n",
             )
         if args == [
@@ -270,6 +288,10 @@ def _execute_esp_signer(
     protected_run=None,
     before_protected_copy=None,
     expected_main_sha: str | None = None,
+    current_main_sha: str | None = None,
+    dirty: bool = False,
+    ancestor_ok: bool = True,
+    source_blob: str | None = None,
 ):
     protected = tmp_path / "protected-installer.sh"
     artifact = tmp_path / "signer"
@@ -283,15 +305,22 @@ def _execute_esp_signer(
         "HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLED_ARTIFACTS",
         {artifact: ("d248088477a7c59219a9c19c47bcfc464c6dcd27", 0o555)},
     )
-    expected = expected_main_sha or maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA
+    current = current_main_sha or maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA
+    expected = expected_main_sha or current
     return maintenance.execute_home_edge_esp_lab_stage1_signer_install(
         expected_main_sha=expected,
-        registered_clean_main_sha=maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA,
-        github_main_sha=maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA,
+        registered_clean_main_sha=current,
+        github_main_sha=current,
         checkout_path=tmp_path,
-        checkout_head_sha=maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA,
-        checkout_origin_main_sha=maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA,
-        run_command=_esp_signer_git_runner(blob_bytes),
+        checkout_head_sha=current,
+        checkout_origin_main_sha=current,
+        run_command=_esp_signer_git_runner(
+            blob_bytes,
+            current_main_sha=current,
+            dirty=dirty,
+            ancestor_ok=ancestor_ok,
+            source_blob=source_blob,
+        ),
         protected_run_command=protected_run or (lambda _argv, _timeout: (1, "")),
         before_protected_copy=before_protected_copy,
     )
@@ -311,6 +340,95 @@ def test_esp_lab_stage1_signer_wrong_expected_main_sha_uses_zero_sudo(
     assert "RESULT: NEEDS_OPERATOR" in report
     assert "EXPECTED_MAIN_SHA_MISMATCH" in report
     assert sudo_calls == []
+
+
+def test_esp_lab_stage1_signer_accepts_newer_descendant_main_with_reviewed_blob(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    newer_main = "c" * 40
+    calls: list[list[str]] = []
+
+    def fake_verify(path: Path, _expected_sha256: str | None, expected_mode: int, **kwargs):
+        del path, kwargs
+        assert expected_mode in {0o500, 0o555}
+
+    monkeypatch.setattr(maintenance, "_verify_regular_file", fake_verify)
+    _code, report = _execute_esp_signer(
+        tmp_path,
+        monkeypatch,
+        current_main_sha=newer_main,
+        protected_run=lambda argv, _timeout: calls.append(argv) or (0, ""),
+    )
+    assert "RESULT: DONE" in report
+    assert f'"expected_main_sha": "{newer_main}"' in report
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "reason"),
+    (
+        ({"dirty": True}, "CHECKOUT_DIRTY"),
+        ({"ancestor_ok": False}, "TRUSTED_SOURCE_ANCESTOR_MISSING"),
+        ({"source_blob": "0" * 40}, "SIGNER_INSTALLER_TREE_ENTRY_MISMATCH"),
+    ),
+)
+def test_esp_lab_stage1_signer_blocks_checkout_or_source_drift_before_sudo(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    kwargs: dict[str, object],
+    reason: str,
+) -> None:
+    sudo_calls: list[list[str]] = []
+    _code, report = _execute_esp_signer(
+        tmp_path,
+        monkeypatch,
+        protected_run=lambda argv, _timeout: sudo_calls.append(argv) or (0, ""),
+        **kwargs,
+    )
+    assert "RESULT: NEEDS_OPERATOR" in report
+    assert reason in report
+    assert sudo_calls == []
+
+
+def test_esp_lab_stage1_signer_authority_drift_after_staging_blocks_execution(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    expected = "d" * 40
+    calls: list[list[str]] = []
+    status_calls = 0
+
+    def run_command(args, cwd, timeout, env):
+        nonlocal status_calls
+        del cwd, timeout, env
+        if args[:3] == ["git", "rev-parse", "--verify"]:
+            return 0, f"{expected}\n"
+        if args == ["git", "status", "--porcelain", "--untracked-files=all"]:
+            status_calls += 1
+            return 0, "" if status_calls == 1 else " M README.md\n"
+        if args[:4] == ["git", "merge-base", "--is-ancestor", maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_TRUSTED_SOURCE_ANCESTOR_SHA]:
+            return 0, ""
+        return _esp_signer_git_runner(b"#!/bin/sh\necho installer\n", current_main_sha=expected)(
+            args, None, None, None
+        )
+
+    def fake_verify(path: Path, _expected_sha256: str | None, expected_mode: int, **kwargs):
+        del path, kwargs
+        assert expected_mode in {0o500, 0o555}
+
+    monkeypatch.setattr(maintenance, "_verify_regular_file", fake_verify)
+    _code, report = maintenance.execute_home_edge_esp_lab_stage1_signer_install(
+        expected_main_sha=expected,
+        registered_clean_main_sha=expected,
+        github_main_sha=expected,
+        checkout_path=tmp_path,
+        checkout_head_sha=expected,
+        checkout_origin_main_sha=expected,
+        run_command=run_command,
+        protected_run_command=lambda argv, _timeout: calls.append(argv) or (0, ""),
+    )
+    assert "RESULT: NEEDS_OPERATOR" in report
+    assert "CHECKOUT_DIRTY" in report
+    assert len(calls) == 1
 
 
 def test_esp_lab_stage1_signer_uses_git_blob_not_worktree_and_fixed_install_argv(
@@ -383,6 +501,62 @@ def test_esp_lab_stage1_signer_private_staging_tamper_blocks_before_sudo(
     assert "RESULT: NEEDS_OPERATOR" in report
     assert "FILE_CONTENT_MISMATCH" in report
     assert sudo_calls == []
+
+
+def test_esp_lab_stage1_signer_staged_symlink_blocks_before_sudo(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    sudo_calls: list[list[str]] = []
+
+    def tamper(staged: Path) -> None:
+        staged.unlink()
+        staged.symlink_to(tmp_path / "target")
+
+    _code, report = _execute_esp_signer(
+        tmp_path,
+        monkeypatch,
+        protected_run=lambda argv, _timeout: sudo_calls.append(argv) or (0, ""),
+        before_protected_copy=tamper,
+    )
+    assert "RESULT: NEEDS_OPERATOR" in report
+    assert "FILE_NOT_REGULAR" in report
+    assert sudo_calls == []
+
+
+def test_esp_lab_stage1_signer_post_audit_blocks_symlink_and_wrong_sudoers_bytes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    signer = tmp_path / "signer"
+    sudoers = tmp_path / "sudoers"
+    target = tmp_path / "target"
+    target.write_text("artifact-ok\n", encoding="utf-8")
+    signer.symlink_to(target)
+    sudoers.write_text("wrong sudoers\n", encoding="utf-8")
+    sudoers.chmod(0o440)
+    monkeypatch.setattr(
+        maintenance,
+        "HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLED_ARTIFACTS",
+        {
+            signer: ("d248088477a7c59219a9c19c47bcfc464c6dcd27", 0o555),
+            sudoers: (maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_SUDOERS_SHA256, 0o440),
+        },
+    )
+    with pytest.raises(maintenance.RepositoryMaintenanceBlocked, match="FILE_NOT_REGULAR"):
+        maintenance._verify_regular_file(
+            signer,
+            hashlib.sha256(b"artifact-ok\n").hexdigest(),
+            0o555,
+            owner_uid=os.getuid(),
+            group_gid=os.getgid(),
+        )
+    with pytest.raises(maintenance.RepositoryMaintenanceBlocked, match="FILE_CONTENT_MISMATCH"):
+        maintenance._verify_regular_file(
+            sudoers,
+            maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_SUDOERS_SHA256,
+            0o440,
+            owner_uid=os.getuid(),
+            group_gid=os.getgid(),
+        )
 
 
 def test_esp_lab_stage1_signer_success_audits_fixed_artifacts_and_does_not_activate(

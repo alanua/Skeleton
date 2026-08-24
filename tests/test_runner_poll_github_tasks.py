@@ -581,6 +581,10 @@ def test_esp_lab_stage1_signer_install_is_allowlisted() -> None:
             "signer_install_unknown_input_field",
         ),
         (
+            _esp_lab_stage1_signer_install_body(expected_main_sha="8e049eb631f63d81"),
+            "signer_install_expected_main_sha_invalid",
+        ),
+        (
             _esp_lab_stage1_signer_install_body()
             + "\nOperator Approval: "
             + runner.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_OPERATOR_APPROVAL,
@@ -612,6 +616,7 @@ def test_esp_lab_stage1_signer_install_rejects_bad_metadata_before_privilege(
 
 
 def test_esp_lab_stage1_signer_install_blocks_stale_registered_main_before_executor() -> None:
+    expected_sha = "b" * 40
     executor_report = (
         "RESULT: NEEDS_OPERATOR\n"
         "Receipt:\n"
@@ -621,7 +626,7 @@ def test_esp_lab_stage1_signer_install_blocks_stale_registered_main_before_execu
                 "status": "NEEDS_OPERATOR",
                 "reason": "REGISTERED_MAIN_SHA_MISMATCH",
                 "repository": runner.REPO,
-                "expected_main_sha": runner.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA,
+                "expected_main_sha": expected_sha,
                 "target": "runner-controller",
                 "source_blob": runner.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_BLOB,
                 "installer_sha256": "a" * 64,
@@ -632,7 +637,7 @@ def test_esp_lab_stage1_signer_install_blocks_stale_registered_main_before_execu
             }
         )
     )
-    preflight_patch, sha_patch, exact_git_patch = _esp_signer_preflight_patches("b" * 40)
+    preflight_patch, sha_patch, exact_git_patch = _esp_signer_preflight_patches(expected_sha)
     with (
         preflight_patch,
         sha_patch,
@@ -646,16 +651,17 @@ def test_esp_lab_stage1_signer_install_blocks_stale_registered_main_before_execu
         report = runner.dispatch_runtime_maintenance_task(
             runner.HOME_EDGE_01_ESP_LAB_STAGE1_SIGNER_INSTALL_V1,
             str(runner.ROOT),
-            _esp_lab_stage1_signer_install_body(),
+            _esp_lab_stage1_signer_install_body(expected_main_sha=expected_sha),
         )
 
     assert runner.maintenance_report_status(report) == "NEEDS_OPERATOR"
     assert "REGISTERED_MAIN_SHA_MISMATCH" in report
     execute.assert_called_once()
+    assert execute.call_args.kwargs["expected_main_sha"] == expected_sha
 
 
 def test_esp_lab_stage1_signer_install_success_receipt_is_public_safe() -> None:
-    expected_sha = runner.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA
+    expected_sha = "c" * 40
     executor_report = (
         "RESULT: DONE\n"
         "Executor: repository_maintenance.home_edge_esp_lab_stage1_signer_install\n"
@@ -693,7 +699,7 @@ def test_esp_lab_stage1_signer_install_success_receipt_is_public_safe() -> None:
         report = runner.dispatch_runtime_maintenance_task(
             runner.HOME_EDGE_01_ESP_LAB_STAGE1_SIGNER_INSTALL_V1,
             str(runner.ROOT),
-            _esp_lab_stage1_signer_install_body(),
+            _esp_lab_stage1_signer_install_body(expected_main_sha=expected_sha),
         )
 
     assert runner.maintenance_report_status(report) == "DONE"
@@ -701,6 +707,7 @@ def test_esp_lab_stage1_signer_install_success_receipt_is_public_safe() -> None:
     assert "installed_artifacts_verified=true" in report
     assert "activation_executed=false" in report
     assert "private_evidence_exposed=false" in report
+    assert f"expected_main_sha={expected_sha}" in report
     assert "/root/secret" not in report
     assert "HMAC" not in report
     assert execute.call_args.kwargs["checkout_path"] == Path("/synthetic/skeleton")
