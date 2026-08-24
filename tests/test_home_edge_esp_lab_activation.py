@@ -11,6 +11,7 @@ from core.home_edge.esp_lab_activation import (
     RECEIPT_SCHEMA,
     TASK_ID,
     activation_receipt,
+    cli,
     execute_stage1_activation,
     parse_activation_issue_body,
     validate_activation_receipt,
@@ -154,5 +155,17 @@ def test_install_script_has_no_runtime_service_or_destructive_esp_path() -> None
         "pwsh",
     ]
     assert all(token not in source for token in forbidden)
+    assert 'REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"' in source
+    assert "/home/agent/agent-dev/repos/Skeleton" not in source
     assert "skeleton-home-edge-esp-lab" in source
     assert "live_device_mutation_attempted=false" in source
+
+
+def test_activation_cli_emits_valid_receipt(capsys: object) -> None:
+    rc = cli(["--expected-sha", SHA, "--checkout", str(ROOT)])
+
+    captured = capsys.readouterr()
+    receipt = json.loads(captured.out)
+    assert rc == 0
+    assert captured.err == ""
+    assert validate_activation_receipt(receipt, expected_sha=SHA) is None

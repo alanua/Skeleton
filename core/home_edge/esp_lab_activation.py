@@ -285,6 +285,14 @@ def cli(argv: list[str] | None = None) -> int:
     parser.add_argument("--checkout", default=".")
     args = parser.parse_args(argv)
     receipt = activation_receipt(source_sha=args.expected_sha, checkout=args.checkout)
+    reason = validate_activation_receipt(receipt, expected_sha=args.expected_sha)
     json.dump(receipt, sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write("\n")
-    return 0 if receipt.get("success_criteria") == "met" else 2
+    if reason is not None:
+        sys.stderr.write(f"BLOCKED: {reason}\n")
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(cli())

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-REPO_ROOT="/home/agent/agent-dev/repos/Skeleton"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
 INSTALL_BIN="/usr/local/bin"
 COMMITTED=0
 BACKUP_DIR=""
