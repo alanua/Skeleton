@@ -17,11 +17,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $Root 'index.html') -PathType Leaf))
     throw 'espconnect_not_installed'
 }
 
-$Prefix = "http://127.0.0.1:$Port/"
-$Listener = [Net.HttpListener]::new()
-$Listener.Prefixes.Add($Prefix)
-$Listener.Start()
-
+$Url = "http://127.0.0.1:$Port/"
 $Mime = @{
     '.html' = 'text/html; charset=utf-8'
     '.css' = 'text/css; charset=utf-8'
@@ -39,7 +35,7 @@ $Mime = @{
 }
 
 function Resolve-EspConnectPath([string]$RequestPath) {
-    $decoded = [Uri]::UnescapeDataString($RequestPath)
+    $decoded = [Uri]::UnescapeDataString($RequestPath.Split('?', 2)[0])
     if ($decoded.Contains([char]0)) { throw 'invalid_path' }
     $relative = $decoded.TrimStart('/').Replace('/', [IO.Path]::DirectorySeparatorChar)
     if ([string]::IsNullOrWhiteSpace($relative)) { $relative = 'index.html' }
@@ -53,51 +49,91 @@ function Resolve-EspConnectPath([string]$RequestPath) {
     return $candidate
 }
 
+function Write-HttpResponse(
+    [Net.Sockets.NetworkStream]$Stream,
+    [int]$StatusCode,
+    [string]$StatusText,
+    [string]$ContentType,
+    [byte[]]$Body,
+    [bool]$HeadOnly
+) {
+    $header = "HTTP/1.1 $StatusCode $StatusText`r`nContent-Type: $ContentType`r`nContent-Length: $($Body.Length)`r`nCache-Control: no-store`r`nX-Content-Type-Options: nosniff`r`nConnection: close`r`n`r`n"
+    $headerBytes = [Text.Encoding]::ASCII.GetBytes($header)
+    $Stream.Write($headerBytes, 0, $headerBytes.Length)
+    if (-not $HeadOnly -and $Body.Length -gt 0) {
+        $Stream.Write($Body, 0, $Body.Length)
+    }
+    $Stream.Flush()
+}
+
+$Listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $Port)
+$Listener.Start()
 Write-Output ([ordered]@{
     status = 'serving'
-    url = $Prefix
+    url = $Url
     bind = '127.0.0.1'
     localhost_only = $true
+    http_sys = $false
+    admin_required = $false
     stop = 'Ctrl+C'
 } | ConvertTo-Json -Compress)
 
 if ($OpenBrowser) {
-    Start-Process $Prefix
+    Start-Process $Url
 }
 
 try {
-    while ($Listener.IsListening) {
-        $Context = $Listener.GetContext()
+    while ($true) {
+        $Client = $Listener.AcceptTcpClient()
         try {
-            $Path = Resolve-EspConnectPath $Context.Request.Url.AbsolutePath
-            if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-                $Context.Response.StatusCode = 404
-                $Bytes = [Text.Encoding]::UTF8.GetBytes('not found')
+            $Client.ReceiveTimeout = 5000
+            $Client.SendTimeout = 5000
+            $Stream = $Client.GetStream()
+            $Reader = [IO.StreamReader]::new($Stream, [Text.Encoding]::ASCII, $false, 4096, $true)
+            $RequestLine = $Reader.ReadLine()
+            if ([string]::IsNullOrWhiteSpace($RequestLine)) {
+                continue
             }
-            else {
-                $Context.Response.StatusCode = 200
+            $parts = $RequestLine.Split(' ')
+            if ($parts.Count -ne 3 -or $parts[2] -notmatch '^HTTP/1\.[01]$') {
+                $Body = [Text.Encoding]::UTF8.GetBytes('bad request')
+                Write-HttpResponse $Stream 400 'Bad Request' 'text/plain; charset=utf-8' $Body $false
+                continue
+            }
+            $Method = $parts[0].ToUpperInvariant()
+            if ($Method -notin @('GET', 'HEAD')) {
+                $Body = [Text.Encoding]::UTF8.GetBytes('method not allowed')
+                Write-HttpResponse $Stream 405 'Method Not Allowed' 'text/plain; charset=utf-8' $Body $false
+                continue
+            }
+            while ($true) {
+                $line = $Reader.ReadLine()
+                if ($null -eq $line -or $line.Length -eq 0) { break }
+                if ($line.Length -gt 8192) { throw 'header_too_large' }
+            }
+
+            try {
+                $Path = Resolve-EspConnectPath $parts[1]
+                if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+                    $Body = [Text.Encoding]::UTF8.GetBytes('not found')
+                    Write-HttpResponse $Stream 404 'Not Found' 'text/plain; charset=utf-8' $Body ($Method -eq 'HEAD')
+                    continue
+                }
                 $Extension = [IO.Path]::GetExtension($Path).ToLowerInvariant()
-                $Context.Response.ContentType = if ($Mime.ContainsKey($Extension)) { $Mime[$Extension] } else { 'application/octet-stream' }
-                $Bytes = [IO.File]::ReadAllBytes($Path)
+                $ContentType = if ($Mime.ContainsKey($Extension)) { $Mime[$Extension] } else { 'application/octet-stream' }
+                $Body = [IO.File]::ReadAllBytes($Path)
+                Write-HttpResponse $Stream 200 'OK' $ContentType $Body ($Method -eq 'HEAD')
             }
-            $Context.Response.Headers['Cache-Control'] = 'no-store'
-            $Context.Response.ContentLength64 = $Bytes.Length
-            $Context.Response.OutputStream.Write($Bytes, 0, $Bytes.Length)
-        }
-        catch {
-            if ($Context.Response.OutputStream.CanWrite) {
-                $Context.Response.StatusCode = 400
-                $Bytes = [Text.Encoding]::UTF8.GetBytes('bad request')
-                $Context.Response.ContentLength64 = $Bytes.Length
-                $Context.Response.OutputStream.Write($Bytes, 0, $Bytes.Length)
+            catch {
+                $Body = [Text.Encoding]::UTF8.GetBytes('bad request')
+                Write-HttpResponse $Stream 400 'Bad Request' 'text/plain; charset=utf-8' $Body ($Method -eq 'HEAD')
             }
         }
         finally {
-            $Context.Response.OutputStream.Close()
+            $Client.Close()
         }
     }
 }
 finally {
     $Listener.Stop()
-    $Listener.Close()
 }

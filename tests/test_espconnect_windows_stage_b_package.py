@@ -70,8 +70,13 @@ def test_package_does_not_install_services_or_expose_network_listener() -> None:
         assert token not in install
     assert "http://127.0.0.1:$port/" in serve
     assert "0.0.0.0" not in serve
-    assert "httplistener" in serve
-    assert "start-process $prefix" in serve
+    assert "[net.sockets.tcplistener]" in serve
+    assert "[net.ipaddress]::loopback" in serve
+    assert "httplistener" not in serve
+    assert "netsh" not in serve
+    assert "http_sys = $false" in serve
+    assert "admin_required = $false" in serve
+    assert "start-process $url" in serve
 
 
 def test_static_server_confines_requests_to_install_root() -> None:
@@ -80,6 +85,7 @@ def test_static_server_confines_requests_to_install_root() -> None:
     assert "[IO.Path]::GetFullPath" in source
     assert "path_escape" in source
     assert "StartsWith($Root + [IO.Path]::DirectorySeparatorChar" in source
-    assert "Cache-Control" in source
-    assert "no-store" in source
+    assert "Cache-Control: no-store" in source
+    assert "X-Content-Type-Options: nosniff" in source
     assert "index.html" in source
+    assert "@('GET', 'HEAD')" in source
