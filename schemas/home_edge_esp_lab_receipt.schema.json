@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/alanua/Skeleton/schemas/home_edge_esp_lab_receipt.schema.json",
+  "title": "Home Edge ESP Lab Public Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "aggregate",
+    "capability_state_counts",
+    "detected_family",
+    "endpoint_kind",
+    "flash_size_class",
+    "node_id",
+    "operation",
+    "risk_flags"
+  ],
+  "properties": {
+    "schema": {
+      "const": "skeleton.home_edge.esp_lab.v1.receipt"
+    },
+    "aggregate": {
+      "enum": [
+        "PASS",
+        "CAUTION",
+        "FAIL"
+      ]
+    },
+    "capability_state_counts": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer"
+      }
+    },
+    "detected_family": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "endpoint_kind": {
+      "enum": [
+        "home_edge_local_linux",
+        "windows_workstation_connector"
+      ]
+    },
+    "flash_size_class": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "node_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{16}$"
+    },
+    "operation": {
+      "type": "string"
+    },
+    "risk_flags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

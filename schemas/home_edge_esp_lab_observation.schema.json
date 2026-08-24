@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/alanua/Skeleton/schemas/home_edge_esp_lab_observation.schema.json",
+  "title": "Home Edge ESP Lab Private Observation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "generated_at",
+    "control_plane_id",
+    "node_id",
+    "endpoint_kind",
+    "adapter_kind",
+    "operation",
+    "execution_mode",
+    "adapter",
+    "adapter_version",
+    "detected",
+    "private_device_metadata",
+    "salted_device_fingerprint",
+    "raw_bounded_evidence",
+    "probes",
+    "capability_matrix"
+  ],
+  "properties": {
+    "schema": {
+      "const": "skeleton.home_edge.esp_lab.v1.observation"
+    },
+    "generated_at": {
+      "type": "string"
+    },
+    "control_plane_id": {
+      "type": "string"
+    },
+    "node_id": {
+      "type": "string"
+    },
+    "endpoint_kind": {
+      "type": "string"
+    },
+    "adapter_kind": {
+      "type": "string"
+    },
+    "operation": {
+      "type": "string"
+    },
+    "execution_mode": {
+      "type": "string"
+    },
+    "adapter": {
+      "type": "string"
+    },
+    "adapter_version": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "detected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "family",
+        "revision",
+        "flash_manufacturer_id",
+        "flash_device_id",
+        "flash_size",
+        "mac_observed"
+      ],
+      "properties": {
+        "family": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "flash_manufacturer_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "flash_device_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "flash_size": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mac_observed": {
+          "type": "boolean"
+        }
+      }
+    },
+    "private_device_metadata": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "salted_device_fingerprint": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "raw_bounded_evidence": {
+      "type": "array"
+    },
+    "probes": {
+      "type": "array"
+    },
+    "capability_matrix": {
+      "type": "array"
+    }
+  }
+}
