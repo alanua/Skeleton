@@ -22,9 +22,10 @@ INSTALLER_PATH = ROOT / "scripts/install_home_edge_esp_lab_activation_signer.sh"
 STAGE1_INSTALLER_PATH = ROOT / "scripts/install_home_edge_esp_lab.sh"
 SECRET = "synthetic-esp-lab-stage1-key"
 SIGNER_TRUSTED_ANCESTOR_SHA = "725dfc3aedbce194c7afcc229eb44b1eec4f463a"
-SIGNER_PAYLOAD_BLOB_SHA = "6800e8b61a0d951ab09e63162bb03a6a56cb4b83"
+SIGNER_PAYLOAD_BLOB_SHA = "9e349149ea17c38284c8bda1051b3d0de9688d4c"
 SIGNER_WRAPPER_BLOB_SHA = "d248088477a7c59219a9c19c47bcfc464c6dcd27"
-SIGNER_STAGE1_INSTALLER_BLOB_SHA = "e2c2378660df0cbaaf02e4556a1d1887a258b863"
+SIGNER_STAGE1_INSTALLER_BLOB_SHA = "4db8042020915dbcdd261accc5c87a75682fa115"
+OLD_STAGE1_INSTALLER_BLOB_SHA = "e2c2378660df0cbaaf02e4556a1d1887a258b863"
 
 
 def _load_payload():
@@ -46,12 +47,115 @@ def _esp_module_bytes() -> bytes:
     )
 
 
+def _old_stage1_installer_bytes() -> bytes:
+    return subprocess.check_output(["git", "cat-file", "-p", OLD_STAGE1_INSTALLER_BLOB_SHA], cwd=ROOT)
+
+
 def _git_blob(path: Path) -> str:
     return subprocess.check_output(["git", "hash-object", "--no-filters", str(path)], cwd=ROOT).decode().strip()
 
 
 def _git_tree_blob(path: str) -> str:
     return subprocess.check_output(["git", "hash-object", "--no-filters", path], cwd=ROOT).decode().strip()
+
+
+def _stage1_payload_text() -> str:
+    return json.dumps(activation.build_stage1_payload(esp_module=_esp_module_bytes()), separators=(",", ":"))
+
+
+def _prepare_stage1_installer_test_root(tmp_path: Path) -> Path:
+    root = tmp_path / "stage1-root"
+    (root / "etc").mkdir(parents=True)
+    (root / "usr/bin").mkdir(parents=True)
+    (root / "sys/class/tty").mkdir(parents=True)
+    (root / "usr/local/bin").mkdir(parents=True)
+    (root / "usr/bin/apt-get").write_text("#!/usr/bin/env sh\nexit 0\n", encoding="utf-8")
+    (root / "usr/bin/esptool").write_text("#!/usr/bin/env sh\nexit 0\n", encoding="utf-8")
+    (root / "usr/bin/apt-get").chmod(0o755)
+    (root / "usr/bin/esptool").chmod(0o755)
+    root.chmod(0o700)
+    return root
+
+
+def _run_stage1_installer_test_mode(root: Path) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env.update(
+        {
+            "SKELETON_ESP_LAB_INSTALLER_TEST_MODE": "1",
+            "SKELETON_ESP_LAB_TEST_ROOT": str(root),
+        }
+    )
+    return subprocess.run(
+        ["/bin/bash", str(STAGE1_INSTALLER_PATH)],
+        input=_stage1_payload_text(),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        timeout=30,
+        check=False,
+    )
+
+
+def _write_debian_13_os_release(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('ID=debian\nVERSION_ID="13"\n', encoding="utf-8")
+
+
+def test_stage1_installer_accepts_regular_debian_13_os_release(tmp_path: Path) -> None:
+    root = _prepare_stage1_installer_test_root(tmp_path)
+    _write_debian_13_os_release(root / "etc/os-release")
+
+    result = _run_stage1_installer_test_mode(root)
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert json.loads(result.stdout)["runtime_state"] == "READY"
+
+
+def test_stage1_installer_accepts_only_canonical_debian_13_os_release_symlink(tmp_path: Path) -> None:
+    root = _prepare_stage1_installer_test_root(tmp_path)
+    _write_debian_13_os_release(root / "usr/lib/os-release")
+    (root / "etc/os-release").symlink_to("../usr/lib/os-release")
+
+    result = _run_stage1_installer_test_mode(root)
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert json.loads(result.stdout)["runtime_state"] == "READY"
+
+
+@pytest.mark.parametrize("case", ["missing", "dangling", "other-target", "canonical-target-symlink"])
+def test_stage1_installer_rejects_unavailable_or_unsafe_os_release_paths(tmp_path: Path, case: str) -> None:
+    root = _prepare_stage1_installer_test_root(tmp_path)
+    if case == "dangling":
+        (root / "etc/os-release").symlink_to("../usr/lib/os-release")
+    elif case == "other-target":
+        _write_debian_13_os_release(root / "var/lib/os-release")
+        (root / "etc/os-release").symlink_to("../var/lib/os-release")
+    elif case == "canonical-target-symlink":
+        _write_debian_13_os_release(root / "usr/share/os-release")
+        (root / "usr/lib").mkdir(parents=True)
+        (root / "usr/lib/os-release").symlink_to("../share/os-release")
+        (root / "etc/os-release").symlink_to("../usr/lib/os-release")
+
+    result = _run_stage1_installer_test_mode(root)
+
+    assert result.returncode == 2
+    assert result.stderr == "BLOCKED: os release is unavailable\n"
+
+
+@pytest.mark.parametrize("body", ['ID=debian\nVERSION_ID="12"\n', 'ID=ubuntu\nVERSION_ID="24.04"\n'])
+def test_stage1_installer_rejects_unsupported_host_os_after_safe_os_release_resolution(tmp_path: Path, body: str) -> None:
+    root = _prepare_stage1_installer_test_root(tmp_path)
+    (root / "usr/lib").mkdir(parents=True)
+    (root / "usr/lib/os-release").write_text(body, encoding="utf-8")
+    (root / "etc/os-release").symlink_to("../usr/lib/os-release")
+
+    result = _run_stage1_installer_test_mode(root)
+
+    assert result.returncode == 2
+    assert result.stderr == "BLOCKED: host os is unsupported\n"
 
 
 def _make_signer_installer_preflight_fixture(
@@ -294,6 +398,17 @@ def test_controller_builds_exact_request_calls_fixed_signer_and_executor_once(mo
     assert unsigned["script"].encode("utf-8") == _installer_bytes()
     activation._validate_stage1_payload_text(unsigned["stdin_text"])
     assert executor_calls[0]["signature"].startswith("sha256=")
+
+
+def test_controller_rejects_previous_stage1_installer_blob_in_authority() -> None:
+    unsigned = activation.build_activation_request(
+        installer_script=_installer_bytes(),
+        esp_module=_esp_module_bytes(),
+    ).to_mapping(include_signature=False)
+    unsigned["script"] = _old_stage1_installer_bytes().decode("utf-8")
+
+    with pytest.raises(ValueError, match="activation_signer_authority_mismatch"):
+        activation._validate_activation_authority(unsigned, include_signature=False)
 
 
 def test_controller_has_no_direct_hmac_or_sign_request_path() -> None:

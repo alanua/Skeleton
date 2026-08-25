@@ -39,12 +39,14 @@ if [[ $TEST_MODE -eq 1 ]]; then
   RUNTIME_BASE="$TEST_ROOT/opt/skeleton/esp-lab"
   WRAPPER_PATH="$TEST_ROOT/usr/local/bin/skeleton-esp-lab"
   OS_RELEASE_PATH="$TEST_ROOT/etc/os-release"
+  OS_RELEASE_CANONICAL_PATH="$TEST_ROOT/usr/lib/os-release"
   SYSFS_ROOT="$TEST_ROOT/sys/class/tty"
   APT_GET="$TEST_ROOT/usr/bin/apt-get"
 else
   RUNTIME_BASE="/opt/skeleton/esp-lab"
   WRAPPER_PATH="/usr/local/bin/skeleton-esp-lab"
   OS_RELEASE_PATH="/etc/os-release"
+  OS_RELEASE_CANONICAL_PATH="/usr/lib/os-release"
   SYSFS_ROOT="/sys/class/tty"
   APT_GET="/usr/bin/apt-get"
 fi
@@ -200,7 +202,14 @@ PY
 TARGET_ROOT="$RUNTIME_BASE/$SOURCE_SHA"
 
 validate_os_release() {
-  [[ -f "$OS_RELEASE_PATH" && ! -L "$OS_RELEASE_PATH" ]] || fail "os release is unavailable"
+  if [[ -L "$OS_RELEASE_PATH" ]]; then
+    local resolved=""
+    resolved="$(readlink -f -- "$OS_RELEASE_PATH")" || fail "os release is unavailable"
+    [[ "$resolved" == "$OS_RELEASE_CANONICAL_PATH" ]] || fail "os release is unavailable"
+    [[ -f "$resolved" && ! -L "$resolved" ]] || fail "os release is unavailable"
+  else
+    [[ -f "$OS_RELEASE_PATH" ]] || fail "os release is unavailable"
+  fi
   local id="" version=""
   while IFS='=' read -r key value; do
     value="${value%\"}"
