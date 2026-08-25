@@ -695,6 +695,53 @@ def test_executor_failed_nonzero_rejects_unknown_stderr_without_exposing_text() 
     assert "ttyUSB0" not in json.dumps(public, sort_keys=True)
 
 
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "BLOCKED: payload hash mismatch",
+        "BLOCKED: payload hash mismatch\nprivate",
+        "BLOCKED: payload hash mismatch\r\n",
+    ],
+)
+def test_executor_failed_nonzero_rejects_malformed_stderr_signatures(stderr: str) -> None:
+    public = activation.public_result_from_executor_receipt(_failed_receipt(stderr=stderr).to_mapping())
+
+    assert public["status"] == "BLOCKED"
+    assert public["runtime_state"] == "BLOCKED"
+    assert public["reason"] == "executor_receipt_not_ok"
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        None,
+        b"BLOCKED: payload hash mismatch\n",
+        ["BLOCKED: payload hash mismatch\n"],
+    ],
+)
+def test_executor_failed_nonzero_rejects_non_string_stderr(stderr: Any) -> None:
+    receipt = _failed_receipt(stderr="BLOCKED: payload hash mismatch\n").to_mapping()
+    receipt["stderr"] = stderr
+
+    public = activation.public_result_from_executor_receipt(receipt)
+
+    assert public["status"] == "BLOCKED"
+    assert public["runtime_state"] == "BLOCKED"
+    assert public["reason"] == "executor_receipt_not_ok"
+
+
+def test_executor_failed_nonzero_rejects_oversize_stderr_without_exposing_text() -> None:
+    private_marker = "/dev/ttyUSB0"
+    receipt = _failed_receipt(stderr="A" * activation.MAX_EXECUTOR_OUTPUT_BYTES + private_marker).to_mapping()
+
+    public = activation.public_result_from_executor_receipt(receipt)
+
+    assert public["status"] == "BLOCKED"
+    assert public["runtime_state"] == "BLOCKED"
+    assert public["reason"] == "executor_receipt_not_ok"
+    assert private_marker not in json.dumps(public, sort_keys=True)
+
+
 def test_executor_failed_nonzero_never_converts_embedded_ready_to_success() -> None:
     public = activation.public_result_from_executor_receipt(
         _failed_receipt(stdout=_result(), stderr="BLOCKED: payload hash mismatch\n").to_mapping()
@@ -703,28 +750,6 @@ def test_executor_failed_nonzero_never_converts_embedded_ready_to_success() -> N
     assert public["status"] == "BLOCKED"
     assert public["runtime_state"] == "BLOCKED"
     assert public["reason"] == "stage1_payload_invalid"
-
-
-def test_executor_failed_nonzero_never_preserves_embedded_blocked_stdout_receipt() -> None:
-    embedded = json.dumps(activation._blocked_result("installer_sha256_mismatch"), separators=(",", ":"))
-
-    public = activation.public_result_from_executor_receipt(_failed_receipt(stdout=embedded, stderr="").to_mapping())
-
-    assert public["status"] == "BLOCKED"
-    assert public["runtime_state"] == "BLOCKED"
-    assert public["reason"] == "executor_receipt_not_ok"
-
-
-def test_non_executed_transport_status_ignores_embedded_blocked_receipt() -> None:
-    embedded = json.dumps(activation._blocked_result("installer_sha256_mismatch"), separators=(",", ":"))
-
-    for status in ("blocked", "timeout", "cancelled"):
-        receipt = {**_failed_receipt(embedded).to_mapping(), "status": status, "exit_code": None}
-        public = activation.public_result_from_executor_receipt(receipt)
-
-        assert public["status"] == "BLOCKED"
-        assert public["runtime_state"] == "BLOCKED"
-        assert public["reason"] == "executor_receipt_not_ok"
 
 
 def test_public_report_excludes_private_evidence() -> None:

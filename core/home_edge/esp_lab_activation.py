@@ -426,39 +426,6 @@ def sanitize_activation_result(result: Mapping[str, Any]) -> dict[str, object]:
     return public
 
 
-def sanitize_blocked_activation_result(result: Mapping[str, Any]) -> dict[str, object]:
-    required = [
-        "schema",
-        "status",
-        "reason",
-        "runtime_state",
-        "source_sha",
-        "candidate_count",
-        "device_canary",
-        "dependency_installed_by_operation",
-        "idempotent_reuse",
-    ]
-    if list(result.keys()) != required:
-        raise ValueError("activation_result_keys_invalid")
-    if result["schema"] != RESULT_SCHEMA:
-        raise ValueError("activation_result_schema_invalid")
-    if result["status"] != "BLOCKED" or result["runtime_state"] != "BLOCKED":
-        raise ValueError("activation_result_state_invalid")
-    if result["source_sha"] != APPROVED_SOURCE_SHA:
-        raise ValueError("activation_result_source_invalid")
-    if result["candidate_count"] != 0 or isinstance(result["candidate_count"], bool):
-        raise ValueError("activation_result_candidate_count_invalid")
-    if result["device_canary"] != "unknown":
-        raise ValueError("activation_result_canary_invalid")
-    if result["dependency_installed_by_operation"] is not False or result["idempotent_reuse"] is not False:
-        raise ValueError("activation_result_bool_invalid")
-    public = dict(result)
-    for key, value in public.items():
-        if isinstance(value, str) and PUBLIC_VALUE_RE.fullmatch(value) is None:
-            raise ValueError(f"activation_result_{key}_unsafe")
-    return public
-
-
 def _reviewed_git_blob(
     repo_root: Path,
     repo_path: str,
