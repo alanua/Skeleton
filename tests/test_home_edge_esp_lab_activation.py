@@ -223,7 +223,7 @@ def _ok_receipt(stdout: str) -> HomeEdgeExecReceipt:
     )
 
 
-def _failed_receipt(stdout: str) -> HomeEdgeExecReceipt:
+def _failed_receipt(stdout: str = "", stderr: str = "") -> HomeEdgeExecReceipt:
     now = datetime.now(UTC).isoformat()
     return HomeEdgeExecReceipt(
         status="failed",
@@ -232,7 +232,7 @@ def _failed_receipt(stdout: str) -> HomeEdgeExecReceipt:
         execution_lane=activation.EXECUTION_LANE,
         exit_code=2,
         stdout=stdout,
-        stderr="",
+        stderr=stderr,
         started_at=now,
         finished_at=now,
         duration_seconds=0.01,
@@ -666,19 +666,49 @@ def test_executor_success_exact_result_done_and_fail_closed_cases() -> None:
     assert activation.public_result_from_executor_receipt(_ok_receipt(_result(schema="wrong")).to_mapping())["status"] == "BLOCKED"
 
 
-def test_executor_failed_nonzero_preserves_sanitized_stage1_blocked_receipt() -> None:
-    embedded = activation._blocked_result("installer_sha256_mismatch")
+@pytest.mark.parametrize(
+    ("stderr", "reason"),
+    [
+        ("BLOCKED: payload hash mismatch\n", "stage1_payload_invalid"),
+        ("BLOCKED: host os is unsupported\n", "stage1_host_os_unsupported"),
+        ("BLOCKED: existing runtime target is unsafe\n", "stage1_runtime_target_unsafe"),
+        ("BLOCKED: wrapper canary failed\n", "stage1_wrapper_canary_failed"),
+    ],
+)
+def test_executor_failed_nonzero_classifies_exact_stage1_stderr_signatures(stderr: str, reason: str) -> None:
+    public = activation.public_result_from_executor_receipt(_failed_receipt(stderr=stderr).to_mapping())
 
-    public = activation.public_result_from_executor_receipt(_failed_receipt(json.dumps(embedded, separators=(",", ":"))).to_mapping())
-
-    assert public == embedded
     assert public["status"] == "BLOCKED"
     assert public["runtime_state"] == "BLOCKED"
-    assert public["reason"] == "installer_sha256_mismatch"
+    assert public["reason"] == reason
+
+
+def test_executor_failed_nonzero_rejects_unknown_stderr_without_exposing_text() -> None:
+    receipt = _failed_receipt(stderr="BLOCKED: private /dev/ttyUSB0 serial evidence\n").to_mapping()
+
+    public = activation.public_result_from_executor_receipt(receipt)
+
+    assert public["status"] == "BLOCKED"
+    assert public["runtime_state"] == "BLOCKED"
+    assert public["reason"] == "executor_receipt_not_ok"
+    assert "private" not in json.dumps(public, sort_keys=True)
+    assert "ttyUSB0" not in json.dumps(public, sort_keys=True)
 
 
 def test_executor_failed_nonzero_never_converts_embedded_ready_to_success() -> None:
-    public = activation.public_result_from_executor_receipt(_failed_receipt(_result()).to_mapping())
+    public = activation.public_result_from_executor_receipt(
+        _failed_receipt(stdout=_result(), stderr="BLOCKED: payload hash mismatch\n").to_mapping()
+    )
+
+    assert public["status"] == "BLOCKED"
+    assert public["runtime_state"] == "BLOCKED"
+    assert public["reason"] == "stage1_payload_invalid"
+
+
+def test_executor_failed_nonzero_never_preserves_embedded_blocked_stdout_receipt() -> None:
+    embedded = json.dumps(activation._blocked_result("installer_sha256_mismatch"), separators=(",", ":"))
+
+    public = activation.public_result_from_executor_receipt(_failed_receipt(stdout=embedded, stderr="").to_mapping())
 
     assert public["status"] == "BLOCKED"
     assert public["runtime_state"] == "BLOCKED"

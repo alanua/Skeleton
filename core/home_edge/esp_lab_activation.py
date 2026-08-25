@@ -45,6 +45,43 @@ SIGNER_STDIN_MAX_BYTES = 256 * 1024
 PUBLIC_VALUE_RE = re.compile(r"^[A-Za-z0-9_.:=-]+$")
 SOURCE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 ATTEMPT_TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
+STAGE1_FAILED_STDERR_SIGNATURES = {
+    "BLOCKED: installer accepts stdin only\n": "stage1_installer_stdin_invalid",
+    "BLOCKED: test root requires pytest guard\n": "stage1_test_root_guard_missing",
+    "BLOCKED: test root must be under tmp\n": "stage1_test_root_invalid",
+    "BLOCKED: test root is unsafe\n": "stage1_test_root_unsafe",
+    "BLOCKED: test root mode is unsafe\n": "stage1_test_root_unsafe",
+    "BLOCKED: test environment requires guard\n": "stage1_test_environment_guard_missing",
+    "BLOCKED: payload size is invalid\n": "stage1_payload_invalid",
+    "BLOCKED: payload is not valid json\n": "stage1_payload_invalid",
+    "BLOCKED: payload keys are invalid\n": "stage1_payload_invalid",
+    "BLOCKED: payload schema is invalid\n": "stage1_payload_invalid",
+    "BLOCKED: source sha is invalid\n": "stage1_payload_invalid",
+    "BLOCKED: payload file list is invalid\n": "stage1_payload_invalid",
+    "BLOCKED: payload file keys are invalid\n": "stage1_payload_invalid",
+    "BLOCKED: payload file order is invalid\n": "stage1_payload_invalid",
+    "BLOCKED: payload file hash is invalid\n": "stage1_payload_invalid",
+    "BLOCKED: payload file body is invalid\n": "stage1_payload_invalid",
+    "BLOCKED: payload base64 is invalid\n": "stage1_payload_invalid",
+    "BLOCKED: payload decoded size is invalid\n": "stage1_payload_invalid",
+    "BLOCKED: payload hash mismatch\n": "stage1_payload_invalid",
+    "BLOCKED: isolated package marker is invalid\n": "stage1_payload_invalid",
+    "BLOCKED: os release is unavailable\n": "stage1_host_os_unavailable",
+    "BLOCKED: host os is unsupported\n": "stage1_host_os_unsupported",
+    "BLOCKED: installer must run as root\n": "stage1_installer_privilege_invalid",
+    "BLOCKED: host is unsupported\n": "stage1_host_unsupported",
+    "BLOCKED: python runtime is unavailable\n": "stage1_python_runtime_unavailable",
+    "BLOCKED: runtime base is unsafe\n": "stage1_runtime_base_unsafe",
+    "BLOCKED: runtime base ownership is unsafe\n": "stage1_runtime_base_unsafe",
+    "BLOCKED: runtime base mode is unsafe\n": "stage1_runtime_base_unsafe",
+    "BLOCKED: existing runtime target is unsafe\n": "stage1_runtime_target_unsafe",
+    "BLOCKED: existing wrapper is unsafe\n": "stage1_wrapper_unsafe",
+    "BLOCKED: existing wrapper ownership is unsafe\n": "stage1_wrapper_unsafe",
+    "BLOCKED: test apt is unavailable\n": "stage1_test_dependency_unavailable",
+    "BLOCKED: runtime target validation failed\n": "stage1_runtime_target_unsafe",
+    "BLOCKED: wrapper canary failed\n": "stage1_wrapper_canary_failed",
+    "BLOCKED: canary did not return a list\n": "stage1_wrapper_canary_failed",
+}
 
 
 def activate_esp_lab_stage1(*, repo_root: Path | None = None) -> dict[str, object]:
@@ -328,7 +365,7 @@ def _decode_payload_body(item: Any, *, path: str, sha256: str) -> bytes:
 
 def public_result_from_executor_receipt(receipt: Mapping[str, Any]) -> dict[str, object]:
     if receipt.get("status") == "failed" and _nonzero_int(receipt.get("exit_code")):
-        return _blocked_stage1_result_from_executor_stdout(receipt)
+        return _blocked_stage1_result_from_executor_stderr(receipt)
     if receipt.get("status") != "ok" or receipt.get("exit_code") != 0:
         return _blocked_result("executor_receipt_not_ok")
     stdout = receipt.get("stdout")
@@ -346,20 +383,14 @@ def public_result_from_executor_receipt(receipt: Mapping[str, Any]) -> dict[str,
         return _blocked_result("executor_public_result_unsafe")
 
 
-def _blocked_stage1_result_from_executor_stdout(receipt: Mapping[str, Any]) -> dict[str, object]:
-    stdout = receipt.get("stdout")
-    if not isinstance(stdout, str) or len(stdout.encode("utf-8")) > MAX_EXECUTOR_OUTPUT_BYTES:
+def _blocked_stage1_result_from_executor_stderr(receipt: Mapping[str, Any]) -> dict[str, object]:
+    stderr = receipt.get("stderr")
+    if not isinstance(stderr, str) or len(stderr.encode("utf-8")) > MAX_EXECUTOR_OUTPUT_BYTES:
         return _blocked_result("executor_receipt_not_ok")
-    try:
-        decoded = json.loads(stdout)
-    except json.JSONDecodeError:
+    reason = STAGE1_FAILED_STDERR_SIGNATURES.get(stderr)
+    if reason is None:
         return _blocked_result("executor_receipt_not_ok")
-    if not isinstance(decoded, Mapping):
-        return _blocked_result("executor_receipt_not_ok")
-    try:
-        return sanitize_blocked_activation_result(decoded)
-    except ValueError:
-        return _blocked_result("executor_receipt_not_ok")
+    return _blocked_result(reason)
 
 
 def sanitize_activation_result(result: Mapping[str, Any]) -> dict[str, object]:
