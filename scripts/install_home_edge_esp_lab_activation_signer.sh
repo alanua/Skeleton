@@ -12,9 +12,9 @@ PAYLOAD_REL="scripts/home_edge_esp_lab_activation_signer_payload.py"
 WRAPPER_REL="scripts/home_edge_esp_lab_activation_signer"
 INSTALLER_REL="scripts/install_home_edge_esp_lab.sh"
 TRUSTED_ANCESTOR_SHA="725dfc3aedbce194c7afcc229eb44b1eec4f463a"
-PAYLOAD_BLOB_SHA="7c86372f8eaacc9e4100070eee07336bf2703249"
+PAYLOAD_BLOB_SHA="6800e8b61a0d951ab09e63162bb03a6a56cb4b83"
 WRAPPER_BLOB_SHA="d248088477a7c59219a9c19c47bcfc464c6dcd27"
-INSTALLER_BLOB_SHA="1527705a28127a88cf24199706a75fd77a79894c"
+INSTALLER_BLOB_SHA="e2c2378660df0cbaaf02e4556a1d1887a258b863"
 COMMITTED=0
 BACKUP_DIR=""
 STAGING_PARENT=""
@@ -106,16 +106,12 @@ if ! /usr/bin/git -C "$REPO_ROOT" merge-base --is-ancestor "$TRUSTED_ANCESTOR_SH
   exit 2
 fi
 
-PAYLOAD_SRC="$REPO_ROOT/$PAYLOAD_REL"
-WRAPPER_SRC="$REPO_ROOT/$WRAPPER_REL"
-INSTALLER_SRC="$REPO_ROOT/$INSTALLER_REL"
-
 reviewed_blob_sha() {
   /usr/bin/git hash-object --no-filters --stdin < "$1"
 }
 
-validate_source_file() {
-  local path="$1" rel_path="$2" max_bytes="$3" expected_blob="$4" expected_mode="$5" size mode actual_blob tree_entry tree_mode tree_type tree_blob tree_path
+validate_source_blob() {
+  local rel_path="$1" max_bytes="$2" expected_blob="$3" expected_mode="$4" size object_type tree_entry tree_mode tree_type tree_blob tree_path
   if ! tree_entry="$(/usr/bin/git -C "$REPO_ROOT" ls-tree HEAD -- "$rel_path")"; then
     printf 'BLOCKED: reviewed signer source tree entry is unavailable\n' >&2
     exit 2
@@ -125,30 +121,23 @@ validate_source_file() {
     printf 'BLOCKED: reviewed signer source tree entry does not match approved blob\n' >&2
     exit 2
   fi
-  if [[ -L "$path" || ! -f "$path" || ! -r "$path" ]]; then
-    printf 'BLOCKED: reviewed signer source is not a readable regular file\n' >&2
+  if ! object_type="$(/usr/bin/git -C "$REPO_ROOT" cat-file -t "$expected_blob")" || [[ "$object_type" != "blob" ]]; then
+    printf 'BLOCKED: reviewed signer source blob is unavailable\n' >&2
     exit 2
   fi
-  size="$(stat -c '%s' -- "$path")"
-  mode="$(stat -c '%a' -- "$path")"
+  if ! size="$(/usr/bin/git -C "$REPO_ROOT" cat-file -s "$expected_blob")" || [[ ! "$size" =~ ^[0-9]+$ ]]; then
+    printf 'BLOCKED: reviewed signer source blob size is unavailable\n' >&2
+    exit 2
+  fi
   if (( size <= 0 || size > max_bytes )); then
     printf 'BLOCKED: reviewed signer source size is unsafe\n' >&2
     exit 2
   fi
-  if (( (8#$mode & 8#022) != 0 )); then
-    printf 'BLOCKED: reviewed signer source is group/world writable\n' >&2
-    exit 2
-  fi
-  actual_blob="$(reviewed_blob_sha "$path")"
-  if [[ "$actual_blob" != "$expected_blob" ]]; then
-    printf 'BLOCKED: reviewed signer source bytes do not match approved blob\n' >&2
-    exit 2
-  fi
 }
 
-validate_source_file "$PAYLOAD_SRC" "$PAYLOAD_REL" $((128 * 1024)) "$PAYLOAD_BLOB_SHA" "100644"
-validate_source_file "$WRAPPER_SRC" "$WRAPPER_REL" $((16 * 1024)) "$WRAPPER_BLOB_SHA" "100755"
-validate_source_file "$INSTALLER_SRC" "$INSTALLER_REL" $((256 * 1024)) "$INSTALLER_BLOB_SHA" "100755"
+validate_source_blob "$PAYLOAD_REL" $((128 * 1024)) "$PAYLOAD_BLOB_SHA" "100644"
+validate_source_blob "$WRAPPER_REL" $((16 * 1024)) "$WRAPPER_BLOB_SHA" "100755"
+validate_source_blob "$INSTALLER_REL" $((256 * 1024)) "$INSTALLER_BLOB_SHA" "100755"
 for path in /etc/skeleton /etc/skeleton/home-edge-01.env /etc/skeleton/home-edge-executor-controller.env; do
   if [[ -L "$path" || ! -e "$path" ]]; then
     printf 'BLOCKED: controller boundary metadata is unavailable\n' >&2
@@ -214,27 +203,28 @@ if [[ $HAD_SUDOERS -eq 1 ]]; then cp -a "$SUDOERS_PATH" "$BACKUP_DIR/sudoers"; f
 BACKUPS_READY=1
 mkdir -p "$STAGING_PARENT/install" "$STAGING_PARENT/exec"
 
-copy_stable_source() {
-  local source="$1" destination="$2" mode="$3" expected_blob="$4" before after staged_blob
-  before="$(stat -c '%d:%i:%s:%Y:%Z:%a:%u:%g' -- "$source")"
-  cp --no-dereference -- "$source" "$destination"
+copy_reviewed_blob() {
+  local destination="$1" mode="$2" expected_blob="$3" staged_blob
+  if ! /usr/bin/git -C "$REPO_ROOT" cat-file -p "$expected_blob" > "$destination"; then
+    printf 'BLOCKED: reviewed signer source blob is unavailable\n' >&2
+    exit 2
+  fi
   if [[ -L "$destination" || ! -f "$destination" ]]; then
     printf 'BLOCKED: inert copy did not produce a regular file\n' >&2
     exit 2
   fi
   chown root:root "$destination"
   chmod "$mode" "$destination"
-  after="$(stat -c '%d:%i:%s:%Y:%Z:%a:%u:%g' -- "$source")"
   staged_blob="$(reviewed_blob_sha "$destination")"
-  if [[ "$before" != "$after" || "$staged_blob" != "$expected_blob" ]]; then
-    printf 'BLOCKED: reviewed signer source changed during inert copy\n' >&2
+  if [[ "$staged_blob" != "$expected_blob" ]]; then
+    printf 'BLOCKED: reviewed signer source blob changed during inert copy\n' >&2
     exit 2
   fi
 }
 
-copy_stable_source "$PAYLOAD_SRC" "$STAGING_PARENT/install/signer_payload.py" 0555 "$PAYLOAD_BLOB_SHA"
-copy_stable_source "$INSTALLER_SRC" "$STAGING_PARENT/install/install_home_edge_esp_lab.sh" 0444 "$INSTALLER_BLOB_SHA"
-copy_stable_source "$WRAPPER_SRC" "$STAGING_PARENT/exec/signer" 0555 "$WRAPPER_BLOB_SHA"
+copy_reviewed_blob "$STAGING_PARENT/install/signer_payload.py" 0555 "$PAYLOAD_BLOB_SHA"
+copy_reviewed_blob "$STAGING_PARENT/install/install_home_edge_esp_lab.sh" 0444 "$INSTALLER_BLOB_SHA"
+copy_reviewed_blob "$STAGING_PARENT/exec/signer" 0555 "$WRAPPER_BLOB_SHA"
 
 install -d -o root -g root -m 0755 "$(dirname "$INSTALL_ROOT")" "$(dirname "$EXEC_ROOT")"
 rm -rf "$INSTALL_ROOT.new" "$EXEC_ROOT.new"

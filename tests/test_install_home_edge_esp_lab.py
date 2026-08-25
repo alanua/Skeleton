@@ -421,3 +421,4 @@ def test_installer_source_static_contract() -> None:
     assert "purge" not in source
     assert "CHECK_OWNERSHIP=1" in source
     assert 'stat -c \'%u:%g\'' in source
+    assert "dd iflag=fullblock" in source

@@ -287,6 +287,21 @@ def _esp_signer_git_runner(
     return run_command
 
 
+def test_esp_lab_stage1_signer_trust_chain_pins_match_recomputed_blobs() -> None:
+    assert (
+        maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_BLOB
+        == "ae105e2a6f23f3681bc1a4cf4a7485389a81f6cd"
+    )
+    assert (
+        maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_PAYLOAD_BLOB
+        == "6800e8b61a0d951ab09e63162bb03a6a56cb4b83"
+    )
+    assert (
+        maintenance.HOME_EDGE_ESP_LAB_STAGE1_INSTALLER_BLOB
+        == "e2c2378660df0cbaaf02e4556a1d1887a258b863"
+    )
+
+
 def _execute_esp_signer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

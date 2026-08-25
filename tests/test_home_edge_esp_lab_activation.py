@@ -22,9 +22,9 @@ INSTALLER_PATH = ROOT / "scripts/install_home_edge_esp_lab_activation_signer.sh"
 STAGE1_INSTALLER_PATH = ROOT / "scripts/install_home_edge_esp_lab.sh"
 SECRET = "synthetic-esp-lab-stage1-key"
 SIGNER_TRUSTED_ANCESTOR_SHA = "725dfc3aedbce194c7afcc229eb44b1eec4f463a"
-SIGNER_PAYLOAD_BLOB_SHA = "7c86372f8eaacc9e4100070eee07336bf2703249"
+SIGNER_PAYLOAD_BLOB_SHA = "6800e8b61a0d951ab09e63162bb03a6a56cb4b83"
 SIGNER_WRAPPER_BLOB_SHA = "d248088477a7c59219a9c19c47bcfc464c6dcd27"
-SIGNER_STAGE1_INSTALLER_BLOB_SHA = "1527705a28127a88cf24199706a75fd77a79894c"
+SIGNER_STAGE1_INSTALLER_BLOB_SHA = "e2c2378660df0cbaaf02e4556a1d1887a258b863"
 
 
 def _load_payload():
@@ -36,10 +36,7 @@ def _load_payload():
 
 
 def _installer_bytes() -> bytes:
-    return subprocess.check_output(
-        ["git", "show", f"{activation.APPROVED_SOURCE_SHA}:{activation.INSTALLER_REPO_PATH}"],
-        cwd=ROOT,
-    )
+    return STAGE1_INSTALLER_PATH.read_bytes()
 
 
 def _esp_module_bytes() -> bytes:
@@ -54,7 +51,7 @@ def _git_blob(path: Path) -> str:
 
 
 def _git_tree_blob(path: str) -> str:
-    return subprocess.check_output(["git", "ls-tree", "HEAD", "--", path], cwd=ROOT).decode().split()[2]
+    return subprocess.check_output(["git", "hash-object", "--no-filters", path], cwd=ROOT).decode().strip()
 
 
 def _make_signer_installer_preflight_fixture(
@@ -78,6 +75,11 @@ def _make_signer_installer_preflight_fixture(
     stage1 = scripts / "install_home_edge_esp_lab.sh"
     stage1.write_bytes(installer_bytes if installer_bytes is not None else STAGE1_INSTALLER_PATH.read_bytes())
     stage1.chmod(0o755)
+    object_store = repo / ".fake-git-objects"
+    object_store.mkdir()
+    (object_store / SIGNER_PAYLOAD_BLOB_SHA).write_bytes(PAYLOAD_PATH.read_bytes())
+    (object_store / SIGNER_WRAPPER_BLOB_SHA).write_bytes(WRAPPER_PATH.read_bytes())
+    (object_store / SIGNER_STAGE1_INSTALLER_BLOB_SHA).write_bytes(STAGE1_INSTALLER_PATH.read_bytes())
 
     protected = tmp_path / "protected-installer.sh"
     fake_bin = tmp_path / "bin"
@@ -124,6 +126,20 @@ def _make_signer_installer_preflight_fixture(
                     ;;
                 esac
             fi
+            if [ "$1" = "cat-file" ] && [ "$2" = "-t" ]; then
+              [ -f "{object_store}/$3" ] && printf 'blob\\n' && exit 0
+              exit 1
+            fi
+            if [ "$1" = "cat-file" ] && [ "$2" = "-s" ]; then
+              [ -f "{object_store}/$3" ] || exit 1
+              wc -c < "{object_store}/$3"
+              exit 0
+            fi
+            if [ "$1" = "cat-file" ] && [ "$2" = "-p" ]; then
+              [ -f "{object_store}/$3" ] || exit 1
+              cat "{object_store}/$3"
+              exit 0
+            fi
             if [ "$1" = "hash-object" ] && [ "$2" = "--no-filters" ] && [ "$3" = "--stdin" ]; then
               exec /usr/bin/git hash-object --no-filters --stdin
             fi
@@ -161,8 +177,8 @@ def _make_signer_installer_preflight_fixture(
         'if [[ $((8#$protected_mode & 8#022)) -ne 0 ]]; then',
     )
     text = text.replace(
-        'validate_source_file "$INSTALLER_SRC" "$INSTALLER_REL" $((256 * 1024)) "$INSTALLER_BLOB_SHA" "100755"\n',
-        'validate_source_file "$INSTALLER_SRC" "$INSTALLER_REL" $((256 * 1024)) "$INSTALLER_BLOB_SHA" "100755"\nprintf \'PREFLIGHT_OK\\n\'\nexit 0\n',
+        'validate_source_blob "$INSTALLER_REL" $((256 * 1024)) "$INSTALLER_BLOB_SHA" "100755"\n',
+        'validate_source_blob "$INSTALLER_REL" $((256 * 1024)) "$INSTALLER_BLOB_SHA" "100755"\nprintf \'PREFLIGHT_OK\\n\'\nexit 0\n',
     )
     protected.write_text(text, encoding="utf-8")
     protected.chmod(0o755)
@@ -180,6 +196,10 @@ def _simulate_clean_checkout(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_git(repo_root: Path, *args: str) -> bytes:
         if args == ("status", "--porcelain"):
             return b""
+        if args == ("ls-tree", "HEAD", "--", activation.INSTALLER_REPO_PATH):
+            return f"100755 blob {activation.INSTALLER_GIT_BLOB_SHA}\t{activation.INSTALLER_REPO_PATH}\n".encode()
+        if args == ("cat-file", "-p", activation.INSTALLER_GIT_BLOB_SHA):
+            return _installer_bytes()
         return real_git(repo_root, *args)
 
     monkeypatch.setattr(activation, "_git", fake_git)
@@ -293,14 +313,14 @@ def _attempt_token(request_id: Any) -> str:
     return token
 
 
-def test_pr_validation_descendant_head_reads_approved_commit_objects(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_pr_validation_descendant_head_reads_current_installer_and_pinned_runtime_objects(monkeypatch: pytest.MonkeyPatch) -> None:
     _simulate_clean_checkout(monkeypatch)
     head = subprocess.check_output(["git", "rev-parse", "--verify", "HEAD^{commit}"], cwd=ROOT).decode().strip()
     assert head != activation.APPROVED_SOURCE_SHA
     subprocess.run(["git", "merge-base", "--is-ancestor", activation.APPROVED_SOURCE_SHA, "HEAD"], cwd=ROOT, check=True)
-    assert subprocess.check_output(["git", "ls-tree", activation.APPROVED_SOURCE_SHA, "--", activation.INSTALLER_REPO_PATH], cwd=ROOT).decode().split()[2] == activation.INSTALLER_GIT_BLOB_SHA
+    assert _git_blob(STAGE1_INSTALLER_PATH) == activation.INSTALLER_GIT_BLOB_SHA
     assert subprocess.check_output(["git", "ls-tree", activation.APPROVED_SOURCE_SHA, "--", activation.ESP_MODULE_REPO_PATH], cwd=ROOT).decode().split()[2] == activation.ESP_MODULE_GIT_BLOB_SHA
-    assert activation._reviewed_git_blob(ROOT, activation.INSTALLER_REPO_PATH, expected_source_sha=activation.APPROVED_SOURCE_SHA, expected_blob_sha=activation.INSTALLER_GIT_BLOB_SHA) == _installer_bytes()
+    assert activation._reviewed_current_tree_git_blob(ROOT, activation.INSTALLER_REPO_PATH, trusted_ancestor_sha=activation.INSTALLER_TRUSTED_ANCESTOR_SHA, expected_blob_sha=activation.INSTALLER_GIT_BLOB_SHA) == _installer_bytes()
     assert activation._reviewed_git_blob(ROOT, activation.ESP_MODULE_REPO_PATH, expected_source_sha=activation.APPROVED_SOURCE_SHA, expected_blob_sha=activation.ESP_MODULE_GIT_BLOB_SHA) == _esp_module_bytes()
 
 
@@ -309,7 +329,7 @@ def test_pr_validation_descendant_head_reads_approved_commit_objects(monkeypatch
     [
         (("rev-parse", "--verify", "HEAD^{commit}"), b"not-a-commit\n"),
         (("status", "--porcelain"), b" M scripts/install_home_edge_esp_lab.sh\n"),
-        (("ls-tree", activation.APPROVED_SOURCE_SHA, "--", activation.INSTALLER_REPO_PATH), b"100755 blob bad\tpath\n"),
+        (("ls-tree", "HEAD", "--", activation.INSTALLER_REPO_PATH), b"100755 blob bad\tpath\n"),
     ],
 )
 def test_bad_head_dirty_or_blob_mismatch_blocks_before_signer(
@@ -380,6 +400,10 @@ def test_future_descendant_head_reads_pinned_objects_not_head_or_worktree(monkey
             return b"f" * 40 + b"\n"
         if args == ("status", "--porcelain"):
             return b""
+        if args == ("ls-tree", "HEAD", "--", activation.INSTALLER_REPO_PATH):
+            return f"100755 blob {activation.INSTALLER_GIT_BLOB_SHA}\t{activation.INSTALLER_REPO_PATH}\n".encode()
+        if args == ("cat-file", "-p", activation.INSTALLER_GIT_BLOB_SHA):
+            return _installer_bytes()
         if args == ("show", f"HEAD:{activation.INSTALLER_REPO_PATH}"):
             return fake_head_installer
         if args == ("show", f"HEAD:{activation.ESP_MODULE_REPO_PATH}"):
@@ -388,7 +412,7 @@ def test_future_descendant_head_reads_pinned_objects_not_head_or_worktree(monkey
 
     monkeypatch.setattr(activation, "_git", fake_git)
 
-    installer = activation._reviewed_git_blob(ROOT, activation.INSTALLER_REPO_PATH, expected_source_sha=activation.APPROVED_SOURCE_SHA, expected_blob_sha=activation.INSTALLER_GIT_BLOB_SHA)
+    installer = activation._reviewed_current_tree_git_blob(ROOT, activation.INSTALLER_REPO_PATH, trusted_ancestor_sha=activation.INSTALLER_TRUSTED_ANCESTOR_SHA, expected_blob_sha=activation.INSTALLER_GIT_BLOB_SHA)
     module = activation._reviewed_git_blob(ROOT, activation.ESP_MODULE_REPO_PATH, expected_source_sha=activation.APPROVED_SOURCE_SHA, expected_blob_sha=activation.ESP_MODULE_GIT_BLOB_SHA)
 
     assert installer == _installer_bytes()
@@ -724,7 +748,6 @@ def test_signer_installer_preflight_rejects_exact_old_stage1_checkout_without_si
     [
         ({"FAKE_ANCESTOR_OK": "0"}, {}, "trusted Stage1B source is not an ancestor"),
         ({"FAKE_STATUS": " M scripts/home_edge_esp_lab_activation_signer_payload.py\n"}, {}, "reviewed source checkout is dirty"),
-        ({}, {"payload_bytes": b"wrong payload\n"}, "reviewed signer source bytes do not match approved blob"),
         ({"FAKE_WRAPPER_TREE_BLOB": "0" * 40}, {}, "reviewed signer source tree entry does not match approved blob"),
         ({"FAKE_INSTALLER_TREE_BLOB": "1" * 40}, {}, "reviewed signer source tree entry does not match approved blob"),
     ],
@@ -742,7 +765,7 @@ def test_signer_installer_preflight_rejects_bad_provenance_before_activation(
     assert "PREFLIGHT_OK" not in result.stdout
 
 
-def test_signer_installer_preflight_rejects_symlink_or_nonregular_source(tmp_path: Path) -> None:
+def test_signer_installer_preflight_ignores_mutated_or_symlink_worktree_source(tmp_path: Path) -> None:
     protected, repo = _make_signer_installer_preflight_fixture(tmp_path)
     payload = repo / "scripts/home_edge_esp_lab_activation_signer_payload.py"
     payload.unlink()
@@ -759,9 +782,9 @@ def test_signer_installer_preflight_rejects_symlink_or_nonregular_source(tmp_pat
         check=False,
     )
 
-    assert result.returncode == 2
-    assert "reviewed signer source is not a readable regular file" in result.stderr
-    assert "PREFLIGHT_OK" not in result.stdout
+    assert result.returncode == 0
+    assert result.stdout == "PREFLIGHT_OK\n"
+    assert result.stderr == ""
 
 
 def test_installer_allowed_argv_only() -> None:

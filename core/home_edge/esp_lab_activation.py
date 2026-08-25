@@ -22,9 +22,10 @@ REQUEST_TIMEOUT_SECONDS = 300
 MAX_EXECUTOR_OUTPUT_BYTES = 8192
 OPERATOR_APPROVAL_REF = "EXACT_HEAD_HOME_EDGE_ESP_LAB_STAGE1_ACTIVATION_APPROVED"
 APPROVED_SOURCE_SHA = "725dfc3aedbce194c7afcc229eb44b1eec4f463a"
+INSTALLER_TRUSTED_ANCESTOR_SHA = APPROVED_SOURCE_SHA
 INSTALLER_REPO_PATH = "scripts/install_home_edge_esp_lab.sh"
-INSTALLER_GIT_BLOB_SHA = "1527705a28127a88cf24199706a75fd77a79894c"
-INSTALLER_SHA256 = "15250704662c83b89ebcf3a6b98efe09458d35539b2cbaceb976f5ab60ebd71a"
+INSTALLER_GIT_BLOB_SHA = "e2c2378660df0cbaaf02e4556a1d1887a258b863"
+INSTALLER_SHA256 = "8eeef1374af6dee0451890e7db4e37e7fe8f249ec7aff55687e0a196168dbcfe"
 INIT_REPO_PATH = "core/__init__.py"
 INIT_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 ESP_MODULE_REPO_PATH = "core/home_edge/esp_lab.py"
@@ -49,10 +50,10 @@ ATTEMPT_TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
 def activate_esp_lab_stage1(*, repo_root: Path | None = None) -> dict[str, object]:
     root = Path.cwd() if repo_root is None else Path(repo_root)
     try:
-        installer = _reviewed_git_blob(
+        installer = _reviewed_current_tree_git_blob(
             root,
             INSTALLER_REPO_PATH,
-            expected_source_sha=APPROVED_SOURCE_SHA,
+            trusted_ancestor_sha=INSTALLER_TRUSTED_ANCESTOR_SHA,
             expected_blob_sha=INSTALLER_GIT_BLOB_SHA,
         )
         esp_module = _reviewed_git_blob(
@@ -387,7 +388,24 @@ def _reviewed_git_blob(
     blob = _git(repo_root, "ls-tree", expected_source_sha, "--", repo_path).decode().split()
     if len(blob) < 3 or blob[2] != expected_blob_sha:
         raise ValueError("reviewed_source_blob_mismatch")
-    data = _git(repo_root, "show", f"{expected_source_sha}:{repo_path}")
+    data = _git(repo_root, "cat-file", "-p", expected_blob_sha)
+    if _git_blob_sha1(data) != expected_blob_sha:
+        raise ValueError("reviewed_source_blob_mismatch")
+    return data
+
+
+def _reviewed_current_tree_git_blob(
+    repo_root: Path,
+    repo_path: str,
+    *,
+    trusted_ancestor_sha: str,
+    expected_blob_sha: str,
+) -> bytes:
+    _validate_trusted_checkout(repo_root, expected_source_sha=trusted_ancestor_sha)
+    blob = _git(repo_root, "ls-tree", "HEAD", "--", repo_path).decode().split()
+    if len(blob) < 3 or blob[2] != expected_blob_sha:
+        raise ValueError("reviewed_source_blob_mismatch")
+    data = _git(repo_root, "cat-file", "-p", expected_blob_sha)
     if _git_blob_sha1(data) != expected_blob_sha:
         raise ValueError("reviewed_source_blob_mismatch")
     return data
