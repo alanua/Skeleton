@@ -7,6 +7,7 @@ import os
 import shutil
 import stat
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -107,6 +108,39 @@ def _run_once(root: Path, payload: bytes | None = None, *, cwd: Path | None = No
     )
 
 
+def _run_delayed_stdin(
+    root: Path,
+    chunks: list[bytes],
+    *,
+    installer: Path = INSTALLER,
+    delay_seconds: float = 0.05,
+) -> subprocess.CompletedProcess[str]:
+    process = subprocess.Popen(
+        ["bash", str(installer)],
+        cwd=Path("/tmp"),
+        env=_env(root),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert process.stdin is not None
+    for chunk in chunks:
+        try:
+            process.stdin.write(chunk)
+            process.stdin.flush()
+        except BrokenPipeError:
+            break
+        time.sleep(delay_seconds)
+    try:
+        process.stdin.close()
+    except BrokenPipeError:
+        pass
+    stdout = process.stdout.read().decode("utf-8") if process.stdout is not None else ""
+    stderr = process.stderr.read().decode("utf-8") if process.stderr is not None else ""
+    returncode = process.wait(timeout=30)
+    return subprocess.CompletedProcess(["bash", str(installer)], returncode, stdout, stderr)
+
+
 def _runtime(root: Path) -> Path:
     return root / "opt/skeleton/esp-lab" / _source_sha()
 
@@ -181,6 +215,37 @@ def test_first_install_exact_tree_manifest_modes_and_real_wrapper_outside_repo(t
     assert wrapped.returncode == 0
     assert json.loads(wrapped.stdout) == []
     assert (root / "usr/bin/esptool").is_file()
+
+
+def test_delayed_multi_write_stdin_reaches_ready_with_fullblock_and_short_read_control_fails(tmp_path: Path) -> None:
+    payload = _payload()
+    chunks = [payload[:97], payload[97:257], payload[257:4096], payload[4096:]]
+
+    control = tmp_path / "install_without_fullblock.sh"
+    source = INSTALLER.read_text(encoding="utf-8")
+    pre_fix_source = source.replace("dd iflag=fullblock bs=$((MAX_ENCODED + 1))", "dd bs=$((MAX_ENCODED + 1))", 1)
+    assert pre_fix_source != source
+    control.write_text(pre_fix_source, encoding="utf-8")
+    control.chmod(0o755)
+
+    pre_fix_root = _make_root(tmp_path / "pre-fix")
+    pre_fix = _run_delayed_stdin(pre_fix_root, chunks, installer=control)
+    assert pre_fix.returncode != 0
+    assert "payload is not valid json" in pre_fix.stderr
+    assert not (pre_fix_root / "apt.log").exists()
+    assert not (pre_fix_root / "opt/skeleton/esp-lab").exists()
+    assert not (pre_fix_root / "usr/local/bin/skeleton-esp-lab").exists()
+
+    root = _make_root(tmp_path / "fullblock")
+    completed = _run_delayed_stdin(root, chunks)
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["runtime_state"] == "READY"
+    assert result["source_sha"] == _source_sha()
+    assert result["candidate_count"] == 0
+    assert result["device_canary"] == "awaiting_physical_device"
+    assert _runtime(root).is_dir()
+    assert (root / "usr/local/bin/skeleton-esp-lab").is_file()
 
 
 def test_candidate_count_only_and_canary_argv_semantics(tmp_path: Path) -> None:
