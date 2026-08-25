@@ -223,6 +223,24 @@ def _ok_receipt(stdout: str) -> HomeEdgeExecReceipt:
     )
 
 
+def _failed_receipt(stdout: str = "", stderr: str = "") -> HomeEdgeExecReceipt:
+    now = datetime.now(UTC).isoformat()
+    return HomeEdgeExecReceipt(
+        status="failed",
+        request_id="synthetic-esp-lab-request",
+        node_id=activation.TARGET_NODE,
+        execution_lane=activation.EXECUTION_LANE,
+        exit_code=2,
+        stdout=stdout,
+        stderr=stderr,
+        started_at=now,
+        finished_at=now,
+        duration_seconds=0.01,
+        idempotency="executed",
+        receipt_hash="e" * 64,
+    )
+
+
 def _result(**updates: Any) -> str:
     data: dict[str, Any] = {
         "schema": activation.RESULT_SCHEMA,
@@ -646,6 +664,92 @@ def test_executor_success_exact_result_done_and_fail_closed_cases() -> None:
     assert activation.public_result_from_executor_receipt({**_ok_receipt(_result()).to_mapping(), "exit_code": 2})["status"] == "BLOCKED"
     assert activation.public_result_from_executor_receipt(_ok_receipt("{not-json").to_mapping())["status"] == "BLOCKED"
     assert activation.public_result_from_executor_receipt(_ok_receipt(_result(schema="wrong")).to_mapping())["status"] == "BLOCKED"
+
+
+@pytest.mark.parametrize(
+    ("stderr", "reason"),
+    [
+        ("BLOCKED: payload hash mismatch\n", "stage1_payload_invalid"),
+        ("BLOCKED: host os is unsupported\n", "stage1_host_os_unsupported"),
+        ("BLOCKED: existing runtime target is unsafe\n", "stage1_runtime_target_unsafe"),
+        ("BLOCKED: wrapper canary failed\n", "stage1_wrapper_canary_failed"),
+    ],
+)
+def test_executor_failed_nonzero_classifies_exact_stage1_stderr_signatures(stderr: str, reason: str) -> None:
+    public = activation.public_result_from_executor_receipt(_failed_receipt(stderr=stderr).to_mapping())
+
+    assert public["status"] == "BLOCKED"
+    assert public["runtime_state"] == "BLOCKED"
+    assert public["reason"] == reason
+
+
+def test_executor_failed_nonzero_rejects_unknown_stderr_without_exposing_text() -> None:
+    receipt = _failed_receipt(stderr="BLOCKED: private /dev/ttyUSB0 serial evidence\n").to_mapping()
+
+    public = activation.public_result_from_executor_receipt(receipt)
+
+    assert public["status"] == "BLOCKED"
+    assert public["runtime_state"] == "BLOCKED"
+    assert public["reason"] == "executor_receipt_not_ok"
+    assert "private" not in json.dumps(public, sort_keys=True)
+    assert "ttyUSB0" not in json.dumps(public, sort_keys=True)
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "BLOCKED: payload hash mismatch",
+        "BLOCKED: payload hash mismatch\nprivate",
+        "BLOCKED: payload hash mismatch\r\n",
+    ],
+)
+def test_executor_failed_nonzero_rejects_malformed_stderr_signatures(stderr: str) -> None:
+    public = activation.public_result_from_executor_receipt(_failed_receipt(stderr=stderr).to_mapping())
+
+    assert public["status"] == "BLOCKED"
+    assert public["runtime_state"] == "BLOCKED"
+    assert public["reason"] == "executor_receipt_not_ok"
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        None,
+        b"BLOCKED: payload hash mismatch\n",
+        ["BLOCKED: payload hash mismatch\n"],
+    ],
+)
+def test_executor_failed_nonzero_rejects_non_string_stderr(stderr: Any) -> None:
+    receipt = _failed_receipt(stderr="BLOCKED: payload hash mismatch\n").to_mapping()
+    receipt["stderr"] = stderr
+
+    public = activation.public_result_from_executor_receipt(receipt)
+
+    assert public["status"] == "BLOCKED"
+    assert public["runtime_state"] == "BLOCKED"
+    assert public["reason"] == "executor_receipt_not_ok"
+
+
+def test_executor_failed_nonzero_rejects_oversize_stderr_without_exposing_text() -> None:
+    private_marker = "/dev/ttyUSB0"
+    receipt = _failed_receipt(stderr="A" * activation.MAX_EXECUTOR_OUTPUT_BYTES + private_marker).to_mapping()
+
+    public = activation.public_result_from_executor_receipt(receipt)
+
+    assert public["status"] == "BLOCKED"
+    assert public["runtime_state"] == "BLOCKED"
+    assert public["reason"] == "executor_receipt_not_ok"
+    assert private_marker not in json.dumps(public, sort_keys=True)
+
+
+def test_executor_failed_nonzero_never_converts_embedded_ready_to_success() -> None:
+    public = activation.public_result_from_executor_receipt(
+        _failed_receipt(stdout=_result(), stderr="BLOCKED: payload hash mismatch\n").to_mapping()
+    )
+
+    assert public["status"] == "BLOCKED"
+    assert public["runtime_state"] == "BLOCKED"
+    assert public["reason"] == "stage1_payload_invalid"
 
 
 def test_public_report_excludes_private_evidence() -> None:
