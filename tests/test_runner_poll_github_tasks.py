@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import inspect
 import json
 import os
 import re
@@ -15,6 +16,7 @@ from scripts import runner_poll_github_tasks as runner
 from scripts import telegram_callback_poller as callback_poller
 from core.secret_store import SecretReference
 from core.home_edge import debian_media_bootstrap as media_bootstrap
+from core.home_edge import esp_lab_activation
 from core.home_edge import media_source_snapshot
 from core.home_edge import post_migration_reconcile
 
@@ -184,6 +186,26 @@ def _esp_lab_stage1_signer_install_body(
             f"Expected Main SHA: {expected_main_sha}",
             f"Target: {target}",
             f"Operator Approval: {approval}",
+            *extra,
+        )
+    )
+
+
+def _esp_lab_stage1_activation_body(
+    *,
+    task_id: str = runner.HOME_EDGE_01_ESP_LAB_STAGE1_ACTIVATION_V1,
+    expected_main_sha: str = HEAD_SHA,
+    repository: str = runner.REPO,
+    target: str = "home-edge-01",
+    extra: tuple[str, ...] = (),
+) -> str:
+    return "\n".join(
+        (
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {task_id}",
+            f"Repository: {repository}",
+            f"Expected Main SHA: {expected_main_sha}",
+            f"Target: {target}",
             *extra,
         )
     )
@@ -552,6 +574,189 @@ def _esp_signer_preflight_patches(expected_sha: str):
         mock.patch.object(runner, "_read_skeleton_sha", side_effect=read_sha),
         mock.patch.object(runner, "_read_exact_git_sha", return_value=expected_sha),
     )
+
+
+def test_esp_lab_stage1_activation_imports_exact_task_id() -> None:
+    assert runner.HOME_EDGE_01_ESP_LAB_STAGE1_ACTIVATION_V1 == esp_lab_activation.TASK_ID
+    assert (
+        runner.HOME_EDGE_01_ESP_LAB_STAGE1_ACTIVATION_V1
+        == "home_edge_01_esp_lab_stage1_activation_v1"
+    )
+    assert runner.HOME_EDGE_01_ESP_LAB_STAGE1_ACTIVATION_V1 in runner.RUNTIME_MAINTENANCE_TASK_IDS
+
+
+def test_esp_lab_stage1_activation_dispatches_from_registered_clean_checkout() -> None:
+    checkout_path = Path("/synthetic/canonical-clean-skeleton")
+    checkout = mock.Mock(
+        checkout_path=checkout_path,
+        status_lines=["registered_checkout_current_main=true"],
+    )
+
+    def read_sha(_task_id, path, ref, status_lines, _step):
+        assert path == checkout_path
+        assert ref in {"HEAD", "origin/main"}
+        assert "registered_checkout_current_main=true" in status_lines
+        return HEAD_SHA, None
+
+    activation_result = {
+        "schema": esp_lab_activation.RESULT_SCHEMA,
+        "status": "DONE",
+        "reason": "completed",
+        "runtime_state": "READY",
+        "source_sha": esp_lab_activation.APPROVED_SOURCE_SHA,
+        "candidate_count": 1,
+        "device_canary": "serial_candidates_present",
+        "dependency_installed_by_operation": False,
+        "idempotent_reuse": True,
+    }
+    with (
+        mock.patch.object(
+            runner,
+            "_mempalace_runtime_smoke_preflight",
+            return_value=(checkout, ["registered_checkout_current_main=true"], None),
+        ) as preflight,
+        mock.patch.object(runner, "_read_skeleton_sha", side_effect=read_sha),
+        mock.patch.object(
+            runner,
+            "activate_esp_lab_stage1",
+            return_value=activation_result,
+        ) as activate,
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HOME_EDGE_01_ESP_LAB_STAGE1_ACTIVATION_V1,
+            "/caller/workdir/must-not-be-used",
+            _esp_lab_stage1_activation_body(),
+        )
+
+    preflight.assert_called_once_with(runner.HOME_EDGE_01_ESP_LAB_STAGE1_ACTIVATION_V1)
+    activate.assert_called_once_with(repo_root=checkout_path)
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert f"maintenance_task_id={runner.HOME_EDGE_01_ESP_LAB_STAGE1_ACTIVATION_V1}" in report
+    assert f"source_sha={esp_lab_activation.APPROVED_SOURCE_SHA}" in report
+    assert "runtime_state=READY" in report
+    assert "device_canary=serial_candidates_present" in report
+    assert "dependency_installed_by_operation=false" in report
+    assert "idempotent_reuse=true" in report
+    assert "success_criteria=met" in report
+    assert str(checkout_path) not in report
+    assert "/caller/workdir" not in report
+
+
+def test_esp_lab_stage1_activation_near_match_is_not_registered() -> None:
+    near_match = "home_edge_01_esp_lab_stage1_activation_v1_extra"
+
+    with mock.patch.object(runner, "activate_esp_lab_stage1") as activate:
+        report = runner.dispatch_runtime_maintenance_task(
+            near_match,
+            str(runner.ROOT),
+            _esp_lab_stage1_activation_body(task_id=near_match),
+        )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "reason=maintenance_task_id_not_allowlisted" in report
+    activate.assert_not_called()
+    variants = {
+        task_id
+        for task_id in runner.RUNTIME_MAINTENANCE_TASK_IDS
+        if "esp_lab_stage1_activation" in task_id
+    }
+    assert variants == {runner.HOME_EDGE_01_ESP_LAB_STAGE1_ACTIVATION_V1}
+
+
+@pytest.mark.parametrize(
+    ("body", "reason"),
+    (
+        (
+            _esp_lab_stage1_activation_body(
+                task_id="home_edge_01_esp_lab_stage1_activation"
+            ),
+            "esp_lab_stage1_activation_task_id_mismatch",
+        ),
+        (
+            _esp_lab_stage1_activation_body(repository="alanua/Skeleton2"),
+            "esp_lab_stage1_activation_repository_mismatch",
+        ),
+        (
+            _esp_lab_stage1_activation_body(target="runner-controller"),
+            "esp_lab_stage1_activation_target_mismatch",
+        ),
+        (
+            _esp_lab_stage1_activation_body(extra=("Command: sudo sh",)),
+            "esp_lab_stage1_activation_unknown_input_field",
+        ),
+        (
+            _esp_lab_stage1_activation_body(expected_main_sha="8e049eb631f63d81"),
+            "esp_lab_stage1_activation_expected_main_sha_invalid",
+        ),
+    ),
+)
+def test_esp_lab_stage1_activation_rejects_bad_metadata_before_activation(
+    body: str,
+    reason: str,
+) -> None:
+    with (
+        mock.patch.object(runner, "_mempalace_runtime_smoke_preflight") as preflight,
+        mock.patch.object(runner, "activate_esp_lab_stage1") as activate,
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HOME_EDGE_01_ESP_LAB_STAGE1_ACTIVATION_V1,
+            str(runner.ROOT),
+            body,
+        )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert f"reason={reason}" in report
+    preflight.assert_not_called()
+    activate.assert_not_called()
+
+
+def test_esp_lab_stage1_activation_blocks_checkout_sha_mismatch_before_activation() -> None:
+    checkout = mock.Mock(
+        checkout_path=Path("/synthetic/canonical-clean-skeleton"),
+        status_lines=["registered_checkout_current_main=true"],
+    )
+
+    def read_sha(_task_id, _path, _ref, _status_lines, _step):
+        return "b" * 40, None
+
+    with (
+        mock.patch.object(
+            runner,
+            "_mempalace_runtime_smoke_preflight",
+            return_value=(checkout, ["registered_checkout_current_main=true"], None),
+        ),
+        mock.patch.object(runner, "_read_skeleton_sha", side_effect=read_sha),
+        mock.patch.object(runner, "activate_esp_lab_stage1") as activate,
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.HOME_EDGE_01_ESP_LAB_STAGE1_ACTIVATION_V1,
+            str(runner.ROOT),
+            _esp_lab_stage1_activation_body(expected_main_sha=HEAD_SHA),
+        )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "reason=esp_lab_activation_expected_main_sha_mismatch" in report
+    activate.assert_not_called()
+
+
+def test_esp_lab_stage1_activation_route_has_no_direct_hmac_signing_or_transport() -> None:
+    route_source = "\n".join(
+        (
+            inspect.getsource(runner.home_edge_01_esp_lab_stage1_activation_v1),
+            inspect.getsource(runner._home_edge_esp_lab_stage1_activation_input),
+            inspect.getsource(runner._home_edge_esp_lab_stage1_activation_result_lines),
+        )
+    )
+
+    assert "activate_esp_lab_stage1" in route_source
+    for forbidden in (
+        "hmac",
+        "sign_request",
+        "sign_activation_request",
+        "HomeEdgeExecRequest",
+        "execute_home_edge_request",
+    ):
+        assert forbidden not in route_source
 
 
 def test_esp_lab_stage1_signer_install_is_allowlisted() -> None:
