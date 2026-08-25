@@ -18,6 +18,10 @@ REMOTE_TMP_PATH: Final = "/tmp/skeleton-lavalamp-c98acbf-firmware.bin"
 STATE_DIR: Final = ".local/state/skeleton/home-edge-01/lavalamp"
 REMOTE_TIMEOUT_SECONDS: Final = 600
 POSTFLIGHT_EFFECTS: Final = ("CY Anemone", "CY Tidal Bloom")
+REQUEST_SCHEMA: Final = "skeleton.home_edge.lavalamp_ota_request.v1"
+POSTFLIGHT_REQUEST_SCHEMA: Final = "skeleton.home_edge.lavalamp_postflight_request.v1"
+IDEMPOTENCY_KEY: Final = "lavalamp-c98acbf-build-ota-1922-20260812-v2"
+MAX_REMOTE_REQUEST_JSON_BYTES: Final = 2048
 REMOTE_FAILURE_SCHEMA: Final = "skeleton.home_edge.lavalamp_ota_failure.v1"
 REMOTE_FAILURE_REASON_TO_ERROR: Final = {
     "PREFLIGHT_IDENTITY_MISMATCH": "REMOTE_PREFLIGHT_IDENTITY_MISMATCH",
@@ -78,7 +82,7 @@ class FirmwareTransferRequest:
     relay: str = HOME_EDGE_NODE
     target: str = DEVICE_TARGET
     postflight_effects: tuple[str, str] = POSTFLIGHT_EFFECTS
-    idempotency_key: str = "lavalamp-c98acbf-build-ota-1922-20260812-v2"
+    idempotency_key: str = IDEMPOTENCY_KEY
 
 
 @dataclass(frozen=True)
@@ -111,7 +115,7 @@ class HomeEdgeFirmwareAction:
             raise HomeEdgeFirmwareActionError("TRANSFER_FAILED")
 
         remote_request = {
-            "schema": "skeleton.home_edge.lavalamp_ota_request.v1",
+            "schema": REQUEST_SCHEMA,
             "remote_path": REMOTE_TMP_PATH,
             "byte_size": request.byte_size,
             "sha256": request.sha256,
@@ -122,7 +126,7 @@ class HomeEdgeFirmwareAction:
         }
         code, output = self.run_command(
             self._ssh_args(profile, identity_path, known_hosts_path),
-            REMOTE_PYTHON_ACTION + "\n" + json.dumps(remote_request, sort_keys=True),
+            _remote_python_stdin(REMOTE_PYTHON_ACTION, remote_request),
             REMOTE_TIMEOUT_SECONDS,
         )
         if code != 0:
@@ -133,7 +137,7 @@ class HomeEdgeFirmwareAction:
         profile, identity_path, known_hosts_path = self._validated_profile()
         self._validate_request(request)
         remote_request = {
-            "schema": "skeleton.home_edge.lavalamp_postflight_request.v1",
+            "schema": POSTFLIGHT_REQUEST_SCHEMA,
             "target": DEVICE_TARGET,
             "byte_size": request.byte_size,
             "sha256": request.sha256,
@@ -143,7 +147,7 @@ class HomeEdgeFirmwareAction:
         }
         code, output = self.run_command(
             self._ssh_args(profile, identity_path, known_hosts_path),
-            REMOTE_POSTFLIGHT_PYTHON_ACTION + "\n" + json.dumps(remote_request, sort_keys=True),
+            _remote_python_stdin(REMOTE_POSTFLIGHT_PYTHON_ACTION, remote_request),
             REMOTE_TIMEOUT_SECONDS,
         )
         if code != 0:
@@ -192,6 +196,15 @@ class HomeEdgeFirmwareAction:
             raise HomeEdgeFirmwareActionError("FIRMWARE_SIZE_INVALID")
         if len(request.sha256) != 64 or any(ch not in "0123456789abcdef" for ch in request.sha256):
             raise HomeEdgeFirmwareActionError("FIRMWARE_HASH_INVALID")
+        if request.idempotency_key != IDEMPOTENCY_KEY:
+            raise HomeEdgeFirmwareActionError("IDEMPOTENCY_KEY_MISMATCH")
+
+
+def _remote_python_stdin(action: str, remote_request: Mapping[str, object]) -> str:
+    request_json = json.dumps(remote_request, sort_keys=True, separators=(",", ":"))
+    if len(request_json.encode("utf-8")) > MAX_REMOTE_REQUEST_JSON_BYTES:
+        raise HomeEdgeFirmwareActionError("REMOTE_REQUEST_TOO_LARGE")
+    return f"REMOTE_REQUEST_JSON = {request_json!r}\n" + action
 
 
 def _strict_secret_file(value: str) -> Path:
@@ -301,6 +314,9 @@ REMOTE_TMP_PATH = "/tmp/skeleton-lavalamp-c98acbf-firmware.bin"
 MAX_BYTES = 4 * 1024 * 1024
 BOUNDARY = "skeleton-lavalamp-fixed-boundary"
 FAILURE_SCHEMA = "skeleton.home_edge.lavalamp_ota_failure.v1"
+REQUEST_SCHEMA = "skeleton.home_edge.lavalamp_ota_request.v1"
+POSTFLIGHT_EFFECTS = ["CY Anemone", "CY Tidal Bloom"]
+IDEMPOTENCY_KEY = "lavalamp-c98acbf-build-ota-1922-20260812-v2"
 WLED_COMPATIBILITY_REJECTION_MARKER = b"not compatible"
 
 class NoRedirect(request.HTTPRedirectHandler):
@@ -396,15 +412,23 @@ def has_effect(effects, name):
 
 def read_payload():
     try:
-        candidate = json.loads(sys.stdin.read())
+        candidate = json.loads(REMOTE_REQUEST_JSON)
     except json.JSONDecodeError:
         raise MalformedRemoteRequest()
     if not isinstance(candidate, dict):
         raise MalformedRemoteRequest()
-    for key in ("remote_path", "byte_size", "sha256", "target", "postflight_effects", "state_dir"):
+    for key in ("schema", "remote_path", "byte_size", "sha256", "target", "postflight_effects", "state_dir", "idempotency_key"):
         if key not in candidate:
             raise MalformedRemoteRequest()
+    if candidate.get("schema") != REQUEST_SCHEMA:
+        raise MalformedRemoteRequest()
     if candidate.get("remote_path") != REMOTE_TMP_PATH:
+        raise MalformedRemoteRequest()
+    if candidate.get("target") != TARGET:
+        raise MalformedRemoteRequest()
+    if candidate.get("postflight_effects") != POSTFLIGHT_EFFECTS:
+        raise MalformedRemoteRequest()
+    if candidate.get("idempotency_key") != IDEMPOTENCY_KEY:
         raise MalformedRemoteRequest()
     if not isinstance(candidate.get("byte_size"), int) or not isinstance(candidate.get("sha256"), str):
         raise MalformedRemoteRequest()
@@ -420,8 +444,6 @@ try:
     remote_path = Path(payload["remote_path"])
     state_dir = Path.home() / payload["state_dir"]
     result = {"target": TARGET, "sha256": payload["sha256"], "byte_size": payload["byte_size"], "effects": {}, "final_status": "OTA_UNVERIFIED"}
-    if payload.get("target") != TARGET:
-        raise MalformedRemoteRequest()
     failure_stage = "artifact_verify"
     try:
         data = remote_path.read_bytes()
@@ -523,7 +545,7 @@ out(result)
 
 
 REMOTE_POSTFLIGHT_PYTHON_ACTION: Final = r'''
-import json, sys
+import json
 from urllib import request
 
 TARGET = "192.168.1.164"
@@ -536,7 +558,7 @@ def get_json(path, timeout=10):
 def has_effect(effects, name):
     return any(item == name or (isinstance(item, list) and name in item) for item in effects)
 
-payload = json.loads(sys.stdin.read())
+payload = json.loads(REMOTE_REQUEST_JSON)
 effects = get_json("/json/eff")
 result = {
     "target": TARGET,

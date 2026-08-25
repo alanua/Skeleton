@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
-import sys
+import subprocess
 from contextlib import redirect_stdout
 from pathlib import Path
 from urllib import error, request
@@ -20,6 +20,7 @@ from core.home_edge.firmware_action import (
     FirmwareTransferRequest,
     HomeEdgeFirmwareAction,
     HomeEdgeFirmwareActionError,
+    _remote_python_stdin,
 )
 from core.home_edge.profile import HomeEdgeProfile, synthetic_profile_mapping
 
@@ -67,6 +68,19 @@ def _failure_receipt(
             "failure_stage": stage,
         }
     )
+
+
+def _remote_request_payload(req: FirmwareTransferRequest, tmp_path: Path) -> dict[str, object]:
+    return {
+        "schema": "skeleton.home_edge.lavalamp_ota_request.v1",
+        "remote_path": REMOTE_TMP_PATH,
+        "byte_size": req.byte_size,
+        "sha256": req.sha256,
+        "target": DEVICE_TARGET,
+        "postflight_effects": list(req.postflight_effects),
+        "state_dir": str(tmp_path / "state"),
+        "idempotency_key": req.idempotency_key,
+    }
 
 
 class _Response:
@@ -187,16 +201,14 @@ def _run_remote_failure(
 
         monkeypatch.setattr(json, "dump", fake_dump)
     sha256 = "ec4d577ee88cfc72af6589309da85d67feaf32ffabc78e5e705d77c2a5712036"
-    payload = stdin_payload or {
-        "schema": "skeleton.home_edge.lavalamp_ota_request.v1",
-        "remote_path": REMOTE_TMP_PATH,
-        "byte_size": len(b"firmware-image"),
-        "sha256": sha256,
-        "target": DEVICE_TARGET,
-        "postflight_effects": ["CY Anemone", "CY Tidal Bloom"],
-        "state_dir": str(tmp_path / "state"),
-        "idempotency_key": "test",
-    }
+    payload = stdin_payload or _remote_request_payload(
+        FirmwareTransferRequest(
+            firmware_path=firmware,
+            byte_size=len(b"firmware-image"),
+            sha256=sha256,
+        ),
+        tmp_path,
+    )
     responses = [
         info if info is not None else {"brand": "WLED", "arch": "esp32"},
         effects if effects is not None else [],
@@ -226,17 +238,12 @@ def _run_remote_failure(
         "build_opener",
         lambda *_args: _Opener(upload_outcome or _Response(status=200)),
     )
+    source = _remote_python_stdin(REMOTE_PYTHON_ACTION, payload)
     if stdin_read_error:
-        class _ExplodingStdin:
-            def read(self) -> str:
-                raise RuntimeError("SECRET_EXCEPTION_TEXT")
-
-        monkeypatch.setattr(sys, "stdin", _ExplodingStdin())
-    else:
-        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+        source = "REMOTE_REQUEST_JSON = object()\n" + REMOTE_PYTHON_ACTION
     stdout = io.StringIO()
     with pytest.raises(SystemExit) as exc, redirect_stdout(stdout):
-        exec(REMOTE_PYTHON_ACTION, {})
+        exec(source, {})
     assert exc.value.code == 1
     assert not firmware.exists()
     lines = [line for line in stdout.getvalue().splitlines() if line]
@@ -320,6 +327,78 @@ def test_strict_scp_and_ssh_are_fixed(monkeypatch: pytest.MonkeyPatch, tmp_path:
     assert receipt["target"] == DEVICE_TARGET
     assert receipt["no_direct_controller_lan_ota"] is True
     assert receipt["effects"] == {"CY Anemone": True, "CY Tidal Bloom": True}
+
+
+def test_python_stdin_control_old_framing_leaves_no_remote_request(tmp_path: Path) -> None:
+    req = _request(tmp_path)
+    payload = _remote_request_payload(req, tmp_path)
+    pre_fix_action = REMOTE_PYTHON_ACTION.replace(
+        "candidate = json.loads(REMOTE_REQUEST_JSON)",
+        "candidate = json.loads(sys.stdin.read())",
+    )
+    Path(REMOTE_TMP_PATH).unlink(missing_ok=True)
+
+    completed = subprocess.run(
+        ["python3", "-"],
+        input=pre_fix_action + "\n" + json.dumps(payload, sort_keys=True),
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    receipt = json.loads(completed.stdout)
+    assert receipt["failure_reason"] == "MALFORMED_REMOTE_REQUEST"
+    assert receipt["failure_stage"] == "request_parse"
+    assert receipt["sha256"] == ""
+    assert receipt["byte_size"] == 0
+
+
+def test_python_stdin_framing_delivers_request_to_real_remote_parser(tmp_path: Path) -> None:
+    req = _request(tmp_path)
+    payload = _remote_request_payload(req, tmp_path)
+    Path(REMOTE_TMP_PATH).unlink(missing_ok=True)
+
+    completed = subprocess.run(
+        ["python3", "-"],
+        input=_remote_python_stdin(REMOTE_PYTHON_ACTION, payload),
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    receipt = json.loads(completed.stdout)
+    assert receipt["failure_reason"] == "ARTIFACT_READ_FAILED"
+    assert receipt["failure_stage"] == "artifact_verify"
+    assert receipt["sha256"] == req.sha256
+    assert receipt["byte_size"] == req.byte_size
+
+
+def test_remote_request_strings_remain_data_not_executable_source(tmp_path: Path) -> None:
+    req = _request(tmp_path)
+    marker = tmp_path / "executed"
+    payload = _remote_request_payload(req, tmp_path)
+    payload["state_dir"] = f"x'; pathlib.Path({str(marker)!r}).write_text('ran'); '"
+    Path(REMOTE_TMP_PATH).unlink(missing_ok=True)
+
+    completed = subprocess.run(
+        ["python3", "-"],
+        input=_remote_python_stdin(REMOTE_PYTHON_ACTION, payload),
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    receipt = json.loads(completed.stdout)
+    assert receipt["failure_reason"] == "ARTIFACT_READ_FAILED"
+    assert receipt["sha256"] == req.sha256
+    assert receipt["byte_size"] == req.byte_size
+    assert not marker.exists()
 
 
 def test_remote_unverified_blocks_without_private_values(
