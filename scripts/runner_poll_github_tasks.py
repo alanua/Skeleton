@@ -53,6 +53,7 @@ from core.hermes_private_memory import (
     write_hermes_private_memory_heartbeat,
 )
 from core.home_edge.esp_lab_activation import (
+    OPERATOR_APPROVAL_REF as HOME_EDGE_ESP_LAB_STAGE1_ACTIVATION_OPERATOR_APPROVAL,
     TASK_ID as HOME_EDGE_ESP_LAB_STAGE1_ACTIVATION_TASK_ID,
     activate_esp_lab_stage1,
 )
@@ -15585,6 +15586,7 @@ _HOME_EDGE_ESP_LAB_STAGE1_ACTIVATION_INPUT_FIELDS = frozenset(
         "Repository",
         "Expected Main SHA",
         "Target",
+        "Operator Approval",
     )
 )
 
@@ -15624,6 +15626,11 @@ def _home_edge_esp_lab_stage1_activation_input(
         return None, "esp_lab_stage1_activation_expected_main_sha_invalid"
     if parsed["Target"] != "home-edge-01":
         return None, "esp_lab_stage1_activation_target_mismatch"
+    if (
+        parsed["Operator Approval"]
+        != HOME_EDGE_ESP_LAB_STAGE1_ACTIVATION_OPERATOR_APPROVAL
+    ):
+        return None, "esp_lab_stage1_activation_operator_approval_mismatch"
     return parsed, None
 
 

@@ -197,6 +197,7 @@ def _esp_lab_stage1_activation_body(
     expected_main_sha: str = HEAD_SHA,
     repository: str = runner.REPO,
     target: str = "home-edge-01",
+    approval: str = esp_lab_activation.OPERATOR_APPROVAL_REF,
     extra: tuple[str, ...] = (),
 ) -> str:
     return "\n".join(
@@ -206,6 +207,7 @@ def _esp_lab_stage1_activation_body(
             f"Repository: {repository}",
             f"Expected Main SHA: {expected_main_sha}",
             f"Target: {target}",
+            f"Operator Approval: {approval}",
             *extra,
         )
     )
@@ -579,6 +581,10 @@ def _esp_signer_preflight_patches(expected_sha: str):
 def test_esp_lab_stage1_activation_imports_exact_task_id() -> None:
     assert runner.HOME_EDGE_01_ESP_LAB_STAGE1_ACTIVATION_V1 == esp_lab_activation.TASK_ID
     assert (
+        runner.HOME_EDGE_ESP_LAB_STAGE1_ACTIVATION_OPERATOR_APPROVAL
+        == esp_lab_activation.OPERATOR_APPROVAL_REF
+    )
+    assert (
         runner.HOME_EDGE_01_ESP_LAB_STAGE1_ACTIVATION_V1
         == "home_edge_01_esp_lab_stage1_activation_v1"
     )
@@ -681,12 +687,38 @@ def test_esp_lab_stage1_activation_near_match_is_not_registered() -> None:
             "esp_lab_stage1_activation_target_mismatch",
         ),
         (
+            _esp_lab_stage1_activation_body(approval="NEAR_MATCH"),
+            "esp_lab_stage1_activation_operator_approval_mismatch",
+        ),
+        (
             _esp_lab_stage1_activation_body(extra=("Command: sudo sh",)),
+            "esp_lab_stage1_activation_unknown_input_field",
+        ),
+        (
+            _esp_lab_stage1_activation_body(
+                extra=(
+                    f"Approval Reference: {esp_lab_activation.OPERATOR_APPROVAL_REF}",
+                )
+            ),
             "esp_lab_stage1_activation_unknown_input_field",
         ),
         (
             _esp_lab_stage1_activation_body(expected_main_sha="8e049eb631f63d81"),
             "esp_lab_stage1_activation_expected_main_sha_invalid",
+        ),
+        (
+            "\n".join(
+                line
+                for line in _esp_lab_stage1_activation_body().splitlines()
+                if not line.startswith("Operator Approval:")
+            ),
+            "esp_lab_stage1_activation_required_input_missing",
+        ),
+        (
+            _esp_lab_stage1_activation_body()
+            + "\nOperator Approval: "
+            + esp_lab_activation.OPERATOR_APPROVAL_REF,
+            "esp_lab_stage1_activation_duplicate_input_field",
         ),
     ),
 )
