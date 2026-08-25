@@ -113,7 +113,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-dd bs=$((MAX_ENCODED + 1)) count=1 of="$PAYLOAD_JSON" status=none
+dd iflag=fullblock bs=$((MAX_ENCODED + 1)) count=1 of="$PAYLOAD_JSON" status=none
 payload_size="$(stat -c '%s' -- "$PAYLOAD_JSON")"
 if (( payload_size == 0 || payload_size > MAX_ENCODED )); then
   fail "payload size is invalid"
