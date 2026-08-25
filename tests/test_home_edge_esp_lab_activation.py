@@ -223,6 +223,24 @@ def _ok_receipt(stdout: str) -> HomeEdgeExecReceipt:
     )
 
 
+def _failed_receipt(stdout: str) -> HomeEdgeExecReceipt:
+    now = datetime.now(UTC).isoformat()
+    return HomeEdgeExecReceipt(
+        status="failed",
+        request_id="synthetic-esp-lab-request",
+        node_id=activation.TARGET_NODE,
+        execution_lane=activation.EXECUTION_LANE,
+        exit_code=2,
+        stdout=stdout,
+        stderr="",
+        started_at=now,
+        finished_at=now,
+        duration_seconds=0.01,
+        idempotency="executed",
+        receipt_hash="e" * 64,
+    )
+
+
 def _result(**updates: Any) -> str:
     data: dict[str, Any] = {
         "schema": activation.RESULT_SCHEMA,
@@ -646,6 +664,37 @@ def test_executor_success_exact_result_done_and_fail_closed_cases() -> None:
     assert activation.public_result_from_executor_receipt({**_ok_receipt(_result()).to_mapping(), "exit_code": 2})["status"] == "BLOCKED"
     assert activation.public_result_from_executor_receipt(_ok_receipt("{not-json").to_mapping())["status"] == "BLOCKED"
     assert activation.public_result_from_executor_receipt(_ok_receipt(_result(schema="wrong")).to_mapping())["status"] == "BLOCKED"
+
+
+def test_executor_failed_nonzero_preserves_sanitized_stage1_blocked_receipt() -> None:
+    embedded = activation._blocked_result("installer_sha256_mismatch")
+
+    public = activation.public_result_from_executor_receipt(_failed_receipt(json.dumps(embedded, separators=(",", ":"))).to_mapping())
+
+    assert public == embedded
+    assert public["status"] == "BLOCKED"
+    assert public["runtime_state"] == "BLOCKED"
+    assert public["reason"] == "installer_sha256_mismatch"
+
+
+def test_executor_failed_nonzero_never_converts_embedded_ready_to_success() -> None:
+    public = activation.public_result_from_executor_receipt(_failed_receipt(_result()).to_mapping())
+
+    assert public["status"] == "BLOCKED"
+    assert public["runtime_state"] == "BLOCKED"
+    assert public["reason"] == "executor_receipt_not_ok"
+
+
+def test_non_executed_transport_status_ignores_embedded_blocked_receipt() -> None:
+    embedded = json.dumps(activation._blocked_result("installer_sha256_mismatch"), separators=(",", ":"))
+
+    for status in ("blocked", "timeout", "cancelled"):
+        receipt = {**_failed_receipt(embedded).to_mapping(), "status": status, "exit_code": None}
+        public = activation.public_result_from_executor_receipt(receipt)
+
+        assert public["status"] == "BLOCKED"
+        assert public["runtime_state"] == "BLOCKED"
+        assert public["reason"] == "executor_receipt_not_ok"
 
 
 def test_public_report_excludes_private_evidence() -> None:
