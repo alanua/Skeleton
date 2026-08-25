@@ -860,7 +860,17 @@ class RepositoryMaintenanceExecutor:
             action = self.firmware_action or HomeEdgeFirmwareAction()
             duplicate = manifest.get("status") == "DONE" and isinstance(manifest.get("ota"), Mapping)
             if duplicate:
-                ota_receipt = action.verify_postflight_only(request)
+                try:
+                    ota_receipt = action.verify_postflight_only(request)
+                except HomeEdgeFirmwareActionError as exc:
+                    if exc.reason_code != "REMOTE_EFFECTS_MISSING":
+                        raise
+                    manifest = _reconciled_lavalamp_pending_ota_manifest(manifest)
+                    _atomic_write_json(manifest_path, manifest)
+                    return 0, _repository_result(
+                        "BLOCKED",
+                        _reconciliation_receipt(manifest, exc.reason_code),
+                    )
             else:
                 ota_receipt = action.execute(request)
                 manifest = {
@@ -1363,6 +1373,33 @@ def _manifest_mismatch_reason(manifest: Mapping[str, object]) -> str | None:
     return None
 
 
+def _reconciled_lavalamp_pending_ota_manifest(manifest: Mapping[str, object]) -> dict[str, object]:
+    if manifest.get("status") != "DONE" or not isinstance(manifest.get("ota"), Mapping):
+        raise RepositoryMaintenanceBlocked("STALE_DONE_RECONCILIATION_UNSAFE")
+    prior_history = manifest.get("reconciliation_history")
+    history = list(prior_history) if isinstance(prior_history, list) else []
+    reconciled = dict(manifest)
+    reconciled.pop("ota", None)
+    now = _utc_now()
+    history.append(
+        {
+            "at": now,
+            "from_status": "DONE",
+            "to_status": "BUILT",
+            "reason": "REMOTE_EFFECTS_MISSING",
+        }
+    )
+    reconciled.update(
+        {
+            "status": "BUILT",
+            "updated_at": now,
+            "public_status": "artifact_built_pending_home_edge_ota",
+            "reconciliation_history": history,
+        }
+    )
+    return reconciled
+
+
 def _atomic_write_json(path: Path, payload: Mapping[str, object]) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -1389,6 +1426,32 @@ def _blocked_receipt(reason: str) -> dict[str, object]:
         "reason": re.sub(r"[^A-Z0-9_]+", "_", reason.upper()).strip("_") or "BLOCKED",
         "no_filesystem_build_or_network_after_rejection": True,
         "public_status": "blocked_before_untrusted_side_effect",
+    }
+
+
+def _reconciliation_receipt(manifest: Mapping[str, object], reason: str) -> dict[str, object]:
+    return {
+        "schema": LAVALAMP_EXECUTOR_SCHEMA,
+        "status": "BLOCKED",
+        "operation": BUILD_AND_LOCAL_OTA_OPERATION,
+        "project": LAVALAMP_PROJECT,
+        "repository": LAVALAMP_REPOSITORY,
+        "reason": reason,
+        "reconciled_manifest_status": "BUILT",
+        "pending": "home_edge_ota",
+        "source_branch": LAVALAMP_SOURCE_BRANCH,
+        "source_sha": LAVALAMP_SOURCE_SHA,
+        "wled_commit": LAVALAMP_WLED_SHA,
+        "environment": LAVALAMP_PLATFORMIO_ENV,
+        "artifact_files": list(LAVALAMP_ALLOWED_ARTIFACTS),
+        "byte_size": manifest.get("byte_size"),
+        "sha256": manifest.get("sha256"),
+        "approval_reference": LAVALAMP_APPROVAL_REFERENCE,
+        "idempotency_key": LAVALAMP_IDEMPOTENCY_KEY,
+        "postflight_only_actions": 1,
+        "build_actions_after_reconciliation": 0,
+        "ota_actions_after_reconciliation": 0,
+        "public_status": "stale_done_reconciled_to_pending_home_edge_ota",
     }
 
 

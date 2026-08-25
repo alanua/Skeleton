@@ -974,9 +974,10 @@ def _path_traversal_node_archive() -> bytes:
 
 
 class FakeFirmwareAction:
-    def __init__(self) -> None:
+    def __init__(self, *, postflight_error: str | None = None) -> None:
         self.executions = 0
         self.postflights = 0
+        self.postflight_error = postflight_error
 
     def execute(self, request: object) -> dict[str, object]:
         self.executions += 1
@@ -987,6 +988,8 @@ class FakeFirmwareAction:
 
     def verify_postflight_only(self, request: object) -> dict[str, object]:
         self.postflights += 1
+        if self.postflight_error is not None:
+            raise maintenance.HomeEdgeFirmwareActionError(self.postflight_error)
         return {
             "final_status": "DONE",
             "effects": {"CY Anemone": True, "CY Tidal Bloom": True},
@@ -1067,6 +1070,67 @@ class FakeRepositoryRunner:
             firmware.write_bytes(b"firmware-image")
             return 0, ""
         return 1, "unexpected"
+
+
+def _install_lavalamp_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    manifest_overrides: dict[str, object] | None = None,
+    manifest_text: str | None = None,
+) -> tuple[Path, str]:
+    artifact_root = tmp_path / "artifacts/lavalamp/issue-1922-c98acbf"
+    artifact_root.mkdir(parents=True)
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr(maintenance, "LAVALAMP_APPROVED_ARTIFACT_PARENT", tmp_path / "artifacts/lavalamp")
+    monkeypatch.setattr(maintenance, "LAVALAMP_ARTIFACT_ROOT", artifact_root)
+    firmware = artifact_root / LAVALAMP_FIRMWARE_NAME
+    firmware_bytes = b"firmware-image"
+    firmware.write_bytes(firmware_bytes)
+    digest = hashlib.sha256(firmware_bytes).hexdigest()
+    manifest: dict[str, object] = {
+        "schema": maintenance.LAVALAMP_EXECUTOR_SCHEMA,
+        "status": "DONE",
+        "operation": BUILD_AND_LOCAL_OTA_OPERATION,
+        "project": "lavalamp",
+        "repository": LAVALAMP_REPOSITORY,
+        "source_branch": LAVALAMP_SOURCE_BRANCH,
+        "source_sha": LAVALAMP_SOURCE_SHA,
+        "wled_commit": LAVALAMP_WLED_SHA,
+        "environment": LAVALAMP_PLATFORMIO_ENV,
+        "artifact_root": str(artifact_root),
+        "artifact_files": [LAVALAMP_FIRMWARE_NAME, LAVALAMP_MANIFEST_NAME],
+        "firmware_path": str(firmware),
+        "byte_size": len(firmware_bytes),
+        "sha256": digest,
+        "build_command": f"{sys.executable} -m platformio run -e {LAVALAMP_PLATFORMIO_ENV}",
+        "build_timeout_seconds": maintenance.LAVALAMP_BUILD_TIMEOUT_SECONDS,
+        "relay": "home-edge-01",
+        "target": "192.168.1.164",
+        "no_direct_controller_lan_ota": True,
+        "required_effects": ["CY Anemone", "CY Tidal Bloom"],
+        "approval_reference": LAVALAMP_APPROVAL_REFERENCE,
+        "idempotency_key": LAVALAMP_IDEMPOTENCY_KEY,
+        "public_status": "done",
+        "created_at": "2026-08-12T18:10:00Z",
+        "updated_at": "2026-08-12T18:11:00Z",
+        "cleanup_status": "complete",
+        "reconciliation_history": [{"at": "2026-08-12T18:09:00Z", "reason": "prior"}],
+        "ota": {
+            "schema": "skeleton.home_edge.lavalamp_ota_receipt.v1",
+            "final_status": "DONE",
+            "source_artifact_hash": digest,
+            "byte_size": len(firmware_bytes),
+        },
+    }
+    if manifest_overrides:
+        manifest.update(manifest_overrides)
+    manifest_path = artifact_root / LAVALAMP_MANIFEST_NAME
+    if manifest_text is None:
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    else:
+        manifest_path.write_text(manifest_text, encoding="utf-8")
+    return artifact_root, digest
 
 
 def test_lavalamp_mismatch_blocks_before_commands(tmp_path: Path) -> None:
@@ -1507,3 +1571,159 @@ def test_lavalamp_verified_completion_does_not_reflash(
     assert action.executions == 0
     assert action.postflights == 1
     assert not any(call[0] == [sys.executable, "-m", "platformio", "run", "-e", LAVALAMP_PLATFORMIO_ENV] for call in fake.calls)
+
+
+def test_lavalamp_stale_done_remote_effects_missing_reconciles_to_pending_ota_and_stops(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    artifact_root, digest = _install_lavalamp_artifact(monkeypatch, tmp_path)
+    checkout = _source_checkout(tmp_path)
+    fake = FakeRepositoryRunner()
+    action = FakeFirmwareAction(postflight_error="REMOTE_EFFECTS_MISSING")
+
+    _code, output = RepositoryMaintenanceExecutor(
+        project_tree_path=_project_tree(tmp_path, checkout),
+        run_command=fake,
+        firmware_action=action,
+    ).execute(_lavalamp_task(payload__artifact_root=str(artifact_root)))
+
+    assert output.startswith("RESULT: BLOCKED")
+    receipt = json.loads(output.split("Receipt:\n", 1)[1])
+    assert receipt["reason"] == "REMOTE_EFFECTS_MISSING"
+    assert receipt["reconciled_manifest_status"] == "BUILT"
+    assert receipt["build_actions_after_reconciliation"] == 0
+    assert receipt["ota_actions_after_reconciliation"] == 0
+    assert str(artifact_root) not in output
+    manifest = json.loads((artifact_root / LAVALAMP_MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert manifest["status"] == "BUILT"
+    assert manifest["public_status"] == "artifact_built_pending_home_edge_ota"
+    assert "ota" not in manifest
+    assert manifest["source_sha"] == LAVALAMP_SOURCE_SHA
+    assert manifest["wled_commit"] == LAVALAMP_WLED_SHA
+    assert manifest["sha256"] == digest
+    assert manifest["byte_size"] == len(b"firmware-image")
+    assert manifest["approval_reference"] == LAVALAMP_APPROVAL_REFERENCE
+    assert manifest["idempotency_key"] == LAVALAMP_IDEMPOTENCY_KEY
+    assert manifest["reconciliation_history"][0] == {"at": "2026-08-12T18:09:00Z", "reason": "prior"}
+    assert manifest["reconciliation_history"][1]["reason"] == "REMOTE_EFFECTS_MISSING"
+    assert action.postflights == 1
+    assert action.executions == 0
+    assert fake.calls == []
+
+
+def test_lavalamp_verified_done_with_required_effects_keeps_manifest_without_rewrite(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    artifact_root, _digest = _install_lavalamp_artifact(monkeypatch, tmp_path)
+    manifest_path = artifact_root / LAVALAMP_MANIFEST_NAME
+    original_manifest_text = manifest_path.read_text(encoding="utf-8")
+    checkout = _source_checkout(tmp_path)
+    action = FakeFirmwareAction()
+
+    _code, output = RepositoryMaintenanceExecutor(
+        project_tree_path=_project_tree(tmp_path, checkout),
+        run_command=FakeRepositoryRunner(),
+        firmware_action=action,
+    ).execute(_lavalamp_task(payload__artifact_root=str(artifact_root)))
+
+    assert output.startswith("RESULT: DONE")
+    assert manifest_path.read_text(encoding="utf-8") == original_manifest_text
+    assert action.postflights == 1
+    assert action.executions == 0
+
+
+@pytest.mark.parametrize(
+    ("manifest_overrides", "manifest_text", "reason"),
+    (
+        ({"source_sha": "0" * 40}, None, "STALE_ARTIFACT_MANIFEST"),
+        (None, "{not-json", "STALE_ARTIFACT_MANIFEST"),
+    ),
+)
+def test_lavalamp_nonmatching_or_malformed_done_blocks_without_reconciliation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    manifest_overrides: dict[str, object] | None,
+    manifest_text: str | None,
+    reason: str,
+) -> None:
+    artifact_root, _digest = _install_lavalamp_artifact(
+        monkeypatch,
+        tmp_path,
+        manifest_overrides=manifest_overrides,
+        manifest_text=manifest_text,
+    )
+    manifest_path = artifact_root / LAVALAMP_MANIFEST_NAME
+    original_manifest_text = manifest_path.read_text(encoding="utf-8")
+    checkout = _source_checkout(tmp_path)
+    action = FakeFirmwareAction(postflight_error="REMOTE_EFFECTS_MISSING")
+
+    _code, output = RepositoryMaintenanceExecutor(
+        project_tree_path=_project_tree(tmp_path, checkout),
+        run_command=FakeRepositoryRunner(),
+        firmware_action=action,
+    ).execute(_lavalamp_task(payload__artifact_root=str(artifact_root)))
+
+    assert output.startswith("RESULT: BLOCKED")
+    assert reason in output
+    assert "stale_done_reconciled_to_pending_home_edge_ota" not in output
+    assert manifest_path.read_text(encoding="utf-8") == original_manifest_text
+    assert action.postflights == 0
+    assert action.executions == 0
+
+
+def test_lavalamp_unrelated_postflight_failure_blocks_without_reconciliation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    artifact_root, _digest = _install_lavalamp_artifact(monkeypatch, tmp_path)
+    manifest_path = artifact_root / LAVALAMP_MANIFEST_NAME
+    original_manifest_text = manifest_path.read_text(encoding="utf-8")
+    checkout = _source_checkout(tmp_path)
+    action = FakeFirmwareAction(postflight_error="OTA_UNVERIFIED")
+
+    _code, output = RepositoryMaintenanceExecutor(
+        project_tree_path=_project_tree(tmp_path, checkout),
+        run_command=FakeRepositoryRunner(),
+        firmware_action=action,
+    ).execute(_lavalamp_task(payload__artifact_root=str(artifact_root)))
+
+    assert output.startswith("RESULT: BLOCKED")
+    assert '"reason": "OTA_UNVERIFIED"' in output
+    assert "stale_done_reconciled_to_pending_home_edge_ota" not in output
+    assert manifest_path.read_text(encoding="utf-8") == original_manifest_text
+    assert action.postflights == 1
+    assert action.executions == 0
+
+
+def test_lavalamp_reconciliation_atomic_write_failure_leaves_done_manifest_intact(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    artifact_root, _digest = _install_lavalamp_artifact(monkeypatch, tmp_path)
+    manifest_path = artifact_root / LAVALAMP_MANIFEST_NAME
+    original_manifest_text = manifest_path.read_text(encoding="utf-8")
+    checkout = _source_checkout(tmp_path)
+    action = FakeFirmwareAction(postflight_error="REMOTE_EFFECTS_MISSING")
+    write_attempts = 0
+
+    def fail_write(path: Path, payload: object) -> None:
+        nonlocal write_attempts
+        write_attempts += 1
+        assert path == manifest_path
+        assert isinstance(payload, dict)
+        assert payload["status"] == "BUILT"
+        raise OSError("synthetic atomic replace failure")
+
+    monkeypatch.setattr(maintenance, "_atomic_write_json", fail_write)
+
+    _code, output = RepositoryMaintenanceExecutor(
+        project_tree_path=_project_tree(tmp_path, checkout),
+        run_command=FakeRepositoryRunner(),
+        firmware_action=action,
+    ).execute(_lavalamp_task(payload__artifact_root=str(artifact_root)))
+
+    assert output.startswith("RESULT: BLOCKED")
+    assert '"reason": "REPOSITORY_MAINTENANCE_FAILED"' in output
+    assert manifest_path.read_text(encoding="utf-8") == original_manifest_text
+    assert not (artifact_root / f"{LAVALAMP_MANIFEST_NAME}.tmp").exists()
+    assert write_attempts == 1
+    assert action.postflights == 1
+    assert action.executions == 0
