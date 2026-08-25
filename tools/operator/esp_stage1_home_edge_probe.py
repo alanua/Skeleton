@@ -6,6 +6,7 @@ import os
 import shlex
 import stat
 import subprocess
+import time
 from pathlib import Path
 
 ENV_FILE = Path("/etc/skeleton-runner.env")
@@ -25,14 +26,7 @@ def stop(reason: str) -> None:
     raise SystemExit(2)
 
 
-def parse_env(path: Path) -> dict[str, str]:
-    try:
-        st = path.lstat()
-        if not stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode):
-            stop("RUNNER_ENV_UNSAFE")
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        stop("RUNNER_ENV_UNAVAILABLE")
+def parse_env_text(text: str) -> dict[str, str]:
     result: dict[str, str] = {}
     for raw in text.splitlines():
         line = raw.strip()
@@ -41,13 +35,61 @@ def parse_env(path: Path) -> dict[str, str]:
         try:
             parts = shlex.split(line, comments=False, posix=True)
         except ValueError:
-            stop("RUNNER_ENV_PARSE_FAILED")
+            continue
         if len(parts) != 1 or "=" not in parts[0]:
             continue
         key, value = parts[0].split("=", 1)
         if key in ALLOWED_KEYS:
             result[key] = value
     return result
+
+
+def env_from_file(path: Path) -> dict[str, str]:
+    try:
+        st = path.lstat()
+        if not stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode):
+            return {}
+        return parse_env_text(path.read_text(encoding="utf-8"))
+    except OSError:
+        return {}
+
+
+def env_from_live_runner(timeout_seconds: float = 70.0) -> dict[str, str]:
+    deadline = time.monotonic() + timeout_seconds
+    uid = os.geteuid() if hasattr(os, "geteuid") else None
+    while time.monotonic() < deadline:
+        try:
+            proc_entries = sorted(Path("/proc").iterdir(), key=lambda p: p.name)
+        except OSError:
+            proc_entries = []
+        for entry in proc_entries:
+            if not entry.name.isdigit():
+                continue
+            try:
+                if uid is not None and entry.stat().st_uid != uid:
+                    continue
+                cmdline = (entry / "cmdline").read_bytes()
+                if b"runner_poll_github_tasks.py" not in cmdline:
+                    continue
+                raw = (entry / "environ").read_bytes()
+            except OSError:
+                continue
+            result: dict[str, str] = {}
+            for item in raw.split(b"\0"):
+                if not item or b"=" not in item:
+                    continue
+                key_b, value_b = item.split(b"=", 1)
+                try:
+                    key = key_b.decode("utf-8")
+                    value = value_b.decode("utf-8")
+                except UnicodeDecodeError:
+                    continue
+                if key in ALLOWED_KEYS:
+                    result[key] = value
+            if result:
+                return result
+        time.sleep(0.5)
+    return {}
 
 
 def safe_regular(path_text: str, reason: str) -> str:
@@ -63,7 +105,16 @@ def safe_regular(path_text: str, reason: str) -> str:
     return str(path)
 
 
-env = parse_env(ENV_FILE)
+env = env_from_file(ENV_FILE)
+required_direct = {
+    "SKELETON_HOME_EDGE_01_SSH_IDENTITY_FILE",
+    "SKELETON_HOME_EDGE_01_SSH_KNOWN_HOSTS_FILE",
+}
+if not required_direct.issubset(env):
+    env.update(env_from_live_runner())
+if not required_direct.issubset(env):
+    stop("RUNNER_RUNTIME_ENV_UNAVAILABLE")
+
 profile: dict[str, object] = {}
 profile_path = env.get("SKELETON_HOME_EDGE_01_PROFILE", "")
 if profile_path:
@@ -90,7 +141,7 @@ if not target_user or not tailscale_ip:
     stop("TARGET_UNAVAILABLE")
 
 remote = f'''from __future__ import annotations
-import json, os, shutil, stat, subprocess
+import json, shutil, stat, subprocess
 from pathlib import Path
 SOURCE_SHA={SOURCE_SHA!r}
 
@@ -109,7 +160,7 @@ def meta(path_text):
         return {{"exists":False,"safe":True}}
     kind="dir" if stat.S_ISDIR(st.st_mode) else "file" if stat.S_ISREG(st.st_mode) else "other"
     safe=(kind in {{"dir","file"}} and not stat.S_ISLNK(st.st_mode) and st.st_uid==0 and st.st_gid==0 and (stat.S_IMODE(st.st_mode)&0o022)==0)
-    return {{"exists":True,"safe":safe,"kind":kind,"mode":oct(stat.S_IMODE(st.st_mode))}}
+    return {{"exists":True,"safe":safe,"kind":kind}}
 
 os_id=""; os_version=""
 try:
