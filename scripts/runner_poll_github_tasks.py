@@ -52,6 +52,11 @@ from core.hermes_private_memory import (
     record_hermes_private_memory_note,
     write_hermes_private_memory_heartbeat,
 )
+from core.home_edge.esp_lab_activation import (
+    OPERATOR_APPROVAL_REF as HOME_EDGE_ESP_LAB_STAGE1_ACTIVATION_OPERATOR_APPROVAL,
+    TASK_ID as HOME_EDGE_ESP_LAB_STAGE1_ACTIVATION_TASK_ID,
+    activate_esp_lab_stage1,
+)
 from core.hermes_worker import run_hermes_memory_task_packet
 from core.loop_controller import LoopPolicy
 from core.loop_engine import LoopEngine
@@ -342,6 +347,9 @@ HOME_EDGE_AUDIT_PERSIST_V1 = "home_edge_audit_persist_v1"
 HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1 = "home_edge_01_debian_media_bootstrap_v1"
 HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1 = "home_edge_01_post_migration_reconcile_v1"
 HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1 = "home_edge_01_media_source_snapshot_v1"
+HOME_EDGE_01_ESP_LAB_STAGE1_ACTIVATION_V1 = (
+    HOME_EDGE_ESP_LAB_STAGE1_ACTIVATION_TASK_ID
+)
 HOME_EDGE_01_ESP_LAB_STAGE1_SIGNER_INSTALL_V1 = (
     HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID
 )
@@ -391,6 +399,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1,
         HOME_EDGE_01_POST_MIGRATION_RECONCILE_V1,
         HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1,
+        HOME_EDGE_01_ESP_LAB_STAGE1_ACTIVATION_V1,
         HOME_EDGE_01_ESP_LAB_STAGE1_SIGNER_INSTALL_V1,
         BUILD_AND_LOCAL_OTA_OPERATION,
         PREPARE_PRIVATE_STATIC_SITE_HANDOFF,
@@ -725,6 +734,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "excluded_secret_like_count",
         "external_side_effects_executed",
         "activation_executed",
+        "dependency_installed_by_operation",
+        "device_canary",
         "exact_base_changed_files_count",
         "evidence_ref",
         "existing_pr_lookup",
@@ -762,6 +773,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "hermes_memory_smoke_status",
         "host_id_sha256_12",
         "handoff_ref",
+        "idempotent_reuse",
         "input_row_count",
         "input_table_count",
         "installed_skill_platform_count",
@@ -895,6 +907,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "room_area_row_count",
         "row_count",
         "run_id",
+        "runtime_state",
         "runner_root_exists",
         "runner_status",
         "scanned_entry_count",
@@ -910,6 +923,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "skipped_worktrees_count",
         "source_issue",
         "source_issue_number",
+        "source_sha",
         "source_bytes",
         "source_identity",
         "source_pack_error_count",
@@ -15565,6 +15579,156 @@ def home_edge_01_media_source_snapshot_v1(body: str) -> str:
         )
 
 
+_HOME_EDGE_ESP_LAB_STAGE1_ACTIVATION_INPUT_FIELDS = frozenset(
+    (
+        "Mode",
+        "Maintenance Task ID",
+        "Repository",
+        "Expected Main SHA",
+        "Target",
+        "Operator Approval",
+    )
+)
+
+
+def _home_edge_esp_lab_stage1_activation_input(
+    body: str,
+) -> tuple[dict[str, str] | None, str | None]:
+    parsed: dict[str, str] = {}
+    metadata = (body or "").strip()
+    if not metadata:
+        return None, "esp_lab_stage1_activation_required_input_missing"
+    for raw_line in metadata.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = re.fullmatch(
+            r"(?P<field>[A-Za-z][A-Za-z0-9 ]*):\s*(?P<value>\S(?:.*\S)?)",
+            line,
+        )
+        if match is None:
+            return None, "esp_lab_stage1_activation_noncanonical_input"
+        field = match.group("field")
+        if field not in _HOME_EDGE_ESP_LAB_STAGE1_ACTIVATION_INPUT_FIELDS:
+            return None, "esp_lab_stage1_activation_unknown_input_field"
+        if field in parsed:
+            return None, "esp_lab_stage1_activation_duplicate_input_field"
+        parsed[field] = match.group("value")
+    if set(parsed) != _HOME_EDGE_ESP_LAB_STAGE1_ACTIVATION_INPUT_FIELDS:
+        return None, "esp_lab_stage1_activation_required_input_missing"
+    if parsed["Mode"] != RUNTIME_MAINTENANCE_MODE:
+        return None, "esp_lab_stage1_activation_mode_mismatch"
+    if parsed["Maintenance Task ID"] != HOME_EDGE_01_ESP_LAB_STAGE1_ACTIVATION_V1:
+        return None, "esp_lab_stage1_activation_task_id_mismatch"
+    if parsed["Repository"] != REPO:
+        return None, "esp_lab_stage1_activation_repository_mismatch"
+    if re.fullmatch(r"[0-9a-f]{40}", parsed["Expected Main SHA"]) is None:
+        return None, "esp_lab_stage1_activation_expected_main_sha_invalid"
+    if parsed["Target"] != "home-edge-01":
+        return None, "esp_lab_stage1_activation_target_mismatch"
+    if (
+        parsed["Operator Approval"]
+        != HOME_EDGE_ESP_LAB_STAGE1_ACTIVATION_OPERATOR_APPROVAL
+    ):
+        return None, "esp_lab_stage1_activation_operator_approval_mismatch"
+    return parsed, None
+
+
+def _home_edge_esp_lab_stage1_activation_result_lines(
+    result: Mapping[str, object],
+) -> list[str]:
+    lines: list[str] = []
+    for key in (
+        "schema",
+        "runtime_state",
+        "source_sha",
+        "candidate_count",
+        "device_canary",
+        "dependency_installed_by_operation",
+        "idempotent_reuse",
+        "reason",
+    ):
+        value = result.get(key)
+        if isinstance(value, bool):
+            lines.append(f"{key}={str(value).lower()}")
+        elif isinstance(value, int) and not isinstance(value, bool):
+            lines.append(f"{key}={value}")
+        elif isinstance(value, str):
+            lines.append(f"{key}={value}")
+    return lines
+
+
+def home_edge_01_esp_lab_stage1_activation_v1(body: str) -> str:
+    task_id = HOME_EDGE_01_ESP_LAB_STAGE1_ACTIVATION_V1
+    parsed, reason = _home_edge_esp_lab_stage1_activation_input(body)
+    if reason is not None or parsed is None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [f"reason={reason or 'esp_lab_stage1_activation_invalid_input'}"],
+            "not_met",
+        )
+
+    registered_checkout, status_lines, preflight_report = _mempalace_runtime_smoke_preflight(
+        task_id
+    )
+    if preflight_report is not None or registered_checkout is None:
+        return preflight_report or _maintenance_report(
+            "BLOCKED",
+            task_id,
+            ["reason=registered_skeleton_checkout_unavailable"],
+            "not_met",
+        )
+
+    checkout_path = registered_checkout.checkout_path
+    head_sha, failure_report = _read_skeleton_sha(
+        task_id,
+        checkout_path,
+        "HEAD",
+        status_lines,
+        "esp_lab_activation_read_checkout_head",
+    )
+    if failure_report is not None or head_sha is None:
+        return failure_report or _maintenance_report(
+            "BLOCKED",
+            task_id,
+            ["reason=esp_lab_activation_checkout_head_unavailable"],
+            "not_met",
+        )
+    origin_main_sha, failure_report = _read_skeleton_sha(
+        task_id,
+        checkout_path,
+        "origin/main",
+        status_lines,
+        "esp_lab_activation_read_origin_main",
+    )
+    if failure_report is not None or origin_main_sha is None:
+        return failure_report or _maintenance_report(
+            "BLOCKED",
+            task_id,
+            ["reason=esp_lab_activation_origin_main_unavailable"],
+            "not_met",
+        )
+
+    expected_main_sha = parsed["Expected Main SHA"].lower()
+    if head_sha != expected_main_sha or origin_main_sha != expected_main_sha:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=esp_lab_activation_expected_main_sha_mismatch"],
+            "not_met",
+        )
+
+    result = activate_esp_lab_stage1(repo_root=checkout_path)
+    success = result.get("status") == "DONE"
+    return _maintenance_report(
+        "DONE" if success else "BLOCKED",
+        task_id,
+        [*status_lines, *_home_edge_esp_lab_stage1_activation_result_lines(result)],
+        "met" if success else "not_met",
+    )
+
+
 _HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INPUT_FIELDS = frozenset(
     (
         "Mode",
@@ -16682,6 +16846,8 @@ def dispatch_runtime_maintenance_task(
             return home_edge_01_post_migration_reconcile_v1(body)
         if task_id == HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1:
             return home_edge_01_media_source_snapshot_v1(body)
+        if task_id == HOME_EDGE_01_ESP_LAB_STAGE1_ACTIVATION_V1:
+            return home_edge_01_esp_lab_stage1_activation_v1(body)
         if task_id == HOME_EDGE_01_ESP_LAB_STAGE1_SIGNER_INSTALL_V1:
             return home_edge_01_esp_lab_stage1_signer_install_v1(body)
         if task_id == PREPARE_PRIVATE_STATIC_SITE_HANDOFF:
