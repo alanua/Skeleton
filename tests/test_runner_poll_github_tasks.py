@@ -20367,16 +20367,21 @@ def test_gmail_primary_activation_blocks_before_reference_without_sync_approval(
 
 def test_gmail_primary_activation_blocks_on_reference_bootstrap_before_canary() -> None:
     preflight_patch, sha_patch = _gmail_readonly_preflight_patches(HEAD_SHA)
+    calls: list[str] = []
+
+    def fake_command(command, cwd=None):
+        del cwd
+        calls.append(" ".join(command))
+        if command == [runner._BITWARDEN_GMAIL_PRIMARY_REFERENCE_HELPER, "bootstrap"]:
+            return 1, "PRIVATE_UUID_11111111-2222-3333-4444-555555555555\n"
+        return 0, ""
+
     with (
         preflight_patch,
         sha_patch,
-        mock.patch.object(
-            runner,
-            "registered_bitwarden_reference_from_systemd_index",
-            side_effect=runner.SecretReferenceRegistrationError("REFERENCE_BOOTSTRAP_REQUIRED"),
-        ) as bind,
+        mock.patch.object(runner, "registered_bitwarden_reference_from_systemd_index") as bind,
         mock.patch.object(runner, "run_gmail_readonly_canary") as canary,
-        mock.patch.object(runner, "run_command") as command,
+        mock.patch.object(runner, "run_command", side_effect=fake_command),
     ):
         report = runner.dispatch_runtime_maintenance_task(
             runner.MAIL_GMAIL_PRIMARY_REGISTERED_ACTIVATION,
@@ -20385,10 +20390,15 @@ def test_gmail_primary_activation_blocks_on_reference_bootstrap_before_canary() 
         )
 
     assert runner.maintenance_report_status(report) == "BLOCKED"
-    assert "step=reference_bind status=failed reason=REFERENCE_BOOTSTRAP_REQUIRED" in report
-    assert bind.call_count == 1
+    assert "step=bootstrap_gmail_primary_reference_index status=failed exit_code=1" in report
+    assert "11111111-2222-3333-4444-555555555555" not in report
+    assert calls == [
+        "sudo -n systemctl disable --now skeleton-mail-operations.timer",
+        f"{runner._BITWARDEN_GMAIL_PRIMARY_REFERENCE_HELPER} preflight",
+        f"{runner._BITWARDEN_GMAIL_PRIMARY_REFERENCE_HELPER} bootstrap",
+    ]
+    bind.assert_not_called()
     canary.assert_not_called()
-    command.assert_not_called()
 
 
 def test_gmail_primary_activation_enables_worker_only_after_canary_passes() -> None:
@@ -20427,15 +20437,64 @@ def test_gmail_primary_activation_enables_worker_only_after_canary_passes() -> N
         )
 
     assert runner.maintenance_report_status(report) == "DONE"
-    assert "step=reference_bind status=done" in report
+    assert "step=canonical_reference_reread status=done" in report
     assert "step=gmail_readonly_canary status=done" in report
     assert bind.call_count == 1
     assert canary.call_count == 1
     assert calls == [
+        "sudo -n systemctl disable --now skeleton-mail-operations.timer",
+        f"{runner._BITWARDEN_GMAIL_PRIMARY_REFERENCE_HELPER} preflight",
+        f"{runner._BITWARDEN_GMAIL_PRIMARY_REFERENCE_HELPER} bootstrap",
         "sudo -n systemctl daemon-reload",
         "sudo -n systemctl enable skeleton-mail-operations.timer",
         "sudo -n systemctl start skeleton-mail-operations.timer",
         "sudo -n systemctl start skeleton-mail-operations.service",
         "sudo -n systemctl is-active --quiet skeleton-mail-operations.timer",
         "sudo -n systemctl show --property=Result --value skeleton-mail-operations.service",
+    ]
+
+
+def test_gmail_primary_activation_keeps_timer_disabled_on_canary_failure() -> None:
+    preflight_patch, sha_patch = _gmail_readonly_preflight_patches(HEAD_SHA)
+    calls: list[str] = []
+
+    def fake_command(command, cwd=None):
+        del cwd
+        calls.append(" ".join(command))
+        return 0, ""
+
+    with (
+        preflight_patch,
+        sha_patch,
+        mock.patch.object(
+            runner,
+            "registered_bitwarden_reference_from_systemd_index",
+            return_value=SecretReference(
+                provider="bitwarden",
+                reference_id="11111111-2222-3333-4444-555555555555",
+            ),
+        ),
+        mock.patch.object(
+            runner,
+            "run_gmail_readonly_canary",
+            return_value=runner.blocked_gmail_readonly_receipt(
+                account_alias="acct:gmail-primary",
+                reason_code="GMAIL_READONLY_PROVIDER_FAILURE",
+            ),
+        ),
+        mock.patch.object(runner, "run_command", side_effect=fake_command),
+    ):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.MAIL_GMAIL_PRIMARY_REGISTERED_ACTIVATION,
+            "/synthetic",
+            _gmail_primary_activation_body(),
+        )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "step=gmail_readonly_canary status=failed" in report
+    assert calls == [
+        "sudo -n systemctl disable --now skeleton-mail-operations.timer",
+        f"{runner._BITWARDEN_GMAIL_PRIMARY_REFERENCE_HELPER} preflight",
+        f"{runner._BITWARDEN_GMAIL_PRIMARY_REFERENCE_HELPER} bootstrap",
+        "sudo -n systemctl daemon-reload",
     ]
