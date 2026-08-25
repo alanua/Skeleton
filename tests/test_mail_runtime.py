@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -104,6 +105,20 @@ def test_production_gmail_missing_registered_credential_does_not_fall_back(monke
     monkeypatch.setattr(mail_operations_worker, "build_registered_gmail_provider", blocked)
     with pytest.raises(RuntimeError, match="registered credential missing"):
         mail_operations_worker._provider(account, None)
+
+
+def test_mail_worker_unit_loads_canonical_encrypted_credentials() -> None:
+    root = Path(__file__).resolve().parents[1]
+    unit = (root / "ops" / "systemd" / "skeleton-mail-operations.service").read_text(encoding="utf-8")
+
+    assert (
+        "LoadCredentialEncrypted=bitwarden-access-token:"
+        "/etc/credstore.encrypted/bitwarden-access-token"
+    ) in unit
+    assert (
+        "LoadCredentialEncrypted=skeleton-secret-reference-index:"
+        "/etc/credstore.encrypted/skeleton-secret-reference-index"
+    ) in unit
 
 
 def test_explicit_fixture_mode_remains_offline_and_deterministic(tmp_path) -> None:

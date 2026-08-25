@@ -16421,6 +16421,9 @@ _MAIL_GMAIL_ACTIVATION_APPROVAL = (
 )
 _MAIL_GMAIL_SERVICE = "skeleton-mail-operations.service"
 _MAIL_GMAIL_TIMER = "skeleton-mail-operations.timer"
+_BITWARDEN_GMAIL_PRIMARY_REFERENCE_HELPER = (
+    "/opt/skeleton-bitwarden-sdk-runtime/bin/bitwarden-gmail-primary-reference-helper"
+)
 
 
 def _mail_gmail_activation_input(
@@ -16489,6 +16492,16 @@ def mail_gmail_primary_registered_activation_v1(body: str) -> str:
         "step=exact_main_preflight status=done",
         "account_alias=acct:gmail-primary",
     ]
+    for step, command in (
+        ("disable_mail_timer", _non_interactive_sudo("systemctl", "disable", "--now", _MAIL_GMAIL_TIMER)),
+        ("bitwarden_sdk_helper_preflight", [_BITWARDEN_GMAIL_PRIMARY_REFERENCE_HELPER, "preflight"]),
+        ("bootstrap_gmail_primary_reference_index", [_BITWARDEN_GMAIL_PRIMARY_REFERENCE_HELPER, "bootstrap"]),
+        ("systemd_credential_reload_boundary", _non_interactive_sudo("systemctl", "daemon-reload")),
+    ):
+        report = _run_maintenance_command(task_id, step, command, status_lines)
+        if report is not None:
+            return report
+
     try:
         registered_bitwarden_reference_from_systemd_index(
             os.environ,
@@ -16500,10 +16513,10 @@ def mail_gmail_primary_registered_activation_v1(body: str) -> str:
         return _maintenance_report(
             "BLOCKED",
             task_id,
-            [*status_lines, f"step=reference_bind status=failed reason={str(exc)}"],
+            [*status_lines, f"step=canonical_reference_reread status=failed reason={str(exc)}"],
             "not_met",
         )
-    status_lines.append("step=reference_bind status=done")
+    status_lines.append("step=canonical_reference_reread status=done")
 
     try:
         receipt = run_gmail_readonly_canary(
@@ -16533,7 +16546,6 @@ def mail_gmail_primary_registered_activation_v1(body: str) -> str:
     status_lines.append("step=gmail_readonly_canary status=done")
 
     for step, command in (
-        ("systemd_daemon_reload", _non_interactive_sudo("systemctl", "daemon-reload")),
         ("enable_mail_timer", _non_interactive_sudo("systemctl", "enable", _MAIL_GMAIL_TIMER)),
         ("start_mail_timer", _non_interactive_sudo("systemctl", "start", _MAIL_GMAIL_TIMER)),
         ("start_mail_worker_once", _non_interactive_sudo("systemctl", "start", _MAIL_GMAIL_SERVICE)),
