@@ -327,6 +327,8 @@ def _decode_payload_body(item: Any, *, path: str, sha256: str) -> bytes:
 
 
 def public_result_from_executor_receipt(receipt: Mapping[str, Any]) -> dict[str, object]:
+    if receipt.get("status") == "failed" and _nonzero_int(receipt.get("exit_code")):
+        return _blocked_stage1_result_from_executor_stdout(receipt)
     if receipt.get("status") != "ok" or receipt.get("exit_code") != 0:
         return _blocked_result("executor_receipt_not_ok")
     stdout = receipt.get("stdout")
@@ -342,6 +344,22 @@ def public_result_from_executor_receipt(receipt: Mapping[str, Any]) -> dict[str,
         return sanitize_activation_result(decoded)
     except ValueError:
         return _blocked_result("executor_public_result_unsafe")
+
+
+def _blocked_stage1_result_from_executor_stdout(receipt: Mapping[str, Any]) -> dict[str, object]:
+    stdout = receipt.get("stdout")
+    if not isinstance(stdout, str) or len(stdout.encode("utf-8")) > MAX_EXECUTOR_OUTPUT_BYTES:
+        return _blocked_result("executor_receipt_not_ok")
+    try:
+        decoded = json.loads(stdout)
+    except json.JSONDecodeError:
+        return _blocked_result("executor_receipt_not_ok")
+    if not isinstance(decoded, Mapping):
+        return _blocked_result("executor_receipt_not_ok")
+    try:
+        return sanitize_blocked_activation_result(decoded)
+    except ValueError:
+        return _blocked_result("executor_receipt_not_ok")
 
 
 def sanitize_activation_result(result: Mapping[str, Any]) -> dict[str, object]:
@@ -371,6 +389,39 @@ def sanitize_activation_result(result: Mapping[str, Any]) -> dict[str, object]:
     public = dict(result)
     public["status"] = "DONE"
     public["reason"] = "completed"
+    for key, value in public.items():
+        if isinstance(value, str) and PUBLIC_VALUE_RE.fullmatch(value) is None:
+            raise ValueError(f"activation_result_{key}_unsafe")
+    return public
+
+
+def sanitize_blocked_activation_result(result: Mapping[str, Any]) -> dict[str, object]:
+    required = [
+        "schema",
+        "status",
+        "reason",
+        "runtime_state",
+        "source_sha",
+        "candidate_count",
+        "device_canary",
+        "dependency_installed_by_operation",
+        "idempotent_reuse",
+    ]
+    if list(result.keys()) != required:
+        raise ValueError("activation_result_keys_invalid")
+    if result["schema"] != RESULT_SCHEMA:
+        raise ValueError("activation_result_schema_invalid")
+    if result["status"] != "BLOCKED" or result["runtime_state"] != "BLOCKED":
+        raise ValueError("activation_result_state_invalid")
+    if result["source_sha"] != APPROVED_SOURCE_SHA:
+        raise ValueError("activation_result_source_invalid")
+    if result["candidate_count"] != 0 or isinstance(result["candidate_count"], bool):
+        raise ValueError("activation_result_candidate_count_invalid")
+    if result["device_canary"] != "unknown":
+        raise ValueError("activation_result_canary_invalid")
+    if result["dependency_installed_by_operation"] is not False or result["idempotent_reuse"] is not False:
+        raise ValueError("activation_result_bool_invalid")
+    public = dict(result)
     for key, value in public.items():
         if isinstance(value, str) and PUBLIC_VALUE_RE.fullmatch(value) is None:
             raise ValueError(f"activation_result_{key}_unsafe")
@@ -439,6 +490,10 @@ def _git(repo_root: Path, *args: str) -> bytes:
 def _git_blob_sha1(data: bytes) -> str:
     header = f"blob {len(data)}\0".encode("ascii")
     return hashlib.sha1(header + data, usedforsecurity=False).hexdigest()
+
+
+def _nonzero_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value != 0
 
 
 def _blocked_result(reason: str) -> dict[str, object]:
