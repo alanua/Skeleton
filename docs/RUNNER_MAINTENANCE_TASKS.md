@@ -199,6 +199,57 @@ CMS byte size, encrypted-result CMS SHA-256, a validated
 Tailscale hostname, DNS name, URL, plaintext result JSON, private keys,
 environment values, or OpenSSL/Tailscale diagnostic output.
 
+`home_edge_01_esp_lab_stage1_signer_install_v1` installs only the reviewed Home
+Edge ESP Lab Stage1 activation signer installer. It requires exactly:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: home_edge_01_esp_lab_stage1_signer_install_v1
+Repository: alanua/Skeleton
+Expected Main SHA: <current exact 40-hex main commit>
+Target: runner-controller
+Operator Approval: EXACT_HEAD_HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_APPROVED
+```
+
+The issue cannot choose a source path, ref, command, user, package, service,
+destination, sudo argv, or installer argv. The Runner verifies the registered
+canonical Skeleton checkout is clean and that `Expected Main SHA`, registered
+clean `main`, GitHub current `main`, checkout `HEAD`, and checkout `origin/main`
+are the same exact commit before privilege. The executor independently verifies
+GitHub current `main` with a non-mutating fixed
+`git ls-remote --exit-code origin refs/heads/main` query and accepts only one
+canonical `<40hex>\trefs/heads/main` result equal to `Expected Main SHA`; network
+errors, malformed output, multiple rows, or mismatch fail closed before sudo. The
+previously reviewed merge source
+`8e049eb631f63d81ab932eac6ab0cf3d3d5a5949` is a trusted source ancestor, not a
+forever-live main requirement; it must remain an ancestor of current main. The
+Runner also verifies that the reviewed installer path at current main resolves to
+the exact reviewed Git blob/type/mode. It copies only the exact immutable Git blob for
+`scripts/install_home_edge_esp_lab_activation_signer.sh` into a private staging
+file, verifies the staged installer as a non-symlink regular file with exact
+owner, mode, and content hash, and inspects only the fixed protected destination
+parent with no-follow semantics before privilege. That parent may be absent for
+first bootstrap, or it must already be an exact non-symlink root-owned directory
+with mode `0755`; symlink, non-directory, ownership, or mode drift fails closed
+before the protected copy. The Runner installs the staged file to the fixed
+protected path with noninteractive `sudo -n /usr/bin/install -D -o root -g root
+-m 0555`, then verifies both the fixed protected parent and protected installer
+again with exact owner, mode, and content hash. It re-checks authority/source
+state and repeats the fresh non-mutating remote-main verification immediately
+before privileged execution, and executes only that protected installer as:
+
+```text
+/usr/bin/sudo -n /usr/local/libexec/skeleton/home-edge/esp-lab-stage1-installer/install_home_edge_esp_lab_activation_signer.sh --repo-root <registered-canonical-checkout>
+```
+
+Post-audit checks only the fixed signer executable, payload, Stage1 installer,
+and sudoers entry as named non-symlink regular files with exact owner, mode, and
+expected content hash. The sudoers body stays private; public output is limited
+to aggregate status, public-safe hashes, fixed identifiers, and booleans. The
+task never reads or exposes HMAC
+credential content and never runs ESP activation, Home Edge requests, device
+discovery, flashing, or downstream actions.
+
 `sync_telegram_callback_poller_runtime` may only:
 
 1. Stop `skeleton-telegram-callback-poll.timer` and
