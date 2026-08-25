@@ -8,6 +8,7 @@ import json
 import re
 from typing import Any, Final
 
+from core.mail_security import MailSecurityAssessment, MailSecurityCategory, assess_mail_security
 from core.scheduler_models import SCHEDULE_SCHEMA, ScheduleSpec
 from core.shared_dispatch import PRIVACY_PUBLIC_SAFE
 
@@ -60,6 +61,16 @@ _PRIVATE_KEYS = frozenset(
         "mailbox",
         "email",
         "address",
+        "security_metadata",
+    }
+)
+_SECURITY_NO_REPLY_CATEGORIES = frozenset(
+    {
+        MailSecurityCategory.PHISHING.value,
+        MailSecurityCategory.SCAM.value,
+        MailSecurityCategory.PSEUDO_INKASSO.value,
+        MailSecurityCategory.IDENTITY_MISUSE_SUSPECTED.value,
+        MailSecurityCategory.OFFICIAL_LEGAL_NOTICE.value,
     }
 )
 
@@ -81,6 +92,7 @@ class MailEnvelope:
     deadline_hint: str | None = None
     sender_ref: str | None = None
     thread_ref: str | None = None
+    security_metadata: Mapping[str, Any] | None = None
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "MailEnvelope":
@@ -101,6 +113,7 @@ class MailEnvelope:
             deadline_hint=_optional_text(value.get("deadline_hint"), "deadline_hint", 256),
             sender_ref=_optional_text(value.get("sender_ref"), "sender_ref", 256),
             thread_ref=_optional_text(value.get("thread_ref"), "thread_ref", 256),
+            security_metadata=_optional_mapping(value.get("security_metadata"), "security_metadata"),
         )
 
     @property
@@ -175,17 +188,40 @@ def process_important_mail(
     _non_negative_int(now, "now")
     mail = MailEnvelope.from_mapping(envelope)
     normalized = normalize_correspondence(mail, case_namespace=case_namespace)
-    if not normalized.important:
+    policy = classify_mail_policy(mail)
+    security = assess_mail_security(
+        message_hash=normalized.message_hash,
+        case_ref=normalized.case_ref,
+        correspondence_ref=normalized.correspondence_ref,
+        provider=mail.provider,
+        policy_category=policy.category,
+        subject_hint=mail.subject_hint,
+        body_preview=mail.body_preview,
+        metadata=mail.security_metadata,
+    )
+    if not normalized.important and not security.needs_operator:
         return _public_receipt(
             status="IGNORED",
             reason="MAIL_NOT_IMPORTANT",
             normalized=normalized,
+            security_assessment=security.to_mapping(),
+            operator_packet=None,
+            scheduler_checkpoint=None,
+            draft_revision=None,
+        )
+    if security.category == MailSecurityCategory.SPAM:
+        return _public_receipt(
+            status="IGNORED",
+            reason="ROUTINE_SPAM_SUPPRESSED",
+            normalized=normalized,
+            security_assessment=security.to_mapping(),
             operator_packet=None,
             scheduler_checkpoint=None,
             draft_revision=None,
         )
 
-    draft = build_semantic_draft_revision(normalized, mail)
+    no_reply = security.category.value in _SECURITY_NO_REPLY_CATEGORIES
+    draft = None if no_reply else build_semantic_draft_revision(normalized, mail)
     checkpoint = (
         build_scheduler_deadline_checkpoint(normalized, mail, now=now)
         if normalized.deadline_at is not None
@@ -196,15 +232,21 @@ def process_important_mail(
         mail,
         draft_revision=draft,
         scheduler_checkpoint=checkpoint,
+        security_assessment=security,
         operator_language=operator_language,
     )
     return _public_receipt(
         status="NEEDS_OPERATOR",
-        reason="IMPORTANT_MAIL_REVIEW_REQUIRED",
+        reason=(
+            "MAIL_SECURITY_REVIEW_REQUIRED"
+            if security.category.value in _SECURITY_NO_REPLY_CATEGORIES
+            else "IMPORTANT_MAIL_REVIEW_REQUIRED"
+        ),
         normalized=normalized,
+        security_assessment=security.to_mapping(),
         operator_packet=operator_packet,
         scheduler_checkpoint=checkpoint.to_mapping() if checkpoint is not None else None,
-        draft_revision=draft.to_mapping(),
+        draft_revision=None if draft is None else draft.to_mapping(),
     )
 
 
@@ -417,22 +459,36 @@ def build_ukrainian_operator_packet(
     normalized: NormalizedCorrespondence,
     envelope: MailEnvelope | Mapping[str, Any],
     *,
-    draft_revision: SemanticDraftRevision,
+    draft_revision: SemanticDraftRevision | None,
     scheduler_checkpoint: ScheduleSpec | None,
+    security_assessment: MailSecurityAssessment | Mapping[str, Any] | None = None,
     operator_language: str = "uk",
 ) -> dict[str, Any]:
     mail = envelope if isinstance(envelope, MailEnvelope) else MailEnvelope.from_mapping(envelope)
     if operator_language != "uk":
         raise MailOperationError("UNSUPPORTED_OPERATOR_LANGUAGE", "operator presentation must be Ukrainian")
-    actions = [
-        {
-            "id": "approve_reply",
-            "label_uk": "Схвалити відповідь",
-            "requires_semantic_hash": draft_revision.approved_semantic_hash,
-        },
-        {"id": "revise_reply", "label_uk": "Уточнити відповідь"},
-        {"id": "defer", "label_uk": "Відкласти"},
-    ]
+    security_mapping = _security_mapping(security_assessment)
+    security_category = security_mapping.get("category")
+    no_reply = security_category in _SECURITY_NO_REPLY_CATEGORIES
+    if no_reply:
+        actions = [
+            {"id": "open_private_case", "label_uk": "Відкрити приватну справу"},
+            {"id": "search_private_evidence", "label_uk": "Перевірити докази"},
+            {"id": "defer", "label_uk": "Відкласти"},
+            {"id": "mark_false_positive", "label_uk": "Позначити як хибний сигнал"},
+        ]
+    else:
+        if draft_revision is None:
+            raise MailOperationError("MISSING_DRAFT_REVISION", "operator reply packet requires draft revision")
+        actions = [
+            {
+                "id": "approve_reply",
+                "label_uk": "Схвалити відповідь",
+                "requires_semantic_hash": draft_revision.approved_semantic_hash,
+            },
+            {"id": "revise_reply", "label_uk": "Уточнити відповідь"},
+            {"id": "defer", "label_uk": "Відкласти"},
+        ]
     if scheduler_checkpoint is not None:
         actions.append({"id": "confirm_deadline", "label_uk": "Підтвердити дедлайн"})
     summary = _ukrainian_summary(normalized, mail)
@@ -445,15 +501,20 @@ def build_ukrainian_operator_packet(
         "source_language": normalized.source_language,
         "summary_uk": summary,
         "policy": policy.to_mapping(),
-        "explanation_uk": "Лист позначено як важливий локальними правилами. Жодних живих читань або відправок не виконано.",
+        "security_assessment": security_mapping or None,
+        "explanation_uk": (
+            "Лист потребує перевірки без відповіді, оплати, переходу за посиланнями або визнання боргу."
+            if no_reply
+            else "Лист позначено як важливий локальними правилами. Жодних живих читань або відправок не виконано."
+        ),
         "telegram_reply_contract": {
-            "actionable": True,
+            "actionable": not bool(security_mapping.get("suppress_telegram")),
             "allowed_actions": actions,
             "requires_callback": True,
             "public_safe": True,
         },
-        "draft_ref": draft_revision.draft_ref,
-        "approved_semantic_hash": draft_revision.approved_semantic_hash,
+        "draft_ref": None if draft_revision is None else draft_revision.draft_ref,
+        "approved_semantic_hash": None if draft_revision is None else draft_revision.approved_semantic_hash,
         "scheduler_checkpoint_id": (
             _checkpoint_id(normalized) if scheduler_checkpoint is not None else None
         ),
@@ -469,6 +530,7 @@ def _public_receipt(
     status: str,
     reason: str,
     normalized: NormalizedCorrespondence,
+    security_assessment: Mapping[str, Any] | None,
     operator_packet: Mapping[str, Any] | None,
     scheduler_checkpoint: Mapping[str, Any] | None,
     draft_revision: Mapping[str, Any] | None,
@@ -483,6 +545,7 @@ def _public_receipt(
         "source_language": normalized.source_language,
         "important": normalized.important,
         "deadline_at": normalized.deadline_at,
+        "security_assessment": security_assessment,
         "operator_packet": operator_packet,
         "scheduler_checkpoint": scheduler_checkpoint,
         "draft_revision": draft_revision,
@@ -586,10 +649,26 @@ def _optional_text(value: Any, field: str, limit: int) -> str | None:
     return _bounded_text(value, field, limit)
 
 
+def _optional_mapping(value: Any, field: str) -> Mapping[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise MailOperationError("INVALID_MAPPING", f"{field} must be an object")
+    return dict(value)
+
+
 def _non_negative_int(value: Any, field: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise MailOperationError("INVALID_INTEGER", f"{field} must be a non-negative integer")
     return value
+
+
+def _security_mapping(value: MailSecurityAssessment | Mapping[str, Any] | None) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if isinstance(value, MailSecurityAssessment):
+        return value.to_mapping()
+    return dict(value)
 
 
 def _hash(value: Any, field: str) -> str:
