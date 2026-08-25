@@ -199,8 +199,16 @@ CMS byte size, encrypted-result CMS SHA-256, a validated
 Tailscale hostname, DNS name, URL, plaintext result JSON, private keys,
 environment values, or OpenSSL/Tailscale diagnostic output.
 
-`home_edge_01_esp_lab_stage1_signer_install_v1` installs only the reviewed Home
-Edge ESP Lab Stage1 activation signer installer. It requires exactly:
+`home_edge_01_esp_lab_stage1_signer_install_v1` is now the first production
+action registered behind the Runner controller privileged gateway. Unprivileged
+maintenance code reaches it only through the fixed gateway sudo argv
+`/usr/bin/sudo -n /usr/local/libexec/skeleton/runner-controller/privileged-gateway`;
+the optional SSH path is a forced-command transport into the same typed JSON
+request and does not expose shell, PTY, forwarding, agent forwarding, root
+login, or issue-controlled command input.
+
+The action installs only the reviewed Home Edge ESP Lab Stage1 activation signer
+installer. It requires exactly:
 
 ```text
 Mode: RUNTIME_MAINTENANCE_TASK

@@ -802,6 +802,62 @@ def test_esp_lab_stage1_signer_success_audits_fixed_artifacts_and_does_not_activ
     assert len(calls) == 2
 
 
+def test_esp_lab_stage1_signer_default_uses_only_fixed_gateway_sudo_argv(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import core.runner_controller_privileged_gateway as gateway
+
+    calls: list[tuple[str, ...]] = []
+
+    class FakeGatewayTransport:
+        argv = gateway.LOCAL_SUDO_GATEWAY_ARGV
+
+        def submit(self, request: object) -> tuple[int, bytes]:
+            calls.append(self.argv)
+            assert isinstance(request, dict)
+            assert "argv" not in request
+            assert "env" not in request
+            assert "path" not in request
+            receipt = {
+                "schema": gateway.RECEIPT_SCHEMA_ID,
+                "status": "NEEDS_OPERATOR",
+                "reason": "SYNTHETIC_BLOCK",
+                "action_id": maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID,
+                "repository": "alanua/Skeleton",
+                "target": "runner-controller",
+                "request_hash": "a" * 64,
+                "expected_main_sha": maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA,
+                "source_blob": maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_BLOB,
+                "protected_copy_verified": False,
+                "installed_artifacts_verified": False,
+                "activation_executed": False,
+                "private_evidence_exposed": False,
+                "stderr_exposed": False,
+                "env_exposed": False,
+                "private_paths_exposed": False,
+                "external_side_effects_executed": False,
+                "receipt_hash": "b" * 64,
+            }
+            return 0, json.dumps(receipt).encode("utf-8")
+
+    monkeypatch.setattr(gateway, "LocalSudoGatewayTransport", FakeGatewayTransport)
+    sha = maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA
+
+    _code, report = maintenance.execute_home_edge_esp_lab_stage1_signer_install(
+        expected_main_sha=sha,
+        registered_clean_main_sha=sha,
+        github_main_sha=sha,
+        checkout_path=tmp_path,
+        checkout_head_sha=sha,
+        checkout_origin_main_sha=sha,
+    )
+
+    assert "RESULT: NEEDS_OPERATOR" in report
+    assert "SYNTHETIC_BLOCK" in report
+    assert calls == [gateway.LOCAL_SUDO_GATEWAY_ARGV]
+
+
 def test_control_plane_recovery_wires_fixed_actions_without_hermes_substitution(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     calls: list[str] = []
 

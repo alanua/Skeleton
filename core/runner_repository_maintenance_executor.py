@@ -688,9 +688,18 @@ def execute_home_edge_esp_lab_stage1_signer_install(
     checkout_head_sha: str,
     checkout_origin_main_sha: str,
     run_command: RepositoryRunCommand = _repository_run_command,
-    protected_run_command: ProtectedRunCommand = _run_protected_command,
+    protected_run_command: ProtectedRunCommand | None = None,
     before_protected_copy: Callable[[Path], None] | None = None,
 ) -> tuple[int, str]:
+    if protected_run_command is None:
+        return _execute_home_edge_esp_lab_stage1_signer_install_via_gateway(
+            expected_main_sha=expected_main_sha,
+            registered_clean_main_sha=registered_clean_main_sha,
+            github_main_sha=github_main_sha,
+            checkout_path=checkout_path,
+            checkout_head_sha=checkout_head_sha,
+            checkout_origin_main_sha=checkout_origin_main_sha,
+        )
     staged: Path | None = None
     installer_sha256: str | None = None
     try:
@@ -826,6 +835,65 @@ def execute_home_edge_esp_lab_stage1_signer_install(
     finally:
         if staged is not None:
             shutil.rmtree(staged.parent, ignore_errors=True)
+
+
+def _execute_home_edge_esp_lab_stage1_signer_install_via_gateway(
+    *,
+    expected_main_sha: str,
+    registered_clean_main_sha: str,
+    github_main_sha: str,
+    checkout_path: Path,
+    checkout_head_sha: str,
+    checkout_origin_main_sha: str,
+) -> tuple[int, str]:
+    try:
+        from core.runner_controller_privileged_gateway import (
+            LocalSudoGatewayTransport,
+            build_gateway_request,
+        )
+
+        request = build_gateway_request(
+            request_id=(
+                f"{HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID}:"
+                f"{expected_main_sha}:runner-controller"
+            ),
+            idempotency_key=(
+                f"runner-controller-privileged-gateway-{expected_main_sha[:12]}-"
+                "esp-stage1-signer"
+            ),
+            expected_main_sha=expected_main_sha,
+            registered_clean_main_sha=registered_clean_main_sha,
+            github_main_sha=github_main_sha,
+            checkout_path=checkout_path,
+            checkout_head_sha=checkout_head_sha,
+            checkout_origin_main_sha=checkout_origin_main_sha,
+        )
+        code, output = LocalSudoGatewayTransport().submit(request)
+        if code != 0:
+            return _protected_blocked("PRIVILEGED_GATEWAY_UNAVAILABLE")
+        gateway_receipt = json.loads(output.decode("utf-8"))
+        if not isinstance(gateway_receipt, Mapping):
+            return _protected_blocked("PRIVILEGED_GATEWAY_RECEIPT_INVALID")
+        status = "DONE" if gateway_receipt.get("status") == "DONE" else "NEEDS_OPERATOR"
+        receipt = _protected_receipt(
+            status,
+            str(gateway_receipt.get("reason") or "PRIVILEGED_GATEWAY_BLOCKED"),
+            expected_main_sha=(
+                str(gateway_receipt.get("expected_main_sha"))
+                if isinstance(gateway_receipt.get("expected_main_sha"), str)
+                else expected_main_sha
+            ),
+            installer_sha256=(
+                str(gateway_receipt.get("installer_sha256"))
+                if isinstance(gateway_receipt.get("installer_sha256"), str)
+                else None
+            ),
+            artifacts_ok=gateway_receipt.get("installed_artifacts_verified") is True,
+        )
+        receipt["protected_copy_verified"] = gateway_receipt.get("protected_copy_verified") is True
+        return 0, _protected_result(status, receipt)
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError, ValueError):
+        return _protected_blocked("PRIVILEGED_GATEWAY_UNAVAILABLE")
 
 
 @dataclass(frozen=True)
