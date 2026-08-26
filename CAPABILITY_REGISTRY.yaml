@@ -408,6 +408,7 @@ capabilities:
     protected: true
     requires:
       - core/runner_controller_privileged_gateway_hardening.py
+      - core/runner_controller_privileged_gateway.py
       - core/home_edge/esp_lab_stage1_signer_install.py
       - scripts/runner_controller_privileged_gateway.py
       - scripts/install_runner_controller_privileged_gateway.sh
