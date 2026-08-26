@@ -43,7 +43,7 @@ def _request(**overrides: object) -> dict[str, object]:
         "expires_at": (NOW + timedelta(seconds=120)).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "repository": "alanua/Skeleton",
         "target": "runner-controller",
-        "operator_approval": "EXACT_HEAD_HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_APPROVED",
+        "operator_approval": gateway.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_OPERATOR_APPROVAL,
         "expected_main_sha": SHA,
         "registered_clean_main_sha": SHA,
         "github_main_sha": SHA,
@@ -60,7 +60,7 @@ def _executor_report(status: str = "DONE", reason: str = "SIGNER_INSTALLATION_VE
         "status": status,
         "reason": reason,
         "expected_main_sha": SHA,
-        "source_blob": "7ed95f5ba6d274451f62cfc31f88bc204eaaa386",
+        "source_blob": "ef285000113c1254170b8924b4c3ab8d82250423",
         "installer_sha256": "a" * 64,
         "protected_copy_verified": status == "DONE",
         "installed_artifacts_verified": status == "DONE",
@@ -299,6 +299,15 @@ def test_installer_live_account_is_locked_valid_shell_and_no_generic_root_shell(
     assert 'passwd -l "$SSH_USER" >/dev/null 2>&1 || block "ssh-account-lock-failed"' in text
     assert 'useradd --system --home-dir /nonexistent --shell "$SSH_SHELL" --no-create-home "$SSH_USER"' in text
     assert 'usermod --home /nonexistent --shell "$SSH_SHELL" "$SSH_USER"' in text
+    assert '$RUNNER_USER ALL=(root) NOPASSWD: $EXEC_ROOT/privileged-gateway ""\n' in text
+    assert '$SSH_USER ALL=(root) NOPASSWD: $EXEC_ROOT/privileged-gateway ""\n' in text
     assert "PermitRootLogin" not in text
     assert "sudo bash" not in text
     assert "bash -c" not in text
+
+
+def test_privileged_wrapper_imports_only_from_production_install_root() -> None:
+    text = (ROOT / "scripts/runner_controller_privileged_gateway.py").read_text(encoding="utf-8")
+    assert 'INSTALL_ROOT = Path("/usr/local/lib/skeleton/runner-controller")' in text
+    assert 'Path(__file__).resolve().parents' not in text
+    assert "INSTALL_ROOTS" not in text

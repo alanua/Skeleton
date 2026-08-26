@@ -68,9 +68,9 @@ actions:
     handler: home_edge_esp_lab_stage1_signer_install
     repository: alanua/Skeleton
     target: runner-controller
-    operator_approval: EXACT_HEAD_HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_APPROVED
+    operator_approval: EXACT_HEAD_HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_V2_APPROVED
     source_path: scripts/install_home_edge_esp_lab_activation_signer.sh
-    source_blob: 7ed95f5ba6d274451f62cfc31f88bc204eaaa386
+    source_blob: ef285000113c1254170b8924b4c3ab8d82250423
     source_mode: "100755"
     trusted_source_ancestor_sha: 8e049eb631f63d81ab932eac6ab0cf3d3d5a5949
     destination: /usr/local/libexec/skeleton/home-edge/esp-lab-stage1-installer/install_home_edge_esp_lab_activation_signer.sh
