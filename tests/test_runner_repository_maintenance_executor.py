@@ -241,7 +241,8 @@ def _esp_signer_git_runner(
 
     def run_command(args, cwd, timeout, env):
         del cwd, timeout, env
-        if args == ["git", "ls-remote", "--exit-code", "origin", "refs/heads/main"]:
+        args = ["git", *args[1:]] if args and args[0] == "/usr/bin/git" else args
+        if args[:3] == ["git", "ls-remote", "--exit-code"] and args[-1:] == ["refs/heads/main"]:
             if remote_results:
                 return remote_results.pop(0)
             return 0, f"{current_main_sha}\trefs/heads/main\n"
@@ -291,7 +292,7 @@ def _esp_signer_git_runner(
 def test_esp_lab_stage1_signer_trust_chain_pins_match_recomputed_blobs() -> None:
     assert (
         maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_BLOB
-        == "7ed95f5ba6d274451f62cfc31f88bc204eaaa386"
+        == "ef285000113c1254170b8924b4c3ab8d82250423"
     )
     assert (
         maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_PAYLOAD_BLOB
@@ -439,6 +440,7 @@ def test_esp_lab_stage1_signer_authority_drift_after_staging_blocks_execution(
     def run_command(args, cwd, timeout, env):
         nonlocal status_calls
         del cwd, timeout, env
+        args = ["git", *args[1:]] if args and args[0] == "/usr/bin/git" else args
         if args[:3] == ["git", "rev-parse", "--verify"]:
             return 0, f"{expected}\n"
         if args == ["git", "status", "--porcelain", "--untracked-files=all"]:
