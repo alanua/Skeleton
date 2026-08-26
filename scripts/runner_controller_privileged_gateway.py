@@ -1,23 +1,18 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -I
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
-INSTALL_ROOTS = (
-    Path("/usr/local/lib/skeleton/runner-controller"),
-    Path(__file__).resolve().parents[3] / "lib/skeleton/runner-controller",
-)
-for install_root in INSTALL_ROOTS:
-    if install_root.is_dir():
-        sys.path.insert(0, str(install_root))
-        break
+INSTALL_ROOT = Path("/usr/local/lib/skeleton/runner-controller")
+sys.path.insert(0, str(INSTALL_ROOT))
 
-from core.runner_controller_privileged_gateway_hardening import execute_stdin
+from core.runner_controller_privileged_gateway_hardening import MAX_REQUEST_BYTES, execute_stdin
 
 
 def main() -> int:
-    code, output = execute_stdin(sys.stdin.buffer.read())
+    data = sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1)
+    code, output = execute_stdin(data)
     sys.stdout.buffer.write(output)
     return code
 
