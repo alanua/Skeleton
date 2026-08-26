@@ -1,5 +1,8 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -Eeuo pipefail
+PATH="/usr/sbin:/usr/bin:/sbin:/bin"
+export PATH
+unset BASH_ENV ENV CDPATH
 
 DESTDIR=""
 REPO_ROOT=""
@@ -10,26 +13,38 @@ SSH_SHELL="/bin/sh"
 SSH_PUBLIC_KEY=""
 SSHD_BIN="/usr/sbin/sshd"
 HARDENED_SYNTHETIC="${SKELETON_GATEWAY_HARDENED_SYNTHETIC:-0}"
+
 CANONICAL_LIVE_REPO_ROOT="/home/agent/agent-dev/repos/Skeleton"
 CANONICAL_ORIGIN_HTTPS="https://github.com/alanua/Skeleton.git"
 CANONICAL_ORIGIN_SSH="git@github.com:alanua/Skeleton.git"
+PROTECTED_BOOTSTRAP_PATH="/usr/local/libexec/skeleton/runner-controller/bootstrap/install_runner_controller_privileged_gateway.sh"
+BOOTSTRAP_SOURCE_PATH="scripts/install_runner_controller_privileged_gateway.sh"
+
+GIT_BIN="/usr/bin/git"
+RUNUSER_BIN="/usr/sbin/runuser"
+ENV_BIN="/usr/bin/env"
+VISUDO_BIN="/usr/sbin/visudo"
+STAT_BIN="/usr/bin/stat"
+MAX_GIT_OUTPUT_BYTES=65536
+MAX_SSH_KEY_BYTES=4096
+
 INSTALL_ROOT="/usr/local/lib/skeleton/runner-controller"
 EXEC_ROOT="/usr/local/libexec/skeleton/runner-controller"
 STATE_ROOT="/var/lib/skeleton/runner-controller"
 SUDOERS_PATH="/etc/sudoers.d/skeleton-runner-controller-privileged-gateway"
+SSH_SUDOERS_PATH="/etc/sudoers.d/skeleton-runner-gateway"
 SSHD_FRAGMENT="/etc/ssh/sshd_config.d/skeleton-runner-controller-privileged-gateway.conf"
 SSH_AUTHORIZED_KEYS="/var/lib/skeleton/runner-controller/ssh/authorized_keys"
 GATEWAY_COMMAND="/usr/bin/sudo -n /usr/local/libexec/skeleton/runner-controller/privileged-gateway"
 
 usage() {
   cat <<'EOF'
-Usage: sudo scripts/install_runner_controller_privileged_gateway.sh --repo-root PATH --expected-main-sha SHA [--destdir PATH] [--ssh-public-key KEY] [--sshd-bin PATH]
+Usage: install_runner_controller_privileged_gateway.sh --repo-root PATH --expected-main-sha SHA [--destdir PATH] [--ssh-public-key KEY] [--sshd-bin PATH]
 
-Installs the Skeleton Runner privileged gateway from exact Git objects at the
-approved main SHA. Live installs require the canonical runner-controller
-Skeleton checkout and exact alanua/Skeleton origin before any root mutation.
-DESTDIR runs the exact-object checks against a synthetic Git fixture. Set
-SKELETON_GATEWAY_HARDENED_SYNTHETIC=1 for the production-like hardened fixture.
+Live root execution is accepted only from the protected bootstrap copy:
+  /usr/local/libexec/skeleton/runner-controller/bootstrap/install_runner_controller_privileged_gateway.sh
+
+DESTDIR is test-only synthetic mode and never relaxes live root authority.
 EOF
 }
 
@@ -40,10 +55,6 @@ block() {
 
 target() {
   printf '%s%s\n' "$DESTDIR" "$1"
-}
-
-run_git() {
-  git -C "$CANONICAL_REPO_ROOT" "$@"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -92,11 +103,74 @@ fi
 if [[ "$HARDENED_SYNTHETIC" != "0" && "$HARDENED_SYNTHETIC" != "1" ]]; then
   block "synthetic-mode-invalid"
 fi
+if [[ -z "$DESTDIR" && "$SSHD_BIN" != "/usr/sbin/sshd" ]]; then
+  block "live-sshd-bin-not-fixed"
+fi
+
+verify_live_bootstrap_path() {
+  [[ -z "$DESTDIR" ]] || return 0
+  local running
+  running="$(realpath -e -- "${BASH_SOURCE[0]}")" || block "protected-bootstrap-unavailable"
+  [[ "$running" == "$PROTECTED_BOOTSTRAP_PATH" ]] || block "direct-checkout-bootstrap-forbidden"
+  [[ ! -L "$PROTECTED_BOOTSTRAP_PATH" && -f "$PROTECTED_BOOTSTRAP_PATH" ]] || block "protected-bootstrap-unsafe"
+  local meta uid gid mode
+  meta="$("$STAT_BIN" -Lc '%u:%g:%a' -- "$PROTECTED_BOOTSTRAP_PATH")" || block "protected-bootstrap-stat-failed"
+  IFS=: read -r uid gid mode <<<"$meta"
+  [[ "$uid" == "0" && "$gid" == "0" ]] || block "protected-bootstrap-owner-mismatch"
+  [[ "$mode" =~ ^[0-7]{3,4}$ ]] || block "protected-bootstrap-mode-invalid"
+  (( (8#$mode & 8#022) == 0 )) || block "protected-bootstrap-writable"
+}
+
+verify_live_bootstrap_path
 
 CANONICAL_REPO_ROOT="$(realpath -e -- "$REPO_ROOT")" || block "repo-root-unavailable"
 if [[ -z "$DESTDIR" && "$CANONICAL_REPO_ROOT" != "$CANONICAL_LIVE_REPO_ROOT" ]]; then
   block "repo-root-not-canonical-runner-controller-checkout"
 fi
+
+git_capture() {
+  local cwd="$1"
+  shift
+  local tmp rc size
+  tmp="$(mktemp "${TMPDIR:-/tmp}/skeleton-gateway-git.XXXXXX")" || block "git-output-tempfile-unavailable"
+  if [[ -z "$DESTDIR" ]]; then
+    if "$RUNUSER_BIN" -u "$RUNNER_USER" -- \
+      "$ENV_BIN" -i \
+        HOME=/nonexistent LANG=C LC_ALL=C PATH=/usr/bin:/bin \
+        GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 \
+        "$GIT_BIN" -C "$cwd" "$@" >"$tmp" 2>&1
+    then
+      rc=0
+    else
+      rc=$?
+    fi
+  else
+    if "$ENV_BIN" -i \
+      HOME=/nonexistent LANG=C LC_ALL=C PATH=/usr/bin:/bin \
+      GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 \
+      "$GIT_BIN" -C "$cwd" "$@" >"$tmp" 2>&1
+    then
+      rc=0
+    else
+      rc=$?
+    fi
+  fi
+  size="$("$STAT_BIN" -Lc '%s' -- "$tmp")" || {
+    rm -f -- "$tmp"
+    block "git-output-stat-failed"
+  }
+  if (( size > MAX_GIT_OUTPUT_BYTES )); then
+    rm -f -- "$tmp"
+    block "git-output-too-large"
+  fi
+  cat -- "$tmp"
+  rm -f -- "$tmp"
+  return "$rc"
+}
+
+run_git() {
+  git_capture "$CANONICAL_REPO_ROOT" "$@"
+}
 
 origin_url="$(run_git remote get-url origin 2>/dev/null)" || block "origin-unavailable"
 if [[ "$origin_url" != "$CANONICAL_ORIGIN_HTTPS" && "$origin_url" != "$CANONICAL_ORIGIN_SSH" ]]; then
@@ -110,22 +184,30 @@ fi
 inside_work_tree="$(run_git rev-parse --is-inside-work-tree 2>/dev/null)" || block "repo-root-not-git-worktree"
 [[ "$inside_work_tree" == "true" ]] || block "repo-root-not-git-worktree"
 
-current_head="$(run_git rev-parse --verify HEAD^{commit})" || block "head-unavailable"
-origin_main="$(run_git rev-parse --verify origin/main^{commit})" || block "origin-main-unavailable"
+current_head="$(run_git rev-parse --verify 'HEAD^{commit}')" || block "head-unavailable"
+origin_main="$(run_git rev-parse --verify 'origin/main^{commit}')" || block "origin-main-unavailable"
 [[ "$current_head" == "$EXPECTED_MAIN_SHA" ]] || block "head-sha-mismatch"
 [[ "$origin_main" == "$EXPECTED_MAIN_SHA" ]] || block "origin-main-sha-mismatch"
 [[ -z "$(run_git status --porcelain=v1 --untracked-files=all)" ]] || block "worktree-not-clean"
 
-fresh_remote_main="$(run_git ls-remote origin refs/heads/main | awk '{print $1}')" || block "fresh-remote-main-unavailable"
-[[ "$fresh_remote_main" == "$EXPECTED_MAIN_SHA" ]] || block "fresh-remote-main-mismatch"
+if [[ -z "$DESTDIR" ]]; then
+  fresh_remote_row="$(git_capture / ls-remote --exit-code "$CANONICAL_ORIGIN_HTTPS" refs/heads/main)" || block "fresh-remote-main-unavailable"
+else
+  fresh_remote_row="$(run_git ls-remote --exit-code origin refs/heads/main)" || block "fresh-remote-main-unavailable"
+fi
+[[ "$fresh_remote_row" != *$'\n'* ]] || block "fresh-remote-main-malformed"
+[[ "$fresh_remote_row" == *$'\t'* ]] || block "fresh-remote-main-malformed"
+fresh_remote_sha="${fresh_remote_row%%$'\t'*}"
+fresh_remote_ref="${fresh_remote_row#*$'\t'}"
+[[ "$fresh_remote_sha" =~ ^[0-9a-f]{40}$ && "$fresh_remote_ref" == "refs/heads/main" ]] || block "fresh-remote-main-malformed"
+[[ "$fresh_remote_sha" == "$EXPECTED_MAIN_SHA" ]] || block "fresh-remote-main-mismatch"
 
 verify_tree_entry() {
   local mode="$1"
   local path="$2"
-  local line
+  local line actual_mode actual_type actual_blob actual_path
   line="$(run_git ls-tree "$EXPECTED_MAIN_SHA" -- "$path")" || block "tree-entry-unavailable-$path"
-  [[ -n "$line" ]] || block "tree-entry-missing-$path"
-  local actual_mode actual_type actual_blob actual_path
+  [[ -n "$line" && "$line" != *$'\n'* ]] || block "tree-entry-missing-or-malformed-$path"
   actual_mode="${line%% *}"
   line="${line#* }"
   actual_type="${line%% *}"
@@ -138,31 +220,28 @@ verify_tree_entry() {
 }
 
 verify_running_installer() {
-  local script_path script_canonical script_relative expected_blob actual_blob
-  script_path="${BASH_SOURCE[0]}"
-  script_canonical="$(realpath -e -- "$script_path")" || block "installer-source-unavailable"
-  case "$script_canonical" in
-    "$CANONICAL_REPO_ROOT"/*) ;;
-    *) block "installer-source-outside-repo" ;;
-  esac
-  script_relative="${script_canonical#"$CANONICAL_REPO_ROOT"/}"
-  [[ "$script_relative" == "scripts/install_runner_controller_privileged_gateway.sh" ]] || block "installer-source-path-mismatch"
-  expected_blob="$(verify_tree_entry 100755 "$script_relative")"
-  actual_blob="$(run_git hash-object -- "$script_canonical")" || block "installer-hash-unavailable"
+  local expected_blob actual_blob script_path
+  expected_blob="$(verify_tree_entry 100755 "$BOOTSTRAP_SOURCE_PATH")"
+  if [[ -z "$DESTDIR" ]]; then
+    script_path="$PROTECTED_BOOTSTRAP_PATH"
+  else
+    script_path="$(realpath -e -- "${BASH_SOURCE[0]}")" || block "installer-source-unavailable"
+  fi
+  actual_blob="$(run_git hash-object --no-filters --stdin < "$script_path")" || block "installer-hash-unavailable"
   [[ "$actual_blob" == "$expected_blob" ]] || block "installer-blob-mismatch"
 }
 
 copy_git_file() {
-  local mode="$1"
+  local tree_mode="$1"
   local source_path="$2"
   local dest_path="$3"
   local blob tmp
-  blob="$(verify_tree_entry "$mode" "$source_path")"
+  blob="$(verify_tree_entry "$tree_mode" "$source_path")"
   tmp="$(mktemp "$(dirname -- "$dest_path")/.git-object.XXXXXX")" || block "tempfile-unavailable"
-  run_git cat-file -p "$blob" > "$tmp" || {
+  if ! run_git cat-file -p "$blob" >"$tmp"; then
     rm -f -- "$tmp"
     block "git-object-read-failed-$source_path"
-  }
+  fi
   chmod "$mode_to_install" "$tmp"
   mv -f -- "$tmp" "$dest_path"
 }
@@ -184,7 +263,7 @@ write_file() {
   local dest_path
   dest_path="$(target "$absolute_dest")"
   install -d -m 0755 "$(dirname -- "$dest_path")"
-  cat > "$dest_path"
+  cat >"$dest_path"
   chmod "$mode" "$dest_path"
 }
 
@@ -197,7 +276,7 @@ validate_sshd_fragment() {
 
 write_sshd_fragment_candidate() {
   local candidate="$1"
-  cat > "$candidate" <<EOF
+  cat >"$candidate" <<EOF
 Match User $SSH_USER
     PasswordAuthentication no
     KbdInteractiveAuthentication no
@@ -214,12 +293,23 @@ EOF
   chmod 0444 "$candidate"
 }
 
-validate_ssh_inputs_before_install() {
+validate_ssh_public_key() {
   [[ -n "$SSH_PUBLIC_KEY" ]] || return 0
-  case "$SSH_PUBLIC_KEY" in
-    ssh-ed25519\ *|ecdsa-sha2-nistp256\ *) ;;
-    *) block "unapproved-ssh-public-key-type" ;;
-  esac
+  (( ${#SSH_PUBLIC_KEY} <= MAX_SSH_KEY_BYTES )) || block "ssh-public-key-too-large"
+  [[ "$SSH_PUBLIC_KEY" != *$'\n'* && "$SSH_PUBLIC_KEY" != *$'\r'* ]] || block "ssh-public-key-multiline"
+  local algorithm key_blob comment extra
+  IFS=' ' read -r algorithm key_blob comment extra <<<"$SSH_PUBLIC_KEY"
+  [[ -n "$algorithm" && -n "$key_blob" && -z "${extra:-}" ]] || block "ssh-public-key-format-invalid"
+  [[ "$algorithm" == "ssh-ed25519" || "$algorithm" == "ecdsa-sha2-nistp256" ]] || block "unapproved-ssh-public-key-type"
+  [[ "$key_blob" =~ ^[A-Za-z0-9+/]+={0,2}$ ]] || block "ssh-public-key-base64-invalid"
+  if [[ -n "${comment:-}" ]]; then
+    [[ "$comment" =~ ^[A-Za-z0-9._@:+-]{1,128}$ ]] || block "ssh-public-key-comment-invalid"
+  fi
+}
+
+validate_ssh_inputs_before_install() {
+  validate_ssh_public_key
+  [[ -n "$SSH_PUBLIC_KEY" ]] || return 0
   if [[ -z "$DESTDIR" ]]; then
     [[ -x "$SSH_SHELL" ]] || block "ssh-shell-unavailable"
   fi
@@ -233,7 +323,25 @@ validate_ssh_inputs_before_install() {
   rm -f -- "$candidate"
 }
 
+install_sudoers_rule() {
+  local absolute_path="$1"
+  local content="$2"
+  local dest candidate
+  dest="$(target "$absolute_path")"
+  candidate="$(mktemp "${TMPDIR:-/tmp}/skeleton-runner-controller-sudoers.XXXXXX")" || block "sudoers-candidate-unavailable"
+  printf '%s\n' "$content" >"$candidate"
+  chmod 0440 "$candidate"
+  "$VISUDO_BIN" -cf "$candidate" >/dev/null 2>&1 || {
+    rm -f -- "$candidate"
+    block "sudoers-validation-failed"
+  }
+  install -d -m 0755 "$(dirname -- "$dest")"
+  install -o root -g root -m 0440 "$candidate" "$dest" 2>/dev/null || install -m 0440 "$candidate" "$dest"
+  rm -f -- "$candidate"
+}
+
 install_ssh_account_live() {
+  [[ -x "$SSH_SHELL" ]] || block "ssh-shell-unavailable"
   if ! getent passwd "$SSH_USER" >/dev/null; then
     useradd --system --home-dir /nonexistent --shell "$SSH_SHELL" --no-create-home "$SSH_USER"
   fi
@@ -243,7 +351,7 @@ install_ssh_account_live() {
 
 verify_effective_sshd_live() {
   local effective
-  effective="$($SSHD_BIN -T -C user="$SSH_USER",host=localhost,addr=127.0.0.1 2>/dev/null)" || block "sshd-effective-config-unavailable"
+  effective="$("$SSHD_BIN" -T -C user="$SSH_USER",host=localhost,addr=127.0.0.1 2>/dev/null)" || block "sshd-effective-config-unavailable"
   grep -Fxq "forcecommand $GATEWAY_COMMAND" <<<"$effective" || block "sshd-forcecommand-mismatch"
   grep -Fxq "permittty no" <<<"$effective" || block "sshd-permittty-mismatch"
   grep -Fxq "allowtcpforwarding no" <<<"$effective" || block "sshd-forwarding-mismatch"
@@ -259,9 +367,9 @@ validate_ssh_inputs_before_install
 
 install -d -m 0755 "$(target "$INSTALL_ROOT/core")" "$(target "$INSTALL_ROOT/core/home_edge")" "$(target "$EXEC_ROOT")"
 install -d -m 0700 "$(target "$STATE_ROOT")"
-printf '%s\n' '# installed runner-controller gateway package' > "$(target "$INSTALL_ROOT/core/__init__.py")"
+printf '%s\n' '# installed runner-controller gateway package' >"$(target "$INSTALL_ROOT/core/__init__.py")"
 chmod 0444 "$(target "$INSTALL_ROOT/core/__init__.py")"
-printf '%s\n' '# installed runner-controller gateway home-edge package' > "$(target "$INSTALL_ROOT/core/home_edge/__init__.py")"
+printf '%s\n' '# installed runner-controller gateway home-edge package' >"$(target "$INSTALL_ROOT/core/home_edge/__init__.py")"
 chmod 0444 "$(target "$INSTALL_ROOT/core/home_edge/__init__.py")"
 
 install_git_file 100644 0444 "core/runner_controller_privileged_gateway.py" "$INSTALL_ROOT/core/runner_controller_privileged_gateway.py"
@@ -303,9 +411,7 @@ write_file 0444 "$INSTALL_ROOT/config/checkout.json" <<EOF
 {"schema":"skeleton.runner_controller_checkout_config.v1","repository":"alanua/Skeleton","checkout_path":"$CANONICAL_LIVE_REPO_ROOT"}
 EOF
 
-write_file 0440 "$SUDOERS_PATH" <<EOF
-$RUNNER_USER ALL=(root) NOPASSWD: $EXEC_ROOT/privileged-gateway ""
-EOF
+install_sudoers_rule "$SUDOERS_PATH" "$RUNNER_USER ALL=(root) NOPASSWD: $EXEC_ROOT/privileged-gateway \"\""
 
 if [[ -z "$SSH_PUBLIC_KEY" ]]; then
   printf 'DONE: Runner controller privileged gateway files installed inertly\n'
@@ -332,9 +438,7 @@ write_file 0600 "$SSH_AUTHORIZED_KEYS" <<EOF
 command="$GATEWAY_COMMAND",no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-user-rc $SSH_PUBLIC_KEY
 EOF
 
-write_file 0440 "/etc/sudoers.d/skeleton-runner-gateway" <<EOF
-$SSH_USER ALL=(root) NOPASSWD: $EXEC_ROOT/privileged-gateway ""
-EOF
+install_sudoers_rule "$SSH_SUDOERS_PATH" "$SSH_USER ALL=(root) NOPASSWD: $EXEC_ROOT/privileged-gateway \"\""
 
 install -d -m 0755 "$(dirname -- "$(target "$SSHD_FRAGMENT")")"
 candidate="$(mktemp "$(target "$SSHD_FRAGMENT").candidate.XXXXXX")" || block "sshd-candidate-unavailable"
