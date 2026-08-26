@@ -56,14 +56,16 @@ target() {
   printf '%s%s\n' "$DESTDIR" "$1"
 }
 
-install -d -m 0755 "$(target "$INSTALL_ROOT/core")" "$(target "$EXEC_ROOT")"
+install -d -m 0755 "$(target "$INSTALL_ROOT/core")" "$(target "$INSTALL_ROOT/core/home_edge")" "$(target "$EXEC_ROOT")"
 install -d -m 0700 "$(target "$STATE_ROOT")"
 printf '%s\n' '# installed runner-controller gateway package' > "$(target "$INSTALL_ROOT/core/__init__.py")"
 chmod 0444 "$(target "$INSTALL_ROOT/core/__init__.py")"
+printf '%s\n' '# installed runner-controller gateway home-edge package' > "$(target "$INSTALL_ROOT/core/home_edge/__init__.py")"
+chmod 0444 "$(target "$INSTALL_ROOT/core/home_edge/__init__.py")"
 install -m 0444 "$repo_root/core/runner_controller_privileged_gateway.py" \
   "$(target "$INSTALL_ROOT/core/runner_controller_privileged_gateway.py")"
-install -m 0444 "$repo_root/core/runner_repository_maintenance_executor.py" \
-  "$(target "$INSTALL_ROOT/core/runner_repository_maintenance_executor.py")"
+install -m 0444 "$repo_root/core/home_edge/esp_lab_stage1_signer_install.py" \
+  "$(target "$INSTALL_ROOT/core/home_edge/esp_lab_stage1_signer_install.py")"
 install -m 0555 "$repo_root/scripts/runner_controller_privileged_gateway.py" \
   "$(target "$EXEC_ROOT/privileged-gateway")"
 
@@ -80,7 +82,7 @@ capabilities:
     protected: true
     requires:
       - core/runner_controller_privileged_gateway.py
-      - core/runner_repository_maintenance_executor.py
+      - core/home_edge/esp_lab_stage1_signer_install.py
       - scripts/runner_controller_privileged_gateway.py
       - scripts/install_runner_controller_privileged_gateway.sh
       - RUNNER_PRIVILEGED_ACTIONS.yaml

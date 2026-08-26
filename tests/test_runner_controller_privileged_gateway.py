@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from datetime import UTC, datetime, timedelta
 import json
 import os
@@ -382,6 +383,14 @@ def test_installer_bash_n_and_synthetic_isolated_root(tmp_path: Path) -> None:
         / "usr/local/lib/skeleton/runner-controller/core/runner_controller_privileged_gateway.py"
     ).is_file()
     assert (
+        tmp_path
+        / "usr/local/lib/skeleton/runner-controller/core/home_edge/esp_lab_stage1_signer_install.py"
+    ).is_file()
+    assert not (
+        tmp_path
+        / "usr/local/lib/skeleton/runner-controller/core/runner_repository_maintenance_executor.py"
+    ).exists()
+    assert (
         tmp_path / "usr/local/lib/skeleton/runner-controller/config/RUNNER_PRIVILEGED_ACTIONS.yaml"
     ).is_file()
 
@@ -414,3 +423,116 @@ def test_installed_tree_smoke_from_empty_cwd_and_env(tmp_path: Path) -> None:
     assert receipt["status"] == "NEEDS_OPERATOR"
     assert receipt["reason"] == "REQUEST_FIELD_SET_MISMATCH"
     assert result.stderr == b""
+
+
+def test_installed_gateway_valid_request_reaches_synthetic_action_from_empty_cwd(
+    tmp_path: Path,
+) -> None:
+    script = ROOT / "scripts/install_runner_controller_privileged_gateway.sh"
+    install = subprocess.run(
+        ["bash", str(script), "--destdir", str(tmp_path)],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert install.returncode == 0
+
+    install_root = tmp_path / "usr/local/lib/skeleton/runner-controller"
+    code = f"""
+import json
+import sys
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+sys.path.insert(0, {str(install_root)!r})
+import core.home_edge.esp_lab_stage1_signer_install as signer
+import core.runner_controller_privileged_gateway as gateway
+
+now = datetime(2026, 8, 25, 12, 0, 0, tzinfo=UTC)
+sha = {SHA!r}
+request = gateway.build_gateway_request(
+    request_id="req-installed-valid",
+    idempotency_key="idem-installed-valid",
+    expected_main_sha=sha,
+    registered_clean_main_sha=sha,
+    github_main_sha=sha,
+    checkout_path=Path("/home/agent/agent-dev/repos/Skeleton"),
+    checkout_head_sha=sha,
+    checkout_origin_main_sha=sha,
+    issued_at=now,
+    expires_at=now + timedelta(seconds=120),
+)
+calls = []
+
+def runner(request, action):
+    calls.append((request["action_id"], action.handler))
+    receipt = signer._protected_receipt(
+        "DONE",
+        "SIGNER_INSTALLATION_VERIFIED",
+        expected_main_sha=sha,
+        installer_sha256="a" * 64,
+        artifacts_ok=True,
+    )
+    return 0, signer._protected_result("DONE", receipt)
+
+receipt = gateway.execute_gateway_request(request, now=now, runner=runner)
+print(json.dumps({{"receipt": receipt, "calls": calls}}, sort_keys=True))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=str(tmp_path),
+        env={"PATH": os.environ.get("PATH", "")},
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["calls"] == [
+        [
+            gateway.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID,
+            "home_edge_esp_lab_stage1_signer_install",
+        ]
+    ]
+    assert payload["receipt"]["status"] == "DONE"
+    assert payload["receipt"]["reason"] == "SIGNER_INSTALLATION_VERIFIED"
+
+
+def test_installed_gateway_import_closure_stays_narrow(tmp_path: Path) -> None:
+    script = ROOT / "scripts/install_runner_controller_privileged_gateway.sh"
+    install = subprocess.run(
+        ["bash", str(script), "--destdir", str(tmp_path)],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert install.returncode == 0
+
+    install_root = tmp_path / "usr/local/lib/skeleton/runner-controller"
+    installed = {
+        path.relative_to(install_root).as_posix()
+        for path in install_root.rglob("*.py")
+    }
+    assert installed == {
+        "core/__init__.py",
+        "core/home_edge/__init__.py",
+        "core/home_edge/esp_lab_stage1_signer_install.py",
+        "core/runner_controller_privileged_gateway.py",
+    }
+
+    imported: set[str] = set()
+    for relative in installed:
+        tree = ast.parse((install_root / relative).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module is not None:
+                imported.add(node.module)
+
+    assert "core.runner_repository_maintenance_executor" not in imported
+    assert not any(name.startswith("core.runner_executor") for name in imported)
+    assert not any(name.startswith("core.codex_runtime_recovery") for name in imported)

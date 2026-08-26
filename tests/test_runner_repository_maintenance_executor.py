@@ -12,6 +12,7 @@ import tarfile
 
 import pytest
 
+import core.home_edge.esp_lab_stage1_signer_install as signer
 import core.runner_repository_maintenance_executor as maintenance
 from core.runner_repository_maintenance_executor import (
     BUILD_AND_LOCAL_OTA_OPERATION,
@@ -319,12 +320,12 @@ def _execute_esp_signer(
     protected = tmp_path / "protected-parent" / "protected-installer.sh"
     artifact = tmp_path / "signer"
     monkeypatch.setattr(
-        maintenance,
+        signer,
         "HOME_EDGE_ESP_LAB_STAGE1_SIGNER_PROTECTED_INSTALLER",
         protected,
     )
     monkeypatch.setattr(
-        maintenance,
+        signer,
         "HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLED_ARTIFACTS",
         {artifact: ("d248088477a7c59219a9c19c47bcfc464c6dcd27", 0o555)},
     )
@@ -376,8 +377,8 @@ def test_esp_lab_stage1_signer_accepts_newer_descendant_main_with_reviewed_blob(
         del path, kwargs
         assert expected_mode in {0o500, 0o555}
 
-    monkeypatch.setattr(maintenance, "_verify_regular_file", fake_verify)
-    monkeypatch.setattr(maintenance, "_verify_protected_installer_parent", lambda **_kwargs: None)
+    monkeypatch.setattr(signer, "_verify_regular_file", fake_verify)
+    monkeypatch.setattr(signer, "_verify_protected_installer_parent", lambda **_kwargs: None)
     _code, report = _execute_esp_signer(
         tmp_path,
         monkeypatch,
@@ -440,8 +441,8 @@ def test_esp_lab_stage1_signer_authority_drift_after_staging_blocks_execution(
         del path, kwargs
         assert expected_mode in {0o500, 0o555}
 
-    monkeypatch.setattr(maintenance, "_verify_regular_file", fake_verify)
-    monkeypatch.setattr(maintenance, "_verify_protected_installer_parent", lambda **_kwargs: None)
+    monkeypatch.setattr(signer, "_verify_regular_file", fake_verify)
+    monkeypatch.setattr(signer, "_verify_protected_installer_parent", lambda **_kwargs: None)
     _code, report = maintenance.execute_home_edge_esp_lab_stage1_signer_install(
         expected_main_sha=expected,
         registered_clean_main_sha=expected,
@@ -483,8 +484,8 @@ def test_esp_lab_stage1_signer_uses_git_blob_not_worktree_and_fixed_install_argv
             return 0, ""
         return 1, ""
 
-    monkeypatch.setattr(maintenance, "_verify_regular_file", fake_verify)
-    monkeypatch.setattr(maintenance, "_verify_protected_installer_parent", lambda **_kwargs: None)
+    monkeypatch.setattr(signer, "_verify_regular_file", fake_verify)
+    monkeypatch.setattr(signer, "_verify_protected_installer_parent", lambda **_kwargs: None)
     _code, report = _execute_esp_signer(
         tmp_path, monkeypatch, blob_bytes=blob_bytes, protected_run=protected_run
     )
@@ -532,8 +533,8 @@ def test_esp_lab_stage1_signer_parent_absent_uses_install_d_bootstrap(
             return 0, ""
         return 0, ""
 
-    monkeypatch.setattr(maintenance, "_verify_regular_file", fake_verify)
-    monkeypatch.setattr(maintenance, "_verify_protected_installer_parent", fake_parent_check)
+    monkeypatch.setattr(signer, "_verify_regular_file", fake_verify)
+    monkeypatch.setattr(signer, "_verify_protected_installer_parent", fake_parent_check)
     _code, report = _execute_esp_signer(tmp_path, monkeypatch, protected_run=protected_run)
 
     assert "RESULT: DONE" in report
@@ -554,14 +555,14 @@ def test_esp_lab_stage1_signer_existing_exact_safe_parent_passes_nofollow_audit(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     protected = tmp_path / "protected-parent" / "protected-installer.sh"
-    monkeypatch.setattr(maintenance, "HOME_EDGE_ESP_LAB_STAGE1_SIGNER_PROTECTED_INSTALLER", protected)
+    monkeypatch.setattr(signer, "HOME_EDGE_ESP_LAB_STAGE1_SIGNER_PROTECTED_INSTALLER", protected)
     monkeypatch.setattr(
-        maintenance.os,
+        signer.os,
         "lstat",
         lambda path: _fake_stat_result(stat.S_IFDIR | 0o755) if path == protected.parent else os.lstat(path),
     )
 
-    maintenance._verify_protected_installer_parent()
+    signer._verify_protected_installer_parent()
 
 
 @pytest.mark.parametrize(
@@ -583,9 +584,9 @@ def test_esp_lab_stage1_signer_parent_nofollow_audit_rejects_unsafe_metadata(
     reason: str,
 ) -> None:
     protected = tmp_path / "protected-parent" / "protected-installer.sh"
-    monkeypatch.setattr(maintenance, "HOME_EDGE_ESP_LAB_STAGE1_SIGNER_PROTECTED_INSTALLER", protected)
+    monkeypatch.setattr(signer, "HOME_EDGE_ESP_LAB_STAGE1_SIGNER_PROTECTED_INSTALLER", protected)
     monkeypatch.setattr(
-        maintenance.os,
+        signer.os,
         "lstat",
         lambda path: _fake_stat_result(fake_mode, uid=uid, gid=gid)
         if path == protected.parent
@@ -593,7 +594,7 @@ def test_esp_lab_stage1_signer_parent_nofollow_audit_rejects_unsafe_metadata(
     )
 
     with pytest.raises(maintenance.RepositoryMaintenanceBlocked, match=reason):
-        maintenance._verify_protected_installer_parent()
+        signer._verify_protected_installer_parent()
 
 
 def test_esp_lab_stage1_signer_unsafe_parent_blocks_before_privileged_copy(
@@ -605,7 +606,7 @@ def test_esp_lab_stage1_signer_unsafe_parent_blocks_before_privileged_copy(
         assert allow_absent is True
         raise maintenance.RepositoryMaintenanceBlocked("PROTECTED_PARENT_NOT_DIRECTORY")
 
-    monkeypatch.setattr(maintenance, "_verify_protected_installer_parent", fake_parent_check)
+    monkeypatch.setattr(signer, "_verify_protected_installer_parent", fake_parent_check)
     _code, report = _execute_esp_signer(
         tmp_path,
         monkeypatch,
@@ -633,8 +634,8 @@ def test_esp_lab_stage1_signer_post_copy_parent_audit_blocks_installer_execution
         del path, kwargs
         assert expected_mode in {0o500, 0o555}
 
-    monkeypatch.setattr(maintenance, "_verify_regular_file", fake_verify)
-    monkeypatch.setattr(maintenance, "_verify_protected_installer_parent", fake_parent_check)
+    monkeypatch.setattr(signer, "_verify_regular_file", fake_verify)
+    monkeypatch.setattr(signer, "_verify_protected_installer_parent", fake_parent_check)
     _code, report = _execute_esp_signer(
         tmp_path,
         monkeypatch,
@@ -686,8 +687,8 @@ def test_esp_lab_stage1_signer_remote_main_change_after_copy_blocks_execution(
         del path, kwargs
         assert expected_mode in {0o500, 0o555}
 
-    monkeypatch.setattr(maintenance, "_verify_regular_file", fake_verify)
-    monkeypatch.setattr(maintenance, "_verify_protected_installer_parent", lambda **_kwargs: None)
+    monkeypatch.setattr(signer, "_verify_regular_file", fake_verify)
+    monkeypatch.setattr(signer, "_verify_protected_installer_parent", lambda **_kwargs: None)
     _code, report = _execute_esp_signer(
         tmp_path,
         monkeypatch,
@@ -747,31 +748,31 @@ def test_esp_lab_stage1_signer_staged_symlink_blocks_before_sudo(
 def test_esp_lab_stage1_signer_post_audit_blocks_symlink_and_wrong_sudoers_bytes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    signer = tmp_path / "signer"
+    signer_path = tmp_path / "signer"
     sudoers = tmp_path / "sudoers"
     target = tmp_path / "target"
     target.write_text("artifact-ok\n", encoding="utf-8")
-    signer.symlink_to(target)
+    signer_path.symlink_to(target)
     sudoers.write_text("wrong sudoers\n", encoding="utf-8")
     sudoers.chmod(0o440)
     monkeypatch.setattr(
-        maintenance,
+        signer,
         "HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLED_ARTIFACTS",
         {
-            signer: ("d248088477a7c59219a9c19c47bcfc464c6dcd27", 0o555),
+            signer_path: ("d248088477a7c59219a9c19c47bcfc464c6dcd27", 0o555),
             sudoers: (maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_SUDOERS_SHA256, 0o440),
         },
     )
     with pytest.raises(maintenance.RepositoryMaintenanceBlocked, match="FILE_NOT_REGULAR"):
-        maintenance._verify_regular_file(
-            signer,
+        signer._verify_regular_file(
+            signer_path,
             hashlib.sha256(b"artifact-ok\n").hexdigest(),
             0o555,
             owner_uid=os.getuid(),
             group_gid=os.getgid(),
         )
     with pytest.raises(maintenance.RepositoryMaintenanceBlocked, match="FILE_CONTENT_MISMATCH"):
-        maintenance._verify_regular_file(
+        signer._verify_regular_file(
             sudoers,
             maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_SUDOERS_SHA256,
             0o440,
@@ -793,8 +794,8 @@ def test_esp_lab_stage1_signer_success_audits_fixed_artifacts_and_does_not_activ
         calls.append(argv)
         return 0, ""
 
-    monkeypatch.setattr(maintenance, "_verify_regular_file", fake_verify)
-    monkeypatch.setattr(maintenance, "_verify_protected_installer_parent", lambda **_kwargs: None)
+    monkeypatch.setattr(signer, "_verify_regular_file", fake_verify)
+    monkeypatch.setattr(signer, "_verify_protected_installer_parent", lambda **_kwargs: None)
     _code, report = _execute_esp_signer(tmp_path, monkeypatch, protected_run=protected_run)
     assert "RESULT: DONE" in report
     assert '"installed_artifacts_verified": true' in report

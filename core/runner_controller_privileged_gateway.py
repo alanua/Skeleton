@@ -12,6 +12,21 @@ import subprocess
 import stat
 from typing import Final
 
+from core.home_edge.esp_lab_stage1_signer_install import (
+    HOME_EDGE_ESP_LAB_STAGE1_INSTALLER_BLOB,
+    HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA,
+    HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_BLOB,
+    HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_MODE,
+    HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID,
+    HOME_EDGE_ESP_LAB_STAGE1_SIGNER_OPERATOR_APPROVAL,
+    HOME_EDGE_ESP_LAB_STAGE1_SIGNER_PAYLOAD_BLOB,
+    HOME_EDGE_ESP_LAB_STAGE1_SIGNER_PROTECTED_INSTALLER,
+    HOME_EDGE_ESP_LAB_STAGE1_SIGNER_SOURCE_PATH,
+    HOME_EDGE_ESP_LAB_STAGE1_SIGNER_SUDOERS_SHA256,
+    HOME_EDGE_ESP_LAB_STAGE1_SIGNER_TRUSTED_SOURCE_ANCESTOR_SHA,
+    HOME_EDGE_ESP_LAB_STAGE1_SIGNER_WRAPPER_BLOB,
+)
+
 
 REQUEST_SCHEMA_ID: Final = "skeleton.runner_controller_privileged_request.v1"
 RECEIPT_SCHEMA_ID: Final = "skeleton.runner_controller_privileged_receipt.v1"
@@ -63,41 +78,6 @@ MAX_TOKEN_BYTES: Final = 160
 MAX_PATH_BYTES: Final = 4096
 MAX_RECEIPT_BYTES: Final = 16 * 1024
 MAX_AGE_SECONDS: Final = 300
-HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID: Final = (
-    "home_edge_01_esp_lab_stage1_signer_install_v1"
-)
-HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA: Final = (
-    "8e049eb631f63d81ab932eac6ab0cf3d3d5a5949"
-)
-HOME_EDGE_ESP_LAB_STAGE1_SIGNER_TRUSTED_SOURCE_ANCESTOR_SHA: Final = (
-    HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA
-)
-HOME_EDGE_ESP_LAB_STAGE1_SIGNER_SOURCE_PATH: Final = (
-    "scripts/install_home_edge_esp_lab_activation_signer.sh"
-)
-HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_BLOB: Final = (
-    "7ed95f5ba6d274451f62cfc31f88bc204eaaa386"
-)
-HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_MODE: Final = "100755"
-HOME_EDGE_ESP_LAB_STAGE1_SIGNER_PAYLOAD_BLOB: Final = (
-    "9e349149ea17c38284c8bda1051b3d0de9688d4c"
-)
-HOME_EDGE_ESP_LAB_STAGE1_SIGNER_WRAPPER_BLOB: Final = (
-    "d248088477a7c59219a9c19c47bcfc464c6dcd27"
-)
-HOME_EDGE_ESP_LAB_STAGE1_INSTALLER_BLOB: Final = (
-    "4db8042020915dbcdd261accc5c87a75682fa115"
-)
-HOME_EDGE_ESP_LAB_STAGE1_SIGNER_SUDOERS_SHA256: Final = (
-    "b7e0c12abca7dd59238f285dff3c83b4f8c6bbf26235154c45e54c8a705f34a4"
-)
-HOME_EDGE_ESP_LAB_STAGE1_SIGNER_OPERATOR_APPROVAL: Final = (
-    "EXACT_HEAD_HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_APPROVED"
-)
-HOME_EDGE_ESP_LAB_STAGE1_SIGNER_PROTECTED_INSTALLER: Final = Path(
-    "/usr/local/libexec/skeleton/home-edge/esp-lab-stage1-installer/"
-    "install_home_edge_esp_lab_activation_signer.sh"
-)
 REQUEST_FIELDS: Final = (
     "schema",
     "request_id",
@@ -486,6 +466,7 @@ def verify_protected_capability_metadata(path: Path = DEFAULT_CAPABILITY_REGISTR
         raise PrivilegedGatewayError("capability_registry_gateway_invalid")
     required = {
         "core/runner_controller_privileged_gateway.py",
+        "core/home_edge/esp_lab_stage1_signer_install.py",
         "scripts/runner_controller_privileged_gateway.py",
         "scripts/install_runner_controller_privileged_gateway.sh",
         "RUNNER_PRIVILEGED_ACTIONS.yaml",
@@ -751,7 +732,7 @@ def _run_registered_action(
 ) -> tuple[int, str]:
     if action.action_id != HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID:
         raise PrivilegedGatewayError("action_handler_missing")
-    from core.runner_repository_maintenance_executor import (
+    from core.home_edge.esp_lab_stage1_signer_install import (
         execute_home_edge_esp_lab_stage1_signer_install,
     )
 
