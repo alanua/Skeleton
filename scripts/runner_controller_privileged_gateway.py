@@ -13,7 +13,7 @@ for install_root in INSTALL_ROOTS:
         sys.path.insert(0, str(install_root))
         break
 
-from core.runner_controller_privileged_gateway import execute_stdin
+from core.runner_controller_privileged_gateway_hardening import execute_stdin
 
 
 def main() -> int:
