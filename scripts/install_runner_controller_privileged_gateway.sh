@@ -6,6 +6,7 @@ REPO_ROOT=""
 EXPECTED_MAIN_SHA=""
 RUNNER_USER="agent"
 SSH_USER="skeleton-runner-gateway"
+SSH_SHELL="/bin/sh"
 SSH_PUBLIC_KEY=""
 SSHD_BIN="/usr/sbin/sshd"
 CANONICAL_LIVE_REPO_ROOT="/home/agent/agent-dev/repos/Skeleton"
@@ -94,7 +95,7 @@ if [[ "$origin_url" != "$CANONICAL_ORIGIN_HTTPS" && "$origin_url" != "$CANONICAL
   if [[ -n "$DESTDIR" && "${SKELETON_GATEWAY_ALLOW_SYNTHETIC_ORIGIN:-}" == "1" ]]; then
     :
   else
-  block "origin-mismatch"
+    block "origin-mismatch"
   fi
 fi
 
@@ -187,11 +188,25 @@ validate_sshd_fragment() {
 }
 
 install_ssh_account_live() {
+  [[ -x "$SSH_SHELL" ]] || block "ssh-shell-unavailable"
   if ! getent passwd "$SSH_USER" >/dev/null; then
-    useradd --system --home-dir /nonexistent --shell /usr/sbin/nologin --no-create-home "$SSH_USER"
+    useradd --system --home-dir /nonexistent --shell "$SSH_SHELL" --no-create-home "$SSH_USER"
   fi
   passwd -l "$SSH_USER" >/dev/null 2>&1 || true
-  usermod --home /nonexistent --shell /usr/sbin/nologin "$SSH_USER"
+  usermod --home /nonexistent --shell "$SSH_SHELL" "$SSH_USER"
+}
+
+verify_effective_sshd_live() {
+  local effective
+  effective="$($SSHD_BIN -T -C user="$SSH_USER",host=localhost,addr=127.0.0.1 2>/dev/null)" || block "sshd-effective-config-unavailable"
+  grep -Fxq "forcecommand $GATEWAY_COMMAND" <<<"$effective" || block "sshd-forcecommand-mismatch"
+  grep -Fxq "permittty no" <<<"$effective" || block "sshd-permittty-mismatch"
+  grep -Fxq "allowtcpforwarding no" <<<"$effective" || block "sshd-forwarding-mismatch"
+  grep -Fxq "x11forwarding no" <<<"$effective" || block "sshd-x11-mismatch"
+  grep -Fxq "allowagentforwarding no" <<<"$effective" || block "sshd-agent-forwarding-mismatch"
+  grep -Fxq "permituserrc no" <<<"$effective" || block "sshd-userrc-mismatch"
+  grep -Fxq "passwordauthentication no" <<<"$effective" || block "sshd-password-auth-mismatch"
+  grep -Fxq "kbdinteractiveauthentication no" <<<"$effective" || block "sshd-kbd-auth-mismatch"
 }
 
 verify_running_installer
@@ -204,34 +219,14 @@ printf '%s\n' '# installed runner-controller gateway home-edge package' > "$(tar
 chmod 0444 "$(target "$INSTALL_ROOT/core/home_edge/__init__.py")"
 
 install_git_file 100644 0444 "core/runner_controller_privileged_gateway.py" "$INSTALL_ROOT/core/runner_controller_privileged_gateway.py"
+install_git_file 100644 0444 "core/runner_controller_privileged_gateway_hardening.py" "$INSTALL_ROOT/core/runner_controller_privileged_gateway_hardening.py"
 install_git_file 100644 0444 "core/home_edge/esp_lab_stage1_signer_install.py" "$INSTALL_ROOT/core/home_edge/esp_lab_stage1_signer_install.py"
 install_git_file 100755 0555 "scripts/runner_controller_privileged_gateway.py" "$EXEC_ROOT/privileged-gateway"
 install_git_file 100644 0444 "RUNNER_PRIVILEGED_ACTIONS.yaml" "$INSTALL_ROOT/config/RUNNER_PRIVILEGED_ACTIONS.yaml"
+install_git_file 100644 0444 "CAPABILITY_REGISTRY.yaml" "$INSTALL_ROOT/config/CAPABILITY_REGISTRY.yaml"
 install_git_file 100644 0444 "schemas/runner_controller_privileged_request.schema.json" "$INSTALL_ROOT/schemas/runner_controller_privileged_request.schema.json"
 install_git_file 100644 0444 "schemas/runner_controller_privileged_receipt.schema.json" "$INSTALL_ROOT/schemas/runner_controller_privileged_receipt.schema.json"
 install_git_file 100644 0444 "docs/RUNNER_CONTROLLER_PRIVILEGED_GATEWAY.md" "$INSTALL_ROOT/docs/RUNNER_CONTROLLER_PRIVILEGED_GATEWAY.md"
-
-write_file 0444 "$INSTALL_ROOT/config/CAPABILITY_REGISTRY.yaml" <<'EOF'
-version: "1.0.0"
-capabilities:
-  runner_controller_privileged_gateway:
-    status: available
-    module: core/runner_controller_privileged_gateway.py
-    live_runtime_execution: true
-    protected: true
-    requires:
-      - core/runner_controller_privileged_gateway.py
-      - core/home_edge/esp_lab_stage1_signer_install.py
-      - scripts/runner_controller_privileged_gateway.py
-      - scripts/install_runner_controller_privileged_gateway.sh
-      - RUNNER_PRIVILEGED_ACTIONS.yaml
-      - schemas/runner_controller_privileged_request.schema.json
-      - schemas/runner_controller_privileged_receipt.schema.json
-      - docs/RUNNER_CONTROLLER_PRIVILEGED_GATEWAY.md
-    tested: true
-    added: "2026-08-25"
-    description: Protected no-argument sudo gateway with root-owned installed trust anchors and public-safe receipts.
-EOF
 
 write_file 0444 "$INSTALL_ROOT/config/checkout.json" <<EOF
 {"schema":"skeleton.runner_controller_checkout_config.v1","repository":"alanua/Skeleton","checkout_path":"$CANONICAL_LIVE_REPO_ROOT"}
@@ -258,7 +253,7 @@ if [[ -z "$DESTDIR" ]]; then
   install_ssh_account_live
 else
   write_file 0444 "/etc/passwd.d/skeleton-runner-gateway.plan" <<EOF
-$SSH_USER:x:synthetic:synthetic:Skeleton Runner Gateway:/nonexistent:/usr/sbin/nologin
+$SSH_USER:x:synthetic:synthetic:Skeleton Runner Gateway:/nonexistent:$SSH_SHELL
 EOF
 fi
 
@@ -293,6 +288,21 @@ if ! validate_sshd_fragment "$candidate"; then
   block "sshd-validation-failed"
 fi
 mv -f -- "$candidate" "$(target "$SSHD_FRAGMENT")"
+
+if [[ -z "$DESTDIR" ]]; then
+  "$SSHD_BIN" -t >/dev/null 2>&1 || {
+    rm -f -- "$SSHD_FRAGMENT"
+    block "sshd-full-config-validation-failed"
+  }
+  if systemctl reload ssh.service >/dev/null 2>&1; then
+    :
+  elif systemctl reload sshd.service >/dev/null 2>&1; then
+    :
+  else
+    block "sshd-reload-failed"
+  fi
+  verify_effective_sshd_live
+fi
 
 printf 'DONE: Runner controller privileged gateway files installed inertly\n'
 printf 'gateway=%s\n' "$EXEC_ROOT/privileged-gateway"
