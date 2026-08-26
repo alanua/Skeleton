@@ -303,6 +303,19 @@ def test_esp_lab_stage1_signer_trust_chain_pins_match_recomputed_blobs() -> None
     )
 
 
+def test_esp_lab_stage1_signer_v2_outer_boundary_keeps_activation_source_trust() -> None:
+    script = Path("scripts/install_home_edge_esp_lab_activation_signer.sh").read_text(
+        encoding="utf-8"
+    )
+    assert (
+        maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_TRUSTED_SOURCE_ANCESTOR_SHA
+        == maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA
+    )
+    assert (
+        'TRUSTED_ANCESTOR_SHA="725dfc3aedbce194c7afcc229eb44b1eec4f463a"' in script
+    )
+
+
 def _execute_esp_signer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
