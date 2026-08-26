@@ -1108,6 +1108,31 @@ activation, canon promotion, secrets, destructive cleanup, force-push, broad
 generic chat approvals such as `+`, model output, and other issues are not
 approval sources.
 
+The normal `publish_existing_issue_worktree` path remains same-branch only:
+`Output Branch` must equal `runner/issue-{Source Issue}`. A differing source
+worktree branch and output branch is accepted only for an explicitly declared
+Existing PR update, and only when the structured override includes both
+`source_worktree_branch` and `output_branch` with exact validated values:
+
+```text
+Existing PR: 3405
+Expected Existing PR Head SHA: <optional exact current PR head SHA>
+Publish Override: {"action":"publish_existing_issue_worktree","allowed_files":["path/explicitly/allowed.ext"],"base_branch":"main","draft_pr":true,"output_branch":"runner/issue-3404","source_issue":3407,"source_worktree_branch":"runner/issue-3407","target_repository":"alanua/Skeleton"}
+```
+
+For this Existing PR cross-branch exception, the Runner resolves the retained
+source as `issue-{Source Issue}`, requires its current branch to equal
+`source_worktree_branch`, validates the live PR number as open, draft, same
+repository, exact base branch, and exact head branch `output_branch`, and
+checks `Expected Existing PR Head SHA` before any staging, commit, or push when
+that field is supplied. It then transfers only the validated retained
+allowlisted file contents to the output branch through a bounded Runner-owned
+temporary worktree, pushes the exact output branch without force, re-reads the
+same PR, and requires the exact pushed head and changed-file set before
+reporting `DONE`. It never resets, cleans, stashes, deletes, stages, or commits
+in the source retained worktree, and it must not create a replacement PR when
+`Existing PR` is supplied.
+
 It may only:
 
 1. Validate `Target Repository` as exactly `alanua/Skeleton`.

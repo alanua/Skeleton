@@ -6817,6 +6817,147 @@ def _valid_publish_existing_override(
     }
 
 
+def _valid_publish_existing_cross_branch_override(
+    *,
+    target_repository: str = runner.REPO,
+    source_issue: int = 3407,
+    source_worktree_branch: str = "runner/issue-3407",
+    output_branch: str = "runner/issue-3404",
+    base_branch: str = "main",
+    allowed_files: tuple[str, ...] = ("scripts/runner_poll_github_tasks.py",),
+    draft_pr: bool = True,
+) -> dict[str, object]:
+    override = _valid_publish_existing_override(
+        target_repository=target_repository,
+        source_issue=source_issue,
+        output_branch=output_branch,
+        base_branch=base_branch,
+        allowed_files=allowed_files,
+        draft_pr=draft_pr,
+    )
+    override["source_worktree_branch"] = source_worktree_branch
+    return override
+
+
+def _publish_existing_cross_branch_body(
+    *,
+    source_issue: int | str = 3407,
+    output_branch: str = "runner/issue-3404",
+    existing_pr: int | str = 3405,
+    expected_head_sha: str | None = HEAD_SHA,
+    allowed_files: tuple[str, ...] = ("scripts/runner_poll_github_tasks.py",),
+    publish_override: object | None = None,
+    extra_metadata: tuple[str, ...] = (),
+) -> str:
+    metadata = [
+        f"Existing PR: {existing_pr}",
+        *(
+            [f"Expected Existing PR Head SHA: {expected_head_sha}"]
+            if expected_head_sha is not None
+            else []
+        ),
+        *extra_metadata,
+    ]
+    return _publish_existing_issue_worktree_body(
+        source_issue=source_issue,
+        output_branch=output_branch,
+        allowed_files=allowed_files,
+        publish_override=publish_override,
+    ).replace("Allowed Files:\n", "\n".join(metadata) + "\nAllowed Files:\n")
+
+
+def _publish_existing_cross_branch_commands(
+    *,
+    source_path: Path,
+    source_branch: str = "runner/issue-3407",
+    output_branch: str = "runner/issue-3404",
+    pr_number: int = 3405,
+    base_ref: str = "main",
+    pre_head_sha: str = HEAD_SHA,
+    post_head_sha: str = "b" * 40,
+    changed_files: tuple[str, ...] = ("scripts/runner_poll_github_tasks.py",),
+    untracked_files: tuple[str, ...] = (),
+    post_pr_files: tuple[str, ...] | None = None,
+    pre_pr_state: dict[str, object] | None = None,
+    post_pr_state: dict[str, object] | None = None,
+    staged_diff_code: int = 1,
+    push_code: int = 0,
+) -> object:
+    pr_view_count = 0
+    after_files = post_pr_files if post_pr_files is not None else changed_files
+    before = pre_pr_state or _existing_pr_publish_state(
+        number=pr_number,
+        base_ref=base_ref,
+        head_ref=output_branch,
+        head_sha=pre_head_sha,
+        url=f"https://github.com/alanua/Skeleton/pull/{pr_number}",
+        files=changed_files,
+    )
+    after = post_pr_state or _existing_pr_publish_state(
+        number=pr_number,
+        base_ref=base_ref,
+        head_ref=output_branch,
+        head_sha=post_head_sha if staged_diff_code == 1 else pre_head_sha,
+        url=f"https://github.com/alanua/Skeleton/pull/{pr_number}",
+        files=after_files,
+    )
+
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        nonlocal pr_view_count
+        cwd_path = Path(cwd or "")
+        if command[:4] == ["gh", "pr", "view", str(pr_number)]:
+            assert cwd_path == source_path
+            pr_view_count += 1
+            return 0, json.dumps(before if pr_view_count == 1 else after)
+        if cwd_path == source_path:
+            if command == ["git", "branch", "--show-current"]:
+                return 0, f"{source_branch}\n"
+            if command == ["git", "remote", "get-url", "origin"]:
+                return 0, "https://github.com/alanua/Skeleton.git\n"
+            if command == ["git", "diff", "--name-only", "HEAD", "--"]:
+                return 0, "\n".join(changed_files) + ("\n" if changed_files else "")
+            if command == ["git", "ls-files", "--others", "--exclude-standard"]:
+                return 0, "\n".join(untracked_files) + ("\n" if untracked_files else "")
+            if command[:4] == ["git", "diff", "--quiet", "--"]:
+                return 1, ""
+            if command == ["git", "read-tree", "HEAD"]:
+                return 0, ""
+            if command[:3] == ["git", "update-index", "--add"]:
+                return 0, ""
+            if command[:4] == ["git", "diff", "--check", "--cached"]:
+                return 0, ""
+            if command[:4] == ["git", "worktree", "add", "--detach"]:
+                return 0, ""
+            if command[:3] == ["git", "worktree", "remove"]:
+                return 0, ""
+        else:
+            if command == ["git", "diff", "--check", "--", *changed_files]:
+                return 0, ""
+            if command == ["git", "add", "--", *changed_files]:
+                return 0, ""
+            if command == ["git", "diff", "--quiet", "--cached", "--", *changed_files]:
+                return staged_diff_code, ""
+            if command == [
+                "git",
+                "commit",
+                "-m",
+                "Publish issue #3407 worktree to existing PR",
+            ]:
+                return 0, ""
+            if command == ["git", "rev-parse", "HEAD"]:
+                return 0, f"{post_head_sha}\n"
+            if command == [
+                "git",
+                "push",
+                "origin",
+                f"refs/heads/{output_branch}:refs/heads/{output_branch}",
+            ]:
+                return push_code, ""
+        return 2, f"unexpected command: {command!r} cwd={cwd_path}"
+
+    return run
+
+
 def _publish_target_project_issue_worktree_body(
     *,
     target_project: str = "lumenflow",
@@ -10431,6 +10572,242 @@ def test_publish_existing_issue_worktree_public_report_is_sanitized(
     assert raw_error not in report
     assert "token=secret" not in report
     assert "command output" not in report
+
+
+def test_publish_existing_issue_worktree_cross_branch_existing_pr_shape_updates_only_output_branch(
+    tmp_path: Path,
+) -> None:
+    allowed_files = (
+        "scripts/runner_poll_github_tasks.py",
+        "tests/test_runner_poll_github_tasks.py",
+        "docs/RUNNER_MAINTENANCE_TASKS.md",
+    )
+    worktree_path = _prepare_issue_publish_worktree(tmp_path, issue_number=3407)
+    source_marker = (worktree_path / ".git").read_bytes()
+    for relative_path in allowed_files:
+        path = worktree_path / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"retained:{relative_path}\n", encoding="utf-8")
+    pushed_head = "c" * 40
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_publish_existing_cross_branch_commands(
+            source_path=worktree_path,
+            changed_files=allowed_files,
+            post_head_sha=pushed_head,
+            post_pr_files=allowed_files,
+        ),
+    ) as run:
+        report = runner.publish_existing_issue_worktree(
+            _publish_existing_cross_branch_body(
+                allowed_files=allowed_files,
+                publish_override=_valid_publish_existing_cross_branch_override(
+                    allowed_files=allowed_files
+                ),
+            )
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert "maintenance_task_id=publish_existing_issue_worktree" in report
+    assert "source_issue=3407" in report
+    assert "expected_source_branch=runner/issue-3407" in report
+    assert "expected_branch=runner/issue-3404" in report
+    assert "pull_request=3405" in report
+    assert f"pushed_head_sha={pushed_head}" in report
+    assert "post_push_pr_changed_files_count=3" in report
+    assert [
+        "git",
+        "push",
+        "origin",
+        "refs/heads/runner/issue-3404:refs/heads/runner/issue-3404",
+    ] in commands
+    assert all("--force" not in command for command in commands)
+    assert all(command[:3] != ["gh", "pr", "create"] for command in commands)
+    assert all(
+        command[:2] != ["git", "add"] or call.kwargs.get("cwd") != worktree_path
+        for call, command in zip(run.call_args_list, commands)
+    )
+    assert (worktree_path / ".git").read_bytes() == source_marker
+
+
+def test_publish_existing_issue_worktree_cross_branch_repeat_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path, issue_number=3407)
+    source_file = worktree_path / "scripts/runner_poll_github_tasks.py"
+    source_file.parent.mkdir(parents=True, exist_ok=True)
+    source_file.write_text("retained\n", encoding="utf-8")
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_publish_existing_cross_branch_commands(
+            source_path=worktree_path,
+            staged_diff_code=0,
+            post_pr_files=("scripts/runner_poll_github_tasks.py",),
+        ),
+    ) as run:
+        report = runner.publish_existing_issue_worktree(
+            _publish_existing_cross_branch_body(
+                publish_override=_valid_publish_existing_cross_branch_override()
+            )
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert "step=publication_idempotent status=done" in report
+    assert f"pushed_head_sha={HEAD_SHA}" in report
+    assert all(command[:2] != ["git", "commit"] for command in commands)
+    assert all(command[:2] != ["git", "push"] for command in commands)
+
+
+def test_publish_existing_issue_worktree_cross_branch_without_dual_override_fails_closed(
+    tmp_path: Path,
+) -> None:
+    _prepare_issue_publish_worktree(tmp_path, issue_number=3407)
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(runner, "run_command") as run:
+        report = runner.publish_existing_issue_worktree(
+            _publish_existing_cross_branch_body(
+                publish_override=_valid_publish_existing_override(
+                    source_issue=3407,
+                    output_branch="runner/issue-3404",
+                )
+            )
+        )
+
+    assert report.startswith("NEEDS_OPERATOR:")
+    assert "reason=output_branch_mismatch" in report
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("pre_state", "reason"),
+    (
+        (
+            _existing_pr_publish_state(
+                number=3405,
+                head_ref="runner/issue-999",
+                head_sha=HEAD_SHA,
+                url="https://github.com/alanua/Skeleton/pull/3405",
+            ),
+            "pr_head_branch_mismatch",
+        ),
+        (
+            _existing_pr_publish_state(
+                number=3405,
+                head_ref="runner/issue-3404",
+                head_sha="d" * 40,
+                url="https://github.com/alanua/Skeleton/pull/3405",
+            ),
+            "pr_head_sha_mismatch",
+        ),
+        (
+            _existing_pr_publish_state(
+                number=3405,
+                state="CLOSED",
+                head_ref="runner/issue-3404",
+                head_sha=HEAD_SHA,
+                url="https://github.com/alanua/Skeleton/pull/3405",
+            ),
+            "pr_not_open",
+        ),
+        (
+            _existing_pr_publish_state(
+                number=3405,
+                is_draft=False,
+                head_ref="runner/issue-3404",
+                head_sha=HEAD_SHA,
+                url="https://github.com/alanua/Skeleton/pull/3405",
+            ),
+            "pr_not_draft",
+        ),
+        (
+            _existing_pr_publish_state(
+                number=3405,
+                base_ref="develop",
+                head_ref="runner/issue-3404",
+                head_sha=HEAD_SHA,
+                url="https://github.com/alanua/Skeleton/pull/3405",
+            ),
+            "pr_base_mismatch",
+        ),
+        (
+            _existing_pr_publish_state(
+                number=3405,
+                head_ref="runner/issue-3404",
+                head_sha=HEAD_SHA,
+                head_repository="alanua/Other",
+                url="https://github.com/alanua/Skeleton/pull/3405",
+            ),
+            "pr_head_repository_mismatch",
+        ),
+    ),
+)
+def test_publish_existing_issue_worktree_cross_branch_bad_pr_blocks_before_mutation(
+    tmp_path: Path, pre_state: dict[str, object], reason: str
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path, issue_number=3407)
+    source_file = worktree_path / "scripts/runner_poll_github_tasks.py"
+    source_file.parent.mkdir(parents=True, exist_ok=True)
+    source_file.write_text("retained\n", encoding="utf-8")
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_publish_existing_cross_branch_commands(
+            source_path=worktree_path,
+            pre_pr_state=pre_state,
+        ),
+    ) as run:
+        report = runner.publish_existing_issue_worktree(
+            _publish_existing_cross_branch_body(
+                publish_override=_valid_publish_existing_cross_branch_override()
+            )
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith(("NEEDS_OPERATOR:", "BLOCKED:"))
+    assert f"reason={reason}" in report
+    assert all(command[:2] != ["git", "add"] for command in commands)
+    assert all(command[:2] != ["git", "push"] for command in commands)
+
+
+def test_publish_existing_issue_worktree_cross_branch_unexpected_untracked_blocks(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path, issue_number=3407)
+    source_file = worktree_path / "scripts/runner_poll_github_tasks.py"
+    source_file.parent.mkdir(parents=True, exist_ok=True)
+    source_file.write_text("retained\n", encoding="utf-8")
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_publish_existing_cross_branch_commands(
+            source_path=worktree_path,
+            untracked_files=("docs/unexpected.md",),
+        ),
+    ) as run:
+        report = runner.publish_existing_issue_worktree(
+            _publish_existing_cross_branch_body(
+                publish_override=_valid_publish_existing_cross_branch_override()
+            )
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith(("NEEDS_OPERATOR:", "BLOCKED:"))
+    assert "reason=unexpected_untracked_files" in report
+    assert all(command[:2] != ["git", "add"] for command in commands)
+    assert all(command[:2] != ["git", "push"] for command in commands)
 
 
 def test_publish_issue_worktree_to_existing_pr_updates_existing_draft_pr_only(

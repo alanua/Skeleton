@@ -1214,6 +1214,20 @@ class IssueWorktreePublishInspectionRequest:
 
 
 @dataclass(frozen=True)
+class IssueWorktreeCrossBranchExistingPrRequest:
+    repository: str
+    source_issue: int
+    source_worktree_branch: str
+    output_branch: str
+    base_branch: str
+    draft_pr: bool
+    pr_number: int
+    expected_pr_head_sha: str | None
+    allowed_files: frozenset[str]
+    override_hash: str
+
+
+@dataclass(frozen=True)
 class IssueWorktreeExistingPrPublishRequest:
     repository: str
     source_issue: int
@@ -9665,7 +9679,12 @@ def _declared_existing_pr_expected_head_sha(body: str) -> str | None:
         if key in task_fields:
             candidates.append(task_fields[key])
     metadata = _metadata_before_task(body)
-    for field in ("Expected PR Head SHA", "Expected Head SHA", "Head SHA"):
+    for field in (
+        "Expected Existing PR Head SHA",
+        "Expected PR Head SHA",
+        "Expected Head SHA",
+        "Head SHA",
+    ):
         value = _body_field(metadata, field)
         if value is not None:
             candidates.append(value)
@@ -11453,7 +11472,22 @@ def _issue_worktree_publish_inspection_metadata(
             return None, "missing_or_invalid_output_branch"
     elif expected_branch != required_branch:
         return None, "missing_or_invalid_expected_branch"
-    if (explicit_recovery_route or target_project_route) and expected_branch != required_branch:
+    explicit_cross_branch_existing_pr = (
+        explicit_recovery_route
+        and not target_project_route
+        and isinstance(expected_branch, str)
+        and _declared_existing_pr_number(body) is not None
+        and _issue_worktree_publish_dual_branch_override_metadata(
+            metadata,
+            source_issue=source_issue_number,
+            output_branch=expected_branch,
+        )
+    )
+    if (
+        (explicit_recovery_route or target_project_route)
+        and expected_branch != required_branch
+        and not explicit_cross_branch_existing_pr
+    ):
         return None, "output_branch_mismatch"
     base_reason = _issue_worktree_publish_base_failure(
         base_branch, base_sha, target_project_route=target_project_route
@@ -12953,6 +12987,62 @@ def _issue_worktree_publish_pr_block_reason(
     return None
 
 
+def _issue_worktree_publish_pr_number_state(
+    request: IssueWorktreeCrossBranchExistingPrRequest, worktree_path: Path
+) -> dict[str, Any]:
+    code, output = run_command(
+        [
+            "gh",
+            "pr",
+            "view",
+            str(request.pr_number),
+            "--repo",
+            request.repository,
+            "--json",
+            (
+                "number,url,state,isDraft,baseRefName,baseRefOid,headRefName,"
+                "headRefOid,headRepository,headRepositoryOwner,files"
+            ),
+        ],
+        cwd=worktree_path,
+    )
+    if code != 0:
+        raise RuntimeError("gh pr view failed")
+    parsed = json.loads(output or "{}")
+    if not isinstance(parsed, dict):
+        raise RuntimeError("gh pr view returned non-object JSON")
+    return parsed
+
+
+def _issue_worktree_cross_branch_pr_block_reason(
+    request: IssueWorktreeCrossBranchExistingPrRequest,
+    pr_state: dict[str, Any],
+    *,
+    expected_head_sha: str | None,
+    post_push: bool = False,
+) -> str | None:
+    prefix = "post_push_" if post_push else ""
+    if pr_state.get("number") != request.pr_number:
+        return f"{prefix}pr_number_mismatch"
+    if str(pr_state.get("state") or "").upper() != "OPEN":
+        return f"{prefix}pr_not_open"
+    if request.draft_pr and pr_state.get("isDraft") is not True:
+        return f"{prefix}pr_not_draft"
+    if pr_state.get("baseRefName") != request.base_branch:
+        return f"{prefix}pr_base_mismatch"
+    if _head_repository_name_with_owner(pr_state) != request.repository:
+        return f"{prefix}pr_head_repository_mismatch"
+    if pr_state.get("headRefName") != request.output_branch:
+        return f"{prefix}pr_head_branch_mismatch"
+    if expected_head_sha is not None:
+        head_sha = str(pr_state.get("headRefOid") or "").lower()
+        if head_sha != expected_head_sha:
+            return f"{prefix}pr_head_sha_mismatch"
+    if _existing_pr_publish_pr_url(pr_state) is None:
+        return f"{prefix}pr_url_unavailable"
+    return None
+
+
 def _issue_worktree_publish_fetch_and_verify_base(
     request: IssueWorktreePublishInspectionRequest,
     worktree_path: Path,
@@ -12968,6 +13058,30 @@ def _issue_worktree_publish_fetch_and_verify_base(
         return None, result or "fetch_base_failed"
     assert result is not None
     return result, None
+
+
+def _issue_worktree_publish_dual_branch_override_metadata(
+    metadata: str,
+    *,
+    source_issue: int,
+    output_branch: str,
+) -> bool:
+    raw_override = _body_field(metadata, "Publish Override")
+    if raw_override is None:
+        return False
+    try:
+        override = json.loads(raw_override)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(override, dict):
+        return False
+    source_branch = override.get("source_worktree_branch")
+    return (
+        isinstance(source_branch, str)
+        and _safe_issue_publish_branch_name(source_branch)
+        and source_branch == f"runner/issue-{source_issue}"
+        and override.get("output_branch") == output_branch
+    )
 
 
 def _issue_worktree_publish_override_result(
@@ -13009,6 +13123,392 @@ def _issue_worktree_publish_override_result(
     ):
         return "publish_override_scope_mismatch", None
     return "publish_override_valid", one_time_override_hash(override)
+
+
+def _issue_worktree_publish_cross_branch_request(
+    body: str,
+    metadata: str,
+    request: IssueWorktreePublishInspectionRequest,
+) -> tuple[IssueWorktreeCrossBranchExistingPrRequest | None, str | None]:
+    raw_override = _body_field(metadata, "Publish Override")
+    if raw_override is None:
+        return None, None
+    try:
+        override = json.loads(raw_override)
+    except json.JSONDecodeError:
+        return None, "publish_override_malformed"
+    if not isinstance(override, dict):
+        return None, "publish_override_malformed"
+    if "source_worktree_branch" not in override:
+        return None, None
+    expected_keys = {
+        "action",
+        "target_repository",
+        "source_issue",
+        "source_worktree_branch",
+        "output_branch",
+        "base_branch",
+        "allowed_files",
+        "draft_pr",
+    }
+    if set(override) != expected_keys:
+        return None, "publish_override_malformed"
+    allowed_files = override.get("allowed_files")
+    source_worktree_branch = override.get("source_worktree_branch")
+    output_branch = override.get("output_branch")
+    if (
+        override.get("action") != PUBLISH_EXISTING_ISSUE_WORKTREE
+        or override.get("target_repository") != request.repository
+        or override.get("source_issue") != request.source_issue
+        or not isinstance(source_worktree_branch, str)
+        or not _safe_issue_publish_branch_name(source_worktree_branch)
+        or source_worktree_branch != f"runner/issue-{request.source_issue}"
+        or not isinstance(output_branch, str)
+        or not _safe_issue_publish_branch_name(output_branch)
+        or output_branch != request.expected_branch
+        or output_branch == source_worktree_branch
+        or override.get("base_branch") != request.base_branch
+        or not _safe_target_base_branch_name(request.base_branch)
+        or override.get("draft_pr") is not request.draft_pr
+        or request.draft_pr is not True
+        or not isinstance(allowed_files, list)
+        or not all(isinstance(path, str) for path in allowed_files)
+        or any(not _safe_issue_publish_file_path(path) for path in allowed_files)
+        or len(set(allowed_files)) != len(allowed_files)
+        or set(allowed_files) != set(request.allowed_files)
+    ):
+        return None, "publish_override_scope_mismatch"
+    pr_number = _declared_existing_pr_number(body)
+    if pr_number is None:
+        return None, "missing_existing_pr_number"
+    expected_head_sha = _declared_existing_pr_expected_head_sha(body)
+    return (
+        IssueWorktreeCrossBranchExistingPrRequest(
+            repository=request.repository,
+            source_issue=request.source_issue,
+            source_worktree_branch=source_worktree_branch,
+            output_branch=output_branch,
+            base_branch=request.base_branch,
+            draft_pr=request.draft_pr,
+            pr_number=pr_number,
+            expected_pr_head_sha=expected_head_sha,
+            allowed_files=request.allowed_files,
+            override_hash=one_time_override_hash(override),
+        ),
+        None,
+    )
+
+
+def _issue_worktree_publish_copy_retained_files(
+    source_path: Path, output_path: Path, files: tuple[str, ...]
+) -> str | None:
+    source_root = source_path.resolve(strict=False)
+    output_root = output_path.resolve(strict=False)
+    for relative_path in files:
+        source_file = (source_path / relative_path).resolve(strict=False)
+        output_file = (output_path / relative_path).resolve(strict=False)
+        try:
+            source_file.relative_to(source_root)
+            output_file.relative_to(output_root)
+        except ValueError:
+            return "unsafe_source_file"
+        try:
+            source_stat = source_file.lstat()
+        except OSError:
+            return "unsafe_source_file"
+        if not stat.S_ISREG(source_stat.st_mode) or stat.S_ISLNK(source_stat.st_mode):
+            return "unsafe_source_file"
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_file, output_file)
+    return None
+
+
+def _issue_worktree_publish_cross_branch_existing_pr(
+    task_id: str,
+    request: IssueWorktreeCrossBranchExistingPrRequest,
+    source_path: Path,
+    status_lines: list[str],
+) -> str:
+    try:
+        pr_state = _issue_worktree_publish_pr_number_state(request, source_path)
+    except (RuntimeError, json.JSONDecodeError):
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "step=read_pr_metadata status=failed"],
+            "not_met",
+        )
+    expected_pre_head = request.expected_pr_head_sha or str(
+        pr_state.get("headRefOid") or ""
+    ).lower()
+    if request.expected_pr_head_sha is not None:
+        status_lines.append(f"expected_existing_pr_head_sha={request.expected_pr_head_sha}")
+    pr_reason = _issue_worktree_cross_branch_pr_block_reason(
+        request, pr_state, expected_head_sha=expected_pre_head
+    )
+    pre_push_pr_files = _existing_pr_publish_file_paths(pr_state)
+    if pr_reason is not None:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, f"reason={pr_reason}"], "not_met"
+        )
+    if _HEAD_SHA_RE.fullmatch(expected_pre_head) is None:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=pr_head_sha_mismatch"], "not_met"
+        )
+    pr_url = _existing_pr_publish_pr_url(pr_state)
+    assert pr_url is not None
+    status_lines.extend(
+        (
+            "step=read_pr_metadata status=done",
+            f"pull_request={request.pr_number}",
+            f"existing_pr_url={pr_url}",
+            f"pre_push_pr_changed_files_count={len(pre_push_pr_files)}",
+            f"existing_pr_head_sha={expected_pre_head}",
+        )
+    )
+
+    code, output = run_command(["git", "branch", "--show-current"], cwd=source_path)
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "step=read_current_branch status=failed"], "not_met"
+        )
+    current_branch_lines = _git_status_path_lines(output)
+    current_branch = current_branch_lines[0] if current_branch_lines else ""
+    status_lines.append(f"current_branch={current_branch}")
+    if current_branch != request.source_worktree_branch:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=source_branch_mismatch"], "not_met"
+        )
+
+    code, output = run_command(["git", "remote", "get-url", "origin"], cwd=source_path)
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "step=read_origin_remote status=failed"], "not_met"
+        )
+    if not _remote_url_matches_project_repo(output, request.repository):
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=origin_remote_mismatch"], "not_met"
+        )
+
+    code, output = run_command(["git", "diff", "--name-only", "HEAD", "--"], cwd=source_path)
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "step=read_changed_tracked_files status=failed"], "not_met"
+        )
+    changed_tracked_files = _git_status_path_lines(output)
+    if not all(_safe_issue_publish_file_path(path) for path in changed_tracked_files):
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=changed_tracked_file_path_unsafe"], "not_met"
+        )
+    code, output = run_command(["git", "ls-files", "--others", "--exclude-standard"], cwd=source_path)
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "step=read_untracked_files status=failed"], "not_met"
+        )
+    untracked_files = _git_status_path_lines(output)
+    if not all(
+        _safe_issue_publish_file_path(path)
+        or _is_ignored_issue_publish_untracked_path(path)
+        for path in untracked_files
+    ):
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=untracked_file_path_unsafe"], "not_met"
+        )
+    unexpected_untracked_files = [
+        path
+        for path in untracked_files
+        if not _is_ignored_issue_publish_untracked_path(path)
+        and path not in request.allowed_files
+    ]
+    allowed_untracked_files = [
+        path
+        for path in untracked_files
+        if not _is_ignored_issue_publish_untracked_path(path)
+        and path in request.allowed_files
+    ]
+    if unexpected_untracked_files:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=unexpected_untracked_files"], "not_met"
+        )
+    validated_files = tuple(
+        dict.fromkeys([*changed_tracked_files, *allowed_untracked_files])
+    )
+    if not validated_files:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=no_publishable_changes"], "not_met"
+        )
+    if not set(validated_files) <= request.allowed_files:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=changed_files_outside_allowlist"], "not_met"
+        )
+    status_lines.extend(
+        (
+            f"changed_tracked_files_count={len(changed_tracked_files)}",
+            f"allowed_untracked_files_count={len(allowed_untracked_files)}",
+            f"validated_publish_files_count={len(validated_files)}",
+        )
+    )
+
+    packet = RegisteredWorktreeOverlayPacket(
+        packet_id="publish_existing_issue_worktree_cross_branch",
+        source_issue=request.source_issue,
+        source_branch=request.source_worktree_branch,
+        pr_number=request.pr_number,
+        target_branch=request.output_branch,
+        target_head_sha=expected_pre_head,
+        allowed_files=tuple(sorted(request.allowed_files)),
+    )
+    specs, source_file_reason = _registered_worktree_overlay_source_specs(
+        packet,
+        source_path,
+        tuple(changed_tracked_files),
+        tuple(allowed_untracked_files),
+    )
+    if source_file_reason is not None:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, f"reason={source_file_reason}"], "not_met"
+        )
+    assert specs is not None
+    whitespace_reason = _registered_worktree_overlay_validate_tracked_whitespace(
+        source_path, specs
+    )
+    if whitespace_reason is not None:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, f"reason={whitespace_reason}"], "not_met"
+        )
+
+    with tempfile.TemporaryDirectory(prefix="runner-publish-existing-") as temp_dir:
+        output_path = Path(temp_dir) / "output"
+        output_worktree_added = False
+        try:
+            code, _output = run_command(
+                ["git", "worktree", "add", "--detach", str(output_path), expected_pre_head],
+                cwd=source_path,
+            )
+            if code != 0:
+                return _maintenance_report(
+                    "BLOCKED", task_id, [*status_lines, "reason=temporary_worktree_failed"], "not_met"
+                )
+            output_worktree_added = True
+            copy_reason = _issue_worktree_publish_copy_retained_files(
+                source_path, output_path, validated_files
+            )
+            if copy_reason is not None:
+                return _maintenance_report(
+                    "BLOCKED", task_id, [*status_lines, f"reason={copy_reason}"], "not_met"
+                )
+            code, _output = run_command(
+                ["git", "diff", "--check", "--", *validated_files], cwd=output_path
+            )
+            if code != 0:
+                return _maintenance_report(
+                    "BLOCKED", task_id, [*status_lines, "reason=diff_check_failed"], "not_met"
+                )
+            code, _output = run_command(["git", "add", "--", *validated_files], cwd=output_path)
+            if code != 0:
+                return _maintenance_report(
+                    "BLOCKED", task_id, [*status_lines, "reason=staging_failed"], "not_met"
+                )
+            code, _output = run_command(
+                ["git", "diff", "--quiet", "--cached", "--", *validated_files],
+                cwd=output_path,
+            )
+            if code == 0:
+                pushed_head_sha = expected_pre_head
+                status_lines.append("step=publication_idempotent status=done")
+            elif code == 1:
+                code, _output = run_command(
+                    [
+                        "git",
+                        "commit",
+                        "-m",
+                        f"Publish issue #{request.source_issue} worktree to existing PR",
+                    ],
+                    cwd=output_path,
+                )
+                if code != 0:
+                    return _maintenance_report(
+                        "BLOCKED", task_id, [*status_lines, "reason=commit_failed"], "not_met"
+                    )
+                code, output = run_command(["git", "rev-parse", "HEAD"], cwd=output_path)
+                if code != 0:
+                    return _maintenance_report(
+                        "BLOCKED", task_id, [*status_lines, "step=read_post_commit_head status=failed"], "not_met"
+                    )
+                head_lines = _git_status_path_lines(output)
+                pushed_head_sha = head_lines[0].lower() if head_lines else ""
+                if (
+                    _HEAD_SHA_RE.fullmatch(pushed_head_sha) is None
+                    or pushed_head_sha == expected_pre_head
+                ):
+                    return _maintenance_report(
+                        "BLOCKED",
+                        task_id,
+                        [*status_lines, "reason=post_commit_head_invalid_or_unchanged"],
+                        "not_met",
+                    )
+                code, _output = run_command(
+                    [
+                        "git",
+                        "push",
+                        "origin",
+                        f"refs/heads/{request.output_branch}:refs/heads/{request.output_branch}",
+                    ],
+                    cwd=output_path,
+                )
+                if code != 0:
+                    return _maintenance_report(
+                        "BLOCKED", task_id, [*status_lines, "reason=push_failed"], "not_met"
+                    )
+                status_lines.append("step=push_expected_pr_branch status=done")
+            else:
+                return _maintenance_report(
+                    "BLOCKED", task_id, [*status_lines, "reason=staged_diff_failed"], "not_met"
+                )
+        finally:
+            if output_worktree_added:
+                run_command(["git", "worktree", "remove", str(output_path)], cwd=source_path)
+
+    try:
+        post_push_pr_state = _issue_worktree_publish_pr_number_state(request, source_path)
+    except (RuntimeError, json.JSONDecodeError):
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "step=post_push_read_pr_metadata status=failed"],
+            "not_met",
+        )
+    post_reason = _issue_worktree_cross_branch_pr_block_reason(
+        request,
+        post_push_pr_state,
+        expected_head_sha=pushed_head_sha,
+        post_push=True,
+    )
+    if post_reason is not None:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, f"reason={post_reason}"], "not_met"
+        )
+    post_push_pr_files = _existing_pr_publish_file_paths(post_push_pr_state)
+    if not post_push_pr_files:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=post_push_pr_files_missing"], "not_met"
+        )
+    if not post_push_pr_files <= request.allowed_files:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=post_push_pr_files_outside_allowlist"], "not_met"
+        )
+    if post_push_pr_files != set(validated_files):
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=post_push_pr_files_mismatch"], "not_met"
+        )
+    status_lines.extend(
+        (
+            "step=post_push_read_pr_metadata status=done",
+            f"pushed_head_sha={pushed_head_sha}",
+            f"post_push_pr_changed_files_count={len(post_push_pr_files)}",
+        )
+    )
+    return _maintenance_report("DONE", task_id, status_lines, "met")
 
 
 def _issue_worktree_publish_remote_branch_absent(
@@ -14780,6 +15280,34 @@ def _issue_worktree_publish_validated_report(
             [*status_lines, "reason=issue_worktree_git_missing"],
             "not_met",
         )
+
+    if explicit_recovery_route and not target_project_route:
+        cross_branch_request, cross_branch_reason = (
+            _issue_worktree_publish_cross_branch_request(body, metadata, request)
+        )
+        if cross_branch_reason is not None:
+            return _maintenance_report(
+                failure_status,
+                task_id,
+                [
+                    *status_lines,
+                    f"step=publish_override status=failed reason={cross_branch_reason}",
+                ],
+                "not_met",
+            )
+        if cross_branch_request is not None:
+            status_lines.extend(
+                (
+                    f"source_worktree_branch={cross_branch_request.source_worktree_branch}",
+                    f"expected_source_branch={cross_branch_request.source_worktree_branch}",
+                    f"output_branch={cross_branch_request.output_branch}",
+                    "step=publish_override status=done reason=publish_override_valid",
+                    f"publish_override_hash={cross_branch_request.override_hash}",
+                )
+            )
+            return _issue_worktree_publish_cross_branch_existing_pr(
+                task_id, cross_branch_request, worktree_path, status_lines
+            )
 
     code, output = run_command(["git", "branch", "--show-current"], cwd=worktree_path)
     if code != 0:
