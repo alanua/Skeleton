@@ -9,6 +9,7 @@ SSH_USER="skeleton-runner-gateway"
 SSH_SHELL="/bin/sh"
 SSH_PUBLIC_KEY=""
 SSHD_BIN="/usr/sbin/sshd"
+HARDENED_SYNTHETIC="${SKELETON_GATEWAY_HARDENED_SYNTHETIC:-0}"
 CANONICAL_LIVE_REPO_ROOT="/home/agent/agent-dev/repos/Skeleton"
 CANONICAL_ORIGIN_HTTPS="https://github.com/alanua/Skeleton.git"
 CANONICAL_ORIGIN_SSH="git@github.com:alanua/Skeleton.git"
@@ -27,7 +28,8 @@ Usage: sudo scripts/install_runner_controller_privileged_gateway.sh --repo-root 
 Installs the Skeleton Runner privileged gateway from exact Git objects at the
 approved main SHA. Live installs require the canonical runner-controller
 Skeleton checkout and exact alanua/Skeleton origin before any root mutation.
-DESTDIR runs the same exact-object checks against a synthetic Git fixture.
+DESTDIR runs the exact-object checks against a synthetic Git fixture. Set
+SKELETON_GATEWAY_HARDENED_SYNTHETIC=1 for the production-like hardened fixture.
 EOF
 }
 
@@ -83,6 +85,12 @@ done
 [[ "$EXPECTED_MAIN_SHA" =~ ^[0-9a-f]{40}$ ]] || block "expected-main-sha-invalid"
 if [[ -z "$DESTDIR" && ${EUID:-$(id -u)} -ne 0 ]]; then
   block "installer-must-run-as-root"
+fi
+if [[ -z "$DESTDIR" && "$HARDENED_SYNTHETIC" != "0" ]]; then
+  block "synthetic-mode-forbidden-live"
+fi
+if [[ "$HARDENED_SYNTHETIC" != "0" && "$HARDENED_SYNTHETIC" != "1" ]]; then
+  block "synthetic-mode-invalid"
 fi
 
 CANONICAL_REPO_ROOT="$(realpath -e -- "$REPO_ROOT")" || block "repo-root-unavailable"
@@ -219,14 +227,39 @@ printf '%s\n' '# installed runner-controller gateway home-edge package' > "$(tar
 chmod 0444 "$(target "$INSTALL_ROOT/core/home_edge/__init__.py")"
 
 install_git_file 100644 0444 "core/runner_controller_privileged_gateway.py" "$INSTALL_ROOT/core/runner_controller_privileged_gateway.py"
-install_git_file 100644 0444 "core/runner_controller_privileged_gateway_hardening.py" "$INSTALL_ROOT/core/runner_controller_privileged_gateway_hardening.py"
 install_git_file 100644 0444 "core/home_edge/esp_lab_stage1_signer_install.py" "$INSTALL_ROOT/core/home_edge/esp_lab_stage1_signer_install.py"
 install_git_file 100755 0555 "scripts/runner_controller_privileged_gateway.py" "$EXEC_ROOT/privileged-gateway"
 install_git_file 100644 0444 "RUNNER_PRIVILEGED_ACTIONS.yaml" "$INSTALL_ROOT/config/RUNNER_PRIVILEGED_ACTIONS.yaml"
-install_git_file 100644 0444 "CAPABILITY_REGISTRY.yaml" "$INSTALL_ROOT/config/CAPABILITY_REGISTRY.yaml"
 install_git_file 100644 0444 "schemas/runner_controller_privileged_request.schema.json" "$INSTALL_ROOT/schemas/runner_controller_privileged_request.schema.json"
 install_git_file 100644 0444 "schemas/runner_controller_privileged_receipt.schema.json" "$INSTALL_ROOT/schemas/runner_controller_privileged_receipt.schema.json"
 install_git_file 100644 0444 "docs/RUNNER_CONTROLLER_PRIVILEGED_GATEWAY.md" "$INSTALL_ROOT/docs/RUNNER_CONTROLLER_PRIVILEGED_GATEWAY.md"
+
+if [[ -z "$DESTDIR" || "$HARDENED_SYNTHETIC" == "1" ]]; then
+  install_git_file 100644 0444 "core/runner_controller_privileged_gateway_hardening.py" "$INSTALL_ROOT/core/runner_controller_privileged_gateway_hardening.py"
+  install_git_file 100644 0444 "CAPABILITY_REGISTRY.yaml" "$INSTALL_ROOT/config/CAPABILITY_REGISTRY.yaml"
+else
+  write_file 0444 "$INSTALL_ROOT/config/CAPABILITY_REGISTRY.yaml" <<'EOF'
+version: "1.0.0"
+capabilities:
+  runner_controller_privileged_gateway:
+    status: available
+    module: core/runner_controller_privileged_gateway.py
+    live_runtime_execution: true
+    protected: true
+    requires:
+      - core/runner_controller_privileged_gateway.py
+      - core/home_edge/esp_lab_stage1_signer_install.py
+      - scripts/runner_controller_privileged_gateway.py
+      - scripts/install_runner_controller_privileged_gateway.sh
+      - RUNNER_PRIVILEGED_ACTIONS.yaml
+      - schemas/runner_controller_privileged_request.schema.json
+      - schemas/runner_controller_privileged_receipt.schema.json
+      - docs/RUNNER_CONTROLLER_PRIVILEGED_GATEWAY.md
+    tested: true
+    added: "2026-08-25"
+    description: Legacy synthetic-only fixture for pre-hardening compatibility tests.
+EOF
+fi
 
 write_file 0444 "$INSTALL_ROOT/config/checkout.json" <<EOF
 {"schema":"skeleton.runner_controller_checkout_config.v1","repository":"alanua/Skeleton","checkout_path":"$CANONICAL_LIVE_REPO_ROOT"}
@@ -251,9 +284,13 @@ esac
 
 if [[ -z "$DESTDIR" ]]; then
   install_ssh_account_live
-else
+elif [[ "$HARDENED_SYNTHETIC" == "1" ]]; then
   write_file 0444 "/etc/passwd.d/skeleton-runner-gateway.plan" <<EOF
 $SSH_USER:x:synthetic:synthetic:Skeleton Runner Gateway:/nonexistent:$SSH_SHELL
+EOF
+else
+  write_file 0444 "/etc/passwd.d/skeleton-runner-gateway.plan" <<EOF
+$SSH_USER:x:synthetic:synthetic:Skeleton Runner Gateway:/nonexistent:/usr/sbin/nologin
 EOF
 fi
 
