@@ -268,12 +268,18 @@ def test_root_child_allows_only_exact_two_privileged_command_shapes(
 ) -> None:
     staged_parent = tmp_path / "skeleton-esp-stage1-signer-abc123"
     staged_parent.mkdir()
+    staged_parent.chmod(0o700)
     staged = staged_parent / "install_home_edge_esp_lab_activation_signer.sh"
+    staged.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    staged.chmod(0o500)
     calls: list[list[str]] = []
 
     def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert _kwargs["env"] == gateway.ROOT_CHILD_CLEAN_ENV
+        assert _kwargs["stdout"] == subprocess.DEVNULL
+        assert _kwargs["stderr"] == subprocess.DEVNULL
         calls.append(argv)
-        return subprocess.CompletedProcess(argv, 0, "ok", "")
+        return subprocess.CompletedProcess(argv, 0)
 
     monkeypatch.setattr(gateway.tempfile, "gettempdir", lambda: str(tmp_path))
     monkeypatch.setattr(gateway.subprocess, "run", fake_run)
@@ -296,7 +302,7 @@ def test_root_child_allows_only_exact_two_privileged_command_shapes(
         60,
     )
     assert code == 0
-    assert output == "ok"
+    assert output == "ROOT_CHILD_EXIT_0"
 
     code, output = gateway._root_local_protected_run(
         [
@@ -309,7 +315,7 @@ def test_root_child_allows_only_exact_two_privileged_command_shapes(
         120,
     )
     assert code == 0
-    assert output == "ok"
+    assert output == "ROOT_CHILD_EXIT_0"
     assert calls == [
         [
             "/usr/bin/install",
@@ -337,7 +343,10 @@ def test_root_child_blocks_unregistered_or_mutated_privileged_command_shapes(
 ) -> None:
     staged_parent = tmp_path / "skeleton-esp-stage1-signer-abc123"
     staged_parent.mkdir()
+    staged_parent.chmod(0o700)
     staged = staged_parent / "install_home_edge_esp_lab_activation_signer.sh"
+    staged.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    staged.chmod(0o500)
     monkeypatch.setattr(gateway.tempfile, "gettempdir", lambda: str(tmp_path))
     monkeypatch.setattr(
         gateway.subprocess,
@@ -375,6 +384,20 @@ def test_root_child_blocks_unregistered_or_mutated_privileged_command_shapes(
             "-m",
             "0555",
             str(tmp_path / "other" / "install_home_edge_esp_lab_activation_signer.sh"),
+            gateway.ROOT_CHILD_PROTECTED_INSTALLER,
+        ],
+        [
+            "/usr/bin/sudo",
+            "-n",
+            "/usr/bin/install",
+            "-D",
+            "-o",
+            "root",
+            "-g",
+            "root",
+            "-m",
+            "0555",
+            str(staged.with_name("wrong-name.sh")),
             gateway.ROOT_CHILD_PROTECTED_INSTALLER,
         ],
         [

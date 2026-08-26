@@ -39,12 +39,20 @@ MAX_LEDGER_BYTES: Final = 1024 * 1024
 MAX_LEDGER_ENTRIES: Final = 4096
 MAX_TOKEN_BYTES: Final = 160
 MAX_AGE_SECONDS: Final = 300
+MAX_ROOT_CHILD_SOURCE_BYTES: Final = 128 * 1024
 ROOT_CHILD_STAGING_PARENT_PREFIX: Final = "skeleton-esp-stage1-signer-"
 ROOT_CHILD_STAGED_INSTALLER_NAME: Final = "install_home_edge_esp_lab_activation_signer.sh"
+ROOT_CHILD_STAGED_INSTALLER_MODE: Final = 0o500
 ROOT_CHILD_PROTECTED_INSTALLER: Final = (
     "/usr/local/libexec/skeleton/home-edge/esp-lab-stage1-installer/"
     "install_home_edge_esp_lab_activation_signer.sh"
 )
+ROOT_CHILD_CLEAN_ENV: Final = {
+    "HOME": "/nonexistent",
+    "LANG": "C",
+    "LC_ALL": "C",
+    "PATH": "/usr/bin:/bin",
+}
 REQUEST_FIELDS: Final = frozenset(
     {
         "schema",
@@ -380,14 +388,28 @@ def _parse_executor_receipt(report: str) -> Mapping[str, object] | None:
 def _is_allowed_staged_installer(path: str) -> bool:
     try:
         staged = Path(path)
-        staged.relative_to(Path(tempfile.gettempdir()))
-    except (TypeError, ValueError):
+        temp_root = Path(tempfile.gettempdir())
+        staged.relative_to(temp_root)
+        parent_stat = os.lstat(staged.parent)
+        staged_stat = os.lstat(staged)
+    except (TypeError, ValueError, OSError):
         return False
     return (
         staged.is_absolute()
-        and len(staged.parts) == len(Path(tempfile.gettempdir()).parts) + 2
+        and len(staged.parts) == len(temp_root.parts) + 2
+        and not stat.S_ISLNK(parent_stat.st_mode)
+        and stat.S_ISDIR(parent_stat.st_mode)
+        and parent_stat.st_uid == os.getuid()
+        and parent_stat.st_gid == os.getgid()
+        and stat.S_IMODE(parent_stat.st_mode) == 0o700
         and staged.parent.name.startswith(ROOT_CHILD_STAGING_PARENT_PREFIX)
         and staged.name == ROOT_CHILD_STAGED_INSTALLER_NAME
+        and not stat.S_ISLNK(staged_stat.st_mode)
+        and stat.S_ISREG(staged_stat.st_mode)
+        and staged_stat.st_uid == os.getuid()
+        and staged_stat.st_gid == os.getgid()
+        and stat.S_IMODE(staged_stat.st_mode) == ROOT_CHILD_STAGED_INSTALLER_MODE
+        and 0 < staged_stat.st_size <= MAX_ROOT_CHILD_SOURCE_BYTES
     )
 
 
@@ -424,15 +446,14 @@ def _root_local_protected_run(argv: list[str], timeout: int | None) -> tuple[int
     _validate_root_child_argv(argv[2:])
     completed = subprocess.run(
         argv[2:],
+        env=ROOT_CHILD_CLEAN_ENV,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
         timeout=timeout or 60,
         check=False,
     )
-    return completed.returncode, "\n".join(
-        part for part in (completed.stdout, completed.stderr) if part
-    )
+    return completed.returncode, f"ROOT_CHILD_EXIT_{completed.returncode}"
 
 
 def _run_registered_action(request: Mapping[str, object]) -> tuple[int, str]:
