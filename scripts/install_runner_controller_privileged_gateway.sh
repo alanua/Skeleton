@@ -195,8 +195,45 @@ validate_sshd_fragment() {
   return 0
 }
 
+write_sshd_fragment_candidate() {
+  local candidate="$1"
+  cat > "$candidate" <<EOF
+Match User $SSH_USER
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+    AuthorizedKeysFile $SSH_AUTHORIZED_KEYS
+    PermitTTY no
+    AllowTcpForwarding no
+    PermitOpen none
+    PermitListen none
+    X11Forwarding no
+    AllowAgentForwarding no
+    PermitUserRC no
+    ForceCommand $GATEWAY_COMMAND
+EOF
+  chmod 0444 "$candidate"
+}
+
+validate_ssh_inputs_before_install() {
+  [[ -n "$SSH_PUBLIC_KEY" ]] || return 0
+  case "$SSH_PUBLIC_KEY" in
+    ssh-ed25519\ *|ecdsa-sha2-nistp256\ *) ;;
+    *) block "unapproved-ssh-public-key-type" ;;
+  esac
+  if [[ -z "$DESTDIR" ]]; then
+    [[ -x "$SSH_SHELL" ]] || block "ssh-shell-unavailable"
+  fi
+  local candidate
+  candidate="$(mktemp "${TMPDIR:-/tmp}/skeleton-runner-controller-sshd-fragment.XXXXXX")" || block "sshd-candidate-unavailable"
+  write_sshd_fragment_candidate "$candidate"
+  if ! validate_sshd_fragment "$candidate"; then
+    rm -f -- "$candidate"
+    block "sshd-validation-failed"
+  fi
+  rm -f -- "$candidate"
+}
+
 install_ssh_account_live() {
-  [[ -x "$SSH_SHELL" ]] || block "ssh-shell-unavailable"
   if ! getent passwd "$SSH_USER" >/dev/null; then
     useradd --system --home-dir /nonexistent --shell "$SSH_SHELL" --no-create-home "$SSH_USER"
   fi
@@ -218,6 +255,7 @@ verify_effective_sshd_live() {
 }
 
 verify_running_installer
+validate_ssh_inputs_before_install
 
 install -d -m 0755 "$(target "$INSTALL_ROOT/core")" "$(target "$INSTALL_ROOT/core/home_edge")" "$(target "$EXEC_ROOT")"
 install -d -m 0700 "$(target "$STATE_ROOT")"
@@ -277,11 +315,6 @@ if [[ -z "$SSH_PUBLIC_KEY" ]]; then
   exit 0
 fi
 
-case "$SSH_PUBLIC_KEY" in
-  ssh-ed25519\ *|ecdsa-sha2-nistp256\ *) ;;
-  *) block "unapproved-ssh-public-key-type" ;;
-esac
-
 if [[ -z "$DESTDIR" ]]; then
   install_ssh_account_live
 elif [[ "$HARDENED_SYNTHETIC" == "1" ]]; then
@@ -305,21 +338,7 @@ EOF
 
 install -d -m 0755 "$(dirname -- "$(target "$SSHD_FRAGMENT")")"
 candidate="$(mktemp "$(target "$SSHD_FRAGMENT").candidate.XXXXXX")" || block "sshd-candidate-unavailable"
-cat > "$candidate" <<EOF
-Match User $SSH_USER
-    PasswordAuthentication no
-    KbdInteractiveAuthentication no
-    AuthorizedKeysFile $SSH_AUTHORIZED_KEYS
-    PermitTTY no
-    AllowTcpForwarding no
-    PermitOpen none
-    PermitListen none
-    X11Forwarding no
-    AllowAgentForwarding no
-    PermitUserRC no
-    ForceCommand $GATEWAY_COMMAND
-EOF
-chmod 0444 "$candidate"
+write_sshd_fragment_candidate "$candidate"
 if ! validate_sshd_fragment "$candidate"; then
   rm -f -- "$candidate"
   block "sshd-validation-failed"

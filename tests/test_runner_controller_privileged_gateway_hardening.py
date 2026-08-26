@@ -501,6 +501,80 @@ def test_hardened_synthetic_bootstrap_installs_exact_trust_and_functional_forced
     assert "ForceCommand /usr/bin/sudo -n /usr/local/libexec/skeleton/runner-controller/privileged-gateway" in fragment
 
 
+def test_hardened_synthetic_bootstrap_rejects_bad_ssh_key_before_destdir_mutation(tmp_path: Path) -> None:
+    repo, sha = _hardened_synthetic_repo(tmp_path)
+    sshd = tmp_path / "synthetic-sshd"
+    sshd.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    sshd.chmod(0o755)
+    dest = tmp_path / "dest"
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "SKELETON_GATEWAY_ALLOW_SYNTHETIC_ORIGIN": "1",
+        "SKELETON_GATEWAY_HARDENED_SYNTHETIC": "1",
+    }
+    result = subprocess.run(
+        [
+            "bash",
+            str(repo / "scripts/install_runner_controller_privileged_gateway.sh"),
+            "--destdir",
+            str(dest),
+            "--repo-root",
+            str(repo),
+            "--expected-main-sha",
+            sha,
+            "--ssh-public-key",
+            "ssh-rsa AAAABadLegacyKey runner@example",
+            "--sshd-bin",
+            str(sshd),
+        ],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert "BLOCKED: unapproved-ssh-public-key-type" in result.stderr
+    assert not dest.exists()
+
+
+def test_hardened_synthetic_bootstrap_rejects_bad_sshd_before_destdir_mutation(tmp_path: Path) -> None:
+    repo, sha = _hardened_synthetic_repo(tmp_path)
+    sshd = tmp_path / "synthetic-sshd"
+    sshd.write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
+    sshd.chmod(0o755)
+    dest = tmp_path / "dest"
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "SKELETON_GATEWAY_ALLOW_SYNTHETIC_ORIGIN": "1",
+        "SKELETON_GATEWAY_HARDENED_SYNTHETIC": "1",
+    }
+    result = subprocess.run(
+        [
+            "bash",
+            str(repo / "scripts/install_runner_controller_privileged_gateway.sh"),
+            "--destdir",
+            str(dest),
+            "--repo-root",
+            str(repo),
+            "--expected-main-sha",
+            sha,
+            "--ssh-public-key",
+            SSH_KEY,
+            "--sshd-bin",
+            str(sshd),
+        ],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert "BLOCKED: sshd-validation-failed" in result.stderr
+    assert not dest.exists()
+
+
 def test_installer_live_account_is_locked_valid_shell_and_no_generic_root_shell() -> None:
     text = (ROOT / "scripts/install_runner_controller_privileged_gateway.sh").read_text(encoding="utf-8")
     assert 'SSH_SHELL="/bin/sh"' in text
