@@ -262,6 +262,138 @@ def test_nonzero_or_partial_action_is_conservatively_reported_as_mutation(tmp_pa
     assert receipt["private_paths_exposed"] is False
 
 
+def test_root_child_allows_only_exact_two_privileged_command_shapes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    staged_parent = tmp_path / "skeleton-esp-stage1-signer-abc123"
+    staged_parent.mkdir()
+    staged = staged_parent / "install_home_edge_esp_lab_activation_signer.sh"
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "ok", "")
+
+    monkeypatch.setattr(gateway.tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(gateway.subprocess, "run", fake_run)
+
+    code, output = gateway._root_local_protected_run(
+        [
+            "/usr/bin/sudo",
+            "-n",
+            "/usr/bin/install",
+            "-D",
+            "-o",
+            "root",
+            "-g",
+            "root",
+            "-m",
+            "0555",
+            str(staged),
+            gateway.ROOT_CHILD_PROTECTED_INSTALLER,
+        ],
+        60,
+    )
+    assert code == 0
+    assert output == "ok"
+
+    code, output = gateway._root_local_protected_run(
+        [
+            "/usr/bin/sudo",
+            "-n",
+            gateway.ROOT_CHILD_PROTECTED_INSTALLER,
+            "--repo-root",
+            "/home/agent/agent-dev/repos/Skeleton",
+        ],
+        120,
+    )
+    assert code == 0
+    assert output == "ok"
+    assert calls == [
+        [
+            "/usr/bin/install",
+            "-D",
+            "-o",
+            "root",
+            "-g",
+            "root",
+            "-m",
+            "0555",
+            str(staged),
+            gateway.ROOT_CHILD_PROTECTED_INSTALLER,
+        ],
+        [
+            gateway.ROOT_CHILD_PROTECTED_INSTALLER,
+            "--repo-root",
+            "/home/agent/agent-dev/repos/Skeleton",
+        ],
+    ]
+
+
+def test_root_child_blocks_unregistered_or_mutated_privileged_command_shapes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    staged_parent = tmp_path / "skeleton-esp-stage1-signer-abc123"
+    staged_parent.mkdir()
+    staged = staged_parent / "install_home_edge_esp_lab_activation_signer.sh"
+    monkeypatch.setattr(gateway.tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(
+        gateway.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("blocked root child argv must not execute")
+        ),
+    )
+
+    blocked = [
+        ["/usr/bin/sudo", "-n", "/bin/sh", "-c", "id"],
+        [
+            "/usr/bin/sudo",
+            "-n",
+            "/usr/bin/install",
+            "-D",
+            "-o",
+            "root",
+            "-g",
+            "root",
+            "-m",
+            "04755",
+            str(staged),
+            gateway.ROOT_CHILD_PROTECTED_INSTALLER,
+        ],
+        [
+            "/usr/bin/sudo",
+            "-n",
+            "/usr/bin/install",
+            "-D",
+            "-o",
+            "root",
+            "-g",
+            "root",
+            "-m",
+            "0555",
+            str(tmp_path / "other" / "install_home_edge_esp_lab_activation_signer.sh"),
+            gateway.ROOT_CHILD_PROTECTED_INSTALLER,
+        ],
+        [
+            "/usr/bin/sudo",
+            "-n",
+            gateway.ROOT_CHILD_PROTECTED_INSTALLER,
+            "--repo-root",
+            str(tmp_path),
+        ],
+    ]
+    for argv in blocked:
+        try:
+            gateway._root_local_protected_run(argv, 60)
+        except gateway.PrivilegedGatewayError as exc:
+            assert exc.reason_code == "ROOT_CHILD_ACTION_NOT_ALLOWED"
+        else:
+            raise AssertionError(f"unexpectedly allowed root child argv: {argv!r}")
+
+
 def test_public_receipt_matches_repository_schema(tmp_path: Path) -> None:
     receipt = _execute(tmp_path, _request(), lambda _request: (0, _executor_report()))
     schema = json.loads((ROOT / "schemas/runner_controller_privileged_receipt.schema.json").read_text(encoding="utf-8"))

@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import stat
 import subprocess
+import tempfile
 from typing import Final
 
 from core.home_edge.esp_lab_stage1_signer_install import (
@@ -38,6 +39,12 @@ MAX_LEDGER_BYTES: Final = 1024 * 1024
 MAX_LEDGER_ENTRIES: Final = 4096
 MAX_TOKEN_BYTES: Final = 160
 MAX_AGE_SECONDS: Final = 300
+ROOT_CHILD_STAGING_PARENT_PREFIX: Final = "skeleton-esp-stage1-signer-"
+ROOT_CHILD_STAGED_INSTALLER_NAME: Final = "install_home_edge_esp_lab_activation_signer.sh"
+ROOT_CHILD_PROTECTED_INSTALLER: Final = (
+    "/usr/local/libexec/skeleton/home-edge/esp-lab-stage1-installer/"
+    "install_home_edge_esp_lab_activation_signer.sh"
+)
 REQUEST_FIELDS: Final = frozenset(
     {
         "schema",
@@ -370,9 +377,51 @@ def _parse_executor_receipt(report: str) -> Mapping[str, object] | None:
     return parsed if isinstance(parsed, Mapping) else None
 
 
+def _is_allowed_staged_installer(path: str) -> bool:
+    try:
+        staged = Path(path)
+        staged.relative_to(Path(tempfile.gettempdir()))
+    except (TypeError, ValueError):
+        return False
+    return (
+        staged.is_absolute()
+        and len(staged.parts) == len(Path(tempfile.gettempdir()).parts) + 2
+        and staged.parent.name.startswith(ROOT_CHILD_STAGING_PARENT_PREFIX)
+        and staged.name == ROOT_CHILD_STAGED_INSTALLER_NAME
+    )
+
+
+def _validate_root_child_argv(argv: list[str]) -> None:
+    install_prefix = [
+        "/usr/bin/install",
+        "-D",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        "-m",
+        "0555",
+    ]
+    if (
+        len(argv) == 10
+        and argv[:8] == install_prefix
+        and _is_allowed_staged_installer(argv[8])
+        and argv[9] == ROOT_CHILD_PROTECTED_INSTALLER
+    ):
+        return
+    if argv == [
+        ROOT_CHILD_PROTECTED_INSTALLER,
+        "--repo-root",
+        str(CANONICAL_CHECKOUT_PATH),
+    ]:
+        return
+    raise PrivilegedGatewayError("root_child_action_not_allowed")
+
+
 def _root_local_protected_run(argv: list[str], timeout: int | None) -> tuple[int, str]:
     if argv[:2] != ["/usr/bin/sudo", "-n"] or len(argv) < 3:
         raise PrivilegedGatewayError("nested_privilege_argv_invalid")
+    _validate_root_child_argv(argv[2:])
     completed = subprocess.run(
         argv[2:],
         text=True,
