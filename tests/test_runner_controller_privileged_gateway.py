@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 import json
+import os
 from pathlib import Path
 import subprocess
+import sys
 
 from jsonschema import Draft202012Validator
 import pytest
@@ -125,6 +127,47 @@ def test_replay_blocks_same_canonical_request_before_runner() -> None:
     assert calls == 1
 
 
+def test_persistent_replay_ledger_blocks_request_and_idempotency_reuse_before_runner(
+    tmp_path: Path,
+) -> None:
+    ledger = tmp_path / "ledger.jsonl"
+    calls = 0
+
+    def runner(_request: object, _action: object) -> tuple[int, str]:
+        nonlocal calls
+        calls += 1
+        return 0, maintenance._protected_result(
+            "NEEDS_OPERATOR",
+            maintenance._protected_receipt("NEEDS_OPERATOR", "SYNTHETIC"),
+        )
+
+    request = _request()
+    first = gateway.execute_gateway_request(
+        request,
+        now=NOW,
+        replay_ledger_path=ledger,
+        runner=runner,
+    )
+    second = gateway.execute_gateway_request(
+        request,
+        now=NOW,
+        replay_ledger_path=ledger,
+        runner=runner,
+    )
+    third = gateway.execute_gateway_request(
+        _request(request_id="req-different-same-idem"),
+        now=NOW,
+        replay_ledger_path=ledger,
+        runner=runner,
+    )
+
+    assert first["reason"] == "SYNTHETIC"
+    assert second["reason"] == "REQUEST_REPLAY"
+    assert third["reason"] == "IDEMPOTENCY_KEY_REPLAY"
+    assert calls == 1
+    assert ledger.read_text(encoding="utf-8").count("\n") == 1
+
+
 def test_local_sudo_and_ssh_forced_command_share_identical_canonical_semantics() -> None:
     current = gateway._utc_now()
     request = _request(
@@ -150,7 +193,8 @@ def test_ssh_restrictions_and_root_login_prohibition_are_deterministic() -> None
     )
 
     fragment = gateway.deterministic_sshd_config_fragment()
-    assert "PermitRootLogin no" in fragment
+    assert "PermitRootLogin" not in fragment
+    assert fragment.startswith("Match User skeleton-runner-gateway\n")
     assert "PermitTTY no" in fragment
     assert "AllowTcpForwarding no" in fragment
     assert "AllowAgentForwarding no" in fragment
@@ -214,21 +258,25 @@ def test_action_registry_drift_blocks_before_root_runner(tmp_path: Path) -> None
 
 
 def test_unapproved_protected_capability_metadata_blocks_before_root_runner(tmp_path: Path) -> None:
-    registry = yaml.safe_load((ROOT / "CAPABILITY_REGISTRY.yaml").read_text(encoding="utf-8"))
-    registry["capabilities"]["runner_controller_privileged_gateway"] = {
-        "status": "available",
-        "module": "core/runner_controller_privileged_gateway.py",
-        "live_runtime_execution": True,
-        "protected": False,
-        "requires": [
-            "core/runner_controller_privileged_gateway.py",
-            "scripts/runner_controller_privileged_gateway.py",
-            "scripts/install_runner_controller_privileged_gateway.sh",
-            "RUNNER_PRIVILEGED_ACTIONS.yaml",
-            "schemas/runner_controller_privileged_request.schema.json",
-            "schemas/runner_controller_privileged_receipt.schema.json",
-            "docs/RUNNER_CONTROLLER_PRIVILEGED_GATEWAY.md",
-        ],
+    registry = {
+        "version": "1.0.0",
+        "capabilities": {
+            "runner_controller_privileged_gateway": {
+                "status": "available",
+                "module": "core/runner_controller_privileged_gateway.py",
+                "live_runtime_execution": True,
+                "protected": False,
+                "requires": [
+                    "core/runner_controller_privileged_gateway.py",
+                    "scripts/runner_controller_privileged_gateway.py",
+                    "scripts/install_runner_controller_privileged_gateway.sh",
+                    "RUNNER_PRIVILEGED_ACTIONS.yaml",
+                    "schemas/runner_controller_privileged_request.schema.json",
+                    "schemas/runner_controller_privileged_receipt.schema.json",
+                    "docs/RUNNER_CONTROLLER_PRIVILEGED_GATEWAY.md",
+                ],
+            },
+        },
     }
     path = tmp_path / "CAPABILITY_REGISTRY.yaml"
     path.write_text(yaml.safe_dump(registry), encoding="utf-8")
@@ -248,6 +296,52 @@ def test_unapproved_protected_capability_metadata_blocks_before_root_runner(tmp_
 
     assert receipt["reason"] == "CAPABILITY_REGISTRY_GATEWAY_UNAPPROVED"
     assert calls == 0
+
+
+def test_missing_protected_capability_metadata_blocks_before_root_runner(tmp_path: Path) -> None:
+    registry = {"version": "1.0.0", "capabilities": {"other": {"status": "available"}}}
+    path = tmp_path / "CAPABILITY_REGISTRY.yaml"
+    path.write_text(yaml.safe_dump(registry), encoding="utf-8")
+    calls = 0
+
+    def runner(_request: object, _action: object) -> tuple[int, str]:
+        nonlocal calls
+        calls += 1
+        return 0, ""
+
+    receipt = gateway.execute_gateway_request(
+        _request(),
+        now=NOW,
+        capability_registry_path=path,
+        runner=runner,
+    )
+
+    assert receipt["reason"] == "CAPABILITY_REGISTRY_GATEWAY_MISSING"
+    assert calls == 0
+
+
+def test_partial_mutation_receipt_reports_external_side_effects_without_done() -> None:
+    receipt = gateway.execute_gateway_request(
+        _request(),
+        now=NOW,
+        runner=lambda _request, _action: (
+            0,
+            maintenance._protected_result(
+                "NEEDS_OPERATOR",
+                maintenance._protected_receipt(
+                    "NEEDS_OPERATOR",
+                    "SIGNER_INSTALLER_FAILED",
+                    protected_copy_verified=True,
+                    installer_sha256="b" * 64,
+                ),
+            ),
+        ),
+    )
+
+    assert receipt["status"] == "NEEDS_OPERATOR"
+    assert receipt["reason"] == "SIGNER_INSTALLER_FAILED"
+    assert receipt["protected_copy_verified"] is True
+    assert receipt["external_side_effects_executed"] is True
 
 
 def test_public_receipts_do_not_expose_stderr_env_keys_or_private_paths() -> None:
@@ -280,6 +374,43 @@ def test_installer_bash_n_and_synthetic_isolated_root(tmp_path: Path) -> None:
     sudoers = tmp_path / "etc/sudoers.d/skeleton-runner-controller-privileged-gateway"
     sshd = tmp_path / "etc/ssh/sshd_config.d/skeleton-runner-controller-privileged-gateway.conf"
     assert sudoers.read_text(encoding="utf-8") == (
-        "agent ALL=(root) NOPASSWD: /usr/local/libexec/skeleton/runner-controller/privileged-gateway\n"
+        'agent ALL=(root) NOPASSWD: /usr/local/libexec/skeleton/runner-controller/privileged-gateway ""\n'
     )
-    assert "PermitRootLogin no" in sshd.read_text(encoding="utf-8")
+    assert "PermitRootLogin" not in sshd.read_text(encoding="utf-8")
+    assert (
+        tmp_path
+        / "usr/local/lib/skeleton/runner-controller/core/runner_controller_privileged_gateway.py"
+    ).is_file()
+    assert (
+        tmp_path / "usr/local/lib/skeleton/runner-controller/config/RUNNER_PRIVILEGED_ACTIONS.yaml"
+    ).is_file()
+
+
+def test_installed_tree_smoke_from_empty_cwd_and_env(tmp_path: Path) -> None:
+    script = ROOT / "scripts/install_runner_controller_privileged_gateway.sh"
+    install = subprocess.run(
+        ["bash", str(script), "--destdir", str(tmp_path)],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert install.returncode == 0
+
+    gateway_script = (
+        tmp_path / "usr/local/libexec/skeleton/runner-controller/privileged-gateway"
+    )
+    result = subprocess.run(
+        [sys.executable, str(gateway_script)],
+        input=b"{}",
+        cwd=str(tmp_path),
+        env={"PATH": os.environ.get("PATH", "")},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert result.returncode == 0
+    receipt = json.loads(result.stdout.decode("utf-8"))
+    assert receipt["status"] == "NEEDS_OPERATOR"
+    assert receipt["reason"] == "REQUEST_FIELD_SET_MISMATCH"
+    assert result.stderr == b""

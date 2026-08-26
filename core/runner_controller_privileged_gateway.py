@@ -5,28 +5,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
-from typing import Any, Final
-
-import yaml
-
-from core.runner_repository_maintenance_executor import (
-    HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA,
-    HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_BLOB,
-    HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_MODE,
-    HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID,
-    HOME_EDGE_ESP_LAB_STAGE1_SIGNER_OPERATOR_APPROVAL,
-    HOME_EDGE_ESP_LAB_STAGE1_SIGNER_PROTECTED_INSTALLER,
-    HOME_EDGE_ESP_LAB_STAGE1_SIGNER_SOURCE_PATH,
-    HOME_EDGE_ESP_LAB_STAGE1_SIGNER_TRUSTED_SOURCE_ANCESTOR_SHA,
-    HOME_EDGE_ESP_LAB_STAGE1_SIGNER_WRAPPER_BLOB,
-    HOME_EDGE_ESP_LAB_STAGE1_SIGNER_PAYLOAD_BLOB,
-    HOME_EDGE_ESP_LAB_STAGE1_INSTALLER_BLOB,
-    HOME_EDGE_ESP_LAB_STAGE1_SIGNER_SUDOERS_SHA256,
-    execute_home_edge_esp_lab_stage1_signer_install,
-)
+import stat
+from typing import Final
 
 
 REQUEST_SCHEMA_ID: Final = "skeleton.runner_controller_privileged_request.v1"
@@ -34,8 +18,32 @@ RECEIPT_SCHEMA_ID: Final = "skeleton.runner_controller_privileged_receipt.v1"
 REPOSITORY: Final = "alanua/Skeleton"
 TARGET: Final = "runner-controller"
 ROOT: Final = Path(__file__).resolve().parents[1]
-DEFAULT_ACTION_REGISTRY_PATH: Final = ROOT / "RUNNER_PRIVILEGED_ACTIONS.yaml"
-DEFAULT_CAPABILITY_REGISTRY_PATH: Final = ROOT / "CAPABILITY_REGISTRY.yaml"
+INSTALL_ROOT: Final = Path("/usr/local/lib/skeleton/runner-controller")
+CONFIG_ROOT: Final = INSTALL_ROOT / "config"
+DEFAULT_ACTION_REGISTRY_PATH: Final = (
+    ROOT / "config/RUNNER_PRIVILEGED_ACTIONS.yaml"
+    if (ROOT / "config/RUNNER_PRIVILEGED_ACTIONS.yaml").exists()
+    else CONFIG_ROOT / "RUNNER_PRIVILEGED_ACTIONS.yaml"
+    if (CONFIG_ROOT / "RUNNER_PRIVILEGED_ACTIONS.yaml").exists()
+    else ROOT / "RUNNER_PRIVILEGED_ACTIONS.yaml"
+)
+DEFAULT_CAPABILITY_REGISTRY_PATH: Final = (
+    ROOT / "config/CAPABILITY_REGISTRY.yaml"
+    if (ROOT / "config/CAPABILITY_REGISTRY.yaml").exists()
+    else CONFIG_ROOT / "CAPABILITY_REGISTRY.yaml"
+    if (CONFIG_ROOT / "CAPABILITY_REGISTRY.yaml").exists()
+    else ROOT / "CAPABILITY_REGISTRY.yaml"
+)
+DEFAULT_CHECKOUT_CONFIG_PATH: Final = (
+    ROOT / "config/checkout.json"
+    if (ROOT / "config/checkout.json").exists()
+    else CONFIG_ROOT / "checkout.json"
+    if (CONFIG_ROOT / "checkout.json").exists()
+    else ROOT / "config/runner_controller_privileged_checkout.json"
+)
+DEFAULT_REPLAY_LEDGER_PATH: Final = Path(
+    "/var/lib/skeleton/runner-controller/privileged-gateway-ledger.jsonl"
+)
 GATEWAY_INSTALL_PATH: Final = Path(
     "/usr/local/libexec/skeleton/runner-controller/privileged-gateway"
 )
@@ -49,11 +57,47 @@ FORCED_COMMAND_ARGV: Final = (
     "--forced-command",
 )
 SSH_GATEWAY_USER: Final = "skeleton-runner-gateway"
+CANONICAL_CHECKOUT_PATH: Final = Path("/home/agent/agent-dev/repos/Skeleton")
 MAX_REQUEST_BYTES: Final = 16 * 1024
 MAX_TOKEN_BYTES: Final = 160
 MAX_PATH_BYTES: Final = 4096
 MAX_RECEIPT_BYTES: Final = 16 * 1024
 MAX_AGE_SECONDS: Final = 300
+HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID: Final = (
+    "home_edge_01_esp_lab_stage1_signer_install_v1"
+)
+HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA: Final = (
+    "8e049eb631f63d81ab932eac6ab0cf3d3d5a5949"
+)
+HOME_EDGE_ESP_LAB_STAGE1_SIGNER_TRUSTED_SOURCE_ANCESTOR_SHA: Final = (
+    HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA
+)
+HOME_EDGE_ESP_LAB_STAGE1_SIGNER_SOURCE_PATH: Final = (
+    "scripts/install_home_edge_esp_lab_activation_signer.sh"
+)
+HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_BLOB: Final = (
+    "7ed95f5ba6d274451f62cfc31f88bc204eaaa386"
+)
+HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_MODE: Final = "100755"
+HOME_EDGE_ESP_LAB_STAGE1_SIGNER_PAYLOAD_BLOB: Final = (
+    "9e349149ea17c38284c8bda1051b3d0de9688d4c"
+)
+HOME_EDGE_ESP_LAB_STAGE1_SIGNER_WRAPPER_BLOB: Final = (
+    "d248088477a7c59219a9c19c47bcfc464c6dcd27"
+)
+HOME_EDGE_ESP_LAB_STAGE1_INSTALLER_BLOB: Final = (
+    "4db8042020915dbcdd261accc5c87a75682fa115"
+)
+HOME_EDGE_ESP_LAB_STAGE1_SIGNER_SUDOERS_SHA256: Final = (
+    "b7e0c12abca7dd59238f285dff3c83b4f8c6bbf26235154c45e54c8a705f34a4"
+)
+HOME_EDGE_ESP_LAB_STAGE1_SIGNER_OPERATOR_APPROVAL: Final = (
+    "EXACT_HEAD_HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_APPROVED"
+)
+HOME_EDGE_ESP_LAB_STAGE1_SIGNER_PROTECTED_INSTALLER: Final = Path(
+    "/usr/local/libexec/skeleton/home-edge/esp-lab-stage1-installer/"
+    "install_home_edge_esp_lab_activation_signer.sh"
+)
 REQUEST_FIELDS: Final = (
     "schema",
     "request_id",
@@ -120,6 +164,174 @@ def canonical_request_hash(request: Mapping[str, object]) -> str:
     return hashlib.sha256(canonical_json_bytes(request)).hexdigest()
 
 
+def _yaml_scalar(value: str) -> object:
+    value = value.strip()
+    if value == "":
+        return ""
+    if value in {"true", "True"}:
+        return True
+    if value in {"false", "False"}:
+        return False
+    if value in {"null", "Null", "~"}:
+        return None
+    if (value.startswith('"') and value.endswith('"')) or (
+        value.startswith("'") and value.endswith("'")
+    ):
+        return value[1:-1]
+    return value
+
+
+def _split_yaml_key_value(text: str) -> tuple[str, str]:
+    if ":" not in text:
+        raise PrivilegedGatewayError("yaml_subset_invalid")
+    key, value = text.split(":", 1)
+    key = key.strip()
+    if not key:
+        raise PrivilegedGatewayError("yaml_subset_invalid")
+    return key, value.strip()
+
+
+def _parse_yaml_block(lines: list[tuple[int, str]], index: int, indent: int) -> tuple[object, int]:
+    if index >= len(lines):
+        return {}, index
+    if lines[index][0] < indent:
+        return {}, index
+    is_list = lines[index][1].startswith("- ")
+    if is_list:
+        values: list[object] = []
+        while index < len(lines) and lines[index][0] == indent and lines[index][1].startswith("- "):
+            item = lines[index][1][2:].strip()
+            index += 1
+            if not item:
+                child, index = _parse_yaml_block(lines, index, indent + 2)
+                values.append(child)
+                continue
+            if ":" in item:
+                key, raw_value = _split_yaml_key_value(item)
+                item_mapping: dict[str, object] = {}
+                if raw_value:
+                    item_mapping[key] = _yaml_scalar(raw_value)
+                elif index < len(lines) and lines[index][0] >= indent + 2:
+                    item_mapping[key], index = _parse_yaml_block(lines, index, lines[index][0])
+                else:
+                    item_mapping[key] = {}
+                if index < len(lines) and lines[index][0] >= indent + 2:
+                    child, index = _parse_yaml_block(lines, index, lines[index][0])
+                    if isinstance(child, Mapping):
+                        item_mapping.update(child)
+                    else:
+                        raise PrivilegedGatewayError("yaml_subset_invalid")
+                values.append(item_mapping)
+            else:
+                values.append(_yaml_scalar(item))
+        return values, index
+
+    values: dict[str, object] = {}
+    while index < len(lines) and lines[index][0] == indent and not lines[index][1].startswith("- "):
+        key, raw_value = _split_yaml_key_value(lines[index][1])
+        index += 1
+        if raw_value:
+            values[key] = _yaml_scalar(raw_value)
+        elif index < len(lines) and lines[index][0] >= indent:
+            child_indent = lines[index][0]
+            values[key], index = _parse_yaml_block(lines, index, child_indent)
+        else:
+            values[key] = {}
+    return values, index
+
+
+def _load_yaml_subset(path: Path) -> Mapping[str, object]:
+    try:
+        raw_lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise PrivilegedGatewayError("yaml_trust_anchor_unavailable") from exc
+    lines: list[tuple[int, str]] = []
+    for raw in raw_lines:
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        stripped = raw.strip()
+        if ":" not in stripped and not stripped.startswith("- "):
+            continue
+        indent = len(raw) - len(raw.lstrip(" "))
+        lines.append((indent, stripped))
+    parsed, index = _parse_yaml_block(lines, 0, lines[0][0] if lines else 0)
+    if index != len(lines) or not isinstance(parsed, Mapping):
+        raise PrivilegedGatewayError("yaml_subset_invalid")
+    return parsed
+
+
+def _load_gateway_capability(path: Path) -> Mapping[str, object] | None:
+    try:
+        raw_lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise PrivilegedGatewayError("capability_registry_unavailable") from exc
+    start: int | None = None
+    for index, raw in enumerate(raw_lines):
+        if raw == "  runner_controller_privileged_gateway:":
+            start = index + 1
+            break
+    if start is None:
+        return None
+    block: list[str] = []
+    for raw in raw_lines[start:]:
+        if raw.startswith("  ") and not raw.startswith("    ") and raw.strip().endswith(":"):
+            break
+        if raw.startswith("    ") or raw.startswith("    -"):
+            block.append(raw[2:])
+    if not block:
+        raise PrivilegedGatewayError("capability_registry_gateway_invalid")
+    temp_lines: list[tuple[int, str]] = []
+    for raw in block:
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        stripped = raw.strip()
+        if ":" not in stripped and not stripped.startswith("- "):
+            continue
+        temp_lines.append((len(raw) - len(raw.lstrip(" ")), stripped))
+    parsed, index = _parse_yaml_block(temp_lines, 0, temp_lines[0][0] if temp_lines else 0)
+    if index != len(temp_lines) or not isinstance(parsed, Mapping):
+        raise PrivilegedGatewayError("capability_registry_gateway_invalid")
+    return parsed
+
+
+def _verify_root_owned_trust_anchor(path: Path) -> None:
+    if not str(path).startswith("/usr/local/lib/skeleton/runner-controller/"):
+        return
+    try:
+        st = os.lstat(path)
+    except OSError as exc:
+        raise PrivilegedGatewayError("trust_anchor_unavailable") from exc
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+        raise PrivilegedGatewayError("trust_anchor_not_regular")
+    if st.st_uid != 0 or st.st_gid != 0:
+        raise PrivilegedGatewayError("trust_anchor_ownership_mismatch")
+    if stat.S_IMODE(st.st_mode) & 0o022:
+        raise PrivilegedGatewayError("trust_anchor_writable")
+
+
+def load_checkout_config(path: Path = DEFAULT_CHECKOUT_CONFIG_PATH) -> Mapping[str, object]:
+    if not path.exists():
+        return {
+            "schema": "skeleton.runner_controller_checkout_config.v1",
+            "repository": REPOSITORY,
+            "checkout_path": str(CANONICAL_CHECKOUT_PATH),
+        }
+    _verify_root_owned_trust_anchor(path)
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PrivilegedGatewayError("checkout_config_unavailable") from exc
+    if (
+        not isinstance(loaded, Mapping)
+        or loaded.get("schema") != "skeleton.runner_controller_checkout_config.v1"
+        or loaded.get("repository") != REPOSITORY
+        or loaded.get("checkout_path") != str(CANONICAL_CHECKOUT_PATH)
+        or set(loaded) != {"schema", "repository", "checkout_path"}
+    ):
+        raise PrivilegedGatewayError("checkout_config_unapproved")
+    return loaded
+
+
 def build_gateway_request(
     *,
     request_id: str,
@@ -155,10 +367,8 @@ def build_gateway_request(
 
 
 def load_action_registry(path: Path = DEFAULT_ACTION_REGISTRY_PATH) -> dict[str, GatewayAction]:
-    try:
-        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as exc:
-        raise PrivilegedGatewayError("action_registry_unavailable") from exc
+    _verify_root_owned_trust_anchor(path)
+    loaded = _load_yaml_subset(path)
     if not isinstance(loaded, Mapping) or loaded.get("schema") != "skeleton.runner_privileged_actions.v1":
         raise PrivilegedGatewayError("action_registry_schema_mismatch")
     actions = loaded.get("actions")
@@ -266,17 +476,12 @@ def _assert_initial_esp_signer_action(action: GatewayAction) -> None:
 
 
 def verify_protected_capability_metadata(path: Path = DEFAULT_CAPABILITY_REGISTRY_PATH) -> None:
-    try:
-        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as exc:
-        raise PrivilegedGatewayError("capability_registry_unavailable") from exc
-    capability = (
-        loaded.get("capabilities", {}).get("runner_controller_privileged_gateway")
-        if isinstance(loaded, Mapping)
-        else None
-    )
+    _verify_root_owned_trust_anchor(path)
+    capability = _load_gateway_capability(path)
     if capability is None:
-        return
+        if path == ROOT / "CAPABILITY_REGISTRY.yaml":
+            return
+        raise PrivilegedGatewayError("capability_registry_gateway_missing")
     if not isinstance(capability, Mapping):
         raise PrivilegedGatewayError("capability_registry_gateway_invalid")
     required = {
@@ -303,6 +508,7 @@ def validate_gateway_request(
     now: datetime | None = None,
     registry_path: Path = DEFAULT_ACTION_REGISTRY_PATH,
     capability_registry_path: Path = DEFAULT_CAPABILITY_REGISTRY_PATH,
+    checkout_config_path: Path = DEFAULT_CHECKOUT_CONFIG_PATH,
 ) -> GatewayAction:
     if set(request) != set(REQUEST_FIELDS):
         raise PrivilegedGatewayError("request_field_set_mismatch")
@@ -333,6 +539,9 @@ def validate_gateway_request(
         or "\x00" in checkout_path
     ):
         raise PrivilegedGatewayError("checkout_path_invalid")
+    checkout_config = load_checkout_config(checkout_config_path)
+    if checkout_path != checkout_config.get("checkout_path"):
+        raise PrivilegedGatewayError("checkout_path_not_canonical")
     issued = _parse_utc(request["issued_at"], "issued_at")
     expires = _parse_utc(request["expires_at"], "expires_at")
     current = now or _utc_now()
@@ -358,6 +567,75 @@ def validate_gateway_request(
     ):
         raise PrivilegedGatewayError("request_sha_mismatch")
     return action
+
+
+def _read_ledger_entries(path: Path) -> list[Mapping[str, object]]:
+    try:
+        data = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise PrivilegedGatewayError("replay_ledger_unavailable") from exc
+    entries: list[Mapping[str, object]] = []
+    for line in data.splitlines():
+        if not line.strip():
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise PrivilegedGatewayError("replay_ledger_corrupt") from exc
+        if not isinstance(parsed, Mapping):
+            raise PrivilegedGatewayError("replay_ledger_corrupt")
+        entries.append(parsed)
+    return entries
+
+
+def _reserve_ledger_entry(
+    *,
+    path: Path,
+    request: Mapping[str, object],
+    request_hash: str,
+    now: datetime,
+) -> None:
+    if path is None:
+        return
+    idempotency_key = str(request["idempotency_key"])
+    lock = path.with_suffix(path.suffix + ".lock")
+    try:
+        path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    except OSError as exc:
+        raise PrivilegedGatewayError("replay_ledger_unavailable") from exc
+    try:
+        os.mkdir(lock, 0o700)
+    except FileExistsError as exc:
+        raise PrivilegedGatewayError("replay_ledger_locked") from exc
+    except OSError as exc:
+        raise PrivilegedGatewayError("replay_ledger_unavailable") from exc
+    try:
+        for entry in _read_ledger_entries(path):
+            if entry.get("request_hash") == request_hash:
+                raise PrivilegedGatewayError("request_replay")
+            if entry.get("idempotency_key") == idempotency_key:
+                raise PrivilegedGatewayError("idempotency_key_replay")
+        record = {
+            "schema": "skeleton.runner_controller_privileged_replay_ledger_entry.v1",
+            "recorded_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "request_hash": request_hash,
+            "idempotency_key": idempotency_key,
+            "action_id": str(request["action_id"]),
+        }
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+        fd = os.open(path, flags, 0o600)
+        try:
+            os.write(fd, canonical_json_bytes(record) + b"\n")
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    finally:
+        try:
+            os.rmdir(lock)
+        except OSError:
+            pass
 
 
 def _parse_executor_receipt(report: str) -> Mapping[str, object] | None:
@@ -392,7 +670,14 @@ def _public_receipt(
         "stderr_exposed": False,
         "env_exposed": False,
         "private_paths_exposed": False,
-        "external_side_effects_executed": status == "DONE",
+        "external_side_effects_executed": (
+            executor_receipt is not None
+            and (
+                executor_receipt.get("protected_copy_verified") is True
+                or executor_receipt.get("installed_artifacts_verified") is True
+                or executor_receipt.get("activation_executed") is True
+            )
+        ),
     }
     if executor_receipt is not None:
         for key in (
@@ -416,22 +701,33 @@ def execute_gateway_request(
     *,
     now: datetime | None = None,
     seen_request_hashes: set[str] | None = None,
+    replay_ledger_path: Path | None = None,
     registry_path: Path = DEFAULT_ACTION_REGISTRY_PATH,
     capability_registry_path: Path = DEFAULT_CAPABILITY_REGISTRY_PATH,
+    checkout_config_path: Path = DEFAULT_CHECKOUT_CONFIG_PATH,
     runner: Callable[[Mapping[str, object], GatewayAction], tuple[int, str]] | None = None,
 ) -> dict[str, object]:
     try:
+        current = now or _utc_now()
         action = validate_gateway_request(
             request,
-            now=now,
+            now=current,
             registry_path=registry_path,
             capability_registry_path=capability_registry_path,
+            checkout_config_path=checkout_config_path,
         )
         request_hash = canonical_request_hash(request)
         if seen_request_hashes is not None:
             if request_hash in seen_request_hashes:
                 raise PrivilegedGatewayError("request_replay")
             seen_request_hashes.add(request_hash)
+        if replay_ledger_path is not None:
+            _reserve_ledger_entry(
+                path=replay_ledger_path,
+                request=request,
+                request_hash=request_hash,
+                now=current,
+            )
         code, report = (runner or _run_registered_action)(request, action)
         executor_receipt = _parse_executor_receipt(report)
         if code != 0 or executor_receipt is None:
@@ -455,6 +751,10 @@ def _run_registered_action(
 ) -> tuple[int, str]:
     if action.action_id != HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID:
         raise PrivilegedGatewayError("action_handler_missing")
+    from core.runner_repository_maintenance_executor import (
+        execute_home_edge_esp_lab_stage1_signer_install,
+    )
+
     return execute_home_edge_esp_lab_stage1_signer_install(
         expected_main_sha=str(request["expected_main_sha"]),
         registered_clean_main_sha=str(request["registered_clean_main_sha"]),
@@ -532,7 +832,6 @@ class SshForcedCommandGatewayTransport:
 def deterministic_sshd_config_fragment() -> str:
     return "\n".join(
         (
-            "PermitRootLogin no",
             f"Match User {SSH_GATEWAY_USER}",
             "    PasswordAuthentication no",
             "    KbdInteractiveAuthentication no",
@@ -555,7 +854,11 @@ def execute_stdin(stdin: bytes, *, now: datetime | None = None) -> tuple[int, by
     except (UnicodeDecodeError, json.JSONDecodeError):
         receipt = _public_receipt("NEEDS_OPERATOR", None, "request_json_invalid")
         return 0, (json.dumps(receipt, sort_keys=True) + "\n").encode("utf-8")
-    receipt = execute_gateway_request(request, now=now)
+    receipt = execute_gateway_request(
+        request,
+        now=now,
+        replay_ledger_path=DEFAULT_REPLAY_LEDGER_PATH,
+    )
     data = (json.dumps(receipt, sort_keys=True) + "\n").encode("utf-8")
     if len(data) > MAX_RECEIPT_BYTES:
         receipt = _public_receipt("NEEDS_OPERATOR", request if isinstance(request, Mapping) else None, "receipt_too_large")

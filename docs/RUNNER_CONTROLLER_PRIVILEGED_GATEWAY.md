@@ -13,9 +13,10 @@ Unprivileged Runner code submits a typed JSON request with schema
 ```
 
 The optional SSH transport is only an alternate transport into the same JSON
-authority. Its deterministic restrictions prohibit root login, PTY, forwarding,
-agent forwarding, interactive keyboard/password auth, user rc, and interactive
-shell. Authorized keys use only a forced command:
+authority for the dedicated `skeleton-runner-gateway` user. Its deterministic
+restrictions prohibit PTY, forwarding, agent forwarding, interactive
+keyboard/password auth, user rc, and interactive shell. It does not change
+global root SSH policy. Authorized keys use only a forced command:
 
 ```text
 /usr/local/libexec/skeleton/runner-controller/privileged-gateway --forced-command
@@ -27,6 +28,16 @@ SHA, registered clean main SHA, GitHub main SHA, checkout path, checkout HEAD,
 checkout origin/main, issued time, expiry, request id, and idempotency key.
 Extra fields and stale, future, expired, replayed, malformed, mismatched, or
 unknown-action requests fail before the gateway action runner is called.
+
+Installed production execution uses root-owned immutable trust anchors under
+`/usr/local/lib/skeleton/runner-controller`: the gateway module bundle, fixed
+action registry, protected capability registry copy, schemas, and canonical
+checkout config. The canonical checkout config fixes the only accepted checkout
+path to `/home/agent/agent-dev/repos/Skeleton`. The stdin gateway records every
+accepted canonical request in an append-only local ledger at
+`/var/lib/skeleton/runner-controller/privileged-gateway-ledger.jsonl` before
+calling the action runner. A repeated request hash or reused idempotency key
+fails closed before any privileged action is invoked again.
 
 ## Initial Production Action
 
@@ -53,12 +64,18 @@ Public receipts use schema
 `skeleton.runner_controller_privileged_receipt.v1` and expose only stable
 status, reason, hashes, fixed identifiers, booleans, and receipt hash. They do
 not expose stderr, environment, secrets, private keys, SSH keys, private config
-paths, or command output.
+paths, or command output. `external_side_effects_executed` reflects protected
+copy, installed-artifact verification, or activation flags from the protected
+executor receipt, so a blocked second phase still reports that a partial root
+mutation happened.
 
 ## Bootstrap Installer
 
 `scripts/install_runner_controller_privileged_gateway.sh` installs inert gateway
-files, the fixed sudoers rule, and the deterministic sshd fragment. Codegen and
-tests must use `bash -n` and `--destdir` isolated-root validation only. They
-must not execute live sudo, mutate `/etc`, reload sshd, start services, or run a
-privileged action.
+files, the fixed no-argument sudoers rule, root-owned config anchors, schemas,
+ledger directory, and the dedicated-user sshd fragment. `--ssh-public-key` is
+optional and writes a forced-command authorized key for the dedicated gateway
+user only. Codegen and tests must use `bash -n`, `--destdir` isolated-root
+validation, and installed-tree smoke checks only. They must not execute live
+sudo, mutate host `/etc`, reload sshd, start services, or run a privileged
+action.

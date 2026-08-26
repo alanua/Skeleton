@@ -382,6 +382,7 @@ def _protected_receipt(
     expected_main_sha: str | None = None,
     installer_sha256: str | None = None,
     artifacts_ok: bool = False,
+    protected_copy_verified: bool | None = None,
 ) -> dict[str, object]:
     receipt: dict[str, object] = {
         "maintenance_task_id": HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID,
@@ -392,7 +393,9 @@ def _protected_receipt(
         or HOME_EDGE_ESP_LAB_STAGE1_SIGNER_TRUSTED_SOURCE_ANCESTOR_SHA,
         "target": "runner-controller",
         "source_blob": HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_BLOB,
-        "protected_copy_verified": status == "DONE",
+        "protected_copy_verified": status == "DONE"
+        if protected_copy_verified is None
+        else protected_copy_verified,
         "installed_artifacts_verified": artifacts_ok,
         "activation_executed": False,
         "private_evidence_exposed": False,
@@ -417,6 +420,7 @@ def _protected_blocked(
     installer_sha256: str | None = None,
     *,
     expected_main_sha: str | None = None,
+    protected_copy_verified: bool = False,
 ) -> tuple[int, str]:
     return 0, _protected_result(
         "NEEDS_OPERATOR",
@@ -425,6 +429,7 @@ def _protected_blocked(
             reason,
             expected_main_sha=expected_main_sha,
             installer_sha256=installer_sha256,
+            protected_copy_verified=protected_copy_verified,
         ),
     )
 
@@ -702,6 +707,7 @@ def execute_home_edge_esp_lab_stage1_signer_install(
         )
     staged: Path | None = None
     installer_sha256: str | None = None
+    protected_copy_verified = False
     try:
         _verify_exact_main_inputs(
             expected_main_sha=expected_main_sha,
@@ -770,6 +776,7 @@ def execute_home_edge_esp_lab_stage1_signer_install(
             installer_sha256,
             0o555,
         )
+        protected_copy_verified = True
 
         _verify_exact_main_inputs(
             expected_main_sha=expected_main_sha,
@@ -803,7 +810,12 @@ def execute_home_edge_esp_lab_stage1_signer_install(
             HOME_EDGE_ESP_LAB_STAGE1_SIGNER_EXEC_TIMEOUT_SECONDS,
         )
         if code != 0:
-            return _protected_blocked("SIGNER_INSTALLER_FAILED", installer_sha256)
+            return _protected_blocked(
+                "SIGNER_INSTALLER_FAILED",
+                installer_sha256,
+                expected_main_sha=expected_main_sha,
+                protected_copy_verified=protected_copy_verified,
+            )
 
         for path, (blob_sha, mode) in HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLED_ARTIFACTS.items():
             expected_hash = (
@@ -825,12 +837,14 @@ def execute_home_edge_esp_lab_stage1_signer_install(
             exc.reason_code,
             installer_sha256,
             expected_main_sha=expected_main_sha,
+            protected_copy_verified=protected_copy_verified,
         )
     except (OSError, subprocess.SubprocessError):
         return _protected_blocked(
             "PRIVILEGE_UNAVAILABLE",
             installer_sha256,
             expected_main_sha=expected_main_sha,
+            protected_copy_verified=protected_copy_verified,
         )
     finally:
         if staged is not None:
