@@ -126,6 +126,15 @@ def canonical_request_hash(request: Mapping[str, object]) -> str:
     return hashlib.sha256(_canonical_json(request)).hexdigest()
 
 
+def _safe_canonical_request_hash(request: Mapping[str, object] | None) -> str | None:
+    if request is None:
+        return None
+    try:
+        return canonical_request_hash(request)
+    except (TypeError, ValueError):
+        return None
+
+
 def _parse_utc(value: object, field: str) -> datetime:
     if not isinstance(value, str) or _ISO_Z_RE.fullmatch(value) is None:
         raise PrivilegedGatewayError(f"{field}_invalid")
@@ -315,7 +324,7 @@ def _public_receipt(
         "action_id": str(request.get("action_id") or "") if request else "",
         "repository": REPOSITORY,
         "target": TARGET,
-        "request_hash": canonical_request_hash(request) if request else None,
+        "request_hash": _safe_canonical_request_hash(request),
         "mutation_started": bool(mutation_started),
         "mutation_performed": bool(mutation_performed),
         "private_evidence_exposed": False,
@@ -392,14 +401,74 @@ def _run_registered_action(request: Mapping[str, object]) -> tuple[int, str]:
 def _validate_cached_receipt(receipt: object, request_hash: str) -> dict[str, object]:
     if not isinstance(receipt, dict):
         raise PrivilegedGatewayError("replay_ledger_corrupt")
+    required_fields = {
+        "schema",
+        "status",
+        "reason",
+        "action_id",
+        "repository",
+        "target",
+        "request_hash",
+        "mutation_started",
+        "mutation_performed",
+        "private_evidence_exposed",
+        "stderr_exposed",
+        "env_exposed",
+        "private_paths_exposed",
+        "external_side_effects_executed",
+        "receipt_hash",
+    }
+    optional_fields = {
+        "expected_main_sha",
+        "source_blob",
+        "installer_sha256",
+        "protected_copy_verified",
+        "installed_artifacts_verified",
+        "activation_executed",
+    }
+    if not required_fields <= set(receipt) or set(receipt) - required_fields - optional_fields:
+        raise PrivilegedGatewayError("replay_ledger_corrupt")
     if receipt.get("schema") != RECEIPT_SCHEMA_ID or receipt.get("request_hash") != request_hash:
+        raise PrivilegedGatewayError("replay_ledger_corrupt")
+    if receipt.get("status") not in {"DONE", "NEEDS_OPERATOR"}:
+        raise PrivilegedGatewayError("replay_ledger_corrupt")
+    if receipt.get("action_id") != HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID:
+        raise PrivilegedGatewayError("replay_ledger_corrupt")
+    if (
+        not isinstance(receipt.get("reason"), str)
+        or re.fullmatch(r"[A-Z0-9_]{1,80}", receipt["reason"]) is None
+    ):
+        raise PrivilegedGatewayError("replay_ledger_corrupt")
+    if receipt.get("repository") != REPOSITORY or receipt.get("target") != TARGET:
         raise PrivilegedGatewayError("replay_ledger_corrupt")
     if receipt.get("receipt_hash") != _receipt_hash(receipt):
         raise PrivilegedGatewayError("replay_ledger_corrupt")
     if len(json.dumps(receipt, sort_keys=True).encode("utf-8")) > MAX_RECEIPT_BYTES:
         raise PrivilegedGatewayError("replay_ledger_corrupt")
+    for bool_key in (
+        "mutation_started",
+        "mutation_performed",
+        "external_side_effects_executed",
+    ):
+        if not isinstance(receipt.get(bool_key), bool):
+            raise PrivilegedGatewayError("replay_ledger_corrupt")
     for leak_key in ("private_evidence_exposed", "stderr_exposed", "env_exposed", "private_paths_exposed"):
         if receipt.get(leak_key) is not False:
+            raise PrivilegedGatewayError("replay_ledger_corrupt")
+    for optional_hash in ("expected_main_sha", "source_blob"):
+        value = receipt.get(optional_hash)
+        if value is not None and (
+            not isinstance(value, str) or _HEX40_RE.fullmatch(value) is None
+        ):
+            raise PrivilegedGatewayError("replay_ledger_corrupt")
+    value = receipt.get("installer_sha256")
+    if value is not None and (
+        not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None
+    ):
+        raise PrivilegedGatewayError("replay_ledger_corrupt")
+    for optional_bool in ("protected_copy_verified", "installed_artifacts_verified", "activation_executed"):
+        value = receipt.get(optional_bool)
+        if value is not None and not isinstance(value, bool):
             raise PrivilegedGatewayError("replay_ledger_corrupt")
     return receipt
 

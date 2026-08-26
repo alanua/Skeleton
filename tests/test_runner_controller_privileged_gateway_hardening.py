@@ -69,6 +69,18 @@ def _executor_report(status: str = "DONE", reason: str = "SIGNER_INSTALLATION_VE
     return "RESULT: " + status + "\nReceipt:\n" + json.dumps(receipt, sort_keys=True)
 
 
+def _receipt_hash(receipt: dict[str, object]) -> str:
+    import hashlib
+
+    return hashlib.sha256(
+        json.dumps(
+            {key: value for key, value in receipt.items() if key != "receipt_hash"},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 def _execute(
     tmp_path: Path,
     request: dict[str, object],
@@ -105,6 +117,22 @@ def test_source_trust_anchors_are_fail_closed_before_runner(tmp_path: Path) -> N
     assert calls == 0
 
 
+def test_malformed_unserializable_request_value_blocks_without_receipt_crash(tmp_path: Path) -> None:
+    calls = 0
+
+    def runner(_request: object) -> tuple[int, str]:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("runner must not execute")
+
+    receipt = _execute(tmp_path, _request(request_id=object()), runner)
+    assert receipt["reason"] == "REQUEST_ID_INVALID"
+    assert receipt["request_hash"] is None
+    assert receipt["mutation_started"] is False
+    assert receipt["mutation_performed"] is False
+    assert calls == 0
+
+
 def test_exact_terminal_retry_returns_cached_receipt_without_second_action(tmp_path: Path) -> None:
     calls = 0
 
@@ -121,6 +149,54 @@ def test_exact_terminal_retry_returns_cached_receipt_without_second_action(tmp_p
     assert first["mutation_performed"] is True
     assert first["external_side_effects_executed"] is True
     assert calls == 1
+
+
+def test_poisoned_terminal_receipt_blocks_replay_before_runner(tmp_path: Path) -> None:
+    request = _request()
+    request_hash = gateway.canonical_request_hash(request)
+    poisoned_receipt: dict[str, object] = {
+        "schema": gateway.RECEIPT_SCHEMA_ID,
+        "status": "DONE",
+        "reason": "SIGNER_INSTALLATION_VERIFIED",
+        "action_id": request["action_id"],
+        "repository": "evil/repo",
+        "target": "runner-controller",
+        "request_hash": request_hash,
+        "mutation_started": True,
+        "mutation_performed": True,
+        "private_evidence_exposed": False,
+        "stderr_exposed": False,
+        "env_exposed": False,
+        "private_paths_exposed": False,
+        "external_side_effects_executed": True,
+    }
+    poisoned_receipt["receipt_hash"] = _receipt_hash(poisoned_receipt)
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_text(
+        json.dumps(
+            {
+                "kind": "terminal",
+                "request_hash": request_hash,
+                "idempotency_key": request["idempotency_key"],
+                "action_id": request["action_id"],
+                "receipt": poisoned_receipt,
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    calls = 0
+
+    def runner(_request: object) -> tuple[int, str]:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("runner must not execute")
+
+    receipt = _execute(tmp_path, request, runner)
+    assert receipt["reason"] == "REPLAY_LEDGER_CORRUPT"
+    assert receipt["mutation_started"] is False
+    assert calls == 0
 
 
 def test_conflicting_idempotency_key_blocks_without_second_action(tmp_path: Path) -> None:
@@ -300,5 +376,6 @@ def test_installer_live_account_is_locked_valid_shell_and_no_generic_root_shell(
     assert 'useradd --system --home-dir /nonexistent --shell "$SSH_SHELL" --no-create-home "$SSH_USER"' in text
     assert 'usermod --home /nonexistent --shell "$SSH_SHELL" "$SSH_USER"' in text
     assert "PermitRootLogin" not in text
+    assert "systemctl reload" not in text
     assert "sudo bash" not in text
     assert "bash -c" not in text

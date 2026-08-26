@@ -331,13 +331,6 @@ if [[ -z "$DESTDIR" ]]; then
     rm -f -- "$SSHD_FRAGMENT"
     block "sshd-full-config-validation-failed"
   }
-  if systemctl reload ssh.service >/dev/null 2>&1; then
-    :
-  elif systemctl reload sshd.service >/dev/null 2>&1; then
-    :
-  else
-    block "sshd-reload-failed"
-  fi
   verify_effective_sshd_live
 fi
 
