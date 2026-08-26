@@ -27,7 +27,7 @@ HOME_EDGE_ESP_LAB_STAGE1_SIGNER_SOURCE_PATH: Final = (
     "scripts/install_home_edge_esp_lab_activation_signer.sh"
 )
 HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_BLOB: Final = (
-    "7ed95f5ba6d274451f62cfc31f88bc204eaaa386"
+    "ef285000113c1254170b8924b4c3ab8d82250423"
 )
 HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_MODE: Final = "100755"
 HOME_EDGE_ESP_LAB_STAGE1_SIGNER_PAYLOAD_BLOB: Final = (
@@ -43,7 +43,7 @@ HOME_EDGE_ESP_LAB_STAGE1_SIGNER_SUDOERS_SHA256: Final = (
     "b7e0c12abca7dd59238f285dff3c83b4f8c6bbf26235154c45e54c8a705f34a4"
 )
 HOME_EDGE_ESP_LAB_STAGE1_SIGNER_OPERATOR_APPROVAL: Final = (
-    "EXACT_HEAD_HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_APPROVED"
+    "EXACT_HEAD_HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_V2_APPROVED"
 )
 HOME_EDGE_ESP_LAB_STAGE1_SIGNER_PROTECTED_INSTALLER: Final = Path(
     "/usr/local/libexec/skeleton/home-edge/esp-lab-stage1-installer/"
@@ -73,6 +73,21 @@ HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TIMEOUT_SECONDS: Final = 60
 HOME_EDGE_ESP_LAB_STAGE1_SIGNER_EXEC_TIMEOUT_SECONDS: Final = 120
 _SUDO_BIN: Final = "/usr/bin/sudo"
 _INSTALL_BIN: Final = "/usr/bin/install"
+_GIT_BIN: Final = "/usr/bin/git"
+_RUNUSER_BIN: Final = "/usr/sbin/runuser"
+_GIT_USER: Final = "agent"
+_CANONICAL_REMOTE_MAIN_URL: Final = "https://github.com/alanua/Skeleton.git"
+_REPO_OUTPUT_LIMIT_BYTES: Final = 64 * 1024
+_REMOTE_MAIN_CWD: Final = Path("/")
+_CLEAN_GIT_ENV: Final = {
+    "HOME": "/nonexistent",
+    "LANG": "C",
+    "LC_ALL": "C",
+    "PATH": "/usr/bin:/bin",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_TERMINAL_PROMPT": "0",
+}
 
 
 class RepositoryMaintenanceBlocked(RuntimeError):
@@ -153,19 +168,32 @@ def _repository_run_command(
     timeout: int | None,
     env: Mapping[str, str] | None,
 ) -> tuple[int, str]:
+    if not args:
+        raise RepositoryMaintenanceBlocked("REPOSITORY_COMMAND_EMPTY")
+    child_args = list(args)
+    if child_args[0] == "git":
+        child_args[0] = _GIT_BIN
+    if child_args[0] == _GIT_BIN and os.geteuid() == 0:
+        child_args = [_RUNUSER_BIN, "-u", _GIT_USER, "--", *child_args]
+    clean_env = dict(_CLEAN_GIT_ENV if args[0] in {"git", _GIT_BIN} else {})
+    if env:
+        clean_env.update({key: value for key, value in env.items() if key in {"PATH", "LANG", "LC_ALL"}})
     completed = subprocess.run(
-        args,
+        child_args,
         cwd=str(cwd) if cwd is not None else None,
-        env=dict(env) if env is not None else None,
+        env=clean_env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         timeout=timeout,
         check=False,
     )
-    return completed.returncode, "\n".join(
+    output = "\n".join(
         part for part in (completed.stdout, completed.stderr) if part
     )
+    if len(output.encode("utf-8", "replace")) > _REPO_OUTPUT_LIMIT_BYTES:
+        raise RepositoryMaintenanceBlocked("REPOSITORY_COMMAND_OUTPUT_TOO_LARGE")
+    return completed.returncode, output
 
 
 def _git_blob_bytes(
@@ -173,13 +201,15 @@ def _git_blob_bytes(
     checkout_path: Path,
     blob_sha: str,
 ) -> bytes:
-    code, output = run_command(["git", "cat-file", "-s", blob_sha], checkout_path, 30, None)
+    code, output = run_command([_GIT_BIN, "cat-file", "-s", blob_sha], checkout_path, 30, None)
     if code != 0 or not output.strip().isdecimal():
         raise RepositoryMaintenanceBlocked("SIGNER_INSTALLER_BLOB_UNAVAILABLE")
     size = int(output.strip())
     if size <= 0 or size > HOME_EDGE_ESP_LAB_STAGE1_SIGNER_MAX_INSTALLER_BYTES:
         raise RepositoryMaintenanceBlocked("SIGNER_INSTALLER_BLOB_SIZE_UNSAFE")
-    code, output = run_command(["git", "cat-file", "-p", blob_sha], checkout_path, 30, None)
+    code, output = run_command([_GIT_BIN, "cat-file", "-p", blob_sha], checkout_path, 30, None)
+    if len(output.encode("utf-8", "replace")) > _REPO_OUTPUT_LIMIT_BYTES:
+        raise RepositoryMaintenanceBlocked("SIGNER_INSTALLER_BLOB_OUTPUT_TOO_LARGE")
     if code != 0:
         raise RepositoryMaintenanceBlocked("SIGNER_INSTALLER_BLOB_UNAVAILABLE")
     data = output.encode("utf-8")
@@ -194,7 +224,7 @@ def _verify_signer_installer_tree_entry(
     main_sha: str,
 ) -> None:
     code, output = run_command(
-        ["git", "ls-tree", main_sha, HOME_EDGE_ESP_LAB_STAGE1_SIGNER_SOURCE_PATH],
+        [_GIT_BIN, "ls-tree", main_sha, HOME_EDGE_ESP_LAB_STAGE1_SIGNER_SOURCE_PATH],
         checkout_path,
         30,
         None,
@@ -209,7 +239,7 @@ def _verify_signer_installer_tree_entry(
     if output.strip() != expected:
         raise RepositoryMaintenanceBlocked("SIGNER_INSTALLER_TREE_ENTRY_MISMATCH")
     code, object_type = run_command(
-        ["git", "cat-file", "-t", HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_BLOB],
+        [_GIT_BIN, "cat-file", "-t", HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_BLOB],
         checkout_path,
         30,
         None,
@@ -243,12 +273,13 @@ def _git_exact_sha(
     ref: str,
 ) -> str:
     code, output = run_command(
-        ["git", "rev-parse", "--verify", f"{ref}^{{commit}}"],
+        [_GIT_BIN, "rev-parse", "--verify", f"{ref}^{{commit}}"],
         checkout_path,
         30,
         None,
     )
-    sha = output.strip().splitlines()[0] if output.strip() else ""
+    lines = output.strip().splitlines()
+    sha = lines[0] if len(lines) == 1 else ""
     if code != 0 or re.fullmatch(r"[0-9a-f]{40}", sha) is None:
         raise RepositoryMaintenanceBlocked("CHECKOUT_AUTHORITY_UNAVAILABLE")
     return sha
@@ -259,8 +290,8 @@ def _git_fresh_remote_main_sha(
     checkout_path: Path,
 ) -> str:
     code, output = run_command(
-        ["git", "ls-remote", "--exit-code", "origin", "refs/heads/main"],
-        checkout_path,
+        [_GIT_BIN, "ls-remote", "--exit-code", _CANONICAL_REMOTE_MAIN_URL, "refs/heads/main"],
+        _REMOTE_MAIN_CWD,
         30,
         None,
     )
@@ -292,7 +323,7 @@ def _verify_clean_trusted_checkout(
     if head_sha != expected_main_sha or origin_main_sha != expected_main_sha:
         raise RepositoryMaintenanceBlocked("CHECKOUT_MAIN_SHA_MISMATCH")
     code, output = run_command(
-        ["git", "status", "--porcelain", "--untracked-files=all"],
+        [_GIT_BIN, "status", "--porcelain", "--untracked-files=all"],
         checkout_path,
         30,
         None,
@@ -303,7 +334,7 @@ def _verify_clean_trusted_checkout(
         raise RepositoryMaintenanceBlocked("CHECKOUT_DIRTY")
     code, _output = run_command(
         [
-            "git",
+            _GIT_BIN,
             "merge-base",
             "--is-ancestor",
             HOME_EDGE_ESP_LAB_STAGE1_SIGNER_TRUSTED_SOURCE_ANCESTOR_SHA,

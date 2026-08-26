@@ -296,7 +296,7 @@ def test_hardened_synthetic_bootstrap_installs_exact_trust_and_functional_forced
 def test_installer_live_account_is_locked_valid_shell_and_no_generic_root_shell() -> None:
     text = (ROOT / "scripts/install_runner_controller_privileged_gateway.sh").read_text(encoding="utf-8")
     assert 'SSH_SHELL="/bin/sh"' in text
-    assert 'passwd -l "$SSH_USER"' in text
+    assert 'passwd -l "$SSH_USER" >/dev/null 2>&1 || block "ssh-account-lock-failed"' in text
     assert 'useradd --system --home-dir /nonexistent --shell "$SSH_SHELL" --no-create-home "$SSH_USER"' in text
     assert 'usermod --home /nonexistent --shell "$SSH_SHELL" "$SSH_USER"' in text
     assert "PermitRootLogin" not in text

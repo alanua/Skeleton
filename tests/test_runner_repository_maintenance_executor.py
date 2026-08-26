@@ -241,47 +241,58 @@ def _esp_signer_git_runner(
 
     def run_command(args, cwd, timeout, env):
         del cwd, timeout, env
-        if args == ["git", "ls-remote", "--exit-code", "origin", "refs/heads/main"]:
+        git = args[0] if args else ""
+        git_args = ["git", *args[1:]] if git in {"git", "/usr/bin/git"} else args
+        if tuple(git_args) in {
+            ("git", "ls-remote", "--exit-code", "origin", "refs/heads/main"),
+            (
+                "git",
+                "ls-remote",
+                "--exit-code",
+                "https://github.com/alanua/Skeleton.git",
+                "refs/heads/main",
+            ),
+        }:
             if remote_results:
                 return remote_results.pop(0)
             return 0, f"{current_main_sha}\trefs/heads/main\n"
-        if args[:3] == ["git", "rev-parse", "--verify"]:
+        if git_args[:3] == ["git", "rev-parse", "--verify"]:
             return 0, f"{current_main_sha}\n"
-        if args == ["git", "status", "--porcelain", "--untracked-files=all"]:
+        if git_args == ["git", "status", "--porcelain", "--untracked-files=all"]:
             return 0, " M scripts/install_home_edge_esp_lab_activation_signer.sh\n" if dirty else ""
-        if args[:4] == ["git", "merge-base", "--is-ancestor", maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_TRUSTED_SOURCE_ANCESTOR_SHA]:
+        if git_args[:4] == ["git", "merge-base", "--is-ancestor", maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_TRUSTED_SOURCE_ANCESTOR_SHA]:
             return (0 if ancestor_ok else 1), ""
-        if args[:2] == ["git", "ls-tree"]:
+        if git_args[:2] == ["git", "ls-tree"]:
             return (
                 0,
                 "100755 blob "
                 f"{source_blob}\t"
                 f"{maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_SOURCE_PATH}\n",
             )
-        if args == [
+        if git_args == [
             "git",
             "cat-file",
             "-t",
             maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_BLOB,
         ]:
             return 0, "blob\n"
-        if args == [
+        if git_args == [
             "git",
             "cat-file",
             "-s",
             maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_BLOB,
         ]:
             return 0, f"{len(blob_bytes)}\n"
-        if args == [
+        if git_args == [
             "git",
             "cat-file",
             "-p",
             maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_BLOB,
         ]:
             return 0, blob_bytes.decode("utf-8")
-        if args[:3] == ["git", "cat-file", "-s"]:
+        if git_args[:3] == ["git", "cat-file", "-s"]:
             return 0, "12\n"
-        if args[:3] == ["git", "cat-file", "-p"]:
+        if git_args[:3] == ["git", "cat-file", "-p"]:
             return 0, "artifact-ok\n"
         raise AssertionError(args)
 
@@ -291,7 +302,7 @@ def _esp_signer_git_runner(
 def test_esp_lab_stage1_signer_trust_chain_pins_match_recomputed_blobs() -> None:
     assert (
         maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_BLOB
-        == "7ed95f5ba6d274451f62cfc31f88bc204eaaa386"
+        == "ef285000113c1254170b8924b4c3ab8d82250423"
     )
     assert (
         maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_PAYLOAD_BLOB
@@ -300,6 +311,19 @@ def test_esp_lab_stage1_signer_trust_chain_pins_match_recomputed_blobs() -> None
     assert (
         maintenance.HOME_EDGE_ESP_LAB_STAGE1_INSTALLER_BLOB
         == "4db8042020915dbcdd261accc5c87a75682fa115"
+    )
+
+
+def test_esp_lab_stage1_signer_v2_outer_boundary_keeps_activation_source_trust() -> None:
+    script = Path("scripts/install_home_edge_esp_lab_activation_signer.sh").read_text(
+        encoding="utf-8"
+    )
+    assert (
+        maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_TRUSTED_SOURCE_ANCESTOR_SHA
+        == maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA
+    )
+    assert (
+        'TRUSTED_ANCESTOR_SHA="725dfc3aedbce194c7afcc229eb44b1eec4f463a"' in script
     )
 
 
@@ -426,12 +450,14 @@ def test_esp_lab_stage1_signer_authority_drift_after_staging_blocks_execution(
     def run_command(args, cwd, timeout, env):
         nonlocal status_calls
         del cwd, timeout, env
-        if args[:3] == ["git", "rev-parse", "--verify"]:
+        git = args[0] if args else ""
+        git_args = ["git", *args[1:]] if git in {"git", "/usr/bin/git"} else args
+        if git_args[:3] == ["git", "rev-parse", "--verify"]:
             return 0, f"{expected}\n"
-        if args == ["git", "status", "--porcelain", "--untracked-files=all"]:
+        if git_args == ["git", "status", "--porcelain", "--untracked-files=all"]:
             status_calls += 1
             return 0, "" if status_calls == 1 else " M README.md\n"
-        if args[:4] == ["git", "merge-base", "--is-ancestor", maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_TRUSTED_SOURCE_ANCESTOR_SHA]:
+        if git_args[:4] == ["git", "merge-base", "--is-ancestor", maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_TRUSTED_SOURCE_ANCESTOR_SHA]:
             return 0, ""
         return _esp_signer_git_runner(b"#!/bin/sh\necho installer\n", current_main_sha=expected)(
             args, None, None, None
