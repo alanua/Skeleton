@@ -1,0 +1,29 @@
+schema: skeleton.runner_privileged_actions.v1
+actions:
+  - action_id: home_edge_01_esp_lab_stage1_signer_install_v1
+    handler: home_edge_esp_lab_stage1_signer_install
+    repository: alanua/Skeleton
+    target: runner-controller
+    operator_approval: EXACT_HEAD_HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_V2_APPROVED
+    source_path: scripts/install_home_edge_esp_lab_activation_signer.sh
+    source_blob: ef285000113c1254170b8924b4c3ab8d82250423
+    source_mode: "100755"
+    trusted_source_ancestor_sha: 8e049eb631f63d81ab932eac6ab0cf3d3d5a5949
+    destination: /usr/local/libexec/skeleton/home-edge/esp-lab-stage1-installer/install_home_edge_esp_lab_activation_signer.sh
+    installer_argv:
+      - /usr/local/libexec/skeleton/home-edge/esp-lab-stage1-installer/install_home_edge_esp_lab_activation_signer.sh
+      - --repo-root
+      - "{checkout_path}"
+    post_audit_artifacts:
+      - path: /usr/local/libexec/skeleton/home-edge/esp-lab-stage1/signer
+        content_hash: d248088477a7c59219a9c19c47bcfc464c6dcd27
+        mode: "0555"
+      - path: /usr/local/lib/skeleton/home-edge/esp-lab-stage1/signer_payload.py
+        content_hash: 9e349149ea17c38284c8bda1051b3d0de9688d4c
+        mode: "0555"
+      - path: /usr/local/lib/skeleton/home-edge/esp-lab-stage1/install_home_edge_esp_lab.sh
+        content_hash: 4db8042020915dbcdd261accc5c87a75682fa115
+        mode: "0444"
+      - path: /etc/sudoers.d/skeleton-home-edge-esp-lab-stage1-signer
+        content_hash: b7e0c12abca7dd59238f285dff3c83b4f8c6bbf26235154c45e54c8a705f34a4
+        mode: "0440"

@@ -199,8 +199,16 @@ CMS byte size, encrypted-result CMS SHA-256, a validated
 Tailscale hostname, DNS name, URL, plaintext result JSON, private keys,
 environment values, or OpenSSL/Tailscale diagnostic output.
 
-`home_edge_01_esp_lab_stage1_signer_install_v1` installs only the reviewed Home
-Edge ESP Lab Stage1 activation signer installer. It requires exactly:
+`home_edge_01_esp_lab_stage1_signer_install_v1` is now the first production
+action registered behind the Runner controller privileged gateway. Unprivileged
+maintenance code reaches it only through the fixed gateway sudo argv
+`/usr/bin/sudo -n /usr/local/libexec/skeleton/runner-controller/privileged-gateway`;
+the optional SSH path is a forced-command transport into the same typed JSON
+request and does not expose shell, PTY, forwarding, agent forwarding, root
+login, or issue-controlled command input.
+
+The action installs only the reviewed Home Edge ESP Lab Stage1 activation signer
+installer. It requires exactly:
 
 ```text
 Mode: RUNTIME_MAINTENANCE_TASK
@@ -1107,35 +1115,6 @@ activation, canon promotion, secrets, destructive cleanup, force-push, broad
 `git add`, or issue-provided commands. Runner labels, task completion text,
 generic chat approvals such as `+`, model output, and other issues are not
 approval sources.
-
-The normal `publish_existing_issue_worktree` path remains same-branch only:
-`Output Branch` must equal `runner/issue-{Source Issue}`. A differing source
-worktree branch and output branch is accepted only for an explicitly declared
-Existing PR update, and only when the structured override includes both
-`source_worktree_branch` and `output_branch` with exact validated values:
-
-```text
-Existing PR: 3405
-Expected Existing PR Head SHA: <optional exact current PR head SHA>
-Publish Override: {"action":"publish_existing_issue_worktree","allowed_files":["path/explicitly/allowed.ext"],"base_branch":"main","draft_pr":true,"output_branch":"runner/issue-3404","source_issue":3407,"source_worktree_branch":"runner/issue-3407","target_repository":"alanua/Skeleton"}
-```
-
-For this Existing PR cross-branch exception, the Runner resolves the retained
-source as `issue-{Source Issue}`, requires its current branch to equal
-`source_worktree_branch`, validates the live PR number as open, draft, same
-repository, exact base branch, and exact head branch `output_branch`, and
-checks `Expected Existing PR Head SHA` before any staging, commit, or push when
-that field is supplied. It then transfers only the validated retained
-allowlisted file contents to the output branch through a bounded Runner-owned
-temporary detached worktree, pushes that detached `HEAD` explicitly to
-`refs/heads/<output_branch>` without force, re-reads the same PR, and requires
-the exact pushed head before reporting `DONE`. Post-push file validation
-preserves legitimate pre-existing PR files: every pre-push PR file must remain
-present, newly introduced PR files must be in the explicit allowlist, and every
-validated retained publish file must still be represented in the PR changed-file
-set. It never resets, cleans, stashes, deletes, stages, or commits in the source
-retained worktree, and it must not create a replacement PR when `Existing PR` is
-supplied.
 
 It may only:
 

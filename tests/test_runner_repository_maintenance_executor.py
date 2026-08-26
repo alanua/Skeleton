@@ -240,7 +240,9 @@ def _esp_signer_git_runner(
 
     def run_command(args, cwd, timeout, env):
         del cwd, timeout, env
-        if args == ["git", "ls-remote", "--exit-code", "origin", "refs/heads/main"]:
+        if args and args[0] == "/usr/bin/git":
+            args = ["git", *args[1:]]
+        if args == ["git", "ls-remote", "--exit-code", "https://github.com/alanua/Skeleton.git", "refs/heads/main"]:
             if remote_results:
                 return remote_results.pop(0)
             return 0, f"{current_main_sha}\trefs/heads/main\n"
@@ -290,8 +292,10 @@ def _esp_signer_git_runner(
 def test_esp_lab_stage1_signer_trust_chain_pins_match_recomputed_blobs() -> None:
     assert (
         maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_BLOB
-        == "7ed95f5ba6d274451f62cfc31f88bc204eaaa386"
+        == "ef285000113c1254170b8924b4c3ab8d82250423"
     )
+    assert maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_BLOB != "7ed95f5ba6d274451f62cfc31f88bc204eaaa386"
+    assert maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_OPERATOR_APPROVAL == "EXACT_HEAD_HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_V2_APPROVED"
     assert (
         maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_PAYLOAD_BLOB
         == "9e349149ea17c38284c8bda1051b3d0de9688d4c"
@@ -374,7 +378,7 @@ def test_esp_lab_stage1_signer_accepts_newer_descendant_main_with_reviewed_blob(
 
     def fake_verify(path: Path, _expected_sha256: str | None, expected_mode: int, **kwargs):
         del path, kwargs
-        assert expected_mode in {0o500, 0o555}
+        assert expected_mode in {0o440, 0o444, 0o500, 0o555}
 
     monkeypatch.setattr(maintenance, "_verify_regular_file", fake_verify)
     monkeypatch.setattr(maintenance, "_verify_protected_installer_parent", lambda **_kwargs: None)
@@ -425,6 +429,8 @@ def test_esp_lab_stage1_signer_authority_drift_after_staging_blocks_execution(
     def run_command(args, cwd, timeout, env):
         nonlocal status_calls
         del cwd, timeout, env
+        if args and args[0] == "/usr/bin/git":
+            args = ["git", *args[1:]]
         if args[:3] == ["git", "rev-parse", "--verify"]:
             return 0, f"{expected}\n"
         if args == ["git", "status", "--porcelain", "--untracked-files=all"]:
@@ -438,7 +444,7 @@ def test_esp_lab_stage1_signer_authority_drift_after_staging_blocks_execution(
 
     def fake_verify(path: Path, _expected_sha256: str | None, expected_mode: int, **kwargs):
         del path, kwargs
-        assert expected_mode in {0o500, 0o555}
+        assert expected_mode in {0o440, 0o444, 0o500, 0o555}
 
     monkeypatch.setattr(maintenance, "_verify_regular_file", fake_verify)
     monkeypatch.setattr(maintenance, "_verify_protected_installer_parent", lambda **_kwargs: None)
@@ -471,7 +477,7 @@ def test_esp_lab_stage1_signer_uses_git_blob_not_worktree_and_fixed_install_argv
         del kwargs
         if path.name == "install_home_edge_esp_lab_activation_signer.sh":
             assert path.read_bytes() == blob_bytes
-        assert expected_mode in {0o500, 0o555}
+        assert expected_mode in {0o440, 0o444, 0o500, 0o555}
         if expected_sha256 is not None and path.exists():
             assert hashlib.sha256(path.read_bytes()).hexdigest() == expected_sha256
 
@@ -522,7 +528,7 @@ def test_esp_lab_stage1_signer_parent_absent_uses_install_d_bootstrap(
 
     def fake_verify(path: Path, _expected_sha256: str | None, expected_mode: int, **kwargs):
         del path, kwargs
-        assert expected_mode in {0o500, 0o555}
+        assert expected_mode in {0o440, 0o444, 0o500, 0o555}
 
     def protected_run(argv: list[str], _timeout: int | None):
         calls.append(argv)
@@ -631,7 +637,7 @@ def test_esp_lab_stage1_signer_post_copy_parent_audit_blocks_installer_execution
 
     def fake_verify(path: Path, _expected_sha256: str | None, expected_mode: int, **kwargs):
         del path, kwargs
-        assert expected_mode in {0o500, 0o555}
+        assert expected_mode in {0o440, 0o444, 0o500, 0o555}
 
     monkeypatch.setattr(maintenance, "_verify_regular_file", fake_verify)
     monkeypatch.setattr(maintenance, "_verify_protected_installer_parent", fake_parent_check)
@@ -684,7 +690,7 @@ def test_esp_lab_stage1_signer_remote_main_change_after_copy_blocks_execution(
 
     def fake_verify(path: Path, _expected_sha256: str | None, expected_mode: int, **kwargs):
         del path, kwargs
-        assert expected_mode in {0o500, 0o555}
+        assert expected_mode in {0o440, 0o444, 0o500, 0o555}
 
     monkeypatch.setattr(maintenance, "_verify_regular_file", fake_verify)
     monkeypatch.setattr(maintenance, "_verify_protected_installer_parent", lambda **_kwargs: None)
@@ -787,7 +793,7 @@ def test_esp_lab_stage1_signer_success_audits_fixed_artifacts_and_does_not_activ
 
     def fake_verify(path: Path, _expected_sha256: str | None, expected_mode: int, **kwargs):
         del kwargs
-        assert expected_mode in {0o500, 0o555}
+        assert expected_mode in {0o440, 0o444, 0o500, 0o555}
 
     def protected_run(argv: list[str], _timeout: int | None):
         calls.append(argv)
