@@ -22,6 +22,7 @@ INSTALLER_PATH = ROOT / "scripts/install_home_edge_esp_lab_activation_signer.sh"
 STAGE1_INSTALLER_PATH = ROOT / "scripts/install_home_edge_esp_lab.sh"
 SECRET = "synthetic-esp-lab-stage1-key"
 SIGNER_TRUSTED_ANCESTOR_SHA = "725dfc3aedbce194c7afcc229eb44b1eec4f463a"
+SIGNER_INSTALLER_BLOB_SHA = "ef285000113c1254170b8924b4c3ab8d82250423"
 SIGNER_PAYLOAD_BLOB_SHA = "9e349149ea17c38284c8bda1051b3d0de9688d4c"
 SIGNER_WRAPPER_BLOB_SHA = "d248088477a7c59219a9c19c47bcfc464c6dcd27"
 SIGNER_STAGE1_INSTALLER_BLOB_SHA = "4db8042020915dbcdd261accc5c87a75682fa115"
@@ -181,6 +182,7 @@ def _make_signer_installer_preflight_fixture(
     stage1.chmod(0o755)
     object_store = repo / ".fake-git-objects"
     object_store.mkdir()
+    (object_store / SIGNER_INSTALLER_BLOB_SHA).write_bytes(INSTALLER_PATH.read_bytes())
     (object_store / SIGNER_PAYLOAD_BLOB_SHA).write_bytes(PAYLOAD_PATH.read_bytes())
     (object_store / SIGNER_WRAPPER_BLOB_SHA).write_bytes(WRAPPER_PATH.read_bytes())
     (object_store / SIGNER_STAGE1_INSTALLER_BLOB_SHA).write_bytes(STAGE1_INSTALLER_PATH.read_bytes())
@@ -214,6 +216,11 @@ def _make_signer_installer_preflight_fixture(
             fi
             if [ "$1" = "ls-tree" ] && [ "$2" = "HEAD" ] && [ "$3" = "--" ]; then
                 case "$4" in
+                  scripts/install_home_edge_esp_lab_activation_signer.sh)
+                    [ "${{FAKE_OLD_CHECKOUT:-0}}" = "1" ] && exit 0
+                    printf '100755 blob %s\\t%s\\n' "${{FAKE_SIGNER_INSTALLER_TREE_BLOB:-{SIGNER_INSTALLER_BLOB_SHA}}}" "$4"
+                    exit 0
+                    ;;
                   scripts/home_edge_esp_lab_activation_signer_payload.py)
                     [ "${{FAKE_OLD_CHECKOUT:-0}}" = "1" ] && exit 0
                     printf '100644 blob %s\\t%s\\n' "${{FAKE_PAYLOAD_TREE_BLOB:-{SIGNER_PAYLOAD_BLOB_SHA}}}" "$4"
@@ -275,6 +282,8 @@ def _make_signer_installer_preflight_fixture(
     )
     text = text.replace('/usr/bin/systemctl', str(fake_systemctl))
     text = text.replace('/usr/bin/git', str(fake_git))
+    text = text.replace('"$RUNUSER_BIN" -u "$RUNNER_USER" -- "$GIT_BIN"', '"$GIT_BIN"')
+    text = text.replace('env -i HOME=/nonexistent', 'env HOME=/nonexistent')
     text = text.replace('if [[ ${EUID:-$(id -u)} -ne 0 ]]; then', 'if [[ 0 -ne 0 ]]; then')
     text = text.replace(
         'if [[ "$protected_uid" != "0" || "$protected_gid" != "0" || $((8#$protected_mode & 8#022)) -ne 0 ]]; then',
@@ -884,7 +893,7 @@ def test_installer_static_fixed_paths_sudoers_visudo_rollback_and_no_generic_sud
     assert 'EXEC_ROOT="/usr/local/libexec/skeleton/home-edge/esp-lab-stage1"' in text
     assert 'SUDOERS_PATH="/etc/sudoers.d/skeleton-home-edge-esp-lab-stage1-signer"' in text
     assert 'NOPASSWD: $EXEC_ROOT/signer ""' in text
-    assert "visudo -cf" in text
+    assert '"$VISUDO_BIN" -cf' in text
     assert "BACKUPS_READY=0" in text and "ACTIVATION_STARTED=0" in text
     assert 'if [[ $COMMITTED -eq 0 && $ACTIVATION_STARTED -eq 1 ]]; then' in text
     assert "ALL=(ALL)" not in text
@@ -905,6 +914,7 @@ def test_signer_installer_static_stage1_sha_is_ancestor_boundary_not_exact_head(
 
 
 def test_current_pr_head_signer_payload_wrapper_and_stage1_installer_blobs_match_constants() -> None:
+    assert _git_blob(INSTALLER_PATH) == SIGNER_INSTALLER_BLOB_SHA
     assert _git_tree_blob("scripts/home_edge_esp_lab_activation_signer_payload.py") == SIGNER_PAYLOAD_BLOB_SHA
     assert _git_tree_blob("scripts/home_edge_esp_lab_activation_signer") == SIGNER_WRAPPER_BLOB_SHA
     assert _git_tree_blob("scripts/install_home_edge_esp_lab.sh") == SIGNER_STAGE1_INSTALLER_BLOB_SHA
