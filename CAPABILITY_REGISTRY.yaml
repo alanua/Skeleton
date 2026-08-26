@@ -407,6 +407,7 @@ capabilities:
     live_runtime_execution: true
     protected: true
     requires:
+      - core/runner_controller_privileged_gateway.py
       - core/runner_controller_privileged_gateway_hardening.py
       - core/home_edge/esp_lab_stage1_signer_install.py
       - scripts/runner_controller_privileged_gateway.py
