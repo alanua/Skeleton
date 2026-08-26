@@ -1127,11 +1127,15 @@ repository, exact base branch, and exact head branch `output_branch`, and
 checks `Expected Existing PR Head SHA` before any staging, commit, or push when
 that field is supplied. It then transfers only the validated retained
 allowlisted file contents to the output branch through a bounded Runner-owned
-temporary worktree, pushes the exact output branch without force, re-reads the
-same PR, and requires the exact pushed head and changed-file set before
-reporting `DONE`. It never resets, cleans, stashes, deletes, stages, or commits
-in the source retained worktree, and it must not create a replacement PR when
-`Existing PR` is supplied.
+temporary detached worktree, pushes that detached `HEAD` explicitly to
+`refs/heads/<output_branch>` without force, re-reads the same PR, and requires
+the exact pushed head before reporting `DONE`. Post-push file validation
+preserves legitimate pre-existing PR files: every pre-push PR file must remain
+present, newly introduced PR files must be in the explicit allowlist, and every
+validated retained publish file must still be represented in the PR changed-file
+set. It never resets, cleans, stashes, deletes, stages, or commits in the source
+retained worktree, and it must not create a replacement PR when `Existing PR` is
+supplied.
 
 It may only:
 

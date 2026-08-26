@@ -13452,7 +13452,7 @@ def _issue_worktree_publish_cross_branch_existing_pr(
                         "git",
                         "push",
                         "origin",
-                        f"refs/heads/{request.output_branch}:refs/heads/{request.output_branch}",
+                        f"HEAD:refs/heads/{request.output_branch}",
                     ],
                     cwd=output_path,
                 )
@@ -13493,13 +13493,18 @@ def _issue_worktree_publish_cross_branch_existing_pr(
         return _maintenance_report(
             "BLOCKED", task_id, [*status_lines, "reason=post_push_pr_files_missing"], "not_met"
         )
-    if not post_push_pr_files <= request.allowed_files:
+    if not pre_push_pr_files <= post_push_pr_files:
         return _maintenance_report(
-            "BLOCKED", task_id, [*status_lines, "reason=post_push_pr_files_outside_allowlist"], "not_met"
+            "BLOCKED", task_id, [*status_lines, "reason=pre_existing_pr_files_missing"], "not_met"
         )
-    if post_push_pr_files != set(validated_files):
+    new_pr_files = post_push_pr_files - pre_push_pr_files
+    if not new_pr_files <= request.allowed_files:
         return _maintenance_report(
-            "BLOCKED", task_id, [*status_lines, "reason=post_push_pr_files_mismatch"], "not_met"
+            "BLOCKED", task_id, [*status_lines, "reason=new_pr_files_outside_allowlist"], "not_met"
+        )
+    if not set(validated_files) <= post_push_pr_files:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=validated_publish_files_missing"], "not_met"
         )
     status_lines.extend(
         (

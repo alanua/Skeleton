@@ -6950,7 +6950,7 @@ def _publish_existing_cross_branch_commands(
                 "git",
                 "push",
                 "origin",
-                f"refs/heads/{output_branch}:refs/heads/{output_branch}",
+                f"HEAD:refs/heads/{output_branch}",
             ]:
                 return push_code, ""
         return 2, f"unexpected command: {command!r} cwd={cwd_path}"
@@ -10623,8 +10623,14 @@ def test_publish_existing_issue_worktree_cross_branch_existing_pr_shape_updates_
         "git",
         "push",
         "origin",
-        "refs/heads/runner/issue-3404:refs/heads/runner/issue-3404",
+        "HEAD:refs/heads/runner/issue-3404",
     ] in commands
+    assert [
+        "git",
+        "push",
+        "origin",
+        "refs/heads/runner/issue-3404:refs/heads/runner/issue-3404",
+    ] not in commands
     assert all("--force" not in command for command in commands)
     assert all(command[:3] != ["gh", "pr", "create"] for command in commands)
     assert all(
@@ -10632,6 +10638,214 @@ def test_publish_existing_issue_worktree_cross_branch_existing_pr_shape_updates_
         for call, command in zip(run.call_args_list, commands)
     )
     assert (worktree_path / ".git").read_bytes() == source_marker
+
+
+def test_publish_existing_issue_worktree_cross_branch_real_git_pushes_detached_head(
+    tmp_path: Path,
+) -> None:
+    original_run_command = runner.run_command
+
+    def git(cwd: Path, *args: str) -> str:
+        code, output = original_run_command(["git", *args], cwd=cwd)
+        assert code == 0, output
+        return output.strip()
+
+    origin = tmp_path / "origin.git"
+    seed = tmp_path / "seed"
+    source = tmp_path / "issue-3407"
+    git(tmp_path, "init", "--bare", str(origin))
+    git(tmp_path, "init", str(seed))
+    git(seed, "config", "user.email", "runner@example.invalid")
+    git(seed, "config", "user.name", "Runner Test")
+    git(seed, "remote", "add", "origin", str(origin))
+    tracked_file = seed / "scripts" / "runner_poll_github_tasks.py"
+    tracked_file.parent.mkdir(parents=True)
+    tracked_file.write_text("base\n", encoding="utf-8")
+    git(seed, "add", "scripts/runner_poll_github_tasks.py")
+    git(seed, "commit", "-m", "base")
+    pre_head = git(seed, "rev-parse", "HEAD")
+    git(seed, "branch", "-M", "main")
+    git(seed, "push", "origin", "main")
+    git(seed, "push", "origin", f"HEAD:refs/heads/runner/issue-3404")
+    git(tmp_path, "clone", str(origin), str(source))
+    git(source, "config", "user.email", "runner@example.invalid")
+    git(source, "config", "user.name", "Runner Test")
+    git(source, "checkout", "-b", "runner/issue-3407", "origin/main")
+    git(source, "branch", "runner/issue-3404", pre_head)
+
+    detached = tmp_path / "detached-regression"
+    git(source, "worktree", "add", "--detach", str(detached), pre_head)
+    (detached / "scripts" / "runner_poll_github_tasks.py").write_text(
+        "old refspec would miss this\n", encoding="utf-8"
+    )
+    git(detached, "add", "scripts/runner_poll_github_tasks.py")
+    git(detached, "commit", "-m", "detached regression")
+    detached_head = git(detached, "rev-parse", "HEAD")
+    git(
+        detached,
+        "push",
+        "origin",
+        "refs/heads/runner/issue-3404:refs/heads/runner/issue-3404",
+    )
+    assert git(source, "ls-remote", "origin", "refs/heads/runner/issue-3404").split()[0] == pre_head
+    assert detached_head != pre_head
+    git(source, "worktree", "remove", str(detached))
+
+    (source / "scripts" / "runner_poll_github_tasks.py").write_text(
+        "published from source\n", encoding="utf-8"
+    )
+    source_status_before = git(source, "status", "--porcelain=v1", "-uall")
+    source_bytes_before = (source / "scripts" / "runner_poll_github_tasks.py").read_bytes()
+    pr_view_count = 0
+
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        nonlocal pr_view_count
+        if command[:4] == ["gh", "pr", "view", "3405"]:
+            assert Path(cwd or "") == source
+            pr_view_count += 1
+            head_sha = pre_head
+            if pr_view_count > 1:
+                head_sha = git(source, "ls-remote", "origin", "refs/heads/runner/issue-3404").split()[0]
+            return 0, json.dumps(
+                _existing_pr_publish_state(
+                    number=3405,
+                    base_ref="main",
+                    head_ref="runner/issue-3404",
+                    head_sha=head_sha,
+                    url="https://github.com/alanua/Skeleton/pull/3405",
+                    files=("scripts/runner_poll_github_tasks.py",),
+                )
+            )
+        if command == ["git", "remote", "get-url", "origin"] and Path(cwd or "") == source:
+            return 0, "https://github.com/alanua/Skeleton.git\n"
+        return original_run_command(command, cwd=Path(cwd or ""))
+
+    with mock.patch.object(runner, "worktree_root", return_value=tmp_path), mock.patch.object(
+        runner, "run_command", side_effect=run
+    ):
+        report = runner.publish_existing_issue_worktree(
+            _publish_existing_cross_branch_body(
+                expected_head_sha=pre_head,
+                publish_override=_valid_publish_existing_cross_branch_override(),
+            )
+        )
+
+    pushed_head = git(source, "ls-remote", "origin", "refs/heads/runner/issue-3404").split()[0]
+    assert report.startswith("DONE:")
+    assert f"pushed_head_sha={pushed_head}" in report
+    assert pushed_head != pre_head
+    assert git(source, "rev-parse", f"{pushed_head}^") == pre_head
+    assert git(source, "status", "--porcelain=v1", "-uall") == source_status_before
+    assert (source / "scripts" / "runner_poll_github_tasks.py").read_bytes() == source_bytes_before
+
+
+def test_publish_existing_issue_worktree_cross_branch_preserves_preexisting_pr_files(
+    tmp_path: Path,
+) -> None:
+    allowed_files = (
+        "scripts/runner_poll_github_tasks.py",
+        "tests/test_runner_poll_github_tasks.py",
+        "docs/RUNNER_MAINTENANCE_TASKS.md",
+        "docs/runner/a.md",
+        "docs/runner/b.md",
+        "docs/runner/c.md",
+    )
+    pre_existing_files = (
+        *allowed_files,
+        "docs/legacy-1.md",
+        "docs/legacy-2.md",
+        "docs/legacy-3.md",
+        "docs/legacy-4.md",
+        "docs/legacy-5.md",
+    )
+    worktree_path = _prepare_issue_publish_worktree(tmp_path, issue_number=3407)
+    for relative_path in allowed_files:
+        path = worktree_path / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"retained:{relative_path}\n", encoding="utf-8")
+
+    with mock.patch.object(runner, "worktree_root", return_value=tmp_path), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_publish_existing_cross_branch_commands(
+            source_path=worktree_path,
+            changed_files=allowed_files,
+            pre_pr_state=_existing_pr_publish_state(
+                number=3405,
+                head_ref="runner/issue-3404",
+                head_sha=HEAD_SHA,
+                url="https://github.com/alanua/Skeleton/pull/3405",
+                files=pre_existing_files,
+            ),
+            post_pr_files=pre_existing_files,
+            post_head_sha="c" * 40,
+        ),
+    ):
+        report = runner.publish_existing_issue_worktree(
+            _publish_existing_cross_branch_body(
+                allowed_files=allowed_files,
+                publish_override=_valid_publish_existing_cross_branch_override(
+                    allowed_files=allowed_files
+                ),
+            )
+        )
+
+    assert report.startswith("DONE:")
+    assert "pre_push_pr_changed_files_count=11" in report
+    assert "post_push_pr_changed_files_count=11" in report
+    assert "validated_publish_files_count=6" in report
+
+
+@pytest.mark.parametrize(
+    ("pre_files", "post_files", "reason"),
+    (
+        (
+            ("scripts/runner_poll_github_tasks.py", "docs/pre-existing.md"),
+            ("scripts/runner_poll_github_tasks.py",),
+            "pre_existing_pr_files_missing",
+        ),
+        (
+            ("scripts/runner_poll_github_tasks.py",),
+            ("scripts/runner_poll_github_tasks.py", "docs/unexpected.md"),
+            "new_pr_files_outside_allowlist",
+        ),
+    ),
+)
+def test_publish_existing_issue_worktree_cross_branch_post_push_file_set_blocks(
+    tmp_path: Path,
+    pre_files: tuple[str, ...],
+    post_files: tuple[str, ...],
+    reason: str,
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path, issue_number=3407)
+    source_file = worktree_path / "scripts/runner_poll_github_tasks.py"
+    source_file.parent.mkdir(parents=True, exist_ok=True)
+    source_file.write_text("retained\n", encoding="utf-8")
+    with mock.patch.object(runner, "worktree_root", return_value=tmp_path), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_publish_existing_cross_branch_commands(
+            source_path=worktree_path,
+            pre_pr_state=_existing_pr_publish_state(
+                number=3405,
+                head_ref="runner/issue-3404",
+                head_sha=HEAD_SHA,
+                url="https://github.com/alanua/Skeleton/pull/3405",
+                files=pre_files,
+            ),
+            post_pr_files=post_files,
+            post_head_sha="c" * 40,
+        ),
+    ):
+        report = runner.publish_existing_issue_worktree(
+            _publish_existing_cross_branch_body(
+                publish_override=_valid_publish_existing_cross_branch_override()
+            )
+        )
+
+    assert report.startswith(("NEEDS_OPERATOR:", "BLOCKED:"))
+    assert f"reason={reason}" in report
+    assert "pushed_head_sha=" not in report
 
 
 def test_publish_existing_issue_worktree_cross_branch_repeat_is_idempotent(
