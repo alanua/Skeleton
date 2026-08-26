@@ -400,3 +400,23 @@ capabilities:
     tested: false
     live_runtime_execution: false
     description: Future operator-approved live storage bridge for memory routing decisions; not implemented in stage 1.
+
+  runner_controller_privileged_gateway:
+    status: available
+    module: core/runner_controller_privileged_gateway_hardening.py
+    live_runtime_execution: true
+    protected: true
+    requires:
+      - core/runner_controller_privileged_gateway_hardening.py
+      - core/runner_controller_privileged_gateway.py
+      - core/home_edge/esp_lab_stage1_signer_install.py
+      - scripts/runner_controller_privileged_gateway.py
+      - scripts/install_runner_controller_privileged_gateway.sh
+      - RUNNER_PRIVILEGED_ACTIONS.yaml
+      - CAPABILITY_REGISTRY.yaml
+      - schemas/runner_controller_privileged_request.schema.json
+      - schemas/runner_controller_privileged_receipt.schema.json
+      - docs/RUNNER_CONTROLLER_PRIVILEGED_GATEWAY.md
+    tested: true
+    added: "2026-08-26"
+    description: Protected typed no-argument sudo/forced-command gateway with exact trust anchors, persistent cached idempotency, conservative mutation receipts, and no generic root shell authority.

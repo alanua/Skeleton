@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.runner_controller_privileged_request.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "request_id",
+    "idempotency_key",
+    "action_id",
+    "issued_at",
+    "expires_at",
+    "repository",
+    "target",
+    "operator_approval",
+    "expected_main_sha",
+    "registered_clean_main_sha",
+    "github_main_sha",
+    "checkout_path",
+    "checkout_head_sha",
+    "checkout_origin_main_sha"
+  ],
+  "properties": {
+    "schema": {"const": "skeleton.runner_controller_privileged_request.v1"},
+    "request_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$", "maxLength": 160},
+    "idempotency_key": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$", "maxLength": 160},
+    "action_id": {"const": "home_edge_01_esp_lab_stage1_signer_install_v1"},
+    "issued_at": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"},
+    "expires_at": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"},
+    "repository": {"const": "alanua/Skeleton"},
+    "target": {"const": "runner-controller"},
+    "operator_approval": {"const": "EXACT_HEAD_HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_APPROVED"},
+    "expected_main_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "registered_clean_main_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "github_main_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "checkout_path": {"type": "string", "pattern": "^/home/agent/agent-dev/.{1,4075}$", "maxLength": 4096},
+    "checkout_head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "checkout_origin_main_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+  }
+}
