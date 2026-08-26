@@ -739,7 +739,9 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "exact_base_changed_files_count",
         "evidence_ref",
         "existing_pr_lookup",
+        "existing_pr_head_sha",
         "existing_pr_url",
+        "expected_existing_pr_head_sha",
         "expected_branch",
         "expected_main_sha",
         "expected_head_sha",
@@ -13014,6 +13016,29 @@ def _issue_worktree_publish_pr_number_state(
     return parsed
 
 
+def _issue_worktree_publish_cross_branch_public_rest_pr_state(
+    request: IssueWorktreeCrossBranchExistingPrRequest,
+) -> dict[str, Any]:
+    if not _public_skeleton_rest_allowed(request.repository, request.pr_number):
+        raise RuntimeError("cross-branch REST fallback not allowed")
+    return _public_skeleton_rest_pr_state(
+        repository=request.repository,
+        pr_number=request.pr_number,
+    )
+
+
+def _issue_worktree_publish_pr_number_state_with_fallback(
+    request: IssueWorktreeCrossBranchExistingPrRequest, worktree_path: Path
+) -> tuple[dict[str, Any], str]:
+    try:
+        return _issue_worktree_publish_pr_number_state(request, worktree_path), "gh"
+    except (RuntimeError, json.JSONDecodeError):
+        return (
+            _issue_worktree_publish_cross_branch_public_rest_pr_state(request),
+            "public_rest",
+        )
+
+
 def _issue_worktree_cross_branch_pr_block_reason(
     request: IssueWorktreeCrossBranchExistingPrRequest,
     pr_state: dict[str, Any],
@@ -13230,7 +13255,9 @@ def _issue_worktree_publish_cross_branch_existing_pr(
     status_lines: list[str],
 ) -> str:
     try:
-        pr_state = _issue_worktree_publish_pr_number_state(request, source_path)
+        pr_state, pr_metadata_source = _issue_worktree_publish_pr_number_state_with_fallback(
+            request, source_path
+        )
     except (RuntimeError, json.JSONDecodeError):
         return _maintenance_report(
             "BLOCKED",
@@ -13260,6 +13287,7 @@ def _issue_worktree_publish_cross_branch_existing_pr(
     status_lines.extend(
         (
             "step=read_pr_metadata status=done",
+            f"pr_metadata_source={pr_metadata_source}",
             f"pull_request={request.pr_number}",
             f"existing_pr_url={pr_url}",
             f"pre_push_pr_changed_files_count={len(pre_push_pr_files)}",
@@ -13470,7 +13498,10 @@ def _issue_worktree_publish_cross_branch_existing_pr(
                 run_command(["git", "worktree", "remove", str(output_path)], cwd=source_path)
 
     try:
-        post_push_pr_state = _issue_worktree_publish_pr_number_state(request, source_path)
+        (
+            post_push_pr_state,
+            post_push_pr_metadata_source,
+        ) = _issue_worktree_publish_pr_number_state_with_fallback(request, source_path)
     except (RuntimeError, json.JSONDecodeError):
         return _maintenance_report(
             "BLOCKED",
@@ -13509,6 +13540,7 @@ def _issue_worktree_publish_cross_branch_existing_pr(
     status_lines.extend(
         (
             "step=post_push_read_pr_metadata status=done",
+            f"post_push_pr_metadata_source={post_push_pr_metadata_source}",
             f"pushed_head_sha={pushed_head_sha}",
             f"post_push_pr_changed_files_count={len(post_push_pr_files)}",
         )
@@ -14242,6 +14274,19 @@ def _registered_worktree_overlay_rest_allowed(packet: RegisteredWorktreeOverlayP
     return isinstance(project, dict) and project.get("repo") == REPO and project.get("public") is True
 
 
+def _public_skeleton_rest_allowed(repository: str, pr_number: int) -> bool:
+    if repository != _REGISTERED_OVERLAY_PUBLIC_REST_REPO:
+        return False
+    if REPO != _REGISTERED_OVERLAY_PUBLIC_REST_REPO:
+        return False
+    if not isinstance(pr_number, int) or pr_number <= 0:
+        return False
+    project_tree = load_runner_project_tree()
+    projects = project_tree.get("projects") if isinstance(project_tree, dict) else None
+    project = projects.get("skeleton") if isinstance(projects, dict) else None
+    return isinstance(project, dict) and project.get("repo") == REPO and project.get("public") is True
+
+
 def _registered_worktree_overlay_rest_path(pr_number: int, *, page: int | None = None) -> str:
     path = f"/repos/{_REGISTERED_OVERLAY_PUBLIC_REST_REPO}/pulls/{pr_number}"
     if page is not None:
@@ -14307,6 +14352,10 @@ def _registered_worktree_overlay_rest_repository_name(repository: object) -> str
     return None
 
 
+def _registered_worktree_overlay_rest_pr_url_allowed(url: str, pr_number: int) -> bool:
+    return url.rstrip("/") == f"https://github.com/{_REGISTERED_OVERLAY_PUBLIC_REST_REPO}/pull/{pr_number}"
+
+
 def _registered_worktree_overlay_files_from_rest(pr_number: int) -> list[dict[str, str]]:
     files: list[dict[str, str]] = []
     seen_paths: set[str] = set()
@@ -14340,19 +14389,14 @@ def _registered_worktree_overlay_files_from_rest(pr_number: int) -> list[dict[st
     raise RuntimeError("registered overlay REST pagination exceeded")
 
 
-def _registered_worktree_overlay_public_rest_pr_state(
-    request: IssueWorktreeExistingPrPublishRequest,
-    packet: RegisteredWorktreeOverlayPacket,
+def _public_skeleton_rest_pr_state(
+    *,
+    repository: str,
+    pr_number: int,
 ) -> dict[str, Any]:
-    if not _registered_worktree_overlay_rest_allowed(packet):
-        raise RuntimeError("registered overlay REST fallback not allowed")
-    if request.repository != _REGISTERED_OVERLAY_PUBLIC_REST_REPO:
-        raise RuntimeError("registered overlay REST repository mismatch")
-    if request.pr_number != packet.pr_number:
-        raise RuntimeError("registered overlay REST PR number mismatch")
     pr_payload, _headers = _registered_worktree_overlay_fetch_public_rest_json(
-        _registered_worktree_overlay_rest_path(request.pr_number),
-        request.pr_number,
+        _registered_worktree_overlay_rest_path(pr_number),
+        pr_number,
         _REGISTERED_OVERLAY_PUBLIC_REST_PR_BYTES,
     )
     if not isinstance(pr_payload, dict):
@@ -14371,7 +14415,7 @@ def _registered_worktree_overlay_public_rest_pr_state(
     state = pr_payload.get("state")
     number = pr_payload.get("number")
     draft = pr_payload.get("draft")
-    if number != request.pr_number:
+    if number != pr_number:
         raise RuntimeError("registered overlay REST PR number mismatch")
     if state not in {"open", "closed"}:
         raise RuntimeError("registered overlay REST PR state malformed")
@@ -14383,12 +14427,16 @@ def _registered_worktree_overlay_public_rest_pr_state(
         raise RuntimeError("registered overlay REST base SHA malformed")
     if not isinstance(head_sha, str) or _HEAD_SHA_RE.fullmatch(head_sha) is None:
         raise RuntimeError("registered overlay REST head SHA malformed")
-    if head_repo_name != request.repository:
+    if head_repo_name != repository:
         raise RuntimeError("registered overlay REST head repository mismatch")
-    if not isinstance(html_url, str) or _PUBLIC_GITHUB_PR_URL_RE.fullmatch(html_url) is None:
+    if (
+        not isinstance(html_url, str)
+        or _PUBLIC_GITHUB_PR_URL_RE.fullmatch(html_url) is None
+        or not _registered_worktree_overlay_rest_pr_url_allowed(html_url, pr_number)
+    ):
         raise RuntimeError("registered overlay REST PR URL malformed")
-    files = _registered_worktree_overlay_files_from_rest(request.pr_number)
-    owner, name = request.repository.split("/", 1)
+    files = _registered_worktree_overlay_files_from_rest(pr_number)
+    owner, name = repository.split("/", 1)
     pr_state = {
         "number": number,
         "state": state.upper(),
@@ -14398,7 +14446,7 @@ def _registered_worktree_overlay_public_rest_pr_state(
         "headRefName": head_ref,
         "headRefOid": head_sha.lower(),
         "headRepository": {
-            "nameWithOwner": request.repository,
+            "nameWithOwner": repository,
             "owner": {"login": owner},
             "name": name,
         },
@@ -14409,6 +14457,22 @@ def _registered_worktree_overlay_public_rest_pr_state(
     if not _registered_worktree_overlay_pr_state_shape_valid(pr_state, strict_values=True):
         raise RuntimeError("registered overlay REST normalized shape invalid")
     return pr_state
+
+
+def _registered_worktree_overlay_public_rest_pr_state(
+    request: IssueWorktreeExistingPrPublishRequest,
+    packet: RegisteredWorktreeOverlayPacket,
+) -> dict[str, Any]:
+    if not _registered_worktree_overlay_rest_allowed(packet):
+        raise RuntimeError("registered overlay REST fallback not allowed")
+    if request.repository != _REGISTERED_OVERLAY_PUBLIC_REST_REPO:
+        raise RuntimeError("registered overlay REST repository mismatch")
+    if request.pr_number != packet.pr_number:
+        raise RuntimeError("registered overlay REST PR number mismatch")
+    return _public_skeleton_rest_pr_state(
+        repository=request.repository,
+        pr_number=request.pr_number,
+    )
 
 
 def _registered_worktree_overlay_pr_state_with_fallback(

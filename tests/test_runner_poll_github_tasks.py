@@ -6882,6 +6882,7 @@ def _publish_existing_cross_branch_commands(
     post_pr_state: dict[str, object] | None = None,
     staged_diff_code: int = 1,
     push_code: int = 0,
+    pr_view_code: int = 0,
 ) -> object:
     pr_view_count = 0
     after_files = post_pr_files if post_pr_files is not None else changed_files
@@ -6908,6 +6909,8 @@ def _publish_existing_cross_branch_commands(
         if command[:4] == ["gh", "pr", "view", str(pr_number)]:
             assert cwd_path == source_path
             pr_view_count += 1
+            if pr_view_code != 0:
+                return pr_view_code, "pr view output must not leak"
             return 0, json.dumps(before if pr_view_count == 1 else after)
         if cwd_path == source_path:
             if command == ["git", "branch", "--show-current"]:
@@ -7334,6 +7337,37 @@ def _overlay_rest_pr_payload(packet_id: str, *, head_sha: str | None = None) -> 
 
 def _overlay_rest_file_payload(files: tuple[str, ...]) -> list[dict[str, object]]:
     return [{"filename": path} for path in files]
+
+
+def _cross_branch_rest_pr_payload(
+    *,
+    number: int = 3405,
+    state: str = "open",
+    draft: object = True,
+    base_ref: str = "main",
+    base_sha: str = "a" * 40,
+    head_ref: str = "runner/issue-3404",
+    head_sha: str = HEAD_SHA,
+    head_repository: str = runner.REPO,
+    html_url: str | None = None,
+) -> dict[str, object]:
+    owner, name = head_repository.split("/", 1)
+    return {
+        "number": number,
+        "state": state,
+        "draft": draft,
+        "html_url": html_url or f"https://github.com/alanua/Skeleton/pull/{number}",
+        "base": {"ref": base_ref, "sha": base_sha},
+        "head": {
+            "ref": head_ref,
+            "sha": head_sha,
+            "repo": {
+                "full_name": head_repository,
+                "name": name,
+                "owner": {"login": owner},
+            },
+        },
+    }
 
 
 class _OverlayRestResponse:
@@ -10600,7 +10634,7 @@ def test_publish_existing_issue_worktree_cross_branch_existing_pr_shape_updates_
             post_head_sha=pushed_head,
             post_pr_files=allowed_files,
         ),
-    ) as run:
+    ) as run, mock.patch.object(runner.urllib.request, "build_opener") as build_opener:
         report = runner.publish_existing_issue_worktree(
             _publish_existing_cross_branch_body(
                 allowed_files=allowed_files,
@@ -10637,7 +10671,297 @@ def test_publish_existing_issue_worktree_cross_branch_existing_pr_shape_updates_
         command[:2] != ["git", "add"] or call.kwargs.get("cwd") != worktree_path
         for call, command in zip(run.call_args_list, commands)
     )
+    build_opener.assert_not_called()
     assert (worktree_path / ".git").read_bytes() == source_marker
+
+
+def test_publish_existing_issue_worktree_cross_branch_gh_failure_uses_public_rest(
+    tmp_path: Path,
+) -> None:
+    allowed_files = (
+        "scripts/runner_poll_github_tasks.py",
+        "tests/test_runner_poll_github_tasks.py",
+        "docs/RUNNER_MAINTENANCE_TASKS.md",
+    )
+    exact_3410_head = "45591eb215d81c6eb8c0b6b6a947104477c1735f"
+    pushed_head = "c" * 40
+    worktree_path = _prepare_issue_publish_worktree(tmp_path, issue_number=3407)
+    for relative_path in allowed_files:
+        path = worktree_path / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"retained:{relative_path}\n", encoding="utf-8")
+    pr_url = "https://api.github.com/repos/alanua/Skeleton/pulls/3405"
+    files_url = f"{pr_url}/files?per_page=100&page=1"
+    opener = _OverlayRestOpener(
+        {
+            pr_url: [
+                _OverlayRestResponse(
+                    _cross_branch_rest_pr_payload(head_sha=exact_3410_head),
+                    pr_url,
+                ),
+                _OverlayRestResponse(
+                    _cross_branch_rest_pr_payload(head_sha=pushed_head),
+                    pr_url,
+                ),
+            ],
+            files_url: [
+                _OverlayRestResponse(_overlay_rest_file_payload(allowed_files), files_url),
+                _OverlayRestResponse(_overlay_rest_file_payload(allowed_files), files_url),
+            ],
+        }
+    )
+    with mock.patch.object(
+        runner,
+        "load_runner_project_tree",
+        return_value=_project_tree_with_skeleton_worktree_root(tmp_path),
+    ), mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_publish_existing_cross_branch_commands(
+            source_path=worktree_path,
+            changed_files=allowed_files,
+            post_head_sha=pushed_head,
+            post_pr_files=allowed_files,
+            pr_view_code=1,
+        ),
+    ), mock.patch.object(runner.urllib.request, "build_opener", return_value=opener):
+        report = runner.publish_existing_issue_worktree(
+            _publish_existing_cross_branch_body(
+                expected_head_sha=exact_3410_head,
+                allowed_files=allowed_files,
+                publish_override=_valid_publish_existing_cross_branch_override(
+                    allowed_files=allowed_files
+                ),
+            )
+        )
+
+    assert report.startswith("DONE:")
+    assert "pr_metadata_source=public_rest" in report
+    assert "post_push_pr_metadata_source=public_rest" in report
+    assert "pull_request=3405" in report
+    assert f"expected_existing_pr_head_sha={exact_3410_head}" in report
+    assert "validated_publish_files_count=3" in report
+    assert f"pushed_head_sha={pushed_head}" in report
+    assert [request.full_url for request in opener.requests] == [
+        pr_url,
+        files_url,
+        pr_url,
+        files_url,
+    ]
+    for request in opener.requests:
+        assert request.headers == {
+            "Accept": "application/vnd.github+json",
+            "X-github-api-version": "2022-11-28",
+            "User-agent": "skeleton-runner-registered-overlay",
+        }
+        assert "Authorization" not in request.headers
+        assert "Cookie" not in request.headers
+    assert set(opener.timeouts) == {runner._REGISTERED_OVERLAY_PUBLIC_REST_TIMEOUT_SECONDS}
+
+
+def test_publish_existing_issue_worktree_cross_branch_post_push_gh_failure_rereads_public_rest(
+    tmp_path: Path,
+) -> None:
+    pushed_head = "c" * 40
+    worktree_path = _prepare_issue_publish_worktree(tmp_path, issue_number=3407)
+    source_file = worktree_path / "scripts/runner_poll_github_tasks.py"
+    source_file.parent.mkdir(parents=True, exist_ok=True)
+    source_file.write_text("retained\n", encoding="utf-8")
+    pr_url = "https://api.github.com/repos/alanua/Skeleton/pulls/3405"
+    files_url = f"{pr_url}/files?per_page=100&page=1"
+    opener = _OverlayRestOpener(
+        {
+            pr_url: _OverlayRestResponse(
+                _cross_branch_rest_pr_payload(head_sha=pushed_head),
+                pr_url,
+            ),
+            files_url: _OverlayRestResponse(
+                _overlay_rest_file_payload(("scripts/runner_poll_github_tasks.py",)),
+                files_url,
+            ),
+        }
+    )
+    pr_view_count = 0
+    base_run = _publish_existing_cross_branch_commands(
+        source_path=worktree_path,
+        post_head_sha=pushed_head,
+        post_pr_files=("scripts/runner_poll_github_tasks.py",),
+    )
+
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        nonlocal pr_view_count
+        if command[:4] == ["gh", "pr", "view", "3405"]:
+            pr_view_count += 1
+            if pr_view_count == 1:
+                return 0, json.dumps(
+                    _existing_pr_publish_state(
+                        number=3405,
+                        head_ref="runner/issue-3404",
+                        head_sha=HEAD_SHA,
+                        url="https://github.com/alanua/Skeleton/pull/3405",
+                    )
+                )
+            return 1, "post-push gh output must not leak"
+        return base_run(command, cwd=cwd)
+
+    with mock.patch.object(
+        runner,
+        "load_runner_project_tree",
+        return_value=_project_tree_with_skeleton_worktree_root(tmp_path),
+    ), mock.patch.object(runner, "worktree_root", return_value=tmp_path), mock.patch.object(
+        runner, "run_command", side_effect=run
+    ), mock.patch.object(runner.urllib.request, "build_opener", return_value=opener):
+        report = runner.publish_existing_issue_worktree(
+            _publish_existing_cross_branch_body(
+                publish_override=_valid_publish_existing_cross_branch_override()
+            )
+        )
+
+    assert report.startswith("DONE:")
+    assert "pr_metadata_source=gh" in report
+    assert "post_push_pr_metadata_source=public_rest" in report
+    assert f"pushed_head_sha={pushed_head}" in report
+
+
+@pytest.mark.parametrize(
+    ("pr_response", "file_response"),
+    (
+        (
+            _OverlayRestResponse(
+                {}, "https://api.github.com/repos/alanua/Skeleton/pulls/3405", status=500
+            ),
+            None,
+        ),
+        (
+            _OverlayRestResponse(
+                {},
+                "https://evil.example/repos/alanua/Skeleton/pulls/3405",
+            ),
+            None,
+        ),
+        (
+            _OverlayRestResponse(
+                {},
+                "https://api.github.com/repos/alanua/Skeleton/pulls/3405",
+                raw=b"[" * (runner._REGISTERED_OVERLAY_PUBLIC_REST_PR_BYTES + 1),
+            ),
+            None,
+        ),
+        (
+            _OverlayRestResponse(
+                _cross_branch_rest_pr_payload(number=3406),
+                "https://api.github.com/repos/alanua/Skeleton/pulls/3405",
+            ),
+            _OverlayRestResponse(
+                _overlay_rest_file_payload(("scripts/runner_poll_github_tasks.py",)),
+                "https://api.github.com/repos/alanua/Skeleton/pulls/3405/files?per_page=100&page=1",
+            ),
+        ),
+        (
+            _OverlayRestResponse(
+                _cross_branch_rest_pr_payload(head_repository="alanua/Other"),
+                "https://api.github.com/repos/alanua/Skeleton/pulls/3405",
+            ),
+            _OverlayRestResponse(
+                _overlay_rest_file_payload(("scripts/runner_poll_github_tasks.py",)),
+                "https://api.github.com/repos/alanua/Skeleton/pulls/3405/files?per_page=100&page=1",
+            ),
+        ),
+        (
+            _OverlayRestResponse(
+                _cross_branch_rest_pr_payload(head_ref="runner/issue-999"),
+                "https://api.github.com/repos/alanua/Skeleton/pulls/3405",
+            ),
+            _OverlayRestResponse(
+                _overlay_rest_file_payload(("scripts/runner_poll_github_tasks.py",)),
+                "https://api.github.com/repos/alanua/Skeleton/pulls/3405/files?per_page=100&page=1",
+            ),
+        ),
+        (
+            _OverlayRestResponse(
+                _cross_branch_rest_pr_payload(base_ref="develop"),
+                "https://api.github.com/repos/alanua/Skeleton/pulls/3405",
+            ),
+            _OverlayRestResponse(
+                _overlay_rest_file_payload(("scripts/runner_poll_github_tasks.py",)),
+                "https://api.github.com/repos/alanua/Skeleton/pulls/3405/files?per_page=100&page=1",
+            ),
+        ),
+        (
+            _OverlayRestResponse(
+                _cross_branch_rest_pr_payload(state="closed"),
+                "https://api.github.com/repos/alanua/Skeleton/pulls/3405",
+            ),
+            _OverlayRestResponse(
+                _overlay_rest_file_payload(("scripts/runner_poll_github_tasks.py",)),
+                "https://api.github.com/repos/alanua/Skeleton/pulls/3405/files?per_page=100&page=1",
+            ),
+        ),
+        (
+            _OverlayRestResponse(
+                _cross_branch_rest_pr_payload(draft=False),
+                "https://api.github.com/repos/alanua/Skeleton/pulls/3405",
+            ),
+            _OverlayRestResponse(
+                _overlay_rest_file_payload(("scripts/runner_poll_github_tasks.py",)),
+                "https://api.github.com/repos/alanua/Skeleton/pulls/3405/files?per_page=100&page=1",
+            ),
+        ),
+        (
+            _OverlayRestResponse(
+                _cross_branch_rest_pr_payload(),
+                "https://api.github.com/repos/alanua/Skeleton/pulls/3405",
+            ),
+            _OverlayRestResponse(
+                [{"filename": "../unsafe"}],
+                "https://api.github.com/repos/alanua/Skeleton/pulls/3405/files?per_page=100&page=1",
+            ),
+        ),
+    ),
+)
+def test_publish_existing_issue_worktree_cross_branch_public_rest_failures_block_before_mutation(
+    tmp_path: Path,
+    pr_response: _OverlayRestResponse,
+    file_response: _OverlayRestResponse | None,
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path, issue_number=3407)
+    pr_url = "https://api.github.com/repos/alanua/Skeleton/pulls/3405"
+    files_url = f"{pr_url}/files?per_page=100&page=1"
+    responses = {pr_url: pr_response}
+    if file_response is not None:
+        responses[files_url] = file_response
+    opener = _OverlayRestOpener(responses)
+    with mock.patch.object(
+        runner,
+        "load_runner_project_tree",
+        return_value=_project_tree_with_skeleton_worktree_root(tmp_path),
+    ), mock.patch.object(runner, "worktree_root", return_value=tmp_path), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_publish_existing_cross_branch_commands(
+            source_path=worktree_path,
+            pr_view_code=1,
+        ),
+    ) as run, mock.patch.object(runner.urllib.request, "build_opener", return_value=opener):
+        report = runner.publish_existing_issue_worktree(
+            _publish_existing_cross_branch_body(
+                publish_override=_valid_publish_existing_cross_branch_override()
+            )
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith(("NEEDS_OPERATOR:", "BLOCKED:"))
+    assert (
+        "step=read_pr_metadata status=failed" in report
+        or "reason=pr_head_branch_mismatch" in report
+        or "reason=pr_base_mismatch" in report
+        or "reason=pr_not_open" in report
+        or "reason=pr_not_draft" in report
+    )
+    assert all(command[:2] != ["git", "add"] for command in commands)
+    assert all(command[:2] != ["git", "push"] for command in commands)
 
 
 def test_publish_existing_issue_worktree_cross_branch_real_git_pushes_detached_head(
