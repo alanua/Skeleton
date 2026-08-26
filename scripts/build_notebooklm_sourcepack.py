@@ -71,12 +71,12 @@ def build_sourcepack(root: Path = ROOT) -> str:
     available_capabilities = [
         capability_line(capability_id, capability)
         for capability_id, capability in capabilities.items()
-        if capability["status"] == "available"
+        if capability["status"] == "available" and capability.get("protected") is not True
     ]
     planned_capabilities = [
         capability_line(capability_id, capability)
         for capability_id, capability in capabilities.items()
-        if capability["status"] == "planned"
+        if capability["status"] == "planned" and capability.get("protected") is not True
     ]
 
     lines: list[str] = [
