@@ -4,14 +4,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-INSTALL_ROOTS = (
-    Path("/usr/local/lib/skeleton/runner-controller"),
-    Path(__file__).resolve().parents[3] / "lib/skeleton/runner-controller",
-)
-for install_root in INSTALL_ROOTS:
-    if install_root.is_dir():
-        sys.path.insert(0, str(install_root))
-        break
+INSTALL_ROOT = Path("/usr/local/lib/skeleton/runner-controller")
+if INSTALL_ROOT.is_dir():
+    sys.path.insert(0, str(INSTALL_ROOT))
 
 from core.runner_controller_privileged_gateway_hardening import execute_stdin
 

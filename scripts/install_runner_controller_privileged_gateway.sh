@@ -200,7 +200,7 @@ install_ssh_account_live() {
   if ! getent passwd "$SSH_USER" >/dev/null; then
     useradd --system --home-dir /nonexistent --shell "$SSH_SHELL" --no-create-home "$SSH_USER"
   fi
-  passwd -l "$SSH_USER" >/dev/null 2>&1 || true
+  passwd -l "$SSH_USER" >/dev/null 2>&1 || block "ssh-account-lock-failed"
   usermod --home /nonexistent --shell "$SSH_SHELL" "$SSH_USER"
 }
 

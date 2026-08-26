@@ -1,10 +1,13 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -Eeuo pipefail
 
 REPO_ROOT=""
 RUNNER_USER="agent"
 RUNNER_SERVICE="skeleton-runner-poll.service"
 PROTECTED_INSTALLER_PATH="/usr/local/libexec/skeleton/home-edge/esp-lab-stage1-installer/install_home_edge_esp_lab_activation_signer.sh"
+GIT_BIN="/usr/bin/git"
+RUNUSER_BIN="/usr/sbin/runuser"
+VISUDO_BIN="/usr/sbin/visudo"
 INSTALL_ROOT="/usr/local/lib/skeleton/home-edge/esp-lab-stage1"
 EXEC_ROOT="/usr/local/libexec/skeleton/home-edge/esp-lab-stage1"
 SUDOERS_PATH="/etc/sudoers.d/skeleton-home-edge-esp-lab-stage1-signer"
@@ -23,6 +26,7 @@ HAD_EXEC_ROOT=0
 HAD_SUDOERS=0
 BACKUPS_READY=0
 ACTIVATION_STARTED=0
+MAX_GIT_OUTPUT_BYTES=65536
 
 usage() {
   cat <<'EOF'
@@ -65,6 +69,31 @@ if [[ "$(readlink -f -- "$0")" != "$PROTECTED_INSTALLER_PATH" ]]; then
   printf 'BLOCKED: root must execute only protected installed signer installer copy\n' >&2
   exit 2
 fi
+
+run_git() {
+  local tmp rc size
+  tmp="$(mktemp)" || {
+    printf 'BLOCKED: reviewed source git output tempfile is unavailable\n' >&2
+    exit 2
+  }
+  env -i HOME=/nonexistent LANG=C LC_ALL=C PATH=/usr/bin:/bin GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 \
+    "$RUNUSER_BIN" -u "$RUNNER_USER" -- "$GIT_BIN" -C "$REPO_ROOT" "$@" >"$tmp" 2>&1
+  rc=$?
+  size="$(wc -c <"$tmp")" || {
+    rm -f -- "$tmp"
+    printf 'BLOCKED: reviewed source git output size is unavailable\n' >&2
+    exit 2
+  }
+  if (( size > MAX_GIT_OUTPUT_BYTES )); then
+    rm -f -- "$tmp"
+    printf 'BLOCKED: reviewed source git output is too large\n' >&2
+    exit 2
+  fi
+  cat "$tmp"
+  rm -f -- "$tmp"
+  return "$rc"
+}
+
 if [[ -L "$PROTECTED_INSTALLER_PATH" || ! -f "$PROTECTED_INSTALLER_PATH" ]]; then
   printf 'BLOCKED: protected signer installer copy is unsafe\n' >&2
   exit 2
@@ -85,7 +114,7 @@ if [[ "$actual_runner_user" != "$RUNNER_USER" ]]; then
   printf 'BLOCKED: live Runner service user does not match canonical agent account\n' >&2
   exit 2
 fi
-if ! CURRENT_HEAD="$(/usr/bin/git -C "$REPO_ROOT" rev-parse --verify "HEAD^{commit}")"; then
+if ! CURRENT_HEAD="$(run_git rev-parse --verify "HEAD^{commit}")"; then
   printf 'BLOCKED: reviewed source checkout HEAD is invalid\n' >&2
   exit 2
 fi
@@ -93,7 +122,7 @@ if [[ ! "$CURRENT_HEAD" =~ ^[0-9a-f]{40}$ ]]; then
   printf 'BLOCKED: reviewed source checkout HEAD is invalid\n' >&2
   exit 2
 fi
-if ! REPO_STATUS="$(/usr/bin/git -C "$REPO_ROOT" status --porcelain)"; then
+if ! REPO_STATUS="$(run_git status --porcelain)"; then
   printf 'BLOCKED: reviewed source checkout status is unavailable\n' >&2
   exit 2
 fi
@@ -101,18 +130,25 @@ if [[ -n "$REPO_STATUS" ]]; then
   printf 'BLOCKED: reviewed source checkout is dirty\n' >&2
   exit 2
 fi
-if ! /usr/bin/git -C "$REPO_ROOT" merge-base --is-ancestor "$TRUSTED_ANCESTOR_SHA" "$CURRENT_HEAD"; then
+if ! run_git merge-base --is-ancestor "$TRUSTED_ANCESTOR_SHA" "$CURRENT_HEAD" >/dev/null; then
   printf 'BLOCKED: trusted Stage1B source is not an ancestor of reviewed checkout\n' >&2
   exit 2
 fi
 
 reviewed_blob_sha() {
-  /usr/bin/git hash-object --no-filters --stdin < "$1"
+  /usr/bin/python3 - "$1" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+data = pathlib.Path(sys.argv[1]).read_bytes()
+sys.stdout.write(hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest())
+PY
 }
 
 validate_source_blob() {
   local rel_path="$1" max_bytes="$2" expected_blob="$3" expected_mode="$4" size object_type tree_entry tree_mode tree_type tree_blob tree_path
-  if ! tree_entry="$(/usr/bin/git -C "$REPO_ROOT" ls-tree HEAD -- "$rel_path")"; then
+  if ! tree_entry="$(run_git ls-tree HEAD -- "$rel_path")"; then
     printf 'BLOCKED: reviewed signer source tree entry is unavailable\n' >&2
     exit 2
   fi
@@ -121,11 +157,11 @@ validate_source_blob() {
     printf 'BLOCKED: reviewed signer source tree entry does not match approved blob\n' >&2
     exit 2
   fi
-  if ! object_type="$(/usr/bin/git -C "$REPO_ROOT" cat-file -t "$expected_blob")" || [[ "$object_type" != "blob" ]]; then
+  if ! object_type="$(run_git cat-file -t "$expected_blob")" || [[ "$object_type" != "blob" ]]; then
     printf 'BLOCKED: reviewed signer source blob is unavailable\n' >&2
     exit 2
   fi
-  if ! size="$(/usr/bin/git -C "$REPO_ROOT" cat-file -s "$expected_blob")" || [[ ! "$size" =~ ^[0-9]+$ ]]; then
+  if ! size="$(run_git cat-file -s "$expected_blob")" || [[ ! "$size" =~ ^[0-9]+$ ]]; then
     printf 'BLOCKED: reviewed signer source blob size is unavailable\n' >&2
     exit 2
   fi
@@ -205,7 +241,7 @@ mkdir -p "$STAGING_PARENT/install" "$STAGING_PARENT/exec"
 
 copy_reviewed_blob() {
   local destination="$1" mode="$2" expected_blob="$3" staged_blob
-  if ! /usr/bin/git -C "$REPO_ROOT" cat-file -p "$expected_blob" > "$destination"; then
+  if ! run_git cat-file -p "$expected_blob" > "$destination"; then
     printf 'BLOCKED: reviewed signer source blob is unavailable\n' >&2
     exit 2
   fi
@@ -266,7 +302,7 @@ cat > "$BACKUP_DIR/sudoers.new" <<EOF
 $RUNNER_USER ALL=(root) NOPASSWD: $EXEC_ROOT/signer ""
 EOF
 chmod 0440 "$BACKUP_DIR/sudoers.new"
-visudo -cf "$BACKUP_DIR/sudoers.new" >/dev/null
+"$VISUDO_BIN" -cf "$BACKUP_DIR/sudoers.new" >/dev/null
 install -o root -g root -m 0440 "$BACKUP_DIR/sudoers.new" "$SUDOERS_PATH"
 
 COMMITTED=1
