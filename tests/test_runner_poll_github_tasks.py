@@ -2582,6 +2582,28 @@ def test_update_existing_pr_process_publishes_same_pr_and_queues_validation(
             "HEAD:refs/heads/runner/issue-2749",
         ]:
             return 0, ""
+        if command == [
+            "gh",
+            "pr",
+            "view",
+            "2749",
+            "--repo",
+            runner.REPO,
+            "--json",
+            "number,state,headRefName,headRefOid,url",
+        ]:
+            return (
+                0,
+                json.dumps(
+                    {
+                        "number": 2749,
+                        "state": "OPEN",
+                        "headRefName": "runner/issue-2749",
+                        "headRefOid": post_head,
+                        "url": pr_url,
+                    }
+                ),
+            )
         if command[:3] == ["gh", "issue", "list"]:
             return 0, "[]"
         if command[:3] == ["gh", "issue", "create"]:
@@ -2691,6 +2713,199 @@ def test_update_existing_pr_head_mismatch_blocks_before_publish_or_new_pr(
     assert all(command[:3] != ["gh", "pr", "create"] for command in commands)
     report = post.call_args.args[1]
     assert "pr_head_sha_mismatch" in report
+
+
+def _finalize_existing_pr_commands(
+    *,
+    worktree_path: Path,
+    pr_number: int = 2749,
+    head_branch: str = "runner/issue-2749",
+    post_head: str = "d" * 40,
+    post_pr_head: str | None = None,
+) -> object:
+    files_output = (
+        "scripts/runner_poll_github_tasks.py\n"
+        "tests/test_runner_poll_github_tasks.py\n"
+    )
+
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        assert Path(cwd or "") == worktree_path
+        if command in (
+            ["git", "diff", "--name-only"],
+            ["git", "diff", "--cached", "--name-only"],
+            ["git", "ls-files", "--others", "--exclude-standard"],
+        ):
+            return (
+                0,
+                files_output
+                if command == ["git", "diff", "--name-only"]
+                else "",
+            )
+        if command == ["git", "diff", "--check"]:
+            return 0, ""
+        if command == ["python3", "-m", "pytest", "-q"]:
+            return 0, "700 passed\n"
+        if command == [
+            "git",
+            "add",
+            "--",
+            "scripts/runner_poll_github_tasks.py",
+            "tests/test_runner_poll_github_tasks.py",
+        ]:
+            return 0, ""
+        if command == ["git", "diff", "--cached", "--check"]:
+            return 0, ""
+        if command == [
+            "git",
+            "commit",
+            "-m",
+            "runner: issue #2757 update existing PR",
+        ]:
+            return 0, ""
+        if command == ["git", "rev-parse", "HEAD"]:
+            return 0, f"{post_head}\n"
+        if command == [
+            "git",
+            "push",
+            "origin",
+            f"--force-with-lease={head_branch}:{HEAD_SHA}",
+            f"HEAD:refs/heads/{head_branch}",
+        ]:
+            return 0, ""
+        if command == [
+            "gh",
+            "pr",
+            "view",
+            str(pr_number),
+            "--repo",
+            runner.REPO,
+            "--json",
+            "number,state,headRefName,headRefOid,url",
+        ]:
+            return (
+                0,
+                json.dumps(
+                    {
+                        "number": pr_number,
+                        "state": "OPEN",
+                        "headRefName": head_branch,
+                        "headRefOid": post_pr_head or post_head,
+                        "url": f"https://github.com/alanua/Skeleton/pull/{pr_number}",
+                    }
+                ),
+            )
+        return 2, f"unexpected command: {command!r}"
+
+    return run
+
+
+def test_finalize_existing_pr_success_rereads_exact_pr_head_after_push(
+    tmp_path: Path,
+) -> None:
+    worktree_path = tmp_path / "issue-2757"
+    request = runner.CodegenExistingPrWorktreeRequest(
+        pr_number=2749,
+        expected_head_sha=HEAD_SHA,
+    )
+    pre_state = _pr_validation_state(
+        number=2749,
+        headRefName="runner/issue-2749",
+        headRefOid=HEAD_SHA,
+    )
+
+    with mock.patch.object(
+        runner,
+        "_get_pr_branch_validation_state",
+        return_value=(pre_state, "gh"),
+    ) as preflight, mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_finalize_existing_pr_commands(worktree_path=worktree_path),
+    ) as run_command:
+        report = runner.finalize_existing_pr_success(
+            {"number": 2757},
+            str(worktree_path),
+            "codex output",
+            _codegen_update_existing_pr_issue_body(
+                pr_number=2749,
+                allowed_files=(
+                    "scripts/runner_poll_github_tasks.py",
+                    "tests/test_runner_poll_github_tasks.py",
+                ),
+            ),
+            request,
+        )
+
+    preflight.assert_called_once_with(runner.REPO, 2749)
+    commands = [call.args[0] for call in run_command.call_args_list]
+    push_command = [
+        "git",
+        "push",
+        "origin",
+        f"--force-with-lease=runner/issue-2749:{HEAD_SHA}",
+        "HEAD:refs/heads/runner/issue-2749",
+    ]
+    post_push_read = [
+        "gh",
+        "pr",
+        "view",
+        "2749",
+        "--repo",
+        runner.REPO,
+        "--json",
+        "number,state,headRefName,headRefOid,url",
+    ]
+    assert commands.index(push_command) < commands.index(post_push_read)
+    assert "Existing PR: https://github.com/alanua/Skeleton/pull/2749" in report
+    assert "replacement_pr_created=false" in report
+
+
+def test_finalize_existing_pr_success_blocks_stale_post_push_head(
+    tmp_path: Path,
+) -> None:
+    worktree_path = tmp_path / "issue-2757"
+    request = runner.CodegenExistingPrWorktreeRequest(
+        pr_number=2749,
+        expected_head_sha=HEAD_SHA,
+    )
+
+    with mock.patch.object(
+        runner,
+        "_get_pr_branch_validation_state",
+        return_value=(
+            _pr_validation_state(
+                number=2749,
+                headRefName="runner/issue-2749",
+                headRefOid=HEAD_SHA,
+            ),
+            "gh",
+        ),
+    ), mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_finalize_existing_pr_commands(
+            worktree_path=worktree_path,
+            post_pr_head="e" * 40,
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="post_push_pr_head_sha_mismatch"):
+            runner.finalize_existing_pr_success(
+                {"number": 2757},
+                str(worktree_path),
+                "codex output",
+                _codegen_update_existing_pr_issue_body(
+                    pr_number=2749,
+                    allowed_files=(
+                        "scripts/runner_poll_github_tasks.py",
+                        "tests/test_runner_poll_github_tasks.py",
+                    ),
+                ),
+                request,
+            )
 
 
 def test_validation_completion_invokes_replenishment_even_when_blocked() -> None:

@@ -5193,6 +5193,51 @@ def _codegen_existing_pr_publish_preflight(
     return head_branch, pr_state, None
 
 
+def _codegen_existing_pr_post_push_pr_state(
+    request: CodegenExistingPrWorktreeRequest,
+    workdir: str | Path,
+) -> dict[str, Any]:
+    code, output = run_command(
+        [
+            "gh",
+            "pr",
+            "view",
+            str(request.pr_number),
+            "--repo",
+            REPO,
+            "--json",
+            "number,state,headRefName,headRefOid,url",
+        ],
+        cwd=workdir,
+    )
+    if code != 0:
+        raise RuntimeError("gh pr view failed")
+    parsed = json.loads(output or "{}")
+    if not isinstance(parsed, dict):
+        raise RuntimeError("gh pr view returned non-object JSON")
+    return parsed
+
+
+def _codegen_existing_pr_post_push_block_reason(
+    request: CodegenExistingPrWorktreeRequest,
+    pr_state: dict[str, Any],
+    pushed_head_sha: str,
+    expected_head_branch: str,
+) -> str | None:
+    if pr_state.get("number") != request.pr_number:
+        return "post_push_pr_number_mismatch"
+    if str(pr_state.get("state") or "").upper() != "OPEN":
+        return "post_push_pr_not_open"
+    if pr_state.get("headRefName") != expected_head_branch:
+        return "post_push_pr_head_branch_mismatch"
+    head_sha = str(pr_state.get("headRefOid") or "").lower()
+    if head_sha != pushed_head_sha:
+        return "post_push_pr_head_sha_mismatch"
+    if _existing_pr_publish_pr_url(pr_state) is None:
+        return "post_push_pr_url_unavailable"
+    return None
+
+
 def finalize_existing_pr_success(
     issue: dict[str, Any],
     workdir: str,
@@ -5284,23 +5329,24 @@ def finalize_existing_pr_success(
     if code != 0:
         raise RuntimeError(f"git push existing PR head failed:\n{output}")
 
-    (
-        refreshed_head_branch,
-        post_state,
-        post_reason,
-    ) = _codegen_existing_pr_publish_preflight(
-        CodegenExistingPrWorktreeRequest(
-            pr_number=request.pr_number,
-            expected_head_sha=commit_sha,
-            expected_head_branch=head_branch,
-        )
+    post_request = CodegenExistingPrWorktreeRequest(
+        pr_number=request.pr_number,
+        expected_head_sha=commit_sha,
+        expected_head_branch=head_branch,
     )
-    if post_reason is not None or refreshed_head_branch != head_branch:
+    try:
+        post_state = _codegen_existing_pr_post_push_pr_state(post_request, workdir)
+    except (RuntimeError, json.JSONDecodeError):
+        raise RuntimeError("Existing PR update post-push PR metadata unavailable.")
+    post_reason = _codegen_existing_pr_post_push_block_reason(
+        post_request, post_state, commit_sha, head_branch
+    )
+    if post_reason is not None:
         raise RuntimeError(
             "Existing PR update post-push verification failed: "
-            f"{post_reason or 'pr_head_branch_mismatch'}"
+            f"{post_reason}"
         )
-    pr_url = _existing_pr_publish_pr_url(post_state or {})
+    pr_url = _existing_pr_publish_pr_url(post_state)
     if pr_url is None:
         raise RuntimeError("Existing PR update post-push PR URL unavailable.")
 
