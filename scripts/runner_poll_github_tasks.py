@@ -270,8 +270,10 @@ RUNTIME_ARTIFACTS = (
     "core/__pycache__",
     "tests/__pycache__",
     "scripts/__pycache__",
+    ".runner-pytest-tmp",
     ".codex",
 )
+RUNNER_PYTEST_TEMP_ROOT_DIR = ".runner-pytest-tmp"
 TELEGRAM_API_BASE = "https://api.telegram.org"
 TELEGRAM_TIMEOUT_SECONDS = 10
 TELEGRAM_CALLBACK_DATA_LIMIT = 64
@@ -1362,20 +1364,40 @@ def run_command(
 
 def _validation_command_environment(
     environment: Mapping[str, str] | None = None,
+    *,
+    temp_root: str | Path | None = None,
 ) -> dict[str, str]:
     source = os.environ if environment is None else environment
-    return sanitize_codegen_child_environment(
+    sanitized = sanitize_codegen_child_environment(
         source,
         authority_environment={},
     )
+    if temp_root is not None:
+        temp_root_value = str(temp_root)
+        sanitized["TMPDIR"] = temp_root_value
+        sanitized["TEMP"] = temp_root_value
+        sanitized["TMP"] = temp_root_value
+    return sanitized
+
+
+def _prepare_validation_pytest_temp_root(cwd: str | Path) -> Path:
+    temp_root = Path(cwd) / RUNNER_PYTEST_TEMP_ROOT_DIR
+    if temp_root.exists():
+        if temp_root.is_dir() and not temp_root.is_symlink():
+            shutil.rmtree(temp_root)
+        else:
+            temp_root.unlink(missing_ok=True)
+    temp_root.mkdir(mode=0o700, parents=True, exist_ok=False)
+    return temp_root
 
 
 def _run_validation_profile_command(
     args: list[str],
     cwd: str | Path,
 ) -> tuple[int, str]:
+    temp_root = _prepare_validation_pytest_temp_root(cwd)
     token = _RUN_COMMAND_ENV_OVERRIDE.set(
-        _validation_command_environment()
+        _validation_command_environment(temp_root=temp_root)
     )
     try:
         return run_command(args, cwd=cwd)

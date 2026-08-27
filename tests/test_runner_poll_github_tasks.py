@@ -20564,24 +20564,32 @@ def test_validation_command_environment_strips_only_home_edge_runtime_values() -
         "HOME": "/home/agent",
         "PATH": "/usr/bin",
         "LANG": "C.UTF-8",
+        "TMPDIR": "/tmp/shared-pytest",
+        "TEMP": "/tmp/shared-pytest",
+        "TMP": "/tmp/shared-pytest",
         "SKELETON_HOME_EDGE_01_HOSTNAME": "live-home-edge",
         HOME_EDGE_EXEC_HMAC_ENV: SYNTHETIC_HOME_EDGE_EXEC_HMAC,
         "SKELETON_UNRELATED_SETTING": "kept-skeleton-value",
         "SKELETON_RUNNER_MEMORY_DB": "/private/runner.sqlite",
     }
 
-    filtered = runner._validation_command_environment(environment)
+    temp_root = Path("/tmp/runner-validation-temp-root")
+    filtered = runner._validation_command_environment(environment, temp_root=temp_root)
 
     assert filtered == {
         "HOME": "/home/agent",
         "PATH": "/usr/bin",
         "LANG": "C.UTF-8",
+        "TMPDIR": str(temp_root),
+        "TEMP": str(temp_root),
+        "TMP": str(temp_root),
         "SKELETON_UNRELATED_SETTING": "kept-skeleton-value",
         "SKELETON_RUNNER_MEMORY_DB": "/private/runner.sqlite",
     }
     assert environment["SKELETON_HOME_EDGE_01_HOSTNAME"] == "live-home-edge"
     assert environment[HOME_EDGE_EXEC_HMAC_ENV] == SYNTHETIC_HOME_EDGE_EXEC_HMAC
     assert environment["SKELETON_RUNNER_MEMORY_DB"] == "/private/runner.sqlite"
+    assert environment["TMPDIR"] == "/tmp/shared-pytest"
 
 
 def test_run_validation_profile_command_sanitizes_and_resets_environment(
@@ -20599,6 +20607,16 @@ def test_run_validation_profile_command_sanitizes_and_resets_environment(
     )
     monkeypatch.setenv("PATH", "/usr/bin")
     monkeypatch.setenv("HOME", "/home/agent")
+    monkeypatch.setenv("TMPDIR", "/tmp/shared-pytest")
+    stale_shared_pytest = tmp_path / "shared-pytest" / "pytest-of-agent" / "stale"
+    stale_shared_pytest.mkdir(parents=True)
+    stale_task_temp = (
+        tmp_path
+        / runner.RUNNER_PYTEST_TEMP_ROOT_DIR
+        / "pytest-of-agent"
+        / "stale"
+    )
+    stale_task_temp.mkdir(parents=True)
 
     completed = runner.subprocess.CompletedProcess(
         args=["python3"],
@@ -20634,6 +20652,13 @@ def test_run_validation_profile_command_sanitizes_and_resets_environment(
     assert "SKELETON_HOME_EDGE_01_HOSTNAME" not in validation_environment
     assert HOME_EDGE_EXEC_HMAC_ENV not in validation_environment
     assert validation_environment["SKELETON_RUNNER_MEMORY_DB"] == "/private/runner.sqlite"
+    expected_temp_root = str(tmp_path / runner.RUNNER_PYTEST_TEMP_ROOT_DIR)
+    assert validation_environment["TMPDIR"] == expected_temp_root
+    assert validation_environment["TEMP"] == expected_temp_root
+    assert validation_environment["TMP"] == expected_temp_root
+    assert Path(expected_temp_root).is_dir()
+    assert not stale_task_temp.exists()
+    assert stale_shared_pytest.exists()
     assert "env" not in normal_kwargs
 
     assert (
@@ -20645,6 +20670,7 @@ def test_run_validation_profile_command_sanitizes_and_resets_environment(
         os.environ["SKELETON_RUNNER_MEMORY_DB"]
         == "/private/runner.sqlite"
     )
+    assert os.environ["TMPDIR"] == "/tmp/shared-pytest"
 
 
 def test_run_validation_profile_command_resets_environment_after_failure(
