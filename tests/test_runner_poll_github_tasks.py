@@ -25,6 +25,11 @@ ORIGINAL_GRAPHIFY_RESOLVE_USER_SCRIPT = runner._graphify_resolve_user_script
 ORIGINAL_GRAPHIFY_RESOLVE_GRAPHIFY_CLI = runner._graphify_resolve_graphify_cli
 
 HEAD_SHA = "a" * 40
+LIVE_CANARY_POST_PUSH_RETRY_PR_NUMBER = 3545
+LIVE_CANARY_POST_PUSH_RETRY_PR_HEAD_SHA = (
+    "b6d9f3dbbabcaa3d32cd3871c13eebd069970c3f"
+)
+LIVE_CANARY_POST_PUSH_RETRY_MERGE_SHA = "209e96e1bb0983e9529ea17da2a42000caa216f2"
 PR_URL = "https://github.com/alanua/Skeleton/pull/123"
 DONE_REPORT = f"""DONE: Codex completed successfully and produced file changes.
 
@@ -2662,16 +2667,18 @@ def _finalize_existing_pr_success_with_post_push_states(
     tmp_path: Path,
     post_states: list[dict[str, object]],
     pushed_head_sha: str = "d" * 40,
+    pr_number: int = 2749,
+    head_branch: str = "runner/issue-2749",
     sleep: mock.Mock | None = None,
 ) -> str:
     worktree = tmp_path / "issue-2757"
     worktree.mkdir()
     pre_state = _pr_validation_state(
-        number=2749,
-        headRefName="runner/issue-2749",
+        number=pr_number,
+        headRefName=head_branch,
         headRefOid=HEAD_SHA,
         baseRefOid="c" * 40,
-        url="https://github.com/alanua/Skeleton/pull/2749",
+        url=f"https://github.com/alanua/Skeleton/pull/{pr_number}",
     )
     states = [(pre_state, "gh"), *[(state, "gh") for state in post_states]]
 
@@ -2699,8 +2706,8 @@ def _finalize_existing_pr_success_with_post_push_states(
             "git",
             "push",
             "origin",
-            f"--force-with-lease=runner/issue-2749:{HEAD_SHA}",
-            "HEAD:refs/heads/runner/issue-2749",
+            f"--force-with-lease={head_branch}:{HEAD_SHA}",
+            f"HEAD:refs/heads/{head_branch}",
         ]:
             return 0, ""
         return 2, f"unexpected command: {command!r}"
@@ -2732,9 +2739,9 @@ def _finalize_existing_pr_success_with_post_push_states(
                     {"number": 2757},
                     str(worktree),
                     "codex output",
-                    _codegen_update_existing_pr_issue_body(),
+                    _codegen_update_existing_pr_issue_body(pr_number=pr_number),
                     runner.CodegenExistingPrWorktreeRequest(
-                        pr_number=2749,
+                        pr_number=pr_number,
                         expected_head_sha=HEAD_SHA,
                         expected_head_branch=None,
                     ),
@@ -2743,9 +2750,9 @@ def _finalize_existing_pr_success_with_post_push_states(
             {"number": 2757},
             str(worktree),
             "codex output",
-            _codegen_update_existing_pr_issue_body(),
+            _codegen_update_existing_pr_issue_body(pr_number=pr_number),
             runner.CodegenExistingPrWorktreeRequest(
-                pr_number=2749,
+                pr_number=pr_number,
                 expected_head_sha=HEAD_SHA,
                 expected_head_branch=None,
             ),
@@ -2782,6 +2789,48 @@ def test_update_existing_pr_post_push_exact_head_retries_stale_then_succeeds(
     assert "DONE: Codex completed successfully and updated the existing PR." in report
     assert f"Commit: {pushed_head}" in report
     assert "post_push_pr_metadata_attempts=2" in report
+    sleep.assert_called_once_with(runner.POST_PUSH_PR_HEAD_PROPAGATION_BACKOFF_SECONDS)
+
+
+def test_live_canary_update_existing_pr_post_push_retry_after_3545_public_metadata(
+    tmp_path: Path,
+) -> None:
+    assert LIVE_CANARY_POST_PUSH_RETRY_PR_NUMBER == 3545
+    assert LIVE_CANARY_POST_PUSH_RETRY_MERGE_SHA == (
+        "209e96e1bb0983e9529ea17da2a42000caa216f2"
+    )
+
+    stale_state = _pr_validation_state(
+        number=LIVE_CANARY_POST_PUSH_RETRY_PR_NUMBER,
+        headRefName="runner/issue-3544",
+        headRefOid=HEAD_SHA,
+        baseRefOid="c" * 40,
+        url="https://github.com/alanua/Skeleton/pull/3545",
+    )
+    fresh_state = _pr_validation_state(
+        number=LIVE_CANARY_POST_PUSH_RETRY_PR_NUMBER,
+        headRefName="runner/issue-3544",
+        headRefOid=LIVE_CANARY_POST_PUSH_RETRY_PR_HEAD_SHA,
+        baseRefOid="c" * 40,
+        url="https://github.com/alanua/Skeleton/pull/3545",
+    )
+    sleep = mock.Mock()
+
+    report = _finalize_existing_pr_success_with_post_push_states(
+        tmp_path=tmp_path,
+        post_states=[stale_state, fresh_state],
+        pushed_head_sha=LIVE_CANARY_POST_PUSH_RETRY_PR_HEAD_SHA,
+        pr_number=LIVE_CANARY_POST_PUSH_RETRY_PR_NUMBER,
+        head_branch="runner/issue-3544",
+        sleep=sleep,
+    )
+
+    assert "DONE: Codex completed successfully and updated the existing PR." in report
+    assert f"Existing PR: https://github.com/alanua/Skeleton/pull/{LIVE_CANARY_POST_PUSH_RETRY_PR_NUMBER}" in report
+    assert f"Commit: {LIVE_CANARY_POST_PUSH_RETRY_PR_HEAD_SHA}" in report
+    assert "post_push_pr_metadata_attempts=2" in report
+    assert "post_push_pr_head_sha_mismatch" not in report
+    assert "pr_head_sha_mismatch" not in report
     sleep.assert_called_once_with(runner.POST_PUSH_PR_HEAD_PROPAGATION_BACKOFF_SECONDS)
 
 
