@@ -1,0 +1,134 @@
+name: Runner Controller Host Self-Audit Bridge
+
+"on":
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runner-controller-host-self-audit-bridge
+  cancel-in-progress: false
+
+jobs:
+  host-self-audit:
+    name: Read-only host self-audit bridge
+    if: >-
+      github.repository == 'alanua/Skeleton' &&
+      github.event.issue.state == 'open' &&
+      github.event.label.name == 'host-self-audit:read-only' &&
+      github.event.issue.user.login == 'alanua' &&
+      contains(github.event.issue.body, 'Authorization Marker: EXACT_HEAD_HOST_SELF_AUDIT_BRIDGE_V1')
+    runs-on:
+      - self-hosted
+      - Linux
+      - X64
+    timeout-minutes: 8
+    env:
+      CANONICAL_REPOSITORY: alanua/Skeleton
+      EXPECTED_HEAD_SHA: 8f29994bcdcde3891a545cc39dcaab1dde7f3d92
+      TARGET_CHECKOUT: /home/agent/agent-dev/repos/Skeleton
+      CODEX_WORKTREE_PREFIX: /home/agent/agent-dev/worktrees/skeleton
+      EXPECTED_PR_SCOPE: ".github/workflows/runner-controller-host-self-audit-bridge.yml tests/test_runner_controller_host_self_audit_bridge_workflow.py"
+    steps:
+      - name: Read host identity and checkout state only
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          status=BLOCKED
+          reason=UNSET
+          host_ownership=unknown
+          namespace_map=unknown
+          checkout_head=unknown
+          origin_main=unknown
+          scope_status=unknown
+
+          finish() {
+            {
+              echo "status=${status}"
+              echo "reason=${reason}"
+              echo "expected_head_sha=${EXPECTED_HEAD_SHA}"
+              echo "checkout_head=${checkout_head}"
+              echo "origin_main=${origin_main}"
+              echo "host_ownership=${host_ownership}"
+              echo "namespace_map=${namespace_map}"
+              echo "scope_status=${scope_status}"
+              echo "mutation_performed=false"
+              echo "external_side_effects_executed=false"
+            } >> "${GITHUB_STEP_SUMMARY}"
+          }
+          trap finish EXIT
+
+          test "${GITHUB_REPOSITORY}" = "${CANONICAL_REPOSITORY}"
+          test "${GITHUB_SHA}" = "${EXPECTED_HEAD_SHA}"
+          test "${TARGET_CHECKOUT}" = "/home/agent/agent-dev/repos/Skeleton"
+          test "${CODEX_WORKTREE_PREFIX}" = "/home/agent/agent-dev/worktrees/skeleton"
+          test -d "${TARGET_CHECKOUT}/.git"
+
+          case "${GITHUB_WORKSPACE:-}" in
+            "${CODEX_WORKTREE_PREFIX}"/*)
+              reason=CODEX_WORKTREE_NAMESPACE_REMAP
+              namespace_map=codex_worktree
+              exit 1
+              ;;
+          esac
+
+          uid_map="$(sed -n '1p' /proc/self/uid_map)"
+          gid_map="$(sed -n '1p' /proc/self/gid_map)"
+          case "${uid_map}:${gid_map}" in
+            "         0          0 4294967295:         0          0 4294967295"|"0 0 4294967295:0 0 4294967295")
+              namespace_map=host_identity
+              ;;
+            *)
+              reason=NON_HOST_USER_NAMESPACE
+              namespace_map=remapped_user_namespace
+              exit 1
+              ;;
+          esac
+
+          checkout_owner="$(stat -c '%U:%G:%u:%g' "${TARGET_CHECKOUT}")"
+          git_owner="$(stat -c '%U:%G:%u:%g' "${TARGET_CHECKOUT}/.git")"
+          if test "${checkout_owner}" != "${git_owner}"; then
+            reason=CHECKOUT_OWNER_MISMATCH
+            host_ownership=mismatch
+            exit 1
+          fi
+          host_ownership="${checkout_owner}"
+
+          origin_url="$(git -C "${TARGET_CHECKOUT}" remote get-url origin)"
+          case "${origin_url}" in
+            https://github.com/alanua/Skeleton|https://github.com/alanua/Skeleton.git) ;;
+            *)
+              reason=UNEXPECTED_ORIGIN
+              exit 1
+              ;;
+          esac
+
+          git -C "${TARGET_CHECKOUT}" fetch --quiet --dry-run origin main
+          origin_main="$(git -C "${TARGET_CHECKOUT}" rev-parse origin/main)"
+          checkout_head="$(git -C "${TARGET_CHECKOUT}" rev-parse HEAD)"
+          test "${origin_main}" = "${EXPECTED_HEAD_SHA}"
+          test "${checkout_head}" = "${EXPECTED_HEAD_SHA}"
+
+          mapfile -t changed_files < <(
+            git -C "${GITHUB_WORKSPACE}" diff --name-only "${EXPECTED_HEAD_SHA}...HEAD" 2>/dev/null || true
+          )
+          scope_status=empty
+          if ((${#changed_files[@]} > 0)); then
+            scope_status=exact_two_files
+            for path in "${changed_files[@]}"; do
+              case " ${EXPECTED_PR_SCOPE} " in
+                *" ${path} "*) ;;
+                *)
+                  reason=UNEXPECTED_PR_SCOPE
+                  scope_status=unexpected
+                  exit 1
+                  ;;
+              esac
+            done
+          fi
+
+          status=DONE
+          reason=HOST_SELF_AUDIT_READ_ONLY_VERIFIED
