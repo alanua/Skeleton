@@ -1,0 +1,118 @@
+name: Runner Controller Gateway Bootstrap Bridge
+
+"on":
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runner-controller-gateway-bootstrap-bridge
+  cancel-in-progress: false
+
+jobs:
+  bootstrap-gateway:
+    if: >-
+      github.repository == 'alanua/Skeleton' &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.base.sha == '8f29994bcdcde3891a545cc39dcaab1dde7f3d92' &&
+      github.event.pull_request.head.ref == 'manual/gateway-bootstrap-bridge-20260827' &&
+      github.event.pull_request.user.login == 'alanua' &&
+      github.event.label.name == 'gateway-bootstrap-approved' &&
+      contains(github.event.pull_request.body, 'Authorization Marker: EXACT_HEAD_RUNNER_CONTROLLER_GATEWAY_BOOTSTRAP_BRIDGE_APPROVED') &&
+      contains(github.event.pull_request.body, github.event.pull_request.head.sha)
+    runs-on:
+      - self-hosted
+      - Linux
+      - X64
+    timeout-minutes: 8
+    env:
+      CANONICAL_REPOSITORY: alanua/Skeleton
+      EXPECTED_MAIN_SHA: 8f29994bcdcde3891a545cc39dcaab1dde7f3d92
+      TARGET_CHECKOUT: /home/agent/agent-dev/repos/Skeleton
+      CANONICAL_REMOTE: https://github.com/alanua/Skeleton.git
+      BOOTSTRAP_SOURCE_PATH: scripts/install_runner_controller_privileged_gateway.sh
+      PROTECTED_BOOTSTRAP_PATH: /usr/local/libexec/skeleton/runner-controller/bootstrap/install_runner_controller_privileged_gateway.sh
+    steps:
+      - name: Materialize and execute exact reviewed bootstrap
+        shell: /bin/bash
+        run: |
+          set -Eeuo pipefail
+          export PATH=/usr/bin:/bin
+          unset BASH_ENV ENV CDPATH PYTHONPATH PYTHONHOME LD_PRELOAD LD_LIBRARY_PATH GIT_DIR GIT_WORK_TREE
+
+          status=BLOCKED
+          source_verified=false
+          protected_copy_installed=false
+          gateway_bootstrap_completed=false
+          bootstrap_tree_blob=unknown
+
+          write_summary() {
+            {
+              echo "status=${status}"
+              echo "expected_main_sha=${EXPECTED_MAIN_SHA}"
+              echo "source_verified=${source_verified}"
+              echo "protected_copy_installed=${protected_copy_installed}"
+              echo "gateway_bootstrap_completed=${gateway_bootstrap_completed}"
+              echo "bootstrap_tree_blob=${bootstrap_tree_blob}"
+              echo "ssh=DISABLED_NOT_CONFIGURED"
+            } >> "${GITHUB_STEP_SUMMARY}"
+          }
+          trap write_summary EXIT
+
+          test "${GITHUB_REPOSITORY}" = "${CANONICAL_REPOSITORY}"
+          test -d "${TARGET_CHECKOUT}/.git"
+
+          origin_url="$(/usr/bin/git -C "${TARGET_CHECKOUT}" remote get-url origin)"
+          case "${origin_url}" in
+            https://github.com/alanua/Skeleton|https://github.com/alanua/Skeleton.git|git@github.com:alanua/Skeleton.git) ;;
+            *) exit 1 ;;
+          esac
+
+          current_branch="$(/usr/bin/git -C "${TARGET_CHECKOUT}" rev-parse --abbrev-ref HEAD)"
+          test "${current_branch}" = main
+          test -z "$(/usr/bin/git -C "${TARGET_CHECKOUT}" status --porcelain=v1 --untracked-files=all)"
+
+          /usr/bin/git -C "${TARGET_CHECKOUT}" fetch --quiet origin main
+          checkout_head="$(/usr/bin/git -C "${TARGET_CHECKOUT}" rev-parse 'HEAD^{commit}')"
+          origin_main="$(/usr/bin/git -C "${TARGET_CHECKOUT}" rev-parse 'origin/main^{commit}')"
+          test "${checkout_head}" = "${EXPECTED_MAIN_SHA}"
+          test "${origin_main}" = "${EXPECTED_MAIN_SHA}"
+
+          fresh_remote="$(/usr/bin/env -i \
+            HOME=/nonexistent LANG=C LC_ALL=C PATH=/usr/bin:/bin \
+            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 \
+            /usr/bin/git -C / ls-remote --exit-code "${CANONICAL_REMOTE}" refs/heads/main)"
+          test "${fresh_remote}" = "${EXPECTED_MAIN_SHA}"$'\trefs/heads/main'
+
+          tree_line="$(/usr/bin/git -C "${TARGET_CHECKOUT}" ls-tree "${EXPECTED_MAIN_SHA}" -- "${BOOTSTRAP_SOURCE_PATH}")"
+          tree_meta="${tree_line%%$'\t'*}"
+          tree_path="${tree_line#*$'\t'}"
+          read -r tree_mode tree_type bootstrap_tree_blob <<<"${tree_meta}"
+          test "${tree_mode}" = 100755
+          test "${tree_type}" = blob
+          test "${tree_path}" = "${BOOTSTRAP_SOURCE_PATH}"
+          [[ "${bootstrap_tree_blob}" =~ ^[0-9a-f]{40}$ ]]
+          test "$(/usr/bin/git -C "${TARGET_CHECKOUT}" cat-file -t "${bootstrap_tree_blob}")" = blob
+
+          temp_root="$(/usr/bin/mktemp -d "${RUNNER_TEMP}/gateway-bootstrap-bridge.XXXXXX")"
+          cleanup() { /usr/bin/rm -rf -- "${temp_root}"; }
+          trap 'cleanup; write_summary' EXIT
+          staged="${temp_root}/install_runner_controller_privileged_gateway.sh"
+          /usr/bin/git -C "${TARGET_CHECKOUT}" cat-file blob "${bootstrap_tree_blob}" > "${staged}"
+          /usr/bin/chmod 0500 "${staged}"
+          staged_blob="$(/usr/bin/git hash-object --no-filters -- "${staged}")"
+          test "${staged_blob}" = "${bootstrap_tree_blob}"
+          source_verified=true
+
+          /usr/bin/sudo -n /usr/bin/install -D -o root -g root -m 0555 -- \
+            "${staged}" "${PROTECTED_BOOTSTRAP_PATH}"
+          protected_copy_installed=true
+
+          /usr/bin/sudo -n "${PROTECTED_BOOTSTRAP_PATH}" \
+            --repo-root "${TARGET_CHECKOUT}" \
+            --expected-main-sha "${EXPECTED_MAIN_SHA}" \
+            >"${temp_root}/bootstrap.stdout" 2>"${temp_root}/bootstrap.stderr"
+          gateway_bootstrap_completed=true
+          status=DONE
