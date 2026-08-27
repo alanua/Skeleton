@@ -2508,6 +2508,7 @@ def test_update_existing_pr_process_publishes_same_pr_and_queues_validation(
     tmp_path: Path,
 ) -> None:
     issue_path = tmp_path / "issue-2757"
+    issue_path.mkdir()
     post_head = "d" * 40
     pr_url = "https://github.com/alanua/Skeleton/pull/2749"
     issue = {
@@ -18732,7 +18733,6 @@ def test_validate_pr_branch_runner_exact_base_profile_runs_commands_in_order(
 def test_validate_pr_branch_bauclock_time_ledger_profile_uses_target_checkout(
     tmp_path: Path,
 ) -> None:
-    del tmp_path
     checkout_path = _safe_checkout_path("bauclock-validation-main")
     worktree_root = _safe_checkout_path("bauclock-validation-worktrees")
     validation_path = worktree_root / "validate-pr-branch" / "pr-52"
@@ -18805,6 +18805,12 @@ def test_validate_pr_branch_bauclock_time_ledger_profile_uses_target_checkout(
             return 0, ""
         return 2, "unexpected command"
 
+    def create_pytest_temp_root(cwd: str | Path) -> Path:
+        assert Path(cwd) == validation_path
+        temp_root = tmp_path / ".runner-validation-pytest-target"
+        os.mkdir(temp_root)
+        return temp_root
+
     with mock.patch.object(
         runner, "load_runner_project_tree", return_value=project_tree
     ), mock.patch.object(
@@ -18817,6 +18823,10 @@ def test_validate_pr_branch_bauclock_time_ledger_profile_uses_target_checkout(
         runner,
         "_validation_git_worktree_check",
         return_value=(True, ["validation_real_writable_git_worktree=true"], None),
+    ), mock.patch.object(
+        runner,
+        "_create_validation_pytest_temp_root",
+        side_effect=create_pytest_temp_root,
     ), mock.patch.object(
         runner, "run_command", side_effect=run_validation_command
     ) as run:
@@ -20755,6 +20765,28 @@ def test_run_validation_profile_command_resets_environment_after_failure(
     assert not pytest_temp_root.exists()
     assert HOME_EDGE_EXEC_HMAC_ENV not in validation_environment
     assert "env" not in subprocess_run.call_args_list[1].kwargs
+    assert not list(tmp_path.glob(".runner-validation-pytest-*"))
+
+
+def test_run_validation_profile_command_fails_closed_when_pytest_temp_root_unavailable(
+    tmp_path: Path,
+) -> None:
+    with mock.patch.object(
+        runner.tempfile,
+        "mkdtemp",
+        side_effect=OSError("temp root unavailable"),
+    ) as mkdtemp, mock.patch.object(runner.subprocess, "run") as subprocess_run:
+        with pytest.raises(OSError, match="temp root unavailable"):
+            runner._run_validation_profile_command(
+                ["python3", "-m", "pytest", "-q"],
+                cwd=tmp_path,
+            )
+
+    mkdtemp.assert_called_once_with(
+        prefix=".runner-validation-pytest-",
+        dir=tmp_path,
+    )
+    subprocess_run.assert_not_called()
     assert not list(tmp_path.glob(".runner-validation-pytest-*"))
 
 

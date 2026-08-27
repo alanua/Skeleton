@@ -1391,18 +1391,16 @@ def _validation_command_uses_pytest(args: list[str]) -> bool:
 
 def _create_validation_pytest_temp_root(cwd: str | Path) -> Path:
     cwd_path = Path(cwd)
-    temp_parent = cwd_path if cwd_path.is_dir() else None
-    try:
-        return Path(
-            tempfile.mkdtemp(
-                prefix=".runner-validation-pytest-",
-                dir=temp_parent,
-            )
+    if not cwd_path.is_dir():
+        raise FileNotFoundError(
+            f"pytest validation cwd is not an existing directory: {cwd_path}"
         )
-    except OSError:
-        if temp_parent is None:
-            raise
-        return Path(tempfile.mkdtemp(prefix=".runner-validation-pytest-"))
+    return Path(
+        tempfile.mkdtemp(
+            prefix=".runner-validation-pytest-",
+            dir=cwd_path,
+        )
+    )
 
 
 def _run_validation_profile_command(
