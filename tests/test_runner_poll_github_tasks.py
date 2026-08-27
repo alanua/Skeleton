@@ -20694,6 +20694,13 @@ def test_run_validation_profile_command_sanitizes_and_resets_environment(
 
     assert validation_environment["PATH"] == "/usr/bin"
     assert validation_environment["HOME"] == "/home/agent"
+    pytest_temp_root = Path(validation_environment["TMPDIR"])
+    assert pytest_temp_root.parent == tmp_path
+    assert pytest_temp_root.name.startswith(".runner-validation-pytest-")
+    assert validation_environment["TEMP"] == str(pytest_temp_root)
+    assert validation_environment["TMP"] == str(pytest_temp_root)
+    assert validation_environment["PYTEST_DEBUG_TEMPROOT"] == str(pytest_temp_root)
+    assert not pytest_temp_root.exists()
     assert "SKELETON_HOME_EDGE_01_HOSTNAME" not in validation_environment
     assert HOME_EDGE_EXEC_HMAC_ENV not in validation_environment
     assert validation_environment["SKELETON_RUNNER_MEMORY_DB"] == "/private/runner.sqlite"
@@ -20708,6 +20715,7 @@ def test_run_validation_profile_command_sanitizes_and_resets_environment(
         os.environ["SKELETON_RUNNER_MEMORY_DB"]
         == "/private/runner.sqlite"
     )
+    assert not list(tmp_path.glob(".runner-validation-pytest-*"))
 
 
 def test_run_validation_profile_command_resets_environment_after_failure(
@@ -20738,8 +20746,16 @@ def test_run_validation_profile_command_resets_environment_after_failure(
     assert code == 0
     assert output == "ok\n"
     assert "env" in subprocess_run.call_args_list[0].kwargs
-    assert HOME_EDGE_EXEC_HMAC_ENV not in subprocess_run.call_args_list[0].kwargs["env"]
+    validation_environment = subprocess_run.call_args_list[0].kwargs["env"]
+    pytest_temp_root = Path(validation_environment["TMPDIR"])
+    assert pytest_temp_root.parent == tmp_path
+    assert validation_environment["TEMP"] == str(pytest_temp_root)
+    assert validation_environment["TMP"] == str(pytest_temp_root)
+    assert validation_environment["PYTEST_DEBUG_TEMPROOT"] == str(pytest_temp_root)
+    assert not pytest_temp_root.exists()
+    assert HOME_EDGE_EXEC_HMAC_ENV not in validation_environment
     assert "env" not in subprocess_run.call_args_list[1].kwargs
+    assert not list(tmp_path.glob(".runner-validation-pytest-*"))
 
 
 def test_finalize_success_validation_subprocesses_use_sanitized_environment(
