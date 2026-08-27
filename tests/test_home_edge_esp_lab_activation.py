@@ -253,7 +253,20 @@ def _make_signer_installer_preflight_fixture(
         ),
         encoding="utf-8",
     )
-    for executable in (fake_bin / "getent", fake_bin / "visudo", fake_git, fake_systemctl):
+    fake_runuser = fake_bin / "runuser"
+    fake_runuser.write_text(
+        textwrap.dedent(
+            f"""\
+            #!/usr/bin/env sh
+            if [ "$1" = "-u" ] && [ "$3" = "--" ]; then
+              shift 3
+            fi
+            exec "$@"
+            """
+        ),
+        encoding="utf-8",
+    )
+    for executable in (fake_bin / "getent", fake_bin / "visudo", fake_git, fake_runuser, fake_systemctl):
         executable.chmod(0o755)
 
     text = INSTALLER_PATH.read_text(encoding="utf-8")
@@ -274,7 +287,13 @@ def _make_signer_installer_preflight_fixture(
         f'SUDOERS_PATH="{tmp_path / "sudoers"}"',
     )
     text = text.replace('/usr/bin/systemctl', str(fake_systemctl))
-    text = text.replace('/usr/bin/git', str(fake_git))
+    text = text.replace('GIT_BIN="/usr/bin/git"', f'GIT_BIN="{fake_git}"')
+    text = text.replace('RUNUSER_BIN="/usr/sbin/runuser"', f'RUNUSER_BIN="{fake_runuser}"')
+    text = text.replace('VISUDO_BIN="/usr/sbin/visudo"', f'VISUDO_BIN="{fake_bin / "visudo"}"')
+    text = text.replace(
+        "env -i HOME=/nonexistent LANG=C LC_ALL=C PATH=/usr/bin:/bin",
+        "env HOME=/nonexistent LANG=C LC_ALL=C PATH=/usr/bin:/bin",
+    )
     text = text.replace('if [[ ${EUID:-$(id -u)} -ne 0 ]]; then', 'if [[ 0 -ne 0 ]]; then')
     text = text.replace(
         'if [[ "$protected_uid" != "0" || "$protected_gid" != "0" || $((8#$protected_mode & 8#022)) -ne 0 ]]; then',
@@ -884,7 +903,7 @@ def test_installer_static_fixed_paths_sudoers_visudo_rollback_and_no_generic_sud
     assert 'EXEC_ROOT="/usr/local/libexec/skeleton/home-edge/esp-lab-stage1"' in text
     assert 'SUDOERS_PATH="/etc/sudoers.d/skeleton-home-edge-esp-lab-stage1-signer"' in text
     assert 'NOPASSWD: $EXEC_ROOT/signer ""' in text
-    assert "visudo -cf" in text
+    assert '"$VISUDO_BIN" -cf' in text
     assert "BACKUPS_READY=0" in text and "ACTIVATION_STARTED=0" in text
     assert 'if [[ $COMMITTED -eq 0 && $ACTIVATION_STARTED -eq 1 ]]; then' in text
     assert "ALL=(ALL)" not in text

@@ -43,7 +43,7 @@ def _request(**overrides: object) -> dict[str, object]:
         "expires_at": (NOW + timedelta(seconds=120)).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "repository": "alanua/Skeleton",
         "target": "runner-controller",
-        "operator_approval": "EXACT_HEAD_HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_APPROVED",
+        "operator_approval": "EXACT_HEAD_HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_V2_APPROVED",
         "expected_main_sha": SHA,
         "registered_clean_main_sha": SHA,
         "github_main_sha": SHA,
@@ -60,13 +60,25 @@ def _executor_report(status: str = "DONE", reason: str = "SIGNER_INSTALLATION_VE
         "status": status,
         "reason": reason,
         "expected_main_sha": SHA,
-        "source_blob": "7ed95f5ba6d274451f62cfc31f88bc204eaaa386",
+        "source_blob": "ef285000113c1254170b8924b4c3ab8d82250423",
         "installer_sha256": "a" * 64,
         "protected_copy_verified": status == "DONE",
         "installed_artifacts_verified": status == "DONE",
         "activation_executed": False,
     }
     return "RESULT: " + status + "\nReceipt:\n" + json.dumps(receipt, sort_keys=True)
+
+
+def _receipt_hash(receipt: dict[str, object]) -> str:
+    import hashlib
+
+    return hashlib.sha256(
+        json.dumps(
+            {key: value for key, value in receipt.items() if key != "receipt_hash"},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def _execute(
@@ -105,6 +117,22 @@ def test_source_trust_anchors_are_fail_closed_before_runner(tmp_path: Path) -> N
     assert calls == 0
 
 
+def test_malformed_unserializable_request_value_blocks_without_receipt_crash(tmp_path: Path) -> None:
+    calls = 0
+
+    def runner(_request: object) -> tuple[int, str]:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("runner must not execute")
+
+    receipt = _execute(tmp_path, _request(request_id=object()), runner)
+    assert receipt["reason"] == "REQUEST_ID_INVALID"
+    assert receipt["request_hash"] is None
+    assert receipt["mutation_started"] is False
+    assert receipt["mutation_performed"] is False
+    assert calls == 0
+
+
 def test_exact_terminal_retry_returns_cached_receipt_without_second_action(tmp_path: Path) -> None:
     calls = 0
 
@@ -121,6 +149,54 @@ def test_exact_terminal_retry_returns_cached_receipt_without_second_action(tmp_p
     assert first["mutation_performed"] is True
     assert first["external_side_effects_executed"] is True
     assert calls == 1
+
+
+def test_poisoned_terminal_receipt_blocks_replay_before_runner(tmp_path: Path) -> None:
+    request = _request()
+    request_hash = gateway.canonical_request_hash(request)
+    poisoned_receipt: dict[str, object] = {
+        "schema": gateway.RECEIPT_SCHEMA_ID,
+        "status": "DONE",
+        "reason": "SIGNER_INSTALLATION_VERIFIED",
+        "action_id": request["action_id"],
+        "repository": "evil/repo",
+        "target": "runner-controller",
+        "request_hash": request_hash,
+        "mutation_started": True,
+        "mutation_performed": True,
+        "private_evidence_exposed": False,
+        "stderr_exposed": False,
+        "env_exposed": False,
+        "private_paths_exposed": False,
+        "external_side_effects_executed": True,
+    }
+    poisoned_receipt["receipt_hash"] = _receipt_hash(poisoned_receipt)
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_text(
+        json.dumps(
+            {
+                "kind": "terminal",
+                "request_hash": request_hash,
+                "idempotency_key": request["idempotency_key"],
+                "action_id": request["action_id"],
+                "receipt": poisoned_receipt,
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    calls = 0
+
+    def runner(_request: object) -> tuple[int, str]:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("runner must not execute")
+
+    receipt = _execute(tmp_path, request, runner)
+    assert receipt["reason"] == "REPLAY_LEDGER_CORRUPT"
+    assert receipt["mutation_started"] is False
+    assert calls == 0
 
 
 def test_conflicting_idempotency_key_blocks_without_second_action(tmp_path: Path) -> None:
@@ -184,6 +260,161 @@ def test_nonzero_or_partial_action_is_conservatively_reported_as_mutation(tmp_pa
     assert receipt["stderr_exposed"] is False
     assert receipt["env_exposed"] is False
     assert receipt["private_paths_exposed"] is False
+
+
+def test_root_child_allows_only_exact_two_privileged_command_shapes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    staged_parent = tmp_path / "skeleton-esp-stage1-signer-abc123"
+    staged_parent.mkdir()
+    staged_parent.chmod(0o700)
+    staged = staged_parent / "install_home_edge_esp_lab_activation_signer.sh"
+    staged.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    staged.chmod(0o500)
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert _kwargs["env"] == gateway.ROOT_CHILD_CLEAN_ENV
+        assert _kwargs["stdout"] == subprocess.DEVNULL
+        assert _kwargs["stderr"] == subprocess.DEVNULL
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(gateway.tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(gateway.subprocess, "run", fake_run)
+
+    code, output = gateway._root_local_protected_run(
+        [
+            "/usr/bin/sudo",
+            "-n",
+            "/usr/bin/install",
+            "-D",
+            "-o",
+            "root",
+            "-g",
+            "root",
+            "-m",
+            "0555",
+            str(staged),
+            gateway.ROOT_CHILD_PROTECTED_INSTALLER,
+        ],
+        60,
+    )
+    assert code == 0
+    assert output == "ROOT_CHILD_EXIT_0"
+
+    code, output = gateway._root_local_protected_run(
+        [
+            "/usr/bin/sudo",
+            "-n",
+            gateway.ROOT_CHILD_PROTECTED_INSTALLER,
+            "--repo-root",
+            "/home/agent/agent-dev/repos/Skeleton",
+        ],
+        120,
+    )
+    assert code == 0
+    assert output == "ROOT_CHILD_EXIT_0"
+    assert calls == [
+        [
+            "/usr/bin/install",
+            "-D",
+            "-o",
+            "root",
+            "-g",
+            "root",
+            "-m",
+            "0555",
+            str(staged),
+            gateway.ROOT_CHILD_PROTECTED_INSTALLER,
+        ],
+        [
+            gateway.ROOT_CHILD_PROTECTED_INSTALLER,
+            "--repo-root",
+            "/home/agent/agent-dev/repos/Skeleton",
+        ],
+    ]
+
+
+def test_root_child_blocks_unregistered_or_mutated_privileged_command_shapes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    staged_parent = tmp_path / "skeleton-esp-stage1-signer-abc123"
+    staged_parent.mkdir()
+    staged_parent.chmod(0o700)
+    staged = staged_parent / "install_home_edge_esp_lab_activation_signer.sh"
+    staged.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    staged.chmod(0o500)
+    monkeypatch.setattr(gateway.tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(
+        gateway.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("blocked root child argv must not execute")
+        ),
+    )
+
+    blocked = [
+        ["/usr/bin/sudo", "-n", "/bin/sh", "-c", "id"],
+        [
+            "/usr/bin/sudo",
+            "-n",
+            "/usr/bin/install",
+            "-D",
+            "-o",
+            "root",
+            "-g",
+            "root",
+            "-m",
+            "04755",
+            str(staged),
+            gateway.ROOT_CHILD_PROTECTED_INSTALLER,
+        ],
+        [
+            "/usr/bin/sudo",
+            "-n",
+            "/usr/bin/install",
+            "-D",
+            "-o",
+            "root",
+            "-g",
+            "root",
+            "-m",
+            "0555",
+            str(tmp_path / "other" / "install_home_edge_esp_lab_activation_signer.sh"),
+            gateway.ROOT_CHILD_PROTECTED_INSTALLER,
+        ],
+        [
+            "/usr/bin/sudo",
+            "-n",
+            "/usr/bin/install",
+            "-D",
+            "-o",
+            "root",
+            "-g",
+            "root",
+            "-m",
+            "0555",
+            str(staged.with_name("wrong-name.sh")),
+            gateway.ROOT_CHILD_PROTECTED_INSTALLER,
+        ],
+        [
+            "/usr/bin/sudo",
+            "-n",
+            gateway.ROOT_CHILD_PROTECTED_INSTALLER,
+            "--repo-root",
+            str(tmp_path),
+        ],
+    ]
+    for argv in blocked:
+        try:
+            gateway._root_local_protected_run(argv, 60)
+        except gateway.PrivilegedGatewayError as exc:
+            assert exc.reason_code == "ROOT_CHILD_ACTION_NOT_ALLOWED"
+        else:
+            raise AssertionError(f"unexpectedly allowed root child argv: {argv!r}")
 
 
 def test_public_receipt_matches_repository_schema(tmp_path: Path) -> None:
@@ -293,12 +524,87 @@ def test_hardened_synthetic_bootstrap_installs_exact_trust_and_functional_forced
     assert "ForceCommand /usr/bin/sudo -n /usr/local/libexec/skeleton/runner-controller/privileged-gateway" in fragment
 
 
+def test_hardened_synthetic_bootstrap_rejects_bad_ssh_key_before_destdir_mutation(tmp_path: Path) -> None:
+    repo, sha = _hardened_synthetic_repo(tmp_path)
+    sshd = tmp_path / "synthetic-sshd"
+    sshd.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    sshd.chmod(0o755)
+    dest = tmp_path / "dest"
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "SKELETON_GATEWAY_ALLOW_SYNTHETIC_ORIGIN": "1",
+        "SKELETON_GATEWAY_HARDENED_SYNTHETIC": "1",
+    }
+    result = subprocess.run(
+        [
+            "bash",
+            str(repo / "scripts/install_runner_controller_privileged_gateway.sh"),
+            "--destdir",
+            str(dest),
+            "--repo-root",
+            str(repo),
+            "--expected-main-sha",
+            sha,
+            "--ssh-public-key",
+            "ssh-rsa AAAABadLegacyKey runner@example",
+            "--sshd-bin",
+            str(sshd),
+        ],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert "BLOCKED: unapproved-ssh-public-key-type" in result.stderr
+    assert not dest.exists()
+
+
+def test_hardened_synthetic_bootstrap_rejects_bad_sshd_before_destdir_mutation(tmp_path: Path) -> None:
+    repo, sha = _hardened_synthetic_repo(tmp_path)
+    sshd = tmp_path / "synthetic-sshd"
+    sshd.write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
+    sshd.chmod(0o755)
+    dest = tmp_path / "dest"
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "SKELETON_GATEWAY_ALLOW_SYNTHETIC_ORIGIN": "1",
+        "SKELETON_GATEWAY_HARDENED_SYNTHETIC": "1",
+    }
+    result = subprocess.run(
+        [
+            "bash",
+            str(repo / "scripts/install_runner_controller_privileged_gateway.sh"),
+            "--destdir",
+            str(dest),
+            "--repo-root",
+            str(repo),
+            "--expected-main-sha",
+            sha,
+            "--ssh-public-key",
+            SSH_KEY,
+            "--sshd-bin",
+            str(sshd),
+        ],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert "BLOCKED: sshd-validation-failed" in result.stderr
+    assert not dest.exists()
+
+
 def test_installer_live_account_is_locked_valid_shell_and_no_generic_root_shell() -> None:
     text = (ROOT / "scripts/install_runner_controller_privileged_gateway.sh").read_text(encoding="utf-8")
     assert 'SSH_SHELL="/bin/sh"' in text
-    assert 'passwd -l "$SSH_USER"' in text
+    assert 'passwd -l "$SSH_USER" >/dev/null 2>&1 || block "ssh-account-lock-failed"' in text
     assert 'useradd --system --home-dir /nonexistent --shell "$SSH_SHELL" --no-create-home "$SSH_USER"' in text
     assert 'usermod --home /nonexistent --shell "$SSH_SHELL" "$SSH_USER"' in text
     assert "PermitRootLogin" not in text
+    assert "systemctl reload" not in text
     assert "sudo bash" not in text
     assert "bash -c" not in text

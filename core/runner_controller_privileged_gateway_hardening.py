@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import stat
 import subprocess
+import tempfile
 from typing import Final
 
 from core.home_edge.esp_lab_stage1_signer_install import (
@@ -38,6 +39,20 @@ MAX_LEDGER_BYTES: Final = 1024 * 1024
 MAX_LEDGER_ENTRIES: Final = 4096
 MAX_TOKEN_BYTES: Final = 160
 MAX_AGE_SECONDS: Final = 300
+MAX_ROOT_CHILD_SOURCE_BYTES: Final = 128 * 1024
+ROOT_CHILD_STAGING_PARENT_PREFIX: Final = "skeleton-esp-stage1-signer-"
+ROOT_CHILD_STAGED_INSTALLER_NAME: Final = "install_home_edge_esp_lab_activation_signer.sh"
+ROOT_CHILD_STAGED_INSTALLER_MODE: Final = 0o500
+ROOT_CHILD_PROTECTED_INSTALLER: Final = (
+    "/usr/local/libexec/skeleton/home-edge/esp-lab-stage1-installer/"
+    "install_home_edge_esp_lab_activation_signer.sh"
+)
+ROOT_CHILD_CLEAN_ENV: Final = {
+    "HOME": "/nonexistent",
+    "LANG": "C",
+    "LC_ALL": "C",
+    "PATH": "/usr/bin:/bin",
+}
 REQUEST_FIELDS: Final = frozenset(
     {
         "schema",
@@ -68,9 +83,9 @@ actions:
     handler: home_edge_esp_lab_stage1_signer_install
     repository: alanua/Skeleton
     target: runner-controller
-    operator_approval: EXACT_HEAD_HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_APPROVED
+    operator_approval: EXACT_HEAD_HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_V2_APPROVED
     source_path: scripts/install_home_edge_esp_lab_activation_signer.sh
-    source_blob: 7ed95f5ba6d274451f62cfc31f88bc204eaaa386
+    source_blob: ef285000113c1254170b8924b4c3ab8d82250423
     source_mode: "100755"
     trusted_source_ancestor_sha: 8e049eb631f63d81ab932eac6ab0cf3d3d5a5949
     destination: /usr/local/libexec/skeleton/home-edge/esp-lab-stage1-installer/install_home_edge_esp_lab_activation_signer.sh
@@ -124,6 +139,15 @@ def _canonical_json(value: Mapping[str, object]) -> bytes:
 
 def canonical_request_hash(request: Mapping[str, object]) -> str:
     return hashlib.sha256(_canonical_json(request)).hexdigest()
+
+
+def _safe_canonical_request_hash(request: Mapping[str, object] | None) -> str | None:
+    if request is None:
+        return None
+    try:
+        return canonical_request_hash(request)
+    except (TypeError, ValueError):
+        return None
 
 
 def _parse_utc(value: object, field: str) -> datetime:
@@ -315,7 +339,7 @@ def _public_receipt(
         "action_id": str(request.get("action_id") or "") if request else "",
         "repository": REPOSITORY,
         "target": TARGET,
-        "request_hash": canonical_request_hash(request) if request else None,
+        "request_hash": _safe_canonical_request_hash(request),
         "mutation_started": bool(mutation_started),
         "mutation_performed": bool(mutation_performed),
         "private_evidence_exposed": False,
@@ -361,20 +385,75 @@ def _parse_executor_receipt(report: str) -> Mapping[str, object] | None:
     return parsed if isinstance(parsed, Mapping) else None
 
 
+def _is_allowed_staged_installer(path: str) -> bool:
+    try:
+        staged = Path(path)
+        temp_root = Path(tempfile.gettempdir())
+        staged.relative_to(temp_root)
+        parent_stat = os.lstat(staged.parent)
+        staged_stat = os.lstat(staged)
+    except (TypeError, ValueError, OSError):
+        return False
+    return (
+        staged.is_absolute()
+        and len(staged.parts) == len(temp_root.parts) + 2
+        and not stat.S_ISLNK(parent_stat.st_mode)
+        and stat.S_ISDIR(parent_stat.st_mode)
+        and parent_stat.st_uid == os.getuid()
+        and parent_stat.st_gid == os.getgid()
+        and stat.S_IMODE(parent_stat.st_mode) == 0o700
+        and staged.parent.name.startswith(ROOT_CHILD_STAGING_PARENT_PREFIX)
+        and staged.name == ROOT_CHILD_STAGED_INSTALLER_NAME
+        and not stat.S_ISLNK(staged_stat.st_mode)
+        and stat.S_ISREG(staged_stat.st_mode)
+        and staged_stat.st_uid == os.getuid()
+        and staged_stat.st_gid == os.getgid()
+        and stat.S_IMODE(staged_stat.st_mode) == ROOT_CHILD_STAGED_INSTALLER_MODE
+        and 0 < staged_stat.st_size <= MAX_ROOT_CHILD_SOURCE_BYTES
+    )
+
+
+def _validate_root_child_argv(argv: list[str]) -> None:
+    install_prefix = [
+        "/usr/bin/install",
+        "-D",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        "-m",
+        "0555",
+    ]
+    if (
+        len(argv) == 10
+        and argv[:8] == install_prefix
+        and _is_allowed_staged_installer(argv[8])
+        and argv[9] == ROOT_CHILD_PROTECTED_INSTALLER
+    ):
+        return
+    if argv == [
+        ROOT_CHILD_PROTECTED_INSTALLER,
+        "--repo-root",
+        str(CANONICAL_CHECKOUT_PATH),
+    ]:
+        return
+    raise PrivilegedGatewayError("root_child_action_not_allowed")
+
+
 def _root_local_protected_run(argv: list[str], timeout: int | None) -> tuple[int, str]:
     if argv[:2] != ["/usr/bin/sudo", "-n"] or len(argv) < 3:
         raise PrivilegedGatewayError("nested_privilege_argv_invalid")
+    _validate_root_child_argv(argv[2:])
     completed = subprocess.run(
         argv[2:],
+        env=ROOT_CHILD_CLEAN_ENV,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
         timeout=timeout or 60,
         check=False,
     )
-    return completed.returncode, "\n".join(
-        part for part in (completed.stdout, completed.stderr) if part
-    )
+    return completed.returncode, f"ROOT_CHILD_EXIT_{completed.returncode}"
 
 
 def _run_registered_action(request: Mapping[str, object]) -> tuple[int, str]:
@@ -392,14 +471,74 @@ def _run_registered_action(request: Mapping[str, object]) -> tuple[int, str]:
 def _validate_cached_receipt(receipt: object, request_hash: str) -> dict[str, object]:
     if not isinstance(receipt, dict):
         raise PrivilegedGatewayError("replay_ledger_corrupt")
+    required_fields = {
+        "schema",
+        "status",
+        "reason",
+        "action_id",
+        "repository",
+        "target",
+        "request_hash",
+        "mutation_started",
+        "mutation_performed",
+        "private_evidence_exposed",
+        "stderr_exposed",
+        "env_exposed",
+        "private_paths_exposed",
+        "external_side_effects_executed",
+        "receipt_hash",
+    }
+    optional_fields = {
+        "expected_main_sha",
+        "source_blob",
+        "installer_sha256",
+        "protected_copy_verified",
+        "installed_artifacts_verified",
+        "activation_executed",
+    }
+    if not required_fields <= set(receipt) or set(receipt) - required_fields - optional_fields:
+        raise PrivilegedGatewayError("replay_ledger_corrupt")
     if receipt.get("schema") != RECEIPT_SCHEMA_ID or receipt.get("request_hash") != request_hash:
+        raise PrivilegedGatewayError("replay_ledger_corrupt")
+    if receipt.get("status") not in {"DONE", "NEEDS_OPERATOR"}:
+        raise PrivilegedGatewayError("replay_ledger_corrupt")
+    if receipt.get("action_id") != HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID:
+        raise PrivilegedGatewayError("replay_ledger_corrupt")
+    if (
+        not isinstance(receipt.get("reason"), str)
+        or re.fullmatch(r"[A-Z0-9_]{1,80}", receipt["reason"]) is None
+    ):
+        raise PrivilegedGatewayError("replay_ledger_corrupt")
+    if receipt.get("repository") != REPOSITORY or receipt.get("target") != TARGET:
         raise PrivilegedGatewayError("replay_ledger_corrupt")
     if receipt.get("receipt_hash") != _receipt_hash(receipt):
         raise PrivilegedGatewayError("replay_ledger_corrupt")
     if len(json.dumps(receipt, sort_keys=True).encode("utf-8")) > MAX_RECEIPT_BYTES:
         raise PrivilegedGatewayError("replay_ledger_corrupt")
+    for bool_key in (
+        "mutation_started",
+        "mutation_performed",
+        "external_side_effects_executed",
+    ):
+        if not isinstance(receipt.get(bool_key), bool):
+            raise PrivilegedGatewayError("replay_ledger_corrupt")
     for leak_key in ("private_evidence_exposed", "stderr_exposed", "env_exposed", "private_paths_exposed"):
         if receipt.get(leak_key) is not False:
+            raise PrivilegedGatewayError("replay_ledger_corrupt")
+    for optional_hash in ("expected_main_sha", "source_blob"):
+        value = receipt.get(optional_hash)
+        if value is not None and (
+            not isinstance(value, str) or _HEX40_RE.fullmatch(value) is None
+        ):
+            raise PrivilegedGatewayError("replay_ledger_corrupt")
+    value = receipt.get("installer_sha256")
+    if value is not None and (
+        not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None
+    ):
+        raise PrivilegedGatewayError("replay_ledger_corrupt")
+    for optional_bool in ("protected_copy_verified", "installed_artifacts_verified", "activation_executed"):
+        value = receipt.get(optional_bool)
+        if value is not None and not isinstance(value, bool):
             raise PrivilegedGatewayError("replay_ledger_corrupt")
     return receipt
 
