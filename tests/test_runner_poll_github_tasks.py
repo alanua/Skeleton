@@ -2441,6 +2441,69 @@ def test_codegen_existing_pr_schema_alias_materializes_exact_existing_head() -> 
     )
 
 
+def _codegen_update_existing_pr_runner_contract_body(
+    *,
+    allowed_files: tuple[str, ...] = (
+        "scripts/runner_poll_github_tasks.py",
+        "tests/test_runner_poll_github_tasks.py",
+    ),
+) -> str:
+    return "\n".join(
+        (
+            "schema: skeleton.runner_task.v1",
+            "repo: alanua/Skeleton",
+            "branch: runner/issue-auto",
+            "task_kind: code_generation",
+            "payload:",
+            "  operation: update_existing_pr",
+            "  existing_pr: 3523",
+            f"  expected_existing_pr_head_sha: {HEAD_SHA}",
+            "allowed_files:",
+            *[f"  - {path}" for path in allowed_files],
+            "forbidden_actions:",
+            "  - merge",
+            "  - live execution",
+            "validation:",
+            "  - focused regression",
+            "expected_output:",
+            "  - draft PR exact head SHA",
+        )
+    )
+
+
+def test_codegen_existing_pr_allowed_files_accepts_3523_schema_contract_scope() -> None:
+    allowed_files, reason = runner._codegen_publish_allowed_files(
+        _codegen_update_existing_pr_runner_contract_body()
+    )
+
+    assert reason is None
+    assert allowed_files == frozenset(
+        {
+            "scripts/runner_poll_github_tasks.py",
+            "tests/test_runner_poll_github_tasks.py",
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "unsafe_path",
+    (
+        "../scripts/runner_poll_github_tasks.py",
+        "scripts/../runner_poll_github_tasks.py",
+        ".github/workflows/publish.yml",
+    ),
+)
+def test_codegen_existing_pr_allowed_files_schema_contract_rejects_unsafe_paths(
+    unsafe_path: str,
+) -> None:
+    allowed_files, reason = runner._codegen_publish_allowed_files(
+        _codegen_update_existing_pr_runner_contract_body(allowed_files=(unsafe_path,))
+    )
+
+    assert allowed_files == frozenset()
+    assert reason == "invalid_allowed_files"
+
+
 def test_update_existing_pr_process_publishes_same_pr_and_queues_validation(
     tmp_path: Path,
 ) -> None:
