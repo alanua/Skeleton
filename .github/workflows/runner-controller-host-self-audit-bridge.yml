@@ -1,0 +1,168 @@
+name: Runner Controller Host Self Audit Bridge
+
+"on":
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runner-controller-host-self-audit-bridge
+  cancel-in-progress: false
+
+jobs:
+  host-self-audit:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.action == 'labeled' &&
+      github.repository == 'alanua/Skeleton' &&
+      github.event.pull_request.base.repo.full_name == 'alanua/Skeleton' &&
+      github.event.pull_request.head.repo.full_name == 'alanua/Skeleton' &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.base.sha == '8f29994bcdcde3891a545cc39dcaab1dde7f3d92' &&
+      github.event.pull_request.head.ref == 'runner/issue-3514' &&
+      github.event.pull_request.user.login == 'alanua' &&
+      github.event.label.name == 'runner-controller-host-self-audit-approved' &&
+      contains(github.event.pull_request.body, 'Authorization Marker: EXACT_HEAD_RUNNER_CONTROLLER_HOST_SELF_AUDIT_APPROVED') &&
+      contains(github.event.pull_request.body, github.event.pull_request.head.sha)
+    runs-on:
+      - self-hosted
+      - Linux
+      - X64
+    timeout-minutes: 6
+    env:
+      CANONICAL_REPOSITORY: alanua/Skeleton
+      EXPECTED_MAIN_SHA: 8f29994bcdcde3891a545cc39dcaab1dde7f3d92
+      TARGET_CHECKOUT: /home/agent/agent-dev/repos/Skeleton
+      CANONICAL_REMOTE: https://github.com/alanua/Skeleton.git
+      EXPECTED_CHECKOUT_CONFIG: '{"schema":"skeleton.runner_controller_checkout_config.v1","repository":"alanua/Skeleton","checkout_path":"/home/agent/agent-dev/repos/Skeleton"}'
+      ANCHOR_MATRIX: |
+        100644 444 CAPABILITY_REGISTRY.yaml /usr/local/lib/skeleton/runner-controller/config/CAPABILITY_REGISTRY.yaml b264a0d60afadc9fae35a351852f3aade7bcc359
+        100644 444 RUNNER_PRIVILEGED_ACTIONS.yaml /usr/local/lib/skeleton/runner-controller/config/RUNNER_PRIVILEGED_ACTIONS.yaml b70e4c415013171fb1d064c5d5170ad8037118e8
+        100644 444 core/home_edge/esp_lab_stage1_signer_install.py /usr/local/lib/skeleton/runner-controller/core/home_edge/esp_lab_stage1_signer_install.py 84a2c7aaa6b7f89c285094d564b986154b4d8468
+        100644 444 core/runner_controller_privileged_gateway.py /usr/local/lib/skeleton/runner-controller/core/runner_controller_privileged_gateway.py 5cd6b3876e97f636f619548adf87ad47601e7507
+        100644 444 core/runner_controller_privileged_gateway_hardening.py /usr/local/lib/skeleton/runner-controller/core/runner_controller_privileged_gateway_hardening.py ce970cc54edc6ded84b1696dce9777d93a315b80
+        100644 444 docs/RUNNER_CONTROLLER_PRIVILEGED_GATEWAY.md /usr/local/lib/skeleton/runner-controller/docs/RUNNER_CONTROLLER_PRIVILEGED_GATEWAY.md 3407fa04bb3dd8f6f6b10c297df0d7d52fa354ba
+        100644 444 schemas/runner_controller_privileged_receipt.schema.json /usr/local/lib/skeleton/runner-controller/schemas/runner_controller_privileged_receipt.schema.json ac265f22c2e2a06eee7746c65b2dff9d3a5326f0
+        100644 444 schemas/runner_controller_privileged_request.schema.json /usr/local/lib/skeleton/runner-controller/schemas/runner_controller_privileged_request.schema.json 9b5ab01f5c1277493bfd34523dfff3dc57f338be
+        100755 555 scripts/install_runner_controller_privileged_gateway.sh /usr/local/libexec/skeleton/runner-controller/bootstrap/install_runner_controller_privileged_gateway.sh 5b909c12ba57d5e71b236d709a54b761552b39e8
+        100755 555 scripts/runner_controller_privileged_gateway.py /usr/local/libexec/skeleton/runner-controller/privileged-gateway 766b7a6cd1cec315638e040e86e335626d6173d5
+    steps:
+      - name: Audit canonical installed gateway trust anchors
+        shell: /bin/bash {0}
+        run: |
+          set -Eeuo pipefail
+          export PATH=/usr/bin:/bin
+          unset BASH_ENV ENV CDPATH PYTHONPATH PYTHONHOME LD_PRELOAD LD_LIBRARY_PATH GIT_DIR GIT_WORK_TREE
+
+          status=BLOCKED
+          canonical_checkout_verified=false
+          remote_main_verified=false
+          installed_anchor_count=0
+          generated_anchor_count=0
+          sudoers_anchor_stat_verified=false
+          ssh_transport=DISABLED_NOT_AUDITED
+
+          write_summary() {
+            {
+              echo "status=${status}"
+              echo "event=pull_request:labeled"
+              echo "expected_main_sha=${EXPECTED_MAIN_SHA}"
+              echo "pr_head_sha=${{ github.event.pull_request.head.sha }}"
+              echo "canonical_checkout_verified=${canonical_checkout_verified}"
+              echo "remote_main_verified=${remote_main_verified}"
+              echo "installed_anchor_count=${installed_anchor_count}"
+              echo "generated_anchor_count=${generated_anchor_count}"
+              echo "sudoers_anchor_stat_verified=${sudoers_anchor_stat_verified}"
+              echo "ssh=${ssh_transport}"
+            } >> "${GITHUB_STEP_SUMMARY}"
+          }
+          trap write_summary EXIT
+
+          block() {
+            printf 'BLOCKED: %s\n' "$1" >&2
+            exit 2
+          }
+
+          verify_regular_root_anchor() {
+            local path="$1" expected_mode="$2" meta uid gid mode type
+            [[ -n "$path" && "$path" == /* ]] || block "anchor-path-not-absolute"
+            [[ ! -L "$path" ]] || block "anchor-is-symlink"
+            meta="$(/usr/bin/stat -Lc '%u:%g:%a:%F' -- "$path")" || block "anchor-stat-failed"
+            IFS=: read -r uid gid mode type <<<"$meta"
+            [[ "$uid" == "0" && "$gid" == "0" ]] || block "anchor-owner-mismatch"
+            [[ "$mode" == "$expected_mode" ]] || block "anchor-mode-mismatch"
+            [[ "$type" == "regular file" ]] || block "anchor-not-regular"
+          }
+
+          verify_git_blob_anchor() {
+            local source_mode="$1" install_mode="$2" source_path="$3" installed_path="$4" expected_blob="$5"
+            local line actual_mode rest actual_type actual_blob actual_path installed_blob
+            line="$(/usr/bin/git -C "${TARGET_CHECKOUT}" ls-tree "${EXPECTED_MAIN_SHA}" -- "$source_path")" ||
+              block "tree-entry-unavailable"
+            [[ -n "$line" && "$line" != *$'\n'* ]] || block "tree-entry-missing-or-malformed"
+            actual_mode="${line%% *}"
+            rest="${line#* }"
+            actual_type="${rest%% *}"
+            rest="${rest#* }"
+            actual_blob="${rest%%$'\t'*}"
+            actual_path="${rest#*$'\t'}"
+            [[ "$actual_mode" == "$source_mode" ]] || block "tree-mode-mismatch"
+            [[ "$actual_type" == "blob" ]] || block "tree-type-mismatch"
+            [[ "$actual_path" == "$source_path" ]] || block "tree-path-mismatch"
+            [[ "$actual_blob" == "$expected_blob" ]] || block "tree-blob-mismatch"
+            verify_regular_root_anchor "$installed_path" "$install_mode"
+            installed_blob="$(/usr/bin/git -C "${TARGET_CHECKOUT}" hash-object --no-filters -- "$installed_path")" ||
+              block "installed-anchor-hash-failed"
+            [[ "$installed_blob" == "$expected_blob" ]] || block "installed-anchor-blob-mismatch"
+            installed_anchor_count=$((installed_anchor_count + 1))
+          }
+
+          test "${GITHUB_REPOSITORY}" = "${CANONICAL_REPOSITORY}" || block "repository-mismatch"
+          test -d "${TARGET_CHECKOUT}/.git" || block "canonical-checkout-missing"
+
+          origin_url="$(/usr/bin/git -C "${TARGET_CHECKOUT}" remote get-url origin)" ||
+            block "origin-unavailable"
+          case "${origin_url}" in
+            https://github.com/alanua/Skeleton|https://github.com/alanua/Skeleton.git|git@github.com:alanua/Skeleton.git) ;;
+            *) block "origin-mismatch" ;;
+          esac
+
+          current_branch="$(/usr/bin/git -C "${TARGET_CHECKOUT}" rev-parse --abbrev-ref HEAD)" ||
+            block "branch-unavailable"
+          test "${current_branch}" = main || block "checkout-branch-mismatch"
+          test -z "$(/usr/bin/git -C "${TARGET_CHECKOUT}" status --porcelain=v1 --untracked-files=all)" ||
+            block "checkout-dirty"
+          checkout_head="$(/usr/bin/git -C "${TARGET_CHECKOUT}" rev-parse 'HEAD^{commit}')" ||
+            block "head-unavailable"
+          origin_main="$(/usr/bin/git -C "${TARGET_CHECKOUT}" rev-parse 'origin/main^{commit}')" ||
+            block "origin-main-unavailable"
+          test "${checkout_head}" = "${EXPECTED_MAIN_SHA}" || block "head-sha-mismatch"
+          test "${origin_main}" = "${EXPECTED_MAIN_SHA}" || block "origin-main-sha-mismatch"
+          canonical_checkout_verified=true
+
+          fresh_remote="$(/usr/bin/env -i \
+            HOME=/nonexistent LANG=C LC_ALL=C PATH=/usr/bin:/bin \
+            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 \
+            /usr/bin/git -C / ls-remote --exit-code "${CANONICAL_REMOTE}" refs/heads/main)" ||
+            block "fresh-remote-main-unavailable"
+          test "${fresh_remote}" = "${EXPECTED_MAIN_SHA}"$'\trefs/heads/main' ||
+            block "fresh-remote-main-mismatch"
+          remote_main_verified=true
+
+          while read -r source_mode install_mode source_path installed_path expected_blob; do
+            [[ -n "${source_mode:-}" ]] || continue
+            verify_git_blob_anchor "$source_mode" "$install_mode" "$source_path" "$installed_path" "$expected_blob"
+          done <<<"${ANCHOR_MATRIX}"
+
+          checkout_config=/usr/local/lib/skeleton/runner-controller/config/checkout.json
+          verify_regular_root_anchor "$checkout_config" 444
+          test "$(/usr/bin/cat -- "$checkout_config")" = "${EXPECTED_CHECKOUT_CONFIG}" ||
+            block "checkout-config-content-mismatch"
+          generated_anchor_count=$((generated_anchor_count + 1))
+
+          verify_regular_root_anchor /etc/sudoers.d/skeleton-runner-controller-privileged-gateway 440
+          sudoers_anchor_stat_verified=true
+
+          status=DONE
