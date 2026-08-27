@@ -34,6 +34,16 @@ def test_trigger_permissions_and_runner_are_exact() -> None:
     assert job["timeout-minutes"] == 8
 
 
+def test_bootstrap_step_uses_valid_absolute_bash_shell_template() -> None:
+    job = _workflow()["jobs"]["bootstrap-gateway"]
+    steps = job["steps"]
+    assert isinstance(steps, list)
+    assert len(steps) == 1
+    step = steps[0]
+    assert step["name"] == "Materialize and execute exact reviewed bootstrap"
+    assert step["shell"] == "/bin/bash {0}"
+
+
 def test_operator_gate_binds_exact_base_branch_and_current_head() -> None:
     job = _workflow()["jobs"]["bootstrap-gateway"]
     condition = job["if"]

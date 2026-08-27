@@ -36,7 +36,7 @@ jobs:
       PROTECTED_BOOTSTRAP_PATH: /usr/local/libexec/skeleton/runner-controller/bootstrap/install_runner_controller_privileged_gateway.sh
     steps:
       - name: Materialize and execute exact reviewed bootstrap
-        shell: /bin/bash
+        shell: /bin/bash {0}
         run: |
           set -Eeuo pipefail
           export PATH=/usr/bin:/bin
