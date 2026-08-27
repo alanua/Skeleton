@@ -1,0 +1,189 @@
+name: Runner Controller Gateway Bootstrap Bridge
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/runner-controller-gateway-bootstrap-bridge.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runner-controller-gateway-bootstrap-bridge-v1
+  cancel-in-progress: false
+
+jobs:
+  bootstrap-bridge:
+    if: github.repository == 'alanua/Skeleton' && github.ref == 'refs/heads/main'
+    runs-on:
+      - self-hosted
+      - Linux
+      - X64
+    timeout-minutes: 10
+    env:
+      CANONICAL_REPOSITORY: alanua/Skeleton
+      TARGET_CHECKOUT: /home/agent/agent-dev/repos/Skeleton
+      GATEWAY_INSTALL_PATH: /usr/local/libexec/skeleton/runner-controller/privileged-gateway
+      ACTION_ID: home_edge_01_esp_lab_stage1_signer_install_v1
+      OPERATOR_APPROVAL: EXACT_HEAD_HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_V2_APPROVED
+      REQUEST_ID: one-shot-gateway-bootstrap-bridge-8f29994b-v1
+      IDEMPOTENCY_KEY: one-shot-gateway-bootstrap-bridge-8f29994b-v1
+    steps:
+      - name: Submit bounded one-shot gateway request
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test "${GITHUB_REPOSITORY}" = "${CANONICAL_REPOSITORY}"
+          test "${GITHUB_REF}" = "refs/heads/main"
+          test "${TARGET_CHECKOUT}" = "/home/agent/agent-dev/repos/Skeleton"
+          test "${GATEWAY_INSTALL_PATH}" = "/usr/local/libexec/skeleton/runner-controller/privileged-gateway"
+          test -d "${TARGET_CHECKOUT}/.git"
+          test -x "${GATEWAY_INSTALL_PATH}"
+
+          origin_url="$(git -C "${TARGET_CHECKOUT}" remote get-url origin)"
+          case "${origin_url}" in
+            https://github.com/alanua/Skeleton|https://github.com/alanua/Skeleton.git) ;;
+            *) exit 1 ;;
+          esac
+
+          git -C "${TARGET_CHECKOUT}" fetch --quiet --prune origin main
+          origin_main_sha="$(git -C "${TARGET_CHECKOUT}" rev-parse origin/main)"
+          if [[ ! "${origin_main_sha}" =~ ^[0-9a-f]{40}$ ]]; then
+            exit 1
+          fi
+          if [[ ! "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            exit 1
+          fi
+          test "${GITHUB_SHA}" = "${origin_main_sha}"
+
+          checkout_branch="$(git -C "${TARGET_CHECKOUT}" rev-parse --abbrev-ref HEAD)"
+          checkout_head_sha="$(git -C "${TARGET_CHECKOUT}" rev-parse HEAD)"
+          checkout_origin_main_sha="$(git -C "${TARGET_CHECKOUT}" rev-parse origin/main)"
+          checkout_status="$(git -C "${TARGET_CHECKOUT}" status --porcelain --untracked-files=all)"
+          test "${checkout_branch}" = "main"
+          test "${checkout_head_sha}" = "${origin_main_sha}"
+          test "${checkout_origin_main_sha}" = "${origin_main_sha}"
+          test -z "${checkout_status}"
+
+          request_file="$(mktemp "${RUNNER_TEMP}/gateway-bootstrap-request.XXXXXX.json")"
+          receipt_file="$(mktemp "${RUNNER_TEMP}/gateway-bootstrap-receipt.XXXXXX.json")"
+          summary_file="$(mktemp "${RUNNER_TEMP}/gateway-bootstrap-summary.XXXXXX")"
+          trap 'rm -f "${request_file}" "${receipt_file}" "${summary_file}"' EXIT
+
+          issued_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          expires_at="$(date -u -d '+300 seconds' '+%Y-%m-%dT%H:%M:%SZ')"
+
+          REQUEST_FILE="${request_file}" \
+          ISSUED_AT="${issued_at}" \
+          EXPIRES_AT="${expires_at}" \
+          EXPECTED_MAIN_SHA="${origin_main_sha}" \
+          CHECKOUT_HEAD_SHA="${checkout_head_sha}" \
+          CHECKOUT_ORIGIN_MAIN_SHA="${checkout_origin_main_sha}" \
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          request = {
+              "schema": "skeleton.runner_controller_privileged_request.v1",
+              "request_id": os.environ["REQUEST_ID"],
+              "idempotency_key": os.environ["IDEMPOTENCY_KEY"],
+              "action_id": os.environ["ACTION_ID"],
+              "issued_at": os.environ["ISSUED_AT"],
+              "expires_at": os.environ["EXPIRES_AT"],
+              "repository": os.environ["CANONICAL_REPOSITORY"],
+              "target": "runner-controller",
+              "operator_approval": os.environ["OPERATOR_APPROVAL"],
+              "expected_main_sha": os.environ["EXPECTED_MAIN_SHA"],
+              "registered_clean_main_sha": os.environ["EXPECTED_MAIN_SHA"],
+              "github_main_sha": os.environ["EXPECTED_MAIN_SHA"],
+              "checkout_path": os.environ["TARGET_CHECKOUT"],
+              "checkout_head_sha": os.environ["CHECKOUT_HEAD_SHA"],
+              "checkout_origin_main_sha": os.environ["CHECKOUT_ORIGIN_MAIN_SHA"],
+          }
+          encoded = json.dumps(request, sort_keys=True, separators=(",", ":")) + "\n"
+          if len(encoded.encode("utf-8")) > 16 * 1024:
+              raise SystemExit("request_too_large")
+          Path(os.environ["REQUEST_FILE"]).write_text(encoded, encoding="utf-8")
+          PY
+
+          set +e
+          /usr/bin/sudo -n "${GATEWAY_INSTALL_PATH}" < "${request_file}" > "${receipt_file}"
+          gateway_exit="$?"
+          set -e
+
+          RECEIPT_FILE="${receipt_file}" SUMMARY_FILE="${summary_file}" python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          receipt_path = Path(os.environ["RECEIPT_FILE"])
+          raw = receipt_path.read_bytes()
+          if len(raw) > 16 * 1024:
+              raise SystemExit("receipt_too_large")
+          receipt = json.loads(raw.decode("utf-8"))
+          required = {
+              "schema",
+              "status",
+              "reason",
+              "action_id",
+              "repository",
+              "target",
+              "request_hash",
+              "mutation_started",
+              "mutation_performed",
+              "private_evidence_exposed",
+              "stderr_exposed",
+              "env_exposed",
+              "private_paths_exposed",
+              "external_side_effects_executed",
+              "receipt_hash",
+          }
+          optional = {
+              "expected_main_sha",
+              "source_blob",
+              "installer_sha256",
+              "protected_copy_verified",
+              "installed_artifacts_verified",
+              "activation_executed",
+          }
+          if not required <= set(receipt) or set(receipt) - required - optional:
+              raise SystemExit("receipt_field_set_invalid")
+          if receipt["schema"] != "skeleton.runner_controller_privileged_receipt.v1":
+              raise SystemExit("receipt_schema_invalid")
+          if receipt["repository"] != "alanua/Skeleton" or receipt["target"] != "runner-controller":
+              raise SystemExit("receipt_authority_invalid")
+          if receipt["action_id"] != "home_edge_01_esp_lab_stage1_signer_install_v1":
+              raise SystemExit("receipt_action_invalid")
+          if receipt["status"] not in {"DONE", "NEEDS_OPERATOR"}:
+              raise SystemExit("receipt_status_invalid")
+          if re.fullmatch(r"[A-Z0-9_]{1,80}", str(receipt["reason"])) is None:
+              raise SystemExit("receipt_reason_invalid")
+          for key in ("private_evidence_exposed", "stderr_exposed", "env_exposed", "private_paths_exposed"):
+              if receipt.get(key) is not False:
+                  raise SystemExit("receipt_public_safety_invalid")
+          lines = [
+              "runner_controller_gateway_bootstrap_bridge_status=" + receipt["status"],
+              "reason=" + receipt["reason"],
+              "mutation_started=" + str(receipt["mutation_started"]).lower(),
+              "mutation_performed=" + str(receipt["mutation_performed"]).lower(),
+              "external_side_effects_executed=" + str(receipt["external_side_effects_executed"]).lower(),
+              "private_evidence_exposed=false",
+              "stderr_exposed=false",
+              "env_exposed=false",
+              "private_paths_exposed=false",
+              "request_hash=" + str(receipt["request_hash"]),
+              "receipt_hash=" + receipt["receipt_hash"],
+          ]
+          if "expected_main_sha" in receipt:
+              lines.append("expected_main_sha=" + receipt["expected_main_sha"])
+          Path(os.environ["SUMMARY_FILE"]).write_text("\n".join(lines) + "\n", encoding="utf-8")
+          if receipt["status"] != "DONE":
+              raise SystemExit("gateway_receipt_needs_operator")
+          PY
+
+          cat "${summary_file}" >> "${GITHUB_STEP_SUMMARY}"
+          test "${gateway_exit}" = "0"
