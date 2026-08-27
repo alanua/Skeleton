@@ -1166,6 +1166,42 @@ evidence text for recovery handling. Those words are not the final result.
     assert result == runner.CodexTaskResult("DONE")
 
 
+def test_exact_runner_task_success_requires_result_done_marker() -> None:
+    body = "\n".join(
+        (
+            "schema: skeleton.runner_task.v1",
+            "expected_output:",
+            "- false-success regression closed",
+            "",
+            "```task",
+            "Repair the false-success path.",
+            "```",
+        )
+    )
+
+    assert (
+        runner.exact_runner_task_success_block_reason(
+            body,
+            "DONE: Codex completed successfully.\n\nfalse-success regression closed",
+        )
+        == "exact_success_marker_missing"
+    )
+    assert (
+        runner.exact_runner_task_success_block_reason(
+            body,
+            "RESULT: DONE\n\nChanged files:\n- scripts/runner_poll_github_tasks.py",
+        )
+        == "exact_expected_output_missing"
+    )
+    assert (
+        runner.exact_runner_task_success_block_reason(
+            body,
+            "RESULT: DONE\n\nfalse-success regression closed",
+        )
+        is None
+    )
+
+
 def test_private_memory_run_codex_preserves_safe_result_done_output(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -2345,6 +2381,71 @@ def test_codegen_done_with_draft_pr_creates_exact_validation_continuation_once()
     assert f"Expected Base SHA: {'b' * 40}" in body
     assert "privacy_boundary: PUBLIC_SAFE_QUEUE_AND_PR_METADATA_ONLY" in body
     assert f"idempotency_key: {idempotency_key}" in body
+
+
+def test_schema_codegen_wrong_success_marker_blocks_before_finalize_or_validation(
+    tmp_path: Path,
+) -> None:
+    coordinator = tmp_path / "coordinator"
+    issue_path = tmp_path / "worktrees" / "issue-3517"
+    issue = {
+        "number": 3517,
+        "title": "Exact runner task semantics",
+        "body": "\n".join(
+            (
+                "schema: skeleton.runner_task.v1",
+                "expected_output:",
+                "- draft PR exact head SHA",
+                "- false-success regression closed",
+                "allowed_files:",
+                "- scripts/runner_poll_github_tasks.py",
+                "- tests/test_runner_poll_github_tasks.py",
+                "",
+                "```task",
+                "Repair the wrong-label/wrong-marker false-success class.",
+                "```",
+            )
+        ),
+        "comments": [],
+        "labels": [runner.LABEL_READY],
+    }
+
+    with mock.patch.object(runner, "set_issue_label") as set_label, mock.patch.object(
+        runner, "prepare_issue_worktree", return_value=(0, "ready", issue_path)
+    ), mock.patch.object(runner, "cleanup_runtime_artifacts"), mock.patch.object(
+        runner,
+        "run_codex_task",
+        return_value=(
+            0,
+            "DONE: Codex completed successfully.\n\nfalse-success regression closed",
+        ),
+    ), mock.patch.object(
+        runner, "finalize_success"
+    ) as finalize, mock.patch.object(
+        runner, "ensure_codegen_pr_validation_continuation"
+    ) as continuation, mock.patch.object(
+        runner, "cleanup_issue_worktree"
+    ) as cleanup_issue_worktree, mock.patch.object(
+        runner, "post_issue_comment"
+    ) as post, mock.patch.object(
+        runner, "notify_task_finished"
+    ) as notify, mock.patch.object(
+        runner, "record_runner_task_picked_up", return_value=None
+    ), mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ), mock.patch.object(
+        runner, "maybe_replenish_runner_queue_after_completion", return_value=True
+    ):
+        runner.process_issue(issue, workdir=str(coordinator))
+
+    finalize.assert_not_called()
+    continuation.assert_not_called()
+    cleanup_issue_worktree.assert_not_called()
+    report = post.call_args.args[1]
+    assert "exact_success_marker_missing" in report
+    assert "Draft PR:" not in report
+    set_label.assert_any_call(3517, runner.LABEL_RUNNING, runner.LABEL_BLOCKED)
+    notify.assert_called_with(3517, "BLOCKED", report)
 
 
 def test_codegen_existing_pr_contract_rejects_parallel_pr_without_continuation() -> None:
