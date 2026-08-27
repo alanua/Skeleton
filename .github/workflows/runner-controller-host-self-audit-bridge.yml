@@ -1,0 +1,92 @@
+name: Runner Controller Host Self-Audit Bridge
+
+on:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: runner-controller-host-self-audit-bridge-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  host-self-audit-bridge:
+    name: Inert exact-head host self-audit bridge
+    if: >-
+      github.repository == 'alanua/Skeleton' &&
+      github.event_name == 'pull_request' &&
+      github.event.action == 'labeled' &&
+      github.event.label.name == 'host:self-audit' &&
+      github.event.pull_request.draft == true &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.head.sha == '8f29994bcdcde3891a545cc39dcaab1dde7f3d92' &&
+      github.event.pull_request.changed_files == 2
+    runs-on:
+      - self-hosted
+      - Linux
+      - X64
+    timeout-minutes: 5
+    env:
+      CANONICAL_REPOSITORY: alanua/Skeleton
+      EXPECTED_HEAD_SHA: 8f29994bcdcde3891a545cc39dcaab1dde7f3d92
+      REQUIRED_LABEL: host:self-audit
+      REQUIRED_BASE_REF: main
+      REQUIRED_CHANGED_FILES: "2"
+      ALLOWED_FILE_1: .github/workflows/runner-controller-host-self-audit-bridge.yml
+      ALLOWED_FILE_2: tests/test_runner_controller_host_self_audit_bridge_workflow.py
+    steps:
+      - name: Verify inert bridge contract from pull request event metadata
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          event_path = os.environ.get("GITHUB_EVENT_PATH", "")
+          if not event_path:
+              raise SystemExit("missing event path")
+
+          with open(event_path, "r", encoding="utf-8") as handle:
+              event = json.load(handle)
+
+          repository = event.get("repository") or {}
+          pull_request = event.get("pull_request") or {}
+          label = event.get("label") or {}
+          head = pull_request.get("head") or {}
+          base = pull_request.get("base") or {}
+
+          checks = {
+              "repository": repository.get("full_name") == os.environ["CANONICAL_REPOSITORY"],
+              "action": event.get("action") == "labeled",
+              "label": label.get("name") == os.environ["REQUIRED_LABEL"],
+              "draft": pull_request.get("draft") is True,
+              "base": base.get("ref") == os.environ["REQUIRED_BASE_REF"],
+              "head_sha": head.get("sha") == os.environ["EXPECTED_HEAD_SHA"],
+              "changed_files": str(pull_request.get("changed_files")) == os.environ["REQUIRED_CHANGED_FILES"],
+          }
+          failed = [name for name, ok in checks.items() if not ok]
+          if failed:
+              raise SystemExit("bridge contract mismatch: " + ",".join(failed))
+
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary_path:
+              with open(summary_path, "a", encoding="utf-8") as summary:
+                  summary.write("repository=alanua/Skeleton\n")
+                  summary.write("bridge_status=metadata_verified\n")
+                  summary.write(f"expected_head_sha={os.environ['EXPECTED_HEAD_SHA']}\n")
+                  summary.write("changed_files=2\n")
+                  summary.write("external_side_effects_executed=false\n")
+
+          print("RESULT: DONE")
+          print("bridge_status=metadata_verified")
+          print("external_side_effects_executed=false")
+          PY
