@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+import fcntl
 import hashlib
 import json
 import os
@@ -12,36 +14,21 @@ import subprocess
 import stat
 from typing import Final
 
-try:
-    from core.home_edge.esp_lab_stage1_signer_install import (
-        HOME_EDGE_ESP_LAB_STAGE1_INSTALLER_BLOB,
-        HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA,
-        HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_BLOB,
-        HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_MODE,
-        HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID,
-        HOME_EDGE_ESP_LAB_STAGE1_SIGNER_OPERATOR_APPROVAL,
-        HOME_EDGE_ESP_LAB_STAGE1_SIGNER_PAYLOAD_BLOB,
-        HOME_EDGE_ESP_LAB_STAGE1_SIGNER_PROTECTED_INSTALLER,
-        HOME_EDGE_ESP_LAB_STAGE1_SIGNER_SOURCE_PATH,
-        HOME_EDGE_ESP_LAB_STAGE1_SIGNER_SUDOERS_SHA256,
-        HOME_EDGE_ESP_LAB_STAGE1_SIGNER_TRUSTED_SOURCE_ANCESTOR_SHA,
-        HOME_EDGE_ESP_LAB_STAGE1_SIGNER_WRAPPER_BLOB,
-    )
-except ModuleNotFoundError:
-    from core.runner_repository_maintenance_executor import (
-        HOME_EDGE_ESP_LAB_STAGE1_INSTALLER_BLOB,
-        HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA,
-        HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_BLOB,
-        HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_MODE,
-        HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID,
-        HOME_EDGE_ESP_LAB_STAGE1_SIGNER_OPERATOR_APPROVAL,
-        HOME_EDGE_ESP_LAB_STAGE1_SIGNER_PAYLOAD_BLOB,
-        HOME_EDGE_ESP_LAB_STAGE1_SIGNER_PROTECTED_INSTALLER,
-        HOME_EDGE_ESP_LAB_STAGE1_SIGNER_SOURCE_PATH,
-        HOME_EDGE_ESP_LAB_STAGE1_SIGNER_SUDOERS_SHA256,
-        HOME_EDGE_ESP_LAB_STAGE1_SIGNER_TRUSTED_SOURCE_ANCESTOR_SHA,
-        HOME_EDGE_ESP_LAB_STAGE1_SIGNER_WRAPPER_BLOB,
-    )
+from core.home_edge.esp_lab_stage1_signer_install import (
+    HOME_EDGE_ESP_LAB_STAGE1_INSTALLER_BLOB,
+    HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA,
+    HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_BLOB,
+    HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_MODE,
+    HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID,
+    HOME_EDGE_ESP_LAB_STAGE1_SIGNER_OPERATOR_APPROVAL,
+    HOME_EDGE_ESP_LAB_STAGE1_SIGNER_PAYLOAD_BLOB,
+    HOME_EDGE_ESP_LAB_STAGE1_SIGNER_PROTECTED_INSTALLER,
+    HOME_EDGE_ESP_LAB_STAGE1_SIGNER_SOURCE_PATH,
+    HOME_EDGE_ESP_LAB_STAGE1_SIGNER_SUDOERS_SHA256,
+    HOME_EDGE_ESP_LAB_STAGE1_SIGNER_TRUSTED_SOURCE_ANCESTOR_SHA,
+    HOME_EDGE_ESP_LAB_STAGE1_SIGNER_WRAPPER_BLOB,
+    execute_home_edge_esp_lab_stage1_signer_install,
+)
 
 
 REQUEST_SCHEMA_ID: Final = "skeleton.runner_controller_privileged_request.v1"
@@ -94,6 +81,8 @@ MAX_REQUEST_BYTES: Final = 16 * 1024
 MAX_TOKEN_BYTES: Final = 160
 MAX_PATH_BYTES: Final = 4096
 MAX_RECEIPT_BYTES: Final = 16 * 1024
+MAX_LEDGER_BYTES: Final = 1024 * 1024
+MAX_LEDGER_ENTRIES: Final = 4096
 MAX_AGE_SECONDS: Final = 300
 REQUEST_FIELDS: Final = (
     "schema",
@@ -115,54 +104,6 @@ REQUEST_FIELDS: Final = (
 _HEX40_RE = re.compile(r"^[0-9a-f]{40}$")
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$")
 _ISO_Z_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
-
-
-def _embedded_action_registry() -> Mapping[str, object]:
-    return {
-        "schema": "skeleton.runner_privileged_actions.v1",
-        "actions": [
-            {
-                "action_id": HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID,
-                "handler": "home_edge_esp_lab_stage1_signer_install",
-                "repository": REPOSITORY,
-                "target": TARGET,
-                "operator_approval": HOME_EDGE_ESP_LAB_STAGE1_SIGNER_OPERATOR_APPROVAL,
-                "source_path": HOME_EDGE_ESP_LAB_STAGE1_SIGNER_SOURCE_PATH,
-                "source_blob": HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_BLOB,
-                "source_mode": HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_MODE,
-                "trusted_source_ancestor_sha": HOME_EDGE_ESP_LAB_STAGE1_SIGNER_TRUSTED_SOURCE_ANCESTOR_SHA,
-                "destination": str(HOME_EDGE_ESP_LAB_STAGE1_SIGNER_PROTECTED_INSTALLER),
-                "installer_argv": [
-                    str(HOME_EDGE_ESP_LAB_STAGE1_SIGNER_PROTECTED_INSTALLER),
-                    "--repo-root",
-                    "{checkout_path}",
-                ],
-                "post_audit_artifacts": [
-                    {
-                        "path": "/usr/local/libexec/skeleton/home-edge/esp-lab-stage1/signer",
-                        "content_hash": HOME_EDGE_ESP_LAB_STAGE1_SIGNER_WRAPPER_BLOB,
-                        "mode": "0555",
-                    },
-                    {
-                        "path": "/usr/local/lib/skeleton/home-edge/esp-lab-stage1/signer_payload.py",
-                        "content_hash": HOME_EDGE_ESP_LAB_STAGE1_SIGNER_PAYLOAD_BLOB,
-                        "mode": "0555",
-                    },
-                    {
-                        "path": "/usr/local/lib/skeleton/home-edge/esp-lab-stage1/install_home_edge_esp_lab.sh",
-                        "content_hash": HOME_EDGE_ESP_LAB_STAGE1_INSTALLER_BLOB,
-                        "mode": "0444",
-                    },
-                    {
-                        "path": "/etc/sudoers.d/skeleton-home-edge-esp-lab-stage1-signer",
-                        "content_hash": HOME_EDGE_ESP_LAB_STAGE1_SIGNER_SUDOERS_SHA256,
-                        "mode": "0440",
-                    },
-                ],
-            }
-        ],
-    }
-
 
 class PrivilegedGatewayError(ValueError):
     def __init__(self, reason_code: str) -> None:
@@ -412,10 +353,7 @@ def build_gateway_request(
 
 def load_action_registry(path: Path = DEFAULT_ACTION_REGISTRY_PATH) -> dict[str, GatewayAction]:
     _verify_root_owned_trust_anchor(path)
-    if not path.exists() and path == ROOT / "RUNNER_PRIVILEGED_ACTIONS.yaml":
-        loaded = _embedded_action_registry()
-    else:
-        loaded = _load_yaml_subset(path)
+    loaded = _load_yaml_subset(path)
     if not isinstance(loaded, Mapping) or loaded.get("schema") != "skeleton.runner_privileged_actions.v1":
         raise PrivilegedGatewayError("action_registry_schema_mismatch")
     actions = loaded.get("actions")
@@ -526,17 +464,17 @@ def verify_protected_capability_metadata(path: Path = DEFAULT_CAPABILITY_REGISTR
     _verify_root_owned_trust_anchor(path)
     capability = _load_gateway_capability(path)
     if capability is None:
-        if path == ROOT / "CAPABILITY_REGISTRY.yaml":
-            return
         raise PrivilegedGatewayError("capability_registry_gateway_missing")
     if not isinstance(capability, Mapping):
         raise PrivilegedGatewayError("capability_registry_gateway_invalid")
     required = {
+        "core/runner_controller_privileged_gateway_hardening.py",
         "core/runner_controller_privileged_gateway.py",
         "core/home_edge/esp_lab_stage1_signer_install.py",
         "scripts/runner_controller_privileged_gateway.py",
         "scripts/install_runner_controller_privileged_gateway.sh",
         "RUNNER_PRIVILEGED_ACTIONS.yaml",
+        "CAPABILITY_REGISTRY.yaml",
         "schemas/runner_controller_privileged_request.schema.json",
         "schemas/runner_controller_privileged_receipt.schema.json",
         "docs/RUNNER_CONTROLLER_PRIVILEGED_GATEWAY.md",
@@ -557,6 +495,7 @@ def validate_gateway_request(
     registry_path: Path = DEFAULT_ACTION_REGISTRY_PATH,
     capability_registry_path: Path = DEFAULT_CAPABILITY_REGISTRY_PATH,
     checkout_config_path: Path = DEFAULT_CHECKOUT_CONFIG_PATH,
+    validate_time: bool = True,
 ) -> GatewayAction:
     if set(request) != set(REQUEST_FIELDS):
         raise PrivilegedGatewayError("request_field_set_mismatch")
@@ -595,7 +534,7 @@ def validate_gateway_request(
     current = now or _utc_now()
     if expires <= issued or (expires - issued).total_seconds() > MAX_AGE_SECONDS:
         raise PrivilegedGatewayError("request_expiry_window_invalid")
-    if issued > current or expires < current:
+    if validate_time and (issued > current or expires < current):
         raise PrivilegedGatewayError("request_expired_or_not_yet_valid")
     if request["repository"] != REPOSITORY or request["target"] != TARGET:
         raise PrivilegedGatewayError("request_authority_mismatch")
@@ -617,75 +556,6 @@ def validate_gateway_request(
     return action
 
 
-def _read_ledger_entries(path: Path) -> list[Mapping[str, object]]:
-    try:
-        data = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return []
-    except OSError as exc:
-        raise PrivilegedGatewayError("replay_ledger_unavailable") from exc
-    entries: list[Mapping[str, object]] = []
-    for line in data.splitlines():
-        if not line.strip():
-            continue
-        try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError as exc:
-            raise PrivilegedGatewayError("replay_ledger_corrupt") from exc
-        if not isinstance(parsed, Mapping):
-            raise PrivilegedGatewayError("replay_ledger_corrupt")
-        entries.append(parsed)
-    return entries
-
-
-def _reserve_ledger_entry(
-    *,
-    path: Path,
-    request: Mapping[str, object],
-    request_hash: str,
-    now: datetime,
-) -> None:
-    if path is None:
-        return
-    idempotency_key = str(request["idempotency_key"])
-    lock = path.with_suffix(path.suffix + ".lock")
-    try:
-        path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-    except OSError as exc:
-        raise PrivilegedGatewayError("replay_ledger_unavailable") from exc
-    try:
-        os.mkdir(lock, 0o700)
-    except FileExistsError as exc:
-        raise PrivilegedGatewayError("replay_ledger_locked") from exc
-    except OSError as exc:
-        raise PrivilegedGatewayError("replay_ledger_unavailable") from exc
-    try:
-        for entry in _read_ledger_entries(path):
-            if entry.get("request_hash") == request_hash:
-                raise PrivilegedGatewayError("request_replay")
-            if entry.get("idempotency_key") == idempotency_key:
-                raise PrivilegedGatewayError("idempotency_key_replay")
-        record = {
-            "schema": "skeleton.runner_controller_privileged_replay_ledger_entry.v1",
-            "recorded_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "request_hash": request_hash,
-            "idempotency_key": idempotency_key,
-            "action_id": str(request["action_id"]),
-        }
-        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
-        fd = os.open(path, flags, 0o600)
-        try:
-            os.write(fd, canonical_json_bytes(record) + b"\n")
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-    finally:
-        try:
-            os.rmdir(lock)
-        except OSError:
-            pass
-
-
 def _parse_executor_receipt(report: str) -> Mapping[str, object] | None:
     marker = "Receipt:\n"
     if marker not in report:
@@ -697,11 +567,23 @@ def _parse_executor_receipt(report: str) -> Mapping[str, object] | None:
     return parsed if isinstance(parsed, Mapping) else None
 
 
+def _receipt_hash(receipt: Mapping[str, object]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            {key: value for key, value in receipt.items() if key != "receipt_hash"},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 def _public_receipt(
     status: str,
     request: Mapping[str, object] | None,
     reason: str,
     *,
+    mutation_started: bool = False,
+    mutation_performed: bool = False,
     executor_receipt: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     action_id = str(request.get("action_id")) if request is not None else ""
@@ -714,18 +596,13 @@ def _public_receipt(
         "repository": REPOSITORY,
         "target": TARGET,
         "request_hash": request_hash,
+        "mutation_started": bool(mutation_started),
+        "mutation_performed": bool(mutation_performed),
         "private_evidence_exposed": False,
         "stderr_exposed": False,
         "env_exposed": False,
         "private_paths_exposed": False,
-        "external_side_effects_executed": (
-            executor_receipt is not None
-            and (
-                executor_receipt.get("protected_copy_verified") is True
-                or executor_receipt.get("installed_artifacts_verified") is True
-                or executor_receipt.get("activation_executed") is True
-            )
-        ),
+        "external_side_effects_executed": bool(mutation_performed),
     }
     if executor_receipt is not None:
         for key in (
@@ -738,10 +615,163 @@ def _public_receipt(
         ):
             if key in executor_receipt:
                 receipt[key] = executor_receipt[key]
-    receipt["receipt_hash"] = hashlib.sha256(
-        json.dumps({k: v for k, v in receipt.items() if k != "receipt_hash"}, sort_keys=True).encode("utf-8")
-    ).hexdigest()
+        if any(
+            executor_receipt.get(key) is True
+            for key in (
+                "protected_copy_verified",
+                "installed_artifacts_verified",
+                "activation_executed",
+            )
+        ):
+            receipt["external_side_effects_executed"] = True
+    receipt["receipt_hash"] = _receipt_hash(receipt)
     return receipt
+
+
+def _validate_cached_receipt(receipt: object, request_hash: str) -> dict[str, object]:
+    if not isinstance(receipt, dict):
+        raise PrivilegedGatewayError("replay_ledger_corrupt")
+    if receipt.get("schema") != RECEIPT_SCHEMA_ID or receipt.get("request_hash") != request_hash:
+        raise PrivilegedGatewayError("replay_ledger_corrupt")
+    if receipt.get("receipt_hash") != _receipt_hash(receipt):
+        raise PrivilegedGatewayError("replay_ledger_corrupt")
+    if len(json.dumps(receipt, sort_keys=True).encode("utf-8")) > MAX_RECEIPT_BYTES:
+        raise PrivilegedGatewayError("replay_ledger_corrupt")
+    for leak_key in ("private_evidence_exposed", "stderr_exposed", "env_exposed", "private_paths_exposed"):
+        if receipt.get(leak_key) is not False:
+            raise PrivilegedGatewayError("replay_ledger_corrupt")
+    return receipt
+
+
+class _Ledger(AbstractContextManager["_Ledger"]):
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.lock_path = path.with_suffix(path.suffix + ".lock")
+        self.lock_fd: int | None = None
+        self.entries: list[Mapping[str, object]] = []
+
+    def __enter__(self) -> "_Ledger":
+        try:
+            self.path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+            flags = os.O_RDWR | os.O_CREAT
+            if hasattr(os, "O_CLOEXEC"):
+                flags |= os.O_CLOEXEC
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            self.lock_fd = os.open(self.lock_path, flags, 0o600)
+            os.fchmod(self.lock_fd, 0o600)
+            st = os.fstat(self.lock_fd)
+            if not stat.S_ISREG(st.st_mode):
+                raise PrivilegedGatewayError("replay_ledger_lock_unsafe")
+            if self.path == DEFAULT_REPLAY_LEDGER_PATH and (st.st_uid != 0 or st.st_gid != 0):
+                raise PrivilegedGatewayError("replay_ledger_lock_ownership_mismatch")
+            fcntl.flock(self.lock_fd, fcntl.LOCK_EX)
+            self.entries = self._read_entries()
+            return self
+        except PrivilegedGatewayError:
+            self.__exit__(None, None, None)
+            raise
+        except OSError as exc:
+            self.__exit__(None, None, None)
+            raise PrivilegedGatewayError("replay_ledger_unavailable") from exc
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self.lock_fd is not None:
+            try:
+                fcntl.flock(self.lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(self.lock_fd)
+            self.lock_fd = None
+        return None
+
+    def _read_entries(self) -> list[Mapping[str, object]]:
+        try:
+            st = os.lstat(self.path)
+        except FileNotFoundError:
+            return []
+        except OSError as exc:
+            raise PrivilegedGatewayError("replay_ledger_unavailable") from exc
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+            raise PrivilegedGatewayError("replay_ledger_unsafe")
+        if st.st_size > MAX_LEDGER_BYTES:
+            raise PrivilegedGatewayError("replay_ledger_oversize")
+        if self.path == DEFAULT_REPLAY_LEDGER_PATH:
+            if st.st_uid != 0 or st.st_gid != 0 or stat.S_IMODE(st.st_mode) & 0o077:
+                raise PrivilegedGatewayError("replay_ledger_ownership_or_mode_mismatch")
+        try:
+            data = self.path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise PrivilegedGatewayError("replay_ledger_unavailable") from exc
+        entries: list[Mapping[str, object]] = []
+        for line in data.splitlines():
+            if not line.strip():
+                continue
+            try:
+                parsed = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise PrivilegedGatewayError("replay_ledger_corrupt") from exc
+            if not isinstance(parsed, Mapping) or set(parsed) - {
+                "kind",
+                "request_hash",
+                "idempotency_key",
+                "action_id",
+                "receipt",
+            }:
+                raise PrivilegedGatewayError("replay_ledger_corrupt")
+            entries.append(parsed)
+            if len(entries) > MAX_LEDGER_ENTRIES:
+                raise PrivilegedGatewayError("replay_ledger_oversize")
+        return entries
+
+    def lookup(self, *, request_hash: str, idempotency_key: str) -> dict[str, object] | None:
+        reservation_found = False
+        terminal: dict[str, object] | None = None
+        for entry in self.entries:
+            if entry.get("idempotency_key") != idempotency_key:
+                continue
+            if entry.get("request_hash") != request_hash:
+                raise PrivilegedGatewayError("idempotency_key_conflict")
+            if entry.get("kind") == "reservation":
+                reservation_found = True
+            elif entry.get("kind") == "terminal":
+                terminal = _validate_cached_receipt(entry.get("receipt"), request_hash)
+            else:
+                raise PrivilegedGatewayError("replay_ledger_corrupt")
+        if terminal is not None:
+            return terminal
+        if reservation_found:
+            raise PrivilegedGatewayError("prior_execution_state_uncertain")
+        return None
+
+    def append(self, entry: Mapping[str, object]) -> None:
+        encoded = canonical_json_bytes(entry) + b"\n"
+        if len(encoded) > MAX_RECEIPT_BYTES:
+            raise PrivilegedGatewayError("replay_ledger_entry_oversize")
+        try:
+            current_size = self.path.stat().st_size if self.path.exists() else 0
+            if current_size + len(encoded) > MAX_LEDGER_BYTES:
+                raise PrivilegedGatewayError("replay_ledger_oversize")
+            flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+            if hasattr(os, "O_CLOEXEC"):
+                flags |= os.O_CLOEXEC
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            fd = os.open(self.path, flags, 0o600)
+            try:
+                os.fchmod(fd, 0o600)
+                st = os.fstat(fd)
+                if self.path == DEFAULT_REPLAY_LEDGER_PATH and (st.st_uid != 0 or st.st_gid != 0):
+                    raise PrivilegedGatewayError("replay_ledger_ownership_mismatch")
+                os.write(fd, encoded)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        except PrivilegedGatewayError:
+            raise
+        except OSError as exc:
+            raise PrivilegedGatewayError("replay_ledger_unavailable") from exc
+        self.entries.append(dict(entry))
 
 
 def execute_gateway_request(
@@ -755,6 +785,9 @@ def execute_gateway_request(
     checkout_config_path: Path = DEFAULT_CHECKOUT_CONFIG_PATH,
     runner: Callable[[Mapping[str, object], GatewayAction], tuple[int, str]] | None = None,
 ) -> dict[str, object]:
+    mutation_started = False
+    mutation_performed = False
+    executor_receipt: Mapping[str, object] | None = None
     try:
         current = now or _utc_now()
         action = validate_gateway_request(
@@ -763,6 +796,7 @@ def execute_gateway_request(
             registry_path=registry_path,
             capability_registry_path=capability_registry_path,
             checkout_config_path=checkout_config_path,
+            validate_time=replay_ledger_path is None,
         )
         request_hash = canonical_request_hash(request)
         if seen_request_hashes is not None:
@@ -770,27 +804,101 @@ def execute_gateway_request(
                 raise PrivilegedGatewayError("request_replay")
             seen_request_hashes.add(request_hash)
         if replay_ledger_path is not None:
-            _reserve_ledger_entry(
-                path=replay_ledger_path,
-                request=request,
-                request_hash=request_hash,
-                now=current,
-            )
-        code, report = (runner or _run_registered_action)(request, action)
-        executor_receipt = _parse_executor_receipt(report)
-        if code != 0 or executor_receipt is None:
-            return _public_receipt("NEEDS_OPERATOR", request, "action_executor_failed", executor_receipt=None)
-        status = "DONE" if executor_receipt.get("status") == "DONE" else "NEEDS_OPERATOR"
-        return _public_receipt(
-            status,
+            with _Ledger(replay_ledger_path) as ledger:
+                cached = ledger.lookup(
+                    request_hash=request_hash,
+                    idempotency_key=str(request["idempotency_key"]),
+                )
+                if cached is not None:
+                    return cached
+                issued = _parse_utc(request["issued_at"], "issued_at")
+                expires = _parse_utc(request["expires_at"], "expires_at")
+                if issued > current or expires < current:
+                    raise PrivilegedGatewayError("request_expired_or_not_yet_valid")
+                ledger.append(
+                    {
+                        "kind": "reservation",
+                        "request_hash": request_hash,
+                        "idempotency_key": str(request["idempotency_key"]),
+                        "action_id": str(request["action_id"]),
+                    }
+                )
+                receipt = _execute_reserved_request(
+                    request,
+                    action,
+                    runner,
+                    mutation_started=True,
+                    mutation_performed=True,
+                )
+                ledger.append(
+                    {
+                        "kind": "terminal",
+                        "request_hash": request_hash,
+                        "idempotency_key": str(request["idempotency_key"]),
+                        "action_id": str(request["action_id"]),
+                        "receipt": receipt,
+                    }
+                )
+                return receipt
+        mutation_started = True
+        mutation_performed = True
+        return _execute_reserved_request(
             request,
-            str(executor_receipt.get("reason") or "ACTION_REPORTED_BLOCKED"),
-            executor_receipt=executor_receipt,
+            action,
+            runner,
+            mutation_started=mutation_started,
+            mutation_performed=mutation_performed,
         )
     except PrivilegedGatewayError as exc:
-        return _public_receipt("NEEDS_OPERATOR", request if isinstance(request, Mapping) else None, exc.reason_code)
+        return _public_receipt(
+            "NEEDS_OPERATOR",
+            request if isinstance(request, Mapping) else None,
+            exc.reason_code,
+            mutation_started=mutation_started,
+            mutation_performed=mutation_performed,
+            executor_receipt=executor_receipt,
+        )
     except Exception:
-        return _public_receipt("NEEDS_OPERATOR", request if isinstance(request, Mapping) else None, "gateway_unexpected_failure")
+        return _public_receipt(
+            "NEEDS_OPERATOR",
+            request if isinstance(request, Mapping) else None,
+            "gateway_unexpected_failure",
+            mutation_started=mutation_started,
+            mutation_performed=mutation_performed,
+            executor_receipt=executor_receipt,
+        )
+
+
+def _execute_reserved_request(
+    request: Mapping[str, object],
+    action: GatewayAction,
+    runner: Callable[[Mapping[str, object], GatewayAction], tuple[int, str]] | None,
+    *,
+    mutation_started: bool,
+    mutation_performed: bool,
+) -> dict[str, object]:
+    try:
+        code, report = (runner or _run_registered_action)(request, action)
+        executor_receipt = _parse_executor_receipt(report)
+    except Exception:
+        code, executor_receipt = 1, None
+    if code != 0 or executor_receipt is None:
+        return _public_receipt(
+            "NEEDS_OPERATOR",
+            request,
+            "action_executor_failed",
+            mutation_started=mutation_started,
+            mutation_performed=mutation_performed,
+        )
+    status = "DONE" if executor_receipt.get("status") == "DONE" else "NEEDS_OPERATOR"
+    return _public_receipt(
+        status,
+        request,
+        str(executor_receipt.get("reason") or "ACTION_REPORTED_BLOCKED"),
+        mutation_started=mutation_started,
+        mutation_performed=mutation_performed,
+        executor_receipt=executor_receipt,
+    )
 
 
 def _run_registered_action(
@@ -799,15 +907,6 @@ def _run_registered_action(
 ) -> tuple[int, str]:
     if action.action_id != HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID:
         raise PrivilegedGatewayError("action_handler_missing")
-    try:
-        from core.home_edge.esp_lab_stage1_signer_install import (
-            execute_home_edge_esp_lab_stage1_signer_install,
-        )
-    except ModuleNotFoundError:
-        from core.runner_repository_maintenance_executor import (
-            execute_home_edge_esp_lab_stage1_signer_install,
-        )
-
     return execute_home_edge_esp_lab_stage1_signer_install(
         expected_main_sha=str(request["expected_main_sha"]),
         registered_clean_main_sha=str(request["registered_clean_main_sha"]),

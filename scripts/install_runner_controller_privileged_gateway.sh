@@ -380,32 +380,8 @@ install_git_file 100644 0444 "schemas/runner_controller_privileged_request.schem
 install_git_file 100644 0444 "schemas/runner_controller_privileged_receipt.schema.json" "$INSTALL_ROOT/schemas/runner_controller_privileged_receipt.schema.json"
 install_git_file 100644 0444 "docs/RUNNER_CONTROLLER_PRIVILEGED_GATEWAY.md" "$INSTALL_ROOT/docs/RUNNER_CONTROLLER_PRIVILEGED_GATEWAY.md"
 
-if [[ -z "$DESTDIR" || "$HARDENED_SYNTHETIC" == "1" ]]; then
-  install_git_file 100644 0444 "core/runner_controller_privileged_gateway_hardening.py" "$INSTALL_ROOT/core/runner_controller_privileged_gateway_hardening.py"
-  install_git_file 100644 0444 "CAPABILITY_REGISTRY.yaml" "$INSTALL_ROOT/config/CAPABILITY_REGISTRY.yaml"
-else
-  write_file 0444 "$INSTALL_ROOT/config/CAPABILITY_REGISTRY.yaml" <<'EOF'
-version: "1.0.0"
-capabilities:
-  runner_controller_privileged_gateway:
-    status: available
-    module: core/runner_controller_privileged_gateway.py
-    live_runtime_execution: true
-    protected: true
-    requires:
-      - core/runner_controller_privileged_gateway.py
-      - core/home_edge/esp_lab_stage1_signer_install.py
-      - scripts/runner_controller_privileged_gateway.py
-      - scripts/install_runner_controller_privileged_gateway.sh
-      - RUNNER_PRIVILEGED_ACTIONS.yaml
-      - schemas/runner_controller_privileged_request.schema.json
-      - schemas/runner_controller_privileged_receipt.schema.json
-      - docs/RUNNER_CONTROLLER_PRIVILEGED_GATEWAY.md
-    tested: true
-    added: "2026-08-25"
-    description: Legacy synthetic-only fixture for pre-hardening compatibility tests.
-EOF
-fi
+install_git_file 100644 0444 "core/runner_controller_privileged_gateway_hardening.py" "$INSTALL_ROOT/core/runner_controller_privileged_gateway_hardening.py"
+install_git_file 100644 0444 "CAPABILITY_REGISTRY.yaml" "$INSTALL_ROOT/config/CAPABILITY_REGISTRY.yaml"
 
 write_file 0444 "$INSTALL_ROOT/config/checkout.json" <<EOF
 {"schema":"skeleton.runner_controller_checkout_config.v1","repository":"alanua/Skeleton","checkout_path":"$CANONICAL_LIVE_REPO_ROOT"}

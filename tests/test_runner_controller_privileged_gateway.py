@@ -60,6 +60,8 @@ RECEIPT_SCHEMA = {
         "repository",
         "target",
         "request_hash",
+        "mutation_started",
+        "mutation_performed",
         "private_evidence_exposed",
         "stderr_exposed",
         "env_exposed",
@@ -81,6 +83,8 @@ RECEIPT_SCHEMA = {
         "protected_copy_verified": {"type": "boolean"},
         "installed_artifacts_verified": {"type": "boolean"},
         "activation_executed": {"type": "boolean"},
+        "mutation_started": {"type": "boolean"},
+        "mutation_performed": {"type": "boolean"},
         "private_evidence_exposed": {"const": False},
         "stderr_exposed": {"const": False},
         "env_exposed": {"const": False},
@@ -202,8 +206,10 @@ def _make_synthetic_repo(tmp_path: Path) -> tuple[Path, Path, str]:
     _write(repo / "scripts/install_runner_controller_privileged_gateway.sh", (ROOT / "scripts/install_runner_controller_privileged_gateway.sh").read_text(encoding="utf-8"), 0o755)
     _write(repo / "scripts/runner_controller_privileged_gateway.py", (ROOT / "scripts/runner_controller_privileged_gateway.py").read_text(encoding="utf-8"), 0o755)
     _write(repo / "core/runner_controller_privileged_gateway.py", (ROOT / "core/runner_controller_privileged_gateway.py").read_text(encoding="utf-8"))
+    _write(repo / "core/runner_controller_privileged_gateway_hardening.py", (ROOT / "core/runner_controller_privileged_gateway_hardening.py").read_text(encoding="utf-8"))
     _write(repo / "core/home_edge/esp_lab_stage1_signer_install.py", _signer_module())
     _write(repo / "RUNNER_PRIVILEGED_ACTIONS.yaml", _action_registry())
+    _write(repo / "CAPABILITY_REGISTRY.yaml", (ROOT / "CAPABILITY_REGISTRY.yaml").read_text(encoding="utf-8"))
     _write(repo / "schemas/runner_controller_privileged_request.schema.json", json.dumps(REQUEST_SCHEMA, indent=2, sort_keys=True))
     _write(repo / "schemas/runner_controller_privileged_receipt.schema.json", json.dumps(RECEIPT_SCHEMA, indent=2, sort_keys=True))
     _write(repo / "docs/RUNNER_CONTROLLER_PRIVILEGED_GATEWAY.md", (ROOT / "docs/RUNNER_CONTROLLER_PRIVILEGED_GATEWAY.md").read_text(encoding="utf-8"))
@@ -267,6 +273,42 @@ def test_request_and_receipt_schemas_are_exact_and_gateway_outputs_validate() ->
     Draft202012Validator(RECEIPT_SCHEMA).validate(receipt)
 
 
+def test_missing_action_or_capability_metadata_blocks_before_runner(tmp_path: Path) -> None:
+    calls = 0
+
+    def runner(_request: object, _action: object) -> tuple[int, str]:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("runner must not be reached")
+
+    missing_action = gateway.execute_gateway_request(
+        _request(),
+        now=NOW,
+        registry_path=tmp_path / "missing-actions.yaml",
+        runner=runner,
+    )
+    assert missing_action["reason"] == "YAML_TRUST_ANCHOR_UNAVAILABLE"
+    assert missing_action["mutation_started"] is False
+    assert missing_action["mutation_performed"] is False
+
+    missing_capability = gateway.execute_gateway_request(
+        _request(),
+        now=NOW,
+        capability_registry_path=tmp_path / "missing-capabilities.yaml",
+        runner=runner,
+    )
+    assert missing_capability["reason"] == "CAPABILITY_REGISTRY_UNAVAILABLE"
+    assert missing_capability["mutation_started"] is False
+    assert missing_capability["mutation_performed"] is False
+    assert calls == 0
+
+
+def test_production_gateway_has_no_repository_maintenance_fallback() -> None:
+    source = (ROOT / "core/runner_controller_privileged_gateway.py").read_text(encoding="utf-8")
+    assert "core.runner_repository_maintenance_executor" not in source
+    assert "_embedded_action_registry" not in source
+
+
 @pytest.mark.parametrize(
     ("override", "reason"),
     (
@@ -311,6 +353,108 @@ def test_replay_blocks_same_canonical_request_before_runner() -> None:
     assert first["reason"] == "SYNTHETIC"
     assert second["reason"] == "REQUEST_REPLAY"
     assert calls == 1
+
+
+def test_replay_ledger_returns_byte_equivalent_terminal_receipt_without_second_action(tmp_path: Path) -> None:
+    calls = 0
+
+    def runner(_request: object, _action: object) -> tuple[int, str]:
+        nonlocal calls
+        calls += 1
+        return 0, maintenance._protected_result(
+            "DONE",
+            maintenance._protected_receipt(
+                "DONE",
+                "SIGNER_INSTALLATION_VERIFIED",
+                expected_main_sha=SHA,
+                installer_sha256="a" * 64,
+                artifacts_ok=True,
+            ),
+        )
+
+    ledger = tmp_path / "ledger.jsonl"
+    first = gateway.execute_gateway_request(_request(), now=NOW, replay_ledger_path=ledger, runner=runner)
+    second = gateway.execute_gateway_request(
+        _request(),
+        now=NOW + timedelta(days=1),
+        replay_ledger_path=ledger,
+        runner=runner,
+    )
+    assert json.dumps(first, sort_keys=True).encode("utf-8") == json.dumps(second, sort_keys=True).encode("utf-8")
+    assert first["status"] == "DONE"
+    assert first["mutation_started"] is True
+    assert first["mutation_performed"] is True
+    assert first["external_side_effects_executed"] is True
+    assert calls == 1
+
+
+def test_replay_ledger_conflict_and_reserved_without_terminal_block_before_action(tmp_path: Path) -> None:
+    calls = 0
+
+    def runner(_request: object, _action: object) -> tuple[int, str]:
+        nonlocal calls
+        calls += 1
+        return 0, maintenance._protected_result(
+            "DONE",
+            maintenance._protected_receipt("DONE", "SIGNER_INSTALLATION_VERIFIED", artifacts_ok=True),
+        )
+
+    ledger = tmp_path / "ledger.jsonl"
+    first = gateway.execute_gateway_request(_request(), now=NOW, replay_ledger_path=ledger, runner=runner)
+    assert first["status"] == "DONE"
+    conflict = gateway.execute_gateway_request(
+        _request(request_id="req-different"),
+        now=NOW,
+        replay_ledger_path=ledger,
+        runner=runner,
+    )
+    assert conflict["reason"] == "IDEMPOTENCY_KEY_CONFLICT"
+    assert conflict["mutation_started"] is False
+    assert conflict["mutation_performed"] is False
+    assert calls == 1
+
+    reserved = _request(idempotency_key="idem-reserved")
+    (tmp_path / "reserved.jsonl").write_text(
+        json.dumps(
+            {
+                "kind": "reservation",
+                "request_hash": gateway.canonical_request_hash(reserved),
+                "idempotency_key": reserved["idempotency_key"],
+                "action_id": reserved["action_id"],
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    uncertain = gateway.execute_gateway_request(
+        reserved,
+        now=NOW,
+        replay_ledger_path=tmp_path / "reserved.jsonl",
+        runner=runner,
+    )
+    assert uncertain["reason"] == "PRIOR_EXECUTION_STATE_UNCERTAIN"
+    assert uncertain["mutation_started"] is False
+    assert uncertain["mutation_performed"] is False
+    assert calls == 1
+
+
+def test_failed_or_partial_action_preserves_conservative_side_effect_truth(tmp_path: Path) -> None:
+    receipt = gateway.execute_gateway_request(
+        _request(),
+        now=NOW,
+        replay_ledger_path=tmp_path / "ledger.jsonl",
+        runner=lambda _request, _action: (1, "private stderr must not escape"),
+    )
+    assert receipt["status"] == "NEEDS_OPERATOR"
+    assert receipt["reason"] == "ACTION_EXECUTOR_FAILED"
+    assert receipt["mutation_started"] is True
+    assert receipt["mutation_performed"] is True
+    assert receipt["external_side_effects_executed"] is True
+    assert "private stderr" not in json.dumps(receipt, sort_keys=True)
+    assert receipt["stderr_exposed"] is False
+    assert receipt["env_exposed"] is False
+    assert receipt["private_paths_exposed"] is False
 
 
 def test_local_sudo_and_ssh_deliver_identical_bytes_and_no_extra_gateway_argv() -> None:
@@ -499,6 +643,7 @@ print(json.dumps(receipt, sort_keys=True))
         "core/home_edge/__init__.py",
         "core/home_edge/esp_lab_stage1_signer_install.py",
         "core/runner_controller_privileged_gateway.py",
+        "core/runner_controller_privileged_gateway_hardening.py",
     }
     imported: set[str] = set()
     for relative in installed:
