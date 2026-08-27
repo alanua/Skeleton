@@ -1188,6 +1188,10 @@ class CodegenExistingPrWorktreeRequest:
     expected_head_branch: str | None = None
 
 
+POST_PUSH_PR_HEAD_PROPAGATION_MAX_ATTEMPTS = 4
+POST_PUSH_PR_HEAD_PROPAGATION_BACKOFF_SECONDS = 1.0
+
+
 @dataclass(frozen=True)
 class PreflightPrRefreshRequest:
     pr_number: int
@@ -5215,6 +5219,8 @@ def _codegen_existing_pr_publish_preflight(
         )
     except RuntimeError:
         return None, None, "pr_metadata_unavailable"
+    if pr_state.get("number") != request.pr_number:
+        return None, pr_state, "pr_number_mismatch"
     if pr_state.get("state") != "OPEN":
         return None, pr_state, "pr_not_open"
     head_sha = str(pr_state.get("headRefOid") or "").lower()
@@ -5229,6 +5235,35 @@ def _codegen_existing_pr_publish_preflight(
     if not _safe_target_base_branch_name(head_branch):
         return None, pr_state, "pr_head_branch_unsafe"
     return head_branch, pr_state, None
+
+
+def _codegen_existing_pr_publish_post_push_preflight(
+    request: CodegenExistingPrWorktreeRequest,
+    *,
+    expected_head_branch: str,
+    pushed_head_sha: str,
+) -> tuple[str | None, dict[str, Any] | None, str | None, int]:
+    post_push_request = CodegenExistingPrWorktreeRequest(
+        pr_number=request.pr_number,
+        expected_head_sha=pushed_head_sha,
+        expected_head_branch=expected_head_branch,
+    )
+    for attempt in range(1, POST_PUSH_PR_HEAD_PROPAGATION_MAX_ATTEMPTS + 1):
+        head_branch, pr_state, reason = _codegen_existing_pr_publish_preflight(
+            post_push_request
+        )
+        if reason is None and head_branch == expected_head_branch:
+            return head_branch, pr_state, None, attempt
+        if reason != "pr_head_sha_mismatch":
+            return head_branch, pr_state, reason or "pr_head_branch_mismatch", attempt
+        if attempt < POST_PUSH_PR_HEAD_PROPAGATION_MAX_ATTEMPTS:
+            time.sleep(POST_PUSH_PR_HEAD_PROPAGATION_BACKOFF_SECONDS)
+    return (
+        None,
+        pr_state,
+        "pr_head_sha_mismatch",
+        POST_PUSH_PR_HEAD_PROPAGATION_MAX_ATTEMPTS,
+    )
 
 
 def finalize_existing_pr_success(
@@ -5326,12 +5361,11 @@ def finalize_existing_pr_success(
         refreshed_head_branch,
         post_state,
         post_reason,
-    ) = _codegen_existing_pr_publish_preflight(
-        CodegenExistingPrWorktreeRequest(
-            pr_number=request.pr_number,
-            expected_head_sha=commit_sha,
-            expected_head_branch=head_branch,
-        )
+        post_push_attempts,
+    ) = _codegen_existing_pr_publish_post_push_preflight(
+        request,
+        expected_head_branch=head_branch,
+        pushed_head_sha=commit_sha,
     )
     if post_reason is not None or refreshed_head_branch != head_branch:
         raise RuntimeError(
@@ -5356,6 +5390,7 @@ def finalize_existing_pr_success(
         f"existing_pr_url={pr_url}\n"
         f"existing_pr={request.pr_number}\n"
         f"existing_pr_head_branch={head_branch}\n"
+        f"post_push_pr_metadata_attempts={post_push_attempts}\n"
         f"replacement_pr_created=false"
     )
 
@@ -14155,6 +14190,33 @@ def _existing_pr_publish_post_push_block_reason(
     return None
 
 
+def _existing_pr_publish_post_push_state_with_exact_head(
+    request: IssueWorktreeExistingPrPublishRequest,
+    worktree_path: Path,
+    pushed_head_sha: str,
+) -> tuple[dict[str, Any] | None, str | None, int]:
+    pr_state: dict[str, Any] | None = None
+    for attempt in range(1, POST_PUSH_PR_HEAD_PROPAGATION_MAX_ATTEMPTS + 1):
+        try:
+            pr_state = _existing_pr_publish_pr_state(request, worktree_path)
+        except (RuntimeError, json.JSONDecodeError):
+            return None, "post_push_read_pr_metadata_failed", attempt
+        reason = _existing_pr_publish_post_push_block_reason(
+            request, pr_state, pushed_head_sha
+        )
+        if reason is None:
+            return pr_state, None, attempt
+        if reason != "post_push_pr_head_sha_mismatch":
+            return pr_state, reason, attempt
+        if attempt < POST_PUSH_PR_HEAD_PROPAGATION_MAX_ATTEMPTS:
+            time.sleep(POST_PUSH_PR_HEAD_PROPAGATION_BACKOFF_SECONDS)
+    return (
+        pr_state,
+        "post_push_pr_head_sha_mismatch",
+        POST_PUSH_PR_HEAD_PROPAGATION_MAX_ATTEMPTS,
+    )
+
+
 def _registered_worktree_overlay_metadata(
     body: str,
 ) -> tuple[RegisteredWorktreeOverlayRequest | None, str | None]:
@@ -15273,22 +15335,23 @@ def publish_issue_worktree_to_existing_pr(body: str) -> str:
             "BLOCKED", task_id, [*status_lines, "reason=push_failed"], "not_met"
         )
 
-    try:
-        post_push_pr_state = _existing_pr_publish_pr_state(request, worktree_path)
-    except (RuntimeError, json.JSONDecodeError):
+    post_push_pr_state, post_reason, post_push_attempts = (
+        _existing_pr_publish_post_push_state_with_exact_head(
+            request, worktree_path, pushed_head_sha
+        )
+    )
+    if post_reason == "post_push_read_pr_metadata_failed":
         return _maintenance_report(
             "BLOCKED",
             task_id,
             [*status_lines, "step=post_push_read_pr_metadata status=failed"],
             "not_met",
         )
-    post_reason = _existing_pr_publish_post_push_block_reason(
-        request, post_push_pr_state, pushed_head_sha
-    )
     if post_reason is not None:
         return _maintenance_report(
             "BLOCKED", task_id, [*status_lines, f"reason={post_reason}"], "not_met"
         )
+    assert post_push_pr_state is not None
     post_push_pr_files = _existing_pr_publish_file_paths(post_push_pr_state)
     if not pre_push_pr_files <= post_push_pr_files:
         return _maintenance_report(
@@ -15309,6 +15372,7 @@ def publish_issue_worktree_to_existing_pr(body: str) -> str:
         (
             "step=push_expected_pr_branch status=done",
             "step=post_push_read_pr_metadata status=done",
+            f"post_push_pr_metadata_attempts={post_push_attempts}",
             f"post_push_pr_changed_files_count={len(post_push_pr_files)}",
             f"new_pr_changed_files_count={len(newly_introduced_files)}",
         )
