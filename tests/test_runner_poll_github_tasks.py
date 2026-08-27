@@ -2531,6 +2531,13 @@ def test_update_existing_pr_process_publishes_same_pr_and_queues_validation(
         baseRefOid="c" * 40,
         url=pr_url,
     )
+    stale_post_pr_state = _pr_validation_state(
+        number=2749,
+        headRefName="runner/issue-2749",
+        headRefOid=HEAD_SHA,
+        baseRefOid="c" * 40,
+        url=pr_url,
+    )
     post_pr_state = _pr_validation_state(
         number=2749,
         headRefName="runner/issue-2749",
@@ -2602,9 +2609,12 @@ def test_update_existing_pr_process_publishes_same_pr_and_queues_validation(
         "_get_pr_branch_validation_state",
         side_effect=[
             (pre_pr_state, "gh"),
+            (stale_post_pr_state, "gh"),
             (post_pr_state, "gh"),
             (post_pr_state, "gh"),
         ],
+    ), mock.patch.object(
+        runner.time, "sleep"
     ), mock.patch.object(
         runner, "run_command", side_effect=run
     ) as run_command, mock.patch.object(
@@ -2641,9 +2651,203 @@ def test_update_existing_pr_process_publishes_same_pr_and_queues_validation(
     report = post.call_args.args[1]
     assert "Existing PR: https://github.com/alanua/Skeleton/pull/2749" in report
     assert "replacement_pr_created=false" in report
+    assert "post_push_pr_metadata_attempts=2" in report
     assert "validation_continuation=created" in report
     assert "validation_pr=2749" in report
     assert f"validation_head_sha={post_head}" in report
+
+
+def _finalize_existing_pr_success_with_post_push_states(
+    *,
+    tmp_path: Path,
+    post_states: list[dict[str, object]],
+    pushed_head_sha: str = "d" * 40,
+    sleep: mock.Mock | None = None,
+) -> str:
+    worktree = tmp_path / "issue-2757"
+    worktree.mkdir()
+    pre_state = _pr_validation_state(
+        number=2749,
+        headRefName="runner/issue-2749",
+        headRefOid=HEAD_SHA,
+        baseRefOid="c" * 40,
+        url="https://github.com/alanua/Skeleton/pull/2749",
+    )
+    states = [(pre_state, "gh"), *[(state, "gh") for state in post_states]]
+
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        del cwd
+        if command == [
+            "git",
+            "add",
+            "--",
+            "scripts/runner_poll_github_tasks.py",
+        ]:
+            return 0, ""
+        if command == ["git", "diff", "--cached", "--check"]:
+            return 0, ""
+        if command == [
+            "git",
+            "commit",
+            "-m",
+            "runner: issue #2757 update existing PR",
+        ]:
+            return 0, ""
+        if command == ["git", "rev-parse", "HEAD"]:
+            return 0, f"{pushed_head_sha}\n"
+        if command == [
+            "git",
+            "push",
+            "origin",
+            f"--force-with-lease=runner/issue-2749:{HEAD_SHA}",
+            "HEAD:refs/heads/runner/issue-2749",
+        ]:
+            return 0, ""
+        return 2, f"unexpected command: {command!r}"
+
+    patches = [
+        mock.patch.object(
+            runner,
+            "changed_files",
+            return_value=["scripts/runner_poll_github_tasks.py"],
+        ),
+        mock.patch.object(runner, "cleanup_runtime_artifacts"),
+        mock.patch.object(
+            runner,
+            "_run_finalization_validation_command",
+            side_effect=[(0, ""), (0, "700 passed\n")],
+        ),
+        mock.patch.object(
+            runner, "_get_pr_branch_validation_state", side_effect=states
+        ),
+        mock.patch.object(runner, "run_command", side_effect=run),
+    ]
+    if sleep is not None:
+        patches.append(mock.patch.object(runner.time, "sleep", sleep))
+
+    with patches[0], patches[1], patches[2], patches[3], patches[4]:
+        if sleep is not None:
+            with patches[5]:
+                return runner.finalize_existing_pr_success(
+                    {"number": 2757},
+                    str(worktree),
+                    "codex output",
+                    _codegen_update_existing_pr_issue_body(),
+                    runner.CodegenExistingPrWorktreeRequest(
+                        pr_number=2749,
+                        expected_head_sha=HEAD_SHA,
+                        expected_head_branch=None,
+                    ),
+                )
+        return runner.finalize_existing_pr_success(
+            {"number": 2757},
+            str(worktree),
+            "codex output",
+            _codegen_update_existing_pr_issue_body(),
+            runner.CodegenExistingPrWorktreeRequest(
+                pr_number=2749,
+                expected_head_sha=HEAD_SHA,
+                expected_head_branch=None,
+            ),
+        )
+
+
+def test_update_existing_pr_post_push_exact_head_retries_stale_then_succeeds(
+    tmp_path: Path,
+) -> None:
+    pushed_head = "d" * 40
+    stale_state = _pr_validation_state(
+        number=2749,
+        headRefName="runner/issue-2749",
+        headRefOid=HEAD_SHA,
+        baseRefOid="c" * 40,
+        url="https://github.com/alanua/Skeleton/pull/2749",
+    )
+    fresh_state = _pr_validation_state(
+        number=2749,
+        headRefName="runner/issue-2749",
+        headRefOid=pushed_head,
+        baseRefOid="c" * 40,
+        url="https://github.com/alanua/Skeleton/pull/2749",
+    )
+    sleep = mock.Mock()
+
+    report = _finalize_existing_pr_success_with_post_push_states(
+        tmp_path=tmp_path,
+        post_states=[stale_state, fresh_state],
+        pushed_head_sha=pushed_head,
+        sleep=sleep,
+    )
+
+    assert "DONE: Codex completed successfully and updated the existing PR." in report
+    assert f"Commit: {pushed_head}" in report
+    assert "post_push_pr_metadata_attempts=2" in report
+    sleep.assert_called_once_with(runner.POST_PUSH_PR_HEAD_PROPAGATION_BACKOFF_SECONDS)
+
+
+def test_update_existing_pr_post_push_exact_head_blocks_after_retry_exhaustion(
+    tmp_path: Path,
+) -> None:
+    stale_state = _pr_validation_state(
+        number=2749,
+        headRefName="runner/issue-2749",
+        headRefOid=HEAD_SHA,
+        baseRefOid="c" * 40,
+        url="https://github.com/alanua/Skeleton/pull/2749",
+    )
+    sleep = mock.Mock()
+
+    with pytest.raises(RuntimeError, match="pr_head_sha_mismatch"):
+        _finalize_existing_pr_success_with_post_push_states(
+            tmp_path=tmp_path,
+            post_states=[
+                stale_state
+                for _ in range(runner.POST_PUSH_PR_HEAD_PROPAGATION_MAX_ATTEMPTS)
+            ],
+            sleep=sleep,
+        )
+
+    assert sleep.call_count == runner.POST_PUSH_PR_HEAD_PROPAGATION_MAX_ATTEMPTS - 1
+
+
+@pytest.mark.parametrize(
+    ("post_state_updates", "reason"),
+    (
+        (
+            {"number": 999},
+            "pr_number_mismatch",
+        ),
+        (
+            {"state": "CLOSED"},
+            "pr_not_open",
+        ),
+        (
+            {"headRefName": "runner/issue-999"},
+            "pr_head_branch_mismatch",
+        ),
+    ),
+)
+def test_update_existing_pr_post_push_wrong_metadata_fails_closed_without_retry(
+    tmp_path: Path, post_state_updates: dict[str, object], reason: str
+) -> None:
+    post_state = _pr_validation_state(
+        number=2749,
+        headRefName="runner/issue-2749",
+        headRefOid="d" * 40,
+        baseRefOid="c" * 40,
+        url="https://github.com/alanua/Skeleton/pull/2749",
+    )
+    post_state.update(post_state_updates)
+    sleep = mock.Mock()
+
+    with pytest.raises(RuntimeError, match=reason):
+        _finalize_existing_pr_success_with_post_push_states(
+            tmp_path=tmp_path,
+            post_states=[post_state],
+            sleep=sleep,
+        )
+
+    sleep.assert_not_called()
 
 
 def test_update_existing_pr_head_mismatch_blocks_before_publish_or_new_pr(
