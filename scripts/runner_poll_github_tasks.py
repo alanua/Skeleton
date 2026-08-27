@@ -1362,11 +1362,44 @@ def run_command(
 
 def _validation_command_environment(
     environment: Mapping[str, str] | None = None,
+    *,
+    pytest_temp_root: Path | None = None,
 ) -> dict[str, str]:
     source = os.environ if environment is None else environment
-    return sanitize_codegen_child_environment(
+    filtered = sanitize_codegen_child_environment(
         source,
         authority_environment={},
+    )
+    if pytest_temp_root is not None:
+        temp_root = str(pytest_temp_root)
+        filtered.update(
+            {
+                "TMPDIR": temp_root,
+                "TEMP": temp_root,
+                "TMP": temp_root,
+                "PYTEST_DEBUG_TEMPROOT": temp_root,
+            }
+        )
+    return filtered
+
+
+def _validation_command_uses_pytest(args: list[str]) -> bool:
+    return args[:3] == ["python3", "-m", "pytest"] or (
+        bool(args) and Path(args[0]).name == "pytest"
+    )
+
+
+def _create_validation_pytest_temp_root(cwd: str | Path) -> Path:
+    cwd_path = Path(cwd)
+    if not cwd_path.is_dir():
+        raise FileNotFoundError(
+            f"pytest validation cwd is not an existing directory: {cwd_path}"
+        )
+    return Path(
+        tempfile.mkdtemp(
+            prefix=".runner-validation-pytest-",
+            dir=cwd_path,
+        )
     )
 
 
@@ -1374,13 +1407,18 @@ def _run_validation_profile_command(
     args: list[str],
     cwd: str | Path,
 ) -> tuple[int, str]:
+    pytest_temp_root: Path | None = None
+    if _validation_command_uses_pytest(args):
+        pytest_temp_root = _create_validation_pytest_temp_root(cwd)
     token = _RUN_COMMAND_ENV_OVERRIDE.set(
-        _validation_command_environment()
+        _validation_command_environment(pytest_temp_root=pytest_temp_root)
     )
     try:
         return run_command(args, cwd=cwd)
     finally:
         _RUN_COMMAND_ENV_OVERRIDE.reset(token)
+        if pytest_temp_root is not None:
+            shutil.rmtree(pytest_temp_root)
 
 
 def _run_finalization_validation_command(
