@@ -1,0 +1,225 @@
+name: Runner Controller Host Self-Audit Bridge
+
+on:
+  workflow_dispatch:
+    inputs:
+      pull_request_number:
+        description: Pull request number to authorize for host self-audit
+        required: true
+        type: string
+      head_sha:
+        description: Exact current pull request head SHA
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: runner-controller-host-self-audit-bridge-${{ inputs.pull_request_number }}-${{ inputs.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  authorize-current-pr-head:
+    name: Authorize exact current PR head
+    if: github.repository == 'alanua/Skeleton'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      authorized_head_sha: ${{ steps.authorize.outputs.authorized_head_sha }}
+      authorized_pr_number: ${{ steps.authorize.outputs.authorized_pr_number }}
+    steps:
+      - name: Verify exact current PR head and two-file scope
+        id: authorize
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          INPUT_PR_NUMBER: ${{ inputs.pull_request_number }}
+          INPUT_HEAD_SHA: ${{ inputs.head_sha }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          import re
+          import sys
+          import urllib.error
+          import urllib.request
+
+          repository = os.environ["REPOSITORY"]
+          pr_number = os.environ["INPUT_PR_NUMBER"]
+          expected_head_sha = os.environ["INPUT_HEAD_SHA"]
+          token = os.environ["GH_TOKEN"]
+
+          if repository != "alanua/Skeleton":
+              raise SystemExit("unexpected repository")
+          if not re.fullmatch(r"[1-9][0-9]{0,8}", pr_number):
+              raise SystemExit("pull_request_number must be a positive decimal integer")
+          if not re.fullmatch(r"[0-9a-f]{40}", expected_head_sha):
+              raise SystemExit("head_sha must be an exact lowercase 40-character commit SHA")
+
+          allowed_files = {
+              ".github/workflows/runner-controller-host-self-audit-bridge.yml",
+              "tests/test_runner_controller_host_self_audit_bridge_workflow.py",
+          }
+
+          def github_json(path: str) -> object:
+              request = urllib.request.Request(
+                  f"https://api.github.com{path}",
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "Authorization": f"Bearer {token}",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                      "User-Agent": "skeleton-runner-controller-host-self-audit-bridge",
+                  },
+              )
+              try:
+                  with urllib.request.urlopen(request, timeout=20) as response:
+                      return json.loads(response.read().decode("utf-8"))
+              except urllib.error.HTTPError as exc:
+                  raise SystemExit(f"github api request failed: {exc.code}") from exc
+
+          pull = github_json(f"/repos/{repository}/pulls/{pr_number}")
+          if not isinstance(pull, dict):
+              raise SystemExit("github api returned invalid pull request payload")
+          if pull.get("state") != "open":
+              raise SystemExit("pull request must be open")
+          if pull.get("base", {}).get("repo", {}).get("full_name") != repository:
+              raise SystemExit("pull request base repository mismatch")
+          if pull.get("base", {}).get("ref") != "main":
+              raise SystemExit("pull request base branch must be main")
+          if pull.get("head", {}).get("repo", {}).get("full_name") != repository:
+              raise SystemExit("pull request head repository must be alanua/Skeleton")
+
+          current_head_sha = str(pull.get("head", {}).get("sha", ""))
+          if current_head_sha != expected_head_sha:
+              raise SystemExit("input head_sha is not the current pull request head")
+          if not re.fullmatch(r"[0-9a-f]{40}", current_head_sha):
+              raise SystemExit("github current pull request head is not a full lowercase SHA")
+
+          changed_files: set[str] = set()
+          page = 1
+          while True:
+              files = github_json(
+                  f"/repos/{repository}/pulls/{pr_number}/files?per_page=100&page={page}"
+              )
+              if not isinstance(files, list):
+                  raise SystemExit("github api returned invalid pull request files payload")
+              if not files:
+                  break
+              for item in files:
+                  filename = item.get("filename") if isinstance(item, dict) else None
+                  if not isinstance(filename, str):
+                      raise SystemExit("pull request file entry missing filename")
+                  changed_files.add(filename)
+              page += 1
+              if page > 30:
+                  raise SystemExit("pull request file list exceeded deterministic page bound")
+
+          if changed_files != allowed_files:
+              raise SystemExit(
+                  "pull request must contain exactly the host self-audit bridge workflow "
+                  "and its deterministic workflow tests"
+              )
+
+          output_path = os.environ["GITHUB_OUTPUT"]
+          with open(output_path, "a", encoding="utf-8") as output:
+              output.write(f"authorized_head_sha={current_head_sha}\n")
+              output.write(f"authorized_pr_number={pr_number}\n")
+          print(f"authorized_current_pr_head={current_head_sha}")
+          print("authorized_two_file_scope=true")
+          PY
+
+  host-self-audit:
+    name: Strictly read-only runner-controller host self-audit
+    needs: authorize-current-pr-head
+    if: needs.authorize-current-pr-head.outputs.authorized_head_sha == inputs.head_sha
+    runs-on:
+      - self-hosted
+      - Linux
+      - X64
+      - hetzner-agent-runner-1
+    timeout-minutes: 10
+    env:
+      AUTHORIZED_HEAD_SHA: ${{ needs.authorize-current-pr-head.outputs.authorized_head_sha }}
+      AUTHORIZED_PR_NUMBER: ${{ needs.authorize-current-pr-head.outputs.authorized_pr_number }}
+      CANONICAL_REPOSITORY: alanua/Skeleton
+      TARGET_CHECKOUT: /home/agent/agent-dev/repos/Skeleton
+      RUNNER_WORKTREES_ROOT: /home/agent/agent-dev/worktrees/skeleton
+    steps:
+      - name: Run public-safe read-only host self-audit
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          audit_status=BLOCKED
+          repository_verified=false
+          checkout_present=false
+          worktrees_root_present=false
+          git_available=false
+          python_available=false
+          runner_temp_available=false
+          poller_process_count=0
+
+          write_summary() {
+            {
+              echo "audit_status=${audit_status}"
+              echo "authorized_pr_number=${AUTHORIZED_PR_NUMBER}"
+              echo "authorized_head_sha=${AUTHORIZED_HEAD_SHA}"
+              echo "repository_verified=${repository_verified}"
+              echo "checkout_present=${checkout_present}"
+              echo "worktrees_root_present=${worktrees_root_present}"
+              echo "git_available=${git_available}"
+              echo "python_available=${python_available}"
+              echo "runner_temp_available=${runner_temp_available}"
+              echo "poller_process_count=${poller_process_count}"
+              echo "external_side_effects_executed=false"
+              echo "private_evidence_exposed=false"
+            } >> "${GITHUB_STEP_SUMMARY}"
+          }
+          trap write_summary EXIT
+
+          test "${GITHUB_REPOSITORY}" = "${CANONICAL_REPOSITORY}"
+          test "${AUTHORIZED_HEAD_SHA}" = "${{ inputs.head_sha }}"
+          test "${AUTHORIZED_HEAD_SHA}" != "${{ github.event.pull_request.merge_commit_sha }}"
+          [[ "${AUTHORIZED_HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          repository_verified=true
+
+          test -d "${TARGET_CHECKOUT}"
+          test -d "${TARGET_CHECKOUT}/.git"
+          checkout_present=true
+
+          test -d "${RUNNER_WORKTREES_ROOT}"
+          worktrees_root_present=true
+
+          git --version >/dev/null
+          git_available=true
+
+          python3 --version >/dev/null
+          python_available=true
+
+          test -d "${RUNNER_TEMP}"
+          test -w "${RUNNER_TEMP}"
+          runner_temp_available=true
+
+          uname -srm >/dev/null
+          id -u >/dev/null
+          id -g >/dev/null
+          df -Pk "${RUNNER_TEMP}" >/dev/null
+          git -C "${TARGET_CHECKOUT}" rev-parse --is-inside-work-tree >/dev/null
+          git -C "${TARGET_CHECKOUT}" remote get-url origin >/dev/null
+          git -C "${TARGET_CHECKOUT}" rev-parse HEAD >/dev/null
+          git -C "${TARGET_CHECKOUT}" status --short --untracked-files=no >/dev/null
+
+          poller_process_count="$(
+            (pgrep -af '(^|/)runner_poll_github_tasks[.]py([[:space:]]|$)' || true) \
+              | wc -l \
+              | tr -d '[:space:]'
+          )"
+          [[ "${poller_process_count}" =~ ^[0-9]+$ ]]
+
+          audit_status=DONE
