@@ -224,6 +224,7 @@ RUNNER_MODE_ENFORCE = "enforce"
 RUNNER_MODES = frozenset((RUNNER_MODE_OFF, RUNNER_MODE_SHADOW, RUNNER_MODE_ENFORCE))
 UNIVERSAL_RUNNER_ALLOWED_STATUS = "allowed"
 LAST_RUNNER_SHADOW_RECEIPT: dict[str, object] | None = None
+POST_PUSH_PR_HEAD_PROPAGATION_RETRY_DELAYS_SECONDS = (1.0, 2.0, 4.0)
 
 
 def trusted_runner_comment_authors() -> frozenset[str]:
@@ -828,6 +829,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "mpv_status",
         "ports_disabled",
         "ports_enabled",
+        "post_push_pr_metadata_attempts",
         "post_push_pr_metadata_source",
         "pr_number",
         "pr_metadata_source",
@@ -5238,6 +5240,37 @@ def _codegen_existing_pr_post_push_block_reason(
     return None
 
 
+def _post_push_pr_head_sha_is_stale(
+    pr_state: dict[str, Any], stale_head_sha: str
+) -> bool:
+    return str(pr_state.get("headRefOid") or "").lower() == stale_head_sha
+
+
+def _codegen_existing_pr_post_push_pr_state_with_bounded_retry(
+    request: CodegenExistingPrWorktreeRequest,
+    workdir: str | Path,
+    *,
+    pushed_head_sha: str,
+    expected_head_branch: str,
+    stale_head_sha: str,
+) -> tuple[dict[str, Any], str | None, int]:
+    for attempt, delay in enumerate(
+        (*POST_PUSH_PR_HEAD_PROPAGATION_RETRY_DELAYS_SECONDS, None), start=1
+    ):
+        post_state = _codegen_existing_pr_post_push_pr_state(request, workdir)
+        post_reason = _codegen_existing_pr_post_push_block_reason(
+            request, post_state, pushed_head_sha, expected_head_branch
+        )
+        if (
+            post_reason != "post_push_pr_head_sha_mismatch"
+            or not _post_push_pr_head_sha_is_stale(post_state, stale_head_sha)
+            or delay is None
+        ):
+            return post_state, post_reason, attempt
+        time.sleep(delay)
+    raise AssertionError("post-push PR retry loop must return")
+
+
 def finalize_existing_pr_success(
     issue: dict[str, Any],
     workdir: str,
@@ -5335,12 +5368,17 @@ def finalize_existing_pr_success(
         expected_head_branch=head_branch,
     )
     try:
-        post_state = _codegen_existing_pr_post_push_pr_state(post_request, workdir)
+        post_state, post_reason, post_push_pr_metadata_attempts = (
+            _codegen_existing_pr_post_push_pr_state_with_bounded_retry(
+                post_request,
+                workdir,
+                pushed_head_sha=commit_sha,
+                expected_head_branch=head_branch,
+                stale_head_sha=request.expected_head_sha,
+            )
+        )
     except (RuntimeError, json.JSONDecodeError):
         raise RuntimeError("Existing PR update post-push PR metadata unavailable.")
-    post_reason = _codegen_existing_pr_post_push_block_reason(
-        post_request, post_state, commit_sha, head_branch
-    )
     if post_reason is not None:
         raise RuntimeError(
             "Existing PR update post-push verification failed: "
@@ -5364,6 +5402,7 @@ def finalize_existing_pr_success(
         f"existing_pr_url={pr_url}\n"
         f"existing_pr={request.pr_number}\n"
         f"existing_pr_head_branch={head_branch}\n"
+        f"post_push_pr_metadata_attempts={post_push_pr_metadata_attempts}\n"
         f"replacement_pr_created=false"
     )
 
@@ -14163,6 +14202,31 @@ def _existing_pr_publish_post_push_block_reason(
     return None
 
 
+def _existing_pr_publish_post_push_pr_state_with_bounded_retry(
+    request: IssueWorktreeExistingPrPublishRequest,
+    worktree_path: Path,
+    *,
+    pushed_head_sha: str,
+) -> tuple[dict[str, Any], str | None, int]:
+    for attempt, delay in enumerate(
+        (*POST_PUSH_PR_HEAD_PROPAGATION_RETRY_DELAYS_SECONDS, None), start=1
+    ):
+        post_push_pr_state = _existing_pr_publish_pr_state(request, worktree_path)
+        post_reason = _existing_pr_publish_post_push_block_reason(
+            request, post_push_pr_state, pushed_head_sha
+        )
+        if (
+            post_reason != "post_push_pr_head_sha_mismatch"
+            or not _post_push_pr_head_sha_is_stale(
+                post_push_pr_state, request.expected_pr_head_sha
+            )
+            or delay is None
+        ):
+            return post_push_pr_state, post_reason, attempt
+        time.sleep(delay)
+    raise AssertionError("post-push PR retry loop must return")
+
+
 def _registered_worktree_overlay_metadata(
     body: str,
 ) -> tuple[RegisteredWorktreeOverlayRequest | None, str | None]:
@@ -15282,7 +15346,11 @@ def publish_issue_worktree_to_existing_pr(body: str) -> str:
         )
 
     try:
-        post_push_pr_state = _existing_pr_publish_pr_state(request, worktree_path)
+        post_push_pr_state, post_reason, post_push_pr_metadata_attempts = (
+            _existing_pr_publish_post_push_pr_state_with_bounded_retry(
+                request, worktree_path, pushed_head_sha=pushed_head_sha
+            )
+        )
     except (RuntimeError, json.JSONDecodeError):
         return _maintenance_report(
             "BLOCKED",
@@ -15290,9 +15358,6 @@ def publish_issue_worktree_to_existing_pr(body: str) -> str:
             [*status_lines, "step=post_push_read_pr_metadata status=failed"],
             "not_met",
         )
-    post_reason = _existing_pr_publish_post_push_block_reason(
-        request, post_push_pr_state, pushed_head_sha
-    )
     if post_reason is not None:
         return _maintenance_report(
             "BLOCKED", task_id, [*status_lines, f"reason={post_reason}"], "not_met"
@@ -15317,6 +15382,7 @@ def publish_issue_worktree_to_existing_pr(body: str) -> str:
         (
             "step=push_expected_pr_branch status=done",
             "step=post_push_read_pr_metadata status=done",
+            f"post_push_pr_metadata_attempts={post_push_pr_metadata_attempts}",
             f"post_push_pr_changed_files_count={len(post_push_pr_files)}",
             f"new_pr_changed_files_count={len(newly_introduced_files)}",
         )

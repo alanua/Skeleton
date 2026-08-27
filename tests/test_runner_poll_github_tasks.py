@@ -2908,6 +2908,182 @@ def test_finalize_existing_pr_success_blocks_stale_post_push_head(
             )
 
 
+def test_finalize_existing_pr_success_retries_stale_post_push_head_once(
+    tmp_path: Path,
+) -> None:
+    worktree_path = tmp_path / "issue-2757"
+    post_head = "d" * 40
+    request = runner.CodegenExistingPrWorktreeRequest(
+        pr_number=2749,
+        expected_head_sha=HEAD_SHA,
+    )
+    pre_state = _pr_validation_state(
+        number=2749,
+        headRefName="runner/issue-2749",
+        headRefOid=HEAD_SHA,
+    )
+    stale_post_state = _pr_validation_state(
+        number=2749,
+        headRefName="runner/issue-2749",
+        headRefOid=HEAD_SHA,
+        url="https://github.com/alanua/Skeleton/pull/2749",
+    )
+    fresh_post_state = _pr_validation_state(
+        number=2749,
+        headRefName="runner/issue-2749",
+        headRefOid=post_head,
+        url="https://github.com/alanua/Skeleton/pull/2749",
+    )
+    post_reads = [stale_post_state, fresh_post_state]
+
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        if command == [
+            "gh",
+            "pr",
+            "view",
+            "2749",
+            "--repo",
+            runner.REPO,
+            "--json",
+            "number,state,headRefName,headRefOid,url",
+        ]:
+            return 0, json.dumps(post_reads.pop(0))
+        return _finalize_existing_pr_commands(
+            worktree_path=worktree_path, post_head=post_head
+        )(command, cwd)
+
+    with mock.patch.object(
+        runner,
+        "_get_pr_branch_validation_state",
+        return_value=(pre_state, "gh"),
+    ), mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "time"
+    ) as time_module, mock.patch.object(
+        runner, "run_command", side_effect=run
+    ) as run_command:
+        report = runner.finalize_existing_pr_success(
+            {"number": 2757},
+            str(worktree_path),
+            "codex output",
+            _codegen_update_existing_pr_issue_body(
+                pr_number=2749,
+                allowed_files=(
+                    "scripts/runner_poll_github_tasks.py",
+                    "tests/test_runner_poll_github_tasks.py",
+                ),
+            ),
+            request,
+        )
+
+    pr_view_command = [
+        "gh",
+        "pr",
+        "view",
+        "2749",
+        "--repo",
+        runner.REPO,
+        "--json",
+        "number,state,headRefName,headRefOid,url",
+    ]
+    commands = [call.args[0] for call in run_command.call_args_list]
+    assert commands.count(pr_view_command) == 2
+    time_module.sleep.assert_called_once_with(
+        runner.POST_PUSH_PR_HEAD_PROPAGATION_RETRY_DELAYS_SECONDS[0]
+    )
+    assert "post_push_pr_metadata_attempts=2" in report
+    assert "Existing PR: https://github.com/alanua/Skeleton/pull/2749" in report
+
+
+def test_finalize_existing_pr_success_exhausts_stale_post_push_head_retries(
+    tmp_path: Path,
+) -> None:
+    worktree_path = tmp_path / "issue-2757"
+    post_head = "d" * 40
+    request = runner.CodegenExistingPrWorktreeRequest(
+        pr_number=2749,
+        expected_head_sha=HEAD_SHA,
+    )
+
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        if command == [
+            "gh",
+            "pr",
+            "view",
+            "2749",
+            "--repo",
+            runner.REPO,
+            "--json",
+            "number,state,headRefName,headRefOid,url",
+        ]:
+            return (
+                0,
+                json.dumps(
+                    _pr_validation_state(
+                        number=2749,
+                        headRefName="runner/issue-2749",
+                        headRefOid=HEAD_SHA,
+                        url="https://github.com/alanua/Skeleton/pull/2749",
+                    )
+                ),
+            )
+        return _finalize_existing_pr_commands(
+            worktree_path=worktree_path, post_head=post_head
+        )(command, cwd)
+
+    with mock.patch.object(
+        runner,
+        "_get_pr_branch_validation_state",
+        return_value=(
+            _pr_validation_state(
+                number=2749,
+                headRefName="runner/issue-2749",
+                headRefOid=HEAD_SHA,
+            ),
+            "gh",
+        ),
+    ), mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "time"
+    ) as time_module, mock.patch.object(
+        runner, "run_command", side_effect=run
+    ) as run_command:
+        with pytest.raises(RuntimeError, match="post_push_pr_head_sha_mismatch"):
+            runner.finalize_existing_pr_success(
+                {"number": 2757},
+                str(worktree_path),
+                "codex output",
+                _codegen_update_existing_pr_issue_body(
+                    pr_number=2749,
+                    allowed_files=(
+                        "scripts/runner_poll_github_tasks.py",
+                        "tests/test_runner_poll_github_tasks.py",
+                    ),
+                ),
+                request,
+            )
+
+    pr_view_command = [
+        "gh",
+        "pr",
+        "view",
+        "2749",
+        "--repo",
+        runner.REPO,
+        "--json",
+        "number,state,headRefName,headRefOid,url",
+    ]
+    commands = [call.args[0] for call in run_command.call_args_list]
+    assert commands.count(pr_view_command) == (
+        len(runner.POST_PUSH_PR_HEAD_PROPAGATION_RETRY_DELAYS_SECONDS) + 1
+    )
+    assert [call.args[0] for call in time_module.sleep.call_args_list] == list(
+        runner.POST_PUSH_PR_HEAD_PROPAGATION_RETRY_DELAYS_SECONDS
+    )
+
+
 def test_validation_completion_invokes_replenishment_even_when_blocked() -> None:
     with mock.patch.object(
         runner, "dispatch_runtime_maintenance_task", return_value="BLOCKED: nope"
@@ -11872,6 +12048,101 @@ def test_publish_issue_worktree_to_existing_pr_post_push_verification_blocks(
 
     assert report.startswith("BLOCKED:")
     assert f"reason={reason}" in report
+
+
+def test_publish_issue_worktree_to_existing_pr_retries_stale_post_push_head_once(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path, issue_number=1640)
+    post_head = "b" * 40
+    post_states = [
+        _existing_pr_publish_state(head_sha=HEAD_SHA),
+        _existing_pr_publish_state(
+            head_sha=post_head,
+            files=(
+                "scripts/runner_poll_github_tasks.py",
+                "tests/test_runner_poll_github_tasks.py",
+            ),
+        ),
+    ]
+    base_run = _existing_pr_publish_commands(
+        worktree_path=worktree_path,
+        post_commit_head=post_head,
+        untracked_files=("tests/test_runner_poll_github_tasks.py",),
+        validated_publish_files=(
+            "scripts/runner_poll_github_tasks.py",
+            "tests/test_runner_poll_github_tasks.py",
+        ),
+    )
+    pr_view_count = 0
+
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        nonlocal pr_view_count
+        if command[:4] == ["gh", "pr", "view", "1638"]:
+            pr_view_count += 1
+            if pr_view_count == 1:
+                return 0, json.dumps(_existing_pr_publish_state())
+            return 0, json.dumps(post_states.pop(0))
+        return base_run(command, cwd)
+
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner, "time"
+    ) as time_module, mock.patch.object(
+        runner, "run_command", side_effect=run
+    ):
+        report = runner.publish_issue_worktree_to_existing_pr(
+            _publish_issue_worktree_to_existing_pr_body(
+                allowed_files=(
+                    "scripts/runner_poll_github_tasks.py",
+                    "tests/test_runner_poll_github_tasks.py",
+                )
+            )
+        )
+
+    assert report.startswith("DONE:")
+    assert "post_push_pr_metadata_attempts=2" in report
+    assert f"pushed_head_sha={post_head}" in report
+    time_module.sleep.assert_called_once_with(
+        runner.POST_PUSH_PR_HEAD_PROPAGATION_RETRY_DELAYS_SECONDS[0]
+    )
+
+
+def test_publish_issue_worktree_to_existing_pr_exhausts_stale_post_push_head_retries(
+    tmp_path: Path,
+) -> None:
+    worktree_path = _prepare_issue_publish_worktree(tmp_path, issue_number=1640)
+    post_head = "b" * 40
+    base_run = _existing_pr_publish_commands(
+        worktree_path=worktree_path,
+        post_commit_head=post_head,
+        post_pr_state=_existing_pr_publish_state(head_sha=HEAD_SHA),
+    )
+
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(
+        runner, "time"
+    ) as time_module, mock.patch.object(
+        runner, "run_command", side_effect=base_run
+    ) as run:
+        report = runner.publish_issue_worktree_to_existing_pr(
+            _publish_issue_worktree_to_existing_pr_body()
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    pr_view_commands = [
+        command for command in commands if command[:4] == ["gh", "pr", "view", "1638"]
+    ]
+    assert report.startswith("BLOCKED:")
+    assert "reason=post_push_pr_head_sha_mismatch" in report
+    assert len(pr_view_commands) == (
+        len(runner.POST_PUSH_PR_HEAD_PROPAGATION_RETRY_DELAYS_SECONDS) + 2
+    )
+    assert [call.args[0] for call in time_module.sleep.call_args_list] == list(
+        runner.POST_PUSH_PR_HEAD_PROPAGATION_RETRY_DELAYS_SECONDS
+    )
 
 
 def test_publish_issue_worktree_to_existing_pr_rejects_unapproved_or_extra_metadata() -> None:
