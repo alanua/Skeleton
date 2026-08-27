@@ -11301,7 +11301,7 @@ def _issue_publish_allowed_files(metadata: str) -> tuple[frozenset[str], str | N
         if re.fullmatch(r"\s*(?:Allowed Files|allowed_files):\s*", line):
             allowed_files: list[str] = []
             for item in lines[index + 1 :]:
-                if re.fullmatch(r"\s*[A-Za-z][A-Za-z ]+:\s*.*", item):
+                if re.fullmatch(r"\s*[A-Za-z][A-Za-z0-9 _-]{0,80}:\s*.*", item):
                     break
                 if re.fullmatch(r"\s*```\s*(?:yaml|yml)?\s*", item):
                     break
