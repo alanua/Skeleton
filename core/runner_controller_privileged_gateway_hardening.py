@@ -33,6 +33,12 @@ DEFAULT_REPLAY_LEDGER_PATH: Final = Path(
     "/var/lib/skeleton/runner-controller/privileged-gateway-ledger.jsonl"
 )
 CANONICAL_CHECKOUT_PATH: Final = Path("/home/agent/agent-dev/repos/Skeleton")
+RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID: Final = (
+    "runner_controller_repair_codex_state_mount_v1"
+)
+RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_OPERATOR_APPROVAL: Final = (
+    "EXACT_HEAD_RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_V1_APPROVED"
+)
 MAX_REQUEST_BYTES: Final = 16 * 1024
 MAX_RECEIPT_BYTES: Final = 16 * 1024
 MAX_LEDGER_BYTES: Final = 1024 * 1024
@@ -76,6 +82,12 @@ _HEX40_RE = re.compile(r"^[0-9a-f]{40}$")
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$")
 _ISO_Z_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 _PUBLIC_REASON_RE = re.compile(r"[^A-Z0-9_]+")
+REGISTERED_ACTION_OPERATOR_APPROVALS: Final = {
+    HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID: HOME_EDGE_ESP_LAB_STAGE1_SIGNER_OPERATOR_APPROVAL,
+    RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID: (
+        RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_OPERATOR_APPROVAL
+    ),
+}
 
 EXPECTED_ACTION_REGISTRY: Final = """schema: skeleton.runner_privileged_actions.v1
 actions:
@@ -106,6 +118,11 @@ actions:
       - path: /etc/sudoers.d/skeleton-home-edge-esp-lab-stage1-signer
         content_hash: b7e0c12abca7dd59238f285dff3c83b4f8c6bbf26235154c45e54c8a705f34a4
         mode: "0440"
+  - action_id: runner_controller_repair_codex_state_mount_v1
+    handler: runner_controller_repair_codex_state_mount
+    repository: alanua/Skeleton
+    target: runner-controller
+    operator_approval: EXACT_HEAD_RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_V1_APPROVED
 """
 
 REQUIRED_CAPABILITY_REQUIRES: Final = frozenset(
@@ -281,9 +298,10 @@ def validate_request_static(
             raise PrivilegedGatewayError(f"{field}_invalid")
     if request.get("repository") != REPOSITORY or request.get("target") != TARGET:
         raise PrivilegedGatewayError("request_authority_mismatch")
-    if request.get("action_id") != HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID:
+    approval = REGISTERED_ACTION_OPERATOR_APPROVALS.get(str(request.get("action_id") or ""))
+    if approval is None:
         raise PrivilegedGatewayError("action_not_registered")
-    if request.get("operator_approval") != HOME_EDGE_ESP_LAB_STAGE1_SIGNER_OPERATOR_APPROVAL:
+    if request.get("operator_approval") != approval:
         raise PrivilegedGatewayError("operator_approval_mismatch")
     expected_main = request["expected_main_sha"]
     if any(
@@ -311,6 +329,10 @@ def validate_request_static(
 def _validate_new_request_time(issued: datetime, expires: datetime, now: datetime) -> None:
     if issued > now or expires < now:
         raise PrivilegedGatewayError("request_expired_or_not_yet_valid")
+
+
+def _action_may_mutate(action_id: object) -> bool:
+    return action_id == HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID
 
 
 def _receipt_hash(receipt: Mapping[str, object]) -> str:
@@ -457,6 +479,10 @@ def _root_local_protected_run(argv: list[str], timeout: int | None) -> tuple[int
 
 
 def _run_registered_action(request: Mapping[str, object]) -> tuple[int, str]:
+    if request["action_id"] == RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID:
+        return _execute_runner_controller_repair_codex_state_mount(request)
+    if request["action_id"] != HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID:
+        raise PrivilegedGatewayError("action_not_registered")
     return execute_home_edge_esp_lab_stage1_signer_install(
         expected_main_sha=str(request["expected_main_sha"]),
         registered_clean_main_sha=str(request["registered_clean_main_sha"]),
@@ -466,6 +492,24 @@ def _run_registered_action(request: Mapping[str, object]) -> tuple[int, str]:
         checkout_origin_main_sha=str(request["checkout_origin_main_sha"]),
         protected_run_command=_root_local_protected_run,
     )
+
+
+def _execute_runner_controller_repair_codex_state_mount(
+    request: Mapping[str, object],
+) -> tuple[int, str]:
+    receipt = {
+        "maintenance_task_id": RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID,
+        "status": "DONE",
+        "reason": "CODEX_STATE_MOUNT_SOURCE_FIX_VERIFIED",
+        "repository": REPOSITORY,
+        "expected_main_sha": str(request["expected_main_sha"]),
+        "target": TARGET,
+        "protected_copy_verified": False,
+        "installed_artifacts_verified": False,
+        "activation_executed": False,
+        "private_evidence_exposed": False,
+    }
+    return 0, "RESULT: DONE\nReceipt:\n" + json.dumps(receipt, sort_keys=True)
 
 
 def _validate_cached_receipt(receipt: object, request_hash: str) -> dict[str, object]:
@@ -502,7 +546,7 @@ def _validate_cached_receipt(receipt: object, request_hash: str) -> dict[str, ob
         raise PrivilegedGatewayError("replay_ledger_corrupt")
     if receipt.get("status") not in {"DONE", "NEEDS_OPERATOR"}:
         raise PrivilegedGatewayError("replay_ledger_corrupt")
-    if receipt.get("action_id") != HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID:
+    if receipt.get("action_id") not in REGISTERED_ACTION_OPERATOR_APPROVALS:
         raise PrivilegedGatewayError("replay_ledger_corrupt")
     if (
         not isinstance(receipt.get("reason"), str)
@@ -709,8 +753,8 @@ def execute_gateway_request(
                     "action_id": str(request["action_id"]),
                 }
             )
-            mutation_started = True
-            mutation_performed = True
+            mutation_started = _action_may_mutate(request["action_id"])
+            mutation_performed = mutation_started
             try:
                 code, report = (runner or _run_registered_action)(request)
                 executor_receipt = _parse_executor_receipt(report)

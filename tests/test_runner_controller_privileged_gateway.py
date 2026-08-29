@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 import json
 import os
@@ -156,6 +157,11 @@ def _action_registry() -> str:
               - path: /etc/sudoers.d/skeleton-home-edge-esp-lab-stage1-signer
                 content_hash: {maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_SUDOERS_SHA256}
                 mode: "0440"
+          - action_id: {gateway.RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID}
+            handler: runner_controller_repair_codex_state_mount
+            repository: alanua/Skeleton
+            target: runner-controller
+            operator_approval: {gateway.RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_OPERATOR_APPROVAL}
         """
     )
 
@@ -341,19 +347,76 @@ def test_ssh_restrictions_and_root_login_prohibition_are_deterministic() -> None
     assert "ForceCommand /usr/bin/sudo -n /usr/local/libexec/skeleton/runner-controller/privileged-gateway" in fragment
 
 
-def test_action_registry_first_action_preserves_exact_existing_esp_signer_contract(tmp_path: Path) -> None:
+def test_action_registry_preserves_existing_esp_signer_and_adds_exact_codex_state_action(tmp_path: Path) -> None:
     registry_path = ROOT / "RUNNER_PRIVILEGED_ACTIONS.yaml"
     if not registry_path.exists():
         registry_path = _temp_registry(tmp_path)
     actions = gateway.load_action_registry(path=registry_path)
     action = actions[maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID]
-    assert list(actions) == [maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID]
+    assert list(actions) == [
+        maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID,
+        gateway.RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID,
+    ]
     assert action.source_blob == maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_BLOB
     assert action.installer_argv == (
         str(maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_PROTECTED_INSTALLER),
         "--repo-root",
         "{checkout_path}",
     )
+    codex_action = actions[gateway.RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID]
+    assert codex_action.handler == "runner_controller_repair_codex_state_mount"
+    assert codex_action.operator_approval == gateway.RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_OPERATOR_APPROVAL
+    assert codex_action.installer_argv == ()
+    assert codex_action.post_audit_artifacts == ()
+
+
+def test_codex_state_action_is_accepted_without_root_command_or_private_receipt_fields() -> None:
+    request = _request(
+        action_id=gateway.RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID,
+        operator_approval=gateway.RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_OPERATOR_APPROVAL,
+    )
+    calls: list[tuple[dict[str, object], gateway.GatewayAction]] = []
+
+    def runner(
+        received: Mapping[str, object],
+        action: gateway.GatewayAction,
+    ) -> tuple[int, str]:
+        calls.append((dict(received), action))
+        return gateway._execute_runner_controller_repair_codex_state_mount(received, action)
+
+    receipt = gateway.execute_gateway_request(request, now=NOW, runner=runner)
+    assert receipt["status"] == "DONE"
+    assert receipt["reason"] == "CODEX_STATE_MOUNT_SOURCE_FIX_VERIFIED"
+    assert receipt["external_side_effects_executed"] is False
+    assert receipt["private_evidence_exposed"] is False
+    assert receipt["stderr_exposed"] is False
+    assert receipt["env_exposed"] is False
+    assert receipt["private_paths_exposed"] is False
+    assert "/home/agent/" not in json.dumps(receipt, sort_keys=True)
+    assert len(calls) == 1
+    assert calls[0][1].installer_argv == ()
+
+
+def test_codex_state_action_rejects_command_arguments_and_approval_mismatch_before_runner() -> None:
+    calls = 0
+
+    def runner(_request: object, _action: object) -> tuple[int, str]:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("runner must not be reached")
+
+    with_argv = _request(
+        action_id=gateway.RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID,
+        operator_approval=gateway.RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_OPERATOR_APPROVAL,
+        argv=["/bin/sh", "-c", "id"],
+    )
+    mismatch = _request(
+        action_id=gateway.RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID,
+        operator_approval=maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_OPERATOR_APPROVAL,
+    )
+    assert gateway.execute_gateway_request(with_argv, now=NOW, runner=runner)["reason"] == "REQUEST_FIELD_SET_MISMATCH"
+    assert gateway.execute_gateway_request(mismatch, now=NOW, runner=runner)["reason"] == "OPERATOR_APPROVAL_MISMATCH"
+    assert calls == 0
 
 
 def _temp_registry(root: Path) -> Path:

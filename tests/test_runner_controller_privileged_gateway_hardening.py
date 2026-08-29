@@ -262,6 +262,91 @@ def test_nonzero_or_partial_action_is_conservatively_reported_as_mutation(tmp_pa
     assert receipt["private_paths_exposed"] is False
 
 
+def test_exact_registered_actions_are_accepted_and_unknown_action_fails_closed(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    def runner(request: dict[str, object]) -> tuple[int, str]:
+        calls.append(str(request["action_id"]))
+        return 0, _executor_report()
+
+    signer = _execute(tmp_path, _request(idempotency_key="idem-signer"), runner)
+    codex = _execute(
+        tmp_path,
+        _request(
+            request_id="req-codex-state",
+            idempotency_key="idem-codex-state",
+            action_id=gateway.RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID,
+            operator_approval=gateway.RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_OPERATOR_APPROVAL,
+        ),
+        lambda request: gateway._execute_runner_controller_repair_codex_state_mount(request),
+    )
+    unknown = _execute(
+        tmp_path,
+        _request(
+            request_id="req-unknown",
+            idempotency_key="idem-unknown",
+            action_id="arbitrary_privileged_shell_v1",
+        ),
+        runner,
+    )
+
+    assert signer["status"] == "DONE"
+    assert codex["status"] == "DONE"
+    assert codex["reason"] == "CODEX_STATE_MOUNT_SOURCE_FIX_VERIFIED"
+    assert codex["mutation_started"] is False
+    assert codex["mutation_performed"] is False
+    assert codex["external_side_effects_executed"] is False
+    assert unknown["reason"] == "ACTION_NOT_REGISTERED"
+    assert calls == ["home_edge_01_esp_lab_stage1_signer_install_v1"]
+
+
+def test_codex_state_action_blocks_argv_fields_and_approval_mismatch_before_runner(tmp_path: Path) -> None:
+    calls = 0
+
+    def runner(_request: object) -> tuple[int, str]:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("runner must not execute")
+
+    with_argv = _request(
+        action_id=gateway.RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID,
+        operator_approval=gateway.RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_OPERATOR_APPROVAL,
+        argv=["/bin/sh", "-c", "id"],
+    )
+    mismatch = _request(
+        request_id="req-mismatch",
+        idempotency_key="idem-mismatch",
+        action_id=gateway.RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID,
+        operator_approval="EXACT_HEAD_HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_V2_APPROVED",
+    )
+
+    argv_receipt = _execute(tmp_path, with_argv, runner)
+    mismatch_receipt = _execute(tmp_path, mismatch, runner)
+    assert argv_receipt["reason"] == "REQUEST_FIELD_SET_MISMATCH"
+    assert mismatch_receipt["reason"] == "OPERATOR_APPROVAL_MISMATCH"
+    assert calls == 0
+
+
+def test_codex_state_receipt_exposes_only_public_safe_fields(tmp_path: Path) -> None:
+    request = _request(
+        action_id=gateway.RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID,
+        operator_approval=gateway.RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_OPERATOR_APPROVAL,
+    )
+    receipt = _execute(
+        tmp_path,
+        request,
+        lambda received: gateway._execute_runner_controller_repair_codex_state_mount(received),
+    )
+    serialized = json.dumps(receipt, sort_keys=True)
+    assert receipt["private_evidence_exposed"] is False
+    assert receipt["stderr_exposed"] is False
+    assert receipt["env_exposed"] is False
+    assert receipt["private_paths_exposed"] is False
+    assert "/home/agent/" not in serialized
+    assert "SECRET" not in serialized
+    assert "PRIVATE" not in serialized
+
+
 def test_root_child_allows_only_exact_two_privileged_command_shapes(
     tmp_path: Path,
     monkeypatch,
