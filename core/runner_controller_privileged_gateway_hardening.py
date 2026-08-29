@@ -37,7 +37,7 @@ RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID: Final = (
     "runner_controller_repair_codex_state_mount_v1"
 )
 RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_OPERATOR_APPROVAL: Final = (
-    "EXACT_HEAD_RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_V1_APPROVED"
+    "EXPLICIT_AUTONOMOUS_RUNNER_REPAIR_20260828"
 )
 MAX_REQUEST_BYTES: Final = 16 * 1024
 MAX_RECEIPT_BYTES: Final = 16 * 1024
@@ -122,7 +122,7 @@ actions:
     handler: runner_controller_repair_codex_state_mount
     repository: alanua/Skeleton
     target: runner-controller
-    operator_approval: EXACT_HEAD_RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_V1_APPROVED
+    operator_approval: EXPLICIT_AUTONOMOUS_RUNNER_REPAIR_20260828
 """
 
 REQUIRED_CAPABILITY_REQUIRES: Final = frozenset(
