@@ -17488,7 +17488,7 @@ def runner_controller_repair_codex_state_mount_v1(body: str) -> str:
     if not isinstance(receipt,dict):
         return _maintenance_report("BLOCKED",task_id,[*status_lines,"reason=privileged_gateway_receipt_invalid"],"not_met")
     gateway_status=str(receipt.get("status") or "NEEDS_OPERATOR").upper(); gateway_reason=str(receipt.get("reason") or "GATEWAY_RESULT_MISSING")
-    status_lines += [f"privileged_gateway_status={gateway_status}",f"privileged_gateway_reason={gateway_reason}","typed_gateway_dispatch=true","generic_check_project_checkout=false"]
+    status_lines += [f"gateway_status={gateway_status}",f"reason={gateway_reason}","action=typed_gateway_dispatch","generic_check_project_checkout=false"]
     return _maintenance_report("DONE" if gateway_status=="DONE" else "NEEDS_OPERATOR",task_id,status_lines,"met" if gateway_status=="DONE" else "not_met")
 
 def dispatch_runtime_maintenance_task(
