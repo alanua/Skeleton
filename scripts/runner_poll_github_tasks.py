@@ -401,6 +401,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1,
         HOME_EDGE_01_ESP_LAB_STAGE1_ACTIVATION_V1,
         HOME_EDGE_01_ESP_LAB_STAGE1_SIGNER_INSTALL_V1,
+        "runner_controller_repair_codex_state_mount_v1",
         BUILD_AND_LOCAL_OTA_OPERATION,
         PREPARE_PRIVATE_STATIC_SITE_HANDOFF,
         DEPLOY_PRIVATE_STATIC_SITE,
@@ -2831,15 +2832,27 @@ def extract_runtime_maintenance_task_id(body: str) -> tuple[bool, str | None]:
         body or "",
         re.MULTILINE,
     )
-    if mode_found is None:
-        return False, None
+    if mode_found is not None:
+        task_id = re.search(
+            r"^\s*Maintenance Task ID:\s*(?P<task_id>[a-z0-9_]+)\s*$",
+            body or "",
+            re.MULTILINE,
+        )
+        return True, task_id.group("task_id") if task_id else None
 
-    task_id = re.search(
-        r"^\s*Maintenance Task ID:\s*(?P<task_id>[a-z0-9_]+)\s*$",
+    modern_mode_found = re.search(
+        rf"^\s*Mode:\s*{RUNTIME_MAINTENANCE_MODE}\s*/\s*RUN_NOW\s*$",
         body or "",
         re.MULTILINE,
     )
-    return True, task_id.group("task_id") if task_id else None
+    if modern_mode_found is None:
+        return False, None
+
+    task_content = extract_task_block(body)
+    if task_content is None:
+        return True, None
+    from core.runner_runtime_maintenance_compat import extract_fenced_runtime_maintenance_operation
+    return True, extract_fenced_runtime_maintenance_operation(task_content)
 
 
 def extract_telegram_approved_pr_merge_request(
