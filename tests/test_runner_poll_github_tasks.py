@@ -21906,3 +21906,79 @@ def test_gmail_primary_activation_enables_worker_only_after_canary_passes() -> N
         "sudo -n systemctl is-active --quiet skeleton-mail-operations.timer",
         "sudo -n systemctl show --property=Result --value skeleton-mail-operations.service",
     ]
+
+
+def test_dispatch_runtime_maintenance_codex_state_mount_uses_typed_gateway(monkeypatch):
+    calls=[]
+    def fake(body):
+        calls.append(body); return runner._maintenance_report("DONE","runner_controller_repair_codex_state_mount_v1",["typed_gateway_dispatch=true","generic_check_project_checkout=false"],"met")
+    def fail(_body): raise AssertionError("generic check_project_checkout must not be used")
+    monkeypatch.setattr(runner,"runner_controller_repair_codex_state_mount_v1",fake)
+    monkeypatch.setattr(runner,"check_project_checkout",fail)
+    report=runner.dispatch_runtime_maintenance_task("runner_controller_repair_codex_state_mount_v1","/tmp","synthetic-body")
+    assert calls == ["synthetic-body"]
+    assert runner.maintenance_report_is_done(report)
+    assert "maintenance_task_id=runner_controller_repair_codex_state_mount_v1" in report
+
+def test_dispatch_runtime_maintenance_unknown_task_remains_blocked():
+    report=runner.dispatch_runtime_maintenance_task("runner_controller_unknown_privileged_operation_v1","/tmp","synthetic-body")
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "reason=maintenance_task_id_not_allowlisted" in report
+def test_runner_controller_repair_codex_state_mount_builds_exact_typed_gateway_request(monkeypatch):
+    from pathlib import Path
+    from types import SimpleNamespace
+    from core import runner_controller_privileged_gateway as gateway
+    sha = "a" * 40
+    checkout = Path("/home/agent/agent-dev/repos/Skeleton")
+    registered = SimpleNamespace(checkout_path=checkout, status_lines=[])
+    monkeypatch.setattr(runner, "_registered_skeleton_checkout", lambda task_id: (registered, None))
+    monkeypatch.setattr(runner, "_verify_skeleton_checkout_present", lambda *args: None)
+    monkeypatch.setattr(runner, "_read_skeleton_origin", lambda *args: None)
+    monkeypatch.setattr(runner, "_read_skeleton_current_branch", lambda *args: None)
+    monkeypatch.setattr(runner, "_read_skeleton_clean_state", lambda *args: None)
+    monkeypatch.setattr(runner, "_fetch_skeleton_origin_main", lambda *args: None)
+    monkeypatch.setattr(runner, "_read_skeleton_sha", lambda *args: (sha, None))
+    monkeypatch.setattr(runner, "_run_freshness_command", lambda *args: (f"{sha}\trefs/heads/main\n", None))
+    captured = {}
+    class FakeTransport:
+        def submit(self, request):
+            captured.update(request)
+            return 0, b'{"status":"DONE","reason":"REPAIRED_CANARY_PASS"}'
+    monkeypatch.setattr(gateway, "LocalSudoGatewayTransport", FakeTransport)
+    report = runner.runner_controller_repair_codex_state_mount_v1("synthetic-body")
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert captured["action_id"] == "runner_controller_repair_codex_state_mount_v1"
+    assert captured["operator_approval"] == "EXPLICIT_AUTONOMOUS_RUNNER_REPAIR_20260828"
+    assert captured["expected_main_sha"] == sha
+    assert captured["registered_clean_main_sha"] == sha
+    assert captured["github_main_sha"] == sha
+    assert captured["checkout_head_sha"] == sha
+    assert captured["checkout_origin_main_sha"] == sha
+    assert captured["checkout_path"] == str(checkout)
+    assert "gateway_status=DONE" in report
+    assert "reason=REPAIRED_CANARY_PASS" in report
+    assert "action=typed_gateway_dispatch" in report
+
+def test_runner_controller_repair_codex_state_mount_non_done_needs_operator(monkeypatch):
+    from pathlib import Path
+    from types import SimpleNamespace
+    from core import runner_controller_privileged_gateway as gateway
+    sha = "b" * 40
+    checkout = Path("/home/agent/agent-dev/repos/Skeleton")
+    registered = SimpleNamespace(checkout_path=checkout, status_lines=[])
+    monkeypatch.setattr(runner, "_registered_skeleton_checkout", lambda task_id: (registered, None))
+    monkeypatch.setattr(runner, "_verify_skeleton_checkout_present", lambda *args: None)
+    monkeypatch.setattr(runner, "_read_skeleton_origin", lambda *args: None)
+    monkeypatch.setattr(runner, "_read_skeleton_current_branch", lambda *args: None)
+    monkeypatch.setattr(runner, "_read_skeleton_clean_state", lambda *args: None)
+    monkeypatch.setattr(runner, "_fetch_skeleton_origin_main", lambda *args: None)
+    monkeypatch.setattr(runner, "_read_skeleton_sha", lambda *args: (sha, None))
+    monkeypatch.setattr(runner, "_run_freshness_command", lambda *args: (f"{sha}\trefs/heads/main\n", None))
+    class FakeTransport:
+        def submit(self, request):
+            return 0, b'{"status":"NEEDS_OPERATOR","reason":"LOWER_LEVEL_GATE_BLOCK"}'
+    monkeypatch.setattr(gateway, "LocalSudoGatewayTransport", FakeTransport)
+    report = runner.runner_controller_repair_codex_state_mount_v1("synthetic-body")
+    assert runner.maintenance_report_status(report) == "NEEDS_OPERATOR"
+    assert "gateway_status=NEEDS_OPERATOR" in report
+    assert "reason=LOWER_LEVEL_GATE_BLOCK" in report
