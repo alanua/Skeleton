@@ -282,3 +282,27 @@ def test_codegen_wrapper_does_not_fallback_for_unrelated_codex_failure(tmp_path:
     assert "SKELETON_CODEGEN_PROVIDER=openhands" not in result.stdout
     assert "RESULT: OK" not in result.stdout
     assert not fallback_marker.exists()
+
+
+def test_codegen_wrapper_scopes_temp_state_to_worktree_and_cleans_it(tmp_path: Path) -> None:
+    result, fallback_marker = _run_wrapper(
+        tmp_path,
+        codex_body=(
+            "#!/bin/sh\n"
+            "test -d \"$TMPDIR\" || exit 41\n"
+            "test -w \"$TMPDIR\" || exit 42\n"
+            "test \"$TMPDIR\" = \"$TEMP\" || exit 43\n"
+            "test \"$TMPDIR\" = \"$TMP\" || exit 44\n"
+            "touch \"$TMPDIR/probe\" || exit 45\n"
+            "printf '%s\\n' \"$TMPDIR\"\n"
+            "exit 0\n"
+        ),
+    )
+    assert result.returncode == 0
+    lines = result.stdout.splitlines()
+    assert lines[0] == "SKELETON_CODEGEN_PROVIDER=codex"
+    scratch = Path(lines[1])
+    assert scratch.parent == (tmp_path / "work").resolve()
+    assert scratch.name.startswith(".runner-codex-state-")
+    assert not scratch.exists()
+    assert not fallback_marker.exists()
