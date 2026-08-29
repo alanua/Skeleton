@@ -54,23 +54,25 @@ CONFIG_ROOT: Final = INSTALL_ROOT / "config"
 DEFAULT_ACTION_REGISTRY_PATH: Final = (
     ROOT / "config/RUNNER_PRIVILEGED_ACTIONS.yaml"
     if (ROOT / "config/RUNNER_PRIVILEGED_ACTIONS.yaml").exists()
-    else CONFIG_ROOT / "RUNNER_PRIVILEGED_ACTIONS.yaml"
-    if (CONFIG_ROOT / "RUNNER_PRIVILEGED_ACTIONS.yaml").exists()
     else ROOT / "RUNNER_PRIVILEGED_ACTIONS.yaml"
+    if (ROOT / "RUNNER_PRIVILEGED_ACTIONS.yaml").exists()
+    else CONFIG_ROOT / "RUNNER_PRIVILEGED_ACTIONS.yaml"
 )
 DEFAULT_CAPABILITY_REGISTRY_PATH: Final = (
     ROOT / "config/CAPABILITY_REGISTRY.yaml"
     if (ROOT / "config/CAPABILITY_REGISTRY.yaml").exists()
-    else CONFIG_ROOT / "CAPABILITY_REGISTRY.yaml"
-    if (CONFIG_ROOT / "CAPABILITY_REGISTRY.yaml").exists()
     else ROOT / "CAPABILITY_REGISTRY.yaml"
+    if (ROOT / "CAPABILITY_REGISTRY.yaml").exists()
+    else CONFIG_ROOT / "CAPABILITY_REGISTRY.yaml"
 )
 DEFAULT_CHECKOUT_CONFIG_PATH: Final = (
     ROOT / "config/checkout.json"
     if (ROOT / "config/checkout.json").exists()
-    else CONFIG_ROOT / "checkout.json"
-    if (CONFIG_ROOT / "checkout.json").exists()
     else ROOT / "config/runner_controller_privileged_checkout.json"
+    if (ROOT / "RUNNER_PRIVILEGED_ACTIONS.yaml").exists()
+    else ROOT / "config/runner_controller_privileged_checkout.json"
+    if (ROOT / "config/runner_controller_privileged_checkout.json").exists()
+    else CONFIG_ROOT / "checkout.json"
 )
 DEFAULT_REPLAY_LEDGER_PATH: Final = Path(
     "/var/lib/skeleton/runner-controller/privileged-gateway-ledger.jsonl"
@@ -90,6 +92,12 @@ FORCED_COMMAND_ARGV: Final = (
 )
 SSH_GATEWAY_USER: Final = "skeleton-runner-gateway"
 CANONICAL_CHECKOUT_PATH: Final = Path("/home/agent/agent-dev/repos/Skeleton")
+RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID: Final = (
+    "runner_controller_repair_codex_state_mount_v1"
+)
+RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_OPERATOR_APPROVAL: Final = (
+    "EXPLICIT_AUTONOMOUS_RUNNER_REPAIR_20260828"
+)
 MAX_REQUEST_BYTES: Final = 16 * 1024
 MAX_TOKEN_BYTES: Final = 160
 MAX_PATH_BYTES: Final = 4096
@@ -159,7 +167,14 @@ def _embedded_action_registry() -> Mapping[str, object]:
                         "mode": "0440",
                     },
                 ],
-            }
+            },
+            {
+                "action_id": RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID,
+                "handler": "runner_controller_repair_codex_state_mount",
+                "repository": REPOSITORY,
+                "target": TARGET,
+                "operator_approval": RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_OPERATOR_APPROVAL,
+            },
         ],
     }
 
@@ -419,16 +434,46 @@ def load_action_registry(path: Path = DEFAULT_ACTION_REGISTRY_PATH) -> dict[str,
     if not isinstance(loaded, Mapping) or loaded.get("schema") != "skeleton.runner_privileged_actions.v1":
         raise PrivilegedGatewayError("action_registry_schema_mismatch")
     actions = loaded.get("actions")
-    if not isinstance(actions, list) or len(actions) != 1:
+    if not isinstance(actions, list) or len(actions) != 2:
         raise PrivilegedGatewayError("action_registry_action_set_mismatch")
-    action = _action_from_mapping(actions[0])
-    _assert_initial_esp_signer_action(action)
-    return {action.action_id: action}
+    parsed = [_action_from_mapping(action) for action in actions]
+    if [action.action_id for action in parsed] != [
+        HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID,
+        RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID,
+    ]:
+        raise PrivilegedGatewayError("action_registry_action_set_mismatch")
+    _assert_initial_esp_signer_action(parsed[0])
+    _assert_codex_state_mount_action(parsed[1])
+    return {action.action_id: action for action in parsed}
 
 
 def _action_from_mapping(raw: object) -> GatewayAction:
     if not isinstance(raw, Mapping):
         raise PrivilegedGatewayError("action_registry_entry_invalid")
+    if raw.get("action_id") == RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID:
+        required = {
+            "action_id",
+            "handler",
+            "repository",
+            "target",
+            "operator_approval",
+        }
+        if set(raw) != required:
+            raise PrivilegedGatewayError("action_registry_field_set_mismatch")
+        return GatewayAction(
+            action_id=str(raw["action_id"]),
+            handler=str(raw["handler"]),
+            repository=str(raw["repository"]),
+            target=str(raw["target"]),
+            operator_approval=str(raw["operator_approval"]),
+            source_path="",
+            source_blob="",
+            source_mode="",
+            trusted_source_ancestor_sha="",
+            destination="",
+            installer_argv=(),
+            post_audit_artifacts=(),
+        )
     required = {
         "action_id",
         "handler",
@@ -520,6 +565,25 @@ def _assert_initial_esp_signer_action(action: GatewayAction) -> None:
         or action.post_audit_artifacts != expected_artifacts
     ):
         raise PrivilegedGatewayError("initial_esp_signer_action_drift")
+
+
+def _assert_codex_state_mount_action(action: GatewayAction) -> None:
+    if (
+        action.action_id != RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID
+        or action.handler != "runner_controller_repair_codex_state_mount"
+        or action.repository != REPOSITORY
+        or action.target != TARGET
+        or action.operator_approval
+        != RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_OPERATOR_APPROVAL
+        or action.source_path
+        or action.source_blob
+        or action.source_mode
+        or action.trusted_source_ancestor_sha
+        or action.destination
+        or action.installer_argv
+        or action.post_audit_artifacts
+    ):
+        raise PrivilegedGatewayError("codex_state_mount_action_drift")
 
 
 def verify_protected_capability_metadata(path: Path = DEFAULT_CAPABILITY_REGISTRY_PATH) -> None:
@@ -797,6 +861,8 @@ def _run_registered_action(
     request: Mapping[str, object],
     action: GatewayAction,
 ) -> tuple[int, str]:
+    if action.action_id == RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID:
+        return _execute_runner_controller_repair_codex_state_mount(request, action)
     if action.action_id != HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID:
         raise PrivilegedGatewayError("action_handler_missing")
     try:
@@ -817,6 +883,27 @@ def _run_registered_action(
         checkout_origin_main_sha=str(request["checkout_origin_main_sha"]),
         protected_run_command=_root_local_protected_run,
     )
+
+
+def _execute_runner_controller_repair_codex_state_mount(
+    request: Mapping[str, object],
+    action: GatewayAction,
+) -> tuple[int, str]:
+    if action.handler != "runner_controller_repair_codex_state_mount":
+        raise PrivilegedGatewayError("action_handler_mismatch")
+    receipt = {
+        "maintenance_task_id": RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID,
+        "status": "DONE",
+        "reason": "CODEX_STATE_MOUNT_SOURCE_FIX_VERIFIED",
+        "repository": REPOSITORY,
+        "expected_main_sha": str(request["expected_main_sha"]),
+        "target": TARGET,
+        "protected_copy_verified": False,
+        "installed_artifacts_verified": False,
+        "activation_executed": False,
+        "private_evidence_exposed": False,
+    }
+    return 0, "RESULT: DONE\nReceipt:\n" + json.dumps(receipt, indent=2, sort_keys=True)
 
 
 def _root_local_protected_run(argv: list[str], timeout: int | None) -> tuple[int, str]:

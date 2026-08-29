@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import stat
 import subprocess
+import tempfile
 
 from core.codex_runtime_recovery import (
     CodexRuntimeRecoveryError,
@@ -49,6 +50,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 _DEFAULT_CODEX_MODEL = "gpt-5.6"
 
@@ -58,6 +60,21 @@ def _codex_args(argv: list[str]) -> list[str]:
     if args and args[0] == "exec" and "--model" not in args:
         args[1:1] = ["--model", _DEFAULT_CODEX_MODEL]
     return args
+
+
+def _workdir_from_args(args: list[str]) -> Path | None:
+    try:
+        index = args.index("--cd")
+        raw = args[index + 1]
+    except (ValueError, IndexError):
+        return None
+    try:
+        workdir = Path(raw).resolve(strict=True)
+    except OSError:
+        return None
+    if not workdir.is_dir():
+        return None
+    return workdir
 
 
 def main() -> int:
@@ -88,15 +105,27 @@ def main() -> int:
     ):
         child_env.pop(name, None)
 
-    codex = subprocess.run(
-        [real_codex, *_codex_args(sys.argv[1:])],
-        input=stdin_text,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=child_env,
-        check=False,
-    )
+    args = _codex_args(sys.argv[1:])
+    workdir = _workdir_from_args(args)
+    if workdir is None:
+        return 126
+
+    with tempfile.TemporaryDirectory(
+        prefix=".runner-codex-state-",
+        dir=str(workdir),
+    ) as scratch:
+        child_env["TMPDIR"] = scratch
+        child_env["TEMP"] = scratch
+        child_env["TMP"] = scratch
+        codex = subprocess.run(
+            [real_codex, *args],
+            input=stdin_text,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=child_env,
+            check=False,
+        )
     if codex.returncode == 0:
         sys.stdout.write("SKELETON_CODEGEN_PROVIDER=codex\n")
     sys.stdout.write(codex.stdout)

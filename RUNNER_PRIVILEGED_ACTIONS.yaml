@@ -27,3 +27,8 @@ actions:
       - path: /etc/sudoers.d/skeleton-home-edge-esp-lab-stage1-signer
         content_hash: b7e0c12abca7dd59238f285dff3c83b4f8c6bbf26235154c45e54c8a705f34a4
         mode: "0440"
+  - action_id: runner_controller_repair_codex_state_mount_v1
+    handler: runner_controller_repair_codex_state_mount
+    repository: alanua/Skeleton
+    target: runner-controller
+    operator_approval: EXPLICIT_AUTONOMOUS_RUNNER_REPAIR_20260828
