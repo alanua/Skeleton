@@ -17440,6 +17440,57 @@ def mail_gmail_primary_registered_activation_v1(body: str) -> str:
     return _maintenance_report("DONE", task_id, status_lines, "met")
 
 
+def runner_controller_repair_codex_state_mount_v1(body: str) -> str:
+    task_id = "runner_controller_repair_codex_state_mount_v1"
+    registered, report = _registered_skeleton_checkout(task_id)
+    if report is not None:
+        return report
+    assert registered is not None
+    checkout = registered.checkout_path
+    status_lines = list(registered.status_lines)
+    present = _verify_skeleton_checkout_present(task_id, registered)
+    if present is not None:
+        return present
+    origin = _read_skeleton_origin(task_id, registered, status_lines)
+    if origin is not None:
+        return origin
+    branch = _read_skeleton_current_branch(task_id, checkout, status_lines)
+    if branch is not None:
+        return branch
+    clean = _read_skeleton_clean_state(task_id, checkout, status_lines)
+    if clean is not None:
+        return clean
+    fetched = _fetch_skeleton_origin_main(task_id, checkout, status_lines)
+    if fetched is not None:
+        return fetched
+    values=[]
+    for ref,step in (("HEAD","read_checkout_head"),("origin/main","read_origin_main")):
+        sha, failure = _read_skeleton_sha(task_id, checkout, ref, status_lines, step)
+        if failure is not None or sha is None:
+            return failure or _maintenance_report("BLOCKED",task_id,[*status_lines,f"reason={step}_failed"],"not_met")
+        values.append(sha)
+    out, failure = _run_freshness_command(["git","-C",str(checkout),"ls-remote","origin","refs/heads/main"],status_lines,"read_github_main")
+    parts=(out or "").split(); github_sha=parts[0].lower() if parts else ""
+    if failure is not None or _HEAD_SHA_RE.fullmatch(github_sha) is None or len(parts)<2 or parts[1]!="refs/heads/main":
+        return _maintenance_report("BLOCKED",task_id,[*status_lines,failure or "reason=github_main_read_failed"],"not_met")
+    if len({values[0],values[1],github_sha}) != 1:
+        return _maintenance_report("BLOCKED",task_id,[*status_lines,"reason=registered_checkout_not_exact_main"],"not_met")
+    from core.runner_controller_privileged_gateway import LocalSudoGatewayTransport,RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_OPERATOR_APPROVAL,RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID,build_gateway_request
+    request=build_gateway_request(request_id="repair-codex-state-mount-3584",idempotency_key="runner-controller-codex-state-mount-repair-20260828-v1",expected_main_sha=values[0],registered_clean_main_sha=values[0],github_main_sha=github_sha,checkout_path=checkout,checkout_head_sha=values[0],checkout_origin_main_sha=values[1])
+    request["action_id"]=RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID
+    request["operator_approval"]=RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_OPERATOR_APPROVAL
+    code,payload=LocalSudoGatewayTransport().submit(request)
+    if code != 0:
+        return _maintenance_report("BLOCKED",task_id,[*status_lines,"reason=privileged_gateway_transport_failed"],"not_met")
+    try: receipt=json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError,json.JSONDecodeError):
+        return _maintenance_report("BLOCKED",task_id,[*status_lines,"reason=privileged_gateway_receipt_invalid"],"not_met")
+    if not isinstance(receipt,dict):
+        return _maintenance_report("BLOCKED",task_id,[*status_lines,"reason=privileged_gateway_receipt_invalid"],"not_met")
+    gateway_status=str(receipt.get("status") or "NEEDS_OPERATOR").upper(); gateway_reason=str(receipt.get("reason") or "GATEWAY_RESULT_MISSING")
+    status_lines += [f"privileged_gateway_status={gateway_status}",f"privileged_gateway_reason={gateway_reason}","typed_gateway_dispatch=true","generic_check_project_checkout=false"]
+    return _maintenance_report("DONE" if gateway_status=="DONE" else "NEEDS_OPERATOR",task_id,status_lines,"met" if gateway_status=="DONE" else "not_met")
+
 def dispatch_runtime_maintenance_task(
     task_id: str, workdir: str, body: str = ""
 ) -> str:
@@ -17451,6 +17502,8 @@ def dispatch_runtime_maintenance_task(
             "not_met",
         )
     try:
+        if task_id == "runner_controller_repair_codex_state_mount_v1":
+            return runner_controller_repair_codex_state_mount_v1(body)
         if task_id == MAIL_GMAIL_PRIMARY_REGISTERED_ACTIVATION:
             return mail_gmail_primary_registered_activation_v1(body)
         if task_id == MAIL_GMAIL_READONLY_CANARY_TASK_ID:

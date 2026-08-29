@@ -21906,3 +21906,21 @@ def test_gmail_primary_activation_enables_worker_only_after_canary_passes() -> N
         "sudo -n systemctl is-active --quiet skeleton-mail-operations.timer",
         "sudo -n systemctl show --property=Result --value skeleton-mail-operations.service",
     ]
+
+
+def test_dispatch_runtime_maintenance_codex_state_mount_uses_typed_gateway(monkeypatch):
+    calls=[]
+    def fake(body):
+        calls.append(body); return runner._maintenance_report("DONE","runner_controller_repair_codex_state_mount_v1",["typed_gateway_dispatch=true","generic_check_project_checkout=false"],"met")
+    def fail(_body): raise AssertionError("generic check_project_checkout must not be used")
+    monkeypatch.setattr(runner,"runner_controller_repair_codex_state_mount_v1",fake)
+    monkeypatch.setattr(runner,"check_project_checkout",fail)
+    report=runner.dispatch_runtime_maintenance_task("runner_controller_repair_codex_state_mount_v1","/tmp","synthetic-body")
+    assert calls == ["synthetic-body"]
+    assert runner.maintenance_report_is_done(report)
+    assert "maintenance_task_id=runner_controller_repair_codex_state_mount_v1" in report
+
+def test_dispatch_runtime_maintenance_unknown_task_remains_blocked():
+    report=runner.dispatch_runtime_maintenance_task("runner_controller_unknown_privileged_operation_v1","/tmp","synthetic-body")
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "reason=maintenance_task_id_not_allowlisted" in report
