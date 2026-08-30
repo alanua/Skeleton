@@ -149,6 +149,10 @@ from core.private_static_site_runtime import (
 )
 from core.project_tree import get_project, get_project_by_repo, load_project_tree
 from core.runner_child_environment import sanitize_codegen_child_environment
+from core.runner_process_observer import (
+    build_spawn_trace_command,
+    parse_first_denied_filesystem_event,
+)
 from core.secret_reference import (
     SecretReferenceRegistrationError,
     registered_bitwarden_reference_from_systemd_index,
@@ -1347,6 +1351,7 @@ def run_command(
     *,
     timeout: int | None = None,
     input: str | None = None,
+    observe_process_spawn: bool = False,
 ) -> tuple[int, str]:
     run_kwargs: dict[str, Any] = {
         "cwd": str(cwd) if cwd is not None else None,
@@ -1361,8 +1366,47 @@ def run_command(
     if environment is not None:
         run_kwargs["env"] = dict(environment)
 
-    result = subprocess.run(args, **run_kwargs)
-    return result.returncode, result.stdout + result.stderr
+    command = args
+    trace_path: Path | None = None
+    provider_started_at_epoch: float | None = None
+    diagnostic_breadcrumb: str | None = None
+    if observe_process_spawn:
+        if shutil.which("strace") is None:
+            diagnostic_breadcrumb = "tracer_unavailable"
+        else:
+            try:
+                trace_parent = Path(cwd) if cwd is not None else ROOT
+                with tempfile.NamedTemporaryFile(prefix=".runner-codegen-trace-", suffix=".log", dir=trace_parent, delete=False) as trace_file:
+                    trace_path = Path(trace_file.name)
+                provider_started_at_epoch = time.time()
+                command = build_spawn_trace_command(args, trace_path=trace_path)
+            except OSError:
+                trace_path = None
+                provider_started_at_epoch = None
+                diagnostic_breadcrumb = "trace_setup_failed_closed"
+    try:
+        result = subprocess.run(command, **run_kwargs)
+        combined_output = result.stdout + result.stderr
+        if trace_path is not None and provider_started_at_epoch is not None:
+            try:
+                trace_text = trace_path.read_text(encoding="utf-8", errors="replace")
+                evidence = parse_first_denied_filesystem_event(trace_text, provider_started_at_epoch=provider_started_at_epoch, executable=args[0] if args else "unknown")
+            except OSError:
+                diagnostic_breadcrumb = "trace_read_failed_closed"
+            else:
+                if evidence is not None:
+                    combined_output += "\nRUNNER_PROCESS_DIAGNOSTIC=" + json.dumps(evidence.as_public_dict(), sort_keys=True, separators=(",", ":")) + "\n"
+                else:
+                    diagnostic_breadcrumb = "completed_no_target_event"
+        if diagnostic_breadcrumb is not None:
+            combined_output += "\nRUNNER_PROCESS_DIAGNOSTIC_CAPTURE=" + diagnostic_breadcrumb + "\n"
+        return result.returncode, combined_output
+    finally:
+        if trace_path is not None:
+            try:
+                trace_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _validation_command_environment(
@@ -4027,6 +4071,7 @@ def run_codex_task(
         handoff_status_code, handoff_status_output = run_command(
             ["git", "status", "--porcelain", "--untracked-files=all"],
             cwd=workdir,
+            observe_process_spawn=True,
         )
         if handoff_status_code != 0 or handoff_status_output.strip():
             return (
