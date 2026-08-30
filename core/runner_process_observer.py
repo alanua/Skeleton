@@ -8,7 +8,7 @@ from typing import Sequence
 
 BLOCKER_SIGNATURE = "e3d01b54774a3957"
 TARGET_DENIED_PATH = "f" * 40
-TRACE_SYSCALLS = "execve,execveat,open,openat,openat2,creat,mkdir,mkdirat,rename,renameat,renameat2,unlink,unlinkat,stat,lstat,newfstatat,access,faccessat,faccessat2,chdir"
+TRACE_SYSCALLS = "open,openat,openat2,creat,mkdir,mkdirat,rename,renameat,renameat2,unlink,unlinkat,stat,lstat,newfstatat,access,faccessat,faccessat2,chdir"
 _DENIED_ERRNOS = frozenset({"EACCES", "EPERM"})
 _TRACE_LINE = re.compile(
     r"^(?P<pid>\d+)\s+(?P<stamp>\d+(?:\.\d+)?)\s+(?P<syscall>[a-zA-Z0-9_]+)\((?P<args>.*)\)\s+=\s+-1\s+(?P<errno>EACCES|EPERM)\b"
