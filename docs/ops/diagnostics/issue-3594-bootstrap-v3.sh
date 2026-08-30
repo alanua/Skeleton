@@ -3,7 +3,9 @@ set -uo pipefail
 
 REPO_DIR="/home/agent/agent-dev/repos/Skeleton"
 BRANCH="diagnostic/3594-supervisor-observer"
-EXPECTED_HEAD="c6a6d67b01e2d50720e219ae97d9c35c335ff42a"
+BOOTSTRAP_SHA="${1:-}"
+EXPECTED_WORK_HEAD="${2:-c6a6d67b01e2d50720e219ae97d9c35c335ff42a}"
+ALLOWED_BOOTSTRAP_DELTA="docs/ops/diagnostics/issue-3594-bootstrap-v3.sh"
 PR_URL="https://github.com/alanua/Skeleton/pull/3595"
 TMP_ROOT="$(mktemp -d)"
 STATUS="BOOTSTRAP_FAILED"
@@ -13,7 +15,7 @@ TEST_LINE=""
 
 finish() {
   if command -v gh >/dev/null 2>&1; then
-    BODY="[BOOTSTRAP RECEIPT v3]\nstatus=${STATUS}\ndetail=${DETAIL}\nhead=${NEW_HEAD:-none}\nfocused_tests=${TEST_LINE:-not_run}\nruntime_mutation=none\nmerge=none\nrequeue=none"
+    BODY="[BOOTSTRAP RECEIPT v3]\nstatus=${STATUS}\ndetail=${DETAIL}\nbootstrap_sha=${BOOTSTRAP_SHA:-none}\nexpected_work_head=${EXPECTED_WORK_HEAD:-none}\nhead=${NEW_HEAD:-none}\nfocused_tests=${TEST_LINE:-not_run}\nruntime_mutation=none\nmerge=none\nrequeue=none"
     gh pr comment 3595 --repo alanua/Skeleton --body "$BODY" >/dev/null 2>&1 || true
     gh issue comment 3594 --repo alanua/Skeleton --body "$BODY" >/dev/null 2>&1 || true
   fi
@@ -22,6 +24,10 @@ finish() {
 }
 trap finish EXIT
 
+[[ -n "$BOOTSTRAP_SHA" ]] || { DETAIL="bootstrap_sha_missing"; exit 2; }
+[[ "$BOOTSTRAP_SHA" =~ ^[0-9a-f]{40}$ ]] || { DETAIL="bootstrap_sha_invalid:${BOOTSTRAP_SHA}"; exit 2; }
+[[ "$EXPECTED_WORK_HEAD" =~ ^[0-9a-f]{40}$ ]] || { DETAIL="expected_work_head_invalid:${EXPECTED_WORK_HEAD}"; exit 2; }
+
 ORIGIN="$(git -C "$REPO_DIR" remote get-url origin 2>/dev/null)" || { DETAIL="origin_unavailable"; exit 1; }
 git clone -q --shared "$REPO_DIR" "$TMP_ROOT/repo" || { DETAIL="clone_failed"; exit 1; }
 cd "$TMP_ROOT/repo" || { DETAIL="clone_cd_failed"; exit 1; }
@@ -29,7 +35,27 @@ git remote set-url origin "$ORIGIN" || { DETAIL="remote_set_failed"; exit 1; }
 git fetch -q origin "$BRANCH" || { DETAIL="fetch_failed"; exit 1; }
 git checkout -q -B "$BRANCH" FETCH_HEAD || { DETAIL="checkout_failed"; exit 1; }
 ACTUAL_HEAD="$(git rev-parse HEAD)"
-[[ "$ACTUAL_HEAD" == "$EXPECTED_HEAD" ]] || { DETAIL="head_mismatch:${ACTUAL_HEAD}"; exit 2; }
+
+if [[ "$ACTUAL_HEAD" != "$BOOTSTRAP_SHA" ]]; then
+  DETAIL="bootstrap_head_mismatch:expected=${BOOTSTRAP_SHA},got=${ACTUAL_HEAD}"
+  exit 2
+fi
+
+if ! git cat-file -e "${EXPECTED_WORK_HEAD}^{commit}" 2>/dev/null; then
+  DETAIL="expected_work_head_missing:${EXPECTED_WORK_HEAD}"
+  exit 2
+fi
+if ! git merge-base --is-ancestor "$EXPECTED_WORK_HEAD" "$BOOTSTRAP_SHA"; then
+  DETAIL="ancestry_check_failed:expected=${BOOTSTRAP_SHA}_descendant_of=${EXPECTED_WORK_HEAD},got=${ACTUAL_HEAD}"
+  exit 2
+fi
+
+BOOTSTRAP_DELTA="$(git diff --name-only "$EXPECTED_WORK_HEAD" "$BOOTSTRAP_SHA")"
+if [[ "$BOOTSTRAP_DELTA" != "$ALLOWED_BOOTSTRAP_DELTA" ]]; then
+  SAFE_DELTA="${BOOTSTRAP_DELTA//$'\n'/,}"
+  DETAIL="bootstrap_scope_mismatch:allowed=${ALLOWED_BOOTSTRAP_DELTA},got=${SAFE_DELTA:-none}"
+  exit 3
+fi
 
 python3 - <<'PY' || { DETAIL="patch_failed"; exit 1; }
 from pathlib import Path
