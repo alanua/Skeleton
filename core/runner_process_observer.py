@@ -7,6 +7,7 @@ from typing import Sequence
 
 
 BLOCKER_SIGNATURE = "e3d01b54774a3957"
+TARGET_DENIED_PATH = "f" * 40
 TRACE_SYSCALLS = "execve,execveat,open,openat,openat2,creat,mkdir,mkdirat,rename,renameat,renameat2,unlink,unlinkat,stat,lstat,newfstatat,access,faccessat,faccessat2,chdir"
 _DENIED_ERRNOS = frozenset({"EACCES", "EPERM"})
 _TRACE_LINE = re.compile(
@@ -90,19 +91,23 @@ def parse_first_denied_filesystem_event(
     *,
     provider_started_at_epoch: float,
     executable: str,
+    expected_path: str = TARGET_DENIED_PATH,
     blocker_signature: str = BLOCKER_SIGNATURE,
 ) -> SpawnDiagnosticEvidence | None:
-    """Return only the first public-safe EACCES/EPERM filesystem event.
+    """Return only the target EACCES/EPERM event, never an arbitrary denied path.
 
     Env values, prompt text and arbitrary argv are intentionally never emitted.
+    Unrelated denied events are skipped so they cannot be misclassified as this blocker.
     """
+    if not public_safe_path(expected_path):
+        return None
     for line in trace_text.splitlines():
         match = _TRACE_LINE.match(line.strip())
         if match is None or match.group("errno") not in _DENIED_ERRNOS:
             continue
         path = _first_quoted_path(match.group("args"))
-        if path is None or not public_safe_path(path):
-            return None
+        if path != expected_path:
+            continue
         offset_ms = max(
             0,
             int(round((float(match.group("stamp")) - provider_started_at_epoch) * 1000)),
