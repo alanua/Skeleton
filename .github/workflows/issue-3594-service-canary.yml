@@ -25,7 +25,7 @@ jobs:
       - X64
     timeout-minutes: 6
     env:
-      EXPECTED_PARENT: 01c50257997853d839ff40b17e421297d52eccf9
+      EXPECTED_PARENT: 3002206b5b9dca54ea90828da1e51e1e639a84e3
       TARGET_CHECKOUT: /home/agent/agent-dev/repos/Skeleton
     steps:
       - name: Run exact bounded Runner codegen canary
@@ -94,12 +94,14 @@ jobs:
           canary_rc=$?
           set -e
 
-          cat "$tmp/canary.safe" >> "$GITHUB_STEP_SUMMARY"
-          echo "wrapper_exit_code=${canary_rc}" >> "$GITHUB_STEP_SUMMARY"
-          echo "repository_mutation=none" >> "$GITHUB_STEP_SUMMARY"
-          echo "merge=none" >> "$GITHUB_STEP_SUMMARY"
-          echo "requeue=none" >> "$GITHUB_STEP_SUMMARY"
-          test -z "$(git -C "$tmp/repo" status --porcelain --untracked-files=all)" || {
-            echo "isolated_worktree_changed=true" >> "$GITHUB_STEP_SUMMARY"
-          }
+          cat "$tmp/canary.safe"
+          echo "wrapper_exit_code=${canary_rc}"
+          echo "repository_mutation=none"
+          echo "merge=none"
+          echo "requeue=none"
+          if test -z "$(git -C "$tmp/repo" status --porcelain --untracked-files=all)"; then
+            echo "isolated_worktree_changed=false"
+          else
+            echo "isolated_worktree_changed=true"
+          fi
           test "$canary_rc" -eq 0
