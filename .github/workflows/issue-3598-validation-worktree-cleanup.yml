@@ -31,9 +31,11 @@ jobs:
             if [ "$TARGET" = "$EXPECTED_TARGET" ]; then
               [ -e "$TARGET" ] && EB=true || EB=false
               git -C "$REPO" worktree list --porcelain | grep -Fqx "worktree $TARGET" && RB=true || RB=false
+              set +e
               git -C "$REPO" worktree remove --force "$TARGET" >/dev/null 2>&1
               REMOVE_CODE=$?
-              git -C "$REPO" worktree prune >/dev/null 2>&1 || true
+              git -C "$REPO" worktree prune >/dev/null 2>&1
+              set -e
               [ -e "$TARGET" ] && EA=true || EA=false
               git -C "$REPO" worktree list --porcelain | grep -Fqx "worktree $TARGET" && RA=true || RA=false
               if [ "$EA" = false ] && [ "$RA" = false ]; then STATUS=DONE; REASON=stale_validation_worktree_cleared; else REASON=bounded_worktree_remove_failed; fi
