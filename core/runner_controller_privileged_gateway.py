@@ -8,8 +8,10 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import stat
+import tempfile
 from typing import Final
 
 try:
@@ -98,6 +100,28 @@ RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID: Final = (
 RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_OPERATOR_APPROVAL: Final = (
     "EXPLICIT_AUTONOMOUS_RUNNER_REPAIR_20260828"
 )
+SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_TASK_ID: Final = (
+    "skeleton_control_mcp_hetzner_activate_v1"
+)
+SKELETON_CONTROL_MCP_HETZNER_OPERATOR_APPROVAL: Final = (
+    "EXACT_HEAD_SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_V1_APPROVED"
+)
+SKELETON_CONTROL_MCP_HETZNER_SOURCE_PATH: Final = "scripts/skeleton_control_mcp.py"
+SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB: Final = (
+    "6f6bdce2f8d7d4b6eba6a491b9913ff6df8a3608"
+)
+SKELETON_CONTROL_MCP_HETZNER_SOURCE_MODE: Final = "100644"
+SKELETON_CONTROL_MCP_HETZNER_TRUSTED_SOURCE_ANCESTOR_SHA: Final = (
+    "60bf74972c26e7015f4e686a2cafc513f96a7f55"
+)
+SKELETON_CONTROL_MCP_HETZNER_DESTINATION: Final = Path(
+    "/usr/local/bin/skeleton-control-mcp"
+)
+SKELETON_CONTROL_MCP_HETZNER_DESTINATION_MODE: Final = 0o555
+SKELETON_CONTROL_MCP_HETZNER_SOURCE_SHA256: Final = (
+    "a1bda7d8acdb9bad71a33bab2496952a6f0367c33e2340bcb650bc195b3a142b"
+)
+SKELETON_CONTROL_MCP_HETZNER_MAX_SOURCE_BYTES: Final = 64 * 1024
 MAX_REQUEST_BYTES: Final = 16 * 1024
 MAX_TOKEN_BYTES: Final = 160
 MAX_PATH_BYTES: Final = 4096
@@ -174,6 +198,26 @@ def _embedded_action_registry() -> Mapping[str, object]:
                 "repository": REPOSITORY,
                 "target": TARGET,
                 "operator_approval": RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_OPERATOR_APPROVAL,
+            },
+            {
+                "action_id": SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_TASK_ID,
+                "handler": "skeleton_control_mcp_hetzner_activate",
+                "repository": REPOSITORY,
+                "target": TARGET,
+                "operator_approval": SKELETON_CONTROL_MCP_HETZNER_OPERATOR_APPROVAL,
+                "source_path": SKELETON_CONTROL_MCP_HETZNER_SOURCE_PATH,
+                "source_blob": SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB,
+                "source_mode": SKELETON_CONTROL_MCP_HETZNER_SOURCE_MODE,
+                "trusted_source_ancestor_sha": SKELETON_CONTROL_MCP_HETZNER_TRUSTED_SOURCE_ANCESTOR_SHA,
+                "destination": str(SKELETON_CONTROL_MCP_HETZNER_DESTINATION),
+                "installer_argv": [],
+                "post_audit_artifacts": [
+                    {
+                        "path": str(SKELETON_CONTROL_MCP_HETZNER_DESTINATION),
+                        "content_hash": SKELETON_CONTROL_MCP_HETZNER_SOURCE_SHA256,
+                        "mode": "0555",
+                    }
+                ],
             },
         ],
     }
@@ -434,16 +478,18 @@ def load_action_registry(path: Path = DEFAULT_ACTION_REGISTRY_PATH) -> dict[str,
     if not isinstance(loaded, Mapping) or loaded.get("schema") != "skeleton.runner_privileged_actions.v1":
         raise PrivilegedGatewayError("action_registry_schema_mismatch")
     actions = loaded.get("actions")
-    if not isinstance(actions, list) or len(actions) != 2:
+    if not isinstance(actions, list) or len(actions) != 3:
         raise PrivilegedGatewayError("action_registry_action_set_mismatch")
     parsed = [_action_from_mapping(action) for action in actions]
     if [action.action_id for action in parsed] != [
         HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID,
         RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID,
+        SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_TASK_ID,
     ]:
         raise PrivilegedGatewayError("action_registry_action_set_mismatch")
     _assert_initial_esp_signer_action(parsed[0])
     _assert_codex_state_mount_action(parsed[1])
+    _assert_skeleton_control_mcp_hetzner_action(parsed[2])
     return {action.action_id: action for action in parsed}
 
 
@@ -492,6 +538,8 @@ def _action_from_mapping(raw: object) -> GatewayAction:
         raise PrivilegedGatewayError("action_registry_field_set_mismatch")
     argv = raw["installer_argv"]
     artifacts = raw["post_audit_artifacts"]
+    if argv == "[]":
+        argv = []
     if not isinstance(argv, list) or not all(isinstance(item, str) for item in argv):
         raise PrivilegedGatewayError("action_registry_argv_invalid")
     if not isinstance(artifacts, list):
@@ -584,6 +632,32 @@ def _assert_codex_state_mount_action(action: GatewayAction) -> None:
         or action.post_audit_artifacts
     ):
         raise PrivilegedGatewayError("codex_state_mount_action_drift")
+
+
+def _assert_skeleton_control_mcp_hetzner_action(action: GatewayAction) -> None:
+    expected_artifacts = (
+        (
+            str(SKELETON_CONTROL_MCP_HETZNER_DESTINATION),
+            SKELETON_CONTROL_MCP_HETZNER_SOURCE_SHA256,
+            SKELETON_CONTROL_MCP_HETZNER_DESTINATION_MODE,
+        ),
+    )
+    if (
+        action.action_id != SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_TASK_ID
+        or action.handler != "skeleton_control_mcp_hetzner_activate"
+        or action.repository != REPOSITORY
+        or action.target != TARGET
+        or action.operator_approval != SKELETON_CONTROL_MCP_HETZNER_OPERATOR_APPROVAL
+        or action.source_path != SKELETON_CONTROL_MCP_HETZNER_SOURCE_PATH
+        or action.source_blob != SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB
+        or action.source_mode != SKELETON_CONTROL_MCP_HETZNER_SOURCE_MODE
+        or action.trusted_source_ancestor_sha
+        != SKELETON_CONTROL_MCP_HETZNER_TRUSTED_SOURCE_ANCESTOR_SHA
+        or action.destination != str(SKELETON_CONTROL_MCP_HETZNER_DESTINATION)
+        or action.installer_argv
+        or action.post_audit_artifacts != expected_artifacts
+    ):
+        raise PrivilegedGatewayError("skeleton_control_mcp_hetzner_action_drift")
 
 
 def verify_protected_capability_metadata(path: Path = DEFAULT_CAPABILITY_REGISTRY_PATH) -> None:
@@ -863,6 +937,8 @@ def _run_registered_action(
 ) -> tuple[int, str]:
     if action.action_id == RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID:
         return _execute_runner_controller_repair_codex_state_mount(request, action)
+    if action.action_id == SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_TASK_ID:
+        return _execute_skeleton_control_mcp_hetzner_activate(request, action)
     if action.action_id != HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID:
         raise PrivilegedGatewayError("action_handler_missing")
     try:
@@ -904,6 +980,236 @@ def _execute_runner_controller_repair_codex_state_mount(
         "private_evidence_exposed": False,
     }
     return 0, "RESULT: DONE\nReceipt:\n" + json.dumps(receipt, indent=2, sort_keys=True)
+
+
+def _gateway_action_result(status: str, receipt: Mapping[str, object]) -> str:
+    return "RESULT: " + status + "\nReceipt:\n" + json.dumps(receipt, indent=2, sort_keys=True)
+
+
+def _skeleton_control_mcp_receipt(
+    status: str,
+    reason: str,
+    *,
+    expected_main_sha: str,
+    installer_sha256: str | None = None,
+    protected_copy_verified: bool = False,
+    installed_artifacts_verified: bool = False,
+) -> dict[str, object]:
+    receipt: dict[str, object] = {
+        "maintenance_task_id": SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_TASK_ID,
+        "status": status,
+        "reason": _public_reason(reason),
+        "repository": REPOSITORY,
+        "expected_main_sha": expected_main_sha,
+        "target": TARGET,
+        "source_blob": SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB,
+        "protected_copy_verified": protected_copy_verified,
+        "installed_artifacts_verified": installed_artifacts_verified,
+        "activation_executed": False,
+        "private_evidence_exposed": False,
+    }
+    if installer_sha256 is not None:
+        receipt["installer_sha256"] = installer_sha256
+    return receipt
+
+
+def _skeleton_control_mcp_blocked(
+    reason: str,
+    *,
+    expected_main_sha: str,
+    installer_sha256: str | None = None,
+    protected_copy_verified: bool = False,
+) -> tuple[int, str]:
+    return 0, _gateway_action_result(
+        "NEEDS_OPERATOR",
+        _skeleton_control_mcp_receipt(
+            "NEEDS_OPERATOR",
+            reason,
+            expected_main_sha=expected_main_sha,
+            installer_sha256=installer_sha256,
+            protected_copy_verified=protected_copy_verified,
+        ),
+    )
+
+
+def _fixed_git(checkout_path: Path, args: tuple[str, ...]) -> tuple[int, str]:
+    completed = subprocess.run(
+        ["/usr/bin/git", *args],
+        cwd=str(checkout_path),
+        env={
+            "HOME": "/nonexistent",
+            "LANG": "C",
+            "LC_ALL": "C",
+            "PATH": "/usr/bin:/bin",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+        },
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        timeout=30,
+        check=False,
+    )
+    return completed.returncode, completed.stdout
+
+
+def _read_fixed_git_blob(checkout_path: Path, blob_sha: str) -> bytes:
+    code, output = _fixed_git(checkout_path, ("cat-file", "-s", blob_sha))
+    if code != 0 or not output.strip().isdecimal():
+        raise PrivilegedGatewayError("skeleton_control_mcp_source_unavailable")
+    size = int(output.strip())
+    if size <= 0 or size > SKELETON_CONTROL_MCP_HETZNER_MAX_SOURCE_BYTES:
+        raise PrivilegedGatewayError("skeleton_control_mcp_source_size_unapproved")
+    code, output = _fixed_git(checkout_path, ("cat-file", "-p", blob_sha))
+    data = output.encode("utf-8")
+    if code != 0 or len(data) != size:
+        raise PrivilegedGatewayError("skeleton_control_mcp_source_unavailable")
+    return data
+
+
+def _verify_skeleton_control_mcp_source(
+    *,
+    checkout_path: Path,
+    expected_main_sha: str,
+) -> None:
+    code, output = _fixed_git(
+        checkout_path,
+        ("ls-tree", expected_main_sha, SKELETON_CONTROL_MCP_HETZNER_SOURCE_PATH),
+    )
+    expected_tree_entry = (
+        f"{SKELETON_CONTROL_MCP_HETZNER_SOURCE_MODE} blob "
+        f"{SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB}\t"
+        f"{SKELETON_CONTROL_MCP_HETZNER_SOURCE_PATH}"
+    )
+    if code != 0 or output.strip() != expected_tree_entry:
+        raise PrivilegedGatewayError("skeleton_control_mcp_source_tree_mismatch")
+    code, object_type = _fixed_git(
+        checkout_path,
+        ("cat-file", "-t", SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB),
+    )
+    if code != 0 or object_type.strip() != "blob":
+        raise PrivilegedGatewayError("skeleton_control_mcp_source_blob_mismatch")
+    code, _output = _fixed_git(
+        checkout_path,
+        (
+            "merge-base",
+            "--is-ancestor",
+            SKELETON_CONTROL_MCP_HETZNER_TRUSTED_SOURCE_ANCESTOR_SHA,
+            expected_main_sha,
+        ),
+    )
+    if code != 0:
+        raise PrivilegedGatewayError("skeleton_control_mcp_trust_ancestor_missing")
+
+
+def _verify_fixed_installed_file(path: Path, expected_sha256: str, expected_mode: int) -> None:
+    st = os.lstat(path)
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+        raise PrivilegedGatewayError("skeleton_control_mcp_destination_not_regular")
+    if st.st_uid != 0 or st.st_gid != 0:
+        raise PrivilegedGatewayError("skeleton_control_mcp_destination_owner_mismatch")
+    if stat.S_IMODE(st.st_mode) != expected_mode:
+        raise PrivilegedGatewayError("skeleton_control_mcp_destination_mode_mismatch")
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    if digest.hexdigest() != expected_sha256:
+        raise PrivilegedGatewayError("skeleton_control_mcp_destination_hash_mismatch")
+
+
+def _atomic_write_root_file(destination: Path, data: bytes, mode: int) -> None:
+    destination.parent.mkdir(parents=True, mode=0o755, exist_ok=True)
+    temporary_destination = destination.with_name(f".{destination.name}.tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(temporary_destination, flags, mode)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            fd = -1
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chown(temporary_destination, 0, 0)
+        os.chmod(temporary_destination, mode)
+        os.replace(temporary_destination, destination)
+    finally:
+        if fd != -1:
+            os.close(fd)
+        try:
+            temporary_destination.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _execute_skeleton_control_mcp_hetzner_activate(
+    request: Mapping[str, object],
+    action: GatewayAction,
+) -> tuple[int, str]:
+    if action.handler != "skeleton_control_mcp_hetzner_activate":
+        raise PrivilegedGatewayError("action_handler_mismatch")
+    expected_main_sha = str(request["expected_main_sha"])
+    protected_copy_verified = False
+    staged_parent: Path | None = None
+    try:
+        checkout_path = Path(str(request["checkout_path"]))
+        _verify_skeleton_control_mcp_source(
+            checkout_path=checkout_path,
+            expected_main_sha=expected_main_sha,
+        )
+        data = _read_fixed_git_blob(checkout_path, SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB)
+        installer_sha256 = hashlib.sha256(data).hexdigest()
+        if installer_sha256 != SKELETON_CONTROL_MCP_HETZNER_SOURCE_SHA256:
+            raise PrivilegedGatewayError("skeleton_control_mcp_source_hash_mismatch")
+        staged_parent = Path(tempfile.mkdtemp(prefix="skeleton-control-mcp-"))
+        staged_parent.chmod(0o700)
+        staged = staged_parent / "skeleton-control-mcp"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        fd = os.open(staged, flags, 0o500)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                fd = -1
+                handle.write(data)
+        finally:
+            if fd != -1:
+                os.close(fd)
+        staged.chmod(0o500)
+        _verify_skeleton_control_mcp_source(
+            checkout_path=checkout_path,
+            expected_main_sha=expected_main_sha,
+        )
+        destination = Path(action.destination)
+        _atomic_write_root_file(
+            destination,
+            data,
+            SKELETON_CONTROL_MCP_HETZNER_DESTINATION_MODE,
+        )
+        protected_copy_verified = True
+        _verify_fixed_installed_file(
+            destination,
+            SKELETON_CONTROL_MCP_HETZNER_SOURCE_SHA256,
+            SKELETON_CONTROL_MCP_HETZNER_DESTINATION_MODE,
+        )
+        receipt = _skeleton_control_mcp_receipt(
+            "DONE",
+            "SKELETON_CONTROL_MCP_HETZNER_LAUNCHER_VERIFIED",
+            expected_main_sha=expected_main_sha,
+            installer_sha256=installer_sha256,
+            protected_copy_verified=True,
+            installed_artifacts_verified=True,
+        )
+        return 0, _gateway_action_result("DONE", receipt)
+    except (OSError, subprocess.SubprocessError, PrivilegedGatewayError) as exc:
+        return _skeleton_control_mcp_blocked(
+            exc.reason_code if isinstance(exc, PrivilegedGatewayError) else "privilege_unavailable",
+            expected_main_sha=expected_main_sha,
+            protected_copy_verified=protected_copy_verified,
+        )
+    finally:
+        if staged_parent is not None:
+            shutil.rmtree(staged_parent, ignore_errors=True)
 
 
 def _root_local_protected_run(argv: list[str], timeout: int | None) -> tuple[int, str]:

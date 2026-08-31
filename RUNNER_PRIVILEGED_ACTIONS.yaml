@@ -32,3 +32,18 @@ actions:
     repository: alanua/Skeleton
     target: runner-controller
     operator_approval: EXPLICIT_AUTONOMOUS_RUNNER_REPAIR_20260828
+  - action_id: skeleton_control_mcp_hetzner_activate_v1
+    handler: skeleton_control_mcp_hetzner_activate
+    repository: alanua/Skeleton
+    target: runner-controller
+    operator_approval: EXACT_HEAD_SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_V1_APPROVED
+    source_path: scripts/skeleton_control_mcp.py
+    source_blob: 6f6bdce2f8d7d4b6eba6a491b9913ff6df8a3608
+    source_mode: "100644"
+    trusted_source_ancestor_sha: 60bf74972c26e7015f4e686a2cafc513f96a7f55
+    destination: /usr/local/bin/skeleton-control-mcp
+    installer_argv: []
+    post_audit_artifacts:
+      - path: /usr/local/bin/skeleton-control-mcp
+        content_hash: a1bda7d8acdb9bad71a33bab2496952a6f0367c33e2340bcb650bc195b3a142b
+        mode: "0555"
