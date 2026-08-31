@@ -4059,6 +4059,7 @@ def run_codex_task(
             codex_code, codex_output = run_command(
                 codex_exec_command(task_content, workdir, task),
                 cwd=workdir,
+                observe_process_spawn=True,
             )
         finally:
             _RUN_COMMAND_ENV_OVERRIDE.reset(token)
@@ -4071,7 +4072,6 @@ def run_codex_task(
         handoff_status_code, handoff_status_output = run_command(
             ["git", "status", "--porcelain", "--untracked-files=all"],
             cwd=workdir,
-            observe_process_spawn=True,
         )
         if handoff_status_code != 0 or handoff_status_output.strip():
             return (
