@@ -1,3 +1,4 @@
+# one-shot bounded bootstrap for issue #3598
 name: Issue 3598 Validation Worktree Cleanup
 
 on:
