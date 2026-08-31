@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 concurrency:
   group: issue-3594-service-canary
@@ -23,85 +24,153 @@ jobs:
       - self-hosted
       - Linux
       - X64
-    timeout-minutes: 6
+    timeout-minutes: 8
     env:
-      EXPECTED_PARENT: 3002206b5b9dca54ea90828da1e51e1e639a84e3
+      EXPECTED_PARENT: 734f035f49dfaa5b1eab21094ef14d9973e9380e
+      EXPECTED_MAIN: a7e4a94a187de8064601449bc30dda8faec34be7
       TARGET_CHECKOUT: /home/agent/agent-dev/repos/Skeleton
+      GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Run exact bounded Runner codegen canary
+      - name: Run canonical service-shaped codegen canary
         shell: bash
         run: |
           set -euo pipefail
-          tmp="$(mktemp -d "${RUNNER_TEMP}/issue-3594-canary.XXXXXX")"
-          trap 'rm -rf "$tmp"' EXIT
+          tmp="$(mktemp -d "${RUNNER_TEMP}/issue-3594-service-canary.XXXXXX")"
+          canary_issue=""
+          timer_was_active=false
+          cleanup() {
+            if [[ -n "$canary_issue" ]]; then
+              gh issue close "$canary_issue" --repo alanua/Skeleton --reason not-planned >/dev/null 2>&1 || true
+            fi
+            if [[ "$timer_was_active" == true ]]; then
+              systemctl --user start skeleton-runner-poll.timer >/dev/null 2>&1 || true
+            fi
+            rm -rf "$tmp"
+          }
+          trap cleanup EXIT
 
           test -d "${TARGET_CHECKOUT}/.git"
+          test "$(git -C "${TARGET_CHECKOUT}" rev-parse HEAD)" = "$EXPECTED_MAIN"
+          test "$(git -C "${TARGET_CHECKOUT}" rev-parse --abbrev-ref HEAD)" = main
+          test -z "$(git -C "${TARGET_CHECKOUT}" status --porcelain --untracked-files=all)"
+          systemctl --user is-active --quiet skeleton-runner-poll.timer && timer_was_active=true || true
+          systemctl --user stop skeleton-runner-poll.timer
+          systemctl --user stop skeleton-runner-poll.service || true
+
           origin="$(git -C "${TARGET_CHECKOUT}" remote get-url origin)"
-          case "${origin}" in
+          case "$origin" in
             https://github.com/alanua/Skeleton|https://github.com/alanua/Skeleton.git) ;;
             *) exit 2 ;;
           esac
-
           git clone -q --shared "${TARGET_CHECKOUT}" "$tmp/repo"
           git -C "$tmp/repo" remote set-url origin "$origin"
           git -C "$tmp/repo" fetch -q origin diagnostic/3594-supervisor-observer
           head_sha="$(git -C "$tmp/repo" rev-parse FETCH_HEAD)"
           test "$head_sha" = "${{ github.event.pull_request.head.sha }}"
-          git -C "$tmp/repo" checkout -q --detach "$head_sha"
+          git -C "$tmp/repo" checkout -q -B diagnostic/3594-supervisor-observer "$head_sha"
           test "$(git -C "$tmp/repo" rev-parse HEAD^)" = "$EXPECTED_PARENT"
           test "$(git -C "$tmp/repo" diff --name-only "$EXPECTED_PARENT" "$head_sha")" = ".github/workflows/issue-3594-service-canary.yml"
           test -z "$(git -C "$tmp/repo" status --porcelain --untracked-files=all)"
           command -v codex >/dev/null
           command -v strace >/dev/null
+          command -v gh >/dev/null
 
+          cat >"$tmp/body.md" <<'EOF'
+          Mode: RUNNER_TASK
+          Repository: alanua/Skeleton
+          Base: main@a7e4a94a187de8064601449bc30dda8faec34be7
+          Parent: #3594 #3591 #3593
+          Priority: P0 / DIAGNOSTIC_CANARY
+          Risk: green
+          Privacy Boundary: PUBLIC_SAFE_DIAGNOSTIC_METADATA_ONLY
+
+          ```task
+          schema: skeleton.runner_task.v1
+          repo: alanua/Skeleton
+          base_sha: a7e4a94a187de8064601449bc30dda8faec34be7
+          branch: runner/issue-auto
+          task_kind: code_generation
+          payload:
+            operation: issue_3594_real_service_codegen_canary
+            task: >-
+              Diagnostic canary only. Do not edit any files. Return exactly RESULT: BLOCKED with reason diagnostic_canary_noop. Do not run validation or Git operations.
+          requested_capabilities:
+            - repository_read
+            - repository_write
+            - test_execution
+          allowed_files:
+            - docs/ops/diagnostics/issue-3594-canary-placeholder.txt
+          forbidden_actions:
+            - no file edits
+            - no commit or PR
+            - no merge or deploy
+            - no secrets/private data
+            - no runtime/device mutation
+          validation:
+            - provider process launches through canonical Runner codegen path
+            - no repository changes
+          expected_output:
+            - RESULT: BLOCKED diagnostic_canary_noop
+          privacy_boundary: PUBLIC_SAFE_DIAGNOSTIC_METADATA_ONLY
+          ```
+          EOF
+
+          url="$(gh issue create --repo alanua/Skeleton \
+            --title 'P0 transient real-service codegen canary for #3594' \
+            --body-file "$tmp/body.md" \
+            --label agent:task \
+            --label priority:P0 \
+            --label runner:priority-1 \
+            --label queue:RUN_NOW \
+            --label runner:ready \
+            --label risk:green)"
+          canary_issue="${url##*/}"
+          [[ "$canary_issue" =~ ^[0-9]+$ ]]
+
+          unit="issue-3594-canary-${GITHUB_RUN_ID}"
           set +e
-          timeout 180 env -u SKELETON_RUNNER_PRIVATE_MEMORY_REQUIRED \
-            PYTHONPATH="$tmp/repo" \
-            python3 - "$tmp/repo" >"$tmp/canary.safe" <<'PY'
-          import json
-          import re
-          import sys
-          from pathlib import Path
-          from scripts import runner_poll_github_tasks as runner
-
-          workdir = str(Path(sys.argv[1]).resolve())
-          task = (
-              "Diagnostic service canary for issue #3594 only. "
-              "Do not edit files. Return exactly RESULT: OK."
-          )
-          code, output = runner.run_codex_task(task, workdir, None)
-          diagnostic = re.search(r"^RUNNER_PROCESS_DIAGNOSTIC=(\{.*\})$", output, re.MULTILINE)
-          capture = re.search(r"^RUNNER_PROCESS_DIAGNOSTIC_CAPTURE=([A-Za-z0-9_:-]+)$", output, re.MULTILINE)
-          print(f"canary_exit_code={code}")
-          if diagnostic:
-              data = json.loads(diagnostic.group(1))
-              allowed = {
-                  "blocker_signature", "syscall", "path", "provider_offset_ms",
-                  "process_id", "executable", "phase"
-              }
-              if set(data) != allowed:
-                  raise SystemExit("diagnostic_schema_mismatch")
-              if data.get("blocker_signature") != "e3d01b54774a3957":
-                  raise SystemExit("blocker_signature_mismatch")
-              print("diagnostic_status=target_event_captured")
-              for key in ("blocker_signature", "syscall", "path", "provider_offset_ms", "process_id", "executable", "phase"):
-                  print(f"{key}={data[key]}")
-          elif capture:
-              print(f"diagnostic_status={capture.group(1)}")
-          else:
-              print("diagnostic_status=no_diagnostic_marker")
-          PY
-          canary_rc=$?
+          timeout 240 systemd-run --user --wait --collect \
+            --unit "$unit" \
+            --property Type=oneshot \
+            --property "WorkingDirectory=$tmp/repo" \
+            --setenv SKELETON_RUNNER_MODE=enforce \
+            --setenv SKELETON_RUNNER_BRANCH=diagnostic/3594-supervisor-observer \
+            --setenv PATH=/home/agent/.local/bin:/usr/local/bin:/usr/bin:/bin \
+            /usr/bin/python3 "$tmp/repo/scripts/runner_poll_github_tasks.py" --workdir "$tmp/repo" \
+            >"$tmp/systemd.out" 2>"$tmp/systemd.err"
+          service_rc=$?
           set -e
 
-          cat "$tmp/canary.safe"
-          echo "wrapper_exit_code=${canary_rc}"
-          echo "repository_mutation=none"
-          echo "merge=none"
-          echo "requeue=none"
-          if test -z "$(git -C "$tmp/repo" status --porcelain --untracked-files=all)"; then
-            echo "isolated_worktree_changed=false"
-          else
-            echo "isolated_worktree_changed=true"
-          fi
-          test "$canary_rc" -eq 0
+          gh issue view "$canary_issue" --repo alanua/Skeleton --json comments,labels >"$tmp/issue.json"
+          python3 - "$tmp/issue.json" "$canary_issue" "$service_rc" <<'PY'
+          import json, re, sys
+          data = json.load(open(sys.argv[1], encoding='utf-8'))
+          issue = sys.argv[2]
+          service_rc = sys.argv[3]
+          bodies = [c.get('body','') for c in data.get('comments', [])]
+          text = '\n'.join(bodies)
+          diag = re.search(r'^RUNNER_PROCESS_DIAGNOSTIC=(\{.*\})$', text, re.MULTILINE)
+          capture = re.search(r'^RUNNER_PROCESS_DIAGNOSTIC_CAPTURE=([A-Za-z0-9_:-]+)$', text, re.MULTILINE)
+          labels = sorted(x.get('name','') for x in data.get('labels', []))
+          print(f'canary_issue={issue}')
+          print(f'service_exit_code={service_rc}')
+          if diag:
+              payload = json.loads(diag.group(1))
+              allowed = {'blocker_signature','syscall','path','provider_offset_ms','process_id','executable','phase'}
+              if set(payload) != allowed or payload.get('blocker_signature') != 'e3d01b54774a3957':
+                  raise SystemExit('unsafe_or_invalid_diagnostic_payload')
+              print('diagnostic_status=target_event_captured')
+              for key in ('blocker_signature','syscall','path','provider_offset_ms','process_id','executable','phase'):
+                  print(f'{key}={payload[key]}')
+          elif capture:
+              print(f'diagnostic_status={capture.group(1)}')
+          else:
+              print('diagnostic_status=marker_absent')
+          terminal = [x for x in labels if x in {'runner:done','runner:blocked','runner:running','runner:ready'}]
+          print('terminal_labels=' + ','.join(terminal))
+          print('repository_mutation=none')
+          print('merge=none')
+          print('ordinary_requeue=none')
+          PY
+
+          test -z "$(git -C "${TARGET_CHECKOUT}" status --porcelain --untracked-files=all)"
