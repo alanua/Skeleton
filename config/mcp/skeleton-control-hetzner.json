@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "skeleton-control-hetzner": {
+      "command": "/usr/local/bin/skeleton-control-mcp",
+      "args": []
+    }
+  }
+}
