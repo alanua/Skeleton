@@ -1,100 +1,47 @@
-# one-shot bounded bootstrap for issue #3598
-name: Issue 3598 Validation Worktree Cleanup
-
+name: issue-3598-validation-worktree-cleanup
 on:
   push:
-    branches:
-      - bootstrap/3601-validation-worktree-cleanup
-
+    branches: [bootstrap/3601-validation-worktree-cleanup]
 permissions:
   contents: read
   issues: write
-
 jobs:
   cleanup:
     runs-on: self-hosted
     timeout-minutes: 10
     steps:
-      - name: Clean exact stale validation worktree
+      - name: bounded-cleanup
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        shell: bash
         run: |
-          set -euo pipefail
+          set -u
           REPO="$HOME/agent-dev/repos/Skeleton"
-          EXPECTED_MAIN="a7e4a94a187de8064601449bc30dda8faec34be7"
-          ISSUE=3598
-          PR=3601
-          status="BLOCKED"
-          reason="preflight_failed"
-          remove_code="not_run"
-          registered_before="unknown"
-          registered_after="unknown"
-          exists_before="unknown"
-          exists_after="unknown"
-
-          if [[ ! -d "$REPO/.git" ]]; then
-            reason="canonical_checkout_missing"
-          elif [[ "$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)" != "$EXPECTED_MAIN" ]]; then
-            reason="canonical_head_mismatch"
-          elif [[ -n "$(git -C "$REPO" status --porcelain 2>/dev/null || true)" ]]; then
-            reason="canonical_checkout_dirty"
-          else
-            TARGET="$(cd "$REPO" && python3 - <<'PY'
-from scripts import runner_poll_github_tasks as r
-print(r._validation_worktree_path('alanua/Skeleton', 3601))
-PY
-)"
-            case "$TARGET" in
-              "$HOME"/agent-dev/worktrees/skeleton/validate-pr-branch/pr-3601) ;;
-              *) reason="derived_target_outside_exact_bound"; TARGET="" ;;
-            esac
-            if [[ -n "${TARGET:-}" ]]; then
-              [[ -e "$TARGET" ]] && exists_before=true || exists_before=false
-              if git -C "$REPO" worktree list --porcelain | grep -Fqx "worktree $TARGET"; then
-                registered_before=true
-              else
-                registered_before=false
-              fi
-
-              set +e
+          EXPECTED="a7e4a94a187de8064601449bc30dda8faec34be7"
+          STATUS=BLOCKED
+          REASON=preflight_failed
+          REMOVE_CODE=not_run
+          EB=unknown
+          RB=unknown
+          EA=unknown
+          RA=unknown
+          if [ -d "$REPO/.git" ] && [ "$(git -C "$REPO" rev-parse HEAD 2>/dev/null)" = "$EXPECTED" ] && [ -z "$(git -C "$REPO" status --porcelain 2>/dev/null)" ]; then
+            TARGET=$(cd "$REPO" && python3 -c "from scripts import runner_poll_github_tasks as r; print(r._validation_worktree_path('alanua/Skeleton',3601))")
+            EXPECTED_TARGET="$HOME/agent-dev/worktrees/skeleton/validate-pr-branch/pr-3601"
+            if [ "$TARGET" = "$EXPECTED_TARGET" ]; then
+              [ -e "$TARGET" ] && EB=true || EB=false
+              git -C "$REPO" worktree list --porcelain | grep -Fqx "worktree $TARGET" && RB=true || RB=false
               git -C "$REPO" worktree remove --force "$TARGET" >/dev/null 2>&1
-              remove_code=$?
-              set -e
+              REMOVE_CODE=$?
               git -C "$REPO" worktree prune >/dev/null 2>&1 || true
-
-              [[ -e "$TARGET" ]] && exists_after=true || exists_after=false
-              if git -C "$REPO" worktree list --porcelain | grep -Fqx "worktree $TARGET"; then
-                registered_after=true
-              else
-                registered_after=false
-              fi
-
-              if [[ "$exists_after" == false && "$registered_after" == false ]]; then
-                status="DONE"
-                reason="stale_validation_worktree_cleared"
-              else
-                reason="bounded_worktree_remove_failed"
-              fi
+              [ -e "$TARGET" ] && EA=true || EA=false
+              git -C "$REPO" worktree list --porcelain | grep -Fqx "worktree $TARGET" && RA=true || RA=false
+              if [ "$EA" = false ] && [ "$RA" = false ]; then STATUS=DONE; REASON=stale_validation_worktree_cleared; else REASON=bounded_worktree_remove_failed; fi
+            else
+              REASON=derived_target_outside_exact_bound
             fi
           fi
-
-          body=$(cat <<EOF
-          ${status}: bounded #3598 validation-worktree cleanup receipt
-          expected_main_sha=${EXPECTED_MAIN}
-          target_pr=${PR}
-          exists_before=${exists_before}
-          registered_before=${registered_before}
-          worktree_remove_exit_code=${remove_code}
-          exists_after=${exists_after}
-          registered_after=${registered_after}
-          reason=${reason}
-          repository_source_mutation=none
-          service_mutation=none
-          permission_widening=none
-          private_path_exposed=false
-          secrets_exposed=false
-          EOF
-          )
-          gh issue comment "$ISSUE" --repo alanua/Skeleton --body "$body"
-          [[ "$status" == DONE ]]
+          printf '%s\n' "$STATUS: bounded #3598 validation-worktree cleanup receipt" "expected_main_sha=$EXPECTED" "target_pr=3601" "exists_before=$EB" "registered_before=$RB" "worktree_remove_exit_code=$REMOVE_CODE" "exists_after=$EA" "registered_after=$RA" "reason=$REASON" "repository_source_mutation=none" "service_mutation=none" "permission_widening=none" "private_path_exposed=false" "secrets_exposed=false" > /tmp/issue-3598-receipt.txt
+          gh issue comment 3598 --repo alanua/Skeleton --body-file /tmp/issue-3598-receipt.txt
+          rm -f /tmp/issue-3598-receipt.txt
+          [ "$STATUS" = DONE ]
