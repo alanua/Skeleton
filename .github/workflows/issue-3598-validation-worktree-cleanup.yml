@@ -1,4 +1,4 @@
-name: issue-3598-validation-artifact-localization
+name: issue-3598-cleanup-and-test-hygiene
 on:
   push:
     branches: [bootstrap/3601-validation-worktree-cleanup]
@@ -6,11 +6,11 @@ permissions:
   contents: read
   issues: write
 jobs:
-  diagnose:
+  recover:
     runs-on: self-hosted
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
-      - name: localize
+      - name: clean-exact-stale-validation-tree
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -20,26 +20,42 @@ jobs:
           EXPECTED="a7e4a94a187de8064601449bc30dda8faec34be7"
           [ "$(git -C "$REPO" rev-parse HEAD)" = "$EXPECTED" ]
           [ -z "$(git -C "$REPO" status --porcelain)" ]
-          cd "$REPO"
-          MATCHES=$(grep -R -n -E 'first_install_canary_fail|canary_failure_restores_p0|esp-lab|install-root' tests core scripts 2>/dev/null | head -80 | sed "s#^$REPO/##" || true)
-          TARGET=$(python3 -c "from scripts import runner_poll_github_tasks as r; print(r._validation_worktree_path('alanua/Skeleton',3601))")
-          DENIED_COUNT=0
-          ROOT_OWNED_COUNT=0
-          if [ -d "$TARGET" ]; then
-            DENIED_COUNT=$(find "$TARGET" -name ffffffffffffffffffffffffffffffffffffffff -print 2>/dev/null | wc -l)
-            ROOT_OWNED_COUNT=$(find "$TARGET" -name ffffffffffffffffffffffffffffffffffffffff -uid 0 -print 2>/dev/null | wc -l)
+          TARGET=$(cd "$REPO" && python3 -c "from scripts import runner_poll_github_tasks as r; print(r._validation_worktree_path('alanua/Skeleton',3601))")
+          EXPECTED_TARGET="$HOME/agent-dev/worktrees/skeleton/validate-pr-branch/pr-3601"
+          [ "$TARGET" = "$EXPECTED_TARGET" ]
+          [ ! -L "$TARGET" ]
+          if git -C "$REPO" worktree list --porcelain | grep -Fqx "worktree $TARGET"; then
+            echo 'unexpected_registered_validation_worktree' >&2
+            exit 20
           fi
-          {
-            echo 'DIAGNOSTIC: #3598 root-owned validation artifact localization'
-            echo "expected_main_sha=$EXPECTED"
-            echo "target_pr=3601"
-            echo "denied_marker_count=$DENIED_COUNT"
-            echo "root_owned_marker_count=$ROOT_OWNED_COUNT"
-            echo 'repository_matches:'
-            printf '%s\n' "$MATCHES"
-            echo 'private_path_exposed=false'
-            echo 'secrets_exposed=false'
-            echo 'mutation=none'
-          } > /tmp/issue-3598-diag.txt
-          gh issue comment 3598 --repo alanua/Skeleton --body-file /tmp/issue-3598-diag.txt
-          rm -f /tmp/issue-3598-diag.txt
+          if [ -e "$TARGET" ]; then
+            find "$TARGET" -type d -exec chmod u+rwx {} +
+            rm -rf --one-file-system "$TARGET"
+          fi
+          git -C "$REPO" worktree prune >/dev/null 2>&1 || true
+          [ ! -e "$TARGET" ]
+          ! git -C "$REPO" worktree list --porcelain | grep -Fqx "worktree $TARGET"
+          printf '%s\n' 'DONE: exact stale #3598 validation tree cleared' 'permission_change_scope=pytest_owned_stale_validation_directories_only' 'repository_source_mutation=none' 'service_mutation=none' 'private_path_exposed=false' 'secrets_exposed=false' > /tmp/issue-3598-clean.txt
+          gh issue comment 3598 --repo alanua/Skeleton --body-file /tmp/issue-3598-clean.txt
+          rm -f /tmp/issue-3598-clean.txt
+      - name: checkout-hygiene-fix
+        uses: actions/checkout@v4
+        with:
+          ref: fix/pytest-esp-lab-temp-permissions
+          path: hygiene-fix
+      - name: validate-hygiene-fix
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/hygiene-fix"
+          python3 -m pytest -q tests/test_install_home_edge_esp_lab.py | tee /tmp/issue-3598-focused.txt
+          python3 -m pytest -q | tee /tmp/issue-3598-full.txt
+          git diff --check
+          [ -z "$(git status --porcelain)" ]
+          FOCUSED=$(tail -n 1 /tmp/issue-3598-focused.txt | tr -cd '[:print:]')
+          FULL=$(tail -n 1 /tmp/issue-3598-full.txt | tr -cd '[:print:]')
+          printf '%s\n' 'DONE: pytest temp-permission hygiene candidate validated' 'candidate_head=360c37aa227a9053afe3a8b1003b92276348a689' "focused=$FOCUSED" "full=$FULL" 'git_diff_check=pass' 'worktree_clean=true' 'runtime_mutation=none' 'secrets_exposed=false' > /tmp/issue-3598-tests.txt
+          gh issue comment 3598 --repo alanua/Skeleton --body-file /tmp/issue-3598-tests.txt
+          rm -f /tmp/issue-3598-focused.txt /tmp/issue-3598-full.txt /tmp/issue-3598-tests.txt
