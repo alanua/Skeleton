@@ -1,0 +1,105 @@
+name: Issue 3594 One-Shot Service Canary
+
+on:
+  pull_request:
+    types: [synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: issue-3594-service-canary
+  cancel-in-progress: false
+
+jobs:
+  canary:
+    if: >-
+      github.repository == 'alanua/Skeleton' &&
+      github.event.pull_request.number == 3595 &&
+      github.event.pull_request.state == 'open' &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.head.ref == 'diagnostic/3594-supervisor-observer'
+    runs-on:
+      - self-hosted
+      - Linux
+      - X64
+    timeout-minutes: 6
+    env:
+      EXPECTED_PARENT: 01c50257997853d839ff40b17e421297d52eccf9
+      TARGET_CHECKOUT: /home/agent/agent-dev/repos/Skeleton
+    steps:
+      - name: Run exact bounded Runner codegen canary
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d "${RUNNER_TEMP}/issue-3594-canary.XXXXXX")"
+          trap 'rm -rf "$tmp"' EXIT
+
+          test -d "${TARGET_CHECKOUT}/.git"
+          origin="$(git -C "${TARGET_CHECKOUT}" remote get-url origin)"
+          case "${origin}" in
+            https://github.com/alanua/Skeleton|https://github.com/alanua/Skeleton.git) ;;
+            *) exit 2 ;;
+          esac
+
+          git clone -q --shared "${TARGET_CHECKOUT}" "$tmp/repo"
+          git -C "$tmp/repo" remote set-url origin "$origin"
+          git -C "$tmp/repo" fetch -q origin diagnostic/3594-supervisor-observer
+          head_sha="$(git -C "$tmp/repo" rev-parse FETCH_HEAD)"
+          test "$head_sha" = "${{ github.event.pull_request.head.sha }}"
+          git -C "$tmp/repo" checkout -q --detach "$head_sha"
+          test "$(git -C "$tmp/repo" rev-parse HEAD^)" = "$EXPECTED_PARENT"
+          test "$(git -C "$tmp/repo" diff --name-only "$EXPECTED_PARENT" "$head_sha")" = ".github/workflows/issue-3594-service-canary.yml"
+          test -z "$(git -C "$tmp/repo" status --porcelain --untracked-files=all)"
+          command -v codex >/dev/null
+          command -v strace >/dev/null
+
+          set +e
+          timeout 180 env -u SKELETON_RUNNER_PRIVATE_MEMORY_REQUIRED \
+            PYTHONPATH="$tmp/repo" \
+            python3 - "$tmp/repo" >"$tmp/canary.safe" <<'PY'
+          import json
+          import re
+          import sys
+          from pathlib import Path
+          from scripts import runner_poll_github_tasks as runner
+
+          workdir = str(Path(sys.argv[1]).resolve())
+          task = (
+              "Diagnostic service canary for issue #3594 only. "
+              "Do not edit files. Return exactly RESULT: OK."
+          )
+          code, output = runner.run_codex_task(task, workdir, None)
+          diagnostic = re.search(r"^RUNNER_PROCESS_DIAGNOSTIC=(\{.*\})$", output, re.MULTILINE)
+          capture = re.search(r"^RUNNER_PROCESS_DIAGNOSTIC_CAPTURE=([A-Za-z0-9_:-]+)$", output, re.MULTILINE)
+          print(f"canary_exit_code={code}")
+          if diagnostic:
+              data = json.loads(diagnostic.group(1))
+              allowed = {
+                  "blocker_signature", "syscall", "path", "provider_offset_ms",
+                  "process_id", "executable", "phase"
+              }
+              if set(data) != allowed:
+                  raise SystemExit("diagnostic_schema_mismatch")
+              if data.get("blocker_signature") != "e3d01b54774a3957":
+                  raise SystemExit("blocker_signature_mismatch")
+              print("diagnostic_status=target_event_captured")
+              for key in ("blocker_signature", "syscall", "path", "provider_offset_ms", "process_id", "executable", "phase"):
+                  print(f"{key}={data[key]}")
+          elif capture:
+              print(f"diagnostic_status={capture.group(1)}")
+          else:
+              print("diagnostic_status=no_diagnostic_marker")
+          PY
+          canary_rc=$?
+          set -e
+
+          cat "$tmp/canary.safe" >> "$GITHUB_STEP_SUMMARY"
+          echo "wrapper_exit_code=${canary_rc}" >> "$GITHUB_STEP_SUMMARY"
+          echo "repository_mutation=none" >> "$GITHUB_STEP_SUMMARY"
+          echo "merge=none" >> "$GITHUB_STEP_SUMMARY"
+          echo "requeue=none" >> "$GITHUB_STEP_SUMMARY"
+          test -z "$(git -C "$tmp/repo" status --porcelain --untracked-files=all)" || {
+            echo "isolated_worktree_changed=true" >> "$GITHUB_STEP_SUMMARY"
+          }
+          test "$canary_rc" -eq 0
