@@ -20,30 +20,40 @@ jobs:
           EXPECTED="a7e4a94a187de8064601449bc30dda8faec34be7"
           STATUS=BLOCKED
           REASON=preflight_failed
-          REMOVE_CODE=not_run
           EB=unknown
           RB=unknown
           EA=unknown
           RA=unknown
+          FALLBACK=not_run
           if [ -d "$REPO/.git" ] && [ "$(git -C "$REPO" rev-parse HEAD 2>/dev/null)" = "$EXPECTED" ] && [ -z "$(git -C "$REPO" status --porcelain 2>/dev/null)" ]; then
             TARGET=$(cd "$REPO" && python3 -c "from scripts import runner_poll_github_tasks as r; print(r._validation_worktree_path('alanua/Skeleton',3601))")
             EXPECTED_TARGET="$HOME/agent-dev/worktrees/skeleton/validate-pr-branch/pr-3601"
-            if [ "$TARGET" = "$EXPECTED_TARGET" ]; then
+            if [ "$TARGET" = "$EXPECTED_TARGET" ] && [ ! -L "$TARGET" ]; then
               [ -e "$TARGET" ] && EB=true || EB=false
               git -C "$REPO" worktree list --porcelain | grep -Fqx "worktree $TARGET" && RB=true || RB=false
-              set +e
-              git -C "$REPO" worktree remove --force "$TARGET" >/dev/null 2>&1
-              REMOVE_CODE=$?
-              git -C "$REPO" worktree prune >/dev/null 2>&1
-              set -e
+              if [ "$RB" = false ]; then
+                if [ "$EB" = true ]; then
+                  rm -rf --one-file-system "$TARGET"
+                  FALLBACK=exact_unregistered_directory_removed
+                else
+                  FALLBACK=already_absent
+                fi
+                git -C "$REPO" worktree prune >/dev/null 2>&1 || true
+              else
+                set +e
+                git -C "$REPO" worktree remove --force "$TARGET" >/dev/null 2>&1
+                set -e
+                git -C "$REPO" worktree prune >/dev/null 2>&1 || true
+                FALLBACK=registered_git_worktree_remove
+              fi
               [ -e "$TARGET" ] && EA=true || EA=false
               git -C "$REPO" worktree list --porcelain | grep -Fqx "worktree $TARGET" && RA=true || RA=false
-              if [ "$EA" = false ] && [ "$RA" = false ]; then STATUS=DONE; REASON=stale_validation_worktree_cleared; else REASON=bounded_worktree_remove_failed; fi
+              if [ "$EA" = false ] && [ "$RA" = false ]; then STATUS=DONE; REASON=stale_validation_worktree_cleared; else REASON=bounded_cleanup_failed; fi
             else
-              REASON=derived_target_outside_exact_bound
+              REASON=derived_target_not_exact_or_symlink
             fi
           fi
-          printf '%s\n' "$STATUS: bounded #3598 validation-worktree cleanup receipt" "expected_main_sha=$EXPECTED" "target_pr=3601" "exists_before=$EB" "registered_before=$RB" "worktree_remove_exit_code=$REMOVE_CODE" "exists_after=$EA" "registered_after=$RA" "reason=$REASON" "repository_source_mutation=none" "service_mutation=none" "permission_widening=none" "private_path_exposed=false" "secrets_exposed=false" > /tmp/issue-3598-receipt.txt
+          printf '%s\n' "$STATUS: bounded #3598 stale validation cleanup" "expected_main_sha=$EXPECTED" "target_pr=3601" "exists_before=$EB" "registered_before=$RB" "cleanup_mode=$FALLBACK" "exists_after=$EA" "registered_after=$RA" "reason=$REASON" "repository_source_mutation=none" "service_mutation=none" "permission_widening=none" "private_path_exposed=false" "secrets_exposed=false" > /tmp/issue-3598-receipt.txt
           gh issue comment 3598 --repo alanua/Skeleton --body-file /tmp/issue-3598-receipt.txt
           rm -f /tmp/issue-3598-receipt.txt
           [ "$STATUS" = DONE ]
