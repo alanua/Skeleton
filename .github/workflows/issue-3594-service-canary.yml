@@ -26,7 +26,7 @@ jobs:
       - X64
     timeout-minutes: 8
     env:
-      EXPECTED_PARENT: 734f035f49dfaa5b1eab21094ef14d9973e9380e
+      EXPECTED_PARENT: b341876cd91c92b8ff5091056e6c51f49837f929
       EXPECTED_MAIN: a7e4a94a187de8064601449bc30dda8faec34be7
       TARGET_CHECKOUT: /home/agent/agent-dev/repos/Skeleton
       GH_TOKEN: ${{ github.token }}
@@ -53,6 +53,9 @@ jobs:
           test "$(git -C "${TARGET_CHECKOUT}" rev-parse HEAD)" = "$EXPECTED_MAIN"
           test "$(git -C "${TARGET_CHECKOUT}" rev-parse --abbrev-ref HEAD)" = main
           test -z "$(git -C "${TARGET_CHECKOUT}" status --porcelain --untracked-files=all)"
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
+          test -S "${XDG_RUNTIME_DIR}/bus"
           systemctl --user is-active --quiet skeleton-runner-poll.timer && timer_was_active=true || true
           systemctl --user stop skeleton-runner-poll.timer
           systemctl --user stop skeleton-runner-poll.service || true
