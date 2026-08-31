@@ -5,7 +5,7 @@ REPO_DIR="/home/agent/agent-dev/repos/Skeleton"
 BRANCH="diagnostic/3594-supervisor-observer"
 BOOTSTRAP_SHA="${1:-}"
 EXPECTED_WORK_HEAD="${2:-c6a6d67b01e2d50720e219ae97d9c35c335ff42a}"
-ALLOWED_BOOTSTRAP_DELTA="docs/ops/diagnostics/issue-3594-bootstrap-v3.sh"
+ALLOWED_BOOTSTRAP_DELTA=$'.github/workflows/issue-3594-one-shot-bootstrap.yml\ndocs/ops/diagnostics/issue-3594-bootstrap-v3.sh'
 PR_URL="https://github.com/alanua/Skeleton/pull/3595"
 TMP_ROOT="$(mktemp -d)"
 STATUS="BOOTSTRAP_FAILED"
@@ -53,7 +53,7 @@ fi
 BOOTSTRAP_DELTA="$(git diff --name-only "$EXPECTED_WORK_HEAD" "$BOOTSTRAP_SHA")"
 if [[ "$BOOTSTRAP_DELTA" != "$ALLOWED_BOOTSTRAP_DELTA" ]]; then
   SAFE_DELTA="${BOOTSTRAP_DELTA//$'\n'/,}"
-  DETAIL="bootstrap_scope_mismatch:allowed=${ALLOWED_BOOTSTRAP_DELTA},got=${SAFE_DELTA:-none}"
+  DETAIL="bootstrap_scope_mismatch:allowed=${ALLOWED_BOOTSTRAP_DELTA//$'\n'/,},got=${SAFE_DELTA:-none}"
   exit 3
 fi
 
