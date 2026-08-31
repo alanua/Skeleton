@@ -1,0 +1,103 @@
+name: Issue 3594 One-Shot Protected Bootstrap
+
+on:
+  pull_request:
+    types: [synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: issue-3594-one-shot-bootstrap
+  cancel-in-progress: false
+
+jobs:
+  bootstrap:
+    if: >-
+      github.repository == 'alanua/Skeleton' &&
+      github.event.pull_request.number == 3595 &&
+      github.event.pull_request.state == 'open' &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.head.ref == 'diagnostic/3594-supervisor-observer' &&
+      github.event.pull_request.head.repo.full_name == 'alanua/Skeleton' &&
+      github.event.pull_request.user.login == 'alanua'
+    runs-on:
+      - self-hosted
+      - Linux
+      - X64
+    timeout-minutes: 12
+    env:
+      REPO_DIR: /home/agent/agent-dev/repos/Skeleton
+      BRANCH: diagnostic/3594-supervisor-observer
+      EXPECTED_WORK_HEAD: c6a6d67b01e2d50720e219ae97d9c35c335ff42a
+      BOOTSTRAP_PATH: docs/ops/diagnostics/issue-3594-bootstrap-v3.sh
+      WORKFLOW_PATH: .github/workflows/issue-3594-one-shot-bootstrap.yml
+    steps:
+      - name: Apply exact protected observer wiring and self-remove
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          lock_file="${HOME}/.local/state/skeleton-runner/issue-3594-bootstrap.lock"
+          install -d -m 700 "$(dirname "${lock_file}")"
+          exec 9>"${lock_file}"
+          flock -w 180 9
+
+          test "${REPO_DIR}" = "/home/agent/agent-dev/repos/Skeleton"
+          test -d "${REPO_DIR}/.git"
+          origin_url="$(git -C "${REPO_DIR}" remote get-url origin)"
+          case "${origin_url}" in
+            https://github.com/alanua/Skeleton|https://github.com/alanua/Skeleton.git) ;;
+            *) exit 1 ;;
+          esac
+
+          git -C "${REPO_DIR}" fetch --quiet origin "${BRANCH}"
+          current_remote_head="$(git -C "${REPO_DIR}" rev-parse "origin/${BRANCH}")"
+
+          if ! git -C "${REPO_DIR}" cat-file -e "origin/${BRANCH}:${WORKFLOW_PATH}" 2>/dev/null || \
+             ! git -C "${REPO_DIR}" cat-file -e "origin/${BRANCH}:${BOOTSTRAP_PATH}" 2>/dev/null; then
+            echo "bootstrap_status=ALREADY_REMOVED" >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+
+          test "${current_remote_head}" = "${{ github.event.pull_request.head.sha }}"
+          test "$(git -C "${REPO_DIR}" diff --name-only "${EXPECTED_WORK_HEAD}" "${current_remote_head}")" = "$(printf '%s\n' "${WORKFLOW_PATH}" "${BOOTSTRAP_PATH}")"
+
+          tmp_root="$(mktemp -d "${RUNNER_TEMP}/issue-3594-bootstrap.XXXXXX")"
+          trap 'rm -rf "${tmp_root}"' EXIT
+          git -C "${REPO_DIR}" show "origin/${BRANCH}:${BOOTSTRAP_PATH}" > "${tmp_root}/bootstrap.sh"
+          chmod 700 "${tmp_root}/bootstrap.sh"
+          "${tmp_root}/bootstrap.sh" "${current_remote_head}" "${EXPECTED_WORK_HEAD}"
+
+          git -C "${REPO_DIR}" fetch --quiet origin "${BRANCH}"
+          patched_head="$(git -C "${REPO_DIR}" rev-parse "origin/${BRANCH}")"
+          git -C "${REPO_DIR}" merge-base --is-ancestor "${current_remote_head}" "${patched_head}"
+          test "$(git -C "${REPO_DIR}" diff --name-only "${EXPECTED_WORK_HEAD}" "${patched_head}")" = "$(printf '%s\n' "${WORKFLOW_PATH}" "${BOOTSTRAP_PATH}" scripts/runner_poll_github_tasks.py tests/test_runner_process_observer_wiring_target.py)"
+
+          git clone -q --shared "${REPO_DIR}" "${tmp_root}/cleanup"
+          git -C "${tmp_root}/cleanup" remote set-url origin "${origin_url}"
+          git -C "${tmp_root}/cleanup" fetch -q origin "${BRANCH}"
+          git -C "${tmp_root}/cleanup" checkout -q -B "${BRANCH}" FETCH_HEAD
+          test "$(git -C "${tmp_root}/cleanup" rev-parse HEAD)" = "${patched_head}"
+          rm -f "${tmp_root}/cleanup/${BOOTSTRAP_PATH}" "${tmp_root}/cleanup/${WORKFLOW_PATH}"
+          git -C "${tmp_root}/cleanup" add -u -- "${BOOTSTRAP_PATH}" "${WORKFLOW_PATH}"
+          test "$(git -C "${tmp_root}/cleanup" diff --cached --name-only)" = "$(printf '%s\n' "${WORKFLOW_PATH}" "${BOOTSTRAP_PATH}")"
+          git -C "${tmp_root}/cleanup" diff --cached --check
+          git -C "${tmp_root}/cleanup" config user.name github-actions[bot]
+          git -C "${tmp_root}/cleanup" config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git -C "${tmp_root}/cleanup" commit -q -m "diag: remove one-shot bootstrap for #3594"
+          cleanup_head="$(git -C "${tmp_root}/cleanup" rev-parse HEAD)"
+          test "$(git -C "${tmp_root}/cleanup" diff --name-only "${EXPECTED_WORK_HEAD}" "${cleanup_head}")" = "$(printf '%s\n' scripts/runner_poll_github_tasks.py tests/test_runner_process_observer_wiring_target.py)"
+          git -C "${tmp_root}/cleanup" push -q origin "HEAD:${BRANCH}"
+
+          {
+            echo "bootstrap_status=DONE"
+            echo "protected_patch_scope=exact"
+            echo "focused_tests=passed_by_bootstrap"
+            echo "bootstrap_removed=true"
+            echo "workflow_removed=true"
+            echo "runtime_mutation=none"
+            echo "merge=none"
+            echo "requeue=none"
+            echo "final_head=${cleanup_head}"
+          } >> "${GITHUB_STEP_SUMMARY}"
