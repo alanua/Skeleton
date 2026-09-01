@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
+import stat
 import textwrap
 
 from jsonschema import Draft202012Validator
@@ -280,6 +282,32 @@ def test_exact_registered_actions_are_accepted_and_unknown_action_fails_closed(t
         ),
         lambda request: gateway._execute_runner_controller_repair_codex_state_mount(request),
     )
+    hetzner = _execute(
+        tmp_path,
+        _request(
+            request_id="req-hetzner-mcp",
+            idempotency_key="idem-hetzner-mcp",
+            action_id=gateway.SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_TASK_ID,
+            operator_approval=gateway.SKELETON_CONTROL_MCP_HETZNER_OPERATOR_APPROVAL,
+        ),
+        lambda _request: (
+            0,
+            "RESULT: DONE\nReceipt:\n"
+            + json.dumps(
+                {
+                    "status": "DONE",
+                    "reason": "SKELETON_CONTROL_MCP_HETZNER_LAUNCHER_VERIFIED",
+                    "expected_main_sha": SHA,
+                    "source_blob": gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB,
+                    "installer_sha256": gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_SHA256,
+                    "protected_copy_verified": True,
+                    "installed_artifacts_verified": True,
+                    "activation_executed": False,
+                },
+                sort_keys=True,
+            ),
+        ),
+    )
     unknown = _execute(
         tmp_path,
         _request(
@@ -296,6 +324,10 @@ def test_exact_registered_actions_are_accepted_and_unknown_action_fails_closed(t
     assert codex["mutation_started"] is False
     assert codex["mutation_performed"] is False
     assert codex["external_side_effects_executed"] is False
+    assert hetzner["status"] == "DONE"
+    assert hetzner["reason"] == "SKELETON_CONTROL_MCP_HETZNER_LAUNCHER_VERIFIED"
+    assert hetzner["mutation_started"] is True
+    assert hetzner["mutation_performed"] is True
     assert unknown["reason"] == "ACTION_NOT_REGISTERED"
     assert calls == ["home_edge_01_esp_lab_stage1_signer_install_v1"]
 
@@ -345,6 +377,43 @@ def test_codex_state_receipt_exposes_only_public_safe_fields(tmp_path: Path) -> 
     assert "/home/agent/" not in serialized
     assert "SECRET" not in serialized
     assert "PRIVATE" not in serialized
+
+
+def test_hetzner_mcp_hardened_handler_installs_only_fixed_launcher(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo, head = _hardened_synthetic_repo(tmp_path)
+    destination = tmp_path / "bin/skeleton-control-mcp"
+
+    def verify_without_root_owner(path: Path, expected_sha256: str, expected_mode: int) -> None:
+        st = os.lstat(path)
+        assert not stat.S_ISLNK(st.st_mode)
+        assert stat.S_ISREG(st.st_mode)
+        assert stat.S_IMODE(st.st_mode) == expected_mode
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == expected_sha256
+
+    monkeypatch.setattr(gateway, "SKELETON_CONTROL_MCP_HETZNER_DESTINATION", destination)
+    monkeypatch.setattr(gateway, "SKELETON_CONTROL_MCP_HETZNER_TRUSTED_SOURCE_ANCESTOR_SHA", head)
+    monkeypatch.setattr(gateway.os, "chown", lambda *_args: None)
+    monkeypatch.setattr(gateway, "_verify_fixed_installed_file", verify_without_root_owner)
+
+    code, report = gateway._execute_skeleton_control_mcp_hetzner_activate(
+        {
+            "expected_main_sha": head,
+            "checkout_path": str(repo),
+        }
+    )
+    receipt = json.loads(report.split("Receipt:\n", 1)[1])
+    assert code == 0
+    assert receipt["status"] == "DONE"
+    assert receipt["source_blob"] == gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB
+    assert receipt["installer_sha256"] == gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_SHA256
+    assert receipt["activation_executed"] is False
+    assert destination.read_text(encoding="utf-8") == (repo / "scripts/skeleton_control_mcp.py").read_text(encoding="utf-8")
+    serialized = json.dumps(receipt, sort_keys=True)
+    assert "/home/agent/" not in serialized
+    assert "SECRET" not in serialized
 
 
 def test_root_child_allows_only_exact_two_privileged_command_shapes(
@@ -536,6 +605,7 @@ def _hardened_synthetic_repo(tmp_path: Path) -> tuple[Path, str]:
     for relative, mode in (
         ("scripts/install_runner_controller_privileged_gateway.sh", 0o755),
         ("scripts/runner_controller_privileged_gateway.py", 0o755),
+        ("scripts/skeleton_control_mcp.py", 0o644),
         ("core/runner_controller_privileged_gateway.py", 0o644),
         ("core/runner_controller_privileged_gateway_hardening.py", 0o644),
         ("core/home_edge/esp_lab_stage1_signer_install.py", 0o644),

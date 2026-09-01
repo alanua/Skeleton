@@ -3,12 +3,14 @@ from __future__ import annotations
 import ast
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
+import hashlib
 import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+import stat
 import textwrap
 
 from jsonschema import Draft202012Validator
@@ -162,6 +164,21 @@ def _action_registry() -> str:
             repository: alanua/Skeleton
             target: runner-controller
             operator_approval: {gateway.RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_OPERATOR_APPROVAL}
+          - action_id: {gateway.SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_TASK_ID}
+            handler: skeleton_control_mcp_hetzner_activate
+            repository: alanua/Skeleton
+            target: runner-controller
+            operator_approval: {gateway.SKELETON_CONTROL_MCP_HETZNER_OPERATOR_APPROVAL}
+            source_path: {gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_PATH}
+            source_blob: {gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB}
+            source_mode: "{gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_MODE}"
+            trusted_source_ancestor_sha: {gateway.SKELETON_CONTROL_MCP_HETZNER_TRUSTED_SOURCE_ANCESTOR_SHA}
+            destination: {gateway.SKELETON_CONTROL_MCP_HETZNER_DESTINATION}
+            installer_argv: []
+            post_audit_artifacts:
+              - path: {gateway.SKELETON_CONTROL_MCP_HETZNER_DESTINATION}
+                content_hash: {gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_SHA256}
+                mode: "0555"
         """
     )
 
@@ -207,6 +224,7 @@ def _make_synthetic_repo(tmp_path: Path) -> tuple[Path, Path, str]:
     _git(repo, "config", "user.name", "Runner")
     _write(repo / "scripts/install_runner_controller_privileged_gateway.sh", (ROOT / "scripts/install_runner_controller_privileged_gateway.sh").read_text(encoding="utf-8"), 0o755)
     _write(repo / "scripts/runner_controller_privileged_gateway.py", (ROOT / "scripts/runner_controller_privileged_gateway.py").read_text(encoding="utf-8"), 0o755)
+    _write(repo / "scripts/skeleton_control_mcp.py", (ROOT / "scripts/skeleton_control_mcp.py").read_text(encoding="utf-8"))
     _write(repo / "core/runner_controller_privileged_gateway.py", (ROOT / "core/runner_controller_privileged_gateway.py").read_text(encoding="utf-8"))
     _write(repo / "core/home_edge/esp_lab_stage1_signer_install.py", _signer_module())
     _write(repo / "RUNNER_PRIVILEGED_ACTIONS.yaml", _action_registry())
@@ -347,7 +365,7 @@ def test_ssh_restrictions_and_root_login_prohibition_are_deterministic() -> None
     assert "ForceCommand /usr/bin/sudo -n /usr/local/libexec/skeleton/runner-controller/privileged-gateway" in fragment
 
 
-def test_action_registry_preserves_existing_esp_signer_and_adds_exact_codex_state_action(tmp_path: Path) -> None:
+def test_action_registry_preserves_existing_actions_and_adds_exact_hetzner_mcp_action(tmp_path: Path) -> None:
     registry_path = ROOT / "RUNNER_PRIVILEGED_ACTIONS.yaml"
     if not registry_path.exists():
         registry_path = _temp_registry(tmp_path)
@@ -356,6 +374,7 @@ def test_action_registry_preserves_existing_esp_signer_and_adds_exact_codex_stat
     assert list(actions) == [
         maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID,
         gateway.RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID,
+        gateway.SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_TASK_ID,
     ]
     assert action.source_blob == maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_BLOB
     assert action.installer_argv == (
@@ -368,6 +387,22 @@ def test_action_registry_preserves_existing_esp_signer_and_adds_exact_codex_stat
     assert codex_action.operator_approval == gateway.RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_OPERATOR_APPROVAL
     assert codex_action.installer_argv == ()
     assert codex_action.post_audit_artifacts == ()
+    hetzner_action = actions[gateway.SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_TASK_ID]
+    assert hetzner_action.handler == "skeleton_control_mcp_hetzner_activate"
+    assert hetzner_action.operator_approval == gateway.SKELETON_CONTROL_MCP_HETZNER_OPERATOR_APPROVAL
+    assert hetzner_action.source_path == gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_PATH
+    assert hetzner_action.source_blob == gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB
+    assert hetzner_action.source_mode == gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_MODE
+    assert hetzner_action.trusted_source_ancestor_sha == gateway.SKELETON_CONTROL_MCP_HETZNER_TRUSTED_SOURCE_ANCESTOR_SHA
+    assert hetzner_action.destination == str(gateway.SKELETON_CONTROL_MCP_HETZNER_DESTINATION)
+    assert hetzner_action.installer_argv == ()
+    assert hetzner_action.post_audit_artifacts == (
+        (
+            str(gateway.SKELETON_CONTROL_MCP_HETZNER_DESTINATION),
+            gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_SHA256,
+            gateway.SKELETON_CONTROL_MCP_HETZNER_DESTINATION_MODE,
+        ),
+    )
 
 
 def test_codex_state_action_is_accepted_without_root_command_or_private_receipt_fields() -> None:
@@ -417,6 +452,96 @@ def test_codex_state_action_rejects_command_arguments_and_approval_mismatch_befo
     assert gateway.execute_gateway_request(with_argv, now=NOW, runner=runner)["reason"] == "REQUEST_FIELD_SET_MISMATCH"
     assert gateway.execute_gateway_request(mismatch, now=NOW, runner=runner)["reason"] == "OPERATOR_APPROVAL_MISMATCH"
     assert calls == 0
+
+
+def test_hetzner_mcp_action_rejects_argv_and_registry_destination_drift_before_runner(
+    tmp_path: Path,
+) -> None:
+    calls = 0
+
+    def runner(_request: object, _action: object) -> tuple[int, str]:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("runner must not be reached")
+
+    with_argv = _request(
+        action_id=gateway.SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_TASK_ID,
+        operator_approval=gateway.SKELETON_CONTROL_MCP_HETZNER_OPERATOR_APPROVAL,
+        argv=["/bin/sh", "-c", "id"],
+    )
+    assert gateway.execute_gateway_request(with_argv, now=NOW, runner=runner)["reason"] == "REQUEST_FIELD_SET_MISMATCH"
+
+    tampered = _action_registry().replace(
+        "destination: /usr/local/bin/skeleton-control-mcp",
+        "destination: /tmp/skeleton-control-mcp",
+    )
+    registry = tmp_path / "RUNNER_PRIVILEGED_ACTIONS.yaml"
+    registry.write_text(tampered, encoding="utf-8")
+    with pytest.raises(gateway.PrivilegedGatewayError) as exc:
+        gateway.load_action_registry(path=registry)
+    assert exc.value.reason_code == "SKELETON_CONTROL_MCP_HETZNER_ACTION_DRIFT"
+    assert calls == 0
+
+
+def test_hetzner_mcp_action_installs_only_fixed_launcher_and_public_safe_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, _remote, head = _make_synthetic_repo(tmp_path)
+    destination = tmp_path / "bin/skeleton-control-mcp"
+    monkeypatch.setattr(gateway, "SKELETON_CONTROL_MCP_HETZNER_TRUSTED_SOURCE_ANCESTOR_SHA", head)
+    action = gateway.GatewayAction(
+        action_id=gateway.SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_TASK_ID,
+        handler="skeleton_control_mcp_hetzner_activate",
+        repository="alanua/Skeleton",
+        target="runner-controller",
+        operator_approval=gateway.SKELETON_CONTROL_MCP_HETZNER_OPERATOR_APPROVAL,
+        source_path=gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_PATH,
+        source_blob=gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB,
+        source_mode=gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_MODE,
+        trusted_source_ancestor_sha=gateway.SKELETON_CONTROL_MCP_HETZNER_TRUSTED_SOURCE_ANCESTOR_SHA,
+        destination=str(destination),
+        installer_argv=(),
+        post_audit_artifacts=(
+            (
+                str(destination),
+                gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_SHA256,
+                gateway.SKELETON_CONTROL_MCP_HETZNER_DESTINATION_MODE,
+            ),
+        ),
+    )
+
+    def verify_without_root_owner(path: Path, expected_sha256: str, expected_mode: int) -> None:
+        st = os.lstat(path)
+        assert not stat.S_ISLNK(st.st_mode)
+        assert stat.S_ISREG(st.st_mode)
+        assert stat.S_IMODE(st.st_mode) == expected_mode
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == expected_sha256
+
+    monkeypatch.setattr(gateway.os, "chown", lambda *_args: None)
+    monkeypatch.setattr(gateway, "_verify_fixed_installed_file", verify_without_root_owner)
+
+    code, report = gateway._execute_skeleton_control_mcp_hetzner_activate(
+        {
+            "expected_main_sha": head,
+            "checkout_path": str(repo),
+        },
+        action,
+    )
+    receipt = gateway._parse_executor_receipt(report)
+    assert code == 0
+    assert receipt is not None
+    assert receipt["status"] == "DONE"
+    assert receipt["reason"] == "SKELETON_CONTROL_MCP_HETZNER_LAUNCHER_VERIFIED"
+    assert receipt["source_blob"] == gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB
+    assert receipt["installer_sha256"] == gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_SHA256
+    assert receipt["protected_copy_verified"] is True
+    assert receipt["installed_artifacts_verified"] is True
+    assert receipt["activation_executed"] is False
+    assert destination.read_text(encoding="utf-8") == (repo / "scripts/skeleton_control_mcp.py").read_text(encoding="utf-8")
+    serialized = json.dumps(receipt, sort_keys=True)
+    assert "/home/agent/" not in serialized
+    assert "SECRET" not in serialized
 
 
 def _temp_registry(root: Path) -> Path:
