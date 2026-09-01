@@ -48,7 +48,7 @@ SKELETON_CONTROL_MCP_HETZNER_OPERATOR_APPROVAL: Final = (
 )
 SKELETON_CONTROL_MCP_HETZNER_SOURCE_PATH: Final = "scripts/skeleton_control_mcp.py"
 SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB: Final = (
-    "6f6bdce2f8d7d4b6eba6a491b9913ff6df8a3608"
+    "d94576297ea26fdd78f9ac8fc50d7cdb91bfdc09"
 )
 SKELETON_CONTROL_MCP_HETZNER_SOURCE_MODE: Final = "100644"
 SKELETON_CONTROL_MCP_HETZNER_TRUSTED_SOURCE_ANCESTOR_SHA: Final = (
@@ -59,7 +59,7 @@ SKELETON_CONTROL_MCP_HETZNER_DESTINATION: Final = Path(
 )
 SKELETON_CONTROL_MCP_HETZNER_DESTINATION_MODE: Final = 0o555
 SKELETON_CONTROL_MCP_HETZNER_SOURCE_SHA256: Final = (
-    "a1bda7d8acdb9bad71a33bab2496952a6f0367c33e2340bcb650bc195b3a142b"
+    "e14d54e8ea3f00dbb2bd4fe1b3dcfd310e3b10c5f01e433e1eb5306a60547395"
 )
 SKELETON_CONTROL_MCP_HETZNER_MAX_SOURCE_BYTES: Final = 64 * 1024
 MAX_REQUEST_BYTES: Final = 16 * 1024
@@ -155,14 +155,14 @@ actions:
     target: runner-controller
     operator_approval: EXACT_HEAD_SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_V1_APPROVED
     source_path: scripts/skeleton_control_mcp.py
-    source_blob: 6f6bdce2f8d7d4b6eba6a491b9913ff6df8a3608
+    source_blob: d94576297ea26fdd78f9ac8fc50d7cdb91bfdc09
     source_mode: "100644"
     trusted_source_ancestor_sha: 60bf74972c26e7015f4e686a2cafc513f96a7f55
     destination: /usr/local/bin/skeleton-control-mcp
     installer_argv: []
     post_audit_artifacts:
       - path: /usr/local/bin/skeleton-control-mcp
-        content_hash: a1bda7d8acdb9bad71a33bab2496952a6f0367c33e2340bcb650bc195b3a142b
+        content_hash: e14d54e8ea3f00dbb2bd4fe1b3dcfd310e3b10c5f01e433e1eb5306a60547395
         mode: "0555"
 """
 

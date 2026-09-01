@@ -383,13 +383,7 @@ def test_hetzner_mcp_hardened_handler_installs_only_fixed_launcher(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    head = subprocess.run(
-        ["git", "-C", str(ROOT), "rev-parse", "HEAD"],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=True,
-    ).stdout.strip()
+    repo, head = _hardened_synthetic_repo(tmp_path)
     destination = tmp_path / "bin/skeleton-control-mcp"
 
     def verify_without_root_owner(path: Path, expected_sha256: str, expected_mode: int) -> None:
@@ -400,13 +394,14 @@ def test_hetzner_mcp_hardened_handler_installs_only_fixed_launcher(
         assert hashlib.sha256(path.read_bytes()).hexdigest() == expected_sha256
 
     monkeypatch.setattr(gateway, "SKELETON_CONTROL_MCP_HETZNER_DESTINATION", destination)
+    monkeypatch.setattr(gateway, "SKELETON_CONTROL_MCP_HETZNER_TRUSTED_SOURCE_ANCESTOR_SHA", head)
     monkeypatch.setattr(gateway.os, "chown", lambda *_args: None)
     monkeypatch.setattr(gateway, "_verify_fixed_installed_file", verify_without_root_owner)
 
     code, report = gateway._execute_skeleton_control_mcp_hetzner_activate(
         {
             "expected_main_sha": head,
-            "checkout_path": str(ROOT),
+            "checkout_path": str(repo),
         }
     )
     receipt = json.loads(report.split("Receipt:\n", 1)[1])
@@ -415,7 +410,7 @@ def test_hetzner_mcp_hardened_handler_installs_only_fixed_launcher(
     assert receipt["source_blob"] == gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB
     assert receipt["installer_sha256"] == gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_SHA256
     assert receipt["activation_executed"] is False
-    assert destination.read_text(encoding="utf-8") == (ROOT / "scripts/skeleton_control_mcp.py").read_text(encoding="utf-8")
+    assert destination.read_text(encoding="utf-8") == (repo / "scripts/skeleton_control_mcp.py").read_text(encoding="utf-8")
     serialized = json.dumps(receipt, sort_keys=True)
     assert "/home/agent/" not in serialized
     assert "SECRET" not in serialized
@@ -610,6 +605,7 @@ def _hardened_synthetic_repo(tmp_path: Path) -> tuple[Path, str]:
     for relative, mode in (
         ("scripts/install_runner_controller_privileged_gateway.sh", 0o755),
         ("scripts/runner_controller_privileged_gateway.py", 0o755),
+        ("scripts/skeleton_control_mcp.py", 0o644),
         ("core/runner_controller_privileged_gateway.py", 0o644),
         ("core/runner_controller_privileged_gateway_hardening.py", 0o644),
         ("core/home_edge/esp_lab_stage1_signer_install.py", 0o644),

@@ -224,6 +224,7 @@ def _make_synthetic_repo(tmp_path: Path) -> tuple[Path, Path, str]:
     _git(repo, "config", "user.name", "Runner")
     _write(repo / "scripts/install_runner_controller_privileged_gateway.sh", (ROOT / "scripts/install_runner_controller_privileged_gateway.sh").read_text(encoding="utf-8"), 0o755)
     _write(repo / "scripts/runner_controller_privileged_gateway.py", (ROOT / "scripts/runner_controller_privileged_gateway.py").read_text(encoding="utf-8"), 0o755)
+    _write(repo / "scripts/skeleton_control_mcp.py", (ROOT / "scripts/skeleton_control_mcp.py").read_text(encoding="utf-8"))
     _write(repo / "core/runner_controller_privileged_gateway.py", (ROOT / "core/runner_controller_privileged_gateway.py").read_text(encoding="utf-8"))
     _write(repo / "core/home_edge/esp_lab_stage1_signer_install.py", _signer_module())
     _write(repo / "RUNNER_PRIVILEGED_ACTIONS.yaml", _action_registry())
@@ -486,8 +487,9 @@ def test_hetzner_mcp_action_installs_only_fixed_launcher_and_public_safe_receipt
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    head = _git(ROOT, "rev-parse", "HEAD").stdout.strip()
+    repo, _remote, head = _make_synthetic_repo(tmp_path)
     destination = tmp_path / "bin/skeleton-control-mcp"
+    monkeypatch.setattr(gateway, "SKELETON_CONTROL_MCP_HETZNER_TRUSTED_SOURCE_ANCESTOR_SHA", head)
     action = gateway.GatewayAction(
         action_id=gateway.SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_TASK_ID,
         handler="skeleton_control_mcp_hetzner_activate",
@@ -522,7 +524,7 @@ def test_hetzner_mcp_action_installs_only_fixed_launcher_and_public_safe_receipt
     code, report = gateway._execute_skeleton_control_mcp_hetzner_activate(
         {
             "expected_main_sha": head,
-            "checkout_path": str(ROOT),
+            "checkout_path": str(repo),
         },
         action,
     )
@@ -536,7 +538,7 @@ def test_hetzner_mcp_action_installs_only_fixed_launcher_and_public_safe_receipt
     assert receipt["protected_copy_verified"] is True
     assert receipt["installed_artifacts_verified"] is True
     assert receipt["activation_executed"] is False
-    assert destination.read_text(encoding="utf-8") == (ROOT / "scripts/skeleton_control_mcp.py").read_text(encoding="utf-8")
+    assert destination.read_text(encoding="utf-8") == (repo / "scripts/skeleton_control_mcp.py").read_text(encoding="utf-8")
     serialized = json.dumps(receipt, sort_keys=True)
     assert "/home/agent/" not in serialized
     assert "SECRET" not in serialized

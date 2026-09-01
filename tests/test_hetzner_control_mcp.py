@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
+import sys
+from pathlib import Path
 
 from core.hetzner_control_mcp import (
     ACTION_GATE_TOOL,
@@ -10,6 +14,7 @@ from core.hetzner_control_mcp import (
 )
 
 
+ROOT = Path(__file__).resolve().parents[1]
 HEAD_SHA = "a1b2c3d4e5f60718293a4b5c6d7e8f901234abcd"
 
 
@@ -130,3 +135,52 @@ def test_jsonrpc_boundary_lists_and_calls_tools() -> None:
     payload = json.loads(called["result"]["content"][0]["text"])
     assert payload["result"]["status"] == "blocked"
     assert "expected_head_sha must be a 40-character Git SHA." in payload["result"]["reasons"]
+
+
+def test_installed_form_launcher_resolves_registered_checkout_outside_repo_cwd(tmp_path: Path) -> None:
+    install_root = tmp_path / "installed"
+    launcher = install_root / "usr/local/bin/skeleton-control-mcp"
+    launcher.parent.mkdir(parents=True)
+    shutil.copy2(ROOT / "scripts/skeleton_control_mcp.py", launcher)
+    launcher.chmod(0o555)
+
+    config = install_root / "usr/local/lib/skeleton/runner-controller/config/checkout.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        json.dumps(
+            {
+                "schema": "skeleton.runner_controller_checkout_config.v1",
+                "repository": "alanua/Skeleton",
+                "checkout_path": str(ROOT),
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    outside_repo = tmp_path / "outside-repo"
+    outside_repo.mkdir()
+    messages = "\n".join(
+        [
+            json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize"}),
+            json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+            "",
+        ]
+    )
+
+    completed = subprocess.run(
+        [sys.executable, str(launcher)],
+        input=messages,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=outside_repo,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    responses = [json.loads(line) for line in completed.stdout.splitlines()]
+    assert responses[0]["result"]["serverInfo"]["name"] == "skeleton-control-hetzner"
+    tools = responses[1]["result"]["tools"]
+    assert [tool["name"] for tool in tools] == [ACTION_GATE_TOOL, RUNNER_PRIVILEGED_TOOL]
+    assert len(tools) == 2
