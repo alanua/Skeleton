@@ -21834,6 +21834,13 @@ def test_gmail_primary_activation_blocks_before_reference_without_sync_approval(
 
 def test_gmail_primary_activation_blocks_on_reference_bootstrap_before_canary() -> None:
     preflight_patch, sha_patch = _gmail_readonly_preflight_patches(HEAD_SHA)
+    calls: list[str] = []
+
+    def fake_command(command, cwd=None):
+        del cwd
+        calls.append(" ".join(command))
+        return 0, ""
+
     with (
         preflight_patch,
         sha_patch,
@@ -21843,7 +21850,7 @@ def test_gmail_primary_activation_blocks_on_reference_bootstrap_before_canary() 
             side_effect=runner.SecretReferenceRegistrationError("REFERENCE_BOOTSTRAP_REQUIRED"),
         ) as bind,
         mock.patch.object(runner, "run_gmail_readonly_canary") as canary,
-        mock.patch.object(runner, "run_command") as command,
+        mock.patch.object(runner, "run_command", side_effect=fake_command) as command,
     ):
         report = runner.dispatch_runtime_maintenance_task(
             runner.MAIL_GMAIL_PRIMARY_REGISTERED_ACTIVATION,
@@ -21854,8 +21861,12 @@ def test_gmail_primary_activation_blocks_on_reference_bootstrap_before_canary() 
     assert runner.maintenance_report_status(report) == "BLOCKED"
     assert "step=reference_bind status=failed reason=REFERENCE_BOOTSTRAP_REQUIRED" in report
     assert bind.call_count == 1
+    assert calls == [
+        "/opt/skeleton-bitwarden-sdk-runtime/bin/python -c import bitwarden_sdk",
+        "/opt/skeleton-bitwarden-sdk-runtime/bin/python /opt/skeleton-mail-operations/bitwarden_gmail_reference_bootstrap.py",
+    ]
     canary.assert_not_called()
-    command.assert_not_called()
+    assert command.call_count == 2
 
 
 def test_gmail_primary_activation_enables_worker_only_after_canary_passes() -> None:
@@ -21894,11 +21905,15 @@ def test_gmail_primary_activation_enables_worker_only_after_canary_passes() -> N
         )
 
     assert runner.maintenance_report_status(report) == "DONE"
+    assert "step=bitwarden_sdk_runtime_preflight status=done" in report
+    assert "step=identity_metadata_bootstrap status=done" in report
     assert "step=reference_bind status=done" in report
     assert "step=gmail_readonly_canary status=done" in report
     assert bind.call_count == 1
     assert canary.call_count == 1
     assert calls == [
+        "/opt/skeleton-bitwarden-sdk-runtime/bin/python -c import bitwarden_sdk",
+        "/opt/skeleton-bitwarden-sdk-runtime/bin/python /opt/skeleton-mail-operations/bitwarden_gmail_reference_bootstrap.py",
         "sudo -n systemctl daemon-reload",
         "sudo -n systemctl enable skeleton-mail-operations.timer",
         "sudo -n systemctl start skeleton-mail-operations.timer",

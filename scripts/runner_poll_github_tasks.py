@@ -17297,6 +17297,8 @@ _MAIL_GMAIL_ACTIVATION_APPROVAL = (
 )
 _MAIL_GMAIL_SERVICE = "skeleton-mail-operations.service"
 _MAIL_GMAIL_TIMER = "skeleton-mail-operations.timer"
+_MAIL_GMAIL_BITWARDEN_SDK_PYTHON = "/opt/skeleton-bitwarden-sdk-runtime/bin/python"
+_MAIL_GMAIL_REFERENCE_BOOTSTRAP = "/opt/skeleton-mail-operations/bitwarden_gmail_reference_bootstrap.py"
 
 
 def _mail_gmail_activation_input(
@@ -17365,6 +17367,28 @@ def mail_gmail_primary_registered_activation_v1(body: str) -> str:
         "step=exact_main_preflight status=done",
         "account_alias=acct:gmail-primary",
     ]
+
+    for step, command in (
+        (
+            "bitwarden_sdk_runtime_preflight",
+            [
+                _MAIL_GMAIL_BITWARDEN_SDK_PYTHON,
+                "-c",
+                "import bitwarden_sdk",
+            ],
+        ),
+        (
+            "identity_metadata_bootstrap",
+            [
+                _MAIL_GMAIL_BITWARDEN_SDK_PYTHON,
+                _MAIL_GMAIL_REFERENCE_BOOTSTRAP,
+            ],
+        ),
+    ):
+        report = _run_maintenance_command(task_id, step, command, status_lines)
+        if report is not None:
+            return report
+
     try:
         registered_bitwarden_reference_from_systemd_index(
             os.environ,
