@@ -354,6 +354,9 @@ HOME_EDGE_01_ESP_LAB_STAGE1_SIGNER_INSTALL_V1 = (
     HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID
 )
 MAIL_GMAIL_PRIMARY_REGISTERED_ACTIVATION = "mail_gmail_primary_registered_activation_v1"
+SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_V1 = (
+    "skeleton_control_mcp_hetzner_activate_v1"
+)
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
         MAIL_GMAIL_READONLY_CANARY_TASK_ID,
@@ -402,6 +405,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         HOME_EDGE_01_ESP_LAB_STAGE1_ACTIVATION_V1,
         HOME_EDGE_01_ESP_LAB_STAGE1_SIGNER_INSTALL_V1,
         "runner_controller_repair_codex_state_mount_v1",
+        SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_V1,
         BUILD_AND_LOCAL_OTA_OPERATION,
         PREPARE_PRIVATE_STATIC_SITE_HANDOFF,
         DEPLOY_PRIVATE_STATIC_SITE,
@@ -17440,6 +17444,302 @@ def mail_gmail_primary_registered_activation_v1(body: str) -> str:
     return _maintenance_report("DONE", task_id, status_lines, "met")
 
 
+_SKELETON_CONTROL_MCP_HETZNER_INPUT_FIELDS = frozenset(
+    (
+        "Mode",
+        "Maintenance Task ID",
+        "Repository",
+        "Expected Main SHA",
+        "Target",
+        "Operator Approval",
+    )
+)
+
+
+def _skeleton_control_mcp_hetzner_input(
+    body: str,
+) -> tuple[dict[str, str] | None, str | None]:
+    from core.runner_controller_privileged_gateway import (
+        SKELETON_CONTROL_MCP_HETZNER_OPERATOR_APPROVAL,
+    )
+
+    parsed: dict[str, str] = {}
+    metadata = (body or "").strip()
+    if not metadata:
+        return None, "skeleton_control_mcp_required_input_missing"
+    for raw_line in metadata.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = re.fullmatch(
+            r"(?P<field>[A-Za-z][A-Za-z0-9 ]*):\s*(?P<value>\S(?:.*\S)?)",
+            line,
+        )
+        if match is None:
+            return None, "skeleton_control_mcp_noncanonical_input"
+        field = match.group("field")
+        if field not in _SKELETON_CONTROL_MCP_HETZNER_INPUT_FIELDS:
+            return None, "skeleton_control_mcp_unknown_input_field"
+        if field in parsed:
+            return None, "skeleton_control_mcp_duplicate_input_field"
+        parsed[field] = match.group("value")
+    if set(parsed) != _SKELETON_CONTROL_MCP_HETZNER_INPUT_FIELDS:
+        return None, "skeleton_control_mcp_required_input_missing"
+    if parsed["Mode"] != RUNTIME_MAINTENANCE_MODE:
+        return None, "skeleton_control_mcp_mode_mismatch"
+    if parsed["Maintenance Task ID"] != SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_V1:
+        return None, "skeleton_control_mcp_task_id_mismatch"
+    if parsed["Repository"] != REPO:
+        return None, "skeleton_control_mcp_repository_mismatch"
+    if re.fullmatch(r"[0-9a-f]{40}", parsed["Expected Main SHA"]) is None:
+        return None, "skeleton_control_mcp_expected_main_sha_invalid"
+    if parsed["Target"] != "runner-controller":
+        return None, "skeleton_control_mcp_target_mismatch"
+    if parsed["Operator Approval"] != SKELETON_CONTROL_MCP_HETZNER_OPERATOR_APPROVAL:
+        return None, "skeleton_control_mcp_operator_approval_mismatch"
+    return parsed, None
+
+
+def _skeleton_control_mcp_hetzner_checkout_proof(
+    task_id: str,
+) -> tuple[
+    RegisteredProjectCheckout | None,
+    list[str],
+    str | None,
+    str | None,
+    str | None,
+]:
+    from core.runner_controller_privileged_gateway import CANONICAL_CHECKOUT_PATH
+
+    registered, report = _registered_skeleton_checkout(task_id)
+    if report is not None or registered is None:
+        return None, [], None, None, report
+    checkout = registered.checkout_path
+    status_lines = list(registered.status_lines)
+    if checkout != CANONICAL_CHECKOUT_PATH:
+        return None, status_lines, None, None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=checkout_path_not_canonical"],
+            "not_met",
+        )
+    present = _verify_skeleton_checkout_present(task_id, registered)
+    if present is not None:
+        return None, status_lines, None, None, present
+    origin = _read_skeleton_origin(task_id, registered, status_lines)
+    if origin is not None:
+        return None, status_lines, None, None, origin
+    branch = _read_skeleton_current_branch(task_id, checkout, status_lines)
+    if branch is not None:
+        return None, status_lines, None, None, branch
+    clean = _read_skeleton_clean_state(task_id, checkout, status_lines)
+    if clean is not None:
+        return None, status_lines, None, None, clean
+    fetched = _fetch_skeleton_origin_main(task_id, checkout, status_lines)
+    if fetched is not None:
+        return None, status_lines, None, None, fetched
+
+    head_sha, failure = _read_skeleton_sha(
+        task_id, checkout, "HEAD", status_lines, "read_checkout_head"
+    )
+    if failure is not None or head_sha is None:
+        return None, status_lines, None, None, failure or _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=checkout_head_read_failed"],
+            "not_met",
+        )
+    origin_main_sha, failure = _read_skeleton_sha(
+        task_id, checkout, "origin/main", status_lines, "read_origin_main"
+    )
+    if failure is not None or origin_main_sha is None:
+        return None, status_lines, None, None, failure or _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=origin_main_read_failed"],
+            "not_met",
+        )
+    output, failure = _run_freshness_command(
+        ["git", "-C", str(checkout), "ls-remote", "origin", "refs/heads/main"],
+        status_lines,
+        "read_github_main",
+    )
+    parts = (output or "").split()
+    github_sha = parts[0].lower() if parts else ""
+    if (
+        failure is not None
+        or _HEAD_SHA_RE.fullmatch(github_sha) is None
+        or len(parts) < 2
+        or parts[1] != "refs/heads/main"
+    ):
+        return None, status_lines, None, None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, failure or "reason=github_main_read_failed"],
+            "not_met",
+        )
+    if len({head_sha, origin_main_sha, github_sha}) != 1:
+        return None, status_lines, None, None, _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=registered_checkout_not_exact_main"],
+            "not_met",
+        )
+    return registered, status_lines, head_sha, github_sha, None
+
+
+def _skeleton_control_mcp_hetzner_receipt_valid(
+    receipt: Mapping[str, object],
+    *,
+    expected_main_sha: str,
+) -> bool:
+    from core.runner_controller_privileged_gateway import (
+        SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB,
+    )
+
+    if receipt.get("status") not in {"DONE", "NEEDS_OPERATOR"}:
+        return False
+    reason = receipt.get("reason")
+    if not isinstance(reason, str) or re.fullmatch(r"[A-Z0-9_]{1,80}", reason) is None:
+        return False
+    if (
+        receipt.get("action_id") != SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_V1
+        or receipt.get("repository") != REPO
+        or receipt.get("target") != "runner-controller"
+        or receipt.get("expected_main_sha") != expected_main_sha
+        or receipt.get("source_blob") != SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB
+        or receipt.get("private_evidence_exposed") is not False
+    ):
+        return False
+    for key in (
+        "stderr_exposed",
+        "env_exposed",
+        "private_paths_exposed",
+        "external_side_effects_executed",
+        "protected_copy_verified",
+        "installed_artifacts_verified",
+        "activation_executed",
+    ):
+        if key in receipt and receipt.get(key) not in {True, False}:
+            return False
+    if receipt.get("activation_executed") is not False:
+        return False
+    installer_sha256 = receipt.get("installer_sha256")
+    if installer_sha256 is not None and (
+        not isinstance(installer_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", installer_sha256) is None
+    ):
+        return False
+    return True
+
+
+def skeleton_control_mcp_hetzner_activate_v1(body: str) -> str:
+    task_id = SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_V1
+    parsed, reason = _skeleton_control_mcp_hetzner_input(body)
+    if reason is not None or parsed is None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [f"reason={reason or 'skeleton_control_mcp_invalid_input'}"],
+            "not_met",
+        )
+
+    registered, status_lines, head_sha, github_sha, report = (
+        _skeleton_control_mcp_hetzner_checkout_proof(task_id)
+    )
+    if report is not None or registered is None or head_sha is None or github_sha is None:
+        return report or _maintenance_report(
+            "BLOCKED",
+            task_id,
+            ["reason=registered_skeleton_checkout_unavailable"],
+            "not_met",
+        )
+    expected_main_sha = parsed["Expected Main SHA"].lower()
+    if head_sha != expected_main_sha or github_sha != expected_main_sha:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                *status_lines,
+                f"github_main_sha={github_sha}",
+                "reason=expected_head_sha_mismatch",
+            ],
+            "not_met",
+        )
+
+    from core.runner_controller_privileged_gateway import (
+        LocalSudoGatewayTransport,
+        SKELETON_CONTROL_MCP_HETZNER_OPERATOR_APPROVAL,
+        build_gateway_request,
+    )
+
+    request = build_gateway_request(
+        request_id="skeleton-control-mcp-hetzner-activate-3640",
+        idempotency_key="skeleton-control-mcp-hetzner-activate-20260901-v1",
+        expected_main_sha=expected_main_sha,
+        registered_clean_main_sha=head_sha,
+        github_main_sha=github_sha,
+        checkout_path=registered.checkout_path,
+        checkout_head_sha=head_sha,
+        checkout_origin_main_sha=head_sha,
+    )
+    request["action_id"] = SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_V1
+    request["operator_approval"] = SKELETON_CONTROL_MCP_HETZNER_OPERATOR_APPROVAL
+    code, payload = LocalSudoGatewayTransport().submit(request)
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=privileged_gateway_transport_failed"],
+            "not_met",
+        )
+    try:
+        receipt = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=privileged_gateway_receipt_invalid"],
+            "not_met",
+        )
+    if not isinstance(receipt, Mapping) or not _skeleton_control_mcp_hetzner_receipt_valid(
+        receipt,
+        expected_main_sha=expected_main_sha,
+    ):
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=privileged_gateway_receipt_invalid"],
+            "not_met",
+        )
+
+    gateway_status = str(receipt["status"])
+    public_lines = [
+        *status_lines,
+        f"expected_main_sha={receipt['expected_main_sha']}",
+        f"github_main_sha={github_sha}",
+        f"gateway_status={gateway_status}",
+        f"source_blob={receipt['source_blob']}",
+        f"protected_copy_verified={str(receipt.get('protected_copy_verified') is True).lower()}",
+        f"installed_artifacts_verified={str(receipt.get('installed_artifacts_verified') is True).lower()}",
+        f"activation_executed={str(receipt.get('activation_executed') is True).lower()}",
+        f"external_side_effects_executed={str(receipt.get('external_side_effects_executed') is True).lower()}",
+        f"private_evidence_exposed={str(receipt.get('private_evidence_exposed') is True).lower()}",
+        f"reason={receipt['reason']}",
+        "action=typed_gateway_dispatch",
+        "generic_check_project_checkout=false",
+    ]
+    if isinstance(receipt.get("installer_sha256"), str):
+        public_lines.insert(5, f"installer_sha256={receipt['installer_sha256']}")
+    success = gateway_status == "DONE" and receipt.get("installed_artifacts_verified") is True
+    return _maintenance_report(
+        "DONE" if success else "NEEDS_OPERATOR",
+        task_id,
+        public_lines,
+        "met" if success else "not_met",
+    )
+
+
 def runner_controller_repair_codex_state_mount_v1(body: str) -> str:
     task_id = "runner_controller_repair_codex_state_mount_v1"
     registered, report = _registered_skeleton_checkout(task_id)
@@ -17504,6 +17804,8 @@ def dispatch_runtime_maintenance_task(
     try:
         if task_id == "runner_controller_repair_codex_state_mount_v1":
             return runner_controller_repair_codex_state_mount_v1(body)
+        if task_id == SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_V1:
+            return skeleton_control_mcp_hetzner_activate_v1(body)
         if task_id == MAIL_GMAIL_PRIMARY_REGISTERED_ACTIVATION:
             return mail_gmail_primary_registered_activation_v1(body)
         if task_id == MAIL_GMAIL_READONLY_CANARY_TASK_ID:

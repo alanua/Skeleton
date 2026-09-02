@@ -21982,3 +21982,225 @@ def test_runner_controller_repair_codex_state_mount_non_done_needs_operator(monk
     assert runner.maintenance_report_status(report) == "NEEDS_OPERATOR"
     assert "gateway_status=NEEDS_OPERATOR" in report
     assert "reason=LOWER_LEVEL_GATE_BLOCK" in report
+
+
+def _skeleton_control_mcp_hetzner_body(
+    *,
+    expected_main_sha: str = HEAD_SHA,
+    repository: str = runner.REPO,
+    target: str = "runner-controller",
+    approval: str = "EXACT_HEAD_SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_V1_APPROVED",
+) -> str:
+    return "\n".join(
+        (
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {runner.SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_V1}",
+            f"Repository: {repository}",
+            f"Expected Main SHA: {expected_main_sha}",
+            f"Target: {target}",
+            f"Operator Approval: {approval}",
+        )
+    )
+
+
+def test_dispatch_runtime_maintenance_skeleton_control_mcp_uses_fixed_typed_gateway(
+    monkeypatch,
+):
+    calls = []
+
+    def fake(body):
+        calls.append(body)
+        return runner._maintenance_report(
+            "DONE",
+            runner.SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_V1,
+            ["action=typed_gateway_dispatch", "generic_check_project_checkout=false"],
+            "met",
+        )
+
+    def fail(_body):
+        raise AssertionError("generic check_project_checkout must not be used")
+
+    body = _skeleton_control_mcp_hetzner_body()
+    monkeypatch.setattr(runner, "skeleton_control_mcp_hetzner_activate_v1", fake)
+    monkeypatch.setattr(runner, "check_project_checkout", fail)
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_V1,
+        "/tmp",
+        body,
+    )
+
+    assert calls == [body]
+    assert runner.maintenance_report_is_done(report)
+    assert (
+        f"maintenance_task_id={runner.SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_V1}"
+        in report
+    )
+
+
+def test_skeleton_control_mcp_builds_exact_typed_gateway_request(monkeypatch):
+    from types import SimpleNamespace
+    from core import runner_controller_privileged_gateway as gateway
+
+    checkout = gateway.CANONICAL_CHECKOUT_PATH
+    registered = SimpleNamespace(checkout_path=checkout, status_lines=[])
+    captured = {}
+
+    monkeypatch.setattr(
+        runner, "_registered_skeleton_checkout", lambda task_id: (registered, None)
+    )
+    monkeypatch.setattr(runner, "_verify_skeleton_checkout_present", lambda *args: None)
+    monkeypatch.setattr(runner, "_read_skeleton_origin", lambda *args: None)
+    monkeypatch.setattr(runner, "_read_skeleton_current_branch", lambda *args: None)
+    monkeypatch.setattr(runner, "_read_skeleton_clean_state", lambda *args: None)
+    monkeypatch.setattr(runner, "_fetch_skeleton_origin_main", lambda *args: None)
+    monkeypatch.setattr(runner, "_read_skeleton_sha", lambda *args: (HEAD_SHA, None))
+    monkeypatch.setattr(
+        runner,
+        "_run_freshness_command",
+        lambda *args: (f"{HEAD_SHA}\trefs/heads/main\n", None),
+    )
+
+    class FakeTransport:
+        def submit(self, request):
+            captured.update(request)
+            return 0, json.dumps(
+                {
+                    "schema": gateway.RECEIPT_SCHEMA_ID,
+                    "status": "DONE",
+                    "reason": "SKELETON_CONTROL_MCP_HETZNER_LAUNCHER_VERIFIED",
+                    "action_id": gateway.SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_TASK_ID,
+                    "repository": runner.REPO,
+                    "target": "runner-controller",
+                    "expected_main_sha": HEAD_SHA,
+                    "source_blob": gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB,
+                    "installer_sha256": "c" * 64,
+                    "protected_copy_verified": True,
+                    "installed_artifacts_verified": True,
+                    "activation_executed": False,
+                    "private_evidence_exposed": False,
+                    "stderr_exposed": False,
+                    "env_exposed": False,
+                    "private_paths_exposed": False,
+                    "external_side_effects_executed": True,
+                }
+            ).encode("utf-8")
+
+    monkeypatch.setattr(gateway, "LocalSudoGatewayTransport", FakeTransport)
+
+    report = runner.skeleton_control_mcp_hetzner_activate_v1(
+        _skeleton_control_mcp_hetzner_body()
+    )
+
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert set(captured) == set(gateway.REQUEST_FIELDS)
+    assert (
+        captured["action_id"]
+        == gateway.SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_TASK_ID
+    )
+    assert (
+        captured["operator_approval"]
+        == gateway.SKELETON_CONTROL_MCP_HETZNER_OPERATOR_APPROVAL
+    )
+    assert captured["repository"] == runner.REPO
+    assert captured["target"] == "runner-controller"
+    assert captured["expected_main_sha"] == HEAD_SHA
+    assert captured["registered_clean_main_sha"] == HEAD_SHA
+    assert captured["github_main_sha"] == HEAD_SHA
+    assert captured["checkout_head_sha"] == HEAD_SHA
+    assert captured["checkout_origin_main_sha"] == HEAD_SHA
+    assert captured["checkout_path"] == str(checkout)
+    assert "gateway_status=DONE" in report
+    assert "source_blob=" + gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB in report
+    assert "installer_sha256=" + "c" * 64 in report
+    assert "activation_executed=false" in report
+    assert "private_evidence_exposed=false" in report
+    assert "action=typed_gateway_dispatch" in report
+
+
+@pytest.mark.parametrize(
+    ("updates", "reason"),
+    (
+        (
+            {"approval": "PENDING"},
+            "reason=skeleton_control_mcp_operator_approval_mismatch",
+        ),
+        (
+            {"repository": "alanua/NotSkeleton"},
+            "reason=skeleton_control_mcp_repository_mismatch",
+        ),
+        (
+            {"target": "home-edge-01"},
+            "reason=skeleton_control_mcp_target_mismatch",
+        ),
+    ),
+)
+def test_skeleton_control_mcp_blocks_bad_metadata_before_checkout(
+    monkeypatch,
+    updates,
+    reason,
+):
+    monkeypatch.setattr(
+        runner,
+        "_skeleton_control_mcp_hetzner_checkout_proof",
+        lambda _task_id: (_ for _ in ()).throw(
+            AssertionError("checkout proof must not run")
+        ),
+    )
+
+    report = runner.skeleton_control_mcp_hetzner_activate_v1(
+        _skeleton_control_mcp_hetzner_body(**updates)
+    )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert reason in report
+
+
+def test_skeleton_control_mcp_blocks_head_mismatch_before_gateway(monkeypatch):
+    from types import SimpleNamespace
+    from core import runner_controller_privileged_gateway as gateway
+
+    registered = SimpleNamespace(checkout_path=gateway.CANONICAL_CHECKOUT_PATH)
+    monkeypatch.setattr(
+        runner,
+        "_skeleton_control_mcp_hetzner_checkout_proof",
+        lambda _task_id: (registered, [], "b" * 40, "b" * 40, None),
+    )
+    monkeypatch.setattr(
+        gateway,
+        "LocalSudoGatewayTransport",
+        lambda: (_ for _ in ()).throw(AssertionError("gateway must not run")),
+    )
+
+    report = runner.skeleton_control_mcp_hetzner_activate_v1(
+        _skeleton_control_mcp_hetzner_body(expected_main_sha=HEAD_SHA)
+    )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "reason=expected_head_sha_mismatch" in report
+
+
+def test_skeleton_control_mcp_blocks_noncanonical_checkout_before_gateway(monkeypatch):
+    from pathlib import Path
+    from types import SimpleNamespace
+    from core import runner_controller_privileged_gateway as gateway
+
+    registered = SimpleNamespace(
+        checkout_path=Path("/home/agent/agent-dev/repos/Other"),
+        status_lines=[],
+    )
+    monkeypatch.setattr(
+        runner, "_registered_skeleton_checkout", lambda task_id: (registered, None)
+    )
+    monkeypatch.setattr(
+        gateway,
+        "LocalSudoGatewayTransport",
+        lambda: (_ for _ in ()).throw(AssertionError("gateway must not run")),
+    )
+
+    report = runner.skeleton_control_mcp_hetzner_activate_v1(
+        _skeleton_control_mcp_hetzner_body()
+    )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "reason=checkout_path_not_canonical" in report
