@@ -17297,6 +17297,13 @@ _MAIL_GMAIL_ACTIVATION_APPROVAL = (
 )
 _MAIL_GMAIL_SERVICE = "skeleton-mail-operations.service"
 _MAIL_GMAIL_TIMER = "skeleton-mail-operations.timer"
+_MAIL_GMAIL_INSTALL_ROOT = "/opt/skeleton-mail-operations"
+_MAIL_GMAIL_RUNTIME_PYTHON = (
+    f"{_MAIL_GMAIL_INSTALL_ROOT}/bitwarden-sdk-runtime/bin/python"
+)
+_MAIL_GMAIL_BOOTSTRAP_HELPER = (
+    f"{_MAIL_GMAIL_INSTALL_ROOT}/bitwarden_gmail_reference_bootstrap.py"
+)
 
 
 def _mail_gmail_activation_input(
@@ -17365,6 +17372,30 @@ def mail_gmail_primary_registered_activation_v1(body: str) -> str:
         "step=exact_main_preflight status=done",
         "account_alias=acct:gmail-primary",
     ]
+
+    for step, command in (
+        (
+            "runtime_preflight",
+            [
+                _MAIL_GMAIL_RUNTIME_PYTHON,
+                "-c",
+                "import bitwarden_sdk; print('bitwarden_sdk_import=ok')",
+            ],
+        ),
+        (
+            "bootstrap_reference",
+            [
+                _MAIL_GMAIL_RUNTIME_PYTHON,
+                _MAIL_GMAIL_BOOTSTRAP_HELPER,
+                "--machine-token-file",
+                "/run/credentials/skeleton-mail-operations.service/bitwarden-access-token",
+            ],
+        ),
+    ):
+        report = _run_maintenance_command(task_id, step, command, status_lines)
+        if report is not None:
+            return report
+
     try:
         registered_bitwarden_reference_from_systemd_index(
             os.environ,
@@ -17376,10 +17407,10 @@ def mail_gmail_primary_registered_activation_v1(body: str) -> str:
         return _maintenance_report(
             "BLOCKED",
             task_id,
-            [*status_lines, f"step=reference_bind status=failed reason={str(exc)}"],
+            [*status_lines, f"step=reference_reread status=failed reason={str(exc)}"],
             "not_met",
         )
-    status_lines.append("step=reference_bind status=done")
+    status_lines.append("step=reference_reread status=done")
 
     try:
         receipt = run_gmail_readonly_canary(
