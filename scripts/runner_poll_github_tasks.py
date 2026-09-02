@@ -155,9 +155,11 @@ from core.secret_reference import (
 )
 from core.runner_codegen_router import (
     CodegenRouteError,
+    CodexPrimaryRoute,
     codex_failure_allows_secondary,
     openhands_secondary_command,
     prepare_openhands_secondary_environment,
+    select_codex_primary_route,
     select_openhands_secondary_route,
     task_contract_allows_cloud_secondary,
 )
@@ -3988,6 +3990,12 @@ def _codex_executor(argv: list[str], stdin_text: str, env: Mapping[str, str]) ->
 def run_codex_task(
     task_content: str, workdir: str, task: RunnerTask | None = None
 ) -> tuple[int, str]:
+    # Resolve primary Codex binding with timeout authority from registry
+    try:
+        primary_route = select_codex_primary_route()
+    except CodegenRouteError as exc:
+        return 1, f"SKELETON_CODEGEN_PRIMARY_FAILURE=binding_resolution_failed: {exc}\n"
+
     try:
         bootstrap_request = private_memory_bootstrap_request(task_content, workdir, task)
     except RunnerPrivateMemoryConfigError as exc:
@@ -4015,6 +4023,15 @@ def run_codex_task(
             codex_code, codex_output = run_command(
                 codex_exec_command(task_content, workdir, task),
                 cwd=workdir,
+                timeout=primary_route.binding.timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            # Normalize TimeoutExpired to stable availability failure
+            codex_code = 1
+            codex_output = (
+                f"SKELETON_CODEGEN_PRIMARY_FAILURE=primary_timeout\n"
+                f"SKELETON_CODEGEN_PRIMARY_TIMEOUT_SECONDS={primary_route.binding.timeout_seconds}\n"
+                f"SKELETON_CODEGEN_PRIMARY_COMMAND={' '.join(exc.cmd if isinstance(exc.cmd, list) else [str(exc.cmd)])}\n"
             )
         finally:
             _RUN_COMMAND_ENV_OVERRIDE.reset(token)
@@ -4032,7 +4049,7 @@ def run_codex_task(
             return (
                 1,
                 codex_output
-                + "\nSKELETON_CODEGEN_SECONDARY_FAILURE=PRIMARY_LEFT_WORKTREE_DIRTY\n",
+                + "SKELETON_CODEGEN_SECONDARY_FAILURE=PRIMARY_LEFT_WORKTREE_DIRTY\n",
             )
 
         try:

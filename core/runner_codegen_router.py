@@ -27,6 +27,7 @@ from integrations.credential_runtime import (
 ROOT = Path(__file__).resolve().parents[1]
 EXECUTOR_REGISTRY_PATH = ROOT / "EXECUTOR_REGISTRY.yaml"
 MODEL_REGISTRY_PATH = ROOT / "MODEL_REGISTRY.yaml"
+CODEX_EXECUTOR_ID = "codex-embedded"
 OPENHANDS_EXECUTOR_ID = "openhands-external"
 OPENROUTER_CREDENTIAL_SERVICE = "runner-openhands"
 OPENROUTER_CREDENTIAL_ALIAS = "openrouter-api"
@@ -47,11 +48,18 @@ _QUOTA_OR_PROVIDER_MARKERS = (
     "temporarily unavailable",
     "service unavailable",
     "try again at",
+    "primary_timeout",
 )
 
 
 class CodegenRouteError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class CodexPrimaryRoute:
+    binding: ExecutionBinding
+    lease: RouteLease
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +98,69 @@ def task_contract_allows_cloud_secondary(task_content: str) -> bool:
     if not privacy or "PRIVATE" in privacy:
         return False
     return "PUBLIC" in privacy
+
+
+def _production_codex_profile() -> TaskProfile:
+    return TaskProfile(
+        operation="primary_codex_codegen",
+        task_class="code_generation",
+        required_executor_capabilities=(
+            "repository_read",
+            "repository_write",
+            "test_execution",
+        ),
+        required_model_capabilities=(
+            ("reasoning", 0.70),
+            ("repository_edit", 0.70),
+            ("tool_use", 0.70),
+        ),
+        privacy_class="PUBLIC",
+        side_effect_class="REPOSITORY_MUTATION",
+        deliverable_contract=DeliverableContract(
+            require_changed_files=True,
+            minimum_changed_files=1,
+            require_tests_passed=True,
+        ),
+        validation_id="runner-codex-primary-deliverable-v1",
+        budget_ref="primary-codex-bounded",
+        timeout_seconds=1800,
+        retry_policy_ref="primary-codex-on-timeout-v1",
+        permissions=("repository_read", "repository_write", "test_execution"),
+        max_attempts=1,
+        max_tokens=0,
+        requires_operator=False,
+    )
+
+
+def select_codex_primary_route(
+    *,
+    now: datetime | None = None,
+    executor_registry_path: str | Path = EXECUTOR_REGISTRY_PATH,
+    model_registry_path: str | Path = MODEL_REGISTRY_PATH,
+) -> CodexPrimaryRoute:
+    """Select the primary Codex executor binding with timeout authority from registry.
+
+    Fails closed if the binding cannot be resolved from production registry authority.
+    """
+    profile = _production_codex_profile()
+    executors = load_executor_registry(executor_registry_path)
+    models = load_model_registry(model_registry_path)
+    bindings = build_execution_bindings(profile, executors, models, production=True)
+    binding = next(
+        (candidate for candidate in bindings if candidate.executor_id == CODEX_EXECUTOR_ID),
+        None,
+    )
+    if binding is None:
+        raise CodegenRouteError("no_eligible_codex_primary_binding")
+    current = now or datetime.now(UTC)
+    if current.tzinfo is None:
+        raise CodegenRouteError("route_time_timezone_required")
+    lease = build_route_lease(
+        profile,
+        binding,
+        expires_at=(current.astimezone(UTC) + timedelta(minutes=30)).isoformat(),
+    )
+    return CodexPrimaryRoute(binding=binding, lease=lease)
 
 
 def _production_codegen_profile() -> TaskProfile:

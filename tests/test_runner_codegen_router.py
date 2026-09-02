@@ -9,9 +9,11 @@ import pytest
 import core.runner_codegen_router as router
 from core.runner_codegen_router import (
     CodegenRouteError,
+    CodexPrimaryRoute,
     codex_failure_allows_secondary,
     openhands_secondary_command,
     prepare_openhands_secondary_environment,
+    select_codex_primary_route,
     select_openhands_secondary_route,
     task_contract_allows_cloud_secondary,
 )
@@ -124,3 +126,35 @@ def test_openhands_command_is_fixed_except_task_text() -> None:
     ]
     assert "moonshot" not in " ".join(command)
     assert "openrouter" not in " ".join(command)
+
+
+def test_codex_primary_route_selects_codex_embedded_executor() -> None:
+    route = select_codex_primary_route(now=datetime(2026, 8, 17, tzinfo=UTC))
+    assert route.binding.executor_id == "codex-embedded"
+    assert route.binding.model_binding_kind == "EMBEDDED_MODEL"
+    assert route.lease.binding_id == route.binding.binding_id
+
+
+def test_codex_primary_route_timeout_is_positive_and_bounded_by_executor_max() -> None:
+    route = select_codex_primary_route(now=datetime(2026, 8, 17, tzinfo=UTC))
+    # timeout_seconds should be positive and <= executor max (1800 from registry)
+    assert route.binding.timeout_seconds > 0
+    assert route.binding.timeout_seconds <= 1800
+    assert route.lease.timeout_seconds == route.binding.timeout_seconds
+
+
+def test_codex_primary_route_fails_closed_when_binding_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Simulate no eligible codex binding by returning empty bindings
+    monkeypatch.setattr(router, "CODEX_EXECUTOR_ID", "nonexistent-executor")
+    with pytest.raises(CodegenRouteError, match="no_eligible_codex_primary_binding"):
+        select_codex_primary_route(now=datetime(2026, 8, 17, tzinfo=UTC))
+
+
+def test_codex_failure_allows_secondary_for_timeout() -> None:
+    # Timeout marker should allow secondary routing
+    assert codex_failure_allows_secondary(1, "SKELETON_CODEGEN_PRIMARY_FAILURE=primary_timeout")
+    assert codex_failure_allows_secondary(1, "primary_timeout")
+    # Normal success should not allow secondary
+    assert not codex_failure_allows_secondary(0, "primary_timeout")
