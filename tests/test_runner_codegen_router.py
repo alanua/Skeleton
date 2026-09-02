@@ -12,6 +12,7 @@ from core.runner_codegen_router import (
     codex_failure_allows_secondary,
     openhands_secondary_command,
     prepare_openhands_secondary_environment,
+    select_codex_primary_route,
     select_openhands_secondary_route,
     task_contract_allows_cloud_secondary,
 )
@@ -26,6 +27,13 @@ def test_only_availability_failures_allow_secondary() -> None:
     assert not codex_failure_allows_secondary(0, "usage limit reached")
     assert not codex_failure_allows_secondary(1, "tests failed")
     assert not codex_failure_allows_secondary(1, "validation failed")
+
+
+def test_timeout_failure_allows_secondary() -> None:
+    """Timeout failures are normalized into stable failure taxonomy for secondary eligibility."""
+    assert codex_failure_allows_secondary(1, "SKELETON_CODEGEN_PRIMARY_TIMEOUT")
+    assert codex_failure_allows_secondary(1, "Some output\nSKELETON_CODEGEN_PRIMARY_TIMEOUT\nMore output")
+    assert not codex_failure_allows_secondary(0, "SKELETON_CODEGEN_PRIMARY_TIMEOUT")
 
 
 def test_cloud_secondary_requires_public_repository_write_contract() -> None:
@@ -56,6 +64,14 @@ def test_production_route_selects_openhands_with_canary_passed_kimi() -> None:
     assert route.binding.model_id == "openrouter-kimi-k2-challenger"
     assert route.runtime_model == "openrouter/moonshotai/kimi-k2"
     assert route.lease.binding_id == route.binding.binding_id
+
+
+def test_codex_primary_route_selects_binding_with_timeout() -> None:
+    """Codex primary route selects binding with timeout_seconds from registry."""
+    route = select_codex_primary_route()
+    assert route.binding.executor_id == "codex-embedded"
+    assert route.binding.timeout_seconds > 0
+    assert route.binding.timeout_seconds <= 1800  # Max from profile
 
 
 def test_glm_and_local_are_not_eligible_production_codegen_models() -> None:
