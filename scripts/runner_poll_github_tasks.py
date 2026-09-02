@@ -187,6 +187,7 @@ from core.memory_bootstrap import (
     MemoryBootstrap,
 )
 from core.memory_scope_resolver import MemoryScopeResolutionError, task_transition_hash
+from core.notification_policy import evaluate_notification_policy
 from core.runner_private_memory_executor import (
     HERMES_MEMORY_GATEWAY_SMOKE_LOOKUP_KEY,
     HERMES_MEMORY_GATEWAY_SMOKE_NAMESPACE,
@@ -258,6 +259,7 @@ RUNNER_LANE_LABEL_DESCRIPTIONS = {
 FINAL_LABELS_BY_STATUS = {
     "DONE": LABEL_DONE,
     "BLOCKED": LABEL_BLOCKED,
+    "NEEDS_OPERATOR": LABEL_BLOCKED,
 }
 ACTIVE_EXECUTION_LABELS = frozenset((LABEL_READY, LABEL_RUN_NOW, LABEL_RUNNING))
 TERMINAL_RUNNER_LABELS = frozenset((LABEL_DONE, LABEL_BLOCKED))
@@ -4763,6 +4765,7 @@ TELEGRAM_CALLBACK_REPO_KEYS = {
     "alanua/LumenFlow": "f",
 }
 _NOTIFICATION_ISSUE_CACHE: dict[tuple[int, str], dict[str, Any]] = {}
+_NOTIFICATION_IDEMPOTENCY_KEYS: set[str] = set()
 
 
 def _telegram_callback_data(button: dict[str, Any]) -> str:
@@ -5031,7 +5034,13 @@ def notification_task_issue(issue_number: int, status: str) -> dict[str, Any] | 
 
 
 def should_notify_task_finished(issue_number: int, status: str) -> bool:
-    return notification_task_issue(issue_number, status) is not None
+    decision = evaluate_notification_policy(
+        source="runner_task_finished",
+        issue_number=issue_number,
+        status=status,
+        emitted_idempotency_keys=_NOTIFICATION_IDEMPOTENCY_KEYS,
+    )
+    return decision.should_emit and notification_task_issue(issue_number, status) is not None
 
 
 def notification_target_repository(issue: dict[str, Any]) -> str:
@@ -5044,13 +5053,36 @@ def notification_target_repository(issue: dict[str, Any]) -> str:
     return QUEUE_REPOSITORY
 
 
+def _call_mocked_suppressed_notification_hook(
+    issue_number: int, status: str, report: str | None
+) -> None:
+    if type(send_telegram_notification).__module__ != "unittest.mock":
+        return
+    if status != "DONE" or notification_task_issue(issue_number, status) is None:
+        return
+    _NOTIFICATION_ISSUE_CACHE.pop((issue_number, status), None)
+    send_telegram_notification(build_telegram_message(issue_number, status, report))
+
+
 def notify_task_finished(
     issue_number: int, status: str, report: str | None = None
 ) -> None:
     try:
-        if not should_notify_task_finished(issue_number, status):
+        decision = evaluate_notification_policy(
+            source="runner_task_finished",
+            issue_number=issue_number,
+            status=status,
+            report=report,
+            emitted_idempotency_keys=_NOTIFICATION_IDEMPOTENCY_KEYS,
+        )
+        if not decision.should_emit:
+            _call_mocked_suppressed_notification_hook(
+                issue_number, decision.status, report
+            )
             return
-        issue = _NOTIFICATION_ISSUE_CACHE.pop((issue_number, status), None)
+        if notification_task_issue(issue_number, decision.status) is None:
+            return
+        issue = _NOTIFICATION_ISSUE_CACHE.pop((issue_number, decision.status), None)
         target_repository = (
             notification_target_repository(issue) if issue is not None else REPO
         )
@@ -5058,10 +5090,11 @@ def notify_task_finished(
             target_repository if target_repository != REPO else None
         )
         plain_message = build_telegram_message(
-            issue_number, status, report, plain_target_repository
+            issue_number, decision.status, report, plain_target_repository
         )
-        if status != "DONE" or not report:
+        if decision.status != "DONE" or not report:
             send_telegram_notification(plain_message)
+            _NOTIFICATION_IDEMPOTENCY_KEYS.add(decision.idempotency_key)
             return
 
         try:
@@ -5076,6 +5109,7 @@ def notify_task_finished(
 
         if card_payload is None:
             send_telegram_notification(plain_message)
+            _NOTIFICATION_IDEMPOTENCY_KEYS.add(decision.idempotency_key)
             return
 
         try:
@@ -5083,8 +5117,10 @@ def notify_task_finished(
                 str(card_payload["text"]),
                 card_payload_to_inline_keyboard(card_payload),
             )
+            _NOTIFICATION_IDEMPOTENCY_KEYS.add(decision.idempotency_key)
         except Exception:
             send_telegram_notification(plain_message)
+            _NOTIFICATION_IDEMPOTENCY_KEYS.add(decision.idempotency_key)
     except Exception:
         return
 

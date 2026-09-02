@@ -49,6 +49,11 @@ HOME_EDGE_EXEC_HMAC_ENV = "SKELETON_HOME_EDGE_EXEC_HMAC_SECRET"
 SYNTHETIC_HOME_EDGE_EXEC_HMAC = "synthetic-home-edge-exec-hmac-marker"
 
 
+@pytest.fixture(autouse=True)
+def _clear_notification_idempotency_keys() -> None:
+    runner._NOTIFICATION_IDEMPOTENCY_KEYS.clear()
+
+
 def _media_bootstrap_issue_body(expected_sha: str = HEAD_SHA) -> str:
     return "\n".join(
         (
@@ -6612,23 +6617,23 @@ def test_send_telegram_notification_without_env_makes_no_network_call() -> None:
     urlopen.assert_not_called()
 
 
-def test_done_pr_card_success_sends_reply_markup() -> None:
+def test_done_pr_notification_is_suppressed_before_card_build() -> None:
     card = {"text": "PR ready card", "buttons": []}
     reply_markup = {"inline_keyboard": []}
 
     with mock.patch.object(
-        runner, "should_notify_task_finished", return_value=True
-    ), mock.patch.object(
         runner, "build_done_pr_ready_card_payload", return_value=card
-    ), mock.patch.object(
+    ) as build_card, mock.patch.object(
         runner, "card_payload_to_inline_keyboard", return_value=reply_markup
-    ), mock.patch.object(runner, "send_telegram_notification") as send:
+    ) as keyboard, mock.patch.object(runner.urllib.request, "urlopen") as urlopen:
         runner.notify_task_finished(129, "DONE", DONE_REPORT)
 
-    send.assert_called_once_with("PR ready card", reply_markup)
+    build_card.assert_not_called()
+    keyboard.assert_not_called()
+    urlopen.assert_not_called()
 
 
-def test_done_pr_card_uses_target_repository_from_issue_body() -> None:
+def test_done_notification_does_not_fetch_issue_or_send() -> None:
     issue = {
         "number": 129,
         "body": "Target Repository: alanua/bauclock\nExpected Output: done\n\n```task\nDo it\n```",
@@ -6639,24 +6644,36 @@ def test_done_pr_card_uses_target_repository_from_issue_body() -> None:
 
     with mock.patch.object(
         runner, "get_notification_issue", return_value=issue
-    ), mock.patch.object(runner, "send_telegram_notification") as send:
+    ) as get_issue, mock.patch.object(runner.urllib.request, "urlopen") as urlopen:
         runner.notify_task_finished(129, "DONE", DONE_REPORT)
 
-    assert send.call_count == 1
-    text = send.call_args.args[0]
-    reply_markup = send.call_args.args[1]
-    assert "Проєкт: bauclock" in text
-    assert "Репозиторій: alanua/bauclock" in text
-    assert "Задача: #129" in text
-    assert "Repository: alanua/Skeleton" not in text
-    assert "target_repo" not in text
-    assert [row[0]["text"] for row in reply_markup["inline_keyboard"]] == [
-        "Деталі",
-        "Відкрити PR",
-    ]
+    get_issue.assert_not_called()
+    urlopen.assert_not_called()
 
 
-def test_cross_project_blocked_status_uses_target_repository_from_issue_body() -> None:
+def test_cross_project_blocked_notification_is_suppressed() -> None:
+    issue = {
+        "number": 999,
+        "body": (
+            "Target Project: lumenflow\n"
+            "Target Repository: alanua/LumenFlow\n\n"
+            "```task\nDo it\n```"
+        ),
+        "state": "open",
+        "closed": False,
+        "labels": [{"name": runner.LABEL_BLOCKED}],
+    }
+
+    with mock.patch.object(
+        runner, "get_notification_issue", return_value=issue
+    ) as get_issue, mock.patch.object(runner.urllib.request, "urlopen") as urlopen:
+        runner.notify_task_finished(999, "BLOCKED")
+
+    get_issue.assert_not_called()
+    urlopen.assert_not_called()
+
+
+def test_needs_operator_uses_target_repository_and_emits_once() -> None:
     issue = {
         "number": 999,
         "body": (
@@ -6672,66 +6689,53 @@ def test_cross_project_blocked_status_uses_target_repository_from_issue_body() -
     with mock.patch.object(
         runner, "get_notification_issue", return_value=issue
     ), mock.patch.object(runner, "send_telegram_notification") as send:
-        runner.notify_task_finished(999, "BLOCKED")
+        runner.notify_task_finished(999, "NEEDS_OPERATOR", "NEEDS_OPERATOR: inspect")
+        runner.notify_task_finished(999, "NEEDS_OPERATOR", "NEEDS_OPERATOR: inspect")
 
     send.assert_called_once_with(
         "Проєкт: LumenFlow\n"
         "Репозиторій: alanua/LumenFlow\n"
         "Задача: #999\n"
-        "Статус: BLOCKED"
+        "Статус: NEEDS_OPERATOR"
     )
 
 
-def test_done_pr_card_build_failure_falls_back_to_plain_done() -> None:
+def test_done_pr_card_build_failure_is_not_reached_for_suppressed_done() -> None:
     with mock.patch.object(
-        runner, "should_notify_task_finished", return_value=True
-    ), mock.patch.object(
         runner,
         "build_done_pr_ready_card_payload",
         side_effect=RuntimeError("telegram-bot-token-must-not-leak"),
-    ), mock.patch.object(runner, "send_telegram_notification") as send:
+    ), mock.patch.object(runner.urllib.request, "urlopen") as urlopen:
         runner.notify_task_finished(129, "DONE", DONE_REPORT)
 
-    send.assert_called_once_with(_plain_done_message())
-    assert "telegram-bot-token-must-not-leak" not in send.call_args.args[0]
+    urlopen.assert_not_called()
 
 
-def test_done_pr_reply_markup_send_failure_falls_back_to_plain_done() -> None:
+def test_done_pr_reply_markup_send_failure_is_not_reached_for_suppressed_done() -> None:
     card = {"text": "PR ready card", "buttons": []}
     reply_markup = {"inline_keyboard": []}
 
     with mock.patch.object(
-        runner, "should_notify_task_finished", return_value=True
-    ), mock.patch.object(
         runner, "build_done_pr_ready_card_payload", return_value=card
     ), mock.patch.object(
         runner, "card_payload_to_inline_keyboard", return_value=reply_markup
-    ), mock.patch.object(
-        runner,
-        "send_telegram_notification",
-        side_effect=(RuntimeError("reply_markup send failed"), None),
-    ) as send:
+    ), mock.patch.object(runner.urllib.request, "urlopen") as urlopen:
         runner.notify_task_finished(129, "DONE", DONE_REPORT)
 
-    assert send.call_args_list == [
-        mock.call("PR ready card", reply_markup),
-        mock.call(_plain_done_message()),
-    ]
+    urlopen.assert_not_called()
 
 
 def test_pr_card_build_does_not_execute_merge_or_reject_side_effects() -> None:
     card = {"text": "PR ready card", "buttons": []}
     with mock.patch.object(
-        runner, "should_notify_task_finished", return_value=True
-    ), mock.patch.object(
         runner, "build_done_pr_ready_card_payload", return_value=card
     ), mock.patch.object(runner, "run_command") as run_command, mock.patch.object(
-        runner, "send_telegram_notification"
-    ) as send:
+        runner.urllib.request, "urlopen"
+    ) as urlopen:
         runner.notify_task_finished(129, "DONE", DONE_REPORT)
 
     run_command.assert_not_called()
-    send.assert_called_once()
+    urlopen.assert_not_called()
 
 
 def _maintenance_issue(
