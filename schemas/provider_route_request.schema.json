@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://skeleton.local/schemas/provider_route_request.schema.json",
+  "title": "Provider route request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "task_class",
+    "required_capability",
+    "privacy_class"
+  ],
+  "properties": {
+    "task_class": {
+      "type": "string",
+      "enum": [
+        "DETERMINISTIC",
+        "EASY_CODING",
+        "HARD_CODING",
+        "REVIEW",
+        "GENERAL"
+      ]
+    },
+    "required_capability": {
+      "type": "string",
+      "enum": [
+        "none",
+        "reasoning",
+        "repository_edit",
+        "tool_use",
+        "code_review"
+      ]
+    },
+    "privacy_class": {
+      "type": "string",
+      "enum": [
+        "PUBLIC",
+        "SANITIZED",
+        "LOCAL_PRIVATE"
+      ]
+    },
+    "max_cost_class": {
+      "type": "string",
+      "enum": [
+        "NONE",
+        "LOW",
+        "MEDIUM",
+        "HIGH"
+      ],
+      "default": "HIGH"
+    },
+    "max_latency_class": {
+      "type": "string",
+      "enum": [
+        "NONE",
+        "LOW",
+        "MEDIUM",
+        "HIGH"
+      ],
+      "default": "HIGH"
+    },
+    "min_capability_score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "default": 0
+    },
+    "prefer_local": {
+      "type": "boolean",
+      "default": true
+    },
+    "provider_health": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "enum": [
+          "LIVE",
+          "DEGRADED",
+          "OUTAGE",
+          "COOLDOWN",
+          "DISABLED"
+        ]
+      },
+      "default": {}
+    },
+    "task_text": {
+      "type": "string",
+      "description": "Optional untrusted text. Provider and model names in this field have no routing authority.",
+      "default": ""
+    }
+  }
+}
