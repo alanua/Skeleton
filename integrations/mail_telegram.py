@@ -9,13 +9,24 @@ from typing import Any, Final
 MAIL_TELEGRAM_HANDOFF_SCHEMA: Final = "skeleton.mail_telegram_handoff.v1"
 MAIL_TELEGRAM_ACTION_SCHEMA: Final = "skeleton.mail_telegram_action.v1"
 
-_ACTIONS = frozenset({"approve_reply", "revise_reply", "defer", "confirm_deadline"})
+_ACTIONS = frozenset(
+    {
+        "approve_reply",
+        "revise_reply",
+        "defer",
+        "confirm_deadline",
+        "open_private_case",
+        "search_private_evidence",
+        "mark_false_positive",
+    }
+)
 
 
 def build_mail_telegram_handoff(operator_packet: Mapping[str, Any]) -> dict[str, Any]:
     case_ref = str(operator_packet.get("case_ref") or "")
     correspondence_ref = str(operator_packet.get("correspondence_ref") or "")
     semantic_hash = str(operator_packet.get("approved_semantic_hash") or "")
+    security = operator_packet.get("security_assessment")
     return {
         "schema": MAIL_TELEGRAM_HANDOFF_SCHEMA,
         "case_ref": case_ref,
@@ -23,6 +34,9 @@ def build_mail_telegram_handoff(operator_packet: Mapping[str, Any]) -> dict[str,
         "summary_uk": str(operator_packet.get("summary_uk") or ""),
         "draft_ref": operator_packet.get("draft_ref"),
         "approved_semantic_hash": semantic_hash,
+        "risk_level": security.get("risk_level") if isinstance(security, Mapping) else None,
+        "risk_category": security.get("category") if isinstance(security, Mapping) else None,
+        "reason_codes": tuple(security.get("reason_codes", ())) if isinstance(security, Mapping) else (),
         "allowed_actions": tuple(
             action["id"]
             for action in operator_packet.get("telegram_reply_contract", {}).get(
