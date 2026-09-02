@@ -521,6 +521,20 @@ def test_required_namespaces_and_allowlisted_commands_are_registered() -> None:
         }
 
 
+def test_dios_project_identity_is_not_memory_gateway_namespace_without_policy_registration() -> None:
+    with pytest.raises(MemoryGatewayPolicyError) as excinfo:
+        gateway("dios")
+
+    assert excinfo.value.reason_code == "UNKNOWN_NAMESPACE"
+
+
+def test_dios_command_cannot_bypass_existing_memory_gateway_policy() -> None:
+    with pytest.raises(MemoryGatewayPolicyError) as excinfo:
+        gateway("skeleton").execute(request("dios", "memory.lookup_exact", {"key": "primary_fact"}))
+
+    assert excinfo.value.reason_code == "UNKNOWN_NAMESPACE"
+
+
 def test_private_memory_gateway_put_is_idempotent_and_exact_readback_is_authoritative(tmp_path: Path) -> None:
     stack = PrivateMemoryStack(tmp_path)
     stack.init(import_manifest=False)
