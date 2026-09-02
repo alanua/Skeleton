@@ -1,0 +1,26 @@
+services:
+  control-board:
+    build:
+      context: ../..
+      dockerfile: deploy/control_board/Dockerfile
+    ports:
+      - "127.0.0.1:8080:8080"
+    env_file:
+      - ./env.example
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid,nodev
+    cpus: "0.50"
+    mem_limit: 256m
+    pids_limit: 128
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2).read()"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
