@@ -6,7 +6,7 @@ It has no media mutation capability and no persistent state store. It observes o
 
 - Skeleton Cast mode at `http://127.0.0.1:8100/api/mode`;
 - Skeleton Cast player state at the fixed loopback `/api/player` endpoint for desktop video modes;
-- Android target `dumpsys media_session` through fixed `adb` argv when `SKELETON_HOME_EDGE_ANDROID_SERIAL` has been privately resolved by deployment from canonical device identity.
+- Android target `dumpsys media_session` through fixed `adb` argv only for the explicit `youtube_tv_receiver` mode when `SKELETON_HOME_EDGE_ANDROID_SERIAL` has been privately resolved by deployment from canonical device identity.
 
 The Android serial is never printed. Invalid or absent serial configuration is `UNKNOWN`, not an inferred device.
 
@@ -22,8 +22,9 @@ Stdout is one public-safe JSON object with schema `skeleton.home_edge.media_disp
 
 Current Skeleton Cast modes are normalized without a second authority:
 
-- `mpv`, `vlc`, `chrome`, `kiosk`: require an explicit bounded playback marker from `/api/player`;
-- `youtube`, `airscreen`: require the Android media-session observer; PLAYING/BUFFERING/CONNECTING owns the display, PAUSED/STOPPED/ENDED clears it;
+- `mpv`, `vlc`, `chrome`, `kiosk`, `youtube_web`: require an explicit bounded playback marker from `/api/player`;
+- `youtube_tv_receiver`: requires the Android media-session observer; PLAYING/BUFFERING/CONNECTING owns the display, PAUSED/STOPPED/ENDED clears it;
+- legacy `youtube` and `airscreen`: unsupported as display authority and return `UNKNOWN`;
 - generic `android`: explicit non-playing is clear, but playing is `UNKNOWN` unless video ownership is independently confirmed, so audio-only playback is never falsely declared a video owner;
 - `games`: foreground display owner;
 - `off`: clear;

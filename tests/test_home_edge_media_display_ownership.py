@@ -32,6 +32,18 @@ def test_desktop_video_running_unpaused_is_owner(mode: str) -> None:
     assert decision.observations[-1].reason == "player_running_unpaused"
 
 
+def test_youtube_web_uses_ordinary_desktop_player_contract() -> None:
+    decision = ownership.decide_from_snapshots(
+        mode_payload={"mode": "youtube_web"},
+        player_payload={"running": True, "pause": False},
+        android_media_dump="active=true\nstate=PlaybackState {state=3}\n",
+    )
+
+    assert decision.state is ownership.Ownership.OWNER
+    assert decision.reason == "confirmed_video_playing"
+    assert decision.observations[-1].source == "skeleton_cast_player"
+
+
 def test_desktop_video_running_paused_releases_to_clear() -> None:
     decision = ownership.decide_from_snapshots(
         mode_payload={"mode": "chrome"},
@@ -112,20 +124,31 @@ def test_contradictory_explicit_markers_keep_existing_owner_precedence() -> None
 def test_android_youtube_playing_is_owner() -> None:
     dump = "Sessions Stack\n  active=true\n  state=PlaybackState {state=3, position=123}\n"
     decision = ownership.decide_from_snapshots(
-        mode_payload={"mode": "youtube"},
+        mode_payload={"mode": "youtube_tv_receiver"},
         android_media_dump=dump,
     )
     assert decision.state is ownership.Ownership.OWNER
-    assert decision.reason == "confirmed_android_video_playing"
+    assert decision.reason == "confirmed_youtube_tv_receiver_playing"
 
 
 def test_android_youtube_paused_releases_to_clear() -> None:
     dump = "active=true\nstate=PlaybackState {state=2, position=123}\n"
     decision = ownership.decide_from_snapshots(
-        mode_payload={"mode": "youtube"},
+        mode_payload={"mode": "youtube_tv_receiver"},
         android_media_dump=dump,
     )
     assert decision.state is ownership.Ownership.CLEAR
+
+
+@pytest.mark.parametrize("mode", ["youtube", "airscreen"])
+def test_legacy_android_video_modes_are_not_receiver_authority(mode: str) -> None:
+    decision = ownership.decide_from_snapshots(
+        mode_payload={"mode": mode},
+        android_media_dump="active=true\nstate=PlaybackState {state=3, position=123}\n",
+    )
+
+    assert decision.state is ownership.Ownership.UNKNOWN
+    assert decision.reason == "legacy_android_video_mode_unsupported"
 
 
 def test_android_generic_playing_does_not_falsely_claim_video_owner() -> None:
