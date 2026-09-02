@@ -6575,6 +6575,68 @@ def test_approve_reject_buttons_require_reliable_sha_and_changed_files() -> None
     )
 
 
+def test_telegram_terminal_policy_suppresses_ordinary_done_and_blocked() -> None:
+    assert (
+        runner.telegram_terminal_notification_policy("DONE", "DONE: no operator action").action
+        == "suppress"
+    )
+    assert (
+        runner.telegram_terminal_notification_policy(
+            "BLOCKED",
+            "BLOCKED: ordinary task failure\nNEEDS_OPERATOR appears only in prose",
+        ).action
+        == "suppress"
+    )
+
+
+def test_telegram_terminal_policy_preserves_explicit_attention_and_pr_approval() -> None:
+    assert (
+        runner.telegram_terminal_notification_policy(
+            "NEEDS_OPERATOR",
+            "BLOCKED is just prose here",
+        ).action
+        == "plain_attention"
+    )
+    assert (
+        runner.telegram_terminal_notification_policy("OPERATOR_ATTENTION").action
+        == "plain_attention"
+    )
+    assert (
+        runner.telegram_terminal_notification_policy("DONE", DONE_REPORT).action
+        == "pr_approval_card"
+    )
+
+
+def test_telegram_terminal_policy_does_not_infer_attention_from_report_prose() -> None:
+    report = (
+        "DONE: routine completion.\n\n"
+        "The task mentioned NEEDS_OPERATOR, DONE, and BLOCKED in documentation.\n"
+    )
+
+    policy = runner.telegram_terminal_notification_policy("DONE", report)
+
+    assert policy.action == "suppress"
+
+
+def test_ordinary_done_and_blocked_notifications_are_suppressed() -> None:
+    with mock.patch.object(
+        runner, "should_notify_task_finished", return_value=True
+    ), mock.patch.object(runner, "send_telegram_notification") as send:
+        runner.notify_task_finished(129, "DONE", "DONE: routine completion")
+        runner.notify_task_finished(129, "BLOCKED", "NEEDS_OPERATOR is prose only")
+
+    send.assert_not_called()
+
+
+def test_explicit_needs_operator_sends_one_bounded_attention_notification() -> None:
+    with mock.patch.object(
+        runner, "should_notify_task_finished", return_value=True
+    ), mock.patch.object(runner, "send_telegram_notification") as send:
+        runner.notify_task_finished(129, "NEEDS_OPERATOR", "BLOCKED appears in prose")
+
+    send.assert_called_once_with("Проєкт: Skeleton\nЗадача: #129\nСтатус: NEEDS_OPERATOR")
+
+
 def test_send_telegram_notification_posts_reply_markup_for_card() -> None:
     card = runner.build_done_pr_ready_card_payload(DONE_REPORT)
     assert card is not None
@@ -6656,7 +6718,7 @@ def test_done_pr_card_uses_target_repository_from_issue_body() -> None:
     ]
 
 
-def test_cross_project_blocked_status_uses_target_repository_from_issue_body() -> None:
+def test_cross_project_blocked_status_uses_target_repository_from_issue_body_without_telegram() -> None:
     issue = {
         "number": 999,
         "body": (
@@ -6674,15 +6736,10 @@ def test_cross_project_blocked_status_uses_target_repository_from_issue_body() -
     ), mock.patch.object(runner, "send_telegram_notification") as send:
         runner.notify_task_finished(999, "BLOCKED")
 
-    send.assert_called_once_with(
-        "Проєкт: LumenFlow\n"
-        "Репозиторій: alanua/LumenFlow\n"
-        "Задача: #999\n"
-        "Статус: BLOCKED"
-    )
+    send.assert_not_called()
 
 
-def test_done_pr_card_build_failure_falls_back_to_plain_done() -> None:
+def test_done_pr_card_build_failure_does_not_send_plain_done() -> None:
     with mock.patch.object(
         runner, "should_notify_task_finished", return_value=True
     ), mock.patch.object(
@@ -6692,11 +6749,10 @@ def test_done_pr_card_build_failure_falls_back_to_plain_done() -> None:
     ), mock.patch.object(runner, "send_telegram_notification") as send:
         runner.notify_task_finished(129, "DONE", DONE_REPORT)
 
-    send.assert_called_once_with(_plain_done_message())
-    assert "telegram-bot-token-must-not-leak" not in send.call_args.args[0]
+    send.assert_not_called()
 
 
-def test_done_pr_reply_markup_send_failure_falls_back_to_plain_done() -> None:
+def test_done_pr_reply_markup_send_failure_does_not_send_plain_done() -> None:
     card = {"text": "PR ready card", "buttons": []}
     reply_markup = {"inline_keyboard": []}
 
@@ -6713,10 +6769,7 @@ def test_done_pr_reply_markup_send_failure_falls_back_to_plain_done() -> None:
     ) as send:
         runner.notify_task_finished(129, "DONE", DONE_REPORT)
 
-    assert send.call_args_list == [
-        mock.call("PR ready card", reply_markup),
-        mock.call(_plain_done_message()),
-    ]
+    send.assert_called_once_with("PR ready card", reply_markup)
 
 
 def test_pr_card_build_does_not_execute_merge_or_reject_side_effects() -> None:
