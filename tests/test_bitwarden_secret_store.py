@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
+import textwrap
 from types import SimpleNamespace
 
 import pytest
@@ -126,3 +130,178 @@ def test_bws_cli_rejects_reference_mismatch_and_nonzero_exit(tmp_path: Path, mon
     )
     with pytest.raises(SecretProviderUnavailable, match="secret_get_failed"):
         store.resolve(reference, context)
+
+
+def _install_synthetic_bitwarden_sdk(tmp_path: Path) -> Path:
+    package = tmp_path / "runtime" / "bitwarden_sdk"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text(
+        textwrap.dedent(
+            """
+            import json
+            import os
+
+            __version__ = "2.1.0"
+
+            class DeviceType:
+                SDK = "SDK"
+
+            def client_settings_from_dict(value):
+                return dict(value)
+
+            class _Response:
+                def __init__(self, data):
+                    self.data = data
+
+            class _Auth:
+                def __init__(self):
+                    self.login_calls = []
+
+                def login_access_token(self, token, state_file):
+                    if token != "synthetic-machine-token":
+                        raise RuntimeError("bad token")
+                    self.login_calls.append((token, state_file))
+
+                def get_access_token_organization(self):
+                    return "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+            class _Secrets:
+                def list(self, organization_id):
+                    if organization_id != "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee":
+                        raise RuntimeError("bad organization")
+                    return _Response(json.loads(os.environ["BITWARDEN_SYNTHETIC_IDENTIFIERS_JSON"]))
+
+                def get(self, *args, **kwargs):
+                    raise AssertionError("secret get must not be called")
+
+                def get_by_ids(self, *args, **kwargs):
+                    raise AssertionError("secret get_by_ids must not be called")
+
+            class BitwardenClient:
+                def __init__(self, settings):
+                    self.settings = settings
+                    self._auth = _Auth()
+                    self._secrets = _Secrets()
+
+                def auth(self):
+                    return self._auth
+
+                def secrets(self):
+                    return self._secrets
+            """
+        ).strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    return package.parent
+
+
+def _run_bootstrap_helper(
+    tmp_path: Path,
+    identifiers: list[dict[str, str]],
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    runtime = _install_synthetic_bitwarden_sdk(tmp_path)
+    token_file = tmp_path / "bitwarden-access-token"
+    token_file.write_text("synthetic-machine-token\n", encoding="utf-8")
+    output_index = tmp_path / "out" / "skeleton-secret-reference-index"
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(runtime)
+    env["BITWARDEN_SYNTHETIC_IDENTIFIERS_JSON"] = json.dumps(identifiers)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/bitwarden_gmail_reference_bootstrap.py",
+            "--token-file",
+            str(token_file),
+            "--output-index",
+            str(output_index),
+            "--state-file",
+            str(tmp_path / "state.json"),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=10,
+    )
+    return result, output_index
+
+
+def test_bitwarden_bootstrap_helper_persists_only_unique_gmail_primary_uuid(tmp_path: Path) -> None:
+    secret_id = "11111111-2222-3333-4444-555555555555"
+    result, output_index = _run_bootstrap_helper(
+        tmp_path,
+        [
+            {"id": secret_id, "key": "skeleton/mail-gmail/acct:gmail-primary/oauth-readonly"},
+            {"id": "66666666-7777-8888-9999-000000000000", "key": "other"},
+        ],
+    )
+
+    assert result.returncode == 0
+    receipt = json.loads(result.stdout)
+    assert receipt == {
+        "schema": "skeleton.bitwarden_reference_bootstrap_receipt.v1",
+        "status": "DONE",
+        "match_count": 1,
+        "persisted": True,
+        "reason": "OK",
+    }
+    payload = json.loads(output_index.read_text(encoding="utf-8"))
+    assert payload == {
+        "schema": "skeleton.secret_reference_index.v1",
+        "registrations": [
+            {
+                "service_id": "mail-gmail",
+                "alias": "acct:gmail-primary",
+                "provider": "bitwarden",
+                "reference_id": secret_id,
+            }
+        ],
+    }
+    assert secret_id not in result.stdout
+    assert "synthetic-machine-token" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    ("identifiers", "reason"),
+    [
+        ([], "REFERENCE_MATCH_NONE"),
+        (
+            [
+                {"id": "11111111-2222-3333-4444-555555555555", "key": "skeleton/mail-gmail/acct:gmail-primary/oauth-readonly"},
+                {"id": "66666666-7777-8888-9999-000000000000", "key": "skeleton/mail-gmail/acct:gmail-primary/oauth-readonly"},
+            ],
+            "REFERENCE_MATCH_AMBIGUOUS",
+        ),
+    ],
+)
+def test_bitwarden_bootstrap_helper_fails_closed_on_none_or_ambiguous(
+    tmp_path: Path,
+    identifiers: list[dict[str, str]],
+    reason: str,
+) -> None:
+    result, output_index = _run_bootstrap_helper(tmp_path, identifiers)
+
+    assert result.returncode == 1
+    receipt = json.loads(result.stdout)
+    assert receipt["status"] == "BLOCKED"
+    assert receipt["persisted"] is False
+    assert receipt["reason"] == reason
+    assert not output_index.exists()
+
+
+def test_bitwarden_bootstrap_helper_has_no_value_bearing_discovery_calls() -> None:
+    source = Path("scripts/bitwarden_gmail_reference_bootstrap.py").read_text(encoding="utf-8")
+    forbidden = (
+        ".secrets().get(",
+        ".secrets().get_by_ids(",
+        ".get_by_ids(",
+        " secret list",
+        "bws secret list",
+        "export",
+        "run ",
+    )
+    for needle in forbidden:
+        assert needle not in source

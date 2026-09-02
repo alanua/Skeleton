@@ -354,10 +354,12 @@ HOME_EDGE_01_ESP_LAB_STAGE1_SIGNER_INSTALL_V1 = (
     HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID
 )
 MAIL_GMAIL_PRIMARY_REGISTERED_ACTIVATION = "mail_gmail_primary_registered_activation_v1"
+MAIL_GMAIL_PRIMARY_BITWARDEN_BOOTSTRAP = "mail_gmail_primary_bitwarden_reference_bootstrap_v1"
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
         MAIL_GMAIL_READONLY_CANARY_TASK_ID,
         MAIL_GMAIL_PRIMARY_REGISTERED_ACTIVATION,
+        MAIL_GMAIL_PRIMARY_BITWARDEN_BOOTSTRAP,
         SYNC_TELEGRAM_CALLBACK_POLLER_RUNTIME,
         ENSURE_TELEGRAM_CALLBACK_LOCAL_CONFIG,
         CHECK_PROJECT_CHECKOUT,
@@ -17297,6 +17299,266 @@ _MAIL_GMAIL_ACTIVATION_APPROVAL = (
 )
 _MAIL_GMAIL_SERVICE = "skeleton-mail-operations.service"
 _MAIL_GMAIL_TIMER = "skeleton-mail-operations.timer"
+_BITWARDEN_ACCESS_TOKEN_CREDENTIAL_NAME = "bitwarden-access-token"
+_REFERENCE_INDEX_CREDENTIAL_NAME = "skeleton-secret-reference-index"
+_DEFAULT_BITWARDEN_SDK_PYTHON = "/opt/skeleton-bitwarden-sdk-runtime/venv/bin/python"
+_DEFAULT_BITWARDEN_BOOTSTRAP_HELPER = (
+    "/opt/skeleton-bitwarden-sdk-runtime/bitwarden_gmail_reference_bootstrap.py"
+)
+_DEFAULT_REFERENCE_INDEX_ENCRYPTED_PATH = (
+    "/etc/credstore.encrypted/skeleton-secret-reference-index"
+)
+_BITWARDEN_BOOTSTRAP_ALLOWED_REASONS = frozenset(
+    (
+        "OK",
+        "ACCESS_TOKEN_CREDENTIAL_UNAVAILABLE",
+        "ACCESS_TOKEN_ORGANIZATION_UNAVAILABLE",
+        "BITWARDEN_BOOTSTRAP_UNEXPECTED_FAILURE",
+        "BITWARDEN_SDK_UNAVAILABLE",
+        "BITWARDEN_SDK_VERSION_MISMATCH",
+        "OUTPUT_INDEX_PATH_INVALID",
+        "REFERENCE_MATCH_AMBIGUOUS",
+        "REFERENCE_MATCH_NONE",
+        "SECRET_IDENTIFIER_CONTRACT_MISMATCH",
+    )
+)
+
+
+def _mail_gmail_systemd_credential_path(name: str) -> Path | None:
+    directory = os.environ.get("CREDENTIALS_DIRECTORY", "").strip()
+    if not directory:
+        return None
+    root = Path(directory)
+    if not root.is_absolute() or "/" in name or "\\" in name or name in {".", ".."}:
+        return None
+    path = root / name
+    return path if path.is_file() else None
+
+
+def _mail_gmail_bootstrap_executable(name: str, default: str) -> Path | None:
+    value = os.environ.get(name, default).strip()
+    if not value:
+        return None
+    path = Path(value)
+    if not path.is_absolute() or not path.is_file():
+        return None
+    return path
+
+
+def _parse_bitwarden_bootstrap_receipt(output: str) -> dict[str, object] | None:
+    try:
+        receipt = json.loads((output or "").strip().splitlines()[-1])
+    except (IndexError, json.JSONDecodeError):
+        return None
+    if not isinstance(receipt, dict):
+        return None
+    if set(receipt) != {"schema", "status", "match_count", "persisted", "reason"}:
+        return None
+    if receipt.get("schema") != "skeleton.bitwarden_reference_bootstrap_receipt.v1":
+        return None
+    if receipt.get("status") not in {"DONE", "BLOCKED"}:
+        return None
+    if receipt.get("match_count") not in {0, 1, 2}:
+        return None
+    if not isinstance(receipt.get("persisted"), bool):
+        return None
+    reason = receipt.get("reason")
+    if not isinstance(reason, str) or reason not in _BITWARDEN_BOOTSTRAP_ALLOWED_REASONS:
+        return None
+    if receipt["status"] == "DONE" and (
+        receipt["match_count"] != 1
+        or receipt["persisted"] is not True
+        or receipt["reason"] != "OK"
+    ):
+        return None
+    return receipt
+
+
+def _encrypt_mail_gmail_reference_index(
+    *,
+    plaintext_index: Path,
+    status_lines: list[str],
+) -> str | None:
+    encrypted_path = Path(
+        os.environ.get(
+            "SKELETON_SECRET_REFERENCE_INDEX_ENCRYPTED_PATH",
+            _DEFAULT_REFERENCE_INDEX_ENCRYPTED_PATH,
+        )
+    )
+    if not encrypted_path.is_absolute():
+        return _maintenance_report(
+            "BLOCKED",
+            MAIL_GMAIL_PRIMARY_BITWARDEN_BOOTSTRAP,
+            [*status_lines, "step=encrypt_reference_index status=failed reason=encrypted_index_path_invalid"],
+            "not_met",
+        )
+    encrypted_path.parent.mkdir(parents=True, exist_ok=True)
+    command = _non_interactive_sudo(
+        "systemd-creds",
+        "encrypt",
+        f"--name={_REFERENCE_INDEX_CREDENTIAL_NAME}",
+        str(plaintext_index),
+        str(encrypted_path),
+    )
+    report = _run_maintenance_command(
+        MAIL_GMAIL_PRIMARY_BITWARDEN_BOOTSTRAP,
+        "encrypt_reference_index",
+        command,
+        status_lines,
+    )
+    if report is not None:
+        return report
+    return None
+
+
+def _mail_gmail_bootstrap_reference_index(
+    *,
+    status_lines: list[str] | None = None,
+    plaintext_index_copy: Path | None = None,
+) -> str | None:
+    task_id = MAIL_GMAIL_PRIMARY_BITWARDEN_BOOTSTRAP
+    lines = status_lines if status_lines is not None else []
+    token_file = _mail_gmail_systemd_credential_path(_BITWARDEN_ACCESS_TOKEN_CREDENTIAL_NAME)
+    if token_file is None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*lines, "step=bootstrap_reference_index status=failed reason=ACCESS_TOKEN_CREDENTIAL_UNAVAILABLE"],
+            "not_met",
+        )
+    python_path = _mail_gmail_bootstrap_executable(
+        "SKELETON_BITWARDEN_SDK_PYTHON",
+        _DEFAULT_BITWARDEN_SDK_PYTHON,
+    )
+    helper_path = _mail_gmail_bootstrap_executable(
+        "SKELETON_BITWARDEN_BOOTSTRAP_HELPER",
+        _DEFAULT_BITWARDEN_BOOTSTRAP_HELPER,
+    )
+    if python_path is None or helper_path is None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*lines, "step=bootstrap_reference_index status=failed reason=BITWARDEN_SDK_UNAVAILABLE"],
+            "not_met",
+        )
+
+    with tempfile.TemporaryDirectory(prefix="skeleton-bitwarden-bootstrap-") as tmp_dir:
+        tmp_root = Path(tmp_dir)
+        plaintext_index = tmp_root / "skeleton-secret-reference-index.json"
+        state_file = tmp_root / "bitwarden-sdk-state.json"
+        code, output = run_command(
+            [
+                str(python_path),
+                str(helper_path),
+                "--token-file",
+                str(token_file),
+                "--output-index",
+                str(plaintext_index),
+                "--state-file",
+                str(state_file),
+            ],
+            timeout=45,
+        )
+        receipt = _parse_bitwarden_bootstrap_receipt(output)
+        if code != 0 or receipt is None or receipt.get("status") != "DONE":
+            reason = "BITWARDEN_BOOTSTRAP_UNEXPECTED_FAILURE"
+            match_count = 0
+            if receipt is not None:
+                reason = str(receipt["reason"])
+                match_count = int(receipt["match_count"])
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [
+                    *lines,
+                    "step=bootstrap_reference_index status=failed",
+                    f"bootstrap_match_count={match_count}",
+                    "bootstrap_persisted=false",
+                    f"reason={reason}",
+                ],
+                "not_met",
+            )
+        if not plaintext_index.is_file():
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [*lines, "step=bootstrap_reference_index status=failed reason=REFERENCE_INDEX_WRITE_MISSING"],
+                "not_met",
+            )
+        if plaintext_index_copy is not None:
+            if not plaintext_index_copy.is_absolute():
+                return _maintenance_report(
+                    "BLOCKED",
+                    task_id,
+                    [*lines, "step=bootstrap_reference_index status=failed reason=REFERENCE_INDEX_COPY_PATH_INVALID"],
+                    "not_met",
+                )
+            plaintext_index_copy.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(plaintext_index, plaintext_index_copy)
+            os.chmod(plaintext_index_copy, 0o600)
+        lines.extend(
+            [
+                "step=bootstrap_reference_index status=done",
+                "bootstrap_match_count=1",
+                "bootstrap_persisted=true",
+            ]
+        )
+        encrypt_report = _encrypt_mail_gmail_reference_index(
+            plaintext_index=plaintext_index,
+            status_lines=lines,
+        )
+        if encrypt_report is not None:
+            return encrypt_report.replace(
+                f"maintenance_task_id={MAIL_GMAIL_PRIMARY_BITWARDEN_BOOTSTRAP}",
+                f"maintenance_task_id={task_id}",
+            )
+    return None
+
+
+def _mail_gmail_primary_bootstrap_input(
+    body: str,
+) -> tuple[dict[str, str] | None, str | None]:
+    parsed, reason = _gmail_readonly_canary_input(
+        "\n".join(
+            line
+            for line in (body or "").splitlines()
+            if not line.strip().startswith("Maintenance Task ID:")
+        )
+        + f"\nMaintenance Task ID: {MAIL_GMAIL_READONLY_CANARY_TASK_ID}"
+    )
+    if reason is not None:
+        return None, reason.replace("gmail_readonly_canary", "mail_gmail_bootstrap")
+    if parsed["Account Alias"] != "acct:gmail-primary":
+        return None, "mail_gmail_bootstrap_account_alias_mismatch"
+    return parsed, None
+
+
+def mail_gmail_primary_bitwarden_reference_bootstrap_v1(body: str) -> str:
+    task_id = MAIL_GMAIL_PRIMARY_BITWARDEN_BOOTSTRAP
+    parsed, reason = _mail_gmail_primary_bootstrap_input(body)
+    if reason is not None or parsed is None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [f"reason={reason or 'mail_gmail_bootstrap_invalid_input'}"],
+            "not_met",
+        )
+
+    preflight_report = _gmail_readonly_canary_preflight(parsed["Expected Main SHA"])
+    if preflight_report is not None:
+        return preflight_report.replace(
+            f"maintenance_task_id={MAIL_GMAIL_READONLY_CANARY_TASK_ID}",
+            f"maintenance_task_id={task_id}",
+        )
+
+    status_lines = [
+        "step=exact_main_preflight status=done",
+        "account_alias=acct:gmail-primary",
+    ]
+    report = _mail_gmail_bootstrap_reference_index(status_lines=status_lines)
+    if report is not None:
+        return report
+    return _maintenance_report("DONE", task_id, status_lines, "met")
 
 
 def _mail_gmail_activation_input(
@@ -17365,48 +17627,74 @@ def mail_gmail_primary_registered_activation_v1(body: str) -> str:
         "step=exact_main_preflight status=done",
         "account_alias=acct:gmail-primary",
     ]
-    try:
-        registered_bitwarden_reference_from_systemd_index(
-            os.environ,
-            service_id="mail-gmail",
-            alias="acct:gmail-primary",
-            bootstrap_required=True,
-        )
-    except SecretReferenceRegistrationError as exc:
+    token_file = _mail_gmail_systemd_credential_path(_BITWARDEN_ACCESS_TOKEN_CREDENTIAL_NAME)
+    if token_file is None:
         return _maintenance_report(
             "BLOCKED",
             task_id,
-            [*status_lines, f"step=reference_bind status=failed reason={str(exc)}"],
+            [*status_lines, "step=bootstrap_reference_index status=failed reason=ACCESS_TOKEN_CREDENTIAL_UNAVAILABLE"],
             "not_met",
         )
-    status_lines.append("step=reference_bind status=done")
 
-    try:
-        receipt = run_gmail_readonly_canary(
-            account_alias="acct:gmail-primary",
-            authority_environment=os.environ,
+    with tempfile.TemporaryDirectory(prefix="skeleton-mail-gmail-activation-") as tmp_dir:
+        credential_dir = Path(tmp_dir) / "credentials"
+        credential_dir.mkdir(mode=0o700)
+        os.symlink(token_file, credential_dir / _BITWARDEN_ACCESS_TOKEN_CREDENTIAL_NAME)
+        bootstrap_index = credential_dir / _REFERENCE_INDEX_CREDENTIAL_NAME
+        bootstrap_report = _mail_gmail_bootstrap_reference_index(
+            status_lines=status_lines,
+            plaintext_index_copy=bootstrap_index,
         )
-    except GmailReadonlyCanaryError as exc:
-        receipt = blocked_gmail_readonly_receipt(
-            account_alias="acct:gmail-primary",
-            reason_code=exc.reason_code,
+        if bootstrap_report is not None:
+            return bootstrap_report.replace(
+                f"maintenance_task_id={MAIL_GMAIL_PRIMARY_BITWARDEN_BOOTSTRAP}",
+                f"maintenance_task_id={task_id}",
+            )
+        activation_environment = dict(os.environ)
+        activation_environment["CREDENTIALS_DIRECTORY"] = str(credential_dir)
+
+        try:
+            registered_bitwarden_reference_from_systemd_index(
+                activation_environment,
+                service_id="mail-gmail",
+                alias="acct:gmail-primary",
+                bootstrap_required=True,
+            )
+        except SecretReferenceRegistrationError as exc:
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [*status_lines, f"step=reference_reread status=failed reason={str(exc)}"],
+                "not_met",
+            )
+        status_lines.append("step=reference_reread status=done")
+
+        try:
+            receipt = run_gmail_readonly_canary(
+                account_alias="acct:gmail-primary",
+                authority_environment=activation_environment,
+            )
+        except GmailReadonlyCanaryError as exc:
+            receipt = blocked_gmail_readonly_receipt(
+                account_alias="acct:gmail-primary",
+                reason_code=exc.reason_code,
+            )
+        canary_report = _gmail_readonly_canary_receipt_report(
+            receipt,
+            preflight_passed=True,
         )
-    canary_report = _gmail_readonly_canary_receipt_report(
-        receipt,
-        preflight_passed=True,
-    )
-    if not maintenance_report_is_done(canary_report):
-        return _maintenance_report(
-            "BLOCKED",
-            task_id,
-            [
-                *status_lines,
-                "step=gmail_readonly_canary status=failed",
-                f"stable_reason={receipt.get('stable_reason', 'GMAIL_READONLY_PROVIDER_FAILURE')}",
-            ],
-            "not_met",
-        )
-    status_lines.append("step=gmail_readonly_canary status=done")
+        if not maintenance_report_is_done(canary_report):
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [
+                    *status_lines,
+                    "step=gmail_readonly_canary status=failed",
+                    f"stable_reason={receipt.get('stable_reason', 'GMAIL_READONLY_PROVIDER_FAILURE')}",
+                ],
+                "not_met",
+            )
+        status_lines.append("step=gmail_readonly_canary status=done")
 
     for step, command in (
         ("systemd_daemon_reload", _non_interactive_sudo("systemctl", "daemon-reload")),
@@ -17506,6 +17794,8 @@ def dispatch_runtime_maintenance_task(
             return runner_controller_repair_codex_state_mount_v1(body)
         if task_id == MAIL_GMAIL_PRIMARY_REGISTERED_ACTIVATION:
             return mail_gmail_primary_registered_activation_v1(body)
+        if task_id == MAIL_GMAIL_PRIMARY_BITWARDEN_BOOTSTRAP:
+            return mail_gmail_primary_bitwarden_reference_bootstrap_v1(body)
         if task_id == MAIL_GMAIL_READONLY_CANARY_TASK_ID:
             return mail_gmail_readonly_canary_v1(body)
         if task_id == BUILD_AND_LOCAL_OTA_OPERATION:
