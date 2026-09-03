@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-REPO_ROOT="${SKELETON_HOME_EDGE_REPO_ROOT:-/home/agent/agent-dev/repos/Skeleton}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+LOCAL_REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
+REPO_ROOT="${SKELETON_HOME_EDGE_REPO_ROOT:-$LOCAL_REPO_ROOT}"
 PROFILE_ENV="${SKELETON_HOME_EDGE_PROFILE_ENV:-/etc/skeleton/home-edge-01.env}"
 CONTROLLER_ENV="${SKELETON_HOME_EDGE_CONTROLLER_ENV:-/etc/skeleton/home-edge-executor-controller.env}"
 
