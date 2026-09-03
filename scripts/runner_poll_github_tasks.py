@@ -1398,16 +1398,28 @@ def _validation_command_uses_pytest(args: list[str]) -> bool:
     )
 
 
+def _validation_pytest_temp_parent(cwd_path: Path) -> Path:
+    candidates = [Path(tempfile.gettempdir()), Path("/tmp")]
+    for candidate in candidates:
+        candidate_path = candidate.resolve(strict=False)
+        if candidate_path.is_relative_to(cwd_path):
+            continue
+        if candidate_path.is_dir():
+            return candidate_path
+    raise FileNotFoundError("no external pytest validation temp parent is available")
+
+
 def _create_validation_pytest_temp_root(cwd: str | Path) -> Path:
     cwd_path = Path(cwd)
     if not cwd_path.is_dir():
         raise FileNotFoundError(
             f"pytest validation cwd is not an existing directory: {cwd_path}"
         )
+    temp_parent = _validation_pytest_temp_parent(cwd_path.resolve(strict=True))
     return Path(
         tempfile.mkdtemp(
             prefix=".runner-validation-pytest-",
-            dir=cwd_path,
+            dir=temp_parent,
         )
     )
 

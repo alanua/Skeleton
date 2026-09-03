@@ -20909,7 +20909,7 @@ def test_run_validation_profile_command_sanitizes_and_resets_environment(
     assert validation_environment["PATH"] == "/usr/bin"
     assert validation_environment["HOME"] == "/home/agent"
     pytest_temp_root = Path(validation_environment["TMPDIR"])
-    assert pytest_temp_root.parent == tmp_path
+    assert not pytest_temp_root.is_relative_to(tmp_path)
     assert pytest_temp_root.name.startswith(".runner-validation-pytest-")
     assert validation_environment["TEMP"] == str(pytest_temp_root)
     assert validation_environment["TMP"] == str(pytest_temp_root)
@@ -20962,7 +20962,7 @@ def test_run_validation_profile_command_resets_environment_after_failure(
     assert "env" in subprocess_run.call_args_list[0].kwargs
     validation_environment = subprocess_run.call_args_list[0].kwargs["env"]
     pytest_temp_root = Path(validation_environment["TMPDIR"])
-    assert pytest_temp_root.parent == tmp_path
+    assert not pytest_temp_root.is_relative_to(tmp_path)
     assert validation_environment["TEMP"] == str(pytest_temp_root)
     assert validation_environment["TMP"] == str(pytest_temp_root)
     assert validation_environment["PYTEST_DEBUG_TEMPROOT"] == str(pytest_temp_root)
@@ -20988,9 +20988,30 @@ def test_run_validation_profile_command_fails_closed_when_pytest_temp_root_unava
 
     mkdtemp.assert_called_once_with(
         prefix=".runner-validation-pytest-",
-        dir=tmp_path,
+        dir=Path(runner.tempfile.gettempdir()).resolve(strict=False),
     )
     subprocess_run.assert_not_called()
+    assert not list(tmp_path.glob(".runner-validation-pytest-*"))
+
+
+def test_create_validation_pytest_temp_root_ignores_unsafe_repo_temp_parent(
+    tmp_path: Path,
+) -> None:
+    unsafe_temp_parent = tmp_path / "ambient-temp"
+    unsafe_temp_parent.mkdir()
+
+    with mock.patch.object(
+        runner.tempfile,
+        "gettempdir",
+        return_value=str(unsafe_temp_parent),
+    ):
+        temp_root = runner._create_validation_pytest_temp_root(tmp_path)
+
+    try:
+        assert not temp_root.is_relative_to(tmp_path)
+        assert temp_root.name.startswith(".runner-validation-pytest-")
+    finally:
+        runner.shutil.rmtree(temp_root)
     assert not list(tmp_path.glob(".runner-validation-pytest-*"))
 
 
