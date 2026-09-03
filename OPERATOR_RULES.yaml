@@ -182,3 +182,17 @@ rules:
       - projects/skeleton/PROJECT_OPERATING_STANDARD.md:practical_full_functional_product_intent
     plain_language: Treat every project as a practical real-world full-functional product by default. Intermediate prototypes and MVP slices must be labelled as stages and must not replace the declared final capability target.
     check: project_plan_preserves_declared_full_functional_target_and_labels_intermediate_stages
+
+  - id: runtime_identity_must_not_use_historical_username
+    severity: block
+    scope:
+      - runtime_maintenance
+      - connector_action
+      - operation_definition
+      - device_registry
+      - memory_route
+      - status_response
+    source_refs:
+      - COMMANDS.yaml:behavior_playbook:runtime_desktop_identity_resolution
+    plain_language: Resolve the current desktop user and home directory from the live execution context or registered device identity; never use a historical username or an old chat path as current runtime authority.
+    check: runtime_user_and_home_are_resolved_from_current_authority_not_historical_username
