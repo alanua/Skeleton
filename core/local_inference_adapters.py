@@ -42,9 +42,11 @@ class AdapterRegistry:
 
 def build_default_registry() -> AdapterRegistry:
     from core.family_document_local_inference import FAMILY_DOCUMENT_ADAPTER
+    from core.email_message_local_inference import EMAIL_MESSAGE_ADAPTER
 
     registry = AdapterRegistry()
     registry.register(FAMILY_DOCUMENT_ADAPTER)
+    registry.register(EMAIL_MESSAGE_ADAPTER)
     return registry
 
 
