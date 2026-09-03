@@ -4,7 +4,6 @@ import com.skeleton.home.homeedge.GmailOAuthHomeEdgeApi
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
 import java.net.InetSocketAddress
-import java.util.concurrent.Executors
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -64,6 +63,19 @@ class GmailOAuthHomeEdgeApiTest {
     }
 
     @Test
+    fun completeFailsClosedWhenSuccessMarkerIsMissing() {
+        val baseUrl = startServer { exchange ->
+            respond(exchange, 200, """{"message":"callback accepted"}""")
+        }
+
+        val failure = runCatching {
+            GmailOAuthHomeEdgeApi(baseUrl).complete("http://localhost/?code=fixture-code&state=fixture-state")
+        }.exceptionOrNull()
+
+        assertTrue(failure?.message?.contains("callback accepted") == true)
+    }
+
+    @Test
     fun completeRejectsBlankReturnedUrlWithoutNetworkCall() {
         val failure = runCatching {
             GmailOAuthHomeEdgeApi("http://127.0.0.1:9").complete("   ")
@@ -74,7 +86,6 @@ class GmailOAuthHomeEdgeApiTest {
 
     private fun startServer(handler: (HttpExchange) -> Unit): String {
         val httpServer = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
-        httpServer.executor = Executors.newSingleThreadExecutor()
         httpServer.createContext("/") { exchange -> handler(exchange) }
         httpServer.start()
         server = httpServer
