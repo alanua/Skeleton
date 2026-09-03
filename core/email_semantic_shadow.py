@@ -14,6 +14,9 @@ _QUOTED_PATTERNS = (
     re.compile(r"(?im)^-----Original Message-----\s*$"),
 )
 _SIGNATURE = re.compile(r"(?m)^--\s*$")
+_OUTLOOK_BLOCK = re.compile(r"(?im)^(?:From|Von|Від|От):\s*.+\n(?:Sent|Gesendet|Надіслано|Отправлено):\s*.+\n(?:To|An|Кому):\s*.+(?:\n(?:Subject|Betreff|Тема):\s*.+)?")
+_HTML_TAG = re.compile(r"<[^>]+>")
+_SUBJECT_PREFIX = re.compile(r"(?i)^\s*(?:re|fwd?|aw|wg)\s*:\s*")
 _WS = re.compile(r"[ \t]+")
 _BLANKS = re.compile(r"\n{3,}")
 
@@ -25,6 +28,9 @@ def normalize_message_text(text: str | None) -> str:
         match = pattern.search(value)
         if match:
             cut = min(cut, match.start())
+    outlook = _OUTLOOK_BLOCK.search(value)
+    if outlook:
+        cut = min(cut, outlook.start())
     sig = _SIGNATURE.search(value)
     if sig:
         cut = min(cut, sig.start())
@@ -37,6 +43,23 @@ def normalize_message_text(text: str | None) -> str:
     return _BLANKS.sub("\n\n", "\n".join(lines)).strip()
 
 
+def normalize_subject(subject: str | None) -> str:
+    value = html.unescape(subject or "").strip()
+    previous = None
+    while value and value != previous:
+        previous = value
+        value = _SUBJECT_PREFIX.sub("", value).strip()
+    return value
+
+
+def html_to_text(value: str | None) -> str:
+    if not value:
+        return ""
+    text = re.sub(r"(?is)<(?:br|/p|/div|/li|/tr|/h[1-6])[^>]*>", "\n", value)
+    text = _HTML_TAG.sub(" ", text)
+    return normalize_message_text(html.unescape(text))
+
+
 @dataclass(frozen=True)
 class ThreadRecord:
     thread_id: str
@@ -47,9 +70,11 @@ class ThreadRecord:
     native_labels: tuple[str, ...]
     internal_ms_min: int
     internal_ms_max: int
+    message_count: int
+    digest_truncated: bool
 
 
-def aggregate_threads(rows: Iterable[Mapping[str, object]], max_chars_per_message: int = 1200) -> list[ThreadRecord]:
+def aggregate_threads(rows: Iterable[Mapping[str, object]], max_chars_per_message: int = 1200, max_chars_per_thread: int = 3000) -> list[ThreadRecord]:
     grouped: dict[str, list[Mapping[str, object]]] = {}
     for row in rows:
         tid = str(row.get("thread_id") or row.get("message_id") or "").strip()
@@ -68,7 +93,7 @@ def aggregate_threads(rows: Iterable[Mapping[str, object]], max_chars_per_messag
             mids.append(str(row.get("message_id") or ""))
             times.append(int(row.get("internal_ms") or 0))
             if not subject:
-                subject = str(row.get("subject") or "").strip()
+                subject = normalize_subject(str(row.get("subject") or ""))
             for key in ("from_addr", "to_addr"):
                 value = str(row.get(key) or "").strip()
                 if value:
@@ -76,10 +101,19 @@ def aggregate_threads(rows: Iterable[Mapping[str, object]], max_chars_per_messag
             raw_labels = row.get("label_ids")
             if isinstance(raw_labels, str):
                 labels.update(x for x in raw_labels.split(",") if x)
-            text = normalize_message_text(str(row.get("body_text") or row.get("snippet") or ""))
+            raw_body = row.get("body_text") or html_to_text(str(row.get("body_html") or "")) or row.get("snippet") or ""
+            text = normalize_message_text(str(raw_body))
             if text:
                 parts.append(text[:max_chars_per_message])
-        digest = ("Subject: " + subject + "\n\n" if subject else "") + "\n\n---\n\n".join(parts)
+        prefix = ("Subject: " + subject + "\n\n") if subject else ""
+        # Preserve early context and the newest state for long conversations.
+        if len(parts) > 3:
+            selected = parts[:2] + [parts[-1]]
+        else:
+            selected = parts
+        raw_digest = prefix + "\n\n---\n\n".join(selected)
+        digest_truncated = len(raw_digest) > max_chars_per_thread or len(parts) > len(selected)
+        digest = raw_digest[:max_chars_per_thread]
         result.append(ThreadRecord(
             thread_id=tid,
             subject=subject,
@@ -89,6 +123,8 @@ def aggregate_threads(rows: Iterable[Mapping[str, object]], max_chars_per_messag
             native_labels=tuple(sorted(labels)),
             internal_ms_min=min(times) if times else 0,
             internal_ms_max=max(times) if times else 0,
+            message_count=len(items),
+            digest_truncated=digest_truncated,
         ))
     return result
 
