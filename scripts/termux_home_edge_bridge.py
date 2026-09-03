@@ -69,7 +69,7 @@ def build_controller_argv(
         "read_only",
         "--run-as",
         "desktop-user",
-        "--timeout",
+        "--timeout-seconds",
         str(timeout),
         "--request-id",
         request_id,
@@ -96,6 +96,8 @@ def run_probe(config: BridgeConfig, argv: Sequence[str]) -> dict:
         raise RuntimeError("canonical controller returned an invalid receipt") from exc
     if not isinstance(receipt, dict):
         raise RuntimeError("canonical controller returned a non-object receipt")
+    if receipt.get("status") != "ok":
+        raise RuntimeError("canonical Home Edge controller did not return an ok receipt")
     return receipt
 
 
