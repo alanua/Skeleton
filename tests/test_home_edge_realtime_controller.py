@@ -8,6 +8,7 @@ from scripts.home_edge_exec_mcp_probe import run_probe
 
 
 ROOT = Path(__file__).resolve().parents[1]
+STALE_REPO_ROOT = "/home/agent/agent-dev/repos/Skeleton"
 
 
 def test_mcp_probe_initializes_lists_and_calls_tool(tmp_path: Path) -> None:
@@ -67,6 +68,23 @@ def test_launcher_reuses_existing_private_runtime_files() -> None:
     assert "/etc/skeleton/home-edge-executor-controller.env" in launcher
     assert "home_edge_exec_mcp.py" in launcher
     assert "github" not in launcher.lower()
+
+
+def test_launcher_has_no_stale_controller_repo_root_default() -> None:
+    launcher = (ROOT / "scripts/home_edge_exec_mcp_launcher.sh").read_text(encoding="utf-8")
+
+    assert STALE_REPO_ROOT not in launcher
+    assert "SKELETON_HOME_EDGE_REPO_ROOT" in launcher
+    assert "BASH_SOURCE" in launcher
+
+
+def test_installer_embeds_selected_repo_root_in_installed_launcher() -> None:
+    installer = (ROOT / "scripts/install_home_edge_realtime_controller.sh").read_text(encoding="utf-8")
+
+    assert STALE_REPO_ROOT not in installer
+    assert "installed-launcher" in installer
+    assert "export SKELETON_HOME_EDGE_REPO_ROOT=%q" in installer
+    assert "home_edge_exec_mcp_launcher.sh" in installer
 
 
 def test_installer_runs_protocol_probe_and_live_read_only_probe() -> None:
