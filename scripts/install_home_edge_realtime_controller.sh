@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-REPO_ROOT="/home/agent/agent-dev/repos/Skeleton"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
 INSTALL_BIN="/usr/local/bin"
 CONFIG_DIR="/etc/skeleton/mcp"
 BACKUP_DIR=""
@@ -89,8 +90,15 @@ if [[ -e "$CONFIG_DIR/skeleton-home-edge-exec.json" ]]; then
   cp -a "$CONFIG_DIR/skeleton-home-edge-exec.json" "$BACKUP_DIR/skeleton-home-edge-exec.json"
 fi
 
+# Install a self-contained launcher that preserves the exact repository root
+# selected by this installer. This avoids stale controller-global defaults.
+{
+  printf '#!/usr/bin/env bash\nset -Eeuo pipefail\n'
+  printf 'export SKELETON_HOME_EDGE_REPO_ROOT=%q\n' "$REPO_ROOT"
+  printf 'exec %q\n' "$REPO_ROOT/scripts/home_edge_exec_mcp_launcher.sh"
+} > "$BACKUP_DIR/installed-launcher"
 install -o root -g root -m 0755 \
-  "$REPO_ROOT/scripts/home_edge_exec_mcp_launcher.sh" \
+  "$BACKUP_DIR/installed-launcher" \
   "$INSTALL_BIN/skeleton-home-edge-exec-mcp"
 install -o root -g root -m 0755 \
   "$REPO_ROOT/scripts/home_edge_exec_mcp_probe.py" \
@@ -99,10 +107,8 @@ install -o root -g root -m 0644 \
   "$REPO_ROOT/config/mcp/skeleton-home-edge-exec.json" \
   "$CONFIG_DIR/skeleton-home-edge-exec.json"
 
-SKELETON_HOME_EDGE_REPO_ROOT="$REPO_ROOT" \
-  "$INSTALL_BIN/skeleton-home-edge-exec-probe" --skip-call
-SKELETON_HOME_EDGE_REPO_ROOT="$REPO_ROOT" \
-  "$INSTALL_BIN/skeleton-home-edge-exec-probe"
+"$INSTALL_BIN/skeleton-home-edge-exec-probe" --skip-call
+"$INSTALL_BIN/skeleton-home-edge-exec-probe"
 
 COMMITTED=1
 rm -rf "$BACKUP_DIR"
