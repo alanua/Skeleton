@@ -2265,6 +2265,47 @@ def classify_codex_task_result(output: str, exit_code: int) -> CodexTaskResult:
     return CodexTaskResult("DONE")
 
 
+def _is_runner_task_schema_issue(body: str) -> bool:
+    schema = _body_field(_metadata_before_task(body), "schema")
+    return schema == "skeleton.runner_task.v1"
+
+
+def _expected_output_items(body: str) -> tuple[str, ...]:
+    expected_output = _expected_output_value(body)
+    if isinstance(expected_output, str):
+        return (expected_output.strip(),) if expected_output.strip() else ()
+    if isinstance(expected_output, list) and all(
+        isinstance(item, str) for item in expected_output
+    ):
+        return tuple(item.strip() for item in expected_output if item.strip())
+    return ()
+
+
+def exact_runner_task_success_block_reason(
+    issue_body: str, codex_output: str
+) -> str | None:
+    if not _is_runner_task_schema_issue(issue_body):
+        return None
+
+    final_answer = final_codex_answer(codex_output).lstrip()
+    if not final_answer.startswith("RESULT: DONE"):
+        return "exact_success_marker_missing"
+
+    normalized_output = re.sub(r"\s+", " ", codex_output).lower()
+    for item in _expected_output_items(issue_body):
+        normalized_item = re.sub(r"\s+", " ", item).lower()
+        if "draft pr" in normalized_item or "pr exact head sha" in normalized_item:
+            continue
+        if (
+            "exact" in normalized_item
+            or "marker" in normalized_item
+            or "false-success" in normalized_item
+        ):
+            if normalized_item not in normalized_output:
+                return "exact_expected_output_missing"
+    return None
+
+
 def control_recovery_db_path() -> Path:
     if ROOT != MODULE_ROOT:
         return ROOT / ".codex" / "control_recovery.sqlite3"
@@ -2916,7 +2957,7 @@ def extract_telegram_approved_pr_merge_request(
 
 def _body_field(body: str, field: str) -> str | None:
     match = re.search(
-        rf"^\s*{re.escape(field)}:\s*(?P<value>\S(?:.*\S)?)\s*$",
+        rf"^[ \t]*{re.escape(field)}:[ \t]*(?P<value>\S(?:.*\S)?)[ \t]*$",
         body or "",
         re.MULTILINE,
     )
@@ -18626,6 +18667,33 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                 blocked_codex_output_report(
                     codex_output,
                     codex_result.marker or "BLOCKED",
+                    issue_workdir,
+                ),
+                runner_task,
+            )
+            report = append_retry_fields(report, retry_decision)
+            warning = record_runner_executor_result(
+                issue_number,
+                runner_task.target_project if runner_task is not None else "skeleton",
+                "BLOCKED",
+                "BLOCKED",
+                "codex",
+                report,
+            )
+            report = append_memory_warning(report, warning or pickup_memory_warning)
+            post_issue_comment(issue_number, report)
+            set_issue_label(issue_number, LABEL_RUNNING, LABEL_BLOCKED)
+            notify_task_finished(issue_number, "BLOCKED", report)
+            maybe_replenish_runner_queue_after_completion()
+            return
+        exact_success_reason = exact_runner_task_success_block_reason(
+            issue_body, codex_output
+        )
+        if exact_success_reason is not None:
+            report = report_runner_lane(
+                blocked_codex_output_report(
+                    codex_output,
+                    exact_success_reason,
                     issue_workdir,
                 ),
                 runner_task,
