@@ -315,6 +315,7 @@ fun OperatorHubScreen(padding: PaddingValues) {
         Text("Зв'язок: ONLINE / DEGRADED / OFFLINE")
         Text("Дії: SENT / ACCEPTED / APPLIED / PHYSICALLY_VERIFIED")
         Text("Операторський контур зарезервовано без живих підключень.")
+        GmailOAuthPanel()
     }
 }
 
