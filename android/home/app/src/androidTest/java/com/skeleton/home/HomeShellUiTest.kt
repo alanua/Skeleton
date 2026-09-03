@@ -55,6 +55,24 @@ class HomeShellUiTest {
     }
 
     @Test
+    fun operatorHubShowsDedicatedGmailOAuthControls() {
+        compose.setContent {
+            HomeApp(
+                session = SyntheticSession.operator(),
+                initialRoute = HomeRoute.OperatorHub,
+            )
+        }
+
+        compose.onNodeWithText("Home Edge → Secrets").assertIsDisplayed()
+        compose.onNodeWithContentDescription("gmail-oauth-start").assertIsDisplayed()
+        compose.onNodeWithContentDescription("gmail-oauth-returned-url").assertIsDisplayed()
+        compose.onNodeWithContentDescription("gmail-oauth-complete").assertIsDisplayed()
+        compose.onNodeWithText("Авторизувати Gmail (телефон)").assertIsDisplayed()
+        compose.onNodeWithText("Вставити адресу після Google").assertIsDisplayed()
+        compose.onNodeWithText("Завершити авторизацію").assertIsDisplayed()
+    }
+
+    @Test
     fun videoSearchRetryActionIsVisibleAndClickable() {
         compose.setContent {
             HomeApp(
