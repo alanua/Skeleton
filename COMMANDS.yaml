@@ -26,6 +26,10 @@ behavior_playbook:
     trigger: operator_provides_issue_or_pr_number
     safe_next_step: read_scope_tests_data_runtime_risk_then_approve_reject_or_state_blocker_and_one_next_step
     report: short_review_decision_with_reason
+  runtime_desktop_identity_resolution:
+    trigger: any_runtime_path_or_operation_depends_on_desktop_username_or_home_directory
+    safe_next_step: resolve_current_runtime_user_and_home_from_the_execution_context_or_registered_device_identity_and_never_inherit_a_historical_username
+    report: resolved_runtime_identity_and_path_or_blocked_identity_mismatch
 
 commands:
   прокинься:
