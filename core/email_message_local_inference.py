@@ -6,10 +6,14 @@ from typing import Any, Mapping
 from core.local_inference_adapters import AdapterSpec, InferenceValidationError, validate_json_schema
 
 REQUEST_TYPE = "email_message.classify"
-RESPONSE_SCHEMA_ID = "skeleton.email_message_inference.v1"
+RESPONSE_SCHEMA_ID = "skeleton.email_message_inference.v2"
 PRIMARY_CATEGORIES = (
     "government", "finance", "work", "security", "technical", "shopping",
     "travel", "education", "personal", "ads", "spam", "other",
+)
+MESSAGE_KINDS = (
+    "automated_report", "incident_alert", "issue_discussion", "proposal", "action_request",
+    "transactional_notice", "newsletter", "promotion", "personal_correspondence", "other",
 )
 IMPORTANCE = ("critical", "high", "normal", "low")
 
@@ -30,7 +34,7 @@ _INPUT_SCHEMA: dict[str, Any] = {
 _OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "required": [
-        "schema", "route", "primary_category", "importance", "is_marketing",
+        "schema", "route", "primary_category", "message_kind", "importance", "is_marketing",
         "is_spam_suspected", "security_event", "technical_consequence",
         "action_required", "deadline", "summary_uk", "important_points_uk",
         "case_key", "confidence", "evidence", "reason_codes",
@@ -40,6 +44,7 @@ _OUTPUT_SCHEMA: dict[str, Any] = {
         "schema": {"type": "string", "const": RESPONSE_SCHEMA_ID},
         "route": {"type": "string", "enum": ["ACCEPT", "REVIEW"]},
         "primary_category": {"type": "string", "enum": list(PRIMARY_CATEGORIES)},
+        "message_kind": {"type": "string", "enum": list(MESSAGE_KINDS)},
         "importance": {"type": "string", "enum": list(IMPORTANCE)},
         "is_marketing": {"type": "boolean"},
         "is_spam_suspected": {"type": "boolean"},
@@ -64,14 +69,14 @@ def build_email_message_prompt(payload: Mapping[str, Any]) -> str:
         "You are Skeleton's private semantic email triage component. Return exactly one JSON object and no prose. "
         "Classify the actual intent and consequence of the message, not incidental words. Sender identity, subject and snippet are primary evidence; body text is supporting evidence. "
         "Ignore signatures, legal footers, unsubscribe text, tracking text, quoted replies and generic website security/privacy boilerplate unless they are the actual message. "
-        "Choose exactly one primary_category. Security means a real authentication/security event, breach, suspicious access, credential/2FA action, account protection warning or phishing/scam—not merely the words security/login in a footer. "
+        "Choose exactly one primary_category (what domain the message is about) AND exactly one message_kind (what kind of message it is). These are independent axes. Security means a real authentication/security event, breach, suspicious access, credential/2FA action, account protection warning or phishing/scam—not merely the words security/login in a footer. "
         "Finance means a real payment, invoice, statement, banking/tax/insurance/contract financial consequence—not a discount, coupon or price mentioned in marketing. "
-        "Work means actual employment, client, business, application or professional obligation—not generic commercial mail. Technical means an operational technical report/problem/change; technical_consequence is true only when there is a real system consequence requiring awareness/action. "
+        "Work means actual employment, client, business, application or professional obligation—not generic commercial mail. Technical is the subject domain, not a synonym for report. message_kind=automated_report is reserved for machine-generated status/report output. GitHub issue/PR comments and human technical discussions are issue_discussion; a proposed design/tool/change is proposal; an incident/failure alert is incident_alert. technical_consequence is true only when there is a real system consequence requiring awareness/action. "
         "Ads means promotional/newsletter content. Spam means phishing/scam or strongly suspicious unsolicited content; Gmail SPAM is evidence but still inspect content. A legitimate verification-code or account-alert message is security, not spam, merely because it says if this was not you. Travel price alerts belong to travel, not finance/security. "
-        "Calibrate with these examples: Bitwarden/Google/Hetzner verification code from the legitimate service sender => security, is_spam_suspected=false. Samsung/Kaufland/Wizz discount offer => ads, low/normal importance. A bank, insurer, airline, retailer, software vendor or other legitimate service promoting bonuses, referral rewards, discounts, upgrades, events or products is still ads; sender industry does not make promotional content finance/work/personal/security. Promotional expiry dates are not user obligations: normally action_required=false and importance=low unless the message is tied to an already existing user commitment. Google Flights tracked-route price alert => travel. GitHub workflow 'No jobs were run' with no consequence => technical, technical_consequence=false, action_required=false, low importance. A fake parcel/prize/bank-login lure impersonating a brand => spam and possibly security. "
+        "Calibrate with these examples: Bitwarden/Google/Hetzner verification code from the legitimate service sender => security, is_spam_suspected=false. Samsung/Kaufland/Wizz discount offer => ads, low/normal importance. A bank, insurer, airline, retailer, software vendor or other legitimate service promoting bonuses, referral rewards, discounts, upgrades, events or products is still ads; sender industry does not make promotional content finance/work/personal/security. Promotional expiry dates are not user obligations: normally action_required=false and importance=low unless the message is tied to an already existing user commitment. Google Flights tracked-route price alert => travel. GitHub workflow 'No jobs were run' with no consequence => primary_category=technical, message_kind=automated_report, technical_consequence=false, action_required=false, low importance. A human GitHub issue/PR comment discussing architecture, sandbox posture, Vetto or another proposed approach => primary_category=technical and message_kind=issue_discussion or proposal; NEVER automated_report merely because it is on GitHub. A fake parcel/prize/bank-login lure impersonating a brand => spam and possibly security. "
         "Set action_required only for a concrete future action. Set deadline only if explicitly supported. Importance high/critical requires a real consequence, deadline, security risk, official/legal matter, money due/received, or important work/personal obligation. "
         "Use REVIEW when confidence < 0.82 or category/consequence is genuinely ambiguous. ACCEPT requires confidence >= 0.82. Do not invent facts. summary_uk and every important_points_uk item MUST be written in Ukrainian, even when the input is another language. "
-        f"Use schema {RESPONSE_SCHEMA_ID}. Categories: {json.dumps(PRIMARY_CATEGORIES)}. Input: {json.dumps(compact, ensure_ascii=False, separators=(',', ':'))}"
+        f"Use schema {RESPONSE_SCHEMA_ID}. Categories: {json.dumps(PRIMARY_CATEGORIES)}. Message kinds: {json.dumps(MESSAGE_KINDS)}. Input: {json.dumps(compact, ensure_ascii=False, separators=(',', ':'))}"
     )
 
 

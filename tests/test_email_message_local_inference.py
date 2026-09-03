@@ -10,7 +10,7 @@ def payload(subject="Your Bitwarden Verification Code", body="If this was not yo
 
 
 def output(**kw):
-    v={"schema":"skeleton.email_message_inference.v1","route":"ACCEPT","primary_category":"security","importance":"high","is_marketing":False,"is_spam_suspected":False,"security_event":True,"technical_consequence":False,"action_required":False,"deadline":None,"summary_uk":"Код підтвердження входу Bitwarden.","important_points_uk":["Перевірити, чи вхід ініціювали ви."],"case_key":"bitwarden/account-access","confidence":0.96,"evidence":["Verification Code","If this was not you"],"reason_codes":[]}
+    v={"schema":"skeleton.email_message_inference.v2","route":"ACCEPT","primary_category":"security","message_kind":"incident_alert","importance":"high","is_marketing":False,"is_spam_suspected":False,"security_event":True,"technical_consequence":False,"action_required":False,"deadline":None,"summary_uk":"Код підтвердження входу Bitwarden.","important_points_uk":["Перевірити, чи вхід ініціювали ви."],"case_key":"bitwarden/account-access","confidence":0.96,"evidence":["Verification Code","If this was not you"],"reason_codes":[]}
     v.update(kw); return v
 
 
@@ -48,3 +48,22 @@ def test_low_confidence_accept_fails_closed():
     try: validate_email_message_output(bad,payload())
     except InferenceValidationError as e: assert str(e)=="acceptance_confidence_too_low"
     else: raise AssertionError("expected validation failure")
+
+
+def test_prompt_separates_domain_from_message_kind_and_github_discussion():
+    p=build_email_message_prompt(payload("Re: [alanua/Skeleton] P0 host-level gateway self-audit outside Codex sandbox", "shleder commented: Codex CLI sandbox posture; proposing Vetto as an approach"))
+    assert "independent axes" in p
+    assert "NEVER automated_report" in p
+    assert "issue_discussion" in p
+
+
+def test_v2_requires_message_kind():
+    bad=output(); bad.pop("message_kind")
+    try: validate_email_message_output(bad,payload())
+    except InferenceValidationError: pass
+    else: raise AssertionError("expected validation failure")
+
+
+def test_accepts_technical_issue_discussion_kind():
+    v=output(primary_category="technical",message_kind="issue_discussion",security_event=False,importance="normal",summary_uk="Обговорення технічної пропозиції в GitHub.")
+    assert validate_email_message_output(v,payload("Re: issue #3496","Human discussion proposing Vetto"))["message_kind"] == "issue_discussion"
