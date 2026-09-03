@@ -24,7 +24,7 @@ class GmailOAuthHomeEdgeApiTest {
         val baseUrl = startServer { exchange ->
             assertEquals("/api/mobile/gmail/oauth/start", exchange.requestURI.path)
             assertEquals("POST", exchange.requestMethod)
-            respond(exchange, 200, """{"authorization_url":"https://accounts.google.com/o/oauth2/v2/auth?state=test","message":"Відкрийте Google"}""")
+            respond(exchange, 200, """{"authorization_url":"https://accounts.google.com/o/oauth2/v2/auth?state=fixture-state","message":"Відкрийте Google"}""")
         }
 
         val result = GmailOAuthHomeEdgeApi(baseUrl).start()
@@ -35,13 +35,13 @@ class GmailOAuthHomeEdgeApiTest {
 
     @Test
     fun completePostsReturnedUrlToExistingHomeEdgeEndpoint() {
-        val returnedUrl = "http://localhost/?code=fake-code&state=fake-state"
+        val returnedUrl = "http://localhost/?code=fixture-code&state=fixture-state"
         val baseUrl = startServer { exchange ->
             assertEquals("/api/mobile/gmail/oauth/callback-complete", exchange.requestURI.path)
             assertEquals("POST", exchange.requestMethod)
             val requestBody = exchange.requestBody.bufferedReader().use { it.readText() }
             assertTrue(requestBody.contains("returned_url"))
-            assertTrue(requestBody.contains("fake-code"))
+            assertTrue(requestBody.contains("fixture-code"))
             respond(exchange, 200, """{"ok":true,"message":"Gmail авторизовано"}""")
         }
 
@@ -57,7 +57,7 @@ class GmailOAuthHomeEdgeApiTest {
         }
 
         val failure = runCatching {
-            GmailOAuthHomeEdgeApi(baseUrl).complete("http://localhost/?code=fake&state=wrong")
+            GmailOAuthHomeEdgeApi(baseUrl).complete("http://localhost/?code=fixture-code&state=wrong-fixture-state")
         }.exceptionOrNull()
 
         assertTrue(failure?.message?.contains("OAuth state mismatch") == true)
