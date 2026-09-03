@@ -26,7 +26,12 @@ class GmailOAuthHomeEdgeApi(configuredBaseUrls: String = BuildConfig.HOME_EDGE_B
             JSONObject().put("returned_url", callback).toString(),
         ) { body ->
             val json = JSONObject(body)
-            val ok = json.optBoolean("ok", json.optString("status").equals("ok", true))
+            val status = json.optString("status").trim()
+            val ok = when {
+                json.has("ok") -> json.optBoolean("ok", false)
+                status.isNotBlank() -> status.equals("ok", true) || status.equals("authorized", true) || status.equals("success", true)
+                else -> false
+            }
             check(ok) { json.optString("message").ifBlank { "Авторизацію Gmail не завершено" } }
             GmailOAuthCompleteResult(json.optString("message").ifBlank { "Gmail авторизовано" })
         }
