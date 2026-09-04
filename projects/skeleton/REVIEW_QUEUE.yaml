@@ -1130,3 +1130,18 @@ entries:
     recommended_action: "Review as a high-priority bounded-route candidate only. Require external process memory outside model context; short isolated restartable iterations; maker/checker split when risk justifies it; machine-verifiable success criteria where possible; max_iterations, timeout, retry limit, budget bound, stop conditions, fallback, and failure output for every loop; git worktrees or equivalent isolation for parallel code agents; persisted attempt state, evidence, failures, and next action between iterations; no automatic merge from passing tests; operator approval for protected or high-risk changes; bounded allowlisted connectors and MCP access; and stop/escalate on privacy, scope, protected-file, or repeated-error boundaries."
     status: REVIEW
     canon_status: not_canon_until_promoted
+
+  - id: RQ-2026-09-04-TRANSLATION-V2
+    source_batch: issue_3719_claude_architecture_review
+    date: '2026-09-04'
+    classification: REVIEW
+    target_project: skeleton
+    summary: Replace heuristic dual-MT trust for document translation with OCR gating, entity locking, independent verification, document-level calibration, explicit fail-closed states, and a separate migration queue for 94 blocked legacy translations.
+    existing_match: Runtime v1.5 emergency gate currently blocks untrusted translations; this review proposes a replacement v2 architecture rather than extending v1.5.
+    risk: Incorrect legal, medical, financial, or government translation can materially mislead the operator; correlated local MT agreement is not evidence of semantic correctness.
+    recommended_action: Implement only as shadow/test modules while classification remains REVIEW; do not promote to CANON or trusted runtime until document-level evaluation and explicit operator approval.
+    status: REVIEW
+    canon_status: not_canon_until_promoted
+    github_issue: 3719
+    review_doc: docs/reviews/TRANSLATION_PIPELINE_V2_REVIEW.md
+    implementation_plan: docs/reviews/TRANSLATION_PIPELINE_V2_IMPLEMENTATION_PLAN.md
