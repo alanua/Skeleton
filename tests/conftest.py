@@ -9,29 +9,28 @@ from scripts import runner_poll_github_tasks as runner
 
 
 @pytest.fixture(autouse=True)
-def isolate_codex_env_sanitization_from_spawn_observer(
+def isolate_codex_env_sanitization_from_host_strace(
     request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Keep the env-sanitization unit test focused on its own contract.
+    """Keep the env-sanitization unit test independent of host strace availability.
 
-    The spawn observer has dedicated regression tests. The environment test replaces
-    subprocess.run with a synthetic result and historically asserts the provider
-    output byte-for-byte; letting the host's strace availability add an observer
-    breadcrumb makes that unrelated test host-dependent. Disable only the observer
-    flag for that one test while leaving every dedicated observer test untouched.
+    The spawn observer has dedicated regression coverage. This unrelated environment
+    test historically asserts the synthetic provider output byte-for-byte, so make
+    only that test see strace as unavailable without replacing Runner call paths.
     """
     if request.node.name != "test_run_codex_task_sanitizes_home_edge_environment":
         yield
         return
 
-    original_run_command = runner.run_command
+    original_which = runner.shutil.which
 
-    def run_command_without_spawn_observer(*args, **kwargs):
-        kwargs["observe_process_spawn"] = False
-        return original_run_command(*args, **kwargs)
+    def which_without_strace(name: str):
+        if name == "strace":
+            return None
+        return original_which(name)
 
-    monkeypatch.setattr(runner, "run_command", run_command_without_spawn_observer)
+    monkeypatch.setattr(runner.shutil, "which", which_without_strace)
     yield
 
 
