@@ -28,6 +28,12 @@ The engineering/dev set is for debugging only and cannot justify production trus
 
 Entity locking is not trusted merely because exact reinsertion works for detected entities. Extraction recall is a separate first-class safety property. Missed critical entities are tracked as their own failure mode, and recall must be measured per critical entity class before locking can be promoted beyond shadow/test use.
 
+## Gold labeling and insufficient-data amendment
+
+Entity-recall gold labeling must include a blind human pass over raw OCR/document text before extractor candidates are revealed. The primary human adjudicator is the operator unless another human reviewer is explicitly designated; model/extractor suggestions never constitute gold. Ambiguous legal/medical cases requiring domain expertise remain unresolved and do not count until a competent human reviewer adjudicates them.
+
+A class with too little evidence is never silently skipped or passed. It must carry an explicit insufficient-data state, and production trust for locking that class remains inactive. Current extractor observations (`medical_code=2`, `name=0` over 117 documents) are only detector-output scarcity signals and are not evidence that the archive truly contains only those counts; blind annotation determines archive-native availability. If archive-native material is insufficient, supplemental real examples require explicit provenance and must remain distinguishable from archive-native examples.
+
 ## Runtime boundary
 
 The current v1.5 publication gate remains active only as temporary fail-closed protection. It is not a development target and its threshold/consensus logic must not be tuned toward v2. V2 components are introduced in shadow/test mode first. Production authority, re-enabling blocked translations, and migration require successful domain-specific document-level evaluation and a separate explicit operator approval.

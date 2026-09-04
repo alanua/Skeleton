@@ -45,8 +45,13 @@ Parent review: #3719.
    - tests: shared-error round-trip regression and gross-drift detection.
 
 8. `GOLD_LABELING_PLAN`
-   - explicit per-domain owner/reviewer, target document count, estimated labeling time, adjudication rules and disagreement resolution;
-   - model-assisted pre-labeling is allowed only as draft assistance; unreviewed model labels never enter the gold set;
+   - primary human adjudicator is Oleksii/operator unless another human reviewer is explicitly designated; ambiguous legal/medical cases stay unresolved until competent human adjudication;
+   - blind first pass over raw OCR/document text is mandatory: extractor candidates, spans, confidence and model suggestions are hidden until labels are frozen;
+   - initial entity-recall target is >=12 positive human-adjudicated real archive examples per critical class, spanning real format variation;
+   - explicit per-class data state: UNASSESSED / ENOUGH_ARCHIVE_NATIVE_DATA / INSUFFICIENT_ARCHIVE_NATIVE_DATA / SUPPLEMENTAL_SOURCE_REQUIRED / GATE_INACTIVE_INSUFFICIENT_DATA;
+   - insufficient data is fail-closed and never treated as skip/pass;
+   - supplemental real examples, if required, retain explicit source provenance and remain distinguishable from archive-native examples;
+   - model-assisted pre-labeling is allowed only after the blind pass for reconciliation/drafting; unreviewed model labels never enter the gold set;
    - checkpoint must be complete before production holdout work starts.
 
 9. `skeleton.translation.calibration`
