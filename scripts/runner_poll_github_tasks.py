@@ -17651,10 +17651,15 @@ def _skeleton_control_mcp_hetzner_receipt_valid(
     expected_main_sha: str,
 ) -> bool:
     from core.runner_controller_privileged_gateway import (
+        RECEIPT_SCHEMA_ID,
         SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB,
     )
 
-    if receipt.get("status") not in {"DONE", "NEEDS_OPERATOR"}:
+    status = receipt.get("status")
+    if (
+        receipt.get("schema") != RECEIPT_SCHEMA_ID
+        or status not in {"DONE", "NEEDS_OPERATOR"}
+    ):
         return False
     reason = receipt.get("reason")
     if not isinstance(reason, str) or re.fullmatch(r"[A-Z0-9_]{1,80}", reason) is None:
@@ -17663,9 +17668,50 @@ def _skeleton_control_mcp_hetzner_receipt_valid(
         receipt.get("action_id") != SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_V1
         or receipt.get("repository") != REPO
         or receipt.get("target") != "runner-controller"
-        or receipt.get("expected_main_sha") != expected_main_sha
+    ):
+        return False
+    for key in (
+        "private_evidence_exposed",
+        "stderr_exposed",
+        "env_exposed",
+        "private_paths_exposed",
+    ):
+        if receipt.get(key) is not False:
+            return False
+    if any(
+        key in receipt
+        for key in (
+            "payload",
+            "raw_payload",
+            "stderr",
+            "env",
+            "environment",
+            "path",
+            "paths",
+            "private_path",
+            "private_paths",
+            "checkout_path",
+        )
+    ):
+        return False
+    if status == "NEEDS_OPERATOR":
+        if (
+            "activation_executed" in receipt
+            and receipt.get("activation_executed") is not False
+        ):
+            return False
+        for key in (
+            "external_side_effects_executed",
+            "protected_copy_verified",
+            "installed_artifacts_verified",
+        ):
+            if key in receipt and receipt.get(key) not in {True, False}:
+                return False
+        return True
+    if (
+        receipt.get("expected_main_sha") != expected_main_sha
         or receipt.get("source_blob") != SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB
-        or receipt.get("private_evidence_exposed") is not False
+        or receipt.get("activation_executed") is not False
     ):
         return False
     for key in (
@@ -17679,8 +17725,6 @@ def _skeleton_control_mcp_hetzner_receipt_valid(
     ):
         if key in receipt and receipt.get(key) not in {True, False}:
             return False
-    if receipt.get("activation_executed") is not False:
-        return False
     installer_sha256 = receipt.get("installer_sha256")
     if installer_sha256 is not None and (
         not isinstance(installer_sha256, str)
@@ -17773,10 +17817,9 @@ def skeleton_control_mcp_hetzner_activate_v1(body: str) -> str:
     gateway_status = str(receipt["status"])
     public_lines = [
         *status_lines,
-        f"expected_main_sha={receipt['expected_main_sha']}",
+        f"expected_main_sha={receipt.get('expected_main_sha', expected_main_sha)}",
         f"github_main_sha={github_sha}",
         f"gateway_status={gateway_status}",
-        f"source_blob={receipt['source_blob']}",
         f"protected_copy_verified={str(receipt.get('protected_copy_verified') is True).lower()}",
         f"installed_artifacts_verified={str(receipt.get('installed_artifacts_verified') is True).lower()}",
         f"activation_executed={str(receipt.get('activation_executed') is True).lower()}",
@@ -17786,6 +17829,8 @@ def skeleton_control_mcp_hetzner_activate_v1(body: str) -> str:
         "action=typed_gateway_dispatch",
         "generic_check_project_checkout=false",
     ]
+    if isinstance(receipt.get("source_blob"), str):
+        public_lines.insert(4, f"source_blob={receipt['source_blob']}")
     if isinstance(receipt.get("installer_sha256"), str):
         public_lines.insert(5, f"installer_sha256={receipt['installer_sha256']}")
     success = gateway_status == "DONE" and receipt.get("installed_artifacts_verified") is True
