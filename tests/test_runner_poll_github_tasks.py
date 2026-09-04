@@ -22024,6 +22024,54 @@ def _skeleton_control_mcp_hetzner_body(
     )
 
 
+def _patch_skeleton_control_mcp_checkout(monkeypatch) -> None:
+    from types import SimpleNamespace
+    from core import runner_controller_privileged_gateway as gateway
+
+    registered = SimpleNamespace(
+        checkout_path=gateway.CANONICAL_CHECKOUT_PATH,
+        status_lines=[],
+    )
+    monkeypatch.setattr(
+        runner, "_registered_skeleton_checkout", lambda task_id: (registered, None)
+    )
+    monkeypatch.setattr(runner, "_verify_skeleton_checkout_present", lambda *args: None)
+    monkeypatch.setattr(runner, "_read_skeleton_origin", lambda *args: None)
+    monkeypatch.setattr(runner, "_read_skeleton_current_branch", lambda *args: None)
+    monkeypatch.setattr(runner, "_read_skeleton_clean_state", lambda *args: None)
+    monkeypatch.setattr(runner, "_fetch_skeleton_origin_main", lambda *args: None)
+    monkeypatch.setattr(runner, "_read_skeleton_sha", lambda *args: (HEAD_SHA, None))
+    monkeypatch.setattr(
+        runner,
+        "_run_freshness_command",
+        lambda *args: (f"{HEAD_SHA}\trefs/heads/main\n", None),
+    )
+
+
+def _skeleton_control_mcp_gateway_receipt(**updates: object) -> dict[str, object]:
+    from core import runner_controller_privileged_gateway as gateway
+
+    drop = updates.pop("__drop__", ())
+    receipt: dict[str, object] = {
+        "schema": gateway.RECEIPT_SCHEMA_ID,
+        "status": "NEEDS_OPERATOR",
+        "reason": "ACTION_NOT_REGISTERED",
+        "action_id": gateway.SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_TASK_ID,
+        "repository": runner.REPO,
+        "target": "runner-controller",
+        "request_hash": "d" * 64,
+        "private_evidence_exposed": False,
+        "stderr_exposed": False,
+        "env_exposed": False,
+        "private_paths_exposed": False,
+        "external_side_effects_executed": False,
+    }
+    receipt.update(updates)
+    for key in (drop if isinstance(drop, tuple) else ()):
+        receipt.pop(key, None)
+    return receipt
+
+
 def test_dispatch_runtime_maintenance_skeleton_control_mcp_uses_fixed_typed_gateway(
     monkeypatch,
 ):
@@ -22137,6 +22185,118 @@ def test_skeleton_control_mcp_builds_exact_typed_gateway_request(monkeypatch):
     assert "activation_executed=false" in report
     assert "private_evidence_exposed=false" in report
     assert "action=typed_gateway_dispatch" in report
+
+
+@pytest.mark.parametrize(
+    "reason",
+    (
+        "ACTION_NOT_REGISTERED",
+        "REQUEST_REPLAY",
+        "IDEMPOTENCY_KEY_REPLAY",
+        "TRUSTED_SOURCE_ANCESTOR_MISSING",
+    ),
+)
+def test_skeleton_control_mcp_pre_executor_needs_operator_surfaces_bounded_reason(
+    monkeypatch,
+    reason,
+):
+    from core import runner_controller_privileged_gateway as gateway
+
+    _patch_skeleton_control_mcp_checkout(monkeypatch)
+
+    class FakeTransport:
+        def submit(self, request):
+            return 0, json.dumps(
+                _skeleton_control_mcp_gateway_receipt(reason=reason)
+            ).encode("utf-8")
+
+    monkeypatch.setattr(gateway, "LocalSudoGatewayTransport", FakeTransport)
+
+    report = runner.skeleton_control_mcp_hetzner_activate_v1(
+        _skeleton_control_mcp_hetzner_body()
+    )
+
+    assert runner.maintenance_report_status(report) == "NEEDS_OPERATOR"
+    assert "gateway_status=NEEDS_OPERATOR" in report
+    assert f"reason={reason}" in report
+    assert "reason=privileged_gateway_receipt_invalid" not in report
+    assert "activation_executed=false" in report
+    assert "private_evidence_exposed=false" in report
+    assert "stderr" not in report.lower()
+    assert "env_" not in report.lower()
+    assert "private_path" not in report.lower()
+
+
+@pytest.mark.parametrize(
+    "updates",
+    (
+        {"schema": "wrong.schema"},
+        {"action_id": "wrong_action"},
+        {"repository": "alanua/NotSkeleton"},
+        {"target": "home-edge-01"},
+        {"reason": "lowercase_reason"},
+        {"reason": "A" * 81},
+        {"private_evidence_exposed": True},
+        {"stderr_exposed": True},
+        {"env_exposed": True},
+        {"private_paths_exposed": True},
+        {"private_evidence_exposed": None},
+        {"stderr_exposed": None},
+        {"env_exposed": None},
+        {"private_paths_exposed": None},
+        {"__drop__": ("private_evidence_exposed",)},
+        {"__drop__": ("stderr_exposed",)},
+        {"__drop__": ("env_exposed",)},
+        {"__drop__": ("private_paths_exposed",)},
+        {"activation_executed": True},
+        {"external_side_effects_executed": True},
+        {"external_side_effects_executed": None},
+        {"external_side_effects_executed": "false"},
+        {"__drop__": ("external_side_effects_executed",)},
+        {"protected_copy_verified": True},
+        {"protected_copy_verified": None},
+        {"installed_artifacts_verified": True},
+        {"installed_artifacts_verified": None},
+        {"reason": "SKELETON_CONTROL_MCP_HETZNER_LAUNCHER_VERIFIED"},
+        {"payload": {"private": "data"}},
+        {"stderr": "private stderr"},
+        {"env": {"SECRET": "value"}},
+        {"private_path": "/private/customer"},
+        {"checkout_path": "/home/agent/agent-dev/repos/Skeleton"},
+        {
+            "status": "DONE",
+            "source_blob": "d94576297ea26fdd78f9ac8fc50d7cdb91bfdc09",
+        },
+        {
+            "status": "DONE",
+            "expected_main_sha": HEAD_SHA,
+            "activation_executed": False,
+        },
+    ),
+)
+def test_skeleton_control_mcp_malformed_gateway_receipts_remain_invalid(
+    monkeypatch,
+    updates,
+):
+    from core import runner_controller_privileged_gateway as gateway
+
+    _patch_skeleton_control_mcp_checkout(monkeypatch)
+
+    class FakeTransport:
+        def submit(self, request):
+            return 0, json.dumps(
+                _skeleton_control_mcp_gateway_receipt(**updates)
+            ).encode("utf-8")
+
+    monkeypatch.setattr(gateway, "LocalSudoGatewayTransport", FakeTransport)
+
+    report = runner.skeleton_control_mcp_hetzner_activate_v1(
+        _skeleton_control_mcp_hetzner_body()
+    )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "reason=privileged_gateway_receipt_invalid" in report
+    assert "lowercase_reason" not in report
 
 
 @pytest.mark.parametrize(
