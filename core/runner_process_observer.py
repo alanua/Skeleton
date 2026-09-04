@@ -8,6 +8,8 @@ from typing import Sequence
 
 BLOCKER_SIGNATURE = "e3d01b54774a3957"
 TARGET_DENIED_PATH = "f" * 40
+MANIFEST_DENIED_PATH = "manifest.json"
+KNOWN_DENIED_PATHS = frozenset({TARGET_DENIED_PATH, MANIFEST_DENIED_PATH})
 TRACE_SYSCALLS = "open,openat,openat2,creat,mkdir,mkdirat,rename,renameat,renameat2,unlink,unlinkat,stat,lstat,newfstatat,access,faccessat,faccessat2,chdir"
 _DENIED_ERRNOS = frozenset({"EACCES", "EPERM"})
 _TRACE_LINE = re.compile(
@@ -91,22 +93,26 @@ def parse_first_denied_filesystem_event(
     *,
     provider_started_at_epoch: float,
     executable: str,
-    expected_path: str = TARGET_DENIED_PATH,
+    expected_path: str | None = None,
     blocker_signature: str = BLOCKER_SIGNATURE,
 ) -> SpawnDiagnosticEvidence | None:
-    """Return only the target EACCES/EPERM event, never an arbitrary denied path.
+    """Return only a bounded known EACCES/EPERM target, never an arbitrary denied path.
 
     Env values, prompt text and arbitrary argv are intentionally never emitted.
-    Unrelated denied events are skipped so they cannot be misclassified as this blocker.
+    With no explicit target, only the fixed public-safe allowlist is eligible.
     """
-    if not public_safe_path(expected_path):
-        return None
+    if expected_path is not None:
+        if expected_path not in KNOWN_DENIED_PATHS or not public_safe_path(expected_path):
+            return None
+        eligible_paths = frozenset({expected_path})
+    else:
+        eligible_paths = KNOWN_DENIED_PATHS
     for line in trace_text.splitlines():
         match = _TRACE_LINE.match(line.strip())
         if match is None or match.group("errno") not in _DENIED_ERRNOS:
             continue
         path = _first_quoted_path(match.group("args"))
-        if path != expected_path:
+        if path not in eligible_paths:
             continue
         offset_ms = max(
             0,
