@@ -12,7 +12,7 @@ Prevent circular recall evaluation and prevent classes with too little evidence 
 - Models/extractors may prepare document queues, hashes, provenance and neutral viewing packets, but they do not create gold labels.
 - **Blind pass is mandatory for recall labeling:** the adjudicator sees the raw OCR/document text and class definition, but not extractor candidates, misses, confidence, regex spans, or model suggestions.
 - Only after the blind labels are frozen may a reconciliation pass reveal extractor output and compare detected vs expected entities.
-- Ambiguous legal/medical cases that require domain expertise remain `ADJUDICATION_UNRESOLVED` until a competent second human reviewer is designated; they do not count as gold in the meantime.
+- Ambiguous legal/medical cases that require domain expertise remain `ADJUDICATION_UNRESOLVED` until a competent second human reviewer is designated; they do not count as gold in the meantime. **Current status: `SECOND_REVIEWER_UNAVAILABLE`** — no qualified second reviewer has been designated yet, so unresolved sensitive cases are excluded from gold rather than default-adjudicated.
 
 ## Initial entity-recall dataset gate
 
@@ -40,13 +40,18 @@ If archive-native material is genuinely insufficient, supplemental real document
 
 ## Anti-anchoring protocol
 
-1. Build a private randomized document packet from source documents, without extractor overlays.
+1. Build a private randomized document packet from **all currently available source documents**, without extractor overlays and without filtering/ranking by extractor detections. Random order is generated from an independent cryptographic seed and source hashes, not filesystem order, document date, prior extractor order, or candidate density.
 2. Human annotates all occurrences of the target class in the raw OCR/document text.
 3. Freeze labels with source hash, spans/text, class, reviewer and timestamp.
 4. Reveal extractor output only in a separate reconciliation step.
 5. Record false negatives and false positives separately.
 6. Promote newly observed real miss formats into negative regression fixtures after adjudication.
+7. Prior human exposure to some documents cannot be erased; this is recorded as residual anchoring risk. Randomization and hiding extractor output reduce sequence/candidate anchoring but do not claim to eliminate memory effects.
 
 ## Immediate risk status
 
 Current extractor observations suggest possible data scarcity for `medical_code` and `name`, but this is only a risk signal, not proof of corpus insufficiency. Their current availability state remains `UNASSESSED` until blind annotation. If blind annotation cannot produce the minimum positive count, those classes move to `INSUFFICIENT_ARCHIVE_NATIVE_DATA` and then either `SUPPLEMENTAL_SOURCE_REQUIRED` or `GATE_INACTIVE_INSUFFICIENT_DATA`; they never silently pass.
+
+## Packet completeness rule
+
+A blind packet is not called corpus-complete unless every eligible production metadata record has an available raw source-text artifact. Missing source text is reported explicitly and excluded from recall claims until recovered or adjudicated as unavailable. Packet construction never substitutes extractor output for missing source text.
