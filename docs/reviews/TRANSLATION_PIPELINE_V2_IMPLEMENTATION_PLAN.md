@@ -1,6 +1,6 @@
-# Translation pipeline v2 — implementation breakdown (REVIEW only)
+# Translation pipeline v2 — canonical implementation sequence
 
-Status: REVIEW. Not CANON. Do not merge or activate runtime behavior from this plan without explicit operator approval.
+Status: CANON architecture and implementation order, explicitly approved by Oleksii on 2026-09-04. Runtime activation remains separately gated by evaluation and operator approval.
 
 Parent review: #3719.
 
@@ -61,6 +61,6 @@ Parent review: #3719.
 - fail-closed tests for unavailable verifier, exhausted budget, model/prompt version drift;
 - regression fixtures for the production failures that triggered #3719.
 
-## Runtime safety during REVIEW
+## Runtime safety during implementation
 
-The current v1.5 emergency publication gate stays active unchanged. No v2 component becomes authoritative and no blocked translation is re-enabled until the v2 acceptance gate has measured domain-specific precision and Oleksii explicitly approves CANON/runtime promotion.
+The current v1.5 emergency publication gate stays active unchanged. No v2 component becomes authoritative and no blocked translation is re-enabled until the v2 acceptance gate has measured domain-specific precision and Oleksii explicitly approves production runtime promotion.
