@@ -141,3 +141,14 @@ Docs: canonical architecture doc (replacing the inline logic in `gateway.py`), s
 **Status note:** the v1.5 emergency gate (0.92 threshold + dual-MT consensus) stays active as a protective measure — it is correctly refusing to publish bad translations right now — but is not to be extended or tuned further. It is fully retired once v2's calibrated document-level gate is in place, not incrementally patched toward it.
 
 *Prepared in response to Skeleton issue #3719. Recommends replacing v1.5's dual-MT-agreement-as-trust-signal with entity locking + independent verification + calibrated, document-level decision gates; keeps fail-closed publising and immutable OCR source from the current design. Amended per review discussion: back-translation is a contributing signal only, and acceptance is measured at the document level, not the segment level.*
+
+
+## Canon amendment — entity recall, statistical acceptance, labeling resources
+
+Approved 2026-09-04 after review of three additional failure risks:
+
+- **ENTITY_RECALL_GATE:** entity extraction recall is measured per critical class before locking is trusted; missed entities are a first-class failure mode.
+- **Per-domain statistical acceptance:** the 50–100 sample is engineering-only. Legal, medical, financial and government each require an independent production holdout; roughly 299–300 zero-error examples per domain is the planning target for an approximately 1% one-sided 95% upper error bound. Acceptance uses the actual confidence bound and whole-document failures, not a pooled point estimate.
+- **GOLD_LABELING_PLAN:** human-adjudicated labeling capacity, timing and disagreement rules are an explicit checkpoint. Model-only labels do not count as gold.
+
+Canonical sequence is now: OCR gate → entity extraction → ENTITY_RECALL_GATE → entity locking → gateway v2 shadow → deterministic audits/terminology → LLM judge → auxiliary back-translation → GOLD_LABELING_PLAN → per-domain calibration/holdout → migration queue → separately approved production promotion.

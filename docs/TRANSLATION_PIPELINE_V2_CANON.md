@@ -10,13 +10,23 @@ Skeleton will replace the v1.5 document-translation trust logic as a whole with 
 ## Canonical implementation order
 
 1. `skeleton.translation.ocr_gate`
-2. `skeleton.translation.entity_ledger` and entity locking
-3. `skeleton.translation.gateway.v2` and explicit state machine, initially shadow-only
-4. `skeleton.translation.verifier.terminology` plus deterministic entity audit
-5. `skeleton.translation.verifier.llm_judge` with whole-document context
-6. `skeleton.translation.verifier.backtranslation` as auxiliary evidence only
-7. `skeleton.translation.calibration` with versioned labeled eval sets and whole-document acceptance
-8. `skeleton.translation.migration_queue` for the blocked historical corpus after acceptance gates pass
+2. `skeleton.translation.entity_ledger` extraction, then mandatory `ENTITY_RECALL_GATE` measured separately for amounts, dates, case/reference numbers, IBAN/account identifiers, medical codes, names and addresses; only after that gate passes may entity locking be considered production-ready
+3. `skeleton.translation.entity_ledger` entity locking and exact reinsertion
+4. `skeleton.translation.gateway.v2` and explicit state machine, initially shadow-only
+5. `skeleton.translation.verifier.terminology` plus deterministic entity audit
+6. `skeleton.translation.verifier.llm_judge` with whole-document context
+7. `skeleton.translation.verifier.backtranslation` as auxiliary evidence only
+8. `GOLD_LABELING_PLAN` resourcing checkpoint per domain before production holdout construction
+9. `skeleton.translation.calibration`: dev/engineering set first, then independent production holdout per domain; acceptance uses whole-document outcomes and a confidence bound on error rate, not a pooled point estimate
+10. `skeleton.translation.migration_queue` for the blocked historical corpus after the relevant domain acceptance gates pass
+
+## Statistical acceptance amendment
+
+The engineering/dev set is for debugging only and cannot justify production trust. Legal, medical, financial and government domains each require their own independent human-adjudicated production holdout. As a planning target, approximately 299–300 independent zero-error examples per domain are needed to bound the one-sided 95% upper error rate to about 1%; the exact acceptance calculation must be reported from the actual sample size and observed errors. A model-generated label is never gold until a human reviewer adjudicates it. Production acceptance is whole-document: one semantic or protected-entity error fails that document.
+
+## Entity extraction acceptance amendment
+
+Entity locking is not trusted merely because exact reinsertion works for detected entities. Extraction recall is a separate first-class safety property. Missed critical entities are tracked as their own failure mode, and recall must be measured per critical entity class before locking can be promoted beyond shadow/test use.
 
 ## Runtime boundary
 
