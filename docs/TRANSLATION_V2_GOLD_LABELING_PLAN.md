@@ -55,3 +55,7 @@ Current extractor observations suggest possible data scarcity for `medical_code`
 ## Packet completeness rule
 
 A blind packet is not called corpus-complete unless every eligible production metadata record has an available raw source-text artifact. Missing source text is reported explicitly and excluded from recall claims until recovered or adjudicated as unavailable. Packet construction never substitutes extractor output for missing source text.
+
+## Recovered-source OCR quality rule
+
+When source text is reconstructed from a PDF because the canonical text artifact is missing, the reconstructed text must pass through `skeleton.translation.ocr_gate` before packet merge. `OCR_CORRUPT` recovered sources are blocked from the gold-label packet. `OCR_UNCERTAIN` recovered sources may be included only with an explicit source-quality flag and must remain distinguishable from clean/previously canonical source evidence. The current 22 recovered records are all `OCR_UNCERTAIN` solely because token-confidence metadata is unavailable; 20 came from an existing PDF text layer and 2 required OCR fallback. This status is preserved rather than upgraded by assumption.
