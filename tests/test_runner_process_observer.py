@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from core.runner_process_observer import (
     BLOCKER_SIGNATURE,
+    MANIFEST_DENIED_PATH,
     TARGET_DENIED_PATH,
     build_spawn_trace_command,
     parse_first_denied_filesystem_event,
@@ -45,6 +46,22 @@ def test_parse_target_denied_event_emits_minimal_public_metadata() -> None:
         "executable",
         "phase",
     }
+
+
+def test_parse_manifest_denied_event_emits_only_bounded_public_target() -> None:
+    trace = (
+        f'4242 1756544400.125000 openat(AT_FDCWD, "{MANIFEST_DENIED_PATH}", O_RDONLY) = -1 EACCES (Permission denied)\n'
+    )
+
+    evidence = parse_first_denied_filesystem_event(
+        trace,
+        provider_started_at_epoch=1756544400.100,
+        executable="/usr/local/bin/codex",
+    )
+
+    assert evidence is not None
+    assert evidence.path == MANIFEST_DENIED_PATH
+    assert evidence.blocker_signature == BLOCKER_SIGNATURE
 
 
 def test_parse_ignores_non_permission_failures() -> None:
@@ -92,6 +109,22 @@ def test_unsafe_expected_path_fails_closed_without_leaking_value() -> None:
             provider_started_at_epoch=1756544400.100,
             executable="/usr/local/bin/codex",
             expected_path=unsafe_path,
+        )
+        is None
+    )
+
+
+def test_arbitrary_public_safe_expected_path_is_not_eligible() -> None:
+    arbitrary = "other.json"
+    trace = (
+        f'4242 1756544400.125000 openat(AT_FDCWD, "{arbitrary}", O_RDONLY) = -1 EACCES (Permission denied)\n'
+    )
+    assert (
+        parse_first_denied_filesystem_event(
+            trace,
+            provider_started_at_epoch=1756544400.100,
+            executable="/usr/local/bin/codex",
+            expected_path=arbitrary,
         )
         is None
     )
