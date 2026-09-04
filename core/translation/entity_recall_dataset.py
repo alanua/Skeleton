@@ -34,6 +34,7 @@ class EntityRecallFixture:
     adjudication: AdjudicationStatus
     positive: bool = True
     archive_derived: bool = True
+    source_quality_requires_review: bool = False
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,9 @@ class GoldSetReadiness:
     ready: bool
     minimum_positive_per_class: int
     human_positive_counts: dict[EntityClass, int]
+    quality_review_positive_counts: dict[EntityClass, int]
+    clean_or_canonical_positive_counts: dict[EntityClass, int]
+    warnings: tuple[str, ...]
     failures: tuple[str, ...]
 
 
@@ -58,7 +62,9 @@ def validate_gold_set(
         raise ValueError("minimum_positive_per_class must be >= 1")
 
     counts: Counter[EntityClass] = Counter()
+    quality_review_counts: Counter[EntityClass] = Counter()
     failures: list[str] = []
+    warnings: list[str] = []
     for item in fixtures:
         if not item.fixture_id or not item.source_sha256 or not item.expected_text:
             failures.append("fixture_missing_required_provenance")
@@ -67,17 +73,27 @@ def validate_gold_set(
             failures.append(f"non_archive_fixture:{item.fixture_id}")
         if item.positive and item.adjudication is AdjudicationStatus.HUMAN_ADJUDICATED:
             counts[item.entity_class] += 1
+            if item.source_quality_requires_review:
+                quality_review_counts[item.entity_class] += 1
 
     for entity_class in CRITICAL_ENTITY_CLASSES:
         n = counts[entity_class]
+        uncertain_n = quality_review_counts[entity_class]
         if n < minimum_positive_per_class:
             failures.append(
                 f"insufficient_human_positive_examples:{entity_class}:{n}/{minimum_positive_per_class}"
+            )
+        if n >= minimum_positive_per_class and uncertain_n * 2 > n:
+            warnings.append(
+                f"quality_review_majority:{entity_class}:{uncertain_n}/{n}"
             )
 
     return GoldSetReadiness(
         ready=not failures,
         minimum_positive_per_class=minimum_positive_per_class,
         human_positive_counts={entity_class: counts[entity_class] for entity_class in CRITICAL_ENTITY_CLASSES},
+        quality_review_positive_counts={entity_class: quality_review_counts[entity_class] for entity_class in CRITICAL_ENTITY_CLASSES},
+        clean_or_canonical_positive_counts={entity_class: counts[entity_class]-quality_review_counts[entity_class] for entity_class in CRITICAL_ENTITY_CLASSES},
+        warnings=tuple(warnings),
         failures=tuple(failures),
     )

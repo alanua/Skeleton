@@ -9,7 +9,7 @@ from core.translation.entity_recall_dataset import (
 )
 
 
-def _fixture(cls: EntityClass, index: int, *, adjudication=AdjudicationStatus.HUMAN_ADJUDICATED, positive=True, archive_derived=True):
+def _fixture(cls: EntityClass, index: int, *, adjudication=AdjudicationStatus.HUMAN_ADJUDICATED, positive=True, archive_derived=True, source_quality_requires_review=False):
     return EntityRecallFixture(
         fixture_id=f"{cls}-{index}",
         entity_class=cls,
@@ -18,6 +18,7 @@ def _fixture(cls: EntityClass, index: int, *, adjudication=AdjudicationStatus.HU
         adjudication=adjudication,
         positive=positive,
         archive_derived=archive_derived,
+        source_quality_requires_review=source_quality_requires_review,
     )
 
 
@@ -77,3 +78,22 @@ def test_non_archive_fixture_fails_readiness_even_when_counts_are_full() -> None
     result=validate_gold_set(fixtures)
     assert result.ready is False
     assert "non_archive_fixture:date-999" in result.failures
+
+
+def test_quality_review_examples_are_reported_separately() -> None:
+    fixtures=[]
+    for cls in CRITICAL_ENTITY_CLASSES:
+        fixtures.extend(_fixture(cls,i,source_quality_requires_review=(i<3)) for i in range(12))
+    result=validate_gold_set(fixtures)
+    assert result.ready is True
+    assert all(result.quality_review_positive_counts[c] == 3 for c in CRITICAL_ENTITY_CLASSES)
+    assert all(result.clean_or_canonical_positive_counts[c] == 9 for c in CRITICAL_ENTITY_CLASSES)
+
+
+def test_quality_review_majority_is_explicit_warning_not_silent_mix() -> None:
+    fixtures=[]
+    for cls in CRITICAL_ENTITY_CLASSES:
+        fixtures.extend(_fixture(cls,i,source_quality_requires_review=(i<7)) for i in range(12))
+    result=validate_gold_set(fixtures)
+    assert result.ready is True
+    assert any(x.startswith('quality_review_majority:medical_code:7/12') for x in result.warnings)

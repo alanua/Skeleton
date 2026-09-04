@@ -59,3 +59,11 @@ A blind packet is not called corpus-complete unless every eligible production me
 ## Recovered-source OCR quality rule
 
 When source text is reconstructed from a PDF because the canonical text artifact is missing, the reconstructed text must pass through `skeleton.translation.ocr_gate` before packet merge. `OCR_CORRUPT` recovered sources are blocked from the gold-label packet. `OCR_UNCERTAIN` recovered sources may be included only with an explicit source-quality flag and must remain distinguishable from clean/previously canonical source evidence. The current 22 recovered records are all `OCR_UNCERTAIN` solely because token-confidence metadata is unavailable; 20 came from an existing PDF text layer and 2 required OCR fallback. This status is preserved rather than upgraded by assumption.
+
+## Gold-set source-quality composition
+
+`source_quality_requires_review=true` examples remain archive-native, but they are never silently mixed into the initial per-class quota. Reports must show, for every critical class, human-adjudicated positives split into (a) clean/previously canonical source evidence and (b) recovered `OCR_UNCERTAIN` source evidence. If more than half of a class's qualifying positives come from source-quality-review documents, the class receives an explicit `QUALITY_REVIEW_MAJORITY` warning and cannot be described simply as a clean archive-native baseline. This warning does not convert insufficient data into a pass and does not override later production calibration requirements.
+
+## Annotation resource accounting
+
+Every blind annotation session records reviewer, document id, start/end timestamps, elapsed active seconds, classes reviewed, source-quality-review flag, completion state and unresolved-case count. Resource reporting is aggregated per document and per class. This is used to compare actual labeling effort with the plan and to detect unsustainable reviewer load; it is not a quality score and never changes gold acceptance by itself. Pauses or abandoned sessions must not be silently counted as active review time.
