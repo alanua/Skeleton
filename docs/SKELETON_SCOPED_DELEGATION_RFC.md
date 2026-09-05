@@ -4,7 +4,7 @@ Status: CANON
 Owner: Skeleton
 Human authority: operator
 Canon approved by operator: 2026-09-05
-Canon source commit: pending this promotion commit
+Canon promotion commit: 07ba799236b11f7e2180eda10f70fdef11bad80a
 Scope: Skeleton execution authorization, integrity, audit, risk, recovery, and migration
 
 ## 1. Problem statement
