@@ -534,6 +534,10 @@ PR_BRANCH_VALIDATION_PROFILES = {
         ),
     ),
 }
+VALIDATE_PR_BRANCH_ROUTE_SAFE_EXCEPTIONS = (
+    OSError,
+    subprocess.SubprocessError,
+)
 VALIDATION_FAILED_OUTPUT_LIMIT = 4000
 VALIDATION_FAILED_OUTPUT_TRUNCATED_MARKER = (
     "[Runner validation output truncated to 4000 characters.]"
@@ -10950,9 +10954,13 @@ def validate_pr_branch(body: str) -> str:
     for index, command in enumerate(
         _validation_profile_commands(request.profile, base_sha), 1
     ):
-        code, output = _run_validation_profile_command(
-            list(command), cwd=validation_path
-        )
+        try:
+            code, output = _run_validation_profile_command(
+                list(command), cwd=validation_path
+            )
+        except (OSError, subprocess.SubprocessError):
+            code = 127
+            output = "FileNotFoundError: validation command unavailable"
         status_lines.extend(
             _validation_command_receipt_lines(index, command, code, output)
         )
@@ -17899,7 +17907,18 @@ def dispatch_runtime_maintenance_task(
         if task_id == ENSURE_PROJECT_CHECKOUT:
             return ensure_project_checkout(body)
         if task_id == VALIDATE_PR_BRANCH:
-            return validate_pr_branch(body)
+            try:
+                return validate_pr_branch(body)
+            except VALIDATE_PR_BRANCH_ROUTE_SAFE_EXCEPTIONS:
+                return _maintenance_report(
+                    "BLOCKED",
+                    task_id,
+                    [
+                        "step=validate_pr_branch_route status=failed",
+                        "reason=validate_pr_branch_route_exception",
+                    ],
+                    "not_met",
+                )
         if task_id == PREFLIGHT_PR_REFRESH:
             return preflight_pr_refresh(body)
         if task_id == HERMES_WORKER_PREFLIGHT:
