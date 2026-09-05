@@ -10509,6 +10509,18 @@ def _validation_command_receipt_lines(
     return lines
 
 
+def _validation_command_exception_token(error: BaseException) -> str:
+    if isinstance(error, FileNotFoundError):
+        return "command_unavailable"
+    if isinstance(error, PermissionError):
+        return "permission_denied"
+    if isinstance(error, subprocess.TimeoutExpired):
+        return "timeout"
+    if isinstance(error, subprocess.SubprocessError):
+        return "subprocess_error"
+    return "os_error"
+
+
 def _validation_command_failure_lines(
     index: int, command: tuple[str, ...], exit_code: int, output: str
 ) -> list[str]:
@@ -10913,9 +10925,9 @@ def validate_pr_branch(body: str) -> str:
             code, output = _run_validation_profile_command(
                 list(command), cwd=validation_path
             )
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, subprocess.SubprocessError) as error:
             code = 127
-            output = "FileNotFoundError: validation command unavailable"
+            output = _validation_command_exception_token(error)
         status_lines.extend(
             _validation_command_receipt_lines(index, command, code, output)
         )

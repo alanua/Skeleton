@@ -18934,8 +18934,18 @@ def test_validate_pr_branch_runner_exact_base_profile_runs_commands_in_order(
     assert f"validation_command_text=git_diff_--check_{'b' * 40}.dot.dot.HEAD" in report
 
 
-def test_validate_pr_branch_runner_exact_base_route_reports_command_exception_evidence(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("exception", "token"),
+    (
+        (FileNotFoundError("raw executable detail /home/agent/private/bin"), "command_unavailable"),
+        (PermissionError("raw permission detail /home/agent/private.env"), "permission_denied"),
+        (runner.subprocess.TimeoutExpired(cmd=["/home/agent/private/bin"], timeout=1), "timeout"),
+        (runner.subprocess.SubprocessError("raw subprocess detail token=secret"), "subprocess_error"),
+        (OSError("raw os detail /home/agent/private.sock"), "os_error"),
+    ),
+)
+def test_validate_pr_branch_runner_exact_base_route_reports_safe_command_exception_token(
+    tmp_path: Path, exception: Exception, token: str
 ) -> None:
     validation_path = tmp_path / "validate-pr-branch" / "pr-123"
 
@@ -18970,7 +18980,7 @@ def test_validate_pr_branch_runner_exact_base_route_reports_command_exception_ev
     ), mock.patch.object(
         runner,
         "_run_validation_profile_command",
-        side_effect=OSError("private temp root /home/agent/private unavailable"),
+        side_effect=exception,
     ):
         report = runner.dispatch_runtime_maintenance_task(
             runner.VALIDATE_PR_BRANCH,
@@ -18987,9 +18997,40 @@ def test_validate_pr_branch_runner_exact_base_route_reports_command_exception_ev
         in report
     )
     assert "validation_failure_phase=process_start" in report
-    assert "validation_error_summary=FileNotFoundError:_validation_command_unavailable" in report
+    assert f"validation_error_summary={token}" in report
     assert "reason=maintenance_step_raised" not in report
-    assert "private temp root" not in report
+    assert "raw " not in report
+    assert "token=secret" not in report
+    assert "/home/agent/private" not in report
+
+
+@pytest.mark.parametrize(
+    "exception",
+    (
+        FileNotFoundError("raw executable detail /home/agent/private/bin"),
+        PermissionError("raw permission detail /home/agent/private.env"),
+        runner.subprocess.TimeoutExpired(cmd=["/home/agent/private/bin"], timeout=1),
+        runner.subprocess.SubprocessError("raw subprocess detail token=secret"),
+        OSError("raw os detail /home/agent/private.sock"),
+    ),
+)
+def test_validate_pr_branch_route_safe_exceptions_do_not_collapse_to_generic_maintenance(
+    exception: Exception,
+) -> None:
+    with mock.patch.object(runner, "validate_pr_branch", side_effect=exception):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.VALIDATE_PR_BRANCH,
+            str(runner.ROOT),
+            _validate_pr_issue_body(profile="runner_exact_base"),
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert f"maintenance_task_id={runner.VALIDATE_PR_BRANCH}" in report
+    assert "step=validate_pr_branch_route status=failed" in report
+    assert "reason=validate_pr_branch_route_exception" in report
+    assert "reason=maintenance_step_raised" not in report
+    assert "raw " not in report
+    assert "token=secret" not in report
     assert "/home/agent/private" not in report
 
 
