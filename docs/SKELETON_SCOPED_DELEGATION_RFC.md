@@ -1,8 +1,10 @@
 # RFC: Scoped Delegation and Capability-Based Authorization for Skeleton
 
-Status: REVIEW
+Status: CANON
 Owner: Skeleton
 Human authority: operator
+Canon approved by operator: 2026-09-05
+Canon source commit: pending this promotion commit
 Scope: Skeleton execution authorization, integrity, audit, risk, recovery, and migration
 
 ## 1. Problem statement
