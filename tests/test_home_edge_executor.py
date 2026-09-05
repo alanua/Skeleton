@@ -214,6 +214,18 @@ def test_unsigned_stale_bad_signature_and_replayed_requests_reject_before_launch
     assert launches == 3
 
 
+def test_idempotent_retry_allows_fresh_integrity_envelope(tmp_path: Path) -> None:
+    exec_engine = engine(tmp_path)
+    first = signed_request(idempotency_key="retry-key", nonce="retry-nonce-1")
+    assert exec_engine.execute(first).idempotency == "executed"
+
+    retry = dict(first)
+    retry["timestamp"] = datetime.now(UTC).isoformat()
+    retry["nonce"] = "retry-nonce-2"
+    retry["signature"] = sign_request(HomeEdgeExecRequest.from_mapping({k: v for k, v in retry.items() if k != "signature"}), SECRET)
+    assert exec_engine.execute(retry).idempotency == "replayed"
+
+
 def test_idempotent_replay_requires_same_payload_digest(tmp_path: Path) -> None:
     exec_engine = engine(tmp_path, audit_log=None)
 

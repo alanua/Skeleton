@@ -722,7 +722,17 @@ def _hash_json(value: Mapping[str, Any]) -> str:
 
 
 def _payload_digest(request: HomeEdgeExecRequest) -> str:
-    return _hash_json(request.canonical_for_signature())
+    """Digest the idempotent operation identity, excluding per-attempt integrity fields.
+
+    timestamp, nonce and signature authenticate/replay-protect one transport attempt.
+    They must not make a legitimate retry with the same idempotency key look like a
+    different operation. public is already presentation-only and excluded by
+    canonical_for_signature().
+    """
+    payload = request.canonical_for_signature()
+    payload.pop("timestamp", None)
+    payload.pop("nonce", None)
+    return _hash_json(payload)
 
 
 def _state_section(state: Mapping[str, Any], name: str) -> Mapping[str, Any]:
