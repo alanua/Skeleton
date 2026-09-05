@@ -160,11 +160,15 @@ invoke:operation:de_pc_status_v1@1.0.0#<digest>
 
 ### 7.2 Capability activation
 
-A capability begins in `PENDING`, becomes `ACTIVE` only after human grant, and may later become `REVOKED` or `EXPIRED`.
+A capability begins in `PENDING`, becomes `ACTIVE` only after human grant, and may later become `REVOKED` or `EXPIRED`. `REVOKED` and `EXPIRED` are terminal capability states. Any later grant of the same verb/resource scope MUST use a new `capability_id` and a new human grant; no transition from `REVOKED` or `EXPIRED` back to `ACTIVE` is valid.
 
 ### 7.3 Capability membership replaces repeated approval
 
+Before every authorization, Skeleton MUST verify that the effective live capability set matches `grant_snapshot.capability_set_hash` or a cryptographically/audit-verifiable narrow-only delta chain rooted in that snapshot. A mismatch fails closed.
+
 If an action is fully contained within an `ACTIVE` capability, inside the granted resource scope and budgets, and does not cross a fresh risk boundary, Skeleton SHOULD NOT request another per-call human approval.
+
+A `fresh risk boundary` exists if and only if: (a) the action's risk tier exceeds the tier granted to the capability; (b) applying it would cross a §10 risk-budget threshold, including an applicable cross-session aggregate threshold; or (c) a §11 composition rule requires fresh approval. Implementations MUST NOT invent an implicit approval bypass or escalation criterion outside these versioned policy rules.
 
 ### 7.4 Privileged operation registration is out-of-band
 
@@ -183,6 +187,8 @@ Normative invariant:
 ```text
 operation.registered_at < session.created_at
 ```
+
+For `invoke:operation`, the resource scope MUST identify one exact `(operation_id, operation_version, operation_digest)` triple. Wildcards, ranges, aliases that can retarget, and unpinned versions are invalid. At every invocation, Skeleton MUST re-check the exact triple, its digest, and `operation.registered_at < session.created_at` against the operation actually being invoked.
 
 Any operation version or digest change requires a new human grant.
 
@@ -227,11 +233,12 @@ rollback_tested: true
 rollback_verified: true
 rollback_verified_at: timestamp
 rollback_evidence: receipt_ref
+rollback_verified_environment_digest: sha256
 ```
 
 If `rollback_verified != true`, fail closed and classify the operation into the fresh-approval tier.
 
-Rollback verification MUST test the actual end-to-end restoration path, not merely existence of a rollback command.
+Rollback verification MUST test the actual end-to-end restoration path, not merely existence of a rollback command. The verification MUST be bound to a digest of the relevant dependent environment/schema/state. If the current dependency digest differs, `rollback_verified` is stale and the operation is not automatically eligible until rollback is re-verified.
 
 ## 10. Cumulative risk ledger
 
@@ -259,6 +266,8 @@ Increasing any risk limit requires fresh human approval. Skeleton may automatica
 
 When a cumulative limit is crossed, the session returns `CUMULATIVE_RISK_EXCEEDED` and requires a new human decision.
 
+Skeleton MUST also maintain a system-level cumulative-risk view across concurrently active sessions for policy-declared coupled resource scopes. A versioned dependency/coupling map defines which otherwise non-overlapping scopes can compose into shared risk. Cross-session aggregate limits fail closed independently of each session's remaining budget.
+
 ## 11. Composition-aware checks
 
 The policy engine MUST evaluate capability composition, not only each capability independently.
@@ -284,12 +293,14 @@ acquired_at: timestamp
 expires_at: timestamp
 generation: integer
 status: ACTIVE | RELEASED | PENDING_RECOVERY_DECISION
+COMPOSITION_DENIED
+CROSS_SESSION_RISK_EXCEEDED
 ```
 
 Rules:
 
 - read/read overlap may be allowed;
-- write/read or write/write overlap on the same protected scope is blocked unless a specific reconciliation rule exists;
+- write/read or write/write overlap on the same protected scope is blocked unless a specific reconciliation rule exists; reconciliation rules are policy-versioned, human-reviewed artifacts with exact conflict shapes and resource scopes, and MUST NOT be open-ended bypass grants;
 - `lease.session_id` MUST equal the owning delegation session;
 - `lease.expires_at <= session.expires_at`;
 - lease renewal cannot outlive or independently extend the session;
@@ -315,9 +326,11 @@ If an already-applied mutation cannot be safely rolled back automatically, the a
 During this state:
 
 - the resource remains write-locked;
+- reads MUST carry `state_unverified=true`; automated consumers MUST NOT use such reads as authoritative input for further mutation until recovery resolves;
 - no new session may claim the same mutable scope;
 - recovery policy may propose options but does not silently choose a higher-risk action;
-- the operator resolves the state explicitly unless a pre-approved recovery operation is already applicable.
+- the operator resolves the state explicitly unless a pre-approved recovery operation is already applicable;
+- any pre-approved recovery operation remains subject to the same §7.4 registration-ordering, exact version/digest pinning, per-invocation validation, §9 rollback-verification, capability, lease, and risk-budget invariants as an ordinary R2 operation; recovery is not an exemption path.
 
 This prevents a revoked-but-still-mutated resource from becoming apparently unowned and immediately writable by another session.
 
@@ -343,6 +356,8 @@ Every emergency override MUST be:
 - separately audited;
 - bound to the security policy version or advisory that triggered it;
 - distinguishable from routine policy updates.
+
+Emergency override scope MUST explicitly enumerate the affected sessions/capabilities/resource scopes and tie each class of impact to the vulnerability exposure. Unscoped `suspend everything` behavior is invalid by default. A review-approved blast-radius threshold MUST require stronger operator authorization, including a second independent human sign-off where the deployment has such an authority available.
 
 Routine policy updates do not mutate active grant snapshots.
 
@@ -381,6 +396,8 @@ INSUFFICIENT_EVIDENCE
 SESSION_EXPIRED
 SESSION_REVOKED
 PENDING_RECOVERY_DECISION
+COMPOSITION_DENIED
+CROSS_SESSION_RISK_EXCEEDED
 ```
 
 Each result should also carry a specific internal reason code and audit reference.
@@ -408,7 +425,11 @@ FAILED
 VERIFICATION_FAILED
 ROLLED_BACK
 PENDING_RECOVERY_DECISION
+COMPOSITION_DENIED
+CROSS_SESSION_RISK_EXCEEDED
 ```
+
+Session suspension or revocation MUST attempt to halt every in-flight action that has not yet reached `APPLIED`. An action that reaches `APPLIED` after its parent session's suspension/revocation timestamp MUST be flagged for mandatory operator review and recovery evaluation; starting under a formerly valid grant does not retroactively authorize post-revocation application.
 
 Exit code zero, HTTP 2xx, service active, or command accepted is not sufficient proof of `PHYSICALLY_VERIFIED`.
 
@@ -440,7 +461,7 @@ For each historical receipt, the replay engine MUST verify that every field requ
 
 `INSUFFICIENT_EVIDENCE`
 
-The replay engine MUST NOT silently substitute old classifications, infer missing resource scope from a prior policy label, or treat absent data as zero risk.
+The replay engine MUST NOT silently substitute old classifications, infer missing resource scope from a prior policy label, or treat absent data as zero risk. Evidence sufficiency includes correctness/provenance checks, not field presence alone. Receipts produced during a known control-path defect window MUST NOT count toward promotion coverage unless independently cross-verified. Each replay campaign MUST predeclare a minimum manual/independent cross-check rate for otherwise sufficient receipts.
 
 ### 19.1 Coverage threshold
 
@@ -545,6 +566,17 @@ No risk tier inherits promotion merely because a lower tier passed.
 
 At minimum:
 
+- `REVOKED` and `EXPIRED` capabilities cannot transition back to `ACTIVE`;
+- live capability mutation that breaks the grant-snapshot hash/delta chain fails closed;
+- `invoke:operation` rejects wildcard/range scopes and rechecks exact id/version/digest/registration time on every invocation;
+- stale rollback environment digest invalidates automatic rollback eligibility;
+- coupled non-overlapping sessions can trigger cross-session risk denial;
+- recovery operations cannot bypass ordinary R2 invariants;
+- reads during pending recovery are marked unverified and cannot drive automated mutation;
+- reconciliation rules cannot exceed their reviewed exact conflict scope;
+- emergency override rejects unscoped blast radius and enforces configured stronger-authorization threshold;
+- suspension/revocation races with `SENT`/`ACCEPTED` actions produce halt attempts and mandatory review for post-revocation application;
+- known-bad historical receipt windows do not count as replay evidence without independent verification;
 - agent cannot widen a granted resource scope;
 - expired session cannot retain or renew a lease;
 - revoked capability cannot enqueue new work;
@@ -578,6 +610,13 @@ At minimum:
 11. Integrity, authorization, execution, and verification are separately observable.
 12. Missing evidence fails closed.
 13. Migration proceeds by risk tier with explicit promotion decisions.
+14. `REVOKED` and `EXPIRED` capabilities are terminal; re-grant creates a new capability identity.
+15. Every authorization is bound back to the immutable grant snapshot or a verifiable narrow-only delta chain.
+16. Operation invocation is exact-triple pinned and revalidated at every call.
+17. Rollback assurance expires when its verified dependency/environment digest changes.
+18. Risk composition is enforced both within and across policy-coupled concurrent sessions.
+19. Recovery paths do not bypass ordinary capability, operation, rollback, lease, or risk invariants.
+20. Session suspension/revocation has explicit semantics for in-flight actions.
 
 ## 25. Open implementation questions
 
