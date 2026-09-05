@@ -268,6 +268,8 @@ When a cumulative limit is crossed, the session returns `CUMULATIVE_RISK_EXCEEDE
 
 Skeleton MUST also maintain a system-level cumulative-risk view across concurrently active sessions for policy-declared coupled resource scopes. A versioned dependency/coupling map defines which otherwise non-overlapping scopes can compose into shared risk. Cross-session aggregate limits fail closed independently of each session's remaining budget.
 
+The dependency/coupling map is itself a policy-versioned, human-reviewed governance artifact subject to the same change-control discipline as reconciliation rules and privileged operation registration. A delegation session MUST NOT create, modify, narrow, or replace this map.
+
 ## 11. Composition-aware checks
 
 The policy engine MUST evaluate capability composition, not only each capability independently.
@@ -293,8 +295,6 @@ acquired_at: timestamp
 expires_at: timestamp
 generation: integer
 status: ACTIVE | RELEASED | PENDING_RECOVERY_DECISION
-COMPOSITION_DENIED
-CROSS_SESSION_RISK_EXCEEDED
 ```
 
 Rules:
@@ -425,8 +425,6 @@ FAILED
 VERIFICATION_FAILED
 ROLLED_BACK
 PENDING_RECOVERY_DECISION
-COMPOSITION_DENIED
-CROSS_SESSION_RISK_EXCEEDED
 ```
 
 Session suspension or revocation MUST attempt to halt every in-flight action that has not yet reached `APPLIED`. An action that reaches `APPLIED` after its parent session's suspension/revocation timestamp MUST be flagged for mandatory operator review and recovery evaluation; starting under a formerly valid grant does not retroactively authorize post-revocation application.
