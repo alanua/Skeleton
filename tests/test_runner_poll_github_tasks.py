@@ -18934,6 +18934,92 @@ def test_validate_pr_branch_runner_exact_base_profile_runs_commands_in_order(
     assert f"validation_command_text=git_diff_--check_{'b' * 40}.dot.dot.HEAD" in report
 
 
+@pytest.mark.parametrize(
+    ("exception", "token"),
+    (
+        (FileNotFoundError("raw missing binary token=secret"), "command_unavailable"),
+        (PermissionError("raw permission detail /home/agent/private.sock"), "permission_denied"),
+        (runner.subprocess.SubprocessError("raw subprocess detail token=secret"), "subprocess_error"),
+        (OSError("raw os detail /home/agent/private.sock"), "os_error"),
+    ),
+)
+def test_validate_pr_branch_runner_exact_base_reports_safe_process_start_exception(
+    tmp_path: Path, exception: Exception, token: str
+) -> None:
+    validation_path = tmp_path / "validate-pr-branch" / "pr-123"
+
+    def run_validation_command(
+        command: list[str], cwd: str | Path | None = None
+    ) -> tuple[int, str]:
+        metadata_result = _validation_metadata_command(command, cwd, validation_path)
+        if metadata_result is not None:
+            return metadata_result
+        if command[:3] == ["gh", "pr", "view"]:
+            return 0, json.dumps(_pr_validation_state())
+        if command[:3] == ["git", "fetch", "origin"]:
+            return 0, ""
+        if command[:2] == ["git", "rev-parse"] and cwd == runner.ROOT:
+            return 0, f"{HEAD_SHA}\n"
+        if command[:3] == ["git", "worktree", "add"]:
+            return 0, ""
+        if command == ["git", "rev-parse", "HEAD"] and cwd == validation_path:
+            return 0, f"{HEAD_SHA}\n"
+        return 2, "unexpected command"
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(tmp_path)}, clear=True
+    ), mock.patch.object(Path, "exists", autospec=True, return_value=False), mock.patch.object(
+        Path, "mkdir", autospec=True
+    ), mock.patch.object(
+        runner,
+        "_validation_git_worktree_check",
+        return_value=(True, ["validation_real_writable_git_worktree=true"], None),
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run_validation_command
+    ), mock.patch.object(
+        runner, "_run_validation_profile_command", side_effect=exception
+    ):
+        report = runner.validate_pr_branch(
+            _validate_pr_issue_body(profile="runner_exact_base")
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert "step=validation_profile_command_1 status=failed exit_code=127" in report
+    assert "validation_failure_phase=process_start" in report
+    assert f"validation_error_summary={token}" in report
+    assert "reason=maintenance_step_raised" not in report
+    assert "raw " not in report
+    assert "token=secret" not in report
+    assert "/home/agent/private" not in report
+
+
+@pytest.mark.parametrize(
+    "exception",
+    (
+        runner.subprocess.SubprocessError("raw subprocess detail token=secret"),
+        OSError("raw os detail /home/agent/private.sock"),
+    ),
+)
+def test_validate_pr_branch_route_safe_exceptions_do_not_use_generic_report(
+    exception: Exception,
+) -> None:
+    with mock.patch.object(runner, "validate_pr_branch", side_effect=exception):
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.VALIDATE_PR_BRANCH,
+            str(runner.ROOT),
+            _validate_pr_issue_body(profile="runner_exact_base"),
+        )
+
+    assert report.startswith("BLOCKED:")
+    assert f"maintenance_task_id={runner.VALIDATE_PR_BRANCH}" in report
+    assert "step=validate_pr_branch_route status=failed" in report
+    assert "reason=validate_pr_branch_route_exception" in report
+    assert "reason=maintenance_step_raised" not in report
+    assert "raw " not in report
+    assert "token=secret" not in report
+    assert "/home/agent/private" not in report
+
+
 def test_validate_pr_branch_bauclock_time_ledger_profile_uses_target_checkout(
     tmp_path: Path,
 ) -> None:
