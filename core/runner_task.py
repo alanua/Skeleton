@@ -69,10 +69,11 @@ _REQUIRED_FIELDS = frozenset(
         "validation_timeout_seconds",
         "expected_output",
         "privacy_boundary",
-        "approval_reference",
         "idempotency_key",
     }
 )
+_OPTIONAL_FIELDS = frozenset({"approval_reference"})
+_ALLOWED_FIELDS = _REQUIRED_FIELDS | _OPTIONAL_FIELDS
 
 _MAX_PAYLOAD_DEPTH = 16
 _MAX_PAYLOAD_ITEMS = 256
@@ -108,7 +109,7 @@ class RunnerTask:
     validation_timeout_seconds: int
     expected_output: tuple[str, ...]
     privacy_boundary: str
-    approval_reference: str
+    approval_reference: str | None
     idempotency_key: str
 
     @classmethod
@@ -125,7 +126,7 @@ class RunnerTask:
             )
 
         keys = frozenset(value)
-        unknown = sorted(keys - _REQUIRED_FIELDS)
+        unknown = sorted(keys - _ALLOWED_FIELDS)
         if unknown:
             raise RunnerTaskValidationError(
                 "UNKNOWN_TASK_FIELD",
@@ -165,8 +166,8 @@ class RunnerTask:
             "privacy_boundary",
             PRIVACY_BOUNDARIES,
         )
-        approval_reference = _safe_token(
-            value["approval_reference"], "approval_reference"
+        approval_reference = _optional_safe_token(
+            value.get("approval_reference"), "approval_reference"
         )
         idempotency_key = _safe_token(value["idempotency_key"], "idempotency_key")
 
@@ -300,6 +301,12 @@ def _safe_token(value: object, field: str) -> str:
             f"{field} must be a bounded token",
         )
     return value
+
+
+def _optional_safe_token(value: object, field: str) -> str | None:
+    if value is None:
+        return None
+    return _safe_token(value, field)
 
 
 def _payload(value: object) -> Mapping[str, Any]:
