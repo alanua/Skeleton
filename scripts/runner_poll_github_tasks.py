@@ -575,21 +575,9 @@ _REGISTERED_OVERLAY_PUBLIC_REST_HEADERS = {
 _CALLBACK_DIGEST_RE = re.compile(r"^[0-9a-f]{12}$")
 _BLOCKED_OUTPUT_MARKERS = (
     "BLOCKED",
-    "Blocked:",
-    "missing capability",
-    "wrong worktree",
-    "not target repo",
-    "writer unavailable",
-    "cancelled",
-    "no build files",
-    "PlatformIO not available",
-    "no firmware",
-    "assigned worktree is not target",
 )
 _BLOCKED_OUTPUT_MARKER_RES = tuple(
     re.compile(r"^\s*BLOCKED\s*:", re.IGNORECASE | re.MULTILINE)
-    if marker == "BLOCKED"
-    else re.compile(rf"(?<!\w){re.escape(marker)}(?!\w)", re.IGNORECASE)
     for marker in _BLOCKED_OUTPUT_MARKERS
 )
 _FINAL_STATUS_LINE_RE = re.compile(
