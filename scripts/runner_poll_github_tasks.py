@@ -18024,6 +18024,15 @@ def _runner_controller_refresh_receipt_valid(
     )
 
 
+def _runner_controller_refresh_gateway_identity(expected_main_sha: str) -> tuple[str, str]:
+    if re.fullmatch(r"[0-9a-f]{40}", expected_main_sha) is None:
+        raise ValueError("runner_controller_refresh_expected_main_sha_invalid")
+    return (
+        f"runner-controller-refresh-trust-anchor-bundle-v1-request-{expected_main_sha}",
+        f"runner-controller-refresh-trust-anchor-bundle-v1-idempotency-{expected_main_sha}",
+    )
+
+
 def runner_controller_refresh_trust_anchor_bundle_v1(body: str) -> str:
     task_id = RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_V1
     parsed, reason = _runner_controller_refresh_input(body)
@@ -18065,9 +18074,12 @@ def runner_controller_refresh_trust_anchor_bundle_v1(body: str) -> str:
         build_gateway_request,
     )
 
+    request_id, idempotency_key = _runner_controller_refresh_gateway_identity(
+        expected_main_sha
+    )
     request = build_gateway_request(
-        request_id="runner-controller-refresh-trust-anchor-bundle-3846",
-        idempotency_key="runner-controller-refresh-trust-anchor-bundle-20260908-v1",
+        request_id=request_id,
+        idempotency_key=idempotency_key,
         expected_main_sha=expected_main_sha,
         registered_clean_main_sha=head_sha,
         github_main_sha=github_sha,
