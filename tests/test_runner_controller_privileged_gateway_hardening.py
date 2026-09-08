@@ -408,9 +408,9 @@ def test_runner_controller_refresh_blocks_argv_path_and_approval_before_runner(t
     with_argv = _request(**base, argv=["/bin/sh", "-c", "id"])
     with_path = _request(**base, path="/tmp/issue-controlled")
     mismatch = _request(
-        **base,
         request_id="req-refresh-mismatch",
         idempotency_key="idem-refresh-mismatch",
+        action_id=gateway.RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID,
         operator_approval="PENDING",
     )
 
