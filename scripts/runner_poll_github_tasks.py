@@ -361,6 +361,9 @@ MAIL_GMAIL_PRIMARY_REGISTERED_ACTIVATION = "mail_gmail_primary_registered_activa
 SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_V1 = (
     "skeleton_control_mcp_hetzner_activate_v1"
 )
+RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_V1 = (
+    "runner_controller_refresh_trust_anchor_bundle_v1"
+)
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
         MAIL_GMAIL_READONLY_CANARY_TASK_ID,
@@ -410,6 +413,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         HOME_EDGE_01_ESP_LAB_STAGE1_SIGNER_INSTALL_V1,
         "runner_controller_repair_codex_state_mount_v1",
         SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_V1,
+        RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_V1,
         BUILD_AND_LOCAL_OTA_OPERATION,
         PREPARE_PRIVATE_STATIC_SITE_HANDOFF,
         DEPLOY_PRIVATE_STATIC_SITE,
@@ -747,6 +751,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "excluded_secret_like_count",
         "external_side_effects_executed",
         "activation_executed",
+        "action_present",
         "dependency_installed_by_operation",
         "device_canary",
         "exact_base_changed_files_count",
@@ -818,6 +823,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "mode",
         "model_credentials_removed_from_smoke",
         "mutation_mode",
+        "mutation_performed",
+        "mutation_started",
         "durable_handoff_status",
         "network_disabled",
         "network_provider_enabled",
@@ -913,6 +920,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "semantic_record_count",
         "ram_bytes",
         "repository",
+        "registry_refresh",
         "reboot_guard_status",
         "reboot_performed",
         "refresh_count",
@@ -17876,6 +17884,254 @@ def skeleton_control_mcp_hetzner_activate_v1(body: str) -> str:
     )
 
 
+_RUNNER_CONTROLLER_REFRESH_PRE_EXECUTOR_REASONS = frozenset(
+    (
+        "ACTION_NOT_REGISTERED",
+        "ACTION_REGISTRY_DRIFT",
+        "CAPABILITY_REGISTRY_GATEWAY_MISSING",
+        "CAPABILITY_REGISTRY_GATEWAY_UNAPPROVED",
+        "CHECKOUT_CONFIG_UNAPPROVED",
+        "REQUEST_SHA_MISMATCH",
+    )
+)
+
+
+def _runner_controller_refresh_input(
+    body: str,
+) -> tuple[dict[str, str] | None, str | None]:
+    from core.runner_controller_privileged_gateway import (
+        RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_OPERATOR_APPROVAL,
+        RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID,
+    )
+
+    metadata = (body or "").strip()
+    parsed_refresh: dict[str, str] = {}
+    if not metadata:
+        return None, "runner_controller_refresh_required_input_missing"
+    for raw_line in metadata.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = re.fullmatch(
+            r"(?P<field>[A-Za-z][A-Za-z0-9 ]*):\s*(?P<value>\S(?:.*\S)?)",
+            line,
+        )
+        if match is None:
+            return None, "runner_controller_refresh_noncanonical_input"
+        field = match.group("field")
+        if field not in _SKELETON_CONTROL_MCP_HETZNER_INPUT_FIELDS:
+            return None, "runner_controller_refresh_unknown_input_field"
+        if field in parsed_refresh:
+            return None, "runner_controller_refresh_duplicate_input_field"
+        parsed_refresh[field] = match.group("value")
+    if set(parsed_refresh) != _SKELETON_CONTROL_MCP_HETZNER_INPUT_FIELDS:
+        return None, "runner_controller_refresh_required_input_missing"
+    if parsed_refresh["Mode"] != RUNTIME_MAINTENANCE_MODE:
+        return None, "runner_controller_refresh_mode_mismatch"
+    if parsed_refresh["Maintenance Task ID"] != RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID:
+        return None, "runner_controller_refresh_task_id_mismatch"
+    if parsed_refresh["Repository"] != REPO:
+        return None, "runner_controller_refresh_repository_mismatch"
+    if re.fullmatch(r"[0-9a-f]{40}", parsed_refresh["Expected Main SHA"]) is None:
+        return None, "runner_controller_refresh_expected_main_sha_invalid"
+    if parsed_refresh["Target"] != "runner-controller":
+        return None, "runner_controller_refresh_target_mismatch"
+    if (
+        parsed_refresh["Operator Approval"]
+        != RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_OPERATOR_APPROVAL
+    ):
+        return None, "runner_controller_refresh_operator_approval_mismatch"
+    return parsed_refresh, None
+
+
+def _runner_controller_refresh_receipt_valid(
+    receipt: Mapping[str, object],
+    *,
+    expected_main_sha: str,
+) -> bool:
+    from core.runner_controller_privileged_gateway import (
+        RECEIPT_SCHEMA_ID,
+        RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID,
+    )
+
+    status = receipt.get("status")
+    reason = receipt.get("reason")
+    if (
+        receipt.get("schema") != RECEIPT_SCHEMA_ID
+        or status not in {"DONE", "NEEDS_OPERATOR"}
+        or not isinstance(reason, str)
+        or re.fullmatch(r"[A-Z0-9_]{1,80}", reason) is None
+        or receipt.get("action_id")
+        != RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID
+        or receipt.get("repository") != REPO
+        or receipt.get("target") != "runner-controller"
+        or receipt.get("expected_main_sha") != expected_main_sha
+        or receipt.get("activation_executed") is not False
+        or receipt.get("action_present") is not True
+    ):
+        return False
+    if receipt.get("registry_refresh") not in {"DONE", "NEEDS_OPERATOR"}:
+        return False
+    for key in (
+        "mutation_started",
+        "mutation_performed",
+        "external_side_effects_executed",
+        "private_evidence_exposed",
+        "stderr_exposed",
+        "env_exposed",
+        "private_paths_exposed",
+    ):
+        if key not in receipt or not isinstance(receipt.get(key), bool):
+            return False
+    for key in (
+        "private_evidence_exposed",
+        "stderr_exposed",
+        "env_exposed",
+        "private_paths_exposed",
+    ):
+        if receipt.get(key) is not False:
+            return False
+    if any(
+        key in receipt
+        for key in (
+            "payload",
+            "raw_payload",
+            "stderr",
+            "stdout",
+            "env",
+            "environment",
+            "path",
+            "paths",
+            "argv",
+            "command",
+            "checkout_path",
+            "private_path",
+            "private_paths",
+        )
+    ):
+        return False
+    if status == "DONE":
+        return (
+            receipt.get("registry_refresh") == "DONE"
+            and receipt.get("mutation_performed") is True
+            and receipt.get("external_side_effects_executed") is True
+        )
+    return (
+        receipt.get("registry_refresh") == "NEEDS_OPERATOR"
+        and receipt.get("mutation_performed") is False
+        and receipt.get("external_side_effects_executed") is False
+        and reason in _RUNNER_CONTROLLER_REFRESH_PRE_EXECUTOR_REASONS
+    )
+
+
+def runner_controller_refresh_trust_anchor_bundle_v1(body: str) -> str:
+    task_id = RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_V1
+    parsed, reason = _runner_controller_refresh_input(body)
+    if reason is not None or parsed is None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [f"reason={reason or 'runner_controller_refresh_invalid_input'}"],
+            "not_met",
+        )
+
+    registered, status_lines, head_sha, github_sha, report = (
+        _skeleton_control_mcp_hetzner_checkout_proof(task_id)
+    )
+    if report is not None or registered is None or head_sha is None or github_sha is None:
+        return report or _maintenance_report(
+            "BLOCKED",
+            task_id,
+            ["reason=registered_skeleton_checkout_unavailable"],
+            "not_met",
+        )
+    expected_main_sha = parsed["Expected Main SHA"].lower()
+    if head_sha != expected_main_sha or github_sha != expected_main_sha:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                *status_lines,
+                f"github_main_sha={github_sha}",
+                "reason=expected_head_sha_mismatch",
+            ],
+            "not_met",
+        )
+
+    from core.runner_controller_privileged_gateway import (
+        LocalSudoGatewayTransport,
+        RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_OPERATOR_APPROVAL,
+        RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID,
+        build_gateway_request,
+    )
+
+    request = build_gateway_request(
+        request_id="runner-controller-refresh-trust-anchor-bundle-3846",
+        idempotency_key="runner-controller-refresh-trust-anchor-bundle-20260908-v1",
+        expected_main_sha=expected_main_sha,
+        registered_clean_main_sha=head_sha,
+        github_main_sha=github_sha,
+        checkout_path=registered.checkout_path,
+        checkout_head_sha=head_sha,
+        checkout_origin_main_sha=head_sha,
+    )
+    request["action_id"] = RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID
+    request["operator_approval"] = (
+        RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_OPERATOR_APPROVAL
+    )
+    code, payload = LocalSudoGatewayTransport().submit(request)
+    if code != 0:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=privileged_gateway_transport_failed"],
+            "not_met",
+        )
+    try:
+        receipt = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=privileged_gateway_receipt_invalid"],
+            "not_met",
+        )
+    if not isinstance(receipt, Mapping) or not _runner_controller_refresh_receipt_valid(
+        receipt,
+        expected_main_sha=expected_main_sha,
+    ):
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, "reason=privileged_gateway_receipt_invalid"],
+            "not_met",
+        )
+
+    gateway_status = str(receipt["status"])
+    public_lines = [
+        *status_lines,
+        f"expected_main_sha={receipt.get('expected_main_sha')}",
+        f"github_main_sha={github_sha}",
+        f"gateway_status={gateway_status}",
+        f"registry_refresh={receipt.get('registry_refresh')}",
+        f"action_present={str(receipt.get('action_present') is True).lower()}",
+        f"mutation_performed={str(receipt.get('mutation_performed') is True).lower()}",
+        f"external_side_effects_executed={str(receipt.get('external_side_effects_executed') is True).lower()}",
+        f"activation_executed={str(receipt.get('activation_executed') is True).lower()}",
+        f"private_evidence_exposed={str(receipt.get('private_evidence_exposed') is True).lower()}",
+        f"reason={receipt['reason']}",
+        "action=typed_gateway_dispatch",
+        "generic_check_project_checkout=false",
+    ]
+    success = gateway_status == "DONE" and receipt.get("registry_refresh") == "DONE"
+    return _maintenance_report(
+        "DONE" if success else "NEEDS_OPERATOR",
+        task_id,
+        public_lines,
+        "met" if success else "not_met",
+    )
+
+
 def runner_controller_repair_codex_state_mount_v1(body: str) -> str:
     task_id = "runner_controller_repair_codex_state_mount_v1"
     registered, report = _registered_skeleton_checkout(task_id)
@@ -17942,6 +18198,8 @@ def dispatch_runtime_maintenance_task(
             return runner_controller_repair_codex_state_mount_v1(body)
         if task_id == SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_V1:
             return skeleton_control_mcp_hetzner_activate_v1(body)
+        if task_id == RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_V1:
+            return runner_controller_refresh_trust_anchor_bundle_v1(body)
         if task_id == MAIL_GMAIL_PRIMARY_REGISTERED_ACTIVATION:
             return mail_gmail_primary_registered_activation_v1(body)
         if task_id == MAIL_GMAIL_READONLY_CANARY_TASK_ID:

@@ -179,6 +179,11 @@ def _action_registry() -> str:
               - path: {gateway.SKELETON_CONTROL_MCP_HETZNER_DESTINATION}
                 content_hash: {gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_SHA256}
                 mode: "0555"
+          - action_id: {gateway.RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID}
+            handler: runner_controller_refresh_trust_anchor_bundle
+            repository: alanua/Skeleton
+            target: runner-controller
+            operator_approval: {gateway.RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_OPERATOR_APPROVAL}
         """
     )
 
@@ -375,6 +380,7 @@ def test_action_registry_preserves_existing_actions_and_adds_exact_hetzner_mcp_a
         maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID,
         gateway.RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID,
         gateway.SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_TASK_ID,
+        gateway.RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID,
     ]
     assert action.source_blob == maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_BLOB
     assert action.installer_argv == (
@@ -403,6 +409,14 @@ def test_action_registry_preserves_existing_actions_and_adds_exact_hetzner_mcp_a
             gateway.SKELETON_CONTROL_MCP_HETZNER_DESTINATION_MODE,
         ),
     )
+    refresh_action = actions[gateway.RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID]
+    assert refresh_action.handler == "runner_controller_refresh_trust_anchor_bundle"
+    assert (
+        refresh_action.operator_approval
+        == gateway.RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_OPERATOR_APPROVAL
+    )
+    assert refresh_action.installer_argv == ()
+    assert refresh_action.post_audit_artifacts == ()
 
 
 def test_codex_state_action_is_accepted_without_root_command_or_private_receipt_fields() -> None:
@@ -481,6 +495,91 @@ def test_hetzner_mcp_action_rejects_argv_and_registry_destination_drift_before_r
         gateway.load_action_registry(path=registry)
     assert exc.value.reason_code == "SKELETON_CONTROL_MCP_HETZNER_ACTION_DRIFT"
     assert calls == 0
+
+
+def test_runner_controller_refresh_action_blocks_argv_and_registry_drift_before_runner(
+    tmp_path: Path,
+) -> None:
+    calls = 0
+
+    def runner(_request: object, _action: object) -> tuple[int, str]:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("runner must not be reached")
+
+    with_argv = _request(
+        action_id=gateway.RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID,
+        operator_approval=gateway.RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_OPERATOR_APPROVAL,
+        argv=["/bin/sh", "-c", "id"],
+    )
+    assert (
+        gateway.execute_gateway_request(with_argv, now=NOW, runner=runner)["reason"]
+        == "REQUEST_FIELD_SET_MISMATCH"
+    )
+
+    tampered = _action_registry().replace(
+        "handler: runner_controller_refresh_trust_anchor_bundle",
+        "handler: arbitrary_privileged_shell",
+    )
+    registry = tmp_path / "RUNNER_PRIVILEGED_ACTIONS.yaml"
+    registry.write_text(tampered, encoding="utf-8")
+    with pytest.raises(gateway.PrivilegedGatewayError) as exc:
+        gateway.load_action_registry(path=registry)
+    assert exc.value.reason_code == "RUNNER_CONTROLLER_REFRESH_ACTION_DRIFT"
+    assert calls == 0
+
+
+def test_runner_controller_refresh_invokes_only_fixed_protected_bootstrap_and_public_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        assert kwargs["stdout"] == subprocess.DEVNULL
+        assert kwargs["stderr"] == subprocess.DEVNULL
+        return subprocess.CompletedProcess(argv, 0)
+
+    action = gateway.GatewayAction(
+        action_id=gateway.RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID,
+        handler="runner_controller_refresh_trust_anchor_bundle",
+        repository="alanua/Skeleton",
+        target="runner-controller",
+        operator_approval=gateway.RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_OPERATOR_APPROVAL,
+        source_path="",
+        source_blob="",
+        source_mode="",
+        trusted_source_ancestor_sha="",
+        destination="",
+        installer_argv=(),
+        post_audit_artifacts=(),
+    )
+    monkeypatch.setattr(gateway.subprocess, "run", fake_run)
+    code, report = gateway._execute_runner_controller_refresh_trust_anchor_bundle(
+        {
+            "expected_main_sha": SHA,
+            "action_id": gateway.RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID,
+        },
+        action,
+    )
+    receipt = gateway._parse_executor_receipt(report)
+    assert code == 0
+    assert receipt is not None
+    assert receipt["status"] == "DONE"
+    assert receipt["registry_refresh"] == "DONE"
+    assert receipt["action_present"] is True
+    assert calls == [
+        [
+            str(gateway.RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_PROTECTED_BOOTSTRAP),
+            "--repo-root",
+            str(gateway.CANONICAL_CHECKOUT_PATH),
+            "--expected-main-sha",
+            SHA,
+        ]
+    ]
+    serialized = json.dumps(receipt, sort_keys=True)
+    assert "/home/agent/" not in serialized
+    assert "SECRET" not in serialized
 
 
 def test_hetzner_mcp_action_installs_only_fixed_launcher_and_public_safe_receipt(

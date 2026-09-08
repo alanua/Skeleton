@@ -308,6 +308,34 @@ def test_exact_registered_actions_are_accepted_and_unknown_action_fails_closed(t
             ),
         ),
     )
+    refresh = _execute(
+        tmp_path,
+        _request(
+            request_id="req-refresh-bundle",
+            idempotency_key="idem-refresh-bundle",
+            action_id=gateway.RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID,
+            operator_approval=(
+                gateway.RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_OPERATOR_APPROVAL
+            ),
+        ),
+        lambda _request: (
+            0,
+            "RESULT: DONE\nReceipt:\n"
+            + json.dumps(
+                {
+                    "status": "DONE",
+                    "reason": "RUNNER_CONTROLLER_TRUST_ANCHOR_BUNDLE_REFRESHED",
+                    "expected_main_sha": SHA,
+                    "registry_refresh": "DONE",
+                    "action_present": True,
+                    "protected_copy_verified": True,
+                    "installed_artifacts_verified": True,
+                    "activation_executed": False,
+                },
+                sort_keys=True,
+            ),
+        ),
+    )
     unknown = _execute(
         tmp_path,
         _request(
@@ -328,6 +356,12 @@ def test_exact_registered_actions_are_accepted_and_unknown_action_fails_closed(t
     assert hetzner["reason"] == "SKELETON_CONTROL_MCP_HETZNER_LAUNCHER_VERIFIED"
     assert hetzner["mutation_started"] is True
     assert hetzner["mutation_performed"] is True
+    assert refresh["status"] == "DONE"
+    assert refresh["reason"] == "RUNNER_CONTROLLER_TRUST_ANCHOR_BUNDLE_REFRESHED"
+    assert refresh["registry_refresh"] == "DONE"
+    assert refresh["action_present"] is True
+    assert refresh["mutation_started"] is True
+    assert refresh["mutation_performed"] is True
     assert unknown["reason"] == "ACTION_NOT_REGISTERED"
     assert calls == ["home_edge_01_esp_lab_stage1_signer_install_v1"]
 
@@ -356,6 +390,33 @@ def test_codex_state_action_blocks_argv_fields_and_approval_mismatch_before_runn
     mismatch_receipt = _execute(tmp_path, mismatch, runner)
     assert argv_receipt["reason"] == "REQUEST_FIELD_SET_MISMATCH"
     assert mismatch_receipt["reason"] == "OPERATOR_APPROVAL_MISMATCH"
+    assert calls == 0
+
+
+def test_runner_controller_refresh_blocks_argv_path_and_approval_before_runner(tmp_path: Path) -> None:
+    calls = 0
+
+    def runner(_request: object) -> tuple[int, str]:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("runner must not execute")
+
+    base = {
+        "action_id": gateway.RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID,
+        "operator_approval": gateway.RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_OPERATOR_APPROVAL,
+    }
+    with_argv = _request(**base, argv=["/bin/sh", "-c", "id"])
+    with_path = _request(**base, path="/tmp/issue-controlled")
+    mismatch = _request(
+        **base,
+        request_id="req-refresh-mismatch",
+        idempotency_key="idem-refresh-mismatch",
+        operator_approval="PENDING",
+    )
+
+    assert _execute(tmp_path, with_argv, runner)["reason"] == "REQUEST_FIELD_SET_MISMATCH"
+    assert _execute(tmp_path, with_path, runner)["reason"] == "REQUEST_FIELD_SET_MISMATCH"
+    assert _execute(tmp_path, mismatch, runner)["reason"] == "OPERATOR_APPROVAL_MISMATCH"
     assert calls == 0
 
 

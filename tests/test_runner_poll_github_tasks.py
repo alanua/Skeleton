@@ -22492,3 +22492,253 @@ def test_skeleton_control_mcp_blocks_noncanonical_checkout_before_gateway(monkey
 
     assert runner.maintenance_report_status(report) == "BLOCKED"
     assert "reason=checkout_path_not_canonical" in report
+
+
+def _runner_controller_refresh_body(
+    *,
+    expected_main_sha: str = HEAD_SHA,
+    repository: str = runner.REPO,
+    target: str = "runner-controller",
+    approval: str = "EXACT_HEAD_RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_V1_APPROVED",
+    extra: str = "",
+) -> str:
+    return "\n".join(
+        line
+        for line in (
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {runner.RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_V1}",
+            f"Repository: {repository}",
+            f"Expected Main SHA: {expected_main_sha}",
+            f"Target: {target}",
+            f"Operator Approval: {approval}",
+            extra,
+        )
+        if line
+    )
+
+
+def _patch_runner_controller_refresh_checkout(monkeypatch) -> None:
+    _patch_skeleton_control_mcp_checkout(monkeypatch)
+
+
+def _runner_controller_refresh_gateway_receipt(**updates: object) -> dict[str, object]:
+    from core import runner_controller_privileged_gateway as gateway
+
+    receipt: dict[str, object] = {
+        "schema": gateway.RECEIPT_SCHEMA_ID,
+        "status": "DONE",
+        "reason": "RUNNER_CONTROLLER_TRUST_ANCHOR_BUNDLE_REFRESHED",
+        "action_id": gateway.RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID,
+        "repository": runner.REPO,
+        "target": "runner-controller",
+        "request_hash": "e" * 64,
+        "expected_main_sha": HEAD_SHA,
+        "registry_refresh": "DONE",
+        "action_present": True,
+        "mutation_started": True,
+        "mutation_performed": True,
+        "activation_executed": False,
+        "private_evidence_exposed": False,
+        "stderr_exposed": False,
+        "env_exposed": False,
+        "private_paths_exposed": False,
+        "external_side_effects_executed": True,
+    }
+    receipt.update(updates)
+    return receipt
+
+
+def test_dispatch_runtime_maintenance_runner_controller_refresh_uses_fixed_typed_gateway(
+    monkeypatch,
+):
+    calls = []
+
+    def fake(body):
+        calls.append(body)
+        return runner._maintenance_report(
+            "DONE",
+            runner.RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_V1,
+            ["action=typed_gateway_dispatch", "generic_check_project_checkout=false"],
+            "met",
+        )
+
+    def fail(_body):
+        raise AssertionError("generic check_project_checkout must not be used")
+
+    body = _runner_controller_refresh_body()
+    monkeypatch.setattr(
+        runner, "runner_controller_refresh_trust_anchor_bundle_v1", fake
+    )
+    monkeypatch.setattr(runner, "check_project_checkout", fail)
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_V1,
+        "/tmp",
+        body,
+    )
+
+    assert calls == [body]
+    assert runner.maintenance_report_is_done(report)
+    assert (
+        f"maintenance_task_id={runner.RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_V1}"
+        in report
+    )
+
+
+def test_runner_controller_refresh_builds_exact_typed_gateway_request(monkeypatch):
+    from core import runner_controller_privileged_gateway as gateway
+
+    _patch_runner_controller_refresh_checkout(monkeypatch)
+    captured = {}
+
+    class FakeTransport:
+        def submit(self, request):
+            captured.update(request)
+            return 0, json.dumps(
+                _runner_controller_refresh_gateway_receipt()
+            ).encode("utf-8")
+
+    monkeypatch.setattr(gateway, "LocalSudoGatewayTransport", FakeTransport)
+    report = runner.runner_controller_refresh_trust_anchor_bundle_v1(
+        _runner_controller_refresh_body()
+    )
+
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert set(captured) == set(gateway.REQUEST_FIELDS)
+    assert (
+        captured["action_id"]
+        == gateway.RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID
+    )
+    assert (
+        captured["operator_approval"]
+        == gateway.RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_OPERATOR_APPROVAL
+    )
+    assert captured["repository"] == runner.REPO
+    assert captured["target"] == "runner-controller"
+    assert captured["expected_main_sha"] == HEAD_SHA
+    assert captured["registered_clean_main_sha"] == HEAD_SHA
+    assert captured["github_main_sha"] == HEAD_SHA
+    assert captured["checkout_head_sha"] == HEAD_SHA
+    assert captured["checkout_origin_main_sha"] == HEAD_SHA
+    assert captured["checkout_path"] == str(gateway.CANONICAL_CHECKOUT_PATH)
+    assert "registry_refresh=DONE" in report
+    assert "action_present=true" in report
+    assert "mutation_performed=true" in report
+    assert "external_side_effects_executed=true" in report
+    assert "action=typed_gateway_dispatch" in report
+
+
+@pytest.mark.parametrize(
+    ("body", "reason"),
+    (
+        (
+            _runner_controller_refresh_body(approval="PENDING"),
+            "reason=runner_controller_refresh_operator_approval_mismatch",
+        ),
+        (
+            _runner_controller_refresh_body(repository="alanua/NotSkeleton"),
+            "reason=runner_controller_refresh_repository_mismatch",
+        ),
+        (
+            _runner_controller_refresh_body(target="home-edge-01"),
+            "reason=runner_controller_refresh_target_mismatch",
+        ),
+        (
+            _runner_controller_refresh_body(expected_main_sha="0" * 39),
+            "reason=runner_controller_refresh_expected_main_sha_invalid",
+        ),
+        (
+            _runner_controller_refresh_body(extra="argv: /bin/sh"),
+            "reason=runner_controller_refresh_unknown_input_field",
+        ),
+        (
+            _runner_controller_refresh_body(extra="Path: /tmp/issue-controlled"),
+            "reason=runner_controller_refresh_unknown_input_field",
+        ),
+    ),
+)
+def test_runner_controller_refresh_blocks_bad_metadata_before_checkout(
+    monkeypatch,
+    body,
+    reason,
+):
+    monkeypatch.setattr(
+        runner,
+        "_skeleton_control_mcp_hetzner_checkout_proof",
+        lambda _task_id: (_ for _ in ()).throw(
+            AssertionError("checkout proof must not run")
+        ),
+    )
+
+    report = runner.runner_controller_refresh_trust_anchor_bundle_v1(body)
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert reason in report
+
+
+def test_runner_controller_refresh_blocks_dirty_checkout_before_gateway(monkeypatch):
+    from core import runner_controller_privileged_gateway as gateway
+
+    monkeypatch.setattr(
+        runner,
+        "_skeleton_control_mcp_hetzner_checkout_proof",
+        lambda _task_id: (
+            None,
+            ["current_branch=main"],
+            None,
+            None,
+            runner._maintenance_report(
+                "BLOCKED",
+                runner.RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_V1,
+                ["current_branch=main", "reason=checkout_dirty"],
+                "not_met",
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        gateway,
+        "LocalSudoGatewayTransport",
+        lambda: (_ for _ in ()).throw(AssertionError("gateway must not run")),
+    )
+
+    report = runner.runner_controller_refresh_trust_anchor_bundle_v1(
+        _runner_controller_refresh_body()
+    )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "reason=checkout_dirty" in report
+
+
+def test_runner_controller_refresh_blocks_registry_drift_receipt_without_done(
+    monkeypatch,
+):
+    from core import runner_controller_privileged_gateway as gateway
+
+    _patch_runner_controller_refresh_checkout(monkeypatch)
+
+    class FakeTransport:
+        def submit(self, request):
+            return 0, json.dumps(
+                _runner_controller_refresh_gateway_receipt(
+                    status="NEEDS_OPERATOR",
+                    reason="ACTION_REGISTRY_DRIFT",
+                    registry_refresh="NEEDS_OPERATOR",
+                    mutation_started=False,
+                    mutation_performed=False,
+                    external_side_effects_executed=False,
+                    protected_copy_verified=False,
+                    installed_artifacts_verified=False,
+                )
+            ).encode("utf-8")
+
+    monkeypatch.setattr(gateway, "LocalSudoGatewayTransport", FakeTransport)
+
+    report = runner.runner_controller_refresh_trust_anchor_bundle_v1(
+        _runner_controller_refresh_body()
+    )
+
+    assert runner.maintenance_report_status(report) == "NEEDS_OPERATOR"
+    assert "registry_refresh=NEEDS_OPERATOR" in report
+    assert "mutation_performed=false" in report
+    assert "external_side_effects_executed=false" in report
+    assert "reason=ACTION_REGISTRY_DRIFT" in report
