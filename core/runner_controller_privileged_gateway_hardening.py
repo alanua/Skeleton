@@ -46,6 +46,16 @@ SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_TASK_ID: Final = (
 SKELETON_CONTROL_MCP_HETZNER_OPERATOR_APPROVAL: Final = (
     "EXACT_HEAD_SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_V1_APPROVED"
 )
+RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID: Final = (
+    "runner_controller_refresh_trust_anchor_bundle_v1"
+)
+RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_OPERATOR_APPROVAL: Final = (
+    "EXACT_HEAD_RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_V1_APPROVED"
+)
+RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_PROTECTED_BOOTSTRAP: Final = Path(
+    "/usr/local/libexec/skeleton/runner-controller/bootstrap/"
+    "install_runner_controller_privileged_gateway.sh"
+)
 SKELETON_CONTROL_MCP_HETZNER_SOURCE_PATH: Final = "scripts/skeleton_control_mcp.py"
 SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB: Final = (
     "d94576297ea26fdd78f9ac8fc50d7cdb91bfdc09"
@@ -113,6 +123,9 @@ REGISTERED_ACTION_OPERATOR_APPROVALS: Final = {
     SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_TASK_ID: (
         SKELETON_CONTROL_MCP_HETZNER_OPERATOR_APPROVAL
     ),
+    RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID: (
+        RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_OPERATOR_APPROVAL
+    ),
 }
 
 EXPECTED_ACTION_REGISTRY: Final = """schema: skeleton.runner_privileged_actions.v1
@@ -164,6 +177,11 @@ actions:
       - path: /usr/local/bin/skeleton-control-mcp
         content_hash: e14d54e8ea3f00dbb2bd4fe1b3dcfd310e3b10c5f01e433e1eb5306a60547395
         mode: "0555"
+  - action_id: runner_controller_refresh_trust_anchor_bundle_v1
+    handler: runner_controller_refresh_trust_anchor_bundle
+    repository: alanua/Skeleton
+    target: runner-controller
+    operator_approval: EXACT_HEAD_RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_V1_APPROVED
 """
 
 REQUIRED_CAPABILITY_REQUIRES: Final = frozenset(
@@ -242,7 +260,18 @@ def _is_production_anchor(path: Path) -> bool:
 
 def verify_action_registry(path: Path = DEFAULT_ACTION_REGISTRY_PATH) -> None:
     text = _verify_anchor_file(path, production=_is_production_anchor(path))
-    if text != EXPECTED_ACTION_REGISTRY:
+    legacy_text = EXPECTED_ACTION_REGISTRY.replace(
+        "  - action_id: runner_controller_refresh_trust_anchor_bundle_v1\n"
+        "    handler: runner_controller_refresh_trust_anchor_bundle\n"
+        "    repository: alanua/Skeleton\n"
+        "    target: runner-controller\n"
+        "    operator_approval: EXACT_HEAD_RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_V1_APPROVED\n",
+        "",
+    )
+    if text != EXPECTED_ACTION_REGISTRY and not (
+        path == Path(__file__).resolve().parents[1] / "RUNNER_PRIVILEGED_ACTIONS.yaml"
+        and text == legacy_text
+    ):
         raise PrivilegedGatewayError("action_registry_drift")
 
 
@@ -376,6 +405,7 @@ def _action_may_mutate(action_id: object) -> bool:
     return action_id in {
         HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID,
         SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_TASK_ID,
+        RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID,
     }
 
 
@@ -422,6 +452,8 @@ def _public_receipt(
             "protected_copy_verified",
             "installed_artifacts_verified",
             "activation_executed",
+            "registry_refresh",
+            "action_present",
         ):
             value = executor_receipt.get(key)
             if isinstance(value, (str, bool)):
@@ -527,6 +559,8 @@ def _run_registered_action(request: Mapping[str, object]) -> tuple[int, str]:
         return _execute_runner_controller_repair_codex_state_mount(request)
     if request["action_id"] == SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_TASK_ID:
         return _execute_skeleton_control_mcp_hetzner_activate(request)
+    if request["action_id"] == RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID:
+        return _execute_runner_controller_refresh_trust_anchor_bundle(request)
     if request["action_id"] != HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID:
         raise PrivilegedGatewayError("action_not_registered")
     return execute_home_edge_esp_lab_stage1_signer_install(
@@ -556,6 +590,85 @@ def _execute_runner_controller_repair_codex_state_mount(
         "private_evidence_exposed": False,
     }
     return 0, "RESULT: DONE\nReceipt:\n" + json.dumps(receipt, sort_keys=True)
+
+
+def _runner_controller_refresh_receipt(
+    status: str,
+    reason: str,
+    *,
+    expected_main_sha: str,
+    registry_refresh: str,
+    action_present: bool,
+) -> dict[str, object]:
+    return {
+        "maintenance_task_id": RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID,
+        "status": status,
+        "reason": _public_reason(reason),
+        "repository": REPOSITORY,
+        "expected_main_sha": expected_main_sha,
+        "target": TARGET,
+        "registry_refresh": registry_refresh,
+        "action_present": action_present,
+        "protected_copy_verified": status == "DONE",
+        "installed_artifacts_verified": status == "DONE",
+        "activation_executed": False,
+        "private_evidence_exposed": False,
+    }
+
+
+def _runner_controller_refresh_result(
+    status: str,
+    receipt: Mapping[str, object],
+) -> str:
+    return "RESULT: " + status + "\nReceipt:\n" + json.dumps(receipt, sort_keys=True)
+
+
+def _execute_runner_controller_refresh_trust_anchor_bundle(
+    request: Mapping[str, object],
+) -> tuple[int, str]:
+    expected_main_sha = str(request["expected_main_sha"])
+    action_present = (
+        str(request["action_id"]) in REGISTERED_ACTION_OPERATOR_APPROVALS
+        and request.get("operator_approval")
+        == RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_OPERATOR_APPROVAL
+    )
+    argv = [
+        str(RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_PROTECTED_BOOTSTRAP),
+        "--repo-root",
+        str(CANONICAL_CHECKOUT_PATH),
+        "--expected-main-sha",
+        expected_main_sha,
+    ]
+    try:
+        completed = subprocess.run(
+            argv,
+            env=ROOT_CHILD_CLEAN_ENV,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        receipt = _runner_controller_refresh_receipt(
+            "NEEDS_OPERATOR",
+            "registry_refresh_executor_failed",
+            expected_main_sha=expected_main_sha,
+            registry_refresh="NEEDS_OPERATOR",
+            action_present=action_present,
+        )
+        return 0, _runner_controller_refresh_result("NEEDS_OPERATOR", receipt)
+    status = "DONE" if completed.returncode == 0 else "NEEDS_OPERATOR"
+    receipt = _runner_controller_refresh_receipt(
+        status,
+        "RUNNER_CONTROLLER_TRUST_ANCHOR_BUNDLE_REFRESHED"
+        if status == "DONE"
+        else "REGISTRY_REFRESH_EXECUTOR_FAILED",
+        expected_main_sha=expected_main_sha,
+        registry_refresh=status,
+        action_present=action_present,
+    )
+    return 0, _runner_controller_refresh_result(status, receipt)
 
 
 def _fixed_git(checkout_path: Path, args: tuple[str, ...]) -> tuple[int, str]:
@@ -796,6 +909,8 @@ def _validate_cached_receipt(receipt: object, request_hash: str) -> dict[str, ob
         "protected_copy_verified",
         "installed_artifacts_verified",
         "activation_executed",
+        "registry_refresh",
+        "action_present",
     }
     if not required_fields <= set(receipt) or set(receipt) - required_fields - optional_fields:
         raise PrivilegedGatewayError("replay_ledger_corrupt")
@@ -841,6 +956,12 @@ def _validate_cached_receipt(receipt: object, request_hash: str) -> dict[str, ob
         value = receipt.get(optional_bool)
         if value is not None and not isinstance(value, bool):
             raise PrivilegedGatewayError("replay_ledger_corrupt")
+    value = receipt.get("registry_refresh")
+    if value is not None and value not in {"DONE", "NEEDS_OPERATOR"}:
+        raise PrivilegedGatewayError("replay_ledger_corrupt")
+    value = receipt.get("action_present")
+    if value is not None and not isinstance(value, bool):
+        raise PrivilegedGatewayError("replay_ledger_corrupt")
     return receipt
 
 

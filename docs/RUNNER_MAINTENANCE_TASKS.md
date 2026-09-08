@@ -258,6 +258,35 @@ task never reads or exposes HMAC
 credential content and never runs ESP activation, Home Edge requests, device
 discovery, flashing, or downstream actions.
 
+`runner_controller_refresh_trust_anchor_bundle_v1` is a protected maintenance
+action for refreshing only the already installed Runner Controller privileged
+gateway trust-anchor bundle. It accepts exactly:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: runner_controller_refresh_trust_anchor_bundle_v1
+Repository: alanua/Skeleton
+Expected Main SHA: <current exact 40-hex main commit>
+Target: runner-controller
+Operator Approval: EXACT_HEAD_RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_V1_APPROVED
+```
+
+The issue cannot supply a path, argv, command, registry location, destination,
+user, package, service, or shell. The Runner first verifies the registered
+canonical Skeleton checkout is clean and that `Expected Main SHA`, registered
+clean `main`, GitHub current `main`, checkout `HEAD`, and checkout
+`origin/main` all match exactly. The privileged gateway then accepts only the
+fixed action id, repository, target, approval token, canonical checkout path,
+and exact SHA tuple. It invokes only the protected reviewed bootstrap installer
+at `/usr/local/libexec/skeleton/runner-controller/bootstrap/install_runner_controller_privileged_gateway.sh`
+with fixed `--repo-root` and `--expected-main-sha` values derived from the
+validated request. Public output is bounded to exact main, `registry_refresh`,
+`action_present`, `mutation_performed`, `external_side_effects_executed`,
+`activation_executed=false`, and fixed gateway status/reason fields. The action
+must never expose generic root, shell, SSH, argv, path, arbitrary registry, or
+destination capability. This documentation registers the action contract only;
+do not execute the runtime refresh from a Codex issue worktree.
+
 `sync_telegram_callback_poller_runtime` may only:
 
 1. Stop `skeleton-telegram-callback-poll.timer` and

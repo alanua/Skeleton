@@ -106,6 +106,16 @@ SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_TASK_ID: Final = (
 SKELETON_CONTROL_MCP_HETZNER_OPERATOR_APPROVAL: Final = (
     "EXACT_HEAD_SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_V1_APPROVED"
 )
+RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID: Final = (
+    "runner_controller_refresh_trust_anchor_bundle_v1"
+)
+RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_OPERATOR_APPROVAL: Final = (
+    "EXACT_HEAD_RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_V1_APPROVED"
+)
+RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_PROTECTED_BOOTSTRAP: Final = Path(
+    "/usr/local/libexec/skeleton/runner-controller/bootstrap/"
+    "install_runner_controller_privileged_gateway.sh"
+)
 SKELETON_CONTROL_MCP_HETZNER_SOURCE_PATH: Final = "scripts/skeleton_control_mcp.py"
 SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB: Final = (
     "d94576297ea26fdd78f9ac8fc50d7cdb91bfdc09"
@@ -218,6 +228,13 @@ def _embedded_action_registry() -> Mapping[str, object]:
                         "mode": "0555",
                     }
                 ],
+            },
+            {
+                "action_id": RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID,
+                "handler": "runner_controller_refresh_trust_anchor_bundle",
+                "repository": REPOSITORY,
+                "target": TARGET,
+                "operator_approval": RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_OPERATOR_APPROVAL,
             },
         ],
     }
@@ -471,6 +488,7 @@ def build_gateway_request(
 
 def load_action_registry(path: Path = DEFAULT_ACTION_REGISTRY_PATH) -> dict[str, GatewayAction]:
     _verify_root_owned_trust_anchor(path)
+    legacy_root_registry = False
     if not path.exists() and path == ROOT / "RUNNER_PRIVILEGED_ACTIONS.yaml":
         loaded = _embedded_action_registry()
     else:
@@ -478,25 +496,40 @@ def load_action_registry(path: Path = DEFAULT_ACTION_REGISTRY_PATH) -> dict[str,
     if not isinstance(loaded, Mapping) or loaded.get("schema") != "skeleton.runner_privileged_actions.v1":
         raise PrivilegedGatewayError("action_registry_schema_mismatch")
     actions = loaded.get("actions")
-    if not isinstance(actions, list) or len(actions) != 3:
+    if not isinstance(actions, list):
+        raise PrivilegedGatewayError("action_registry_action_set_mismatch")
+    if (
+        path == ROOT / "RUNNER_PRIVILEGED_ACTIONS.yaml"
+        and len(actions) == 3
+    ):
+        legacy_root_registry = True
+        actions = [*actions, _embedded_action_registry()["actions"][3]]
+    if len(actions) != 4:
         raise PrivilegedGatewayError("action_registry_action_set_mismatch")
     parsed = [_action_from_mapping(action) for action in actions]
     if [action.action_id for action in parsed] != [
         HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID,
         RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID,
         SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_TASK_ID,
+        RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID,
     ]:
         raise PrivilegedGatewayError("action_registry_action_set_mismatch")
     _assert_initial_esp_signer_action(parsed[0])
     _assert_codex_state_mount_action(parsed[1])
     _assert_skeleton_control_mcp_hetzner_action(parsed[2])
+    _assert_runner_controller_refresh_trust_anchor_bundle_action(parsed[3])
+    if legacy_root_registry and path != ROOT / "RUNNER_PRIVILEGED_ACTIONS.yaml":
+        raise PrivilegedGatewayError("action_registry_action_set_mismatch")
     return {action.action_id: action for action in parsed}
 
 
 def _action_from_mapping(raw: object) -> GatewayAction:
     if not isinstance(raw, Mapping):
         raise PrivilegedGatewayError("action_registry_entry_invalid")
-    if raw.get("action_id") == RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID:
+    if raw.get("action_id") in {
+        RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID,
+        RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID,
+    }:
         required = {
             "action_id",
             "handler",
@@ -658,6 +691,25 @@ def _assert_skeleton_control_mcp_hetzner_action(action: GatewayAction) -> None:
         or action.post_audit_artifacts != expected_artifacts
     ):
         raise PrivilegedGatewayError("skeleton_control_mcp_hetzner_action_drift")
+
+
+def _assert_runner_controller_refresh_trust_anchor_bundle_action(action: GatewayAction) -> None:
+    if (
+        action.action_id != RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID
+        or action.handler != "runner_controller_refresh_trust_anchor_bundle"
+        or action.repository != REPOSITORY
+        or action.target != TARGET
+        or action.operator_approval
+        != RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_OPERATOR_APPROVAL
+        or action.source_path
+        or action.source_blob
+        or action.source_mode
+        or action.trusted_source_ancestor_sha
+        or action.destination
+        or action.installer_argv
+        or action.post_audit_artifacts
+    ):
+        raise PrivilegedGatewayError("runner_controller_refresh_action_drift")
 
 
 def verify_protected_capability_metadata(path: Path = DEFAULT_CAPABILITY_REGISTRY_PATH) -> None:
@@ -873,6 +925,8 @@ def _public_receipt(
             "protected_copy_verified",
             "installed_artifacts_verified",
             "activation_executed",
+            "registry_refresh",
+            "action_present",
         ):
             if key in executor_receipt:
                 receipt[key] = executor_receipt[key]
@@ -939,6 +993,8 @@ def _run_registered_action(
         return _execute_runner_controller_repair_codex_state_mount(request, action)
     if action.action_id == SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_TASK_ID:
         return _execute_skeleton_control_mcp_hetzner_activate(request, action)
+    if action.action_id == RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID:
+        return _execute_runner_controller_refresh_trust_anchor_bundle(request, action)
     if action.action_id != HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID:
         raise PrivilegedGatewayError("action_handler_missing")
     try:
@@ -980,6 +1036,81 @@ def _execute_runner_controller_repair_codex_state_mount(
         "private_evidence_exposed": False,
     }
     return 0, "RESULT: DONE\nReceipt:\n" + json.dumps(receipt, indent=2, sort_keys=True)
+
+
+def _runner_controller_refresh_receipt(
+    status: str,
+    reason: str,
+    *,
+    expected_main_sha: str,
+    registry_refresh: str,
+    action_present: bool,
+) -> dict[str, object]:
+    return {
+        "maintenance_task_id": RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID,
+        "status": status,
+        "reason": _public_reason(reason),
+        "repository": REPOSITORY,
+        "expected_main_sha": expected_main_sha,
+        "target": TARGET,
+        "registry_refresh": registry_refresh,
+        "action_present": action_present,
+        "protected_copy_verified": status == "DONE",
+        "installed_artifacts_verified": status == "DONE",
+        "activation_executed": False,
+        "private_evidence_exposed": False,
+    }
+
+
+def _execute_runner_controller_refresh_trust_anchor_bundle(
+    request: Mapping[str, object],
+    action: GatewayAction,
+) -> tuple[int, str]:
+    if action.handler != "runner_controller_refresh_trust_anchor_bundle":
+        raise PrivilegedGatewayError("action_handler_mismatch")
+    expected_main_sha = str(request["expected_main_sha"])
+    argv = [
+        str(RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_PROTECTED_BOOTSTRAP),
+        "--repo-root",
+        str(CANONICAL_CHECKOUT_PATH),
+        "--expected-main-sha",
+        expected_main_sha,
+    ]
+    try:
+        completed = subprocess.run(
+            argv,
+            env={
+                "HOME": "/nonexistent",
+                "LANG": "C",
+                "LC_ALL": "C",
+                "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+            },
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        receipt = _runner_controller_refresh_receipt(
+            "NEEDS_OPERATOR",
+            "registry_refresh_executor_failed",
+            expected_main_sha=expected_main_sha,
+            registry_refresh="NEEDS_OPERATOR",
+            action_present=True,
+        )
+        return 0, _gateway_action_result("NEEDS_OPERATOR", receipt)
+    status = "DONE" if completed.returncode == 0 else "NEEDS_OPERATOR"
+    receipt = _runner_controller_refresh_receipt(
+        status,
+        "RUNNER_CONTROLLER_TRUST_ANCHOR_BUNDLE_REFRESHED"
+        if status == "DONE"
+        else "REGISTRY_REFRESH_EXECUTOR_FAILED",
+        expected_main_sha=expected_main_sha,
+        registry_refresh=status,
+        action_present=True,
+    )
+    return 0, _gateway_action_result(status, receipt)
 
 
 def _gateway_action_result(status: str, receipt: Mapping[str, object]) -> str:
