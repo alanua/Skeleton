@@ -22517,8 +22517,32 @@ def _runner_controller_refresh_body(
     )
 
 
-def _patch_runner_controller_refresh_checkout(monkeypatch) -> None:
-    _patch_skeleton_control_mcp_checkout(monkeypatch)
+def _patch_runner_controller_refresh_checkout(
+    monkeypatch, *, expected_main_sha: str = HEAD_SHA
+) -> None:
+    from types import SimpleNamespace
+    from core import runner_controller_privileged_gateway as gateway
+
+    registered = SimpleNamespace(
+        checkout_path=gateway.CANONICAL_CHECKOUT_PATH,
+        status_lines=[],
+    )
+    monkeypatch.setattr(
+        runner, "_registered_skeleton_checkout", lambda task_id: (registered, None)
+    )
+    monkeypatch.setattr(runner, "_verify_skeleton_checkout_present", lambda *args: None)
+    monkeypatch.setattr(runner, "_read_skeleton_origin", lambda *args: None)
+    monkeypatch.setattr(runner, "_read_skeleton_current_branch", lambda *args: None)
+    monkeypatch.setattr(runner, "_read_skeleton_clean_state", lambda *args: None)
+    monkeypatch.setattr(runner, "_fetch_skeleton_origin_main", lambda *args: None)
+    monkeypatch.setattr(
+        runner, "_read_skeleton_sha", lambda *args: (expected_main_sha, None)
+    )
+    monkeypatch.setattr(
+        runner,
+        "_run_freshness_command",
+        lambda *args: (f"{expected_main_sha}\trefs/heads/main\n", None),
+    )
 
 
 def _runner_controller_refresh_gateway_receipt(**updates: object) -> dict[str, object]:
@@ -22615,6 +22639,12 @@ def test_runner_controller_refresh_builds_exact_typed_gateway_request(monkeypatc
     )
     assert captured["repository"] == runner.REPO
     assert captured["target"] == "runner-controller"
+    assert captured["request_id"] == (
+        "runner-controller-refresh-trust-anchor-bundle-v1-request-" + HEAD_SHA
+    )
+    assert captured["idempotency_key"] == (
+        "runner-controller-refresh-trust-anchor-bundle-v1-idempotency-" + HEAD_SHA
+    )
     assert captured["expected_main_sha"] == HEAD_SHA
     assert captured["registered_clean_main_sha"] == HEAD_SHA
     assert captured["github_main_sha"] == HEAD_SHA
@@ -22626,6 +22656,89 @@ def test_runner_controller_refresh_builds_exact_typed_gateway_request(monkeypatc
     assert "mutation_performed=true" in report
     assert "external_side_effects_executed=true" in report
     assert "action=typed_gateway_dispatch" in report
+
+
+def test_runner_controller_refresh_identity_is_stable_for_same_exact_main(monkeypatch):
+    from core import runner_controller_privileged_gateway as gateway
+
+    _patch_runner_controller_refresh_checkout(monkeypatch)
+    captured = []
+
+    class FakeTransport:
+        def submit(self, request):
+            captured.append(
+                (request["request_id"], request["idempotency_key"], request["action_id"])
+            )
+            return 0, json.dumps(
+                _runner_controller_refresh_gateway_receipt()
+            ).encode("utf-8")
+
+    monkeypatch.setattr(gateway, "LocalSudoGatewayTransport", FakeTransport)
+
+    first = runner.runner_controller_refresh_trust_anchor_bundle_v1(
+        _runner_controller_refresh_body(expected_main_sha=HEAD_SHA)
+    )
+    second = runner.runner_controller_refresh_trust_anchor_bundle_v1(
+        _runner_controller_refresh_body(expected_main_sha=HEAD_SHA)
+    )
+
+    assert runner.maintenance_report_status(first) == "DONE"
+    assert runner.maintenance_report_status(second) == "DONE"
+    assert len(captured) == 2
+    assert captured[0] == captured[1]
+    assert (
+        captured[0][2]
+        == gateway.RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID
+    )
+
+
+def test_runner_controller_refresh_identity_separates_different_exact_main(monkeypatch):
+    from core import runner_controller_privileged_gateway as gateway
+
+    first_sha = "a" * 40
+    second_sha = "b" * 40
+    captured = []
+    checkout_sha = first_sha
+
+    def fake_checkout(_task_id):
+        from types import SimpleNamespace
+
+        registered = SimpleNamespace(
+            checkout_path=gateway.CANONICAL_CHECKOUT_PATH,
+            status_lines=[],
+        )
+        return registered, [], checkout_sha, checkout_sha, None
+
+    class FakeTransport:
+        def submit(self, request):
+            captured.append((request["request_id"], request["idempotency_key"]))
+            return 0, json.dumps(
+                _runner_controller_refresh_gateway_receipt(
+                    expected_main_sha=request["expected_main_sha"]
+                )
+            ).encode("utf-8")
+
+    monkeypatch.setattr(
+        runner, "_skeleton_control_mcp_hetzner_checkout_proof", fake_checkout
+    )
+    monkeypatch.setattr(gateway, "LocalSudoGatewayTransport", FakeTransport)
+
+    first = runner.runner_controller_refresh_trust_anchor_bundle_v1(
+        _runner_controller_refresh_body(expected_main_sha=first_sha)
+    )
+    checkout_sha = second_sha
+    second = runner.runner_controller_refresh_trust_anchor_bundle_v1(
+        _runner_controller_refresh_body(expected_main_sha=second_sha)
+    )
+
+    assert runner.maintenance_report_status(first) == "DONE"
+    assert runner.maintenance_report_status(second) == "DONE"
+    assert len(captured) == 2
+    assert captured[0] != captured[1]
+    assert captured[0][0].endswith(first_sha)
+    assert captured[0][1].endswith(first_sha)
+    assert captured[1][0].endswith(second_sha)
+    assert captured[1][1].endswith(second_sha)
 
 
 def test_runner_controller_refresh_rejects_live_receipt_missing_mutation_contract():
