@@ -583,7 +583,7 @@ _BLOCKED_OUTPUT_MARKERS = (
     "cancelled",
     "no build files",
     "PlatformIO not available",
-    "no firmware",
+    "no firmware target",
     "assigned worktree is not target",
 )
 _BLOCKED_OUTPUT_MARKER_RES = tuple(
@@ -1049,6 +1049,7 @@ _PYTEST_SUMMARY_LINE_RE = re.compile(
 )
 _SAFE_CODEX_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,80}$")
 _TASK_FENCE_OPEN_LINE_RE = re.compile(r"^[ \t]*```task[ \t]*$")
+_NON_TASK_FENCE_OPEN_LINE_RE = re.compile(r"^[ \t]*```(?P<info>[A-Za-z0-9_.-]+)[ \t]*$")
 _FENCE_CLOSE_LINE_RE = re.compile(r"^[ \t]*```[ \t]*$")
 _AUFMASS_PRIVATE_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{2,80}$")
 
@@ -2301,6 +2302,12 @@ def classify_codex_task_result(output: str, exit_code: int) -> CodexTaskResult:
     if exit_code != 0:
         return CodexTaskResult("BLOCKED", f"exit code {exit_code}")
 
+    result_status = _final_result_status(output)
+    if result_status == "DONE":
+        return CodexTaskResult("DONE")
+    if result_status is not None:
+        return CodexTaskResult("BLOCKED", result_status)
+
     status = _first_final_status(output)
     if status is not None:
         if status == "DONE":
@@ -2690,21 +2697,43 @@ def task_fence_block_reason(body: str) -> str | None:
     lines = (body or "").splitlines()
     index = 0
     while index < len(lines):
-        if _TASK_FENCE_OPEN_LINE_RE.match(lines[index]) is None:
+        if _TASK_FENCE_OPEN_LINE_RE.match(lines[index]) is not None:
+            closing_index: int | None = None
+            for candidate_index, candidate in enumerate(lines[index + 1 :], start=index + 1):
+                if _FENCE_CLOSE_LINE_RE.match(candidate):
+                    closing_index = candidate_index
+                    break
+            if closing_index is not None:
+                index = closing_index + 1
+                continue
+            return (
+                "missing_closing_task_fence: task fence starts with ```task but "
+                "does not include a closing ``` fence."
+            )
+        non_task_fence = _NON_TASK_FENCE_OPEN_LINE_RE.match(lines[index])
+        if non_task_fence is None:
             index += 1
             continue
-        closing_index: int | None = None
+        closing_index = None
+        fenced_lines: list[str] = []
         for candidate_index, candidate in enumerate(lines[index + 1 :], start=index + 1):
             if _FENCE_CLOSE_LINE_RE.match(candidate):
                 closing_index = candidate_index
                 break
-        if closing_index is not None:
-            index = closing_index + 1
+            fenced_lines.append(candidate)
+        if closing_index is None:
+            index += 1
             continue
-        return (
-            "missing_closing_task_fence: task fence starts with ```task but "
-            "does not include a closing ``` fence."
-        )
+        if re.search(
+            r"(?m)^[^\S\r\n]*schema:[^\S\r\n]*skeleton\.runner_task\.v1[^\S\r\n]*$",
+            "\n".join(fenced_lines),
+        ):
+            fence = non_task_fence.group("info")
+            return (
+                f"wrong_task_fence: skeleton.runner_task.v1 payload is fenced as "
+                f"```{fence}; runnable task payloads must use ```task."
+            )
+        index = closing_index + 1
     return None
 
 

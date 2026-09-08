@@ -1028,7 +1028,7 @@ def test_blocked_output_classifier_detects_runner_blockers() -> None:
         "cancelled by operator": "cancelled",
         "no build files were present": "no build files",
         "PlatformIO not available": "PlatformIO not available",
-        "no firmware target exists": "no firmware",
+        "no firmware target exists": "no firmware target",
         "assigned worktree is not target": "assigned worktree is not target",
     }
 
@@ -1166,6 +1166,39 @@ evidence text for recovery handling. Those words are not the final result.
     assert result == runner.CodexTaskResult("DONE")
 
 
+def test_codex_task_result_accepts_result_done_with_benign_negative_action_prose() -> None:
+    output = """RESULT: DONE
+
+Changed files:
+- scripts/runner_poll_github_tasks.py
+
+Validation:
+- python -m pytest tests/test_runner_poll_github_tasks.py
+
+No firmware build was run. No OTA was attempted. No deployment was performed.
+"""
+
+    result = runner.classify_codex_task_result(output, 0)
+
+    assert runner.blocked_output_marker(output) is None
+    assert result == runner.CodexTaskResult("DONE")
+
+
+def test_codex_task_result_allows_benign_negative_action_prose_without_status() -> None:
+    output = """Completed the requested runner-only classifier change.
+
+Validation:
+- python -m pytest tests/test_runner_poll_github_tasks.py
+
+No firmware build was run; no OTA or deployment was attempted.
+"""
+
+    result = runner.classify_codex_task_result(output, 0)
+
+    assert runner.blocked_output_marker(output) is None
+    assert result == runner.CodexTaskResult("DONE")
+
+
 def test_private_memory_run_codex_preserves_safe_result_done_output(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1280,6 +1313,25 @@ RESULT: NEEDS_OPERATOR
     assert result == runner.CodexTaskResult("BLOCKED", "NEEDS_OPERATOR")
 
 
+def test_codex_task_result_blocks_explicit_result_blocked() -> None:
+    output = """RESULT: BLOCKED
+
+Cannot validate because the assigned worktree is missing.
+"""
+
+    result = runner.classify_codex_task_result(output, 0)
+
+    assert result == runner.CodexTaskResult("BLOCKED", "BLOCKED")
+
+
+def test_codex_task_result_blocks_explicit_blocked_reason_line() -> None:
+    output = "BLOCKED: missing capability: docker"
+
+    result = runner.classify_codex_task_result(output, 0)
+
+    assert result == runner.CodexTaskResult("BLOCKED", "BLOCKED")
+
+
 def test_codex_task_result_blocks_failure_final_report() -> None:
     blocked = "BLOCK" + "ED"
     output = f"""{blocked}: missing capability
@@ -1319,6 +1371,40 @@ def test_codex_task_result_preserves_nonzero_exit_failure() -> None:
     result = runner.classify_codex_task_result(output, 2)
 
     assert result == runner.CodexTaskResult("BLOCKED", "exit code 2")
+
+
+def test_task_fence_preflight_blocks_structured_payload_under_yaml_fence() -> None:
+    body = """```yaml
+schema: skeleton.runner_task.v1
+repo: alanua/Skeleton
+branch: runner/issue-3834
+task_kind: code_generation
+payload:
+  operation: harden_runner
+allowed_files:
+  - scripts/runner_poll_github_tasks.py
+validation:
+  - python -m pytest
+expected_output:
+  - tests PASS
+```"""
+
+    reason = runner.task_fence_block_reason(body)
+
+    assert reason is not None
+    assert "wrong_task_fence" in reason
+    assert runner.extract_task_block(body) is None
+
+
+def test_arbitrary_yaml_fence_does_not_become_executable_task() -> None:
+    body = """```yaml
+title: documentation-only note
+items:
+  - not a runner task
+```"""
+
+    assert runner.task_fence_block_reason(body) is None
+    assert runner.extract_task_block(body) is None
 
 
 

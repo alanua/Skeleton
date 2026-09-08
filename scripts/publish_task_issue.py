@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 
 DEFAULT_REPO = "alanua/Skeleton"
 READY_LABEL = "runner:ready"
@@ -22,6 +24,19 @@ REQUIRED_SECTIONS = (
     "scope",
     "non_goals",
     "acceptance",
+)
+RUNNER_TASK_SCHEMA = "skeleton.runner_task.v1"
+REQUIRED_RUNNER_TASK_KEYS = frozenset(
+    (
+        "schema",
+        "repo",
+        "branch",
+        "task_kind",
+        "payload",
+        "allowed_files",
+        "validation",
+        "expected_output",
+    )
 )
 
 _SECTION_RE_TEMPLATE = r"(?m)^{section}\s*:"
@@ -72,6 +87,24 @@ def validate_task_body(body: str) -> None:
         raise PublishError("Task issue body closing fence must be the final line.")
 
     fenced_body = "\n".join(stripped_newlines.splitlines()[1:-1])
+    if re.search(
+        rf"(?m)^\s*schema:\s*{re.escape(RUNNER_TASK_SCHEMA)}\s*$",
+        fenced_body,
+    ):
+        try:
+            parsed = yaml.safe_load(fenced_body)
+        except yaml.YAMLError as exc:
+            raise PublishError(f"Runner task payload YAML is invalid: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise PublishError("Runner task payload must be a YAML mapping.")
+        missing = sorted(REQUIRED_RUNNER_TASK_KEYS - parsed.keys())
+        if missing:
+            raise PublishError(
+                "Runner task payload is missing required key(s): "
+                + ", ".join(missing)
+            )
+        return
+
     for section in REQUIRED_SECTIONS:
         pattern = _SECTION_RE_TEMPLATE.format(section=re.escape(section))
         matches = re.findall(pattern, fenced_body)
