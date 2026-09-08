@@ -5537,6 +5537,77 @@ def test_runner_task_accepts_matching_target_project_and_repository() -> None:
     )
 
 
+def _schema_codegen_issue_body(
+    *,
+    repo: str = runner.REPO,
+    payload_target: str | None = None,
+    payload_repository: str | None = None,
+    base_sha: str = "b" * 40,
+) -> str:
+    payload_lines = ["  operation: repair"]
+    if payload_target is not None:
+        payload_lines.append(f"  target: {payload_target}")
+    if payload_repository is not None:
+        payload_lines.append(f"  repository: {payload_repository}")
+    return "\n".join(
+        (
+            "schema: skeleton.runner_task.v1",
+            f"repo: {repo}",
+            "branch: runner/schema-target",
+            "task_kind: code_generation",
+            f"base_sha: {base_sha}",
+            "payload:",
+            *payload_lines,
+            "requested_capabilities:",
+            "  - repository_read",
+            "  - repository_write_allowlisted",
+            "  - test_execution",
+            "allowed_files:",
+            "  - firmware/src/main.cpp",
+            "forbidden_actions:",
+            "  - no runtime mutation",
+            "validation:",
+            "  - focused regression",
+            "expected_output:",
+            "  - draft PR",
+            "privacy_boundary: PUBLIC_SAFE_REPOSITORY_ONLY",
+            "approval_reference: GENERIC_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715",
+            "idempotency_key: issue-3833-schema-routing",
+        )
+    )
+
+
+def test_runner_task_schema_control_repo_payload_target_routes_to_lavalamp() -> None:
+    body = _schema_codegen_issue_body(
+        repo=runner.REPO,
+        payload_target="lavalamp",
+        payload_repository="alanua/Lavalamp",
+    )
+
+    task, reason = runner.extract_runner_task(body)
+
+    assert reason is None
+    assert task == runner.RunnerTask(
+        content=body,
+        target_project="lavalamp",
+        has_target_project_metadata=True,
+        target_repository="alanua/Lavalamp",
+        has_target_repository_metadata=True,
+        base_sha="b" * 40,
+    )
+
+
+def test_runner_task_schema_control_repo_payload_target_uses_registered_mapping() -> None:
+    body = _schema_codegen_issue_body(repo=runner.REPO, payload_target="lavalamp")
+
+    task, reason = runner.extract_runner_task(body)
+
+    assert reason is None
+    assert task is not None
+    assert task.target_project == "lavalamp"
+    assert task.target_repository == "alanua/Lavalamp"
+
+
 def test_runner_task_ignores_lane_text_inside_task_fence() -> None:
     task, reason = runner.extract_runner_task("```task\nLane: deploy\nKeep it as prose.\n```")
 
@@ -5671,6 +5742,167 @@ def test_process_issue_blocks_mismatched_target_project_and_repository_alias_bef
 
     assert "resolve to different PROJECT_TREE entries" in block.call_args.args[1]
     set_label.assert_not_called()
+    run_codex.assert_not_called()
+
+
+def test_process_issue_schema_issue_3833_routes_lavalamp_worktree_and_base_sha(
+    tmp_path: Path,
+) -> None:
+    issue_path = tmp_path / "lavalamp" / "issue-3833"
+    base_sha = "c" * 40
+    body = _schema_codegen_issue_body(
+        repo=runner.REPO,
+        payload_target="lavalamp",
+        payload_repository="alanua/Lavalamp",
+        base_sha=base_sha,
+    )
+    issue = {
+        "number": 3833,
+        "title": "Schema routes Lavalamp",
+        "body": body,
+        "comments": [],
+    }
+
+    with mock.patch.object(
+        runner, "prepare_issue_branch"
+    ) as prepare_branch, mock.patch.object(
+        runner, "verify_target_repository_checkout", return_value=None
+    ) as verify_checkout, mock.patch.object(
+        runner,
+        "prepare_target_repository_issue_worktree",
+        return_value=(0, "ready", issue_path),
+    ) as prepare_target, mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, "codex output")
+    ) as run_codex, mock.patch.object(
+        runner, "finalize_local_worktree_success", return_value="DONE local report"
+    ), mock.patch.object(
+        runner, "cleanup_target_repository_issue_worktree", return_value=(0, "")
+    ) as cleanup_target, mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "record_runner_task_picked_up", return_value=None
+    ), mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ):
+        runner.process_issue(issue)
+
+    expected_task = runner.RunnerTask(
+        content=body,
+        target_project="lavalamp",
+        has_target_project_metadata=True,
+        target_repository="alanua/Lavalamp",
+        has_target_repository_metadata=True,
+        base_sha=base_sha,
+    )
+    prepare_branch.assert_not_called()
+    verify_checkout.assert_called_once_with("alanua/Lavalamp")
+    prepare_target.assert_called_once_with(
+        "alanua/Lavalamp",
+        3833,
+        base=None,
+        base_sha=base_sha,
+    )
+    run_codex.assert_called_once_with(body, str(issue_path), expected_task)
+    cleanup_target.assert_called_once_with("alanua/Lavalamp", 3833)
+
+
+def test_process_issue_schema_skeleton_target_remains_skeleton(
+    tmp_path: Path,
+) -> None:
+    coordinator = tmp_path / "repo"
+    issue_path = tmp_path / "skeleton" / "issue-3834"
+    body = _schema_codegen_issue_body(repo=runner.REPO)
+    issue = {
+        "number": 3834,
+        "title": "Schema routes Skeleton",
+        "body": body,
+        "comments": [],
+    }
+
+    with mock.patch.object(
+        runner, "prepare_issue_branch", return_value=(0, "ready", issue_path)
+    ) as prepare_branch, mock.patch.object(
+        runner, "verify_target_repository_checkout"
+    ) as verify_checkout, mock.patch.object(
+        runner, "prepare_target_repository_issue_worktree"
+    ) as prepare_target, mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, "codex output")
+    ) as run_codex, mock.patch.object(
+        runner, "finalize_success", return_value="DONE report"
+    ), mock.patch.object(
+        runner, "cleanup_issue_worktree", return_value=(0, "")
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "record_runner_task_picked_up", return_value=None
+    ), mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ):
+        runner.process_issue(issue, workdir=str(coordinator))
+
+    prepare_branch.assert_called_once_with(3834, str(coordinator))
+    verify_checkout.assert_not_called()
+    prepare_target.assert_not_called()
+    run_codex.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("body", "expected_reason"),
+    (
+        (
+            _schema_codegen_issue_body(
+                repo="alanua/Lavalamp",
+                payload_target="skeleton",
+            ),
+            "resolve to different PROJECT_TREE entries",
+        ),
+        (
+            _schema_codegen_issue_body(
+                repo=runner.REPO,
+                payload_target="unknown",
+            ),
+            "Target project `unknown` is not allowlisted",
+        ),
+    ),
+)
+def test_process_issue_schema_target_metadata_fails_closed_before_claim(
+    body: str,
+    expected_reason: str,
+) -> None:
+    issue = {
+        "number": 3835,
+        "title": "Schema target metadata blocks",
+        "body": body,
+        "comments": [],
+    }
+
+    with mock.patch.object(runner, "block_issue") as block, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(
+        runner, "prepare_issue_branch"
+    ) as prepare_branch, mock.patch.object(
+        runner, "prepare_target_repository_issue_worktree"
+    ) as prepare_target, mock.patch.object(
+        runner, "run_codex_task"
+    ) as run_codex:
+        runner.process_issue(issue)
+
+    assert expected_reason in block.call_args.args[1]
+    set_label.assert_not_called()
+    prepare_branch.assert_not_called()
+    prepare_target.assert_not_called()
     run_codex.assert_not_called()
 
 

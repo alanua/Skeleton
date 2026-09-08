@@ -1099,6 +1099,18 @@ TARGET_REPOSITORY_METADATA_FIELDS = (
     "Selected Repository",
     "Repo",
 )
+TYPED_SCHEMA_TARGET_PROJECT_KEYS = (
+    "target_project",
+    "selected_project",
+    "project",
+    "target",
+)
+TYPED_SCHEMA_TARGET_REPOSITORY_KEYS = (
+    "target_repository",
+    "selected_repository",
+    "repository",
+    "repo",
+)
 
 
 @dataclass(frozen=True)
@@ -1683,6 +1695,9 @@ def _normalize_optional_text(value: object) -> str | None:
 
 def _task_base_metadata(issue_body: str) -> tuple[str | None, str | None]:
     task_fields = _shadow_task_block_mapping(issue_body)
+    typed_task = _typed_runner_task_mapping(issue_body)
+    if typed_task:
+        task_fields = typed_task
     base = _normalize_optional_text(
         _shadow_field(issue_body, task_fields, "Base", "base")
     )
@@ -1719,6 +1734,8 @@ def _safe_target_base_branch_name(base: str) -> bool:
 
 def _target_base_validation_failure(base: str | None, base_sha: str | None) -> str | None:
     if base is None:
+        if base_sha is not None and _HEAD_SHA_RE.fullmatch(base_sha) is None:
+            return "invalid_base_sha"
         return None
     if not _safe_target_base_branch_name(base):
         return "unsafe_base"
@@ -1823,7 +1840,7 @@ def prepare_git_issue_worktree(
                     + "\n".join(outputs),
                     path,
                 )
-        if base is not None:
+        if base is not None or base_sha is not None:
             code, verified_sha_or_reason = _fetch_and_verify_target_base(
                 cwd=path,
                 base=base_ref,
@@ -1833,7 +1850,9 @@ def prepare_git_issue_worktree(
             if code != 0:
                 return (
                     code,
-                    _format_base_preparation_failure(str(verified_sha_or_reason), base)
+                    _format_base_preparation_failure(
+                        str(verified_sha_or_reason), base_ref
+                    )
                     + "\n\n"
                     + "\n".join(outputs),
                     path,
@@ -1851,7 +1870,7 @@ def prepare_git_issue_worktree(
                 return (
                     1,
                     _format_base_preparation_failure(
-                        "existing_worktree_wrong_base", base
+                        "existing_worktree_wrong_base", base_ref
                     )
                     + "\n\n"
                     + "\n".join(outputs),
@@ -1877,7 +1896,7 @@ def prepare_git_issue_worktree(
     ):
         return 1, _format_base_preparation_failure("source_repository_mismatch"), path
 
-    if base is None:
+    if base is None and base_sha is None:
         commands = (
             (["git", "fetch", "origin"], coordinator_workdir),
             (
@@ -1920,7 +1939,7 @@ def prepare_git_issue_worktree(
     if code != 0:
         return (
             code,
-            _format_base_preparation_failure(str(verified_sha_or_reason), base)
+            _format_base_preparation_failure(str(verified_sha_or_reason), base_ref)
             + "\n\n"
             + "\n".join(outputs),
             path,
@@ -1963,7 +1982,7 @@ def prepare_git_issue_worktree(
             ):
                 return (
                     1,
-                    _format_base_preparation_failure("base_sha_mismatch", base)
+                    _format_base_preparation_failure("base_sha_mismatch", base_ref)
                     + "\n\n"
                     + "\n".join(outputs),
                     path,
@@ -2748,6 +2767,98 @@ def _target_repository_metadata_field(metadata: str) -> tuple[str | None, str | 
     return None, None
 
 
+def _typed_runner_task_mapping(body: str) -> Mapping[str, Any]:
+    if extract_task_block(body) is not None:
+        return {}
+    try:
+        parsed = yaml.safe_load(body or "")
+    except yaml.YAMLError:
+        return {}
+    if not isinstance(parsed, Mapping):
+        return {}
+    if parsed.get("schema") != "skeleton.runner_task.v1":
+        return {}
+    return parsed
+
+
+def _mapping_string(mapping: Mapping[str, Any], key: str) -> str | None:
+    value = mapping.get(key)
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _typed_schema_target_candidates(
+    typed_task: Mapping[str, Any],
+) -> tuple[list[str], list[str], bool, bool, str | None]:
+    projects: list[str] = []
+    repositories: list[str] = []
+    root_repository: str | None = None
+    has_project_metadata = False
+    has_repository_metadata = False
+
+    def add_project(value: str | None) -> None:
+        nonlocal has_project_metadata
+        if value is None:
+            return
+        has_project_metadata = True
+        projects.append(value)
+
+    def add_repository(value: str | None) -> None:
+        nonlocal has_repository_metadata
+        if value is None:
+            return
+        has_repository_metadata = True
+        repositories.append(value)
+
+    for key in TYPED_SCHEMA_TARGET_PROJECT_KEYS:
+        add_project(_mapping_string(typed_task, key))
+    for key in TYPED_SCHEMA_TARGET_REPOSITORY_KEYS:
+        value = _mapping_string(typed_task, key)
+        if key == "repo":
+            root_repository = value
+        else:
+            add_repository(value)
+
+    payload = typed_task.get("payload")
+    if isinstance(payload, Mapping):
+        for key in TYPED_SCHEMA_TARGET_PROJECT_KEYS:
+            add_project(_mapping_string(payload, key))
+        for key in TYPED_SCHEMA_TARGET_REPOSITORY_KEYS:
+            add_repository(_mapping_string(payload, key))
+
+    if root_repository is not None and (not projects or root_repository != QUEUE_REPOSITORY):
+        add_repository(root_repository)
+
+    distinct_projects = sorted(set(projects))
+    if len(distinct_projects) > 1:
+        return [], [], has_project_metadata, has_repository_metadata, (
+            "Conflicting target project metadata in Runner task schema: "
+            + ", ".join(f"`{project}`" for project in distinct_projects)
+            + "."
+        )
+
+    distinct_repositories = sorted(set(repositories))
+    if len(distinct_repositories) > 1:
+        non_control = [repo for repo in distinct_repositories if repo != QUEUE_REPOSITORY]
+        if not (QUEUE_REPOSITORY in distinct_repositories and len(non_control) == 1):
+            return [], [], has_project_metadata, has_repository_metadata, (
+                "Conflicting target repository metadata in Runner task schema: "
+                + ", ".join(f"`{repo}`" for repo in distinct_repositories)
+                + "."
+            )
+        distinct_repositories = non_control
+
+    return (
+        distinct_projects,
+        distinct_repositories,
+        has_project_metadata,
+        has_repository_metadata,
+        None,
+    )
+
+
 def resolve_target_project_metadata(
     body: str,
 ) -> tuple[str | None, str | None, str | None]:
@@ -2756,6 +2867,19 @@ def resolve_target_project_metadata(
     target_repository, _target_repository_field = _target_repository_metadata_field(
         metadata
     )
+    typed_task = _typed_runner_task_mapping(body)
+    if target_project is None and target_repository is None and typed_task:
+        (
+            schema_projects,
+            schema_repositories,
+            _has_schema_project,
+            _has_schema_repository,
+            schema_reason,
+        ) = _typed_schema_target_candidates(typed_task)
+        if schema_reason is not None:
+            return None, None, schema_reason
+        target_project = schema_projects[0] if schema_projects else None
+        target_repository = schema_repositories[0] if schema_repositories else None
     project_tree = load_runner_project_tree()
 
     if target_project is None and target_repository is None:
@@ -2827,8 +2951,11 @@ def extract_runner_task(body: str) -> tuple[RunnerTask | None, str | None]:
     if fence_reason is not None:
         return None, fence_reason
     content = extract_task_block(body)
+    typed_task = _typed_runner_task_mapping(body)
     if content is None:
-        return None, None
+        if not typed_task:
+            return None, None
+        content = (body or "").strip()
     metadata = (body or "").split("```task", 1)[0]
     lane, lane_reason = extract_runner_lane(body)
     if lane is None:
@@ -2839,6 +2966,9 @@ def extract_runner_task(body: str) -> tuple[RunnerTask | None, str | None]:
     if target_project is None or target_repository is None:
         return None, target_reason
     base, base_sha = _task_base_metadata(body)
+    _schema_projects, _schema_repositories, has_schema_project, has_schema_repository, _schema_reason = (
+        _typed_schema_target_candidates(typed_task) if typed_task else ([], [], False, False, None)
+    )
     return RunnerTask(
         content=content,
         lane=lane,
@@ -2849,10 +2979,12 @@ def extract_runner_task(body: str) -> tuple[RunnerTask | None, str | None]:
         target_project=target_project,
         has_target_project_metadata=(
             _body_field(metadata, "Target Project") is not None
+            or has_schema_project
         ),
         target_repository=target_repository,
         has_target_repository_metadata=(
             _target_repository_metadata_field(metadata)[0] is not None
+            or has_schema_repository
         ),
         base=base,
         base_sha=base_sha,
@@ -3043,6 +3175,9 @@ def _body_field_or_yaml_value(body: str, field: str, key: str) -> object:
         multiline_value = _metadata_multiline_value(metadata, key)
     if multiline_value is not None:
         return multiline_value
+    typed_task = _typed_runner_task_mapping(body)
+    if typed_task and key in typed_task:
+        return typed_task[key]
     return _metadata_yaml_value(metadata, key)
 
 
@@ -18643,7 +18778,9 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                 )
                 return
         if local_target_worktree:
-            if runner_task is not None and runner_task.base is not None:
+            if runner_task is not None and (
+                runner_task.base is not None or runner_task.base_sha is not None
+            ):
                 worktree_code, worktree_output, worktree_path = (
                     prepare_target_repository_issue_worktree(
                         target_repository,
