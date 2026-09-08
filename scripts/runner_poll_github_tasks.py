@@ -281,6 +281,7 @@ TELEGRAM_TIMEOUT_SECONDS = 10
 TELEGRAM_CALLBACK_DATA_LIMIT = 64
 TELEGRAM_CALLBACK_HMAC_ENV = "SKELETON_TG_CALLBACK_HMAC_SECRET"
 CODEX_MODEL_ENV = "SKELETON_CODEX_MODEL"
+CODEGEN_BOOKKEEPING_ROOT_ENV = "SKELETON_CODEGEN_BOOKKEEPING_ROOT"
 RUNNER_PRIVATE_MEMORY_ROOT_ENV = "SKELETON_RUNNER_PRIVATE_MEMORY_ROOT"
 RUNNER_PRIVATE_MEMORY_DATASET_ENV = "SKELETON_RUNNER_PRIVATE_MEMORY_DATASET"
 RUNNER_PRIVATE_MEMORY_REFS_ENV = "SKELETON_RUNNER_PRIVATE_MEMORY_REFS"
@@ -1503,6 +1504,107 @@ def _run_finalization_validation_command(
     cwd: str | Path,
 ) -> tuple[int, str]:
     return _run_validation_profile_command(args, cwd=cwd)
+
+
+def _codegen_bookkeeping_root() -> Path:
+    configured = os.environ.get(CODEGEN_BOOKKEEPING_ROOT_ENV)
+    if configured is not None and configured.strip():
+        root = Path(configured.strip()).expanduser()
+        if not root.is_absolute():
+            raise RuntimeError("codegen_manifest_root_not_absolute")
+        return root
+    return Path(tempfile.gettempdir()) / "skeleton-runner-codegen-state"
+
+
+def _ensure_private_runner_dir(path: Path) -> None:
+    if path.exists() or path.is_symlink():
+        try:
+            stat_result = path.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise RuntimeError("codegen_manifest_target_unsafe") from exc
+        if stat.S_ISLNK(stat_result.st_mode) or not stat.S_ISDIR(stat_result.st_mode):
+            raise RuntimeError("codegen_manifest_target_unsafe")
+        if stat_result.st_uid != os.getuid():
+            raise RuntimeError("codegen_manifest_target_unsafe")
+        if stat_result.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+            raise RuntimeError("codegen_manifest_target_unsafe")
+        if not os.access(path, os.R_OK | os.W_OK | os.X_OK):
+            raise RuntimeError("codegen_manifest_target_not_writable")
+        return
+    path.mkdir(parents=True, mode=stat.S_IRWXU)
+    os.chmod(path, stat.S_IRWXU)
+
+
+def _codegen_bookkeeping_dir(workdir: str | Path) -> Path:
+    root = _codegen_bookkeeping_root()
+    _ensure_private_runner_dir(root)
+    workdir_text = str(Path(workdir).resolve(strict=False))
+    digest = hashlib.sha256(workdir_text.encode("utf-8")).hexdigest()[:32]
+    state_dir = root / f"worktree-{digest}"
+    _ensure_private_runner_dir(state_dir)
+    for child_name in ("home", "tmp", "xdg-cache", "xdg-state", "xdg-config"):
+        _ensure_private_runner_dir(state_dir / child_name)
+    return state_dir
+
+
+def _write_codegen_manifest(state_dir: Path, workdir: str | Path) -> None:
+    manifest_path = state_dir / "manifest.json"
+    if manifest_path.exists() or manifest_path.is_symlink():
+        try:
+            stat_result = manifest_path.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise RuntimeError("codegen_manifest_target_unsafe") from exc
+        if stat.S_ISLNK(stat_result.st_mode) or not stat.S_ISREG(stat_result.st_mode):
+            raise RuntimeError("codegen_manifest_target_unsafe")
+        if stat_result.st_uid != os.getuid():
+            raise RuntimeError("codegen_manifest_target_unsafe")
+        if stat_result.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+            raise RuntimeError("codegen_manifest_target_unsafe")
+    payload = {
+        "schema": "skeleton.runner_codegen_manifest.v1",
+        "workdir_hash": hashlib.sha256(
+            str(Path(workdir).resolve(strict=False)).encode("utf-8")
+        ).hexdigest(),
+    }
+    temp_path = state_dir / ".manifest.tmp"
+    temp_path.write_text(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    os.chmod(temp_path, stat.S_IRUSR | stat.S_IWUSR)
+    os.replace(temp_path, manifest_path)
+    os.chmod(manifest_path, stat.S_IRUSR | stat.S_IWUSR)
+    read_back = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if read_back != payload:
+        raise RuntimeError("codegen_manifest_roundtrip_failed")
+
+
+def _codegen_environment_with_bookkeeping(
+    environment: Mapping[str, str], state_dir: Path
+) -> dict[str, str]:
+    updated = dict(environment)
+    updated["HOME"] = str(state_dir / "home")
+    updated["TMPDIR"] = str(state_dir / "tmp")
+    updated["TEMP"] = str(state_dir / "tmp")
+    updated["TMP"] = str(state_dir / "tmp")
+    updated["XDG_CACHE_HOME"] = str(state_dir / "xdg-cache")
+    updated["XDG_STATE_HOME"] = str(state_dir / "xdg-state")
+    updated["XDG_CONFIG_HOME"] = str(state_dir / "xdg-config")
+    return updated
+
+
+def _codegen_manifest_blocked_output(reason_code: str) -> str:
+    return (
+        "RESULT: BLOCKED\n"
+        + json.dumps(
+            {
+                "schema": "skeleton.runner_codegen_manifest.block.v1",
+                "status": "BLOCKED",
+                "reason_codes": [reason_code],
+            },
+            sort_keys=True,
+        )
+    )
 
 
 def worktree_root() -> Path:
@@ -4081,16 +4183,29 @@ def run_codex_task(
     ) as task_file:
         task_file.write(task_content)
         task_file.flush()
-        base_codegen_environment = sanitize_codegen_child_environment(os.environ)
+        codex_command = codex_exec_command(task_content, workdir, task)
+        try:
+            codegen_state_dir = _codegen_bookkeeping_dir(workdir)
+            _write_codegen_manifest(codegen_state_dir, workdir)
+        except RuntimeError as exc:
+            return 1, _codegen_manifest_blocked_output(str(exc))
+        base_codegen_environment = _codegen_environment_with_bookkeeping(
+            sanitize_codegen_child_environment(os.environ),
+            codegen_state_dir,
+        )
         token = _RUN_COMMAND_ENV_OVERRIDE.set(base_codegen_environment)
         try:
             codex_code, codex_output = run_command(
-                codex_exec_command(task_content, workdir, task),
+                codex_command,
                 cwd=workdir,
                 observe_process_spawn=True,
             )
         finally:
             _RUN_COMMAND_ENV_OVERRIDE.reset(token)
+        try:
+            _write_codegen_manifest(codegen_state_dir, workdir)
+        except RuntimeError as exc:
+            return 1, _codegen_manifest_blocked_output(str(exc))
 
         if not codex_failure_allows_secondary(codex_code, codex_output):
             return codex_code, codex_output

@@ -20152,6 +20152,83 @@ def test_run_codex_task_sanitizes_home_edge_environment(
     assert os.environ[HOME_EDGE_EXEC_HMAC_ENV] == SYNTHETIC_HOME_EDGE_EXEC_HMAC
 
 
+def test_run_codex_task_uses_runner_owned_manifest_state_after_patch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    state_root = tmp_path / "runner-state"
+    patched_file = worktree / "tests" / "test_runner_poll_github_tasks.py"
+    monkeypatch.setenv(runner.CODEGEN_BOOKKEEPING_ROOT_ENV, str(state_root))
+    monkeypatch.setattr(runner, "private_memory_bootstrap_request", lambda *_args: None)
+    monkeypatch.setattr(runner, "codex_exec_command", lambda *_args: ["codex"])
+    monkeypatch.setattr(
+        runner,
+        "sanitize_codegen_child_environment",
+        lambda _env: {"PATH": "/usr/bin"},
+    )
+
+    def fake_run(args: list[str], cwd: object = None, **_kwargs: object) -> tuple[int, str]:
+        assert args == ["codex"]
+        assert cwd == str(worktree)
+        environment = runner._RUN_COMMAND_ENV_OVERRIDE.get()
+        assert environment is not None
+        home = Path(environment["HOME"])
+        assert home.is_relative_to(state_root)
+        manifest_path = home.parent / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert manifest["schema"] == "skeleton.runner_codegen_manifest.v1"
+        patched_file.parent.mkdir(parents=True)
+        patched_file.write_text("# allowlisted regression patch\n", encoding="utf-8")
+        return 0, "RESULT: DONE\n"
+
+    monkeypatch.setattr(runner, "run_command", fake_run)
+
+    code, output = runner.run_codex_task(
+        "\n".join(
+            (
+                "allowed_files:",
+                "  - tests/test_runner_poll_github_tasks.py",
+                "```task",
+                "produce allowlisted patch",
+                "```",
+            )
+        ),
+        str(worktree),
+    )
+
+    assert code == 0
+    assert output == "RESULT: DONE\n"
+    assert patched_file.read_text(encoding="utf-8") == "# allowlisted regression patch\n"
+    manifest_files = list(state_root.glob("worktree-*/manifest.json"))
+    assert len(manifest_files) == 1
+    assert manifest_files[0].stat().st_mode & 0o777 == 0o600
+
+
+def test_run_codex_task_fails_closed_for_unsafe_manifest_target(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    state_root = tmp_path / "runner-state"
+    monkeypatch.setenv(runner.CODEGEN_BOOKKEEPING_ROOT_ENV, str(state_root))
+    state_dir = runner._codegen_bookkeeping_dir(worktree)
+    (state_dir / "manifest.json").symlink_to(tmp_path / "attacker-controlled.json")
+    monkeypatch.setattr(runner, "private_memory_bootstrap_request", lambda *_args: None)
+    monkeypatch.setattr(runner, "codex_exec_command", lambda *_args: ["codex"])
+
+    with mock.patch.object(runner, "run_command") as run_command:
+        code, output = runner.run_codex_task("Task body", str(worktree), None)
+
+    assert code == 1
+    assert "RESULT: BLOCKED" in output
+    assert "codegen_manifest_target_unsafe" in output
+    assert "attacker-controlled" not in output
+    run_command.assert_not_called()
+
+
 def test_codex_executor_sanitizes_parent_and_overlay_hmac_environment(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
