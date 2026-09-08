@@ -22628,6 +22628,81 @@ def test_runner_controller_refresh_builds_exact_typed_gateway_request(monkeypatc
     assert "action=typed_gateway_dispatch" in report
 
 
+def test_runner_controller_refresh_rejects_live_receipt_missing_mutation_contract():
+    receipt = _runner_controller_refresh_gateway_receipt()
+    receipt.pop("mutation_started")
+    receipt.pop("mutation_performed")
+
+    assert not runner._runner_controller_refresh_receipt_valid(
+        receipt,
+        expected_main_sha=HEAD_SHA,
+    )
+
+
+@pytest.mark.parametrize(
+    "updates",
+    (
+        {"__drop__": ("mutation_started",)},
+        {"__drop__": ("mutation_performed",)},
+        {"__drop__": ("external_side_effects_executed",)},
+        {"mutation_started": "true"},
+        {"mutation_performed": "true"},
+        {"external_side_effects_executed": "true"},
+        {"activation_executed": True},
+        {"private_evidence_exposed": True},
+        {"stderr_exposed": True},
+        {"env_exposed": True},
+        {"private_paths_exposed": True},
+        {"stdout": "private output"},
+        {"stderr": "private error"},
+        {"env": {"TOKEN": "secret"}},
+        {"path": "/home/agent/private"},
+        {"argv": ["/bin/sh"]},
+        {"raw_payload": "private"},
+    ),
+)
+def test_runner_controller_refresh_malformed_gateway_receipts_remain_invalid(updates):
+    receipt = _runner_controller_refresh_gateway_receipt(**updates)
+    for key in updates.get("__drop__", ()):
+        receipt.pop(key, None)
+
+    assert not runner._runner_controller_refresh_receipt_valid(
+        receipt,
+        expected_main_sha=HEAD_SHA,
+    )
+
+
+def test_runner_controller_refresh_accepts_pre_executor_needs_operator_only_without_mutation():
+    receipt = _runner_controller_refresh_gateway_receipt(
+        status="NEEDS_OPERATOR",
+        reason="CAPABILITY_REGISTRY_GATEWAY_MISSING",
+        registry_refresh="NEEDS_OPERATOR",
+        mutation_started=False,
+        mutation_performed=False,
+        external_side_effects_executed=False,
+        protected_copy_verified=False,
+        installed_artifacts_verified=False,
+    )
+
+    assert runner._runner_controller_refresh_receipt_valid(
+        receipt,
+        expected_main_sha=HEAD_SHA,
+    )
+
+    receipt["mutation_performed"] = True
+    assert not runner._runner_controller_refresh_receipt_valid(
+        receipt,
+        expected_main_sha=HEAD_SHA,
+    )
+
+    receipt["mutation_performed"] = False
+    receipt["external_side_effects_executed"] = True
+    assert not runner._runner_controller_refresh_receipt_valid(
+        receipt,
+        expected_main_sha=HEAD_SHA,
+    )
+
+
 @pytest.mark.parametrize(
     ("body", "reason"),
     (

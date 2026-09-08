@@ -887,11 +887,34 @@ def _parse_executor_receipt(report: str) -> Mapping[str, object] | None:
     return parsed if isinstance(parsed, Mapping) else None
 
 
+def _action_may_mutate(action_id: object) -> bool:
+    return action_id in {
+        HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID,
+        SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_TASK_ID,
+        RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID,
+    }
+
+
+def _executor_mutation_performed(
+    executor_receipt: Mapping[str, object] | None,
+) -> bool:
+    if executor_receipt is None:
+        return False
+    return (
+        executor_receipt.get("protected_copy_verified") is True
+        or executor_receipt.get("installed_artifacts_verified") is True
+        or executor_receipt.get("activation_executed") is True
+        or executor_receipt.get("registry_refresh") == "DONE"
+    )
+
+
 def _public_receipt(
     status: str,
     request: Mapping[str, object] | None,
     reason: str,
     *,
+    mutation_started: bool = False,
+    mutation_performed: bool = False,
     executor_receipt: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     action_id = str(request.get("action_id")) if request is not None else ""
@@ -904,18 +927,13 @@ def _public_receipt(
         "repository": REPOSITORY,
         "target": TARGET,
         "request_hash": request_hash,
+        "mutation_started": bool(mutation_started),
+        "mutation_performed": bool(mutation_performed),
         "private_evidence_exposed": False,
         "stderr_exposed": False,
         "env_exposed": False,
         "private_paths_exposed": False,
-        "external_side_effects_executed": (
-            executor_receipt is not None
-            and (
-                executor_receipt.get("protected_copy_verified") is True
-                or executor_receipt.get("installed_artifacts_verified") is True
-                or executor_receipt.get("activation_executed") is True
-            )
-        ),
+        "external_side_effects_executed": bool(mutation_performed),
     }
     if executor_receipt is not None:
         for key in (
@@ -947,6 +965,7 @@ def execute_gateway_request(
     checkout_config_path: Path = DEFAULT_CHECKOUT_CONFIG_PATH,
     runner: Callable[[Mapping[str, object], GatewayAction], tuple[int, str]] | None = None,
 ) -> dict[str, object]:
+    mutation_started = False
     try:
         current = now or _utc_now()
         action = validate_gateway_request(
@@ -968,21 +987,44 @@ def execute_gateway_request(
                 request_hash=request_hash,
                 now=current,
             )
+        mutation_started = _action_may_mutate(action.action_id)
         code, report = (runner or _run_registered_action)(request, action)
         executor_receipt = _parse_executor_receipt(report)
         if code != 0 or executor_receipt is None:
-            return _public_receipt("NEEDS_OPERATOR", request, "action_executor_failed", executor_receipt=None)
+            return _public_receipt(
+                "NEEDS_OPERATOR",
+                request,
+                "action_executor_failed",
+                mutation_started=mutation_started,
+                mutation_performed=False,
+                executor_receipt=None,
+            )
         status = "DONE" if executor_receipt.get("status") == "DONE" else "NEEDS_OPERATOR"
+        mutation_performed = _executor_mutation_performed(executor_receipt)
         return _public_receipt(
             status,
             request,
             str(executor_receipt.get("reason") or "ACTION_REPORTED_BLOCKED"),
+            mutation_started=mutation_started,
+            mutation_performed=mutation_performed,
             executor_receipt=executor_receipt,
         )
     except PrivilegedGatewayError as exc:
-        return _public_receipt("NEEDS_OPERATOR", request if isinstance(request, Mapping) else None, exc.reason_code)
+        return _public_receipt(
+            "NEEDS_OPERATOR",
+            request if isinstance(request, Mapping) else None,
+            exc.reason_code,
+            mutation_started=mutation_started,
+            mutation_performed=False,
+        )
     except Exception:
-        return _public_receipt("NEEDS_OPERATOR", request if isinstance(request, Mapping) else None, "gateway_unexpected_failure")
+        return _public_receipt(
+            "NEEDS_OPERATOR",
+            request if isinstance(request, Mapping) else None,
+            "gateway_unexpected_failure",
+            mutation_started=mutation_started,
+            mutation_performed=False,
+        )
 
 
 def _run_registered_action(

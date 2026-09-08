@@ -63,6 +63,8 @@ RECEIPT_SCHEMA = {
         "repository",
         "target",
         "request_hash",
+        "mutation_started",
+        "mutation_performed",
         "private_evidence_exposed",
         "stderr_exposed",
         "env_exposed",
@@ -78,6 +80,8 @@ RECEIPT_SCHEMA = {
         "repository": {"const": "alanua/Skeleton"},
         "target": {"const": "runner-controller"},
         "request_hash": {"type": ["string", "null"]},
+        "mutation_started": {"type": "boolean"},
+        "mutation_performed": {"type": "boolean"},
         "expected_main_sha": {"type": "string"},
         "source_blob": {"type": "string"},
         "installer_sha256": {"type": "string"},
@@ -292,6 +296,8 @@ def test_request_and_receipt_schemas_are_exact_and_gateway_outputs_validate() ->
         ),
     )
     assert receipt["status"] == "DONE"
+    assert receipt["mutation_started"] is True
+    assert receipt["mutation_performed"] is True
     assert receipt["private_evidence_exposed"] is False
     Draft202012Validator(RECEIPT_SCHEMA).validate(receipt)
 
@@ -436,6 +442,8 @@ def test_codex_state_action_is_accepted_without_root_command_or_private_receipt_
     receipt = gateway.execute_gateway_request(request, now=NOW, runner=runner)
     assert receipt["status"] == "DONE"
     assert receipt["reason"] == "CODEX_STATE_MOUNT_SOURCE_FIX_VERIFIED"
+    assert receipt["mutation_started"] is False
+    assert receipt["mutation_performed"] is False
     assert receipt["external_side_effects_executed"] is False
     assert receipt["private_evidence_exposed"] is False
     assert receipt["stderr_exposed"] is False
@@ -580,6 +588,78 @@ def test_runner_controller_refresh_invokes_only_fixed_protected_bootstrap_and_pu
     serialized = json.dumps(receipt, sort_keys=True)
     assert "/home/agent/" not in serialized
     assert "SECRET" not in serialized
+
+
+def test_runner_controller_refresh_public_gateway_receipt_matches_runner_validator_contract() -> None:
+    from scripts import runner_poll_github_tasks as runner
+
+    request = _request(
+        action_id=gateway.RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID,
+        operator_approval=gateway.RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_OPERATOR_APPROVAL,
+    )
+
+    receipt = gateway.execute_gateway_request(
+        request,
+        now=NOW,
+        runner=lambda _request, _action: (
+            0,
+            gateway._gateway_action_result(
+                "DONE",
+                gateway._runner_controller_refresh_receipt(
+                    "DONE",
+                    "RUNNER_CONTROLLER_TRUST_ANCHOR_BUNDLE_REFRESHED",
+                    expected_main_sha=SHA,
+                    registry_refresh="DONE",
+                    action_present=True,
+                ),
+            ),
+        ),
+    )
+
+    assert receipt["status"] == "DONE"
+    assert receipt["expected_main_sha"] == SHA
+    assert receipt["registry_refresh"] == "DONE"
+    assert receipt["action_present"] is True
+    assert receipt["mutation_started"] is True
+    assert receipt["mutation_performed"] is True
+    assert receipt["external_side_effects_executed"] is True
+    assert receipt["activation_executed"] is False
+    assert runner._runner_controller_refresh_receipt_valid(
+        receipt,
+        expected_main_sha=SHA,
+    )
+
+
+def test_runner_controller_refresh_pre_executor_failure_has_zero_mutation_and_side_effects(
+    tmp_path: Path,
+) -> None:
+    calls = 0
+    missing_capability = tmp_path / "CAPABILITY_REGISTRY.yaml"
+    missing_capability.write_text("version: \"1.0.0\"\ncapabilities:\n", encoding="utf-8")
+
+    def runner(_request: object, _action: object) -> tuple[int, str]:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("runner must not execute")
+
+    receipt = gateway.execute_gateway_request(
+        _request(
+            action_id=gateway.RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID,
+            operator_approval=(
+                gateway.RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_OPERATOR_APPROVAL
+            ),
+        ),
+        now=NOW,
+        runner=runner,
+        capability_registry_path=missing_capability,
+    )
+
+    assert receipt["status"] == "NEEDS_OPERATOR"
+    assert receipt["reason"] == "CAPABILITY_REGISTRY_GATEWAY_MISSING"
+    assert receipt["mutation_started"] is False
+    assert receipt["mutation_performed"] is False
+    assert receipt["external_side_effects_executed"] is False
+    assert calls == 0
 
 
 def test_hetzner_mcp_action_installs_only_fixed_launcher_and_public_safe_receipt(
