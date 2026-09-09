@@ -150,6 +150,11 @@ def _without_codegen_secret_sources(environment: Mapping[str, str]) -> dict[str,
     return {key: value for key, value in environment.items() if key not in _PROVIDER_OVERRIDE_ENV}
 
 
+def sanitize_validation_child_environment(environment: Mapping[str, str]) -> dict[str, str]:
+    """Return a validation child environment without Home Edge credentials."""
+    return _without_home_edge_credentials(environment)
+
+
 def _install_fallback_wrapper(
     environment: dict[str, str],
     authority_environment: Mapping[str, str],

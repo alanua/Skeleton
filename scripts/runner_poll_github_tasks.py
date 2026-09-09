@@ -148,7 +148,10 @@ from core.private_static_site_runtime import (
     prepare_private_static_site_handoff as _execute_prepare_private_static_site_handoff,
 )
 from core.project_tree import get_project, get_project_by_repo, load_project_tree
-from core.runner_child_environment import sanitize_codegen_child_environment
+from core.runner_child_environment import (
+    sanitize_codegen_child_environment,
+    sanitize_validation_child_environment,
+)
 from core.runner_process_observer import (
     build_spawn_trace_command,
     parse_first_denied_filesystem_event,
@@ -1432,10 +1435,7 @@ def _validation_command_environment(
     pytest_temp_root: Path | None = None,
 ) -> dict[str, str]:
     source = os.environ if environment is None else environment
-    filtered = sanitize_codegen_child_environment(
-        source,
-        authority_environment={},
-    )
+    filtered = sanitize_validation_child_environment(source)
     if pytest_temp_root is not None:
         temp_root = str(pytest_temp_root)
         filtered.update(

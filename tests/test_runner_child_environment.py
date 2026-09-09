@@ -5,7 +5,10 @@ from pathlib import Path
 import subprocess
 
 import core.runner_child_environment as child_env
-from core.runner_child_environment import sanitize_codegen_child_environment
+from core.runner_child_environment import (
+    sanitize_codegen_child_environment,
+    sanitize_validation_child_environment,
+)
 
 
 def test_sanitize_codegen_child_environment_removes_home_edge_and_provider_authority(monkeypatch) -> None:
@@ -36,6 +39,61 @@ def test_sanitize_codegen_child_environment_removes_home_edge_and_provider_autho
         "SKELETON_TG_BOT": "telegram-token",
         "UNRELATED_HOME_EDGE_01_VALUE": "kept",
         "ARBITRARY_OVERLAY_VALUE": "kept-overlay-value",
+    }
+    assert environment["SKELETON_HOME_EDGE_01_HOSTNAME"] == "live-home-edge"
+    assert environment["SKELETON_HOME_EDGE_EXEC_HMAC_SECRET"] == "synthetic-hmac-marker"
+
+
+def test_sanitize_validation_child_environment_removes_only_home_edge_credentials(
+    monkeypatch,
+) -> None:
+    environment = {
+        "HOME": "/home/agent",
+        "PATH": "/usr/bin:/bin",
+        "LANG": "C.UTF-8",
+        "SKELETON_HOME_EDGE_01_HOSTNAME": "live-home-edge",
+        "SKELETON_HOME_EDGE_01_SSH_IDENTITY_FILE": "/private/key",
+        "SKELETON_HOME_EDGE_EXEC_HMAC_SECRET": "synthetic-hmac-marker",
+        "SKELETON_OPENROUTER_FALLBACK_API_KEY": "synthetic-fallback-key",
+        "SKELETON_OPENROUTER_FALLBACK_MODEL": "openrouter/synthetic/model",
+        "SKELETON_OPENHANDS_OPENROUTER_REQUIRED": "1",
+        "OPENROUTER_API_KEY": "synthetic-openrouter-key",
+        "BWS_ACCESS_TOKEN": "synthetic-bws-token",
+        "CREDENTIALS_DIRECTORY": "/synthetic/credentials",
+        "LLM_API_KEY": "synthetic-llm-key",
+        "LLM_MODEL": "synthetic/model",
+        "SKELETON_RUNNER_MEMORY_DB": "/private/runner.sqlite",
+        "UNRELATED_HOME_EDGE_01_VALUE": "kept",
+    }
+    monkeypatch.setattr(
+        child_env,
+        "should_attempt_codex_runtime_recovery",
+        lambda _env: (_ for _ in ()).throw(AssertionError("validation must not recover")),
+    )
+    monkeypatch.setattr(
+        child_env,
+        "_install_fallback_wrapper",
+        lambda _env, _authority: (_ for _ in ()).throw(
+            AssertionError("validation must not install wrapper")
+        ),
+    )
+
+    sanitized = sanitize_validation_child_environment(environment)
+
+    assert sanitized == {
+        "HOME": "/home/agent",
+        "PATH": "/usr/bin:/bin",
+        "LANG": "C.UTF-8",
+        "SKELETON_OPENROUTER_FALLBACK_API_KEY": "synthetic-fallback-key",
+        "SKELETON_OPENROUTER_FALLBACK_MODEL": "openrouter/synthetic/model",
+        "SKELETON_OPENHANDS_OPENROUTER_REQUIRED": "1",
+        "OPENROUTER_API_KEY": "synthetic-openrouter-key",
+        "BWS_ACCESS_TOKEN": "synthetic-bws-token",
+        "CREDENTIALS_DIRECTORY": "/synthetic/credentials",
+        "LLM_API_KEY": "synthetic-llm-key",
+        "LLM_MODEL": "synthetic/model",
+        "SKELETON_RUNNER_MEMORY_DB": "/private/runner.sqlite",
+        "UNRELATED_HOME_EDGE_01_VALUE": "kept",
     }
     assert environment["SKELETON_HOME_EDGE_01_HOSTNAME"] == "live-home-edge"
     assert environment["SKELETON_HOME_EDGE_EXEC_HMAC_SECRET"] == "synthetic-hmac-marker"

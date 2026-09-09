@@ -21153,6 +21153,47 @@ def test_run_validation_profile_command_resets_environment_after_failure(
     assert not list(tmp_path.glob(".runner-validation-pytest-*"))
 
 
+def test_run_validation_profile_command_resolves_python3_through_preserved_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    marker = tmp_path / "python3-marker.txt"
+    python = bin_dir / "python3"
+    python.write_text(
+        "#!/bin/sh\n"
+        "printf 'args=%s\\n' \"$*\" > \"$RUNNER_PATH_MARKER\"\n"
+        "printf 'path=%s\\n' \"$PATH\" >> \"$RUNNER_PATH_MARKER\"\n"
+        "printf 'tmpdir=%s\\n' \"$TMPDIR\" >> \"$RUNNER_PATH_MARKER\"\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    python.chmod(0o700)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    monkeypatch.setenv("RUNNER_PATH_MARKER", str(marker))
+    monkeypatch.setenv("HOME", "/home/agent")
+    monkeypatch.setenv("LANG", "C.UTF-8")
+    monkeypatch.setenv("SKELETON_HOME_EDGE_01_HOSTNAME", "live-home-edge")
+    monkeypatch.setenv(HOME_EDGE_EXEC_HMAC_ENV, SYNTHETIC_HOME_EDGE_EXEC_HMAC)
+
+    code, output = runner._run_validation_profile_command(
+        ["python3", "-m", "pytest", "-q"],
+        cwd=tmp_path,
+    )
+
+    assert code == 0
+    assert output == ""
+    marker_text = marker.read_text(encoding="utf-8")
+    assert "args=-m pytest -q" in marker_text
+    assert f"path={bin_dir}" in marker_text
+    temp_line = next(line for line in marker_text.splitlines() if line.startswith("tmpdir="))
+    pytest_temp_root = Path(temp_line.removeprefix("tmpdir="))
+    assert not pytest_temp_root.is_relative_to(tmp_path)
+    assert not pytest_temp_root.exists()
+    assert not list(tmp_path.glob(".runner-validation-pytest-*"))
+
+
 def test_run_validation_profile_command_fails_closed_when_pytest_temp_root_unavailable(
     tmp_path: Path,
 ) -> None:
@@ -21347,9 +21388,39 @@ def test_local_target_finalization_validation_helper_uses_sanitized_environment(
     assert "SKELETON_HOME_EDGE_01_HOSTNAME" not in child_environment
     assert child_environment["SKELETON_RUNNER_MEMORY_DB"] == "/private/runner.sqlite"
 
-def test_validation_command_environment_does_not_bind_codegen_fallback_authority() -> None:
+def test_validation_command_environment_does_not_use_codegen_sanitizer_or_drop_provider_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     source = {
+        "HOME": "/home/agent",
         "PATH": "/usr/bin",
+        "LANG": "C.UTF-8",
+        "SAFE_SETTING": "kept",
+        "SKELETON_HOME_EDGE_01_HOSTNAME": "live-home-edge",
+        HOME_EDGE_EXEC_HMAC_ENV: SYNTHETIC_HOME_EDGE_EXEC_HMAC,
+        "SKELETON_OPENROUTER_FALLBACK_API_KEY": "synthetic-fallback-key",
+        "SKELETON_OPENROUTER_FALLBACK_MODEL": "openrouter/synthetic/model",
+        "SKELETON_OPENHANDS_OPENROUTER_REQUIRED": "1",
+        "OPENROUTER_API_KEY": "synthetic-openrouter-key",
+        "BWS_ACCESS_TOKEN": "synthetic-bws-token",
+        "CREDENTIALS_DIRECTORY": "/synthetic/credentials",
+        "LLM_API_KEY": "synthetic-llm-key",
+        "LLM_MODEL": "synthetic/model",
+    }
+    monkeypatch.setattr(
+        runner,
+        "sanitize_codegen_child_environment",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("validation must not use codegen sanitizer")
+        ),
+    )
+
+    sanitized = runner._validation_command_environment(source)
+
+    assert sanitized == {
+        "HOME": "/home/agent",
+        "PATH": "/usr/bin",
+        "LANG": "C.UTF-8",
         "SAFE_SETTING": "kept",
         "SKELETON_OPENROUTER_FALLBACK_API_KEY": "synthetic-fallback-key",
         "SKELETON_OPENROUTER_FALLBACK_MODEL": "openrouter/synthetic/model",
@@ -21360,10 +21431,6 @@ def test_validation_command_environment_does_not_bind_codegen_fallback_authority
         "LLM_API_KEY": "synthetic-llm-key",
         "LLM_MODEL": "synthetic/model",
     }
-
-    sanitized = runner._validation_command_environment(source)
-
-    assert sanitized == {"PATH": "/usr/bin", "SAFE_SETTING": "kept"}
 
 
 
