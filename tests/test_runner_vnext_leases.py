@@ -79,3 +79,42 @@ def test_sqlite_lease_and_fence_survive_process_reopen(tmp_path) -> None:
     assert second.reason_code == "STALE_LEASE_RECLAIMED"
     assert second.fence_token == first.fence_token + 1
     reopened.close()
+
+
+def test_same_holder_cannot_reuse_lease_for_different_target_state() -> None:
+    clock = Clock()
+    store = LaneLeaseStore(clock=clock)
+    store.acquire(task_id="t1", lane=Lane.PUBLISH, owner="w1", scope_key="branch:x", ttl_seconds=30, target_state_ref="sha:a")
+    with pytest.raises(LeaseError, match="LEASE_TARGET_STATE_MISMATCH"):
+        store.acquire(task_id="t1", lane=Lane.PUBLISH, owner="w1", scope_key="branch:x", ttl_seconds=30, target_state_ref="sha:b")
+
+
+def test_expired_holder_cannot_release_stale_lease() -> None:
+    clock = Clock()
+    store = LaneLeaseStore(clock=clock)
+    receipt = store.acquire(task_id="t1", lane=Lane.CONTROL, owner="w1", scope_key="control", ttl_seconds=5, target_state_ref="sha:a")
+    clock.now = 106.0
+    with pytest.raises(LeaseError, match="LEASE_EXPIRED"):
+        store.release(lane=Lane.CONTROL, scope_key="control", owner="w1", fence_token=receipt.fence_token)
+
+
+def test_store_supports_serialized_multi_thread_use(tmp_path) -> None:
+    import threading
+
+    clock = Clock()
+    store = LaneLeaseStore(tmp_path / "leases.sqlite", clock=clock)
+    errors: list[Exception] = []
+
+    def worker(index: int) -> None:
+        try:
+            receipt = store.acquire(task_id=f"t{index}", lane=Lane.VALIDATE, owner=f"w{index}", scope_key=f"repo:{index}", ttl_seconds=30, target_state_ref=f"sha:{index}")
+            store.heartbeat(lane=Lane.VALIDATE, scope_key=f"repo:{index}", owner=f"w{index}", fence_token=receipt.fence_token)
+        except Exception as exc:  # pragma: no cover - assertion reports collected errors
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []

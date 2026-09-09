@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 import sqlite3
+import threading
 from typing import Callable, Iterator
 
 
@@ -58,10 +59,11 @@ class LaneLeaseStore:
 
     def __init__(self, db_path: str | Path = ":memory:", *, clock: Callable[[], float]) -> None:
         self._clock = clock
+        self._lock = threading.RLock()
         path = str(db_path)
         if path != ":memory:":
             Path(path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
-        self._db = sqlite3.connect(path, isolation_level=None, timeout=5.0)
+        self._db = sqlite3.connect(path, isolation_level=None, timeout=5.0, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA busy_timeout = 5000")
         if path != ":memory:":
@@ -70,7 +72,8 @@ class LaneLeaseStore:
         self._initialize()
 
     def close(self) -> None:
-        self._db.close()
+        with self._lock:
+            self._db.close()
 
     def _initialize(self) -> None:
         self._db.executescript(
@@ -98,14 +101,15 @@ class LaneLeaseStore:
 
     @contextmanager
     def _transaction(self) -> Iterator[None]:
-        self._db.execute("BEGIN IMMEDIATE")
-        try:
-            yield
-        except Exception:
-            self._db.execute("ROLLBACK")
-            raise
-        else:
-            self._db.execute("COMMIT")
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                yield
+            except Exception:
+                self._db.execute("ROLLBACK")
+                raise
+            else:
+                self._db.execute("COMMIT")
 
     @staticmethod
     def _record(row: sqlite3.Row) -> LaneLease:
@@ -150,6 +154,8 @@ class LaneLeaseStore:
             current = self._record(row) if row is not None else None
             if current is not None and not current.expired(now):
                 if current.task_id == task_id and current.owner == owner:
+                    if current.target_state_ref != target_state_ref:
+                        raise LeaseError("LEASE_TARGET_STATE_MISMATCH")
                     return LeaseReceipt("ALREADY_HELD", "LEASE_ALREADY_HELD", task_id, lane, scope_key, current.fence_token)
                 raise LeaseError("LEASE_CONFLICT_ACTIVE_OWNER")
             fence = self._next_fence(lane, scope_key)
@@ -184,6 +190,7 @@ class LaneLeaseStore:
             return LeaseReceipt("HEARTBEAT", "LEASE_HEARTBEAT_RECORDED", current.task_id, lane, scope_key, fence_token)
 
     def release(self, *, lane: Lane, scope_key: str, owner: str, fence_token: int) -> LeaseReceipt:
+        now = self._clock()
         with self._transaction():
             row = self._row(lane, scope_key)
             if row is None:
@@ -193,6 +200,8 @@ class LaneLeaseStore:
                 raise LeaseError("STALE_FENCE_TOKEN")
             if current.owner != owner:
                 raise LeaseError("LEASE_OWNER_MISMATCH")
+            if current.expired(now):
+                raise LeaseError("LEASE_EXPIRED")
             self._db.execute(
                 "DELETE FROM runner_vnext_lane_leases WHERE lane = ? AND scope_key = ?",
                 (lane.value, scope_key),
