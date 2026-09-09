@@ -64,3 +64,18 @@ def test_publish_lanes_fence_per_branch_scope() -> None:
     b = store.acquire(task_id="p2", lane=Lane.PUBLISH, owner="w2", scope_key="branch:b", ttl_seconds=30, target_state_ref="sha:b")
     assert a.fence_token == 1
     assert b.fence_token == 1
+
+
+def test_sqlite_lease_and_fence_survive_process_reopen(tmp_path) -> None:
+    clock = Clock()
+    db = tmp_path / "leases.sqlite"
+    store = LaneLeaseStore(db, clock=clock)
+    first = store.acquire(task_id="t1", lane=Lane.CONTROL, owner="w1", scope_key="control", ttl_seconds=10, target_state_ref="sha:a")
+    store.close()
+
+    clock.now = 111.0
+    reopened = LaneLeaseStore(db, clock=clock)
+    second = reopened.acquire(task_id="t2", lane=Lane.CONTROL, owner="w2", scope_key="control", ttl_seconds=10, target_state_ref="sha:b")
+    assert second.reason_code == "STALE_LEASE_RECLAIMED"
+    assert second.fence_token == first.fence_token + 1
+    reopened.close()
