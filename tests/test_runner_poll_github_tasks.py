@@ -21388,7 +21388,7 @@ def test_local_target_finalization_validation_helper_uses_sanitized_environment(
     assert "SKELETON_HOME_EDGE_01_HOSTNAME" not in child_environment
     assert child_environment["SKELETON_RUNNER_MEMORY_DB"] == "/private/runner.sqlite"
 
-def test_validation_command_environment_does_not_use_codegen_sanitizer_or_drop_provider_values(
+def test_validation_command_environment_does_not_use_codegen_sanitizer_or_leak_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = {
@@ -21422,15 +21422,18 @@ def test_validation_command_environment_does_not_use_codegen_sanitizer_or_drop_p
         "PATH": "/usr/bin",
         "LANG": "C.UTF-8",
         "SAFE_SETTING": "kept",
-        "SKELETON_OPENROUTER_FALLBACK_API_KEY": "synthetic-fallback-key",
         "SKELETON_OPENROUTER_FALLBACK_MODEL": "openrouter/synthetic/model",
         "SKELETON_OPENHANDS_OPENROUTER_REQUIRED": "1",
-        "OPENROUTER_API_KEY": "synthetic-openrouter-key",
-        "BWS_ACCESS_TOKEN": "synthetic-bws-token",
-        "CREDENTIALS_DIRECTORY": "/synthetic/credentials",
-        "LLM_API_KEY": "synthetic-llm-key",
         "LLM_MODEL": "synthetic/model",
     }
+    for secret_name in (
+        "SKELETON_OPENROUTER_FALLBACK_API_KEY",
+        "OPENROUTER_API_KEY",
+        "BWS_ACCESS_TOKEN",
+        "CREDENTIALS_DIRECTORY",
+        "LLM_API_KEY",
+    ):
+        assert secret_name not in sanitized
 
 
 

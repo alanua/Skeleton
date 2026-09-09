@@ -40,11 +40,19 @@ def test_sanitize_codegen_child_environment_removes_home_edge_and_provider_autho
         "UNRELATED_HOME_EDGE_01_VALUE": "kept",
         "ARBITRARY_OVERLAY_VALUE": "kept-overlay-value",
     }
+    for secret_name in (
+        "SKELETON_OPENROUTER_FALLBACK_API_KEY",
+        "OPENROUTER_API_KEY",
+        "BWS_ACCESS_TOKEN",
+        "CREDENTIALS_DIRECTORY",
+        "LLM_API_KEY",
+    ):
+        assert secret_name not in sanitized
     assert environment["SKELETON_HOME_EDGE_01_HOSTNAME"] == "live-home-edge"
     assert environment["SKELETON_HOME_EDGE_EXEC_HMAC_SECRET"] == "synthetic-hmac-marker"
 
 
-def test_sanitize_validation_child_environment_removes_only_home_edge_credentials(
+def test_sanitize_validation_child_environment_removes_credentials_and_preserves_safe_runtime_values(
     monkeypatch,
 ) -> None:
     environment = {
@@ -84,17 +92,20 @@ def test_sanitize_validation_child_environment_removes_only_home_edge_credential
         "HOME": "/home/agent",
         "PATH": "/usr/bin:/bin",
         "LANG": "C.UTF-8",
-        "SKELETON_OPENROUTER_FALLBACK_API_KEY": "synthetic-fallback-key",
         "SKELETON_OPENROUTER_FALLBACK_MODEL": "openrouter/synthetic/model",
         "SKELETON_OPENHANDS_OPENROUTER_REQUIRED": "1",
-        "OPENROUTER_API_KEY": "synthetic-openrouter-key",
-        "BWS_ACCESS_TOKEN": "synthetic-bws-token",
-        "CREDENTIALS_DIRECTORY": "/synthetic/credentials",
-        "LLM_API_KEY": "synthetic-llm-key",
         "LLM_MODEL": "synthetic/model",
         "SKELETON_RUNNER_MEMORY_DB": "/private/runner.sqlite",
         "UNRELATED_HOME_EDGE_01_VALUE": "kept",
     }
+    for secret_name in (
+        "SKELETON_OPENROUTER_FALLBACK_API_KEY",
+        "OPENROUTER_API_KEY",
+        "BWS_ACCESS_TOKEN",
+        "CREDENTIALS_DIRECTORY",
+        "LLM_API_KEY",
+    ):
+        assert secret_name not in sanitized
     assert environment["SKELETON_HOME_EDGE_01_HOSTNAME"] == "live-home-edge"
     assert environment["SKELETON_HOME_EDGE_EXEC_HMAC_SECRET"] == "synthetic-hmac-marker"
 

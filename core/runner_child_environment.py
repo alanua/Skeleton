@@ -23,6 +23,15 @@ HOME_EDGE_EXEC_HMAC_SECRET_ENV = "SKELETON_HOME_EDGE_EXEC_HMAC_SECRET"
 _FALLBACK_BIN_ENV = "SKELETON_CODEGEN_FALLBACK_BIN"
 _REAL_CODEX_ENV = "SKELETON_REAL_CODEX_BIN"
 _ORIGINAL_PATH_ENV = "SKELETON_CODEGEN_ORIGINAL_PATH"
+_VALIDATION_SECRET_ENV = frozenset(
+    {
+        "SKELETON_OPENROUTER_FALLBACK_API_KEY",
+        "OPENROUTER_API_KEY",
+        "BWS_ACCESS_TOKEN",
+        "CREDENTIALS_DIRECTORY",
+        "LLM_API_KEY",
+    }
+)
 _PROVIDER_OVERRIDE_ENV = frozenset(
     {
         "OPENROUTER_API_KEY",
@@ -151,8 +160,9 @@ def _without_codegen_secret_sources(environment: Mapping[str, str]) -> dict[str,
 
 
 def sanitize_validation_child_environment(environment: Mapping[str, str]) -> dict[str, str]:
-    """Return a validation child environment without Home Edge credentials."""
-    return _without_home_edge_credentials(environment)
+    """Return validation env without credentials while preserving ordinary runtime settings."""
+    filtered = _without_home_edge_credentials(environment)
+    return {key: value for key, value in filtered.items() if key not in _VALIDATION_SECRET_ENV}
 
 
 def _install_fallback_wrapper(
