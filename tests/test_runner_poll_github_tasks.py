@@ -49,6 +49,11 @@ HOME_EDGE_EXEC_HMAC_ENV = "SKELETON_HOME_EDGE_EXEC_HMAC_SECRET"
 SYNTHETIC_HOME_EDGE_EXEC_HMAC = "synthetic-home-edge-exec-hmac-marker"
 
 
+@pytest.fixture(autouse=True)
+def _isolate_runner_vnext_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(runner.RUNNER_VNEXT_MODE_ENV, raising=False)
+
+
 def _media_bootstrap_issue_body(expected_sha: str = HEAD_SHA) -> str:
     return "\n".join(
         (
@@ -277,7 +282,10 @@ def test_poll_once_discovers_native_registered_repo_issue(monkeypatch: pytest.Mo
         "labels": ["runner:ready"],
     }
 
-    monkeypatch.setenv("GITHUB_TOKEN", "public-safe-test-token")
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.setenv(runner.RUNNER_MODE_ENV, runner.RUNNER_MODE_SHADOW)
+    monkeypatch.setenv(runner.RUNNER_VNEXT_MODE_ENV, "shadow")
     monkeypatch.setattr(
         runner,
         "registered_runner_queue_sources",
@@ -5170,6 +5178,34 @@ def test_poll_once_processes_issues_single_lane() -> None:
     assert process_issue.call_args_list == [
         mock.call(issues[0], workdir="/coordinator"),
         mock.call(issues[1], workdir="/coordinator"),
+    ]
+
+
+def test_poll_once_vnext_off_uses_legacy_skeleton_queue_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issues = [{"number": 139}]
+    monkeypatch.delenv(runner.RUNNER_VNEXT_MODE_ENV, raising=False)
+    monkeypatch.setattr(runner, "get_ready_issues", lambda: issues)
+    monkeypatch.setattr(
+        runner,
+        "get_ready_issue_items",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("vNext off must not use registered queue intake")
+        ),
+    )
+    monkeypatch.setattr(runner, "reconcile_scheduler_on_poll", lambda: None)
+    monkeypatch.setattr(
+        runner, "reconcile_terminal_issues_active_execution_labels", lambda: 0
+    )
+    monkeypatch.setattr(runner, "self_heal_run_now_queue_intake", lambda: 0)
+
+    with mock.patch.object(runner, "process_issue") as process_issue:
+        count = runner.poll_once(workdir="/coordinator")
+
+    assert count == 1
+    assert process_issue.call_args_list == [
+        mock.call(issues[0], workdir="/coordinator")
     ]
 
 
