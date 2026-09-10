@@ -136,3 +136,31 @@ def test_reservation_scope_hash_is_authoritative_and_persistent(tmp_path) -> Non
     assert reopened.reservation_event("idem-1").reservation_scope_hash == SCOPE
     rebound = reopened.rebind_fence(identity(), expected_fence_token=5, new_fence_token=6)
     assert rebound.reservation_scope_hash == SCOPE
+
+
+def test_effect_start_marker_is_durable_and_blocks_fence_rebind(tmp_path) -> None:
+    db = tmp_path / "started-ledger.sqlite"
+    ident = identity()
+    first = OperationLedger(db)
+    first.reserve(ident, fence_token=5, reservation_scope_hash=SCOPE)
+    started = first.mark_started(ident, fence_token=5, execution_grant_hash="b" * 64)
+    assert started.execution_grant_hash == "b" * 64
+    assert first.status("idem-1") == "STARTED"
+    first.close()
+    reopened = OperationLedger(db)
+    persisted = reopened.started_event("idem-1")
+    assert persisted.execution_grant_hash == "b" * 64
+    assert reopened.status("idem-1") == "STARTED"
+    with pytest.raises(LedgerError, match="OPERATION_STARTED_FENCE_IMMUTABLE"):
+        reopened.rebind_fence(ident, expected_fence_token=5, new_fence_token=6)
+
+
+def test_effect_start_marker_is_exactly_bound_and_idempotent() -> None:
+    ledger = OperationLedger()
+    ident = identity()
+    ledger.reserve(ident, fence_token=3, reservation_scope_hash=SCOPE)
+    first = ledger.mark_started(ident, fence_token=3, execution_grant_hash="c" * 64)
+    same = ledger.mark_started(ident, fence_token=3, execution_grant_hash="c" * 64)
+    assert same == first
+    with pytest.raises(LedgerError, match="EXECUTION_START_EVIDENCE_MISMATCH"):
+        ledger.mark_started(ident, fence_token=3, execution_grant_hash="d" * 64)

@@ -32,12 +32,13 @@ class GreenExecutionGrant:
     node_snapshot_hash: str
     node_attestation_ref: str
     lane: str
+    lease_scope_key: str = field(repr=False)
     fence_token: int
     environment_policy_hash: str
     operation_id: str
     idempotency_key: str
     adapter_id: str
-    target_state_ref: str
+    target_state_ref: str = field(repr=False)
     reservation_scope_hash: str
     planner_envelope_hash: str
     policy_reason_code: str
@@ -136,6 +137,7 @@ class GreenExecutionGate:
             node_snapshot_hash=handoff.node_snapshot_hash,
             node_attestation_ref=handoff.node_attestation_ref,
             lane=handoff.lane.value,
+            lease_scope_key=handoff.lease_scope_key,
             fence_token=handoff.fence_token,
             environment_policy_hash=handoff.environment_policy_hash,
             operation_id=handoff.operation_id,
@@ -152,9 +154,13 @@ class GreenExecutionGate:
 
     @staticmethod
     def public_projection(grant: GreenExecutionGrant) -> dict[str, object]:
-        return {
+        privacy = grant.planner_envelope.privacy.value
+        projection: dict[str, object] = {
             "schema": "skeleton.runner_green_execution_grant.v1",
-            "task_id": grant.task_id,
+            "privacy": privacy,
+            "task_id_hash": _text_hash(grant.task_id),
+            "operation_id_hash": _text_hash(grant.operation_id),
+            "idempotency_key_hash": _text_hash(grant.idempotency_key),
             "node_id": grant.node_id,
             "node_generation": grant.node_generation,
             "node_snapshot_hash": grant.node_snapshot_hash,
@@ -162,8 +168,6 @@ class GreenExecutionGate:
             "lane": grant.lane,
             "fence_token": grant.fence_token,
             "environment_policy_hash": grant.environment_policy_hash,
-            "operation_id": grant.operation_id,
-            "idempotency_key": grant.idempotency_key,
             "adapter_id": grant.adapter_id,
             "reservation_scope_hash": grant.reservation_scope_hash,
             "planner_envelope_hash": grant.planner_envelope_hash,
@@ -172,6 +176,13 @@ class GreenExecutionGate:
             "execution_authorized": grant.execution_authorized,
             "effect_execution_started": grant.effect_execution_started,
         }
+        if privacy == "PUBLIC_SAFE":
+            projection.update({
+                "task_id": grant.task_id,
+                "operation_id": grant.operation_id,
+                "idempotency_key": grant.idempotency_key,
+            })
+        return projection
 
 
 def planner_envelope_hash(envelope: ExecutionEnvelope) -> str:
@@ -199,3 +210,7 @@ def _validate_handoff_shape(handoff: GreenExecutionHandoff) -> None:
         raise ExecutionGateError("EXECUTION_GATE_EFFECT_ALREADY_STARTED")
     if not handoff.envelope.dry_run:
         raise ExecutionGateError("EXECUTION_GATE_IMMUTABLE_PLANNER_ENVELOPE_REQUIRED")
+
+
+def _text_hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()

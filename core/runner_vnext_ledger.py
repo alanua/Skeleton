@@ -22,6 +22,14 @@ class OperationIdentity:
 
 
 @dataclass(frozen=True)
+class ExecutionStartEvidence:
+    identity: OperationIdentity
+    fence_token: int
+    execution_grant_hash: str
+    reservation_scope_hash: str
+
+
+@dataclass(frozen=True)
 class LedgerEvent:
     sequence: int
     identity: OperationIdentity
@@ -83,6 +91,14 @@ class OperationLedger:
               ON runner_vnext_operation_events(idempotency_key) WHERE event_type='RESERVED';
             CREATE UNIQUE INDEX IF NOT EXISTS runner_vnext_one_terminal
               ON runner_vnext_operation_events(idempotency_key) WHERE terminal=1;
+            CREATE TABLE IF NOT EXISTS runner_vnext_operation_starts (
+                idempotency_key TEXT PRIMARY KEY,
+                operation_id TEXT NOT NULL,
+                target_state_ref TEXT NOT NULL,
+                fence_token INTEGER NOT NULL CHECK(fence_token > 0),
+                execution_grant_hash TEXT NOT NULL,
+                reservation_scope_hash TEXT NOT NULL
+            );
             """
         )
         columns = {row["name"] for row in self._db.execute("PRAGMA table_info(runner_vnext_operation_events)").fetchall()}
@@ -139,6 +155,8 @@ class OperationLedger:
             self._require_identity(identity)
             if self._terminal(identity.idempotency_key) is not None:
                 raise LedgerError("TERMINAL_OPERATION_IMMUTABLE")
+            if self._start(identity.idempotency_key) is not None:
+                raise LedgerError("OPERATION_STARTED_FENCE_IMMUTABLE")
             current = self._current_fence(identity.idempotency_key)
             if current != expected_fence_token:
                 raise LedgerError("STALE_FENCE_TOKEN")
@@ -158,6 +176,37 @@ class OperationLedger:
                 reservation_scope_hash=self._reservation_scope_hash(identity.idempotency_key),
             )
             return _event(self._latest(identity.idempotency_key))
+
+    def mark_started(self, identity: OperationIdentity, *, fence_token: int, execution_grant_hash: str) -> ExecutionStartEvidence:
+        _fence(fence_token)
+        _scope_hash(execution_grant_hash)
+        with self._transaction():
+            self._require_identity(identity)
+            if self._terminal(identity.idempotency_key) is not None:
+                raise LedgerError("TERMINAL_OPERATION_IMMUTABLE")
+            if self._current_fence(identity.idempotency_key) != fence_token:
+                raise LedgerError("STALE_FENCE_TOKEN")
+            scope_hash = self._reservation_scope_hash(identity.idempotency_key)
+            existing = self._start(identity.idempotency_key)
+            if existing is not None:
+                evidence = _start_evidence(existing)
+                if (
+                    evidence.identity == identity
+                    and evidence.fence_token == fence_token
+                    and evidence.execution_grant_hash == execution_grant_hash
+                    and evidence.reservation_scope_hash == scope_hash
+                ):
+                    return evidence
+                raise LedgerError("EXECUTION_START_EVIDENCE_MISMATCH")
+            self._db.execute(
+                "INSERT INTO runner_vnext_operation_starts(idempotency_key,operation_id,target_state_ref,fence_token,execution_grant_hash,reservation_scope_hash) VALUES(?,?,?,?,?,?)",
+                (identity.idempotency_key, identity.operation_id, identity.target_state_ref, fence_token, execution_grant_hash, scope_hash),
+            )
+            return _start_evidence(self._start(identity.idempotency_key))
+
+    def started_event(self, idempotency_key: str) -> ExecutionStartEvidence:
+        with self._lock:
+            return _start_evidence(self._start(idempotency_key))
 
     def finish(self, identity: OperationIdentity, *, fence_token: int, success: bool, reason_code: str,
                touched_resource_refs: tuple[str, ...], before_state_ref: str, after_state_ref: str,
@@ -223,11 +272,20 @@ class OperationLedger:
         if not events:
             return None
         terminal = [event for event in events if event.event_type in {"COMPLETED", "FAILED"}]
-        return terminal[-1].event_type if terminal else "RESERVED"
+        if terminal:
+            return terminal[-1].event_type
+        with self._lock:
+            return "STARTED" if self._start(idempotency_key) is not None else "RESERVED"
 
     def _reservation(self, key: str) -> sqlite3.Row | None:
         return self._db.execute(
             "SELECT * FROM runner_vnext_operation_events WHERE idempotency_key=? AND event_type='RESERVED'",
+            (key,),
+        ).fetchone()
+
+    def _start(self, key: str) -> sqlite3.Row | None:
+        return self._db.execute(
+            "SELECT * FROM runner_vnext_operation_starts WHERE idempotency_key=?",
             (key,),
         ).fetchone()
 
@@ -273,6 +331,17 @@ class OperationLedger:
              fence_token, reason_code, json.dumps(touched_resource_refs), before_state_ref, after_state_ref,
              validation_status, external_dedupe_nonce, reservation_scope_hash),
         )
+
+
+def _start_evidence(row: sqlite3.Row | None) -> ExecutionStartEvidence:
+    if row is None:
+        raise LedgerError("EXECUTION_START_EVIDENCE_MISSING")
+    return ExecutionStartEvidence(
+        identity=OperationIdentity(row["operation_id"], row["idempotency_key"], row["target_state_ref"]),
+        fence_token=int(row["fence_token"]),
+        execution_grant_hash=row["execution_grant_hash"],
+        reservation_scope_hash=row["reservation_scope_hash"],
+    )
 
 
 def _event(row: sqlite3.Row | None) -> LedgerEvent:
