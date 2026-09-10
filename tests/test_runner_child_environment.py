@@ -27,6 +27,7 @@ def test_sanitize_codegen_child_environment_removes_home_edge_and_provider_autho
         "SKELETON_OPENHANDS_BIN": "/untrusted/openhands",
         "SKELETON_REAL_CODEX_BIN": "/untrusted/codex",
         "SKELETON_CODEGEN_ORIGINAL_PATH": "/untrusted/path",
+        "CODEX_HOME": "/untrusted/codex-home",
     }
     monkeypatch.setattr(child_env, "should_attempt_codex_runtime_recovery", lambda _env: False)
     monkeypatch.setattr(child_env, "_install_fallback_wrapper", lambda _env, _authority: None)
@@ -141,6 +142,7 @@ def test_codegen_environment_binds_wrapper_to_pinned_codex_only(tmp_path: Path, 
     wrapper = wrapper_dir / "codex"
     assert wrapper.is_file()
     assert sanitized["HOME"] == str(tmp_path)
+    assert sanitized["CODEX_HOME"] == str(tmp_path / ".codex")
     assert sanitized["PATH"].split(":", 1)[0] == str(wrapper_dir)
     assert sanitized["SKELETON_REAL_CODEX_BIN"] == str(codex.resolve())
     assert "SKELETON_OPENHANDS_BIN" not in sanitized
@@ -205,6 +207,7 @@ def test_caller_overlay_cannot_replace_recovery_home_or_path(tmp_path: Path, mon
             "PATH": "/overlay/bin",
             "INVOCATION_ID": "overlay",
             "SKELETON_REAL_CODEX_BIN": "/overlay/codex",
+            "CODEX_HOME": "/overlay/codex-home",
             "SKELETON_OPENHANDS_BIN": "/overlay/openhands",
         },
         authority_environment=authority,
@@ -215,6 +218,7 @@ def test_caller_overlay_cannot_replace_recovery_home_or_path(tmp_path: Path, mon
     assert all(item.get("PATH") == str(trusted_bin) for item in observed)
     assert all(item.get("INVOCATION_ID") == "trusted" for item in observed)
     assert sanitized["HOME"] == str(trusted_home)
+    assert sanitized["CODEX_HOME"] == str(trusted_home / ".codex")
     assert sanitized["SKELETON_REAL_CODEX_BIN"] == str(codex.resolve())
     assert sanitized["PATH"].endswith(str(trusted_bin))
     assert "SKELETON_OPENHANDS_BIN" not in sanitized
@@ -235,6 +239,7 @@ def test_codegen_wrapper_binds_pinned_codex_without_external_executor(tmp_path: 
     wrapper = tmp_path / ".local" / "state" / "skeleton-runner" / "codegen-fallback-bin" / "codex"
     assert wrapper.is_file()
     assert sanitized["HOME"] == str(tmp_path)
+    assert sanitized["CODEX_HOME"] == str(tmp_path / ".codex")
     assert sanitized["SKELETON_REAL_CODEX_BIN"] == str(codex.resolve())
     assert "SKELETON_OPENHANDS_BIN" not in sanitized
     assert sanitized["PATH"] == f"{wrapper.parent}:/trusted/bin"
@@ -279,15 +284,28 @@ def _write_executable(path: Path, body: str) -> None:
     path.chmod(0o700)
 
 
-def _run_wrapper(tmp_path: Path, *, codex_body: str) -> tuple[subprocess.CompletedProcess[str], Path]:
+def _run_wrapper(
+    tmp_path: Path,
+    *,
+    codex_body: str,
+    extra_args: list[str] | None = None,
+    linked_git_metadata: bool = False,
+) -> tuple[subprocess.CompletedProcess[str], Path]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     workdir = tmp_path / "work"
     workdir.mkdir()
+    if linked_git_metadata:
+        common = tmp_path / "repo" / ".git"
+        gitdir = common / "worktrees" / "work"
+        gitdir.mkdir(parents=True)
+        (gitdir / "commondir").write_text("../..\n", encoding="utf-8")
+        (workdir / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
     codex = bin_dir / "codex-real"
     openhands = bin_dir / "openhands-real"
     wrapper = bin_dir / "codex"
     fallback_marker = tmp_path / "openhands-called"
+    (tmp_path / "package.json").write_text("{}\n", encoding="utf-8")
     _write_executable(codex, codex_body)
     _write_executable(
         openhands,
@@ -303,10 +321,20 @@ def _run_wrapper(tmp_path: Path, *, codex_body: str) -> tuple[subprocess.Complet
             "SKELETON_CODEGEN_ORIGINAL_PATH": environment.get("PATH", "/usr/bin:/bin"),
             "OPENHANDS_MARKER": str(fallback_marker),
             "OPENROUTER_API_KEY": "synthetic-provider-secret",
+            "CODEX_HOME": str(tmp_path / "canonical-codex-home"),
         }
     )
     result = subprocess.run(
-        [str(wrapper), "exec", "--cd", str(workdir), "-"],
+        [
+            str(wrapper),
+            "exec",
+            "--sandbox",
+            "workspace-write",
+            *(extra_args or []),
+            "--cd",
+            str(workdir),
+            "-",
+        ],
         input="synthetic bounded task",
         text=True,
         stdout=subprocess.PIPE,
@@ -315,6 +343,85 @@ def _run_wrapper(tmp_path: Path, *, codex_body: str) -> tuple[subprocess.Complet
         check=False,
     )
     return result, fallback_marker
+
+
+def test_codegen_wrapper_preserves_bound_codex_home(tmp_path: Path) -> None:
+    result, _ = _run_wrapper(
+        tmp_path,
+        codex_body="#!/bin/sh\nprintf '%s\\n' \"$CODEX_HOME\"\nexit 0\n",
+    )
+    assert result.returncode == 0
+    assert str(tmp_path / "canonical-codex-home") in result.stdout
+
+
+def test_codegen_wrapper_enforces_permission_profile(tmp_path: Path) -> None:
+    result, _ = _run_wrapper(
+        tmp_path,
+        codex_body="#!/bin/sh\nprintf '%s\\n' \"$@\"\nexit 0\n",
+    )
+    assert result.returncode == 0
+    lines = result.stdout.splitlines()
+    assert "--sandbox" not in lines
+    assert "--ignore-user-config" in lines
+    assert 'approval_policy="never"' in lines
+    assert 'default_permissions="runner-codegen"' in lines
+    filesystem = next(
+        line for line in lines if line.startswith("permissions.runner-codegen.filesystem=")
+    )
+    assert '":root"="deny"' in filesystem
+    assert '":minimal"="read"' in filesystem
+    assert '":workspace_roots"={"."="write"}' in filesystem
+    assert str(tmp_path.resolve()) in filesystem
+    assert "permissions.runner-codegen.network={enabled=false}" in lines
+
+
+def test_codegen_wrapper_uses_supported_chatgpt_default_model(tmp_path: Path) -> None:
+    result, _ = _run_wrapper(
+        tmp_path,
+        codex_body="#!/bin/sh\nprintf '%s\\n' \"$@\"\nexit 0\n",
+    )
+    assert result.returncode == 0
+    lines = result.stdout.splitlines()
+    model_index = lines.index("--model")
+    assert lines[model_index + 1] == "gpt-5.6-sol"
+
+
+def test_codegen_wrapper_rejects_security_override(tmp_path: Path) -> None:
+    result, _ = _run_wrapper(
+        tmp_path,
+        codex_body="#!/bin/sh\nexit 99\n",
+        extra_args=["--add-dir", str(tmp_path)],
+    )
+    assert result.returncode == 125
+
+
+def test_codegen_wrapper_rejects_danger_full_access_override(tmp_path: Path) -> None:
+    result, _ = _run_wrapper(
+        tmp_path,
+        codex_body="#!/bin/sh\nexit 99\n",
+        extra_args=["--sandbox=danger-full-access"],
+    )
+    assert result.returncode == 125
+
+
+def test_codegen_wrapper_grants_git_metadata_read_only_roots(tmp_path: Path) -> None:
+    result, _ = _run_wrapper(
+        tmp_path,
+        codex_body="#!/bin/sh\nprintf '%s\\n' \"$@\"\nexit 0\n",
+        linked_git_metadata=True,
+    )
+    assert result.returncode == 0
+    filesystem = next(
+        line
+        for line in result.stdout.splitlines()
+        if line.startswith("permissions.runner-codegen.filesystem=")
+    )
+    worktree_dotgit = tmp_path / "work" / ".git"
+    gitdir = tmp_path / "repo" / ".git" / "worktrees" / "work"
+    common = tmp_path / "repo" / ".git"
+    assert f'{worktree_dotgit.resolve()}\"=\"read\"' in filesystem
+    assert f'{gitdir.resolve()}\"=\"read\"' in filesystem
+    assert f'{common.resolve()}\"=\"read\"' in filesystem
 
 
 def test_codegen_wrapper_does_not_fallback_for_exact_model_metadata_decoder_failure(tmp_path: Path) -> None:

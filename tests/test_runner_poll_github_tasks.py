@@ -23218,3 +23218,18 @@ def test_runner_controller_refresh_blocks_registry_drift_receipt_without_done(
     assert "mutation_performed=false" in report
     assert "external_side_effects_executed=false" in report
     assert "reason=ACTION_REGISTRY_DRIFT" in report
+
+
+def test_codegen_bookkeeping_home_preserves_bound_codex_home(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    environment = {
+        "HOME": "/home/agent",
+        "PATH": "/usr/bin",
+        "CODEX_HOME": "/home/agent/.codex",
+    }
+
+    isolated = runner._codegen_environment_with_bookkeeping(environment, state_dir)
+
+    assert isolated["HOME"] == str(state_dir / "home")
+    assert isolated["CODEX_HOME"] == "/home/agent/.codex"
+    assert isolated["TMPDIR"] == str(state_dir / "tmp")
