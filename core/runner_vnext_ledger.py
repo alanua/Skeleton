@@ -33,6 +33,7 @@ class LedgerEvent:
     after_state_ref: str | None
     validation_status: str | None
     external_dedupe_nonce: str | None
+    reservation_scope_hash: str | None
 
 
 class OperationLedger:
@@ -75,7 +76,8 @@ class OperationLedger:
                 before_state_ref TEXT,
                 after_state_ref TEXT,
                 validation_status TEXT,
-                external_dedupe_nonce TEXT
+                external_dedupe_nonce TEXT,
+                reservation_scope_hash TEXT
             );
             CREATE UNIQUE INDEX IF NOT EXISTS runner_vnext_one_reservation
               ON runner_vnext_operation_events(idempotency_key) WHERE event_type='RESERVED';
@@ -83,6 +85,9 @@ class OperationLedger:
               ON runner_vnext_operation_events(idempotency_key) WHERE terminal=1;
             """
         )
+        columns = {row["name"] for row in self._db.execute("PRAGMA table_info(runner_vnext_operation_events)").fetchall()}
+        if "reservation_scope_hash" not in columns:
+            self._db.execute("ALTER TABLE runner_vnext_operation_events ADD COLUMN reservation_scope_hash TEXT")
 
     @contextmanager
     def _transaction(self) -> Iterator[None]:
@@ -96,9 +101,10 @@ class OperationLedger:
             else:
                 self._db.execute("COMMIT")
 
-    def reserve(self, identity: OperationIdentity, *, fence_token: int, external_dedupe_nonce: str | None = None) -> LedgerEvent:
+    def reserve(self, identity: OperationIdentity, *, fence_token: int, reservation_scope_hash: str, external_dedupe_nonce: str | None = None) -> LedgerEvent:
         _identity(identity)
         _fence(fence_token)
+        _scope_hash(reservation_scope_hash)
         _nonce(external_dedupe_nonce)
         with self._transaction():
             existing = self._reservation(identity.idempotency_key)
@@ -108,6 +114,8 @@ class OperationLedger:
                     raise LedgerError("IDEMPOTENCY_TARGET_STATE_MISMATCH")
                 if event.external_dedupe_nonce != external_dedupe_nonce:
                     raise LedgerError("IDEMPOTENCY_DEDUPE_NONCE_MISMATCH")
+                if event.reservation_scope_hash != reservation_scope_hash:
+                    raise LedgerError("IDEMPOTENCY_SCOPE_HASH_MISMATCH")
                 return event
             self._insert(
                 identity=identity,
@@ -120,6 +128,7 @@ class OperationLedger:
                 after_state_ref=None,
                 validation_status=None,
                 external_dedupe_nonce=external_dedupe_nonce,
+                reservation_scope_hash=reservation_scope_hash,
             )
             return _event(self._reservation(identity.idempotency_key))
 
@@ -146,6 +155,7 @@ class OperationLedger:
                 after_state_ref=None,
                 validation_status=None,
                 external_dedupe_nonce=None,
+                reservation_scope_hash=self._reservation_scope_hash(identity.idempotency_key),
             )
             return _event(self._latest(identity.idempotency_key))
 
@@ -188,6 +198,7 @@ class OperationLedger:
                 after_state_ref=after_state_ref,
                 validation_status=validation_status,
                 external_dedupe_nonce=None,
+                reservation_scope_hash=self._reservation_scope_hash(identity.idempotency_key),
             )
             return _event(self._terminal(identity.idempotency_key))
 
@@ -198,6 +209,14 @@ class OperationLedger:
                 (idempotency_key,),
             ).fetchall()
             return tuple(_event(row) for row in rows)
+
+    def reservation_event(self, idempotency_key: str) -> LedgerEvent:
+        with self._lock:
+            return _event(self._reservation(idempotency_key))
+
+    def current_fence_token(self, idempotency_key: str) -> int:
+        with self._lock:
+            return self._current_fence(idempotency_key)
 
     def status(self, idempotency_key: str) -> str | None:
         events = self.history(idempotency_key)
@@ -230,6 +249,12 @@ class OperationLedger:
     def _current_fence(self, key: str) -> int:
         return int(self._latest(key)["fence_token"])
 
+    def _reservation_scope_hash(self, key: str) -> str:
+        row = self._reservation(key)
+        if row is None or not row["reservation_scope_hash"]:
+            raise LedgerError("RESERVATION_SCOPE_HASH_MISSING")
+        return str(row["reservation_scope_hash"])
+
     def _require_identity(self, identity: OperationIdentity) -> None:
         row = self._reservation(identity.idempotency_key)
         if row is None:
@@ -240,13 +265,13 @@ class OperationLedger:
     def _insert(self, *, identity: OperationIdentity, event_type: str, terminal: int, fence_token: int,
                 reason_code: str, touched_resource_refs: tuple[str, ...], before_state_ref: str | None,
                 after_state_ref: str | None, validation_status: str | None,
-                external_dedupe_nonce: str | None) -> None:
+                external_dedupe_nonce: str | None, reservation_scope_hash: str | None) -> None:
         import json
         self._db.execute(
-            "INSERT INTO runner_vnext_operation_events(operation_id,idempotency_key,target_state_ref,event_type,terminal,fence_token,reason_code,touched_resource_refs,before_state_ref,after_state_ref,validation_status,external_dedupe_nonce) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO runner_vnext_operation_events(operation_id,idempotency_key,target_state_ref,event_type,terminal,fence_token,reason_code,touched_resource_refs,before_state_ref,after_state_ref,validation_status,external_dedupe_nonce,reservation_scope_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (identity.operation_id, identity.idempotency_key, identity.target_state_ref, event_type, terminal,
              fence_token, reason_code, json.dumps(touched_resource_refs), before_state_ref, after_state_ref,
-             validation_status, external_dedupe_nonce),
+             validation_status, external_dedupe_nonce, reservation_scope_hash),
         )
 
 
@@ -265,6 +290,7 @@ def _event(row: sqlite3.Row | None) -> LedgerEvent:
         after_state_ref=row["after_state_ref"],
         validation_status=row["validation_status"],
         external_dedupe_nonce=row["external_dedupe_nonce"],
+        reservation_scope_hash=row["reservation_scope_hash"],
     )
 
 
@@ -293,3 +319,8 @@ def _public_refs(refs: tuple[str, ...]) -> None:
     for ref in refs:
         if not ref or ref.startswith(("/", "~")) or "\\" in ref or ".." in ref or ":" not in ref:
             raise LedgerError("PUBLIC_RESOURCE_REF_REQUIRED")
+
+
+def _scope_hash(value: str) -> None:
+    if len(value) != 64 or any(ch not in "0123456789abcdef" for ch in value):
+        raise LedgerError("RESERVATION_SCOPE_HASH_INVALID")
