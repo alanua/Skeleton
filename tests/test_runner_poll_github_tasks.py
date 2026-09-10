@@ -19273,6 +19273,8 @@ def test_validate_pr_branch_bauclock_time_ledger_profile_uses_target_checkout(
         "_create_validation_pytest_temp_root",
         side_effect=create_pytest_temp_root,
     ), mock.patch.object(
+        runner, "_remove_validation_pytest_temp_root", return_value=None
+    ), mock.patch.object(
         runner, "run_command", side_effect=run_validation_command
     ) as run:
         report = runner.validate_pr_branch(
@@ -21376,6 +21378,55 @@ def test_create_validation_pytest_temp_root_ignores_unsafe_repo_temp_parent(
     finally:
         runner.shutil.rmtree(temp_root)
     assert not list(tmp_path.glob(".runner-validation-pytest-*"))
+
+
+def test_validation_pytest_temp_cleanup_handles_owner_readonly_tree(tmp_path: Path) -> None:
+    temp_root = runner._create_validation_pytest_temp_root(tmp_path)
+    readonly_dir = temp_root / "readonly"
+    readonly_dir.mkdir()
+    manifest = readonly_dir / "manifest.json"
+    manifest.write_text("{}\n", encoding="utf-8")
+    manifest.chmod(0o444)
+    readonly_dir.chmod(0o555)
+
+    runner._remove_validation_pytest_temp_root(temp_root)
+
+    assert not temp_root.exists()
+
+
+def test_validation_cleanup_failure_preserves_pytest_failure_result(tmp_path: Path) -> None:
+    synthetic_root = tmp_path / ".runner-validation-pytest-synthetic"
+    synthetic_root.mkdir()
+    with mock.patch.object(
+        runner, "_create_validation_pytest_temp_root", return_value=synthetic_root
+    ), mock.patch.object(
+        runner, "_remove_validation_pytest_temp_root", side_effect=RuntimeError("cleanup failed")
+    ), mock.patch.object(
+        runner, "run_command", return_value=(1, "pytest failed")
+    ):
+        code, output = runner._run_validation_profile_command(
+            ["python3", "-m", "pytest", "-q"], cwd=tmp_path
+        )
+
+    assert code == 1
+    assert "pytest failed" in output
+    assert "RUNNER_VALIDATION_TEMP_CLEANUP=failed_preserved_primary_result" in output
+
+
+def test_validation_cleanup_failure_fails_closed_after_success(tmp_path: Path) -> None:
+    synthetic_root = tmp_path / ".runner-validation-pytest-synthetic"
+    synthetic_root.mkdir()
+    with mock.patch.object(
+        runner, "_create_validation_pytest_temp_root", return_value=synthetic_root
+    ), mock.patch.object(
+        runner, "_remove_validation_pytest_temp_root", side_effect=RuntimeError("cleanup failed")
+    ), mock.patch.object(
+        runner, "run_command", return_value=(0, "pytest passed")
+    ):
+        with pytest.raises(RuntimeError, match="validation_temp_cleanup_failed"):
+            runner._run_validation_profile_command(
+                ["python3", "-m", "pytest", "-q"], cwd=tmp_path
+            )
 
 
 def test_finalize_success_validation_subprocesses_use_sanitized_environment(
