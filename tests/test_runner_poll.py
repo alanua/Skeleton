@@ -460,6 +460,7 @@ def test_run_codex_task_calls_codex_exec(monkeypatch: pytest.MonkeyPatch) -> Non
             runner.build_codex_task_prompt("Task body", "/repo"),
         ],
         cwd="/repo",
+        observe_process_spawn=True,
     )
 
 

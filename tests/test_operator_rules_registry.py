@@ -29,6 +29,16 @@ def operator_rule_source_refs(registry: dict) -> list[str]:
 
 
 def yaml_fragment_resolves(value: object, fragment: str) -> bool:
+    parts = fragment.split(":")
+    if len(parts) > 1:
+        current = value
+        for part in parts:
+            if not isinstance(current, dict) or part not in current:
+                break
+            current = current[part]
+        else:
+            return True
+
     if isinstance(value, dict):
         return any(
             str(key) == fragment or yaml_fragment_resolves(child, fragment)
