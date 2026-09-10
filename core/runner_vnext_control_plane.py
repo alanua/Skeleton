@@ -24,6 +24,9 @@ class GreenExecutionHandoff:
     task_id: str
     node_id: str
     node_generation: int
+    node_snapshot_hash: str
+    node_attestation_ref: str
+    node_expires_at: float
     lane: Lane
     lease_scope_key: str
     fence_token: int
@@ -78,6 +81,8 @@ class GreenControlPlane:
     ) -> GreenExecutionHandoff:
         if not _public_ref(lease_scope_key):
             raise ControlPlaneError("CONTROL_PLANE_LEASE_SCOPE_INVALID")
+        if not _public_ref(target_state_ref):
+            raise ControlPlaneError("CONTROL_PLANE_TARGET_STATE_REF_INVALID")
         _validate_task_operation(task, operation)
         policy_input = PolicyInput(
             operation=operation,
@@ -183,6 +188,9 @@ class GreenControlPlane:
             task=task,
             route_node_id=route.selected_node_id,
             route_generation=route.selected_generation,
+            route_snapshot_hash=route.selected_snapshot_hash,
+            route_attestation_ref=route.selected_attestation_ref,
+            route_expires_at=route.selected_expires_at,
             lane=lane,
             lease_scope_key=lease_scope_key,
             fence_token=lease.fence_token,
@@ -234,6 +242,9 @@ class GreenControlPlane:
             "task_id": handoff.task_id,
             "node_id": handoff.node_id,
             "node_generation": handoff.node_generation,
+            "node_snapshot_hash": handoff.node_snapshot_hash,
+            "node_attestation_ref": handoff.node_attestation_ref,
+            "node_expires_at": handoff.node_expires_at,
             "lane": handoff.lane.value,
             "fence_token": handoff.fence_token,
             "environment_policy_hash": handoff.environment_policy_hash,
@@ -255,6 +266,9 @@ def _handoff(
     task: UniversalTask,
     route_node_id: str,
     route_generation: int,
+    route_snapshot_hash: str | None,
+    route_attestation_ref: str | None,
+    route_expires_at: float | None,
     lane: Lane,
     lease_scope_key: str,
     fence_token: int,
@@ -263,10 +277,15 @@ def _handoff(
     authorization: PEPAuthorizationReceipt,
     scope_hash: str,
 ) -> GreenExecutionHandoff:
+    if route_snapshot_hash is None or route_attestation_ref is None or route_expires_at is None:
+        raise ControlPlaneError("CONTROL_PLANE_ROUTE_SNAPSHOT_BINDING_REQUIRED")
     return GreenExecutionHandoff(
         task_id=task.task_id,
         node_id=route_node_id,
         node_generation=route_generation,
+        node_snapshot_hash=route_snapshot_hash,
+        node_attestation_ref=route_attestation_ref,
+        node_expires_at=route_expires_at,
         lane=lane,
         lease_scope_key=lease_scope_key,
         fence_token=fence_token,
@@ -283,6 +302,10 @@ def _handoff(
 
 
 def _validate_task_operation(task: UniversalTask, operation: OperationIR) -> None:
+    if not _public_ref(operation.operation_id) or not operation.operation_id.startswith("op:"):
+        raise ControlPlaneError("CONTROL_PLANE_OPERATION_ID_INVALID")
+    if not _public_ref(task.idempotency_key) or not task.idempotency_key.startswith("idem:"):
+        raise ControlPlaneError("CONTROL_PLANE_IDEMPOTENCY_KEY_INVALID")
     if task.idempotency_key != operation.idempotency_key:
         raise ControlPlaneError("CONTROL_PLANE_TASK_OPERATION_IDEMPOTENCY_MISMATCH")
     if task.target_resources != operation.resources:

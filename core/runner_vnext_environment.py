@@ -63,6 +63,12 @@ class LaneEnvironmentPolicyRegistry:
             if lane_id != policy.lane_id:
                 raise EnvironmentContractError("ENV_POLICY_REGISTRY_LANE_MISMATCH")
 
+    def policy_hash(self, lane_id: str) -> str:
+        policy = self._policies.get(lane_id)
+        if policy is None:
+            raise EnvironmentContractError("ENV_POLICY_LANE_UNKNOWN")
+        return lane_environment_policy_hash(policy)
+
     def build(
         self,
         *,

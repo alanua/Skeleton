@@ -74,6 +74,20 @@ class NodeCapabilityRegistry:
             )
         )
 
+    def require_current(
+        self, *, node_id: str, generation: int, snapshot_hash: str, now: float
+    ) -> NodeCapabilitySnapshot:
+        snapshot = self._snapshots.get(node_id)
+        if snapshot is None:
+            raise RoutingError("NODE_SNAPSHOT_MISSING")
+        if snapshot.generation != generation:
+            raise RoutingError("NODE_GENERATION_MISMATCH")
+        if not (snapshot.observed_at <= now < snapshot.expires_at):
+            raise RoutingError("NODE_SNAPSHOT_EXPIRED")
+        if node_capability_snapshot_hash(snapshot) != snapshot_hash:
+            raise RoutingError("NODE_SNAPSHOT_HASH_MISMATCH")
+        return snapshot
+
 
 class RoutePlanner:
     def __init__(self, registry: NodeCapabilityRegistry) -> None:
