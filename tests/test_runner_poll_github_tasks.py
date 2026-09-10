@@ -264,6 +264,127 @@ def _merge_pr_state(**updates: object) -> dict[str, object]:
     return state
 
 
+def test_poll_once_discovers_native_registered_repo_issue(monkeypatch: pytest.MonkeyPatch) -> None:
+    skeleton_source = runner.RunnerVNextQueueSource("skeleton", runner.REPO)
+    lavalamp_source = runner.RunnerVNextQueueSource("lavalamp", "alanua/Lavalamp")
+    native_issue = {
+        "number": 7,
+        "title": "Native",
+        "body": "```task\nDo it.\n```",
+        "state": "OPEN",
+        "closed": False,
+        "url": "https://github.com/alanua/Lavalamp/issues/7",
+        "labels": ["runner:ready"],
+    }
+
+    monkeypatch.setenv("GITHUB_TOKEN", "public-safe-test-token")
+    monkeypatch.setattr(
+        runner,
+        "registered_runner_queue_sources",
+        lambda _project_tree: (skeleton_source, lavalamp_source),
+    )
+    monkeypatch.setattr(runner, "load_runner_project_tree", lambda: {"projects": {}})
+    monkeypatch.setattr(runner, "get_ready_issues", lambda: [])
+    monkeypatch.setattr(runner, "reconcile_scheduler_on_poll", lambda: None)
+    monkeypatch.setattr(
+        runner, "reconcile_terminal_issues_active_execution_labels", lambda: 0
+    )
+    monkeypatch.setattr(runner, "self_heal_run_now_queue_intake", lambda: 0)
+
+    commands: list[list[str]] = []
+
+    def run_command(command: list[str], **_kwargs: object) -> tuple[int, str]:
+        commands.append(command)
+        assert command[command.index("--repo") + 1] == "alanua/Lavalamp"
+        return 0, json.dumps([native_issue])
+
+    with mock.patch.object(runner, "run_command", side_effect=run_command), mock.patch.object(
+        runner, "process_issue"
+    ) as process_issue:
+        count = runner.poll_once(workdir="/coordinator")
+
+    assert count == 1
+    assert process_issue.call_args_list == [
+        mock.call(
+            native_issue,
+            workdir="/coordinator",
+            source_repository="alanua/Lavalamp",
+        )
+    ]
+    assert commands
+
+
+def test_native_registered_repo_issue_defaults_target_to_source_repo() -> None:
+    task, reason = runner.extract_runner_task(
+        "```task\nDo it.\n```",
+        default_repository="alanua/Lavalamp",
+    )
+
+    assert reason is None
+    assert task is not None
+    assert task.target_project == "lavalamp"
+    assert task.target_repository == "alanua/Lavalamp"
+
+
+def test_native_registered_repo_worktree_identity_does_not_collide_with_skeleton_control_issue() -> None:
+    skeleton_control_path = runner.target_repository_issue_worktree_path(
+        "alanua/Lavalamp",
+        7,
+    )
+    native_path = runner.target_repository_issue_worktree_path(
+        "alanua/Lavalamp",
+        7,
+        source_repository="alanua/Lavalamp",
+    )
+
+    assert native_path != skeleton_control_path
+    assert skeleton_control_path.name == "issue-7"
+    assert native_path.name == "issue-alanua-Lavalamp-7"
+    assert runner.issue_branch(7) == "runner/issue-7"
+    assert (
+        runner.issue_branch(7, source_repository="alanua/Lavalamp")
+        == "runner/alanua-Lavalamp-issue-7"
+    )
+
+
+def test_process_issue_routes_comments_and_labels_to_source_repository(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issue = {
+        "number": 7,
+        "title": "Native",
+        "body": "No task yet",
+        "state": "OPEN",
+        "closed": False,
+    }
+    commands: list[list[str]] = []
+
+    def run_command(command: list[str], **_kwargs: object) -> tuple[int, str]:
+        commands.append(command)
+        if command[:3] == ["gh", "issue", "view"]:
+            return 0, json.dumps({"labels": [{"name": runner.LABEL_READY}]})
+        return 0, ""
+
+    monkeypatch.setattr(runner, "record_runner_executor_result", lambda *args: None)
+    monkeypatch.setattr(runner, "notify_task_finished", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        runner, "maybe_replenish_runner_queue_after_completion", lambda: False
+    )
+
+    with mock.patch.object(runner, "run_command", side_effect=run_command):
+        runner.process_issue(issue, source_repository="alanua/Lavalamp")
+
+    issue_commands = [
+        command for command in commands if command[:2] == ["gh", "issue"]
+    ]
+    assert issue_commands
+    assert {
+        command[command.index("--repo") + 1]
+        for command in issue_commands
+        if "--repo" in command
+    } == {"alanua/Lavalamp"}
+
+
 def _inspect_pr_issue_body(
     *,
     pr_number: int | str | None = 123,
