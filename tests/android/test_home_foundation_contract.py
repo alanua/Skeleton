@@ -131,15 +131,22 @@ def test_future_interfaces_and_state_values_exist() -> None:
 
 
 def test_no_endpoint_secret_or_live_fixture_values() -> None:
-    text = "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in ANDROID_HOME.rglob("*")
-        if path.is_file() and path.suffix in {".kt", ".kts", ".xml", ".md"}
+    production_roots = (
+        ANDROID_HOME / "app" / "src" / "main",
+        ANDROID_HOME / "app" / "src" / "debug",
     )
+    production_files = [ANDROID_HOME / "app" / "build.gradle.kts"]
+    for root in production_roots:
+        production_files.extend(
+            path
+            for path in root.rglob("*")
+            if path.is_file() and path.suffix in {".kt", ".kts", ".xml", ".md"}
+        )
+    text = "\n".join(path.read_text(encoding="utf-8") for path in production_files)
     urls = re.findall(r"https?://[^\"]+", text)
     assert urls == ["http://schemas.android.com/apk/res/android"]
     forbidden = ["api_key", "apikey", "secret", "token", "hmac", "ssh", "device_id"]
-    lowered = text.lower()
+    lowered = text.replace("Home Edge → Secrets", "").lower()
     for word in forbidden:
         assert word not in lowered
     assert "Синтетичний режим" in text

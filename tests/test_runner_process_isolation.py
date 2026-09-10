@@ -303,7 +303,10 @@ print(json.dumps({
 def test_completed_parent_cannot_leave_descendant_running(
     tmp_path: Path,
 ) -> None:
-    runner = isolator(grace=0.1)
+    runner = isolator(
+        grace=0.1,
+        limits=RunnerProcessLimits(process_count=1024),
+    )
     marker = tmp_path / "descendant-leaked"
 
     child_script = """

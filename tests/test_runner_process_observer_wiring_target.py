@@ -4,8 +4,9 @@ from pathlib import Path
 def test_observer_is_wired_only_to_real_codex_spawn() -> None:
     text = Path("scripts/runner_poll_github_tasks.py").read_text(encoding="utf-8")
     assert text.count("observe_process_spawn=True") == 1
+    assert "codex_command = codex_exec_command(task_content, workdir, task)" in text
     expected = '''            codex_code, codex_output = run_command(
-                codex_exec_command(task_content, workdir, task),
+                codex_command,
                 cwd=workdir,
                 observe_process_spawn=True,
             )
