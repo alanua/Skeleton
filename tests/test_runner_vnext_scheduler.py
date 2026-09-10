@@ -43,3 +43,13 @@ def test_labels_are_not_scheduler_input() -> None:
     annotations = LaneRequest.__annotations__
     assert "labels" not in annotations
     assert "github_labels" not in annotations
+
+
+def test_scheduler_can_release_exact_fenced_request() -> None:
+    store = LaneLeaseStore(clock=lambda: 1.0)
+    scheduler = VNextScheduler(store)
+    request = LaneRequest("task:1", Lane.CODEGEN, "node:runner", "repo:branch", 10, "git:a")
+    lease = scheduler.reserve(request)
+    released = scheduler.release(request, fence_token=lease.fence_token)
+    assert released.status == "RELEASED"
+    assert store.current(lane=Lane.CODEGEN, scope_key="repo:branch") is None
