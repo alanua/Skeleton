@@ -1241,6 +1241,7 @@ class PreflightPrRefreshRequest:
 
 @dataclass(frozen=True)
 class PrMergeabilityInspectionRequest:
+    repository: str
     pr_number: int
     expected_head_sha: str | None
 
@@ -5171,6 +5172,17 @@ def extract_pr_number(pr_url: str) -> int | None:
     if not match:
         return None
     return int(match.group("number"))
+
+
+def extract_pr_repository(pr_url: str) -> str | None:
+    match = re.fullmatch(
+        r"https://github\.com/(?P<owner>[A-Za-z0-9_.-]+)/"
+        r"(?P<repo>[A-Za-z0-9_.-]+)/pull/[1-9]\d*/?",
+        pr_url,
+    )
+    if match is None:
+        return None
+    return f"{match.group('owner')}/{match.group('repo')}"
 
 
 def extract_runner_report_pr_binding(
@@ -10342,6 +10354,7 @@ def _validate_pr_branch_continuation_body(
     head_sha: str,
     base_sha: str,
     source_issue: int,
+    source_repository: str,
     idempotency_key: str,
 ) -> str:
     return "\n".join(
@@ -10359,6 +10372,7 @@ def _validate_pr_branch_continuation_body(
             f"Expected Head SHA: {head_sha}",
             f"Expected Base SHA: {base_sha}",
             "Validation Profile: full_pytest",
+            f"Source Repository: {source_repository}",
             f"Source Issue: {source_issue}",
             "",
             "```task",
@@ -10457,13 +10471,16 @@ def ensure_codegen_pr_validation_continuation(
     pr_number = extract_pr_number(pr_url)
     if pr_number is None:
         return None
+    repository = extract_pr_repository(pr_url)
+    if repository not in ALLOWED_TARGET_REPOSITORIES:
+        raise RuntimeError("produced_pr_repository_not_allowed")
     declared_pr = _declared_existing_pr_number(issue_body)
     if declared_pr is not None and declared_pr != pr_number:
         raise RuntimeError("publication_contract_existing_pr_mismatch")
     if declared_pr is None and _codegen_publication_contract_requires_existing_pr(issue_body):
         raise RuntimeError("publication_contract_existing_pr_unverifiable")
 
-    pr_state, _source = _get_pr_branch_validation_state(REPO, pr_number)
+    pr_state, _source = _get_pr_branch_validation_state(repository, pr_number)
     if pr_state.get("state") != "OPEN":
         raise RuntimeError("produced_pr_not_open")
     head_sha = str(pr_state.get("headRefOid") or "").lower()
@@ -10487,12 +10504,12 @@ def ensure_codegen_pr_validation_continuation(
             raise RuntimeError("declared_existing_pr_head_stale")
 
     idempotency_key = _continuation_issue_idempotency_key(
-        REPO, pr_number, head_sha, base_sha
+        repository, pr_number, head_sha, base_sha
     )
     existing_issue = _find_existing_validation_continuation_issue(idempotency_key)
     if existing_issue is not None:
         return ProducedPrValidationContinuation(
-            repository=REPO,
+            repository=repository,
             pr_number=pr_number,
             pr_url=pr_url,
             head_sha=head_sha,
@@ -10505,11 +10522,12 @@ def ensure_codegen_pr_validation_continuation(
         )
 
     body = _validate_pr_branch_continuation_body(
-        repository=REPO,
+        repository=repository,
         pr_number=pr_number,
         head_sha=head_sha,
         base_sha=base_sha,
         source_issue=source_issue,
+        source_repository=_current_queue_repository(),
         idempotency_key=idempotency_key,
     )
     issue_number = _create_validation_continuation_issue(
@@ -10517,7 +10535,7 @@ def ensure_codegen_pr_validation_continuation(
         body=body,
     )
     return ProducedPrValidationContinuation(
-        repository=REPO,
+        repository=repository,
         pr_number=pr_number,
         pr_url=pr_url,
         head_sha=head_sha,
@@ -11431,10 +11449,10 @@ def _pr_mergeability_inspection_metadata(
     body: str,
 ) -> tuple[PrMergeabilityInspectionRequest | None, str | None]:
     metadata = (body or "").split("```task", 1)[0]
-    repository = _body_field(metadata, "Repository")
+    repository = _body_field(metadata, "Repository") or REPO
     pr_number = _body_field(metadata, "Pull Request")
     expected_head_sha = _body_field(metadata, "Expected Head SHA")
-    if repository is not None and repository != REPO:
+    if repository not in ALLOWED_TARGET_REPOSITORIES:
         return None, "unsupported_repository"
     if not isinstance(pr_number, str) or not re.fullmatch(r"[1-9]\d*", pr_number):
         return None, "missing_or_invalid_pull_request"
@@ -11445,6 +11463,7 @@ def _pr_mergeability_inspection_metadata(
         return None, "invalid_expected_head_sha"
     return (
         PrMergeabilityInspectionRequest(
+            repository=repository,
             pr_number=int(pr_number),
             expected_head_sha=(
                 expected_head_sha.lower()
@@ -11489,8 +11508,10 @@ def _github_api_list(path: str, key: str | None = None) -> list[dict[str, Any]]:
         page += 1
 
 
-def _get_pr_mergeability_state(pr_number: int) -> dict[str, Any]:
-    pr_path = f"/repos/{REPO}/pulls/{pr_number}"
+def _get_pr_mergeability_state(pr_number: int, repository: str = REPO) -> dict[str, Any]:
+    if repository not in ALLOWED_TARGET_REPOSITORIES:
+        raise RuntimeError("GitHub PR repository was not allowlisted")
+    pr_path = f"/repos/{repository}/pulls/{pr_number}"
     pr = _github_api_json(pr_path)
     if not isinstance(pr, dict):
         raise RuntimeError("GitHub PR response was malformed")
@@ -11502,7 +11523,7 @@ def _get_pr_mergeability_state(pr_number: int) -> dict[str, Any]:
     compare: dict[str, Any] = {}
     if _HEAD_SHA_RE.fullmatch(base_sha) and _HEAD_SHA_RE.fullmatch(head_sha):
         compare_payload = _github_api_json(
-            f"/repos/{REPO}/compare/{base_sha}...{head_sha}"
+            f"/repos/{repository}/compare/{base_sha}...{head_sha}"
         )
         if isinstance(compare_payload, dict):
             compare = compare_payload
@@ -11510,11 +11531,11 @@ def _get_pr_mergeability_state(pr_number: int) -> dict[str, Any]:
     combined_status: dict[str, Any] = {}
     check_runs: list[dict[str, Any]] = []
     if _HEAD_SHA_RE.fullmatch(head_sha):
-        status_payload = _github_api_json(f"/repos/{REPO}/commits/{head_sha}/status")
+        status_payload = _github_api_json(f"/repos/{repository}/commits/{head_sha}/status")
         if isinstance(status_payload, dict):
             combined_status = status_payload
         check_runs = _github_api_list(
-            f"/repos/{REPO}/commits/{head_sha}/check-runs", key="check_runs"
+            f"/repos/{repository}/commits/{head_sha}/check-runs", key="check_runs"
         )
 
     return {
@@ -11584,6 +11605,7 @@ def _actual_file_delegated_merge_policy(
 def _trusted_validation_receipt_matches(
     report: str,
     *,
+    repository: str,
     pr_number: int,
     head_sha: str,
     base_sha: str,
@@ -11591,6 +11613,7 @@ def _trusted_validation_receipt_matches(
     return (
         runner_report_status(report) == "DONE"
         and f"maintenance_task_id={VALIDATE_PR_BRANCH}" in report
+        and f"repository={repository}" in report
         and f"pull_request={pr_number}" in report
         and f"validation_checkout_head_sha={head_sha}" in report
         and f"validation_base_sha={base_sha}" in report
@@ -11615,7 +11638,7 @@ def _trusted_pr_validation_receipt_state(
             "issue",
             "list",
             "--repo",
-            repository,
+            REPO,
             "--label",
             LABEL_AGENT_TASK,
             "--state",
@@ -11663,7 +11686,7 @@ def _trusted_pr_validation_receipt_state(
                 "view",
                 str(issue_number),
                 "--repo",
-                repository,
+                REPO,
                 "--json",
                 "body,comments,labels",
             ]
@@ -11695,7 +11718,11 @@ def _trusted_pr_validation_receipt_state(
     issue_number, bodies = matching_issues[0]
     for body in bodies:
         if _trusted_validation_receipt_matches(
-            body, pr_number=pr_number, head_sha=head_sha, base_sha=base_sha
+            body,
+            repository=repository,
+            pr_number=pr_number,
+            head_sha=head_sha,
+            base_sha=base_sha,
         ):
             return "success", "none", issue_number
     return "not_success", "validation_receipt_not_success", issue_number
@@ -11750,9 +11777,9 @@ def inspect_pr_mergeability(body: str) -> str:
         return _maintenance_report("BLOCKED", task_id, [f"reason={reason}"], "not_met")
     assert request is not None
 
-    status_lines = [f"repository={REPO}", f"pull_request={request.pr_number}"]
+    status_lines = [f"repository={request.repository}", f"pull_request={request.pr_number}"]
     try:
-        state = _get_pr_mergeability_state(request.pr_number)
+        state = _get_pr_mergeability_state(request.pr_number, request.repository)
     except Exception:
         return _maintenance_report(
             "BLOCKED",
@@ -11770,7 +11797,7 @@ def inspect_pr_mergeability(body: str) -> str:
     base = pr.get("base") if isinstance(pr.get("base"), dict) else {}
     head = pr.get("head") if isinstance(pr.get("head"), dict) else {}
     base_repo = base.get("repo") if isinstance(base.get("repo"), dict) else {}
-    if base_repo.get("full_name") != REPO:
+    if base_repo.get("full_name") != request.repository:
         return _maintenance_report(
             "BLOCKED",
             task_id,
@@ -11801,7 +11828,7 @@ def inspect_pr_mergeability(body: str) -> str:
     ):
         validation_state, validation_reason, receipt_issue = (
             _trusted_pr_validation_receipt_state(
-                repository=REPO,
+                repository=request.repository,
                 pr_number=int(pr["number"]),
                 head_sha=head_sha,
                 base_sha=base_sha,
