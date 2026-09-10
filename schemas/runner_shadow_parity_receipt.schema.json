@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Skeleton Runner vNext Shadow Parity Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema","source_task_ref","target_state_ref","legacy_effect_class","legacy_status","vnext_effect_class","vnext_reason_code","divergence","evidence_refs","side_effects_executed"],
+  "properties": {
+    "schema": {"const":"skeleton.runner_shadow_parity_receipt.v1"},
+    "source_task_ref": {"type":"string","minLength":1,"pattern":"^[A-Za-z0-9][A-Za-z0-9_.:-]*$"},
+    "target_state_ref": {"type":"string","minLength":1,"pattern":"^[A-Za-z0-9][A-Za-z0-9_.:-]*$"},
+    "legacy_effect_class": {"enum":["GREEN","YELLOW","RED",null]},
+    "legacy_status": {"type":"string","minLength":1},
+    "vnext_effect_class": {"enum":["GREEN","YELLOW","RED",null]},
+    "vnext_reason_code": {"type":"string","pattern":"^[A-Z0-9_]+$"},
+    "divergence": {"enum":["MATCH","VNEXT_STRICTER","LEGACY_STRICTER","INCOMPARABLE","INVALID_LEGACY_INPUT"]},
+    "evidence_refs": {"type":"array","uniqueItems":true,"items":{"type":"string","minLength":1,"pattern":"^[A-Za-z0-9][A-Za-z0-9_.:-]*$"}},
+    "side_effects_executed": {"const":false}
+  }
+}
