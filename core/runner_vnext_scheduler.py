@@ -38,6 +38,9 @@ class VNextScheduler:
             fence_token=fence_token,
         )
 
+    def current(self, *, lane: Lane, scope_key: str):
+        return self._lease_store.current(lane=lane, scope_key=scope_key)
+
     @staticmethod
     def public_projection(receipt: LeaseReceipt) -> dict[str, object]:
         return {
