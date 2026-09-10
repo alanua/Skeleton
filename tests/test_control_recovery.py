@@ -283,6 +283,7 @@ def test_agent_state_path_hardening_fails_closed_for_symlink_and_private_modes(
 ) -> None:
     loose_parent = tmp_path / "loose"
     loose_parent.mkdir(mode=0o755)
+    loose_parent.chmod(0o755)
     db = loose_parent / "control_recovery.sqlite3"
     db.write_text("", encoding="utf-8")
     try:
