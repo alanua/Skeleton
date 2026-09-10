@@ -27,6 +27,7 @@ def test_sanitize_codegen_child_environment_removes_home_edge_and_provider_autho
         "SKELETON_OPENHANDS_BIN": "/untrusted/openhands",
         "SKELETON_REAL_CODEX_BIN": "/untrusted/codex",
         "SKELETON_CODEGEN_ORIGINAL_PATH": "/untrusted/path",
+        "CODEX_HOME": "/untrusted/codex-home",
     }
     monkeypatch.setattr(child_env, "should_attempt_codex_runtime_recovery", lambda _env: False)
     monkeypatch.setattr(child_env, "_install_fallback_wrapper", lambda _env, _authority: None)
@@ -141,6 +142,7 @@ def test_codegen_environment_binds_wrapper_to_pinned_codex_only(tmp_path: Path, 
     wrapper = wrapper_dir / "codex"
     assert wrapper.is_file()
     assert sanitized["HOME"] == str(tmp_path)
+    assert sanitized["CODEX_HOME"] == str(tmp_path / ".codex")
     assert sanitized["PATH"].split(":", 1)[0] == str(wrapper_dir)
     assert sanitized["SKELETON_REAL_CODEX_BIN"] == str(codex.resolve())
     assert "SKELETON_OPENHANDS_BIN" not in sanitized
@@ -205,6 +207,7 @@ def test_caller_overlay_cannot_replace_recovery_home_or_path(tmp_path: Path, mon
             "PATH": "/overlay/bin",
             "INVOCATION_ID": "overlay",
             "SKELETON_REAL_CODEX_BIN": "/overlay/codex",
+            "CODEX_HOME": "/overlay/codex-home",
             "SKELETON_OPENHANDS_BIN": "/overlay/openhands",
         },
         authority_environment=authority,
@@ -215,6 +218,7 @@ def test_caller_overlay_cannot_replace_recovery_home_or_path(tmp_path: Path, mon
     assert all(item.get("PATH") == str(trusted_bin) for item in observed)
     assert all(item.get("INVOCATION_ID") == "trusted" for item in observed)
     assert sanitized["HOME"] == str(trusted_home)
+    assert sanitized["CODEX_HOME"] == str(trusted_home / ".codex")
     assert sanitized["SKELETON_REAL_CODEX_BIN"] == str(codex.resolve())
     assert sanitized["PATH"].endswith(str(trusted_bin))
     assert "SKELETON_OPENHANDS_BIN" not in sanitized
@@ -235,6 +239,7 @@ def test_codegen_wrapper_binds_pinned_codex_without_external_executor(tmp_path: 
     wrapper = tmp_path / ".local" / "state" / "skeleton-runner" / "codegen-fallback-bin" / "codex"
     assert wrapper.is_file()
     assert sanitized["HOME"] == str(tmp_path)
+    assert sanitized["CODEX_HOME"] == str(tmp_path / ".codex")
     assert sanitized["SKELETON_REAL_CODEX_BIN"] == str(codex.resolve())
     assert "SKELETON_OPENHANDS_BIN" not in sanitized
     assert sanitized["PATH"] == f"{wrapper.parent}:/trusted/bin"
@@ -303,6 +308,7 @@ def _run_wrapper(tmp_path: Path, *, codex_body: str) -> tuple[subprocess.Complet
             "SKELETON_CODEGEN_ORIGINAL_PATH": environment.get("PATH", "/usr/bin:/bin"),
             "OPENHANDS_MARKER": str(fallback_marker),
             "OPENROUTER_API_KEY": "synthetic-provider-secret",
+            "CODEX_HOME": str(tmp_path / "canonical-codex-home"),
         }
     )
     result = subprocess.run(
@@ -315,6 +321,15 @@ def _run_wrapper(tmp_path: Path, *, codex_body: str) -> tuple[subprocess.Complet
         check=False,
     )
     return result, fallback_marker
+
+
+def test_codegen_wrapper_preserves_bound_codex_home(tmp_path: Path) -> None:
+    result, _ = _run_wrapper(
+        tmp_path,
+        codex_body="#!/bin/sh\nprintf '%s\\n' \"$CODEX_HOME\"\nexit 0\n",
+    )
+    assert result.returncode == 0
+    assert str(tmp_path / "canonical-codex-home") in result.stdout
 
 
 def test_codegen_wrapper_does_not_fallback_for_exact_model_metadata_decoder_failure(tmp_path: Path) -> None:

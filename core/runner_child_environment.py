@@ -23,6 +23,7 @@ HOME_EDGE_EXEC_HMAC_SECRET_ENV = "SKELETON_HOME_EDGE_EXEC_HMAC_SECRET"
 _FALLBACK_BIN_ENV = "SKELETON_CODEGEN_FALLBACK_BIN"
 _REAL_CODEX_ENV = "SKELETON_REAL_CODEX_BIN"
 _ORIGINAL_PATH_ENV = "SKELETON_CODEGEN_ORIGINAL_PATH"
+_CODEX_HOME_ENV = "CODEX_HOME"
 _VALIDATION_SECRET_ENV = frozenset(
     {
         "SKELETON_OPENROUTER_FALLBACK_API_KEY",
@@ -50,6 +51,7 @@ _PROVIDER_OVERRIDE_ENV = frozenset(
         _FALLBACK_BIN_ENV,
         _REAL_CODEX_ENV,
         _ORIGINAL_PATH_ENV,
+        _CODEX_HOME_ENV,
     }
 )
 
@@ -203,6 +205,7 @@ def _install_fallback_wrapper(
         os.chmod(wrapper, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
 
     environment["HOME"] = trusted_home
+    environment[_CODEX_HOME_ENV] = str(Path(trusted_home) / ".codex")
     environment[_REAL_CODEX_ENV] = str(Path(real_codex).resolve(strict=False))
     environment[_ORIGINAL_PATH_ENV] = trusted_path
     environment[_FALLBACK_BIN_ENV] = str(root)
