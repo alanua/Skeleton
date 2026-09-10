@@ -4196,6 +4196,147 @@ def test_universal_runner_mode_selection_is_deterministic(
     assert decision == runner.RunnerModeDecision(expected_mode)
 
 
+def _vnext_bridge_metadata(*, allowed_files=("core/example.py",), privacy="PUBLIC_SAFE_REPOSITORY_ONLY") -> dict[str, object]:
+    return {
+        "issue_number": 3951,
+        "legacy_route": runner.ROUTE_CODE_GENERATION,
+        "repo": runner.REPO,
+        "branch": "runner/issue-3951",
+        "base_sha": "a" * 40,
+        "allowed_files": allowed_files,
+        "privacy_boundary": privacy,
+        "requested_capabilities": ("repository_write_allowlisted", "test_execution"),
+    }
+
+
+def test_vnext_off_mode_does_not_parse_or_change_legacy_task(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(runner.RUNNER_VNEXT_MODE_ENV, raising=False)
+    monkeypatch.setattr(
+        runner, "normalized_runner_shadow_metadata",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("off mode must not parse")),
+    )
+    task = runner.RunnerTask(content="x", base_sha="a" * 40)
+
+    allowed, reason = runner.evaluate_runner_vnext_cutover_hook(
+        issue_number=3951, issue_body="", route=runner.ROUTE_CODE_GENERATION,
+        maintenance_task_id=None, runner_task=task, merge_request=None,
+    )
+
+    assert allowed is True and reason is None
+    assert runner.LAST_RUNNER_VNEXT_RECEIPT["status"] == "off"
+
+
+def test_vnext_shadow_hook_is_observational_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(runner.RUNNER_VNEXT_MODE_ENV, "shadow")
+    monkeypatch.setattr(runner, "normalized_runner_shadow_metadata", lambda **_kwargs: _vnext_bridge_metadata())
+    task = runner.RunnerTask(content="x", base_sha="a" * 40)
+
+    allowed, reason = runner.evaluate_runner_vnext_cutover_hook(
+        issue_number=3951, issue_body="", route=runner.ROUTE_CODE_GENERATION,
+        maintenance_task_id=None, runner_task=task, merge_request=None,
+    )
+
+    assert allowed is True and reason is None
+    assert runner.LAST_RUNNER_VNEXT_RECEIPT["status"] == "shadow_observed"
+    assert runner.LAST_RUNNER_VNEXT_RECEIPT["side_effects_executed"] is False
+
+
+def test_vnext_green_canary_allows_exact_green_match(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(runner.RUNNER_VNEXT_MODE_ENV, "green_canary")
+    monkeypatch.setattr(runner, "normalized_runner_shadow_metadata", lambda **_kwargs: _vnext_bridge_metadata())
+    task = runner.RunnerTask(content="x", base_sha="a" * 40)
+
+    allowed, reason = runner.evaluate_runner_vnext_cutover_hook(
+        issue_number=3951, issue_body="", route=runner.ROUTE_CODE_GENERATION,
+        maintenance_task_id=None, runner_task=task, merge_request=None,
+    )
+
+    assert allowed is True and reason is None
+    assert runner.LAST_RUNNER_VNEXT_RECEIPT["status"] == "green_canary_pass"
+
+
+def test_vnext_green_canary_keeps_protected_code_on_legacy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(runner.RUNNER_VNEXT_MODE_ENV, "green_canary")
+    monkeypatch.setattr(
+        runner, "normalized_runner_shadow_metadata",
+        lambda **_kwargs: _vnext_bridge_metadata(allowed_files=("scripts/runner_poll_github_tasks.py",)),
+    )
+    task = runner.RunnerTask(content="x", base_sha="a" * 40)
+
+    allowed, reason = runner.evaluate_runner_vnext_cutover_hook(
+        issue_number=3951, issue_body="", route=runner.ROUTE_CODE_GENERATION,
+        maintenance_task_id=None, runner_task=task, merge_request=None,
+    )
+
+    assert allowed is True and reason is None
+    assert runner.LAST_RUNNER_VNEXT_RECEIPT["status"] == "legacy_protected_path"
+
+
+def test_vnext_green_canary_invalid_metadata_blocks_before_execution(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(runner.RUNNER_VNEXT_MODE_ENV, "green_canary")
+    monkeypatch.setattr(
+        runner, "normalized_runner_shadow_metadata",
+        lambda **_kwargs: _vnext_bridge_metadata(privacy=None),
+    )
+    task = runner.RunnerTask(content="x", base_sha="a" * 40)
+
+    allowed, reason = runner.evaluate_runner_vnext_cutover_hook(
+        issue_number=3951, issue_body="", route=runner.ROUTE_CODE_GENERATION,
+        maintenance_task_id=None, runner_task=task, merge_request=None,
+    )
+
+    assert allowed is False
+    assert reason == "VNEXT_METADATA_PRIVACY_REQUIRED"
+    assert runner.LAST_RUNNER_VNEXT_RECEIPT["status"] == "green_canary_block"
+
+
+def test_vnext_green_canary_leaves_maintenance_on_legacy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(runner.RUNNER_VNEXT_MODE_ENV, "green_canary")
+
+    allowed, reason = runner.evaluate_runner_vnext_cutover_hook(
+        issue_number=3951, issue_body="", route=runner.ROUTE_RUNTIME_ONLY,
+        maintenance_task_id="maintenance:test", runner_task=None, merge_request=None,
+    )
+
+    assert allowed is True and reason is None
+    assert runner.LAST_RUNNER_VNEXT_RECEIPT["status"] == "legacy_protected_path"
+
+
+def test_vnext_invalid_mode_fails_closed_even_for_legacy_protected_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(runner.RUNNER_VNEXT_MODE_ENV, "invalid")
+
+    allowed, reason = runner.evaluate_runner_vnext_cutover_hook(
+        issue_number=3951, issue_body="", route=runner.ROUTE_RUNTIME_ONLY,
+        maintenance_task_id="maintenance:test", runner_task=None, merge_request=None,
+    )
+
+    assert allowed is False
+    assert reason == "VNEXT_CUTOVER_MODE_INVALID"
+    assert runner.LAST_RUNNER_VNEXT_RECEIPT["status"] == "configuration_blocked"
+
+
+def test_process_issue_vnext_canary_block_has_zero_executor_side_effects(tmp_path: Path) -> None:
+    issue = {
+        "number": 1721,
+        "title": "Blocked vNext canary",
+        "body": _universal_code_issue_body(),
+        "comments": [],
+    }
+    with mock.patch.object(
+        runner, "evaluate_runner_vnext_cutover_hook", return_value=(False, "VNEXT_CANARY_TEST_BLOCK")
+    ), mock.patch.object(runner, "block_issue") as block, mock.patch.object(
+        runner, "prepare_target_repository_issue_worktree"
+    ) as prepare, mock.patch.object(runner, "run_codex_task") as codex, mock.patch.object(
+        runner, "dispatch_runtime_maintenance_task"
+    ) as maintenance:
+        runner.process_issue(issue, workdir=str(tmp_path))
+
+    assert "VNEXT_CANARY_TEST_BLOCK" in block.call_args.args[1]
+    prepare.assert_not_called()
+    codex.assert_not_called()
+    maintenance.assert_not_called()
+
+
 def test_universal_runner_enforce_blocked_gate_has_zero_legacy_side_effects(
     tmp_path: Path,
 ) -> None:

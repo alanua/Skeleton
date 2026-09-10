@@ -82,6 +82,11 @@ from core.runner_diagnostic_executor import (
     reject_mempalace_runtime_smoke_issue_input as _executor_reject_mempalace_runtime_smoke_issue_input,
     validate_mempalace_benchmark_report as _executor_validate_mempalace_benchmark_report,
 )
+from core.runner_vnext_cutover_bridge import (
+    VNEXT_MODES,
+    VNextCutoverBridgeError,
+    evaluate_vnext_cutover_bridge,
+)
 from core.runner_shadow_integration import (
     MAINTENANCE_TASK_KIND_BY_ID as SHADOW_MAINTENANCE_TASK_KIND_BY_ID,
     RunnerShadowReceipt,
@@ -224,6 +229,7 @@ QUEUE_REPOSITORY = "alanua/Skeleton"
 REPO = QUEUE_REPOSITORY
 RUNNER_GITHUB_ACTOR_ENV = "SKELETON_RUNNER_GITHUB_ACTOR"
 RUNNER_MODE_ENV = "SKELETON_RUNNER_MODE"
+RUNNER_VNEXT_MODE_ENV = "SKELETON_RUNNER_VNEXT_MODE"
 RUNNER_SHADOW_MODE_ENV = "SKELETON_RUNNER_SHADOW_MODE"
 RUNNER_MODE_OFF = "off"
 RUNNER_MODE_SHADOW = "shadow"
@@ -231,6 +237,7 @@ RUNNER_MODE_ENFORCE = "enforce"
 RUNNER_MODES = frozenset((RUNNER_MODE_OFF, RUNNER_MODE_SHADOW, RUNNER_MODE_ENFORCE))
 UNIVERSAL_RUNNER_ALLOWED_STATUS = "allowed"
 LAST_RUNNER_SHADOW_RECEIPT: dict[str, object] | None = None
+LAST_RUNNER_VNEXT_RECEIPT: dict[str, object] | None = None
 
 
 def trusted_runner_comment_authors() -> frozenset[str]:
@@ -3707,6 +3714,88 @@ def evaluate_runner_shadow_hook(
         receipt = blocked_shadow_receipt("SHADOW_EVALUATOR_EXCEPTION")
     LAST_RUNNER_SHADOW_RECEIPT = receipt.to_public_mapping()
     return receipt
+
+
+def evaluate_runner_vnext_cutover_hook(
+    *,
+    issue_number: int,
+    issue_body: str,
+    route: str,
+    maintenance_task_id: str | None,
+    runner_task: RunnerTask | None,
+    merge_request: TelegramApprovedPrMergeRequest | None,
+) -> tuple[bool, str | None]:
+    global LAST_RUNNER_VNEXT_RECEIPT
+    configured_mode = os.environ.get(RUNNER_VNEXT_MODE_ENV)
+    normalized_mode = (configured_mode or "off").strip().lower()
+    if normalized_mode not in VNEXT_MODES:
+        LAST_RUNNER_VNEXT_RECEIPT = {
+            "schema": "skeleton.runner_vnext_cutover_bridge.v1",
+            "mode": normalized_mode,
+            "status": "configuration_blocked",
+            "reason_code": "VNEXT_CUTOVER_MODE_INVALID",
+            "canary_eligible": False,
+            "allow_legacy_execution": False,
+            "side_effects_executed": False,
+        }
+        return False, "VNEXT_CUTOVER_MODE_INVALID"
+
+    if normalized_mode == "off":
+        LAST_RUNNER_VNEXT_RECEIPT = {
+            "schema": "skeleton.runner_vnext_cutover_bridge.v1",
+            "mode": "off",
+            "status": "off",
+            "reason_code": "VNEXT_CUTOVER_OFF",
+            "canary_eligible": False,
+            "allow_legacy_execution": True,
+            "side_effects_executed": False,
+        }
+        return True, None
+
+    if runner_task is None:
+        LAST_RUNNER_VNEXT_RECEIPT = {
+            "schema": "skeleton.runner_vnext_cutover_bridge.v1",
+            "mode": normalized_mode,
+            "status": "off" if normalized_mode == "off" else "legacy_protected_path",
+            "reason_code": (
+                "VNEXT_CUTOVER_OFF" if normalized_mode == "off" else "VNEXT_CANARY_NOT_ELIGIBLE"
+            ),
+            "canary_eligible": False,
+            "allow_legacy_execution": True,
+            "side_effects_executed": False,
+        }
+        return True, None
+
+    metadata = normalized_runner_shadow_metadata(
+        issue_number=issue_number,
+        issue_body=issue_body,
+        route=route,
+        maintenance_task_id=maintenance_task_id,
+        runner_task=runner_task,
+        merge_request=merge_request,
+    )
+    try:
+        decision = evaluate_vnext_cutover_bridge(
+            configured_mode=configured_mode, normalized_metadata=metadata
+        )
+    except VNextCutoverBridgeError as exc:
+        normalized_mode = (configured_mode or "off").strip().lower()
+        allow_legacy = normalized_mode in {"off", "shadow"}
+        LAST_RUNNER_VNEXT_RECEIPT = {
+            "schema": "skeleton.runner_vnext_cutover_bridge.v1",
+            "mode": normalized_mode,
+            "status": "shadow_input_invalid" if allow_legacy else "green_canary_block",
+            "reason_code": exc.reason_code,
+            "canary_eligible": False,
+            "allow_legacy_execution": allow_legacy,
+            "side_effects_executed": False,
+        }
+        return allow_legacy, None if allow_legacy else exc.reason_code
+
+    LAST_RUNNER_VNEXT_RECEIPT = decision.to_public_mapping()
+    if decision.allow_legacy_execution:
+        return True, None
+    return False, decision.reason_code
 
 
 def _universal_runner_receipt(
@@ -18763,6 +18852,20 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
             }
 
         prior_comments = get_issue_comments(issue)
+        vnext_allowed, vnext_reason = evaluate_runner_vnext_cutover_hook(
+            issue_number=issue_number,
+            issue_body=issue_body,
+            route=route,
+            maintenance_task_id=maintenance_task_id,
+            runner_task=runner_task,
+            merge_request=merge_request,
+        )
+        if not vnext_allowed:
+            block_issue(
+                issue_number,
+                f"Runner vNext GREEN canary blocked execution: {vnext_reason}.",
+            )
+            return
         if mode_decision.mode == RUNNER_MODE_ENFORCE:
             authority_decision = route_authority_decision_for_issue(
                 issue_number=issue_number,
