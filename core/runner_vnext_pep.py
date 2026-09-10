@@ -7,22 +7,13 @@ from typing import Protocol
 
 from core.runner_vnext_adapters import ExecutionEnvelope
 from core.runner_vnext_contracts import EffectClass
+from core.runner_vnext_ledger import LedgerError, LedgerEvent, OperationLedger
 
 
 class PEPError(RuntimeError):
     def __init__(self, reason_code: str) -> None:
         super().__init__(reason_code)
         self.reason_code = reason_code
-
-
-@dataclass(frozen=True)
-class LedgerReservationEvidence:
-    operation_id: str
-    idempotency_key: str
-    target_state_ref: str
-    fence_token: int
-    status: str
-    envelope_fingerprint: str
 
 
 @dataclass(frozen=True)
@@ -73,13 +64,19 @@ class PolicyEnforcementPoint:
     def evaluate(
         self,
         envelope: ExecutionEnvelope,
-        ledger: LedgerReservationEvidence,
+        ledger: OperationLedger,
         *,
         authority_claim: AuthorityClaim | None = None,
         authority_verifier: AuthorityVerifier | None = None,
     ) -> PEPAuthorizationReceipt | PrivilegedBrokerRequest:
         _validate_envelope(envelope)
-        _validate_ledger(envelope, ledger)
+        try:
+            reservation = ledger.reservation_event(envelope.idempotency_key)
+            current_fence = ledger.current_fence_token(envelope.idempotency_key)
+            current_status = ledger.status(envelope.idempotency_key)
+        except LedgerError as exc:
+            raise PEPError("PEP_LEDGER_RESERVATION_MISSING") from exc
+        _validate_ledger(envelope, reservation, current_fence=current_fence, current_status=current_status)
         if envelope.effect_class is EffectClass.GREEN:
             if authority_claim is not None:
                 raise PEPError("PEP_GREEN_AUTHORITY_CLAIM_UNEXPECTED")
@@ -131,18 +128,24 @@ def _validate_envelope(envelope: ExecutionEnvelope) -> None:
             raise PEPError("PEP_PUBLIC_SAFE_REF_REQUIRED")
 
 
-def _validate_ledger(envelope: ExecutionEnvelope, ledger: LedgerReservationEvidence) -> None:
-    if ledger.status != "RESERVED":
+def _validate_ledger(
+    envelope: ExecutionEnvelope,
+    reservation: LedgerEvent,
+    *,
+    current_fence: int,
+    current_status: str | None,
+) -> None:
+    if reservation.event_type != "RESERVED" or current_status != "RESERVED":
         raise PEPError("PEP_LEDGER_RESERVATION_REQUIRED")
-    if ledger.operation_id != envelope.operation_id:
+    if reservation.identity.operation_id != envelope.operation_id:
         raise PEPError("PEP_LEDGER_OPERATION_MISMATCH")
-    if ledger.idempotency_key != envelope.idempotency_key:
+    if reservation.identity.idempotency_key != envelope.idempotency_key:
         raise PEPError("PEP_LEDGER_IDEMPOTENCY_MISMATCH")
-    if ledger.target_state_ref != envelope.target_state_ref:
+    if reservation.identity.target_state_ref != envelope.target_state_ref:
         raise PEPError("PEP_LEDGER_TARGET_STATE_MISMATCH")
-    if ledger.fence_token != envelope.fence_token:
+    if current_fence != envelope.fence_token:
         raise PEPError("PEP_LEDGER_FENCE_MISMATCH")
-    if ledger.envelope_fingerprint != envelope_fingerprint(envelope):
+    if reservation.reservation_scope_hash != reservation_scope_fingerprint(envelope):
         raise PEPError("PEP_LEDGER_ENVELOPE_FINGERPRINT_MISMATCH")
 
 
@@ -166,12 +169,11 @@ def _public_ref(value: str) -> bool:
     return bool(value) and not value.startswith(("/", "~")) and "\\" not in value and ".." not in value and ":" in value and not any(ch.isspace() for ch in value)
 
 
-def envelope_fingerprint(envelope: ExecutionEnvelope) -> str:
+def reservation_scope_fingerprint(envelope: ExecutionEnvelope) -> str:
     payload = {
         "adapter_id": envelope.adapter_id,
         "operation_id": envelope.operation_id,
         "target_state_ref": envelope.target_state_ref,
-        "fence_token": envelope.fence_token,
         "idempotency_key": envelope.idempotency_key,
         "resources": list(envelope.resources),
         "effects": list(envelope.effects),
