@@ -29,6 +29,15 @@ class VNextScheduler:
             target_state_ref=request.target_state_ref,
         )
 
+
+    def release(self, request: LaneRequest, *, fence_token: int) -> LeaseReceipt:
+        return self._lease_store.release(
+            lane=request.lane,
+            scope_key=request.scope_key,
+            owner=request.owner,
+            fence_token=fence_token,
+        )
+
     @staticmethod
     def public_projection(receipt: LeaseReceipt) -> dict[str, object]:
         return {
