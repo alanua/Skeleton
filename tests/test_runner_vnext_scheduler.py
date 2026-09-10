@@ -53,3 +53,14 @@ def test_scheduler_can_release_exact_fenced_request() -> None:
     released = scheduler.release(request, fence_token=lease.fence_token)
     assert released.status == "RELEASED"
     assert store.current(lane=Lane.CODEGEN, scope_key="repo:branch") is None
+
+
+def test_scheduler_release_exact_does_not_require_fabricated_request_fields() -> None:
+    store = LaneLeaseStore(clock=lambda: 1.0)
+    scheduler = VNextScheduler(store)
+    lease = scheduler.reserve(LaneRequest("task:1", Lane.CODEGEN, "node:runner", "repo:branch", 10, "git:a"))
+    released = scheduler.release_exact(
+        lane=Lane.CODEGEN, scope_key="repo:branch", owner="node:runner", fence_token=lease.fence_token
+    )
+    assert released.status == "RELEASED"
+    assert store.current(lane=Lane.CODEGEN, scope_key="repo:branch") is None

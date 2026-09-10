@@ -100,6 +100,7 @@ def test_successful_gate_revalidates_exact_state_and_grants_without_starting_eff
     assert grant.execution_authorized is True and grant.effect_execution_started is False
     assert grant.planner_envelope_hash == planner_envelope_hash(handoff.envelope)
     assert grant.node_snapshot_hash == handoff.node_snapshot_hash
+    assert grant.lease_scope_key == handoff.lease_scope_key
     assert "parent-secret" not in repr(grant)
 
 
@@ -172,7 +173,25 @@ def test_public_grant_projection_is_closed_value_free_and_has_no_command_surface
     blob = json.dumps(public)
     assert "parent-secret" not in blob
     assert "environment" not in public and "planner_envelope" not in public
-    assert "target_state_ref" not in public
+    assert "target_state_ref" not in public and "lease_scope_key" not in public
     assert not any(key in public for key in ("shell", "argv", "command"))
+    schema = json.loads((ROOT / "schemas" / "runner_green_execution_grant.schema.json").read_text())
+    jsonschema.validate(public, schema)
+
+
+def test_private_grant_projection_hashes_task_and_operation_identity() -> None:
+    nodes, envs, _, scheduler, ledger, _, handoff = build_stack()
+    g = gate(nodes, envs, scheduler, ledger)
+    grant = g.grant(handoff, now=NOW)
+    private_envelope = replace(grant.planner_envelope, privacy=PrivacyClass.PRIVATE)
+    private = replace(
+        grant, task_id="task:customer-sensitive", operation_id="op:customer-sensitive",
+        idempotency_key="idem:customer-sensitive", planner_envelope=private_envelope,
+    )
+    public = g.public_projection(private)
+    blob = json.dumps(public)
+    assert "customer-sensitive" not in blob
+    assert "task_id" not in public and "operation_id" not in public and "idempotency_key" not in public
+    assert public["privacy"] == "PRIVATE"
     schema = json.loads((ROOT / "schemas" / "runner_green_execution_grant.schema.json").read_text())
     jsonschema.validate(public, schema)

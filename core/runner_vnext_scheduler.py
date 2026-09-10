@@ -31,10 +31,18 @@ class VNextScheduler:
 
 
     def release(self, request: LaneRequest, *, fence_token: int) -> LeaseReceipt:
-        return self._lease_store.release(
+        return self.release_exact(
             lane=request.lane,
             scope_key=request.scope_key,
             owner=request.owner,
+            fence_token=fence_token,
+        )
+
+    def release_exact(self, *, lane: Lane, scope_key: str, owner: str, fence_token: int) -> LeaseReceipt:
+        return self._lease_store.release(
+            lane=lane,
+            scope_key=scope_key,
+            owner=owner,
             fence_token=fence_token,
         )
 
