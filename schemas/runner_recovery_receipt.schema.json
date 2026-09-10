@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Skeleton Runner vNext Recovery Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema","request_id","command","idempotency_key","status","reason_code","effect_ceiling","touched_resource_refs","before_state_ref","after_state_ref","validation_status"],
+  "properties": {
+    "schema": {"const": "skeleton.runner_recovery_receipt.v1"},
+    "request_id": {"type":"string","minLength":1},
+    "command": {"enum":["refresh_trust_anchor_bundle","poller_reload_and_stale_reactivation","checkout_freshness_canary","typed_repair_runtime_state","queue_fence_reset"]},
+    "idempotency_key": {"type":"string","minLength":1},
+    "status": {"enum":["DONE","FAILED"]},
+    "reason_code": {"type":"string","pattern":"^[A-Z0-9_]+$"},
+    "effect_ceiling": {"enum":["GREEN","YELLOW"]},
+    "touched_resource_refs": {"type":"array","uniqueItems":true,"items":{"type":"string","minLength":1}},
+    "before_state_ref": {"type":"string","minLength":1},
+    "after_state_ref": {"type":"string","minLength":1},
+    "validation_status": {"enum":["PASS","FAIL"]}
+  }
+}

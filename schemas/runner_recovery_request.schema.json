@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Skeleton Runner vNext Recovery Request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema","request_id","command","target_state_ref","idempotency_key","bounded_resources","expected_effects"],
+  "properties": {
+    "schema": {"const": "skeleton.runner_recovery_request.v1"},
+    "request_id": {"type":"string","minLength":1},
+    "command": {"enum":["refresh_trust_anchor_bundle","poller_reload_and_stale_reactivation","checkout_freshness_canary","typed_repair_runtime_state","queue_fence_reset"]},
+    "target_state_ref": {"type":"string","minLength":1},
+    "idempotency_key": {"type":"string","minLength":1},
+    "bounded_resources": {"type":"array","minItems":1,"uniqueItems":true,"items":{"type":"string","minLength":1}},
+    "expected_effects": {"type":"array","minItems":1,"uniqueItems":true,"items":{"type":"string","minLength":1}},
+    "approval_evidence": {"type":"array","uniqueItems":true,"items":{"type":"string","minLength":1}},
+    "current_fence_token": {"type":["integer","null"],"minimum":1}
+  }
+}
