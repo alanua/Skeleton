@@ -22,6 +22,7 @@ def _run_wrapper(
     bin_dir.mkdir()
     workdir = tmp_path / "work"
     workdir.mkdir()
+    (tmp_path / "package.json").write_text("{}\n", encoding="utf-8")
     codex = bin_dir / "codex-real"
     openhands = bin_dir / "openhands-real"
     wrapper = bin_dir / "codex"
@@ -44,7 +45,7 @@ def _run_wrapper(
             "OPENHANDS_MARKER": str(fallback_marker),
         }
     )
-    args = argv or ["exec", "--sandbox", "read-only", "--cd", str(workdir), "-"]
+    args = argv or ["exec", "--sandbox", "workspace-write", "--cd", str(workdir), "-"]
     result = subprocess.run(
         [str(wrapper), *args],
         input="synthetic bounded task",
@@ -57,7 +58,7 @@ def _run_wrapper(
     return result, codex_argv, fallback_marker
 
 
-def test_wrapper_defaults_codex_to_gpt_5_6_and_reports_codex_provider(tmp_path: Path) -> None:
+def test_wrapper_defaults_codex_to_supported_chatgpt_model_and_reports_provider(tmp_path: Path) -> None:
     result, codex_argv, fallback_marker = _run_wrapper(
         tmp_path,
         codex_body=(
@@ -73,7 +74,7 @@ def test_wrapper_defaults_codex_to_gpt_5_6_and_reports_codex_provider(tmp_path: 
     assert codex_argv.read_text(encoding="utf-8").splitlines()[:3] == [
         "exec",
         "--model",
-        "gpt-5.6",
+        "gpt-5.6-sol",
     ]
     assert not fallback_marker.exists()
 

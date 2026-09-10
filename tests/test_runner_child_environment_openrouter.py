@@ -52,6 +52,7 @@ def _run_quota_wrapper(
     bin_dir.mkdir()
     workdir = tmp_path / "work"
     workdir.mkdir()
+    (tmp_path / "package.json").write_text("{}\n", encoding="utf-8")
     codex = bin_dir / "codex-real"
     openhands = bin_dir / "openhands-real"
     wrapper = bin_dir / "codex"

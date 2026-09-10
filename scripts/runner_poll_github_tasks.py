@@ -1488,6 +1488,48 @@ def _create_validation_pytest_temp_root(cwd: str | Path) -> Path:
     )
 
 
+def _remove_validation_pytest_temp_root(path: Path) -> None:
+    allowed_parents = {
+        candidate.resolve(strict=False)
+        for candidate in (Path(tempfile.gettempdir()), Path("/tmp"))
+        if candidate.is_dir()
+    }
+    try:
+        stat_result = path.stat(follow_symlinks=False)
+        resolved_parent = path.parent.resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeError("validation_temp_cleanup_unsafe") from exc
+    if (
+        path.is_symlink()
+        or not stat.S_ISDIR(stat_result.st_mode)
+        or stat_result.st_uid != os.getuid()
+        or resolved_parent not in allowed_parents
+        or not path.name.startswith(".runner-validation-pytest-")
+    ):
+        raise RuntimeError("validation_temp_cleanup_unsafe")
+
+    for current_root, dir_names, file_names in os.walk(path, topdown=True, followlinks=False):
+        current = Path(current_root)
+        try:
+            current_stat = current.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise RuntimeError("validation_temp_cleanup_unsafe") from exc
+        if current_stat.st_uid != os.getuid() or not stat.S_ISDIR(current_stat.st_mode):
+            raise RuntimeError("validation_temp_cleanup_unsafe")
+        os.chmod(current, stat.S_IRWXU, follow_symlinks=False)
+        for name in (*dir_names, *file_names):
+            child = current / name
+            try:
+                child_stat = child.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise RuntimeError("validation_temp_cleanup_unsafe") from exc
+            if child_stat.st_uid != os.getuid():
+                raise RuntimeError("validation_temp_cleanup_unsafe")
+            if stat.S_ISDIR(child_stat.st_mode) and not stat.S_ISLNK(child_stat.st_mode):
+                os.chmod(child, stat.S_IRWXU, follow_symlinks=False)
+    shutil.rmtree(path)
+
+
 def _run_validation_profile_command(
     args: list[str],
     cwd: str | Path,
@@ -1498,12 +1540,35 @@ def _run_validation_profile_command(
     token = _RUN_COMMAND_ENV_OVERRIDE.set(
         _validation_command_environment(pytest_temp_root=pytest_temp_root)
     )
+    result: tuple[int, str] | None = None
+    run_error: Exception | None = None
     try:
-        return run_command(args, cwd=cwd)
+        result = run_command(args, cwd=cwd)
+    except Exception as exc:
+        run_error = exc
     finally:
         _RUN_COMMAND_ENV_OVERRIDE.reset(token)
-        if pytest_temp_root is not None:
-            shutil.rmtree(pytest_temp_root)
+
+    cleanup_error: Exception | None = None
+    if pytest_temp_root is not None:
+        try:
+            _remove_validation_pytest_temp_root(pytest_temp_root)
+        except (OSError, RuntimeError) as exc:
+            cleanup_error = exc
+
+    if run_error is not None:
+        if cleanup_error is not None:
+            run_error.add_note("validation_temp_cleanup_failed")
+        raise run_error
+    assert result is not None
+    if cleanup_error is not None:
+        if result[0] != 0:
+            return (
+                result[0],
+                result[1] + "\nRUNNER_VALIDATION_TEMP_CLEANUP=failed_preserved_primary_result\n",
+            )
+        raise RuntimeError("validation_temp_cleanup_failed") from cleanup_error
+    return result
 
 
 def _run_finalization_validation_command(
