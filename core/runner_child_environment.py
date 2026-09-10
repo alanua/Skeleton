@@ -57,20 +57,119 @@ _PROVIDER_OVERRIDE_ENV = frozenset(
 
 _WRAPPER = r'''#!/usr/bin/env python3
 from __future__ import annotations
+import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 
-_DEFAULT_CODEX_MODEL = "gpt-5.6"
+_DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
 
 
-def _codex_args(argv: list[str]) -> list[str]:
+_FORBIDDEN_CODEX_EXEC_OPTIONS = frozenset(
+    {
+        "-c",
+        "--config",
+        "-p",
+        "--profile",
+        "--add-dir",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--dangerously-bypass-hook-trust",
+    }
+)
+
+
+def _runtime_package_root(real_codex: str) -> Path:
+    resolved = Path(real_codex).resolve(strict=True)
+    package_root = resolved.parent.parent
+    if not (package_root / "package.json").is_file():
+        raise ValueError("untrusted_codex_runtime_layout")
+    return package_root
+
+
+def _git_read_roots(workdir: Path) -> tuple[Path, ...]:
+    dotgit = workdir / ".git"
+    if dotgit.is_symlink():
+        raise ValueError("unsafe_git_metadata_link")
+    if dotgit.is_dir():
+        return (dotgit.resolve(strict=True),)
+    if not dotgit.is_file():
+        return ()
+
+    line = dotgit.read_text(encoding="utf-8").strip()
+    prefix = "gitdir: "
+    if not line.startswith(prefix):
+        raise ValueError("invalid_gitdir_pointer")
+    raw_gitdir = Path(line[len(prefix) :])
+    gitdir = (raw_gitdir if raw_gitdir.is_absolute() else workdir / raw_gitdir).resolve(strict=True)
+    if not gitdir.is_dir():
+        raise ValueError("invalid_gitdir_target")
+
+    commondir_file = gitdir / "commondir"
+    if not commondir_file.is_file():
+        raise ValueError("missing_git_commondir")
+    raw_common = Path(commondir_file.read_text(encoding="utf-8").strip())
+    common = (raw_common if raw_common.is_absolute() else gitdir / raw_common).resolve(strict=True)
+    if common.name != ".git" or gitdir.parent != common / "worktrees":
+        raise ValueError("unexpected_git_worktree_layout")
+    return (dotgit.resolve(strict=True), gitdir, common)
+
+
+def _secure_exec_args(
+    argv: list[str], *, real_codex: str, workdir: Path
+) -> list[str]:
     args = list(argv)
-    if args and args[0] == "exec" and "--model" not in args:
-        args[1:1] = ["--model", _DEFAULT_CODEX_MODEL]
-    return args
+    if not args or args[0] != "exec":
+        return args
+
+    filtered = [args[0]]
+    index = 1
+    while index < len(args):
+        arg = args[index]
+        if arg in {"--sandbox", "-s"}:
+            if index + 1 >= len(args) or args[index + 1] != "workspace-write":
+                raise ValueError("unsafe_codex_sandbox_override")
+            index += 2
+            continue
+        if arg.startswith("--sandbox=") or (arg.startswith("-s") and not arg.startswith("--")):
+            value = arg.split("=", 1)[1] if "=" in arg else arg[2:]
+            if value != "workspace-write":
+                raise ValueError("unsafe_codex_sandbox_override")
+            index += 1
+            continue
+        if (
+            arg in _FORBIDDEN_CODEX_EXEC_OPTIONS
+            or any(arg.startswith(f"{option}=") for option in _FORBIDDEN_CODEX_EXEC_OPTIONS)
+            or (arg.startswith("-c") and not arg.startswith("--"))
+            or (arg.startswith("-p") and not arg.startswith("--"))
+        ):
+            raise ValueError("unsafe_codex_exec_override")
+        filtered.append(arg)
+        index += 1
+
+    read_roots = (_runtime_package_root(real_codex), *_git_read_roots(workdir))
+    read_rules = ",".join(f"{json.dumps(str(path))}=\"read\"" for path in read_roots)
+    filesystem = (
+        '{":root"="deny",":minimal"="read",'
+        + read_rules
+        + ',":workspace_roots"={"."="write"}}'
+    )
+    security_args = [
+        "--ignore-user-config",
+        "-c",
+        'approval_policy="never"',
+        "-c",
+        'default_permissions="runner-codegen"',
+        "-c",
+        f"permissions.runner-codegen.filesystem={filesystem}",
+        "-c",
+        "permissions.runner-codegen.network={enabled=false}",
+    ]
+    filtered[1:1] = security_args
+    if "--model" not in filtered and "-m" not in filtered:
+        filtered[1:1] = ["--model", _DEFAULT_CODEX_MODEL]
+    return filtered
 
 
 def _workdir_from_args(args: list[str]) -> Path | None:
@@ -116,10 +215,14 @@ def main() -> int:
     ):
         child_env.pop(name, None)
 
-    args = _codex_args(sys.argv[1:])
-    workdir = _workdir_from_args(args)
+    raw_args = sys.argv[1:]
+    workdir = _workdir_from_args(raw_args)
     if workdir is None:
         return 126
+    try:
+        args = _secure_exec_args(raw_args, real_codex=real_codex, workdir=workdir)
+    except (OSError, UnicodeError, ValueError):
+        return 125
 
     with tempfile.TemporaryDirectory(
         prefix=".runner-codex-state-",

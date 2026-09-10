@@ -284,15 +284,28 @@ def _write_executable(path: Path, body: str) -> None:
     path.chmod(0o700)
 
 
-def _run_wrapper(tmp_path: Path, *, codex_body: str) -> tuple[subprocess.CompletedProcess[str], Path]:
+def _run_wrapper(
+    tmp_path: Path,
+    *,
+    codex_body: str,
+    extra_args: list[str] | None = None,
+    linked_git_metadata: bool = False,
+) -> tuple[subprocess.CompletedProcess[str], Path]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     workdir = tmp_path / "work"
     workdir.mkdir()
+    if linked_git_metadata:
+        common = tmp_path / "repo" / ".git"
+        gitdir = common / "worktrees" / "work"
+        gitdir.mkdir(parents=True)
+        (gitdir / "commondir").write_text("../..\n", encoding="utf-8")
+        (workdir / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
     codex = bin_dir / "codex-real"
     openhands = bin_dir / "openhands-real"
     wrapper = bin_dir / "codex"
     fallback_marker = tmp_path / "openhands-called"
+    (tmp_path / "package.json").write_text("{}\n", encoding="utf-8")
     _write_executable(codex, codex_body)
     _write_executable(
         openhands,
@@ -312,7 +325,16 @@ def _run_wrapper(tmp_path: Path, *, codex_body: str) -> tuple[subprocess.Complet
         }
     )
     result = subprocess.run(
-        [str(wrapper), "exec", "--cd", str(workdir), "-"],
+        [
+            str(wrapper),
+            "exec",
+            "--sandbox",
+            "workspace-write",
+            *(extra_args or []),
+            "--cd",
+            str(workdir),
+            "-",
+        ],
         input="synthetic bounded task",
         text=True,
         stdout=subprocess.PIPE,
@@ -330,6 +352,76 @@ def test_codegen_wrapper_preserves_bound_codex_home(tmp_path: Path) -> None:
     )
     assert result.returncode == 0
     assert str(tmp_path / "canonical-codex-home") in result.stdout
+
+
+def test_codegen_wrapper_enforces_permission_profile(tmp_path: Path) -> None:
+    result, _ = _run_wrapper(
+        tmp_path,
+        codex_body="#!/bin/sh\nprintf '%s\\n' \"$@\"\nexit 0\n",
+    )
+    assert result.returncode == 0
+    lines = result.stdout.splitlines()
+    assert "--sandbox" not in lines
+    assert "--ignore-user-config" in lines
+    assert 'approval_policy="never"' in lines
+    assert 'default_permissions="runner-codegen"' in lines
+    filesystem = next(
+        line for line in lines if line.startswith("permissions.runner-codegen.filesystem=")
+    )
+    assert '":root"="deny"' in filesystem
+    assert '":minimal"="read"' in filesystem
+    assert '":workspace_roots"={"."="write"}' in filesystem
+    assert str(tmp_path.resolve()) in filesystem
+    assert "permissions.runner-codegen.network={enabled=false}" in lines
+
+
+def test_codegen_wrapper_uses_supported_chatgpt_default_model(tmp_path: Path) -> None:
+    result, _ = _run_wrapper(
+        tmp_path,
+        codex_body="#!/bin/sh\nprintf '%s\\n' \"$@\"\nexit 0\n",
+    )
+    assert result.returncode == 0
+    lines = result.stdout.splitlines()
+    model_index = lines.index("--model")
+    assert lines[model_index + 1] == "gpt-5.6-sol"
+
+
+def test_codegen_wrapper_rejects_security_override(tmp_path: Path) -> None:
+    result, _ = _run_wrapper(
+        tmp_path,
+        codex_body="#!/bin/sh\nexit 99\n",
+        extra_args=["--add-dir", str(tmp_path)],
+    )
+    assert result.returncode == 125
+
+
+def test_codegen_wrapper_rejects_danger_full_access_override(tmp_path: Path) -> None:
+    result, _ = _run_wrapper(
+        tmp_path,
+        codex_body="#!/bin/sh\nexit 99\n",
+        extra_args=["--sandbox=danger-full-access"],
+    )
+    assert result.returncode == 125
+
+
+def test_codegen_wrapper_grants_git_metadata_read_only_roots(tmp_path: Path) -> None:
+    result, _ = _run_wrapper(
+        tmp_path,
+        codex_body="#!/bin/sh\nprintf '%s\\n' \"$@\"\nexit 0\n",
+        linked_git_metadata=True,
+    )
+    assert result.returncode == 0
+    filesystem = next(
+        line
+        for line in result.stdout.splitlines()
+        if line.startswith("permissions.runner-codegen.filesystem=")
+    )
+    worktree_dotgit = tmp_path / "work" / ".git"
+    gitdir = tmp_path / "repo" / ".git" / "worktrees" / "work"
+    common = tmp_path / "repo" / ".git"
+    assert f'{worktree_dotgit.resolve()}\"=\"read\"' in filesystem
+    assert f'{gitdir.resolve()}\"=\"read\"' in filesystem
+    assert f'{common.resolve()}\"=\"read\"' in filesystem
 
 
 def test_codegen_wrapper_does_not_fallback_for_exact_model_metadata_decoder_failure(tmp_path: Path) -> None:
