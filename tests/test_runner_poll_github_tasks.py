@@ -284,7 +284,8 @@ def test_poll_once_discovers_native_registered_repo_issue(monkeypatch: pytest.Mo
 
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.delenv("GH_TOKEN", raising=False)
-    monkeypatch.setenv(runner.RUNNER_MODE_ENV, runner.RUNNER_MODE_SHADOW)
+    monkeypatch.delenv(runner.RUNNER_MODE_ENV, raising=False)
+    monkeypatch.delenv(runner.RUNNER_SHADOW_MODE_ENV, raising=False)
     monkeypatch.setenv(runner.RUNNER_VNEXT_MODE_ENV, "shadow")
     monkeypatch.setattr(
         runner,
@@ -5181,17 +5182,25 @@ def test_poll_once_processes_issues_single_lane() -> None:
     ]
 
 
-def test_poll_once_vnext_off_uses_legacy_skeleton_queue_only(
+@pytest.mark.parametrize("configured_vnext_mode", (None, "off", "invalid"))
+def test_poll_once_vnext_disabled_or_invalid_uses_legacy_skeleton_queue_only(
     monkeypatch: pytest.MonkeyPatch,
+    configured_vnext_mode: str | None,
 ) -> None:
     issues = [{"number": 139}]
-    monkeypatch.delenv(runner.RUNNER_VNEXT_MODE_ENV, raising=False)
+    monkeypatch.setenv(runner.RUNNER_MODE_ENV, runner.RUNNER_MODE_SHADOW)
+    if configured_vnext_mode is None:
+        monkeypatch.delenv(runner.RUNNER_VNEXT_MODE_ENV, raising=False)
+    else:
+        monkeypatch.setenv(runner.RUNNER_VNEXT_MODE_ENV, configured_vnext_mode)
     monkeypatch.setattr(runner, "get_ready_issues", lambda: issues)
     monkeypatch.setattr(
         runner,
         "get_ready_issue_items",
         lambda: (_ for _ in ()).throw(
-            AssertionError("vNext off must not use registered queue intake")
+            AssertionError(
+                "disabled or invalid vNext mode must not use registered queue intake"
+            )
         ),
     )
     monkeypatch.setattr(runner, "reconcile_scheduler_on_poll", lambda: None)
