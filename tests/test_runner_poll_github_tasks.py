@@ -9385,6 +9385,314 @@ def test_code_task_accepts_fenced_yaml_expected_output_before_codex(
     run_codex.assert_called_once()
 
 
+def _run_git(cwd: Path, *args: str) -> None:
+    completed = runner.subprocess.run(
+        ["git", *args],
+        cwd=str(cwd),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+
+
+def _retained_dirty_worktree_fixture(
+    tmp_path: Path,
+    *,
+    issue_number: int = 4019,
+    branch: str | None = None,
+    changed_files: tuple[str, ...] = (
+        "scripts/runner_poll_github_tasks.py",
+        "tests/test_runner_poll_github_tasks.py",
+    ),
+    untracked_files: tuple[str, ...] = (),
+) -> tuple[Path, Path, Path]:
+    coordinator = tmp_path / "repo"
+    worktree_root = tmp_path / "worktrees"
+    issue_path = worktree_root / f"issue-{issue_number}"
+    coordinator.mkdir()
+    _run_git(coordinator, "init")
+    _run_git(coordinator, "config", "user.email", "runner@example.invalid")
+    _run_git(coordinator, "config", "user.name", "Runner Test")
+    for relative_path in (
+        "scripts/runner_poll_github_tasks.py",
+        "tests/test_runner_poll_github_tasks.py",
+        "docs/out-of-scope.md",
+    ):
+        path = coordinator / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"base {relative_path}\n", encoding="utf-8")
+    _run_git(coordinator, "add", ".")
+    _run_git(coordinator, "commit", "-m", "base")
+    _run_git(coordinator, "branch", "-M", "main")
+    _run_git(
+        coordinator,
+        "worktree",
+        "add",
+        "-b",
+        branch or f"runner/issue-{issue_number}",
+        str(issue_path),
+        "HEAD",
+    )
+    for relative_path in changed_files:
+        path = issue_path / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"retained {relative_path}\n", encoding="utf-8")
+    for relative_path in untracked_files:
+        path = issue_path / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("untracked\n", encoding="utf-8")
+    return coordinator, worktree_root, issue_path
+
+
+def _retained_dirty_issue_body(
+    *,
+    retry_override: bool,
+    allowed_files: tuple[str, ...] = (
+        "scripts/runner_poll_github_tasks.py",
+        "tests/test_runner_poll_github_tasks.py",
+    ),
+) -> str:
+    metadata = [
+        "Selected Project: skeleton",
+        "Expected Output: focused/full pytest PASS",
+        "Allowed Files:",
+        *(f"- {path}" for path in allowed_files),
+    ]
+    if retry_override:
+        metadata.extend(
+            (
+                "Retry Override: retained-dirty-safe-retry",
+                "Retry Reason: retained dirty same issue continuation",
+            )
+        )
+    return "\n".join(
+        (
+            *metadata,
+            "",
+            "```task",
+            "Continue the retained dirty worktree.",
+            "```",
+        )
+    )
+
+
+def _prior_executor_invocation_blocked_comment(body: str) -> dict[str, object]:
+    condition = runner.retry_condition_for_issue(
+        body,
+        runner.ROUTE_CODE_GENERATION,
+        None,
+        "executor_invocation",
+    )
+    report = runner.append_retry_fields(
+        "BLOCKED: Codex output reported a blocked deliverable.",
+        runner.evaluate_retry_policy(condition, []),
+    )
+    return {"author": {"login": "alanua"}, "body": report}
+
+
+def test_retained_dirty_same_issue_retry_override_invokes_provider_in_same_worktree(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    coordinator, worktree_root, issue_path = _retained_dirty_worktree_fixture(
+        tmp_path,
+        untracked_files=(
+            ".runner-codegen-trace-safe.log",
+            ".runner-codex-state-safe/state.json",
+        ),
+    )
+    body = _retained_dirty_issue_body(retry_override=True)
+    issue = {
+        "number": 4019,
+        "title": "Retained dirty continuation",
+        "body": body,
+        "comments": [_prior_executor_invocation_blocked_comment(body)],
+    }
+
+    monkeypatch.setattr(runner, "worktree_root", lambda: worktree_root)
+
+    def run_codex(task_content: str, workdir: str, task: runner.RunnerTask | None) -> tuple[int, str]:
+        assert task_content == "Continue the retained dirty worktree."
+        assert Path(workdir) == issue_path
+        assert task is not None
+        assert (
+            issue_path / "scripts" / "runner_poll_github_tasks.py"
+        ).read_text(encoding="utf-8") == "retained scripts/runner_poll_github_tasks.py\n"
+        assert (
+            issue_path / "tests" / "test_runner_poll_github_tasks.py"
+        ).read_text(encoding="utf-8") == "retained tests/test_runner_poll_github_tasks.py\n"
+        return 0, "RESULT: DONE\n"
+
+    with mock.patch.object(runner, "run_codex_task", side_effect=run_codex) as codex, mock.patch.object(
+        runner, "finalize_success", return_value="DONE report"
+    ), mock.patch.object(runner, "cleanup_issue_worktree", return_value=(0, "")), mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(runner, "set_issue_label"), mock.patch.object(
+        runner, "notify_task_finished"
+    ):
+        runner.process_issue(issue, workdir=str(coordinator))
+
+    codex.assert_called_once()
+
+
+def test_retained_dirty_first_run_blocks_before_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    coordinator, worktree_root, _issue_path = _retained_dirty_worktree_fixture(tmp_path)
+    issue = {
+        "number": 4019,
+        "title": "Retained dirty first run",
+        "body": _retained_dirty_issue_body(retry_override=False),
+        "comments": [],
+    }
+    monkeypatch.setattr(runner, "worktree_root", lambda: worktree_root)
+
+    with mock.patch.object(runner, "run_codex_task") as codex, mock.patch.object(
+        runner, "post_issue_comment"
+    ) as post, mock.patch.object(runner, "set_issue_label"), mock.patch.object(
+        runner, "notify_task_finished"
+    ):
+        runner.process_issue(issue, workdir=str(coordinator))
+
+    codex.assert_not_called()
+    assert "Existing issue worktree is dirty" in post.call_args.args[1]
+
+
+def test_retained_dirty_same_issue_without_override_blocks_before_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    coordinator, worktree_root, _issue_path = _retained_dirty_worktree_fixture(tmp_path)
+    body = _retained_dirty_issue_body(retry_override=False)
+    issue = {
+        "number": 4019,
+        "title": "Retained dirty no override",
+        "body": body,
+        "comments": [_prior_executor_invocation_blocked_comment(body)],
+    }
+    monkeypatch.setattr(runner, "worktree_root", lambda: worktree_root)
+
+    with mock.patch.object(runner, "run_codex_task") as codex, mock.patch.object(
+        runner, "post_issue_comment"
+    ) as post, mock.patch.object(runner, "set_issue_label"), mock.patch.object(
+        runner, "notify_task_finished"
+    ):
+        runner.process_issue(issue, workdir=str(coordinator))
+
+    codex.assert_not_called()
+    assert "Existing issue worktree is dirty" in post.call_args.args[1]
+
+
+def test_retained_dirty_out_of_scope_tracked_file_blocks_before_provider(
+    tmp_path: Path,
+) -> None:
+    coordinator, _worktree_root, issue_path = _retained_dirty_worktree_fixture(
+        tmp_path,
+        changed_files=("scripts/runner_poll_github_tasks.py", "docs/out-of-scope.md"),
+    )
+    gate = runner.CodegenDirtyContinuationGate(
+        repository=runner.REPO,
+        source_repository=runner.REPO,
+        issue_number=4019,
+        expected_branch="runner/issue-4019",
+        allowed_files=frozenset({"scripts/runner_poll_github_tasks.py"}),
+        retry_decision="ALLOW_ONE_TIME_OVERRIDE",
+    )
+
+    code, output, path = runner.prepare_git_issue_worktree(
+        4019,
+        coordinator,
+        issue_path,
+        continuation_gate=gate,
+    )
+
+    assert path == issue_path
+    assert code == 1
+    assert "reason=retained_dirty_changed_files_outside_allowlist" in output
+
+
+def test_retained_dirty_unexpected_untracked_file_blocks_before_provider(
+    tmp_path: Path,
+) -> None:
+    coordinator, _worktree_root, issue_path = _retained_dirty_worktree_fixture(
+        tmp_path,
+        untracked_files=("notes.txt", ".runner-codegen-trace-safe.log"),
+    )
+    gate = runner.CodegenDirtyContinuationGate(
+        repository=runner.REPO,
+        source_repository=runner.REPO,
+        issue_number=4019,
+        expected_branch="runner/issue-4019",
+        allowed_files=frozenset(
+            {
+                "scripts/runner_poll_github_tasks.py",
+                "tests/test_runner_poll_github_tasks.py",
+            }
+        ),
+        retry_decision="ALLOW_ONE_TIME_OVERRIDE",
+    )
+
+    code, output, _path = runner.prepare_git_issue_worktree(
+        4019,
+        coordinator,
+        issue_path,
+        continuation_gate=gate,
+    )
+
+    assert code == 1
+    assert "reason=retained_dirty_unexpected_untracked_files" in output
+
+
+@pytest.mark.parametrize(
+    ("gate_updates", "reason"),
+    (
+        ({"issue_number": 4020}, "retained_dirty_issue_mismatch"),
+        ({"repository": "alanua/Other"}, "retained_dirty_repository_mismatch"),
+        (
+            {"source_repository": "alanua/Other"},
+            "retained_dirty_source_repository_mismatch",
+        ),
+        (
+            {"expected_branch": "runner/issue-4020"},
+            "retained_dirty_expected_branch_mismatch",
+        ),
+    ),
+)
+def test_retained_dirty_scope_mismatch_blocks_before_provider(
+    tmp_path: Path,
+    gate_updates: dict[str, object],
+    reason: str,
+) -> None:
+    coordinator, _worktree_root, issue_path = _retained_dirty_worktree_fixture(tmp_path)
+    gate_kwargs: dict[str, object] = {
+        "repository": runner.REPO,
+        "source_repository": runner.REPO,
+        "issue_number": 4019,
+        "expected_branch": "runner/issue-4019",
+        "allowed_files": frozenset(
+            {
+                "scripts/runner_poll_github_tasks.py",
+                "tests/test_runner_poll_github_tasks.py",
+            }
+        ),
+        "retry_decision": "ALLOW_ONE_TIME_OVERRIDE",
+    }
+    gate_kwargs.update(gate_updates)
+    gate = runner.CodegenDirtyContinuationGate(**gate_kwargs)
+
+    code, output, _path = runner.prepare_git_issue_worktree(
+        4019,
+        coordinator,
+        issue_path,
+        continuation_gate=gate,
+    )
+
+    assert code == 1
+    assert f"reason={reason}" in output
+
+
 def test_unverifiable_prior_runner_history_needs_operator_before_codex() -> None:
     issue = {
         "number": 250,
