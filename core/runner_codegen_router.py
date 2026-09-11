@@ -33,6 +33,47 @@ OPENROUTER_CREDENTIAL_ALIAS = "openrouter-api"
 OPENROUTER_CREDENTIAL_ACTION = "bind-openrouter-fallback"
 _OPENROUTER_BOUND_KEY_ENV = "SKELETON_OPENROUTER_FALLBACK_API_KEY"
 _OPENHANDS_SECONDARY_MAX_OUTPUT_TOKENS = 768
+_OPENHANDS_BOUND_MAX_OUTPUT_TOKENS_ENV = "SKELETON_OPENHANDS_MAX_OUTPUT_TOKENS"
+_OPENHANDS_PERSISTENCE_DIR_ENV = "OPENHANDS_PERSISTENCE_DIR"
+
+# Current OpenHands CLI env overrides cover API key/model/base URL but not the
+# SDK LLM max_output_tokens field. Bootstrap one ephemeral persisted Agent in
+# the Runner-owned private bookkeeping HOME, verify the bound SDK field, then
+# exec the ordinary headless CLI with ephemeral credential/model overrides.
+# Task text remains a separate argv value and cannot alter this bootstrap.
+_OPENHANDS_BOUNDED_BOOTSTRAP_CODE = """\
+import os
+import sys
+from openhands.sdk import LLM
+from openhands_cli.stores.agent_store import AgentStore
+from openhands_cli.utils import get_default_cli_agent
+
+raw_limit = os.environ.get(\"SKELETON_OPENHANDS_MAX_OUTPUT_TOKENS\", \"\")
+try:
+    limit = int(raw_limit)
+except ValueError:
+    raise SystemExit(\"bounded_openhands_token_limit_invalid\")
+if limit <= 0:
+    raise SystemExit(\"bounded_openhands_token_limit_invalid\")
+model = os.environ.get(\"LLM_MODEL\", \"\")
+if not model:
+    raise SystemExit(\"bounded_openhands_model_missing\")
+llm = LLM(
+    model=model,
+    api_key=\"skeleton-nonsecret-placeholder\",
+    max_output_tokens=limit,
+    usage_id=\"agent\",
+)
+store = AgentStore()
+store.save(get_default_cli_agent(llm))
+read_back = store.load_from_disk()
+if read_back is None or read_back.llm.max_output_tokens != limit:
+    raise SystemExit(\"bounded_openhands_agent_config_verification_failed\")
+os.execvp(
+    \"openhands\",
+    [\"openhands\", \"--headless\", \"--json\", \"--override-with-envs\", \"-t\", sys.argv[1]],
+)
+"""
 
 # Provider runtime identifiers are adapter-owned. Task/issue prose never selects them.
 _OPENHANDS_RUNTIME_MODEL_BY_MODEL_ID = {
@@ -166,6 +207,9 @@ def prepare_openhands_secondary_environment(
         raise CodegenRouteError("openhands_bounded_token_budget_required")
     authority = os.environ if authority_environment is None else authority_environment
     environment: MutableMapping[str, str] = dict(base_environment or {})
+    private_home = environment.get("HOME", "").strip()
+    if not private_home:
+        raise CodegenRouteError("openhands_private_home_required")
     try:
         bind_registered_environment_credential(
             service_id=OPENROUTER_CREDENTIAL_SERVICE,
@@ -182,6 +226,10 @@ def prepare_openhands_secondary_environment(
     environment["LLM_API_KEY"] = api_key
     environment["LLM_MODEL"] = selected.runtime_model
     environment["LLM_MAX_OUTPUT_TOKENS"] = str(selected.lease.max_tokens)
+    environment[_OPENHANDS_BOUND_MAX_OUTPUT_TOKENS_ENV] = str(selected.lease.max_tokens)
+    environment[_OPENHANDS_PERSISTENCE_DIR_ENV] = str(
+        Path(private_home) / ".openhands-secondary"
+    )
     environment["MAX_BUDGET_PER_TASK"] = "0.50"
     environment["MAX_ITERATIONS"] = "20"
     environment["LLM_NUM_RETRIES"] = "1"
@@ -191,17 +239,18 @@ def prepare_openhands_secondary_environment(
         "binding_id": selected.binding.binding_id,
         "lease_hash": selected.lease.lease_hash,
         "max_output_tokens": selected.lease.max_tokens,
+        "token_bound_transport": "ephemeral_agent_config",
         "credential_status": "USED",
     }
     return dict(environment), public_receipt
 
 
 def openhands_secondary_command(task_content: str, *, executable: str = "openhands") -> list[str]:
+    if executable != "openhands":
+        raise CodegenRouteError("openhands_executable_override_not_allowed")
     return [
-        executable,
-        "--headless",
-        "--json",
-        "--override-with-envs",
-        "-t",
+        "python3",
+        "-c",
+        _OPENHANDS_BOUNDED_BOOTSTRAP_CODE,
         task_content,
     ]
