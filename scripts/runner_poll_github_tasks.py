@@ -1259,6 +1259,7 @@ class IssueWorktreePublishInspectionRequest:
     target_project: str = "skeleton"
     worktree_root: Path | None = None
     target_project_route: bool = False
+    source_repository: str = QUEUE_REPOSITORY
 
 
 @dataclass(frozen=True)
@@ -5932,6 +5933,143 @@ def finalize_local_worktree_success(
         f"{file_summary}\n\n"
         f"{diff_summary}\n\n"
         f"Codex output:\n```\n{codex_output.strip()}\n```"
+    )
+
+
+def _codegen_explicit_no_code_gap_proven(issue_body: str, codex_output: str) -> bool:
+    metadata = _metadata_before_task(issue_body)
+    final_answer = final_codex_answer(codex_output)
+    return (
+        "NO_CODE_GAP" in metadata
+        and "NO_CODE_GAP" in final_answer
+        and _first_final_status(final_answer) == "DONE"
+    )
+
+
+def _target_project_publication_body(
+    *,
+    issue_number: int,
+    issue_body: str,
+    runner_task: RunnerTask,
+    source_repository: str,
+) -> str:
+    allowed_files, allowed_reason = _codegen_publish_allowed_files(issue_body)
+    if allowed_reason is not None:
+        raise RuntimeError(f"publication_contract_{allowed_reason}")
+    base_branch = runner_task.base or "main"
+    metadata = [
+        f"Target Project: {runner_task.target_project}",
+        f"Target Repository: {runner_task.target_repository}",
+        f"Source Repository: {source_repository}",
+        f"Source Issue: {issue_number}",
+        f"Base Branch: {base_branch}",
+        *([f"Base SHA: {runner_task.base_sha}"] if runner_task.base_sha is not None else []),
+        f"Output Branch: {issue_branch(issue_number)}",
+        "Draft PR: true",
+        "Allowed Files:",
+        *(f"- {path}" for path in sorted(allowed_files)),
+    ]
+    return "\n".join(
+        (
+            *metadata,
+            "",
+            "```task",
+            "Publish the target-project issue worktree through the registered Runner route.",
+            "```",
+        )
+    )
+
+
+def _codegen_requires_target_publication(issue_body: str) -> bool:
+    expected_output = _expected_output_value(issue_body)
+    if isinstance(expected_output, list):
+        expected_text = " ".join(str(item) for item in expected_output)
+    else:
+        expected_text = str(expected_output or "")
+    haystack = expected_text.lower()
+    durable_terms = (
+        "draft pr",
+        "pull request",
+        " pr ",
+        "durable output",
+        "durable target output",
+        "repository edits",
+        "repo edits",
+        "changed allowlisted target files",
+    )
+    return any(term in f" {haystack} " for term in durable_terms)
+
+
+def publish_local_target_worktree_result(
+    *,
+    issue_number: int,
+    issue_body: str,
+    issue_workdir: str,
+    codex_output: str,
+    runner_task: RunnerTask,
+    source_repository: str,
+) -> tuple[str, bool]:
+    files = changed_files(issue_workdir)
+    if not files:
+        if _codegen_explicit_no_code_gap_proven(issue_body, codex_output):
+            return finalize_local_worktree_success(issue_workdir, codex_output, runner_task), True
+        return (
+            "BLOCKED: Runner detected NO_PROGRESS for a cross-project codegen task.\n\n"
+            "reason=NO_PROGRESS_ZERO_TARGET_CHANGES\n"
+            f"source_repository={source_repository}\n"
+            f"source_issue={issue_number}\n"
+            f"target_repository={runner_task.target_repository}\n"
+            "target_publication=not_started\n"
+            "issue_state=publication_not_terminal\n"
+            + issue_workspace_review_note(issue_workdir)
+            + f"\n\nCodex output:\n```\n{codex_output.strip()}\n```",
+            False,
+        )
+
+    local_report = finalize_local_worktree_success(issue_workdir, codex_output, runner_task)
+    try:
+        publish_body = _target_project_publication_body(
+            issue_number=issue_number,
+            issue_body=issue_body,
+            runner_task=runner_task,
+            source_repository=source_repository,
+        )
+    except RuntimeError as exc:
+        return (
+            "BLOCKED: Target-project publication continuation could not be registered.\n\n"
+            f"reason={str(exc) or 'publication_contract_failure'}\n"
+            f"source_repository={source_repository}\n"
+            f"source_issue={issue_number}\n"
+            f"target_repository={runner_task.target_repository}\n"
+            "target_publication=not_started\n"
+            "issue_state=publication_not_terminal\n\n"
+            f"{local_report}"
+            + issue_workspace_review_note(issue_workdir),
+            False,
+        )
+
+    publish_report = publish_target_project_issue_worktree_pr(publish_body)
+    if maintenance_report_status(publish_report) != "DONE":
+        return (
+            "BLOCKED: Target-project publication is pending or failed.\n\n"
+            f"source_repository={source_repository}\n"
+            f"source_issue={issue_number}\n"
+            f"target_repository={runner_task.target_repository}\n"
+            "target_publication=not_done\n"
+            "issue_state=publication_not_terminal\n\n"
+            "Target publication report:\n"
+            f"```\n{publish_report.strip()}\n```\n\n"
+            f"{local_report}"
+            + issue_workspace_review_note(issue_workdir),
+            False,
+        )
+
+    return (
+        f"{local_report.rstrip()}\n\n"
+        "Target publication report:\n"
+        f"```\n{publish_report.strip()}\n```\n"
+        "target_publication=done",
+        True,
     )
 
 
@@ -12062,6 +12200,11 @@ def _issue_worktree_publish_inspection_metadata(
             else _body_field(metadata, "Repository")
         )
     source_issue = _body_field(metadata, "Source Issue")
+    source_repository = (
+        _body_field(metadata, "Source Repository")
+        if target_project_route
+        else QUEUE_REPOSITORY
+    )
     expected_branch = (
         _body_field(metadata, "Output Branch")
         if explicit_recovery_route or target_project_route
@@ -12082,6 +12225,10 @@ def _issue_worktree_publish_inspection_metadata(
         return None, "unsupported_repository"
     if (explicit_recovery_route or target_project_route) and repository is None:
         return None, "missing_target_repository"
+    if source_repository is None:
+        source_repository = QUEUE_REPOSITORY
+    if target_project_route and source_repository not in ALLOWED_TARGET_REPOSITORIES:
+        return None, "unsupported_source_repository"
     if not isinstance(source_issue, str) or re.fullmatch(r"[1-9]\d*", source_issue) is None:
         return None, "missing_or_invalid_source_issue"
     source_issue_number = int(source_issue)
@@ -12142,6 +12289,7 @@ def _issue_worktree_publish_inspection_metadata(
             target_project=target_project,
             worktree_root=target_worktree_root,
             target_project_route=target_project_route,
+            source_repository=source_repository,
         ),
         None,
     )
@@ -12294,7 +12442,9 @@ def _target_project_issue_worktree_path(
 ) -> Path:
     if request.worktree_root is None:
         raise ValueError("target project worktree root is missing")
-    return request.worktree_root / f"issue-{request.source_issue}"
+    return request.worktree_root / _source_issue_slug(
+        request.source_issue, request.source_repository
+    )
 
 
 def _ensure_safe_target_project_issue_publish_worktree_path(
@@ -12310,7 +12460,7 @@ def _ensure_safe_target_project_issue_publish_worktree_path(
         candidate.relative_to(root)
     except ValueError as exc:
         raise ValueError("issue worktree is outside target project worktree root") from exc
-    if candidate.name != f"issue-{request.source_issue}":
+    if candidate.name != _source_issue_slug(request.source_issue, request.source_repository):
         raise ValueError("issue worktree path does not end with the source issue")
     return candidate
 
@@ -19547,10 +19697,23 @@ def _process_issue_in_current_queue_context(
             maybe_replenish_runner_queue_after_completion()
             return
 
+        cleanup_issue_workspace_after_finalize = True
         if local_target_worktree and runner_task is not None:
-            finalized_report = finalize_local_worktree_success(
-                issue_workdir, codex_output, runner_task
-            )
+            if _codegen_requires_target_publication(issue_body):
+                finalized_report, cleanup_issue_workspace_after_finalize = (
+                    publish_local_target_worktree_result(
+                        issue_number=issue_number,
+                        issue_body=issue_body,
+                        issue_workdir=issue_workdir,
+                        codex_output=codex_output,
+                        runner_task=runner_task,
+                        source_repository=source_repository,
+                    )
+                )
+            else:
+                finalized_report = finalize_local_worktree_success(
+                    issue_workdir, codex_output, runner_task
+                )
         elif existing_pr_worktree_request is not None:
             finalized_report = finalize_existing_pr_success(
                 issue,
@@ -19563,27 +19726,28 @@ def _process_issue_in_current_queue_context(
             finalized_report = finalize_success(issue, issue_workdir, codex_output)
         report = report_runner_lane(finalized_report, runner_task)
         cleanup_runtime_artifacts(issue_workdir)
-        if local_target_worktree:
-            if source_repository == QUEUE_REPOSITORY:
-                cleanup_code, cleanup_output = cleanup_target_repository_issue_worktree(
-                    target_repository,
-                    issue_number,
-                )
+        if cleanup_issue_workspace_after_finalize:
+            if local_target_worktree:
+                if source_repository == QUEUE_REPOSITORY:
+                    cleanup_code, cleanup_output = cleanup_target_repository_issue_worktree(
+                        target_repository,
+                        issue_number,
+                    )
+                else:
+                    cleanup_code, cleanup_output = cleanup_target_repository_issue_worktree(
+                        target_repository,
+                        issue_number,
+                        source_repository,
+                    )
             else:
-                cleanup_code, cleanup_output = cleanup_target_repository_issue_worktree(
-                    target_repository,
-                    issue_number,
-                    source_repository,
+                cleanup_code, cleanup_output = cleanup_issue_worktree(
+                    issue_number, coordinator_workdir
                 )
-        else:
-            cleanup_code, cleanup_output = cleanup_issue_worktree(
-                issue_number, coordinator_workdir
-            )
-        if cleanup_code != 0:
-            raise RuntimeError(
-                "Issue workspace cleanup failed:\n"
-                f"{cleanup_output.strip() or f'exit code {cleanup_code}'}"
-            )
+            if cleanup_code != 0:
+                raise RuntimeError(
+                    "Issue workspace cleanup failed:\n"
+                    f"{cleanup_output.strip() or f'exit code {cleanup_code}'}"
+                )
         status = runner_report_status(report)
         if status == "BLOCKED":
             report = blocked_final_report(report)
@@ -19597,7 +19761,7 @@ def _process_issue_in_current_queue_context(
             report,
         )
         report = append_memory_warning(report, warning or pickup_memory_warning)
-        if status == "DONE":
+        if status == "DONE" and not local_target_worktree:
             try:
                 continuation = ensure_codegen_pr_validation_continuation(
                     source_issue=issue_number,
