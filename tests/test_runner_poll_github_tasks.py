@@ -7997,8 +7997,13 @@ def _issue_publish_commands(
     push_code: int = 0,
     pr_create_code: int = 0,
     pr_create_url: str = PR_URL,
+    pr_view_code: int = 0,
     post_push_pr_base_branch: str | None = None,
     post_push_pr_base_sha: str | None = None,
+    target_project_rest_pr_payload: dict[str, object] | None = None,
+    target_project_rest_file_payload: list[dict[str, object]] | None = None,
+    target_project_rest_pr_code: int = 0,
+    target_project_rest_files_code: int = 0,
     commit_message: str = "Publish issue #123 worktree",
     raw_suffix: str = "",
 ) -> object:
@@ -8130,6 +8135,8 @@ def _issue_publish_commands(
         ]:
             return pr_create_code, f"{pr_create_url}\n"
         if command[:4] == ["gh", "pr", "view", branch]:
+            if pr_view_code != 0:
+                return pr_view_code, "pr view output must not leak"
             owner, name = repository.split("/", 1)
             return 0, json.dumps(
                 {
@@ -8148,9 +8155,73 @@ def _issue_publish_commands(
                     "headRepositoryOwner": {"login": owner},
                 }
             )
+        if command == [
+            "gh",
+            "api",
+            "--method",
+            "GET",
+            f"repos/{repository}/pulls/123",
+        ]:
+            if target_project_rest_pr_code != 0:
+                return target_project_rest_pr_code, "REST PR output must not leak"
+            return 0, json.dumps(target_project_rest_pr_payload or {})
+        if command == [
+            "gh",
+            "api",
+            "--method",
+            "GET",
+            f"repos/{repository}/pulls/123/files?per_page=100&page=1",
+        ]:
+            if target_project_rest_files_code != 0:
+                return target_project_rest_files_code, "REST files output must not leak"
+            return 0, json.dumps(target_project_rest_file_payload or [])
         return 2, "unexpected command output must not leak"
 
     return run
+
+
+def _target_project_rest_pr_payload(
+    *,
+    repository: str = "alanua/LumenFlow",
+    number: int = 123,
+    state: str = "open",
+    draft: bool = True,
+    base_ref: str = "main",
+    base_sha: str = "a" * 40,
+    head_ref: str = "runner/issue-123",
+    head_sha: str = "1111111111111111111111111111111111111111",
+    html_url: str = "https://github.com/alanua/LumenFlow/pull/123",
+    base_repository: str | None = None,
+    head_repository: str | None = None,
+) -> dict[str, object]:
+    base_repository = base_repository or repository
+    head_repository = head_repository or repository
+    base_owner, base_name = base_repository.split("/", 1)
+    head_owner, head_name = head_repository.split("/", 1)
+    return {
+        "number": number,
+        "state": state,
+        "draft": draft,
+        "html_url": html_url,
+        "base": {
+            "ref": base_ref,
+            "sha": base_sha,
+            "repo": {
+                "full_name": base_repository,
+                "name": base_name,
+                "owner": {"login": base_owner},
+            },
+        },
+        "head": {
+            "ref": head_ref,
+            "sha": head_sha,
+            "repo": {
+                "full_name": head_repository,
+                "name": head_name,
+                "owner": {"login": head_owner},
+            },
+        },
+    }
 
 
 def _existing_pr_publish_state(
@@ -14495,6 +14566,251 @@ def test_publish_target_project_issue_worktree_pr_post_push_wrong_base_blocks(
     assert f"reason={reason}" in report
     assert "step=push_expected_branch status=done" in report
     assert "step=post_push_read_pr_metadata status=done" not in report
+
+
+def test_publish_target_project_issue_worktree_pr_post_create_gh_failure_uses_bounded_rest_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_root = tmp_path / "lumenflow"
+    pr_url = "https://github.com/alanua/LumenFlow/pull/123"
+    pushed_head = "1" * 40
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    worktree_path = _prepare_issue_publish_worktree(target_root)
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=_target_project_tree(target_root)
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            repository="alanua/LumenFlow",
+            remote_url="https://github.com/alanua/LumenFlow.git",
+            changed_files=("README.md",),
+            fetched_base_sha="a" * 40,
+            commit_message="Publish target project issue #123 worktree",
+            pr_create_url=pr_url,
+            pr_view_code=1,
+            target_project_rest_pr_payload=_target_project_rest_pr_payload(
+                head_sha=pushed_head,
+                html_url=pr_url,
+            ),
+            target_project_rest_file_payload=[{"filename": "README.md"}],
+        ),
+    ) as run:
+        report = runner.publish_target_project_issue_worktree_pr(
+            _publish_target_project_issue_worktree_body(base_sha="a" * 40)
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert "step=create_draft_pr status=done" in report
+    assert "post_push_pr_metadata_source=target_project_rest" in report
+    assert "post_push_pr_changed_files_count=1" in report
+    assert f"pushed_head_sha={pushed_head}" in report
+    assert commands.count(
+        [
+            "git",
+            "push",
+            "origin",
+            "refs/heads/runner/issue-123:refs/heads/runner/issue-123",
+        ]
+    ) == 1
+    assert commands.count(
+        [
+            "git",
+            "commit",
+            "-m",
+            "Publish target project issue #123 worktree",
+        ]
+    ) == 1
+    assert sum(1 for command in commands if command[:3] == ["gh", "pr", "create"]) == 1
+    assert [
+        "gh",
+        "api",
+        "--method",
+        "GET",
+        "repos/alanua/LumenFlow/pulls/123",
+    ] in commands
+    assert [
+        "gh",
+        "api",
+        "--method",
+        "GET",
+        "repos/alanua/LumenFlow/pulls/123/files?per_page=100&page=1",
+    ] in commands
+
+
+@pytest.mark.parametrize(
+    ("command_kwargs", "reason"),
+    (
+        (
+            {"pr_create_url": "https://github.com/alanua/Skeleton/pull/123"},
+            "step=post_push_read_pr_metadata status=failed",
+        ),
+        (
+            {
+                "target_project_rest_pr_payload": _target_project_rest_pr_payload(
+                    number=999
+                )
+            },
+            "step=post_push_read_pr_metadata status=failed",
+        ),
+        (
+            {
+                "target_project_rest_pr_payload": _target_project_rest_pr_payload(
+                    head_repository="alanua/Other"
+                )
+            },
+            "step=post_push_read_pr_metadata status=failed",
+        ),
+        (
+            {
+                "target_project_rest_pr_payload": _target_project_rest_pr_payload(
+                    head_sha="2" * 40
+                )
+            },
+            "reason=post_push_pr_head_sha_mismatch",
+        ),
+        (
+            {
+                "target_project_rest_pr_payload": _target_project_rest_pr_payload(
+                    head_ref="runner/issue-999"
+                )
+            },
+            "reason=post_push_pr_head_branch_mismatch",
+        ),
+        (
+            {
+                "target_project_rest_pr_payload": _target_project_rest_pr_payload(
+                    base_ref="develop"
+                )
+            },
+            "reason=post_push_pr_base_mismatch",
+        ),
+        (
+            {
+                "target_project_rest_pr_payload": _target_project_rest_pr_payload(
+                    base_sha="b" * 40
+                )
+            },
+            "reason=post_push_pr_base_sha_mismatch",
+        ),
+        (
+            {
+                "target_project_rest_pr_payload": _target_project_rest_pr_payload(
+                    state="closed"
+                )
+            },
+            "reason=post_push_pr_not_open",
+        ),
+        (
+            {
+                "target_project_rest_pr_payload": _target_project_rest_pr_payload(
+                    draft=False
+                )
+            },
+            "reason=post_push_pr_not_draft",
+        ),
+        (
+            {
+                "target_project_rest_file_payload": [
+                    {"filename": "README.md"},
+                    {"filename": "secrets.env"},
+                ]
+            },
+            "reason=post_push_pr_files_outside_allowlist",
+        ),
+        (
+            {"target_project_rest_files_code": 1},
+            "step=post_push_read_pr_metadata status=failed",
+        ),
+    ),
+)
+def test_publish_target_project_issue_worktree_pr_rest_fallback_mismatch_blocks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command_kwargs: dict[str, object],
+    reason: str,
+) -> None:
+    target_root = tmp_path / "lumenflow"
+    command_options = dict(command_kwargs)
+    pr_url = command_options.pop(
+        "pr_create_url", "https://github.com/alanua/LumenFlow/pull/123"
+    )
+    defaults = {
+        "target_project_rest_pr_payload": _target_project_rest_pr_payload(
+            html_url=pr_url
+        ),
+        "target_project_rest_file_payload": [{"filename": "README.md"}],
+    }
+    defaults.update(command_options)
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    worktree_path = _prepare_issue_publish_worktree(target_root)
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=_target_project_tree(target_root)
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            repository="alanua/LumenFlow",
+            remote_url="https://github.com/alanua/LumenFlow.git",
+            changed_files=("README.md",),
+            fetched_base_sha="a" * 40,
+            commit_message="Publish target project issue #123 worktree",
+            pr_create_url=pr_url,
+            pr_view_code=1,
+            **defaults,
+        ),
+    ) as run:
+        report = runner.publish_target_project_issue_worktree_pr(
+            _publish_target_project_issue_worktree_body(base_sha="a" * 40)
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("BLOCKED:")
+    assert reason in report
+    assert sum(1 for command in commands if command[:3] == ["gh", "pr", "create"]) == 1
+    assert commands.count(
+        [
+            "git",
+            "push",
+            "origin",
+            "refs/heads/runner/issue-123:refs/heads/runner/issue-123",
+        ]
+    ) == 1
+
+
+def test_publish_target_project_issue_worktree_pr_post_create_gh_success_skips_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_root = tmp_path / "lumenflow"
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    worktree_path = _prepare_issue_publish_worktree(target_root)
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=_target_project_tree(target_root)
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            repository="alanua/LumenFlow",
+            remote_url="https://github.com/alanua/LumenFlow.git",
+            changed_files=("README.md",),
+            fetched_base_sha="a" * 40,
+            commit_message="Publish target project issue #123 worktree",
+        ),
+    ) as run:
+        report = runner.publish_target_project_issue_worktree_pr(
+            _publish_target_project_issue_worktree_body(base_sha="a" * 40)
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert "post_push_pr_metadata_source=target_project_rest" not in report
+    assert all(command[:2] != ["gh", "api"] for command in commands)
 
 
 def test_publish_target_project_issue_worktree_pr_rejects_issue_path_input(
