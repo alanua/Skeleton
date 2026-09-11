@@ -1140,6 +1140,24 @@ class RunnerTask:
     has_target_repository_metadata: bool = False
     base: str | None = None
     base_sha: str | None = None
+    dependencies: tuple["RunnerDependency", ...] = ()
+
+
+@dataclass(frozen=True)
+class RunnerIssueDependency:
+    number: int
+
+
+@dataclass(frozen=True)
+class RunnerPrDependency:
+    number: int
+    base: str
+    base_sha: str
+    head: str
+    head_sha: str
+
+
+RunnerDependency = RunnerIssueDependency | RunnerPrDependency
 
 
 @dataclass(frozen=True)
@@ -3105,6 +3123,127 @@ def extract_target_repository(body: str) -> tuple[str | None, str | None]:
     return target_repository, reason
 
 
+def _runner_dependency_value_from_body(body: str) -> object:
+    task_fields = _shadow_task_block_mapping(body)
+    if "depends_on" in task_fields:
+        return task_fields["depends_on"]
+    metadata = _metadata_before_task(body)
+    multiline = _metadata_multiline_value(metadata, "depends_on")
+    if multiline is not None:
+        return multiline
+    field_value = _body_field(metadata, "depends_on")
+    if field_value is not None:
+        return field_value
+    return _metadata_yaml_value(metadata, "depends_on")
+
+
+def _runner_dependency_field_present(body: str) -> bool:
+    if "depends_on" in _shadow_task_block_mapping(body):
+        return True
+    metadata = _metadata_before_task(body)
+    return (
+        _metadata_has_field(metadata, "depends_on")
+        or _metadata_yaml_value(metadata, "depends_on") is not None
+    )
+
+
+def _runner_dependency_number(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    if isinstance(value, str) and re.fullmatch(r"#?[1-9]\d*", value.strip()):
+        return int(value.strip().lstrip("#"))
+    return None
+
+
+def _runner_dependency_ref(value: object) -> str | None:
+    if isinstance(value, str) and _safe_target_base_branch_name(value):
+        return value
+    return None
+
+
+def _runner_dependency_sha(value: object) -> str | None:
+    if isinstance(value, str) and _HEAD_SHA_RE.fullmatch(value) is not None:
+        return value.lower()
+    return None
+
+
+def _parse_runner_dependency_item(
+    item: object,
+) -> tuple[RunnerDependency | None, str | None]:
+    if isinstance(item, str):
+        match = re.fullmatch(r"#(?P<number>[1-9]\d*)", item.strip())
+        if match is None:
+            return None, "dependency_malformed"
+        return RunnerIssueDependency(int(match.group("number"))), None
+    if not isinstance(item, Mapping):
+        return None, "dependency_malformed"
+    if "issue" in item:
+        if set(item) != {"issue"}:
+            return None, "dependency_unknown"
+        number = _runner_dependency_number(item.get("issue"))
+        if number is None:
+            return None, "dependency_malformed"
+        return RunnerIssueDependency(number), None
+    if "pr" in item:
+        expected_keys = {"pr", "base", "base_sha", "head", "head_sha"}
+        if set(item) != expected_keys:
+            return None, "dependency_unknown"
+        number = _runner_dependency_number(item.get("pr"))
+        base = _runner_dependency_ref(item.get("base"))
+        base_sha = _runner_dependency_sha(item.get("base_sha"))
+        head = _runner_dependency_ref(item.get("head"))
+        head_sha = _runner_dependency_sha(item.get("head_sha"))
+        if None in (number, base, base_sha, head, head_sha):
+            return None, "dependency_malformed"
+        assert number is not None and base is not None and base_sha is not None
+        assert head is not None and head_sha is not None
+        return RunnerPrDependency(number, base, base_sha, head, head_sha), None
+    return None, "dependency_unknown"
+
+
+def parse_runner_dependencies(
+    body: str,
+) -> tuple[tuple[RunnerDependency, ...], str | None]:
+    value = _runner_dependency_value_from_body(body)
+    if value is None:
+        if _runner_dependency_field_present(body):
+            return (), "dependency_malformed"
+        return (), None
+    if isinstance(value, str) and value.strip().startswith("["):
+        try:
+            loaded_value = yaml.safe_load(value)
+        except yaml.YAMLError:
+            loaded_value = value
+        if isinstance(loaded_value, list):
+            value = loaded_value
+    items: tuple[object, ...]
+    if isinstance(value, list):
+        items = tuple(value)
+    elif isinstance(value, tuple):
+        items = value
+    elif isinstance(value, str):
+        items = tuple(part.strip() for part in value.split(",") if part.strip())
+    else:
+        return (), "dependency_malformed"
+    if not items:
+        return (), "dependency_malformed"
+    dependencies: list[RunnerDependency] = []
+    seen: set[tuple[str, int]] = set()
+    for item in items:
+        dependency, reason = _parse_runner_dependency_item(item)
+        if reason is not None or dependency is None:
+            return (), reason or "dependency_malformed"
+        identity = (
+            "issue" if isinstance(dependency, RunnerIssueDependency) else "pr",
+            dependency.number,
+        )
+        if identity in seen:
+            return (), "dependency_malformed"
+        seen.add(identity)
+        dependencies.append(dependency)
+    return tuple(dependencies), None
+
+
 def extract_runner_task(
     body: str,
     default_repository: str = QUEUE_REPOSITORY,
@@ -3126,6 +3265,9 @@ def extract_runner_task(
     if target_project is None or target_repository is None:
         return None, target_reason
     base, base_sha = _task_base_metadata(body)
+    dependencies, dependency_reason = parse_runner_dependencies(body)
+    if dependency_reason is not None:
+        return None, dependency_reason
     return RunnerTask(
         content=content,
         lane=lane,
@@ -3143,6 +3285,7 @@ def extract_runner_task(
         ),
         base=base,
         base_sha=base_sha,
+        dependencies=dependencies,
     ), None
 
 
@@ -4685,6 +4828,168 @@ def set_issue_label(
     code, output = run_command(command)
     if code != 0:
         raise RuntimeError(f"gh issue edit failed:\n{output}")
+
+
+def hold_issue_for_dependency(
+    issue_number: int,
+    reason: str,
+    *,
+    remove_label: str = LABEL_READY,
+    runner_task: RunnerTask | None = None,
+) -> None:
+    report = report_runner_lane(
+        "BLOCKED: Runner dependency gate held pickup.\n\n"
+        f"reason={reason}\n"
+        "issue_state=waiting_dependency\n"
+        "terminal_block=false",
+        runner_task,
+    )
+    warning = record_runner_executor_result(
+        issue_number,
+        runner_task.target_project if runner_task is not None else "skeleton",
+        "WAITING_DEPENDENCY",
+        "WAITING_DEPENDENCY",
+        "codex" if runner_task is not None else None,
+        report,
+    )
+    post_issue_comment(issue_number, append_memory_warning(report, warning))
+    set_issue_label(issue_number, remove_label, LABEL_WAITING_DEPENDENCY)
+
+
+def _live_issue_dependency_state(repository: str, issue_number: int) -> dict[str, Any]:
+    code, output = run_command(
+        [
+            "gh",
+            "issue",
+            "view",
+            str(issue_number),
+            "--repo",
+            repository,
+            "--json",
+            "number,body,state,closed,labels",
+        ]
+    )
+    if code != 0:
+        raise RuntimeError("issue_dependency_unresolved")
+    parsed = json.loads(output or "{}")
+    if not isinstance(parsed, dict):
+        raise RuntimeError("issue_dependency_malformed")
+    return parsed
+
+
+def _live_pr_dependency_state(repository: str, pr_number: int) -> dict[str, Any]:
+    code, output = run_command(
+        [
+            "gh",
+            "pr",
+            "view",
+            str(pr_number),
+            "--repo",
+            repository,
+            "--json",
+            (
+                "number,state,mergedAt,baseRefName,baseRefOid,headRefName,"
+                "headRefOid"
+            ),
+        ]
+    )
+    if code != 0:
+        raise RuntimeError("pr_dependency_unresolved")
+    parsed = json.loads(output or "{}")
+    if not isinstance(parsed, dict):
+        raise RuntimeError("pr_dependency_malformed")
+    return parsed
+
+
+def _issue_dependency_hold_reason(
+    repository: str,
+    dependency: RunnerIssueDependency,
+    *,
+    root_issue_number: int,
+    seen: frozenset[int],
+) -> str | None:
+    if dependency.number in seen:
+        return "dependency_cycle"
+    try:
+        state = _live_issue_dependency_state(repository, dependency.number)
+    except (RuntimeError, json.JSONDecodeError) as exc:
+        return str(exc) or "issue_dependency_unresolved"
+    labels = _issue_label_names(state)
+    terminal = labels & TERMINAL_RUNNER_LABELS
+    active = labels & ACTIVE_EXECUTION_LABELS
+    if LABEL_DONE in labels:
+        if terminal == {LABEL_DONE} and not active:
+            return None
+        return "issue_dependency_terminal_state_conflict"
+    if LABEL_BLOCKED in labels:
+        return "issue_dependency_blocked"
+    if LABEL_RUNNING in labels:
+        return "issue_dependency_running"
+    if active or not terminal:
+        body = str(state.get("body") or "")
+        dependencies, parse_reason = parse_runner_dependencies(body)
+        if parse_reason is not None:
+            return parse_reason
+        for nested in dependencies:
+            if isinstance(nested, RunnerIssueDependency):
+                reason = _issue_dependency_hold_reason(
+                    repository,
+                    nested,
+                    root_issue_number=root_issue_number,
+                    seen=seen | {dependency.number},
+                )
+                if reason is not None:
+                    return reason
+        return "issue_dependency_unresolved"
+    return "issue_dependency_unresolved"
+
+
+def _pr_dependency_hold_reason(
+    repository: str, dependency: RunnerPrDependency
+) -> str | None:
+    try:
+        state = _live_pr_dependency_state(repository, dependency.number)
+    except (RuntimeError, json.JSONDecodeError) as exc:
+        return str(exc) or "pr_dependency_unresolved"
+    if state.get("number") != dependency.number:
+        return "pr_dependency_number_mismatch"
+    if str(state.get("state") or "").upper() != "MERGED":
+        return "pr_dependency_unmerged"
+    if not isinstance(state.get("mergedAt"), str) or not state.get("mergedAt"):
+        return "pr_dependency_unmerged"
+    if state.get("baseRefName") != dependency.base:
+        return "pr_dependency_base_mismatch"
+    if str(state.get("baseRefOid") or "").lower() != dependency.base_sha:
+        return "pr_dependency_base_sha_mismatch"
+    if state.get("headRefName") != dependency.head:
+        return "pr_dependency_head_mismatch"
+    if str(state.get("headRefOid") or "").lower() != dependency.head_sha:
+        return "pr_dependency_head_sha_mismatch"
+    return None
+
+
+def runner_dependency_hold_reason(
+    issue_number: int,
+    task: RunnerTask | None,
+    *,
+    repository: str | None = None,
+) -> str | None:
+    if task is None or not task.dependencies:
+        return None
+    queue_repository = repository or _current_queue_repository()
+    for dependency in task.dependencies:
+        if isinstance(dependency, RunnerIssueDependency):
+            reason = _issue_dependency_hold_reason(
+                queue_repository,
+                dependency,
+                root_issue_number=issue_number,
+                seen=frozenset((issue_number,)),
+            )
+        else:
+            reason = _pr_dependency_hold_reason(queue_repository, dependency)
+        if reason is not None:
+            return reason
+    return None
 
 
 def apply_runner_lane_label(
@@ -19515,6 +19820,9 @@ def _process_issue_in_current_queue_context(
             )
             if runner_task is None:
                 if task_reason is not None:
+                    if task_reason.startswith("dependency_"):
+                        hold_issue_for_dependency(issue_number, task_reason)
+                        return
                     block_issue(issue_number, task_reason)
                     return
                 if merge_mode:
@@ -19705,6 +20013,80 @@ def _process_issue_in_current_queue_context(
                     return
 
         apply_runner_lane_label(issue_number, runner_task)
+
+        dependencies: tuple[RunnerDependency, ...] = ()
+        dependency_gate_required = False
+        if runner_task is not None:
+            dependencies = runner_task.dependencies
+        else:
+            dependency_parse_reason: str | None = None
+            if _runner_dependency_field_present(issue_body):
+                dependencies, dependency_parse_reason = parse_runner_dependencies(
+                    issue_body
+                )
+            if dependency_parse_reason is not None:
+                hold_issue_for_dependency(
+                    issue_number,
+                    dependency_parse_reason,
+                    runner_task=runner_task,
+                )
+                return
+        dependency_gate_required = bool(dependencies)
+        if dependency_gate_required:
+            try:
+                live_issue = _live_issue_dependency_state(source_repository, issue_number)
+            except (RuntimeError, json.JSONDecodeError) as exc:
+                hold_issue_for_dependency(
+                    issue_number,
+                    str(exc) or "dependency_current_issue_unresolved",
+                    runner_task=runner_task,
+                )
+                return
+            live_labels = _issue_label_names(live_issue)
+            if LABEL_READY not in live_labels:
+                return
+            live_body = str(live_issue.get("body") or "")
+            if runner_task is not None:
+                live_runner_task, live_task_reason = extract_runner_task(
+                    live_body,
+                    default_repository=source_repository,
+                )
+                if live_runner_task is None:
+                    hold_issue_for_dependency(
+                        issue_number,
+                        live_task_reason or "dependency_current_task_unresolved",
+                        runner_task=runner_task,
+                    )
+                    return
+                runner_task = live_runner_task
+                task_content = runner_task.content
+                dependencies = runner_task.dependencies
+            else:
+                dependencies, dependency_parse_reason = parse_runner_dependencies(
+                    live_body
+                )
+                if dependency_parse_reason is not None:
+                    hold_issue_for_dependency(
+                        issue_number,
+                        dependency_parse_reason,
+                        runner_task=runner_task,
+                    )
+                    return
+                issue_body = live_body
+            reason = runner_dependency_hold_reason(
+                issue_number,
+                RunnerTask(content="", dependencies=dependencies)
+                if runner_task is None and dependencies
+                else runner_task,
+                repository=source_repository,
+            )
+            if reason is not None:
+                hold_issue_for_dependency(
+                    issue_number,
+                    reason,
+                    runner_task=runner_task,
+                )
+                return
 
         if (
             maintenance_mode
