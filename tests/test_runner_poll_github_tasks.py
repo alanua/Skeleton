@@ -8000,6 +8000,8 @@ def _issue_publish_commands(
     pr_view_code: int = 0,
     post_push_pr_base_branch: str | None = None,
     post_push_pr_base_sha: str | None = None,
+    target_project_rest_list_payload: list[dict[str, object]] | None = None,
+    target_project_rest_list_code: int = 0,
     target_project_rest_pr_payload: dict[str, object] | None = None,
     target_project_rest_file_payload: list[dict[str, object]] | None = None,
     target_project_rest_pr_code: int = 0,
@@ -8101,6 +8103,8 @@ def _issue_publish_commands(
             return diff_check_code, "diff check output must not leak"
         if command == ["git", "rev-parse", "HEAD"]:
             rev_parse_count += 1
+            if remote_branch_exists:
+                return 0, f"{post_commit_head}\n"
             if rev_parse_count == 1:
                 return 0, f"{pre_commit_head}\n"
             return 0, f"{post_commit_head}\n"
@@ -8154,6 +8158,34 @@ def _issue_publish_commands(
                     },
                     "headRepositoryOwner": {"login": owner},
                 }
+            )
+        owner = repository.split("/", 1)[0]
+        rest_list_query = urllib.parse.urlencode(
+            {
+                "state": "open",
+                "head": f"{owner}:{branch}",
+                "base": base_branch,
+                "per_page": "2",
+            }
+        )
+        if command == [
+            "gh",
+            "api",
+            "--method",
+            "GET",
+            f"repos/{repository}/pulls?{rest_list_query}",
+        ]:
+            if target_project_rest_list_code != 0:
+                return target_project_rest_list_code, "REST list output must not leak"
+            if target_project_rest_list_payload is not None:
+                return 0, json.dumps(target_project_rest_list_payload)
+            return 0, json.dumps(
+                [
+                    {
+                        "number": 123,
+                        "html_url": f"https://github.com/{repository}/pull/123",
+                    }
+                ]
             )
         if command == [
             "gh",
@@ -14168,10 +14200,70 @@ def test_publish_target_project_issue_worktree_pr_gh_failure_and_remote_absent_p
     ] in commands
 
 
+def test_publish_target_project_issue_worktree_pr_gh_failure_branch_present_exact_rest_pr_reuses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_root = tmp_path / "lumenflow"
+    base_sha = "a" * 40
+    head_sha = "1" * 40
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    worktree_path = _prepare_issue_publish_worktree(target_root)
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=_target_project_tree(target_root)
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            repository="alanua/LumenFlow",
+            remote_url="https://github.com/alanua/LumenFlow.git",
+            changed_files=("README.md",),
+            fetched_base_sha=base_sha,
+            existing_pr_code=1,
+            remote_branch_exists=True,
+            post_commit_head=head_sha,
+            commit_message="Publish target project issue #123 worktree",
+            target_project_rest_pr_payload=_target_project_rest_pr_payload(
+                base_sha=base_sha,
+                head_sha=head_sha,
+            ),
+            target_project_rest_file_payload=[{"filename": "README.md"}],
+        ),
+    ) as run:
+        report = runner.publish_target_project_issue_worktree_pr(
+            _publish_target_project_issue_worktree_body(base_sha=base_sha)
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert "existing_pr_lookup=existing_pr_found" in report
+    assert "existing_pr_url=https://github.com/alanua/LumenFlow/pull/123" in report
+    assert [
+        "gh",
+        "api",
+        "--method",
+        "GET",
+        (
+            "repos/alanua/LumenFlow/pulls?"
+            "state=open&head=alanua%3Arunner%2Fissue-123&base=main&per_page=2"
+        ),
+    ] in commands
+    assert [
+        "gh",
+        "api",
+        "--method",
+        "GET",
+        "repos/alanua/LumenFlow/pulls/123",
+    ] in commands
+    assert all(command[:2] != ["git", "add"] for command in commands)
+    assert all(command[:2] != ["git", "push"] for command in commands)
+    assert all(command[:3] != ["gh", "pr", "create"] for command in commands)
+
+
 @pytest.mark.parametrize(
     "command_kwargs",
     (
-        {"remote_branch_exists": True},
         {"ls_remote_code": 128},
         {"ls_remote_output": "\n"},
         {
@@ -14220,6 +14312,139 @@ def test_publish_target_project_issue_worktree_pr_gh_failure_ls_remote_blocks(
         "origin",
         "refs/heads/runner/issue-123",
     ] in commands
+    assert all(command[:2] != ["git", "add"] for command in commands)
+    assert all(command[:2] != ["git", "push"] for command in commands)
+    assert all(command[:3] != ["gh", "pr", "create"] for command in commands)
+
+
+@pytest.mark.parametrize(
+    ("command_kwargs", "reason"),
+    (
+        ({"target_project_rest_list_payload": []}, "existing_pr_lookup_unavailable"),
+        (
+            {
+                "target_project_rest_list_payload": [
+                    {
+                        "number": 123,
+                        "html_url": "https://github.com/alanua/LumenFlow/pull/123",
+                    },
+                    {
+                        "number": 124,
+                        "html_url": "https://github.com/alanua/LumenFlow/pull/124",
+                    },
+                ]
+            },
+            "existing_pr_lookup_unavailable",
+        ),
+        ({"target_project_rest_list_code": 1}, "existing_pr_lookup_unavailable"),
+        (
+            {
+                "target_project_rest_list_payload": [
+                    {
+                        "number": 123,
+                        "html_url": "https://github.com/alanua/Skeleton/pull/123",
+                    }
+                ]
+            },
+            "existing_pr_lookup_unavailable",
+        ),
+        (
+            {
+                "target_project_rest_pr_payload": _target_project_rest_pr_payload(
+                    head_sha="2" * 40
+                )
+            },
+            "existing_pr_lookup_unavailable",
+        ),
+        (
+            {
+                "target_project_rest_pr_payload": _target_project_rest_pr_payload(
+                    head_ref="runner/issue-999"
+                )
+            },
+            "existing_pr_lookup_unavailable",
+        ),
+        (
+            {
+                "target_project_rest_pr_payload": _target_project_rest_pr_payload(
+                    head_repository="alanua/Other"
+                )
+            },
+            "existing_pr_lookup_unavailable",
+        ),
+        (
+            {
+                "target_project_rest_pr_payload": _target_project_rest_pr_payload(
+                    base_sha="b" * 40
+                )
+            },
+            "existing_pr_lookup_unavailable",
+        ),
+        (
+            {
+                "target_project_rest_pr_payload": _target_project_rest_pr_payload(
+                    draft=False
+                )
+            },
+            "existing_pr_lookup_unavailable",
+        ),
+        (
+            {
+                "target_project_rest_pr_payload": _target_project_rest_pr_payload(
+                    state="closed"
+                )
+            },
+            "existing_pr_lookup_unavailable",
+        ),
+        ({"target_project_rest_pr_code": 1}, "existing_pr_lookup_unavailable"),
+        ({"target_project_rest_files_code": 1}, "existing_pr_lookup_unavailable"),
+    ),
+)
+def test_publish_target_project_issue_worktree_pr_gh_failure_branch_present_rest_blocks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command_kwargs: dict[str, object],
+    reason: str,
+) -> None:
+    target_root = tmp_path / "lumenflow"
+    base_sha = "a" * 40
+    head_sha = "1" * 40
+    defaults = {
+        "target_project_rest_pr_payload": _target_project_rest_pr_payload(
+            base_sha=base_sha,
+            head_sha=head_sha,
+        ),
+        "target_project_rest_file_payload": [{"filename": "README.md"}],
+    }
+    defaults.update(command_kwargs)
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    worktree_path = _prepare_issue_publish_worktree(target_root)
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=_target_project_tree(target_root)
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            repository="alanua/LumenFlow",
+            remote_url="https://github.com/alanua/LumenFlow.git",
+            changed_files=("README.md",),
+            fetched_base_sha=base_sha,
+            existing_pr_code=1,
+            remote_branch_exists=True,
+            post_commit_head=head_sha,
+            commit_message="Publish target project issue #123 worktree",
+            **defaults,
+        ),
+    ) as run:
+        report = runner.publish_target_project_issue_worktree_pr(
+            _publish_target_project_issue_worktree_body(base_sha=base_sha)
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("BLOCKED:")
+    assert f"existing_pr_lookup={reason}" in report
+    assert "reason=existing_pr_lookup_unavailable" in report
     assert all(command[:2] != ["git", "add"] for command in commands)
     assert all(command[:2] != ["git", "push"] for command in commands)
     assert all(command[:3] != ["gh", "pr", "create"] for command in commands)
@@ -14944,6 +15169,7 @@ def test_publish_target_project_issue_worktree_pr_ignores_codex_noise_and_reuses
     assert "existing_pr_url=https://github.com/alanua/LumenFlow/pull/55" in report
     assert not any(".codex/session.json" in command for command in commands)
     assert all(command[:3] != ["gh", "pr", "create"] for command in commands)
+    assert all(command[:2] != ["gh", "api"] for command in commands)
     assert all(command[:2] != ["git", "push"] for command in commands)
     assert all(command[:3] != ["git", "ls-remote", "--heads"] for command in commands)
 
