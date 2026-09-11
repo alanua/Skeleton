@@ -1140,6 +1140,44 @@ class RunnerTask:
     has_target_repository_metadata: bool = False
     base: str | None = None
     base_sha: str | None = None
+    dependencies: "RunnerTaskDependencies | None" = None
+
+
+@dataclass(frozen=True)
+class IssueDependency:
+    number: int
+    require: str = "terminal_success"
+
+
+@dataclass(frozen=True)
+class PullRequestDependency:
+    number: int
+    require: str = "merged"
+    current_base: bool = False
+    expected_base: str | None = None
+    expected_base_sha: str | None = None
+    expected_head: str | None = None
+    expected_head_sha: str | None = None
+
+
+@dataclass(frozen=True)
+class RunnerTaskDependencies:
+    issues: tuple[IssueDependency, ...] = ()
+    pull_requests: tuple[PullRequestDependency, ...] = ()
+
+
+@dataclass(frozen=True)
+class RunnerTaskDependencyReceiptItem:
+    kind: str
+    number: int
+    status: str
+
+
+@dataclass(frozen=True)
+class RunnerTaskDependencyDecision:
+    allowed: bool
+    status: str
+    items: tuple[RunnerTaskDependencyReceiptItem, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -3126,6 +3164,9 @@ def extract_runner_task(
     if target_project is None or target_repository is None:
         return None, target_reason
     base, base_sha = _task_base_metadata(body)
+    dependencies, dependencies_reason = parse_runner_task_dependencies(body)
+    if dependencies_reason is not None:
+        return None, dependencies_reason
     return RunnerTask(
         content=content,
         lane=lane,
@@ -3143,6 +3184,7 @@ def extract_runner_task(
         ),
         base=base,
         base_sha=base_sha,
+        dependencies=dependencies,
     ), None
 
 
@@ -3331,6 +3373,378 @@ def _body_field_or_yaml_value(body: str, field: str, key: str) -> object:
     if multiline_value is not None:
         return multiline_value
     return _metadata_yaml_value(metadata, key)
+
+
+def _runner_task_dependency_value(body: str) -> object:
+    metadata = _metadata_before_task(body)
+    value = _metadata_yaml_value(metadata, "dependencies")
+    if value is not None:
+        return value
+    lines = metadata.splitlines()
+    for index, line in enumerate(lines):
+        if re.fullmatch(r"[^\S\r\n]*dependencies:[^\S\r\n]*", line) is None:
+            continue
+        yaml_lines = [line]
+        for item in lines[index + 1 :]:
+            if not item.strip():
+                break
+            if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*:[^\r\n]*", item):
+                break
+            yaml_lines.append(item)
+        try:
+            parsed = yaml.safe_load("\n".join(yaml_lines))
+        except yaml.YAMLError:
+            return None
+        if isinstance(parsed, Mapping):
+            return parsed.get("dependencies")
+        return None
+    match = re.search(
+        r"^[^\S\r\n]*dependencies:[^\S\r\n]*(?P<value>\S(?:[^\r\n]*\S)?)[^\S\r\n]*$",
+        metadata,
+        re.MULTILINE,
+    )
+    if match is None:
+        return None
+    text = match.group("value")
+    try:
+        loaded = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return text
+    return loaded
+
+
+def _runner_task_dependencies_field_present(body: str) -> bool:
+    metadata = _metadata_before_task(body)
+    return _metadata_has_field(metadata, "dependencies") or (
+        _metadata_yaml_value(metadata, "dependencies") is not None
+    )
+
+
+def _dependency_number(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("#"):
+            text = text[1:]
+        if re.fullmatch(r"[1-9]\d*", text):
+            return int(text)
+    return None
+
+
+def _dependency_text(value: object) -> str | None:
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _parse_issue_dependencies(value: object) -> tuple[IssueDependency, ...] | None:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        return None
+    parsed: list[IssueDependency] = []
+    seen: set[int] = set()
+    for item in value:
+        if isinstance(item, (str, int)) and not isinstance(item, bool):
+            number = _dependency_number(item)
+            require = "terminal_success"
+        elif isinstance(item, Mapping):
+            number = _dependency_number(item.get("number") or item.get("issue"))
+            require = _dependency_text(item.get("require") or "terminal_success")
+        else:
+            return None
+        if number is None or require != "terminal_success" or number in seen:
+            return None
+        seen.add(number)
+        parsed.append(IssueDependency(number=number, require=require))
+    return tuple(parsed)
+
+
+def _parse_pr_dependencies(value: object) -> tuple[PullRequestDependency, ...] | None:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        return None
+    parsed: list[PullRequestDependency] = []
+    seen: set[int] = set()
+    for item in value:
+        if isinstance(item, (str, int)) and not isinstance(item, bool):
+            number = _dependency_number(item)
+            require = "merged"
+            current_base = False
+            expected_base = None
+            expected_head = None
+            expected_head_sha = None
+        elif isinstance(item, Mapping):
+            number = _dependency_number(
+                item.get("number") or item.get("pull_request") or item.get("pr")
+            )
+            require = _dependency_text(item.get("require") or "merged")
+            current_base = item.get("current_base", False)
+            expected_base = _dependency_text(
+                item.get("expected_base") or item.get("base")
+            )
+            expected_base_sha = _dependency_text(
+                item.get("expected_base_sha") or item.get("base_sha")
+            )
+            expected_head = _dependency_text(
+                item.get("expected_head") or item.get("head")
+            )
+            expected_head_sha = _dependency_text(
+                item.get("expected_head_sha") or item.get("head_sha")
+            )
+        else:
+            return None
+        if (
+            number is None
+            or require != "merged"
+            or not isinstance(current_base, bool)
+            or (expected_base_sha is not None and _HEAD_SHA_RE.fullmatch(expected_base_sha) is None)
+            or (expected_head_sha is not None and _HEAD_SHA_RE.fullmatch(expected_head_sha) is None)
+            or number in seen
+        ):
+            return None
+        seen.add(number)
+        parsed.append(
+            PullRequestDependency(
+                number=number,
+                require=require,
+                current_base=current_base,
+                expected_base=expected_base,
+                expected_base_sha=(
+                    expected_base_sha.lower() if expected_base_sha is not None else None
+                ),
+                expected_head=expected_head,
+                expected_head_sha=(
+                    expected_head_sha.lower() if expected_head_sha is not None else None
+                ),
+            )
+        )
+    return tuple(parsed)
+
+
+def parse_runner_task_dependencies(
+    body: str,
+) -> tuple[RunnerTaskDependencies | None, str | None]:
+    if not _runner_task_dependencies_field_present(body):
+        return None, None
+    value = _runner_task_dependency_value(body)
+    if not isinstance(value, Mapping):
+        return None, "malformed_dependencies"
+    if not set(value) <= {"issues", "pull_requests"}:
+        return None, "unknown_dependencies"
+    issues = _parse_issue_dependencies(value.get("issues"))
+    pull_requests = _parse_pr_dependencies(value.get("pull_requests"))
+    if issues is None or pull_requests is None:
+        return None, "malformed_dependencies"
+    dependencies = RunnerTaskDependencies(
+        issues=issues,
+        pull_requests=pull_requests,
+    )
+    if not dependencies.issues and not dependencies.pull_requests:
+        return None, "malformed_dependencies"
+    return dependencies, None
+
+
+def _github_issue_view(issue_number: int, repository: str) -> Mapping[str, Any] | None:
+    code, output = run_command(
+        [
+            "gh",
+            "issue",
+            "view",
+            str(issue_number),
+            "--repo",
+            repository,
+            "--json",
+            "number,body,state,closed,labels",
+        ]
+    )
+    if code != 0:
+        return None
+    try:
+        parsed = json.loads(output or "{}")
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, Mapping) else None
+
+
+def _github_pr_view(pr_number: int, repository: str) -> Mapping[str, Any] | None:
+    code, output = run_command(
+        [
+            "gh",
+            "pr",
+            "view",
+            str(pr_number),
+            "--repo",
+            repository,
+            "--json",
+            "number,state,merged,baseRefName,baseRefOid,headRefName,headRefOid,headRepository",
+        ]
+    )
+    if code != 0:
+        return None
+    try:
+        parsed = json.loads(output or "{}")
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, Mapping) else None
+
+
+def _runner_dependency_issue_status(issue: Mapping[str, Any] | None) -> str:
+    if issue is None:
+        return "unknown"
+    labels = _issue_label_names(issue)
+    if LABEL_DONE in labels:
+        return "satisfied"
+    if LABEL_BLOCKED in labels:
+        return "blocked"
+    if LABEL_RUNNING in labels:
+        return "running"
+    state = str(issue.get("state") or "").lower()
+    if issue.get("closed") is True or state == "closed":
+        return "unsatisfied"
+    return "unresolved"
+
+
+def _runner_dependency_pr_status(
+    pr: Mapping[str, Any] | None,
+    dependency: PullRequestDependency,
+    task: RunnerTask,
+) -> str:
+    if pr is None:
+        return "unknown"
+    if pr.get("merged") is not True:
+        return "unresolved"
+    expected_base = dependency.expected_base
+    if dependency.current_base:
+        expected_base = expected_base or task.base or "main"
+    if expected_base is not None and pr.get("baseRefName") != expected_base:
+        return "unsatisfied"
+    expected_base_sha = dependency.expected_base_sha
+    if dependency.current_base and expected_base_sha is None:
+        expected_base_sha = task.base_sha
+    if expected_base_sha is not None:
+        base_oid = pr.get("baseRefOid")
+        if not isinstance(base_oid, str) or base_oid.lower() != expected_base_sha:
+            return "unsatisfied"
+    if dependency.expected_head is not None and pr.get("headRefName") != dependency.expected_head:
+        return "unsatisfied"
+    if dependency.expected_head_sha is not None:
+        head_oid = pr.get("headRefOid")
+        if not isinstance(head_oid, str) or head_oid.lower() != dependency.expected_head_sha:
+            return "unsatisfied"
+    return "satisfied"
+
+
+def _runner_dependency_issue_children(body: str) -> tuple[IssueDependency, ...] | None:
+    dependencies, reason = parse_runner_task_dependencies(body)
+    if reason is not None:
+        return None
+    if dependencies is None:
+        return ()
+    return dependencies.issues
+
+
+def _runner_dependency_cycle_status(
+    *,
+    issue_number: int,
+    dependencies: RunnerTaskDependencies,
+    repository: str,
+) -> tuple[RunnerTaskDependencyReceiptItem, ...]:
+    visiting: set[int] = {issue_number}
+    visited: set[int] = set()
+    items: list[RunnerTaskDependencyReceiptItem] = []
+
+    def visit(parent_number: int, children: tuple[IssueDependency, ...], depth: int) -> None:
+        if depth > 16:
+            items.append(RunnerTaskDependencyReceiptItem("issue", parent_number, "unknown"))
+            return
+        for child in children:
+            if child.number in visiting:
+                items.append(RunnerTaskDependencyReceiptItem("issue", child.number, "cyclic"))
+                continue
+            if child.number in visited:
+                continue
+            issue = _github_issue_view(child.number, repository)
+            if issue is None:
+                items.append(RunnerTaskDependencyReceiptItem("issue", child.number, "unknown"))
+                continue
+            nested = _runner_dependency_issue_children(str(issue.get("body") or ""))
+            if nested is None:
+                items.append(RunnerTaskDependencyReceiptItem("issue", child.number, "malformed"))
+                continue
+            visiting.add(child.number)
+            visit(child.number, nested, depth + 1)
+            visiting.remove(child.number)
+            visited.add(child.number)
+
+    visit(issue_number, dependencies.issues, 0)
+    return tuple(items)
+
+
+def evaluate_runner_task_dependencies_for_pickup(
+    *,
+    issue_number: int,
+    task: RunnerTask | None,
+    repository: str,
+) -> RunnerTaskDependencyDecision:
+    if task is None or task.dependencies is None:
+        return RunnerTaskDependencyDecision(True, "none")
+    items: list[RunnerTaskDependencyReceiptItem] = []
+    if any(dependency.number == issue_number for dependency in task.dependencies.issues):
+        items.append(RunnerTaskDependencyReceiptItem("issue", issue_number, "cyclic"))
+    items.extend(
+        _runner_dependency_cycle_status(
+            issue_number=issue_number,
+            dependencies=task.dependencies,
+            repository=repository,
+        )
+    )
+    for dependency in task.dependencies.issues:
+        issue = _github_issue_view(dependency.number, repository)
+        items.append(
+            RunnerTaskDependencyReceiptItem(
+                "issue",
+                dependency.number,
+                _runner_dependency_issue_status(issue),
+            )
+        )
+    for dependency in task.dependencies.pull_requests:
+        pr = _github_pr_view(dependency.number, repository)
+        items.append(
+            RunnerTaskDependencyReceiptItem(
+                "pull_request",
+                dependency.number,
+                _runner_dependency_pr_status(pr, dependency, task),
+            )
+        )
+    bad = tuple(item for item in items if item.status != "satisfied")
+    if bad:
+        return RunnerTaskDependencyDecision(False, "held", tuple(items))
+    return RunnerTaskDependencyDecision(True, "satisfied", tuple(items))
+
+
+def runner_task_dependency_hold_report(
+    decision: RunnerTaskDependencyDecision,
+) -> str:
+    lines = [
+        "WAITING_DEPENDENCY: Runner task prerequisites are not satisfied.",
+        "dependency_status=held",
+    ]
+    for item in decision.items:
+        if item.status == "satisfied":
+            continue
+        lines.append(
+            f"dependency={item.kind}#{item.number} status={item.status}"
+        )
+    return "\n".join(lines)
+
+
+def hold_issue_for_runner_task_dependencies(
+    issue_number: int,
+    decision: RunnerTaskDependencyDecision,
+) -> None:
+    post_issue_comment(issue_number, runner_task_dependency_hold_report(decision))
+    set_issue_label(issue_number, LABEL_READY, LABEL_WAITING_DEPENDENCY)
 
 
 def _metadata_has_field(metadata: str, field: str) -> bool:
@@ -12747,6 +13161,26 @@ def _queue_replenisher_candidate(
     )
 
 
+def _queue_replenisher_typed_dependency_decision(
+    issue: Mapping[str, Any],
+) -> RunnerTaskDependencyDecision:
+    number = _queue_replenisher_issue_number(issue)
+    if number is None:
+        return RunnerTaskDependencyDecision(False, "unknown")
+    task, reason = extract_runner_task(str(issue.get("body") or ""))
+    if reason is not None:
+        return RunnerTaskDependencyDecision(
+            False,
+            "held",
+            (RunnerTaskDependencyReceiptItem("issue", number, "malformed"),),
+        )
+    return evaluate_runner_task_dependencies_for_pickup(
+        issue_number=number,
+        task=task,
+        repository=REPO,
+    )
+
+
 def _queue_replenisher_issue_is_discoverable(issue: Mapping[str, Any]) -> bool:
     labels = _issue_label_names(issue)
     if not is_open_task_issue(dict(issue)):
@@ -12854,6 +13288,22 @@ def _runner_queue_replenishment_selection(
         labels = _issue_label_names(issue)
         if LABEL_READY in labels:
             continue
+        if LABEL_WAITING_DEPENDENCY in labels and _runner_task_dependencies_field_present(
+            str(issue.get("body") or "")
+        ):
+            typed_decision = _queue_replenisher_typed_dependency_decision(issue)
+            if not typed_decision.allowed:
+                waiting_dependency.append(
+                    RunnerQueueReplenisherCandidate(
+                        issue=dict(issue),
+                        number=_queue_replenisher_issue_number(issue) or 0,
+                        intent_key=_queue_replenisher_intent_key(issue),
+                        allowed_files=_queue_replenisher_allowed_files(issue),
+                        dependencies=frozenset(),
+                        dependencies_valid=False,
+                    )
+                )
+                continue
         if not _queue_replenisher_issue_is_discoverable(issue):
             continue
         candidate = _queue_replenisher_candidate(issue)
@@ -19605,6 +20055,15 @@ def _process_issue_in_current_queue_context(
                     retry_decision=retry_decision,
                 )
                 return
+
+        dependency_decision = evaluate_runner_task_dependencies_for_pickup(
+            issue_number=issue_number,
+            task=runner_task,
+            repository=source_repository,
+        )
+        if not dependency_decision.allowed:
+            hold_issue_for_runner_task_dependencies(issue_number, dependency_decision)
+            return
 
         set_issue_label(issue_number, LABEL_READY, LABEL_RUNNING)
         claimed = True

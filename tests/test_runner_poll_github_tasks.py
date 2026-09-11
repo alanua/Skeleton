@@ -4407,6 +4407,273 @@ def test_process_issue_runs_codex_in_prepared_issue_worktree(tmp_path: Path) -> 
     finalize.assert_called_once_with(issue, str(issue_path), "codex output")
 
 
+def _typed_dependency_issue_body(dependencies: str = "") -> str:
+    dependency_block = f"dependencies:\n{dependencies}" if dependencies else ""
+    return "\n".join(
+        (
+            "schema: skeleton.runner_task.v1",
+            "Selected Repository: alanua/Skeleton",
+            "Expected Output: done",
+            dependency_block,
+            "",
+            "```task",
+            "Do it",
+            "```",
+        )
+    )
+
+
+def _dependency_issue_state(number: int, labels: tuple[str, ...], state: str = "OPEN") -> str:
+    return json.dumps(
+        {
+            "number": number,
+            "body": "```task\nParent\n```",
+            "state": state,
+            "closed": state.upper() == "CLOSED",
+            "labels": [{"name": label} for label in labels],
+        }
+    )
+
+
+def test_typed_dependency_parent_blocked_prevents_child_pickup(
+    tmp_path: Path,
+) -> None:
+    issue = {
+        "number": 4005,
+        "title": "Child",
+        "body": _typed_dependency_issue_body(
+            "  issues:\n"
+            "    - number: 4003\n"
+            "      require: terminal_success"
+        ),
+        "comments": [],
+    }
+
+    def run(command: list[str], **_kwargs: object) -> tuple[int, str]:
+        if command[:3] == ["gh", "issue", "view"] and command[3] == "4003":
+            return 0, _dependency_issue_state(4003, (runner.LABEL_BLOCKED,))
+        return 2, "unexpected command"
+
+    with mock.patch.object(runner, "run_command", side_effect=run), mock.patch.object(
+        runner, "set_issue_label"
+    ) as labels, mock.patch.object(
+        runner, "post_issue_comment"
+    ) as comment, mock.patch.object(
+        runner, "prepare_issue_worktree"
+    ) as prepare, mock.patch.object(
+        runner, "run_codex_task"
+    ) as codex:
+        runner.process_issue(issue, workdir=str(tmp_path))
+
+    labels.assert_called_once_with(
+        4005, runner.LABEL_READY, runner.LABEL_WAITING_DEPENDENCY
+    )
+    report = comment.call_args.args[1]
+    assert "dependency=issue#4003 status=blocked" in report
+    prepare.assert_not_called()
+    codex.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("labels", "state", "status"),
+    (
+        ((runner.LABEL_RUNNING,), "OPEN", "running"),
+        ((), "OPEN", "unresolved"),
+        ((runner.LABEL_BLOCKED,), "OPEN", "blocked"),
+    ),
+)
+def test_typed_issue_dependency_unsatisfied_states_are_not_eligible(
+    labels: tuple[str, ...],
+    state: str,
+    status: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = runner.RunnerTask(
+        content="Do it",
+        dependencies=runner.RunnerTaskDependencies(
+            issues=(runner.IssueDependency(4003),)
+        ),
+    )
+
+    monkeypatch.setattr(
+        runner,
+        "_github_issue_view",
+        lambda number, _repository: json.loads(_dependency_issue_state(number, labels, state)),
+    )
+
+    decision = runner.evaluate_runner_task_dependencies_for_pickup(
+        issue_number=4005,
+        task=task,
+        repository=runner.REPO,
+    )
+
+    assert decision.allowed is False
+    assert any(item.number == 4003 and item.status == status for item in decision.items)
+
+
+def test_typed_dependency_terminal_success_parent_pickup_happens_once(
+    tmp_path: Path,
+) -> None:
+    issue_path = tmp_path / "issue-4005"
+    issue = {
+        "number": 4005,
+        "title": "Child",
+        "body": _typed_dependency_issue_body(
+            "  issues:\n"
+            "    - number: 4003\n"
+            "      require: terminal_success"
+        ),
+        "comments": [],
+    }
+
+    def run(command: list[str], **_kwargs: object) -> tuple[int, str]:
+        if command[:3] == ["gh", "issue", "view"] and command[3] == "4003":
+            return 0, _dependency_issue_state(4003, (runner.LABEL_DONE,), "CLOSED")
+        return 2, "unexpected command"
+
+    with mock.patch.object(runner, "run_command", side_effect=run), mock.patch.object(
+        runner, "set_issue_label"
+    ) as labels, mock.patch.object(
+        runner, "prepare_issue_worktree", return_value=(0, "ready", issue_path)
+    ), mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, "codex output")
+    ) as codex, mock.patch.object(
+        runner, "finalize_success", return_value="DONE report"
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "cleanup_issue_worktree"
+    ):
+        runner.process_issue(issue, workdir=str(tmp_path))
+
+    assert labels.call_args_list.count(
+        mock.call(4005, runner.LABEL_READY, runner.LABEL_RUNNING)
+    ) == 1
+    codex.assert_called_once()
+
+
+def test_typed_pr_dependency_validates_merged_base_and_head(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = runner.RunnerTask(
+        content="Do it",
+        base="main",
+        base_sha="b" * 40,
+        dependencies=runner.RunnerTaskDependencies(
+            pull_requests=(
+                runner.PullRequestDependency(
+                    77,
+                    current_base=True,
+                    expected_head="runner/issue-4003",
+                    expected_head_sha="a" * 40,
+                ),
+            )
+        ),
+    )
+    pr = {
+        "number": 77,
+        "state": "MERGED",
+        "merged": True,
+        "baseRefName": "main",
+        "baseRefOid": "b" * 40,
+        "headRefName": "runner/issue-4003",
+        "headRefOid": "a" * 40,
+    }
+    monkeypatch.setattr(runner, "_github_pr_view", lambda _number, _repo: pr)
+
+    decision = runner.evaluate_runner_task_dependencies_for_pickup(
+        issue_number=4005,
+        task=task,
+        repository=runner.REPO,
+    )
+    assert decision.allowed is True
+
+    pr["baseRefName"] = "stale-base"
+    decision = runner.evaluate_runner_task_dependencies_for_pickup(
+        issue_number=4005,
+        task=task,
+        repository=runner.REPO,
+    )
+    assert decision.allowed is False
+    assert any(item.kind == "pull_request" and item.status == "unsatisfied" for item in decision.items)
+
+
+@pytest.mark.parametrize(
+    "body",
+    (
+        _typed_dependency_issue_body("  unknown:\n    - number: 1"),
+        _typed_dependency_issue_body("  issues:\n    - number: nope"),
+        _typed_dependency_issue_body("  issues: []"),
+    ),
+)
+def test_typed_dependency_malformed_or_unknown_declarations_fail_closed(body: str) -> None:
+    task, reason = runner.extract_runner_task(body)
+
+    assert task is None
+    assert reason in {"malformed_dependencies", "unknown_dependencies"}
+
+
+def test_typed_dependency_unknown_and_cycle_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = runner.RunnerTask(
+        content="Do it",
+        dependencies=runner.RunnerTaskDependencies(
+            issues=(runner.IssueDependency(4005), runner.IssueDependency(4006))
+        ),
+    )
+    monkeypatch.setattr(runner, "_github_issue_view", lambda _number, _repo: None)
+
+    decision = runner.evaluate_runner_task_dependencies_for_pickup(
+        issue_number=4005,
+        task=task,
+        repository=runner.REPO,
+    )
+
+    assert decision.allowed is False
+    assert any(item.status == "cyclic" for item in decision.items)
+    assert any(item.status == "unknown" for item in decision.items)
+
+
+def test_dependency_free_ready_task_legacy_pickup_unchanged(tmp_path: Path) -> None:
+    issue_path = tmp_path / "issue-4099"
+    issue = {
+        "number": 4099,
+        "title": "Legacy",
+        "body": "Expected Output: done\n\n```task\nDo it\n```",
+        "comments": [],
+    }
+
+    with mock.patch.object(runner, "_github_issue_view") as issue_view, mock.patch.object(
+        runner, "_github_pr_view"
+    ) as pr_view, mock.patch.object(
+        runner, "set_issue_label"
+    ) as labels, mock.patch.object(
+        runner, "prepare_issue_worktree", return_value=(0, "ready", issue_path)
+    ), mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, "codex output")
+    ), mock.patch.object(
+        runner, "finalize_success", return_value="DONE report"
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "cleanup_issue_worktree"
+    ):
+        runner.process_issue(issue, workdir=str(tmp_path))
+
+    labels.assert_any_call(4099, runner.LABEL_READY, runner.LABEL_RUNNING)
+    issue_view.assert_not_called()
+    pr_view.assert_not_called()
+
+
 def _shadow_code_issue_body() -> str:
     return "\n".join(
         (
