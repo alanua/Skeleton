@@ -2400,7 +2400,13 @@ def test_completion_path_invokes_replenishment_after_done_status(tmp_path: Path)
     replenish.assert_called_once_with()
 
 
-def _lavalamp_codegen_issue_body(expected_output: str = "one protected draft PR") -> str:
+def _lavalamp_codegen_issue_body(
+    expected_output: str | tuple[str, ...] = "one protected draft PR",
+) -> str:
+    if isinstance(expected_output, tuple):
+        expected_output_lines = f"Expected Output: {'; '.join(expected_output)}"
+    else:
+        expected_output_lines = f"Expected Output: {expected_output}"
     return "\n".join(
         (
             "Selected Repository: alanua/Lavalamp",
@@ -2408,7 +2414,7 @@ def _lavalamp_codegen_issue_body(expected_output: str = "one protected draft PR"
             "Base SHA: " + "a" * 40,
             "Allowed Files:",
             "- README.md",
-            f"Expected Output: {expected_output}",
+            expected_output_lines,
             "",
             "```task",
             "Make the target repository change and leave it for Runner publication.",
@@ -2467,6 +2473,116 @@ def test_cross_project_expected_pr_zero_changes_blocks_and_keeps_worktree(
     notify.assert_called_once_with(13, "BLOCKED", mock.ANY)
 
 
+def test_cross_project_explicit_no_code_gap_proof_completes_zero_change_flow(
+    tmp_path: Path,
+) -> None:
+    issue_path = tmp_path / "lavalamp" / "issue-alanua-Lavalamp-13"
+    issue = {
+        "number": 13,
+        "title": "Lavalamp delivery",
+        "body": _lavalamp_codegen_issue_body(
+            ("one protected draft PR", "NO_CODE_GAP_ALLOWED")
+        ),
+        "comments": [],
+    }
+
+    with mock.patch.object(runner, "set_issue_label") as labels, mock.patch.object(
+        runner, "verify_target_repository_checkout", return_value=None
+    ), mock.patch.object(
+        runner,
+        "prepare_target_repository_issue_worktree",
+        return_value=(0, "ready", issue_path),
+    ), mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner,
+        "run_codex_task",
+        return_value=(0, (
+            "RESULT: DONE\n"
+            "NO_CODE_GAP Proof: true\n"
+            "observer_breadcrumb=provider_exit_0"
+        )),
+    ), mock.patch.object(
+        runner, "changed_files", return_value=[]
+    ), mock.patch.object(
+        runner, "local_worktree_recovery_diff", return_value="Local worktree git diff: none"
+    ), mock.patch.object(
+        runner, "cleanup_target_repository_issue_worktree", return_value=(0, "")
+    ) as cleanup, mock.patch.object(
+        runner, "post_issue_comment"
+    ) as post, mock.patch.object(
+        runner, "notify_task_finished"
+    ) as notify, mock.patch.object(
+        runner, "record_runner_task_picked_up", return_value=None
+    ), mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ), mock.patch.object(
+        runner, "maybe_replenish_runner_queue_after_completion", return_value=True
+    ):
+        runner.process_issue(issue, workdir=str(tmp_path), source_repository="alanua/Lavalamp")
+
+    report = post.call_args.args[1]
+    assert report.startswith(runner._LOCAL_WORKTREE_DONE_PREFIX)
+    assert "NO_CODE_GAP Proof: true" in report
+    cleanup.assert_called_once_with("alanua/Lavalamp", 13, "alanua/Lavalamp")
+    labels.assert_any_call(13, runner.LABEL_RUNNING, runner.LABEL_DONE)
+    notify.assert_called_once_with(13, "DONE", mock.ANY)
+
+
+def test_cross_project_negative_no_code_gap_prose_does_not_grant_permission(
+    tmp_path: Path,
+) -> None:
+    issue_path = tmp_path / "lavalamp" / "issue-alanua-Lavalamp-13"
+    issue = {
+        "number": 13,
+        "title": "Lavalamp delivery",
+        "body": _lavalamp_codegen_issue_body(
+            "one protected draft PR; NO_CODE_GAP is not allowed"
+        ),
+        "comments": [],
+    }
+
+    with mock.patch.object(runner, "set_issue_label") as labels, mock.patch.object(
+        runner, "verify_target_repository_checkout", return_value=None
+    ), mock.patch.object(
+        runner,
+        "prepare_target_repository_issue_worktree",
+        return_value=(0, "ready", issue_path),
+    ), mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner,
+        "run_codex_task",
+        return_value=(0, (
+            "RESULT: DONE\n"
+            "This is not a NO_CODE_GAP authorization.\n"
+            "observer_breadcrumb=provider_exit_0"
+        )),
+    ), mock.patch.object(
+        runner, "changed_files", return_value=[]
+    ), mock.patch.object(
+        runner, "cleanup_target_repository_issue_worktree"
+    ) as cleanup, mock.patch.object(
+        runner, "post_issue_comment"
+    ) as post, mock.patch.object(
+        runner, "notify_task_finished"
+    ) as notify, mock.patch.object(
+        runner, "record_runner_task_picked_up", return_value=None
+    ), mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ), mock.patch.object(
+        runner, "maybe_replenish_runner_queue_after_completion", return_value=True
+    ):
+        runner.process_issue(issue, workdir=str(tmp_path), source_repository="alanua/Lavalamp")
+
+    report = post.call_args.args[1]
+    assert report.startswith("BLOCKED:")
+    assert "reason=NO_PROGRESS_ZERO_TARGET_CHANGES" in report
+    cleanup.assert_not_called()
+    labels.assert_any_call(13, runner.LABEL_RUNNING, runner.LABEL_BLOCKED)
+    notify.assert_called_once_with(13, "BLOCKED", mock.ANY)
+
+
 def test_cross_project_changed_worktree_publishes_before_cleanup(tmp_path: Path) -> None:
     issue_path = tmp_path / "lavalamp" / "issue-alanua-Lavalamp-13"
     issue = {
@@ -2484,6 +2600,7 @@ def test_cross_project_changed_worktree_publishes_before_cleanup(tmp_path: Path)
         assert "Source Repository: alanua/Lavalamp" in body
         assert "Source Issue: 13" in body
         assert "Base SHA: " + "a" * 40 in body
+        assert "Output Branch: runner/alanua-Lavalamp-issue-13" in body
         assert "- README.md" in body
         return (
             "DONE: Runner host maintenance task completed.\n"
@@ -2534,6 +2651,25 @@ def test_cross_project_changed_worktree_publishes_before_cleanup(tmp_path: Path)
     cleanup.assert_called_once_with("alanua/Lavalamp", 13, "alanua/Lavalamp")
     labels.assert_any_call(13, runner.LABEL_RUNNING, runner.LABEL_DONE)
     notify.assert_called_once_with(13, "DONE", mock.ANY)
+
+
+def test_skeleton_source_target_publication_branch_identity_is_unchanged() -> None:
+    task, reason = runner.extract_runner_task(
+        _lavalamp_codegen_issue_body(),
+        default_repository=runner.REPO,
+    )
+    assert reason is None
+    assert task is not None
+
+    body = runner._target_project_publication_body(
+        issue_number=13,
+        issue_body=_lavalamp_codegen_issue_body(),
+        runner_task=task,
+        source_repository=runner.REPO,
+    )
+
+    assert "Source Repository: alanua/Skeleton" in body
+    assert "Output Branch: runner/issue-13" in body
 
 
 def test_cross_project_publication_failure_keeps_changed_worktree(

@@ -5937,11 +5937,22 @@ def finalize_local_worktree_success(
 
 
 def _codegen_explicit_no_code_gap_proven(issue_body: str, codex_output: str) -> bool:
-    metadata = _metadata_before_task(issue_body)
+    expected_output = _expected_output_value(issue_body)
+    if isinstance(expected_output, str):
+        expected_output_items = tuple(
+            item.strip() for item in re.split(r"[\n,;]+", expected_output)
+        )
+    elif isinstance(expected_output, list) and all(
+        isinstance(item, str) for item in expected_output
+    ):
+        expected_output_items = tuple(item.strip() for item in expected_output)
+    else:
+        expected_output_items = ()
+    no_code_gap_allowed = "NO_CODE_GAP_ALLOWED" in expected_output_items
     final_answer = final_codex_answer(codex_output)
     return (
-        "NO_CODE_GAP" in metadata
-        and "NO_CODE_GAP" in final_answer
+        no_code_gap_allowed
+        and _body_field(final_answer, "NO_CODE_GAP Proof") == "true"
         and _first_final_status(final_answer) == "DONE"
     )
 
@@ -5964,7 +5975,7 @@ def _target_project_publication_body(
         f"Source Issue: {issue_number}",
         f"Base Branch: {base_branch}",
         *([f"Base SHA: {runner_task.base_sha}"] if runner_task.base_sha is not None else []),
-        f"Output Branch: {issue_branch(issue_number)}",
+        f"Output Branch: {issue_branch(issue_number, source_repository)}",
         "Draft PR: true",
         "Allowed Files:",
         *(f"- {path}" for path in sorted(allowed_files)),
@@ -12099,12 +12110,15 @@ def _safe_issue_publish_branch_name(branch: str) -> bool:
     return (
         bool(branch)
         and branch == branch.strip()
-        and branch.startswith("runner/issue-")
         and ".." not in branch
         and not branch.startswith("/")
         and not branch.endswith("/")
         and "//" not in branch
-        and re.fullmatch(r"[A-Za-z0-9._/-]+", branch) is not None
+        and re.fullmatch(
+            r"runner/(?:issue-[1-9]\d*|[A-Za-z0-9._-]+-issue-[1-9]\d*)",
+            branch,
+        )
+        is not None
     )
 
 
@@ -12232,7 +12246,7 @@ def _issue_worktree_publish_inspection_metadata(
     if not isinstance(source_issue, str) or re.fullmatch(r"[1-9]\d*", source_issue) is None:
         return None, "missing_or_invalid_source_issue"
     source_issue_number = int(source_issue)
-    required_branch = f"runner/issue-{source_issue_number}"
+    required_branch = issue_branch(source_issue_number, source_repository)
     if explicit_recovery_route or target_project_route:
         if not isinstance(expected_branch, str) or not _safe_issue_publish_branch_name(
             expected_branch
