@@ -13678,6 +13678,21 @@ def _issue_worktree_publish_existing_pr_url(
         cwd=worktree_path,
     )
     if code != 0:
+        if request.target_project_route:
+            ls_code, ls_output = run_command(
+                [
+                    "git",
+                    "ls-remote",
+                    "--heads",
+                    "origin",
+                    f"refs/heads/{request.expected_branch}",
+                ],
+                cwd=worktree_path,
+            )
+            if ls_code == 0 and ls_output == "":
+                return IssueWorktreePublishExistingPrLookup(
+                    pr_url=None, reason="existing_pr_not_found"
+                )
         return IssueWorktreePublishExistingPrLookup(
             pr_url=None, reason="existing_pr_lookup_unavailable"
         )
@@ -14335,7 +14350,13 @@ def _issue_worktree_publish_remote_branch_absent(
     request: IssueWorktreePublishInspectionRequest, worktree_path: Path
 ) -> bool:
     code, output = run_command(
-        ["git", "ls-remote", "--heads", "origin", request.expected_branch],
+        [
+            "git",
+            "ls-remote",
+            "--heads",
+            "origin",
+            f"refs/heads/{request.expected_branch}",
+        ],
         cwd=worktree_path,
     )
     return code == 0 and not output.strip()
