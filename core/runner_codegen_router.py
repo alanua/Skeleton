@@ -32,6 +32,7 @@ OPENROUTER_CREDENTIAL_SERVICE = "runner-openhands"
 OPENROUTER_CREDENTIAL_ALIAS = "openrouter-api"
 OPENROUTER_CREDENTIAL_ACTION = "bind-openrouter-fallback"
 _OPENROUTER_BOUND_KEY_ENV = "SKELETON_OPENROUTER_FALLBACK_API_KEY"
+_OPENHANDS_SECONDARY_MAX_OUTPUT_TOKENS = 768
 
 # Provider runtime identifiers are adapter-owned. Task/issue prose never selects them.
 _OPENHANDS_RUNTIME_MODEL_BY_MODEL_ID = {
@@ -119,7 +120,7 @@ def _production_codegen_profile() -> TaskProfile:
         retry_policy_ref="explicit-secondary-on-provider-unavailable-v1",
         permissions=("repository_read", "repository_write", "test_execution"),
         max_attempts=1,
-        max_tokens=0,
+        max_tokens=_OPENHANDS_SECONDARY_MAX_OUTPUT_TOKENS,
         requires_operator=False,
     )
 
@@ -161,6 +162,8 @@ def prepare_openhands_secondary_environment(
     route: OpenHandsSecondaryRoute | None = None,
 ) -> tuple[dict[str, str], dict[str, object]]:
     selected = route or select_openhands_secondary_route()
+    if selected.lease.max_tokens <= 0:
+        raise CodegenRouteError("openhands_bounded_token_budget_required")
     authority = os.environ if authority_environment is None else authority_environment
     environment: MutableMapping[str, str] = dict(base_environment or {})
     try:
@@ -178,6 +181,7 @@ def prepare_openhands_secondary_environment(
         raise CodegenRouteError("openhands_registered_credential_unavailable")
     environment["LLM_API_KEY"] = api_key
     environment["LLM_MODEL"] = selected.runtime_model
+    environment["LLM_MAX_OUTPUT_TOKENS"] = str(selected.lease.max_tokens)
     environment["MAX_BUDGET_PER_TASK"] = "0.50"
     environment["MAX_ITERATIONS"] = "20"
     environment["LLM_NUM_RETRIES"] = "1"
@@ -186,6 +190,7 @@ def prepare_openhands_secondary_environment(
         "model_id": selected.binding.model_id,
         "binding_id": selected.binding.binding_id,
         "lease_hash": selected.lease.lease_hash,
+        "max_output_tokens": selected.lease.max_tokens,
         "credential_status": "USED",
     }
     return dict(environment), public_receipt
