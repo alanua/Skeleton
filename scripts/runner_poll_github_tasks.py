@@ -13756,6 +13756,110 @@ def _issue_worktree_publish_pr_state(
     return parsed
 
 
+def _target_project_publish_rest_pr_state(
+    request: IssueWorktreePublishInspectionRequest,
+    worktree_path: Path,
+    pr_url: str,
+) -> dict[str, Any]:
+    if request.target_project_route is not True:
+        raise RuntimeError("target-project REST fallback not allowed")
+    if request.repository not in ALLOWED_TARGET_REPOSITORIES:
+        raise RuntimeError("target-project REST repository not allowed")
+    if extract_pr_repository(pr_url) != request.repository:
+        raise RuntimeError("target-project REST PR URL repository mismatch")
+    pr_number = extract_pr_number(pr_url)
+    if pr_number is None:
+        raise RuntimeError("target-project REST PR URL malformed")
+
+    code, output = run_command(
+        ["gh", "api", "--method", "GET", f"repos/{request.repository}/pulls/{pr_number}"],
+        cwd=worktree_path,
+    )
+    if code != 0:
+        raise RuntimeError("target-project REST PR read failed")
+    pr_payload = json.loads(output or "{}")
+    if not isinstance(pr_payload, dict):
+        raise RuntimeError("target-project REST PR response malformed")
+
+    code, output = run_command(
+        [
+            "gh",
+            "api",
+            "--method",
+            "GET",
+            f"repos/{request.repository}/pulls/{pr_number}/files?per_page=100&page=1",
+        ],
+        cwd=worktree_path,
+    )
+    if code != 0:
+        raise RuntimeError("target-project REST files read failed")
+    file_payload = json.loads(output or "[]")
+    if not isinstance(file_payload, list) or len(file_payload) >= 100:
+        raise RuntimeError("target-project REST files response malformed")
+
+    base = pr_payload.get("base")
+    head = pr_payload.get("head")
+    if not isinstance(base, dict) or not isinstance(head, dict):
+        raise RuntimeError("target-project REST PR response missing refs")
+    base_repo = _registered_worktree_overlay_rest_repository_name(base.get("repo"))
+    head_repo = _registered_worktree_overlay_rest_repository_name(head.get("repo"))
+    html_url = pr_payload.get("html_url")
+    if (
+        pr_payload.get("number") != pr_number
+        or base_repo != request.repository
+        or head_repo != request.repository
+        or not isinstance(html_url, str)
+        or html_url.rstrip("/") != pr_url.rstrip("/")
+        or _PUBLIC_GITHUB_PR_URL_RE.fullmatch(html_url) is None
+    ):
+        raise RuntimeError("target-project REST PR identity mismatch")
+
+    files: list[dict[str, str]] = []
+    seen_paths: set[str] = set()
+    for item in file_payload:
+        if not isinstance(item, dict):
+            raise RuntimeError("target-project REST file item malformed")
+        filename = item.get("filename")
+        if not isinstance(filename, str) or not _safe_issue_publish_file_path(filename):
+            raise RuntimeError("target-project REST file path malformed")
+        if filename in seen_paths:
+            raise RuntimeError("target-project REST duplicate file path")
+        seen_paths.add(filename)
+        files.append({"path": filename})
+
+    owner, name = request.repository.split("/", 1)
+    return {
+        "number": pr_number,
+        "url": html_url,
+        "state": str(pr_payload.get("state") or "").upper(),
+        "isDraft": pr_payload.get("draft"),
+        "baseRefName": base.get("ref"),
+        "baseRefOid": str(base.get("sha") or "").lower(),
+        "headRefName": head.get("ref"),
+        "headRefOid": str(head.get("sha") or "").lower(),
+        "headRepository": {
+            "nameWithOwner": request.repository,
+            "owner": {"login": owner},
+            "name": name,
+        },
+        "headRepositoryOwner": {"login": owner},
+        "files": files,
+    }
+
+
+def _issue_worktree_publish_post_create_pr_state(
+    request: IssueWorktreePublishInspectionRequest,
+    worktree_path: Path,
+    pr_url: str,
+) -> tuple[dict[str, Any], str]:
+    try:
+        return _issue_worktree_publish_pr_state(request, worktree_path), "gh"
+    except (RuntimeError, json.JSONDecodeError):
+        return _target_project_publish_rest_pr_state(
+            request, worktree_path, pr_url
+        ), "target_project_rest"
+
+
 def _issue_worktree_publish_pr_block_reason(
     request: IssueWorktreePublishInspectionRequest,
     pr_state: dict[str, Any],
@@ -16705,7 +16809,12 @@ def _issue_worktree_publish_validated_report(
     if target_project_route:
         assert verified_base_sha is not None
         try:
-            post_push_pr_state = _issue_worktree_publish_pr_state(request, worktree_path)
+            (
+                post_push_pr_state,
+                post_push_pr_metadata_source,
+            ) = _issue_worktree_publish_post_create_pr_state(
+                request, worktree_path, pr_url
+            )
         except (RuntimeError, json.JSONDecodeError):
             return _maintenance_report(
                 "BLOCKED",
@@ -16723,6 +16832,35 @@ def _issue_worktree_publish_validated_report(
         if post_reason is not None:
             return _maintenance_report(
                 "BLOCKED", task_id, [*status_lines, f"reason={post_reason}"], "not_met"
+            )
+        if post_push_pr_metadata_source != "gh":
+            post_push_pr_files = _existing_pr_publish_file_paths(post_push_pr_state)
+            if not post_push_pr_files:
+                return _maintenance_report(
+                    "BLOCKED",
+                    task_id,
+                    [*status_lines, "reason=post_push_pr_files_missing"],
+                    "not_met",
+                )
+            if not set(validated_publish_files) <= post_push_pr_files:
+                return _maintenance_report(
+                    "BLOCKED",
+                    task_id,
+                    [*status_lines, "reason=validated_publish_files_missing"],
+                    "not_met",
+                )
+            if not post_push_pr_files <= set(request.allowed_files):
+                return _maintenance_report(
+                    "BLOCKED",
+                    task_id,
+                    [*status_lines, "reason=post_push_pr_files_outside_allowlist"],
+                    "not_met",
+                )
+            status_lines.extend(
+                (
+                    f"post_push_pr_metadata_source={post_push_pr_metadata_source}",
+                    f"post_push_pr_changed_files_count={len(post_push_pr_files)}",
+                )
             )
         status_lines.append("step=post_push_read_pr_metadata status=done")
     return _maintenance_report("DONE", task_id, status_lines, "met")
