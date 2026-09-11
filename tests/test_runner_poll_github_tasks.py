@@ -1746,6 +1746,64 @@ def test_typed_dependency_issue_done_allows_pickup_transition(
     ]
 
 
+def test_dependency_free_ready_task_does_not_live_read_before_pickup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    body = _typed_dependency_task_body()
+    issue = {
+        "number": 4002,
+        "title": "Legacy dependency-free task",
+        "body": body,
+        "state": "OPEN",
+        "closed": False,
+        "labels": [{"name": runner.LABEL_READY}],
+    }
+    commands: list[list[str]] = []
+
+    def run(command: list[str], **_kwargs: object) -> tuple[int, str]:
+        commands.append(command)
+        if command[:3] == ["gh", "issue", "view"]:
+            raise AssertionError("dependency-free pickup must not live-read issue")
+        if command[:3] == ["gh", "issue", "edit"]:
+            return 0, ""
+        return 0, ""
+
+    monkeypatch.setattr(runner, "run_command", run)
+    monkeypatch.setattr(runner, "record_runner_executor_result", lambda *args: None)
+    monkeypatch.setattr(runner, "record_runner_task_picked_up", lambda *args: None)
+    monkeypatch.setattr(runner, "notify_task_finished", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        runner, "maybe_replenish_runner_queue_after_completion", lambda: False
+    )
+    monkeypatch.setattr(
+        runner,
+        "prepare_issue_branch",
+        lambda *_args, **_kwargs: (1, "synthetic stop after claim", tmp_path),
+    )
+
+    runner.process_issue(issue, workdir=str(tmp_path))
+
+    assert [
+        command
+        for command in commands
+        if command[:4] == ["gh", "issue", "edit", "4002"]
+        and command[-2:] == ["--add-label", runner.LABEL_RUNNING]
+    ] == [
+        [
+            "gh",
+            "issue",
+            "edit",
+            "4002",
+            "--repo",
+            runner.REPO,
+            "--remove-label",
+            runner.LABEL_READY,
+            "--add-label",
+            runner.LABEL_RUNNING,
+        ]
+    ]
+
+
 @pytest.mark.parametrize(
     ("labels", "reason"),
     (

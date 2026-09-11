@@ -20014,37 +20014,16 @@ def _process_issue_in_current_queue_context(
 
         apply_runner_lane_label(issue_number, runner_task)
 
-        dependency_parse_reason: str | None = None
-        try:
-            live_issue = _live_issue_dependency_state(source_repository, issue_number)
-        except (RuntimeError, json.JSONDecodeError) as exc:
-            hold_issue_for_dependency(
-                issue_number,
-                str(exc) or "dependency_current_issue_unresolved",
-                runner_task=runner_task,
-            )
-            return
-        live_labels = _issue_label_names(live_issue)
-        if LABEL_READY not in live_labels:
-            return
-        live_body = str(live_issue.get("body") or "")
+        dependencies: tuple[RunnerDependency, ...] = ()
+        dependency_gate_required = False
         if runner_task is not None:
-            live_runner_task, live_task_reason = extract_runner_task(
-                live_body,
-                default_repository=source_repository,
-            )
-            if live_runner_task is None:
-                hold_issue_for_dependency(
-                    issue_number,
-                    live_task_reason or "dependency_current_task_unresolved",
-                    runner_task=runner_task,
-                )
-                return
-            runner_task = live_runner_task
-            task_content = runner_task.content
             dependencies = runner_task.dependencies
         else:
-            dependencies, dependency_parse_reason = parse_runner_dependencies(live_body)
+            dependency_parse_reason: str | None = None
+            if _runner_dependency_field_present(issue_body):
+                dependencies, dependency_parse_reason = parse_runner_dependencies(
+                    issue_body
+                )
             if dependency_parse_reason is not None:
                 hold_issue_for_dependency(
                     issue_number,
@@ -20052,21 +20031,62 @@ def _process_issue_in_current_queue_context(
                     runner_task=runner_task,
                 )
                 return
-            issue_body = live_body
-        reason = runner_dependency_hold_reason(
-            issue_number,
-            RunnerTask(content="", dependencies=dependencies)
-            if runner_task is None and dependencies
-            else runner_task,
-            repository=source_repository,
-        )
-        if reason is not None:
-            hold_issue_for_dependency(
+        dependency_gate_required = bool(dependencies)
+        if dependency_gate_required:
+            try:
+                live_issue = _live_issue_dependency_state(source_repository, issue_number)
+            except (RuntimeError, json.JSONDecodeError) as exc:
+                hold_issue_for_dependency(
+                    issue_number,
+                    str(exc) or "dependency_current_issue_unresolved",
+                    runner_task=runner_task,
+                )
+                return
+            live_labels = _issue_label_names(live_issue)
+            if LABEL_READY not in live_labels:
+                return
+            live_body = str(live_issue.get("body") or "")
+            if runner_task is not None:
+                live_runner_task, live_task_reason = extract_runner_task(
+                    live_body,
+                    default_repository=source_repository,
+                )
+                if live_runner_task is None:
+                    hold_issue_for_dependency(
+                        issue_number,
+                        live_task_reason or "dependency_current_task_unresolved",
+                        runner_task=runner_task,
+                    )
+                    return
+                runner_task = live_runner_task
+                task_content = runner_task.content
+                dependencies = runner_task.dependencies
+            else:
+                dependencies, dependency_parse_reason = parse_runner_dependencies(
+                    live_body
+                )
+                if dependency_parse_reason is not None:
+                    hold_issue_for_dependency(
+                        issue_number,
+                        dependency_parse_reason,
+                        runner_task=runner_task,
+                    )
+                    return
+                issue_body = live_body
+            reason = runner_dependency_hold_reason(
                 issue_number,
-                reason,
-                runner_task=runner_task,
+                RunnerTask(content="", dependencies=dependencies)
+                if runner_task is None and dependencies
+                else runner_task,
+                repository=source_repository,
             )
-            return
+            if reason is not None:
+                hold_issue_for_dependency(
+                    issue_number,
+                    reason,
+                    runner_task=runner_task,
+                )
+                return
 
         if (
             maintenance_mode
