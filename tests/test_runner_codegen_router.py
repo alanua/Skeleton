@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 import json
 from pathlib import Path
@@ -56,6 +57,7 @@ def test_production_route_selects_openhands_with_canary_passed_kimi() -> None:
     assert route.binding.model_id == "openrouter-kimi-k2-challenger"
     assert route.runtime_model == "openrouter/moonshotai/kimi-k2"
     assert route.lease.binding_id == route.binding.binding_id
+    assert route.lease.max_tokens == 768
 
 
 def test_glm_and_local_are_not_eligible_production_codegen_models() -> None:
@@ -91,10 +93,28 @@ def test_registered_credential_is_bound_ephemerally_and_public_receipt_has_no_se
 
     assert environment["LLM_API_KEY"] == "synthetic-secret-marker"
     assert environment["LLM_MODEL"] == "openrouter/moonshotai/kimi-k2"
+    assert environment["LLM_MAX_OUTPUT_TOKENS"] == "768"
+    assert int(environment["LLM_MAX_OUTPUT_TOKENS"]) < 100352
     assert "SKELETON_OPENROUTER_FALLBACK_API_KEY" not in environment
     assert "synthetic-secret-marker" not in json.dumps(receipt, sort_keys=True)
     assert receipt["executor_id"] == "openhands-external"
     assert receipt["model_id"] == "openrouter-kimi-k2-challenger"
+    assert receipt["max_output_tokens"] == 768
+
+
+def test_secondary_requires_positive_code_owned_token_lease() -> None:
+    route = select_openhands_secondary_route(now=datetime(2026, 8, 17, tzinfo=UTC))
+    invalid = router.OpenHandsSecondaryRoute(
+        binding=route.binding,
+        lease=replace(route.lease, max_tokens=0),
+        runtime_model=route.runtime_model,
+    )
+    with pytest.raises(CodegenRouteError, match="openhands_bounded_token_budget_required"):
+        prepare_openhands_secondary_environment(
+            authority_environment={},
+            base_environment={"PATH": "/usr/bin"},
+            route=invalid,
+        )
 
 
 def test_missing_registered_credential_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
