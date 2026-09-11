@@ -3,6 +3,36 @@ from __future__ import annotations
 from pathlib import Path
 import stat
 
+import pytest
+
+from scripts import runner_poll_github_tasks as runner
+
+
+@pytest.fixture(autouse=True)
+def isolate_codex_env_sanitization_from_spawn_observer(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Keep the env-sanitization unit test focused on its own contract.
+
+    The spawn observer has dedicated regression tests. The environment test replaces
+    subprocess.run with a synthetic result and historically asserts the provider
+    output byte-for-byte; disable only the observer flag for that one test while
+    leaving every dedicated observer test untouched.
+    """
+    if request.node.name != "test_run_codex_task_sanitizes_home_edge_environment":
+        yield
+        return
+
+    original_run_command = runner.run_command
+
+    def run_command_without_spawn_observer(*args, **kwargs):
+        kwargs["observe_process_spawn"] = False
+        return original_run_command(*args, **kwargs)
+
+    monkeypatch.setattr(runner, "run_command", run_command_without_spawn_observer)
+    yield
+
 
 def pytest_runtest_teardown(item, nextitem) -> None:
     """Restore pytest-owned ESP Lab temp directories after permission tests.
