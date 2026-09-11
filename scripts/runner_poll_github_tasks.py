@@ -13653,7 +13653,10 @@ def _is_ignored_issue_publish_untracked_path(path: str) -> bool:
 
 
 def _issue_worktree_publish_existing_pr_url(
-    request: IssueWorktreePublishInspectionRequest, worktree_path: Path
+    request: IssueWorktreePublishInspectionRequest,
+    worktree_path: Path,
+    *,
+    verified_base_sha: str | None = None,
 ) -> IssueWorktreePublishExistingPrLookup:
     json_fields = (
         "url,state,isDraft,baseRefName,baseRefOid,headRefName,headRefOid,"
@@ -13689,10 +13692,20 @@ def _issue_worktree_publish_existing_pr_url(
                 ],
                 cwd=worktree_path,
             )
-            if ls_code == 0 and ls_output == "":
+            remote_head = _issue_worktree_publish_exact_remote_branch_head(
+                request, ls_code, ls_output
+            )
+            if remote_head == "":
                 return IssueWorktreePublishExistingPrLookup(
                     pr_url=None, reason="existing_pr_not_found"
                 )
+            if remote_head is not None:
+                try:
+                    return _issue_worktree_publish_existing_pr_from_target_rest(
+                        request, worktree_path, remote_head, verified_base_sha
+                    )
+                except (RuntimeError, json.JSONDecodeError):
+                    pass
         return IssueWorktreePublishExistingPrLookup(
             pr_url=None, reason="existing_pr_lookup_unavailable"
         )
@@ -13726,6 +13739,103 @@ def _issue_worktree_publish_existing_pr_url(
         )
     return IssueWorktreePublishExistingPrLookup(
         pr_url=None, reason="existing_pr_lookup_unavailable"
+    )
+
+
+def _issue_worktree_publish_exact_remote_branch_head(
+    request: IssueWorktreePublishInspectionRequest,
+    ls_code: int,
+    ls_output: str,
+) -> str | None:
+    if ls_code != 0:
+        return None
+    if ls_output == "":
+        return ""
+    lines = _git_status_path_lines(ls_output)
+    expected_ref = f"refs/heads/{request.expected_branch}"
+    if len(lines) != 1:
+        return None
+    parts = lines[0].split()
+    if len(parts) != 2 or parts[1] != expected_ref:
+        return None
+    sha = parts[0].lower()
+    if _HEAD_SHA_RE.fullmatch(sha) is None:
+        return None
+    return sha
+
+
+def _issue_worktree_publish_existing_pr_from_target_rest(
+    request: IssueWorktreePublishInspectionRequest,
+    worktree_path: Path,
+    remote_head_sha: str,
+    verified_base_sha: str | None,
+) -> IssueWorktreePublishExistingPrLookup:
+    if request.target_project_route is not True:
+        raise RuntimeError("target-project existing PR REST fallback not allowed")
+    if request.repository not in ALLOWED_TARGET_REPOSITORIES:
+        raise RuntimeError("target-project REST repository not allowed")
+    owner, _repo_name = request.repository.split("/", 1)
+    query = urllib.parse.urlencode(
+        {
+            "state": "open",
+            "head": f"{owner}:{request.expected_branch}",
+            "base": request.base_branch,
+            "per_page": "2",
+        }
+    )
+    code, output = run_command(
+        [
+            "gh",
+            "api",
+            "--method",
+            "GET",
+            f"repos/{request.repository}/pulls?{query}",
+        ],
+        cwd=worktree_path,
+    )
+    if code != 0:
+        raise RuntimeError("target-project REST PR list failed")
+    parsed = json.loads(output or "[]")
+    if not isinstance(parsed, list) or len(parsed) != 1:
+        raise RuntimeError("target-project REST PR list ambiguous")
+    candidate = parsed[0]
+    if not isinstance(candidate, dict):
+        raise RuntimeError("target-project REST PR list item malformed")
+    pr_url = candidate.get("html_url")
+    if not isinstance(pr_url, str) or _PUBLIC_GITHUB_PR_URL_RE.fullmatch(pr_url) is None:
+        raise RuntimeError("target-project REST PR URL malformed")
+    if extract_pr_repository(pr_url) != request.repository:
+        raise RuntimeError("target-project REST PR URL repository mismatch")
+    if candidate.get("number") != extract_pr_number(pr_url):
+        raise RuntimeError("target-project REST PR list number mismatch")
+    if verified_base_sha is None:
+        raise RuntimeError("target-project REST verified base SHA unavailable")
+
+    code, output = run_command(["git", "rev-parse", "HEAD"], cwd=worktree_path)
+    if code != 0:
+        raise RuntimeError("target-project local branch head read failed")
+    head_lines = _git_status_path_lines(output)
+    local_head_sha = head_lines[0].lower() if len(head_lines) == 1 else ""
+    if local_head_sha != remote_head_sha or _HEAD_SHA_RE.fullmatch(local_head_sha) is None:
+        raise RuntimeError("target-project local and remote branch head mismatch")
+
+    pr_state = _target_project_publish_rest_pr_state(
+        request, worktree_path, pr_url
+    )
+    reason = _issue_worktree_publish_pr_block_reason(
+        request,
+        pr_state,
+        verified_base_sha=verified_base_sha,
+        expected_head_sha=remote_head_sha,
+    )
+    if reason is not None:
+        raise RuntimeError(f"target-project REST PR validation failed: {reason}")
+    if pr_state.get("number") != extract_pr_number(pr_url):
+        raise RuntimeError("target-project REST PR number mismatch")
+    return IssueWorktreePublishExistingPrLookup(
+        pr_url=pr_url,
+        reason="existing_pr_found",
+        pr_state=pr_state,
     )
 
 
@@ -16517,7 +16627,11 @@ def _issue_worktree_publish_validated_report(
     if not publish:
         return _maintenance_report("DONE", task_id, status_lines, "met")
 
-    existing_pr_lookup = _issue_worktree_publish_existing_pr_url(request, worktree_path)
+    existing_pr_lookup = _issue_worktree_publish_existing_pr_url(
+        request,
+        worktree_path,
+        verified_base_sha=verified_base_sha if target_project_route else None,
+    )
     status_lines.append(f"existing_pr_lookup={existing_pr_lookup.reason}")
     if existing_pr_lookup.reason == "existing_pr_lookup_unavailable":
         if not explicit_recovery_route:
