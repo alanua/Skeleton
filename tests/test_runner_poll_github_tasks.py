@@ -9495,7 +9495,13 @@ def test_retained_dirty_same_issue_retry_override_invokes_provider_in_same_workt
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    coordinator, worktree_root, issue_path = _retained_dirty_worktree_fixture(tmp_path)
+    coordinator, worktree_root, issue_path = _retained_dirty_worktree_fixture(
+        tmp_path,
+        untracked_files=(
+            ".runner-codegen-trace-safe.log",
+            ".runner-codex-state-safe/state.json",
+        ),
+    )
     body = _retained_dirty_issue_body(retry_override=True)
     issue = {
         "number": 4019,
@@ -9528,6 +9534,30 @@ def test_retained_dirty_same_issue_retry_override_invokes_provider_in_same_workt
         runner.process_issue(issue, workdir=str(coordinator))
 
     codex.assert_called_once()
+
+
+def test_retained_dirty_first_run_blocks_before_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    coordinator, worktree_root, _issue_path = _retained_dirty_worktree_fixture(tmp_path)
+    issue = {
+        "number": 4019,
+        "title": "Retained dirty first run",
+        "body": _retained_dirty_issue_body(retry_override=False),
+        "comments": [],
+    }
+    monkeypatch.setattr(runner, "worktree_root", lambda: worktree_root)
+
+    with mock.patch.object(runner, "run_codex_task") as codex, mock.patch.object(
+        runner, "post_issue_comment"
+    ) as post, mock.patch.object(runner, "set_issue_label"), mock.patch.object(
+        runner, "notify_task_finished"
+    ):
+        runner.process_issue(issue, workdir=str(coordinator))
+
+    codex.assert_not_called()
+    assert "Existing issue worktree is dirty" in post.call_args.args[1]
 
 
 def test_retained_dirty_same_issue_without_override_blocks_before_provider(
@@ -9620,7 +9650,14 @@ def test_retained_dirty_unexpected_untracked_file_blocks_before_provider(
     (
         ({"issue_number": 4020}, "retained_dirty_issue_mismatch"),
         ({"repository": "alanua/Other"}, "retained_dirty_repository_mismatch"),
-        ({"expected_branch": "runner/issue-4020"}, "retained_dirty_expected_branch_mismatch"),
+        (
+            {"source_repository": "alanua/Other"},
+            "retained_dirty_source_repository_mismatch",
+        ),
+        (
+            {"expected_branch": "runner/issue-4020"},
+            "retained_dirty_expected_branch_mismatch",
+        ),
     ),
 )
 def test_retained_dirty_scope_mismatch_blocks_before_provider(
