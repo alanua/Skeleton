@@ -623,7 +623,8 @@ _FINAL_STATUS_DELIVERY_LINE_RE = re.compile(
     r"^\s*(DONE|BLOCKED|NEEDS_OPERATOR)\s*:", re.IGNORECASE
 )
 _FINAL_RESULT_LINE_RE = re.compile(
-    r"^\s*RESULT:\s*(?P<result>DONE|BLOCKED|NEEDS_OPERATOR)\b", re.IGNORECASE
+    r"^\s*RESULT:\s*(?P<result>DONE|BLOCKED|NEEDS_OPERATOR|VALIDATION_DEFERRED)\b",
+    re.IGNORECASE,
 )
 _REPORT_OPERATOR_REQUIRED_RE = re.compile(
     r"^\s*(?:RESULT:\s*)?NEEDS_OPERATOR\b:?", re.IGNORECASE | re.MULTILINE
@@ -2543,6 +2544,8 @@ def classify_codex_task_result(output: str, exit_code: int) -> CodexTaskResult:
     if status is not None:
         if status == "DONE":
             return CodexTaskResult("DONE")
+        if status == "VALIDATION_DEFERRED":
+            return CodexTaskResult("VALIDATION_DEFERRED")
         return CodexTaskResult("BLOCKED", blocked_output_marker(output) or status)
 
     marker = blocked_output_marker(output)
@@ -4427,6 +4430,9 @@ def build_codex_task_prompt(
         "- Edit only allowed files and run the requested validation.\n"
         "- On successful edits and validation, return RESULT: DONE and leave "
         "changes in the issue workspace for the parent Runner.\n"
+        "- If edits are complete but declared sandbox validation is unavailable, "
+        "return exactly RESULT: VALIDATION_DEFERRED and leave changes in the "
+        "issue workspace for trusted-host validation.\n"
         "- Report BLOCKED only for an actual inability to edit or validate the "
         "requested deliverable, never for commit, push, or PR inability.\n\n"
     )
@@ -5920,19 +5926,10 @@ def changed_files(workdir: str) -> list[str]:
     return sorted(files)
 
 
-def finalize_success(issue: dict[str, Any], workdir: str, codex_output: str) -> str:
-    issue_number = int(issue["number"])
-    files = changed_files(workdir)
-    if not files:
-        cleanup_runtime_artifacts(workdir)
-        return (
-            "DONE: Codex completed successfully with no file changes.\n\n"
-            "Runtime artifacts cleaned after Codex execution.\n\n"
-            f"Codex output:\n```\n{codex_output.strip()}\n```"
-        )
-
+def _run_codegen_finalization_validation(
+    workdir: str,
+) -> list[tuple[str, str]]:
     checks: list[tuple[str, str]] = []
-
     for command in (
         ["git", "diff", "--check"],
         ["python3", "-m", "pytest", "-q"],
@@ -5941,9 +5938,70 @@ def finalize_success(issue: dict[str, Any], workdir: str, codex_output: str) -> 
         checks.append((" ".join(command), output))
         if code != 0:
             raise RuntimeError(f"{' '.join(command)} failed:\n{output}")
+    return checks
+
+
+def _trusted_host_deferred_validation_gate(
+    *,
+    workdir: str,
+    allowed_files: frozenset[str],
+) -> tuple[list[str], list[tuple[str, str]]]:
+    files = changed_files(workdir)
+    if not files:
+        raise RuntimeError("VALIDATION_DEFERRED requires changed files.")
+    if not set(files) <= allowed_files:
+        raise RuntimeError("VALIDATION_DEFERRED changed files outside allowed_files.")
+    checks = _run_codegen_finalization_validation(workdir)
+    cleanup_runtime_artifacts(workdir)
+    files = changed_files(workdir)
+    if not files:
+        raise RuntimeError("VALIDATION_DEFERRED requires changed files.")
+    if not set(files) <= allowed_files:
+        raise RuntimeError("VALIDATION_DEFERRED changed files outside allowed_files.")
+    return files, checks
+
+
+def finalize_success(
+    issue: dict[str, Any],
+    workdir: str,
+    codex_output: str,
+    *,
+    defer_validation: bool = False,
+    issue_body: str = "",
+) -> str:
+    issue_number = int(issue["number"])
+    if defer_validation:
+        allowed_files, allowed_reason = _codegen_publish_allowed_files(issue_body)
+        if allowed_reason is not None:
+            raise RuntimeError(
+                "VALIDATION_DEFERRED requires exact safe allowed files: "
+                f"{allowed_reason}"
+            )
+        files, checks = _trusted_host_deferred_validation_gate(
+            workdir=workdir,
+            allowed_files=allowed_files,
+        )
+    else:
+        files = changed_files(workdir)
+        checks = []
+    if not files and not defer_validation:
+        cleanup_runtime_artifacts(workdir)
+        return (
+            "DONE: Codex completed successfully with no file changes.\n\n"
+            "Runtime artifacts cleaned after Codex execution.\n\n"
+            f"Codex output:\n```\n{codex_output.strip()}\n```"
+        )
+
+    if not defer_validation:
+        checks = _run_codegen_finalization_validation(workdir)
 
     cleanup_runtime_artifacts(workdir)
     files = changed_files(workdir)
+    if defer_validation:
+        if not files:
+            raise RuntimeError("VALIDATION_DEFERRED requires changed files.")
+        if not set(files) <= allowed_files:
+            raise RuntimeError("VALIDATION_DEFERRED changed files outside allowed_files.")
 
     for command in (
         ["git", "add", *files],
@@ -6093,6 +6151,8 @@ def finalize_existing_pr_success(
     codex_output: str,
     issue_body: str,
     request: CodegenExistingPrWorktreeRequest,
+    *,
+    defer_validation: bool = False,
 ) -> str:
     issue_number = int(issue["number"])
     allowed_files, allowed_reason = _codegen_publish_allowed_files(issue_body)
@@ -6111,8 +6171,15 @@ def finalize_existing_pr_success(
             f"{preflight_reason or 'pr_head_branch_unavailable'}"
         )
 
-    files = changed_files(workdir)
-    if not files:
+    if defer_validation:
+        files, checks = _trusted_host_deferred_validation_gate(
+            workdir=workdir,
+            allowed_files=allowed_files,
+        )
+    else:
+        files = changed_files(workdir)
+        checks = []
+    if not files and not defer_validation:
         cleanup_runtime_artifacts(workdir)
         return (
             "DONE: Codex completed successfully with no file changes.\n\n"
@@ -6122,19 +6189,14 @@ def finalize_existing_pr_success(
     if not set(files) <= allowed_files:
         raise RuntimeError("Existing PR update changed files outside allowed_files.")
 
-    checks: list[tuple[str, str]] = []
-    for command in (
-        ["git", "diff", "--check"],
-        ["python3", "-m", "pytest", "-q"],
-    ):
-        code, output = _run_finalization_validation_command(command, cwd=workdir)
-        checks.append((" ".join(command), output))
-        if code != 0:
-            raise RuntimeError(f"{' '.join(command)} failed:\n{output}")
+    if not defer_validation:
+        checks = _run_codegen_finalization_validation(workdir)
 
     cleanup_runtime_artifacts(workdir)
     files = changed_files(workdir)
     if not files:
+        if defer_validation:
+            raise RuntimeError("VALIDATION_DEFERRED requires changed files.")
         return (
             "DONE: Codex completed successfully with no file changes.\n\n"
             "Runtime artifacts cleaned after Codex execution.\n\n"
@@ -20366,8 +20428,13 @@ def _process_issue_in_current_queue_context(
             maybe_replenish_runner_queue_after_completion()
             return
 
+        defer_validation = codex_result.status == "VALIDATION_DEFERRED"
         cleanup_issue_workspace_after_finalize = True
         if local_target_worktree and runner_task is not None:
+            if defer_validation:
+                raise RuntimeError(
+                    "VALIDATION_DEFERRED is only supported for issue worktree publication."
+                )
             if _codegen_requires_target_publication(issue_body):
                 finalized_report, cleanup_issue_workspace_after_finalize = (
                     publish_local_target_worktree_result(
@@ -20390,9 +20457,16 @@ def _process_issue_in_current_queue_context(
                 codex_output,
                 issue_body,
                 existing_pr_worktree_request,
+                defer_validation=defer_validation,
             )
         else:
-            finalized_report = finalize_success(issue, issue_workdir, codex_output)
+            finalized_report = finalize_success(
+                issue,
+                issue_workdir,
+                codex_output,
+                defer_validation=defer_validation,
+                issue_body=issue_body,
+            )
         report = report_runner_lane(finalized_report, runner_task)
         cleanup_runtime_artifacts(issue_workdir)
         if cleanup_issue_workspace_after_finalize:

@@ -1299,6 +1299,32 @@ evidence text for recovery handling. Those words are not the final result.
     assert result == runner.CodexTaskResult("DONE")
 
 
+def test_codex_task_result_accepts_exact_validation_deferred_result() -> None:
+    output = """RESULT: VALIDATION_DEFERRED
+
+Changed files:
+- scripts/runner_poll_github_tasks.py
+
+Sandbox validation was unavailable.
+"""
+
+    result = runner.classify_codex_task_result(output, 0)
+
+    assert result == runner.CodexTaskResult("VALIDATION_DEFERRED")
+
+
+def test_codex_task_result_does_not_infer_validation_deferred_from_prose() -> None:
+    output = """Changed files:
+- scripts/runner_poll_github_tasks.py
+
+Validation deferred until later is mentioned as prose only.
+"""
+
+    result = runner.classify_codex_task_result(output, 0)
+
+    assert result == runner.CodexTaskResult("DONE")
+
+
 def test_private_memory_run_codex_preserves_safe_result_done_output(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -3608,6 +3634,155 @@ def test_update_existing_pr_post_push_exact_head_retries_stale_then_succeeds(
     sleep.assert_called_once_with(runner.POST_PUSH_PR_HEAD_PROPAGATION_BACKOFF_SECONDS)
 
 
+def test_validation_deferred_blocks_without_changed_files(tmp_path: Path) -> None:
+    with mock.patch.object(runner, "changed_files", return_value=[]), mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ):
+        with pytest.raises(RuntimeError, match="requires changed files"):
+            runner.finalize_success(
+                {"number": 4019, "title": "Deferred"},
+                str(tmp_path),
+                "RESULT: VALIDATION_DEFERRED",
+                defer_validation=True,
+                issue_body=(
+                    "allowed_files:\n"
+                    "  - scripts/runner_poll_github_tasks.py\n"
+                    "\n```task\nPatch it.\n```"
+                ),
+            )
+
+
+def test_validation_deferred_blocks_out_of_scope_changed_files(tmp_path: Path) -> None:
+    with mock.patch.object(
+        runner, "changed_files", return_value=["docs/out-of-scope.md"]
+    ), mock.patch.object(runner, "cleanup_runtime_artifacts"), mock.patch.object(
+        runner, "_run_finalization_validation_command"
+    ) as validation:
+        with pytest.raises(RuntimeError, match="outside allowed_files"):
+            runner.finalize_success(
+                {"number": 4019, "title": "Deferred"},
+                str(tmp_path),
+                "RESULT: VALIDATION_DEFERRED",
+                defer_validation=True,
+                issue_body=(
+                    "allowed_files:\n"
+                    "  - scripts/runner_poll_github_tasks.py\n"
+                    "\n```task\nPatch it.\n```"
+                ),
+            )
+
+    validation.assert_not_called()
+
+
+def test_validation_deferred_host_validation_failure_stops_before_publication(
+    tmp_path: Path,
+) -> None:
+    changed = ["scripts/runner_poll_github_tasks.py"]
+    with mock.patch.object(
+        runner, "changed_files", return_value=changed
+    ), mock.patch.object(runner, "cleanup_runtime_artifacts"), mock.patch.object(
+        runner,
+        "_run_finalization_validation_command",
+        return_value=(1, "trusted host pytest failed"),
+    ), mock.patch.object(runner, "run_command") as run_command:
+        with pytest.raises(RuntimeError, match="git diff --check failed"):
+            runner.finalize_success(
+                {"number": 4019, "title": "Deferred"},
+                str(tmp_path),
+                "RESULT: VALIDATION_DEFERRED",
+                defer_validation=True,
+                issue_body=(
+                    "allowed_files:\n"
+                    "  - scripts/runner_poll_github_tasks.py\n"
+                    "\n```task\nPatch it.\n```"
+                ),
+            )
+
+    run_command.assert_not_called()
+
+
+def test_existing_pr_validation_deferred_uses_shared_gate_then_publishes(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "issue-2757"
+    worktree.mkdir()
+    post_head = "d" * 40
+    changed = ["scripts/runner_poll_github_tasks.py"]
+    pre_state = _pr_validation_state(
+        number=2749,
+        headRefName="runner/issue-2749",
+        headRefOid=HEAD_SHA,
+        baseRefOid="c" * 40,
+        url="https://github.com/alanua/Skeleton/pull/2749",
+    )
+    post_state = _pr_validation_state(
+        number=2749,
+        headRefName="runner/issue-2749",
+        headRefOid=post_head,
+        baseRefOid="c" * 40,
+        url="https://github.com/alanua/Skeleton/pull/2749",
+    )
+
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        del cwd
+        if command == ["git", "add", "--", *changed]:
+            return 0, ""
+        if command == ["git", "diff", "--cached", "--check"]:
+            return 0, ""
+        if command == [
+            "git",
+            "commit",
+            "-m",
+            "runner: issue #2757 update existing PR",
+        ]:
+            return 0, ""
+        if command == ["git", "rev-parse", "HEAD"]:
+            return 0, f"{post_head}\n"
+        if command == [
+            "git",
+            "push",
+            "origin",
+            f"--force-with-lease=runner/issue-2749:{HEAD_SHA}",
+            "HEAD:refs/heads/runner/issue-2749",
+        ]:
+            return 0, ""
+        return 2, f"unexpected command: {command!r}"
+
+    with mock.patch.object(
+        runner,
+        "_trusted_host_deferred_validation_gate",
+        return_value=(changed, [("python3 -m pytest -q", "trusted host passed\n")]),
+    ) as gate, mock.patch.object(
+        runner, "changed_files", return_value=changed
+    ), mock.patch.object(runner, "cleanup_runtime_artifacts"), mock.patch.object(
+        runner,
+        "_get_pr_branch_validation_state",
+        side_effect=[(pre_state, "gh"), (post_state, "gh")],
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run
+    ):
+        report = runner.finalize_existing_pr_success(
+            {"number": 2757},
+            str(worktree),
+            "RESULT: VALIDATION_DEFERRED",
+            _codegen_update_existing_pr_issue_body(),
+            runner.CodegenExistingPrWorktreeRequest(
+                pr_number=2749,
+                expected_head_sha=HEAD_SHA,
+                expected_head_branch=None,
+            ),
+            defer_validation=True,
+        )
+
+    gate.assert_called_once_with(
+        workdir=str(worktree),
+        allowed_files=frozenset({"scripts/runner_poll_github_tasks.py"}),
+    )
+    assert "DONE: Codex completed successfully and updated the existing PR." in report
+    assert "trusted host passed" in report
+    assert f"Commit: {post_head}" in report
+
+
 def test_update_existing_pr_post_push_exact_head_blocks_after_retry_exhaustion(
     tmp_path: Path,
 ) -> None:
@@ -4700,7 +4875,13 @@ def test_process_issue_runs_codex_in_prepared_issue_worktree(tmp_path: Path) -> 
     run_codex.assert_called_once_with(
         "Do it", str(issue_path), runner.RunnerTask(content="Do it")
     )
-    finalize.assert_called_once_with(issue, str(issue_path), "codex output")
+    finalize.assert_called_once_with(
+        issue,
+        str(issue_path),
+        "codex output",
+        defer_validation=False,
+        issue_body=issue["body"],
+    )
 
 
 def _shadow_code_issue_body() -> str:
@@ -6514,6 +6695,8 @@ def test_codex_task_prompt_contains_parent_publication_contract() -> None:
         "On successful edits and validation, return RESULT: DONE and leave "
         "changes in the issue workspace for the parent Runner."
     ) in prompt
+    assert "return exactly RESULT: VALIDATION_DEFERRED" in prompt
+    assert "trusted-host validation" in prompt
     assert (
         "Report BLOCKED only for an actual inability to edit or validate the "
         "requested deliverable, never for commit, push, or PR inability."
@@ -23004,6 +23187,7 @@ def test_validation_cleanup_failure_fails_closed_after_success(tmp_path: Path) -
 
 def test_finalize_success_validation_subprocesses_use_sanitized_environment(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("SKELETON_HOME_EDGE_01_HOSTNAME", "live-home-edge")
     monkeypatch.setenv("SKELETON_HOME_EDGE_01_TAILSCALE_IP", "100.64.0.1")
@@ -23072,7 +23256,7 @@ def test_finalize_success_validation_subprocesses_use_sanitized_environment(
     ), mock.patch.object(runner, "cleanup_runtime_artifacts"), mock.patch.object(
         runner.subprocess, "run", side_effect=run
     ):
-        report = runner.finalize_success(issue, "/tmp/worktree", "codex output")
+        report = runner.finalize_success(issue, str(tmp_path), "codex output")
 
     assert "99 passed" in report
     validation_calls = captured_calls[:2]
