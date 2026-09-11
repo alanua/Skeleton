@@ -83,6 +83,28 @@ DURABLE_WRITE_CAPABILITIES: Final = frozenset(
         "publish_pull_request",
     }
 )
+CONSEQUENTIAL_DURABLE_WRITE_CAPABILITIES: Final = frozenset(
+    {
+        "repository_maintenance",
+        "memory_gateway_write",
+        "loop_control",
+    }
+)
+RED_PAYLOAD_TERMS: Final = frozenset(
+    {
+        "root",
+        "sudo",
+        "secret",
+        "secrets",
+        "deploy",
+        "deployment",
+        "device",
+        "ota",
+        "finance",
+        "legal",
+        "governance",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -228,23 +250,8 @@ class RunnerGate:
                 "privacy boundary is incompatible with the task kind",
             )
 
-        approved_references = _validated_string_tuple(
-            context.approved_references,
-            field="approved_references",
-            allowed=None,
-            reasons=reasons,
-        )
-        if (
-            approved_references is not None
-            and task.approval_reference not in approved_references
-        ):
-            _add(
-                reasons,
-                "APPROVAL_REFERENCE_NOT_APPROVED",
-                "task approval reference is not present in the trusted approval set",
-            )
-
         target_files = _validated_paths(context.target_files, reasons)
+        protected_targets: tuple[str, ...] = ()
         if target_files is not None:
             if tuple(sorted(target_files)) != tuple(sorted(task.allowed_files)):
                 _add(
@@ -264,7 +271,8 @@ class RunnerGate:
                     reasons=reasons,
                 )
                 if (
-                    protected_approvals is not None
+                    task.approval_reference is None
+                    or protected_approvals is not None
                     and task.approval_reference not in protected_approvals
                 ):
                     _add(
@@ -273,7 +281,40 @@ class RunnerGate:
                         "protected targets require an explicit protected-resource approval",
                     )
 
-        if DURABLE_WRITE_CAPABILITIES.intersection(task.requested_capabilities):
+        approved_references = _validated_string_tuple(
+            context.approved_references,
+            field="approved_references",
+            allowed=None,
+            reasons=reasons,
+        )
+        merge_requested = _merge_requested(context.action_request)
+        approval_required = (
+            bool(protected_targets)
+            or bool(
+                CONSEQUENTIAL_DURABLE_WRITE_CAPABILITIES.intersection(
+                    task.requested_capabilities
+                )
+            )
+        )
+        if (
+            approval_required
+            and approved_references is not None
+            and (
+                task.approval_reference is None
+                or task.approval_reference not in approved_references
+            )
+        ):
+            _add(
+                reasons,
+                "APPROVAL_REFERENCE_NOT_APPROVED",
+                "task approval reference is not present in the trusted approval set",
+            )
+
+        red_reason = _red_payload_reason(task.payload)
+        if red_reason is not None:
+            _add(reasons, "RED_ACTION_BLOCKED", red_reason)
+
+        if _requires_patch_plan(task, protected_targets):
             plan = dict(context.patch_plan) if isinstance(context.patch_plan, Mapping) else None
             patch_decision = self._gate_engine.check_patch_plan(plan)
             if patch_decision.result is not GateResult.ALLOWED:
@@ -299,12 +340,12 @@ class RunnerGate:
             task.task_kind == "publish"
             or "publish_pull_request" in task.requested_capabilities
         )
-        if publish_requested:
+        if publish_requested and merge_requested:
             if not isinstance(context.action_request, ActionGateRequest):
                 _add(
                     reasons,
                     "ACTION_GATE_REQUIRED",
-                    "publish tasks require an ActionGateRequest",
+                    "merge publish tasks require an ActionGateRequest",
                 )
             else:
                 action_decision = self._action_validator(context.action_request)
@@ -316,6 +357,12 @@ class RunnerGate:
                         + "; ".join(action_decision.reasons),
                     )
                 _validate_action_parity(task, context, target_files, reasons)
+        elif publish_requested and context.action_request is not None:
+            _add(
+                reasons,
+                "ACTION_GATE_UNEXPECTED",
+                "non-merge draft publication must not carry a repository action request",
+            )
 
         return _decision(reasons, patch_decision, action_decision)
 
@@ -326,6 +373,43 @@ class RunnerGate:
         ) or any(
             path.startswith(prefix) for prefix in PROTECTED_PATH_PREFIXES
         )
+
+
+def _requires_patch_plan(
+    task: RunnerTask,
+    protected_targets: tuple[str, ...],
+) -> bool:
+    return bool(protected_targets) or bool(
+        CONSEQUENTIAL_DURABLE_WRITE_CAPABILITIES.intersection(task.requested_capabilities)
+    )
+
+
+def _merge_requested(action_request: ActionGateRequest | None) -> bool:
+    return (
+        isinstance(action_request, ActionGateRequest)
+        and action_request.action_type == "merge_pull_request"
+    )
+
+
+def _red_payload_reason(payload: Mapping[str, Any]) -> str | None:
+    for field in ("action", "runtime_action", "operation"):
+        value = payload.get(field)
+        if isinstance(value, str) and _contains_red_term(value):
+            return (
+                "root/sudo/secrets/deploy/device/OTA/finance/legal/governance "
+                "actions require exact RED authority"
+            )
+    return None
+
+
+def _contains_red_term(value: str) -> bool:
+    normalized = value.lower().replace("-", "_")
+    tokens = {
+        token
+        for chunk in normalized.split("/")
+        for token in chunk.replace("_", " ").split()
+    }
+    return bool(tokens.intersection(RED_PAYLOAD_TERMS))
 
 
 def _validated_task(

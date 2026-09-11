@@ -24,9 +24,10 @@ def task(
     task_kind: str = "code_edit",
     *,
     capabilities: tuple[str, ...] | None = None,
-    files: tuple[str, ...] = ("core/runner_gate.py",),
+    files: tuple[str, ...] = ("tests/test_runner_gate.py",),
     privacy: str | None = None,
     payload: dict[str, object] | None = None,
+    approval_reference: str | None = APPROVAL,
 ) -> RunnerTask:
     defaults = {
         "code_edit": (
@@ -48,26 +49,26 @@ def task(
         "diagnostic": "PUBLIC_SAFE_AGGREGATE_ONLY",
         "loop_control": "PUBLIC_SAFE_AGGREGATE_ONLY",
     }
-    return RunnerTask.from_mapping(
-        {
-            "schema": RUNNER_TASK_SCHEMA,
-            "repo": "alanua/Skeleton",
-            "branch": "runner/issue-1516",
-            "base_sha": BASE_SHA,
-            "task_kind": task_kind,
-            "payload": payload or {"issue_number": 1516},
-            "requested_capabilities": list(capabilities or defaults[task_kind]),
-            "allowed_files": list(files),
-            "forbidden_actions": ["no runtime deployment"],
-            "validation_commands": [["python3", "-m", "pytest", "-q"]],
-            "validation_timeout_seconds": 900,
-            "expected_output": ["draft PR"],
-            "privacy_boundary": privacy
-            or privacy_defaults.get(task_kind, "PUBLIC_SAFE_REPOSITORY_ONLY"),
-            "approval_reference": APPROVAL,
-            "idempotency_key": "skeleton-runner-gate-slice-3-v1",
-        }
-    )
+    mapping = {
+        "schema": RUNNER_TASK_SCHEMA,
+        "repo": "alanua/Skeleton",
+        "branch": "runner/issue-1516",
+        "base_sha": BASE_SHA,
+        "task_kind": task_kind,
+        "payload": payload or {"issue_number": 1516},
+        "requested_capabilities": list(capabilities or defaults[task_kind]),
+        "allowed_files": list(files),
+        "forbidden_actions": ["no runtime deployment"],
+        "validation_commands": [["python3", "-m", "pytest", "-q"]],
+        "validation_timeout_seconds": 900,
+        "expected_output": ["draft PR"],
+        "privacy_boundary": privacy
+        or privacy_defaults.get(task_kind, "PUBLIC_SAFE_REPOSITORY_ONLY"),
+        "idempotency_key": "skeleton-runner-gate-slice-3-v1",
+    }
+    if approval_reference is not None:
+        mapping["approval_reference"] = approval_reference
+    return RunnerTask.from_mapping(mapping)
 
 
 def plan(files: tuple[str, ...] = ("core/runner_gate.py",)) -> dict[str, object]:
@@ -123,12 +124,15 @@ def context(
     )
 
 
-def test_code_edit_passes_patch_gate() -> None:
-    selected = task()
-    decision = RunnerGate().evaluate(selected, context(selected))
+def test_green_code_edit_needs_no_approval_or_patch_plan() -> None:
+    selected = task(approval_reference=None)
+    decision = RunnerGate().evaluate(
+        selected,
+        context(selected, approvals=(), protected_approvals=(), patch=None),
+    )
     assert decision.allowed
-    assert decision.patch_gate_decision is not None
-    assert decision.patch_gate_decision.result is GateResult.ALLOWED
+    assert decision.patch_gate_decision is None
+    assert decision.action_gate_decision is None
 
 
 def test_read_route_needs_no_patch_or_action_gate() -> None:
@@ -140,7 +144,7 @@ def test_read_route_needs_no_patch_or_action_gate() -> None:
 
 
 def test_missing_patch_plan_fails_closed() -> None:
-    selected = task()
+    selected = task(files=("core/action_gate.py",))
     decision = RunnerGate().evaluate(
         selected,
         replace(context(selected), patch_plan=None),
@@ -151,10 +155,10 @@ def test_missing_patch_plan_fails_closed() -> None:
 
 
 def test_patch_and_task_files_must_match_runtime_files() -> None:
-    selected = task(files=("core/runner_gate.py", "tests/test_runner_gate.py"))
+    selected = task(files=("core/action_gate.py", "tests/test_runner_gate.py"))
     runtime = context(
         selected,
-        files=("core/runner_gate.py",),
+        files=("core/action_gate.py",),
         patch=plan(("tests/test_runner_gate.py",)),
     )
     decision = RunnerGate().evaluate(selected, runtime)
@@ -198,11 +202,18 @@ def test_route_and_runtime_capabilities_are_checked() -> None:
     assert "CAPABILITY_NOT_AVAILABLE" in decision.reason_codes
 
 
-def test_privacy_and_general_approval_are_checked() -> None:
+def test_green_privacy_mismatch_blocks_without_general_approval_requirement() -> None:
     selected = task("code_edit", privacy="PUBLIC_SAFE_AGGREGATE_ONLY")
     runtime = context(selected, approvals=("different-approval",))
     decision = RunnerGate().evaluate(selected, runtime)
     assert "PRIVACY_BOUNDARY_MISMATCH" in decision.reason_codes
+    assert "APPROVAL_REFERENCE_NOT_APPROVED" not in decision.reason_codes
+
+
+def test_consequential_durable_write_requires_trusted_approval() -> None:
+    selected = task("repository_maintenance")
+    runtime = context(selected, approvals=("different-approval",))
+    decision = RunnerGate().evaluate(selected, runtime)
     assert "APPROVAL_REFERENCE_NOT_APPROVED" in decision.reason_codes
 
 
@@ -230,6 +241,26 @@ def test_protected_target_requires_protected_approval() -> None:
     assert allowed.allowed
 
 
+@pytest.mark.parametrize(
+    "runtime_action",
+    (
+        "sudo root shell",
+        "read secrets",
+        "deploy production",
+        "device ota update",
+        "finance transfer",
+        "legal approval",
+        "governance policy change",
+    ),
+)
+def test_red_runtime_actions_fail_closed(runtime_action: str) -> None:
+    selected = task(payload={"runtime_action": runtime_action})
+
+    decision = RunnerGate().evaluate(selected, context(selected, patch=None))
+
+    assert "RED_ACTION_BLOCKED" in decision.reason_codes
+
+
 def publish_task() -> RunnerTask:
     return task(
         "publish",
@@ -243,12 +274,21 @@ def publish_action(*, approved: bool = True) -> ActionGateRequest:
         repo="alanua/Skeleton",
         pr_number=1517,
         expected_head_sha=HEAD_SHA,
-        expected_files=("core/runner_gate.py",),
+        expected_files=("tests/test_runner_gate.py",),
         user_approved=approved,
     )
 
 
-def test_publish_passes_patch_and_action_gates() -> None:
+def test_green_draft_publish_needs_no_merge_approval_or_patch_plan() -> None:
+    selected = publish_task()
+    runtime = context(selected, approvals=(), protected_approvals=(), patch=None)
+    decision = RunnerGate().evaluate(selected, runtime)
+    assert decision.allowed
+    assert decision.patch_gate_decision is None
+    assert decision.action_gate_decision is None
+
+
+def test_red_merge_publish_passes_action_gate() -> None:
     selected = publish_task()
     runtime = context(
         selected,
@@ -261,15 +301,35 @@ def test_publish_passes_patch_and_action_gates() -> None:
     assert decision.action_gate_decision.status == "allowed"
 
 
-def test_publish_requires_action_request_and_current_head() -> None:
+def test_red_merge_publish_requires_current_head() -> None:
     selected = publish_task()
-    missing_action = RunnerGate().evaluate(selected, context(selected))
-    assert "ACTION_GATE_REQUIRED" in missing_action.reason_codes
     missing_head = RunnerGate().evaluate(
         selected,
         context(selected, action=publish_action()),
     )
     assert "CURRENT_HEAD_SHA_REQUIRED" in missing_head.reason_codes
+
+
+def test_red_merge_without_user_approval_blocks() -> None:
+    selected = publish_task()
+    decision = RunnerGate().evaluate(
+        selected,
+        context(selected, action=publish_action(approved=False), head_sha=HEAD_SHA),
+    )
+
+    assert decision.action_gate_decision is not None
+    assert decision.action_gate_decision.status == "blocked"
+    assert "ACTION_GATE_BLOCKED" in decision.reason_codes
+
+
+def test_red_merge_with_stale_head_blocks() -> None:
+    selected = publish_task()
+    decision = RunnerGate().evaluate(
+        selected,
+        context(selected, action=publish_action(), head_sha="b" * 40),
+    )
+
+    assert "ACTION_HEAD_SHA_MISMATCH" in decision.reason_codes
 
 
 def test_action_gate_and_cross_contract_mismatches_fail_closed() -> None:
@@ -279,7 +339,7 @@ def test_action_gate_and_cross_contract_mismatches_fail_closed() -> None:
         repo="sample/Repo",
         pr_number=999,
         expected_head_sha="b" * 40,
-        expected_files=("tests/test_runner_gate.py",),
+        expected_files=("core/action_gate.py",),
         user_approved=False,
     )
     decision = RunnerGate().evaluate(
