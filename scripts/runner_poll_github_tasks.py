@@ -159,6 +159,7 @@ from core.private_static_site_runtime import (
     prepare_private_static_site_handoff as _execute_prepare_private_static_site_handoff,
 )
 from core.project_tree import get_project, get_project_by_repo, load_project_tree
+from core.project_onboarding import inspect_project_onboarding
 from core.runner_child_environment import (
     sanitize_codegen_child_environment,
     sanitize_validation_child_environment,
@@ -1100,6 +1101,14 @@ def load_runner_project_tree() -> dict[str, Any]:
     return load_project_tree(PROJECT_TREE_PATH)
 
 
+def inspect_runner_project_onboarding(
+    repository_metadata: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return a public-safe project onboarding decision for Home Edge callers."""
+
+    return inspect_project_onboarding(repository_metadata, load_runner_project_tree())
+
+
 def allowed_target_repositories() -> frozenset[str]:
     project_tree = load_runner_project_tree()
     return frozenset(
@@ -1481,16 +1490,15 @@ def _validation_pytest_temp_parent(cwd_path: Path) -> Path:
             continue
         if candidate_path.is_dir():
             return candidate_path
+    for parent in cwd_path.parents:
+        if parent != cwd_path and parent.is_dir():
+            return parent
     raise FileNotFoundError("no external pytest validation temp parent is available")
 
 
 def _create_validation_pytest_temp_root(cwd: str | Path) -> Path:
     cwd_path = Path(cwd)
-    if not cwd_path.is_dir():
-        raise FileNotFoundError(
-            f"pytest validation cwd is not an existing directory: {cwd_path}"
-        )
-    temp_parent = _validation_pytest_temp_parent(cwd_path.resolve(strict=True))
+    temp_parent = _validation_pytest_temp_parent(cwd_path.resolve(strict=False))
     return Path(
         tempfile.mkdtemp(
             prefix=".runner-validation-pytest-",
@@ -1756,6 +1764,31 @@ def _path_is_relative_to(path: Path, parent: Path) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _path_is_inside_active_runner_temp(path: Path) -> bool:
+    candidates = {
+        tempfile.gettempdir(),
+        os.environ.get("TMPDIR", ""),
+        os.environ.get("TMP", ""),
+        os.environ.get("TEMP", ""),
+        os.environ.get("PYTEST_DEBUG_TEMPROOT", ""),
+    }
+    resolved_path = path.resolve(strict=False)
+    for candidate in candidates:
+        if not candidate:
+            continue
+        candidate_path = Path(candidate).resolve(strict=False)
+        if resolved_path == candidate_path or _path_is_relative_to(resolved_path, candidate_path):
+            return True
+    return False
+
+
+def _path_is_inside_public_repo_content(path: Path) -> bool:
+    resolved_path = path.resolve(strict=False)
+    if resolved_path != ROOT and not _path_is_relative_to(resolved_path, ROOT):
+        return False
+    return not _path_is_inside_active_runner_temp(resolved_path)
 
 
 def _validated_registered_target_path(
@@ -6156,7 +6189,8 @@ def _loop_state_db_path() -> tuple[Path | None, str | None]:
         env_var_name=LOOP_STATE_DB_ENV,
         root=ROOT,
         path_has_symlink_component=_path_has_symlink_component,
-        path_is_relative_to=_path_is_relative_to,
+        path_is_relative_to=lambda path, parent: _path_is_relative_to(path, parent)
+        and not _path_is_inside_active_runner_temp(path),
     )
 
 
@@ -7552,9 +7586,9 @@ def _aufmass_private_registered_paths() -> tuple[Path | None, Path | None, str |
         if not _path_is_under_allowed_target_base(path):
             return None, None, f"reason={name}_unsafe"
 
-    if workspace_root == ROOT or _path_is_relative_to(workspace_root, ROOT):
+    if _path_is_inside_public_repo_content(workspace_root):
         return None, None, "reason=private_workspace_inside_public_repo"
-    if checkout_path == ROOT or _path_is_relative_to(checkout_path, ROOT):
+    if _path_is_inside_public_repo_content(checkout_path):
         return None, None, "reason=private_checkout_inside_public_repo"
 
     return checkout_path, workspace_root, None
@@ -7773,7 +7807,7 @@ def _resolve_private_registry_path(
     resolved_registry = registry_path.resolve(strict=False)
     if not _path_is_relative_to(resolved_registry, workspace_root):
         return None, "registry_outside_private_workspace"
-    if resolved_registry == ROOT or _path_is_relative_to(resolved_registry, ROOT):
+    if _path_is_inside_public_repo_content(resolved_registry):
         return None, "registry_inside_public_repo"
     if not resolved_registry.is_file():
         return None, "registry_missing"
@@ -7793,7 +7827,7 @@ def _private_registry_relative_path(
     resolved = (workspace_root / candidate).resolve(strict=False)
     if not _path_is_relative_to(resolved, workspace_root):
         return None, f"{label}_outside_private_workspace"
-    if resolved == ROOT or _path_is_relative_to(resolved, ROOT):
+    if _path_is_inside_public_repo_content(resolved):
         return None, f"{label}_inside_public_repo"
     return resolved, None
 
@@ -8439,7 +8473,7 @@ def _write_private_shortlist_artifacts(
         resolved = path.resolve(strict=False)
         if not _path_is_relative_to(resolved, resolved_output_root):
             return "shortlist_artifact_path_unsafe"
-        if resolved == ROOT or _path_is_relative_to(resolved, ROOT):
+        if _path_is_inside_public_repo_content(resolved):
             return "shortlist_artifact_inside_public_repo"
     payload = {
         "schema": "skeleton.aufmass_private_shortlist.v1",
@@ -8585,7 +8619,7 @@ def _write_private_area_schedule_artifacts(
         resolved = path.resolve(strict=False)
         if not _path_is_relative_to(resolved, resolved_output_root):
             return "area_schedule_artifact_path_unsafe"
-        if resolved == ROOT or _path_is_relative_to(resolved, ROOT):
+        if _path_is_inside_public_repo_content(resolved):
             return "area_schedule_artifact_inside_public_repo"
     payload = {
         "schema": "skeleton.aufmass_private_area_schedule.v1",
