@@ -7978,6 +7978,7 @@ def _issue_publish_commands(
     existing_pr_base_sha: str = "a" * 40,
     existing_pr_code: int = 0,
     remote_branch_exists: bool = False,
+    ls_remote_output: str | None = None,
     ls_remote_code: int = 0,
     base_branch: str = "main",
     fetched_base_sha: str = "a" * 40,
@@ -8076,8 +8077,14 @@ def _issue_publish_commands(
                     "headRepositoryOwner": {"login": owner},
                 }
             )
-        if command == ["git", "ls-remote", "--heads", "origin", branch]:
-            output = (
+        if command == [
+            "git",
+            "ls-remote",
+            "--heads",
+            "origin",
+            f"refs/heads/{branch}",
+        ]:
+            output = ls_remote_output if ls_remote_output is not None else (
                 f"{post_commit_head}\trefs/heads/{branch}\n"
                 if remote_branch_exists
                 else ""
@@ -11256,6 +11263,7 @@ def test_publish_existing_issue_worktree_is_allowlisted_and_creates_draft_pr(
     assert ["git", "add", "--", "scripts/runner_poll_github_tasks.py"] in commands
     assert not any(".codex/session.json" in command for command in commands)
     assert commands[-1][-1] == "--draft"
+    assert all(command[:3] != ["git", "ls-remote", "--heads"] for command in commands)
 
 
 def test_publish_existing_issue_worktree_reuses_existing_pr_when_lookup_succeeds(
@@ -11282,6 +11290,7 @@ def test_publish_existing_issue_worktree_reuses_existing_pr_when_lookup_succeeds
     assert f"existing_pr_url={PR_URL}" in report
     assert all(command[:2] != ["git", "push"] for command in commands)
     assert all(command[:3] != ["gh", "pr", "create"] for command in commands)
+    assert all(command[:3] != ["git", "ls-remote", "--heads"] for command in commands)
 
 
 def test_publish_existing_issue_worktree_lookup_unavailable_without_override_blocks(
@@ -11310,6 +11319,7 @@ def test_publish_existing_issue_worktree_lookup_unavailable_without_override_blo
     assert all(command[:2] != ["git", "add"] for command in commands)
     assert all(command[:2] != ["git", "push"] for command in commands)
     assert all(command[:3] != ["gh", "pr", "create"] for command in commands)
+    assert all(command[:3] != ["git", "ls-remote", "--heads"] for command in commands)
 
 
 def test_publish_existing_issue_worktree_valid_override_publishes_when_remote_absent(
@@ -14039,6 +14049,109 @@ def test_publish_target_project_issue_worktree_pr_uses_project_tree_and_target_r
         if command[:3] == ["gh", "pr", "create"]
     )
     assert all("--force" not in command for command in commands)
+    assert all(command[:3] != ["git", "ls-remote", "--heads"] for command in commands)
+
+
+def test_publish_target_project_issue_worktree_pr_gh_failure_and_remote_absent_publishes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_root = tmp_path / "lumenflow"
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    worktree_path = _prepare_issue_publish_worktree(target_root)
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=_target_project_tree(target_root)
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            repository="alanua/LumenFlow",
+            remote_url="https://github.com/alanua/LumenFlow.git",
+            changed_files=("README.md",),
+            existing_pr_code=1,
+            commit_message="Publish target project issue #123 worktree",
+        ),
+    ) as run:
+        report = runner.publish_target_project_issue_worktree_pr(
+            _publish_target_project_issue_worktree_body()
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert "existing_pr_lookup=existing_pr_not_found" in report
+    assert "step=create_draft_pr status=done" in report
+    assert [
+        "git",
+        "ls-remote",
+        "--heads",
+        "origin",
+        "refs/heads/runner/issue-123",
+    ] in commands
+    assert ["git", "add", "--", "README.md"] in commands
+    assert [
+        "git",
+        "push",
+        "origin",
+        "refs/heads/runner/issue-123:refs/heads/runner/issue-123",
+    ] in commands
+
+
+@pytest.mark.parametrize(
+    "command_kwargs",
+    (
+        {"remote_branch_exists": True},
+        {"ls_remote_code": 128},
+        {"ls_remote_output": "\n"},
+        {
+            "ls_remote_output": (
+                f"{'1' * 40}\trefs/heads/runner/issue-123\n"
+                f"{'2' * 40}\trefs/heads/runner/issue-123\n"
+            )
+        },
+    ),
+)
+def test_publish_target_project_issue_worktree_pr_gh_failure_ls_remote_blocks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command_kwargs: dict[str, object],
+) -> None:
+    target_root = tmp_path / "lumenflow"
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    worktree_path = _prepare_issue_publish_worktree(target_root)
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=_target_project_tree(target_root)
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            repository="alanua/LumenFlow",
+            remote_url="https://github.com/alanua/LumenFlow.git",
+            changed_files=("README.md",),
+            existing_pr_code=1,
+            commit_message="Publish target project issue #123 worktree",
+            **command_kwargs,
+        ),
+    ) as run:
+        report = runner.publish_target_project_issue_worktree_pr(
+            _publish_target_project_issue_worktree_body()
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("BLOCKED:")
+    assert "existing_pr_lookup=existing_pr_lookup_unavailable" in report
+    assert "reason=existing_pr_lookup_unavailable" in report
+    assert [
+        "git",
+        "ls-remote",
+        "--heads",
+        "origin",
+        "refs/heads/runner/issue-123",
+    ] in commands
+    assert all(command[:2] != ["git", "add"] for command in commands)
+    assert all(command[:2] != ["git", "push"] for command in commands)
+    assert all(command[:3] != ["gh", "pr", "create"] for command in commands)
 
 
 def test_publish_target_project_issue_worktree_pr_explicit_main_base_sha_succeeds(
@@ -14516,6 +14629,7 @@ def test_publish_target_project_issue_worktree_pr_ignores_codex_noise_and_reuses
     assert not any(".codex/session.json" in command for command in commands)
     assert all(command[:3] != ["gh", "pr", "create"] for command in commands)
     assert all(command[:2] != ["git", "push"] for command in commands)
+    assert all(command[:3] != ["git", "ls-remote", "--heads"] for command in commands)
 
 
 def test_issue_worktree_publish_inspection_valid_metadata_reports_done(
