@@ -3652,6 +3652,12 @@ def runner_shadow_mode_enabled() -> bool:
     return configured.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def runner_vnext_registered_queue_intake_enabled() -> bool:
+    configured = os.environ.get(RUNNER_VNEXT_MODE_ENV)
+    normalized_mode = (configured or RUNNER_MODE_OFF).strip().lower()
+    return normalized_mode in VNEXT_MODES and normalized_mode != RUNNER_MODE_OFF
+
+
 def protected_runner_shadow_compatibility_bindings() -> RunnerShadowCompatibilityBindings:
     maintenance_task_kind_by_id = {
         task_id: SHADOW_MAINTENANCE_TASK_KIND_BY_ID[task_id]
@@ -19679,13 +19685,7 @@ def poll_once(workdir: str | None = None) -> int:
         self_heal_run_now_queue_intake()
     finally:
         _QUEUE_RECOVERY_SOURCE.reset(source_token)
-    configured_vnext_mode = os.environ.get(RUNNER_VNEXT_MODE_ENV)
-    normalized_vnext_mode = (configured_vnext_mode or "off").strip().lower()
-    runner_mode = runner_mode_decision()
-    if (
-        normalized_vnext_mode == "off"
-        or runner_mode.mode not in {RUNNER_MODE_SHADOW, RUNNER_MODE_ENFORCE}
-    ):
+    if not runner_vnext_registered_queue_intake_enabled():
         issues = get_ready_issues()
         for issue in issues:
             process_issue(issue, workdir=workdir)
