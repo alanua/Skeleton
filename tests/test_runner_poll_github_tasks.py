@@ -49,6 +49,11 @@ HOME_EDGE_EXEC_HMAC_ENV = "SKELETON_HOME_EDGE_EXEC_HMAC_SECRET"
 SYNTHETIC_HOME_EDGE_EXEC_HMAC = "synthetic-home-edge-exec-hmac-marker"
 
 
+@pytest.fixture(autouse=True)
+def _isolate_runner_vnext_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(runner.RUNNER_VNEXT_MODE_ENV, raising=False)
+
+
 def _media_bootstrap_issue_body(expected_sha: str = HEAD_SHA) -> str:
     return "\n".join(
         (
@@ -264,6 +269,130 @@ def _merge_pr_state(**updates: object) -> dict[str, object]:
     return state
 
 
+def test_poll_once_discovers_native_registered_repo_issue(monkeypatch: pytest.MonkeyPatch) -> None:
+    skeleton_source = runner.RunnerVNextQueueSource("skeleton", runner.REPO)
+    lavalamp_source = runner.RunnerVNextQueueSource("lavalamp", "alanua/Lavalamp")
+    native_issue = {
+        "number": 7,
+        "title": "Native",
+        "body": "```task\nDo it.\n```",
+        "state": "OPEN",
+        "closed": False,
+        "url": "https://github.com/alanua/Lavalamp/issues/7",
+        "labels": ["runner:ready"],
+    }
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.setenv(runner.RUNNER_MODE_ENV, runner.RUNNER_MODE_SHADOW)
+    monkeypatch.setenv(runner.RUNNER_VNEXT_MODE_ENV, "shadow")
+    monkeypatch.setattr(
+        runner,
+        "registered_runner_queue_sources",
+        lambda _project_tree: (skeleton_source, lavalamp_source),
+    )
+    monkeypatch.setattr(runner, "load_runner_project_tree", lambda: {"projects": {}})
+    monkeypatch.setattr(runner, "get_ready_issues", lambda: [])
+    monkeypatch.setattr(runner, "reconcile_scheduler_on_poll", lambda: None)
+    monkeypatch.setattr(
+        runner, "reconcile_terminal_issues_active_execution_labels", lambda: 0
+    )
+    monkeypatch.setattr(runner, "self_heal_run_now_queue_intake", lambda: 0)
+
+    commands: list[list[str]] = []
+
+    def run_command(command: list[str], **_kwargs: object) -> tuple[int, str]:
+        commands.append(command)
+        assert command[command.index("--repo") + 1] == "alanua/Lavalamp"
+        return 0, json.dumps([native_issue])
+
+    with mock.patch.object(runner, "run_command", side_effect=run_command), mock.patch.object(
+        runner, "process_issue"
+    ) as process_issue:
+        count = runner.poll_once(workdir="/coordinator")
+
+    assert count == 1
+    assert process_issue.call_args_list == [
+        mock.call(
+            native_issue,
+            workdir="/coordinator",
+            source_repository="alanua/Lavalamp",
+        )
+    ]
+    assert commands
+
+
+def test_native_registered_repo_issue_defaults_target_to_source_repo() -> None:
+    task, reason = runner.extract_runner_task(
+        "```task\nDo it.\n```",
+        default_repository="alanua/Lavalamp",
+    )
+
+    assert reason is None
+    assert task is not None
+    assert task.target_project == "lavalamp"
+    assert task.target_repository == "alanua/Lavalamp"
+
+
+def test_native_registered_repo_worktree_identity_does_not_collide_with_skeleton_control_issue() -> None:
+    skeleton_control_path = runner.target_repository_issue_worktree_path(
+        "alanua/Lavalamp",
+        7,
+    )
+    native_path = runner.target_repository_issue_worktree_path(
+        "alanua/Lavalamp",
+        7,
+        source_repository="alanua/Lavalamp",
+    )
+
+    assert native_path != skeleton_control_path
+    assert skeleton_control_path.name == "issue-7"
+    assert native_path.name == "issue-alanua-Lavalamp-7"
+    assert runner.issue_branch(7) == "runner/issue-7"
+    assert (
+        runner.issue_branch(7, source_repository="alanua/Lavalamp")
+        == "runner/alanua-Lavalamp-issue-7"
+    )
+
+
+def test_process_issue_routes_comments_and_labels_to_source_repository(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issue = {
+        "number": 7,
+        "title": "Native",
+        "body": "No task yet",
+        "state": "OPEN",
+        "closed": False,
+    }
+    commands: list[list[str]] = []
+
+    def run_command(command: list[str], **_kwargs: object) -> tuple[int, str]:
+        commands.append(command)
+        if command[:3] == ["gh", "issue", "view"]:
+            return 0, json.dumps({"labels": [{"name": runner.LABEL_READY}]})
+        return 0, ""
+
+    monkeypatch.setattr(runner, "record_runner_executor_result", lambda *args: None)
+    monkeypatch.setattr(runner, "notify_task_finished", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        runner, "maybe_replenish_runner_queue_after_completion", lambda: False
+    )
+
+    with mock.patch.object(runner, "run_command", side_effect=run_command):
+        runner.process_issue(issue, source_repository="alanua/Lavalamp")
+
+    issue_commands = [
+        command for command in commands if command[:2] == ["gh", "issue"]
+    ]
+    assert issue_commands
+    assert {
+        command[command.index("--repo") + 1]
+        for command in issue_commands
+        if "--repo" in command
+    } == {"alanua/Lavalamp"}
+
+
 def _inspect_pr_issue_body(
     *,
     pr_number: int | str | None = 123,
@@ -283,6 +412,7 @@ def _inspect_pr_issue_body(
 
 
 def _inspect_pr_state(**updates: object) -> dict[str, object]:
+    repository = str(updates.pop("repository", runner.REPO))
     pr: dict[str, object] = {
         "number": 123,
         "state": "open",
@@ -292,7 +422,7 @@ def _inspect_pr_state(**updates: object) -> dict[str, object]:
         "base": {
             "ref": "main",
             "sha": "b" * 40,
-            "repo": {"full_name": runner.REPO},
+            "repo": {"full_name": repository},
         },
         "head": {"ref": "runner/issue-123", "sha": HEAD_SHA},
     }
@@ -313,6 +443,7 @@ def _inspect_pr_state(**updates: object) -> dict[str, object]:
 
 def _validation_receipt_issue_json(
     *,
+    repository: str = runner.REPO,
     pr_number: int = 123,
     head_sha: str = HEAD_SHA,
     base_sha: str = "b" * 40,
@@ -321,12 +452,13 @@ def _validation_receipt_issue_json(
     receipt_base_sha: str | None = None,
 ) -> str:
     idempotency_key = runner._continuation_issue_idempotency_key(
-        runner.REPO, pr_number, head_sha, base_sha
+        repository, pr_number, head_sha, base_sha
     )
     receipt = "\n".join(
         (
             f"{status}: Runner host maintenance task completed.",
             f"maintenance_task_id={runner.VALIDATE_PR_BRANCH}",
+            f"repository={repository}",
             f"pull_request={pr_number}",
             f"validation_checkout_head_sha={receipt_head_sha or head_sha}",
             f"validation_base_sha={receipt_base_sha or base_sha}",
@@ -2345,6 +2477,69 @@ def test_codegen_done_with_draft_pr_creates_exact_validation_continuation_once()
     assert f"Expected Base SHA: {'b' * 40}" in body
     assert "privacy_boundary: PUBLIC_SAFE_QUEUE_AND_PR_METADATA_ONLY" in body
     assert f"idempotency_key: {idempotency_key}" in body
+
+
+def test_registered_repo_done_creates_skeleton_validation_for_produced_repo_pr() -> None:
+    created: list[tuple[str, str, str]] = []
+    lookups: list[tuple[str, int]] = []
+    report = DONE_REPORT.replace(
+        "https://github.com/alanua/Skeleton/pull/123",
+        "https://github.com/alanua/Lavalamp/pull/123",
+    )
+
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        del cwd
+        if command[:3] == ["gh", "issue", "list"]:
+            return 0, "[]"
+        if command[:3] == ["gh", "issue", "create"]:
+            created.append(
+                (
+                    command[command.index("--repo") + 1],
+                    command[command.index("--title") + 1],
+                    command[command.index("--body") + 1],
+                )
+            )
+            return 0, "https://github.com/alanua/Skeleton/issues/3001\n"
+        return 2, "unexpected command"
+
+    def pr_state(repository: str, pr_number: int) -> tuple[dict[str, object], str]:
+        lookups.append((repository, pr_number))
+        return _pr_validation_state(number=pr_number), "gh"
+
+    token = runner._CURRENT_QUEUE_REPOSITORY.set("alanua/Lavalamp")
+    try:
+        with mock.patch.object(
+            runner, "_get_pr_branch_validation_state", side_effect=pr_state
+        ), mock.patch.object(runner, "run_command", side_effect=run):
+            continuation = runner.ensure_codegen_pr_validation_continuation(
+                source_issue=123,
+                issue_body=(
+                    "Selected Repository: alanua/Lavalamp\n\n"
+                    "```task\n"
+                    "schema: skeleton.runner_task.v1\n"
+                    "task: do it\n"
+                    "```"
+                ),
+                report=report,
+            )
+    finally:
+        runner._CURRENT_QUEUE_REPOSITORY.reset(token)
+
+    assert continuation is not None
+    assert continuation.repository == "alanua/Lavalamp"
+    assert continuation.pr_number == 123
+    assert lookups == [("alanua/Lavalamp", 123)]
+    assert len(created) == 1
+    create_repo, title, body = created[0]
+    assert create_repo == runner.REPO
+    assert title == f"Validate PR #123 at {HEAD_SHA[:8]}"
+    assert "Repository: alanua/Lavalamp" in body
+    assert "Source Repository: alanua/Lavalamp" in body
+    assert "Source Issue: 123" in body
+    assert (
+        f"idempotency_key: {runner._continuation_issue_idempotency_key('alanua/Lavalamp', 123, HEAD_SHA, 'b' * 40)}"
+        in body
+    )
 
 
 def test_codegen_existing_pr_contract_rejects_parallel_pr_without_continuation() -> None:
@@ -4983,6 +5178,34 @@ def test_poll_once_processes_issues_single_lane() -> None:
     assert process_issue.call_args_list == [
         mock.call(issues[0], workdir="/coordinator"),
         mock.call(issues[1], workdir="/coordinator"),
+    ]
+
+
+def test_poll_once_vnext_off_uses_legacy_skeleton_queue_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issues = [{"number": 139}]
+    monkeypatch.delenv(runner.RUNNER_VNEXT_MODE_ENV, raising=False)
+    monkeypatch.setattr(runner, "get_ready_issues", lambda: issues)
+    monkeypatch.setattr(
+        runner,
+        "get_ready_issue_items",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("vNext off must not use registered queue intake")
+        ),
+    )
+    monkeypatch.setattr(runner, "reconcile_scheduler_on_poll", lambda: None)
+    monkeypatch.setattr(
+        runner, "reconcile_terminal_issues_active_execution_labels", lambda: 0
+    )
+    monkeypatch.setattr(runner, "self_heal_run_now_queue_intake", lambda: 0)
+
+    with mock.patch.object(runner, "process_issue") as process_issue:
+        count = runner.poll_once(workdir="/coordinator")
+
+    assert count == 1
+    assert process_issue.call_args_list == [
+        mock.call(issues[0], workdir="/coordinator")
     ]
 
 
@@ -19970,6 +20193,64 @@ def test_inspect_pr_mergeability_uses_github_api_only() -> None:
         ["gh", "issue", "list"],
         ["gh", "issue", "view"],
     ]
+
+
+def test_inspect_pr_mergeability_registered_repo_uses_target_pr_and_skeleton_receipt() -> None:
+    repository = "alanua/Lavalamp"
+    payloads = {
+        f"https://api.github.com/repos/{repository}/pulls/123": _inspect_pr_state(
+            repository=repository
+        )["pr"],
+        (
+            f"https://api.github.com/repos/{repository}/pulls/123/files"
+            "?per_page=100&page=1"
+        ): _inspect_pr_state(repository=repository)["files"],
+        (
+            f"https://api.github.com/repos/{repository}/compare/"
+            f"{'b' * 40}...{HEAD_SHA}"
+        ): _inspect_pr_state(repository=repository)["compare"],
+        f"https://api.github.com/repos/{repository}/commits/{HEAD_SHA}/status": _inspect_pr_state(
+            repository=repository
+        )["combined_status"],
+        (
+            f"https://api.github.com/repos/{repository}/commits/{HEAD_SHA}/check-runs"
+            "?per_page=100&page=1"
+        ): {"check_runs": []},
+    }
+
+    def urlopen(request: object, timeout: int = 0) -> mock.MagicMock:
+        del timeout
+        assert isinstance(request, runner.urllib.request.Request)
+        assert runner.REPO not in request.full_url
+        return _json_response(payloads[request.full_url])
+
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        del cwd
+        if command[:3] == ["gh", "issue", "list"]:
+            assert command[command.index("--repo") + 1] == runner.REPO
+            assert (
+                command[command.index("--search") + 1]
+                == runner._continuation_issue_idempotency_key(
+                    repository, 123, HEAD_SHA, "b" * 40
+                )
+            )
+            return 0, _validation_receipt_issue_json(repository=repository)
+        if command[:3] == ["gh", "issue", "view"]:
+            assert command[command.index("--repo") + 1] == runner.REPO
+            return 0, _validation_receipt_issue_view_json(repository=repository)
+        return 2, "unexpected command"
+
+    with mock.patch.object(
+        runner.urllib.request, "urlopen", side_effect=urlopen
+    ), mock.patch.object(runner, "run_command", side_effect=run):
+        report = runner.inspect_pr_mergeability(
+            _inspect_pr_issue_body(repository=repository)
+        )
+
+    assert report.startswith("DONE:")
+    assert "repository=alanua/Lavalamp" in report
+    assert "pull_request=123" in report
+    assert "validation_receipt_issue=3001" in report
 
 
 def test_inspect_pr_mergeability_issue_body_does_not_execute_arbitrary_commands() -> None:

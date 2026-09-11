@@ -87,6 +87,12 @@ from core.runner_vnext_cutover_bridge import (
     VNextCutoverBridgeError,
     evaluate_vnext_cutover_bridge,
 )
+from core.runner_vnext_queue import (
+    RunnerVNextQueueItem,
+    RunnerVNextQueueSource,
+    registered_runner_queue_sources,
+    runner_vnext_queue_item_priority_key,
+)
 from core.runner_shadow_integration import (
     MAINTENANCE_TASK_KIND_BY_ID as SHADOW_MAINTENANCE_TASK_KIND_BY_ID,
     RunnerShadowReceipt,
@@ -238,6 +244,9 @@ RUNNER_MODES = frozenset((RUNNER_MODE_OFF, RUNNER_MODE_SHADOW, RUNNER_MODE_ENFOR
 UNIVERSAL_RUNNER_ALLOWED_STATUS = "allowed"
 LAST_RUNNER_SHADOW_RECEIPT: dict[str, object] | None = None
 LAST_RUNNER_VNEXT_RECEIPT: dict[str, object] | None = None
+_CURRENT_QUEUE_REPOSITORY: ContextVar[str] = ContextVar(
+    "CURRENT_QUEUE_REPOSITORY", default=QUEUE_REPOSITORY
+)
 
 
 def trusted_runner_comment_authors() -> frozenset[str]:
@@ -1232,6 +1241,7 @@ class PreflightPrRefreshRequest:
 
 @dataclass(frozen=True)
 class PrMergeabilityInspectionRequest:
+    repository: str
     pr_number: int
     expected_head_sha: str | None
 
@@ -1690,6 +1700,13 @@ def issue_worktree_path(issue_number: int) -> Path:
     return worktree_root() / f"issue-{issue_number}"
 
 
+def _source_issue_slug(issue_number: int, source_repository: str = QUEUE_REPOSITORY) -> str:
+    if source_repository == QUEUE_REPOSITORY:
+        return f"issue-{issue_number}"
+    repository_slug = re.sub(r"[^A-Za-z0-9._-]+", "-", source_repository).strip("-")
+    return f"issue-{repository_slug}-{issue_number}"
+
+
 def target_repository_worktree_root(target_repository: str) -> Path:
     project = _project_for_target_repository(target_repository)
     if target_repository == QUEUE_REPOSITORY:
@@ -1786,9 +1803,13 @@ def verify_target_repository_checkout(target_repository: str) -> str | None:
 
 
 def target_repository_issue_worktree_path(
-    target_repository: str, issue_number: int
+    target_repository: str,
+    issue_number: int,
+    source_repository: str = QUEUE_REPOSITORY,
 ) -> Path:
-    return target_repository_worktree_root(target_repository) / f"issue-{issue_number}"
+    return target_repository_worktree_root(target_repository) / _source_issue_slug(
+        issue_number, source_repository
+    )
 
 
 def ensure_safe_target_repository_worktree_path(
@@ -1811,8 +1832,11 @@ def ensure_safe_worktree_path(path: str | Path) -> Path:
     return ensure_safe_target_repository_worktree_path(QUEUE_REPOSITORY, path)
 
 
-def issue_branch(issue_number: int) -> str:
-    return f"runner/issue-{issue_number}"
+def issue_branch(issue_number: int, source_repository: str = QUEUE_REPOSITORY) -> str:
+    if source_repository == QUEUE_REPOSITORY:
+        return f"runner/issue-{issue_number}"
+    repository_slug = re.sub(r"[^A-Za-z0-9._-]+", "-", source_repository).strip("-")
+    return f"runner/{repository_slug}-issue-{issue_number}"
 
 
 def format_command_output(command: list[str], output: str) -> str:
@@ -1830,13 +1854,18 @@ def prepare_target_repository_issue_worktree(
     target_repository: str,
     issue_number: int,
     *,
+    source_repository: str = QUEUE_REPOSITORY,
     base: str | None = None,
     base_sha: str | None = None,
 ) -> tuple[int, str, Path]:
     try:
         path = ensure_safe_target_repository_worktree_path(
             target_repository,
-            target_repository_issue_worktree_path(target_repository, issue_number),
+            target_repository_issue_worktree_path(
+                target_repository,
+                issue_number,
+                source_repository,
+            ),
         )
         checkout_path = target_repository_checkout_path(target_repository)
     except ValueError as exc:
@@ -1849,6 +1878,7 @@ def prepare_target_repository_issue_worktree(
         checkout_path,
         path,
         target_repository=target_repository,
+        source_repository=source_repository,
         base=base,
         base_sha=base_sha,
     )
@@ -1951,10 +1981,11 @@ def prepare_git_issue_worktree(
     path: Path,
     *,
     target_repository: str | None = None,
+    source_repository: str = QUEUE_REPOSITORY,
     base: str | None = None,
     base_sha: str | None = None,
 ) -> tuple[int, str, Path]:
-    branch = issue_branch(issue_number)
+    branch = issue_branch(issue_number, source_repository)
     outputs: list[str] = []
     base_ref = base or "main"
     validation_failure = _target_base_validation_failure(base, base_sha)
@@ -2351,12 +2382,18 @@ def cleanup_issue_worktree(
 
 
 def cleanup_target_repository_issue_worktree(
-    target_repository: str, issue_number: int
+    target_repository: str,
+    issue_number: int,
+    source_repository: str = QUEUE_REPOSITORY,
 ) -> tuple[int, str]:
     try:
         path = ensure_safe_target_repository_worktree_path(
             target_repository,
-            target_repository_issue_worktree_path(target_repository, issue_number),
+            target_repository_issue_worktree_path(
+                target_repository,
+                issue_number,
+                source_repository,
+            ),
         )
     except ValueError as exc:
         return 1, str(exc)
@@ -2810,6 +2847,55 @@ def get_ready_issues() -> list[dict[str, Any]]:
     )
 
 
+def _ready_issues_for_registered_source(
+    source: RunnerVNextQueueSource,
+) -> list[dict[str, Any]]:
+    if source.repository == QUEUE_REPOSITORY:
+        return get_ready_issues()
+    code, output = run_command(
+        [
+            "gh",
+            "issue",
+            "list",
+            "--repo",
+            source.repository,
+            "--label",
+            LABEL_READY,
+            "--state",
+            "open",
+            "--search",
+            "is:issue",
+            "--json",
+            "number,title,body,state,url,closed,labels",
+        ]
+    )
+    if code != 0:
+        raise RuntimeError(f"gh issue list failed for {source.repository}:\n{output}")
+    parsed = json.loads(output or "[]")
+    if not isinstance(parsed, list):
+        raise RuntimeError(
+            f"gh issue list returned non-list JSON for {source.repository}"
+        )
+    return [issue for issue in parsed if isinstance(issue, dict) and is_open_task_issue(issue)]
+
+
+def get_ready_issue_items() -> list[RunnerVNextQueueItem]:
+    items: list[RunnerVNextQueueItem] = []
+    seen: set[tuple[str, int]] = set()
+    project_tree = load_runner_project_tree()
+    for source in registered_runner_queue_sources(project_tree):
+        for issue in _ready_issues_for_registered_source(source):
+            number = issue.get("number")
+            if not isinstance(number, int) or isinstance(number, bool):
+                continue
+            identity = (source.repository, number)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            items.append(RunnerVNextQueueItem(source=source, issue=issue))
+    return sorted(items, key=runner_vnext_queue_item_priority_key)
+
+
 def sort_ready_issues_by_priority(issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(issues, key=_ready_issue_priority_key)
 
@@ -2932,6 +3018,7 @@ def _target_repository_metadata_field(metadata: str) -> tuple[str | None, str | 
 
 def resolve_target_project_metadata(
     body: str,
+    default_repository: str = QUEUE_REPOSITORY,
 ) -> tuple[str | None, str | None, str | None]:
     metadata = (body or "").split("```task", 1)[0]
     target_project = _body_field(metadata, "Target Project")
@@ -2941,7 +3028,20 @@ def resolve_target_project_metadata(
     project_tree = load_runner_project_tree()
 
     if target_project is None and target_repository is None:
-        return "skeleton", QUEUE_REPOSITORY, None
+        try:
+            default_project = get_project_by_repo(project_tree, default_repository)
+            default_project_id = _project_id_for_repo(project_tree, default_repository)
+        except KeyError:
+            return None, None, f"Source repository `{default_repository}` is not registered."
+        if default_project["public"] is not True:
+            return None, None, f"Source repository `{default_repository}` is not public."
+        if default_project.get("runner_enabled") is not True:
+            return (
+                None,
+                None,
+                f"Source repository `{default_repository}` is not runner-enabled.",
+            )
+        return default_project_id, default_repository, None
 
     project_from_project: dict[str, Any] | None = None
     project_from_repository: dict[str, Any] | None = None
@@ -3004,7 +3104,10 @@ def extract_target_repository(body: str) -> tuple[str | None, str | None]:
     return target_repository, reason
 
 
-def extract_runner_task(body: str) -> tuple[RunnerTask | None, str | None]:
+def extract_runner_task(
+    body: str,
+    default_repository: str = QUEUE_REPOSITORY,
+) -> tuple[RunnerTask | None, str | None]:
     fence_reason = task_fence_block_reason(body)
     if fence_reason is not None:
         return None, fence_reason
@@ -3016,7 +3119,8 @@ def extract_runner_task(body: str) -> tuple[RunnerTask | None, str | None]:
     if lane is None:
         return None, lane_reason
     target_project, target_repository, target_reason = resolve_target_project_metadata(
-        body
+        body,
+        default_repository=default_repository,
     )
     if target_project is None or target_repository is None:
         return None, target_reason
@@ -4431,8 +4535,15 @@ def run_codex_task(
         return 0, route_marker + openhands_output
 
 
-def post_issue_comment(issue_number: int, body: str) -> None:
+def _current_queue_repository() -> str:
+    return _CURRENT_QUEUE_REPOSITORY.get()
+
+
+def post_issue_comment(
+    issue_number: int, body: str, repository: str | None = None
+) -> None:
     body = sanitize_public_report(body)
+    queue_repository = repository or _current_queue_repository()
     code, output = run_command(
         [
             "gh",
@@ -4440,7 +4551,7 @@ def post_issue_comment(issue_number: int, body: str) -> None:
             "comment",
             str(issue_number),
             "--repo",
-            REPO,
+            queue_repository,
             "--body",
             truncate_comment(body),
         ]
@@ -4449,7 +4560,9 @@ def post_issue_comment(issue_number: int, body: str) -> None:
         raise RuntimeError(f"gh issue comment failed:\n{output}")
 
 
-def get_issue_comments(issue: dict[str, Any]) -> list[dict[str, Any]] | None:
+def get_issue_comments(
+    issue: dict[str, Any], repository: str | None = None
+) -> list[dict[str, Any]] | None:
     comments = issue.get("comments")
     if isinstance(comments, list):
         return [comment for comment in comments if isinstance(comment, dict)]
@@ -4458,6 +4571,7 @@ def get_issue_comments(issue: dict[str, Any]) -> list[dict[str, Any]] | None:
             return None
         return []
     issue_number = int(issue["number"])
+    queue_repository = repository or _current_queue_repository()
     code, output = run_command(
         [
             "gh",
@@ -4465,7 +4579,7 @@ def get_issue_comments(issue: dict[str, Any]) -> list[dict[str, Any]] | None:
             "view",
             str(issue_number),
             "--repo",
-            REPO,
+            queue_repository,
             "--json",
             "comments",
         ]
@@ -4513,7 +4627,8 @@ def unverifiable_retry_history_report(decision: RetryDecision) -> str:
     )
 
 
-def get_issue_labels(issue_number: int) -> frozenset[str]:
+def get_issue_labels(issue_number: int, repository: str | None = None) -> frozenset[str]:
+    queue_repository = repository or _current_queue_repository()
     code, output = run_command(
         [
             "gh",
@@ -4521,7 +4636,7 @@ def get_issue_labels(issue_number: int) -> frozenset[str]:
             "view",
             str(issue_number),
             "--repo",
-            REPO,
+            queue_repository,
             "--json",
             "labels",
         ]
@@ -4534,11 +4649,16 @@ def get_issue_labels(issue_number: int) -> frozenset[str]:
     return _issue_label_names(parsed)
 
 
-def set_issue_label(issue_number: int, remove: str, add: str) -> None:
+def set_issue_label(
+    issue_number: int, remove: str, add: str, repository: str | None = None
+) -> None:
+    queue_repository = repository or _current_queue_repository()
     if add in TERMINAL_RUNNER_LABELS and (
         remove == LABEL_RUNNING or add == LABEL_BLOCKED
     ):
-        remove_labels = set(get_issue_labels(issue_number) & ACTIVE_EXECUTION_LABELS)
+        remove_labels = set(
+            get_issue_labels(issue_number, queue_repository) & ACTIVE_EXECUTION_LABELS
+        )
     else:
         remove_labels = {remove}
     remove_labels.discard(add)
@@ -4549,7 +4669,7 @@ def set_issue_label(issue_number: int, remove: str, add: str) -> None:
         "edit",
         str(issue_number),
         "--repo",
-        REPO,
+        queue_repository,
     ]
     for label in sorted(remove_labels):
         command.extend(["--remove-label", label])
@@ -4560,11 +4680,14 @@ def set_issue_label(issue_number: int, remove: str, add: str) -> None:
         raise RuntimeError(f"gh issue edit failed:\n{output}")
 
 
-def apply_runner_lane_label(issue_number: int, task: RunnerTask | None) -> None:
+def apply_runner_lane_label(
+    issue_number: int, task: RunnerTask | None, repository: str | None = None
+) -> None:
     if task is None or not task.has_lane_metadata:
         return
 
     label = ensure_runner_lane_label(task.lane)
+    queue_repository = repository or _current_queue_repository()
     code, output = run_command(
         [
             "gh",
@@ -4572,7 +4695,7 @@ def apply_runner_lane_label(issue_number: int, task: RunnerTask | None) -> None:
             "edit",
             str(issue_number),
             "--repo",
-            REPO,
+            queue_repository,
             "--add-label",
             label,
         ]
@@ -4581,18 +4704,19 @@ def apply_runner_lane_label(issue_number: int, task: RunnerTask | None) -> None:
         raise RuntimeError(f"gh issue lane label edit failed:\n{output}")
 
 
-def ensure_runner_lane_label(lane: RunnerLane) -> str:
+def ensure_runner_lane_label(lane: RunnerLane, repository: str | None = None) -> str:
     label = RUNNER_LANE_LABELS.get(lane.name)
     if label is None:
         raise ValueError(f"Refusing to create non-allowlisted Runner lane `{lane.name}`.")
 
+    queue_repository = repository or _current_queue_repository()
     code, output = run_command(
         [
             "gh",
             "label",
             "list",
             "--repo",
-            REPO,
+            queue_repository,
             "--search",
             label,
             "--json",
@@ -4620,7 +4744,7 @@ def ensure_runner_lane_label(lane: RunnerLane) -> str:
             "create",
             label,
             "--repo",
-            REPO,
+            queue_repository,
             "--description",
             RUNNER_LANE_LABEL_DESCRIPTIONS[lane.name],
         ]
@@ -5048,6 +5172,17 @@ def extract_pr_number(pr_url: str) -> int | None:
     return int(match.group("number"))
 
 
+def extract_pr_repository(pr_url: str) -> str | None:
+    match = re.fullmatch(
+        r"https://github\.com/(?P<owner>[A-Za-z0-9_.-]+)/"
+        r"(?P<repo>[A-Za-z0-9_.-]+)/pull/[1-9]\d*/?",
+        pr_url,
+    )
+    if match is None:
+        return None
+    return f"{match.group('owner')}/{match.group('repo')}"
+
+
 def extract_runner_report_pr_binding(
     report: str,
 ) -> tuple[str | None, tuple[str, ...]]:
@@ -5104,7 +5239,7 @@ TELEGRAM_CALLBACK_REPO_KEYS = {
     "alanua/Lavalamp": "l",
     "alanua/LumenFlow": "f",
 }
-_NOTIFICATION_ISSUE_CACHE: dict[tuple[int, str], dict[str, Any]] = {}
+_NOTIFICATION_ISSUE_CACHE: dict[tuple[str, int, str], dict[str, Any]] = {}
 
 
 def _telegram_callback_data(button: dict[str, Any]) -> str:
@@ -5335,7 +5470,10 @@ def send_telegram_notification(
         pass
 
 
-def get_notification_issue(issue_number: int) -> dict[str, Any]:
+def get_notification_issue(
+    issue_number: int, repository: str | None = None
+) -> dict[str, Any]:
+    queue_repository = repository or _current_queue_repository()
     code, output = run_command(
         [
             "gh",
@@ -5343,7 +5481,7 @@ def get_notification_issue(issue_number: int) -> dict[str, Any]:
             "view",
             str(issue_number),
             "--repo",
-            REPO,
+            queue_repository,
             "--json",
             "number,body,state,url,closed,labels",
         ]
@@ -5356,29 +5494,37 @@ def get_notification_issue(issue_number: int) -> dict[str, Any]:
     return parsed
 
 
-def notification_task_issue(issue_number: int, status: str) -> dict[str, Any] | None:
+def notification_task_issue(
+    issue_number: int, status: str, repository: str | None = None
+) -> dict[str, Any] | None:
     expected_label = FINAL_LABELS_BY_STATUS.get(status)
     if expected_label is None:
         return None
 
-    issue = get_notification_issue(issue_number)
+    queue_repository = repository or _current_queue_repository()
+    issue = get_notification_issue(issue_number, queue_repository)
     if not is_open_task_issue(issue):
         return None
     if not has_runner_task_body(issue.get("body") or ""):
         return None
     if expected_label not in label_names(issue.get("labels")):
         return None
-    _NOTIFICATION_ISSUE_CACHE[(issue_number, status)] = issue
+    _NOTIFICATION_ISSUE_CACHE[(queue_repository, issue_number, status)] = issue
     return issue
 
 
-def should_notify_task_finished(issue_number: int, status: str) -> bool:
-    return notification_task_issue(issue_number, status) is not None
+def should_notify_task_finished(
+    issue_number: int, status: str, repository: str | None = None
+) -> bool:
+    return notification_task_issue(issue_number, status, repository) is not None
 
 
 def notification_target_repository(issue: dict[str, Any]) -> str:
     try:
-        target_repository, reason = extract_target_repository(str(issue.get("body") or ""))
+        _target_project, target_repository, reason = resolve_target_project_metadata(
+            str(issue.get("body") or ""),
+            default_repository=_current_queue_repository(),
+        )
         if reason is None and target_repository in ALLOWED_TARGET_REPOSITORIES:
             return target_repository
     except Exception:
@@ -5387,14 +5533,22 @@ def notification_target_repository(issue: dict[str, Any]) -> str:
 
 
 def notify_task_finished(
-    issue_number: int, status: str, report: str | None = None
+    issue_number: int,
+    status: str,
+    report: str | None = None,
+    repository: str | None = None,
 ) -> None:
     try:
-        if not should_notify_task_finished(issue_number, status):
+        queue_repository = repository or _current_queue_repository()
+        if not should_notify_task_finished(issue_number, status, queue_repository):
             return
-        issue = _NOTIFICATION_ISSUE_CACHE.pop((issue_number, status), None)
+        issue = _NOTIFICATION_ISSUE_CACHE.pop(
+            (queue_repository, issue_number, status), None
+        )
         target_repository = (
-            notification_target_repository(issue) if issue is not None else REPO
+            notification_target_repository(issue)
+            if issue is not None
+            else queue_repository
         )
         plain_target_repository = (
             target_repository if target_repository != REPO else None
@@ -10198,6 +10352,7 @@ def _validate_pr_branch_continuation_body(
     head_sha: str,
     base_sha: str,
     source_issue: int,
+    source_repository: str,
     idempotency_key: str,
 ) -> str:
     return "\n".join(
@@ -10215,6 +10370,7 @@ def _validate_pr_branch_continuation_body(
             f"Expected Head SHA: {head_sha}",
             f"Expected Base SHA: {base_sha}",
             "Validation Profile: full_pytest",
+            f"Source Repository: {source_repository}",
             f"Source Issue: {source_issue}",
             "",
             "```task",
@@ -10313,13 +10469,16 @@ def ensure_codegen_pr_validation_continuation(
     pr_number = extract_pr_number(pr_url)
     if pr_number is None:
         return None
+    repository = extract_pr_repository(pr_url)
+    if repository not in ALLOWED_TARGET_REPOSITORIES:
+        raise RuntimeError("produced_pr_repository_not_allowed")
     declared_pr = _declared_existing_pr_number(issue_body)
     if declared_pr is not None and declared_pr != pr_number:
         raise RuntimeError("publication_contract_existing_pr_mismatch")
     if declared_pr is None and _codegen_publication_contract_requires_existing_pr(issue_body):
         raise RuntimeError("publication_contract_existing_pr_unverifiable")
 
-    pr_state, _source = _get_pr_branch_validation_state(REPO, pr_number)
+    pr_state, _source = _get_pr_branch_validation_state(repository, pr_number)
     if pr_state.get("state") != "OPEN":
         raise RuntimeError("produced_pr_not_open")
     head_sha = str(pr_state.get("headRefOid") or "").lower()
@@ -10343,12 +10502,12 @@ def ensure_codegen_pr_validation_continuation(
             raise RuntimeError("declared_existing_pr_head_stale")
 
     idempotency_key = _continuation_issue_idempotency_key(
-        REPO, pr_number, head_sha, base_sha
+        repository, pr_number, head_sha, base_sha
     )
     existing_issue = _find_existing_validation_continuation_issue(idempotency_key)
     if existing_issue is not None:
         return ProducedPrValidationContinuation(
-            repository=REPO,
+            repository=repository,
             pr_number=pr_number,
             pr_url=pr_url,
             head_sha=head_sha,
@@ -10361,11 +10520,12 @@ def ensure_codegen_pr_validation_continuation(
         )
 
     body = _validate_pr_branch_continuation_body(
-        repository=REPO,
+        repository=repository,
         pr_number=pr_number,
         head_sha=head_sha,
         base_sha=base_sha,
         source_issue=source_issue,
+        source_repository=_current_queue_repository(),
         idempotency_key=idempotency_key,
     )
     issue_number = _create_validation_continuation_issue(
@@ -10373,7 +10533,7 @@ def ensure_codegen_pr_validation_continuation(
         body=body,
     )
     return ProducedPrValidationContinuation(
-        repository=REPO,
+        repository=repository,
         pr_number=pr_number,
         pr_url=pr_url,
         head_sha=head_sha,
@@ -11287,10 +11447,10 @@ def _pr_mergeability_inspection_metadata(
     body: str,
 ) -> tuple[PrMergeabilityInspectionRequest | None, str | None]:
     metadata = (body or "").split("```task", 1)[0]
-    repository = _body_field(metadata, "Repository")
+    repository = _body_field(metadata, "Repository") or REPO
     pr_number = _body_field(metadata, "Pull Request")
     expected_head_sha = _body_field(metadata, "Expected Head SHA")
-    if repository is not None and repository != REPO:
+    if repository not in ALLOWED_TARGET_REPOSITORIES:
         return None, "unsupported_repository"
     if not isinstance(pr_number, str) or not re.fullmatch(r"[1-9]\d*", pr_number):
         return None, "missing_or_invalid_pull_request"
@@ -11301,6 +11461,7 @@ def _pr_mergeability_inspection_metadata(
         return None, "invalid_expected_head_sha"
     return (
         PrMergeabilityInspectionRequest(
+            repository=repository,
             pr_number=int(pr_number),
             expected_head_sha=(
                 expected_head_sha.lower()
@@ -11345,8 +11506,10 @@ def _github_api_list(path: str, key: str | None = None) -> list[dict[str, Any]]:
         page += 1
 
 
-def _get_pr_mergeability_state(pr_number: int) -> dict[str, Any]:
-    pr_path = f"/repos/{REPO}/pulls/{pr_number}"
+def _get_pr_mergeability_state(pr_number: int, repository: str = REPO) -> dict[str, Any]:
+    if repository not in ALLOWED_TARGET_REPOSITORIES:
+        raise RuntimeError("GitHub PR repository was not allowlisted")
+    pr_path = f"/repos/{repository}/pulls/{pr_number}"
     pr = _github_api_json(pr_path)
     if not isinstance(pr, dict):
         raise RuntimeError("GitHub PR response was malformed")
@@ -11358,7 +11521,7 @@ def _get_pr_mergeability_state(pr_number: int) -> dict[str, Any]:
     compare: dict[str, Any] = {}
     if _HEAD_SHA_RE.fullmatch(base_sha) and _HEAD_SHA_RE.fullmatch(head_sha):
         compare_payload = _github_api_json(
-            f"/repos/{REPO}/compare/{base_sha}...{head_sha}"
+            f"/repos/{repository}/compare/{base_sha}...{head_sha}"
         )
         if isinstance(compare_payload, dict):
             compare = compare_payload
@@ -11366,11 +11529,11 @@ def _get_pr_mergeability_state(pr_number: int) -> dict[str, Any]:
     combined_status: dict[str, Any] = {}
     check_runs: list[dict[str, Any]] = []
     if _HEAD_SHA_RE.fullmatch(head_sha):
-        status_payload = _github_api_json(f"/repos/{REPO}/commits/{head_sha}/status")
+        status_payload = _github_api_json(f"/repos/{repository}/commits/{head_sha}/status")
         if isinstance(status_payload, dict):
             combined_status = status_payload
         check_runs = _github_api_list(
-            f"/repos/{REPO}/commits/{head_sha}/check-runs", key="check_runs"
+            f"/repos/{repository}/commits/{head_sha}/check-runs", key="check_runs"
         )
 
     return {
@@ -11440,6 +11603,7 @@ def _actual_file_delegated_merge_policy(
 def _trusted_validation_receipt_matches(
     report: str,
     *,
+    repository: str,
     pr_number: int,
     head_sha: str,
     base_sha: str,
@@ -11447,6 +11611,7 @@ def _trusted_validation_receipt_matches(
     return (
         runner_report_status(report) == "DONE"
         and f"maintenance_task_id={VALIDATE_PR_BRANCH}" in report
+        and f"repository={repository}" in report
         and f"pull_request={pr_number}" in report
         and f"validation_checkout_head_sha={head_sha}" in report
         and f"validation_base_sha={base_sha}" in report
@@ -11471,7 +11636,7 @@ def _trusted_pr_validation_receipt_state(
             "issue",
             "list",
             "--repo",
-            repository,
+            REPO,
             "--label",
             LABEL_AGENT_TASK,
             "--state",
@@ -11519,7 +11684,7 @@ def _trusted_pr_validation_receipt_state(
                 "view",
                 str(issue_number),
                 "--repo",
-                repository,
+                REPO,
                 "--json",
                 "body,comments,labels",
             ]
@@ -11551,7 +11716,11 @@ def _trusted_pr_validation_receipt_state(
     issue_number, bodies = matching_issues[0]
     for body in bodies:
         if _trusted_validation_receipt_matches(
-            body, pr_number=pr_number, head_sha=head_sha, base_sha=base_sha
+            body,
+            repository=repository,
+            pr_number=pr_number,
+            head_sha=head_sha,
+            base_sha=base_sha,
         ):
             return "success", "none", issue_number
     return "not_success", "validation_receipt_not_success", issue_number
@@ -11606,9 +11775,9 @@ def inspect_pr_mergeability(body: str) -> str:
         return _maintenance_report("BLOCKED", task_id, [f"reason={reason}"], "not_met")
     assert request is not None
 
-    status_lines = [f"repository={REPO}", f"pull_request={request.pr_number}"]
+    status_lines = [f"repository={request.repository}", f"pull_request={request.pr_number}"]
     try:
-        state = _get_pr_mergeability_state(request.pr_number)
+        state = _get_pr_mergeability_state(request.pr_number, request.repository)
     except Exception:
         return _maintenance_report(
             "BLOCKED",
@@ -11626,7 +11795,7 @@ def inspect_pr_mergeability(body: str) -> str:
     base = pr.get("base") if isinstance(pr.get("base"), dict) else {}
     head = pr.get("head") if isinstance(pr.get("head"), dict) else {}
     base_repo = base.get("repo") if isinstance(base.get("repo"), dict) else {}
-    if base_repo.get("full_name") != REPO:
+    if base_repo.get("full_name") != request.repository:
         return _maintenance_report(
             "BLOCKED",
             task_id,
@@ -11657,7 +11826,7 @@ def inspect_pr_mergeability(body: str) -> str:
     ):
         validation_state, validation_reason, receipt_issue = (
             _trusted_pr_validation_receipt_state(
-                repository=REPO,
+                repository=request.repository,
                 pr_number=int(pr["number"]),
                 head_sha=head_sha,
                 base_sha=base_sha,
@@ -18820,9 +18989,24 @@ def process_runtime_maintenance_issue(
         maybe_replenish_runner_queue_after_completion()
 
 
-def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
+def process_issue(
+    issue: dict[str, Any],
+    workdir: str | None = None,
+    source_repository: str = QUEUE_REPOSITORY,
+) -> None:
+    queue_token = _CURRENT_QUEUE_REPOSITORY.set(source_repository)
+    try:
+        _process_issue_in_current_queue_context(issue, workdir=workdir)
+    finally:
+        _CURRENT_QUEUE_REPOSITORY.reset(queue_token)
+
+
+def _process_issue_in_current_queue_context(
+    issue: dict[str, Any], workdir: str | None = None
+) -> None:
     global LAST_RUNNER_SHADOW_RECEIPT
     issue_number = int(issue["number"])
+    source_repository = _current_queue_repository()
     if not is_open_task_issue(issue):
         return
     labels = _issue_label_names(issue)
@@ -18882,7 +19066,10 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
         if maintenance_mode:
             task_content = ""
         else:
-            runner_task, task_reason = extract_runner_task(issue_body)
+            runner_task, task_reason = extract_runner_task(
+                issue_body,
+                default_repository=source_repository,
+            )
             if runner_task is None:
                 if task_reason is not None:
                     block_issue(issue_number, task_reason)
@@ -19197,21 +19384,41 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
                 return
         if local_target_worktree:
             if runner_task is not None and runner_task.base is not None:
-                worktree_code, worktree_output, worktree_path = (
-                    prepare_target_repository_issue_worktree(
-                        target_repository,
-                        issue_number,
-                        base=runner_task.base,
-                        base_sha=runner_task.base_sha,
+                if source_repository == QUEUE_REPOSITORY:
+                    worktree_code, worktree_output, worktree_path = (
+                        prepare_target_repository_issue_worktree(
+                            target_repository,
+                            issue_number,
+                            base=runner_task.base,
+                            base_sha=runner_task.base_sha,
+                        )
                     )
-                )
+                else:
+                    worktree_code, worktree_output, worktree_path = (
+                        prepare_target_repository_issue_worktree(
+                            target_repository,
+                            issue_number,
+                            source_repository=source_repository,
+                            base=runner_task.base,
+                            base_sha=runner_task.base_sha,
+                        )
+                    )
             else:
-                worktree_code, worktree_output, worktree_path = (
-                    prepare_target_repository_issue_worktree(
-                        target_repository,
-                        issue_number,
+                if source_repository == QUEUE_REPOSITORY:
+                    worktree_code, worktree_output, worktree_path = (
+                        prepare_target_repository_issue_worktree(
+                            target_repository,
+                            issue_number,
+                        )
                     )
-                )
+                else:
+                    worktree_code, worktree_output, worktree_path = (
+                        prepare_target_repository_issue_worktree(
+                            target_repository,
+                            issue_number,
+                            source_repository=source_repository,
+                        )
+                    )
         else:
             if existing_pr_worktree_request is not None:
                 worktree_code, worktree_output, worktree_path = (
@@ -19351,10 +19558,17 @@ def process_issue(issue: dict[str, Any], workdir: str | None = None) -> None:
         report = report_runner_lane(finalized_report, runner_task)
         cleanup_runtime_artifacts(issue_workdir)
         if local_target_worktree:
-            cleanup_code, cleanup_output = cleanup_target_repository_issue_worktree(
-                target_repository,
-                issue_number,
-            )
+            if source_repository == QUEUE_REPOSITORY:
+                cleanup_code, cleanup_output = cleanup_target_repository_issue_worktree(
+                    target_repository,
+                    issue_number,
+                )
+            else:
+                cleanup_code, cleanup_output = cleanup_target_repository_issue_worktree(
+                    target_repository,
+                    issue_number,
+                    source_repository,
+                )
         else:
             cleanup_code, cleanup_output = cleanup_issue_worktree(
                 issue_number, coordinator_workdir
@@ -19465,10 +19679,29 @@ def poll_once(workdir: str | None = None) -> int:
         self_heal_run_now_queue_intake()
     finally:
         _QUEUE_RECOVERY_SOURCE.reset(source_token)
-    issues = get_ready_issues()
-    for issue in issues:
-        process_issue(issue, workdir=workdir)
-    return len(issues)
+    configured_vnext_mode = os.environ.get(RUNNER_VNEXT_MODE_ENV)
+    normalized_vnext_mode = (configured_vnext_mode or "off").strip().lower()
+    runner_mode = runner_mode_decision()
+    if (
+        normalized_vnext_mode == "off"
+        or runner_mode.mode not in {RUNNER_MODE_SHADOW, RUNNER_MODE_ENFORCE}
+    ):
+        issues = get_ready_issues()
+        for issue in issues:
+            process_issue(issue, workdir=workdir)
+        return len(issues)
+
+    items = get_ready_issue_items()
+    for item in items:
+        if item.source_repository == QUEUE_REPOSITORY:
+            process_issue(item.issue, workdir=workdir)
+        else:
+            process_issue(
+                item.issue,
+                workdir=workdir,
+                source_repository=item.source_repository,
+            )
+    return len(items)
 
 
 def main() -> None:
