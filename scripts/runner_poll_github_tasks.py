@@ -159,6 +159,7 @@ from core.private_static_site_runtime import (
     prepare_private_static_site_handoff as _execute_prepare_private_static_site_handoff,
 )
 from core.project_tree import get_project, get_project_by_repo, load_project_tree
+from core.project_onboarding import inspect_project_onboarding
 from core.runner_child_environment import (
     sanitize_codegen_child_environment,
     sanitize_validation_child_environment,
@@ -1098,6 +1099,14 @@ ALLOWED_RUNNER_LANES = frozenset(RUNNER_LANE_LABELS)
 
 def load_runner_project_tree() -> dict[str, Any]:
     return load_project_tree(PROJECT_TREE_PATH)
+
+
+def inspect_runner_project_onboarding(
+    repository_metadata: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return a public-safe project onboarding decision for Home Edge callers."""
+
+    return inspect_project_onboarding(repository_metadata, load_runner_project_tree())
 
 
 def allowed_target_repositories() -> frozenset[str]:
