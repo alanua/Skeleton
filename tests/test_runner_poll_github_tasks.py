@@ -1154,19 +1154,37 @@ def test_blocked_output_classifier_detects_runner_blockers() -> None:
     cases = {
         "BLOCKED: cannot continue": "BLOCKED",
         "Blocked: waiting for access": "BLOCKED",
-        "missing capability: docker": "missing capability",
-        "wrong worktree selected": "wrong worktree",
-        "not target repo": "not target repo",
-        "writer unavailable": "writer unavailable",
-        "cancelled by operator": "cancelled",
-        "no build files were present": "no build files",
-        "PlatformIO not available": "PlatformIO not available",
-        "no firmware target exists": "no firmware",
-        "assigned worktree is not target": "assigned worktree is not target",
     }
 
     for output, expected_marker in cases.items():
         assert runner.blocked_output_marker(output) == expected_marker
+
+
+def test_blocked_output_classifier_ignores_legacy_generic_markers_in_prose() -> None:
+    legacy_markers = (
+        "missing capability",
+        "wrong worktree",
+        "not target repo",
+        "writer unavailable",
+        "cancelled",
+        "no build files",
+        "PlatformIO not available",
+        "no firmware",
+        "assigned worktree is not target",
+    )
+
+    for marker in legacy_markers:
+        output = f"""RESULT: DONE
+
+Completed the requested audit.
+
+Notes:
+The task source mentioned `{marker}` as an example phrase, but it is not a
+Runner-owned terminal status or deterministic failure receipt.
+"""
+
+        assert runner.blocked_output_marker(output) is None
+        assert runner.classify_codex_task_result(output, 0) == runner.CodexTaskResult("DONE")
 
 
 def test_blocked_output_classifier_ignores_echoed_transcript_markers() -> None:
@@ -3875,6 +3893,32 @@ maintenance evidence text. They are not the final delivery status.
 """
 
     assert runner.runner_report_status(report) == "DONE"
+
+
+def test_runner_report_status_ignores_legacy_generic_markers_in_done_report() -> None:
+    legacy_phrases = (
+        "No firmware build was requested.",
+        "PlatformIO not available was quoted from the task prompt.",
+        "The cancellation path mentions cancelled as a status word.",
+        "The audit referenced wrong worktree validation.",
+        "The audit referenced missing capability validation.",
+        "The audit referenced not target repo validation.",
+        "The audit referenced writer unavailable validation.",
+        "The audit referenced no build files validation.",
+        "The audit referenced assigned worktree is not target validation.",
+    )
+
+    for phrase in legacy_phrases:
+        report = f"""DONE: Codex completed successfully with no file changes.
+
+Validation:
+- python3 -m pytest -q tests/test_runner_poll_github_tasks.py
+
+Audit note:
+{phrase}
+"""
+
+        assert runner.runner_report_status(report) == "DONE"
 
 
 def test_runner_report_status_blocks_done_report_with_publish_failure() -> None:
