@@ -1662,6 +1662,244 @@ def test_queue_replenisher_preserves_depth_dependency_duplicate_and_overlap_rule
     assert [issue["number"] for issue in selected] == [20, 26]
 
 
+def _typed_dependency_task_body(*, depends_on: object | None = None) -> str:
+    lines = [
+        "schema: skeleton.runner_task.v1",
+        "privacy_boundary: PUBLIC_SAFE_QUEUE_METADATA_ONLY",
+        "expected_output: no file changes",
+    ]
+    if depends_on is not None:
+        lines.append("depends_on:")
+        if isinstance(depends_on, str):
+            lines.append(f"  - {depends_on}")
+        else:
+            lines.extend(f"  - {json.dumps(item)}" for item in depends_on)
+    lines.extend(("```task", "Touch nothing.", "```"))
+    return "\n".join(lines)
+
+
+def test_typed_dependency_issue_done_allows_pickup_transition(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    body = _typed_dependency_task_body(depends_on="#4000")
+    issue = {
+        "number": 4001,
+        "title": "Dependent",
+        "body": body,
+        "state": "OPEN",
+        "closed": False,
+        "labels": [{"name": runner.LABEL_READY}],
+    }
+    commands: list[list[str]] = []
+
+    def run(command: list[str], **_kwargs: object) -> tuple[int, str]:
+        commands.append(command)
+        if command[:3] == ["gh", "issue", "view"]:
+            number = command[3]
+            if number == "4001":
+                return 0, json.dumps({**issue, "labels": issue["labels"]})
+            if number == "4000":
+                return 0, json.dumps(
+                    {
+                        "number": 4000,
+                        "body": "",
+                        "state": "OPEN",
+                        "closed": False,
+                        "labels": [{"name": runner.LABEL_DONE}],
+                    }
+                )
+        if command[:3] == ["gh", "issue", "edit"]:
+            return 0, ""
+        return 0, ""
+
+    monkeypatch.setattr(runner, "run_command", run)
+    monkeypatch.setattr(runner, "record_runner_executor_result", lambda *args: None)
+    monkeypatch.setattr(runner, "record_runner_task_picked_up", lambda *args: None)
+    monkeypatch.setattr(runner, "notify_task_finished", lambda *args, **kwargs: None)
+    monkeypatch.setattr(runner, "maybe_replenish_runner_queue_after_completion", lambda: False)
+    monkeypatch.setattr(
+        runner,
+        "prepare_issue_branch",
+        lambda *_args, **_kwargs: (1, "synthetic stop after claim", tmp_path),
+    )
+
+    runner.process_issue(issue, workdir=str(tmp_path))
+
+    assert [
+        command
+        for command in commands
+        if command[:4] == ["gh", "issue", "edit", "4001"]
+        and command[-2:] == ["--add-label", runner.LABEL_RUNNING]
+    ] == [
+        [
+            "gh",
+            "issue",
+            "edit",
+            "4001",
+            "--repo",
+            runner.REPO,
+            "--remove-label",
+            runner.LABEL_READY,
+            "--add-label",
+            runner.LABEL_RUNNING,
+        ]
+    ]
+
+
+@pytest.mark.parametrize(
+    ("labels", "reason"),
+    (
+        ((runner.LABEL_RUNNING,), "issue_dependency_running"),
+        ((runner.LABEL_BLOCKED,), "issue_dependency_blocked"),
+        ((), "issue_dependency_unresolved"),
+    ),
+)
+def test_typed_dependency_issue_unresolved_states_hold_before_pickup(
+    labels: tuple[str, ...],
+    reason: str,
+) -> None:
+    task, parse_reason = runner.extract_runner_task(
+        _typed_dependency_task_body(depends_on="#4000")
+    )
+    assert parse_reason is None
+    assert task is not None
+
+    def run(command: list[str], **_kwargs: object) -> tuple[int, str]:
+        assert command[:3] == ["gh", "issue", "view"]
+        return 0, json.dumps(
+            {
+                "number": 4000,
+                "body": "",
+                "state": "OPEN",
+                "closed": False,
+                "labels": [{"name": label} for label in labels],
+            }
+        )
+
+    with mock.patch.object(runner, "run_command", side_effect=run):
+        assert (
+            runner.runner_dependency_hold_reason(4001, task, repository=runner.REPO)
+            == reason
+        )
+
+
+def test_typed_dependency_malformed_unknown_and_cycle_fail_closed() -> None:
+    malformed_task, malformed_reason = runner.extract_runner_task(
+        _typed_dependency_task_body(depends_on="accepted by prose")
+    )
+    unknown_task, unknown_reason = runner.extract_runner_task(
+        "\n".join(
+            (
+                "schema: skeleton.runner_task.v1",
+                "privacy_boundary: PUBLIC_SAFE_QUEUE_METADATA_ONLY",
+                "expected_output: no file changes",
+                "```task",
+                "depends_on:",
+                "  - pull_request: 4002",
+                "```",
+            )
+        )
+    )
+    cyclic_task, cyclic_reason = runner.extract_runner_task(
+        _typed_dependency_task_body(depends_on="#4001")
+    )
+
+    assert malformed_task is None
+    assert malformed_reason == "dependency_malformed"
+    assert unknown_task is None
+    assert unknown_reason == "dependency_unknown"
+    assert cyclic_reason is None
+    assert cyclic_task is not None
+    assert (
+        runner.runner_dependency_hold_reason(4001, cyclic_task, repository=runner.REPO)
+        == "dependency_cycle"
+    )
+
+
+def test_runner_dependency_pr_status_requires_supported_merged_proof_and_exact_refs() -> None:
+    dependency = runner.RunnerPrDependency(
+        number=4100,
+        base="main",
+        base_sha="b" * 40,
+        head="runner/issue-4100",
+        head_sha="c" * 40,
+    )
+    commands: list[list[str]] = []
+
+    def run(command: list[str], **_kwargs: object) -> tuple[int, str]:
+        commands.append(command)
+        return 0, json.dumps(
+            {
+                "number": 4100,
+                "state": "MERGED",
+                "mergedAt": "2026-09-11T00:00:00Z",
+                "baseRefName": "main",
+                "baseRefOid": "b" * 40,
+                "headRefName": "runner/issue-4100",
+                "headRefOid": "c" * 40,
+            }
+        )
+
+    with mock.patch.object(runner, "run_command", side_effect=run):
+        assert runner._pr_dependency_hold_reason(runner.REPO, dependency) is None
+
+    json_fields = commands[0][commands[0].index("--json") + 1].split(",")
+    assert "mergedAt" in json_fields
+    assert "state" in json_fields
+    assert "merged" not in json_fields
+
+
+def test_runner_dependency_pr_status_open_and_ref_mismatch_remain_unsatisfied() -> None:
+    dependency = runner.RunnerPrDependency(
+        number=4100,
+        base="main",
+        base_sha="b" * 40,
+        head="runner/issue-4100",
+        head_sha="c" * 40,
+    )
+
+    with mock.patch.object(
+        runner,
+        "_live_pr_dependency_state",
+        return_value={
+            "number": 4100,
+            "state": "OPEN",
+            "mergedAt": None,
+            "baseRefName": "main",
+            "baseRefOid": "b" * 40,
+            "headRefName": "runner/issue-4100",
+            "headRefOid": "c" * 40,
+        },
+    ):
+        assert runner._pr_dependency_hold_reason(runner.REPO, dependency) == "pr_dependency_unmerged"
+
+    with mock.patch.object(
+        runner,
+        "_live_pr_dependency_state",
+        return_value={
+            "number": 4100,
+            "state": "MERGED",
+            "mergedAt": "2026-09-11T00:00:00Z",
+            "baseRefName": "main",
+            "baseRefOid": "d" * 40,
+            "headRefName": "runner/issue-4100",
+            "headRefOid": "c" * 40,
+        },
+    ):
+        assert (
+            runner._pr_dependency_hold_reason(runner.REPO, dependency)
+            == "pr_dependency_base_sha_mismatch"
+        )
+
+
+def test_dependency_free_ready_task_parser_remains_legacy_compatible() -> None:
+    task, reason = runner.extract_runner_task(_typed_dependency_task_body())
+
+    assert reason is None
+    assert task is not None
+    assert task.dependencies == ()
+
+
 def test_queue_replenisher_dependency_aliases_are_deterministic() -> None:
     upper = _queue_candidate_issue(
         101,
