@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -76,6 +77,7 @@ def test_unregistered_runtime_model_fails_closed(monkeypatch: pytest.MonkeyPatch
 
 def test_registered_credential_is_bound_ephemerally_and_public_receipt_has_no_secret(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     route = select_openhands_secondary_route(now=datetime(2026, 8, 17, tzinfo=UTC))
 
@@ -84,10 +86,12 @@ def test_registered_credential_is_bound_ephemerally_and_public_receipt_has_no_se
         environment["SKELETON_OPENROUTER_FALLBACK_API_KEY"] = "synthetic-secret-marker"
         return {"result": {"status": "USED"}}
 
+    private_home = tmp_path / "home"
+    private_home.mkdir(mode=0o700)
     monkeypatch.setattr(router, "bind_registered_environment_credential", fake_bind)
     environment, receipt = prepare_openhands_secondary_environment(
         authority_environment={"CREDENTIALS_DIRECTORY": "/synthetic"},
-        base_environment={"PATH": "/usr/bin", "HOME": "/private/bookkeeping/home"},
+        base_environment={"PATH": "/usr/bin", "HOME": str(private_home)},
         route=route,
     )
 
@@ -95,16 +99,28 @@ def test_registered_credential_is_bound_ephemerally_and_public_receipt_has_no_se
     assert environment["LLM_MODEL"] == "openrouter/moonshotai/kimi-k2"
     assert environment["LLM_MAX_OUTPUT_TOKENS"] == "768"
     assert environment["SKELETON_OPENHANDS_MAX_OUTPUT_TOKENS"] == "768"
-    assert environment["OPENHANDS_PERSISTENCE_DIR"] == (
-        "/private/bookkeeping/home/.openhands-secondary"
+    assert environment["OPENHANDS_PERSISTENCE_DIR"] == str(
+        private_home / ".openhands-secondary"
     )
+    assert environment["SKELETON_OPENHANDS_BOOTSTRAP_REQUIRED"] == "1"
+    bootstrap_dir = private_home / ".skeleton-openhands-bootstrap"
+    assert environment["PYTHONPATH"] == str(bootstrap_dir)
+    sitecustomize = bootstrap_dir / "sitecustomize.py"
+    bootstrap = sitecustomize.read_text(encoding="utf-8")
+    assert sitecustomize.stat().st_mode & 0o777 == 0o600
+    assert "max_output_tokens=limit" in bootstrap
+    assert "get_default_cli_agent" in bootstrap
+    assert "read_back.llm.max_output_tokens != limit" in bootstrap
+    assert "read_back.condenser.llm.max_output_tokens != limit" in bootstrap
+    assert "os.environ.pop(\"PYTHONPATH\", None)" in bootstrap
+    assert "synthetic-secret-marker" not in bootstrap
     assert int(environment["SKELETON_OPENHANDS_MAX_OUTPUT_TOKENS"]) < 100352
     assert "SKELETON_OPENROUTER_FALLBACK_API_KEY" not in environment
     assert "synthetic-secret-marker" not in json.dumps(receipt, sort_keys=True)
     assert receipt["executor_id"] == "openhands-external"
     assert receipt["model_id"] == "openrouter-kimi-k2-challenger"
     assert receipt["max_output_tokens"] == 768
-    assert receipt["token_bound_transport"] == "ephemeral_agent_config"
+    assert receipt["token_bound_transport"] == "private_startup_agent_config"
 
 
 def test_secondary_requires_private_bookkeeping_home(
@@ -124,6 +140,30 @@ def test_secondary_requires_private_bookkeeping_home(
         )
 
 
+def test_secondary_rejects_unsafe_private_bootstrap_target(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    route = select_openhands_secondary_route(now=datetime(2026, 8, 17, tzinfo=UTC))
+
+    def fake_bind(**kwargs):
+        kwargs["environment"]["SKELETON_OPENROUTER_FALLBACK_API_KEY"] = "secret"
+        return {"result": {"status": "USED"}}
+
+    private_home = tmp_path / "home"
+    private_home.mkdir(mode=0o700)
+    (private_home / ".skeleton-openhands-bootstrap").symlink_to(tmp_path / "elsewhere")
+    monkeypatch.setattr(router, "bind_registered_environment_credential", fake_bind)
+    with pytest.raises(
+        CodegenRouteError, match="openhands_private_bootstrap_unavailable"
+    ):
+        prepare_openhands_secondary_environment(
+            authority_environment={},
+            base_environment={"PATH": "/usr/bin", "HOME": str(private_home)},
+            route=route,
+        )
+
+
 def test_secondary_requires_positive_code_owned_token_lease() -> None:
     route = select_openhands_secondary_route(now=datetime(2026, 8, 17, tzinfo=UTC))
     invalid = router.OpenHandsSecondaryRoute(
@@ -134,40 +174,54 @@ def test_secondary_requires_positive_code_owned_token_lease() -> None:
     with pytest.raises(CodegenRouteError, match="openhands_bounded_token_budget_required"):
         prepare_openhands_secondary_environment(
             authority_environment={},
-            base_environment={"PATH": "/usr/bin", "HOME": "/private/bookkeeping/home"},
+            base_environment={"PATH": "/usr/bin"},
             route=invalid,
         )
 
 
-def test_missing_registered_credential_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_missing_registered_credential_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     route = select_openhands_secondary_route(now=datetime(2026, 8, 17, tzinfo=UTC))
 
     def fake_bind(**kwargs):
         return {"result": {"status": "FAILED"}}
 
+    private_home = tmp_path / "home"
+    private_home.mkdir(mode=0o700)
     monkeypatch.setattr(router, "bind_registered_environment_credential", fake_bind)
     with pytest.raises(CodegenRouteError, match="openhands_registered_credential_unavailable"):
         prepare_openhands_secondary_environment(
             authority_environment={},
-            base_environment={"PATH": "/usr/bin", "HOME": "/private/bookkeeping/home"},
+            base_environment={"PATH": "/usr/bin", "HOME": str(private_home)},
             route=route,
         )
 
 
-def test_openhands_command_bootstraps_verified_sdk_token_bound() -> None:
+def test_openhands_command_is_fixed_except_task_text() -> None:
     command = openhands_secondary_command("bounded task")
-    assert command[:2] == ["python3", "-c"]
-    assert command[-1] == "bounded task"
-    bootstrap = command[2]
-    assert "max_output_tokens=limit" in bootstrap
-    assert "read_back.llm.max_output_tokens != limit" in bootstrap
-    assert "--override-with-envs" in bootstrap
-    assert "os.execvp" in bootstrap
-    assert "skeleton-nonsecret-placeholder" in bootstrap
+    assert command == [
+        "openhands",
+        "--headless",
+        "--json",
+        "--override-with-envs",
+        "-t",
+        "bounded task",
+    ]
     assert "moonshot" not in " ".join(command)
     assert "openrouter" not in " ".join(command)
 
 
-def test_openhands_executable_override_fails_closed() -> None:
-    with pytest.raises(CodegenRouteError, match="openhands_executable_override_not_allowed"):
-        openhands_secondary_command("bounded task", executable="/tmp/openhands")
+def test_openhands_command_preserves_code_owned_resolved_executable() -> None:
+    command = openhands_secondary_command(
+        "bounded task", executable="/usr/bin/openhands"
+    )
+    assert command == [
+        "/usr/bin/openhands",
+        "--headless",
+        "--json",
+        "--override-with-envs",
+        "-t",
+        "bounded task",
+    ]
