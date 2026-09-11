@@ -1340,6 +1340,16 @@ class ContainerValidationWorktreePublishRequest:
 
 
 @dataclass(frozen=True)
+class CodegenDirtyContinuationGate:
+    repository: str
+    source_repository: str
+    issue_number: int
+    expected_branch: str
+    allowed_files: frozenset[str]
+    retry_decision: str
+
+
+@dataclass(frozen=True)
 class IssueWorktreePublishExistingPrLookup:
     pr_url: str | None
     reason: str
@@ -1492,7 +1502,7 @@ def _validation_command_uses_pytest(args: list[str]) -> bool:
 
 
 def _validation_pytest_temp_parent(cwd_path: Path) -> Path:
-    candidates = [Path(tempfile.gettempdir()), Path("/tmp")]
+    candidates = [Path(tempfile.gettempdir()), Path("/tmp"), cwd_path.parent]
     for candidate in candidates:
         candidate_path = candidate.resolve(strict=False)
         if candidate_path.is_relative_to(cwd_path):
@@ -1504,11 +1514,13 @@ def _validation_pytest_temp_parent(cwd_path: Path) -> Path:
 
 def _create_validation_pytest_temp_root(cwd: str | Path) -> Path:
     cwd_path = Path(cwd)
-    if not cwd_path.is_dir():
+    if not cwd_path.exists():
+        cwd_path = cwd_path.resolve(strict=False)
+    elif not cwd_path.is_dir():
         raise FileNotFoundError(
             f"pytest validation cwd is not an existing directory: {cwd_path}"
         )
-    temp_parent = _validation_pytest_temp_parent(cwd_path.resolve(strict=True))
+    temp_parent = _validation_pytest_temp_parent(cwd_path.resolve(strict=False))
     return Path(
         tempfile.mkdtemp(
             prefix=".runner-validation-pytest-",
@@ -1863,10 +1875,18 @@ def format_command_output(command: list[str], output: str) -> str:
 
 
 def prepare_issue_worktree(
-    issue_number: int, coordinator_workdir: str | Path
+    issue_number: int,
+    coordinator_workdir: str | Path,
+    *,
+    continuation_gate: CodegenDirtyContinuationGate | None = None,
 ) -> tuple[int, str, Path]:
     path = ensure_safe_worktree_path(issue_worktree_path(issue_number))
-    return prepare_git_issue_worktree(issue_number, coordinator_workdir, path)
+    return prepare_git_issue_worktree(
+        issue_number,
+        coordinator_workdir,
+        path,
+        continuation_gate=continuation_gate,
+    )
 
 
 def prepare_target_repository_issue_worktree(
@@ -1876,6 +1896,7 @@ def prepare_target_repository_issue_worktree(
     source_repository: str = QUEUE_REPOSITORY,
     base: str | None = None,
     base_sha: str | None = None,
+    continuation_gate: CodegenDirtyContinuationGate | None = None,
 ) -> tuple[int, str, Path]:
     try:
         path = ensure_safe_target_repository_worktree_path(
@@ -1900,6 +1921,7 @@ def prepare_target_repository_issue_worktree(
         source_repository=source_repository,
         base=base,
         base_sha=base_sha,
+        continuation_gate=continuation_gate,
     )
 
 
@@ -1994,6 +2016,103 @@ def _fetch_and_verify_target_base(
     return 0, fetched_sha
 
 
+def _is_approved_runner_codex_metadata_untracked_path(path: str) -> bool:
+    if path == ".codex" or path.startswith(".codex/"):
+        return True
+    if re.fullmatch(r"\.runner-codegen-trace-[A-Za-z0-9_-]+\.log", path):
+        return True
+    return path.startswith(".runner-codex-state-") and "/" in path
+
+
+def _path_is_runner_codex_state_metadata(path: Path) -> bool:
+    resolved = path.resolve(strict=False)
+    try:
+        relative = resolved.relative_to(ROOT.resolve(strict=False))
+    except ValueError:
+        return False
+    return bool(relative.parts) and re.fullmatch(
+        r"\.runner-codex-state-[A-Za-z0-9_-]+", relative.parts[0]
+    ) is not None
+
+
+def _path_is_inside_public_repo(path: Path) -> bool:
+    resolved = path.resolve(strict=False)
+    root = ROOT.resolve(strict=False)
+    return (resolved == root or _path_is_relative_to(resolved, root)) and not (
+        _path_is_runner_codex_state_metadata(resolved)
+    )
+
+
+def _git_name_lines(command: list[str], cwd: Path) -> tuple[int, list[str], str]:
+    code, output = run_command(command, cwd=cwd)
+    return code, [line.strip() for line in output.splitlines() if line.strip()], output
+
+
+def _retained_dirty_continuation_gate_failure(
+    *,
+    issue_number: int,
+    source_repository: str,
+    target_repository: str | None,
+    path: Path,
+    branch: str,
+    gate: CodegenDirtyContinuationGate | None,
+) -> str | None:
+    if gate is None:
+        return "missing_explicit_retry_changed_condition_or_override"
+    repository = target_repository or QUEUE_REPOSITORY
+    if gate.issue_number != issue_number:
+        return "retained_dirty_issue_mismatch"
+    if gate.source_repository != source_repository:
+        return "retained_dirty_source_repository_mismatch"
+    if gate.repository != repository:
+        return "retained_dirty_repository_mismatch"
+    if gate.expected_branch != branch:
+        return "retained_dirty_expected_branch_mismatch"
+    if path.name != _source_issue_slug(issue_number, source_repository):
+        return "retained_dirty_worktree_issue_mismatch"
+    if not gate.allowed_files:
+        return "retained_dirty_allowed_files_missing"
+    if not all(_safe_changed_file(file_name) for file_name in gate.allowed_files):
+        return "retained_dirty_allowed_file_path_unsafe"
+
+    changed_files: set[str] = set()
+    for command in (
+        ["git", "diff", "--name-only"],
+        ["git", "diff", "--cached", "--name-only"],
+    ):
+        code, files, _output = _git_name_lines(command, path)
+        if code != 0:
+            return "retained_dirty_changed_file_discovery_failed"
+        changed_files.update(files)
+    if not changed_files:
+        return "retained_dirty_tracked_files_missing"
+    if not all(_safe_changed_file(file_name) for file_name in changed_files):
+        return "retained_dirty_changed_file_path_unsafe"
+    if not changed_files <= set(gate.allowed_files):
+        return "retained_dirty_changed_files_outside_allowlist"
+
+    code, untracked_files, _output = _git_name_lines(
+        ["git", "ls-files", "--others", "--exclude-standard"],
+        path,
+    )
+    if code != 0:
+        return "retained_dirty_untracked_file_discovery_failed"
+    if not all(
+        _safe_changed_file(file_name)
+        or _is_approved_runner_codex_metadata_untracked_path(file_name)
+        for file_name in untracked_files
+    ):
+        return "retained_dirty_untracked_file_path_unsafe"
+    unexpected_untracked = [
+        file_name
+        for file_name in untracked_files
+        if not _is_approved_runner_codex_metadata_untracked_path(file_name)
+    ]
+    if unexpected_untracked:
+        return "retained_dirty_unexpected_untracked_files"
+    return None
+
+
 def prepare_git_issue_worktree(
     issue_number: int,
     coordinator_workdir: str | Path,
@@ -2003,6 +2122,7 @@ def prepare_git_issue_worktree(
     source_repository: str = QUEUE_REPOSITORY,
     base: str | None = None,
     base_sha: str | None = None,
+    continuation_gate: CodegenDirtyContinuationGate | None = None,
 ) -> tuple[int, str, Path]:
     branch = issue_branch(issue_number, source_repository)
     outputs: list[str] = []
@@ -2012,35 +2132,41 @@ def prepare_git_issue_worktree(
         return 1, _format_base_preparation_failure(validation_failure, base), path
 
     if path.exists():
-        checks = (
-            (["git", "status", "--short"], "dirty"),
-            (["git", "branch", "--show-current"], "branch"),
-        )
-        for command, check_name in checks:
-            code, output = run_command(command, cwd=path)
-            outputs.append(format_command_output(command, output))
-            if code != 0:
-                return (
-                    code,
-                    "Existing issue worktree needs cleanup before reuse.\n\n"
-                    + "\n".join(outputs),
-                    path,
-                )
-            if check_name == "dirty" and output.strip():
-                return (
-                    1,
-                    "Existing issue worktree is dirty; cleanup is required before reuse.\n\n"
-                    + "\n".join(outputs),
-                    path,
-                )
-            if check_name == "branch" and output.strip() != branch:
-                return (
-                    1,
-                    "Existing issue worktree is on the wrong branch; cleanup is "
-                    f"required before reuse. Expected {branch!r}.\n\n"
-                    + "\n".join(outputs),
-                    path,
-                )
+        status_command = ["git", "status", "--short"]
+        code, status_output = run_command(status_command, cwd=path)
+        outputs.append(format_command_output(status_command, status_output))
+        if code != 0:
+            return (
+                code,
+                "Existing issue worktree needs cleanup before reuse.\n\n"
+                + "\n".join(outputs),
+                path,
+            )
+        if status_output.strip() and continuation_gate is None:
+            return (
+                1,
+                "Existing issue worktree is dirty; cleanup is required before reuse.\n\n"
+                + "\n".join(outputs),
+                path,
+            )
+        branch_command = ["git", "branch", "--show-current"]
+        code, branch_output = run_command(branch_command, cwd=path)
+        outputs.append(format_command_output(branch_command, branch_output))
+        if code != 0:
+            return (
+                code,
+                "Existing issue worktree needs cleanup before reuse.\n\n"
+                + "\n".join(outputs),
+                path,
+            )
+        if branch_output.strip() != branch:
+            return (
+                1,
+                "Existing issue worktree is on the wrong branch; cleanup is "
+                f"required before reuse. Expected {branch!r}.\n\n"
+                + "\n".join(outputs),
+                path,
+            )
         if target_repository is not None:
             remote_command = ["git", "remote", "get-url", "origin"]
             code, output = run_command(remote_command, cwd=path)
@@ -2055,6 +2181,27 @@ def prepare_git_issue_worktree(
                     + "\n".join(outputs),
                     path,
                 )
+        if status_output.strip():
+            gate_failure = _retained_dirty_continuation_gate_failure(
+                issue_number=issue_number,
+                source_repository=source_repository,
+                target_repository=target_repository,
+                path=path,
+                branch=branch,
+                gate=continuation_gate,
+            )
+            if gate_failure is not None:
+                return (
+                    1,
+                    "Existing issue worktree is dirty; cleanup is required before reuse.\n"
+                    f"reason={gate_failure}\n\n"
+                    + "\n".join(outputs),
+                    path,
+                )
+            outputs.append(
+                "retained_dirty_continuation_gate=allowed "
+                f"allowed_files_count={len(continuation_gate.allowed_files) if continuation_gate else 0}"
+            )
         if base is not None:
             code, verified_sha_or_reason = _fetch_and_verify_target_base(
                 cwd=path,
@@ -2213,9 +2360,18 @@ def prepare_git_issue_worktree(
 
 
 def prepare_issue_branch(
-    issue_number: int, coordinator_workdir: str | Path
+    issue_number: int,
+    coordinator_workdir: str | Path,
+    *,
+    continuation_gate: CodegenDirtyContinuationGate | None = None,
 ) -> tuple[int, str, Path]:
-    return prepare_issue_worktree(issue_number, coordinator_workdir)
+    if continuation_gate is None:
+        return prepare_issue_worktree(issue_number, coordinator_workdir)
+    return prepare_issue_worktree(
+        issue_number,
+        coordinator_workdir,
+        continuation_gate=continuation_gate,
+    )
 
 
 def _format_existing_pr_worktree_failure(reason: str) -> str:
@@ -6456,12 +6612,17 @@ def _maintenance_report(
 
 
 def _loop_state_db_path() -> tuple[Path | None, str | None]:
+    def public_repo_relative_to(path: Path, parent: Path) -> bool:
+        if parent.resolve(strict=False) == ROOT.resolve(strict=False):
+            return _path_is_inside_public_repo(path)
+        return _path_is_relative_to(path, parent)
+
     return _executor_loop_state_db_path(
         environment=os.environ,
         env_var_name=LOOP_STATE_DB_ENV,
         root=ROOT,
         path_has_symlink_component=_path_has_symlink_component,
-        path_is_relative_to=_path_is_relative_to,
+        path_is_relative_to=public_repo_relative_to,
     )
 
 
@@ -7857,9 +8018,9 @@ def _aufmass_private_registered_paths() -> tuple[Path | None, Path | None, str |
         if not _path_is_under_allowed_target_base(path):
             return None, None, f"reason={name}_unsafe"
 
-    if workspace_root == ROOT or _path_is_relative_to(workspace_root, ROOT):
+    if _path_is_inside_public_repo(workspace_root):
         return None, None, "reason=private_workspace_inside_public_repo"
-    if checkout_path == ROOT or _path_is_relative_to(checkout_path, ROOT):
+    if _path_is_inside_public_repo(checkout_path):
         return None, None, "reason=private_checkout_inside_public_repo"
 
     return checkout_path, workspace_root, None
@@ -8078,7 +8239,7 @@ def _resolve_private_registry_path(
     resolved_registry = registry_path.resolve(strict=False)
     if not _path_is_relative_to(resolved_registry, workspace_root):
         return None, "registry_outside_private_workspace"
-    if resolved_registry == ROOT or _path_is_relative_to(resolved_registry, ROOT):
+    if _path_is_inside_public_repo(resolved_registry):
         return None, "registry_inside_public_repo"
     if not resolved_registry.is_file():
         return None, "registry_missing"
@@ -8098,7 +8259,7 @@ def _private_registry_relative_path(
     resolved = (workspace_root / candidate).resolve(strict=False)
     if not _path_is_relative_to(resolved, workspace_root):
         return None, f"{label}_outside_private_workspace"
-    if resolved == ROOT or _path_is_relative_to(resolved, ROOT):
+    if _path_is_inside_public_repo(resolved):
         return None, f"{label}_inside_public_repo"
     return resolved, None
 
@@ -8744,7 +8905,7 @@ def _write_private_shortlist_artifacts(
         resolved = path.resolve(strict=False)
         if not _path_is_relative_to(resolved, resolved_output_root):
             return "shortlist_artifact_path_unsafe"
-        if resolved == ROOT or _path_is_relative_to(resolved, ROOT):
+        if _path_is_inside_public_repo(resolved):
             return "shortlist_artifact_inside_public_repo"
     payload = {
         "schema": "skeleton.aufmass_private_shortlist.v1",
@@ -8890,7 +9051,7 @@ def _write_private_area_schedule_artifacts(
         resolved = path.resolve(strict=False)
         if not _path_is_relative_to(resolved, resolved_output_root):
             return "area_schedule_artifact_path_unsafe"
-        if resolved == ROOT or _path_is_relative_to(resolved, ROOT):
+        if _path_is_inside_public_repo(resolved):
             return "area_schedule_artifact_inside_public_repo"
     payload = {
         "schema": "skeleton.aufmass_private_area_schedule.v1",
@@ -13954,7 +14115,7 @@ def quarantine_stale_clean_skeleton_worktrees(body: str) -> str:
 
 
 def _is_ignored_issue_publish_untracked_path(path: str) -> bool:
-    return path == ".codex" or path.startswith(".codex/")
+    return _is_approved_runner_codex_metadata_untracked_path(path)
 
 
 def _issue_worktree_publish_existing_pr_url(
@@ -19737,6 +19898,33 @@ def process_runtime_maintenance_issue(
         maybe_replenish_runner_queue_after_completion()
 
 
+def _codegen_dirty_continuation_gate_for_issue(
+    *,
+    issue_number: int,
+    issue_body: str,
+    source_repository: str,
+    target_repository: str,
+    retry_decision: RetryDecision | None,
+) -> CodegenDirtyContinuationGate | None:
+    if retry_decision is None or not (
+        retry_decision.changed_condition or retry_decision.override_used
+    ):
+        return None
+    allowed_files, allowed_reason = _issue_publish_allowed_files(
+        _metadata_before_task(issue_body)
+    )
+    if allowed_reason is not None:
+        allowed_files = frozenset()
+    return CodegenDirtyContinuationGate(
+        repository=target_repository,
+        source_repository=source_repository,
+        issue_number=issue_number,
+        expected_branch=issue_branch(issue_number, source_repository),
+        allowed_files=allowed_files,
+        retry_decision=retry_decision.retry_decision,
+    )
+
+
 def process_issue(
     issue: dict[str, Any],
     workdir: str | None = None,
@@ -20191,6 +20379,13 @@ def _process_issue_in_current_queue_context(
         target_repository = (
             runner_task.target_repository if runner_task is not None else QUEUE_REPOSITORY
         )
+        dirty_continuation_gate = _codegen_dirty_continuation_gate_for_issue(
+            issue_number=issue_number,
+            issue_body=issue_body,
+            source_repository=source_repository,
+            target_repository=target_repository,
+            retry_decision=retry_decision,
+        )
         local_target_worktree = target_repository != QUEUE_REPOSITORY
         existing_pr_worktree_request: CodegenExistingPrWorktreeRequest | None = None
         if not local_target_worktree:
@@ -20216,6 +20411,11 @@ def _process_issue_in_current_queue_context(
                             issue_number,
                             base=runner_task.base,
                             base_sha=runner_task.base_sha,
+                            **(
+                                {"continuation_gate": dirty_continuation_gate}
+                                if dirty_continuation_gate is not None
+                                else {}
+                            ),
                         )
                     )
                 else:
@@ -20226,6 +20426,11 @@ def _process_issue_in_current_queue_context(
                             source_repository=source_repository,
                             base=runner_task.base,
                             base_sha=runner_task.base_sha,
+                            **(
+                                {"continuation_gate": dirty_continuation_gate}
+                                if dirty_continuation_gate is not None
+                                else {}
+                            ),
                         )
                     )
             else:
@@ -20234,6 +20439,11 @@ def _process_issue_in_current_queue_context(
                         prepare_target_repository_issue_worktree(
                             target_repository,
                             issue_number,
+                            **(
+                                {"continuation_gate": dirty_continuation_gate}
+                                if dirty_continuation_gate is not None
+                                else {}
+                            ),
                         )
                     )
                 else:
@@ -20242,6 +20452,11 @@ def _process_issue_in_current_queue_context(
                             target_repository,
                             issue_number,
                             source_repository=source_repository,
+                            **(
+                                {"continuation_gate": dirty_continuation_gate}
+                                if dirty_continuation_gate is not None
+                                else {}
+                            ),
                         )
                     )
         else:
@@ -20254,9 +20469,16 @@ def _process_issue_in_current_queue_context(
                     )
                 )
             else:
-                worktree_code, worktree_output, worktree_path = prepare_issue_branch(
-                    issue_number, coordinator_workdir
-                )
+                if dirty_continuation_gate is not None:
+                    worktree_code, worktree_output, worktree_path = prepare_issue_branch(
+                        issue_number,
+                        coordinator_workdir,
+                        continuation_gate=dirty_continuation_gate,
+                    )
+                else:
+                    worktree_code, worktree_output, worktree_path = prepare_issue_branch(
+                        issue_number, coordinator_workdir
+                    )
         if worktree_code != 0:
             block_issue(
                 issue_number,
