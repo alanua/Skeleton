@@ -87,19 +87,41 @@ def test_registered_credential_is_bound_ephemerally_and_public_receipt_has_no_se
     monkeypatch.setattr(router, "bind_registered_environment_credential", fake_bind)
     environment, receipt = prepare_openhands_secondary_environment(
         authority_environment={"CREDENTIALS_DIRECTORY": "/synthetic"},
-        base_environment={"PATH": "/usr/bin"},
+        base_environment={"PATH": "/usr/bin", "HOME": "/private/bookkeeping/home"},
         route=route,
     )
 
     assert environment["LLM_API_KEY"] == "synthetic-secret-marker"
     assert environment["LLM_MODEL"] == "openrouter/moonshotai/kimi-k2"
     assert environment["LLM_MAX_OUTPUT_TOKENS"] == "768"
-    assert int(environment["LLM_MAX_OUTPUT_TOKENS"]) < 100352
+    assert environment["SKELETON_OPENHANDS_MAX_OUTPUT_TOKENS"] == "768"
+    assert environment["OPENHANDS_PERSISTENCE_DIR"] == (
+        "/private/bookkeeping/home/.openhands-secondary"
+    )
+    assert int(environment["SKELETON_OPENHANDS_MAX_OUTPUT_TOKENS"]) < 100352
     assert "SKELETON_OPENROUTER_FALLBACK_API_KEY" not in environment
     assert "synthetic-secret-marker" not in json.dumps(receipt, sort_keys=True)
     assert receipt["executor_id"] == "openhands-external"
     assert receipt["model_id"] == "openrouter-kimi-k2-challenger"
     assert receipt["max_output_tokens"] == 768
+    assert receipt["token_bound_transport"] == "ephemeral_agent_config"
+
+
+def test_secondary_requires_private_bookkeeping_home(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route = select_openhands_secondary_route(now=datetime(2026, 8, 17, tzinfo=UTC))
+    monkeypatch.setattr(
+        router,
+        "bind_registered_environment_credential",
+        lambda **kwargs: {"result": {"status": "USED"}},
+    )
+    with pytest.raises(CodegenRouteError, match="openhands_private_home_required"):
+        prepare_openhands_secondary_environment(
+            authority_environment={},
+            base_environment={"PATH": "/usr/bin"},
+            route=route,
+        )
 
 
 def test_secondary_requires_positive_code_owned_token_lease() -> None:
@@ -112,7 +134,7 @@ def test_secondary_requires_positive_code_owned_token_lease() -> None:
     with pytest.raises(CodegenRouteError, match="openhands_bounded_token_budget_required"):
         prepare_openhands_secondary_environment(
             authority_environment={},
-            base_environment={"PATH": "/usr/bin"},
+            base_environment={"PATH": "/usr/bin", "HOME": "/private/bookkeeping/home"},
             route=invalid,
         )
 
@@ -127,20 +149,25 @@ def test_missing_registered_credential_fails_closed(monkeypatch: pytest.MonkeyPa
     with pytest.raises(CodegenRouteError, match="openhands_registered_credential_unavailable"):
         prepare_openhands_secondary_environment(
             authority_environment={},
-            base_environment={"PATH": "/usr/bin"},
+            base_environment={"PATH": "/usr/bin", "HOME": "/private/bookkeeping/home"},
             route=route,
         )
 
 
-def test_openhands_command_is_fixed_except_task_text() -> None:
+def test_openhands_command_bootstraps_verified_sdk_token_bound() -> None:
     command = openhands_secondary_command("bounded task")
-    assert command == [
-        "openhands",
-        "--headless",
-        "--json",
-        "--override-with-envs",
-        "-t",
-        "bounded task",
-    ]
+    assert command[:2] == ["python3", "-c"]
+    assert command[-1] == "bounded task"
+    bootstrap = command[2]
+    assert "max_output_tokens=limit" in bootstrap
+    assert "read_back.llm.max_output_tokens != limit" in bootstrap
+    assert "--override-with-envs" in bootstrap
+    assert "os.execvp" in bootstrap
+    assert "skeleton-nonsecret-placeholder" in bootstrap
     assert "moonshot" not in " ".join(command)
     assert "openrouter" not in " ".join(command)
+
+
+def test_openhands_executable_override_fails_closed() -> None:
+    with pytest.raises(CodegenRouteError, match="openhands_executable_override_not_allowed"):
+        openhands_secondary_command("bounded task", executable="/tmp/openhands")
