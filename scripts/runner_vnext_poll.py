@@ -19,6 +19,7 @@ import scripts.runner_poll_github_tasks as legacy
 from core.runner_task import RunnerTask as CoreRunnerTask
 from core.runner_vnext_authoritative_dispatch import (
     MechanicalResult,
+    PrivilegedExecutionGrant,
     RunnerVNextDispatchError,
     run_green_authoritative_dispatch,
     run_privileged_authoritative_dispatch,
@@ -40,7 +41,6 @@ from core.runner_vnext_authority import (
 from core.runner_vnext_contracts import PrivacyClass
 from core.runner_vnext_execution_gate import GreenExecutionGrant
 from core.runner_vnext_leases import Lane
-from core.runner_vnext_pep import PrivilegedBrokerRequest
 from core.runner_vnext_routing import NodeCapabilitySnapshot
 
 ATTESTOR = ROOT / "scripts" / "runner_vnext_attest.py"
@@ -132,7 +132,14 @@ class _LegacyPrivilegedBackend:
         self._workdir = workdir
         self._state_ref = state_ref
 
-    def execute(self, *, bound: object, broker_request: PrivilegedBrokerRequest) -> MechanicalResult:
+    def execute(
+        self,
+        *,
+        bound: object,
+        broker_request: PrivilegedExecutionGrant,
+    ) -> MechanicalResult:
+        if not broker_request.execution_authorized:
+            raise VNextPollerError("VNEXT_PRIVILEGED_GRANT_REQUIRED")
         before = self._state_ref()
         with _temporary_environment({legacy.RUNNER_VNEXT_MODE_ENV: "off"}):
             legacy.process_issue(
@@ -535,7 +542,7 @@ def _dispatch_control(
             source_task_ref=f"issue:{item.issue_number}",
             target_state_ref=target_state,
             resources=(
-                f"control:issue-{item.issue_number}",
+                f"control:{maintenance_task_id}",
                 f"repo:{item.source_repository}",
             ),
             required_capabilities=(
@@ -571,6 +578,13 @@ def _dispatch_control(
 def _dispatch_merge(item: object, body: str, merge_request: object, workdir: str | None) -> None:
     if not legacy.telegram_approve_digest_is_signed(merge_request):
         raise VNextPollerError("VNEXT_MERGE_SIGNED_APPROVAL_REQUIRED")
+    try:
+        pr_state = legacy.get_pr_merge_state(merge_request.pr_number)
+    except Exception as exc:
+        raise VNextPollerError("VNEXT_MERGE_APPROVAL_AUDIT_UNAVAILABLE") from exc
+    block_reason = legacy._pr_merge_block_reason(merge_request, pr_state)
+    if block_reason is not None:
+        raise VNextPollerError("VNEXT_MERGE_APPROVAL_AUDIT_INVALID")
     state_ref = lambda: _pr_head_ref(legacy.REPO, merge_request.pr_number)
     target_state = f"git:{merge_request.approved_head_sha}"
     if state_ref() != target_state:
@@ -691,7 +705,7 @@ def poll_once(workdir: str | None = None) -> int:
         try:
             try:
                 dispatch_item(item, workdir=workdir)
-            except (VNextPollerError, RunnerVNextDispatchError, RunnerVNextAuthorityError) as exc:
+            except Exception as exc:
                 _block_dispatch_error(item, exc)
         finally:
             legacy._CURRENT_QUEUE_REPOSITORY.reset(queue_token)
