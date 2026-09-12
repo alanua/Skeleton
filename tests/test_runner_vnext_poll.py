@@ -144,3 +144,25 @@ def test_unsigned_merge_is_rejected_before_legacy_mechanics(monkeypatch: pytest.
         poll._dispatch_merge(item, "merge", _Merge(), None)
 
     assert exc.value.reason_code == "VNEXT_MERGE_SIGNED_APPROVAL_REQUIRED"
+
+
+def test_merge_requires_matching_operator_audit_before_authority(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Merge:
+        pr_number = 10
+        approved_head_sha = "d" * 40
+        callback_digest = "0123456789ab"
+
+    item = _Item({"number": 6, "body": "merge"})
+    monkeypatch.setattr(poll.legacy, "telegram_approve_digest_is_signed", lambda request: True)
+    monkeypatch.setattr(poll.legacy, "get_pr_merge_state", lambda pr_number: {"number": pr_number})
+    monkeypatch.setattr(poll.legacy, "_pr_merge_block_reason", lambda request, state: "audit mismatch")
+    monkeypatch.setattr(
+        poll.legacy,
+        "process_issue",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy mechanics forbidden")),
+    )
+
+    with pytest.raises(poll.VNextPollerError) as exc:
+        poll._dispatch_merge(item, "merge", _Merge(), None)
+
+    assert exc.value.reason_code == "VNEXT_MERGE_APPROVAL_AUDIT_INVALID"
