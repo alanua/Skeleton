@@ -195,10 +195,11 @@ def test_missing_registered_credential_fails_closed(
         )
 
 
-def test_openhands_command_uses_fixed_code_owned_binary_after_identity_check() -> None:
-    command = openhands_secondary_command("bounded task", executable="/usr/bin/openhands")
+def test_openhands_command_uses_code_resolved_absolute_binary() -> None:
+    resolved = "/home/agent/.local/bin/openhands"
+    command = openhands_secondary_command("bounded task", executable=resolved)
     assert command == [
-        "/usr/bin/openhands",
+        resolved,
         "--headless",
         "--json",
         "--override-with-envs",
@@ -209,9 +210,14 @@ def test_openhands_command_uses_fixed_code_owned_binary_after_identity_check() -
     assert "openrouter" not in " ".join(command)
 
 
-def test_openhands_command_rejects_alternate_absolute_path() -> None:
-    with pytest.raises(CodegenRouteError, match="openhands_executable_identity_mismatch"):
-        openhands_secondary_command("bounded task", executable="/tmp/openhands")
+def test_openhands_command_accepts_usr_bin_when_code_resolved_there() -> None:
+    command = openhands_secondary_command("bounded task", executable="/usr/bin/openhands")
+    assert command[0] == "/usr/bin/openhands"
+
+
+def test_openhands_command_rejects_relative_path() -> None:
+    with pytest.raises(CodegenRouteError, match="openhands_executable_identity_invalid"):
+        openhands_secondary_command("bounded task", executable="openhands")
 
 
 def test_openhands_command_rejects_non_openhands_basename() -> None:
