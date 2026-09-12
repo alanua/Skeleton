@@ -5335,6 +5335,34 @@ def _vnext_bridge_metadata(*, allowed_files=("core/example.py",), privacy="PUBLI
     }
 
 
+def _vnext_node_snapshot_json(
+    *,
+    capabilities=("repository_write_allowlisted", "test_execution"),
+    supported_adapters=(runner.RUNNER_VNEXT_LEGACY_CODEGEN_ADAPTER_ID,),
+    supported_lanes=("codegen",),
+    privacy_classes=("PUBLIC_SAFE",),
+    resource_patterns=("repo:core/example.py",),
+    observed_at=90.0,
+    expires_at=200.0,
+) -> str:
+    return json.dumps(
+        {
+            "schema": "skeleton.runner_node_capability_snapshot.v1",
+            "node_id": "node:runner-1",
+            "generation": 3,
+            "route_rank": 0,
+            "capabilities": list(capabilities),
+            "supported_adapters": list(supported_adapters),
+            "supported_lanes": list(supported_lanes),
+            "privacy_classes": list(privacy_classes),
+            "resource_patterns": list(resource_patterns),
+            "observed_at": observed_at,
+            "expires_at": expires_at,
+            "attestation_ref": "attestation:runner-1-3",
+        }
+    )
+
+
 def test_vnext_off_mode_does_not_parse_or_change_legacy_task(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(runner.RUNNER_VNEXT_MODE_ENV, raising=False)
     monkeypatch.setattr(
@@ -5369,6 +5397,11 @@ def test_vnext_shadow_hook_is_observational_only(monkeypatch: pytest.MonkeyPatch
 
 def test_vnext_green_canary_allows_exact_green_match(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(runner.RUNNER_VNEXT_MODE_ENV, "green_canary")
+    monkeypatch.setenv(
+        runner.RUNNER_VNEXT_NODE_CAPABILITY_SNAPSHOT_ENV,
+        _vnext_node_snapshot_json(),
+    )
+    monkeypatch.setattr(runner.time, "time", lambda: 100.0)
     monkeypatch.setattr(runner, "normalized_runner_shadow_metadata", lambda **_kwargs: _vnext_bridge_metadata())
     task = runner.RunnerTask(content="x", base_sha="a" * 40)
 
@@ -5379,6 +5412,73 @@ def test_vnext_green_canary_allows_exact_green_match(monkeypatch: pytest.MonkeyP
 
     assert allowed is True and reason is None
     assert runner.LAST_RUNNER_VNEXT_RECEIPT["status"] == "green_canary_pass"
+
+
+@pytest.mark.parametrize(
+    ("snapshot_json", "expected_reason"),
+    (
+        (None, "VNEXT_NODE_SNAPSHOT_REQUIRED"),
+        ("{not-json", "VNEXT_NODE_SNAPSHOT_MALFORMED"),
+        (
+            _vnext_node_snapshot_json(observed_at=101.0),
+            "NODE_SNAPSHOT_FROM_FUTURE",
+        ),
+        (
+            _vnext_node_snapshot_json(expires_at=99.0),
+            "NODE_SNAPSHOT_EXPIRED",
+        ),
+        (
+            _vnext_node_snapshot_json(
+                capabilities=(
+                    "repository_write_allowlisted",
+                    "test_execution",
+                    "deploy",
+                )
+            ),
+            "VNEXT_NODE_SNAPSHOT_CAPABILITY_OVERBROAD",
+        ),
+        (
+            _vnext_node_snapshot_json(resource_patterns=("repo:other.py",)),
+            "NO_ROUTE_RESOURCE",
+        ),
+    ),
+)
+def test_vnext_green_canary_external_node_snapshot_blocks_pre_backend(
+    monkeypatch: pytest.MonkeyPatch,
+    snapshot_json: str | None,
+    expected_reason: str,
+) -> None:
+    monkeypatch.setenv(runner.RUNNER_VNEXT_MODE_ENV, "green_canary")
+    if snapshot_json is None:
+        monkeypatch.delenv(runner.RUNNER_VNEXT_NODE_CAPABILITY_SNAPSHOT_ENV, raising=False)
+    else:
+        monkeypatch.setenv(runner.RUNNER_VNEXT_NODE_CAPABILITY_SNAPSHOT_ENV, snapshot_json)
+    monkeypatch.setattr(runner.time, "time", lambda: 100.0)
+    monkeypatch.setattr(
+        runner,
+        "normalized_runner_shadow_metadata",
+        lambda **_kwargs: _vnext_bridge_metadata(),
+    )
+    monkeypatch.setattr(
+        runner,
+        "evaluate_vnext_cutover_bridge",
+        mock.Mock(side_effect=AssertionError("backend must not run")),
+    )
+    task = runner.RunnerTask(content="x", base_sha="a" * 40)
+
+    allowed, reason = runner.evaluate_runner_vnext_cutover_hook(
+        issue_number=3951,
+        issue_body="",
+        route=runner.ROUTE_CODE_GENERATION,
+        maintenance_task_id=None,
+        runner_task=task,
+        merge_request=None,
+    )
+
+    assert allowed is False
+    assert reason == expected_reason
+    assert runner.LAST_RUNNER_VNEXT_RECEIPT["status"] == "green_canary_block"
+    assert runner.LAST_RUNNER_VNEXT_RECEIPT["canary_eligible"] is True
 
 
 def test_vnext_green_canary_keeps_protected_code_on_legacy_path(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -6,7 +6,7 @@ import binascii
 from collections.abc import Mapping
 from contextvars import ContextVar
 import csv
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import hmac
 import json
@@ -87,11 +87,24 @@ from core.runner_vnext_cutover_bridge import (
     VNextCutoverBridgeError,
     evaluate_vnext_cutover_bridge,
 )
+from core.runner_vnext_compat import (
+    CompatError,
+    LegacyTaskObservation,
+    adapt_legacy_task,
+)
+from core.runner_vnext_contracts import PrivacyClass
+from core.runner_vnext_leases import Lane
 from core.runner_vnext_queue import (
     RunnerVNextQueueItem,
     RunnerVNextQueueSource,
     registered_runner_queue_sources,
     runner_vnext_queue_item_priority_key,
+)
+from core.runner_vnext_routing import (
+    NodeCapabilityRegistry,
+    NodeCapabilitySnapshot,
+    RoutePlanner,
+    RoutingError,
 )
 from core.runner_shadow_integration import (
     MAINTENANCE_TASK_KIND_BY_ID as SHADOW_MAINTENANCE_TASK_KIND_BY_ID,
@@ -236,6 +249,11 @@ REPO = QUEUE_REPOSITORY
 RUNNER_GITHUB_ACTOR_ENV = "SKELETON_RUNNER_GITHUB_ACTOR"
 RUNNER_MODE_ENV = "SKELETON_RUNNER_MODE"
 RUNNER_VNEXT_MODE_ENV = "SKELETON_RUNNER_VNEXT_MODE"
+RUNNER_VNEXT_NODE_CAPABILITY_SNAPSHOT_ENV = (
+    "SKELETON_RUNNER_VNEXT_NODE_CAPABILITY_SNAPSHOT_JSON"
+)
+RUNNER_VNEXT_NODE_CAPABILITY_SNAPSHOT_MAX_BYTES = 8192
+RUNNER_VNEXT_LEGACY_CODEGEN_ADAPTER_ID = "legacy_runner:codegen"
 RUNNER_SHADOW_MODE_ENV = "SKELETON_RUNNER_SHADOW_MODE"
 RUNNER_MODE_OFF = "off"
 RUNNER_MODE_SHADOW = "shadow"
@@ -1505,7 +1523,11 @@ def _validation_command_uses_pytest(args: list[str]) -> bool:
 
 
 def _validation_pytest_temp_parent(cwd_path: Path) -> Path:
-    candidates = [Path(tempfile.gettempdir()), Path("/tmp")]
+    candidates = [
+        Path(tempfile.gettempdir()),
+        *_runner_runtime_state_roots(),
+        Path("/tmp"),
+    ]
     for candidate in candidates:
         candidate_path = candidate.resolve(strict=False)
         if candidate_path.is_relative_to(cwd_path):
@@ -1517,11 +1539,7 @@ def _validation_pytest_temp_parent(cwd_path: Path) -> Path:
 
 def _create_validation_pytest_temp_root(cwd: str | Path) -> Path:
     cwd_path = Path(cwd)
-    if not cwd_path.is_dir():
-        raise FileNotFoundError(
-            f"pytest validation cwd is not an existing directory: {cwd_path}"
-        )
-    temp_parent = _validation_pytest_temp_parent(cwd_path.resolve(strict=True))
+    temp_parent = _validation_pytest_temp_parent(cwd_path.resolve(strict=False))
     return Path(
         tempfile.mkdtemp(
             prefix=".runner-validation-pytest-",
@@ -1533,7 +1551,11 @@ def _create_validation_pytest_temp_root(cwd: str | Path) -> Path:
 def _remove_validation_pytest_temp_root(path: Path) -> None:
     allowed_parents = {
         candidate.resolve(strict=False)
-        for candidate in (Path(tempfile.gettempdir()), Path("/tmp"))
+        for candidate in (
+            Path(tempfile.gettempdir()),
+            *_runner_runtime_state_roots(),
+            Path("/tmp"),
+        )
         if candidate.is_dir()
     }
     try:
@@ -1782,11 +1804,40 @@ def _path_is_under_allowed_target_base(path: Path) -> bool:
 
 
 def _path_is_relative_to(path: Path, parent: Path) -> bool:
+    resolved_path = path.resolve(strict=False)
+    resolved_parent = parent.resolve(strict=False)
+    if resolved_parent == ROOT.resolve(strict=False) and _path_is_runner_runtime_state(
+        resolved_path
+    ):
+        return False
     try:
-        path.resolve(strict=False).relative_to(parent.resolve(strict=False))
+        resolved_path.relative_to(resolved_parent)
     except ValueError:
         return False
     return True
+
+
+def _runner_runtime_state_roots() -> tuple[Path, ...]:
+    try:
+        children = tuple(ROOT.iterdir())
+    except OSError:
+        return ()
+    return tuple(
+        child.resolve(strict=False)
+        for child in children
+        if child.is_dir()
+        and (
+            child.name.startswith(".runner-codex-state-")
+            or child.name.startswith(".runner-validation-pytest-")
+        )
+    )
+
+
+def _path_is_runner_runtime_state(path: Path) -> bool:
+    return any(
+        path == state_root or path.is_relative_to(state_root)
+        for state_root in _runner_runtime_state_roots()
+    )
 
 
 def _validated_registered_target_path(
@@ -4263,6 +4314,237 @@ def evaluate_runner_shadow_hook(
     return receipt
 
 
+_VNEXT_NODE_SNAPSHOT_KEYS = frozenset(
+    {
+        "schema",
+        "node_id",
+        "generation",
+        "route_rank",
+        "capabilities",
+        "supported_adapters",
+        "supported_lanes",
+        "privacy_classes",
+        "resource_patterns",
+        "observed_at",
+        "expires_at",
+        "attestation_ref",
+    }
+)
+
+
+def _vnext_metadata_privacy_boundary(value: object) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise VNextCutoverBridgeError("VNEXT_METADATA_PRIVACY_REQUIRED")
+    normalized = value.strip().upper()
+    if normalized in {
+        "PUBLIC_SAFE_REPOSITORY_ONLY",
+        "PUBLIC_SAFE_AGGREGATE_ONLY",
+        "PUBLIC_SAFE_CODE_AND_TESTS_ONLY",
+        "PUBLIC_SAFE",
+    }:
+        return "PUBLIC_SAFE_REPOSITORY_ONLY"
+    if normalized in {
+        "LOCAL_PRIVATE",
+        "PRIVATE_LOCAL",
+        "PRIVATE",
+        "PRIVATE_LOCAL_ONLY",
+        "PRIVATE_MEMORY",
+    }:
+        return "PRIVATE"
+    raise VNextCutoverBridgeError("VNEXT_METADATA_PRIVACY_UNSUPPORTED")
+
+
+def _vnext_string_tuple(value: object) -> tuple[str, ...]:
+    if isinstance(value, tuple) and all(isinstance(item, str) for item in value):
+        return tuple(item for item in value if item)
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return tuple(item for item in value if item)
+    return ()
+
+
+def _vnext_legacy_observation(metadata: Mapping[str, object]) -> LegacyTaskObservation:
+    issue_number = metadata.get("issue_number")
+    if not isinstance(issue_number, int) or issue_number < 1:
+        raise VNextCutoverBridgeError("VNEXT_METADATA_ISSUE_INVALID")
+    repo = metadata.get("repo")
+    branch = metadata.get("branch")
+    base_sha = metadata.get("base_sha")
+    route = metadata.get("legacy_route")
+    if not isinstance(repo, str) or not isinstance(branch, str):
+        raise VNextCutoverBridgeError("VNEXT_METADATA_REPOSITORY_INVALID")
+    if not isinstance(base_sha, str) or len(base_sha) != 40:
+        raise VNextCutoverBridgeError("VNEXT_METADATA_BASE_SHA_REQUIRED")
+
+    task_kind = (
+        "code_edit"
+        if route == ROUTE_CODE_GENERATION
+        else "publish" if route == ROUTE_PUBLISH_ONLY else "diagnostic"
+    )
+    capabilities = _vnext_string_tuple(metadata.get("requested_capabilities"))
+    if not capabilities and task_kind == "code_edit":
+        capabilities = ("repository_write_allowlisted", "test_execution")
+    allowed_files = _vnext_string_tuple(metadata.get("allowed_files"))
+    if not allowed_files:
+        raise VNextCutoverBridgeError("VNEXT_METADATA_ALLOWED_FILES_REQUIRED")
+
+    return LegacyTaskObservation(
+        source_task_ref=f"issue:{issue_number}",
+        target_state_ref=f"git:{base_sha.lower()}",
+        repo=repo,
+        branch=branch,
+        task_kind=task_kind,
+        requested_capabilities=capabilities,
+        allowed_files=allowed_files,
+        privacy_boundary=_vnext_metadata_privacy_boundary(
+            metadata.get("privacy_boundary")
+        ),
+        legacy_effect_class=None,
+        legacy_status="READY",
+        evidence_refs=(),
+    )
+
+
+def _vnext_green_canary_candidate(metadata: Mapping[str, object]) -> bool:
+    try:
+        adapted = adapt_legacy_task(_vnext_legacy_observation(metadata))
+    except (CompatError, VNextCutoverBridgeError):
+        return False
+    return (
+        adapted.task.privacy is PrivacyClass.PUBLIC_SAFE
+        and all(resource.startswith("repo:") for resource in adapted.operation.resources)
+    )
+
+
+def _vnext_snapshot_required_string_array(
+    snapshot: Mapping[str, object],
+    key: str,
+) -> tuple[str, ...]:
+    value = snapshot.get(key)
+    if (
+        not isinstance(value, list)
+        or not value
+        or len(value) > 64
+        or not all(isinstance(item, str) and item for item in value)
+    ):
+        raise VNextCutoverBridgeError("VNEXT_NODE_SNAPSHOT_MALFORMED")
+    return tuple(value)
+
+
+def _vnext_snapshot_required_int(snapshot: Mapping[str, object], key: str) -> int:
+    value = snapshot.get(key)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise VNextCutoverBridgeError("VNEXT_NODE_SNAPSHOT_MALFORMED")
+    return value
+
+
+def _vnext_snapshot_required_float(snapshot: Mapping[str, object], key: str) -> float:
+    value = snapshot.get(key)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise VNextCutoverBridgeError("VNEXT_NODE_SNAPSHOT_MALFORMED")
+    return float(value)
+
+
+def _externally_supplied_vnext_node_snapshot() -> NodeCapabilitySnapshot:
+    raw = os.environ.get(RUNNER_VNEXT_NODE_CAPABILITY_SNAPSHOT_ENV)
+    if raw is None or not raw.strip():
+        raise VNextCutoverBridgeError("VNEXT_NODE_SNAPSHOT_REQUIRED")
+    if len(raw.encode("utf-8")) > RUNNER_VNEXT_NODE_CAPABILITY_SNAPSHOT_MAX_BYTES:
+        raise VNextCutoverBridgeError("VNEXT_NODE_SNAPSHOT_MALFORMED")
+    try:
+        decoded = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise VNextCutoverBridgeError("VNEXT_NODE_SNAPSHOT_MALFORMED") from exc
+    if not isinstance(decoded, Mapping) or frozenset(decoded) != _VNEXT_NODE_SNAPSHOT_KEYS:
+        raise VNextCutoverBridgeError("VNEXT_NODE_SNAPSHOT_MALFORMED")
+    if decoded.get("schema") != "skeleton.runner_node_capability_snapshot.v1":
+        raise VNextCutoverBridgeError("VNEXT_NODE_SNAPSHOT_MALFORMED")
+    node_id = decoded.get("node_id")
+    attestation_ref = decoded.get("attestation_ref")
+    if not isinstance(node_id, str) or not isinstance(attestation_ref, str):
+        raise VNextCutoverBridgeError("VNEXT_NODE_SNAPSHOT_MALFORMED")
+    try:
+        lanes = tuple(
+            Lane(item)
+            for item in _vnext_snapshot_required_string_array(
+                decoded, "supported_lanes"
+            )
+        )
+        privacy = tuple(
+            PrivacyClass(item)
+            for item in _vnext_snapshot_required_string_array(
+                decoded, "privacy_classes"
+            )
+        )
+    except ValueError as exc:
+        raise VNextCutoverBridgeError("VNEXT_NODE_SNAPSHOT_MALFORMED") from exc
+    return NodeCapabilitySnapshot(
+        node_id=node_id,
+        generation=_vnext_snapshot_required_int(decoded, "generation"),
+        route_rank=_vnext_snapshot_required_int(decoded, "route_rank"),
+        capabilities=_vnext_snapshot_required_string_array(decoded, "capabilities"),
+        supported_adapters=_vnext_snapshot_required_string_array(
+            decoded, "supported_adapters"
+        ),
+        supported_lanes=lanes,
+        privacy_classes=privacy,
+        resource_patterns=_vnext_snapshot_required_string_array(
+            decoded, "resource_patterns"
+        ),
+        observed_at=_vnext_snapshot_required_float(decoded, "observed_at"),
+        expires_at=_vnext_snapshot_required_float(decoded, "expires_at"),
+        attestation_ref=attestation_ref,
+    )
+
+
+def _require_external_vnext_node_snapshot(
+    metadata: Mapping[str, object],
+    *,
+    now: float,
+) -> None:
+    try:
+        adapted = adapt_legacy_task(_vnext_legacy_observation(metadata))
+    except CompatError as exc:
+        raise VNextCutoverBridgeError(exc.reason_code) from exc
+    task = replace(
+        adapted.task,
+        task_id=adapted.task.task_id.replace("issue:", "task:issue-", 1),
+    )
+    snapshot = _externally_supplied_vnext_node_snapshot()
+    registry = NodeCapabilityRegistry()
+    try:
+        registry.register(snapshot, now=now)
+        plan = RoutePlanner(registry).plan(
+            task=task,
+            adapter_id=RUNNER_VNEXT_LEGACY_CODEGEN_ADAPTER_ID,
+            lane=Lane.CODEGEN,
+            now=now,
+        )
+        if plan.status != "ROUTED":
+            raise RoutingError(plan.reason_code)
+        if tuple(sorted(snapshot.capabilities)) != tuple(
+            sorted(task.required_capabilities)
+        ):
+            raise RoutingError("VNEXT_NODE_SNAPSHOT_CAPABILITY_OVERBROAD")
+        if snapshot.supported_adapters != (RUNNER_VNEXT_LEGACY_CODEGEN_ADAPTER_ID,):
+            raise RoutingError("VNEXT_NODE_SNAPSHOT_ADAPTER_OVERBROAD")
+        if snapshot.supported_lanes != (Lane.CODEGEN,):
+            raise RoutingError("VNEXT_NODE_SNAPSHOT_LANE_OVERBROAD")
+        if snapshot.privacy_classes != (task.privacy,):
+            raise RoutingError("VNEXT_NODE_SNAPSHOT_PRIVACY_OVERBROAD")
+        if tuple(sorted(snapshot.resource_patterns)) != tuple(
+            sorted(task.target_resources)
+        ):
+            raise RoutingError("VNEXT_NODE_SNAPSHOT_RESOURCE_OVERBROAD")
+        registry.require_current(
+            node_id=snapshot.node_id,
+            generation=snapshot.generation,
+            snapshot_hash=plan.selected_snapshot_hash or "",
+            now=now,
+        )
+    except RoutingError as exc:
+        raise VNextCutoverBridgeError(exc.reason_code) from exc
+
+
 def evaluate_runner_vnext_cutover_hook(
     *,
     issue_number: int,
@@ -4321,6 +4603,20 @@ def evaluate_runner_vnext_cutover_hook(
         runner_task=runner_task,
         merge_request=merge_request,
     )
+    if normalized_mode == "green_canary" and _vnext_green_canary_candidate(metadata):
+        try:
+            _require_external_vnext_node_snapshot(metadata, now=time.time())
+        except VNextCutoverBridgeError as exc:
+            LAST_RUNNER_VNEXT_RECEIPT = {
+                "schema": "skeleton.runner_vnext_cutover_bridge.v1",
+                "mode": normalized_mode,
+                "status": "green_canary_block",
+                "reason_code": exc.reason_code,
+                "canary_eligible": True,
+                "allow_legacy_execution": False,
+                "side_effects_executed": False,
+            }
+            return False, exc.reason_code
     try:
         decision = evaluate_vnext_cutover_bridge(
             configured_mode=configured_mode, normalized_metadata=metadata
