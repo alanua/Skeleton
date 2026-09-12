@@ -33,6 +33,7 @@ OPENROUTER_CREDENTIAL_ALIAS = "openrouter-api"
 OPENROUTER_CREDENTIAL_ACTION = "bind-openrouter-fallback"
 _OPENROUTER_BOUND_KEY_ENV = "SKELETON_OPENROUTER_FALLBACK_API_KEY"
 _OPENHANDS_SECONDARY_MAX_OUTPUT_TOKENS = 768
+_OPENHANDS_FIXED_EXECUTABLE = "/usr/bin/openhands"
 
 # Provider runtime identifiers are adapter-owned. Task/issue prose never selects them.
 _OPENHANDS_RUNTIME_MODEL_BY_MODEL_ID = {
@@ -200,7 +201,7 @@ def openhands_secondary_command(task_content: str, *, executable: str = "openhan
     if Path(executable).name != "openhands":
         raise CodegenRouteError("openhands_executable_identity_invalid")
     return [
-        "openhands",
+        _OPENHANDS_FIXED_EXECUTABLE,
         "--headless",
         "--json",
         "--override-with-envs",
