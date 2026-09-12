@@ -2363,10 +2363,35 @@ def _format_existing_pr_worktree_failure(reason: str) -> str:
     return "\n".join(("Existing PR worktree preparation failed.", f"reason={reason}"))
 
 
+def _existing_pr_worktree_pr_block_reason(
+    request: CodegenExistingPrWorktreeRequest,
+    pr_state: dict[str, Any],
+    *,
+    expected_head_branch: str | None,
+    final: bool = False,
+) -> str | None:
+    prefix = "final_" if final else ""
+    if pr_state.get("number") != request.pr_number:
+        return f"{prefix}pr_number_mismatch"
+    if str(pr_state.get("state") or "").upper() != "OPEN":
+        return f"{prefix}pr_not_open"
+    head_sha = str(pr_state.get("headRefOid") or "").lower()
+    head_branch = str(pr_state.get("headRefName") or "")
+    if head_sha != request.expected_head_sha:
+        return f"{prefix}pr_head_sha_mismatch"
+    if expected_head_branch is not None and head_branch != expected_head_branch:
+        return f"{prefix}pr_head_branch_mismatch"
+    if not _safe_target_base_branch_name(head_branch):
+        return f"{prefix}pr_head_branch_unsafe"
+    return None
+
+
 def prepare_issue_worktree_from_existing_pr_head(
     issue_number: int,
     coordinator_workdir: str | Path,
     request: CodegenExistingPrWorktreeRequest,
+    *,
+    continuation_gate: CodegenDirtyContinuationGate | None = None,
 ) -> tuple[int, str, Path]:
     path = ensure_safe_worktree_path(issue_worktree_path(issue_number))
     branch = issue_branch(issue_number)
@@ -2375,35 +2400,27 @@ def prepare_issue_worktree_from_existing_pr_head(
         pr_state, metadata_source = _get_pr_branch_validation_state(REPO, request.pr_number)
     except RuntimeError:
         return 1, _format_existing_pr_worktree_failure("pr_metadata_unavailable"), path
-    if pr_state.get("state") != "OPEN":
-        return 1, _format_existing_pr_worktree_failure("pr_not_open"), path
-    head_sha = str(pr_state.get("headRefOid") or "").lower()
     head_branch = str(pr_state.get("headRefName") or "")
-    if head_sha != request.expected_head_sha:
-        return 1, _format_existing_pr_worktree_failure("pr_head_sha_mismatch"), path
-    if request.expected_head_branch is not None and head_branch != request.expected_head_branch:
-        return 1, _format_existing_pr_worktree_failure("pr_head_branch_mismatch"), path
-    if not _safe_target_base_branch_name(head_branch):
-        return 1, _format_existing_pr_worktree_failure("pr_head_branch_unsafe"), path
+    expected_head_branch = request.expected_head_branch or head_branch
+    pr_block_reason = _existing_pr_worktree_pr_block_reason(
+        request, pr_state, expected_head_branch=expected_head_branch
+    )
+    if pr_block_reason is not None:
+        return 1, _format_existing_pr_worktree_failure(pr_block_reason), path
 
     if path.exists():
         checks = (
             (["git", "status", "--short"], "dirty"),
             (["git", "branch", "--show-current"], "branch"),
         )
+        dirty_worktree = False
         for command, check_name in checks:
             code, output = run_command(command, cwd=path)
             outputs.append(format_command_output(command, output))
             if code != 0:
                 return code, "\n".join(outputs), path
             if check_name == "dirty" and output.strip():
-                return (
-                    1,
-                    _format_existing_pr_worktree_failure("existing_worktree_dirty")
-                    + "\n\n"
-                    + "\n".join(outputs),
-                    path,
-                )
+                dirty_worktree = True
             if check_name == "branch" and output.strip() != branch:
                 return (
                     1,
@@ -2423,6 +2440,76 @@ def prepare_issue_worktree_from_existing_pr_head(
                 + "\n".join(outputs),
                 path,
             )
+        if dirty_worktree:
+            gate_failure = _retained_dirty_continuation_gate_failure(
+                issue_number=issue_number,
+                source_repository=QUEUE_REPOSITORY,
+                target_repository=None,
+                path=path,
+                branch=branch,
+                gate=continuation_gate,
+            )
+            if gate_failure is not None:
+                return (
+                    1,
+                    _format_existing_pr_worktree_failure("existing_worktree_dirty")
+                    + f"\nreason={gate_failure}\n\n"
+                    + "\n".join(outputs),
+                    path,
+                )
+            rev_command = ["git", "rev-parse", "HEAD"]
+            code, output = run_command(rev_command, cwd=path)
+            outputs.append(format_command_output(rev_command, output))
+            local_head_sha = output.strip().lower()
+            if (
+                code != 0
+                or _HEAD_SHA_RE.fullmatch(local_head_sha) is None
+                or local_head_sha != request.expected_head_sha
+            ):
+                return (
+                    code or 1,
+                    _format_existing_pr_worktree_failure("local_head_sha_mismatch")
+                    + "\n\n"
+                    + "\n".join(outputs),
+                    path,
+                )
+            outputs.append(
+                "retained_dirty_continuation_gate=allowed "
+                f"allowed_files_count={len(continuation_gate.allowed_files) if continuation_gate else 0}"
+            )
+            try:
+                final_pr_state, final_metadata_source = _get_pr_branch_validation_state(
+                    REPO, request.pr_number
+                )
+            except RuntimeError:
+                return (
+                    1,
+                    _format_existing_pr_worktree_failure("final_pr_metadata_unavailable")
+                    + "\n\n"
+                    + "\n".join(outputs),
+                    path,
+                )
+            final_reason = _existing_pr_worktree_pr_block_reason(
+                request,
+                final_pr_state,
+                expected_head_branch=expected_head_branch,
+                final=True,
+            )
+            if final_reason is not None:
+                return (
+                    1,
+                    _format_existing_pr_worktree_failure(final_reason)
+                    + "\n\n"
+                    + "\n".join(outputs),
+                    path,
+                )
+            return 0, "\n".join(
+                [
+                    f"pr_metadata_source={metadata_source}",
+                    f"final_pr_metadata_source={final_metadata_source}",
+                    *outputs,
+                ]
+            ), path
         fetch_command = [
             "git",
             "fetch",
@@ -20559,6 +20646,11 @@ def _process_issue_in_current_queue_context(
                         issue_number,
                         coordinator_workdir,
                         existing_pr_worktree_request,
+                        **(
+                            {"continuation_gate": dirty_continuation_gate}
+                            if dirty_continuation_gate is not None
+                            else {}
+                        ),
                     )
                 )
             else:
