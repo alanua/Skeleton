@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import shlex
@@ -87,12 +88,28 @@ from core.runner_vnext_cutover_bridge import (
     VNextCutoverBridgeError,
     evaluate_vnext_cutover_bridge,
 )
+from core.runner_vnext_authority import (
+    RunnerVNextRuntimeConfig,
+    build_authoritative_stores,
+    bind_runner_operation,
+    grant_green_authority,
+    prepare_green_authority,
+)
+from core.runner_vnext_contracts import PrivacyClass
+from core.runner_vnext_execution import GreenExecutionLifecycle, GreenExecutionResult
+from core.runner_vnext_execution_gate import TargetStateVerifier
+from core.runner_vnext_leases import Lane
+from core.runner_vnext_live_codegen import (
+    LiveCodegenAdapter,
+    MechanicalCodegenBackend,
+)
 from core.runner_vnext_queue import (
     RunnerVNextQueueItem,
     RunnerVNextQueueSource,
     registered_runner_queue_sources,
     runner_vnext_queue_item_priority_key,
 )
+from core.runner_vnext_routing import NodeCapabilityRegistry, NodeCapabilitySnapshot
 from core.runner_shadow_integration import (
     MAINTENANCE_TASK_KIND_BY_ID as SHADOW_MAINTENANCE_TASK_KIND_BY_ID,
     RunnerShadowReceipt,
@@ -236,6 +253,10 @@ REPO = QUEUE_REPOSITORY
 RUNNER_GITHUB_ACTOR_ENV = "SKELETON_RUNNER_GITHUB_ACTOR"
 RUNNER_MODE_ENV = "SKELETON_RUNNER_MODE"
 RUNNER_VNEXT_MODE_ENV = "SKELETON_RUNNER_VNEXT_MODE"
+RUNNER_VNEXT_CODEGEN_RUNTIME_CONTRACT_ENV = "SKELETON_RUNNER_VNEXT_CODEGEN_RUNTIME_JSON"
+RUNNER_VNEXT_CODEGEN_NODE_ID = "node:runner-codegen"
+RUNNER_VNEXT_CODEGEN_ROUTE_RANK = 1
+RUNNER_VNEXT_CODEGEN_MAX_TTL_SECONDS = 3600.0
 RUNNER_SHADOW_MODE_ENV = "SKELETON_RUNNER_SHADOW_MODE"
 RUNNER_MODE_OFF = "off"
 RUNNER_MODE_SHADOW = "shadow"
@@ -1719,6 +1740,338 @@ def _codegen_manifest_blocked_output(reason_code: str) -> str:
             sort_keys=True,
         )
     )
+
+
+class RunnerVNextCodegenContractError(RuntimeError):
+    def __init__(self, reason_code: str) -> None:
+        super().__init__(reason_code)
+        self.reason_code = reason_code
+
+
+def _blocked_vnext_codegen_output(reason_code: str) -> str:
+    return "RESULT: BLOCKED\n" + json.dumps(
+        {
+            "schema": "skeleton.runner_vnext_codegen_block.v1",
+            "status": "BLOCKED",
+            "reason_code": reason_code,
+        },
+        sort_keys=True,
+    )
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    seen: set[str] = set()
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in seen:
+            raise RunnerVNextCodegenContractError("VNEXT_CODEGEN_RUNTIME_JSON_DUPLICATE_KEY")
+        seen.add(key)
+        result[key] = value
+    return result
+
+
+def _vnext_runtime_contract() -> Mapping[str, object]:
+    raw = os.environ.get(RUNNER_VNEXT_CODEGEN_RUNTIME_CONTRACT_ENV)
+    if raw is None or not raw.strip():
+        raise RunnerVNextCodegenContractError("VNEXT_CODEGEN_RUNTIME_CONTRACT_REQUIRED")
+    try:
+        parsed = json.loads(raw, object_pairs_hook=_reject_duplicate_json_keys)
+    except RunnerVNextCodegenContractError:
+        raise
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise RunnerVNextCodegenContractError("VNEXT_CODEGEN_RUNTIME_JSON_MALFORMED") from exc
+    if not isinstance(parsed, Mapping):
+        raise RunnerVNextCodegenContractError("VNEXT_CODEGEN_RUNTIME_CONTRACT_INVALID")
+    if set(parsed) != {"schema", "snapshot"}:
+        raise RunnerVNextCodegenContractError("VNEXT_CODEGEN_RUNTIME_CONTRACT_FIELDS_INVALID")
+    if parsed["schema"] != "skeleton.runner_vnext_codegen_runtime.v1":
+        raise RunnerVNextCodegenContractError("VNEXT_CODEGEN_RUNTIME_SCHEMA_INVALID")
+    if not isinstance(parsed["snapshot"], Mapping):
+        raise RunnerVNextCodegenContractError("VNEXT_CODEGEN_RUNTIME_SNAPSHOT_INVALID")
+    return parsed
+
+
+def _required_core_runner_task(task_content: str) -> CoreRunnerTask:
+    try:
+        parsed = yaml.safe_load(task_content)
+    except yaml.YAMLError as exc:
+        raise RunnerVNextCodegenContractError("VNEXT_CODEGEN_TASK_ENVELOPE_MALFORMED") from exc
+    if not isinstance(parsed, Mapping):
+        raise RunnerVNextCodegenContractError("VNEXT_CODEGEN_TASK_ENVELOPE_REQUIRED")
+    try:
+        return CoreRunnerTask.from_mapping(parsed)
+    except Exception as exc:
+        reason = getattr(exc, "reason_code", "VNEXT_CODEGEN_TASK_ENVELOPE_INVALID")
+        raise RunnerVNextCodegenContractError(str(reason)) from exc
+
+
+def _json_string_sequence(value: object, reason_code: str) -> tuple[str, ...]:
+    if (
+        not isinstance(value, list)
+        or not value
+        or any(not isinstance(item, str) or not item for item in value)
+        or len(set(value)) != len(value)
+    ):
+        raise RunnerVNextCodegenContractError(reason_code)
+    return tuple(value)
+
+
+def _json_int(value: object, reason_code: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise RunnerVNextCodegenContractError(reason_code)
+    return value
+
+
+def _json_number(value: object, reason_code: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise RunnerVNextCodegenContractError(reason_code)
+    number = float(value)
+    if not math.isfinite(number):
+        raise RunnerVNextCodegenContractError(reason_code)
+    return number
+
+
+def _runtime_codegen_nodes_for_task(
+    task: CoreRunnerTask,
+    *,
+    adapter_id: str,
+    now: float,
+) -> NodeCapabilityRegistry:
+    contract = _vnext_runtime_contract()
+    snapshot_payload = contract["snapshot"]
+    assert isinstance(snapshot_payload, Mapping)
+    expected_keys = {
+        "schema",
+        "node_id",
+        "generation",
+        "route_rank",
+        "capabilities",
+        "supported_adapters",
+        "supported_lanes",
+        "privacy_classes",
+        "resource_patterns",
+        "observed_at",
+        "expires_at",
+        "attestation_ref",
+    }
+    if set(snapshot_payload) != expected_keys:
+        raise RunnerVNextCodegenContractError("VNEXT_CODEGEN_NODE_SNAPSHOT_FIELDS_INVALID")
+    if snapshot_payload["schema"] != "skeleton.runner_node_capability_snapshot.v1":
+        raise RunnerVNextCodegenContractError("VNEXT_CODEGEN_NODE_SNAPSHOT_SCHEMA_INVALID")
+    if snapshot_payload["node_id"] != RUNNER_VNEXT_CODEGEN_NODE_ID:
+        raise RunnerVNextCodegenContractError("VNEXT_CODEGEN_NODE_ID_INVALID")
+    generation = _json_int(
+        snapshot_payload["generation"], "VNEXT_CODEGEN_NODE_GENERATION_INVALID"
+    )
+    route_rank = _json_int(
+        snapshot_payload["route_rank"], "VNEXT_CODEGEN_NODE_ROUTE_RANK_INVALID"
+    )
+    if route_rank != RUNNER_VNEXT_CODEGEN_ROUTE_RANK:
+        raise RunnerVNextCodegenContractError("VNEXT_CODEGEN_NODE_ROUTE_RANK_INVALID")
+    capabilities = _json_string_sequence(
+        snapshot_payload["capabilities"], "VNEXT_CODEGEN_NODE_CAPABILITIES_INVALID"
+    )
+    if capabilities != tuple(task.requested_capabilities):
+        raise RunnerVNextCodegenContractError("VNEXT_CODEGEN_NODE_CAPABILITY_WIDENING")
+    supported_adapters = _json_string_sequence(
+        snapshot_payload["supported_adapters"], "VNEXT_CODEGEN_NODE_ADAPTERS_INVALID"
+    )
+    if supported_adapters != (adapter_id,):
+        raise RunnerVNextCodegenContractError("VNEXT_CODEGEN_NODE_ADAPTER_INVALID")
+    supported_lane_values = _json_string_sequence(
+        snapshot_payload["supported_lanes"], "VNEXT_CODEGEN_NODE_LANES_INVALID"
+    )
+    if supported_lane_values != (Lane.CODEGEN.value,):
+        raise RunnerVNextCodegenContractError("VNEXT_CODEGEN_NODE_LANE_INVALID")
+    privacy_values = _json_string_sequence(
+        snapshot_payload["privacy_classes"], "VNEXT_CODEGEN_NODE_PRIVACY_INVALID"
+    )
+    if privacy_values != (PrivacyClass.PUBLIC_SAFE.value,):
+        raise RunnerVNextCodegenContractError("VNEXT_CODEGEN_NODE_PRIVACY_INVALID")
+    resource_patterns = _json_string_sequence(
+        snapshot_payload["resource_patterns"], "VNEXT_CODEGEN_NODE_RESOURCES_INVALID"
+    )
+    expected_resources = tuple(f"repo:{path}" for path in task.allowed_files)
+    if resource_patterns != expected_resources:
+        raise RunnerVNextCodegenContractError("VNEXT_CODEGEN_NODE_RESOURCE_SCOPE_INVALID")
+    observed_at = _json_number(
+        snapshot_payload["observed_at"], "VNEXT_CODEGEN_NODE_OBSERVED_AT_INVALID"
+    )
+    expires_at = _json_number(
+        snapshot_payload["expires_at"], "VNEXT_CODEGEN_NODE_EXPIRES_AT_INVALID"
+    )
+    if expires_at - observed_at > RUNNER_VNEXT_CODEGEN_MAX_TTL_SECONDS:
+        raise RunnerVNextCodegenContractError("VNEXT_CODEGEN_NODE_TTL_OVERLONG")
+    attestation_ref = snapshot_payload["attestation_ref"]
+    if not isinstance(attestation_ref, str) or not attestation_ref:
+        raise RunnerVNextCodegenContractError("VNEXT_CODEGEN_NODE_ATTESTATION_REF_INVALID")
+    registry = NodeCapabilityRegistry()
+    try:
+        registry.register(
+            NodeCapabilitySnapshot(
+                node_id=RUNNER_VNEXT_CODEGEN_NODE_ID,
+                generation=generation,
+                route_rank=route_rank,
+                capabilities=capabilities,
+                supported_adapters=supported_adapters,
+                supported_lanes=(Lane.CODEGEN,),
+                privacy_classes=(PrivacyClass.PUBLIC_SAFE,),
+                resource_patterns=resource_patterns,
+                observed_at=observed_at,
+                expires_at=expires_at,
+                attestation_ref=attestation_ref,
+            ),
+            now=now,
+        )
+    except Exception as exc:
+        reason = getattr(exc, "reason_code", "VNEXT_CODEGEN_NODE_SNAPSHOT_INVALID")
+        raise RunnerVNextCodegenContractError(str(reason)) from exc
+    return registry
+
+
+def _vnext_authority_config(workdir: str) -> RunnerVNextRuntimeConfig:
+    state_root = _codegen_bookkeeping_dir(workdir) / "vnext-authority"
+    return RunnerVNextRuntimeConfig(
+        state_root=str(state_root),
+        ledger_db_path=str(state_root / "ledger.sqlite3"),
+        lease_db_path=str(state_root / "leases.sqlite3"),
+    )
+
+
+class _GitHeadTargetStateVerifier(TargetStateVerifier):
+    def __init__(self, workdir: str) -> None:
+        self._workdir = workdir
+
+    def current_ref(self, _handoff: object) -> str:
+        code, output = run_command(["git", "rev-parse", "HEAD"], cwd=self._workdir)
+        if code != 0:
+            raise RunnerVNextCodegenContractError("VNEXT_CODEGEN_TARGET_STATE_UNREADABLE")
+        head = output.strip().lower()
+        if re.fullmatch(r"[0-9a-f]{40}", head) is None:
+            raise RunnerVNextCodegenContractError("VNEXT_CODEGEN_TARGET_STATE_INVALID")
+        return f"git:{head}"
+
+
+def _porcelain_touched_repo_resources(output: str) -> tuple[str, ...]:
+    resources: list[str] = []
+    for raw_line in (output or "").splitlines():
+        if len(raw_line) < 4:
+            continue
+        path = raw_line[3:]
+        if " -> " in path:
+            path = path.rsplit(" -> ", 1)[1]
+        path = path.strip()
+        if path:
+            resources.append(f"repo:{path}")
+    return tuple(dict.fromkeys(resources))
+
+
+class _RunnerMechanicalCodegenBackend(MechanicalCodegenBackend):
+    def __init__(self, *, task_content: str, workdir: str) -> None:
+        self._task_content = task_content
+        self._workdir = workdir
+        self.exit_code: int | None = None
+        self.output: str = ""
+
+    def run_codegen(
+        self,
+        *,
+        runner_task: CoreRunnerTask,
+        source_task_ref: str,
+        grant: Any,
+    ) -> GreenExecutionResult:
+        before = grant.target_state_ref
+        code, output = _run_legacy_codex_task(self._task_content, self._workdir, None)
+        self.exit_code = code
+        self.output = output
+        status_code, status_output = run_command(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=self._workdir,
+        )
+        touched = _porcelain_touched_repo_resources(status_output) if status_code == 0 else ()
+        head_code, head_output = run_command(["git", "rev-parse", "HEAD"], cwd=self._workdir)
+        after = before
+        head = head_output.strip().lower()
+        if head_code == 0 and re.fullmatch(r"[0-9a-f]{40}", head):
+            after = f"git:{head}"
+        success = code == 0 and classify_codex_task_result(output, code).status == "DONE"
+        return GreenExecutionResult(
+            operation_id=grant.operation_id,
+            idempotency_key=grant.idempotency_key,
+            adapter_id=grant.adapter_id,
+            target_state_ref=grant.target_state_ref,
+            fence_token=grant.fence_token,
+            resources=touched,
+            effects=grant.planner_envelope.effects,
+            outcome="SUCCEEDED" if success else "FAILED",
+            reason_code="EXECUTION_PASS" if success else "EXECUTION_FAILED",
+            before_state_ref=before,
+            after_state_ref=after,
+            validation_status="PASS" if success else "FAIL",
+        )
+
+
+def _green_canary_authoritative_codegen_enabled(task: CoreRunnerTask | None) -> bool:
+    mode = (os.environ.get(RUNNER_VNEXT_MODE_ENV) or "off").strip().lower()
+    return mode == "green_canary" and task is not None and task.task_kind == "code_edit"
+
+
+def _run_authoritative_codegen_task(task_content: str, workdir: str) -> tuple[int, str]:
+    now = time.time()
+    core_task = _required_core_runner_task(task_content)
+    bound = bind_runner_operation(
+        runner_task=core_task,
+        route=ROUTE_CODE_GENERATION,
+        operation="codegen",
+        source_task_ref=f"task:{core_task.idempotency_key}",
+    )
+    nodes = _runtime_codegen_nodes_for_task(
+        core_task,
+        adapter_id=bound.binding.adapter_id,
+        now=now,
+    )
+    stores = build_authoritative_stores(_vnext_authority_config(workdir), clock=time.time)
+    backend = _RunnerMechanicalCodegenBackend(task_content=task_content, workdir=workdir)
+    try:
+        active = nodes.active(now=now)
+        if len(active) != 1:
+            raise RunnerVNextCodegenContractError("VNEXT_CODEGEN_NODE_SNAPSHOT_COUNT_INVALID")
+        ttl_seconds = min(
+            RUNNER_VNEXT_CODEGEN_MAX_TTL_SECONDS,
+            max(1.0, active[0].expires_at - now),
+        )
+        handoff = prepare_green_authority(
+            bound=bound,
+            nodes=nodes,
+            stores=stores,
+            ttl_seconds=ttl_seconds,
+            now=now,
+            parent_environment=os.environ,
+        )
+        grant = grant_green_authority(
+            handoff=handoff,
+            nodes=nodes,
+            stores=stores,
+            target_state_verifier=_GitHeadTargetStateVerifier(workdir),
+            now=now,
+        )
+        adapter = LiveCodegenAdapter(
+            runner_task=core_task,
+            source_task_ref=bound.source_task_ref,
+            backend=backend,
+        )
+        GreenExecutionLifecycle(scheduler=stores.scheduler, ledger=stores.ledger).run(
+            grant,
+            adapter,
+        )
+    except RunnerVNextCodegenContractError:
+        raise
+    except Exception as exc:
+        reason = getattr(exc, "reason_code", "VNEXT_CODEGEN_AUTHORITY_FAILED")
+        raise RunnerVNextCodegenContractError(str(reason)) from exc
+    finally:
+        stores.close()
+    return backend.exit_code if backend.exit_code is not None else 1, backend.output
 
 
 def worktree_root() -> Path:
@@ -4796,6 +5149,21 @@ def _codex_executor(argv: list[str], stdin_text: str, env: Mapping[str, str]) ->
 
 
 def run_codex_task(
+    task_content: str, workdir: str, task: RunnerTask | None = None
+) -> tuple[int, str]:
+    try:
+        core_task = _required_core_runner_task(task_content)
+    except RunnerVNextCodegenContractError:
+        core_task = None
+    if _green_canary_authoritative_codegen_enabled(core_task):
+        try:
+            return _run_authoritative_codegen_task(task_content, workdir)
+        except RunnerVNextCodegenContractError as exc:
+            return 1, _blocked_vnext_codegen_output(exc.reason_code)
+    return _run_legacy_codex_task(task_content, workdir, task)
+
+
+def _run_legacy_codex_task(
     task_content: str, workdir: str, task: RunnerTask | None = None
 ) -> tuple[int, str]:
     try:

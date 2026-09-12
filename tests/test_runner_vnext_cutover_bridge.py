@@ -17,7 +17,11 @@ def metadata(**overrides):
         "base_sha": "a" * 40,
         "allowed_files": ("core/example.py",),
         "privacy_boundary": "PUBLIC_SAFE_REPOSITORY_ONLY",
-        "requested_capabilities": ("repository_write_allowlisted", "test_execution"),
+        "requested_capabilities": (
+            "repository_read",
+            "repository_write_allowlisted",
+            "test_execution",
+        ),
     }
     value.update(overrides)
     return value
@@ -68,6 +72,38 @@ def test_non_code_route_is_never_green_canary_executed() -> None:
     assert decision.canary_eligible is False
     assert decision.status == "legacy_protected_path"
     assert decision.allow_legacy_execution is True
+
+
+def test_authoritative_mode_requires_exact_green_codegen() -> None:
+    decision = evaluate_vnext_cutover_bridge(
+        configured_mode="authoritative",
+        normalized_metadata=metadata(),
+    )
+    assert decision.status == "authoritative_green_ready"
+    assert decision.reason_code == "VNEXT_AUTHORITATIVE_GREEN_READY"
+    assert decision.allow_legacy_execution is False
+
+
+def test_authoritative_mode_keeps_protected_and_widened_tasks_out() -> None:
+    protected = evaluate_vnext_cutover_bridge(
+        configured_mode="authoritative",
+        normalized_metadata=metadata(allowed_files=("scripts/runner_poll_github_tasks.py",)),
+    )
+    assert protected.status == "authoritative_block"
+    assert protected.reason_code == "VNEXT_AUTHORITATIVE_NOT_ELIGIBLE"
+
+    widened = evaluate_vnext_cutover_bridge(
+        configured_mode="authoritative",
+        normalized_metadata=metadata(
+            requested_capabilities=(
+                "repository_read",
+                "repository_write_allowlisted",
+                "test_execution",
+                "diagnostic_read",
+            )
+        ),
+    )
+    assert widened.status == "authoritative_block"
 
 
 def test_invalid_mode_and_metadata_fail_closed_to_caller() -> None:

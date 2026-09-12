@@ -5441,6 +5441,237 @@ def test_vnext_invalid_mode_fails_closed_even_for_legacy_protected_path(monkeypa
     assert runner.LAST_RUNNER_VNEXT_RECEIPT["status"] == "configuration_blocked"
 
 
+def _vnext_codegen_task_content(
+    *,
+    capabilities: tuple[str, ...] = (
+        "repository_read",
+        "repository_write_allowlisted",
+        "test_execution",
+    ),
+    allowed_files: tuple[str, ...] = ("core/example.py",),
+    base_sha: str = HEAD_SHA,
+) -> str:
+    return json.dumps(
+        {
+            "schema": "skeleton.runner_task.v1",
+            "repo": "alanua/Skeleton",
+            "branch": "runner/vnext-codegen-test",
+            "base_sha": base_sha,
+            "task_kind": "code_edit",
+            "payload": {"operation": "repair", "task": "bounded repair"},
+            "requested_capabilities": list(capabilities),
+            "allowed_files": list(allowed_files),
+            "forbidden_actions": ["merge"],
+            "validation_commands": [["python3", "-m", "pytest", "-q"]],
+            "validation_timeout_seconds": 300,
+            "expected_output": ["draft PR"],
+            "privacy_boundary": "PUBLIC_SAFE_REPOSITORY_ONLY",
+            "approval_reference": "chat:vnext-codegen-test",
+            "idempotency_key": "vnext-codegen-test-v1",
+        },
+        sort_keys=True,
+    )
+
+
+def _vnext_codegen_runtime_contract(
+    *,
+    capabilities: tuple[str, ...] = (
+        "repository_read",
+        "repository_write_allowlisted",
+        "test_execution",
+    ),
+    adapters: tuple[str, ...] = ("adapter:repo-codegen",),
+    lanes: tuple[str, ...] = ("codegen",),
+    privacy: tuple[str, ...] = ("PUBLIC_SAFE",),
+    resources: tuple[str, ...] = ("repo:core/example.py",),
+    node_id: str = runner.RUNNER_VNEXT_CODEGEN_NODE_ID,
+    generation: int = 7,
+    route_rank: int = runner.RUNNER_VNEXT_CODEGEN_ROUTE_RANK,
+    observed_at: float = 90.0,
+    expires_at: float = 200.0,
+    attestation_ref: str = "attestation:runner-codegen-7",
+    extra_snapshot: dict[str, object] | None = None,
+) -> str:
+    snapshot = {
+        "schema": "skeleton.runner_node_capability_snapshot.v1",
+        "node_id": node_id,
+        "generation": generation,
+        "route_rank": route_rank,
+        "capabilities": list(capabilities),
+        "supported_adapters": list(adapters),
+        "supported_lanes": list(lanes),
+        "privacy_classes": list(privacy),
+        "resource_patterns": list(resources),
+        "observed_at": observed_at,
+        "expires_at": expires_at,
+        "attestation_ref": attestation_ref,
+    }
+    if extra_snapshot:
+        snapshot.update(extra_snapshot)
+    return json.dumps(
+        {
+            "schema": "skeleton.runner_vnext_codegen_runtime.v1",
+            "snapshot": snapshot,
+        },
+        sort_keys=True,
+    )
+
+
+def test_vnext_green_codegen_uses_external_runtime_snapshot_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    task_content = _vnext_codegen_task_content()
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    monkeypatch.setenv(runner.RUNNER_VNEXT_MODE_ENV, "green_canary")
+    monkeypatch.setenv(runner.CODEGEN_BOOKKEEPING_ROOT_ENV, str(tmp_path / "state"))
+    monkeypatch.setenv(
+        runner.RUNNER_VNEXT_CODEGEN_RUNTIME_CONTRACT_ENV,
+        _vnext_codegen_runtime_contract(),
+    )
+    monkeypatch.setattr(runner.time, "time", lambda: 100.0)
+    backend_calls = 0
+
+    def fake_legacy(content: str, cwd: str, task=None) -> tuple[int, str]:
+        nonlocal backend_calls
+        backend_calls += 1
+        assert content == task_content
+        assert cwd == str(worktree)
+        assert task is None
+        return 0, "RESULT: DONE\n"
+
+    def fake_run(args, cwd=None, **_kwargs):
+        if args == ["git", "rev-parse", "HEAD"]:
+            return 0, HEAD_SHA
+        if args[:3] == ["git", "status", "--porcelain"]:
+            return 0, " M core/example.py\n"
+        raise AssertionError(args)
+
+    monkeypatch.setattr(runner, "_run_legacy_codex_task", fake_legacy)
+    monkeypatch.setattr(runner, "run_command", fake_run)
+
+    code, output = runner.run_codex_task(task_content, str(worktree))
+
+    assert code == 0
+    assert output == "RESULT: DONE\n"
+    assert backend_calls == 1
+    assert list((tmp_path / "state").glob("worktree-*/vnext-authority/ledger.sqlite3*"))
+
+
+@pytest.mark.parametrize(
+    "contract,reason",
+    (
+        ("", "VNEXT_CODEGEN_RUNTIME_CONTRACT_REQUIRED"),
+        (
+            '{"schema":"skeleton.runner_vnext_codegen_runtime.v1","schema":"x","snapshot":{}}',
+            "VNEXT_CODEGEN_RUNTIME_JSON_DUPLICATE_KEY",
+        ),
+        (
+            '{"schema":"skeleton.runner_vnext_codegen_runtime.v1","snapshot":',
+            "VNEXT_CODEGEN_RUNTIME_JSON_MALFORMED",
+        ),
+        (
+            _vnext_codegen_runtime_contract(extra_snapshot={"extra": "nope"}),
+            "VNEXT_CODEGEN_NODE_SNAPSHOT_FIELDS_INVALID",
+        ),
+        (
+            _vnext_codegen_runtime_contract(node_id="node:other"),
+            "VNEXT_CODEGEN_NODE_ID_INVALID",
+        ),
+        (
+            _vnext_codegen_runtime_contract(generation=0),
+            "NODE_GENERATION_INVALID",
+        ),
+        (
+            _vnext_codegen_runtime_contract(route_rank=2),
+            "VNEXT_CODEGEN_NODE_ROUTE_RANK_INVALID",
+        ),
+        (
+            _vnext_codegen_runtime_contract(
+                capabilities=(
+                    "repository_read",
+                    "repository_read",
+                    "test_execution",
+                )
+            ),
+            "VNEXT_CODEGEN_NODE_CAPABILITIES_INVALID",
+        ),
+        (
+            _vnext_codegen_runtime_contract(
+                capabilities=(
+                    "repository_read",
+                    "repository_write_allowlisted",
+                    "test_execution",
+                    "diagnostic_read",
+                )
+            ),
+            "VNEXT_CODEGEN_NODE_CAPABILITY_WIDENING",
+        ),
+        (
+            _vnext_codegen_runtime_contract(adapters=("adapter:repo-validation",)),
+            "VNEXT_CODEGEN_NODE_ADAPTER_INVALID",
+        ),
+        (
+            _vnext_codegen_runtime_contract(lanes=("validate",)),
+            "VNEXT_CODEGEN_NODE_LANE_INVALID",
+        ),
+        (
+            _vnext_codegen_runtime_contract(privacy=("PRIVATE",)),
+            "VNEXT_CODEGEN_NODE_PRIVACY_INVALID",
+        ),
+        (
+            _vnext_codegen_runtime_contract(resources=("repo:scripts/runner_poll_github_tasks.py",)),
+            "VNEXT_CODEGEN_NODE_RESOURCE_SCOPE_INVALID",
+        ),
+        (
+            _vnext_codegen_runtime_contract(attestation_ref="/private/attestation"),
+            "NODE_ATTESTATION_REF_INVALID",
+        ),
+        (
+            _vnext_codegen_runtime_contract(observed_at=101.0, expires_at=200.0),
+            "NODE_SNAPSHOT_FROM_FUTURE",
+        ),
+        (
+            _vnext_codegen_runtime_contract(observed_at=1.0, expires_at=99.0),
+            "NODE_SNAPSHOT_EXPIRED",
+        ),
+        (
+            _vnext_codegen_runtime_contract(observed_at=1.0, expires_at=4002.0),
+            "VNEXT_CODEGEN_NODE_TTL_OVERLONG",
+        ),
+    ),
+)
+def test_vnext_green_codegen_runtime_contract_failures_close_before_backend(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    contract: str,
+    reason: str,
+) -> None:
+    monkeypatch.setenv(runner.RUNNER_VNEXT_MODE_ENV, "green_canary")
+    monkeypatch.setenv(runner.CODEGEN_BOOKKEEPING_ROOT_ENV, str(tmp_path / "state"))
+    if contract:
+        monkeypatch.setenv(runner.RUNNER_VNEXT_CODEGEN_RUNTIME_CONTRACT_ENV, contract)
+    else:
+        monkeypatch.delenv(runner.RUNNER_VNEXT_CODEGEN_RUNTIME_CONTRACT_ENV, raising=False)
+    monkeypatch.setattr(runner.time, "time", lambda: 100.0)
+    legacy = mock.Mock(side_effect=AssertionError("backend must not run"))
+    monkeypatch.setattr(runner, "_run_legacy_codex_task", legacy)
+    prepare = mock.Mock(side_effect=AssertionError("prepare must not run"))
+    monkeypatch.setattr(runner, "prepare_green_authority", prepare)
+
+    code, output = runner.run_codex_task(
+        _vnext_codegen_task_content(),
+        str(tmp_path),
+    )
+
+    assert code == 1
+    assert "RESULT: BLOCKED" in output
+    assert reason in output
+    legacy.assert_not_called()
+    prepare.assert_not_called()
+
+
 def test_process_issue_vnext_canary_block_has_zero_executor_side_effects(tmp_path: Path) -> None:
     issue = {
         "number": 1721,
