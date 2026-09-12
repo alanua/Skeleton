@@ -1031,6 +1031,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "verified_base_sha",
         "validation_base_ref",
         "validation_base_sha",
+        "validation_allowed_file",
+        "validation_allowed_files_count",
         "validation_changed_file",
         "validation_changed_files_count",
         "validation_checkout_head_sha",
@@ -1224,6 +1226,7 @@ class PrBranchValidationRequest:
     expected_head_sha: str | None
     expected_base_sha: str
     profile: str
+    allowed_files: frozenset[str]
 
 
 @dataclass(frozen=True)
@@ -10642,6 +10645,7 @@ def _pr_branch_validation_metadata(
     expected_head_sha = _body_field(metadata, "Expected Head SHA")
     expected_base_sha = _body_field(metadata, "Expected Base SHA")
     profile = _body_field(metadata, "Validation Profile") or "full_pytest"
+    allowed_files, allowed_files_reason = _issue_publish_allowed_files(metadata)
     if repository not in ALLOWED_TARGET_REPOSITORIES:
         return None, "unsupported_repository"
     if not isinstance(pr_number, str) or not re.fullmatch(r"[1-9]\d*", pr_number):
@@ -10657,6 +10661,8 @@ def _pr_branch_validation_metadata(
         return None, "invalid_expected_base_sha"
     if profile not in PR_BRANCH_VALIDATION_PROFILES:
         return None, "unsupported_validation_profile"
+    if allowed_files_reason is not None:
+        return None, allowed_files_reason
     return (
         PrBranchValidationRequest(
             repository=repository,
@@ -10668,6 +10674,7 @@ def _pr_branch_validation_metadata(
             ),
             expected_base_sha=expected_base_sha.lower(),
             profile=profile,
+            allowed_files=allowed_files,
         ),
         None,
     )
@@ -10951,6 +10958,7 @@ def _validate_pr_branch_continuation_body(
     base_sha: str,
     source_issue: int,
     source_repository: str,
+    allowed_files: tuple[str, ...],
     idempotency_key: str,
 ) -> str:
     return "\n".join(
@@ -10959,7 +10967,7 @@ def _validate_pr_branch_continuation_body(
             "privacy_boundary: PUBLIC_SAFE_QUEUE_AND_PR_METADATA_ONLY",
             f"idempotency_key: {idempotency_key}",
             "allowed_files:",
-            "  - scripts/runner_poll_github_tasks.py",
+            *(f"  - {path}" for path in allowed_files),
             "",
             f"Mode: {RUNTIME_MAINTENANCE_MODE}",
             f"Maintenance Task ID: {VALIDATE_PR_BRANCH}",
@@ -11053,6 +11061,70 @@ def _create_validation_continuation_issue(
     return int(match.group("number")) if match is not None else None
 
 
+def _get_pr_branch_validation_file_paths(
+    repository: str, pr_number: int
+) -> tuple[str, ...]:
+    if repository not in ALLOWED_TARGET_REPOSITORIES:
+        raise RuntimeError("PR file metadata repository not allowed")
+    if not isinstance(pr_number, int) or pr_number <= 0:
+        raise RuntimeError("PR file metadata number malformed")
+    files: list[str] = []
+    seen: set[str] = set()
+    max_pages = 30
+    for page in range(1, max_pages + 1):
+        code, output = run_command(
+            [
+                "gh",
+                "api",
+                "--method",
+                "GET",
+                f"repos/{repository}/pulls/{pr_number}/files",
+                "-f",
+                "per_page=100",
+                "-f",
+                f"page={page}",
+            ]
+        )
+        if code != 0:
+            raise RuntimeError("PR file metadata read failed")
+        parsed = json.loads(output or "[]")
+        if not isinstance(parsed, list):
+            raise RuntimeError("PR file metadata returned non-list JSON")
+        for file_info in parsed:
+            if not isinstance(file_info, dict):
+                raise RuntimeError("produced_pr_changed_files_malformed")
+            path = file_info.get("filename")
+            if not isinstance(path, str):
+                path = file_info.get("path")
+            if not isinstance(path, str) or not path:
+                raise RuntimeError("produced_pr_changed_files_malformed")
+            if not _safe_issue_publish_file_path(path):
+                raise RuntimeError("produced_pr_changed_files_unsafe")
+            if path in seen:
+                raise RuntimeError("produced_pr_changed_files_duplicate")
+            seen.add(path)
+            files.append(path)
+        if len(parsed) < 100:
+            break
+    else:
+        raise RuntimeError("PR file metadata pagination incomplete")
+    if not files:
+        raise RuntimeError("produced_pr_changed_files_missing")
+    return tuple(sorted(files))
+
+
+def _pr_branch_validation_binding(
+    pr_state: dict[str, Any],
+) -> tuple[str, str, str, str, str]:
+    return (
+        str(pr_state.get("state") or ""),
+        str(pr_state.get("baseRefName") or ""),
+        str(pr_state.get("baseRefOid") or "").lower(),
+        str(pr_state.get("headRefName") or ""),
+        str(pr_state.get("headRefOid") or "").lower(),
+    )
+
+
 def ensure_codegen_pr_validation_continuation(
     *,
     source_issue: int,
@@ -11098,6 +11170,13 @@ def ensure_codegen_pr_validation_continuation(
             and declared_head.lower() != head_sha
         ):
             raise RuntimeError("declared_existing_pr_head_stale")
+    pr_binding = _pr_branch_validation_binding(pr_state)
+    changed_files = _get_pr_branch_validation_file_paths(repository, pr_number)
+    reread_pr_state, _reread_source = _get_pr_branch_validation_state(
+        repository, pr_number
+    )
+    if _pr_branch_validation_binding(reread_pr_state) != pr_binding:
+        raise RuntimeError("produced_pr_state_drifted")
 
     idempotency_key = _continuation_issue_idempotency_key(
         repository, pr_number, head_sha, base_sha
@@ -11124,6 +11203,7 @@ def ensure_codegen_pr_validation_continuation(
         base_sha=base_sha,
         source_issue=source_issue,
         source_repository=_current_queue_repository(),
+        allowed_files=changed_files,
         idempotency_key=idempotency_key,
     )
     issue_number = _create_validation_continuation_issue(
@@ -11229,6 +11309,8 @@ def _pr_file_paths(pr_state: dict[str, Any]) -> list[str]:
     for file_info in files:
         if isinstance(file_info, dict) and isinstance(file_info.get("path"), str):
             paths.append(file_info["path"])
+        elif isinstance(file_info, dict) and isinstance(file_info.get("filename"), str):
+            paths.append(file_info["filename"])
     return paths
 
 
@@ -11631,14 +11713,19 @@ def _validation_read_command_value(command: list[str], cwd: Path) -> str:
 
 
 def _validation_changed_files(base_sha: str, cwd: Path) -> tuple[list[str], str | None]:
-    code, output = run_command(["git", "diff", "--name-only", base_sha, "HEAD", "--"], cwd=cwd)
+    code, output = run_command(
+        ["git", "diff", "--name-only", f"{base_sha}...HEAD", "--"], cwd=cwd
+    )
     if code != 0:
         return [], "changed_file_discovery_failed"
     files: list[str] = []
     for line in output.splitlines():
         safe_file = _safe_changed_file(line)
-        if safe_file is not None:
-            files.append(safe_file)
+        if safe_file is None:
+            if line.strip():
+                return [], "changed_file_discovery_unsafe"
+            continue
+        files.append(safe_file)
     return sorted(dict.fromkeys(files)), None
 
 
@@ -11775,7 +11862,7 @@ def _validation_profile_commands(
 
 def _validation_checkout_metadata_lines(
     validation_path: Path, base_ref: str, base_sha: str
-) -> tuple[list[str], str | None]:
+) -> tuple[list[str], str | None, list[str]]:
     changed_files, changed_files_reason = _validation_changed_files(
         base_sha, validation_path
     )
@@ -11783,7 +11870,7 @@ def _validation_checkout_metadata_lines(
         return [
             f"validation_base_ref={_validation_receipt_value(base_ref, limit=80)}",
             f"validation_base_sha={base_sha}",
-        ], changed_files_reason
+        ], changed_files_reason, []
     return [
         f"validation_checkout_head_sha={_validation_read_command_value(['git', 'rev-parse', 'HEAD'], validation_path)}",
         f"validation_base_ref={_validation_receipt_value(base_ref, limit=80)}",
@@ -11791,8 +11878,20 @@ def _validation_checkout_metadata_lines(
         f"validation_changed_files_count={len(changed_files)}",
         *(f"validation_changed_file={path}" for path in changed_files),
         f"python_version={_validation_receipt_value('.'.join(str(part) for part in sys.version_info[:3]), limit=40)}",
-        f"validation_pytest_version={_validation_read_command_value(['python3', '-m', 'pytest', '--version'], validation_path)}",
-    ], None
+    ], None, changed_files
+
+
+def _validation_allowed_files_match_lines(
+    allowed_files: frozenset[str], changed_files: list[str]
+) -> tuple[list[str], str | None]:
+    allowed_sorted = sorted(allowed_files)
+    lines = [
+        f"validation_allowed_files_count={len(allowed_sorted)}",
+        *(f"validation_allowed_file={path}" for path in allowed_sorted),
+    ]
+    if set(changed_files) != allowed_files:
+        return lines, "allowed_files_changed_files_mismatch"
+    return lines, None
 
 
 def validate_pr_branch(body: str) -> str:
@@ -11806,6 +11905,8 @@ def validate_pr_branch(body: str) -> str:
         f"repository={request.repository}",
         f"pull_request={request.pr_number}",
         f"validation_profile={request.profile}",
+        f"declared_allowed_files_count={len(request.allowed_files)}",
+        *(f"declared_allowed_file={path}" for path in sorted(request.allowed_files)),
     ]
     checkout_path, checkout_block_reason = _pr_branch_validation_checkout_path(
         request.repository
@@ -11972,7 +12073,7 @@ def validate_pr_branch(body: str) -> str:
             "not_met",
         )
 
-    metadata_lines, metadata_reason = _validation_checkout_metadata_lines(
+    metadata_lines, metadata_reason, validation_changed_files = _validation_checkout_metadata_lines(
         validation_path, base_ref, base_sha
     )
     status_lines.extend(metadata_lines)
@@ -11983,6 +12084,21 @@ def validate_pr_branch(body: str) -> str:
             [*status_lines, f"reason={metadata_reason}"],
             "not_met",
         )
+    allowed_lines, allowed_reason = _validation_allowed_files_match_lines(
+        request.allowed_files, validation_changed_files
+    )
+    status_lines.extend(allowed_lines)
+    if allowed_reason is not None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [*status_lines, f"reason={allowed_reason}"],
+            "not_met",
+        )
+    pytest_version = _validation_read_command_value(
+        ["python3", "-m", "pytest", "--version"], validation_path
+    )
+    status_lines.append(f"validation_pytest_version={pytest_version}")
     clean, initial_status = _validation_worktree_status(validation_path)
     status_lines.append(f"validation_initial_status={initial_status}")
     if not clean:
