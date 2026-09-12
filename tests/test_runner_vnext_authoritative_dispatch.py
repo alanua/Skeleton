@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import threading
 
 import pytest
 
@@ -14,6 +15,7 @@ from core.runner_vnext_authoritative_dispatch import (
 from core.runner_vnext_authority import (
     PrivilegedAuthorityInput,
     ROUTE_MERGE,
+    ROUTE_RUNTIME_ONLY,
     ROUTE_VALIDATION,
     RunnerVNextRuntimeConfig,
     bind_privileged_operation,
@@ -71,6 +73,26 @@ class _PrivilegedBackend:
             touched_resources=("protected:pr-10", "repo:alanua/Skeleton"),
             before_state_ref=self.target_state_ref,
             after_state_ref="git:" + "e" * 40,
+            validation_status="PASS",
+        )
+
+
+class _BlockingPrivilegedBackend:
+    def __init__(self, entered: threading.Event, release: threading.Event) -> None:
+        self.entered = entered
+        self.release = release
+
+    def execute(self, *, bound: object, broker_request: object) -> MechanicalResult:
+        assert broker_request.execution_authorized is True
+        self.entered.set()
+        if not self.release.wait(timeout=5.0):
+            raise AssertionError("test did not release privileged backend")
+        return MechanicalResult(
+            succeeded=True,
+            reason_code="EXECUTION_PASS",
+            touched_resources=tuple(bound.universal_task.target_resources),
+            before_state_ref=bound.target_state_ref,
+            after_state_ref="runtime:control-complete",
             validation_status="PASS",
         )
 
@@ -138,6 +160,26 @@ def _merge_bound():
     )
 
 
+def _control_bound():
+    return bind_privileged_operation(
+        route=ROUTE_RUNTIME_ONLY,
+        operation="control",
+        authority_input=PrivilegedAuthorityInput(
+            source_task_ref="issue:11",
+            target_state_ref="git:" + "c" * 40,
+            resources=("control:runner-vnext", "repo:alanua/Skeleton"),
+            required_capabilities=(
+                "repository_maintenance",
+                "diagnostic_read",
+                "subprocess_isolated",
+            ),
+            privacy=PrivacyClass.PUBLIC_SAFE,
+            operator_boundary_evidence=("approval:control-11",),
+            idempotency_seed="control:test",
+        ),
+    )
+
+
 def _merge_snapshot(bound: object) -> NodeCapabilitySnapshot:
     return NodeCapabilitySnapshot(
         node_id="node:runner-vnext-merge-runtime",
@@ -151,6 +193,22 @@ def _merge_snapshot(bound: object) -> NodeCapabilitySnapshot:
         observed_at=10.0,
         expires_at=50.0,
         attestation_ref="attestation:test:merge",
+    )
+
+
+def _control_snapshot(bound: object) -> NodeCapabilitySnapshot:
+    return NodeCapabilitySnapshot(
+        node_id="node:runner-vnext-control-runtime",
+        generation=1,
+        route_rank=30,
+        capabilities=tuple(bound.universal_task.required_capabilities),
+        supported_adapters=(bound.binding.adapter_id,),
+        supported_lanes=(Lane.CONTROL,),
+        privacy_classes=(PrivacyClass.PUBLIC_SAFE,),
+        resource_patterns=tuple(bound.universal_task.target_resources),
+        observed_at=10.0,
+        expires_at=50.0,
+        attestation_ref="attestation:test:control",
     )
 
 
@@ -302,3 +360,60 @@ def test_privileged_effect_requires_final_grant_and_terminal_replay_is_idempoten
     assert second.terminal_status == "COMPLETED"
     assert second.replayed is True
     assert backend.calls == 1
+
+
+def test_distinct_yellow_and_red_tasks_cannot_hold_privileged_authority_concurrently(
+    tmp_path,
+) -> None:
+    control = _control_bound()
+    merge = _merge_bound()
+    assert control.policy_decision.effect_class.value == "YELLOW"
+    assert merge.policy_decision.effect_class.value == "RED"
+    holder_stores = _stores(tmp_path)
+    contender_stores = _stores(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+    first_result: dict[str, object] = {}
+
+    def run_control() -> None:
+        try:
+            first_result["receipt"] = run_privileged_authoritative_dispatch(
+                bound=control,
+                node_snapshot=_control_snapshot(control),
+                stores=holder_stores,
+                target_state_verifier=_Verifier(control.target_state_ref),
+                backend=_BlockingPrivilegedBackend(entered, release),
+                evidence_refs=tuple(control.universal_task.operator_boundary_evidence),
+                fresh_authority=True,
+                now=20.0,
+                ttl_seconds=30.0,
+            )
+        except Exception as exc:  # pragma: no cover - surfaced in the main thread
+            first_result["error"] = exc
+
+    thread = threading.Thread(target=run_control)
+    thread.start()
+    try:
+        assert entered.wait(timeout=5.0)
+        with pytest.raises(RunnerVNextDispatchError) as exc:
+            run_privileged_authoritative_dispatch(
+                bound=merge,
+                node_snapshot=_merge_snapshot(merge),
+                stores=contender_stores,
+                target_state_verifier=_Verifier(merge.target_state_ref),
+                backend=_ExplodingBackend(),
+                evidence_refs=tuple(merge.universal_task.operator_boundary_evidence),
+                fresh_authority=True,
+                now=20.0,
+                ttl_seconds=30.0,
+            )
+        assert exc.value.reason_code == "LEASE_CONFLICT_ACTIVE_OWNER"
+    finally:
+        release.set()
+        thread.join(timeout=5.0)
+        assert not thread.is_alive()
+        contender_stores.close()
+        holder_stores.close()
+
+    assert "error" not in first_result
+    assert first_result["receipt"].lease_released is True

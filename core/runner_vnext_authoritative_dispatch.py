@@ -23,7 +23,7 @@ from core.runner_vnext_execution import (
     GreenExecutionResult,
 )
 from core.runner_vnext_execution_gate import GreenExecutionGrant, TargetStateVerifier
-from core.runner_vnext_leases import LeaseError
+from core.runner_vnext_leases import Lane, LeaseError
 from core.runner_vnext_ledger import LedgerEvent, LedgerError, OperationIdentity
 from core.runner_vnext_pep import AuthorityClaim, AuthorityVerifier, PrivilegedBrokerRequest
 from core.runner_vnext_routing import NodeCapabilityRegistry, NodeCapabilitySnapshot, RoutePlanner
@@ -34,6 +34,9 @@ class RunnerVNextDispatchError(RuntimeError):
     def __init__(self, reason_code: str) -> None:
         super().__init__(reason_code)
         self.reason_code = reason_code
+
+
+PRIVILEGED_GLOBAL_LEASE_SCOPE_KEY = "authority:privileged-global"
 
 
 @dataclass(frozen=True)
@@ -239,9 +242,9 @@ def run_privileged_authoritative_dispatch(
         lease = stores.scheduler.reserve(
             LaneRequest(
                 task_id=bound.universal_task.task_id,
-                lane=bound.binding.lane,
+                lane=Lane.PRIVILEGED,
                 owner=node_snapshot.node_id,
-                scope_key=bound.lease_scope_key,
+                scope_key=PRIVILEGED_GLOBAL_LEASE_SCOPE_KEY,
                 ttl_seconds=ttl_seconds,
                 target_state_ref=bound.target_state_ref,
             )
@@ -291,8 +294,8 @@ def run_privileged_authoritative_dispatch(
             validation_status=result.validation_status,
         )
         released = stores.scheduler.release_exact(
-            lane=bound.binding.lane,
-            scope_key=bound.lease_scope_key,
+            lane=Lane.PRIVILEGED,
+            scope_key=PRIVILEGED_GLOBAL_LEASE_SCOPE_KEY,
             owner=node_snapshot.node_id,
             fence_token=lease.fence_token,
         )
