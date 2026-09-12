@@ -89,14 +89,27 @@ from core.runner_vnext_cutover_bridge import (
     evaluate_vnext_cutover_bridge,
 )
 from core.runner_vnext_authority import (
+    DISPATCH_TASK_CODEGEN as VNEXT_DISPATCH_TASK_CODEGEN,
+    DISPATCH_TASK_CONTROL as VNEXT_DISPATCH_TASK_CONTROL,
+    DISPATCH_TASK_MERGE as VNEXT_DISPATCH_TASK_MERGE,
+    DISPATCH_TASK_PUBLICATION as VNEXT_DISPATCH_TASK_PUBLICATION,
+    DISPATCH_TASK_RECOVERY as VNEXT_DISPATCH_TASK_RECOVERY,
+    DISPATCH_TASK_VALIDATION as VNEXT_DISPATCH_TASK_VALIDATION,
     ROUTE_CODE_GENERATION as VNEXT_ROUTE_CODE_GENERATION,
+    ROUTE_MERGE as VNEXT_ROUTE_MERGE,
+    ROUTE_PUBLISH_ONLY as VNEXT_ROUTE_PUBLISH_ONLY,
+    ROUTE_RECOVERY as VNEXT_ROUTE_RECOVERY,
+    ROUTE_RUNTIME_ONLY as VNEXT_ROUTE_RUNTIME_ONLY,
+    ROUTE_VALIDATION as VNEXT_ROUTE_VALIDATION,
     RunnerVNextAuthorityError,
     RunnerVNextRuntimeConfig,
+    authoritative_dispatch_inventory_proof,
     authority_receipt_from_bound,
     bind_runner_operation,
     build_authoritative_stores,
     grant_green_authority,
     prepare_green_authority,
+    production_dispatch_route_binding,
 )
 from core.runner_vnext_contracts import PrivacyClass
 from core.runner_vnext_execution import GreenExecutionError, GreenExecutionLifecycle
@@ -281,6 +294,20 @@ RUNNER_VNEXT_CODEGEN_CAPABILITIES = (
     "repository_write_allowlisted",
     "test_execution",
 )
+RUNNER_VNEXT_NODE_IDS_BY_LANE = {
+    Lane.CODEGEN: RUNNER_VNEXT_CODEGEN_NODE_ID,
+    Lane.VALIDATE: "node:runner-vnext-validation-runtime",
+    Lane.PUBLISH: "node:runner-vnext-publication-runtime",
+    Lane.CONTROL: "node:runner-vnext-control-runtime",
+    Lane.MERGE: "node:runner-vnext-merge-runtime",
+}
+RUNNER_VNEXT_ROUTE_RANKS_BY_LANE = {
+    Lane.CODEGEN: RUNNER_VNEXT_CODEGEN_ROUTE_RANK,
+    Lane.VALIDATE: 10,
+    Lane.PUBLISH: 20,
+    Lane.CONTROL: 30,
+    Lane.MERGE: 40,
+}
 _RUNNER_VNEXT_NODE_SNAPSHOT_KEYS = frozenset(
     (
         "schema",
@@ -3821,6 +3848,39 @@ def runner_task_route(
     return ROUTE_CODE_GENERATION
 
 
+def runner_vnext_authoritative_dispatch_class(
+    *,
+    route: str,
+    maintenance_task_id: str | None,
+    merge_request: TelegramApprovedPrMergeRequest | None,
+) -> tuple[str, str]:
+    if merge_request is not None:
+        return VNEXT_ROUTE_MERGE, VNEXT_DISPATCH_TASK_MERGE
+    if maintenance_task_id == VALIDATE_PR_BRANCH:
+        return VNEXT_ROUTE_VALIDATION, VNEXT_DISPATCH_TASK_VALIDATION
+    if maintenance_task_id in PUBLISH_ONLY_MAINTENANCE_TASK_IDS:
+        return VNEXT_ROUTE_PUBLISH_ONLY, VNEXT_DISPATCH_TASK_PUBLICATION
+    if maintenance_task_id in RECOVERY_ONLY_MAINTENANCE_TASK_IDS:
+        return VNEXT_ROUTE_RECOVERY, VNEXT_DISPATCH_TASK_RECOVERY
+    if route == ROUTE_RUNTIME_ONLY:
+        return VNEXT_ROUTE_RUNTIME_ONLY, VNEXT_DISPATCH_TASK_CONTROL
+    if route == ROUTE_CODE_GENERATION:
+        return VNEXT_ROUTE_CODE_GENERATION, VNEXT_DISPATCH_TASK_CODEGEN
+    raise RunnerVNextAuthorityError("VNEXT_AUTHORITY_DISPATCH_ROUTE_UNMAPPED_FAIL_CLOSED")
+
+
+def runner_vnext_authoritative_dispatch_inventory() -> dict[str, object]:
+    active_dispatch = {
+        VNEXT_ROUTE_CODE_GENERATION: VNEXT_DISPATCH_TASK_CODEGEN,
+        VNEXT_ROUTE_VALIDATION: VNEXT_DISPATCH_TASK_VALIDATION,
+        VNEXT_ROUTE_PUBLISH_ONLY: VNEXT_DISPATCH_TASK_PUBLICATION,
+        VNEXT_ROUTE_RUNTIME_ONLY: VNEXT_DISPATCH_TASK_CONTROL,
+        VNEXT_ROUTE_RECOVERY: VNEXT_DISPATCH_TASK_RECOVERY,
+        VNEXT_ROUTE_MERGE: VNEXT_DISPATCH_TASK_MERGE,
+    }
+    return authoritative_dispatch_inventory_proof(active_dispatch)
+
+
 def _comment_author_login(comment: Mapping[str, Any]) -> str | None:
     author = comment.get("author")
     if isinstance(author, Mapping):
@@ -4363,6 +4423,54 @@ def evaluate_runner_vnext_cutover_hook(
         return True, None
 
     if runner_task is None:
+        if normalized_mode == VNEXT_MODE_AUTHORITATIVE:
+            try:
+                production_route, dispatch_task_class = (
+                    runner_vnext_authoritative_dispatch_class(
+                        route=route,
+                        maintenance_task_id=maintenance_task_id,
+                        merge_request=merge_request,
+                    )
+                )
+                binding = production_dispatch_route_binding(
+                    production_route=production_route,
+                    dispatch_task_class=dispatch_task_class,
+                )
+                inventory = runner_vnext_authoritative_dispatch_inventory()
+            except RunnerVNextAuthorityError as exc:
+                LAST_RUNNER_VNEXT_RECEIPT = {
+                    "schema": "skeleton.runner_vnext_cutover_bridge.v1",
+                    "mode": normalized_mode,
+                    "status": "authoritative_block",
+                    "reason_code": exc.reason_code,
+                    "canary_eligible": False,
+                    "allow_legacy_execution": False,
+                    "side_effects_executed": False,
+                }
+                return False, exc.reason_code
+            LAST_RUNNER_VNEXT_RECEIPT = {
+                "schema": "skeleton.runner_vnext_cutover_bridge.v1",
+                "mode": normalized_mode,
+                "status": "authoritative_route_bound",
+                "reason_code": "VNEXT_AUTHORITATIVE_ROUTE_BOUND_NOT_EXECUTED",
+                "canary_eligible": False,
+                "allow_legacy_execution": False,
+                "side_effects_executed": False,
+                "route": binding.route,
+                "operation": binding.operation,
+                "lane": binding.lane.value,
+                "adapter_id": binding.adapter_id,
+                "requires_operator": binding.requires_operator,
+                "requires_fresh_operator_evidence": binding.requires_fresh_operator_evidence,
+                "route_inventory": inventory,
+            }
+            if binding.requires_fresh_operator_evidence and merge_request is None:
+                LAST_RUNNER_VNEXT_RECEIPT["status"] = "authoritative_block"
+                LAST_RUNNER_VNEXT_RECEIPT["reason_code"] = (
+                    "VNEXT_AUTHORITY_OPERATOR_EVIDENCE_REQUIRED"
+                )
+                return False, "VNEXT_AUTHORITY_OPERATOR_EVIDENCE_REQUIRED"
+            return True, None
         LAST_RUNNER_VNEXT_RECEIPT = {
             "schema": "skeleton.runner_vnext_cutover_bridge.v1",
             "mode": normalized_mode,
@@ -4405,9 +4513,18 @@ def evaluate_runner_vnext_cutover_hook(
     LAST_RUNNER_VNEXT_RECEIPT = decision.to_public_mapping()
     if normalized_mode == VNEXT_MODE_AUTHORITATIVE:
         if decision.status == "authoritative_green_ready":
+            try:
+                inventory = runner_vnext_authoritative_dispatch_inventory()
+            except RunnerVNextAuthorityError as exc:
+                LAST_RUNNER_VNEXT_RECEIPT["status"] = "authoritative_block"
+                LAST_RUNNER_VNEXT_RECEIPT["reason_code"] = exc.reason_code
+                LAST_RUNNER_VNEXT_RECEIPT["allow_legacy_execution"] = False
+                return False, exc.reason_code
+            LAST_RUNNER_VNEXT_RECEIPT["route_inventory"] = inventory
             return True, None
         if decision.reason_code == "VNEXT_AUTHORITATIVE_NOT_ELIGIBLE":
-            return True, None
+            LAST_RUNNER_VNEXT_RECEIPT["allow_legacy_execution"] = False
+            return False, decision.reason_code
         return False, decision.reason_code
     if decision.allow_legacy_execution:
         return True, None
@@ -4483,36 +4600,40 @@ def _runner_vnext_nodes(
     bound: object,
     now: float,
 ) -> NodeCapabilityRegistry:
+    binding = getattr(bound, "binding")
+    expected_lane = getattr(binding, "lane")
+    expected_adapter = getattr(binding, "adapter_id")
     expected_resources = getattr(getattr(bound, "universal_task"), "target_resources")
     expected_capabilities = getattr(getattr(bound, "universal_task"), "required_capabilities")
+    expected_node_id = RUNNER_VNEXT_NODE_IDS_BY_LANE.get(expected_lane)
+    expected_route_rank = RUNNER_VNEXT_ROUTE_RANKS_BY_LANE.get(expected_lane)
+    if expected_node_id is None or expected_route_rank is None:
+        raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_LANE_INVALID")
     payload = _runner_vnext_external_snapshot_payload()
     if payload["schema"] != RUNNER_VNEXT_NODE_SNAPSHOT_SCHEMA:
         raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_SCHEMA_INVALID")
-    if payload["node_id"] != RUNNER_VNEXT_CODEGEN_NODE_ID:
+    if payload["node_id"] != expected_node_id:
         raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_NODE_INVALID")
     generation = payload["generation"]
     if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
         raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_GENERATION_INVALID")
-    if payload["route_rank"] != RUNNER_VNEXT_CODEGEN_ROUTE_RANK:
+    if payload["route_rank"] != expected_route_rank:
         raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_ROUTE_RANK_INVALID")
 
     capabilities = _runner_vnext_string_tuple(
         payload["capabilities"], reason_code="VNEXT_NODE_SNAPSHOT_CAPABILITIES_INVALID"
     )
-    if (
-        capabilities != RUNNER_VNEXT_CODEGEN_CAPABILITIES
-        or capabilities != tuple(expected_capabilities)
-    ):
+    if capabilities != tuple(expected_capabilities):
         raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_CAPABILITIES_WIDENED")
     adapters = _runner_vnext_string_tuple(
         payload["supported_adapters"], reason_code="VNEXT_NODE_SNAPSHOT_ADAPTER_INVALID"
     )
-    if adapters != ("adapter:repo-codegen",):
+    if adapters != (expected_adapter,):
         raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_ADAPTER_INVALID")
     lanes = _runner_vnext_string_tuple(
         payload["supported_lanes"], reason_code="VNEXT_NODE_SNAPSHOT_LANE_INVALID"
     )
-    if lanes != (Lane.CODEGEN.name,):
+    if lanes != (expected_lane.name,):
         raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_LANE_INVALID")
     privacy_classes = _runner_vnext_string_tuple(
         payload["privacy_classes"], reason_code="VNEXT_NODE_SNAPSHOT_PRIVACY_INVALID"
@@ -4552,12 +4673,12 @@ def _runner_vnext_nodes(
     try:
         registry.register(
             NodeCapabilitySnapshot(
-                node_id=RUNNER_VNEXT_CODEGEN_NODE_ID,
+                node_id=expected_node_id,
                 generation=generation,
-                route_rank=RUNNER_VNEXT_CODEGEN_ROUTE_RANK,
+                route_rank=expected_route_rank,
                 capabilities=capabilities,
                 supported_adapters=adapters,
-                supported_lanes=(Lane.CODEGEN,),
+                supported_lanes=(expected_lane,),
                 privacy_classes=(PrivacyClass.PUBLIC_SAFE,),
                 resource_patterns=resource_patterns,
                 observed_at=observed_at,

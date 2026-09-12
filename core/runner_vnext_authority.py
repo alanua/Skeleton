@@ -44,6 +44,13 @@ ROUTE_RUNTIME_ONLY = "runtime_only"
 ROUTE_RECOVERY = "recovery"
 ROUTE_MERGE = "merge"
 
+DISPATCH_TASK_CODEGEN = "codegen"
+DISPATCH_TASK_VALIDATION = "validation"
+DISPATCH_TASK_PUBLICATION = "publication"
+DISPATCH_TASK_CONTROL = "control"
+DISPATCH_TASK_RECOVERY = "recovery"
+DISPATCH_TASK_MERGE = "merge"
+
 
 class RunnerVNextAuthorityError(RuntimeError):
     def __init__(self, reason_code: str) -> None:
@@ -228,6 +235,15 @@ _ROUTE_BINDINGS: Mapping[tuple[str, str], RouteAuthorityBinding] = MappingProxyT
     ),
 })
 
+_PRODUCTION_DISPATCH_BINDINGS: Mapping[tuple[str, str], tuple[str, str]] = MappingProxyType({
+    (ROUTE_CODE_GENERATION, DISPATCH_TASK_CODEGEN): (ROUTE_CODE_GENERATION, "codegen"),
+    (ROUTE_VALIDATION, DISPATCH_TASK_VALIDATION): (ROUTE_VALIDATION, "validation"),
+    (ROUTE_PUBLISH_ONLY, DISPATCH_TASK_PUBLICATION): (ROUTE_PUBLISH_ONLY, "publication"),
+    (ROUTE_RUNTIME_ONLY, DISPATCH_TASK_CONTROL): (ROUTE_RUNTIME_ONLY, "control"),
+    (ROUTE_RECOVERY, DISPATCH_TASK_RECOVERY): (ROUTE_RECOVERY, "recovery"),
+    (ROUTE_MERGE, DISPATCH_TASK_MERGE): (ROUTE_MERGE, "merge"),
+})
+
 
 def authoritative_route_inventory() -> tuple[RouteAuthorityBinding, ...]:
     return tuple(_ROUTE_BINDINGS[key] for key in sorted(_ROUTE_BINDINGS))
@@ -251,6 +267,47 @@ def authoritative_route_inventory_proof() -> dict[str, object]:
             }
             for binding in routes
         ],
+    }
+
+
+def production_dispatch_route_binding(
+    *,
+    production_route: str,
+    dispatch_task_class: str,
+) -> RouteAuthorityBinding:
+    mapped = _PRODUCTION_DISPATCH_BINDINGS.get((production_route, dispatch_task_class))
+    if mapped is None:
+        raise RunnerVNextAuthorityError("VNEXT_AUTHORITY_DISPATCH_ROUTE_UNMAPPED_FAIL_CLOSED")
+    return route_binding(*mapped)
+
+
+def authoritative_dispatch_inventory_proof(
+    active_dispatch: Mapping[str, str],
+) -> dict[str, object]:
+    if not active_dispatch:
+        raise RunnerVNextAuthorityError("VNEXT_AUTHORITY_DISPATCH_INVENTORY_EMPTY")
+    entries: list[dict[str, object]] = []
+    for production_route, dispatch_task_class in sorted(active_dispatch.items()):
+        binding = production_dispatch_route_binding(
+            production_route=production_route,
+            dispatch_task_class=dispatch_task_class,
+        )
+        entries.append({
+            "production_route": production_route,
+            "dispatch_task_class": dispatch_task_class,
+            "route": binding.route,
+            "operation": binding.operation,
+            "lane": binding.lane.value,
+            "adapter_id": binding.adapter_id,
+            "requires_operator": binding.requires_operator,
+            "requires_fresh_operator_evidence": binding.requires_fresh_operator_evidence,
+        })
+    return {
+        "schema": "skeleton.runner_vnext_authoritative_dispatch_inventory.v1",
+        "authoritative_mode": AUTHORITATIVE_MODE,
+        "legacy_decision_fallback": False,
+        "dispatch_count": len(entries),
+        "dispatch": entries,
     }
 
 

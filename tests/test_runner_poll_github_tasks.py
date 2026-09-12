@@ -5484,7 +5484,7 @@ def test_vnext_authoritative_hook_exact_green_ready(monkeypatch: pytest.MonkeyPa
     assert runner.LAST_RUNNER_VNEXT_RECEIPT["allow_legacy_execution"] is False
 
 
-def test_vnext_authoritative_protected_codegen_stays_legacy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_vnext_authoritative_protected_codegen_fails_closed_without_legacy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(runner.RUNNER_VNEXT_MODE_ENV, "authoritative")
     monkeypatch.setattr(
         runner,
@@ -5498,8 +5498,66 @@ def test_vnext_authoritative_protected_codegen_stays_legacy_path(monkeypatch: py
         maintenance_task_id=None, runner_task=task, merge_request=None,
     )
 
-    assert allowed is True and reason is None
+    assert allowed is False
+    assert reason == "VNEXT_AUTHORITATIVE_NOT_ELIGIBLE"
     assert runner.LAST_RUNNER_VNEXT_RECEIPT["status"] == "authoritative_block"
+    assert runner.LAST_RUNNER_VNEXT_RECEIPT["allow_legacy_execution"] is False
+
+
+def test_vnext_authoritative_validation_route_is_bound_to_validate_lane(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(runner.RUNNER_VNEXT_MODE_ENV, "authoritative")
+
+    allowed, reason = runner.evaluate_runner_vnext_cutover_hook(
+        issue_number=3951,
+        issue_body="",
+        route=runner.ROUTE_RUNTIME_ONLY,
+        maintenance_task_id=runner.VALIDATE_PR_BRANCH,
+        runner_task=None,
+        merge_request=None,
+    )
+
+    assert allowed is True and reason is None
+    assert runner.LAST_RUNNER_VNEXT_RECEIPT["status"] == "authoritative_route_bound"
+    assert runner.LAST_RUNNER_VNEXT_RECEIPT["operation"] == "validation"
+    assert runner.LAST_RUNNER_VNEXT_RECEIPT["lane"] == "validate"
+    assert runner.LAST_RUNNER_VNEXT_RECEIPT["allow_legacy_execution"] is False
+    assert runner.LAST_RUNNER_VNEXT_RECEIPT["route_inventory"]["legacy_decision_fallback"] is False
+
+
+def test_vnext_authoritative_publication_route_is_bound_to_publish_lane(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(runner.RUNNER_VNEXT_MODE_ENV, "authoritative")
+
+    allowed, reason = runner.evaluate_runner_vnext_cutover_hook(
+        issue_number=3951,
+        issue_body="",
+        route=runner.ROUTE_PUBLISH_ONLY,
+        maintenance_task_id=runner.PUBLISH_ISSUE_WORKTREE_PR,
+        runner_task=None,
+        merge_request=None,
+    )
+
+    assert allowed is True and reason is None
+    assert runner.LAST_RUNNER_VNEXT_RECEIPT["operation"] == "publication"
+    assert runner.LAST_RUNNER_VNEXT_RECEIPT["lane"] == "publish"
+    assert runner.LAST_RUNNER_VNEXT_RECEIPT["allow_legacy_execution"] is False
+
+
+def test_vnext_authoritative_control_route_is_bound_to_control_lane(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(runner.RUNNER_VNEXT_MODE_ENV, "authoritative")
+
+    allowed, reason = runner.evaluate_runner_vnext_cutover_hook(
+        issue_number=3951,
+        issue_body="",
+        route=runner.ROUTE_RUNTIME_ONLY,
+        maintenance_task_id=runner.CHECK_SKELETON_FRESHNESS,
+        runner_task=None,
+        merge_request=None,
+    )
+
+    assert allowed is True and reason is None
+    assert runner.LAST_RUNNER_VNEXT_RECEIPT["operation"] == "control"
+    assert runner.LAST_RUNNER_VNEXT_RECEIPT["lane"] == "control"
+    assert runner.LAST_RUNNER_VNEXT_RECEIPT["allow_legacy_execution"] is False
 
 
 def test_authoritative_codegen_runs_mechanics_once_after_grant(
