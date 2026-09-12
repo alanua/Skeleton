@@ -26,12 +26,12 @@ ROUTE_RANKS = {
     "control": 30,
     "merge": 40,
 }
-ADAPTERS = {
-    "codegen": "adapter:repo-codegen",
-    "validate": "adapter:repo-validation",
-    "publish": "adapter:draft-publication",
-    "control": "adapter:runtime-control",
-    "merge": "adapter:exact-operator-merge",
+ALLOWED_ADAPTERS = {
+    "codegen": frozenset(("adapter:repo-codegen",)),
+    "validate": frozenset(("adapter:repo-validation",)),
+    "publish": frozenset(("adapter:draft-publication",)),
+    "control": frozenset(("adapter:runtime-control", "adapter:operation-recovery")),
+    "merge": frozenset(("adapter:exact-operator-merge",)),
 }
 LANE_CAPABILITIES = {
     "codegen": frozenset(("repository_read", "repository_write_allowlisted", "test_execution")),
@@ -134,7 +134,7 @@ def build_snapshot(
 ) -> dict[str, object]:
     if lane not in NODE_IDS:
         raise ValueError("attestor_lane_invalid")
-    if adapter != ADAPTERS[lane]:
+    if adapter not in ALLOWED_ADAPTERS[lane]:
         raise ValueError("attestor_adapter_invalid")
     if not capabilities or len(set(capabilities)) != len(capabilities):
         raise ValueError("attestor_capabilities_invalid")
