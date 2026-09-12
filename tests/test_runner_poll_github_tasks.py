@@ -3611,6 +3611,65 @@ def test_update_existing_pr_process_publishes_same_pr_and_queues_validation(
     assert f"validation_head_sha={post_head}" in report
 
 
+def test_update_existing_pr_process_passes_dirty_continuation_gate(
+    tmp_path: Path,
+) -> None:
+    issue_path = tmp_path / "issue-2749"
+    issue_path.mkdir()
+    body = "\n".join(
+        (
+            _codegen_update_existing_pr_issue_body(
+                pr_number=2749,
+                allowed_files=("scripts/runner_poll_github_tasks.py",),
+            ),
+            "Retry Override: retained-dirty-safe-retry",
+            "Retry Reason: retained dirty same issue continuation",
+        )
+    )
+    issue = {
+        "number": 2749,
+        "title": "Continue existing PR",
+        "body": body,
+        "comments": [_prior_executor_invocation_blocked_comment(body)],
+        "labels": [runner.LABEL_READY],
+    }
+
+    with mock.patch.object(runner, "set_issue_label"), mock.patch.object(
+        runner,
+        "prepare_issue_worktree_from_existing_pr_head",
+        return_value=(0, "ready", issue_path),
+    ) as prepare, mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, "codex output")
+    ), mock.patch.object(
+        runner, "finalize_existing_pr_success", return_value="DONE report"
+    ), mock.patch.object(
+        runner, "cleanup_issue_worktree", return_value=(0, "")
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "record_runner_task_picked_up", return_value=None
+    ), mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ), mock.patch.object(
+        runner, "maybe_replenish_runner_queue_after_completion", return_value=True
+    ):
+        runner.process_issue(issue, workdir=str(tmp_path))
+
+    gate = prepare.call_args.kwargs["continuation_gate"]
+    assert gate == runner.CodegenDirtyContinuationGate(
+        repository=runner.REPO,
+        source_repository=runner.REPO,
+        issue_number=2749,
+        expected_branch="runner/issue-2749",
+        allowed_files=frozenset({"scripts/runner_poll_github_tasks.py"}),
+        retry_decision="ALLOW_ONE_TIME_OVERRIDE",
+    )
+
+
 def _finalize_existing_pr_success_with_post_push_states(
     *,
     tmp_path: Path,
@@ -4368,6 +4427,201 @@ def test_prepare_issue_worktree_from_existing_pr_head_mismatch_before_mutation(
     assert path == worktree_root / "issue-1640"
     assert not path.exists()
     run.assert_not_called()
+
+
+def _existing_pr_retained_dirty_gate(
+    issue_number: int,
+    *,
+    allowed_files: frozenset[str] = frozenset({"scripts/runner_poll_github_tasks.py"}),
+) -> runner.CodegenDirtyContinuationGate:
+    return runner.CodegenDirtyContinuationGate(
+        repository=runner.REPO,
+        source_repository=runner.REPO,
+        issue_number=issue_number,
+        expected_branch=f"runner/issue-{issue_number}",
+        allowed_files=allowed_files,
+        retry_decision="ALLOW_ONE_TIME_OVERRIDE",
+    )
+
+
+def _clone_existing_pr_retained_worktree(
+    *,
+    seed: Path,
+    worktree_root: Path,
+    issue_number: int,
+    head_sha: str,
+    changed_files: tuple[str, ...] = ("scripts/runner_poll_github_tasks.py",),
+) -> Path:
+    issue_path = worktree_root / f"issue-{issue_number}"
+    assert (
+        runner.run_command(
+            [
+                "git",
+                "clone",
+                "--local",
+                "--no-hardlinks",
+                str(seed),
+                str(issue_path),
+            ]
+        )[0]
+        == 0
+    )
+    assert (
+        runner.run_command(
+            ["git", "checkout", "-B", f"runner/issue-{issue_number}", head_sha],
+            cwd=issue_path,
+        )[0]
+        == 0
+    )
+    assert (
+        runner.run_command(
+            [
+                "git",
+                "remote",
+                "set-url",
+                "origin",
+                f"https://github.com/{runner.REPO}.git",
+            ],
+            cwd=issue_path,
+        )[0]
+        == 0
+    )
+    for relative_path in changed_files:
+        path = issue_path / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"retained {relative_path}\n", encoding="utf-8")
+    return issue_path
+
+
+def test_prepare_issue_worktree_from_existing_pr_head_allows_gated_retained_dirty_same_issue(
+    tmp_path: Path,
+) -> None:
+    seed, main_sha, head_sha = _prepare_existing_pr_head_seed(tmp_path)
+    worktree_root = tmp_path / "worktrees"
+    issue_path = _clone_existing_pr_retained_worktree(
+        seed=seed,
+        worktree_root=worktree_root,
+        issue_number=1638,
+        head_sha=head_sha,
+    )
+    pr_state = {
+        "number": 1638,
+        "state": "OPEN",
+        "baseRefName": "main",
+        "baseRefOid": main_sha,
+        "headRefName": "runner/issue-1638",
+        "headRefOid": head_sha,
+    }
+    real_run_command = runner.run_command
+
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        assert command[1] not in {"fetch", "checkout", "reset", "clean", "stash"}
+        return real_run_command(command, cwd=cwd)
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(worktree_root)}, clear=True
+    ), mock.patch.object(
+        runner, "_get_pr_branch_validation_state", return_value=(pr_state, "gh")
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run
+    ):
+        code, output, path = runner.prepare_issue_worktree_from_existing_pr_head(
+            1638,
+            seed,
+            runner.CodegenExistingPrWorktreeRequest(
+                pr_number=1638,
+                expected_head_sha=head_sha,
+                expected_head_branch="runner/issue-1638",
+            ),
+            continuation_gate=_existing_pr_retained_dirty_gate(1638),
+        )
+
+    assert code == 0, output
+    assert path == issue_path
+    assert "retained_dirty_continuation_gate=allowed" in output
+    assert (path / "scripts" / "runner_poll_github_tasks.py").read_text(
+        encoding="utf-8"
+    ) == "retained scripts/runner_poll_github_tasks.py\n"
+
+
+def test_prepare_issue_worktree_from_existing_pr_head_dirty_without_gate_blocks(
+    tmp_path: Path,
+) -> None:
+    seed, main_sha, head_sha = _prepare_existing_pr_head_seed(tmp_path)
+    worktree_root = tmp_path / "worktrees"
+    _clone_existing_pr_retained_worktree(
+        seed=seed,
+        worktree_root=worktree_root,
+        issue_number=1638,
+        head_sha=head_sha,
+    )
+    pr_state = {
+        "number": 1638,
+        "state": "OPEN",
+        "baseRefName": "main",
+        "baseRefOid": main_sha,
+        "headRefName": "runner/issue-1638",
+        "headRefOid": head_sha,
+    }
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(worktree_root)}, clear=True
+    ), mock.patch.object(
+        runner, "_get_pr_branch_validation_state", return_value=(pr_state, "gh")
+    ):
+        code, output, _path = runner.prepare_issue_worktree_from_existing_pr_head(
+            1638,
+            seed,
+            runner.CodegenExistingPrWorktreeRequest(
+                pr_number=1638,
+                expected_head_sha=head_sha,
+                expected_head_branch="runner/issue-1638",
+            ),
+        )
+
+    assert code == 1
+    assert "reason=existing_worktree_dirty" in output
+    assert "reason=missing_explicit_retry_changed_condition_or_override" in output
+
+
+def test_prepare_issue_worktree_from_existing_pr_head_dirty_head_mismatch_blocks(
+    tmp_path: Path,
+) -> None:
+    seed, main_sha, head_sha = _prepare_existing_pr_head_seed(tmp_path)
+    worktree_root = tmp_path / "worktrees"
+    _clone_existing_pr_retained_worktree(
+        seed=seed,
+        worktree_root=worktree_root,
+        issue_number=1638,
+        head_sha=main_sha,
+    )
+    pr_state = {
+        "number": 1638,
+        "state": "OPEN",
+        "baseRefName": "main",
+        "baseRefOid": main_sha,
+        "headRefName": "runner/issue-1638",
+        "headRefOid": head_sha,
+    }
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(worktree_root)}, clear=True
+    ), mock.patch.object(
+        runner, "_get_pr_branch_validation_state", return_value=(pr_state, "gh")
+    ):
+        code, output, _path = runner.prepare_issue_worktree_from_existing_pr_head(
+            1638,
+            seed,
+            runner.CodegenExistingPrWorktreeRequest(
+                pr_number=1638,
+                expected_head_sha=head_sha,
+                expected_head_branch="runner/issue-1638",
+            ),
+            continuation_gate=_existing_pr_retained_dirty_gate(1638),
+        )
+
+    assert code == 1
+    assert "reason=retained_dirty_head_sha_mismatch" in output
 
 
 def test_prepare_target_worktree_uses_explicit_safe_base_and_matching_sha(
