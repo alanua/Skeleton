@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
+import jsonschema
 import pytest
 
 from core.runner_task import RunnerTask
@@ -22,6 +26,7 @@ from core.runner_vnext_ledger import OperationIdentity
 from core.runner_vnext_scheduler import LaneRequest
 
 BASE_SHA = "1" * 40
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def runner_task(
@@ -219,3 +224,37 @@ def test_authoritative_store_paths_fail_closed(
             ),
             clock=lambda: 100.0,
         )
+
+
+def test_execution_result_schema_allows_only_failed_zero_touched_resources() -> None:
+    schema = json.loads(
+        (ROOT / "schemas" / "runner_green_execution_result.schema.json").read_text()
+    )
+    base = {
+        "schema": "skeleton.runner_green_execution_result.v1",
+        "operation_id": "op:test",
+        "idempotency_key": "idem:test",
+        "adapter_id": "adapter:repo-codegen",
+        "target_state_ref": f"git:{BASE_SHA}",
+        "fence_token": 1,
+        "resources": [],
+        "effects": ["workspace_write"],
+        "reason_code": "EXECUTION_FAILED",
+        "before_state_ref": f"git:{BASE_SHA}",
+        "after_state_ref": f"git:{BASE_SHA}",
+        "validation_status": "FAIL",
+        "rollback_requested": False,
+    }
+    jsonschema.validate({**base, "outcome": "FAILED"}, schema)
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(
+            {
+                **base,
+                "outcome": "SUCCEEDED",
+                "validation_status": "PASS",
+                "reason_code": "EXECUTION_PASS",
+            },
+            schema,
+        )
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate({**base, "outcome": "PARTIAL"}, schema)
