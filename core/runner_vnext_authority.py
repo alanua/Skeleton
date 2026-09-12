@@ -668,9 +668,10 @@ def authority_receipt_from_bound(
         target_state_ref_hash=_text_hash(bound.target_state_ref),
         idempotency_key_hash=_text_hash(bound.operation_ir.idempotency_key),
         source_binding_hash=bound.source_binding_hash,
-        execution_authorized=effect_class is EffectClass.GREEN,
+        execution_authorized=False,
         privileged_broker_request=effect_class is not EffectClass.GREEN,
-        allow_legacy_mechanical_shell=effect_class is EffectClass.GREEN,
+        allow_legacy_mechanical_shell=False,
+        side_effects_executed=False,
     )
 
 

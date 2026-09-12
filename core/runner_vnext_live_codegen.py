@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
-from typing import Protocol
+from typing import Callable, Protocol
 
 from core.runner_gate import RunnerGate
 from core.runner_task import RunnerTask
@@ -38,6 +38,13 @@ class MechanicalCodegenBackend(Protocol):
     ) -> GreenExecutionResult: ...
 
 
+CodegenMechanics = Callable[[str, str, RunnerTask], tuple[int, str]]
+ChangedFilesReader = Callable[[str], tuple[str, ...]]
+ValidationCommandRunner = Callable[[tuple[str, ...], str], tuple[int, str]]
+WorkspaceStateReader = Callable[[str], str]
+CodegenStatusClassifier = Callable[[str, int], str]
+
+
 @dataclass(frozen=True)
 class LiveCodegenPlan:
     bound: BoundRunnerOperation
@@ -66,6 +73,73 @@ class CodegenBackendReceipt:
     adapter_id: str
     result: GreenExecutionResult
     publication_attempted: bool = False
+
+
+class PollerMechanicalCodegenBackend:
+    """Adapter from vNext GREEN grants to the existing bounded poller mechanics."""
+
+    def __init__(
+        self,
+        *,
+        task_content: str,
+        workdir: str,
+        run_mechanics: CodegenMechanics,
+        changed_files: ChangedFilesReader,
+        run_validation_command: ValidationCommandRunner,
+        workspace_state_ref: WorkspaceStateReader,
+        classify_mechanics_status: CodegenStatusClassifier,
+    ) -> None:
+        self._task_content = task_content
+        self._workdir = workdir
+        self._run_mechanics = run_mechanics
+        self._changed_files = changed_files
+        self._run_validation_command = run_validation_command
+        self._workspace_state_ref = workspace_state_ref
+        self._classify_mechanics_status = classify_mechanics_status
+
+    def run_codegen(
+        self,
+        *,
+        runner_task: RunnerTask,
+        source_task_ref: str,
+        grant: GreenExecutionGrant,
+    ) -> GreenExecutionResult:
+        if source_task_ref != compile_live_codegen_plan(
+            runner_task,
+            source_task_ref=source_task_ref,
+        ).source_task_ref:
+            raise RunnerVNextLiveCodegenError("LIVE_CODEGEN_SOURCE_TASK_REF_MISMATCH")
+        before_ref = self._workspace_state_ref(self._workdir)
+        code, output = self._run_mechanics(self._task_content, self._workdir, runner_task)
+        touched = tuple(f"repo:{path}" for path in self._changed_files(self._workdir))
+        mechanics_status = self._classify_mechanics_status(output, code)
+        validation_passed = False
+        if code == 0 and mechanics_status == "DONE" and touched:
+            validation_passed = self._run_exact_validation(runner_task)
+        after_ref = self._workspace_state_ref(self._workdir)
+        succeeded = code == 0 and mechanics_status == "DONE" and touched and validation_passed
+        return GreenExecutionResult(
+            operation_id=grant.operation_id,
+            idempotency_key=grant.idempotency_key,
+            adapter_id=grant.adapter_id,
+            target_state_ref=grant.target_state_ref,
+            fence_token=grant.fence_token,
+            resources=touched,
+            effects=grant.planner_envelope.effects,
+            outcome="SUCCEEDED" if succeeded else "FAILED",
+            reason_code="EXECUTION_PASS" if succeeded else "EXECUTION_FAILED",
+            before_state_ref=before_ref,
+            after_state_ref=after_ref,
+            validation_status="PASS" if succeeded else "FAIL",
+            rollback_requested=False,
+        )
+
+    def _run_exact_validation(self, runner_task: RunnerTask) -> bool:
+        for command in runner_task.validation_commands:
+            code, _output = self._run_validation_command(command, self._workdir)
+            if code != 0:
+                return False
+        return True
 
 
 class LiveCodegenAdapter(GreenAdapterExecutor):
@@ -114,6 +188,12 @@ def compile_live_codegen_plan(
         raise RunnerVNextLiveCodegenError("LIVE_CODEGEN_PUBLIC_REPOSITORY_PRIVACY_REQUIRED")
     if runner_task.task_kind != "code_edit":
         raise RunnerVNextLiveCodegenError("LIVE_CODEGEN_TASK_KIND_UNSUPPORTED")
+    if tuple(runner_task.requested_capabilities) != (
+        "repository_read",
+        "repository_write_allowlisted",
+        "test_execution",
+    ):
+        raise RunnerVNextLiveCodegenError("LIVE_CODEGEN_EXACT_CAPABILITIES_REQUIRED")
     gate = RunnerGate()
     if any(gate.is_protected_path(path) for path in runner_task.allowed_files):
         raise RunnerVNextLiveCodegenError("LIVE_CODEGEN_PROTECTED_TARGET")
