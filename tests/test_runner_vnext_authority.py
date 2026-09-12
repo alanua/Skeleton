@@ -8,13 +8,23 @@ import pytest
 
 from core.runner_task import RunnerTask
 from core.runner_vnext_authority import (
+    DISPATCH_TASK_CODEGEN,
+    DISPATCH_TASK_CONTROL,
+    DISPATCH_TASK_MERGE,
+    DISPATCH_TASK_PUBLICATION,
+    DISPATCH_TASK_RECOVERY,
+    DISPATCH_TASK_VALIDATION,
     ORDINARY_REPOSITORY_PRIVACY,
     ROUTE_CODE_GENERATION,
     ROUTE_MERGE,
+    ROUTE_PUBLISH_ONLY,
+    ROUTE_RECOVERY,
     ROUTE_RUNTIME_ONLY,
+    ROUTE_VALIDATION,
     PrivilegedAuthorityInput,
     RunnerVNextAuthorityError,
     RunnerVNextRuntimeConfig,
+    authoritative_dispatch_inventory_proof,
     authority_receipt_from_bound,
     bind_privileged_operation,
     bind_runner_operation,
@@ -180,6 +190,33 @@ def test_privileged_binder_requires_operator_evidence() -> None:
                 idempotency_seed="request:control-100",
             ),
         )
+
+
+def test_authoritative_dispatch_inventory_is_checked_against_bindings() -> None:
+    proof = authoritative_dispatch_inventory_proof({
+        ROUTE_CODE_GENERATION: DISPATCH_TASK_CODEGEN,
+        ROUTE_VALIDATION: DISPATCH_TASK_VALIDATION,
+        ROUTE_PUBLISH_ONLY: DISPATCH_TASK_PUBLICATION,
+        ROUTE_RUNTIME_ONLY: DISPATCH_TASK_CONTROL,
+        ROUTE_RECOVERY: DISPATCH_TASK_RECOVERY,
+        ROUTE_MERGE: DISPATCH_TASK_MERGE,
+    })
+    by_route = {entry["route"]: entry for entry in proof["dispatch"]}
+    assert by_route[ROUTE_CODE_GENERATION]["lane"] == Lane.CODEGEN.value
+    assert by_route[ROUTE_VALIDATION]["lane"] == Lane.VALIDATE.value
+    assert by_route[ROUTE_PUBLISH_ONLY]["lane"] == Lane.PUBLISH.value
+    assert by_route[ROUTE_RUNTIME_ONLY]["lane"] == Lane.CONTROL.value
+    assert by_route[ROUTE_RECOVERY]["lane"] == Lane.CONTROL.value
+    assert by_route[ROUTE_MERGE]["lane"] == Lane.MERGE.value
+    assert proof["legacy_decision_fallback"] is False
+
+
+def test_authoritative_dispatch_inventory_fails_closed_on_declared_unwired_route() -> None:
+    with pytest.raises(
+        RunnerVNextAuthorityError,
+        match="VNEXT_AUTHORITY_DISPATCH_ROUTE_UNMAPPED_FAIL_CLOSED",
+    ):
+        authoritative_dispatch_inventory_proof({"diagnostic": "unknown"})
 
 
 def test_file_backed_ledger_and_lease_survive_reopen(tmp_path) -> None:
