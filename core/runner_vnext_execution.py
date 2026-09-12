@@ -298,11 +298,12 @@ def _validate_result(grant: GreenExecutionGrant, result: GreenExecutionResult) -
         raise GreenExecutionError("EXECUTION_RESULT_VALIDATION_INVALID")
     if not result.reason_code or any(ch not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_" for ch in result.reason_code):
         raise GreenExecutionError("EXECUTION_RESULT_REASON_INVALID")
-    expected = (grant.operation_id, grant.idempotency_key, grant.adapter_id, grant.target_state_ref, grant.fence_token, grant.planner_envelope.resources, grant.planner_envelope.effects)
-    actual = (result.operation_id, result.idempotency_key, result.adapter_id, result.target_state_ref, result.fence_token, result.resources, result.effects)
+    expected = (grant.operation_id, grant.idempotency_key, grant.adapter_id, grant.target_state_ref, grant.fence_token, grant.planner_envelope.effects)
+    actual = (result.operation_id, result.idempotency_key, result.adapter_id, result.target_state_ref, result.fence_token, result.effects)
     if actual != expected:
         raise GreenExecutionError("EXECUTION_RESULT_BINDING_MISMATCH_NEEDS_RECOVERY")
-    for ref in (*result.resources, result.before_state_ref, result.after_state_ref):
+    _validate_touched_resource_subset(result.resources, authorized_resources=grant.planner_envelope.resources)
+    for ref in (result.before_state_ref, result.after_state_ref):
         if not _public_ref(ref):
             raise GreenExecutionError("EXECUTION_RESULT_PUBLIC_REF_REQUIRED")
 
@@ -330,6 +331,23 @@ def execution_grant_hash(grant: GreenExecutionGrant) -> str:
         "effect_execution_started": grant.effect_execution_started,
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _validate_touched_resource_subset(
+    touched_resource_refs: tuple[str, ...],
+    *,
+    authorized_resources: tuple[str, ...],
+) -> None:
+    if not touched_resource_refs:
+        raise GreenExecutionError("EXECUTION_RESULT_TOUCHED_RESOURCES_REQUIRED")
+    if len(set(touched_resource_refs)) != len(touched_resource_refs):
+        raise GreenExecutionError("EXECUTION_RESULT_TOUCHED_RESOURCES_DUPLICATE")
+    authorized = set(authorized_resources)
+    for ref in touched_resource_refs:
+        if not _public_ref(ref):
+            raise GreenExecutionError("EXECUTION_RESULT_TOUCHED_RESOURCE_MALFORMED")
+        if ref not in authorized:
+            raise GreenExecutionError("EXECUTION_RESULT_TOUCHED_RESOURCE_OUT_OF_SCOPE")
 
 
 def _text_hash(value: str) -> str:
