@@ -33,7 +33,6 @@ OPENROUTER_CREDENTIAL_ALIAS = "openrouter-api"
 OPENROUTER_CREDENTIAL_ACTION = "bind-openrouter-fallback"
 _OPENROUTER_BOUND_KEY_ENV = "SKELETON_OPENROUTER_FALLBACK_API_KEY"
 _OPENHANDS_SECONDARY_MAX_OUTPUT_TOKENS = 768
-_OPENHANDS_FIXED_EXECUTABLE = "/usr/bin/openhands"
 _OPENHANDS_BOUND_MAX_OUTPUT_TOKENS_ENV = "SKELETON_OPENHANDS_MAX_OUTPUT_TOKENS"
 _OPENHANDS_PERSISTENCE_DIR_ENV = "OPENHANDS_PERSISTENCE_DIR"
 _OPENHANDS_BOOTSTRAP_REQUIRED_ENV = "SKELETON_OPENHANDS_BOOTSTRAP_REQUIRED"
@@ -297,12 +296,11 @@ def prepare_openhands_secondary_environment(
 
 
 def openhands_secondary_command(task_content: str, *, executable: str = "openhands") -> list[str]:
-    if Path(executable).name != "openhands":
+    candidate = Path(executable)
+    if not candidate.is_absolute() or candidate.name != "openhands":
         raise CodegenRouteError("openhands_executable_identity_invalid")
-    if Path(executable).is_absolute() and Path(executable) != Path(_OPENHANDS_FIXED_EXECUTABLE):
-        raise CodegenRouteError("openhands_executable_identity_mismatch")
     return [
-        _OPENHANDS_FIXED_EXECUTABLE,
+        str(candidate),
         "--headless",
         "--json",
         "--override-with-envs",
