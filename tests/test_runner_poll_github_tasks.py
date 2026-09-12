@@ -3480,6 +3480,64 @@ def test_update_existing_pr_process_publishes_same_pr_and_queues_validation(
     assert f"validation_head_sha={post_head}" in report
 
 
+def test_update_existing_pr_process_wires_dirty_continuation_gate(
+    tmp_path: Path,
+) -> None:
+    issue_path = tmp_path / "issue-4063"
+    body = "\n".join(
+        (
+            "Retry Override: retained-dirty-safe-retry",
+            "Retry Reason: retained dirty same issue continuation",
+            _codegen_update_existing_pr_issue_body(
+                pr_number=4060,
+                expected_head_sha=HEAD_SHA,
+                allowed_files=(
+                    "scripts/runner_poll_github_tasks.py",
+                    "tests/test_runner_poll_github_tasks.py",
+                ),
+            ),
+        )
+    )
+    issue = {
+        "number": 4063,
+        "title": "Retained dirty existing PR continuation",
+        "body": body,
+        "comments": [_prior_executor_invocation_blocked_comment(body)],
+        "labels": [runner.LABEL_READY],
+    }
+
+    with mock.patch.object(runner, "set_issue_label"), mock.patch.object(
+        runner,
+        "prepare_issue_worktree_from_existing_pr_head",
+        return_value=(1, "blocked for assertion", issue_path),
+    ) as prepare, mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "record_runner_task_picked_up", return_value=None
+    ), mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ):
+        runner.process_issue(issue, workdir=str(tmp_path))
+
+    prepare.assert_called_once()
+    gate = prepare.call_args.kwargs["continuation_gate"]
+    assert gate == runner.CodegenDirtyContinuationGate(
+        repository=runner.REPO,
+        source_repository=runner.REPO,
+        issue_number=4063,
+        expected_branch="runner/issue-4063",
+        allowed_files=frozenset(
+            {
+                "scripts/runner_poll_github_tasks.py",
+                "tests/test_runner_poll_github_tasks.py",
+            }
+        ),
+        retry_decision="ALLOW_ONE_TIME_OVERRIDE",
+    )
+
+
 def _finalize_existing_pr_success_with_post_push_states(
     *,
     tmp_path: Path,
@@ -4160,6 +4218,60 @@ def _prepare_existing_pr_head_seed(tmp_path: Path) -> tuple[Path, str, str]:
     return seed, main_sha.strip(), head_sha.strip()
 
 
+def _prepare_existing_pr_dirty_continuation_fixture(
+    tmp_path: Path,
+    *,
+    changed_files: tuple[str, ...] = ("scripts/runner_poll_github_tasks.py",),
+    untracked_files: tuple[str, ...] = (),
+) -> tuple[Path, Path, Path, str, str, dict[str, object]]:
+    seed, main_sha, head_sha = _prepare_existing_pr_head_seed(tmp_path)
+    worktree_root = tmp_path / "worktrees"
+    issue_path = worktree_root / "issue-1640"
+    _run_git(
+        seed,
+        "worktree",
+        "add",
+        "-b",
+        "runner/issue-1640",
+        str(issue_path),
+        head_sha,
+    )
+    for relative_path in changed_files:
+        path = issue_path / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"retained {relative_path}\n", encoding="utf-8")
+    for relative_path in untracked_files:
+        path = issue_path / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("untracked\n", encoding="utf-8")
+    pr_state = {
+        "number": 1638,
+        "state": "OPEN",
+        "baseRefName": "main",
+        "baseRefOid": main_sha,
+        "headRefName": "runner/issue-1638",
+        "headRefOid": head_sha,
+    }
+    return seed, worktree_root, issue_path, main_sha, head_sha, pr_state
+
+
+def _existing_pr_dirty_continuation_gate(
+    *,
+    allowed_files: frozenset[str] = frozenset({"scripts/runner_poll_github_tasks.py"}),
+    **updates: object,
+) -> runner.CodegenDirtyContinuationGate:
+    gate_kwargs: dict[str, object] = {
+        "repository": runner.REPO,
+        "source_repository": runner.REPO,
+        "issue_number": 1640,
+        "expected_branch": "runner/issue-1640",
+        "allowed_files": allowed_files,
+        "retry_decision": "ALLOW_ONE_TIME_OVERRIDE",
+    }
+    gate_kwargs.update(updates)
+    return runner.CodegenDirtyContinuationGate(**gate_kwargs)
+
+
 def test_prepare_issue_worktree_from_existing_pr_head_preserves_pr_files(
     tmp_path: Path,
 ) -> None:
@@ -4178,6 +4290,8 @@ def test_prepare_issue_worktree_from_existing_pr_head_preserves_pr_files(
         os.environ, {"SKELETON_WORKTREE_ROOT": str(worktree_root)}, clear=True
     ), mock.patch.object(
         runner, "_get_pr_branch_validation_state", return_value=(pr_state, "gh")
+    ), mock.patch.object(
+        runner, "_remote_url_matches_project_repo", return_value=True
     ):
         code, output, path = runner.prepare_issue_worktree_from_existing_pr_head(
             1640,
@@ -4237,6 +4351,147 @@ def test_prepare_issue_worktree_from_existing_pr_head_mismatch_before_mutation(
     assert path == worktree_root / "issue-1640"
     assert not path.exists()
     run.assert_not_called()
+
+
+def test_prepare_issue_worktree_from_existing_pr_head_allows_gated_dirty_continuation(
+    tmp_path: Path,
+) -> None:
+    seed, worktree_root, issue_path, _main_sha, head_sha, pr_state = (
+        _prepare_existing_pr_dirty_continuation_fixture(
+            tmp_path,
+            untracked_files=(
+                ".runner-codegen-trace-safe.log",
+                ".runner-codex-state-safe/state.json",
+            ),
+        )
+    )
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(worktree_root)}, clear=True
+    ), mock.patch.object(
+        runner, "_get_pr_branch_validation_state", return_value=(pr_state, "gh")
+    ), mock.patch.object(
+        runner, "_remote_url_matches_project_repo", return_value=True
+    ):
+        code, output, path = runner.prepare_issue_worktree_from_existing_pr_head(
+            1640,
+            seed,
+            runner.CodegenExistingPrWorktreeRequest(
+                pr_number=1638,
+                expected_head_sha=head_sha,
+                expected_head_branch="runner/issue-1638",
+            ),
+            continuation_gate=_existing_pr_dirty_continuation_gate(),
+        )
+
+    assert path == issue_path
+    assert code == 0, output
+    assert "retained_dirty_continuation_gate=allowed" in output
+    assert "$ git checkout" not in output
+    assert (issue_path / "scripts" / "runner_poll_github_tasks.py").read_text(
+        encoding="utf-8"
+    ) == "retained scripts/runner_poll_github_tasks.py\n"
+    assert runner.run_command(["git", "rev-parse", "HEAD"], cwd=issue_path) == (
+        0,
+        f"{head_sha}\n",
+    )
+
+
+def test_prepare_issue_worktree_from_existing_pr_head_dirty_without_override_blocks(
+    tmp_path: Path,
+) -> None:
+    seed, worktree_root, _issue_path, _main_sha, head_sha, pr_state = (
+        _prepare_existing_pr_dirty_continuation_fixture(tmp_path)
+    )
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(worktree_root)}, clear=True
+    ), mock.patch.object(
+        runner, "_get_pr_branch_validation_state", return_value=(pr_state, "gh")
+    ), mock.patch.object(
+        runner, "_remote_url_matches_project_repo", return_value=True
+    ):
+        code, output, _path = runner.prepare_issue_worktree_from_existing_pr_head(
+            1640,
+            seed,
+            runner.CodegenExistingPrWorktreeRequest(
+                pr_number=1638,
+                expected_head_sha=head_sha,
+                expected_head_branch="runner/issue-1638",
+            ),
+        )
+
+    assert code == 1
+    assert "reason=missing_explicit_retry_changed_condition_or_override" in output
+    assert "$ git fetch" not in output
+
+
+@pytest.mark.parametrize(
+    ("fixture_kwargs", "gate", "reason"),
+    (
+        (
+            {"changed_files": ("scripts/runner_poll_github_tasks.py", "docs/dependency.md")},
+            _existing_pr_dirty_continuation_gate(),
+            "retained_dirty_changed_files_outside_allowlist",
+        ),
+        (
+            {"untracked_files": ("notes.txt", ".runner-codegen-trace-safe.log")},
+            _existing_pr_dirty_continuation_gate(),
+            "retained_dirty_unexpected_untracked_files",
+        ),
+        (
+            {},
+            _existing_pr_dirty_continuation_gate(issue_number=1641),
+            "retained_dirty_issue_mismatch",
+        ),
+        (
+            {},
+            _existing_pr_dirty_continuation_gate(repository="alanua/Other"),
+            "retained_dirty_repository_mismatch",
+        ),
+        (
+            {},
+            _existing_pr_dirty_continuation_gate(source_repository="alanua/Other"),
+            "retained_dirty_source_repository_mismatch",
+        ),
+        (
+            {},
+            _existing_pr_dirty_continuation_gate(expected_branch="runner/issue-1641"),
+            "retained_dirty_expected_branch_mismatch",
+        ),
+    ),
+)
+def test_prepare_issue_worktree_from_existing_pr_head_dirty_gate_mismatch_blocks(
+    tmp_path: Path,
+    fixture_kwargs: dict[str, object],
+    gate: runner.CodegenDirtyContinuationGate,
+    reason: str,
+) -> None:
+    seed, worktree_root, _issue_path, _main_sha, head_sha, pr_state = (
+        _prepare_existing_pr_dirty_continuation_fixture(tmp_path, **fixture_kwargs)
+    )
+
+    with mock.patch.dict(
+        os.environ, {"SKELETON_WORKTREE_ROOT": str(worktree_root)}, clear=True
+    ), mock.patch.object(
+        runner, "_get_pr_branch_validation_state", return_value=(pr_state, "gh")
+    ), mock.patch.object(
+        runner, "_remote_url_matches_project_repo", return_value=True
+    ):
+        code, output, _path = runner.prepare_issue_worktree_from_existing_pr_head(
+            1640,
+            seed,
+            runner.CodegenExistingPrWorktreeRequest(
+                pr_number=1638,
+                expected_head_sha=head_sha,
+                expected_head_branch="runner/issue-1638",
+            ),
+            continuation_gate=gate,
+        )
+
+    assert code == 1
+    assert f"reason={reason}" in output
+    assert "$ git fetch" not in output
 
 
 def test_prepare_target_worktree_uses_explicit_safe_base_and_matching_sha(
