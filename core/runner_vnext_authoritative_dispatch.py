@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
-from typing import Callable, Protocol
+from typing import Protocol
 
 from core.runner_vnext_authority import (
     BoundRunnerOperation,
@@ -17,6 +17,7 @@ from core.runner_vnext_authority import (
 from core.runner_vnext_contracts import EffectClass
 from core.runner_vnext_execution import (
     GreenAdapterExecutor,
+    GreenExecutionError,
     GreenExecutionLifecycle,
     GreenExecutionReceipt,
     GreenExecutionResult,
@@ -46,6 +47,21 @@ class MechanicalResult:
     rollback_requested: bool = False
 
 
+@dataclass(frozen=True)
+class PrivilegedExecutionGrant:
+    adapter_id: str
+    operation_id: str
+    target_state_ref: str
+    fence_token: int
+    idempotency_key: str
+    resources: tuple[str, ...]
+    effects: tuple[str, ...]
+    effect_class: EffectClass
+    policy_reason_code: str
+    approval_evidence_refs: tuple[str, ...]
+    execution_authorized: bool = True
+
+
 class GreenMechanicalBackend(Protocol):
     def execute(
         self,
@@ -60,7 +76,7 @@ class PrivilegedMechanicalBackend(Protocol):
         self,
         *,
         bound: BoundRunnerOperation,
-        broker_request: PrivilegedBrokerRequest,
+        grant: PrivilegedExecutionGrant,
     ) -> MechanicalResult: ...
 
 
@@ -183,8 +199,10 @@ def run_green_authoritative_dispatch(
             grant,
             _GreenMechanicalAdapter(bound=bound, backend=backend),
         )
-    except (RunnerVNextAuthorityError, LedgerError, LeaseError) as exc:
-        raise RunnerVNextDispatchError(getattr(exc, "reason_code", "VNEXT_DISPATCH_GREEN_FAILED")) from exc
+    except (RunnerVNextAuthorityError, GreenExecutionError, LedgerError, LeaseError) as exc:
+        raise RunnerVNextDispatchError(
+            getattr(exc, "reason_code", "VNEXT_DISPATCH_GREEN_FAILED")
+        ) from exc
     return _from_green_receipt(bound, execution)
 
 
@@ -241,12 +259,13 @@ def run_privileged_authoritative_dispatch(
             resources=envelope.resources,
             fresh=fresh_authority,
         )
-        broker = authorize_privileged_broker_request(
+        broker_request = authorize_privileged_broker_request(
             envelope=envelope,
             ledger=stores.ledger,
             authority_claim=claim,
             authority_verifier=ExactAuthorityVerifier(evidence_refs),
         )
+        grant = _privileged_execution_grant(broker_request, evidence_refs=evidence_refs)
         if target_state_verifier.current_ref(bound) != bound.target_state_ref:
             raise RunnerVNextDispatchError("VNEXT_DISPATCH_TARGET_STATE_STALE")
         identity = OperationIdentity(
@@ -257,9 +276,10 @@ def run_privileged_authoritative_dispatch(
         stores.ledger.mark_started(
             identity,
             fence_token=lease.fence_token,
-            execution_grant_hash=_privileged_grant_hash(broker),
+            execution_grant_hash=_privileged_grant_hash(grant),
         )
-        result = backend.execute(bound=bound, broker_request=broker)
+        result = backend.execute(bound=bound, grant=grant)
+        _validate_privileged_mechanical_result(bound, grant, result)
         stores.ledger.finish(
             identity,
             fence_token=lease.fence_token,
@@ -279,7 +299,9 @@ def run_privileged_authoritative_dispatch(
     except RunnerVNextDispatchError:
         raise
     except (RunnerVNextAuthorityError, LedgerError, LeaseError) as exc:
-        raise RunnerVNextDispatchError(getattr(exc, "reason_code", "VNEXT_DISPATCH_PRIVILEGED_FAILED")) from exc
+        raise RunnerVNextDispatchError(
+            getattr(exc, "reason_code", "VNEXT_DISPATCH_PRIVILEGED_FAILED")
+        ) from exc
     terminal = "COMPLETED" if result.succeeded else "FAILED"
     return AuthoritativeDispatchReceipt(
         operation_id=bound.operation_ir.operation_id,
@@ -298,6 +320,63 @@ def run_privileged_authoritative_dispatch(
         execution_started=True,
         lease_released=released.status == "RELEASED",
     )
+
+
+def _privileged_execution_grant(
+    request: PrivilegedBrokerRequest,
+    *,
+    evidence_refs: tuple[str, ...],
+) -> PrivilegedExecutionGrant:
+    if request.execution_authorized:
+        raise RunnerVNextDispatchError("VNEXT_DISPATCH_BROKER_REQUEST_STATE_INVALID")
+    if request.approval_evidence_refs != evidence_refs or not evidence_refs:
+        raise RunnerVNextDispatchError("VNEXT_DISPATCH_BROKER_EVIDENCE_MISMATCH")
+    return PrivilegedExecutionGrant(
+        adapter_id=request.adapter_id,
+        operation_id=request.operation_id,
+        target_state_ref=request.target_state_ref,
+        fence_token=request.fence_token,
+        idempotency_key=request.idempotency_key,
+        resources=request.resources,
+        effects=request.effects,
+        effect_class=request.effect_class,
+        policy_reason_code=request.policy_reason_code,
+        approval_evidence_refs=request.approval_evidence_refs,
+    )
+
+
+def _validate_privileged_mechanical_result(
+    bound: BoundRunnerOperation,
+    grant: PrivilegedExecutionGrant,
+    result: MechanicalResult,
+) -> None:
+    if not grant.execution_authorized:
+        raise RunnerVNextDispatchError("VNEXT_DISPATCH_PRIVILEGED_GRANT_REQUIRED")
+    if result.validation_status not in {"PASS", "FAIL"}:
+        raise RunnerVNextDispatchError("VNEXT_DISPATCH_RESULT_VALIDATION_INVALID")
+    if result.succeeded != (result.validation_status == "PASS"):
+        raise RunnerVNextDispatchError("VNEXT_DISPATCH_RESULT_VALIDATION_MISMATCH")
+    if not result.reason_code or any(
+        ch not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_" for ch in result.reason_code
+    ):
+        raise RunnerVNextDispatchError("VNEXT_DISPATCH_RESULT_REASON_INVALID")
+    if result.before_state_ref != bound.target_state_ref:
+        raise RunnerVNextDispatchError("VNEXT_DISPATCH_RESULT_BEFORE_STATE_MISMATCH")
+    if not _public_ref(result.before_state_ref) or not _public_ref(result.after_state_ref):
+        raise RunnerVNextDispatchError("VNEXT_DISPATCH_RESULT_STATE_REF_INVALID")
+    if len(set(result.touched_resources)) != len(result.touched_resources):
+        raise RunnerVNextDispatchError("VNEXT_DISPATCH_RESULT_RESOURCE_DUPLICATE")
+    authorized = set(grant.resources)
+    if any(not _public_ref(resource) or resource not in authorized for resource in result.touched_resources):
+        raise RunnerVNextDispatchError("VNEXT_DISPATCH_RESULT_RESOURCE_OUT_OF_SCOPE")
+    if result.succeeded and not result.touched_resources:
+        raise RunnerVNextDispatchError("VNEXT_DISPATCH_RESULT_RESOURCE_REQUIRED")
+    if (
+        not result.succeeded
+        and not result.touched_resources
+        and (result.before_state_ref != result.after_state_ref or result.rollback_requested)
+    ):
+        raise RunnerVNextDispatchError("VNEXT_DISPATCH_FAILED_MUTATION_RESOURCE_REQUIRED")
 
 
 def _exact_node_registry(
@@ -328,7 +407,9 @@ def _exact_node_registry(
     try:
         registry.register(snapshot, now=now)
     except Exception as exc:
-        raise RunnerVNextDispatchError(getattr(exc, "reason_code", "VNEXT_DISPATCH_NODE_EVIDENCE_INVALID")) from exc
+        raise RunnerVNextDispatchError(
+            getattr(exc, "reason_code", "VNEXT_DISPATCH_NODE_EVIDENCE_INVALID")
+        ) from exc
     return registry
 
 
@@ -426,22 +507,34 @@ def _from_green_receipt(
     )
 
 
-def _privileged_grant_hash(request: PrivilegedBrokerRequest) -> str:
+def _privileged_grant_hash(grant: PrivilegedExecutionGrant) -> str:
     payload = {
-        "adapter_id": request.adapter_id,
-        "operation_id": request.operation_id,
-        "target_state_ref": request.target_state_ref,
-        "fence_token": request.fence_token,
-        "idempotency_key": request.idempotency_key,
-        "resources": list(request.resources),
-        "effects": list(request.effects),
-        "effect_class": request.effect_class.value,
-        "policy_reason_code": request.policy_reason_code,
-        "approval_evidence_refs": list(request.approval_evidence_refs),
+        "adapter_id": grant.adapter_id,
+        "operation_id": grant.operation_id,
+        "target_state_ref": grant.target_state_ref,
+        "fence_token": grant.fence_token,
+        "idempotency_key": grant.idempotency_key,
+        "resources": list(grant.resources),
+        "effects": list(grant.effects),
+        "effect_class": grant.effect_class.value,
+        "policy_reason_code": grant.policy_reason_code,
+        "approval_evidence_refs": list(grant.approval_evidence_refs),
+        "execution_authorized": grant.execution_authorized,
     }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
+
+def _public_ref(value: str) -> bool:
+    return (
+        bool(value)
+        and not value.startswith(("/", "~"))
+        and "\\" not in value
+        and ".." not in value
+        and ":" in value
+        and not any(ch.isspace() for ch in value)
+    )
 
 
 def _hash_text(value: str) -> str:
