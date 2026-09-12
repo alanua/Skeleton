@@ -22,17 +22,17 @@ ROOT = Path(__file__).resolve().parents[1]
 NOW = 100.0
 
 
-def task() -> UniversalTask:
+def task(resource_refs=("repo:core/a.py",)) -> UniversalTask:
     return UniversalTask(
-        task_id="task:1", intent="write", domain="github", target_resources=("repo:core/a.py",),
+        task_id="task:1", intent="write", domain="github", target_resources=tuple(resource_refs),
         required_capabilities=("repository_write_allowlisted",), privacy=PrivacyClass.PUBLIC_SAFE,
         reversibility=Reversibility.REVERSIBLE, expected_effects=("workspace_write",),
         validation=("pytest",), rollback=("git:reset",), idempotency_key="idem:1",
     )
 
 
-def operation() -> OperationIR:
-    return OperationIR("op:1", "workspace_write", ("repo:core/a.py",), ("workspace_write",), "idem:1")
+def operation(resource_refs=("repo:core/a.py",)) -> OperationIR:
+    return OperationIR("op:1", "workspace_write", tuple(resource_refs), ("workspace_write",), "idem:1")
 
 
 class TargetVerifier:
@@ -40,7 +40,7 @@ class TargetVerifier:
         return "git:abc"
 
 
-def build_runtime():
+def build_runtime(resource_refs=("repo:core/a.py",)):
     nodes = NodeCapabilityRegistry()
     nodes.register(NodeCapabilitySnapshot(
         node_id="node:runner-1", generation=3, route_rank=1,
@@ -68,7 +68,7 @@ def build_runtime():
         adapter_planner=AdapterPlanner({"adapter:repo": manifest}), ledger=ledger,
     )
     handoff = control.prepare(
-        task=task(), operation=operation(), adapter_id="adapter:repo", lane=Lane.CODEGEN,
+        task=task(resource_refs), operation=operation(resource_refs), adapter_id="adapter:repo", lane=Lane.CODEGEN,
         lease_scope_key="repo:branch-main", target_state_ref="git:abc", ttl_seconds=30, now=NOW,
         parent_environment={"HOME":"/home/agent", "PATH":"/usr/bin", "OPENROUTER_API_KEY":"parent-secret"},
         injected_environment={},
@@ -150,6 +150,30 @@ def test_forged_result_after_effect_never_records_false_success() -> None:
         lifecycle.run(grant, FakeExecutor(forged))
     assert ledger.status(grant.idempotency_key) == "STARTED"
     assert scheduler.current(lane=Lane.CODEGEN, scope_key=grant.lease_scope_key) is not None
+
+
+def test_success_may_report_touched_resource_subset() -> None:
+    scheduler, ledger, grant = build_runtime(("repo:core/a.py", "repo:core/b.py"))
+    subset = result(grant, resources=("repo:core/a.py",))
+    receipt = GreenExecutionLifecycle(scheduler=scheduler, ledger=ledger).run(grant, FakeExecutor(subset))
+    assert receipt.touched_resource_refs == ("repo:core/a.py",)
+    assert ledger.history(grant.idempotency_key)[-1].touched_resource_refs == ("repo:core/a.py",)
+
+
+def test_result_touched_resources_must_remain_inside_grant_scope() -> None:
+    scheduler, ledger, grant = build_runtime()
+    out_of_scope = result(grant, resources=("repo:core/b.py",))
+    with pytest.raises(GreenExecutionError, match="EXECUTION_RESULT_RESOURCE_SCOPE_MISMATCH_NEEDS_RECOVERY"):
+        GreenExecutionLifecycle(scheduler=scheduler, ledger=ledger).run(grant, FakeExecutor(out_of_scope))
+    assert ledger.status(grant.idempotency_key) == "STARTED"
+
+
+def test_zero_touched_resources_on_successful_workspace_mutation_fails_closed() -> None:
+    scheduler, ledger, grant = build_runtime()
+    empty = result(grant, resources=())
+    with pytest.raises(GreenExecutionError, match="EXECUTION_SUCCESSFUL_MUTATION_REQUIRES_TOUCHED_RESOURCES"):
+        GreenExecutionLifecycle(scheduler=scheduler, ledger=ledger).run(grant, FakeExecutor(empty))
+    assert ledger.status(grant.idempotency_key) == "STARTED"
 
 
 def test_partial_changed_state_terminalizes_failed_and_requests_rollback() -> None:
