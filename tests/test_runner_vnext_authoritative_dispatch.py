@@ -9,10 +9,14 @@ from core.runner_vnext_authoritative_dispatch import (
     MechanicalResult,
     RunnerVNextDispatchError,
     run_green_authoritative_dispatch,
+    run_privileged_authoritative_dispatch,
 )
 from core.runner_vnext_authority import (
+    PrivilegedAuthorityInput,
+    ROUTE_MERGE,
     ROUTE_VALIDATION,
     RunnerVNextRuntimeConfig,
+    bind_privileged_operation,
     bind_runner_operation,
     build_authoritative_stores,
     grant_green_authority,
@@ -49,8 +53,26 @@ class _Backend:
 
 
 class _ExplodingBackend:
-    def execute(self, *, bound: object, grant: object) -> MechanicalResult:
-        raise AssertionError("mechanics must not execute on terminal replay")
+    def execute(self, **_kwargs: object) -> MechanicalResult:
+        raise AssertionError("mechanics must not execute on replay or blocked authority")
+
+
+class _PrivilegedBackend:
+    def __init__(self, target_state_ref: str) -> None:
+        self.calls = 0
+        self.target_state_ref = target_state_ref
+
+    def execute(self, *, bound: object, broker_request: object) -> MechanicalResult:
+        self.calls += 1
+        assert broker_request.execution_authorized is True
+        return MechanicalResult(
+            succeeded=True,
+            reason_code="EXECUTION_PASS",
+            touched_resources=("protected:pr-10", "repo:alanua/Skeleton"),
+            before_state_ref=self.target_state_ref,
+            after_state_ref="git:" + "e" * 40,
+            validation_status="PASS",
+        )
 
 
 def _task(*, path: str = "tests/example.py", sha: str = "a" * 40) -> RunnerTask:
@@ -97,6 +119,38 @@ def _snapshot(bound: object, *, resources: tuple[str, ...] | None = None) -> Nod
         observed_at=10.0,
         expires_at=50.0,
         attestation_ref="attestation:test:validate",
+    )
+
+
+def _merge_bound():
+    return bind_privileged_operation(
+        route=ROUTE_MERGE,
+        operation="merge",
+        authority_input=PrivilegedAuthorityInput(
+            source_task_ref="issue:10",
+            target_state_ref="git:" + "d" * 40,
+            resources=("protected:pr-10", "repo:alanua/Skeleton"),
+            required_capabilities=("publish_pull_request",),
+            privacy=PrivacyClass.PUBLIC_SAFE,
+            operator_boundary_evidence=("telegram:0123456789ab", "head:" + "d" * 40),
+            idempotency_seed="merge:test",
+        ),
+    )
+
+
+def _merge_snapshot(bound: object) -> NodeCapabilitySnapshot:
+    return NodeCapabilitySnapshot(
+        node_id="node:runner-vnext-merge-runtime",
+        generation=1,
+        route_rank=40,
+        capabilities=tuple(bound.universal_task.required_capabilities),
+        supported_adapters=(bound.binding.adapter_id,),
+        supported_lanes=(Lane.MERGE,),
+        privacy_classes=(PrivacyClass.PUBLIC_SAFE,),
+        resource_patterns=tuple(bound.universal_task.target_resources),
+        observed_at=10.0,
+        expires_at=50.0,
+        attestation_ref="attestation:test:merge",
     )
 
 
@@ -210,3 +264,41 @@ def test_widened_node_evidence_is_rejected_before_mechanics(tmp_path) -> None:
         stores.close()
 
     assert exc.value.reason_code == "VNEXT_DISPATCH_NODE_EVIDENCE_SCOPE_MISMATCH"
+
+
+def test_privileged_effect_requires_final_grant_and_terminal_replay_is_idempotent(tmp_path) -> None:
+    bound = _merge_bound()
+    stores = _stores(tmp_path)
+    backend = _PrivilegedBackend(bound.target_state_ref)
+    evidence = tuple(bound.universal_task.operator_boundary_evidence)
+    try:
+        first = run_privileged_authoritative_dispatch(
+            bound=bound,
+            node_snapshot=_merge_snapshot(bound),
+            stores=stores,
+            target_state_verifier=_Verifier(bound.target_state_ref),
+            backend=backend,
+            evidence_refs=evidence,
+            fresh_authority=True,
+            now=20.0,
+            ttl_seconds=30.0,
+        )
+        second = run_privileged_authoritative_dispatch(
+            bound=bound,
+            node_snapshot=_merge_snapshot(bound),
+            stores=stores,
+            target_state_verifier=_Verifier(bound.target_state_ref),
+            backend=_ExplodingBackend(),
+            evidence_refs=evidence,
+            fresh_authority=True,
+            now=21.0,
+            ttl_seconds=30.0,
+        )
+    finally:
+        stores.close()
+
+    assert first.terminal_status == "COMPLETED"
+    assert first.replayed is False
+    assert second.terminal_status == "COMPLETED"
+    assert second.replayed is True
+    assert backend.calls == 1
