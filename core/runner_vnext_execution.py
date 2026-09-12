@@ -86,6 +86,8 @@ class GreenExecutionLifecycle:
         started = self.begin(grant)
         try:
             result = executor.execute(grant)
+        except GreenExecutionError:
+            raise
         except Exception as exc:
             raise GreenExecutionError("EXECUTION_ADAPTER_EXCEPTION_NEEDS_RECOVERY") from exc
         return self.finalize(grant, started=started, result=result)
@@ -298,10 +300,17 @@ def _validate_result(grant: GreenExecutionGrant, result: GreenExecutionResult) -
         raise GreenExecutionError("EXECUTION_RESULT_VALIDATION_INVALID")
     if not result.reason_code or any(ch not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_" for ch in result.reason_code):
         raise GreenExecutionError("EXECUTION_RESULT_REASON_INVALID")
-    expected = (grant.operation_id, grant.idempotency_key, grant.adapter_id, grant.target_state_ref, grant.fence_token, grant.planner_envelope.resources, grant.planner_envelope.effects)
-    actual = (result.operation_id, result.idempotency_key, result.adapter_id, result.target_state_ref, result.fence_token, result.resources, result.effects)
+    expected = (grant.operation_id, grant.idempotency_key, grant.adapter_id, grant.target_state_ref, grant.fence_token, grant.planner_envelope.effects)
+    actual = (result.operation_id, result.idempotency_key, result.adapter_id, result.target_state_ref, result.fence_token, result.effects)
     if actual != expected:
         raise GreenExecutionError("EXECUTION_RESULT_BINDING_MISMATCH_NEEDS_RECOVERY")
+    if len(set(result.resources)) != len(result.resources):
+        raise GreenExecutionError("EXECUTION_RESULT_RESOURCE_SCOPE_MISMATCH_NEEDS_RECOVERY")
+    authorized = set(grant.planner_envelope.resources)
+    if any(ref not in authorized for ref in result.resources):
+        raise GreenExecutionError("EXECUTION_RESULT_RESOURCE_SCOPE_MISMATCH_NEEDS_RECOVERY")
+    if result.outcome == "SUCCEEDED" and result.before_state_ref != result.after_state_ref and not result.resources:
+        raise GreenExecutionError("EXECUTION_SUCCESSFUL_MUTATION_REQUIRES_TOUCHED_RESOURCES")
     for ref in (*result.resources, result.before_state_ref, result.after_state_ref):
         if not _public_ref(ref):
             raise GreenExecutionError("EXECUTION_RESULT_PUBLIC_REF_REQUIRED")
