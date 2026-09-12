@@ -22,17 +22,17 @@ ROOT = Path(__file__).resolve().parents[1]
 NOW = 100.0
 
 
-def task() -> UniversalTask:
+def task(*, resources=("repo:core/a.py",)) -> UniversalTask:
     return UniversalTask(
-        task_id="task:1", intent="write", domain="github", target_resources=("repo:core/a.py",),
+        task_id="task:1", intent="write", domain="github", target_resources=resources,
         required_capabilities=("repository_write_allowlisted",), privacy=PrivacyClass.PUBLIC_SAFE,
         reversibility=Reversibility.REVERSIBLE, expected_effects=("workspace_write",),
         validation=("pytest",), rollback=("git:reset",), idempotency_key="idem:1",
     )
 
 
-def operation() -> OperationIR:
-    return OperationIR("op:1", "workspace_write", ("repo:core/a.py",), ("workspace_write",), "idem:1")
+def operation(*, resources=("repo:core/a.py",)) -> OperationIR:
+    return OperationIR("op:1", "workspace_write", resources, ("workspace_write",), "idem:1")
 
 
 class TargetVerifier:
@@ -40,7 +40,7 @@ class TargetVerifier:
         return "git:abc"
 
 
-def build_runtime():
+def build_runtime(*, resources=("repo:core/a.py",)):
     nodes = NodeCapabilityRegistry()
     nodes.register(NodeCapabilitySnapshot(
         node_id="node:runner-1", generation=3, route_rank=1,
@@ -68,7 +68,7 @@ def build_runtime():
         adapter_planner=AdapterPlanner({"adapter:repo": manifest}), ledger=ledger,
     )
     handoff = control.prepare(
-        task=task(), operation=operation(), adapter_id="adapter:repo", lane=Lane.CODEGEN,
+        task=task(resources=resources), operation=operation(resources=resources), adapter_id="adapter:repo", lane=Lane.CODEGEN,
         lease_scope_key="repo:branch-main", target_state_ref="git:abc", ttl_seconds=30, now=NOW,
         parent_environment={"HOME":"/home/agent", "PATH":"/usr/bin", "OPENROUTER_API_KEY":"parent-secret"},
         injected_environment={},
@@ -118,6 +118,31 @@ def test_success_terminalizes_once_and_releases_exact_lease() -> None:
     assert ledger.status(grant.idempotency_key) == "COMPLETED"
     assert scheduler.current(lane=Lane.CODEGEN, scope_key=grant.lease_scope_key) is None
     assert [e.event_type for e in ledger.history(grant.idempotency_key)] == ["RESERVED", "COMPLETED"]
+
+
+def test_success_reports_actual_touched_subset_not_full_authorized_scope() -> None:
+    scheduler, ledger, grant = build_runtime(resources=("repo:core/a.py", "repo:core/b.py"))
+    subset = result(grant, resources=("repo:core/a.py",))
+    receipt = GreenExecutionLifecycle(scheduler=scheduler, ledger=ledger).run(grant, FakeExecutor(subset))
+    assert receipt.touched_resource_refs == ("repo:core/a.py",)
+    assert ledger.history(grant.idempotency_key)[-1].touched_resource_refs == ("repo:core/a.py",)
+
+
+def test_result_touched_resources_fail_closed_for_out_of_scope_duplicate_or_zero_mutation() -> None:
+    scheduler, ledger, grant = build_runtime()
+    outside = result(grant, resources=("repo:other.py",))
+    with pytest.raises(GreenExecutionError, match="EXECUTION_RESULT_RESOURCE_SCOPE_INVALID_NEEDS_RECOVERY"):
+        GreenExecutionLifecycle(scheduler=scheduler, ledger=ledger).run(grant, FakeExecutor(outside))
+
+    scheduler, ledger, grant = build_runtime()
+    duplicate = result(grant, resources=("repo:core/a.py", "repo:core/a.py"))
+    with pytest.raises(GreenExecutionError, match="EXECUTION_RESULT_RESOURCE_SCOPE_INVALID_NEEDS_RECOVERY"):
+        GreenExecutionLifecycle(scheduler=scheduler, ledger=ledger).run(grant, FakeExecutor(duplicate))
+
+    scheduler, ledger, grant = build_runtime()
+    zero_changed = result(grant, resources=())
+    with pytest.raises(GreenExecutionError, match="EXECUTION_SUCCESS_REQUIRES_TOUCHED_RESOURCES"):
+        GreenExecutionLifecycle(scheduler=scheduler, ledger=ledger).run(grant, FakeExecutor(zero_changed))
 
 
 def test_effect_start_is_durable_and_retry_never_invokes_adapter_again(tmp_path) -> None:

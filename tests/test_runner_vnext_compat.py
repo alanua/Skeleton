@@ -4,6 +4,7 @@ import pytest
 
 from core.runner_vnext_compat import COMPATIBILITY_DELETION_CONDITION, CompatError, LegacyTaskObservation, adapt_legacy_task
 from core.runner_vnext_contracts import EffectClass, PrivacyClass
+from core.runner_gate import PROTECTED_PATH_PREFIXES, PROTECTED_PATHS
 
 
 def obs(**overrides) -> LegacyTaskObservation:
@@ -35,6 +36,15 @@ def test_code_edit_maps_one_way_to_typed_vnext_plan() -> None:
 def test_protected_path_is_not_disguised_as_ordinary_repo_resource() -> None:
     adapted = adapt_legacy_task(obs(allowed_files=("scripts/runner_poll_github_tasks.py",)))
     assert adapted.operation.resources == ("protected:scripts/runner_poll_github_tasks.py",)
+
+
+def test_compat_reuses_canonical_protected_path_classifier() -> None:
+    paths = tuple(PROTECTED_PATHS) + tuple(f"{prefix}generated.py" for prefix in PROTECTED_PATH_PREFIXES)
+    for path in paths:
+        adapted = adapt_legacy_task(obs(allowed_files=(path,)))
+        assert adapted.operation.resources == (f"protected:{path}",)
+    ordinary = adapt_legacy_task(obs(allowed_files=("core/example.py",)))
+    assert ordinary.operation.resources == ("repo:core/example.py",)
 
 
 def test_unsupported_or_ambiguous_legacy_task_fails_closed() -> None:
