@@ -76,7 +76,7 @@ class PrivilegedMechanicalBackend(Protocol):
         self,
         *,
         bound: BoundRunnerOperation,
-        grant: PrivilegedExecutionGrant,
+        broker_request: PrivilegedExecutionGrant,
     ) -> MechanicalResult: ...
 
 
@@ -278,7 +278,7 @@ def run_privileged_authoritative_dispatch(
             fence_token=lease.fence_token,
             execution_grant_hash=_privileged_grant_hash(grant),
         )
-        result = backend.execute(bound=bound, grant=grant)
+        result = backend.execute(bound=bound, broker_request=grant)
         _validate_privileged_mechanical_result(bound, grant, result)
         stores.ledger.finish(
             identity,
@@ -302,6 +302,8 @@ def run_privileged_authoritative_dispatch(
         raise RunnerVNextDispatchError(
             getattr(exc, "reason_code", "VNEXT_DISPATCH_PRIVILEGED_FAILED")
         ) from exc
+    except Exception as exc:
+        raise RunnerVNextDispatchError("VNEXT_DISPATCH_PRIVILEGED_BACKEND_EXCEPTION") from exc
     terminal = "COMPLETED" if result.succeeded else "FAILED"
     return AuthoritativeDispatchReceipt(
         operation_id=bound.operation_ir.operation_id,
@@ -367,7 +369,10 @@ def _validate_privileged_mechanical_result(
     if len(set(result.touched_resources)) != len(result.touched_resources):
         raise RunnerVNextDispatchError("VNEXT_DISPATCH_RESULT_RESOURCE_DUPLICATE")
     authorized = set(grant.resources)
-    if any(not _public_ref(resource) or resource not in authorized for resource in result.touched_resources):
+    if any(
+        not _public_ref(resource) or resource not in authorized
+        for resource in result.touched_resources
+    ):
         raise RunnerVNextDispatchError("VNEXT_DISPATCH_RESULT_RESOURCE_OUT_OF_SCOPE")
     if result.succeeded and not result.touched_resources:
         raise RunnerVNextDispatchError("VNEXT_DISPATCH_RESULT_RESOURCE_REQUIRED")
