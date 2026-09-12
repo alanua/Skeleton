@@ -85,7 +85,7 @@ def task_contract_allows_cloud_secondary(task_content: str) -> bool:
     if not isinstance(requested, (list, tuple)):
         return False
     requested_capabilities = {str(item) for item in requested}
-    if "repository_write" not in requested_capabilities:
+    if not ({"repository_write", "repository_write_allowlisted"} & requested_capabilities):
         return False
     privacy = str(raw.get("privacy_boundary", "")).upper()
     if not privacy or "PRIVATE" in privacy:
@@ -197,8 +197,10 @@ def prepare_openhands_secondary_environment(
 
 
 def openhands_secondary_command(task_content: str, *, executable: str = "openhands") -> list[str]:
+    if Path(executable).name != "openhands":
+        raise CodegenRouteError("openhands_executable_identity_invalid")
     return [
-        executable,
+        "openhands",
         "--headless",
         "--json",
         "--override-with-envs",
