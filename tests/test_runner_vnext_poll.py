@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pytest
 
@@ -15,7 +15,7 @@ class _Source:
 @dataclass
 class _Item:
     issue: dict
-    source: _Source = _Source()
+    source: _Source = field(default_factory=_Source)
 
     @property
     def source_repository(self) -> str:
