@@ -29,7 +29,13 @@ def test_only_availability_failures_allow_secondary() -> None:
     assert not codex_failure_allows_secondary(1, "validation failed")
 
 
-def test_cloud_secondary_requires_public_repository_write_contract() -> None:
+def test_cloud_secondary_requires_public_allowlisted_repository_write_contract() -> None:
+    assert task_contract_allows_cloud_secondary(
+        """
+requested_capabilities: [repository_read, repository_write_allowlisted, test_execution]
+privacy_boundary: PUBLIC_SAFE_REPOSITORY_ONLY
+"""
+    )
     assert task_contract_allows_cloud_secondary(
         """
 requested_capabilities: [repository_read, repository_write, test_execution]
@@ -44,7 +50,7 @@ privacy_boundary: PUBLIC_SAFE_READ_ONLY
     )
     assert not task_contract_allows_cloud_secondary(
         """
-requested_capabilities: [repository_read, repository_write]
+requested_capabilities: [repository_read, repository_write_allowlisted]
 privacy_boundary: PRIVATE_LOCAL_ONLY
 """
     )
@@ -132,8 +138,8 @@ def test_missing_registered_credential_fails_closed(monkeypatch: pytest.MonkeyPa
         )
 
 
-def test_openhands_command_is_fixed_except_task_text() -> None:
-    command = openhands_secondary_command("bounded task")
+def test_openhands_command_uses_fixed_binary_after_identity_check() -> None:
+    command = openhands_secondary_command("bounded task", executable="/usr/bin/openhands")
     assert command == [
         "openhands",
         "--headless",
@@ -142,5 +148,11 @@ def test_openhands_command_is_fixed_except_task_text() -> None:
         "-t",
         "bounded task",
     ]
+    assert command[0] != "/usr/bin/openhands"
     assert "moonshot" not in " ".join(command)
     assert "openrouter" not in " ".join(command)
+
+
+def test_openhands_command_rejects_non_openhands_basename() -> None:
+    with pytest.raises(CodegenRouteError, match="openhands_executable_identity_invalid"):
+        openhands_secondary_command("bounded task", executable="/tmp/not-openhands")
