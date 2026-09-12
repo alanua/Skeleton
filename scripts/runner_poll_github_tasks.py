@@ -260,6 +260,7 @@ RUNNER_VNEXT_MODE_ENV = "SKELETON_RUNNER_VNEXT_MODE"
 RUNNER_VNEXT_STATE_ROOT_ENV = "SKELETON_RUNNER_VNEXT_STATE_ROOT"
 RUNNER_VNEXT_LEDGER_DB_ENV = "SKELETON_RUNNER_VNEXT_LEDGER_DB"
 RUNNER_VNEXT_LEASE_DB_ENV = "SKELETON_RUNNER_VNEXT_LEASE_DB"
+RUNNER_VNEXT_NODE_SNAPSHOT_JSON_ENV = "SKELETON_RUNNER_VNEXT_NODE_SNAPSHOT_JSON"
 RUNNER_SHADOW_MODE_ENV = "SKELETON_RUNNER_SHADOW_MODE"
 RUNNER_MODE_OFF = "off"
 RUNNER_MODE_SHADOW = "shadow"
@@ -270,6 +271,31 @@ LAST_RUNNER_SHADOW_RECEIPT: dict[str, object] | None = None
 LAST_RUNNER_VNEXT_RECEIPT: dict[str, object] | None = None
 _CURRENT_QUEUE_REPOSITORY: ContextVar[str] = ContextVar(
     "CURRENT_QUEUE_REPOSITORY", default=QUEUE_REPOSITORY
+)
+RUNNER_VNEXT_NODE_SNAPSHOT_SCHEMA = "skeleton.runner_vnext_node_capability_snapshot.v1"
+RUNNER_VNEXT_CODEGEN_NODE_ID = "node:runner-vnext-codegen-runtime"
+RUNNER_VNEXT_CODEGEN_ROUTE_RANK = 0
+RUNNER_VNEXT_NODE_SNAPSHOT_MAX_TTL_SECONDS = 60.0
+RUNNER_VNEXT_CODEGEN_CAPABILITIES = (
+    "repository_read",
+    "repository_write_allowlisted",
+    "test_execution",
+)
+_RUNNER_VNEXT_NODE_SNAPSHOT_KEYS = frozenset(
+    (
+        "schema",
+        "node_id",
+        "generation",
+        "route_rank",
+        "capabilities",
+        "supported_adapters",
+        "supported_lanes",
+        "privacy_classes",
+        "resource_patterns",
+        "observed_at",
+        "expires_at",
+        "attestation_ref",
+    )
 )
 
 
@@ -4409,28 +4435,140 @@ def _runner_vnext_runtime_config() -> RunnerVNextRuntimeConfig:
     )
 
 
-def _runner_vnext_nodes(*, now: float) -> NodeCapabilityRegistry:
-    registry = NodeCapabilityRegistry()
-    registry.register(
-        NodeCapabilitySnapshot(
-            node_id="node:poller-local",
-            generation=int(now),
-            route_rank=0,
-            capabilities=(
-                "repository_read",
-                "repository_write_allowlisted",
-                "test_execution",
-            ),
-            supported_adapters=("adapter:repo-codegen",),
-            supported_lanes=(Lane.CODEGEN,),
-            privacy_classes=(PrivacyClass.PUBLIC_SAFE,),
-            resource_patterns=("repo:*",),
-            observed_at=now,
-            expires_at=now + 60.0,
-            attestation_ref=f"attestation:poller-local-{int(now)}",
-        ),
-        now=now,
+def _runner_vnext_snapshot_reason(reason_code: str) -> RunnerVNextAuthorityError:
+    return RunnerVNextAuthorityError(reason_code)
+
+
+def _runner_vnext_string_tuple(value: object, *, reason_code: str) -> tuple[str, ...]:
+    if (
+        not isinstance(value, list)
+        or not value
+        or not all(isinstance(item, str) and item for item in value)
+    ):
+        raise _runner_vnext_snapshot_reason(reason_code)
+    items = tuple(value)
+    if len(set(items)) != len(items):
+        raise _runner_vnext_snapshot_reason(reason_code)
+    return items
+
+
+def _runner_vnext_snapshot_timestamp(value: object, *, reason_code: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise _runner_vnext_snapshot_reason(reason_code)
+    return float(value)
+
+
+def _runner_vnext_external_snapshot_payload() -> Mapping[str, object]:
+    raw = os.environ.get(RUNNER_VNEXT_NODE_SNAPSHOT_JSON_ENV)
+    if raw is None or not raw.strip():
+        raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_REQUIRED")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_JSON_INVALID") from exc
+    if not isinstance(payload, Mapping):
+        raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_OBJECT_REQUIRED")
+    keys = frozenset(payload)
+    if any(not isinstance(key, str) for key in payload):
+        raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_FIELD_INVALID")
+    if keys != _RUNNER_VNEXT_NODE_SNAPSHOT_KEYS:
+        if keys - _RUNNER_VNEXT_NODE_SNAPSHOT_KEYS:
+            raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_EXTRA_FIELD")
+        raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_MISSING_FIELD")
+    return payload
+
+
+def _runner_vnext_nodes(
+    *,
+    bound: object,
+    now: float,
+) -> NodeCapabilityRegistry:
+    expected_resources = getattr(getattr(bound, "universal_task"), "target_resources")
+    expected_capabilities = getattr(getattr(bound, "universal_task"), "required_capabilities")
+    payload = _runner_vnext_external_snapshot_payload()
+    if payload["schema"] != RUNNER_VNEXT_NODE_SNAPSHOT_SCHEMA:
+        raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_SCHEMA_INVALID")
+    if payload["node_id"] != RUNNER_VNEXT_CODEGEN_NODE_ID:
+        raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_NODE_INVALID")
+    generation = payload["generation"]
+    if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
+        raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_GENERATION_INVALID")
+    if payload["route_rank"] != RUNNER_VNEXT_CODEGEN_ROUTE_RANK:
+        raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_ROUTE_RANK_INVALID")
+
+    capabilities = _runner_vnext_string_tuple(
+        payload["capabilities"], reason_code="VNEXT_NODE_SNAPSHOT_CAPABILITIES_INVALID"
     )
+    if (
+        capabilities != RUNNER_VNEXT_CODEGEN_CAPABILITIES
+        or capabilities != tuple(expected_capabilities)
+    ):
+        raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_CAPABILITIES_WIDENED")
+    adapters = _runner_vnext_string_tuple(
+        payload["supported_adapters"], reason_code="VNEXT_NODE_SNAPSHOT_ADAPTER_INVALID"
+    )
+    if adapters != ("adapter:repo-codegen",):
+        raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_ADAPTER_INVALID")
+    lanes = _runner_vnext_string_tuple(
+        payload["supported_lanes"], reason_code="VNEXT_NODE_SNAPSHOT_LANE_INVALID"
+    )
+    if lanes != (Lane.CODEGEN.name,):
+        raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_LANE_INVALID")
+    privacy_classes = _runner_vnext_string_tuple(
+        payload["privacy_classes"], reason_code="VNEXT_NODE_SNAPSHOT_PRIVACY_INVALID"
+    )
+    if privacy_classes != (PrivacyClass.PUBLIC_SAFE.value,):
+        raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_PRIVACY_INVALID")
+    resource_patterns = _runner_vnext_string_tuple(
+        payload["resource_patterns"], reason_code="VNEXT_NODE_SNAPSHOT_RESOURCE_INVALID"
+    )
+    if resource_patterns != tuple(expected_resources):
+        raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_RESOURCE_WIDENED")
+
+    observed_at = _runner_vnext_snapshot_timestamp(
+        payload["observed_at"], reason_code="VNEXT_NODE_SNAPSHOT_OBSERVED_AT_INVALID"
+    )
+    expires_at = _runner_vnext_snapshot_timestamp(
+        payload["expires_at"], reason_code="VNEXT_NODE_SNAPSHOT_EXPIRES_AT_INVALID"
+    )
+    if observed_at > now:
+        raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_FROM_FUTURE")
+    if expires_at <= observed_at or expires_at <= now:
+        raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_STALE")
+    if expires_at - observed_at > RUNNER_VNEXT_NODE_SNAPSHOT_MAX_TTL_SECONDS:
+        raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_TTL_OVERLONG")
+
+    attestation_ref = payload["attestation_ref"]
+    if (
+        not isinstance(attestation_ref, str)
+        or not attestation_ref.startswith("attestation:")
+        or not re.fullmatch(r"attestation:[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", attestation_ref)
+        or "private" in attestation_ref.lower()
+        or "secret" in attestation_ref.lower()
+    ):
+        raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_ATTESTATION_INVALID")
+
+    registry = NodeCapabilityRegistry()
+    try:
+        registry.register(
+            NodeCapabilitySnapshot(
+                node_id=RUNNER_VNEXT_CODEGEN_NODE_ID,
+                generation=generation,
+                route_rank=RUNNER_VNEXT_CODEGEN_ROUTE_RANK,
+                capabilities=capabilities,
+                supported_adapters=adapters,
+                supported_lanes=(Lane.CODEGEN,),
+                privacy_classes=(PrivacyClass.PUBLIC_SAFE,),
+                resource_patterns=resource_patterns,
+                observed_at=observed_at,
+                expires_at=expires_at,
+                attestation_ref=attestation_ref,
+            ),
+            now=now,
+        )
+    except Exception as exc:
+        reason_code = getattr(exc, "reason_code", "VNEXT_NODE_SNAPSHOT_INVALID")
+        raise _runner_vnext_snapshot_reason(str(reason_code)) from exc
     return registry
 
 
@@ -4494,7 +4632,7 @@ def run_authoritative_vnext_codegen(
             LAST_RUNNER_VNEXT_RECEIPT.update(receipt.to_public_mapping())
         if _vnext_git_head_ref(issue_workdir) != bound.target_state_ref:
             raise RunnerVNextAuthorityError("VNEXT_AUTHORITY_TARGET_STATE_STALE")
-        nodes = _runner_vnext_nodes(now=now)
+        nodes = _runner_vnext_nodes(bound=bound, now=now)
         handoff = prepare_green_authority(
             bound=bound,
             nodes=nodes,
