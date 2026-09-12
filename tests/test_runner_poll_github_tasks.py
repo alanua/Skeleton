@@ -5331,7 +5331,17 @@ def _vnext_bridge_metadata(*, allowed_files=("core/example.py",), privacy="PUBLI
         "base_sha": "a" * 40,
         "allowed_files": allowed_files,
         "privacy_boundary": privacy,
-        "requested_capabilities": ("repository_write_allowlisted", "test_execution"),
+        "requested_capabilities": (
+            "repository_read",
+            "repository_write_allowlisted",
+            "test_execution",
+        ),
+        "approval_reference": "chat:vnext-test",
+        "idempotency_key": "vnext-test",
+        "validation_timeout_seconds": 300,
+        "validation_commands": (("python3", "-m", "pytest", "-q"),),
+        "forbidden_actions": ("merge",),
+        "expected_output": ("draft PR",),
     }
 
 
@@ -5426,6 +5436,95 @@ def test_vnext_green_canary_leaves_maintenance_on_legacy_path(monkeypatch: pytes
 
     assert allowed is True and reason is None
     assert runner.LAST_RUNNER_VNEXT_RECEIPT["status"] == "legacy_protected_path"
+
+
+def test_vnext_authoritative_hook_exact_green_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(runner.RUNNER_VNEXT_MODE_ENV, "authoritative")
+    monkeypatch.setattr(runner, "normalized_runner_shadow_metadata", lambda **_kwargs: _vnext_bridge_metadata())
+    task = runner.RunnerTask(content="x", base_sha="a" * 40)
+
+    allowed, reason = runner.evaluate_runner_vnext_cutover_hook(
+        issue_number=3951, issue_body="", route=runner.ROUTE_CODE_GENERATION,
+        maintenance_task_id=None, runner_task=task, merge_request=None,
+    )
+
+    assert allowed is True and reason is None
+    assert runner.LAST_RUNNER_VNEXT_RECEIPT["status"] == "authoritative_green_ready"
+    assert runner.LAST_RUNNER_VNEXT_RECEIPT["allow_legacy_execution"] is False
+
+
+def test_vnext_authoritative_protected_codegen_stays_legacy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(runner.RUNNER_VNEXT_MODE_ENV, "authoritative")
+    monkeypatch.setattr(
+        runner,
+        "normalized_runner_shadow_metadata",
+        lambda **_kwargs: _vnext_bridge_metadata(allowed_files=("scripts/runner_poll_github_tasks.py",)),
+    )
+    task = runner.RunnerTask(content="x", base_sha="a" * 40)
+
+    allowed, reason = runner.evaluate_runner_vnext_cutover_hook(
+        issue_number=3951, issue_body="", route=runner.ROUTE_CODE_GENERATION,
+        maintenance_task_id=None, runner_task=task, merge_request=None,
+    )
+
+    assert allowed is True and reason is None
+    assert runner.LAST_RUNNER_VNEXT_RECEIPT["status"] == "authoritative_block"
+
+
+def test_authoritative_codegen_runs_mechanics_once_after_grant(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "vnext-state"
+    workdir = tmp_path / "issue"
+    workdir.mkdir()
+    monkeypatch.setenv(runner.RUNNER_VNEXT_STATE_ROOT_ENV, str(state_root))
+    monkeypatch.setenv(runner.RUNNER_VNEXT_LEDGER_DB_ENV, str(state_root / "ledger.sqlite"))
+    monkeypatch.setenv(runner.RUNNER_VNEXT_LEASE_DB_ENV, str(state_root / "leases.sqlite"))
+    metadata = _vnext_bridge_metadata()
+    legacy_task = runner.RunnerTask(content="x", target_repository=runner.REPO)
+    runner.LAST_RUNNER_VNEXT_RECEIPT = {"status": "authoritative_green_ready"}
+
+    mechanics_calls = 0
+
+    def run_mechanics(_content, called_workdir, exact_task):
+        nonlocal mechanics_calls
+        mechanics_calls += 1
+        assert called_workdir == str(workdir)
+        assert exact_task.repo == runner.REPO
+        return 0, "RESULT: DONE"
+
+    with mock.patch.object(
+        runner,
+        "run_command",
+        return_value=(0, f"{'a' * 40}\n"),
+    ), mock.patch.object(
+        runner,
+        "run_codex_task",
+        side_effect=run_mechanics,
+    ), mock.patch.object(
+        runner,
+        "changed_files",
+        side_effect=([], ["core/example.py"], ["core/example.py"]),
+    ), mock.patch.object(
+        runner,
+        "_vnext_run_validation_command",
+        return_value=(0, "ok"),
+    ) as validate:
+        code, output = runner.run_authoritative_vnext_codegen(
+            issue_number=3951,
+            task_content="x",
+            issue_workdir=str(workdir),
+            metadata=metadata,
+            legacy_runner_task=legacy_task,
+        )
+
+    assert code == 0
+    assert "vnext_authoritative_codegen=completed" in output
+    assert mechanics_calls == 1
+    validate.assert_called_once()
+    assert runner.LAST_RUNNER_VNEXT_RECEIPT["execution_authorized"] is True
+    assert runner.LAST_RUNNER_VNEXT_RECEIPT["side_effects_executed"] is True
 
 
 def test_vnext_invalid_mode_fails_closed_even_for_legacy_protected_path(monkeypatch: pytest.MonkeyPatch) -> None:

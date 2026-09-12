@@ -10,6 +10,7 @@ from core.runner_vnext_contracts import EffectClass, PrivacyClass
 from core.runner_vnext_execution import GreenExecutionResult
 from core.runner_vnext_execution_gate import GreenExecutionGrant, planner_envelope_hash
 from core.runner_vnext_live_codegen import (
+    PollerMechanicalCodegenBackend,
     RunnerVNextLiveCodegenError,
     compile_live_codegen_plan,
     run_authorized_live_codegen,
@@ -249,6 +250,44 @@ def test_failed_no_mutation_may_report_zero_touched_resources() -> None:
     )
     assert receipt.result.resources == ()
     assert receipt.result.outcome == "FAILED"
+
+
+def test_poller_backend_success_without_mutation_is_typed_fail() -> None:
+    task = runner_task()
+    grant = grant_for(task)
+    mechanics_calls = 0
+    validation_calls = 0
+
+    def run_mechanics(_content, _workdir, exact_task):
+        nonlocal mechanics_calls
+        mechanics_calls += 1
+        assert exact_task is task
+        return 0, "RESULT: DONE"
+
+    def run_validation(_command, _workdir):
+        nonlocal validation_calls
+        validation_calls += 1
+        return 0, "ok"
+
+    backend = PollerMechanicalCodegenBackend(
+        task_content="bounded repair",
+        workdir="/workspace",
+        run_mechanics=run_mechanics,
+        changed_files=lambda _workdir: (),
+        run_validation_command=run_validation,
+        workspace_state_ref=lambda _workdir: grant.target_state_ref,
+        classify_mechanics_status=lambda _output, _code: "DONE",
+    )
+    receipt = run_authorized_live_codegen(
+        runner_task=task,
+        source_task_ref="issue:200",
+        grant=grant,
+        backend=backend,
+    )
+    assert mechanics_calls == 1
+    assert validation_calls == 0
+    assert receipt.result.outcome == "FAILED"
+    assert receipt.result.validation_status == "FAIL"
 
 
 def test_failed_changed_state_without_touched_resource_fails_closed() -> None:

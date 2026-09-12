@@ -4,13 +4,20 @@ from dataclasses import dataclass
 from typing import Mapping
 
 from core.runner_vnext_compat import CompatError, LegacyTaskObservation, adapt_legacy_task
+from core.runner_vnext_authority import AUTHORITATIVE_MODE
 from core.runner_vnext_contracts import EffectClass, PrivacyClass
 from core.runner_vnext_shadow import DivergenceKind, ShadowParityHarness
 
 VNEXT_MODE_OFF = "off"
 VNEXT_MODE_SHADOW = "shadow"
 VNEXT_MODE_GREEN_CANARY = "green_canary"
-VNEXT_MODES = frozenset({VNEXT_MODE_OFF, VNEXT_MODE_SHADOW, VNEXT_MODE_GREEN_CANARY})
+VNEXT_MODE_AUTHORITATIVE = AUTHORITATIVE_MODE
+VNEXT_MODES = frozenset({
+    VNEXT_MODE_OFF,
+    VNEXT_MODE_SHADOW,
+    VNEXT_MODE_GREEN_CANARY,
+    VNEXT_MODE_AUTHORITATIVE,
+})
 
 
 class VNextCutoverBridgeError(RuntimeError):
@@ -78,6 +85,36 @@ def evaluate_vnext_cutover_bridge(
             reason_code=receipt.vnext_reason_code,
             canary_eligible=canary_eligible,
             allow_legacy_execution=True,
+            source_task_ref=receipt.source_task_ref,
+            target_state_ref=receipt.target_state_ref,
+        )
+
+    if mode == VNEXT_MODE_AUTHORITATIVE:
+        if not _authoritative_eligible(observation):
+            return VNextCutoverBridgeDecision(
+                mode=mode,
+                status="authoritative_block",
+                divergence=receipt.divergence.value,
+                vnext_effect_class=(receipt.vnext_effect_class.value if receipt.vnext_effect_class else None),
+                reason_code="VNEXT_AUTHORITATIVE_NOT_ELIGIBLE",
+                canary_eligible=False,
+                allow_legacy_execution=False,
+                source_task_ref=receipt.source_task_ref,
+                target_state_ref=receipt.target_state_ref,
+            )
+        allowed = (
+            receipt.divergence is DivergenceKind.MATCH
+            and receipt.vnext_effect_class is EffectClass.GREEN
+            and receipt.legacy_effect_class is EffectClass.GREEN
+        )
+        return VNextCutoverBridgeDecision(
+            mode=mode,
+            status="authoritative_green_ready" if allowed else "authoritative_block",
+            divergence=receipt.divergence.value,
+            vnext_effect_class=(receipt.vnext_effect_class.value if receipt.vnext_effect_class else None),
+            reason_code=("VNEXT_AUTHORITATIVE_GREEN_READY" if allowed else receipt.vnext_reason_code),
+            canary_eligible=True,
+            allow_legacy_execution=False,
             source_task_ref=receipt.source_task_ref,
             target_state_ref=receipt.target_state_ref,
         )
@@ -171,6 +208,16 @@ def _canary_eligible(observation: LegacyTaskObservation) -> bool:
     return (
         adapted.task.privacy is PrivacyClass.PUBLIC_SAFE
         and all(resource.startswith("repo:") for resource in adapted.operation.resources)
+    )
+
+
+def _authoritative_eligible(observation: LegacyTaskObservation) -> bool:
+    if not _canary_eligible(observation):
+        return False
+    return observation.requested_capabilities == (
+        "repository_read",
+        "repository_write_allowlisted",
+        "test_execution",
     )
 
 

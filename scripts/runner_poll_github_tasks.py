@@ -83,10 +83,30 @@ from core.runner_diagnostic_executor import (
     validate_mempalace_benchmark_report as _executor_validate_mempalace_benchmark_report,
 )
 from core.runner_vnext_cutover_bridge import (
+    VNEXT_MODE_AUTHORITATIVE,
     VNEXT_MODES,
     VNextCutoverBridgeError,
     evaluate_vnext_cutover_bridge,
 )
+from core.runner_vnext_authority import (
+    ROUTE_CODE_GENERATION as VNEXT_ROUTE_CODE_GENERATION,
+    RunnerVNextAuthorityError,
+    RunnerVNextRuntimeConfig,
+    authority_receipt_from_bound,
+    bind_runner_operation,
+    build_authoritative_stores,
+    grant_green_authority,
+    prepare_green_authority,
+)
+from core.runner_vnext_contracts import PrivacyClass
+from core.runner_vnext_execution import GreenExecutionError, GreenExecutionLifecycle
+from core.runner_vnext_live_codegen import (
+    LiveCodegenAdapter,
+    PollerMechanicalCodegenBackend,
+    RunnerVNextLiveCodegenError,
+)
+from core.runner_vnext_leases import Lane
+from core.runner_vnext_routing import NodeCapabilityRegistry, NodeCapabilitySnapshot
 from core.runner_vnext_queue import (
     RunnerVNextQueueItem,
     RunnerVNextQueueSource,
@@ -97,6 +117,7 @@ from core.runner_shadow_integration import (
     MAINTENANCE_TASK_KIND_BY_ID as SHADOW_MAINTENANCE_TASK_KIND_BY_ID,
     RunnerShadowReceipt,
     RunnerShadowCompatibilityBindings,
+    ShadowBlocked,
     blocked_shadow_receipt,
     evaluate_shadow_from_normalized_metadata,
     gate_context_from_metadata,
@@ -236,6 +257,9 @@ REPO = QUEUE_REPOSITORY
 RUNNER_GITHUB_ACTOR_ENV = "SKELETON_RUNNER_GITHUB_ACTOR"
 RUNNER_MODE_ENV = "SKELETON_RUNNER_MODE"
 RUNNER_VNEXT_MODE_ENV = "SKELETON_RUNNER_VNEXT_MODE"
+RUNNER_VNEXT_STATE_ROOT_ENV = "SKELETON_RUNNER_VNEXT_STATE_ROOT"
+RUNNER_VNEXT_LEDGER_DB_ENV = "SKELETON_RUNNER_VNEXT_LEDGER_DB"
+RUNNER_VNEXT_LEASE_DB_ENV = "SKELETON_RUNNER_VNEXT_LEASE_DB"
 RUNNER_SHADOW_MODE_ENV = "SKELETON_RUNNER_SHADOW_MODE"
 RUNNER_MODE_OFF = "off"
 RUNNER_MODE_SHADOW = "shadow"
@@ -4030,6 +4054,19 @@ def runner_vnext_registered_queue_intake_enabled() -> bool:
     return normalized_mode in VNEXT_MODES and normalized_mode != RUNNER_MODE_OFF
 
 
+def runner_vnext_authoritative_mode_enabled() -> bool:
+    configured = os.environ.get(RUNNER_VNEXT_MODE_ENV)
+    return (configured or RUNNER_MODE_OFF).strip().lower() == VNEXT_MODE_AUTHORITATIVE
+
+
+def runner_vnext_authoritative_green_ready() -> bool:
+    return (
+        runner_vnext_authoritative_mode_enabled()
+        and isinstance(LAST_RUNNER_VNEXT_RECEIPT, dict)
+        and LAST_RUNNER_VNEXT_RECEIPT.get("status") == "authoritative_green_ready"
+    )
+
+
 def protected_runner_shadow_compatibility_bindings() -> RunnerShadowCompatibilityBindings:
     maintenance_task_kind_by_id = {
         task_id: SHADOW_MAINTENANCE_TASK_KIND_BY_ID[task_id]
@@ -4340,9 +4377,176 @@ def evaluate_runner_vnext_cutover_hook(
         return allow_legacy, None if allow_legacy else exc.reason_code
 
     LAST_RUNNER_VNEXT_RECEIPT = decision.to_public_mapping()
+    if normalized_mode == VNEXT_MODE_AUTHORITATIVE:
+        if decision.status == "authoritative_green_ready":
+            return True, None
+        if decision.reason_code == "VNEXT_AUTHORITATIVE_NOT_ELIGIBLE":
+            return True, None
+        return False, decision.reason_code
     if decision.allow_legacy_execution:
         return True, None
     return False, decision.reason_code
+
+
+class _RunnerVNextTargetVerifier:
+    def __init__(self, *, workdir: str) -> None:
+        self._workdir = workdir
+
+    def current_ref(self, _handoff: object) -> str:
+        return _vnext_git_head_ref(self._workdir)
+
+
+def _runner_vnext_runtime_config() -> RunnerVNextRuntimeConfig:
+    state_root = os.environ.get(RUNNER_VNEXT_STATE_ROOT_ENV)
+    ledger = os.environ.get(RUNNER_VNEXT_LEDGER_DB_ENV)
+    lease = os.environ.get(RUNNER_VNEXT_LEASE_DB_ENV)
+    if not state_root or not ledger or not lease:
+        raise RunnerVNextAuthorityError("VNEXT_AUTHORITY_SQLITE_CONFIG_REQUIRED")
+    return RunnerVNextRuntimeConfig(
+        state_root=state_root,
+        ledger_db_path=ledger,
+        lease_db_path=lease,
+    )
+
+
+def _runner_vnext_nodes(*, now: float) -> NodeCapabilityRegistry:
+    registry = NodeCapabilityRegistry()
+    registry.register(
+        NodeCapabilitySnapshot(
+            node_id="node:poller-local",
+            generation=int(now),
+            route_rank=0,
+            capabilities=(
+                "repository_read",
+                "repository_write_allowlisted",
+                "test_execution",
+            ),
+            supported_adapters=("adapter:repo-codegen",),
+            supported_lanes=(Lane.CODEGEN,),
+            privacy_classes=(PrivacyClass.PUBLIC_SAFE,),
+            resource_patterns=("repo:*",),
+            observed_at=now,
+            expires_at=now + 60.0,
+            attestation_ref=f"attestation:poller-local-{int(now)}",
+        ),
+        now=now,
+    )
+    return registry
+
+
+def _vnext_git_head_ref(workdir: str) -> str:
+    code, output = run_command(["git", "rev-parse", "HEAD"], cwd=workdir)
+    if code != 0 or _HEAD_SHA_RE.fullmatch(output.strip()) is None:
+        raise RunnerVNextAuthorityError("VNEXT_AUTHORITY_TARGET_STATE_UNVERIFIED")
+    return f"git:{output.strip().lower()}"
+
+
+def _vnext_workspace_state_ref(workdir: str) -> str:
+    files = changed_files(workdir)
+    payload = {
+        "head": _vnext_git_head_ref(workdir),
+        "changed_files": files,
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return f"workspace:{digest}"
+
+
+def _vnext_changed_files_tuple(workdir: str) -> tuple[str, ...]:
+    return tuple(changed_files(workdir))
+
+
+def _vnext_run_validation_command(command: tuple[str, ...], workdir: str) -> tuple[int, str]:
+    return _run_finalization_validation_command(list(command), cwd=workdir)
+
+
+def _vnext_classify_codegen_status(output: str, exit_code: int) -> str:
+    return classify_codex_task_result(output, exit_code).status
+
+
+def run_authoritative_vnext_codegen(
+    *,
+    issue_number: int,
+    task_content: str,
+    issue_workdir: str,
+    metadata: Mapping[str, object],
+    legacy_runner_task: RunnerTask,
+) -> tuple[int, str]:
+    typed_task = runner_task_from_normalized_metadata(metadata, "code_edit")
+    if typed_task.repo != legacy_runner_task.target_repository:
+        raise RunnerVNextAuthorityError("VNEXT_AUTHORITY_REPOSITORY_MISMATCH")
+    now = time.time()
+    stores = build_authoritative_stores(_runner_vnext_runtime_config(), clock=time.time)
+    try:
+        bound = bind_runner_operation(
+            runner_task=typed_task,
+            route=VNEXT_ROUTE_CODE_GENERATION,
+            operation="codegen",
+            source_task_ref=f"issue:{issue_number}",
+        )
+        receipt = authority_receipt_from_bound(
+            bound,
+            status="bound",
+            reason_code="VNEXT_AUTHORITATIVE_BOUND_NOT_EXECUTED",
+        )
+        if isinstance(LAST_RUNNER_VNEXT_RECEIPT, dict):
+            LAST_RUNNER_VNEXT_RECEIPT.update(receipt.to_public_mapping())
+        if _vnext_git_head_ref(issue_workdir) != bound.target_state_ref:
+            raise RunnerVNextAuthorityError("VNEXT_AUTHORITY_TARGET_STATE_STALE")
+        nodes = _runner_vnext_nodes(now=now)
+        handoff = prepare_green_authority(
+            bound=bound,
+            nodes=nodes,
+            stores=stores,
+            ttl_seconds=float(typed_task.validation_timeout_seconds),
+            now=now,
+            parent_environment=os.environ,
+        )
+        grant = grant_green_authority(
+            handoff=handoff,
+            nodes=nodes,
+            stores=stores,
+            target_state_verifier=_RunnerVNextTargetVerifier(workdir=issue_workdir),
+            now=now,
+        )
+        backend = PollerMechanicalCodegenBackend(
+            task_content=task_content,
+            workdir=issue_workdir,
+            run_mechanics=run_codex_task,
+            changed_files=_vnext_changed_files_tuple,
+            run_validation_command=_vnext_run_validation_command,
+            workspace_state_ref=_vnext_workspace_state_ref,
+            classify_mechanics_status=_vnext_classify_codegen_status,
+        )
+        execution_receipt = GreenExecutionLifecycle(
+            scheduler=stores.scheduler,
+            ledger=stores.ledger,
+        ).run(
+            grant,
+            LiveCodegenAdapter(
+                runner_task=typed_task,
+                source_task_ref=f"issue:{issue_number}",
+                backend=backend,
+            ),
+        )
+    finally:
+        stores.close()
+    public_execution = GreenExecutionLifecycle.public_projection(execution_receipt)
+    if isinstance(LAST_RUNNER_VNEXT_RECEIPT, dict):
+        LAST_RUNNER_VNEXT_RECEIPT.update({
+            "execution_authorized": True,
+            "side_effects_executed": True,
+            "allow_legacy_mechanical_shell": False,
+            "green_execution": public_execution,
+        })
+    if execution_receipt.terminal_status != "COMPLETED":
+        return 1, f"BLOCKED: vNext authoritative codegen failed: {execution_receipt.reason_code}"
+    return 0, (
+        "RESULT: DONE\n"
+        "vnext_authoritative_codegen=completed\n"
+        f"vnext_touched_resource_count={len(execution_receipt.touched_resource_refs)}"
+    )
 
 
 def _universal_runner_receipt(
@@ -20709,9 +20913,50 @@ def _process_issue_in_current_queue_context(
             else:
                 codex_code, codex_output = 0, str(dispatch_result or "")
         else:
-            codex_code, codex_output = run_codex_task(
-                task_content, issue_workdir, runner_task
-            )
+            if runner_vnext_authoritative_green_ready():
+                if runner_task is None:
+                    block_issue(
+                        issue_number,
+                        "Runner vNext authoritative codegen failed: VNEXT_AUTHORITATIVE_RUNNER_TASK_REQUIRED.",
+                        remove_label=LABEL_RUNNING,
+                        retry_decision=retry_decision,
+                    )
+                    return
+                metadata = normalized_runner_shadow_metadata(
+                    issue_number=issue_number,
+                    issue_body=issue_body,
+                    route=route,
+                    maintenance_task_id=maintenance_task_id,
+                    runner_task=runner_task,
+                    merge_request=merge_request,
+                )
+                try:
+                    codex_code, codex_output = run_authoritative_vnext_codegen(
+                        issue_number=issue_number,
+                        task_content=task_content,
+                        issue_workdir=issue_workdir,
+                        metadata=metadata,
+                        legacy_runner_task=runner_task,
+                    )
+                except (
+                    RunnerVNextAuthorityError,
+                    RunnerVNextLiveCodegenError,
+                    GreenExecutionError,
+                    ShadowBlocked,
+                ) as exc:
+                    reason_code = getattr(exc, "reason_code", "VNEXT_AUTHORITATIVE_METADATA_INVALID")
+                    block_issue(
+                        issue_number,
+                        f"Runner vNext authoritative codegen failed: {reason_code}.",
+                        remove_label=LABEL_RUNNING,
+                        runner_task=runner_task,
+                        retry_decision=retry_decision,
+                    )
+                    return
+            else:
+                codex_code, codex_output = run_codex_task(
+                    task_content, issue_workdir, runner_task
+                )
         cleanup_runtime_artifacts(issue_workdir)
         codex_result = classify_codex_task_result(codex_output, codex_code)
         if is_codegen_unknown_variant_max_failure(codex_output, codex_code):

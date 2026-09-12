@@ -15,6 +15,7 @@ from core.runner_vnext_authority import (
     PrivilegedAuthorityInput,
     RunnerVNextAuthorityError,
     RunnerVNextRuntimeConfig,
+    authority_receipt_from_bound,
     bind_privileged_operation,
     bind_runner_operation,
     build_authoritative_stores,
@@ -108,6 +109,25 @@ def test_runner_task_bytes_change_binding() -> None:
     assert first.runner_task_hash != second.runner_task_hash
     assert first.binding_hash != second.binding_hash
     assert first.operation_id != second.operation_id
+
+
+def test_pre_grant_receipt_is_planning_only_not_authorizing() -> None:
+    bound = bind_runner_operation(
+        runner_task=runner_task(),
+        route=ROUTE_CODE_GENERATION,
+        operation="codegen",
+        source_task_ref="issue:100",
+    )
+    receipt = authority_receipt_from_bound(
+        bound,
+        status="bound",
+        reason_code="VNEXT_AUTHORITATIVE_BOUND_NOT_EXECUTED",
+    )
+    public = receipt.to_public_mapping()
+    assert public["effect_class"] == "GREEN"
+    assert public["execution_authorized"] is False
+    assert public["allow_legacy_mechanical_shell"] is False
+    assert public["side_effects_executed"] is False
 
 
 def test_runner_binder_rejects_taskless_route_before_dereference() -> None:
