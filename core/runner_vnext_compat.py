@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from core.runner_gate import RunnerGate
 from core.runner_vnext_contracts import (
     EffectClass,
     OperationIR,
@@ -53,27 +54,7 @@ _KIND_MAP: dict[str, tuple[str, str, Reversibility]] = {
     "publish": ("draft_pr_open", "draft_pr_open", Reversibility.BOUNDED_REVERSIBLE),
     "private_memory": ("private_compute", "private_compute", Reversibility.REVERSIBLE),
 }
-
-_PROTECTED_EXACT = frozenset({
-    "BOOT_MANIFEST.yaml",
-    "PROJECT_TREE.yaml",
-    "OPERATOR_RULES.yaml",
-    "CAPABILITY_REGISTRY.yaml",
-    "scripts/runner_poll_github_tasks.py",
-    "core/gate_engine.py",
-    "core/action_gate.py",
-})
-_PROTECTED_PREFIXES = (
-    ".github/workflows/",
-    "secrets/",
-    "deploy/",
-    "server/",
-    "finance/",
-    "legal/",
-    "governance/",
-    "Runner_core/",
-    "adapter_boundaries/",
-)
+_RUNNER_GATE = RunnerGate()
 
 
 def adapt_legacy_task(observation: LegacyTaskObservation) -> AdaptedLegacyTask:
@@ -155,7 +136,7 @@ def _privacy(value: str) -> PrivacyClass:
 
 
 def _resource_ref(path: str) -> str:
-    protected = path in _PROTECTED_EXACT or path.startswith(_PROTECTED_PREFIXES)
+    protected = _RUNNER_GATE.is_protected_path(path)
     prefix = "protected" if protected else "repo"
     return f"{prefix}:{path}"
 

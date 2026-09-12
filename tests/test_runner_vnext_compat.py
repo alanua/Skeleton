@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from core.runner_gate import PROTECTED_PATHS, PROTECTED_PATH_PREFIXES
 from core.runner_vnext_compat import COMPATIBILITY_DELETION_CONDITION, CompatError, LegacyTaskObservation, adapt_legacy_task
 from core.runner_vnext_contracts import EffectClass, PrivacyClass
 
@@ -32,9 +33,23 @@ def test_code_edit_maps_one_way_to_typed_vnext_plan() -> None:
     assert adapted.policy_input.target_state_ref == "git:abc"
 
 
-def test_protected_path_is_not_disguised_as_ordinary_repo_resource() -> None:
-    adapted = adapt_legacy_task(obs(allowed_files=("scripts/runner_poll_github_tasks.py",)))
-    assert adapted.operation.resources == ("protected:scripts/runner_poll_github_tasks.py",)
+@pytest.mark.parametrize("path", PROTECTED_PATHS)
+def test_canonical_exact_protected_path_is_not_disguised_as_ordinary_repo_resource(path: str) -> None:
+    adapted = adapt_legacy_task(obs(allowed_files=(path,)))
+    assert adapted.operation.resources == (f"protected:{path}",)
+
+
+@pytest.mark.parametrize("prefix", PROTECTED_PATHS + PROTECTED_PATH_PREFIXES)
+def test_canonical_protected_prefix_child_is_not_disguised_as_ordinary_repo_resource(prefix: str) -> None:
+    path = f"{prefix}/example.py" if not prefix.endswith("_") else f"{prefix}live_codegen.py"
+    adapted = adapt_legacy_task(obs(allowed_files=(path,)))
+    assert adapted.operation.resources == (f"protected:{path}",)
+
+
+@pytest.mark.parametrize("path", ("core/example.py", "tests/example.py", "docs/example.md"))
+def test_representative_ordinary_paths_remain_repo_resources(path: str) -> None:
+    adapted = adapt_legacy_task(obs(allowed_files=(path,)))
+    assert adapted.operation.resources == (f"repo:{path}",)
 
 
 def test_unsupported_or_ambiguous_legacy_task_fails_closed() -> None:
