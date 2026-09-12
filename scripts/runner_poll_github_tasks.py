@@ -1031,6 +1031,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "verified_base_sha",
         "validation_base_ref",
         "validation_base_sha",
+        "validation_allowed_file",
+        "validation_allowed_files_count",
         "validation_changed_file",
         "validation_changed_files_count",
         "validation_checkout_head_sha",
@@ -11064,29 +11066,63 @@ def _get_pr_branch_validation_file_paths(
 ) -> tuple[str, ...]:
     if repository not in ALLOWED_TARGET_REPOSITORIES:
         raise RuntimeError("PR file metadata repository not allowed")
-    code, output = run_command(
-        [
-            "gh",
-            "pr",
-            "view",
-            str(pr_number),
-            "--repo",
-            repository,
-            "--json",
-            "files",
-        ]
-    )
-    if code != 0:
-        raise RuntimeError("PR file metadata read failed")
-    parsed = json.loads(output or "{}")
-    if not isinstance(parsed, dict):
-        raise RuntimeError("PR file metadata returned non-object JSON")
-    files = _pr_file_paths(parsed)
+    if not isinstance(pr_number, int) or pr_number <= 0:
+        raise RuntimeError("PR file metadata number malformed")
+    files: list[str] = []
+    seen: set[str] = set()
+    max_pages = 30
+    for page in range(1, max_pages + 1):
+        code, output = run_command(
+            [
+                "gh",
+                "api",
+                "--method",
+                "GET",
+                f"repos/{repository}/pulls/{pr_number}/files",
+                "-f",
+                "per_page=100",
+                "-f",
+                f"page={page}",
+            ]
+        )
+        if code != 0:
+            raise RuntimeError("PR file metadata read failed")
+        parsed = json.loads(output or "[]")
+        if not isinstance(parsed, list):
+            raise RuntimeError("PR file metadata returned non-list JSON")
+        for file_info in parsed:
+            if not isinstance(file_info, dict):
+                raise RuntimeError("produced_pr_changed_files_malformed")
+            path = file_info.get("filename")
+            if not isinstance(path, str):
+                path = file_info.get("path")
+            if not isinstance(path, str) or not path:
+                raise RuntimeError("produced_pr_changed_files_malformed")
+            if not _safe_issue_publish_file_path(path):
+                raise RuntimeError("produced_pr_changed_files_unsafe")
+            if path in seen:
+                raise RuntimeError("produced_pr_changed_files_duplicate")
+            seen.add(path)
+            files.append(path)
+        if len(parsed) < 100:
+            break
+    else:
+        raise RuntimeError("PR file metadata pagination incomplete")
     if not files:
         raise RuntimeError("produced_pr_changed_files_missing")
-    if any(not _safe_issue_publish_file_path(path) for path in files):
-        raise RuntimeError("produced_pr_changed_files_unsafe")
-    return tuple(sorted(dict.fromkeys(files)))
+    return tuple(sorted(files))
+
+
+def _pr_branch_validation_binding(
+    pr_state: dict[str, Any],
+) -> tuple[str, str, str, str, str]:
+    return (
+        str(pr_state.get("state") or ""),
+        str(pr_state.get("baseRefName") or ""),
+        str(pr_state.get("baseRefOid") or "").lower(),
+        str(pr_state.get("headRefName") or ""),
+        str(pr_state.get("headRefOid") or "").lower(),
+    )
 
 
 def ensure_codegen_pr_validation_continuation(
@@ -11134,7 +11170,13 @@ def ensure_codegen_pr_validation_continuation(
             and declared_head.lower() != head_sha
         ):
             raise RuntimeError("declared_existing_pr_head_stale")
+    pr_binding = _pr_branch_validation_binding(pr_state)
     changed_files = _get_pr_branch_validation_file_paths(repository, pr_number)
+    reread_pr_state, _reread_source = _get_pr_branch_validation_state(
+        repository, pr_number
+    )
+    if _pr_branch_validation_binding(reread_pr_state) != pr_binding:
+        raise RuntimeError("produced_pr_state_drifted")
 
     idempotency_key = _continuation_issue_idempotency_key(
         repository, pr_number, head_sha, base_sha
@@ -11836,7 +11878,6 @@ def _validation_checkout_metadata_lines(
         f"validation_changed_files_count={len(changed_files)}",
         *(f"validation_changed_file={path}" for path in changed_files),
         f"python_version={_validation_receipt_value('.'.join(str(part) for part in sys.version_info[:3]), limit=40)}",
-        f"validation_pytest_version={_validation_read_command_value(['python3', '-m', 'pytest', '--version'], validation_path)}",
     ], None, changed_files
 
 
@@ -12054,6 +12095,10 @@ def validate_pr_branch(body: str) -> str:
             [*status_lines, f"reason={allowed_reason}"],
             "not_met",
         )
+    pytest_version = _validation_read_command_value(
+        ["python3", "-m", "pytest", "--version"], validation_path
+    )
+    status_lines.append(f"validation_pytest_version={pytest_version}")
     clean, initial_status = _validation_worktree_status(validation_path)
     status_lines.append(f"validation_initial_status={initial_status}")
     if not clean:

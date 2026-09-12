@@ -3066,9 +3066,10 @@ def test_codegen_done_with_draft_pr_creates_exact_validation_continuation_once()
 
     def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
         del cwd
-        if command[:3] == ["gh", "pr", "view"] and command[-1] == "files":
+        if command[:4] == ["gh", "api", "--method", "GET"]:
+            assert command[4] == f"repos/{runner.REPO}/pulls/123/files"
             return 0, json.dumps(
-                {"files": [{"path": path} for path in reversed(pr_files)]}
+                [{"filename": path} for path in reversed(pr_files)]
             )
         if command[:3] == ["gh", "issue", "list"]:
             return 0, "[]"
@@ -3133,8 +3134,9 @@ def test_registered_repo_done_creates_skeleton_validation_for_produced_repo_pr()
 
     def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
         del cwd
-        if command[:3] == ["gh", "pr", "view"] and command[-1] == "files":
-            return 0, json.dumps({"files": [{"path": "docs/example.md"}]})
+        if command[:4] == ["gh", "api", "--method", "GET"]:
+            assert command[4] == "repos/alanua/Lavalamp/pulls/123/files"
+            return 0, json.dumps([{"filename": "docs/example.md"}])
         if command[:3] == ["gh", "issue", "list"]:
             return 0, "[]"
         if command[:3] == ["gh", "issue", "create"]:
@@ -3174,7 +3176,7 @@ def test_registered_repo_done_creates_skeleton_validation_for_produced_repo_pr()
     assert continuation is not None
     assert continuation.repository == "alanua/Lavalamp"
     assert continuation.pr_number == 123
-    assert lookups == [("alanua/Lavalamp", 123)]
+    assert lookups == [("alanua/Lavalamp", 123), ("alanua/Lavalamp", 123)]
     assert len(created) == 1
     create_repo, title, body = created[0]
     assert create_repo == runner.REPO
@@ -3187,6 +3189,103 @@ def test_registered_repo_done_creates_skeleton_validation_for_produced_repo_pr()
         f"idempotency_key: {runner._continuation_issue_idempotency_key('alanua/Lavalamp', 123, HEAD_SHA, 'b' * 40)}"
         in body
     )
+
+
+def test_pr_branch_validation_file_paths_paginates_all_pages() -> None:
+    page_one = tuple(f"docs/page-one-{index:03d}.md" for index in range(100))
+    page_two = (
+        "tests/test_runner_poll_github_tasks.py",
+        "scripts/runner_poll_github_tasks.py",
+    )
+
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        del cwd
+        assert command[:4] == ["gh", "api", "--method", "GET"]
+        assert command[4] == f"repos/{runner.REPO}/pulls/123/files"
+        assert command[-3:] == ["per_page=100", "-f", command[-1]]
+        page = command[-1]
+        if page == "page=1":
+            return 0, json.dumps([{"filename": path} for path in page_one])
+        if page == "page=2":
+            return 0, json.dumps([{"filename": path} for path in page_two])
+        return 2, f"unexpected page: {page}"
+
+    with mock.patch.object(runner, "run_command", side_effect=run) as run_mock:
+        files = runner._get_pr_branch_validation_file_paths(runner.REPO, 123)
+
+    assert files == tuple(sorted((*page_one, *page_two)))
+    assert [call.args[0][-1] for call in run_mock.call_args_list] == [
+        "page=1",
+        "page=2",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("payload", "reason"),
+    (
+        ([{"filename": ""}], "produced_pr_changed_files_malformed"),
+        ([{"filename": "../secret.txt"}], "produced_pr_changed_files_unsafe"),
+        (
+            [
+                {"filename": "scripts/runner_poll_github_tasks.py"},
+                {"filename": "scripts/runner_poll_github_tasks.py"},
+            ],
+            "produced_pr_changed_files_duplicate",
+        ),
+    ),
+)
+def test_pr_branch_validation_file_paths_fail_closed_on_malformed_unsafe_or_duplicate(
+    payload: list[dict[str, str]], reason: str
+) -> None:
+    with mock.patch.object(
+        runner, "run_command", return_value=(0, json.dumps(payload))
+    ):
+        with pytest.raises(RuntimeError, match=reason):
+            runner._get_pr_branch_validation_file_paths(runner.REPO, 123)
+
+
+def test_pr_branch_validation_file_paths_fails_closed_on_pagination_read_failure() -> None:
+    def run(command: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
+        del cwd
+        if command[-1] == "page=1":
+            return 0, json.dumps(
+                [{"filename": f"docs/page-one-{index:03d}.md"} for index in range(100)]
+            )
+        if command[-1] == "page=2":
+            return 1, "page two failed"
+        return 2, f"unexpected command: {command!r}"
+
+    with mock.patch.object(runner, "run_command", side_effect=run):
+        with pytest.raises(RuntimeError, match="PR file metadata read failed"):
+            runner._get_pr_branch_validation_file_paths(runner.REPO, 123)
+
+
+def test_codegen_done_pr_state_drift_blocks_before_validation_continuation_side_effect() -> None:
+    pre_state = _pr_validation_state()
+    post_state = _pr_validation_state(headRefOid="c" * 40)
+
+    with mock.patch.object(
+        runner,
+        "_get_pr_branch_validation_state",
+        side_effect=[(pre_state, "gh"), (post_state, "gh")],
+    ), mock.patch.object(
+        runner,
+        "_get_pr_branch_validation_file_paths",
+        return_value=("scripts/runner_poll_github_tasks.py",),
+    ), mock.patch.object(
+        runner, "_find_existing_validation_continuation_issue"
+    ) as find, mock.patch.object(
+        runner, "_create_validation_continuation_issue"
+    ) as create:
+        with pytest.raises(RuntimeError, match="produced_pr_state_drifted"):
+            runner.ensure_codegen_pr_validation_continuation(
+                source_issue=90,
+                issue_body="Expected Output: draft PR\n\n```task\nDo it\n```",
+                report=DONE_REPORT,
+            )
+
+    find.assert_not_called()
+    create.assert_not_called()
 
 
 def test_codegen_existing_pr_contract_rejects_parallel_pr_without_continuation() -> None:
@@ -3440,6 +3539,14 @@ def test_update_existing_pr_process_publishes_same_pr_and_queues_validation(
             return 0, "[]"
         if command[:3] == ["gh", "issue", "create"]:
             return 0, "https://github.com/alanua/Skeleton/issues/3004\n"
+        if command[:4] == ["gh", "api", "--method", "GET"]:
+            assert command[4] == f"repos/{runner.REPO}/pulls/2749/files"
+            return 0, json.dumps(
+                [
+                    {"filename": "scripts/runner_poll_github_tasks.py"},
+                    {"filename": "tests/test_runner_poll_github_tasks.py"},
+                ]
+            )
         return 2, f"unexpected command: {command!r}"
 
     with mock.patch.object(runner, "set_issue_label"), mock.patch.object(
@@ -3456,6 +3563,7 @@ def test_update_existing_pr_process_publishes_same_pr_and_queues_validation(
         side_effect=[
             (pre_pr_state, "gh"),
             (stale_post_pr_state, "gh"),
+            (post_pr_state, "gh"),
             (post_pr_state, "gh"),
             (post_pr_state, "gh"),
         ],
@@ -20914,6 +21022,7 @@ def test_validate_pr_branch_stale_allowed_files_blocks_before_pytest(
     assert report.startswith("BLOCKED:")
     assert "validation_changed_files_count=3" in report
     assert "validation_allowed_files_count=1" in report
+    assert "validation_allowed_file=scripts/runner_poll_github_tasks.py" in report
     assert "reason=allowed_files_changed_files_mismatch" in report
     assert not any(command[:3] == ["python3", "-m", "pytest"] for command in commands)
 
@@ -21011,6 +21120,7 @@ def test_validate_pr_branch_exact_allowed_files_runs_profile(
     commands = [call.args[0] for call in run.call_args_list]
     assert report.startswith("DONE:")
     assert "validation_allowed_files_count=3" in report
+    assert "validation_allowed_file=tests/test_runner_poll.py" in report
     assert ["python3", "-m", "pytest", "-q"] in commands
 
 
