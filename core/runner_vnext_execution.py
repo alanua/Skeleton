@@ -82,7 +82,11 @@ class GreenExecutionLifecycle:
         self._scheduler = scheduler
         self._ledger = ledger
 
-    def run(self, grant: GreenExecutionGrant, executor: GreenAdapterExecutor) -> GreenExecutionReceipt:
+    def run(
+        self,
+        grant: GreenExecutionGrant,
+        executor: GreenAdapterExecutor,
+    ) -> GreenExecutionReceipt:
         started = self.begin(grant)
         try:
             result = executor.execute(grant)
@@ -93,10 +97,18 @@ class GreenExecutionLifecycle:
     def begin(self, grant: GreenExecutionGrant) -> GreenExecutionStarted:
         _validate_grant(grant)
         self._validate_authoritative_state(grant, expected_status="RESERVED")
-        identity = OperationIdentity(grant.operation_id, grant.idempotency_key, grant.target_state_ref)
+        identity = OperationIdentity(
+            grant.operation_id,
+            grant.idempotency_key,
+            grant.target_state_ref,
+        )
         grant_hash = execution_grant_hash(grant)
         try:
-            self._ledger.mark_started(identity, fence_token=grant.fence_token, execution_grant_hash=grant_hash)
+            self._ledger.mark_started(
+                identity,
+                fence_token=grant.fence_token,
+                execution_grant_hash=grant_hash,
+            )
         except LedgerError as exc:
             raise GreenExecutionError(exc.reason_code) from exc
         return GreenExecutionStarted(
@@ -116,7 +128,11 @@ class GreenExecutionLifecycle:
         result: GreenExecutionResult,
     ) -> GreenExecutionReceipt:
         _validate_started(grant, started)
-        self._validate_authoritative_state(grant, expected_status="STARTED", execution_grant_hash=started.execution_grant_hash)
+        self._validate_authoritative_state(
+            grant,
+            expected_status="STARTED",
+            execution_grant_hash=started.execution_grant_hash,
+        )
         _validate_result(grant, result)
 
         success = result.outcome == "SUCCEEDED"
@@ -125,7 +141,11 @@ class GreenExecutionLifecycle:
         if not success and result.validation_status != "FAIL":
             raise GreenExecutionError("EXECUTION_FAILURE_REQUIRES_VALIDATION_FAIL")
 
-        identity = OperationIdentity(grant.operation_id, grant.idempotency_key, grant.target_state_ref)
+        identity = OperationIdentity(
+            grant.operation_id,
+            grant.idempotency_key,
+            grant.target_state_ref,
+        )
         try:
             self._ledger.finish(
                 identity,
@@ -142,7 +162,11 @@ class GreenExecutionLifecycle:
 
         lease_released = self._release_exact_lease(grant)
         state_changed = result.before_state_ref != result.after_state_ref
-        rollback_required = (not success) and (result.rollback_requested or state_changed or result.outcome == "PARTIAL")
+        rollback_required = (not success) and (
+            result.rollback_requested
+            or state_changed
+            or result.outcome == "PARTIAL"
+        )
         needs_recovery = rollback_required or not lease_released
         terminal_status = "COMPLETED" if success else "FAILED"
         return GreenExecutionReceipt(
@@ -177,27 +201,43 @@ class GreenExecutionLifecycle:
     ) -> None:
         status = self._ledger.status(grant.idempotency_key)
         if status != expected_status:
-            reason = "EXECUTION_ALREADY_STARTED_NEEDS_RECOVERY" if status == "STARTED" and expected_status == "RESERVED" else "EXECUTION_LEDGER_STATE_MISMATCH"
+            reason = (
+                "EXECUTION_ALREADY_STARTED_NEEDS_RECOVERY"
+                if status == "STARTED" and expected_status == "RESERVED"
+                else "EXECUTION_LEDGER_STATE_MISMATCH"
+            )
             raise GreenExecutionError(reason)
         try:
             reservation = self._ledger.reservation_event(grant.idempotency_key)
             current_fence = self._ledger.current_fence_token(grant.idempotency_key)
         except LedgerError as exc:
             raise GreenExecutionError(exc.reason_code) from exc
-        if reservation.identity.operation_id != grant.operation_id or reservation.identity.target_state_ref != grant.target_state_ref:
+        if (
+            reservation.identity.operation_id != grant.operation_id
+            or reservation.identity.target_state_ref != grant.target_state_ref
+        ):
             raise GreenExecutionError("EXECUTION_LEDGER_IDENTITY_MISMATCH")
         if current_fence != grant.fence_token:
             raise GreenExecutionError("EXECUTION_LEDGER_FENCE_MISMATCH")
-        if reservation.reservation_scope_hash != reservation_scope_fingerprint(grant.planner_envelope):
+        if (
+            reservation.reservation_scope_hash
+            != reservation_scope_fingerprint(grant.planner_envelope)
+        ):
             raise GreenExecutionError("EXECUTION_LEDGER_SCOPE_MISMATCH")
         if expected_status == "STARTED":
             try:
                 started = self._ledger.started_event(grant.idempotency_key)
             except LedgerError as exc:
                 raise GreenExecutionError(exc.reason_code) from exc
-            if started.identity != reservation.identity or started.fence_token != grant.fence_token:
+            if (
+                started.identity != reservation.identity
+                or started.fence_token != grant.fence_token
+            ):
                 raise GreenExecutionError("EXECUTION_START_EVIDENCE_MISMATCH")
-            if execution_grant_hash is None or started.execution_grant_hash != execution_grant_hash:
+            if (
+                execution_grant_hash is None
+                or started.execution_grant_hash != execution_grant_hash
+            ):
                 raise GreenExecutionError("EXECUTION_START_GRANT_HASH_MISMATCH")
             if started.reservation_scope_hash != reservation.reservation_scope_hash:
                 raise GreenExecutionError("EXECUTION_START_SCOPE_MISMATCH")
@@ -272,9 +312,15 @@ def _validate_grant(grant: GreenExecutionGrant) -> None:
         raise GreenExecutionError("EXECUTION_FRESH_AUTHORIZED_GRANT_REQUIRED")
     if grant.planner_envelope_hash != planner_envelope_hash(grant.planner_envelope):
         raise GreenExecutionError("EXECUTION_PLANNER_ENVELOPE_HASH_MISMATCH")
-    if grant.planner_envelope.operation_id != grant.operation_id or grant.planner_envelope.idempotency_key != grant.idempotency_key:
+    if (
+        grant.planner_envelope.operation_id != grant.operation_id
+        or grant.planner_envelope.idempotency_key != grant.idempotency_key
+    ):
         raise GreenExecutionError("EXECUTION_GRANT_ENVELOPE_IDENTITY_MISMATCH")
-    if grant.planner_envelope.adapter_id != grant.adapter_id or grant.planner_envelope.target_state_ref != grant.target_state_ref:
+    if (
+        grant.planner_envelope.adapter_id != grant.adapter_id
+        or grant.planner_envelope.target_state_ref != grant.target_state_ref
+    ):
         raise GreenExecutionError("EXECUTION_GRANT_ENVELOPE_BINDING_MISMATCH")
     if grant.planner_envelope.fence_token != grant.fence_token:
         raise GreenExecutionError("EXECUTION_GRANT_ENVELOPE_FENCE_MISMATCH")
@@ -285,8 +331,22 @@ def _validate_grant(grant: GreenExecutionGrant) -> None:
 def _validate_started(grant: GreenExecutionGrant, started: GreenExecutionStarted) -> None:
     if not started.effect_execution_started:
         raise GreenExecutionError("EXECUTION_STARTED_MARKER_REQUIRED")
-    expected = (grant.operation_id, grant.idempotency_key, grant.adapter_id, grant.fence_token, grant.planner_envelope_hash, execution_grant_hash(grant))
-    actual = (started.operation_id, started.idempotency_key, started.adapter_id, started.fence_token, started.planner_envelope_hash, started.execution_grant_hash)
+    expected = (
+        grant.operation_id,
+        grant.idempotency_key,
+        grant.adapter_id,
+        grant.fence_token,
+        grant.planner_envelope_hash,
+        execution_grant_hash(grant),
+    )
+    actual = (
+        started.operation_id,
+        started.idempotency_key,
+        started.adapter_id,
+        started.fence_token,
+        started.planner_envelope_hash,
+        started.execution_grant_hash,
+    )
     if actual != expected:
         raise GreenExecutionError("EXECUTION_STARTED_MARKER_MISMATCH")
 
@@ -296,15 +356,66 @@ def _validate_result(grant: GreenExecutionGrant, result: GreenExecutionResult) -
         raise GreenExecutionError("EXECUTION_RESULT_OUTCOME_INVALID")
     if result.validation_status not in {"PASS", "FAIL"}:
         raise GreenExecutionError("EXECUTION_RESULT_VALIDATION_INVALID")
-    if not result.reason_code or any(ch not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_" for ch in result.reason_code):
+    if (
+        not result.reason_code
+        or any(ch not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_" for ch in result.reason_code)
+    ):
         raise GreenExecutionError("EXECUTION_RESULT_REASON_INVALID")
-    expected = (grant.operation_id, grant.idempotency_key, grant.adapter_id, grant.target_state_ref, grant.fence_token, grant.planner_envelope.resources, grant.planner_envelope.effects)
-    actual = (result.operation_id, result.idempotency_key, result.adapter_id, result.target_state_ref, result.fence_token, result.resources, result.effects)
+    expected = (
+        grant.operation_id,
+        grant.idempotency_key,
+        grant.adapter_id,
+        grant.target_state_ref,
+        grant.fence_token,
+        grant.planner_envelope.effects,
+    )
+    actual = (
+        result.operation_id,
+        result.idempotency_key,
+        result.adapter_id,
+        result.target_state_ref,
+        result.fence_token,
+        result.effects,
+    )
     if actual != expected:
         raise GreenExecutionError("EXECUTION_RESULT_BINDING_MISMATCH_NEEDS_RECOVERY")
-    for ref in (*result.resources, result.before_state_ref, result.after_state_ref):
+    validate_actual_touched_resources(
+        result,
+        authorized_resources=grant.planner_envelope.resources,
+    )
+    for ref in (result.before_state_ref, result.after_state_ref):
         if not _public_ref(ref):
             raise GreenExecutionError("EXECUTION_RESULT_PUBLIC_REF_REQUIRED")
+
+
+def validate_actual_touched_resources(
+    result: GreenExecutionResult,
+    *,
+    authorized_resources: tuple[str, ...],
+) -> None:
+    touched = result.resources
+    if len(set(touched)) != len(touched):
+        raise GreenExecutionError("EXECUTION_RESULT_TOUCHED_RESOURCES_DUPLICATE")
+    authorized = set(authorized_resources)
+    for ref in touched:
+        if not _public_ref(ref):
+            raise GreenExecutionError("EXECUTION_RESULT_TOUCHED_RESOURCE_MALFORMED")
+        if ref not in authorized:
+            raise GreenExecutionError("EXECUTION_RESULT_TOUCHED_RESOURCE_OUT_OF_SCOPE")
+
+    state_changed = result.before_state_ref != result.after_state_ref
+    if result.outcome == "SUCCEEDED":
+        if not touched:
+            raise GreenExecutionError("EXECUTION_RESULT_TOUCHED_RESOURCES_REQUIRED")
+        return
+    if result.outcome == "PARTIAL":
+        if not touched:
+            raise GreenExecutionError("EXECUTION_RESULT_PARTIAL_TOUCHED_RESOURCES_REQUIRED")
+        return
+    if touched:
+        return
+    if state_changed or result.rollback_requested:
+        raise GreenExecutionError("EXECUTION_RESULT_FAILED_MUTATION_REQUIRES_TOUCHED_RESOURCES")
 
 
 def execution_grant_hash(grant: GreenExecutionGrant) -> str:
@@ -329,7 +440,9 @@ def execution_grant_hash(grant: GreenExecutionGrant) -> str:
         "execution_authorized": grant.execution_authorized,
         "effect_execution_started": grant.effect_execution_started,
     }
-    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def _text_hash(value: str) -> str:
@@ -342,4 +455,11 @@ def _refs_hash(values: tuple[str, ...]) -> str:
 
 
 def _public_ref(value: str) -> bool:
-    return bool(value) and not value.startswith(("/", "~")) and "\\" not in value and ".." not in value and ":" in value and not any(ch.isspace() for ch in value)
+    return (
+        bool(value)
+        and not value.startswith(("/", "~"))
+        and "\\" not in value
+        and ".." not in value
+        and ":" in value
+        and not any(ch.isspace() for ch in value)
+    )

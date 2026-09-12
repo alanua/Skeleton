@@ -33,6 +33,67 @@ OPENROUTER_CREDENTIAL_ALIAS = "openrouter-api"
 OPENROUTER_CREDENTIAL_ACTION = "bind-openrouter-fallback"
 _OPENROUTER_BOUND_KEY_ENV = "SKELETON_OPENROUTER_FALLBACK_API_KEY"
 _OPENHANDS_SECONDARY_MAX_OUTPUT_TOKENS = 768
+_OPENHANDS_FIXED_EXECUTABLE = "/usr/bin/openhands"
+_OPENHANDS_BOUND_MAX_OUTPUT_TOKENS_ENV = "SKELETON_OPENHANDS_MAX_OUTPUT_TOKENS"
+_OPENHANDS_PERSISTENCE_DIR_ENV = "OPENHANDS_PERSISTENCE_DIR"
+_OPENHANDS_BOOTSTRAP_REQUIRED_ENV = "SKELETON_OPENHANDS_BOOTSTRAP_REQUIRED"
+_OPENHANDS_BOOTSTRAP_DIRNAME = ".skeleton-openhands-bootstrap"
+_OPENHANDS_PERSISTENCE_DIRNAME = ".openhands-secondary"
+
+# OpenHands CLI --override-with-envs does not reliably bind the SDK LLM output
+# token limit. A code-owned private Python startup hook persists and verifies the
+# exact RouteLease cap before the CLI imports its normal configuration. It then
+# removes the bootstrap controls so tools spawned by OpenHands do not inherit
+# them.
+_OPENHANDS_SITECUSTOMIZE = """\
+import os
+
+
+def _bounded_openhands_bootstrap_fail():
+    os._exit(78)
+
+
+if os.environ.get("SKELETON_OPENHANDS_BOOTSTRAP_REQUIRED") == "1":
+    raw_limit = os.environ.get("SKELETON_OPENHANDS_MAX_OUTPUT_TOKENS", "")
+    try:
+        limit = int(raw_limit)
+    except ValueError:
+        _bounded_openhands_bootstrap_fail()
+    if limit <= 0:
+        _bounded_openhands_bootstrap_fail()
+    model = os.environ.get("LLM_MODEL", "")
+    persistence_dir = os.environ.get("OPENHANDS_PERSISTENCE_DIR", "")
+    if not model or not persistence_dir:
+        _bounded_openhands_bootstrap_fail()
+    try:
+        from openhands.sdk import LLM
+        from openhands_cli.stores.agent_store import AgentStore
+        from openhands_cli.utils import get_default_cli_agent
+
+        llm = LLM(
+            model=model,
+            api_key="skeleton-nonsecret-placeholder",
+            max_output_tokens=limit,
+            usage_id="agent",
+        )
+        store = AgentStore()
+        store.save(get_default_cli_agent(llm))
+        read_back = store.load_from_disk()
+        if (
+            read_back is None
+            or read_back.llm.max_output_tokens != limit
+            or read_back.condenser is None
+            or read_back.condenser.llm.max_output_tokens != limit
+        ):
+            _bounded_openhands_bootstrap_fail()
+    except BaseException:
+        _bounded_openhands_bootstrap_fail()
+    finally:
+        os.environ.pop("PYTHONPATH", None)
+        os.environ.pop("SKELETON_OPENHANDS_BOOTSTRAP_REQUIRED", None)
+        os.environ.pop("SKELETON_OPENHANDS_MAX_OUTPUT_TOKENS", None)
+        os.environ.pop("LLM_MAX_OUTPUT_TOKENS", None)
+"""
 
 # Provider runtime identifiers are adapter-owned. Task/issue prose never selects them.
 _OPENHANDS_RUNTIME_MODEL_BY_MODEL_ID = {
@@ -63,10 +124,7 @@ class OpenHandsSecondaryRoute:
 
 
 def codex_failure_allows_secondary(exit_code: int, output: str) -> bool:
-    """Allow a secondary executor only for bounded availability failures.
-
-    Ordinary implementation/test/validation failures are not executor-fallback authority.
-    """
+    """Allow a secondary executor only for bounded availability failures."""
     if exit_code == 0:
         return False
     lowered = (output or "").lower()
@@ -85,7 +143,7 @@ def task_contract_allows_cloud_secondary(task_content: str) -> bool:
     if not isinstance(requested, (list, tuple)):
         return False
     requested_capabilities = {str(item) for item in requested}
-    if "repository_write" not in requested_capabilities:
+    if not ({"repository_write", "repository_write_allowlisted"} & requested_capabilities):
         return False
     privacy = str(raw.get("privacy_boundary", "")).upper()
     if not privacy or "PRIVATE" in privacy:
@@ -155,6 +213,37 @@ def select_openhands_secondary_route(
     return OpenHandsSecondaryRoute(binding=binding, lease=lease, runtime_model=runtime_model)
 
 
+def _prepare_openhands_private_bootstrap(private_home: str) -> str:
+    home = Path(private_home)
+    try:
+        if home.is_symlink() or not home.is_dir():
+            raise OSError("private home is not a directory")
+        bootstrap_dir = home / _OPENHANDS_BOOTSTRAP_DIRNAME
+        if bootstrap_dir.exists() and (
+            bootstrap_dir.is_symlink() or not bootstrap_dir.is_dir()
+        ):
+            raise OSError("bootstrap target is unsafe")
+        bootstrap_dir.mkdir(mode=0o700, exist_ok=True)
+        os.chmod(bootstrap_dir, 0o700)
+        sitecustomize = bootstrap_dir / "sitecustomize.py"
+        if sitecustomize.exists() and (
+            sitecustomize.is_symlink() or not sitecustomize.is_file()
+        ):
+            raise OSError("bootstrap file target is unsafe")
+        temporary = bootstrap_dir / ".sitecustomize.py.tmp"
+        if temporary.exists() and (
+            temporary.is_symlink() or not temporary.is_file()
+        ):
+            raise OSError("bootstrap temporary target is unsafe")
+        temporary.write_text(_OPENHANDS_SITECUSTOMIZE, encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, sitecustomize)
+        os.chmod(sitecustomize, 0o600)
+    except OSError as exc:
+        raise CodegenRouteError("openhands_private_bootstrap_unavailable") from exc
+    return str(bootstrap_dir)
+
+
 def prepare_openhands_secondary_environment(
     *,
     authority_environment: Mapping[str, str] | None = None,
@@ -166,6 +255,9 @@ def prepare_openhands_secondary_environment(
         raise CodegenRouteError("openhands_bounded_token_budget_required")
     authority = os.environ if authority_environment is None else authority_environment
     environment: MutableMapping[str, str] = dict(base_environment or {})
+    private_home = environment.get("HOME", "").strip()
+    if not private_home:
+        raise CodegenRouteError("openhands_private_home_required")
     try:
         bind_registered_environment_credential(
             service_id=OPENROUTER_CREDENTIAL_SERVICE,
@@ -179,9 +271,16 @@ def prepare_openhands_secondary_environment(
     api_key = environment.pop(_OPENROUTER_BOUND_KEY_ENV, None)
     if not api_key:
         raise CodegenRouteError("openhands_registered_credential_unavailable")
+    bootstrap_dir = _prepare_openhands_private_bootstrap(private_home)
     environment["LLM_API_KEY"] = api_key
     environment["LLM_MODEL"] = selected.runtime_model
     environment["LLM_MAX_OUTPUT_TOKENS"] = str(selected.lease.max_tokens)
+    environment[_OPENHANDS_BOUND_MAX_OUTPUT_TOKENS_ENV] = str(selected.lease.max_tokens)
+    environment[_OPENHANDS_PERSISTENCE_DIR_ENV] = str(
+        Path(private_home) / _OPENHANDS_PERSISTENCE_DIRNAME
+    )
+    environment[_OPENHANDS_BOOTSTRAP_REQUIRED_ENV] = "1"
+    environment["PYTHONPATH"] = bootstrap_dir
     environment["MAX_BUDGET_PER_TASK"] = "0.50"
     environment["MAX_ITERATIONS"] = "20"
     environment["LLM_NUM_RETRIES"] = "1"
@@ -191,14 +290,19 @@ def prepare_openhands_secondary_environment(
         "binding_id": selected.binding.binding_id,
         "lease_hash": selected.lease.lease_hash,
         "max_output_tokens": selected.lease.max_tokens,
+        "token_bound_transport": "private_startup_agent_config",
         "credential_status": "USED",
     }
     return dict(environment), public_receipt
 
 
 def openhands_secondary_command(task_content: str, *, executable: str = "openhands") -> list[str]:
+    if Path(executable).name != "openhands":
+        raise CodegenRouteError("openhands_executable_identity_invalid")
+    if Path(executable).is_absolute() and Path(executable) != Path(_OPENHANDS_FIXED_EXECUTABLE):
+        raise CodegenRouteError("openhands_executable_identity_mismatch")
     return [
-        executable,
+        _OPENHANDS_FIXED_EXECUTABLE,
         "--headless",
         "--json",
         "--override-with-envs",
