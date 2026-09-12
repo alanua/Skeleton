@@ -138,19 +138,23 @@ def test_missing_registered_credential_fails_closed(monkeypatch: pytest.MonkeyPa
         )
 
 
-def test_openhands_command_uses_fixed_binary_after_identity_check() -> None:
+def test_openhands_command_uses_fixed_code_owned_binary_after_identity_check() -> None:
     command = openhands_secondary_command("bounded task", executable="/usr/bin/openhands")
     assert command == [
-        "openhands",
+        "/usr/bin/openhands",
         "--headless",
         "--json",
         "--override-with-envs",
         "-t",
         "bounded task",
     ]
-    assert command[0] != "/usr/bin/openhands"
     assert "moonshot" not in " ".join(command)
     assert "openrouter" not in " ".join(command)
+
+
+def test_openhands_command_does_not_interpolate_alternate_openhands_path() -> None:
+    command = openhands_secondary_command("bounded task", executable="/tmp/openhands")
+    assert command[0] == "/usr/bin/openhands"
 
 
 def test_openhands_command_rejects_non_openhands_basename() -> None:
