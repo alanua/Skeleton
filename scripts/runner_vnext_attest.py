@@ -301,7 +301,7 @@ def _diagnostic_bound(repository: str, issue_number: int, body: str, expected_id
                 "runtime_change",
                 "secret_access",
             ],
-            "validation_commands": [],
+            "validation_commands": [["python3", "-c", "raise SystemExit(0)"]],
             "validation_timeout_seconds": 60,
             "expected_output": ["harmless vNext diagnostic receipt"],
             "privacy_boundary": "PUBLIC_SAFE_REPOSITORY_ONLY",
