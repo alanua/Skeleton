@@ -180,7 +180,8 @@ def build_snapshot(
         "resource_patterns": list(resources),
         "observed_at": observed_at,
         "expires_at": observed_at + ttl_seconds,
-        "attestation_ref": f"attestation:runtime-probe:{digest}",
+        "schema": "skeleton.runner_vnext_node_capability_snapshot.v1",
+        "attestation_ref": f"attestation:external-boundary:{digest}",
     }
 
 

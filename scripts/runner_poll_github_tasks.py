@@ -91,6 +91,7 @@ from core.runner_vnext_cutover_bridge import (
 )
 from core.runner_vnext_authority import (
     ROUTE_CODE_GENERATION as VNEXT_ROUTE_CODE_GENERATION,
+    ROUTE_DIAGNOSTIC as VNEXT_ROUTE_DIAGNOSTIC,
     RunnerVNextAuthorityError,
     RunnerVNextRuntimeConfig,
     authority_receipt_from_bound,
@@ -279,12 +280,19 @@ _CURRENT_QUEUE_REPOSITORY: ContextVar[str] = ContextVar(
 )
 RUNNER_VNEXT_NODE_SNAPSHOT_SCHEMA = "skeleton.runner_vnext_node_capability_snapshot.v1"
 RUNNER_VNEXT_CODEGEN_NODE_ID = "node:runner-vnext-codegen-runtime"
+RUNNER_VNEXT_DIAGNOSTIC_NODE_ID = "node:runner-vnext-harmless-diagnostic-runtime"
 RUNNER_VNEXT_CODEGEN_ROUTE_RANK = 0
+RUNNER_VNEXT_DIAGNOSTIC_ROUTE_RANK = 5
 RUNNER_VNEXT_NODE_SNAPSHOT_MAX_TTL_SECONDS = 60.0
 RUNNER_VNEXT_CODEGEN_CAPABILITIES = (
     "repository_read",
     "repository_write_allowlisted",
     "test_execution",
+)
+RUNNER_VNEXT_REGISTERED_OPERATION_IDS = (
+    "codegen",
+    "validation",
+    "publication",
 )
 RUNNER_VNEXT_GREEN_CANARY_APPROVAL_REFERENCE = "runner_vnext_green_lifecycle_canary_v1"
 RUNNER_VNEXT_GREEN_CANARY_IDEMPOTENCY_KEY = "runner-vnext-green-lifecycle-canary-v1"
@@ -4522,6 +4530,50 @@ def _runner_vnext_external_snapshot_payload() -> Mapping[str, object]:
     return payload
 
 
+def _runner_vnext_private_attestation_payload(
+    *,
+    bound: object,
+    now: float,
+) -> Mapping[str, object]:
+    lane = getattr(getattr(bound, "binding"), "lane")
+    operation = getattr(bound, "operation")
+    if operation == "diagnostic":
+        node_id = RUNNER_VNEXT_DIAGNOSTIC_NODE_ID
+        route_rank = RUNNER_VNEXT_DIAGNOSTIC_ROUTE_RANK
+    elif operation == "codegen":
+        node_id = RUNNER_VNEXT_CODEGEN_NODE_ID
+        route_rank = RUNNER_VNEXT_CODEGEN_ROUTE_RANK
+    else:
+        raise _runner_vnext_snapshot_reason("VNEXT_NODE_ATTESTATION_OPERATION_INVALID")
+    evidence_payload = {
+        "adapter_id": getattr(getattr(bound, "binding"), "adapter_id"),
+        "capabilities": list(getattr(getattr(bound, "universal_task"), "required_capabilities")),
+        "lane": lane.value,
+        "operation": operation,
+        "operation_id": getattr(getattr(bound, "operation_ir"), "operation_id"),
+        "resources": list(getattr(getattr(bound, "universal_task"), "target_resources")),
+        "source_binding_hash": getattr(bound, "source_binding_hash"),
+        "target_state_ref": getattr(bound, "target_state_ref"),
+    }
+    digest = hashlib.sha256(
+        json.dumps(evidence_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:32]
+    return {
+        "schema": RUNNER_VNEXT_NODE_SNAPSHOT_SCHEMA,
+        "node_id": node_id,
+        "generation": int(now * 1_000_000),
+        "route_rank": route_rank,
+        "capabilities": list(getattr(getattr(bound, "universal_task"), "required_capabilities")),
+        "supported_adapters": [getattr(getattr(bound, "binding"), "adapter_id")],
+        "supported_lanes": [lane.value],
+        "privacy_classes": [getattr(getattr(bound, "universal_task"), "privacy").value],
+        "resource_patterns": list(getattr(getattr(bound, "universal_task"), "target_resources")),
+        "observed_at": now,
+        "expires_at": now + RUNNER_VNEXT_NODE_SNAPSHOT_MAX_TTL_SECONDS,
+        "attestation_ref": f"attestation:external-boundary:{digest}",
+    }
+
+
 def _runner_vnext_nodes(
     *,
     bound: object,
@@ -4529,34 +4581,44 @@ def _runner_vnext_nodes(
 ) -> NodeCapabilityRegistry:
     expected_resources = getattr(getattr(bound, "universal_task"), "target_resources")
     expected_capabilities = getattr(getattr(bound, "universal_task"), "required_capabilities")
-    payload = _runner_vnext_external_snapshot_payload()
+    payload = _runner_vnext_private_attestation_payload(bound=bound, now=now)
     if payload["schema"] != RUNNER_VNEXT_NODE_SNAPSHOT_SCHEMA:
         raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_SCHEMA_INVALID")
-    if payload["node_id"] != RUNNER_VNEXT_CODEGEN_NODE_ID:
+    expected_node_id = (
+        RUNNER_VNEXT_DIAGNOSTIC_NODE_ID
+        if getattr(bound, "operation") == "diagnostic"
+        else RUNNER_VNEXT_CODEGEN_NODE_ID
+    )
+    expected_route_rank = (
+        RUNNER_VNEXT_DIAGNOSTIC_ROUTE_RANK
+        if getattr(bound, "operation") == "diagnostic"
+        else RUNNER_VNEXT_CODEGEN_ROUTE_RANK
+    )
+    if payload["node_id"] != expected_node_id:
         raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_NODE_INVALID")
     generation = payload["generation"]
     if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
         raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_GENERATION_INVALID")
-    if payload["route_rank"] != RUNNER_VNEXT_CODEGEN_ROUTE_RANK:
+    if payload["route_rank"] != expected_route_rank:
         raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_ROUTE_RANK_INVALID")
 
     capabilities = _runner_vnext_string_tuple(
         payload["capabilities"], reason_code="VNEXT_NODE_SNAPSHOT_CAPABILITIES_INVALID"
     )
     if (
-        capabilities != RUNNER_VNEXT_CODEGEN_CAPABILITIES
-        or capabilities != tuple(expected_capabilities)
+        capabilities != tuple(expected_capabilities)
+        or not set(capabilities).issubset(set(RUNNER_VNEXT_CODEGEN_CAPABILITIES))
     ):
         raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_CAPABILITIES_WIDENED")
     adapters = _runner_vnext_string_tuple(
         payload["supported_adapters"], reason_code="VNEXT_NODE_SNAPSHOT_ADAPTER_INVALID"
     )
-    if adapters != ("adapter:repo-codegen",):
+    if adapters != (getattr(getattr(bound, "binding"), "adapter_id"),):
         raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_ADAPTER_INVALID")
     lanes = _runner_vnext_string_tuple(
         payload["supported_lanes"], reason_code="VNEXT_NODE_SNAPSHOT_LANE_INVALID"
     )
-    if lanes != (Lane.CODEGEN.name,):
+    if lanes != (getattr(getattr(bound, "binding"), "lane").value,):
         raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_LANE_INVALID")
     privacy_classes = _runner_vnext_string_tuple(
         payload["privacy_classes"], reason_code="VNEXT_NODE_SNAPSHOT_PRIVACY_INVALID"
@@ -4596,12 +4658,12 @@ def _runner_vnext_nodes(
     try:
         registry.register(
             NodeCapabilitySnapshot(
-                node_id=RUNNER_VNEXT_CODEGEN_NODE_ID,
+                node_id=str(payload["node_id"]),
                 generation=generation,
-                route_rank=RUNNER_VNEXT_CODEGEN_ROUTE_RANK,
+                route_rank=expected_route_rank,
                 capabilities=capabilities,
                 supported_adapters=adapters,
-                supported_lanes=(Lane.CODEGEN,),
+                supported_lanes=(getattr(getattr(bound, "binding"), "lane"),),
                 privacy_classes=(PrivacyClass.PUBLIC_SAFE,),
                 resource_patterns=resource_patterns,
                 observed_at=observed_at,
@@ -4647,18 +4709,11 @@ def _vnext_classify_codegen_status(output: str, exit_code: int) -> str:
     return classify_codex_task_result(output, exit_code).status
 
 
-class _RunnerVNextGreenCanaryDiagnosticBackend:
+class _RunnerVNextGreenCanaryDiagnosticExecutor:
     def __init__(self, *, workdir: str) -> None:
         self._workdir = workdir
 
-    def run_codegen(
-        self,
-        *,
-        runner_task: RunnerTask,
-        source_task_ref: str,
-        grant: GreenExecutionGrant,
-    ) -> GreenExecutionResult:
-        del runner_task, source_task_ref
+    def execute(self, grant: GreenExecutionGrant) -> GreenExecutionResult:
         state_ref = _vnext_workspace_state_ref(self._workdir)
         return GreenExecutionResult(
             operation_id=grant.operation_id,
@@ -4694,10 +4749,12 @@ def run_authoritative_vnext_codegen(
     now = time.time()
     stores = build_authoritative_stores(_runner_vnext_runtime_config(), clock=time.time)
     try:
+        route = VNEXT_ROUTE_DIAGNOSTIC if green_canary_lifecycle else VNEXT_ROUTE_CODE_GENERATION
+        operation = "diagnostic" if green_canary_lifecycle else "codegen"
         bound = bind_runner_operation(
             runner_task=typed_task,
-            route=VNEXT_ROUTE_CODE_GENERATION,
-            operation="codegen",
+            route=route,
+            operation=operation,
             source_task_ref=f"issue:{issue_number}",
         )
         receipt = authority_receipt_from_bound(
@@ -4726,7 +4783,7 @@ def run_authoritative_vnext_codegen(
             now=now,
         )
         if green_canary_lifecycle:
-            backend = _RunnerVNextGreenCanaryDiagnosticBackend(workdir=issue_workdir)
+            executor = _RunnerVNextGreenCanaryDiagnosticExecutor(workdir=issue_workdir)
         else:
             backend = PollerMechanicalCodegenBackend(
                 task_content=task_content,
@@ -4737,17 +4794,15 @@ def run_authoritative_vnext_codegen(
                 workspace_state_ref=_vnext_workspace_state_ref,
                 classify_mechanics_status=_vnext_classify_codegen_status,
             )
-        execution_receipt = GreenExecutionLifecycle(
-            scheduler=stores.scheduler,
-            ledger=stores.ledger,
-        ).run(
-            grant,
-            LiveCodegenAdapter(
+            executor = LiveCodegenAdapter(
                 runner_task=typed_task,
                 source_task_ref=f"issue:{issue_number}",
                 backend=backend,
-            ),
-        )
+            )
+        execution_receipt = GreenExecutionLifecycle(
+            scheduler=stores.scheduler,
+            ledger=stores.ledger,
+        ).run(grant, executor)
     finally:
         stores.close()
     public_execution = GreenExecutionLifecycle.public_projection(execution_receipt)

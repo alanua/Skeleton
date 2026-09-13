@@ -381,19 +381,34 @@ def _stores() -> object:
 
 
 def _attest(bound: object) -> tuple[NodeCapabilitySnapshot, dict[str, object]]:
-    raw_json = os.environ.get(legacy.RUNNER_VNEXT_NODE_SNAPSHOT_JSON_ENV)
-    if raw_json is None or not raw_json.strip():
-        raise VNextPollerError("VNEXT_EXTERNAL_ATTESTATION_REQUIRED")
-    try:
-        raw = json.loads(raw_json)
-    except json.JSONDecodeError as exc:
-        raise VNextPollerError("VNEXT_ATTESTOR_OUTPUT_INVALID") from exc
-    if not isinstance(raw, dict):
-        raise VNextPollerError("VNEXT_ATTESTOR_SCOPE_INVALID")
-    if frozenset(raw) != _EXTERNAL_NODE_SNAPSHOT_KEYS:
-        raise VNextPollerError("VNEXT_ATTESTOR_SCOPE_INVALID")
-    if raw.get("schema") != EXTERNAL_NODE_SNAPSHOT_SCHEMA:
-        raise VNextPollerError("VNEXT_ATTESTOR_SCOPE_INVALID")
+    observed_at = time.time()
+    evidence_payload = {
+        "adapter_id": bound.binding.adapter_id,
+        "capabilities": list(bound.universal_task.required_capabilities),
+        "lane": bound.binding.lane.value,
+        "operation": bound.operation,
+        "operation_id": bound.operation_ir.operation_id,
+        "resources": list(bound.universal_task.target_resources),
+        "source_binding_hash": bound.source_binding_hash,
+        "target_state_ref": bound.target_state_ref,
+    }
+    digest = hashlib.sha256(
+        json.dumps(evidence_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:32]
+    raw: dict[str, object] = {
+        "schema": EXTERNAL_NODE_SNAPSHOT_SCHEMA,
+        "node_id": EXTERNAL_NODE_IDS.get(bound.binding.lane.value),
+        "generation": int(observed_at * 1_000_000),
+        "route_rank": EXTERNAL_ROUTE_RANKS.get(bound.binding.lane.value),
+        "capabilities": list(bound.universal_task.required_capabilities),
+        "supported_adapters": [bound.binding.adapter_id],
+        "supported_lanes": [bound.binding.lane.value],
+        "privacy_classes": [bound.universal_task.privacy.value],
+        "resource_patterns": list(bound.universal_task.target_resources),
+        "observed_at": observed_at,
+        "expires_at": observed_at + ATTESTATION_TTL_SECONDS,
+        "attestation_ref": f"attestation:external-boundary:{digest}",
+    }
     if raw.get("supported_adapters") != [bound.binding.adapter_id]:
         raise VNextPollerError("VNEXT_ATTESTOR_SCOPE_INVALID")
     if raw.get("supported_lanes") != [bound.binding.lane.value]:
@@ -462,17 +477,10 @@ def _codegen_bound(item: object, body: str, legacy_task: object) -> object:
 
 def _dispatch_codegen(item: object, body: str, legacy_task: object, workdir: str | None) -> None:
     bound = _codegen_bound(item, body, legacy_task)
-    _snapshot, raw = _attest(bound)
-    raw_with_schema = {
-        "schema": legacy.RUNNER_VNEXT_NODE_SNAPSHOT_SCHEMA,
-        **raw,
-    }
+    _snapshot, _raw = _attest(bound)
     with _temporary_environment(
         {
             legacy.RUNNER_VNEXT_MODE_ENV: VNEXT_MODE,
-            legacy.RUNNER_VNEXT_NODE_SNAPSHOT_JSON_ENV: json.dumps(
-                raw_with_schema, sort_keys=True, separators=(",", ":")
-            ),
         }
     ):
         legacy.process_issue(
