@@ -26003,3 +26003,249 @@ def test_codegen_bookkeeping_home_preserves_bound_codex_home(tmp_path: Path) -> 
     assert isolated["HOME"] == str(state_dir / "home")
     assert isolated["CODEX_HOME"] == "/home/agent/.codex"
     assert isolated["TMPDIR"] == str(state_dir / "tmp")
+
+
+def test_runner_vnext_maintenance_ids_are_registered_with_exact_protection() -> None:
+    assert runner.RUNNER_VNEXT_READONLY_PREFLIGHT_TASK_ID in runner.RUNTIME_MAINTENANCE_TASK_IDS
+    assert runner.RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID in runner.RUNTIME_MAINTENANCE_TASK_IDS
+    assert runner.RUNNER_VNEXT_EXACT_GREEN_CANARY_TASK_ID in runner.RUNTIME_MAINTENANCE_TASK_IDS
+    assert runner.RUNNER_VNEXT_READONLY_PREFLIGHT_TASK_ID not in runner.PROTECTED_MAINTENANCE_TASK_IDS
+    assert runner.RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID in runner.PROTECTED_MAINTENANCE_TASK_IDS
+    assert runner.RUNNER_VNEXT_EXACT_GREEN_CANARY_TASK_ID in runner.PROTECTED_MAINTENANCE_TASK_IDS
+
+
+def _runner_vnext_selector_body() -> str:
+    return "\n".join(
+        (
+            "Repository: alanua/Skeleton",
+            "Target Issue: 4157",
+            "Expected Binding SHA256: " + ("a" * 64),
+            "Expected Idempotency Key: runner-vnext-green-lifecycle-canary-v1",
+            "Profile: green_diagnostic_v1",
+        )
+    )
+
+
+def test_runner_vnext_external_and_canary_dispatch_use_fixed_entrypoints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import runner_vnext_attest, runner_vnext_poll
+
+    external = {"status": "DONE", "generation": 7, "expires_at": 123.0}
+    with mock.patch.object(
+        runner_vnext_attest,
+        "produce_external_attestation",
+        return_value=external,
+    ) as produce, mock.patch.object(
+        runner_vnext_poll,
+        "run_exact_green_canary",
+        return_value={
+            "status": "DONE",
+            "terminal_status": "COMPLETED",
+            "replayed": False,
+            "execution_started": True,
+            "lease_released": True,
+        },
+    ) as canary:
+        external_report = runner.dispatch_runtime_maintenance_task(
+            runner.RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID,
+            str(runner.ROOT),
+            _runner_vnext_selector_body(),
+        )
+        canary_report = runner.dispatch_runtime_maintenance_task(
+            runner.RUNNER_VNEXT_EXACT_GREEN_CANARY_TASK_ID,
+            str(runner.ROOT),
+            _runner_vnext_selector_body(),
+        )
+    produce.assert_called_once_with(
+        repository="alanua/Skeleton",
+        target_issue=4157,
+        expected_binding_sha256="a" * 64,
+        expected_idempotency_key="runner-vnext-green-lifecycle-canary-v1",
+        profile="green_diagnostic_v1",
+    )
+    canary.assert_called_once_with(
+        repository="alanua/Skeleton",
+        target_issue=4157,
+        expected_binding_sha256="a" * 64,
+        expected_idempotency_key="runner-vnext-green-lifecycle-canary-v1",
+    )
+    assert external_report.startswith("DONE:")
+    assert canary_report.startswith("DONE:")
+    assert "private_snapshot_written=true" in external_report
+    assert "canary_lease_released=true" in canary_report
+    monkeypatch.setattr(
+        runner,
+        "get_ready_issue_items",
+        lambda: (_ for _ in ()).throw(AssertionError("exact action must not scan queue")),
+    )
+    assert runner.maintenance_report_status(canary_report) == "DONE"
+
+
+def _write_runner_vnext_preflight_fixture(
+    tmp_path: Path,
+) -> tuple[Path, Path, Path]:
+    workdir = tmp_path / "checkout"
+    (workdir / "scripts").mkdir(parents=True)
+    (workdir / "scripts" / runner.RUNNER_LEGACY_SERVICE_UNIT).write_text("service\n")
+    (workdir / "scripts" / runner.RUNNER_LEGACY_TIMER_UNIT).write_text("timer\n")
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    state.chmod(0o700)
+    ledger = state / "ledger.sqlite"
+    lease = state / "lease.sqlite"
+    ledger_connection = sqlite3.connect(ledger)
+    ledger_connection.executescript(
+        """
+        CREATE TABLE runner_vnext_operation_events (
+            idempotency_key TEXT NOT NULL,
+            terminal INTEGER NOT NULL
+        );
+        CREATE TABLE runner_vnext_operation_starts (
+            idempotency_key TEXT NOT NULL
+        );
+        """
+    )
+    ledger_connection.commit()
+    ledger_connection.close()
+    lease_connection = sqlite3.connect(lease)
+    lease_connection.executescript(
+        """
+        CREATE TABLE runner_vnext_lane_fences (
+            lane TEXT NOT NULL,
+            scope_key TEXT NOT NULL,
+            fence_token INTEGER NOT NULL
+        );
+        CREATE TABLE runner_vnext_lane_leases (
+            lane TEXT NOT NULL,
+            scope_key TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            owner TEXT NOT NULL,
+            fence_token INTEGER NOT NULL,
+            acquired_at REAL NOT NULL,
+            heartbeat_at REAL NOT NULL,
+            ttl_seconds REAL NOT NULL,
+            target_state_ref TEXT
+        );
+        INSERT INTO runner_vnext_lane_leases VALUES
+            ('validate', 'task:stale', 'task-stale', 'runner', 1, 1, 1, 1, 'git:test');
+        INSERT INTO runner_vnext_lane_fences VALUES ('validate', 'task:stale', 1);
+        """
+    )
+    lease_connection.commit()
+    lease_connection.close()
+    ledger.chmod(0o600)
+    lease.chmod(0o600)
+    observed = time.time() - 1.0
+    snapshot = {
+        "schema": runner.RUNNER_VNEXT_NODE_SNAPSHOT_SCHEMA,
+        "node_id": "node:runner-vnext-harmless-diagnostic-runtime",
+        "generation": 1,
+        "route_rank": 5,
+        "capabilities": ["repository_read"],
+        "supported_adapters": ["adapter:harmless-diagnostic"],
+        "supported_lanes": ["validate"],
+        "privacy_classes": ["PUBLIC_SAFE_REPOSITORY_ONLY"],
+        "resource_patterns": ["repo:docs/RUNNER_MAINTENANCE_TASKS.md"],
+        "observed_at": observed,
+        "expires_at": observed + 30.0,
+        "attestation_ref": "attestation:external-boundary:fixture",
+    }
+    envelope_base = {
+        "schema": "skeleton.runner_vnext_external_attestation_envelope.v1",
+        "repository": "alanua/Skeleton",
+        "target_issue": 4157,
+        "profile": "green_diagnostic_v1",
+        "route": "diagnostic",
+        "binding_sha256": "a" * 64,
+        "idempotency_sha256": "b" * 64,
+        "generation": 1,
+        "snapshot": snapshot,
+    }
+    envelope = {
+        **envelope_base,
+        "payload_sha256": hashlib.sha256(
+            json.dumps(envelope_base, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+    }
+    (state / runner.RUNNER_VNEXT_EXTERNAL_ATTESTATION_FILENAME).write_text(
+        json.dumps(envelope, sort_keys=True, separators=(",", ":")) + "\n"
+    )
+    (state / runner.RUNNER_VNEXT_EXTERNAL_ATTESTATION_FILENAME).chmod(0o600)
+    return workdir, ledger, lease
+
+
+def test_runner_vnext_readonly_preflight_is_public_safe_and_non_mutating(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workdir, ledger, lease = _write_runner_vnext_preflight_fixture(tmp_path)
+    monkeypatch.setenv(runner.RUNNER_VNEXT_STATE_ROOT_ENV, str(ledger.parent))
+    monkeypatch.setenv(runner.RUNNER_VNEXT_LEDGER_DB_ENV, str(ledger))
+    monkeypatch.setenv(runner.RUNNER_VNEXT_LEASE_DB_ENV, str(lease))
+    commands: list[list[str]] = []
+
+    def read_only_probe(command: list[str], cwd=None, timeout=None, **_kwargs):
+        commands.append(command)
+        if command[:4] == ["git", "rev-parse", "--verify", "HEAD"]:
+            return 0, "a" * 40 + "\n"
+        if command[:2] == ["gh", "api"]:
+            return 0, "a" * 40 + "\n"
+        if command[:2] == ["systemctl", "is-active"]:
+            return 0, "active\n"
+        if command[:2] == ["systemctl", "is-enabled"]:
+            return 0, "enabled\n"
+        raise AssertionError(command)
+
+    monkeypatch.setattr(runner, "run_command", read_only_probe)
+    before = (ledger.stat().st_mtime_ns, lease.stat().st_mtime_ns)
+    report = runner.runner_vnext_readonly_preflight(workdir)
+    after = (ledger.stat().st_mtime_ns, lease.stat().st_mtime_ns)
+    assert report.startswith("DONE:")
+    assert "report_mode=read_only" in report
+    assert "mutation_performed=false" in report
+    assert "ledger_file_backed=true" in report
+    assert "lease_file_backed=true" in report
+    assert "unresolved_started_count=0" in report
+    assert "active_lease_count=0" in report
+    assert "stale_lease_count=1" in report
+    assert "fence_count=1" in report
+    assert "route_inventory_ready=true" in report
+    assert str(tmp_path) not in report
+    assert "private" not in report.lower()
+    assert before == after
+    assert all(
+        not (
+            command[:2] == ["systemctl", verb]
+            and verb in {"start", "stop", "restart", "disable", "enable"}
+        )
+        for command in commands
+        for verb in (command[1],)
+        if len(command) > 1
+    )
+
+
+def test_runner_vnext_readonly_preflight_rejects_colliding_or_memory_stores(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workdir = tmp_path / "checkout"
+    (workdir / "scripts").mkdir(parents=True)
+    monkeypatch.setenv(runner.RUNNER_VNEXT_STATE_ROOT_ENV, str(tmp_path))
+    monkeypatch.setenv(runner.RUNNER_VNEXT_LEDGER_DB_ENV, ":memory:")
+    monkeypatch.setenv(runner.RUNNER_VNEXT_LEASE_DB_ENV, ":memory:")
+    monkeypatch.setattr(
+        runner,
+        "run_command",
+        lambda command, cwd=None, timeout=None, **_kwargs: (
+            (0, "a" * 40 + "\n")
+            if command[:4] == ["git", "rev-parse", "--verify", "HEAD"]
+            else (0, "a" * 40 + "\n")
+            if command[:2] == ["gh", "api"]
+            else (0, "active\n")
+            if command[:2] == ["systemctl", "is-active"]
+            else (0, "enabled\n")
+        ),
+    )
+    report = runner.runner_vnext_readonly_preflight(workdir)
+    assert report.startswith("BLOCKED:")
+    assert "ledger_file_backed=false" in report
+    assert "lease_file_backed=false" in report
