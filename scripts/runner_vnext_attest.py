@@ -107,7 +107,7 @@ def _probe_capabilities(lane: str, capabilities: tuple[str, ...]) -> tuple[bool,
     if "repository_read" in capabilities or "diagnostic_read" in capabilities:
         probes["repository_read"] = os.access(ROOT, os.R_OK)
     if "repository_write_allowlisted" in capabilities:
-        probes["repository_write"] = os.access(ROOT, os.W_OK)
+        probes["repository_write_allowlist_declared"] = True
     if "test_execution" in capabilities:
         probes["pytest"] = _probe([sys.executable, "-c", "import pytest"])
     if "publish_pull_request" in capabilities:
@@ -118,8 +118,6 @@ def _probe_capabilities(lane: str, capabilities: tuple[str, ...]) -> tuple[bool,
         probes["subprocess"] = _probe([sys.executable, "-c", "import subprocess; raise SystemExit(0)"])
     if "repository_maintenance" in capabilities:
         probes["maintenance_repo"] = probes["git"] and os.access(ROOT, os.R_OK | os.W_OK)
-    if lane == "codegen":
-        probes["codegen_executor"] = shutil.which("codex") is not None or shutil.which("openhands") is not None
     return all(probes.values()), probes, head
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 
 import pytest
 
@@ -49,6 +50,74 @@ Intent: exact validation
     assert task.payload["profile"] == "full_pytest"
     assert task.allowed_files == ("core/a.py", "tests/test_a.py")
     assert task.requested_capabilities == ("repository_read", "test_execution")
+
+
+def test_runner_vnext_attest_uses_external_snapshot_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    head = "a" * 40
+    base = "b" * 40
+    body = f"""Repository: alanua/Skeleton
+Pull Request: 77
+Expected Head SHA: {head}
+Expected Base SHA: {base}
+Allowed Files:
+- core/a.py
+Intent: exact validation
+"""
+    task, _pr_number = poll._validation_task(_Item({"number": 1, "body": body}), body)
+    bound = poll.bind_runner_operation(
+        runner_task=task,
+        route=poll.ROUTE_VALIDATION,
+        operation="validation",
+        source_task_ref="issue:1",
+    )
+    snapshot = {
+        "schema": poll.EXTERNAL_NODE_SNAPSHOT_SCHEMA,
+        "node_id": "node:runner-vnext-validation-runtime",
+        "generation": 1,
+        "route_rank": 10,
+        "capabilities": ["repository_read", "test_execution"],
+        "supported_adapters": ["adapter:repo-validation"],
+        "supported_lanes": ["validate"],
+        "privacy_classes": ["PUBLIC_SAFE"],
+        "resource_patterns": ["repo:core/a.py"],
+        "observed_at": 100.0,
+        "expires_at": 120.0,
+        "attestation_ref": "attestation:external-validation-1",
+    }
+    monkeypatch.setenv(
+        poll.legacy.RUNNER_VNEXT_NODE_SNAPSHOT_JSON_ENV,
+        json.dumps(snapshot),
+    )
+
+    node, raw = poll._attest(bound)
+
+    assert raw == snapshot
+    assert node.node_id == "node:runner-vnext-validation-runtime"
+    assert node.attestation_ref == "attestation:external-validation-1"
+
+
+def test_runner_vnext_attest_requires_external_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    body = f"""Repository: alanua/Skeleton
+Pull Request: 77
+Expected Head SHA: {'a' * 40}
+Expected Base SHA: {'b' * 40}
+Allowed Files:
+- core/a.py
+Intent: exact validation
+"""
+    task, _pr_number = poll._validation_task(_Item({"number": 1, "body": body}), body)
+    bound = poll.bind_runner_operation(
+        runner_task=task,
+        route=poll.ROUTE_VALIDATION,
+        operation="validation",
+        source_task_ref="issue:1",
+    )
+    monkeypatch.delenv(poll.legacy.RUNNER_VNEXT_NODE_SNAPSHOT_JSON_ENV, raising=False)
+
+    with pytest.raises(poll.VNextPollerError) as exc:
+        poll._attest(bound)
+
+    assert exc.value.reason_code == "VNEXT_EXTERNAL_ATTESTATION_REQUIRED"
 
 
 def test_publication_task_binds_retained_worktree_head(monkeypatch: pytest.MonkeyPatch) -> None:

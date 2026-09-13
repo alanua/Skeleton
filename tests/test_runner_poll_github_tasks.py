@@ -5322,7 +5322,13 @@ def test_universal_runner_mode_selection_is_deterministic(
     assert decision == runner.RunnerModeDecision(expected_mode)
 
 
-def _vnext_bridge_metadata(*, allowed_files=("core/example.py",), privacy="PUBLIC_SAFE_REPOSITORY_ONLY") -> dict[str, object]:
+def _vnext_bridge_metadata(
+    *,
+    allowed_files=("core/example.py",),
+    privacy="PUBLIC_SAFE_REPOSITORY_ONLY",
+    approval_reference="chat:vnext-test",
+    idempotency_key="vnext-test",
+) -> dict[str, object]:
     return {
         "issue_number": 3951,
         "legacy_route": runner.ROUTE_CODE_GENERATION,
@@ -5336,8 +5342,8 @@ def _vnext_bridge_metadata(*, allowed_files=("core/example.py",), privacy="PUBLI
             "repository_write_allowlisted",
             "test_execution",
         ),
-        "approval_reference": "chat:vnext-test",
-        "idempotency_key": "vnext-test",
+        "approval_reference": approval_reference,
+        "idempotency_key": idempotency_key,
         "validation_timeout_seconds": 300,
         "validation_commands": (("python3", "-m", "pytest", "-q"),),
         "forbidden_actions": ("merge",),
@@ -5408,7 +5414,29 @@ def test_vnext_shadow_hook_is_observational_only(monkeypatch: pytest.MonkeyPatch
     assert runner.LAST_RUNNER_VNEXT_RECEIPT["side_effects_executed"] is False
 
 
-def test_vnext_green_canary_allows_exact_green_match(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_runner_vnext_green_canary_allows_only_exact_lifecycle_task(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(runner.RUNNER_VNEXT_MODE_ENV, "green_canary")
+    monkeypatch.setattr(
+        runner,
+        "normalized_runner_shadow_metadata",
+        lambda **_kwargs: _vnext_bridge_metadata(
+            allowed_files=runner.RUNNER_VNEXT_GREEN_CANARY_ALLOWED_FILES,
+            approval_reference=runner.RUNNER_VNEXT_GREEN_CANARY_APPROVAL_REFERENCE,
+            idempotency_key=runner.RUNNER_VNEXT_GREEN_CANARY_IDEMPOTENCY_KEY,
+        ),
+    )
+    task = runner.RunnerTask(content="x", base_sha="a" * 40)
+
+    allowed, reason = runner.evaluate_runner_vnext_cutover_hook(
+        issue_number=3951, issue_body="", route=runner.ROUTE_CODE_GENERATION,
+        maintenance_task_id=None, runner_task=task, merge_request=None,
+    )
+
+    assert allowed is True and reason is None
+    assert runner.LAST_RUNNER_VNEXT_RECEIPT["status"] == "green_canary_pass"
+
+
+def test_runner_vnext_green_canary_non_exact_green_stays_legacy(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(runner.RUNNER_VNEXT_MODE_ENV, "green_canary")
     monkeypatch.setattr(runner, "normalized_runner_shadow_metadata", lambda **_kwargs: _vnext_bridge_metadata())
     task = runner.RunnerTask(content="x", base_sha="a" * 40)
@@ -5419,7 +5447,9 @@ def test_vnext_green_canary_allows_exact_green_match(monkeypatch: pytest.MonkeyP
     )
 
     assert allowed is True and reason is None
-    assert runner.LAST_RUNNER_VNEXT_RECEIPT["status"] == "green_canary_pass"
+    assert runner.LAST_RUNNER_VNEXT_RECEIPT["status"] == "legacy_protected_path"
+    assert runner.LAST_RUNNER_VNEXT_RECEIPT["reason_code"] == "VNEXT_GREEN_CANARY_EXACT_TASK_REQUIRED"
+    assert runner.LAST_RUNNER_VNEXT_RECEIPT["side_effects_executed"] is False
 
 
 def test_vnext_green_canary_keeps_protected_code_on_legacy_path(monkeypatch: pytest.MonkeyPatch) -> None:

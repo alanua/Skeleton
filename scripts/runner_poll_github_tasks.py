@@ -281,6 +281,9 @@ RUNNER_VNEXT_CODEGEN_CAPABILITIES = (
     "repository_write_allowlisted",
     "test_execution",
 )
+RUNNER_VNEXT_GREEN_CANARY_APPROVAL_REFERENCE = "runner_vnext_green_lifecycle_canary_v1"
+RUNNER_VNEXT_GREEN_CANARY_IDEMPOTENCY_KEY = "runner-vnext-green-lifecycle-canary-v1"
+RUNNER_VNEXT_GREEN_CANARY_ALLOWED_FILES = ("docs/RUNNER_MAINTENANCE_TASKS.md",)
 _RUNNER_VNEXT_NODE_SNAPSHOT_KEYS = frozenset(
     (
         "schema",
@@ -4093,6 +4096,17 @@ def runner_vnext_authoritative_green_ready() -> bool:
     )
 
 
+def _runner_vnext_exact_green_canary_task(metadata: Mapping[str, Any]) -> bool:
+    return (
+        metadata.get("legacy_route") == ROUTE_CODE_GENERATION
+        and metadata.get("repo") == REPO
+        and tuple(metadata.get("allowed_files") or ()) == RUNNER_VNEXT_GREEN_CANARY_ALLOWED_FILES
+        and tuple(metadata.get("requested_capabilities") or ()) == RUNNER_VNEXT_CODEGEN_CAPABILITIES
+        and metadata.get("approval_reference") == RUNNER_VNEXT_GREEN_CANARY_APPROVAL_REFERENCE
+        and metadata.get("idempotency_key") == RUNNER_VNEXT_GREEN_CANARY_IDEMPOTENCY_KEY
+    )
+
+
 def protected_runner_shadow_compatibility_bindings() -> RunnerShadowCompatibilityBindings:
     maintenance_task_kind_by_id = {
         task_id: SHADOW_MAINTENANCE_TASK_KIND_BY_ID[task_id]
@@ -4403,6 +4417,21 @@ def evaluate_runner_vnext_cutover_hook(
         return allow_legacy, None if allow_legacy else exc.reason_code
 
     LAST_RUNNER_VNEXT_RECEIPT = decision.to_public_mapping()
+    if (
+        normalized_mode == "green_canary"
+        and decision.status == "green_canary_pass"
+        and not _runner_vnext_exact_green_canary_task(metadata)
+    ):
+        LAST_RUNNER_VNEXT_RECEIPT.update(
+            {
+                "status": "legacy_protected_path",
+                "reason_code": "VNEXT_GREEN_CANARY_EXACT_TASK_REQUIRED",
+                "canary_eligible": False,
+                "allow_legacy_execution": True,
+                "side_effects_executed": False,
+            }
+        )
+        return True, None
     if normalized_mode == VNEXT_MODE_AUTHORITATIVE:
         if decision.status == "authoritative_green_ready":
             return True, None

@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import subprocess
 import sys
 import time
 from typing import Callable, Iterator
@@ -43,9 +42,25 @@ from core.runner_vnext_execution_gate import GreenExecutionGrant
 from core.runner_vnext_leases import Lane
 from core.runner_vnext_routing import NodeCapabilitySnapshot
 
-ATTESTOR = ROOT / "scripts" / "runner_vnext_attest.py"
 VNEXT_MODE = "authoritative"
 ATTESTATION_TTL_SECONDS = 45.0
+EXTERNAL_NODE_SNAPSHOT_SCHEMA = "skeleton.runner_vnext_node_capability_snapshot.v1"
+_EXTERNAL_NODE_SNAPSHOT_KEYS = frozenset(
+    (
+        "schema",
+        "node_id",
+        "generation",
+        "route_rank",
+        "capabilities",
+        "supported_adapters",
+        "supported_lanes",
+        "privacy_classes",
+        "resource_patterns",
+        "observed_at",
+        "expires_at",
+        "attestation_ref",
+    )
+)
 
 
 class VNextPollerError(RuntimeError):
@@ -352,40 +367,29 @@ def _stores() -> object:
 
 
 def _attest(bound: object) -> tuple[NodeCapabilitySnapshot, dict[str, object]]:
-    command = [
-        sys.executable,
-        str(ATTESTOR),
-        "--lane",
-        bound.binding.lane.value,
-        "--adapter",
-        bound.binding.adapter_id,
-        "--privacy",
-        bound.universal_task.privacy.value,
-        "--ttl",
-        str(ATTESTATION_TTL_SECONDS),
-    ]
-    for capability in bound.universal_task.required_capabilities:
-        command.extend(("--capability", capability))
-    for resource in bound.universal_task.target_resources:
-        command.extend(("--resource", resource))
+    raw_json = os.environ.get(legacy.RUNNER_VNEXT_NODE_SNAPSHOT_JSON_ENV)
+    if raw_json is None or not raw_json.strip():
+        raise VNextPollerError("VNEXT_EXTERNAL_ATTESTATION_REQUIRED")
     try:
-        completed = subprocess.run(
-            command,
-            cwd=str(ROOT),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=20,
-            env=os.environ.copy(),
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise VNextPollerError("VNEXT_ATTESTOR_UNAVAILABLE") from exc
-    if completed.returncode != 0:
-        raise VNextPollerError("VNEXT_ATTESTOR_PROBE_FAILED")
-    try:
-        raw = json.loads(completed.stdout)
+        raw = json.loads(raw_json)
     except json.JSONDecodeError as exc:
         raise VNextPollerError("VNEXT_ATTESTOR_OUTPUT_INVALID") from exc
+    if not isinstance(raw, dict):
+        raise VNextPollerError("VNEXT_ATTESTOR_SCOPE_INVALID")
+    if frozenset(raw) != _EXTERNAL_NODE_SNAPSHOT_KEYS:
+        raise VNextPollerError("VNEXT_ATTESTOR_SCOPE_INVALID")
+    if raw.get("schema") != EXTERNAL_NODE_SNAPSHOT_SCHEMA:
+        raise VNextPollerError("VNEXT_ATTESTOR_SCOPE_INVALID")
+    if raw.get("supported_adapters") != [bound.binding.adapter_id]:
+        raise VNextPollerError("VNEXT_ATTESTOR_SCOPE_INVALID")
+    if raw.get("supported_lanes") != [bound.binding.lane.value]:
+        raise VNextPollerError("VNEXT_ATTESTOR_SCOPE_INVALID")
+    if raw.get("capabilities") != list(bound.universal_task.required_capabilities):
+        raise VNextPollerError("VNEXT_ATTESTOR_SCOPE_INVALID")
+    if raw.get("resource_patterns") != list(bound.universal_task.target_resources):
+        raise VNextPollerError("VNEXT_ATTESTOR_SCOPE_INVALID")
+    if raw.get("privacy_classes") != [bound.universal_task.privacy.value]:
+        raise VNextPollerError("VNEXT_ATTESTOR_SCOPE_INVALID")
     try:
         snapshot = NodeCapabilitySnapshot(
             node_id=str(raw["node_id"]),
