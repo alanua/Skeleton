@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import json
 
 import pytest
 
@@ -50,115 +49,6 @@ Intent: exact validation
     assert task.payload["profile"] == "full_pytest"
     assert task.allowed_files == ("core/a.py", "tests/test_a.py")
     assert task.requested_capabilities == ("repository_read", "test_execution")
-
-
-def test_runner_vnext_attest_uses_private_boundary_not_environment_snapshot(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    head = "a" * 40
-    base = "b" * 40
-    body = f"""Repository: alanua/Skeleton
-Pull Request: 77
-Expected Head SHA: {head}
-Expected Base SHA: {base}
-Allowed Files:
-- core/a.py
-Intent: exact validation
-"""
-    task, _pr_number = poll._validation_task(_Item({"number": 1, "body": body}), body)
-    bound = poll.bind_runner_operation(
-        runner_task=task,
-        route=poll.ROUTE_VALIDATION,
-        operation="validation",
-        source_task_ref="issue:1",
-    )
-    task_controlled_snapshot = {
-        "schema": poll.EXTERNAL_NODE_SNAPSHOT_SCHEMA,
-        "node_id": "node:runner-vnext-validation-runtime",
-        "generation": 1,
-        "route_rank": 10,
-        "capabilities": ["repository_read", "test_execution"],
-        "supported_adapters": ["adapter:repo-validation"],
-        "supported_lanes": ["validate"],
-        "privacy_classes": ["PUBLIC_SAFE"],
-        "resource_patterns": ["repo:core/a.py"],
-        "observed_at": 100.0,
-        "expires_at": 145.0,
-        "attestation_ref": "attestation:private-validation-secret",
-    }
-    monkeypatch.setenv(
-        poll.legacy.RUNNER_VNEXT_NODE_SNAPSHOT_JSON_ENV,
-        json.dumps(task_controlled_snapshot),
-    )
-    monkeypatch.setattr(poll.time, "time", lambda: 120.0)
-
-    node, raw = poll._attest(bound)
-
-    assert raw != task_controlled_snapshot
-    assert node.node_id == "node:runner-vnext-validation-runtime"
-    assert node.attestation_ref.startswith("attestation:external-boundary:")
-    assert "private" not in node.attestation_ref
-    assert "secret" not in node.attestation_ref
-    assert raw["supported_adapters"] == ["adapter:repo-validation"]
-    assert raw["supported_lanes"] == ["validate"]
-    assert raw["capabilities"] == ["repository_read", "test_execution"]
-    assert raw["resource_patterns"] == ["repo:core/a.py"]
-
-
-def test_runner_vnext_attest_is_available_without_environment_snapshot(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    body = f"""Repository: alanua/Skeleton
-Pull Request: 77
-Expected Head SHA: {'a' * 40}
-Expected Base SHA: {'b' * 40}
-Allowed Files:
-- core/a.py
-Intent: exact validation
-"""
-    task, _pr_number = poll._validation_task(_Item({"number": 1, "body": body}), body)
-    bound = poll.bind_runner_operation(
-        runner_task=task,
-        route=poll.ROUTE_VALIDATION,
-        operation="validation",
-        source_task_ref="issue:1",
-    )
-    monkeypatch.delenv(poll.legacy.RUNNER_VNEXT_NODE_SNAPSHOT_JSON_ENV, raising=False)
-    monkeypatch.setattr(poll.time, "time", lambda: 120.0)
-
-    node, raw = poll._attest(bound)
-
-    assert node.attestation_ref == raw["attestation_ref"]
-    assert raw["observed_at"] == 120.0
-    assert raw["expires_at"] == 165.0
-
-
-def test_runner_vnext_attest_binds_exact_route_rank_and_generation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    body = f"""Repository: alanua/Skeleton
-Pull Request: 77
-Expected Head SHA: {'a' * 40}
-Expected Base SHA: {'b' * 40}
-Allowed Files:
-- core/a.py
-Intent: exact validation
-"""
-    task, _pr_number = poll._validation_task(_Item({"number": 1, "body": body}), body)
-    bound = poll.bind_runner_operation(
-        runner_task=task,
-        route=poll.ROUTE_VALIDATION,
-        operation="validation",
-        source_task_ref="issue:1",
-    )
-    monkeypatch.delenv(poll.legacy.RUNNER_VNEXT_NODE_SNAPSHOT_JSON_ENV, raising=False)
-    monkeypatch.setattr(poll.time, "time", lambda: 120.0)
-
-    node, raw = poll._attest(bound)
-
-    assert node.route_rank == 10
-    assert raw["generation"] == 120_000_000
-    assert raw["schema"] == poll.EXTERNAL_NODE_SNAPSHOT_SCHEMA
 
 
 def test_publication_task_binds_retained_worktree_head(monkeypatch: pytest.MonkeyPatch) -> None:

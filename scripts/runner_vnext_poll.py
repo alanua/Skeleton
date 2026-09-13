@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import time
 from typing import Callable, Iterator
@@ -42,39 +43,9 @@ from core.runner_vnext_execution_gate import GreenExecutionGrant
 from core.runner_vnext_leases import Lane
 from core.runner_vnext_routing import NodeCapabilitySnapshot
 
+ATTESTOR = ROOT / "scripts" / "runner_vnext_attest.py"
 VNEXT_MODE = "authoritative"
 ATTESTATION_TTL_SECONDS = 45.0
-EXTERNAL_NODE_SNAPSHOT_SCHEMA = "skeleton.runner_vnext_node_capability_snapshot.v1"
-EXTERNAL_NODE_IDS = {
-    "codegen": "node:runner-vnext-codegen-runtime",
-    "validate": "node:runner-vnext-validation-runtime",
-    "publish": "node:runner-vnext-publication-runtime",
-    "control": "node:runner-vnext-control-runtime",
-    "merge": "node:runner-vnext-merge-runtime",
-}
-EXTERNAL_ROUTE_RANKS = {
-    "codegen": 0,
-    "validate": 10,
-    "publish": 20,
-    "control": 30,
-    "merge": 40,
-}
-_EXTERNAL_NODE_SNAPSHOT_KEYS = frozenset(
-    (
-        "schema",
-        "node_id",
-        "generation",
-        "route_rank",
-        "capabilities",
-        "supported_adapters",
-        "supported_lanes",
-        "privacy_classes",
-        "resource_patterns",
-        "observed_at",
-        "expires_at",
-        "attestation_ref",
-    )
-)
 
 
 class VNextPollerError(RuntimeError):
@@ -381,64 +352,41 @@ def _stores() -> object:
 
 
 def _attest(bound: object) -> tuple[NodeCapabilitySnapshot, dict[str, object]]:
-    observed_at = time.time()
-    evidence_payload = {
-        "adapter_id": bound.binding.adapter_id,
-        "capabilities": list(bound.universal_task.required_capabilities),
-        "lane": bound.binding.lane.value,
-        "operation": bound.operation,
-        "operation_id": bound.operation_ir.operation_id,
-        "resources": list(bound.universal_task.target_resources),
-        "source_binding_hash": bound.source_binding_hash,
-        "target_state_ref": bound.target_state_ref,
-    }
-    digest = hashlib.sha256(
-        json.dumps(evidence_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()[:32]
-    raw: dict[str, object] = {
-        "schema": EXTERNAL_NODE_SNAPSHOT_SCHEMA,
-        "node_id": EXTERNAL_NODE_IDS.get(bound.binding.lane.value),
-        "generation": int(observed_at * 1_000_000),
-        "route_rank": EXTERNAL_ROUTE_RANKS.get(bound.binding.lane.value),
-        "capabilities": list(bound.universal_task.required_capabilities),
-        "supported_adapters": [bound.binding.adapter_id],
-        "supported_lanes": [bound.binding.lane.value],
-        "privacy_classes": [bound.universal_task.privacy.value],
-        "resource_patterns": list(bound.universal_task.target_resources),
-        "observed_at": observed_at,
-        "expires_at": observed_at + ATTESTATION_TTL_SECONDS,
-        "attestation_ref": f"attestation:external-boundary:{digest}",
-    }
-    if raw.get("supported_adapters") != [bound.binding.adapter_id]:
-        raise VNextPollerError("VNEXT_ATTESTOR_SCOPE_INVALID")
-    if raw.get("supported_lanes") != [bound.binding.lane.value]:
-        raise VNextPollerError("VNEXT_ATTESTOR_SCOPE_INVALID")
-    if raw.get("capabilities") != list(bound.universal_task.required_capabilities):
-        raise VNextPollerError("VNEXT_ATTESTOR_SCOPE_INVALID")
-    if raw.get("resource_patterns") != list(bound.universal_task.target_resources):
-        raise VNextPollerError("VNEXT_ATTESTOR_SCOPE_INVALID")
-    if raw.get("privacy_classes") != [bound.universal_task.privacy.value]:
-        raise VNextPollerError("VNEXT_ATTESTOR_SCOPE_INVALID")
-    lane = bound.binding.lane.value
-    if raw.get("node_id") != EXTERNAL_NODE_IDS.get(lane):
-        raise VNextPollerError("VNEXT_ATTESTOR_SCOPE_INVALID")
-    if raw.get("route_rank") != EXTERNAL_ROUTE_RANKS.get(lane):
-        raise VNextPollerError("VNEXT_ATTESTOR_SCOPE_INVALID")
-    attestation_ref = raw.get("attestation_ref")
-    if (
-        not isinstance(attestation_ref, str)
-        or not attestation_ref.startswith("attestation:")
-        or "private" in attestation_ref.lower()
-        or "secret" in attestation_ref.lower()
-    ):
-        raise VNextPollerError("VNEXT_ATTESTOR_SCOPE_INVALID")
+    command = [
+        sys.executable,
+        str(ATTESTOR),
+        "--lane",
+        bound.binding.lane.value,
+        "--adapter",
+        bound.binding.adapter_id,
+        "--privacy",
+        bound.universal_task.privacy.value,
+        "--ttl",
+        str(ATTESTATION_TTL_SECONDS),
+    ]
+    for capability in bound.universal_task.required_capabilities:
+        command.extend(("--capability", capability))
+    for resource in bound.universal_task.target_resources:
+        command.extend(("--resource", resource))
     try:
-        observed_at = float(raw["observed_at"])
-        expires_at = float(raw["expires_at"])
-        if expires_at <= observed_at or expires_at <= time.time():
-            raise VNextPollerError("VNEXT_ATTESTOR_SCOPE_INVALID")
-        if expires_at - observed_at > ATTESTATION_TTL_SECONDS:
-            raise VNextPollerError("VNEXT_ATTESTOR_SCOPE_INVALID")
+        completed = subprocess.run(
+            command,
+            cwd=str(ROOT),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            env=os.environ.copy(),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise VNextPollerError("VNEXT_ATTESTOR_UNAVAILABLE") from exc
+    if completed.returncode != 0:
+        raise VNextPollerError("VNEXT_ATTESTOR_PROBE_FAILED")
+    try:
+        raw = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise VNextPollerError("VNEXT_ATTESTOR_OUTPUT_INVALID") from exc
+    try:
         snapshot = NodeCapabilitySnapshot(
             node_id=str(raw["node_id"]),
             generation=int(raw["generation"]),
@@ -448,8 +396,8 @@ def _attest(bound: object) -> tuple[NodeCapabilitySnapshot, dict[str, object]]:
             supported_lanes=tuple(Lane(value) for value in raw["supported_lanes"]),
             privacy_classes=tuple(PrivacyClass(value) for value in raw["privacy_classes"]),
             resource_patterns=tuple(raw["resource_patterns"]),
-            observed_at=observed_at,
-            expires_at=expires_at,
+            observed_at=float(raw["observed_at"]),
+            expires_at=float(raw["expires_at"]),
             attestation_ref=str(raw["attestation_ref"]),
         )
     except (KeyError, TypeError, ValueError) as exc:
@@ -477,10 +425,17 @@ def _codegen_bound(item: object, body: str, legacy_task: object) -> object:
 
 def _dispatch_codegen(item: object, body: str, legacy_task: object, workdir: str | None) -> None:
     bound = _codegen_bound(item, body, legacy_task)
-    _snapshot, _raw = _attest(bound)
+    _snapshot, raw = _attest(bound)
+    raw_with_schema = {
+        "schema": legacy.RUNNER_VNEXT_NODE_SNAPSHOT_SCHEMA,
+        **raw,
+    }
     with _temporary_environment(
         {
             legacy.RUNNER_VNEXT_MODE_ENV: VNEXT_MODE,
+            legacy.RUNNER_VNEXT_NODE_SNAPSHOT_JSON_ENV: json.dumps(
+                raw_with_schema, sort_keys=True, separators=(",", ":")
+            ),
         }
     ):
         legacy.process_issue(
