@@ -84,14 +84,12 @@ from core.runner_diagnostic_executor import (
 )
 from core.runner_vnext_cutover_bridge import (
     VNEXT_MODE_AUTHORITATIVE,
-    VNEXT_MODE_GREEN_CANARY,
     VNEXT_MODES,
     VNextCutoverBridgeError,
     evaluate_vnext_cutover_bridge,
 )
 from core.runner_vnext_authority import (
     ROUTE_CODE_GENERATION as VNEXT_ROUTE_CODE_GENERATION,
-    ROUTE_DIAGNOSTIC as VNEXT_ROUTE_DIAGNOSTIC,
     RunnerVNextAuthorityError,
     RunnerVNextRuntimeConfig,
     authority_receipt_from_bound,
@@ -101,11 +99,7 @@ from core.runner_vnext_authority import (
     prepare_green_authority,
 )
 from core.runner_vnext_contracts import PrivacyClass
-from core.runner_vnext_execution import (
-    GreenExecutionError,
-    GreenExecutionLifecycle,
-    GreenExecutionResult,
-)
+from core.runner_vnext_execution import GreenExecutionError, GreenExecutionLifecycle
 from core.runner_vnext_live_codegen import (
     LiveCodegenAdapter,
     PollerMechanicalCodegenBackend,
@@ -280,23 +274,13 @@ _CURRENT_QUEUE_REPOSITORY: ContextVar[str] = ContextVar(
 )
 RUNNER_VNEXT_NODE_SNAPSHOT_SCHEMA = "skeleton.runner_vnext_node_capability_snapshot.v1"
 RUNNER_VNEXT_CODEGEN_NODE_ID = "node:runner-vnext-codegen-runtime"
-RUNNER_VNEXT_DIAGNOSTIC_NODE_ID = "node:runner-vnext-harmless-diagnostic-runtime"
 RUNNER_VNEXT_CODEGEN_ROUTE_RANK = 0
-RUNNER_VNEXT_DIAGNOSTIC_ROUTE_RANK = 5
 RUNNER_VNEXT_NODE_SNAPSHOT_MAX_TTL_SECONDS = 60.0
 RUNNER_VNEXT_CODEGEN_CAPABILITIES = (
     "repository_read",
     "repository_write_allowlisted",
     "test_execution",
 )
-RUNNER_VNEXT_REGISTERED_OPERATION_IDS = (
-    "codegen",
-    "validation",
-    "publication",
-)
-RUNNER_VNEXT_GREEN_CANARY_APPROVAL_REFERENCE = "runner_vnext_green_lifecycle_canary_v1"
-RUNNER_VNEXT_GREEN_CANARY_IDEMPOTENCY_KEY = "runner-vnext-green-lifecycle-canary-v1"
-RUNNER_VNEXT_GREEN_CANARY_ALLOWED_FILES = ("docs/RUNNER_MAINTENANCE_TASKS.md",)
 _RUNNER_VNEXT_NODE_SNAPSHOT_KEYS = frozenset(
     (
         "schema",
@@ -4109,27 +4093,6 @@ def runner_vnext_authoritative_green_ready() -> bool:
     )
 
 
-def runner_vnext_green_canary_lifecycle_ready() -> bool:
-    return (
-        os.environ.get(RUNNER_VNEXT_MODE_ENV, RUNNER_MODE_OFF).strip().lower()
-        == VNEXT_MODE_GREEN_CANARY
-        and isinstance(LAST_RUNNER_VNEXT_RECEIPT, dict)
-        and LAST_RUNNER_VNEXT_RECEIPT.get("status") == "green_canary_pass"
-        and LAST_RUNNER_VNEXT_RECEIPT.get("reason_code") == "VNEXT_GREEN_CANARY_MATCH"
-    )
-
-
-def _runner_vnext_exact_green_canary_task(metadata: Mapping[str, Any]) -> bool:
-    return (
-        metadata.get("legacy_route") == ROUTE_CODE_GENERATION
-        and metadata.get("repo") == REPO
-        and tuple(metadata.get("allowed_files") or ()) == RUNNER_VNEXT_GREEN_CANARY_ALLOWED_FILES
-        and tuple(metadata.get("requested_capabilities") or ()) == RUNNER_VNEXT_CODEGEN_CAPABILITIES
-        and metadata.get("approval_reference") == RUNNER_VNEXT_GREEN_CANARY_APPROVAL_REFERENCE
-        and metadata.get("idempotency_key") == RUNNER_VNEXT_GREEN_CANARY_IDEMPOTENCY_KEY
-    )
-
-
 def protected_runner_shadow_compatibility_bindings() -> RunnerShadowCompatibilityBindings:
     maintenance_task_kind_by_id = {
         task_id: SHADOW_MAINTENANCE_TASK_KIND_BY_ID[task_id]
@@ -4440,21 +4403,6 @@ def evaluate_runner_vnext_cutover_hook(
         return allow_legacy, None if allow_legacy else exc.reason_code
 
     LAST_RUNNER_VNEXT_RECEIPT = decision.to_public_mapping()
-    if (
-        normalized_mode == "green_canary"
-        and decision.status == "green_canary_pass"
-        and not _runner_vnext_exact_green_canary_task(metadata)
-    ):
-        LAST_RUNNER_VNEXT_RECEIPT.update(
-            {
-                "status": "legacy_protected_path",
-                "reason_code": "VNEXT_GREEN_CANARY_EXACT_TASK_REQUIRED",
-                "canary_eligible": False,
-                "allow_legacy_execution": True,
-                "side_effects_executed": False,
-            }
-        )
-        return True, None
     if normalized_mode == VNEXT_MODE_AUTHORITATIVE:
         if decision.status == "authoritative_green_ready":
             return True, None
@@ -4530,50 +4478,6 @@ def _runner_vnext_external_snapshot_payload() -> Mapping[str, object]:
     return payload
 
 
-def _runner_vnext_private_attestation_payload(
-    *,
-    bound: object,
-    now: float,
-) -> Mapping[str, object]:
-    lane = getattr(getattr(bound, "binding"), "lane")
-    operation = getattr(bound, "operation")
-    if operation == "diagnostic":
-        node_id = RUNNER_VNEXT_DIAGNOSTIC_NODE_ID
-        route_rank = RUNNER_VNEXT_DIAGNOSTIC_ROUTE_RANK
-    elif operation == "codegen":
-        node_id = RUNNER_VNEXT_CODEGEN_NODE_ID
-        route_rank = RUNNER_VNEXT_CODEGEN_ROUTE_RANK
-    else:
-        raise _runner_vnext_snapshot_reason("VNEXT_NODE_ATTESTATION_OPERATION_INVALID")
-    evidence_payload = {
-        "adapter_id": getattr(getattr(bound, "binding"), "adapter_id"),
-        "capabilities": list(getattr(getattr(bound, "universal_task"), "required_capabilities")),
-        "lane": lane.value,
-        "operation": operation,
-        "operation_id": getattr(getattr(bound, "operation_ir"), "operation_id"),
-        "resources": list(getattr(getattr(bound, "universal_task"), "target_resources")),
-        "source_binding_hash": getattr(bound, "source_binding_hash"),
-        "target_state_ref": getattr(bound, "target_state_ref"),
-    }
-    digest = hashlib.sha256(
-        json.dumps(evidence_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()[:32]
-    return {
-        "schema": RUNNER_VNEXT_NODE_SNAPSHOT_SCHEMA,
-        "node_id": node_id,
-        "generation": int(now * 1_000_000),
-        "route_rank": route_rank,
-        "capabilities": list(getattr(getattr(bound, "universal_task"), "required_capabilities")),
-        "supported_adapters": [getattr(getattr(bound, "binding"), "adapter_id")],
-        "supported_lanes": [lane.value],
-        "privacy_classes": [getattr(getattr(bound, "universal_task"), "privacy").value],
-        "resource_patterns": list(getattr(getattr(bound, "universal_task"), "target_resources")),
-        "observed_at": now,
-        "expires_at": now + RUNNER_VNEXT_NODE_SNAPSHOT_MAX_TTL_SECONDS,
-        "attestation_ref": f"attestation:external-boundary:{digest}",
-    }
-
-
 def _runner_vnext_nodes(
     *,
     bound: object,
@@ -4581,44 +4485,34 @@ def _runner_vnext_nodes(
 ) -> NodeCapabilityRegistry:
     expected_resources = getattr(getattr(bound, "universal_task"), "target_resources")
     expected_capabilities = getattr(getattr(bound, "universal_task"), "required_capabilities")
-    payload = _runner_vnext_private_attestation_payload(bound=bound, now=now)
+    payload = _runner_vnext_external_snapshot_payload()
     if payload["schema"] != RUNNER_VNEXT_NODE_SNAPSHOT_SCHEMA:
         raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_SCHEMA_INVALID")
-    expected_node_id = (
-        RUNNER_VNEXT_DIAGNOSTIC_NODE_ID
-        if getattr(bound, "operation") == "diagnostic"
-        else RUNNER_VNEXT_CODEGEN_NODE_ID
-    )
-    expected_route_rank = (
-        RUNNER_VNEXT_DIAGNOSTIC_ROUTE_RANK
-        if getattr(bound, "operation") == "diagnostic"
-        else RUNNER_VNEXT_CODEGEN_ROUTE_RANK
-    )
-    if payload["node_id"] != expected_node_id:
+    if payload["node_id"] != RUNNER_VNEXT_CODEGEN_NODE_ID:
         raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_NODE_INVALID")
     generation = payload["generation"]
     if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
         raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_GENERATION_INVALID")
-    if payload["route_rank"] != expected_route_rank:
+    if payload["route_rank"] != RUNNER_VNEXT_CODEGEN_ROUTE_RANK:
         raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_ROUTE_RANK_INVALID")
 
     capabilities = _runner_vnext_string_tuple(
         payload["capabilities"], reason_code="VNEXT_NODE_SNAPSHOT_CAPABILITIES_INVALID"
     )
     if (
-        capabilities != tuple(expected_capabilities)
-        or not set(capabilities).issubset(set(RUNNER_VNEXT_CODEGEN_CAPABILITIES))
+        capabilities != RUNNER_VNEXT_CODEGEN_CAPABILITIES
+        or capabilities != tuple(expected_capabilities)
     ):
         raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_CAPABILITIES_WIDENED")
     adapters = _runner_vnext_string_tuple(
         payload["supported_adapters"], reason_code="VNEXT_NODE_SNAPSHOT_ADAPTER_INVALID"
     )
-    if adapters != (getattr(getattr(bound, "binding"), "adapter_id"),):
+    if adapters != ("adapter:repo-codegen",):
         raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_ADAPTER_INVALID")
     lanes = _runner_vnext_string_tuple(
         payload["supported_lanes"], reason_code="VNEXT_NODE_SNAPSHOT_LANE_INVALID"
     )
-    if lanes != (getattr(getattr(bound, "binding"), "lane").value,):
+    if lanes != (Lane.CODEGEN.name,):
         raise _runner_vnext_snapshot_reason("VNEXT_NODE_SNAPSHOT_LANE_INVALID")
     privacy_classes = _runner_vnext_string_tuple(
         payload["privacy_classes"], reason_code="VNEXT_NODE_SNAPSHOT_PRIVACY_INVALID"
@@ -4658,12 +4552,12 @@ def _runner_vnext_nodes(
     try:
         registry.register(
             NodeCapabilitySnapshot(
-                node_id=str(payload["node_id"]),
+                node_id=RUNNER_VNEXT_CODEGEN_NODE_ID,
                 generation=generation,
-                route_rank=expected_route_rank,
+                route_rank=RUNNER_VNEXT_CODEGEN_ROUTE_RANK,
                 capabilities=capabilities,
                 supported_adapters=adapters,
-                supported_lanes=(getattr(getattr(bound, "binding"), "lane"),),
+                supported_lanes=(Lane.CODEGEN,),
                 privacy_classes=(PrivacyClass.PUBLIC_SAFE,),
                 resource_patterns=resource_patterns,
                 observed_at=observed_at,
@@ -4709,29 +4603,6 @@ def _vnext_classify_codegen_status(output: str, exit_code: int) -> str:
     return classify_codex_task_result(output, exit_code).status
 
 
-class _RunnerVNextGreenCanaryDiagnosticExecutor:
-    def __init__(self, *, workdir: str) -> None:
-        self._workdir = workdir
-
-    def execute(self, grant: GreenExecutionGrant) -> GreenExecutionResult:
-        state_ref = _vnext_workspace_state_ref(self._workdir)
-        return GreenExecutionResult(
-            operation_id=grant.operation_id,
-            idempotency_key=grant.idempotency_key,
-            adapter_id=grant.adapter_id,
-            target_state_ref=grant.target_state_ref,
-            fence_token=grant.fence_token,
-            resources=grant.planner_envelope.resources,
-            effects=grant.planner_envelope.effects,
-            outcome="SUCCEEDED",
-            reason_code="EXECUTION_GREEN_CANARY_DIAGNOSTIC_PASS",
-            before_state_ref=state_ref,
-            after_state_ref=state_ref,
-            validation_status="PASS",
-            rollback_requested=False,
-        )
-
-
 def run_authoritative_vnext_codegen(
     *,
     issue_number: int,
@@ -4743,18 +4614,13 @@ def run_authoritative_vnext_codegen(
     typed_task = runner_task_from_normalized_metadata(metadata, "code_edit")
     if typed_task.repo != legacy_runner_task.target_repository:
         raise RunnerVNextAuthorityError("VNEXT_AUTHORITY_REPOSITORY_MISMATCH")
-    green_canary_lifecycle = runner_vnext_green_canary_lifecycle_ready()
-    if green_canary_lifecycle and not _runner_vnext_exact_green_canary_task(metadata):
-        raise RunnerVNextAuthorityError("VNEXT_GREEN_CANARY_EXACT_TASK_REQUIRED")
     now = time.time()
     stores = build_authoritative_stores(_runner_vnext_runtime_config(), clock=time.time)
     try:
-        route = VNEXT_ROUTE_DIAGNOSTIC if green_canary_lifecycle else VNEXT_ROUTE_CODE_GENERATION
-        operation = "diagnostic" if green_canary_lifecycle else "codegen"
         bound = bind_runner_operation(
             runner_task=typed_task,
-            route=route,
-            operation=operation,
+            route=VNEXT_ROUTE_CODE_GENERATION,
+            operation="codegen",
             source_task_ref=f"issue:{issue_number}",
         )
         receipt = authority_receipt_from_bound(
@@ -4782,45 +4648,38 @@ def run_authoritative_vnext_codegen(
             target_state_verifier=_RunnerVNextTargetVerifier(workdir=issue_workdir),
             now=now,
         )
-        if green_canary_lifecycle:
-            executor = _RunnerVNextGreenCanaryDiagnosticExecutor(workdir=issue_workdir)
-        else:
-            backend = PollerMechanicalCodegenBackend(
-                task_content=task_content,
-                workdir=issue_workdir,
-                run_mechanics=run_codex_task,
-                changed_files=_vnext_changed_files_tuple,
-                run_validation_command=_vnext_run_validation_command,
-                workspace_state_ref=_vnext_workspace_state_ref,
-                classify_mechanics_status=_vnext_classify_codegen_status,
-            )
-            executor = LiveCodegenAdapter(
-                runner_task=typed_task,
-                source_task_ref=f"issue:{issue_number}",
-                backend=backend,
-            )
+        backend = PollerMechanicalCodegenBackend(
+            task_content=task_content,
+            workdir=issue_workdir,
+            run_mechanics=run_codex_task,
+            changed_files=_vnext_changed_files_tuple,
+            run_validation_command=_vnext_run_validation_command,
+            workspace_state_ref=_vnext_workspace_state_ref,
+            classify_mechanics_status=_vnext_classify_codegen_status,
+        )
         execution_receipt = GreenExecutionLifecycle(
             scheduler=stores.scheduler,
             ledger=stores.ledger,
-        ).run(grant, executor)
+        ).run(
+            grant,
+            LiveCodegenAdapter(
+                runner_task=typed_task,
+                source_task_ref=f"issue:{issue_number}",
+                backend=backend,
+            ),
+        )
     finally:
         stores.close()
     public_execution = GreenExecutionLifecycle.public_projection(execution_receipt)
     if isinstance(LAST_RUNNER_VNEXT_RECEIPT, dict):
         LAST_RUNNER_VNEXT_RECEIPT.update({
             "execution_authorized": True,
-            "side_effects_executed": not green_canary_lifecycle,
+            "side_effects_executed": True,
             "allow_legacy_mechanical_shell": False,
             "green_execution": public_execution,
         })
     if execution_receipt.terminal_status != "COMPLETED":
         return 1, f"BLOCKED: vNext authoritative codegen failed: {execution_receipt.reason_code}"
-    if green_canary_lifecycle:
-        return 0, (
-            "RESULT: DONE\n"
-            "vnext_green_canary_diagnostic=completed\n"
-            f"vnext_touched_resource_count={len(execution_receipt.touched_resource_refs)}"
-        )
     return 0, (
         "RESULT: DONE\n"
         "vnext_authoritative_codegen=completed\n"
@@ -21192,10 +21051,7 @@ def _process_issue_in_current_queue_context(
             else:
                 codex_code, codex_output = 0, str(dispatch_result or "")
         else:
-            if (
-                runner_vnext_authoritative_green_ready()
-                or runner_vnext_green_canary_lifecycle_ready()
-            ):
+            if runner_vnext_authoritative_green_ready():
                 if runner_task is None:
                     block_issue(
                         issue_number,
