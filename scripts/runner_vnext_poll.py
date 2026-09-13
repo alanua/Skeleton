@@ -490,7 +490,7 @@ def _diagnostic_bound(repository: str, issue_number: int, body: str, expected_id
                 "runtime_change",
                 "secret_access",
             ],
-            "validation_commands": [],
+            "validation_commands": [["python3", "-c", "raise SystemExit(0)"]],
             "validation_timeout_seconds": 60,
             "expected_output": ["harmless vNext diagnostic receipt"],
             "privacy_boundary": "PUBLIC_SAFE_REPOSITORY_ONLY",
@@ -538,13 +538,22 @@ def _private_root() -> Path:
 
 def _private_regular_file(path: Path, root: Path, reason: str) -> None:
     try:
-        resolved_parent = path.parent.resolve(strict=True)
         root_resolved = root.resolve(strict=True)
+        resolved = path.resolve(strict=True)
         info = path.lstat()
     except OSError as exc:
         raise VNextPollerError(reason) from exc
-    if resolved_parent != root_resolved:
+    try:
+        relative = resolved.relative_to(root_resolved)
+    except ValueError as exc:
+        raise VNextPollerError(reason) from exc
+    if not relative.parts:
         raise VNextPollerError(reason)
+    cursor = root_resolved
+    for part in relative.parts[:-1]:
+        cursor = cursor / part
+        if cursor.is_symlink():
+            raise VNextPollerError(reason)
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
         raise VNextPollerError(reason)
     if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077:
