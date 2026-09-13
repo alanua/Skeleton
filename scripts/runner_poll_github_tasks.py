@@ -84,6 +84,7 @@ from core.runner_diagnostic_executor import (
 )
 from core.runner_vnext_cutover_bridge import (
     VNEXT_MODE_AUTHORITATIVE,
+    VNEXT_MODE_GREEN_CANARY,
     VNEXT_MODES,
     VNextCutoverBridgeError,
     evaluate_vnext_cutover_bridge,
@@ -99,7 +100,11 @@ from core.runner_vnext_authority import (
     prepare_green_authority,
 )
 from core.runner_vnext_contracts import PrivacyClass
-from core.runner_vnext_execution import GreenExecutionError, GreenExecutionLifecycle
+from core.runner_vnext_execution import (
+    GreenExecutionError,
+    GreenExecutionLifecycle,
+    GreenExecutionResult,
+)
 from core.runner_vnext_live_codegen import (
     LiveCodegenAdapter,
     PollerMechanicalCodegenBackend,
@@ -4096,6 +4101,16 @@ def runner_vnext_authoritative_green_ready() -> bool:
     )
 
 
+def runner_vnext_green_canary_lifecycle_ready() -> bool:
+    return (
+        os.environ.get(RUNNER_VNEXT_MODE_ENV, RUNNER_MODE_OFF).strip().lower()
+        == VNEXT_MODE_GREEN_CANARY
+        and isinstance(LAST_RUNNER_VNEXT_RECEIPT, dict)
+        and LAST_RUNNER_VNEXT_RECEIPT.get("status") == "green_canary_pass"
+        and LAST_RUNNER_VNEXT_RECEIPT.get("reason_code") == "VNEXT_GREEN_CANARY_MATCH"
+    )
+
+
 def _runner_vnext_exact_green_canary_task(metadata: Mapping[str, Any]) -> bool:
     return (
         metadata.get("legacy_route") == ROUTE_CODE_GENERATION
@@ -4632,6 +4647,36 @@ def _vnext_classify_codegen_status(output: str, exit_code: int) -> str:
     return classify_codex_task_result(output, exit_code).status
 
 
+class _RunnerVNextGreenCanaryDiagnosticBackend:
+    def __init__(self, *, workdir: str) -> None:
+        self._workdir = workdir
+
+    def run_codegen(
+        self,
+        *,
+        runner_task: RunnerTask,
+        source_task_ref: str,
+        grant: GreenExecutionGrant,
+    ) -> GreenExecutionResult:
+        del runner_task, source_task_ref
+        state_ref = _vnext_workspace_state_ref(self._workdir)
+        return GreenExecutionResult(
+            operation_id=grant.operation_id,
+            idempotency_key=grant.idempotency_key,
+            adapter_id=grant.adapter_id,
+            target_state_ref=grant.target_state_ref,
+            fence_token=grant.fence_token,
+            resources=grant.planner_envelope.resources,
+            effects=grant.planner_envelope.effects,
+            outcome="SUCCEEDED",
+            reason_code="EXECUTION_GREEN_CANARY_DIAGNOSTIC_PASS",
+            before_state_ref=state_ref,
+            after_state_ref=state_ref,
+            validation_status="PASS",
+            rollback_requested=False,
+        )
+
+
 def run_authoritative_vnext_codegen(
     *,
     issue_number: int,
@@ -4643,6 +4688,9 @@ def run_authoritative_vnext_codegen(
     typed_task = runner_task_from_normalized_metadata(metadata, "code_edit")
     if typed_task.repo != legacy_runner_task.target_repository:
         raise RunnerVNextAuthorityError("VNEXT_AUTHORITY_REPOSITORY_MISMATCH")
+    green_canary_lifecycle = runner_vnext_green_canary_lifecycle_ready()
+    if green_canary_lifecycle and not _runner_vnext_exact_green_canary_task(metadata):
+        raise RunnerVNextAuthorityError("VNEXT_GREEN_CANARY_EXACT_TASK_REQUIRED")
     now = time.time()
     stores = build_authoritative_stores(_runner_vnext_runtime_config(), clock=time.time)
     try:
@@ -4677,15 +4725,18 @@ def run_authoritative_vnext_codegen(
             target_state_verifier=_RunnerVNextTargetVerifier(workdir=issue_workdir),
             now=now,
         )
-        backend = PollerMechanicalCodegenBackend(
-            task_content=task_content,
-            workdir=issue_workdir,
-            run_mechanics=run_codex_task,
-            changed_files=_vnext_changed_files_tuple,
-            run_validation_command=_vnext_run_validation_command,
-            workspace_state_ref=_vnext_workspace_state_ref,
-            classify_mechanics_status=_vnext_classify_codegen_status,
-        )
+        if green_canary_lifecycle:
+            backend = _RunnerVNextGreenCanaryDiagnosticBackend(workdir=issue_workdir)
+        else:
+            backend = PollerMechanicalCodegenBackend(
+                task_content=task_content,
+                workdir=issue_workdir,
+                run_mechanics=run_codex_task,
+                changed_files=_vnext_changed_files_tuple,
+                run_validation_command=_vnext_run_validation_command,
+                workspace_state_ref=_vnext_workspace_state_ref,
+                classify_mechanics_status=_vnext_classify_codegen_status,
+            )
         execution_receipt = GreenExecutionLifecycle(
             scheduler=stores.scheduler,
             ledger=stores.ledger,
@@ -4703,12 +4754,18 @@ def run_authoritative_vnext_codegen(
     if isinstance(LAST_RUNNER_VNEXT_RECEIPT, dict):
         LAST_RUNNER_VNEXT_RECEIPT.update({
             "execution_authorized": True,
-            "side_effects_executed": True,
+            "side_effects_executed": not green_canary_lifecycle,
             "allow_legacy_mechanical_shell": False,
             "green_execution": public_execution,
         })
     if execution_receipt.terminal_status != "COMPLETED":
         return 1, f"BLOCKED: vNext authoritative codegen failed: {execution_receipt.reason_code}"
+    if green_canary_lifecycle:
+        return 0, (
+            "RESULT: DONE\n"
+            "vnext_green_canary_diagnostic=completed\n"
+            f"vnext_touched_resource_count={len(execution_receipt.touched_resource_refs)}"
+        )
     return 0, (
         "RESULT: DONE\n"
         "vnext_authoritative_codegen=completed\n"
@@ -21080,7 +21137,10 @@ def _process_issue_in_current_queue_context(
             else:
                 codex_code, codex_output = 0, str(dispatch_result or "")
         else:
-            if runner_vnext_authoritative_green_ready():
+            if (
+                runner_vnext_authoritative_green_ready()
+                or runner_vnext_green_canary_lifecycle_ready()
+            ):
                 if runner_task is None:
                     block_issue(
                         issue_number,

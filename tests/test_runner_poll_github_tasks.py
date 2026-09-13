@@ -5593,6 +5593,74 @@ def test_authoritative_codegen_runs_mechanics_once_after_grant(
     assert runner.LAST_RUNNER_VNEXT_RECEIPT["side_effects_executed"] is True
 
 
+def test_green_canary_lifecycle_is_harmless_diagnostic_after_grant(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "vnext-state"
+    workdir = tmp_path / "issue"
+    workdir.mkdir()
+    monkeypatch.setenv(runner.RUNNER_VNEXT_MODE_ENV, "green_canary")
+    monkeypatch.setenv(runner.RUNNER_VNEXT_STATE_ROOT_ENV, str(state_root))
+    monkeypatch.setenv(runner.RUNNER_VNEXT_LEDGER_DB_ENV, str(state_root / "ledger.sqlite"))
+    monkeypatch.setenv(runner.RUNNER_VNEXT_LEASE_DB_ENV, str(state_root / "leases.sqlite"))
+    metadata = _vnext_bridge_metadata(
+        allowed_files=runner.RUNNER_VNEXT_GREEN_CANARY_ALLOWED_FILES,
+        approval_reference=runner.RUNNER_VNEXT_GREEN_CANARY_APPROVAL_REFERENCE,
+        idempotency_key=runner.RUNNER_VNEXT_GREEN_CANARY_IDEMPOTENCY_KEY,
+    )
+    legacy_task = runner.RunnerTask(content="x", target_repository=runner.REPO)
+    runner.LAST_RUNNER_VNEXT_RECEIPT = {
+        "status": "green_canary_pass",
+        "reason_code": "VNEXT_GREEN_CANARY_MATCH",
+    }
+    _set_vnext_node_snapshot(
+        monkeypatch,
+        _vnext_node_snapshot(
+            allowed_files=runner.RUNNER_VNEXT_GREEN_CANARY_ALLOWED_FILES,
+            now=1_000.0,
+        ),
+    )
+
+    with mock.patch.object(
+        runner,
+        "run_command",
+        return_value=(0, f"{'a' * 40}\n"),
+    ), mock.patch.object(
+        runner.time,
+        "time",
+        return_value=1_000.0,
+    ), mock.patch.object(
+        runner,
+        "run_codex_task",
+        side_effect=AssertionError("green canary must not invoke codegen mechanics"),
+    ) as mechanics, mock.patch.object(
+        runner,
+        "changed_files",
+        return_value=[],
+    ), mock.patch.object(
+        runner,
+        "_vnext_run_validation_command",
+        side_effect=AssertionError("green canary diagnostic must not run task validation"),
+    ) as validate:
+        code, output = runner.run_authoritative_vnext_codegen(
+            issue_number=3951,
+            task_content="x",
+            issue_workdir=str(workdir),
+            metadata=metadata,
+            legacy_runner_task=legacy_task,
+        )
+
+    assert code == 0
+    assert "vnext_green_canary_diagnostic=completed" in output
+    assert "vnext_touched_resource_count=1" in output
+    mechanics.assert_not_called()
+    validate.assert_not_called()
+    assert runner.LAST_RUNNER_VNEXT_RECEIPT["execution_authorized"] is True
+    assert runner.LAST_RUNNER_VNEXT_RECEIPT["side_effects_executed"] is False
+    assert runner.LAST_RUNNER_VNEXT_RECEIPT["green_execution"]["state_changed"] is False
+
+
 @pytest.mark.parametrize(
     ("snapshot", "reason_code"),
     (

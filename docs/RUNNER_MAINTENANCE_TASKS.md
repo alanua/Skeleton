@@ -53,17 +53,20 @@ completion re-evaluates the queue through the existing replenisher path and
 does not auto-merge, mark a PR ready, or synthesize approval.
 
 Runner vNext staged canary control is intentionally narrow. `green_canary` mode
-is a lifecycle probe for exactly one harmless public docs task:
+is a lifecycle diagnostic for exactly one harmless public docs task:
 `docs/RUNNER_MAINTENANCE_TASKS.md`, approval
 `runner_vnext_green_lifecycle_canary_v1`, and idempotency key
-`runner-vnext-green-lifecycle-canary-v1`. Other ordinary GREEN codegen remains
-on the legacy path unless `authoritative` mode explicitly grants it.
+`runner-vnext-green-lifecycle-canary-v1`. The diagnostic exercises the typed
+GREEN reserve/grant/finish path without invoking legacy codegen mechanics or
+changing repository state. Other ordinary GREEN codegen remains on the legacy
+path unless `authoritative` mode explicitly grants it.
 
 Authoritative vNext codegen accepts node capability attestation only through
 the external snapshot environment field. Task prose cannot supply or widen that
 attestation, and local preflight probes are read-only: they verify repository
-readability, git head, Python/pytest availability, and fixed public capability
-declarations without requiring workspace writes or runtime mutation.
+readability, git head, Python/pytest availability, allowlisted write readiness,
+and codegen executor availability without performing workspace writes or
+runtime mutation.
 
 If a codegen task contract declares `existing_pr` or `update_existing_pr`, the
 continuation can bind only to that declared PR identity. A successful report

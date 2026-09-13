@@ -45,6 +45,20 @@ from core.runner_vnext_routing import NodeCapabilitySnapshot
 VNEXT_MODE = "authoritative"
 ATTESTATION_TTL_SECONDS = 45.0
 EXTERNAL_NODE_SNAPSHOT_SCHEMA = "skeleton.runner_vnext_node_capability_snapshot.v1"
+EXTERNAL_NODE_IDS = {
+    "codegen": "node:runner-vnext-codegen-runtime",
+    "validate": "node:runner-vnext-validation-runtime",
+    "publish": "node:runner-vnext-publication-runtime",
+    "control": "node:runner-vnext-control-runtime",
+    "merge": "node:runner-vnext-merge-runtime",
+}
+EXTERNAL_ROUTE_RANKS = {
+    "codegen": 0,
+    "validate": 10,
+    "publish": 20,
+    "control": 30,
+    "merge": 40,
+}
 _EXTERNAL_NODE_SNAPSHOT_KEYS = frozenset(
     (
         "schema",
@@ -390,7 +404,26 @@ def _attest(bound: object) -> tuple[NodeCapabilitySnapshot, dict[str, object]]:
         raise VNextPollerError("VNEXT_ATTESTOR_SCOPE_INVALID")
     if raw.get("privacy_classes") != [bound.universal_task.privacy.value]:
         raise VNextPollerError("VNEXT_ATTESTOR_SCOPE_INVALID")
+    lane = bound.binding.lane.value
+    if raw.get("node_id") != EXTERNAL_NODE_IDS.get(lane):
+        raise VNextPollerError("VNEXT_ATTESTOR_SCOPE_INVALID")
+    if raw.get("route_rank") != EXTERNAL_ROUTE_RANKS.get(lane):
+        raise VNextPollerError("VNEXT_ATTESTOR_SCOPE_INVALID")
+    attestation_ref = raw.get("attestation_ref")
+    if (
+        not isinstance(attestation_ref, str)
+        or not attestation_ref.startswith("attestation:")
+        or "private" in attestation_ref.lower()
+        or "secret" in attestation_ref.lower()
+    ):
+        raise VNextPollerError("VNEXT_ATTESTOR_SCOPE_INVALID")
     try:
+        observed_at = float(raw["observed_at"])
+        expires_at = float(raw["expires_at"])
+        if expires_at <= observed_at or expires_at <= time.time():
+            raise VNextPollerError("VNEXT_ATTESTOR_SCOPE_INVALID")
+        if expires_at - observed_at > ATTESTATION_TTL_SECONDS:
+            raise VNextPollerError("VNEXT_ATTESTOR_SCOPE_INVALID")
         snapshot = NodeCapabilitySnapshot(
             node_id=str(raw["node_id"]),
             generation=int(raw["generation"]),
@@ -400,8 +433,8 @@ def _attest(bound: object) -> tuple[NodeCapabilitySnapshot, dict[str, object]]:
             supported_lanes=tuple(Lane(value) for value in raw["supported_lanes"]),
             privacy_classes=tuple(PrivacyClass(value) for value in raw["privacy_classes"]),
             resource_patterns=tuple(raw["resource_patterns"]),
-            observed_at=float(raw["observed_at"]),
-            expires_at=float(raw["expires_at"]),
+            observed_at=observed_at,
+            expires_at=expires_at,
             attestation_ref=str(raw["attestation_ref"]),
         )
     except (KeyError, TypeError, ValueError) as exc:

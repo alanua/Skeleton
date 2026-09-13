@@ -81,19 +81,58 @@ Intent: exact validation
         "privacy_classes": ["PUBLIC_SAFE"],
         "resource_patterns": ["repo:core/a.py"],
         "observed_at": 100.0,
-        "expires_at": 120.0,
+        "expires_at": 145.0,
         "attestation_ref": "attestation:external-validation-1",
     }
-    monkeypatch.setenv(
-        poll.legacy.RUNNER_VNEXT_NODE_SNAPSHOT_JSON_ENV,
-        json.dumps(snapshot),
-    )
+    monkeypatch.setenv(poll.legacy.RUNNER_VNEXT_NODE_SNAPSHOT_JSON_ENV, json.dumps(snapshot))
+    monkeypatch.setattr(poll.time, "time", lambda: 120.0)
 
     node, raw = poll._attest(bound)
 
     assert raw == snapshot
     assert node.node_id == "node:runner-vnext-validation-runtime"
     assert node.attestation_ref == "attestation:external-validation-1"
+
+
+def test_runner_vnext_attest_rejects_private_or_stale_external_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = f"""Repository: alanua/Skeleton
+Pull Request: 77
+Expected Head SHA: {'a' * 40}
+Expected Base SHA: {'b' * 40}
+Allowed Files:
+- core/a.py
+Intent: exact validation
+"""
+    task, _pr_number = poll._validation_task(_Item({"number": 1, "body": body}), body)
+    bound = poll.bind_runner_operation(
+        runner_task=task,
+        route=poll.ROUTE_VALIDATION,
+        operation="validation",
+        source_task_ref="issue:1",
+    )
+    snapshot = {
+        "schema": poll.EXTERNAL_NODE_SNAPSHOT_SCHEMA,
+        "node_id": "node:runner-vnext-validation-runtime",
+        "generation": 1,
+        "route_rank": 10,
+        "capabilities": ["repository_read", "test_execution"],
+        "supported_adapters": ["adapter:repo-validation"],
+        "supported_lanes": ["validate"],
+        "privacy_classes": ["PUBLIC_SAFE"],
+        "resource_patterns": ["repo:core/a.py"],
+        "observed_at": 100.0,
+        "expires_at": 145.0,
+        "attestation_ref": "attestation:private-validation-secret",
+    }
+    monkeypatch.setenv(poll.legacy.RUNNER_VNEXT_NODE_SNAPSHOT_JSON_ENV, json.dumps(snapshot))
+    monkeypatch.setattr(poll.time, "time", lambda: 120.0)
+
+    with pytest.raises(poll.VNextPollerError) as exc:
+        poll._attest(bound)
+
+    assert exc.value.reason_code == "VNEXT_ATTESTOR_SCOPE_INVALID"
 
 
 def test_runner_vnext_attest_requires_external_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
