@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import subprocess
+import stat
 import sys
 import time
 from typing import Callable, Iterator
@@ -27,6 +27,7 @@ from core.runner_vnext_authoritative_dispatch import (
 from core.runner_vnext_authority import (
     PrivilegedAuthorityInput,
     ROUTE_CODE_GENERATION,
+    ROUTE_DIAGNOSTIC,
     ROUTE_MERGE,
     ROUTE_PUBLISH_ONLY,
     ROUTE_RECOVERY,
@@ -43,9 +44,47 @@ from core.runner_vnext_execution_gate import GreenExecutionGrant
 from core.runner_vnext_leases import Lane
 from core.runner_vnext_routing import NodeCapabilitySnapshot
 
-ATTESTOR = ROOT / "scripts" / "runner_vnext_attest.py"
 VNEXT_MODE = "authoritative"
 ATTESTATION_TTL_SECONDS = 45.0
+EXTERNAL_NODE_SNAPSHOT_SCHEMA = "skeleton.runner_vnext_node_capability_snapshot.v1"
+EXTERNAL_ATTESTATION_ENVELOPE_SCHEMA = "skeleton.runner_vnext_external_attestation_envelope.v1"
+EXTERNAL_ATTESTATION_PROFILE = "green_diagnostic_v1"
+EXTERNAL_ATTESTATION_FILENAME = "runner-vnext-external-attestation.json"
+DIAGNOSTIC_MODE = "RUNNER_VNEXT_GREEN_DIAGNOSTIC"
+DIAGNOSTIC_NODE_ID = "node:runner-vnext-harmless-diagnostic-runtime"
+DIAGNOSTIC_ROUTE_RANK = 5
+DIAGNOSTIC_ALLOWED_FILE = "docs/RUNNER_MAINTENANCE_TASKS.md"
+DIAGNOSTIC_APPROVAL_REFERENCE = "runner_vnext_green_lifecycle_canary_v1"
+_EXTERNAL_NODE_SNAPSHOT_KEYS = frozenset(
+    (
+        "schema",
+        "node_id",
+        "generation",
+        "route_rank",
+        "capabilities",
+        "supported_adapters",
+        "supported_lanes",
+        "privacy_classes",
+        "resource_patterns",
+        "observed_at",
+        "expires_at",
+        "attestation_ref",
+    )
+)
+_EXTERNAL_ATTESTATION_ENVELOPE_KEYS = frozenset(
+    (
+        "schema",
+        "repository",
+        "target_issue",
+        "profile",
+        "route",
+        "binding_sha256",
+        "idempotency_sha256",
+        "generation",
+        "snapshot",
+        "payload_sha256",
+    )
+)
 
 
 class VNextPollerError(RuntimeError):
@@ -167,13 +206,43 @@ class _LegacyPrivilegedBackend:
         )
 
 
+class _HarmlessDiagnosticBackend:
+    def execute(self, *, bound: object, grant: GreenExecutionGrant) -> MechanicalResult:
+        if grant.adapter_id != "adapter:harmless-diagnostic":
+            raise VNextPollerError("VNEXT_DIAGNOSTIC_ADAPTER_MISMATCH")
+        return MechanicalResult(
+            succeeded=True,
+            reason_code="EXECUTION_HARMLESS_DIAGNOSTIC_PASS",
+            touched_resources=tuple(grant.planner_envelope.resources),
+            before_state_ref=bound.target_state_ref,
+            after_state_ref=bound.target_state_ref,
+            validation_status="PASS",
+            rollback_requested=False,
+        )
+
+
 def _body_field(body: str, field: str) -> str | None:
     return legacy._body_field((body or "").split("```task", 1)[0], field)
+
+
+def _exact_body_field(body: str, field: str) -> str:
+    prefix = field + ":"
+    values = [line[len(prefix):].strip() for line in (body or "").splitlines() if line.startswith(prefix)]
+    if len(values) != 1 or not values[0]:
+        raise VNextPollerError("VNEXT_DIAGNOSTIC_CONTRACT_INVALID")
+    return values[0]
 
 
 def _safe_sha(value: str | None, reason: str) -> str:
     normalized = (value or "").lower()
     if len(normalized) != 40 or any(ch not in "0123456789abcdef" for ch in normalized):
+        raise VNextPollerError(reason)
+    return normalized
+
+
+def _safe_sha256(value: str | None, reason: str) -> str:
+    normalized = (value or "").lower()
+    if len(normalized) != 64 or any(ch not in "0123456789abcdef" for ch in normalized):
         raise VNextPollerError(reason)
     return normalized
 
@@ -199,6 +268,16 @@ def _approval_token(prefix: str, seed: str) -> str:
 def _idempotency_token(prefix: str, seed: str) -> str:
     digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:48]
     return f"{prefix}:{digest}"
+
+
+def _sha256_json(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def _changed_files_from_metadata(body: str) -> tuple[str, ...]:
@@ -237,6 +316,13 @@ def _worktree_head_ref(source_issue: int) -> str:
     return f"git:{_safe_sha(output.strip(), 'VNEXT_SOURCE_WORKTREE_HEAD_INVALID')}"
 
 
+def _current_repo_head_ref() -> str:
+    code, output = legacy.run_command(["git", "rev-parse", "HEAD"], cwd=ROOT)
+    if code != 0:
+        raise VNextPollerError("VNEXT_DIAGNOSTIC_HEAD_UNAVAILABLE")
+    return f"git:{_safe_sha(output.strip(), 'VNEXT_DIAGNOSTIC_HEAD_INVALID')}"
+
+
 def _issue_state_ref(repository: str, issue_number: int) -> str:
     code, output = legacy.run_command(
         [
@@ -260,6 +346,34 @@ def _issue_state_ref(repository: str, issue_number: int) -> str:
         json.dumps(parsed, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     return f"issue-state:{digest}"
+
+
+def _fetch_exact_issue(repository: str, issue_number: int) -> dict[str, object]:
+    if repository != legacy.REPO or issue_number < 1:
+        raise VNextPollerError("VNEXT_DIAGNOSTIC_SELECTOR_INVALID")
+    code, output = legacy.run_command(
+        [
+            "gh",
+            "issue",
+            "view",
+            str(issue_number),
+            "--repo",
+            repository,
+            "--json",
+            "number,body,state",
+        ]
+    )
+    if code != 0:
+        raise VNextPollerError("VNEXT_DIAGNOSTIC_ISSUE_UNAVAILABLE")
+    try:
+        parsed = json.loads(output or "{}")
+    except json.JSONDecodeError as exc:
+        raise VNextPollerError("VNEXT_DIAGNOSTIC_ISSUE_INVALID") from exc
+    if set(parsed) != {"number", "body", "state"}:
+        raise VNextPollerError("VNEXT_DIAGNOSTIC_ISSUE_INVALID")
+    if parsed.get("number") != issue_number or parsed.get("state") != "OPEN" or not isinstance(parsed.get("body"), str):
+        raise VNextPollerError("VNEXT_DIAGNOSTIC_ISSUE_INVALID")
+    return parsed
 
 
 def _validation_task(item: object, body: str) -> tuple[CoreRunnerTask, int]:
@@ -339,6 +453,59 @@ def _publication_task(item: object, body: str) -> tuple[CoreRunnerTask, int]:
     return task, source_issue
 
 
+def _diagnostic_bound(repository: str, issue_number: int, body: str, expected_idempotency_key: str):
+    if repository != legacy.REPO:
+        raise VNextPollerError("VNEXT_DIAGNOSTIC_REPOSITORY_INVALID")
+    if _exact_body_field(body, "Mode") != DIAGNOSTIC_MODE:
+        raise VNextPollerError("VNEXT_DIAGNOSTIC_CONTRACT_INVALID")
+    if _exact_body_field(body, "Repository") != repository:
+        raise VNextPollerError("VNEXT_DIAGNOSTIC_CONTRACT_INVALID")
+    if _exact_body_field(body, "Profile") != EXTERNAL_ATTESTATION_PROFILE:
+        raise VNextPollerError("VNEXT_DIAGNOSTIC_CONTRACT_INVALID")
+    if _exact_body_field(body, "Idempotency Key") != expected_idempotency_key:
+        raise VNextPollerError("VNEXT_DIAGNOSTIC_IDEMPOTENCY_MISMATCH")
+    main_sha = _safe_sha(_exact_body_field(body, "Expected Main SHA"), "VNEXT_DIAGNOSTIC_MAIN_SHA_INVALID")
+    task = CoreRunnerTask.from_mapping(
+        {
+            "schema": "skeleton.runner_task.v1",
+            "repo": repository,
+            "branch": "main",
+            "base_sha": main_sha,
+            "task_kind": "diagnostic",
+            "payload": {
+                "operation": "runner_vnext_green_diagnostic",
+                "profile": EXTERNAL_ATTESTATION_PROFILE,
+                "target_issue": issue_number,
+            },
+            "requested_capabilities": [
+                "repository_read",
+                "repository_write_allowlisted",
+                "test_execution",
+            ],
+            "allowed_files": [DIAGNOSTIC_ALLOWED_FILE],
+            "forbidden_actions": [
+                "codegen",
+                "merge",
+                "publication",
+                "runtime_change",
+                "secret_access",
+            ],
+            "validation_commands": [],
+            "validation_timeout_seconds": 60,
+            "expected_output": ["harmless vNext diagnostic receipt"],
+            "privacy_boundary": "PUBLIC_SAFE_REPOSITORY_ONLY",
+            "approval_reference": DIAGNOSTIC_APPROVAL_REFERENCE,
+            "idempotency_key": expected_idempotency_key,
+        }
+    )
+    return bind_runner_operation(
+        runner_task=task,
+        route=ROUTE_DIAGNOSTIC,
+        operation="diagnostic",
+        source_task_ref=f"issue:{issue_number}",
+    )
+
+
 def _stores() -> object:
     root = os.environ.get(legacy.RUNNER_VNEXT_STATE_ROOT_ENV, "")
     ledger = os.environ.get(legacy.RUNNER_VNEXT_LEDGER_DB_ENV, "")
@@ -351,58 +518,200 @@ def _stores() -> object:
     return build_authoritative_stores(config, clock=time.time)
 
 
-def _attest(bound: object) -> tuple[NodeCapabilitySnapshot, dict[str, object]]:
-    command = [
-        sys.executable,
-        str(ATTESTOR),
-        "--lane",
-        bound.binding.lane.value,
-        "--adapter",
-        bound.binding.adapter_id,
-        "--privacy",
-        bound.universal_task.privacy.value,
-        "--ttl",
-        str(ATTESTATION_TTL_SECONDS),
-    ]
-    for capability in bound.universal_task.required_capabilities:
-        command.extend(("--capability", capability))
-    for resource in bound.universal_task.target_resources:
-        command.extend(("--resource", resource))
+def _private_root() -> Path:
+    raw = os.environ.get(legacy.RUNNER_VNEXT_STATE_ROOT_ENV, "")
+    if not raw or raw == ":memory:":
+        raise VNextPollerError("VNEXT_EXTERNAL_ATTESTATION_STATE_ROOT_INVALID")
+    root = Path(raw)
+    if not root.is_absolute():
+        raise VNextPollerError("VNEXT_EXTERNAL_ATTESTATION_STATE_ROOT_INVALID")
     try:
-        completed = subprocess.run(
-            command,
-            cwd=str(ROOT),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=20,
-            env=os.environ.copy(),
+        info = root.lstat()
+    except OSError as exc:
+        raise VNextPollerError("VNEXT_EXTERNAL_ATTESTATION_STATE_ROOT_INVALID") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise VNextPollerError("VNEXT_EXTERNAL_ATTESTATION_STATE_ROOT_INVALID")
+    if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077:
+        raise VNextPollerError("VNEXT_EXTERNAL_ATTESTATION_STATE_ROOT_INVALID")
+    return root
+
+
+def _private_regular_file(path: Path, root: Path, reason: str) -> None:
+    try:
+        resolved_parent = path.parent.resolve(strict=True)
+        root_resolved = root.resolve(strict=True)
+        info = path.lstat()
+    except OSError as exc:
+        raise VNextPollerError(reason) from exc
+    if resolved_parent != root_resolved:
+        raise VNextPollerError(reason)
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise VNextPollerError(reason)
+    if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077:
+        raise VNextPollerError(reason)
+
+
+def _require_existing_persistent_stores() -> None:
+    root = _private_root()
+    raw_ledger = os.environ.get(legacy.RUNNER_VNEXT_LEDGER_DB_ENV, "")
+    raw_lease = os.environ.get(legacy.RUNNER_VNEXT_LEASE_DB_ENV, "")
+    if not raw_ledger or not raw_lease or raw_ledger == ":memory:" or raw_lease == ":memory:":
+        raise VNextPollerError("VNEXT_PERSISTENT_STORES_REQUIRED")
+    ledger = Path(raw_ledger)
+    lease = Path(raw_lease)
+    if not ledger.is_absolute() or not lease.is_absolute() or ledger == lease:
+        raise VNextPollerError("VNEXT_PERSISTENT_STORES_REQUIRED")
+    _private_regular_file(ledger, root, "VNEXT_PERSISTENT_LEDGER_INVALID")
+    _private_regular_file(lease, root, "VNEXT_PERSISTENT_LEASE_INVALID")
+
+
+def _read_private_snapshot_bytes(path: Path, root: Path) -> bytes:
+    _private_regular_file(path, root, "VNEXT_EXTERNAL_ATTESTATION_FILE_INVALID")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise VNextPollerError("VNEXT_EXTERNAL_ATTESTATION_FILE_INVALID") from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077:
+            raise VNextPollerError("VNEXT_EXTERNAL_ATTESTATION_FILE_INVALID")
+        data = bytearray()
+        while True:
+            chunk = os.read(fd, 8192)
+            if not chunk:
+                break
+            data.extend(chunk)
+            if len(data) > 65536:
+                raise VNextPollerError("VNEXT_EXTERNAL_ATTESTATION_FILE_OVERSIZE")
+        return bytes(data)
+    finally:
+        os.close(fd)
+
+
+def _attest(
+    bound: object,
+    *,
+    expected_repository: str | None = None,
+    expected_issue: int | None = None,
+    expected_binding_sha256: str | None = None,
+    expected_idempotency_key: str | None = None,
+    now: float | None = None,
+) -> tuple[NodeCapabilitySnapshot, dict[str, object]]:
+    if os.environ.get(legacy.RUNNER_VNEXT_NODE_SNAPSHOT_JSON_ENV, "").strip():
+        raise VNextPollerError("VNEXT_EXTERNAL_ATTESTATION_ENV_FORBIDDEN")
+    current_time = time.time() if now is None else now
+    source_ref = str(getattr(bound, "source_task_ref", ""))
+    if not source_ref.startswith("issue:") or not source_ref.removeprefix("issue:").isdigit():
+        raise VNextPollerError("VNEXT_EXTERNAL_ATTESTATION_SOURCE_INVALID")
+    issue_number = int(source_ref.removeprefix("issue:"))
+    repository = expected_repository or (
+        bound.runner_task.repo if getattr(bound, "runner_task", None) is not None else legacy.REPO
+    )
+    if expected_issue is not None and issue_number != expected_issue:
+        raise VNextPollerError("VNEXT_EXTERNAL_ATTESTATION_ISSUE_MISMATCH")
+    binding = _safe_sha256(
+        expected_binding_sha256 or str(getattr(bound, "source_binding_hash", "")),
+        "VNEXT_EXTERNAL_ATTESTATION_BINDING_INVALID",
+    )
+    if binding != str(getattr(bound, "source_binding_hash", "")):
+        raise VNextPollerError("VNEXT_EXTERNAL_ATTESTATION_BINDING_MISMATCH")
+    runner_task = getattr(bound, "runner_task", None)
+    idempotency_key = expected_idempotency_key or (
+        runner_task.idempotency_key if runner_task is not None else bound.operation_ir.idempotency_key
+    )
+    if runner_task is not None and runner_task.idempotency_key != idempotency_key:
+        raise VNextPollerError("VNEXT_EXTERNAL_ATTESTATION_IDEMPOTENCY_MISMATCH")
+
+    root = _private_root()
+    path = root / EXTERNAL_ATTESTATION_FILENAME
+    try:
+        payload = json.loads(_read_private_snapshot_bytes(path, root).decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise VNextPollerError("VNEXT_EXTERNAL_ATTESTATION_MALFORMED") from exc
+    if not isinstance(payload, dict) or frozenset(payload) != _EXTERNAL_ATTESTATION_ENVELOPE_KEYS:
+        raise VNextPollerError("VNEXT_EXTERNAL_ATTESTATION_ENVELOPE_INVALID")
+    if payload["schema"] != EXTERNAL_ATTESTATION_ENVELOPE_SCHEMA:
+        raise VNextPollerError("VNEXT_EXTERNAL_ATTESTATION_SCHEMA_INVALID")
+    if payload["repository"] != repository or payload["target_issue"] != issue_number:
+        raise VNextPollerError("VNEXT_EXTERNAL_ATTESTATION_IDENTITY_MISMATCH")
+    if payload["profile"] != EXTERNAL_ATTESTATION_PROFILE or payload["route"] != getattr(bound, "route"):
+        raise VNextPollerError("VNEXT_EXTERNAL_ATTESTATION_ROUTE_MISMATCH")
+    if payload["binding_sha256"] != binding:
+        raise VNextPollerError("VNEXT_EXTERNAL_ATTESTATION_BINDING_MISMATCH")
+    if payload["idempotency_sha256"] != _sha256_text(idempotency_key):
+        raise VNextPollerError("VNEXT_EXTERNAL_ATTESTATION_IDEMPOTENCY_MISMATCH")
+    base = {key: value for key, value in payload.items() if key != "payload_sha256"}
+    if payload["payload_sha256"] != _sha256_json(base):
+        raise VNextPollerError("VNEXT_EXTERNAL_ATTESTATION_DIGEST_MISMATCH")
+
+    raw = payload["snapshot"]
+    if not isinstance(raw, dict) or frozenset(raw) != _EXTERNAL_NODE_SNAPSHOT_KEYS:
+        raise VNextPollerError("VNEXT_EXTERNAL_ATTESTATION_SNAPSHOT_INVALID")
+    if raw["schema"] != EXTERNAL_NODE_SNAPSHOT_SCHEMA:
+        raise VNextPollerError("VNEXT_EXTERNAL_ATTESTATION_SNAPSHOT_SCHEMA_INVALID")
+    generation = raw["generation"]
+    if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1 or payload["generation"] != generation:
+        raise VNextPollerError("VNEXT_EXTERNAL_ATTESTATION_GENERATION_MISMATCH")
+    expected = (
+        tuple(bound.universal_task.required_capabilities),
+        (bound.binding.adapter_id,),
+        (bound.binding.lane.value,),
+        (bound.universal_task.privacy.value,),
+        tuple(bound.universal_task.target_resources),
+    )
+    try:
+        actual = (
+            tuple(raw["capabilities"]),
+            tuple(raw["supported_adapters"]),
+            tuple(raw["supported_lanes"]),
+            tuple(raw["privacy_classes"]),
+            tuple(raw["resource_patterns"]),
         )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise VNextPollerError("VNEXT_ATTESTOR_UNAVAILABLE") from exc
-    if completed.returncode != 0:
-        raise VNextPollerError("VNEXT_ATTESTOR_PROBE_FAILED")
+    except TypeError as exc:
+        raise VNextPollerError("VNEXT_EXTERNAL_ATTESTATION_SCOPE_INVALID") from exc
+    if actual != expected:
+        raise VNextPollerError("VNEXT_EXTERNAL_ATTESTATION_SCOPE_MISMATCH")
+    if getattr(bound, "route") == ROUTE_DIAGNOSTIC:
+        if raw["node_id"] != DIAGNOSTIC_NODE_ID or raw["route_rank"] != DIAGNOSTIC_ROUTE_RANK:
+            raise VNextPollerError("VNEXT_EXTERNAL_ATTESTATION_NODE_MISMATCH")
+    observed_at = raw["observed_at"]
+    expires_at = raw["expires_at"]
+    if isinstance(observed_at, bool) or isinstance(expires_at, bool):
+        raise VNextPollerError("VNEXT_EXTERNAL_ATTESTATION_TIME_INVALID")
     try:
-        raw = json.loads(completed.stdout)
-    except json.JSONDecodeError as exc:
-        raise VNextPollerError("VNEXT_ATTESTOR_OUTPUT_INVALID") from exc
+        observed = float(observed_at)
+        expires = float(expires_at)
+    except (TypeError, ValueError) as exc:
+        raise VNextPollerError("VNEXT_EXTERNAL_ATTESTATION_TIME_INVALID") from exc
+    if observed > current_time or expires <= current_time or expires <= observed:
+        raise VNextPollerError("VNEXT_EXTERNAL_ATTESTATION_STALE")
+    if expires - observed > ATTESTATION_TTL_SECONDS:
+        raise VNextPollerError("VNEXT_EXTERNAL_ATTESTATION_TTL_INVALID")
+    attestation_ref = raw["attestation_ref"]
+    if not isinstance(attestation_ref, str) or not attestation_ref.startswith("attestation:external-boundary:"):
+        raise VNextPollerError("VNEXT_EXTERNAL_ATTESTATION_REF_INVALID")
+    if any(token in attestation_ref.lower() for token in ("private", "secret", "/", "\\")):
+        raise VNextPollerError("VNEXT_EXTERNAL_ATTESTATION_REF_INVALID")
     try:
         snapshot = NodeCapabilitySnapshot(
             node_id=str(raw["node_id"]),
-            generation=int(raw["generation"]),
+            generation=generation,
             route_rank=int(raw["route_rank"]),
             capabilities=tuple(raw["capabilities"]),
             supported_adapters=tuple(raw["supported_adapters"]),
             supported_lanes=tuple(Lane(value) for value in raw["supported_lanes"]),
             privacy_classes=tuple(PrivacyClass(value) for value in raw["privacy_classes"]),
             resource_patterns=tuple(raw["resource_patterns"]),
-            observed_at=float(raw["observed_at"]),
-            expires_at=float(raw["expires_at"]),
-            attestation_ref=str(raw["attestation_ref"]),
+            observed_at=observed,
+            expires_at=expires,
+            attestation_ref=attestation_ref,
         )
     except (KeyError, TypeError, ValueError) as exc:
-        raise VNextPollerError("VNEXT_ATTESTOR_SCOPE_INVALID") from exc
-    return snapshot, raw
+        raise VNextPollerError("VNEXT_EXTERNAL_ATTESTATION_SCOPE_INVALID") from exc
+    return snapshot, payload
 
 
 def _codegen_bound(item: object, body: str, legacy_task: object) -> object:
@@ -425,19 +734,8 @@ def _codegen_bound(item: object, body: str, legacy_task: object) -> object:
 
 def _dispatch_codegen(item: object, body: str, legacy_task: object, workdir: str | None) -> None:
     bound = _codegen_bound(item, body, legacy_task)
-    _snapshot, raw = _attest(bound)
-    raw_with_schema = {
-        "schema": legacy.RUNNER_VNEXT_NODE_SNAPSHOT_SCHEMA,
-        **raw,
-    }
-    with _temporary_environment(
-        {
-            legacy.RUNNER_VNEXT_MODE_ENV: VNEXT_MODE,
-            legacy.RUNNER_VNEXT_NODE_SNAPSHOT_JSON_ENV: json.dumps(
-                raw_with_schema, sort_keys=True, separators=(",", ":")
-            ),
-        }
-    ):
+    _attest(bound)
+    with _temporary_environment({legacy.RUNNER_VNEXT_MODE_ENV: VNEXT_MODE}):
         legacy.process_issue(
             item.issue,
             workdir=workdir,
@@ -630,6 +928,60 @@ def _dispatch_merge(item: object, body: str, merge_request: object, workdir: str
         raise VNextPollerError(receipt.reason_code)
 
 
+def run_exact_green_canary(
+    *,
+    repository: str,
+    target_issue: int,
+    expected_binding_sha256: str,
+    expected_idempotency_key: str,
+) -> dict[str, object]:
+    expected_binding = _safe_sha256(
+        expected_binding_sha256,
+        "VNEXT_DIAGNOSTIC_BINDING_INVALID",
+    )
+    if not expected_idempotency_key or len(expected_idempotency_key) > 128:
+        raise VNextPollerError("VNEXT_DIAGNOSTIC_IDEMPOTENCY_INVALID")
+    issue = _fetch_exact_issue(repository, target_issue)
+    body = str(issue["body"])
+    bound = _diagnostic_bound(repository, target_issue, body, expected_idempotency_key)
+    if bound.source_binding_hash != expected_binding:
+        raise VNextPollerError("VNEXT_DIAGNOSTIC_BINDING_MISMATCH")
+    current_ref = _current_repo_head_ref
+    if current_ref() != bound.target_state_ref:
+        raise VNextPollerError("VNEXT_DIAGNOSTIC_HEAD_STALE")
+    now = time.time()
+    snapshot, _envelope = _attest(
+        bound,
+        expected_repository=repository,
+        expected_issue=target_issue,
+        expected_binding_sha256=expected_binding,
+        expected_idempotency_key=expected_idempotency_key,
+        now=now,
+    )
+    _require_existing_persistent_stores()
+    stores = _stores()
+    try:
+        receipt = run_green_authoritative_dispatch(
+            bound=bound,
+            node_snapshot=snapshot,
+            stores=stores,
+            target_state_verifier=_CallableTargetVerifier(current_ref),
+            backend=_HarmlessDiagnosticBackend(),
+            now=now,
+            ttl_seconds=ATTESTATION_TTL_SECONDS,
+            parent_environment=dict(os.environ),
+        )
+    finally:
+        stores.close()
+    public = receipt.to_public_mapping()
+    public["schema"] = "skeleton.runner_vnext_exact_green_canary_receipt.v1"
+    public["status"] = "DONE" if receipt.terminal_status == "COMPLETED" else "BLOCKED"
+    public["profile"] = EXTERNAL_ATTESTATION_PROFILE
+    public["binding_sha256"] = expected_binding
+    public["idempotency_sha256"] = _sha256_text(expected_idempotency_key)
+    return public
+
+
 def dispatch_item(item: object, *, workdir: str | None = None) -> None:
     body = str(item.issue.get("body") or "")
     maintenance_mode, maintenance_task_id = legacy.extract_runtime_maintenance_task_id(body)
@@ -716,7 +1068,29 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--workdir")
+    parser.add_argument("--exact-green-canary", action="store_true")
+    parser.add_argument("--repository")
+    parser.add_argument("--target-issue", type=int)
+    parser.add_argument("--expected-binding-sha256")
+    parser.add_argument("--expected-idempotency-key")
     args = parser.parse_args(argv)
+    if args.exact_green_canary:
+        if args.once or args.workdir:
+            return 2
+        if not args.repository or not args.target_issue or not args.expected_binding_sha256 or not args.expected_idempotency_key:
+            return 2
+        try:
+            receipt = run_exact_green_canary(
+                repository=args.repository,
+                target_issue=args.target_issue,
+                expected_binding_sha256=args.expected_binding_sha256,
+                expected_idempotency_key=args.expected_idempotency_key,
+            )
+        except (VNextPollerError, RunnerVNextAuthorityError, RunnerVNextDispatchError) as exc:
+            sys.stderr.write(getattr(exc, "reason_code", "VNEXT_EXACT_GREEN_CANARY_FAILED") + "\n")
+            return 2
+        sys.stdout.write(json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n")
+        return 0
     if args.once:
         poll_once(workdir=args.workdir)
         return 0
