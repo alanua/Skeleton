@@ -5123,96 +5123,6 @@ def _approval_comment(
     }
 
 
-@pytest.mark.parametrize(
-    "comment",
-    (
-        _approval_comment(
-            issue_number=1722,
-            kind=runner.ROUTE_APPROVAL_KIND_PROTECTED,
-            reference="EXPLICIT_PROTECTED_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715",
-            comment_id="5002100945",
-        ),
-        {
-            "id": "5002100945",
-            "author": {"login": "alanua"},
-            "body": "\n".join(
-                (
-                    "Runner approval record",
-                    f"Repository: {runner.REPO}",
-                    "Issue Number: #1722",
-                    "Comment ID: 5002100945",
-                    "Owner: alanua",
-                    f"Kind: {runner.ROUTE_APPROVAL_KIND_PROTECTED}",
-                    (
-                        "Operator Approval: "
-                        "EXPLICIT_PROTECTED_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715"
-                    ),
-                    "Verified Author: alanua",
-                    "Verified Operator: alanua",
-                    "Public Safe Body: true",
-                )
-            ),
-        },
-    ),
-)
-def test_runner_vnext_protected_approval_framing_accepts_single_canonical_aliases(
-    comment: dict[str, object],
-) -> None:
-    approved, protected = runner.trusted_runner_approval_references_for_issue(
-        1722, [comment]
-    )
-
-    assert approved == (
-        "EXPLICIT_PROTECTED_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715",
-    )
-    assert protected == (
-        "EXPLICIT_PROTECTED_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715",
-    )
-
-
-@pytest.mark.parametrize(
-    "extra_line",
-    (
-        "Issue Number: #1722",
-        f"Kind: {runner.ROUTE_APPROVAL_KIND_PROTECTED}",
-        "Operator Approval: EXPLICIT_PROTECTED_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715",
-        "Approval Reference: EXPLICIT_PROTECTED_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715",
-    ),
-)
-def test_runner_vnext_protected_approval_framing_rejects_duplicate_or_ambiguous_aliases(
-    extra_line: str,
-) -> None:
-    comment = _approval_comment(
-        issue_number=1722,
-        kind=runner.ROUTE_APPROVAL_KIND_PROTECTED,
-        reference="EXPLICIT_PROTECTED_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715",
-        comment_id="5002100945",
-    )
-    comment["body"] = f"{comment['body']}\n{extra_line}"
-
-    approved, protected = runner.trusted_runner_approval_references_for_issue(
-        1722, [comment]
-    )
-    decision = runner.route_authority_decision_for_issue(
-        issue_number=1722,
-        body=_universal_maintenance_issue_body(
-            runner.RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID
-        ),
-        route=runner.ROUTE_RUNTIME_ONLY,
-        maintenance_task_id=runner.RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID,
-        comments=[comment],
-    )
-
-    assert approved == ()
-    assert protected == ()
-    assert decision == runner.RouteAuthorityDecision(
-        False,
-        "untrusted_protected_approval_reference",
-        runner.ROUTE_APPROVAL_KIND_PROTECTED,
-        "EXPLICIT_PROTECTED_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715",
-    )
-
-
 def _universal_registry(
     handler: object | None = None,
     *,
@@ -26179,6 +26089,76 @@ def test_runner_vnext_external_and_canary_dispatch_use_fixed_entrypoints(
         lambda: (_ for _ in ()).throw(AssertionError("exact action must not scan queue")),
     )
     assert runner.maintenance_report_status(canary_report) == "DONE"
+
+
+@pytest.mark.parametrize(
+    "approval_line",
+    (
+        "Approval Reference: vnext_selector_approval_exact_20260914",
+        "Operator Approval: vnext_selector_approval_exact_20260914",
+    ),
+)
+def test_runner_vnext_selector_accepts_approval_framing_without_authority(
+    approval_line: str,
+) -> None:
+    from scripts import runner_vnext_attest
+
+    body = (
+        _runner_vnext_selector_body(runner.RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID)
+        + "\n"
+        + approval_line
+    )
+    with mock.patch.object(
+        runner_vnext_attest,
+        "produce_external_attestation",
+        return_value={"status": "DONE", "generation": 7, "expires_at": 123.0},
+    ) as produce:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID,
+            str(runner.ROOT),
+            body,
+        )
+
+    assert runner.maintenance_report_status(report) == "DONE"
+    produce.assert_called_once_with(
+        repository="alanua/Skeleton",
+        target_issue=4157,
+        expected_binding_sha256="a" * 64,
+        expected_idempotency_key="runner-vnext-green-lifecycle-canary-v1",
+        profile="green_diagnostic_v1",
+    )
+
+
+@pytest.mark.parametrize(
+    "extra_metadata",
+    (
+        "Approval Reference: vnext_selector_approval_exact_20260914\n"
+        "Approval Reference: vnext_selector_approval_exact_20260914",
+        "Operator Approval: vnext_selector_approval_exact_20260914\n"
+        "Operator Approval: vnext_selector_approval_exact_20260914",
+        "Approval Reference: vnext_selector_approval_exact_20260914\n"
+        "Operator Approval: vnext_selector_approval_exact_20260914",
+    ),
+)
+def test_runner_vnext_selector_blocks_ambiguous_approval_framing_before_entrypoint(
+    extra_metadata: str,
+) -> None:
+    from scripts import runner_vnext_attest
+
+    body = (
+        _runner_vnext_selector_body(runner.RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID)
+        + "\n"
+        + extra_metadata
+    )
+    with mock.patch.object(runner_vnext_attest, "produce_external_attestation") as produce:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID,
+            str(runner.ROOT),
+            body,
+        )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    produce.assert_not_called()
 
 
 @pytest.mark.parametrize(
