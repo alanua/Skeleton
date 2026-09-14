@@ -5123,6 +5123,96 @@ def _approval_comment(
     }
 
 
+@pytest.mark.parametrize(
+    "comment",
+    (
+        _approval_comment(
+            issue_number=1722,
+            kind=runner.ROUTE_APPROVAL_KIND_PROTECTED,
+            reference="EXPLICIT_PROTECTED_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715",
+            comment_id="5002100945",
+        ),
+        {
+            "id": "5002100945",
+            "author": {"login": "alanua"},
+            "body": "\n".join(
+                (
+                    "Runner approval record",
+                    f"Repository: {runner.REPO}",
+                    "Issue Number: #1722",
+                    "Comment ID: 5002100945",
+                    "Owner: alanua",
+                    f"Kind: {runner.ROUTE_APPROVAL_KIND_PROTECTED}",
+                    (
+                        "Operator Approval: "
+                        "EXPLICIT_PROTECTED_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715"
+                    ),
+                    "Verified Author: alanua",
+                    "Verified Operator: alanua",
+                    "Public Safe Body: true",
+                )
+            ),
+        },
+    ),
+)
+def test_runner_vnext_protected_approval_framing_accepts_single_canonical_aliases(
+    comment: dict[str, object],
+) -> None:
+    approved, protected = runner.trusted_runner_approval_references_for_issue(
+        1722, [comment]
+    )
+
+    assert approved == (
+        "EXPLICIT_PROTECTED_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715",
+    )
+    assert protected == (
+        "EXPLICIT_PROTECTED_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715",
+    )
+
+
+@pytest.mark.parametrize(
+    "extra_line",
+    (
+        "Issue Number: #1722",
+        f"Kind: {runner.ROUTE_APPROVAL_KIND_PROTECTED}",
+        "Operator Approval: EXPLICIT_PROTECTED_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715",
+        "Approval Reference: EXPLICIT_PROTECTED_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715",
+    ),
+)
+def test_runner_vnext_protected_approval_framing_rejects_duplicate_or_ambiguous_aliases(
+    extra_line: str,
+) -> None:
+    comment = _approval_comment(
+        issue_number=1722,
+        kind=runner.ROUTE_APPROVAL_KIND_PROTECTED,
+        reference="EXPLICIT_PROTECTED_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715",
+        comment_id="5002100945",
+    )
+    comment["body"] = f"{comment['body']}\n{extra_line}"
+
+    approved, protected = runner.trusted_runner_approval_references_for_issue(
+        1722, [comment]
+    )
+    decision = runner.route_authority_decision_for_issue(
+        issue_number=1722,
+        body=_universal_maintenance_issue_body(
+            runner.RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID
+        ),
+        route=runner.ROUTE_RUNTIME_ONLY,
+        maintenance_task_id=runner.RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID,
+        comments=[comment],
+    )
+
+    assert approved == ()
+    assert protected == ()
+    assert decision == runner.RouteAuthorityDecision(
+        False,
+        "untrusted_protected_approval_reference",
+        runner.ROUTE_APPROVAL_KIND_PROTECTED,
+        "EXPLICIT_PROTECTED_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715",
+    )
+
+
 def _universal_registry(
     handler: object | None = None,
     *,
@@ -26387,6 +26477,49 @@ def test_runner_vnext_readonly_preflight_rollback_requires_systemd_unit_load_evi
     assert "legacy_timer_load_state=not-found" in report
     assert "rollback_available=false" in report
     assert "reason=legacy_rollback_unavailable" in report
+
+
+@pytest.mark.parametrize(
+    ("failed_unit", "expected_probe_reason"),
+    (
+        (runner.RUNNER_LEGACY_SERVICE_UNIT, "legacy_service_load_probe_failed"),
+        (runner.RUNNER_LEGACY_TIMER_UNIT, "legacy_timer_load_probe_failed"),
+    ),
+)
+def test_runner_vnext_readonly_preflight_fails_closed_when_rollback_load_probe_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failed_unit: str,
+    expected_probe_reason: str,
+) -> None:
+    workdir, ledger, lease = _write_runner_vnext_preflight_fixture(tmp_path)
+    monkeypatch.setenv(runner.RUNNER_VNEXT_STATE_ROOT_ENV, str(ledger.parent))
+    monkeypatch.setenv(runner.RUNNER_VNEXT_LEDGER_DB_ENV, str(ledger))
+    monkeypatch.setenv(runner.RUNNER_VNEXT_LEASE_DB_ENV, str(lease))
+
+    def read_only_probe(command: list[str], cwd=None, timeout=None, **_kwargs):
+        if command[:4] == ["git", "rev-parse", "--verify", "HEAD"]:
+            return 0, "a" * 40 + "\n"
+        if command[:2] == ["gh", "api"]:
+            return 0, "a" * 40 + "\n"
+        if command[:2] == ["systemctl", "is-active"]:
+            return 0, "active\n"
+        if command[:2] == ["systemctl", "is-enabled"]:
+            return 0, "enabled\n"
+        if command[:2] == ["systemctl", "show"]:
+            if command[2] == failed_unit:
+                return 1, "load probe failed\n"
+            return 0, "loaded\n"
+        raise AssertionError(command)
+
+    monkeypatch.setattr(runner, "run_command", read_only_probe)
+
+    report = runner.runner_vnext_readonly_preflight(workdir)
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert expected_probe_reason in report
+    assert "rollback_available=false" in report
+    assert "reason=" + expected_probe_reason in report
 
 
 def test_runner_vnext_readonly_preflight_rejects_colliding_or_memory_stores(

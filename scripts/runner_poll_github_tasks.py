@@ -3917,6 +3917,27 @@ def _approval_comment_is_public_safe(body: str) -> bool:
     return True
 
 
+def _approval_comment_field(
+    body: str, *labels: str
+) -> tuple[str | None, bool]:
+    values: list[str] = []
+    for label in labels:
+        matches = [
+            match.group("value")
+            for match in re.finditer(
+                rf"^\s*{re.escape(label)}:\s*(?P<value>\S(?:.*\S)?)\s*$",
+                body or "",
+                re.MULTILINE,
+            )
+        ]
+        if len(matches) > 1:
+            return None, False
+        values.extend(matches)
+    if len(values) > 1:
+        return None, False
+    return (values[0] if values else None), True
+
+
 def _trusted_comment_route_authority(
     issue_number: int,
     comments: list[dict[str, Any]],
@@ -3938,38 +3959,50 @@ def _trusted_comment_route_authority(
         body = comment.get("body")
         if not isinstance(body, str) or not _approval_comment_is_public_safe(body):
             continue
-        fields = {
-            name: _body_field(body, name)
-            for name in (
-                "Repository",
-                "Issue",
-                "Issue Number",
-                "Comment ID",
-                "Verified Author",
-                "Verified Operator",
-                "Owner",
-                "Public Safe Body",
-                "Approval Kind",
-                "Kind",
-                "Approval Reference",
-                "Operator Approval",
+        repository, repository_valid = _approval_comment_field(body, "Repository")
+        issue, issue_valid = _approval_comment_field(body, "Issue", "Issue Number")
+        comment_body_id, comment_id_valid = _approval_comment_field(body, "Comment ID")
+        verified_author, verified_author_valid = _approval_comment_field(
+            body, "Verified Author"
+        )
+        verified_operator, verified_operator_valid = _approval_comment_field(
+            body, "Verified Operator"
+        )
+        owner_field, owner_valid = _approval_comment_field(body, "Owner")
+        public_safe_body, public_safe_valid = _approval_comment_field(
+            body, "Public Safe Body"
+        )
+        kind_field, kind_valid = _approval_comment_field(body, "Approval Kind", "Kind")
+        reference, reference_valid = _approval_comment_field(
+            body, "Approval Reference", "Operator Approval"
+        )
+        if not all(
+            (
+                repository_valid,
+                issue_valid,
+                comment_id_valid,
+                verified_author_valid,
+                verified_operator_valid,
+                owner_valid,
+                public_safe_valid,
+                kind_valid,
+                reference_valid,
             )
-        }
+        ):
+            continue
         author = _normalized_login(_comment_author_login(comment))
-        verified_author = _normalized_login(fields["Verified Author"])
-        verified_operator = _normalized_login(fields["Verified Operator"])
-        owner = _normalized_login(fields["Owner"] or QUEUE_REPOSITORY.split("/", 1)[0])
-        kind = (fields["Approval Kind"] or fields["Kind"] or "").strip().lower()
-        reference = fields["Approval Reference"] or fields["Operator Approval"]
+        verified_author = _normalized_login(verified_author)
+        verified_operator = _normalized_login(verified_operator)
+        owner = _normalized_login(owner_field or QUEUE_REPOSITORY.split("/", 1)[0])
+        kind = (kind_field or "").strip().lower()
         expected_comment_id = (
             TRUSTED_APPROVAL_COMMENT_IDS_BY_REFERENCE.get(reference or "")
             if isinstance(reference, str)
             else None
         )
         comment_id = _comment_id_text(comment)
-        comment_body_id = fields["Comment ID"]
-        comment_issue = _approval_issue_number(fields["Issue"] or fields["Issue Number"])
-        if fields["Repository"] != REPO:
+        comment_issue = _approval_issue_number(issue)
+        if repository != REPO:
             continue
         if comment_issue != issue_number:
             continue
@@ -3981,7 +4014,7 @@ def _trusted_comment_route_authority(
             continue
         if author != verified_author or verified_author != verified_operator:
             continue
-        if fields["Public Safe Body"] != "true":
+        if public_safe_body != "true":
             continue
         if reference not in trusted_by_kind.get(kind, frozenset()):
             continue
