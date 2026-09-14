@@ -26016,16 +26016,23 @@ def test_runner_vnext_maintenance_ids_are_registered_with_exact_protection() -> 
     assert runner.RUNNER_VNEXT_EXACT_GREEN_CANARY_TASK_ID in runner.PROTECTED_MAINTENANCE_TASK_IDS
 
 
-def _runner_vnext_selector_body() -> str:
+def _runner_vnext_selector_body(
+    task_id: str = runner.RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID,
+    *,
+    task_block: str = "",
+) -> str:
     return "\n".join(
         (
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {task_id}",
             "Repository: alanua/Skeleton",
             "Target Issue: 4157",
             "Expected Binding SHA256: " + ("a" * 64),
             "Expected Idempotency Key: runner-vnext-green-lifecycle-canary-v1",
             "Profile: green_diagnostic_v1",
+            task_block,
         )
-    )
+    ).rstrip()
 
 
 def test_runner_vnext_external_and_canary_dispatch_use_fixed_entrypoints(
@@ -26052,12 +26059,12 @@ def test_runner_vnext_external_and_canary_dispatch_use_fixed_entrypoints(
         external_report = runner.dispatch_runtime_maintenance_task(
             runner.RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID,
             str(runner.ROOT),
-            _runner_vnext_selector_body(),
+            _runner_vnext_selector_body(runner.RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID),
         )
         canary_report = runner.dispatch_runtime_maintenance_task(
             runner.RUNNER_VNEXT_EXACT_GREEN_CANARY_TASK_ID,
             str(runner.ROOT),
-            _runner_vnext_selector_body(),
+            _runner_vnext_selector_body(runner.RUNNER_VNEXT_EXACT_GREEN_CANARY_TASK_ID),
         )
     produce.assert_called_once_with(
         repository="alanua/Skeleton",
@@ -26103,7 +26110,16 @@ def test_runner_vnext_selector_rejects_authority_widening_metadata_before_entryp
 ) -> None:
     from scripts import runner_vnext_attest, runner_vnext_poll
 
-    body = _runner_vnext_selector_body() + "\n" + extra_metadata
+    external_body = (
+        _runner_vnext_selector_body(runner.RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID)
+        + "\n"
+        + extra_metadata
+    )
+    canary_body = (
+        _runner_vnext_selector_body(runner.RUNNER_VNEXT_EXACT_GREEN_CANARY_TASK_ID)
+        + "\n"
+        + extra_metadata
+    )
     with mock.patch.object(
         runner_vnext_attest, "produce_external_attestation"
     ) as produce, mock.patch.object(
@@ -26112,18 +26128,86 @@ def test_runner_vnext_selector_rejects_authority_widening_metadata_before_entryp
         external_report = runner.dispatch_runtime_maintenance_task(
             runner.RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID,
             str(runner.ROOT),
-            body,
+            external_body,
         )
         canary_report = runner.dispatch_runtime_maintenance_task(
             runner.RUNNER_VNEXT_EXACT_GREEN_CANARY_TASK_ID,
             str(runner.ROOT),
-            body,
+            canary_body,
         )
 
     assert runner.maintenance_report_status(external_report) == "BLOCKED"
     assert runner.maintenance_report_status(canary_report) == "BLOCKED"
     produce.assert_not_called()
     canary.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "bad_body",
+    (
+        _runner_vnext_selector_body()
+        + "\nRepository: alanua/Skeleton",
+        _runner_vnext_selector_body()
+        + "\nschema: skeleton.runner_task.v1",
+        _runner_vnext_selector_body().replace(
+            "Maintenance Task ID: runner_vnext_external_attestation",
+            "Maintenance Task ID: runner_vnext_exact_green_canary",
+        ),
+        _runner_vnext_selector_body().replace(
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}/RUN_NOW",
+        ),
+    ),
+)
+def test_runner_vnext_selector_rejects_unknown_duplicate_or_mismatched_pretask_metadata(
+    bad_body: str,
+) -> None:
+    from scripts import runner_vnext_attest
+
+    with mock.patch.object(runner_vnext_attest, "produce_external_attestation") as produce:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID,
+            str(runner.ROOT),
+            bad_body,
+        )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    produce.assert_not_called()
+
+
+def test_runner_vnext_selector_ignores_task_body_metadata_like_text_before_entrypoint() -> None:
+    from scripts import runner_vnext_attest
+
+    body = _runner_vnext_selector_body(
+        runner.RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID,
+        task_block="\n".join(
+            (
+                "```task",
+                "Requested Capabilities: repository_maintenance",
+                "Repository: attacker/repo",
+                "```",
+            )
+        ),
+    )
+    with mock.patch.object(
+        runner_vnext_attest,
+        "produce_external_attestation",
+        return_value={"status": "DONE", "generation": 7, "expires_at": 123.0},
+    ) as produce:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID,
+            str(runner.ROOT),
+            body,
+        )
+
+    assert runner.maintenance_report_status(report) == "DONE"
+    produce.assert_called_once_with(
+        repository="alanua/Skeleton",
+        target_issue=4157,
+        expected_binding_sha256="a" * 64,
+        expected_idempotency_key="runner-vnext-green-lifecycle-canary-v1",
+        profile="green_diagnostic_v1",
+    )
 
 
 def _write_runner_vnext_preflight_fixture(

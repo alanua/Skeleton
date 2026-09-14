@@ -20644,47 +20644,46 @@ def runner_vnext_readonly_preflight(workdir: str | Path) -> str:
     )
 
 
-def _runner_vnext_maintenance_selectors(body: str) -> tuple[str, int, str, str, str]:
-    authority_widening_fields = {
-        "Allowed Files",
-        "Allowed Paths",
-        "Authority Boundary",
-        "Expected Output",
-        "Forbidden Actions",
-        "Privacy Boundary",
-        "Publication Contract",
-        "Requested Capabilities",
-        "Runtime Change",
-        "Secret Access",
-        "Validation Commands",
-        "Validation Timeout Seconds",
+def _runner_vnext_maintenance_selectors(
+    body: str, expected_task_id: str
+) -> tuple[str, int, str, str, str]:
+    allowed_fields = {
+        "Mode",
+        "Maintenance Task ID",
+        "Repository",
+        "Target Issue",
+        "Expected Binding SHA256",
+        "Expected Idempotency Key",
+        "Profile",
     }
-    forbidden_authority_labels = {
-        re.sub(r"[^a-z0-9]+", "_", field.strip().lower()).strip("_")
-        for field in authority_widening_fields
-    }
-    for line in (body or "").splitlines():
-        if ":" not in line:
+    values: dict[str, str] = {}
+    for raw_line in _metadata_before_task(body).splitlines():
+        line = raw_line.strip()
+        if not line:
             continue
-        label = re.sub(
-            r"[^a-z0-9]+",
-            "_",
-            line.split(":", 1)[0].strip().lower(),
-        ).strip("_")
-        if label in forbidden_authority_labels:
-            raise RuntimeError("vnext_selector_authority_metadata_forbidden")
+        match = re.fullmatch(
+            r"(?P<label>[A-Za-z][A-Za-z0-9 ]{0,80}):\s*(?P<value>\S(?:.*\S)?)",
+            line,
+        )
+        if match is None:
+            raise RuntimeError("vnext_selector_noncanonical_metadata")
+        label = match.group("label")
+        if label not in allowed_fields:
+            raise RuntimeError("vnext_selector_unknown_metadata")
+        if label in values:
+            raise RuntimeError("vnext_selector_duplicate_metadata")
+        values[label] = match.group("value")
 
     def field(label: str) -> str:
-        prefix = label + ":"
-        values = [
-            line[len(prefix) :].strip()
-            for line in (body or "").splitlines()
-            if line.startswith(prefix)
-        ]
-        if len(values) != 1 or not values[0]:
+        value = values.get(label)
+        if value is None:
             raise RuntimeError("vnext_selector_contract_invalid")
-        return values[0]
+        return value
 
+    if field("Mode") != RUNTIME_MAINTENANCE_MODE:
+        raise RuntimeError("vnext_selector_mode_invalid")
+    if field("Maintenance Task ID") != expected_task_id:
+        raise RuntimeError("vnext_selector_task_id_invalid")
     repository = field("Repository")
     if repository != REPO:
         raise RuntimeError("vnext_selector_repository_invalid")
@@ -20707,7 +20706,7 @@ def runner_vnext_external_attestation(body: str) -> str:
     task_id = RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID
     try:
         repository, issue, binding, idempotency, profile = (
-            _runner_vnext_maintenance_selectors(body)
+            _runner_vnext_maintenance_selectors(body, task_id)
         )
         from scripts import runner_vnext_attest
 
@@ -20744,7 +20743,7 @@ def runner_vnext_exact_green_canary(body: str) -> str:
     task_id = RUNNER_VNEXT_EXACT_GREEN_CANARY_TASK_ID
     try:
         repository, issue, binding, idempotency, _profile = (
-            _runner_vnext_maintenance_selectors(body)
+            _runner_vnext_maintenance_selectors(body, task_id)
         )
         from scripts import runner_vnext_poll
 
