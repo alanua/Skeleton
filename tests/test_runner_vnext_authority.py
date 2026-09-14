@@ -10,6 +10,7 @@ from core.runner_task import RunnerTask
 from core.runner_vnext_authority import (
     ORDINARY_REPOSITORY_PRIVACY,
     ROUTE_CODE_GENERATION,
+    ROUTE_DIAGNOSTIC,
     ROUTE_MERGE,
     ROUTE_RUNTIME_ONLY,
     PrivilegedAuthorityInput,
@@ -128,6 +129,21 @@ def test_pre_grant_receipt_is_planning_only_not_authorizing() -> None:
     assert public["execution_authorized"] is False
     assert public["allow_legacy_mechanical_shell"] is False
     assert public["side_effects_executed"] is False
+
+
+def test_diagnostic_route_is_typed_green_and_not_codegen() -> None:
+    bound = bind_runner_operation(
+        runner_task=runner_task(allowed_files=("docs/RUNNER_MAINTENANCE_TASKS.md",)),
+        route=ROUTE_DIAGNOSTIC,
+        operation="diagnostic",
+        source_task_ref="issue:100",
+    )
+
+    assert bound.operation == "diagnostic"
+    assert bound.binding.adapter_id == "adapter:harmless-diagnostic"
+    assert bound.operation_ir.kind == "read"
+    assert bound.binding.lane is Lane.VALIDATE
+    assert bound.policy_decision.effect_class is EffectClass.GREEN
 
 
 def test_runner_binder_rejects_taskless_route_before_dereference() -> None:

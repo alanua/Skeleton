@@ -43,6 +43,7 @@ ROUTE_PUBLISH_ONLY = "publish_only"
 ROUTE_RUNTIME_ONLY = "runtime_only"
 ROUTE_RECOVERY = "recovery"
 ROUTE_MERGE = "merge"
+ROUTE_DIAGNOSTIC = "diagnostic"
 
 
 class RunnerVNextAuthorityError(RuntimeError):
@@ -190,6 +191,16 @@ _ROUTE_BINDINGS: Mapping[tuple[str, str], RouteAuthorityBinding] = MappingProxyT
         operation_kind="draft_pr_open",
         effects=("draft_pr_open",),
         reversibility=Reversibility.BOUNDED_REVERSIBLE,
+        requires_runner_task=True,
+    ),
+    (ROUTE_DIAGNOSTIC, "diagnostic"): RouteAuthorityBinding(
+        route=ROUTE_DIAGNOSTIC,
+        operation="diagnostic",
+        lane=Lane.VALIDATE,
+        adapter_id="adapter:harmless-diagnostic",
+        operation_kind="read",
+        effects=("read",),
+        reversibility=Reversibility.REVERSIBLE,
         requires_runner_task=True,
     ),
     (ROUTE_RUNTIME_ONLY, "control"): RouteAuthorityBinding(
@@ -498,6 +509,15 @@ def default_authority_manifests() -> Mapping[str, AdapterManifest]:
             adapter_id="adapter:draft-publication",
             operation_kinds=("draft_pr_open",),
             capabilities=("repository_read", "repository_write_allowlisted", "test_execution", "publish_pull_request"),
+            allowed_effect_classes=(EffectClass.GREEN,),
+            resource_patterns=("repo:*",),
+            privacy_classes=(PrivacyClass.PUBLIC_SAFE,),
+            privileged_pep_required=False,
+        ),
+        "adapter:harmless-diagnostic": AdapterManifest(
+            adapter_id="adapter:harmless-diagnostic",
+            operation_kinds=("read",),
+            capabilities=("repository_read", "repository_write_allowlisted", "test_execution"),
             allowed_effect_classes=(EffectClass.GREEN,),
             resource_patterns=("repo:*",),
             privacy_classes=(PrivacyClass.PUBLIC_SAFE,),

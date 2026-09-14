@@ -14,6 +14,7 @@ import os
 import re
 import shlex
 import shutil
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -94,6 +95,7 @@ from core.runner_vnext_authority import (
     RunnerVNextRuntimeConfig,
     authority_receipt_from_bound,
     bind_runner_operation,
+    authoritative_route_inventory_proof,
     build_authoritative_stores,
     grant_green_authority,
     prepare_green_authority,
@@ -276,6 +278,14 @@ RUNNER_VNEXT_NODE_SNAPSHOT_SCHEMA = "skeleton.runner_vnext_node_capability_snaps
 RUNNER_VNEXT_CODEGEN_NODE_ID = "node:runner-vnext-codegen-runtime"
 RUNNER_VNEXT_CODEGEN_ROUTE_RANK = 0
 RUNNER_VNEXT_NODE_SNAPSHOT_MAX_TTL_SECONDS = 60.0
+RUNNER_VNEXT_READONLY_PREFLIGHT_TASK_ID = "runner_vnext_readonly_preflight"
+RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID = "runner_vnext_external_attestation"
+RUNNER_VNEXT_EXACT_GREEN_CANARY_TASK_ID = "runner_vnext_exact_green_canary"
+RUNNER_VNEXT_PREFLIGHT_SCHEMA = "skeleton.runner_vnext_readonly_preflight_receipt.v1"
+RUNNER_VNEXT_EXTERNAL_ATTESTATION_PROFILE = "green_diagnostic_v1"
+RUNNER_VNEXT_EXTERNAL_ATTESTATION_FILENAME = "runner-vnext-external-attestation.json"
+RUNNER_LEGACY_SERVICE_UNIT = "skeleton-runner-poll.service"
+RUNNER_LEGACY_TIMER_UNIT = "skeleton-runner-poll.timer"
 RUNNER_VNEXT_CODEGEN_CAPABILITIES = (
     "repository_read",
     "repository_write_allowlisted",
@@ -484,6 +494,9 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         "runner_controller_repair_codex_state_mount_v1",
         SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_V1,
         RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_V1,
+        RUNNER_VNEXT_READONLY_PREFLIGHT_TASK_ID,
+        RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID,
+        RUNNER_VNEXT_EXACT_GREEN_CANARY_TASK_ID,
         BUILD_AND_LOCAL_OTA_OPERATION,
         PREPARE_PRIVATE_STATIC_SITE_HANDOFF,
         DEPLOY_PRIVATE_STATIC_SITE,
@@ -546,6 +559,8 @@ PROTECTED_MAINTENANCE_TASK_IDS = frozenset(
         BUILD_AUFMASS_PRIVATE_AREA_SCHEDULE,
         QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES,
         REPLENISH_RUNNER_QUEUE,
+        RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID,
+        RUNNER_VNEXT_EXACT_GREEN_CANARY_TASK_ID,
     )
 )
 CONTAINER_VALIDATION_SOURCE_ISSUE = 1667
@@ -875,6 +890,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "issue_worktree_id",
         "kernel_release",
         "ledger_events_written",
+        "legacy_service_load_state",
+        "legacy_timer_load_state",
         "listed_worktrees_count",
         "machine",
         "maintenance_task_id",
@@ -996,6 +1013,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "refresh_count",
         "rollback_status",
         "rollback_applied",
+        "rollback_available",
         "rollback_ready",
         "room_area_row_count",
         "row_count",
@@ -1113,6 +1131,37 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "worktree_ids",
         "worktree_root",
         "user_failed_unit_count",
+        "preflight_schema",
+        "report_mode",
+        "read_only",
+        "mutation_performed",
+        "public_safe",
+        "runner_mode",
+        "checkout_github_equal",
+        "legacy_service_state",
+        "legacy_timer_state",
+        "legacy_timer_enabled_state",
+        "rollback_available",
+        "ledger_file_backed",
+        "lease_file_backed",
+        "reopen_ready",
+        "unresolved_started_count",
+        "active_lease_count",
+        "stale_lease_count",
+        "fence_count",
+        "ledger_event_count",
+        "attestation_status",
+        "attestation_fresh",
+        "route_inventory_count",
+        "route_inventory_digest",
+        "route_inventory_ready",
+        "unmapped_route_count",
+        "private_snapshot_written",
+        "attestation_generation",
+        "terminal_status",
+        "canary_replayed",
+        "canary_execution_started",
+        "canary_lease_released",
     }
 )
 RUNNER_MEMORY_DB_ENV = "SKELETON_RUNNER_MEMORY_DB"
@@ -20064,6 +20113,679 @@ def runner_controller_repair_codex_state_mount_v1(body: str) -> str:
     status_lines += [f"gateway_status={gateway_status}",f"reason={gateway_reason}","action=typed_gateway_dispatch","generic_check_project_checkout=false"]
     return _maintenance_report("DONE" if gateway_status=="DONE" else "NEEDS_OPERATOR",task_id,status_lines,"met" if gateway_status=="DONE" else "not_met")
 
+def _runner_vnext_preflight_safe_root() -> Path:
+    raw = os.environ.get(RUNNER_VNEXT_STATE_ROOT_ENV, "").strip()
+    if not raw or raw == ":memory:":
+        raise RuntimeError("preflight_state_root_invalid")
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        raise RuntimeError("preflight_state_root_invalid")
+    try:
+        info = candidate.lstat()
+        resolved = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeError("preflight_state_root_invalid") from exc
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or stat.S_IMODE(info.st_mode) & 0o077
+    ):
+        raise RuntimeError("preflight_state_root_invalid")
+    return resolved
+
+
+def _runner_vnext_preflight_safe_file(raw: str, root: Path, reason: str) -> Path:
+    if not raw or raw == ":memory:":
+        raise RuntimeError(reason)
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        raise RuntimeError(reason)
+    lexical = Path(os.path.abspath(str(candidate)))
+    try:
+        relative = lexical.relative_to(root)
+    except ValueError as exc:
+        raise RuntimeError(reason) from exc
+    cursor = root
+    for part in relative.parts[:-1]:
+        cursor = cursor / part
+        try:
+            info = cursor.lstat()
+        except OSError as exc:
+            raise RuntimeError(reason) from exc
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise RuntimeError(reason)
+    try:
+        info = lexical.lstat()
+        resolved = lexical.resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeError(reason) from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise RuntimeError(reason)
+    if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077:
+        raise RuntimeError(reason)
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise RuntimeError(reason) from exc
+    return resolved
+
+
+def _runner_vnext_readonly_db(path: Path, kind: str, now: float) -> dict[str, int | bool]:
+    uri = "file:" + urllib.parse.quote(str(path), safe="/") + "?mode=ro"
+    expected = (
+        {"runner_vnext_operation_events", "runner_vnext_operation_starts"}
+        if kind == "ledger"
+        else {"runner_vnext_lane_fences", "runner_vnext_lane_leases"}
+    )
+    try:
+        connection = sqlite3.connect(uri, uri=True, timeout=2.0)
+    except (OSError, sqlite3.Error) as exc:
+        raise RuntimeError("preflight_sqlite_open_failed") from exc
+    try:
+        connection.execute("PRAGMA query_only = ON")
+        query_only = connection.execute("PRAGMA query_only").fetchone()
+        if not query_only or int(query_only[0]) != 1:
+            raise RuntimeError("preflight_sqlite_not_read_only")
+        integrity = connection.execute("PRAGMA integrity_check").fetchone()
+        if not integrity or str(integrity[0]).lower() != "ok":
+            raise RuntimeError("preflight_sqlite_integrity_failed")
+        rows = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
+            "('runner_vnext_operation_events','runner_vnext_operation_starts',"
+            "'runner_vnext_lane_fences','runner_vnext_lane_leases')"
+        ).fetchall()
+        if {str(row[0]) for row in rows} != expected:
+            raise RuntimeError("preflight_sqlite_schema_missing")
+        connection.execute("SELECT 1").fetchone()
+        if kind == "ledger":
+            unresolved = connection.execute(
+                "SELECT COUNT(*) FROM runner_vnext_operation_starts AS s "
+                "WHERE NOT EXISTS (SELECT 1 FROM runner_vnext_operation_events AS e "
+                "WHERE e.idempotency_key=s.idempotency_key AND e.terminal=1)"
+            ).fetchone()
+            events = connection.execute(
+                "SELECT COUNT(*) FROM runner_vnext_operation_events"
+            ).fetchone()
+            return {
+                "read_only": True,
+                "reopen_ready": True,
+                "unresolved_started_count": int(unresolved[0]) if unresolved else 0,
+                "ledger_event_count": int(events[0]) if events else 0,
+            }
+        leases = connection.execute(
+            "SELECT COUNT(*) FROM runner_vnext_lane_leases "
+            "WHERE heartbeat_at + ttl_seconds > ?",
+            (now,),
+        ).fetchone()
+        stale = connection.execute(
+            "SELECT COUNT(*) FROM runner_vnext_lane_leases "
+            "WHERE heartbeat_at + ttl_seconds <= ?",
+            (now,),
+        ).fetchone()
+        fences = connection.execute(
+            "SELECT COUNT(*) FROM runner_vnext_lane_fences"
+        ).fetchone()
+        return {
+            "read_only": True,
+            "reopen_ready": True,
+            "active_lease_count": int(leases[0]) if leases else 0,
+            "stale_lease_count": int(stale[0]) if stale else 0,
+            "fence_count": int(fences[0]) if fences else 0,
+        }
+    except (OSError, sqlite3.Error) as exc:
+        raise RuntimeError("preflight_sqlite_query_failed") from exc
+    finally:
+        connection.close()
+
+
+def _runner_vnext_readonly_db_reconciled(
+    path: Path, kind: str, now: float
+) -> dict[str, int | bool]:
+    first = _runner_vnext_readonly_db(path, kind, now)
+    second = _runner_vnext_readonly_db(path, kind, now)
+    if first != second:
+        raise RuntimeError("preflight_sqlite_reopen_mismatch")
+    return first
+
+
+def _runner_vnext_preflight_systemctl(unit: str, operation: str) -> str:
+    code, output = run_command(
+        ["systemctl", operation, unit],
+        timeout=10,
+    )
+    value = output.strip().splitlines()[0].strip().lower() if output.strip() else ""
+    allowed = {
+        "active",
+        "inactive",
+        "failed",
+        "unknown",
+        "not-found",
+        "enabled",
+        "disabled",
+        "static",
+        "masked",
+        "indirect",
+        "generated",
+    }
+    if value not in allowed:
+        raise RuntimeError("preflight_systemctl_state_invalid")
+    if code != 0 and value not in {
+        "inactive",
+        "failed",
+        "disabled",
+        "unknown",
+        "not-found",
+        "masked",
+    }:
+        raise RuntimeError("preflight_systemctl_probe_failed")
+    return value
+
+
+def _runner_vnext_preflight_systemd_load_state(unit: str) -> str:
+    code, output = run_command(
+        ["systemctl", "show", unit, "--property=LoadState", "--value"],
+        timeout=10,
+    )
+    states = [line.strip().lower() for line in output.splitlines() if line.strip()]
+    if len(states) != 1:
+        raise RuntimeError("preflight_systemd_load_state_invalid")
+    value = states[0]
+    allowed = {"loaded", "not-found", "masked", "error", "bad-setting"}
+    if value not in allowed:
+        raise RuntimeError("preflight_systemd_load_state_invalid")
+    if code != 0 and value not in {"not-found", "masked", "error", "bad-setting"}:
+        raise RuntimeError("preflight_systemd_load_probe_failed")
+    return value
+
+
+def _runner_vnext_preflight_attestation(
+    root: Path, now: float
+) -> tuple[str, bool]:
+    path = root / RUNNER_VNEXT_EXTERNAL_ATTESTATION_FILENAME
+    try:
+        safe_path = _runner_vnext_preflight_safe_file(
+            str(path), root, "preflight_attestation_file_invalid"
+        )
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(safe_path, flags)
+        try:
+            info = os.fstat(fd)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) & 0o077
+            ):
+                raise RuntimeError("preflight_attestation_file_invalid")
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                chunk = os.read(fd, 8192)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > 65536:
+                    raise RuntimeError("preflight_attestation_oversize")
+                chunks.append(chunk)
+        finally:
+            os.close(fd)
+        envelope = json.loads(b"".join(chunks).decode("utf-8"))
+    except FileNotFoundError as exc:
+        raise RuntimeError("preflight_attestation_missing") from exc
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise RuntimeError("preflight_attestation_invalid") from exc
+    if not isinstance(envelope, dict):
+        raise RuntimeError("preflight_attestation_invalid")
+    required = {
+        "schema",
+        "repository",
+        "target_issue",
+        "profile",
+        "route",
+        "binding_sha256",
+        "idempotency_sha256",
+        "generation",
+        "snapshot",
+        "payload_sha256",
+    }
+    if set(envelope) != required:
+        raise RuntimeError("preflight_attestation_schema_invalid")
+    payload = {key: envelope[key] for key in envelope if key != "payload_sha256"}
+    expected_digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    if envelope.get("payload_sha256") != expected_digest:
+        raise RuntimeError("preflight_attestation_digest_invalid")
+    if (
+        envelope.get("schema") != "skeleton.runner_vnext_external_attestation_envelope.v1"
+        or envelope.get("repository") != REPO
+        or envelope.get("profile") != RUNNER_VNEXT_EXTERNAL_ATTESTATION_PROFILE
+        or envelope.get("route") != "diagnostic"
+    ):
+        raise RuntimeError("preflight_attestation_identity_invalid")
+    snapshot = envelope.get("snapshot")
+    if not isinstance(snapshot, dict):
+        raise RuntimeError("preflight_attestation_snapshot_invalid")
+    snapshot_keys = {
+        "schema",
+        "node_id",
+        "generation",
+        "route_rank",
+        "capabilities",
+        "supported_adapters",
+        "supported_lanes",
+        "privacy_classes",
+        "resource_patterns",
+        "observed_at",
+        "expires_at",
+        "attestation_ref",
+    }
+    if set(snapshot) != snapshot_keys:
+        raise RuntimeError("preflight_attestation_snapshot_invalid")
+    if snapshot.get("schema") != RUNNER_VNEXT_NODE_SNAPSHOT_SCHEMA:
+        raise RuntimeError("preflight_attestation_snapshot_invalid")
+    observed = snapshot.get("observed_at")
+    expires = snapshot.get("expires_at")
+    if (
+        isinstance(observed, bool)
+        or isinstance(expires, bool)
+        or not isinstance(observed, (int, float))
+        or not isinstance(expires, (int, float))
+    ):
+        raise RuntimeError("preflight_attestation_time_invalid")
+    if observed > now:
+        raise RuntimeError("preflight_attestation_time_invalid")
+    if expires <= now:
+        return "stale", False
+    if expires <= observed or expires - observed > 45.0:
+        raise RuntimeError("preflight_attestation_ttl_invalid")
+    reference = snapshot.get("attestation_ref")
+    if (
+        not isinstance(reference, str)
+        or not reference.startswith("attestation:external-boundary:")
+        or any(token in reference.lower() for token in ("private", "secret", "/", "\\"))
+    ):
+        raise RuntimeError("preflight_attestation_reference_invalid")
+    return "fresh", True
+
+
+def runner_vnext_readonly_preflight(workdir: str | Path) -> str:
+    task_id = RUNNER_VNEXT_READONLY_PREFLIGHT_TASK_ID
+    status_lines = [
+        f"preflight_schema={RUNNER_VNEXT_PREFLIGHT_SCHEMA}",
+        "report_mode=read_only",
+        "mutation_performed=false",
+        "public_safe=true",
+    ]
+    blockers: list[str] = []
+    checkout_sha = "missing"
+    github_sha = "missing"
+    try:
+        code, output = run_command(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            cwd=workdir,
+            timeout=15,
+        )
+        value = output.strip().lower()
+        if code != 0 or _HEAD_SHA_RE.fullmatch(value) is None:
+            raise RuntimeError("preflight_checkout_probe_failed")
+        checkout_sha = value
+    except (OSError, RuntimeError):
+        blockers.append("checkout_probe_failed")
+    try:
+        code, output = run_command(
+            ["gh", "api", f"repos/{REPO}/commits/main", "--jq", ".sha"],
+            cwd=workdir,
+            timeout=15,
+        )
+        value = output.strip().lower()
+        if code != 0 or _HEAD_SHA_RE.fullmatch(value) is None:
+            raise RuntimeError("preflight_github_probe_failed")
+        github_sha = value
+    except (OSError, RuntimeError):
+        blockers.append("github_main_probe_failed")
+    status_lines.extend(
+        [
+            f"checkout_head_sha={checkout_sha}",
+            f"github_main_sha={github_sha}",
+            f"checkout_github_equal={str(checkout_sha == github_sha and checkout_sha != 'missing').lower()}",
+        ]
+    )
+    if checkout_sha == "missing" or github_sha == "missing" or checkout_sha != github_sha:
+        blockers.append("checkout_github_mismatch")
+    mode = runner_mode_decision()
+    normalized_mode = mode.mode if mode.mode is not None else "invalid"
+    status_lines.append(f"runner_mode={normalized_mode}")
+    if mode.mode is None:
+        blockers.append("runner_mode_invalid")
+    service_state = "unknown"
+    timer_state = "unknown"
+    timer_enabled = "unknown"
+    service_load_state = "unknown"
+    timer_load_state = "unknown"
+    try:
+        service_state = _runner_vnext_preflight_systemctl(
+            RUNNER_LEGACY_SERVICE_UNIT, "is-active"
+        )
+    except RuntimeError:
+        blockers.append("legacy_service_probe_failed")
+    try:
+        timer_state = _runner_vnext_preflight_systemctl(
+            RUNNER_LEGACY_TIMER_UNIT, "is-active"
+        )
+    except RuntimeError:
+        blockers.append("legacy_timer_probe_failed")
+    try:
+        timer_enabled = _runner_vnext_preflight_systemctl(
+            RUNNER_LEGACY_TIMER_UNIT, "is-enabled"
+        )
+    except RuntimeError:
+        blockers.append("legacy_timer_enabled_probe_failed")
+    try:
+        service_load_state = _runner_vnext_preflight_systemd_load_state(
+            RUNNER_LEGACY_SERVICE_UNIT
+        )
+    except RuntimeError:
+        blockers.append("legacy_service_load_probe_failed")
+    try:
+        timer_load_state = _runner_vnext_preflight_systemd_load_state(
+            RUNNER_LEGACY_TIMER_UNIT
+        )
+    except RuntimeError:
+        blockers.append("legacy_timer_load_probe_failed")
+    status_lines.extend(
+        [
+            f"legacy_service_state={service_state}",
+            f"legacy_timer_state={timer_state}",
+            f"legacy_timer_enabled_state={timer_enabled}",
+            f"legacy_service_load_state={service_load_state}",
+            f"legacy_timer_load_state={timer_load_state}",
+        ]
+    )
+    if service_state != "active":
+        blockers.append("legacy_service_not_active")
+    if timer_state != "active":
+        blockers.append("legacy_timer_not_active")
+    if timer_enabled != "enabled":
+        blockers.append("legacy_timer_not_enabled")
+    rollback_available = (
+        service_load_state == "loaded"
+        and timer_load_state == "loaded"
+    )
+    status_lines.append(f"rollback_available={str(rollback_available).lower()}")
+    if not rollback_available:
+        blockers.append("legacy_rollback_unavailable")
+    store_fields: dict[str, object] = {
+        "ledger_file_backed": False,
+        "lease_file_backed": False,
+        "reopen_ready": False,
+        "unresolved_started_count": 0,
+        "active_lease_count": 0,
+        "stale_lease_count": 0,
+        "fence_count": 0,
+        "ledger_event_count": 0,
+    }
+    now = time.time()
+    try:
+        root = _runner_vnext_preflight_safe_root()
+        ledger = _runner_vnext_preflight_safe_file(
+            os.environ.get(RUNNER_VNEXT_LEDGER_DB_ENV, ""),
+            root,
+            "preflight_ledger_invalid",
+        )
+        lease = _runner_vnext_preflight_safe_file(
+            os.environ.get(RUNNER_VNEXT_LEASE_DB_ENV, ""),
+            root,
+            "preflight_lease_invalid",
+        )
+        if ledger == lease:
+            raise RuntimeError("preflight_store_path_collision")
+        ledger_data = _runner_vnext_readonly_db_reconciled(ledger, "ledger", now)
+        lease_data = _runner_vnext_readonly_db_reconciled(lease, "lease", now)
+        store_fields.update(ledger_data)
+        store_fields.update(lease_data)
+        store_fields["ledger_file_backed"] = True
+        store_fields["lease_file_backed"] = True
+    except (OSError, RuntimeError):
+        blockers.append("persistent_store_preflight_failed")
+        root = None
+    status_lines.extend(
+        [
+            f"ledger_file_backed={str(bool(store_fields['ledger_file_backed'])).lower()}",
+            f"lease_file_backed={str(bool(store_fields['lease_file_backed'])).lower()}",
+            f"reopen_ready={str(bool(store_fields['reopen_ready'])).lower()}",
+            f"unresolved_started_count={int(store_fields['unresolved_started_count'])}",
+            f"active_lease_count={int(store_fields['active_lease_count'])}",
+            f"stale_lease_count={int(store_fields['stale_lease_count'])}",
+            f"fence_count={int(store_fields['fence_count'])}",
+            f"ledger_event_count={int(store_fields['ledger_event_count'])}",
+        ]
+    )
+    if int(store_fields["unresolved_started_count"]) != 0:
+        blockers.append("unresolved_started_operations")
+    try:
+        if root is None:
+            raise RuntimeError("preflight_state_root_unavailable")
+        attestation_status, attestation_fresh = _runner_vnext_preflight_attestation(
+            root, now
+        )
+    except RuntimeError as exc:
+        attestation_status = "missing_or_invalid"
+        attestation_fresh = False
+        blockers.append(str(exc))
+    status_lines.extend(
+        [
+            f"attestation_status={attestation_status}",
+            f"attestation_fresh={str(attestation_fresh).lower()}",
+        ]
+    )
+    if not attestation_fresh:
+        blockers.append("external_attestation_not_fresh")
+    route_ready = False
+    route_count = 0
+    unmapped = 0
+    route_digest = "missing"
+    try:
+        proof = authoritative_route_inventory_proof()
+        routes = proof.get("routes")
+        expected_pairs = {
+            ("code_generation", "codegen"),
+            ("validation", "validation"),
+            ("publish_only", "publication"),
+            ("runtime_only", "control"),
+            ("recovery", "recovery"),
+            ("merge", "merge"),
+            ("diagnostic", "diagnostic"),
+        }
+        observed_pairs = (
+            {(str(item.get("route")), str(item.get("operation"))) for item in routes}
+            if isinstance(routes, list)
+            else set()
+        )
+        route_count = int(proof.get("route_count", 0))
+        route_digest = hashlib.sha256(
+            json.dumps(proof, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        unmapped = len(expected_pairs - observed_pairs) + len(
+            observed_pairs - expected_pairs
+        )
+        route_ready = (
+            proof.get("schema") == "skeleton.runner_vnext_route_inventory.v1"
+            and proof.get("authoritative_mode") == "authoritative"
+            and proof.get("legacy_decision_fallback") is False
+            and route_count == len(expected_pairs)
+            and len(observed_pairs) == route_count
+            and unmapped == 0
+            and all(
+                isinstance(item, dict)
+                and item.get("route")
+                and item.get("operation")
+                and item.get("lane")
+                and item.get("adapter_id")
+                for item in routes
+            )
+        )
+    except (TypeError, ValueError, RunnerVNextAuthorityError):
+        blockers.append("route_inventory_probe_failed")
+    status_lines.extend(
+        [
+            f"route_inventory_count={route_count}",
+            f"route_inventory_digest={route_digest}",
+            f"route_inventory_ready={str(route_ready).lower()}",
+            f"unmapped_route_count={unmapped}",
+        ]
+    )
+    if not route_ready:
+        blockers.append("route_inventory_not_ready")
+    if blockers:
+        status_lines.append(f"reason={blockers[0]}")
+    return _maintenance_report(
+        "DONE" if not blockers else "BLOCKED",
+        task_id,
+        status_lines,
+        "met" if not blockers else "not_met",
+    )
+
+
+def _runner_vnext_maintenance_selectors(
+    body: str, expected_task_id: str
+) -> tuple[str, int, str, str, str]:
+    allowed_fields = {
+        "Mode",
+        "Maintenance Task ID",
+        "Repository",
+        "Target Issue",
+        "Expected Binding SHA256",
+        "Expected Idempotency Key",
+        "Profile",
+        "Approval Reference",
+        "Operator Approval",
+    }
+    values: dict[str, str] = {}
+    for raw_line in _metadata_before_task(body).splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = re.fullmatch(
+            r"(?P<label>[A-Za-z][A-Za-z0-9 ]{0,80}):\s*(?P<value>\S(?:.*\S)?)",
+            line,
+        )
+        if match is None:
+            raise RuntimeError("vnext_selector_noncanonical_metadata")
+        label = match.group("label")
+        if label not in allowed_fields:
+            raise RuntimeError("vnext_selector_unknown_metadata")
+        if label in values:
+            raise RuntimeError("vnext_selector_duplicate_metadata")
+        values[label] = match.group("value")
+    if "Approval Reference" in values and "Operator Approval" in values:
+        raise RuntimeError("vnext_selector_duplicate_metadata")
+
+    def field(label: str) -> str:
+        value = values.get(label)
+        if value is None:
+            raise RuntimeError("vnext_selector_contract_invalid")
+        return value
+
+    if field("Mode") != RUNTIME_MAINTENANCE_MODE:
+        raise RuntimeError("vnext_selector_mode_invalid")
+    if field("Maintenance Task ID") != expected_task_id:
+        raise RuntimeError("vnext_selector_task_id_invalid")
+    repository = field("Repository")
+    if repository != REPO:
+        raise RuntimeError("vnext_selector_repository_invalid")
+    issue_text = field("Target Issue")
+    if not re.fullmatch(r"[1-9]\d*", issue_text):
+        raise RuntimeError("vnext_selector_issue_invalid")
+    binding = field("Expected Binding SHA256").lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", binding):
+        raise RuntimeError("vnext_selector_binding_invalid")
+    idempotency = field("Expected Idempotency Key")
+    if not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", idempotency):
+        raise RuntimeError("vnext_selector_idempotency_invalid")
+    profile = field("Profile")
+    if profile != RUNNER_VNEXT_EXTERNAL_ATTESTATION_PROFILE:
+        raise RuntimeError("vnext_selector_profile_invalid")
+    return repository, int(issue_text), binding, idempotency, profile
+
+
+def runner_vnext_external_attestation(body: str) -> str:
+    task_id = RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID
+    try:
+        repository, issue, binding, idempotency, profile = (
+            _runner_vnext_maintenance_selectors(body, task_id)
+        )
+        from scripts import runner_vnext_attest
+
+        receipt = runner_vnext_attest.produce_external_attestation(
+            repository=repository,
+            target_issue=issue,
+            expected_binding_sha256=binding,
+            expected_idempotency_key=idempotency,
+            profile=profile,
+        )
+        if not isinstance(receipt, dict) or receipt.get("status") != "DONE":
+            raise RuntimeError("external_attestation_producer_blocked")
+        status_lines = [
+            "status=done",
+            "public_safe=true",
+            "private_snapshot_written=true",
+            "mutation_performed=true",
+            f"profile={profile}",
+            f"binding_sha256={binding}",
+            f"attestation_generation={int(receipt.get('generation', 0))}",
+            f"expires_at={receipt.get('expires_at', 'missing')}",
+        ]
+    except (RuntimeError, ValueError, TypeError, OSError):
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            ["status=blocked", "public_safe=true", "reason=external_attestation_failed"],
+            "not_met",
+        )
+    return _maintenance_report("DONE", task_id, status_lines, "met")
+
+
+def runner_vnext_exact_green_canary(body: str) -> str:
+    task_id = RUNNER_VNEXT_EXACT_GREEN_CANARY_TASK_ID
+    try:
+        repository, issue, binding, idempotency, _profile = (
+            _runner_vnext_maintenance_selectors(body, task_id)
+        )
+        from scripts import runner_vnext_poll
+
+        receipt = runner_vnext_poll.run_exact_green_canary(
+            repository=repository,
+            target_issue=issue,
+            expected_binding_sha256=binding,
+            expected_idempotency_key=idempotency,
+        )
+        if not isinstance(receipt, dict) or receipt.get("status") != "DONE":
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                ["status=blocked", "public_safe=true", "reason=exact_canary_blocked"],
+                "not_met",
+            )
+        status_lines = [
+            "status=done",
+            "public_safe=true",
+            "mutation_performed=true",
+            f"terminal_status={str(receipt.get('terminal_status', 'unknown'))}",
+            f"canary_replayed={str(bool(receipt.get('replayed', False))).lower()}",
+            f"canary_execution_started={str(bool(receipt.get('execution_started', False))).lower()}",
+            f"canary_lease_released={str(bool(receipt.get('lease_released', False))).lower()}",
+        ]
+    except (RuntimeError, ValueError, TypeError, OSError):
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            ["status=blocked", "public_safe=true", "reason=exact_canary_failed"],
+            "not_met",
+        )
+    return _maintenance_report("DONE", task_id, status_lines, "met")
+
+
 def dispatch_runtime_maintenance_task(
     task_id: str, workdir: str, body: str = ""
 ) -> str:
@@ -20075,6 +20797,12 @@ def dispatch_runtime_maintenance_task(
             "not_met",
         )
     try:
+        if task_id == RUNNER_VNEXT_READONLY_PREFLIGHT_TASK_ID:
+            return runner_vnext_readonly_preflight(workdir)
+        if task_id == RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID:
+            return runner_vnext_external_attestation(body)
+        if task_id == RUNNER_VNEXT_EXACT_GREEN_CANARY_TASK_ID:
+            return runner_vnext_exact_green_canary(body)
         if task_id == "runner_controller_repair_codex_state_mount_v1":
             return runner_controller_repair_codex_state_mount_v1(body)
         if task_id == SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_V1:
