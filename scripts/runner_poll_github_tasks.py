@@ -20287,7 +20287,10 @@ def _runner_vnext_preflight_systemd_load_state(unit: str) -> str:
         ["systemctl", "show", unit, "--property=LoadState", "--value"],
         timeout=10,
     )
-    value = output.strip().splitlines()[0].strip().lower() if output.strip() else ""
+    states = [line.strip().lower() for line in output.splitlines() if line.strip()]
+    if len(states) != 1:
+        raise RuntimeError("preflight_systemd_load_state_invalid")
+    value = states[0]
     allowed = {"loaded", "not-found", "masked", "error", "bad-setting"}
     if value not in allowed:
         raise RuntimeError("preflight_systemd_load_state_invalid")

@@ -26502,6 +26502,120 @@ def test_runner_vnext_readonly_preflight_fails_closed_when_rollback_load_probe_f
     assert "reason=" + expected_probe_reason in report
 
 
+
+@pytest.mark.parametrize(
+    "masked_unit",
+    (runner.RUNNER_LEGACY_SERVICE_UNIT, runner.RUNNER_LEGACY_TIMER_UNIT),
+)
+def test_runner_vnext_readonly_preflight_blocks_masked_rollback_unit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    masked_unit: str,
+) -> None:
+    workdir, ledger, lease = _write_runner_vnext_preflight_fixture(tmp_path)
+    monkeypatch.setenv(runner.RUNNER_VNEXT_STATE_ROOT_ENV, str(ledger.parent))
+    monkeypatch.setenv(runner.RUNNER_VNEXT_LEDGER_DB_ENV, str(ledger))
+    monkeypatch.setenv(runner.RUNNER_VNEXT_LEASE_DB_ENV, str(lease))
+    commands: list[list[str]] = []
+
+    def read_only_probe(command: list[str], cwd=None, timeout=None, **_kwargs):
+        commands.append(command)
+        if command[:4] == ["git", "rev-parse", "--verify", "HEAD"]:
+            return 0, "a" * 40 + "\n"
+        if command[:2] == ["gh", "api"]:
+            return 0, "a" * 40 + "\n"
+        if command[:2] == ["systemctl", "is-active"]:
+            return 0, "active\n"
+        if command[:2] == ["systemctl", "is-enabled"]:
+            return 0, "enabled\n"
+        if command[:2] == ["systemctl", "show"]:
+            assert command == [
+                "systemctl",
+                "show",
+                command[2],
+                "--property=LoadState",
+                "--value",
+            ]
+            return (0, "masked\n") if command[2] == masked_unit else (0, "loaded\n")
+        raise AssertionError(command)
+
+    monkeypatch.setattr(runner, "run_command", read_only_probe)
+    before = (ledger.stat().st_mtime_ns, lease.stat().st_mtime_ns)
+
+    report = runner.runner_vnext_readonly_preflight(workdir)
+
+    after = (ledger.stat().st_mtime_ns, lease.stat().st_mtime_ns)
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "rollback_available=false" in report
+    assert "reason=legacy_rollback_unavailable" in report
+    assert f"legacy_{'service' if masked_unit == runner.RUNNER_LEGACY_SERVICE_UNIT else 'timer'}_load_state=masked" in report
+    assert before == after
+    assert all(
+        command[0] != "systemctl"
+        or command[1] in {"is-active", "is-enabled", "show"}
+        for command in commands
+    )
+
+
+@pytest.mark.parametrize(
+    "bad_unit",
+    (runner.RUNNER_LEGACY_SERVICE_UNIT, runner.RUNNER_LEGACY_TIMER_UNIT),
+)
+@pytest.mark.parametrize("load_output", ("unknown\n", "loaded\nmasked\n"))
+def test_runner_vnext_readonly_preflight_rejects_unknown_or_ambiguous_load_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    bad_unit: str,
+    load_output: str,
+) -> None:
+    workdir, ledger, lease = _write_runner_vnext_preflight_fixture(tmp_path)
+    monkeypatch.setenv(runner.RUNNER_VNEXT_STATE_ROOT_ENV, str(ledger.parent))
+    monkeypatch.setenv(runner.RUNNER_VNEXT_LEDGER_DB_ENV, str(ledger))
+    monkeypatch.setenv(runner.RUNNER_VNEXT_LEASE_DB_ENV, str(lease))
+    commands: list[list[str]] = []
+
+    def read_only_probe(command: list[str], cwd=None, timeout=None, **_kwargs):
+        commands.append(command)
+        if command[:4] == ["git", "rev-parse", "--verify", "HEAD"]:
+            return 0, "a" * 40 + "\n"
+        if command[:2] == ["gh", "api"]:
+            return 0, "a" * 40 + "\n"
+        if command[:2] == ["systemctl", "is-active"]:
+            return 0, "active\n"
+        if command[:2] == ["systemctl", "is-enabled"]:
+            return 0, "enabled\n"
+        if command[:2] == ["systemctl", "show"]:
+            assert command == [
+                "systemctl",
+                "show",
+                command[2],
+                "--property=LoadState",
+                "--value",
+            ]
+            return (0, load_output) if command[2] == bad_unit else (0, "loaded\n")
+        raise AssertionError(command)
+
+    monkeypatch.setattr(runner, "run_command", read_only_probe)
+    before = (ledger.stat().st_mtime_ns, lease.stat().st_mtime_ns)
+
+    report = runner.runner_vnext_readonly_preflight(workdir)
+
+    after = (ledger.stat().st_mtime_ns, lease.stat().st_mtime_ns)
+    reason = (
+        "legacy_service_load_probe_failed"
+        if bad_unit == runner.RUNNER_LEGACY_SERVICE_UNIT
+        else "legacy_timer_load_probe_failed"
+    )
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "rollback_available=false" in report
+    assert f"reason={reason}" in report
+    assert before == after
+    assert all(
+        command[0] != "systemctl"
+        or command[1] in {"is-active", "is-enabled", "show"}
+        for command in commands
+    )
+
 def test_runner_vnext_readonly_preflight_rejects_colliding_or_memory_stores(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
