@@ -26084,6 +26084,48 @@ def test_runner_vnext_external_and_canary_dispatch_use_fixed_entrypoints(
     assert runner.maintenance_report_status(canary_report) == "DONE"
 
 
+@pytest.mark.parametrize(
+    "extra_metadata",
+    (
+        "Requested Capabilities: repository_maintenance",
+        "requested_capabilities: [repository_maintenance]",
+        "Allowed Files:",
+        "allowed_files: scripts/runner_poll_github_tasks.py",
+        "Forbidden Actions: merge",
+        "forbidden_actions: []",
+        "Privacy Boundary: PRIVATE",
+        "publication_contract: runtime mutation permitted",
+        "Validation Commands: python3 -m pytest",
+    ),
+)
+def test_runner_vnext_selector_rejects_authority_widening_metadata_before_entrypoint(
+    extra_metadata: str,
+) -> None:
+    from scripts import runner_vnext_attest, runner_vnext_poll
+
+    body = _runner_vnext_selector_body() + "\n" + extra_metadata
+    with mock.patch.object(
+        runner_vnext_attest, "produce_external_attestation"
+    ) as produce, mock.patch.object(
+        runner_vnext_poll, "run_exact_green_canary"
+    ) as canary:
+        external_report = runner.dispatch_runtime_maintenance_task(
+            runner.RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID,
+            str(runner.ROOT),
+            body,
+        )
+        canary_report = runner.dispatch_runtime_maintenance_task(
+            runner.RUNNER_VNEXT_EXACT_GREEN_CANARY_TASK_ID,
+            str(runner.ROOT),
+            body,
+        )
+
+    assert runner.maintenance_report_status(external_report) == "BLOCKED"
+    assert runner.maintenance_report_status(canary_report) == "BLOCKED"
+    produce.assert_not_called()
+    canary.assert_not_called()
+
+
 def _write_runner_vnext_preflight_fixture(
     tmp_path: Path,
 ) -> tuple[Path, Path, Path]:
@@ -26196,6 +26238,8 @@ def test_runner_vnext_readonly_preflight_is_public_safe_and_non_mutating(
             return 0, "active\n"
         if command[:2] == ["systemctl", "is-enabled"]:
             return 0, "enabled\n"
+        if command[:2] == ["systemctl", "show"]:
+            return 0, "loaded\n"
         raise AssertionError(command)
 
     monkeypatch.setattr(runner, "run_command", read_only_probe)
@@ -26211,6 +26255,9 @@ def test_runner_vnext_readonly_preflight_is_public_safe_and_non_mutating(
     assert "active_lease_count=0" in report
     assert "stale_lease_count=1" in report
     assert "fence_count=1" in report
+    assert "legacy_service_load_state=loaded" in report
+    assert "legacy_timer_load_state=loaded" in report
+    assert "rollback_available=true" in report
     assert "route_inventory_ready=true" in report
     assert str(tmp_path) not in report
     assert "private" not in report.lower()
@@ -26224,6 +26271,38 @@ def test_runner_vnext_readonly_preflight_is_public_safe_and_non_mutating(
         for verb in (command[1],)
         if len(command) > 1
     )
+
+
+def test_runner_vnext_readonly_preflight_rollback_requires_systemd_unit_load_evidence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workdir, ledger, lease = _write_runner_vnext_preflight_fixture(tmp_path)
+    monkeypatch.setenv(runner.RUNNER_VNEXT_STATE_ROOT_ENV, str(ledger.parent))
+    monkeypatch.setenv(runner.RUNNER_VNEXT_LEDGER_DB_ENV, str(ledger))
+    monkeypatch.setenv(runner.RUNNER_VNEXT_LEASE_DB_ENV, str(lease))
+
+    def read_only_probe(command: list[str], cwd=None, timeout=None, **_kwargs):
+        if command[:4] == ["git", "rev-parse", "--verify", "HEAD"]:
+            return 0, "a" * 40 + "\n"
+        if command[:2] == ["gh", "api"]:
+            return 0, "a" * 40 + "\n"
+        if command[:2] == ["systemctl", "is-active"]:
+            return 0, "active\n"
+        if command[:2] == ["systemctl", "is-enabled"]:
+            return 0, "enabled\n"
+        if command[:2] == ["systemctl", "show"]:
+            return 0, "not-found\n"
+        raise AssertionError(command)
+
+    monkeypatch.setattr(runner, "run_command", read_only_probe)
+
+    report = runner.runner_vnext_readonly_preflight(workdir)
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "legacy_service_load_state=not-found" in report
+    assert "legacy_timer_load_state=not-found" in report
+    assert "rollback_available=false" in report
+    assert "reason=legacy_rollback_unavailable" in report
 
 
 def test_runner_vnext_readonly_preflight_rejects_colliding_or_memory_stores(

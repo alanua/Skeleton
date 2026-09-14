@@ -890,6 +890,8 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "issue_worktree_id",
         "kernel_release",
         "ledger_events_written",
+        "legacy_service_load_state",
+        "legacy_timer_load_state",
         "listed_worktrees_count",
         "machine",
         "maintenance_task_id",
@@ -1011,6 +1013,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "refresh_count",
         "rollback_status",
         "rollback_applied",
+        "rollback_available",
         "rollback_ready",
         "room_area_row_count",
         "row_count",
@@ -20279,6 +20282,20 @@ def _runner_vnext_preflight_systemctl(unit: str, operation: str) -> str:
     return value
 
 
+def _runner_vnext_preflight_systemd_load_state(unit: str) -> str:
+    code, output = run_command(
+        ["systemctl", "show", unit, "--property=LoadState", "--value"],
+        timeout=10,
+    )
+    value = output.strip().splitlines()[0].strip().lower() if output.strip() else ""
+    allowed = {"loaded", "not-found", "masked", "error", "bad-setting"}
+    if value not in allowed:
+        raise RuntimeError("preflight_systemd_load_state_invalid")
+    if code != 0 and value not in {"not-found", "masked", "error", "bad-setting"}:
+        raise RuntimeError("preflight_systemd_load_probe_failed")
+    return value
+
+
 def _runner_vnext_preflight_attestation(
     root: Path, now: float
 ) -> tuple[str, bool]:
@@ -20441,6 +20458,8 @@ def runner_vnext_readonly_preflight(workdir: str | Path) -> str:
     service_state = "unknown"
     timer_state = "unknown"
     timer_enabled = "unknown"
+    service_load_state = "unknown"
+    timer_load_state = "unknown"
     try:
         service_state = _runner_vnext_preflight_systemctl(
             RUNNER_LEGACY_SERVICE_UNIT, "is-active"
@@ -20459,11 +20478,25 @@ def runner_vnext_readonly_preflight(workdir: str | Path) -> str:
         )
     except RuntimeError:
         blockers.append("legacy_timer_enabled_probe_failed")
+    try:
+        service_load_state = _runner_vnext_preflight_systemd_load_state(
+            RUNNER_LEGACY_SERVICE_UNIT
+        )
+    except RuntimeError:
+        blockers.append("legacy_service_load_probe_failed")
+    try:
+        timer_load_state = _runner_vnext_preflight_systemd_load_state(
+            RUNNER_LEGACY_TIMER_UNIT
+        )
+    except RuntimeError:
+        blockers.append("legacy_timer_load_probe_failed")
     status_lines.extend(
         [
             f"legacy_service_state={service_state}",
             f"legacy_timer_state={timer_state}",
             f"legacy_timer_enabled_state={timer_enabled}",
+            f"legacy_service_load_state={service_load_state}",
+            f"legacy_timer_load_state={timer_load_state}",
         ]
     )
     if service_state != "active":
@@ -20472,10 +20505,9 @@ def runner_vnext_readonly_preflight(workdir: str | Path) -> str:
         blockers.append("legacy_timer_not_active")
     if timer_enabled != "enabled":
         blockers.append("legacy_timer_not_enabled")
-    worktree = Path(workdir)
     rollback_available = (
-        (worktree / "scripts" / RUNNER_LEGACY_SERVICE_UNIT).is_file()
-        and (worktree / "scripts" / RUNNER_LEGACY_TIMER_UNIT).is_file()
+        service_load_state == "loaded"
+        and timer_load_state == "loaded"
     )
     status_lines.append(f"rollback_available={str(rollback_available).lower()}")
     if not rollback_available:
@@ -20613,6 +20645,35 @@ def runner_vnext_readonly_preflight(workdir: str | Path) -> str:
 
 
 def _runner_vnext_maintenance_selectors(body: str) -> tuple[str, int, str, str, str]:
+    authority_widening_fields = {
+        "Allowed Files",
+        "Allowed Paths",
+        "Authority Boundary",
+        "Expected Output",
+        "Forbidden Actions",
+        "Privacy Boundary",
+        "Publication Contract",
+        "Requested Capabilities",
+        "Runtime Change",
+        "Secret Access",
+        "Validation Commands",
+        "Validation Timeout Seconds",
+    }
+    forbidden_authority_labels = {
+        re.sub(r"[^a-z0-9]+", "_", field.strip().lower()).strip("_")
+        for field in authority_widening_fields
+    }
+    for line in (body or "").splitlines():
+        if ":" not in line:
+            continue
+        label = re.sub(
+            r"[^a-z0-9]+",
+            "_",
+            line.split(":", 1)[0].strip().lower(),
+        ).strip("_")
+        if label in forbidden_authority_labels:
+            raise RuntimeError("vnext_selector_authority_metadata_forbidden")
+
     def field(label: str) -> str:
         prefix = label + ":"
         values = [
