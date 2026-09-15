@@ -137,6 +137,60 @@ def test_bootstrap_real_private_stack_gateway_e2e_and_privacy_handoff(tmp_path: 
     assert not str(seen["private_path"]).startswith(str(Path.cwd()))
 
 
+def test_bootstrap_context_receipt_is_deterministic_and_derived_indexes_non_authoritative(tmp_path: Path) -> None:
+    reset_bootstrap_adapter_cache()
+    stack = PrivateMemoryStack(tmp_path)
+    stack.init(import_manifest=False)
+    stack.put(namespace="skeleton.notes", fact_id="receipt", value={"summary": "ventilation receipt"})
+    exact = stack.get(namespace="skeleton.notes", fact_id="receipt")
+    adapter = _ConfirmedCogneeAdapter(exact, bounded_text="ventilation receipt")
+    bootstrap = MemoryBootstrap.from_request(
+        _request(tmp_path, str(exact["canonical_ref"])),
+        cognee_adapter_factory=lambda: adapter,
+    )
+
+    first = bootstrap.build_private_context()
+    second = bootstrap.build_private_context()
+    receipt = first["context_receipt"]
+
+    assert first["echo_sentinel"] != second["echo_sentinel"]
+    assert receipt == second["context_receipt"]
+    assert receipt["schema"] == "skeleton.memory_bootstrap.context_receipt.v1"
+    assert receipt["status"] == "VERIFIED"
+    assert receipt["canonical_authority"] == "sqlite"
+    assert receipt["canonical_readbacks"] == [
+        {
+            "canonical_ref": exact["canonical_ref"],
+            "canonical_revision": exact["canonical_revision"],
+            "value_hash": exact["value_hash"],
+            "source_kind": "canonical_sqlite",
+            "readback_receipt_hash": first["canonical"][0]["readback_receipt"]["receipt_hash"],
+        }
+    ]
+    assert receipt["derived_indexes"]["semantic"]["authoritative"] is False
+    assert receipt["derived_indexes"]["graph"]["authoritative"] is False
+    assert receipt["derived_indexes"]["semantic"]["confirmed_refs"][0]["authoritative"] is False
+    assert receipt["aggregate_counts"] == {
+        "canonical_count": 1,
+        "semantic_count": len(first["semantic"]["results"]),
+        "graph_count": len(first["graph"]["results"]),
+    }
+
+
+def test_bootstrap_unavailable_canonical_sqlite_blocks_without_creating_database(tmp_path: Path) -> None:
+    request = _request(tmp_path, "skeleton.notes:missing")
+
+    receipt = MemoryBootstrap.from_request(request).execute(
+        task_body="exact task body",
+        executor=lambda *_args: (0, "should not run"),
+    )
+
+    assert receipt["status"] == "BLOCKED"
+    assert receipt["reason_codes"] == ["PRIVATE_MEMORY_NOT_READY"]
+    assert receipt["aggregate_counts"] == {"canonical_count": 0, "semantic_count": 0, "graph_count": 0}
+    assert not (tmp_path / "canonical.sqlite").exists()
+
+
 def test_bootstrap_rejects_stale_cognee_and_uses_fresh_mempalace(tmp_path: Path) -> None:
     reset_bootstrap_adapter_cache()
     stack = PrivateMemoryStack(tmp_path)

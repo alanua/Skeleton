@@ -132,6 +132,19 @@ class MemoryBootstrap:
             raise MemoryBootstrapError("PRIVATE_CONTEXT_EMPTY", "exact private context is empty")
         semantic = self._selected_semantic(exact_records, current_revision)
         graph = self._selected_graph(current_revision)
+        context_receipt = _context_receipt(
+            scope={
+                "project_id": self.config.scope.project_id,
+                "dataset_id": self.config.scope.dataset_id,
+                "repository": self.config.scope.repository,
+                "branch": self.config.scope.branch,
+                "task_transition_hash": self.config.scope.task_transition_hash,
+            },
+            canonical_revision=current_revision,
+            exact_records=exact_records,
+            semantic=semantic,
+            graph=graph,
+        )
         context = {
             "schema": MEMORY_BOOTSTRAP_RESPONSE_SCHEMA,
             "marker": PRIVATE_CONTEXT_MARKER,
@@ -144,6 +157,7 @@ class MemoryBootstrap:
             "canonical": exact_records,
             "semantic": semantic,
             "graph": graph,
+            "context_receipt": context_receipt,
         }
         self._write_context_cache(context, current_revision)
         return context
@@ -270,6 +284,8 @@ class MemoryBootstrap:
             raise MemoryBootstrapError("EXACT_SCOPE_INVALID", "exact record scope mismatch")
         if record.get("authoritative") is not True or record.get("source_kind") != "canonical_sqlite":
             raise MemoryBootstrapError("PRIVATE_MEMORY_NOT_READY", "exact record is not canonical")
+        if record.get("read_back_status") != "verified":
+            raise MemoryBootstrapError("PRIVATE_MEMORY_NOT_READY", "exact readback was not verified")
         revision = record.get("canonical_revision")
         if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1 or revision > current_revision:
             raise MemoryBootstrapError("PRIVATE_MEMORY_NOT_READY", "exact record revision is invalid")
@@ -283,6 +299,8 @@ class MemoryBootstrap:
         for item in provenance:
             if not _provenance_matches_exact(item, record):
                 raise MemoryBootstrapError("PRIVATE_MEMORY_NOT_READY", "exact provenance is invalid")
+        if not _readback_receipt_matches_exact(record):
+            raise MemoryBootstrapError("PRIVATE_MEMORY_NOT_READY", "exact readback receipt is invalid")
         return dict(record)
 
     def _selected_semantic(self, exact_records: list[dict[str, object]], current_revision: int) -> dict[str, object]:
@@ -419,6 +437,97 @@ def _source_value_hash(result: Mapping[str, object]) -> object:
     if isinstance(attribution, list) and attribution and isinstance(attribution[0], Mapping):
         return attribution[0].get("value_hash")
     return None
+
+
+def _readback_receipt_matches_exact(record: Mapping[str, object]) -> bool:
+    receipt = record.get("readback_receipt")
+    if not isinstance(receipt, Mapping):
+        return False
+    material = {
+        "project_id": record.get("project_id"),
+        "dataset_id": record.get("dataset_id"),
+        "canonical_ref": record.get("canonical_ref"),
+        "canonical_revision": record.get("canonical_revision"),
+        "value_hash": record.get("value_hash"),
+        "authority": "canonical_sqlite",
+    }
+    return (
+        receipt.get("schema") == "skeleton.private_memory_gateway.exact_readback_receipt.v1"
+        and receipt.get("status") == "VERIFIED"
+        and receipt.get("authority") == "canonical_sqlite"
+        and receipt.get("project_id") == record.get("project_id")
+        and receipt.get("dataset_id") == record.get("dataset_id")
+        and receipt.get("canonical_ref") == record.get("canonical_ref")
+        and receipt.get("canonical_revision") == record.get("canonical_revision")
+        and receipt.get("value_hash") == record.get("value_hash")
+        and receipt.get("receipt_hash") == content_hash(material)
+    )
+
+
+def _context_receipt(
+    *,
+    scope: Mapping[str, object],
+    canonical_revision: int,
+    exact_records: list[dict[str, object]],
+    semantic: Mapping[str, object],
+    graph: Mapping[str, object],
+) -> dict[str, object]:
+    canonical_readbacks = [
+        {
+            "canonical_ref": record["canonical_ref"],
+            "canonical_revision": record["canonical_revision"],
+            "value_hash": record["value_hash"],
+            "source_kind": "canonical_sqlite",
+            "readback_receipt_hash": record["readback_receipt"]["receipt_hash"],
+        }
+        for record in sorted(exact_records, key=lambda item: str(item["canonical_ref"]))
+    ]
+    material = {
+        "scope": dict(scope),
+        "canonical_revision": canonical_revision,
+        "canonical_readbacks": canonical_readbacks,
+        "derived_indexes": {
+            "semantic": _derived_index_receipt_section(semantic),
+            "graph": _derived_index_receipt_section(graph),
+        },
+    }
+    return {
+        "schema": "skeleton.memory_bootstrap.context_receipt.v1",
+        "status": "VERIFIED",
+        "idempotency_key": content_hash(material),
+        "canonical_authority": "sqlite",
+        "canonical_revision": canonical_revision,
+        "scope": dict(scope),
+        "canonical_readbacks": canonical_readbacks,
+        "derived_indexes": material["derived_indexes"],
+        "aggregate_counts": {
+            "canonical_count": len(canonical_readbacks),
+            "semantic_count": len(semantic.get("results", [])) if isinstance(semantic.get("results"), list) else 0,
+            "graph_count": len(graph.get("results", [])) if isinstance(graph.get("results"), list) else 0,
+        },
+    }
+
+
+def _derived_index_receipt_section(section: Mapping[str, object]) -> dict[str, object]:
+    results = section.get("results")
+    refs = []
+    for result in results if isinstance(results, list) else []:
+        if not isinstance(result, Mapping):
+            continue
+        refs.append(
+            {
+                "canonical_ref": result.get("canonical_ref"),
+                "canonical_revision": result.get("canonical_revision"),
+                "content_hash": result.get("content_hash") or result.get("value_hash") or _source_value_hash(result),
+                "authoritative": False,
+            }
+        )
+    return {
+        "selected": section.get("selected", "none"),
+        "authoritative": False,
+        "result_count": len(refs),
+        "confirmed_refs": sorted(refs, key=lambda item: str(item["canonical_ref"])),
+    }
 
 
 def _write_private_context_file(context: Mapping[str, object], config: MemoryBootstrapConfig) -> Path:
