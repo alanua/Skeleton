@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://skeleton.local/schemas/operator_queue_snapshot.schema.json",
+  "title": "Skeleton Operator Queue Snapshot",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "public_safe",
+    "snapshot_id",
+    "counts",
+    "status_uk",
+    "summary_uk",
+    "operator_hint_uk",
+    "items",
+    "redacted_private_count"
+  ],
+  "properties": {
+    "schema": {
+      "const": "skeleton.operator_queue_snapshot.v1"
+    },
+    "public_safe": {
+      "const": true
+    },
+    "snapshot_id": {
+      "type": "string",
+      "pattern": "^operator-queue-[0-9a-f]{16}$"
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["active", "ready", "running", "blocked", "done"],
+      "properties": {
+        "active": {"type": "integer", "minimum": 0},
+        "ready": {"type": "integer", "minimum": 0},
+        "running": {"type": "integer", "minimum": 0},
+        "blocked": {"type": "integer", "minimum": 0},
+        "done": {"type": "integer", "minimum": 0}
+      }
+    },
+    "status_uk": {
+      "type": "string",
+      "enum": ["В роботі", "Потрібна увага", "Готово до запуску", "Черга вільна"]
+    },
+    "summary_uk": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "operator_hint_uk": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "issue_number",
+          "issue_ref",
+          "status",
+          "status_label_uk",
+          "operator_hint_uk"
+        ],
+        "properties": {
+          "issue_number": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "issue_ref": {
+            "type": "string",
+            "pattern": "^#[1-9][0-9]*$"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["ready", "running", "blocked", "done", "inactive"]
+          },
+          "status_label_uk": {
+            "type": "string",
+            "enum": [
+              "Готово",
+              "В роботі",
+              "Заблоковано",
+              "Завершено",
+              "Поза активною чергою"
+            ]
+          },
+          "operator_hint_uk": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          },
+          "url": {
+            "type": "string",
+            "pattern": "^https://github\\.com/.+/issues/[1-9][0-9]*$"
+          }
+        }
+      }
+    },
+    "redacted_private_count": {
+      "type": "integer",
+      "minimum": 0
+    }
+  }
+}
