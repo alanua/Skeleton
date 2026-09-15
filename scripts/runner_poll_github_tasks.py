@@ -341,6 +341,8 @@ RUNNER_LANE_LABEL_DESCRIPTIONS = {
 FINAL_LABELS_BY_STATUS = {
     "DONE": LABEL_DONE,
     "BLOCKED": LABEL_BLOCKED,
+    "NEEDS_OPERATOR": LABEL_BLOCKED,
+    "OPERATOR_ATTENTION": LABEL_BLOCKED,
 }
 ACTIVE_EXECUTION_LABELS = frozenset((LABEL_READY, LABEL_RUN_NOW, LABEL_RUNNING))
 TERMINAL_RUNNER_LABELS = frozenset((LABEL_DONE, LABEL_BLOCKED))
@@ -6450,6 +6452,19 @@ def should_notify_task_finished(
     return notification_task_issue(issue_number, status, repository) is not None
 
 
+def _is_attention_notification_status(status: str) -> bool:
+    return status in {"NEEDS_OPERATOR", "OPERATOR_ATTENTION"}
+
+
+def _is_exact_head_pr_approval_card(card_payload: dict[str, Any]) -> bool:
+    actions = {
+        str(button.get("action") or "")
+        for button in card_payload.get("buttons", [])
+        if isinstance(button, dict)
+    }
+    return {"approve", "reject"}.issubset(actions)
+
+
 def notification_target_repository(issue: dict[str, Any]) -> str:
     try:
         _target_project, target_repository, reason = resolve_target_project_metadata(
@@ -6487,8 +6502,10 @@ def notify_task_finished(
         plain_message = build_telegram_message(
             issue_number, status, report, plain_target_repository
         )
-        if status != "DONE" or not report:
+        if _is_attention_notification_status(status):
             send_telegram_notification(plain_message)
+            return
+        if status != "DONE" or not report:
             return
 
         try:
@@ -6498,11 +6515,9 @@ def notify_task_finished(
                 source_issue_number=issue_number,
             )
         except Exception:
-            send_telegram_notification(plain_message)
             return
 
-        if card_payload is None:
-            send_telegram_notification(plain_message)
+        if card_payload is None or not _is_exact_head_pr_approval_card(card_payload):
             return
 
         try:
@@ -6511,7 +6526,7 @@ def notify_task_finished(
                 card_payload_to_inline_keyboard(card_payload),
             )
         except Exception:
-            send_telegram_notification(plain_message)
+            return
     except Exception:
         return
 
