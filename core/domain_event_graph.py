@@ -50,10 +50,13 @@ _ALLOWED_REF_TYPES = frozenset(
 _BRIDGE_RULES: Final = (
     ("mail", "case", "MAIL_CASE"),
     ("case", "scheduler", "CASE_SCHEDULER"),
+    ("case", "finance", "CASE_FINANCE"),
+    ("case", "gewerbe", "CASE_GEWERBE"),
     ("mail_invoice", "finance", "MAIL_INVOICE_FINANCE"),
     ("mail_invoice", "gewerbe", "MAIL_INVOICE_GEWERBE"),
     ("github_ci_mail", "recovery", "GITHUB_CI_MAIL_RECOVERY"),
     ("document", "case", "DOCUMENT_CASE"),
+    ("document", "finance", "DOCUMENT_FINANCE"),
     ("development_goal", "runner_continuation", "DEVELOPMENT_GOAL_RUNNER_CONTINUATION"),
 )
 
@@ -94,6 +97,7 @@ class DomainEventGraph:
 
     def __init__(self) -> None:
         self._events_by_idempotency: dict[str, dict[str, object]] = {}
+        self._events_by_ref: dict[str, dict[str, object]] = {}
         self._nodes: dict[str, dict[str, object]] = {}
         self._edges: dict[str, dict[str, object]] = {}
         self._event_edges: dict[str, set[str]] = defaultdict(set)
@@ -145,15 +149,25 @@ class DomainEventGraph:
             "private_payloads_included": False,
         }
         self._events_by_idempotency[normalized["idempotency_key"]] = event_record
+        self._events_by_ref[event_ref] = event_record
         return GraphIngestResult(event_ref, "NEW_EVENT", node_refs, edge_refs).to_receipt()
 
     def case_timeline(self, *, case_ref: str) -> dict[str, object]:
         case_ref = _safe_token(case_ref, "case_ref")
         rows = []
+        blocked_count = 0
+        uncertain_count = 0
         for event in self._events_for_case(case_ref):
+            state = _event_state(event)
+            if state == "waiting_dependency":
+                blocked_count += 1
+            if state == "inferred_unconfirmed":
+                uncertain_count += 1
             rows.append(
                 {
                     "event_ref": event["event_ref"],
+                    "state": state,
+                    "next_operator_action": _next_operator_action(event, state),
                     "domain": event["domain"],
                     "event_type": event["event_type"],
                     "source_ref": event["source_ref"],
@@ -174,6 +188,8 @@ class DomainEventGraph:
                 "event_count": len(rows),
                 "node_count": len(self._nodes),
                 "edge_count": len(self._edges),
+                "blocked_count": blocked_count,
+                "missing_provenance_count": uncertain_count,
             },
             "public_safe": True,
             "private_payloads_included": False,
@@ -247,15 +263,25 @@ class DomainEventGraph:
     def _events_for_case(self, case_ref: str) -> list[dict[str, object]]:
         direct = set(self._case_events.get(case_ref, set()))
         case_node = _node_ref("case", case_ref)
+        related_nodes = {case_node}
         for edge_ref, edge in self._edges.items():
-            if edge.get("source_ref") == case_node or edge.get("target_ref") == case_node:
+            source_ref = edge.get("source_ref")
+            target_ref = edge.get("target_ref")
+            if source_ref == case_node or target_ref == case_node:
                 direct.update(self._event_edges.get(edge_ref, set()))
+                if isinstance(source_ref, str):
+                    related_nodes.add(source_ref)
+                if isinstance(target_ref, str):
+                    related_nodes.add(target_ref)
+        for event_ref, event in self._events_by_ref.items():
+            if related_nodes.intersection(set(event["node_refs"])):  # type: ignore[arg-type]
+                direct.add(event_ref)
         return [self._event_by_ref(event_ref) for event_ref in direct]
 
     def _event_by_ref(self, event_ref: str) -> dict[str, object]:
-        for event in self._events_by_idempotency.values():
-            if event["event_ref"] == event_ref:
-                return event
+        event = self._events_by_ref.get(event_ref)
+        if event is not None:
+            return event
         raise DomainEventGraphError("EVENT_NOT_FOUND", "event ref is not present")
 
     def _ensure_node(self, ref: Mapping[str, str], event: Mapping[str, object]) -> str:
@@ -329,6 +355,31 @@ class DomainEventGraph:
         return edge_ref
 
 
+def _event_state(event: Mapping[str, object]) -> str:
+    if event.get("confidence") != 1.0 or event.get("inferred") is True:
+        return "inferred_unconfirmed"
+    if event.get("event_type") == "dependency_wait":
+        return "waiting_dependency"
+    return "ready"
+
+
+def _next_operator_action(event: Mapping[str, object], state: str) -> str:
+    if state == "inferred_unconfirmed":
+        return "confirm_exact_ref_before_side_effect"
+    if state == "waiting_dependency":
+        return "wait_for_dependency"
+    event_type = event.get("event_type")
+    if event_type == "mail_case_scheduler_triage":
+        return "dispatch_scheduler_followup"
+    if event_type in {"document_case_attachment", "document_invoice_case_finance_ref"}:
+        return "review_case_finance_ref"
+    if event_type == "mail_invoice_routing":
+        return "reconcile_invoice_finance_ref"
+    if event_type == "scheduler_case_followup_ready":
+        return "dispatch_case_followup"
+    return "review_timeline"
+
+
 def synthetic_cross_domain_envelopes() -> tuple[dict[str, object], ...]:
     """Public-safe fixture covering required bridges across more than three domains."""
 
@@ -349,6 +400,16 @@ def synthetic_cross_domain_envelopes() -> tuple[dict[str, object], ...]:
             "refs": [
                 {"ref_type": "mail", "ref_id": "mail-001"},
                 {"ref_type": "case", "ref_id": "case-001"},
+                {"ref_type": "scheduler", "ref_id": "sched-001"},
+            ],
+        },
+        {
+            **base,
+            "domain": "scheduler",
+            "event_type": "scheduler_case_followup_ready",
+            "source_ref": "sched-001",
+            "idempotency_key": "synthetic-scheduler-case-followup-001",
+            "refs": [
                 {"ref_type": "scheduler", "ref_id": "sched-001"},
             ],
         },
@@ -378,12 +439,13 @@ def synthetic_cross_domain_envelopes() -> tuple[dict[str, object], ...]:
         {
             **base,
             "domain": "documents",
-            "event_type": "document_case_attachment",
+            "event_type": "document_invoice_case_finance_ref",
             "source_ref": "doc-001",
             "idempotency_key": "synthetic-document-case-001",
             "refs": [
                 {"ref_type": "document", "ref_id": "doc-001"},
                 {"ref_type": "case", "ref_id": "case-001"},
+                {"ref_type": "finance", "ref_id": "finance-case-001"},
             ],
         },
         {

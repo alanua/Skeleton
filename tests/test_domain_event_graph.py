@@ -35,11 +35,24 @@ def test_cross_domain_source_is_traceable_through_case_timeline_and_replay_is_id
     assert first["idempotency_classification"] == "NEW_EVENT"
     assert duplicate["idempotency_classification"] == "DUPLICATE_EXISTING"
     assert first["event_ref"] == duplicate["event_ref"]
-    assert timeline["aggregate_counts"]["event_count"] == 2
+    assert timeline["aggregate_counts"]["event_count"] == 4
     domains = {row["domain"] for row in timeline["timeline"]}
-    assert domains == {"mail", "documents"}
+    assert domains == {"mail", "documents", "scheduler"}
+    event_types = {row["event_type"] for row in timeline["timeline"]}
+    assert {
+        "mail_case_scheduler_triage",
+        "scheduler_case_followup_ready",
+        "mail_invoice_routing",
+        "document_invoice_case_finance_ref",
+    } <= event_types
+    actions = {row["event_type"]: row["next_operator_action"] for row in timeline["timeline"]}
+    assert actions["mail_case_scheduler_triage"] == "dispatch_scheduler_followup"
+    assert actions["scheduler_case_followup_ready"] == "dispatch_case_followup"
+    assert actions["mail_invoice_routing"] == "reconcile_invoice_finance_ref"
+    assert actions["document_invoice_case_finance_ref"] == "review_case_finance_ref"
+    assert {row["state"] for row in timeline["timeline"]} == {"ready"}
     edge_refs = {edge for row in timeline["timeline"] for edge in row["edge_refs"]}
-    assert len(edge_refs) >= 3
+    assert len(edge_refs) >= 5
     assert timeline["private_payloads_included"] is False
 
 
@@ -78,6 +91,31 @@ def test_uncertain_inferred_link_cannot_authorize_destructive_action() -> None:
 
     assert receipt["edge_refs"]
     assert graph.authorize_destructive_action(edge_ref=receipt["edge_refs"][0]) is False
+    timeline = graph.case_timeline(case_ref="case-uncertain")
+    assert timeline["aggregate_counts"]["blocked_count"] == 0
+    assert timeline["aggregate_counts"]["missing_provenance_count"] == 1
+    assert timeline["timeline"][0]["state"] == "inferred_unconfirmed"
+    assert timeline["timeline"][0]["next_operator_action"] == "confirm_exact_ref_before_side_effect"
+
+
+def test_scheduler_dependency_wait_adds_deterministic_blocked_case_state() -> None:
+    graph = DomainEventGraph()
+    for envelope in synthetic_cross_domain_envelopes():
+        graph.ingest(envelope)
+    graph.record_scheduler_dependency(
+        occurrence_ref="sched-001",
+        dependency_ref="sched-dependency-001",
+        observed_at=120,
+        idempotency_key="synthetic-scheduler-wait-case-001",
+    )
+
+    timeline = graph.case_timeline(case_ref="case-001")
+    waiting = [row for row in timeline["timeline"] if row["event_type"] == "dependency_wait"]
+
+    assert len(waiting) == 1
+    assert waiting[0]["state"] == "waiting_dependency"
+    assert waiting[0]["next_operator_action"] == "wait_for_dependency"
+    assert timeline["aggregate_counts"]["blocked_count"] == 1
 
 
 def test_memory_gateway_exposes_public_safe_case_timeline() -> None:
