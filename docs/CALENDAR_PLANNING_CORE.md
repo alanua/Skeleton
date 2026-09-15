@@ -98,6 +98,23 @@ Scheduler Core
 
 Condition monitoring such as prices, weather or transport remains a Travel workflow. Scheduler only decides when that workflow runs.
 
+## Route planning contract
+
+The first route-planning slice is `skeleton.travel_route_plan.v1`. It is an offline, provider-neutral normalization contract for public-safe synthetic route metadata only.
+
+Route plans contain:
+
+- opaque `origin_ref` and `destination_ref`;
+- bounded requested modes;
+- up to three route alternatives;
+- up to eight ordered legs per alternative;
+- allowlisted modes and bounded durations;
+- source kind, source revision, generation time and freshness seconds.
+
+Route plans do not contain addresses, coordinates, private trip payloads, provider identifiers, live provider responses, booking or payment data, calendar event payloads or credentials. Unknown fields fail closed. The contract performs no provider, network, booking, payment or calendar calls.
+
+This is not a second Travel control plane. Scheduler remains responsible only for due-time dispatch, Calendar Planning remains responsible only for calendar projection/reconciliation proposals, and Travel route planning remains a normalized data contract that later Travel workflows may consume.
+
 ## Not included
 
 - Google Calendar API calls;
