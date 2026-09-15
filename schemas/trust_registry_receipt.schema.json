@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.skeleton.local/trust_registry_receipt.schema.json",
+  "title": "Skeleton Trust Registry Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "machine_id",
+    "public_fingerprint",
+    "key_id",
+    "key_version",
+    "trust_state",
+    "reasons"
+  ],
+  "properties": {
+    "status": {"enum": ["allowed", "blocked"]},
+    "machine_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{2,63}$"},
+    "public_fingerprint": {
+      "type": ["string", "null"],
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9:+/=_-]{15,255}$"
+    },
+    "key_id": {
+      "type": ["string", "null"],
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{2,127}$"
+    },
+    "key_version": {"type": ["integer", "null"], "minimum": 1},
+    "trust_state": {"type": ["string", "null"], "enum": ["PENDING", "TRUSTED", "REVOKED", "ROTATING", null]},
+    "reasons": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,95}$"}
+    }
+  }
+}

@@ -4,7 +4,14 @@
   "title": "Skeleton Trust Binding",
   "type": "object",
   "additionalProperties": false,
-  "required": ["identity", "trust_state", "allowed_transports", "allowed_capabilities", "state_changed_at"],
+  "required": [
+    "identity",
+    "trust_state",
+    "allowed_transports",
+    "allowed_capabilities",
+    "state_changed_at",
+    "rotation_expires_at"
+  ],
   "properties": {
     "identity": {"$ref": "machine_identity.schema.json"},
     "trust_state": {"enum": ["PENDING", "TRUSTED", "REVOKED", "ROTATING"]},
@@ -20,6 +27,7 @@
       "uniqueItems": true,
       "items": {"type": "string", "pattern": "^[a-z][a-z0-9_.:-]{1,95}$"}
     },
-    "state_changed_at": {"type": "string", "format": "date-time"}
+    "state_changed_at": {"type": "string", "format": "date-time"},
+    "rotation_expires_at": {"type": ["string", "null"], "format": "date-time"}
   }
 }
