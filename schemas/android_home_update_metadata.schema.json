@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.android_home_update_metadata.schema.json",
+  "title": "Android Home Update Metadata",
+  "description": "Public-safe metadata for reviewing Android Home APK artifacts. This schema does not authorize download, install, signing, publishing, or device mutation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "source_sha",
+    "artifact_scope",
+    "version_code",
+    "version_name",
+    "apk_sha256",
+    "apk_bytes",
+    "package_id",
+    "update_channel"
+  ],
+  "properties": {
+    "source_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "artifact_scope": {
+      "type": "string",
+      "enum": [
+        "android_home_operator_preview_apk",
+        "android_home_family_review_apk"
+      ]
+    },
+    "version_code": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2100000000
+    },
+    "version_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80,
+      "pattern": "^[0-9]+(?:\\.[0-9]+){1,3}(?:[-+][A-Za-z0-9][A-Za-z0-9._-]{0,63})?$"
+    },
+    "apk_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "apk_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 500000000
+    },
+    "package_id": {
+      "type": "string",
+      "enum": [
+        "com.skeleton.home",
+        "com.skeleton.home.preview"
+      ]
+    },
+    "update_channel": {
+      "type": "string",
+      "enum": [
+        "operator",
+        "family"
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "update_channel": {
+            "const": "operator"
+          }
+        },
+        "required": ["update_channel"]
+      },
+      "then": {
+        "properties": {
+          "artifact_scope": {
+            "const": "android_home_operator_preview_apk"
+          },
+          "package_id": {
+            "const": "com.skeleton.home.preview"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "update_channel": {
+            "const": "family"
+          }
+        },
+        "required": ["update_channel"]
+      },
+      "then": {
+        "properties": {
+          "artifact_scope": {
+            "const": "android_home_family_review_apk"
+          },
+          "package_id": {
+            "const": "com.skeleton.home"
+          }
+        }
+      }
+    }
+  ]
+}
