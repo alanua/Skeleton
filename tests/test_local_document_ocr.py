@@ -77,3 +77,10 @@ def test_bounded_provider_output_overflow_fails_closed() -> None:
 def test_bounded_provider_timeout_kills_process_group() -> None:
     with pytest.raises(LocalDocumentOcrError, match="timeout"):
         ocr._run((sys.executable, "-c", "import time; time.sleep(5)"), timeout=1, max_output=1024)
+
+
+def test_default_dependency_check_fails_closed_when_tool_missing(monkeypatch) -> None:
+    monkeypatch.setattr(ocr, "_is_executable_file", lambda path: path != ocr.TESSERACT)
+
+    with pytest.raises(LocalDocumentOcrError, match=ocr.TESSERACT):
+        ocr.assert_default_local_ocr_available()

@@ -29,6 +29,23 @@ OCRMY_PDF = "/usr/bin/ocrmypdf"
 LIBREOFFICE = "/usr/bin/libreoffice"
 
 
+def assert_default_local_ocr_available() -> None:
+    missing = [
+        path
+        for path in (PDFTOTEXT, PDFINFO, TESSERACT, OCRMY_PDF, LIBREOFFICE)
+        if not _is_executable_file(path)
+    ]
+    if missing:
+        raise LocalDocumentOcrError(
+            "local OCR dependencies unavailable: " + ", ".join(sorted(missing))
+        )
+
+
+def _is_executable_file(path: str) -> bool:
+    candidate = Path(path)
+    return candidate.is_file() and os.access(candidate, os.X_OK)
+
+
 def _run(argv: Sequence[str], *, timeout: int = 120, max_output: int = 2_000_000) -> str:
     if not argv or not Path(argv[0]).is_absolute():
         raise LocalDocumentOcrError("local OCR executable is not absolute")
