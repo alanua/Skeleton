@@ -22,11 +22,24 @@ Gmail OAuth material is resolved only through the provider-neutral
 must first provide exactly one opaque Bitwarden reference in the encrypted
 systemd credential `skeleton-secret-reference-index` using schema
 `skeleton.secret_reference_index.v1`. If that registration is absent or
-ambiguous, credential resolution fails closed with `REFERENCE_BOOTSTRAP_REQUIRED`
-or `REFERENCE_REGISTRATION_AMBIGUOUS`; the worker must not query vault projects,
-list secrets, export vault data, or read unrelated values. The actual OAuth
-bundle remains in Bitwarden and is delivered only ephemerally to the Gmail
-provider.
+ambiguous, normal worker credential resolution fails closed with
+`REFERENCE_BOOTSTRAP_REQUIRED` or `REFERENCE_REGISTRATION_AMBIGUOUS`; the worker
+must not query vault projects, use `bws secret list`, export vault data, or read
+unrelated values. The actual OAuth bundle remains in Bitwarden and is delivered
+only ephemerally to the Gmail provider.
+
+The activation task may bootstrap a missing `acct:gmail-primary` index entry
+from the existing `bitwarden-access-token` systemd credential. It does not
+require or assume a separate `bitwarden-organization-id` credential. The helper
+installed at `/opt/skeleton-mail-operations/bitwarden_gmail_reference_helper.py`
+runs under the pinned `/opt/skeleton-bitwarden-sdk-runtime/venv/bin/python`
+runtime, exchanges the machine token only with
+`https://identity.bitwarden.com/connect/token`, extracts only the organization
+claim from the returned JWT, and performs one metadata-only secret identifier
+listing against the fixed Bitwarden API host. Zero or multiple Gmail matches
+block activation; exactly one match is encrypted with `systemd-creds` into the
+existing reference-index credential and writes only the opaque UUID into the
+current credential directory for the immediate reread.
 
 Installing the worker copies code and units but leaves
 `skeleton-mail-operations.timer` disabled. Activation is a separate registered
