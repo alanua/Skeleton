@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -11,6 +12,7 @@ from core.scheduler_engine import SchedulerEngine, SchedulerEngineConfig
 from core.scheduler_store import SchedulerStore
 from integrations.mail_scheduler import build_mail_poll_schedule
 from scripts import mail_operations_worker
+from scripts import runner_poll_github_tasks as runner
 
 
 def _account() -> MailProviderAccount:
@@ -113,3 +115,34 @@ def test_explicit_fixture_mode_remains_offline_and_deterministic(tmp_path) -> No
     provider = mail_operations_worker._provider(_gmail_account(), fixture)
 
     assert isinstance(provider, StaticMailProvider)
+
+
+def test_mail_service_uses_isolated_bitwarden_sdk_runtime() -> None:
+    service = Path("ops/systemd/skeleton-mail-operations.service").read_text(encoding="utf-8")
+    assert (
+        "ExecStart=/opt/skeleton-mail-operations/bitwarden-sdk-runtime/bin/python "
+        "/opt/skeleton-mail-operations/mail_operations_worker.py"
+    ) in service
+    assert (
+        "LoadCredentialEncrypted=skeleton-secret-reference-index:"
+        "/etc/credstore.encrypted/skeleton-mail-operations.service/"
+        "skeleton-secret-reference-index"
+    ) in service
+    assert (
+        "LoadCredentialEncrypted=bitwarden-access-token:"
+        "/etc/credstore.encrypted/skeleton-mail-operations.service/"
+        "bitwarden-access-token"
+    ) in service
+    assert "Environment=BITWARDEN" not in service
+
+
+def test_helper_install_path_matches_runner_activation_path() -> None:
+    installer = Path("scripts/install_mail_operations_worker.sh").read_text(encoding="utf-8")
+    assert "scripts/bitwarden_gmail_reference_bootstrap.py" in installer
+    assert (
+        runner._MAIL_GMAIL_BOOTSTRAP_HELPER
+        == "/opt/skeleton-mail-operations/bitwarden_gmail_reference_bootstrap.py"
+    )
+    assert runner._MAIL_GMAIL_BOOTSTRAP_HELPER in installer
+    assert runner._MAIL_GMAIL_RUNTIME_PYTHON in installer
+    assert "bitwarden-sdk==2.1.0" in Path("scripts/install_bitwarden_sdk_runtime.sh").read_text(encoding="utf-8")
