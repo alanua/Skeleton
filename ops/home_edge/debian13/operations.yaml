@@ -1,0 +1,58 @@
+schema: skeleton.operations.v1
+node: home-edge-01
+operations:
+  - id: home_edge.debian13.inspect_external
+    node: home-edge-01
+    argv: ["ops/home_edge/debian13/inspect-external.sh", "--json"]
+    run_as: operator
+    timeout_seconds: 30
+    risk: low
+    approvals: []
+    preconditions: ["local_console", "no_mount_or_write"]
+    independent_verification: ["json_schema", "no_side_effect_commands"]
+    retry: "safe_repeat_read_only"
+    rollback: "none_read_only"
+  - id: home_edge.debian13.backup_current
+    node: home-edge-01
+    argv: ["ops/home_edge/debian13/backup-current.sh", "--plan", "--target", "<external-by-id>"]
+    run_as: root
+    timeout_seconds: 7200
+    risk: yellow
+    approvals: ["backup_write"]
+    preconditions: ["external_identity_verified", "protected_internal_excluded", "sufficient_space", "mount_options_expected"]
+    independent_verification: ["manifest_sha256", "source_identity_match", "public_safe_receipt"]
+    retry: "resume_only_after_identity_recheck"
+    rollback: "delete_incomplete_external_backup_only"
+  - id: home_edge.debian13.image_current
+    node: home-edge-01
+    argv: ["ops/home_edge/debian13/image-current.sh", "--plan", "--target", "<external-by-id>"]
+    run_as: root
+    timeout_seconds: 14400
+    risk: yellow
+    approvals: ["image_write"]
+    preconditions: ["external_identity_verified", "protected_internal_source_read_only", "capacity_sufficient"]
+    independent_verification: ["image_sha256", "readonly_bounded_image_inspection"]
+    retry: "restart_new_image_after_identity_recheck"
+    rollback: "delete_incomplete_external_image_only"
+  - id: home_edge.debian13.bootstrap_external
+    node: home-edge-01
+    argv: ["ops/home_edge/debian13/bootstrap.sh", "--plan", "--target", "<external-by-id>"]
+    run_as: root
+    timeout_seconds: 7200
+    risk: yellow
+    approvals: ["external_repartition"]
+    preconditions: ["Debian_13_amd64", "hostname_home-edge-01", "uid_1000", "Fujitsu_Q556_2", "legacy_bios", "protected_internal_present"]
+    independent_verification: ["grub_i386_pc_external_only", "no_efibootmgr", "no_internal_disk_commands"]
+    retry: "wipe_external_candidate_only_after_fresh_approval"
+    rollback: "restore_external_disk_from_rollback_bundle"
+  - id: home_edge.debian13.reboot_test_boot
+    node: home-edge-01
+    argv: ["ops/home_edge/debian13/first-boot-guard.sh", "--arm", "--target", "<external-by-id>"]
+    run_as: operator
+    timeout_seconds: 300
+    risk: yellow
+    approvals: ["reboot_test_boot"]
+    preconditions: ["external_boot_candidate_verified", "operator_at_console", "firmware_one_time_usb_boot"]
+    independent_verification: ["Mint_returns_when_USB_not_selected", "first_boot_guard_marker"]
+    retry: "manual_one_time_boot_retry"
+    rollback: "firmware_returns_to_untouched_Mint_internal_disk"

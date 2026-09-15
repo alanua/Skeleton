@@ -1,0 +1,35 @@
+schema: skeleton.home_edge.debian13.package_manifest.v1
+target:
+  os: Debian 13
+  architecture: amd64
+  hostname: home-edge-01
+packages:
+  base:
+    - openssh-server
+    - nftables
+    - tailscale
+    - pipewire
+    - wireplumber
+    - alsa-utils
+  media:
+    - mpv
+    - yt-dlp
+    - intel-media-va-driver
+    - vainfo
+  services:
+    - avahi-daemon
+    - sane-utils
+    - brother-cups-wrapper
+  recovery:
+    - rsync
+    - acl
+    - attr
+    - cryptsetup
+    - qemu-utils
+    - guestfish
+prohibited_workloads:
+  - removed-local-display-workload
+  - legacy-local-display-port
+notes:
+  - Package presence is not acceptance for YouTube VA-API; live bounded playback metrics are required.
+  - Private operator material is excluded from manifests, receipts, logs, and Git.

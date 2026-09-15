@@ -1,0 +1,40 @@
+{
+  "schema": "skeleton.home_edge.debian13.external_migration.architecture.v1",
+  "node": "home-edge-01",
+  "os": {"required": "Debian 13", "architecture": "amd64"},
+  "hardware": {
+    "platform": "Fujitsu Q556/2",
+    "boot_required": "legacy-bios",
+    "uefi_optional": true
+  },
+  "protected_internal_disk_regression_fixtures": [
+    "ata-SAMSUNG_MZ7PD128HCFV-000H1_S1MBNYAH205253",
+    "wwn-0x5002538500000000"
+  ],
+  "external_identity": {
+    "required_prefix": "/dev/disk/by-id/",
+    "required_fields": ["model", "capacity_bytes"],
+    "one_of": ["serial", "wwn"],
+    "forbidden_authorizers": ["/dev/sdX", "/dev/nvmeXnY", "label", "mountpoint"]
+  },
+  "approval_gates": {
+    "backup_write": "HE_APPROVE_BACKUP_WRITE",
+    "image_write": "HE_APPROVE_IMAGE_WRITE",
+    "external_repartition": "HE_APPROVE_EXTERNAL_REPARTITION",
+    "reboot_test_boot": "HE_APPROVE_REBOOT_TEST_BOOT",
+    "internal_cutover": "HE_APPROVE_INTERNAL_CUTOVER"
+  },
+  "boot": {
+    "grub_target": "i386-pc",
+    "install_device": "external_disk_only",
+    "forbidden": ["efibootmgr", "NVRAM", "boot_order_change", "internal_grub"]
+  },
+  "pipewire": {
+    "canonical_sink": "alsa_output.pci-0000_00_1f.3.analog-stereo",
+    "device": "HDA Intel PCH",
+    "codec": "ALC671 Analog",
+    "hdmi_default_allowed": false
+  },
+  "acceptance_schema": "skeleton.home_edge.debian13.acceptance.v1",
+  "physical_verification_rule": "command_success_never_sets_physically_verified"
+}
