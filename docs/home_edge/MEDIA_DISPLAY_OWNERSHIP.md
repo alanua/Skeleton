@@ -31,6 +31,23 @@ Current Skeleton Cast modes are normalized without a second authority:
 
 A confirmed owner always wins over saver ownership. Ambiguity never causes the visual saver to cover a potentially active video.
 
+## Screensaver preemption adapter
+
+`scripts/home_edge_screensaver_preemption.py status` is the source-owned visual saver gate. It does not inspect media endpoints, Android state or saver internals directly. Before a visual saver is shown, it invokes exactly:
+
+```sh
+home-edge-media-display-owner status
+```
+
+The canonical owner command is the only decision source:
+
+- owner exit `0` with well-formed `OWNER`: suppress the saver;
+- owner exit `1` with well-formed `CLEAR`: allow the saver;
+- owner exit `2` with well-formed `UNKNOWN`: suppress the saver;
+- timeout, unavailable command, malformed JSON, mismatched state/exit code or any unrecognized exit: suppress the saver fail-closed.
+
+The adapter exits `0` only when the saver may be shown and exits `1` for every suppression/fail-closed result. Its stdout is a public-safe JSON object with schema `skeleton.home_edge.screensaver_preemption.v1`; it emits only `show_saver`, stable reason labels and the owner command exit class.
+
 ## Install and rollback
 
 Source-only helpers:
