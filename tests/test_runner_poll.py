@@ -657,7 +657,13 @@ def test_process_issue_accepts_done_output_with_echoed_prompt_blocked_word() -> 
     ) as label, mock.patch.object(runner, "notify_task_finished") as notify:
         runner.process_issue(issue, workdir="/repo")
 
-    finalize.assert_called_once_with(issue, "runner/issue-53", codex_output)
+    finalize.assert_called_once_with(
+        issue,
+        "runner/issue-53",
+        codex_output,
+        defer_validation=False,
+        issue_body=issue["body"],
+    )
     comment.assert_called_once_with(53, "DONE report")
     assert label.call_args_list == [
         mock.call(53, runner.LABEL_READY, runner.LABEL_RUNNING),
