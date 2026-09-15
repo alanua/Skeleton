@@ -14,6 +14,8 @@ Schedule Registry
 
 The v1 dispatcher boundary is deliberately inactive. A tick may produce a private typed proposal, but it does not enqueue Runner, start Loop, call a network provider, write canonical memory, or execute shell commands.
 
+Scheduler Core is the only authority that claims pending occurrences, assigns dispatch attempts and records dispatch receipts. Calendar, Telegram, provider callbacks and shared dispatch routes may supply typed inputs or receipts only after Scheduler has created the occurrence and attempt.
+
 ## Schedule contract
 
 Schedules use `skeleton.schedule.v1`. Supported triggers:
@@ -37,7 +39,9 @@ pending → skipped | needs_operator | failed
 needs_operator → pending | skipped | failed | done
 ```
 
-A stale `running` occurrence is never silently repeated. Restart recovery moves it to `needs_operator`.
+A stale `running` occurrence is never silently repeated. Restart recovery first checks the dispatch receipt ledger for the current attempt. A successful receipt finalizes the occurrence without replay; an ambiguous mutating receipt moves it to `needs_operator`; a missing receipt permits only bounded retry before operator review.
+
+Dispatch receipt writes are idempotent by receipt id and idempotency key. An exact duplicate receipt is a no-op and preserves the original row. Any conflicting reuse of a receipt id or idempotency key fails closed with a store conflict instead of overwriting or silently ignoring the mismatch.
 
 ## CLI
 
@@ -82,5 +86,6 @@ The authoritative aggregate production launch receipt is recorded in GitHub issu
 - no arbitrary shell, SQL or Python from schedule payloads;
 - no authority from Calendar or Telegram text;
 - no second Runner;
+- no second Scheduler, dispatcher authority or schedule store;
 - no automatic protected, finance, legal, deployment or secret action;
 - no private payloads in public receipts or GitHub evidence.

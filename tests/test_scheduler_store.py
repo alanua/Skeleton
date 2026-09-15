@@ -144,3 +144,93 @@ def test_transition_conflict_fails_closed(tmp_path) -> None:
             reason="DISPATCH_STARTED",
             now=101,
         )
+
+
+def test_record_dispatch_receipt_exact_duplicate_is_noop(tmp_path) -> None:
+    store = SchedulerStore(tmp_path / "scheduler.sqlite3")
+    store.initialize()
+    schedule, _ = store.register(_spec(), now=1)
+    occurrence_id = stable_occurrence_id(schedule.spec.schedule_id, schedule.version, 100)
+    proposal = build_execution_proposal(schedule, occurrence_id=occurrence_id, scheduled_for=100)
+    store.create_occurrence(
+        occurrence_id=occurrence_id,
+        schedule=schedule,
+        scheduled_for=100,
+        state="pending",
+        reason="DISPATCH_REQUIRED",
+        proposal=proposal,
+        now=100,
+    )
+    claimed = store.claim_next_pending(now=101)
+    assert claimed is not None
+
+    receipt_id = store.record_dispatch_receipt(
+        occurrence_id=occurrence_id,
+        attempt=claimed.attempt,
+        idempotency_key=claimed.idempotency_key or "",
+        status="done",
+        reason="SYNTHETIC_DONE",
+        evidence_ref="synthetic:done",
+        result={"status": "DONE", "external_side_effects_executed": False},
+        now=102,
+    )
+    replay_id = store.record_dispatch_receipt(
+        occurrence_id=occurrence_id,
+        attempt=claimed.attempt,
+        idempotency_key=claimed.idempotency_key or "",
+        status="done",
+        reason="SYNTHETIC_DONE",
+        evidence_ref="synthetic:done",
+        result={"external_side_effects_executed": False, "status": "DONE"},
+        now=103,
+    )
+
+    receipts = store.list_dispatch_receipts(occurrence_id)
+    assert replay_id == receipt_id
+    assert len(receipts) == 1
+    assert receipts[0]["created_at"] == 102
+
+
+def test_record_dispatch_receipt_conflicting_replay_fails_closed(tmp_path) -> None:
+    store = SchedulerStore(tmp_path / "scheduler.sqlite3")
+    store.initialize()
+    schedule, _ = store.register(_spec(), now=1)
+    occurrence_id = stable_occurrence_id(schedule.spec.schedule_id, schedule.version, 100)
+    proposal = build_execution_proposal(schedule, occurrence_id=occurrence_id, scheduled_for=100)
+    store.create_occurrence(
+        occurrence_id=occurrence_id,
+        schedule=schedule,
+        scheduled_for=100,
+        state="pending",
+        reason="DISPATCH_REQUIRED",
+        proposal=proposal,
+        now=100,
+    )
+    claimed = store.claim_next_pending(now=101)
+    assert claimed is not None
+    store.record_dispatch_receipt(
+        occurrence_id=occurrence_id,
+        attempt=claimed.attempt,
+        idempotency_key=claimed.idempotency_key or "",
+        status="done",
+        reason="SYNTHETIC_DONE",
+        evidence_ref="synthetic:done",
+        result={"status": "DONE", "external_side_effects_executed": False},
+        now=102,
+    )
+
+    with pytest.raises(SchedulerStoreError, match="DISPATCH_RECEIPT_CONFLICT"):
+        store.record_dispatch_receipt(
+            occurrence_id=occurrence_id,
+            attempt=claimed.attempt,
+            idempotency_key=claimed.idempotency_key or "",
+            status="failed",
+            reason="SYNTHETIC_FAILED",
+            evidence_ref="synthetic:failed",
+            result={"status": "FAILED", "external_side_effects_executed": False},
+            now=103,
+        )
+
+    receipts = store.list_dispatch_receipts(occurrence_id)
+    assert len(receipts) == 1
+    assert receipts[0]["status"] == "done"

@@ -594,9 +594,32 @@ class SchedulerStore:
             separators=(",", ":"), sort_keys=True,
         )
         with self._transaction() as connection:
+            existing_rows = connection.execute(
+                """
+                SELECT * FROM dispatch_receipts
+                 WHERE receipt_id = ? OR idempotency_key = ?
+                 ORDER BY created_at, receipt_id
+                """,
+                (receipt_id, idempotency_key),
+            ).fetchall()
+            for row in existing_rows:
+                if _dispatch_receipt_matches(
+                    row,
+                    receipt_id=receipt_id,
+                    occurrence_id=occurrence_id,
+                    attempt=attempt,
+                    idempotency_key=idempotency_key,
+                    status=status,
+                    reason=reason,
+                    evidence_ref=evidence_ref,
+                    result_json=result_json,
+                    parent_receipt_id=parent_receipt_id,
+                ):
+                    return receipt_id
+                raise SchedulerStoreError("DISPATCH_RECEIPT_CONFLICT")
             connection.execute(
                 """
-                INSERT OR IGNORE INTO dispatch_receipts(
+                INSERT INTO dispatch_receipts(
                     receipt_id, occurrence_id, attempt, idempotency_key, status, reason,
                     evidence_ref, result_json, created_at, parent_receipt_id
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -874,6 +897,35 @@ def _receipt_is_ambiguous_mutating(value: object) -> bool:
     if isinstance(route_receipt, Mapping):
         return _receipt_is_ambiguous_mutating(route_receipt)
     return False
+
+
+def _dispatch_receipt_matches(
+    row: sqlite3.Row,
+    *,
+    receipt_id: str,
+    occurrence_id: str,
+    attempt: int,
+    idempotency_key: str,
+    status: str,
+    reason: str,
+    evidence_ref: str,
+    result_json: str,
+    parent_receipt_id: str | None,
+) -> bool:
+    return (
+        str(row["receipt_id"]) == receipt_id
+        and str(row["occurrence_id"]) == occurrence_id
+        and int(row["attempt"]) == attempt
+        and str(row["idempotency_key"]) == idempotency_key
+        and str(row["status"]) == status
+        and str(row["reason"]) == reason
+        and str(row["evidence_ref"]) == evidence_ref
+        and str(row["result_json"]) == result_json
+        and (
+            None if row["parent_receipt_id"] is None else str(row["parent_receipt_id"])
+        )
+        == parent_receipt_id
+    )
 
 
 def _sha256_hex(value: str) -> str:
