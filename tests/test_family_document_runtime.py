@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
+from jsonschema import ValidationError, validate
 
 from core.family_document_runtime import FamilyDocumentReceiptOutbox, FamilyDocumentRuntime
 from core.family_document_sinks import FileFamilyDocumentArchive
 from core.family_document_sources import LocalDirectoryDocumentSource
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def runtime(tmp_path):
@@ -22,6 +29,12 @@ def runtime(tmp_path):
             "route": "ACCEPT",
         },
     ), inbox
+
+
+def receipt_schema() -> dict[str, object]:
+    return json.loads(
+        (ROOT / "schemas" / "family_document_receipt.schema.json").read_text(encoding="utf-8")
+    )
 
 
 def test_no_notification_before_stable_file_gate(tmp_path) -> None:
@@ -168,3 +181,52 @@ def test_outbox_rejects_receipt_key_payload_conflict(tmp_path) -> None:
 
     with pytest.raises(ValueError):
         outbox.enqueue({**receipt, "message": "different"})
+
+
+def test_family_document_receipt_schema_matches_current_runtime_contract(tmp_path) -> None:
+    rt, inbox = runtime(tmp_path)
+    (inbox / "scan.txt").write_text("synthetic document", encoding="utf-8")
+    rt.scan_once(drain=False)
+    rt.scan_once(drain=False)
+
+    payload = rt.outbox.receipts()[0]["payload"]
+    schema = receipt_schema()
+
+    assert payload["receipt_type"] == "package_part"
+    assert "record_id" not in payload
+    assert payload["part_index"] <= payload["part_count"]
+    validate(instance=payload, schema=schema)
+
+    for receipt_type in ("intake", "terminal"):
+        validate(
+            instance={
+                "schema": "skeleton.family_document_receipt.v1",
+                "receipt_key": f"{receipt_type}:record-1",
+                "receipt_type": receipt_type,
+                "record_id": "record-1",
+            },
+            schema=schema,
+        )
+
+    with pytest.raises(ValidationError):
+        validate(
+            instance={
+                "schema": "skeleton.family_document_receipt.v1",
+                "receipt_key": "legacy:package",
+                "receipt_type": "package_report",
+                "message": "legacy",
+            },
+            schema=schema,
+        )
+
+    with pytest.raises(ValidationError):
+        validate(
+            instance={
+                "schema": "skeleton.family_document_receipt.v1",
+                "receipt_key": "package:missing-fields:0001",
+                "receipt_type": "package_part",
+                "status": "DONE",
+                "message": "synthetic report",
+            },
+            schema=schema,
+        )
