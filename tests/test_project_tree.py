@@ -2,6 +2,7 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+import yaml
 
 import core.project_tree as project_tree
 from core.project_tree import (
@@ -9,6 +10,8 @@ from core.project_tree import (
     get_project,
     load_project_tree,
     plan_worktree_name,
+    propose_project_registration,
+    serialize_project_tree,
     validate_project_tree,
 )
 
@@ -290,3 +293,72 @@ def test_project_tree_has_no_subprocess_usage() -> None:
     source = Path(project_tree.__file__).read_text(encoding="utf-8")
 
     assert "subprocess" not in source
+
+
+def test_project_tree_serialization_round_trip_preserves_existing_projects() -> None:
+    tree = loaded_tree()
+    serialized = serialize_project_tree(tree)
+    round_tripped = yaml.safe_load(serialized)
+
+    assert validate_project_tree(round_tripped) == tree
+    assert get_project(round_tripped, "skeleton") == get_project(tree, "skeleton")
+
+
+def test_project_tree_registration_proposal_adds_entry_without_mutating_input() -> None:
+    tree = loaded_tree()
+    entry = {
+        "repo": "alanua/NewApp",
+        "checkout_path": "/home/agent/agent-dev/worktrees/alanua-newapp/main",
+        "worktree_root": "/home/agent/agent-dev/worktrees/alanua-newapp",
+        "public": True,
+        "runner_enabled": True,
+        "execution_modes": {
+            "planning_only": False,
+            "codex_issue_worktree": True,
+            "live_cross_repo": False,
+        },
+        "requires_explicit_approval_for_mode_change": True,
+        "future_parallel_worktrees": True,
+        "runtime_approval_required": True,
+        "worktree_name_prefix": "alanua-newapp",
+    }
+
+    proposed = propose_project_registration(tree, "alanua_newapp", entry)
+
+    assert "alanua_newapp" not in tree["projects"]
+    assert proposed["projects"]["alanua_newapp"]["repo"] == "alanua/NewApp"
+    assert get_project(tree, "skeleton") == get_project(proposed, "skeleton")
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("repo", "alanua/Skeleton", "repo"),
+        ("checkout_path", "/home/agent/agent-dev/repos/Skeleton", "checkout_path"),
+        ("worktree_root", "/home/agent/agent-dev/worktrees/skeleton", "worktree_root"),
+        ("worktree_name_prefix", "skeleton", "worktree_name_prefix"),
+    ),
+)
+def test_project_tree_registration_proposal_detects_conflicts(
+    field: str, value: str, message: str
+) -> None:
+    entry = {
+        "repo": "alanua/NewApp",
+        "checkout_path": "/home/agent/agent-dev/worktrees/alanua-newapp/main",
+        "worktree_root": "/home/agent/agent-dev/worktrees/alanua-newapp",
+        "public": True,
+        "runner_enabled": True,
+        "execution_modes": {
+            "planning_only": False,
+            "codex_issue_worktree": True,
+            "live_cross_repo": False,
+        },
+        "requires_explicit_approval_for_mode_change": True,
+        "future_parallel_worktrees": True,
+        "runtime_approval_required": True,
+        "worktree_name_prefix": "alanua-newapp",
+    }
+    entry[field] = value
+
+    with pytest.raises(ValueError, match=message):
+        propose_project_registration(loaded_tree(), "alanua_newapp", entry)

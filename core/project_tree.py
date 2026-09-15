@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import copy
 import os
 import re
 from pathlib import Path
@@ -28,6 +29,48 @@ REQUIRED_PROJECT_FIELDS = (
 def load_project_tree(path: Union[str, Path]) -> dict[str, Any]:
     data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     return validate_project_tree(data)
+
+
+def serialize_project_tree(project_tree: Mapping[str, Any]) -> str:
+    validated_tree = validate_project_tree(copy.deepcopy(dict(project_tree)))
+    return yaml.safe_dump(validated_tree, sort_keys=False)
+
+
+def propose_project_registration(
+    project_tree: Mapping[str, Any],
+    project_id: str,
+    project_entry: Mapping[str, Any],
+) -> dict[str, Any]:
+    proposed_tree = validate_project_tree(copy.deepcopy(dict(project_tree)))
+    _validate_project_id(project_id)
+    _validate_project(project_id, dict(project_entry))
+
+    projects = proposed_tree["projects"]
+    if project_id in projects:
+        raise ValueError(f"project_id {project_id!r} already exists.")
+
+    repo = project_entry["repo"]
+    checkout_path = project_entry["checkout_path"]
+    worktree_root = project_entry["worktree_root"]
+    worktree_name_prefix = project_entry["worktree_name_prefix"]
+    for existing_id, existing_project in projects.items():
+        if existing_project["repo"] == repo:
+            raise ValueError(f"repo {repo!r} already exists.")
+        if existing_project["checkout_path"] == checkout_path:
+            raise ValueError(
+                f"checkout_path conflicts with existing project {existing_id!r}."
+            )
+        if existing_project["worktree_root"] == worktree_root:
+            raise ValueError(
+                f"worktree_root conflicts with existing project {existing_id!r}."
+            )
+        if existing_project["worktree_name_prefix"] == worktree_name_prefix:
+            raise ValueError(
+                f"worktree_name_prefix conflicts with existing project {existing_id!r}."
+            )
+
+    projects[project_id] = copy.deepcopy(dict(project_entry))
+    return validate_project_tree(proposed_tree)
 
 
 def validate_project_tree(project_tree: object) -> dict[str, Any]:
