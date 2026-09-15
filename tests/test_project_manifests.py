@@ -116,3 +116,41 @@ def test_jeeves_is_separate_from_skeleton_core() -> None:
     assert skeleton["source_repo"] == "alanua/Skeleton"
     assert jeeves["source_repo"] == "alanua/jeeves"
     assert "separate" in jeeves["means"].lower()
+
+
+def test_dios_is_public_safe_routing_identity_delegated_to_skeleton_core() -> None:
+    dios = load_yaml("projects/dios/PROJECT_MANIFEST.yaml")
+
+    assert dios["project_id"] == "dios"
+    assert dios["registration_contract"] == "PUBLIC_SAFE_DOMAIN_REGISTRATION_ONLY"
+    assert dios["privacy_class"] == "public_safe_code_project"
+    assert dios["routing_identity"] == {
+        "kind": "project_namespace",
+        "namespace": "dios",
+        "execution": "delegated_to_skeleton_shared_core",
+        "review_gate": "delegated_to_skeleton_shared_core",
+        "privacy_gate": "delegated_to_skeleton_shared_core",
+        "storage_gate": "delegated_to_skeleton_shared_core",
+    }
+    assert dios["control_core"] == "alanua/Skeleton"
+    assert set(dios["architecture_freeze"].values()) == {"forbidden"}
+    assert "parser_runtime_workstation_execution" in dios["architecture_freeze"]
+    assert "private_drawing_execution" in dios["architecture_freeze"]
+    assert "shared control, execution, review, privacy and storage gate core" in dios["route_note"]
+
+
+def test_aufmass_remains_dios_child_module_without_schema_duplication() -> None:
+    dios = load_yaml("projects/dios/PROJECT_MANIFEST.yaml")
+    aufmass = load_yaml("projects/aufmass/PROJECT_MANIFEST.yaml")
+
+    assert dios["child_modules"] == [
+        {
+            "project_id": "aufmass",
+            "role": "child_module",
+            "implementation_route": "alanua/Skeleton",
+            "schema_duplication": "forbidden",
+        }
+    ]
+    assert aufmass["parent_project_id"] == "dios"
+    assert aufmass["project_role"] == "child_module"
+    assert aufmass["implementation_route"] == "alanua/Skeleton"
