@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from core.audit_ledger import AUDIT_EVENT_SCHEMA, AuditLedger
+from core.public_receipt import PublicField
 
 
 def test_audit_ledger_appends_valid_events(tmp_path: Path) -> None:
@@ -85,3 +86,40 @@ def test_rotation_preserves_old_file_and_creates_new_file(tmp_path: Path) -> Non
     assert rotated[0].read_text(encoding="utf-8") == '{"event_type":"old"}\n'
     assert ledger_path.exists()
     assert ledger_path.read_text(encoding="utf-8") == ""
+
+
+def test_audit_ledger_publishes_sanitized_receipt_with_private_evidence_ref(tmp_path: Path) -> None:
+    ledger_path = tmp_path / "audit.jsonl"
+    ledger = AuditLedger(ledger_path)
+
+    ledger.append_public_receipt(
+        event_type="receipt_published",
+        receipt={
+            "schema": "skeleton.public_receipt.v1",
+            "status": "DONE",
+            "receipt_id": "receipt-alpha",
+            "counts": {"processed": 2},
+            "hashes": {"content_hash": "e" * 64},
+            "private_payload": {"redacted": True},
+        },
+        public_fields=(
+            PublicField.at("schema", kind="opaque_id"),
+            PublicField.at("status", kind="status"),
+            PublicField.at("receipt_id", kind="opaque_id"),
+            PublicField.at("counts", kind="aggregate"),
+            PublicField.at("hashes.content_hash", kind="hash"),
+        ),
+        private_evidence_ref="private-ref-001",
+        metadata={"project_id": "skeleton"},
+    )
+
+    row = json.loads(ledger_path.read_text(encoding="utf-8"))
+    assert row["private_evidence_ref"] == "private-ref-001"
+    assert row["receipt"] == {
+        "schema": "skeleton.public_receipt.v1",
+        "status": "DONE",
+        "receipt_id": "receipt-alpha",
+        "counts": {"processed": 2},
+        "hashes": {"content_hash": "e" * 64},
+    }
+    assert "private_payload" not in json.dumps(row, sort_keys=True)

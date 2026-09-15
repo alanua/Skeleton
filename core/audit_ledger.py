@@ -5,7 +5,9 @@ import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
+
+from core.public_receipt import PublicField, sanitize_public_receipt
 
 
 AUDIT_EVENT_SCHEMA = "skeleton.memory_event.v1"
@@ -60,6 +62,25 @@ class AuditLedger:
         with self.path.open("a", encoding="utf-8", newline="\n") as ledger:
             ledger.write(payload)
             ledger.write("\n")
+
+    def append_public_receipt(
+        self,
+        *,
+        event_type: str,
+        receipt: Mapping[str, Any],
+        public_fields: Iterable[PublicField],
+        private_evidence_ref: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> None:
+        event: dict[str, Any] = {
+            "event_type": event_type,
+            "receipt": sanitize_public_receipt(receipt, public_fields),
+        }
+        if private_evidence_ref is not None:
+            event["private_evidence_ref"] = private_evidence_ref
+        if metadata:
+            event["metadata"] = dict(metadata)
+        self.append(event)
 
     def read_recent(self, n: int) -> list[dict[str, Any]]:
         if n <= 0 or not self.path.exists():
