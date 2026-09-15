@@ -58,10 +58,18 @@ class OwnershipDecision:
 
 MODE_OFF = frozenset({"off"})
 MODE_FOREGROUND_OWNER = frozenset({"games"})
-MODE_DESKTOP_VIDEO = frozenset({"mpv", "vlc", "chrome", "kiosk"})
-MODE_ANDROID_VIDEO = frozenset({"youtube", "airscreen"})
+MODE_DESKTOP_VIDEO = frozenset({"mpv", "vlc", "chrome", "kiosk", "youtube_web"})
+MODE_ANDROID_VIDEO = frozenset({"youtube_tv_receiver"})
+MODE_ANDROID_LEGACY_VIDEO = frozenset({"youtube", "airscreen"})
 MODE_ANDROID_AMBIGUOUS = frozenset({"android"})
-KNOWN_MODES = MODE_OFF | MODE_FOREGROUND_OWNER | MODE_DESKTOP_VIDEO | MODE_ANDROID_VIDEO | MODE_ANDROID_AMBIGUOUS
+KNOWN_MODES = (
+    MODE_OFF
+    | MODE_FOREGROUND_OWNER
+    | MODE_DESKTOP_VIDEO
+    | MODE_ANDROID_VIDEO
+    | MODE_ANDROID_LEGACY_VIDEO
+    | MODE_ANDROID_AMBIGUOUS
+)
 
 _PLAYBACK_KEYS = frozenset(
     {
@@ -204,10 +212,14 @@ def decide_from_snapshots(
         android = android_media_observation(android_media_dump, video_mode_confirmed=True)
         observations.append(android)
         if android.state is Ownership.OWNER:
-            return OwnershipDecision(Ownership.OWNER, "confirmed_android_video_playing", tuple(observations))
+            return OwnershipDecision(Ownership.OWNER, "confirmed_youtube_tv_receiver_playing", tuple(observations))
         if android.state is Ownership.CLEAR:
-            return OwnershipDecision(Ownership.CLEAR, "confirmed_android_video_not_playing", tuple(observations))
-        return OwnershipDecision(Ownership.UNKNOWN, "android_video_state_unknown", tuple(observations))
+            return OwnershipDecision(Ownership.CLEAR, "confirmed_youtube_tv_receiver_not_playing", tuple(observations))
+        return OwnershipDecision(Ownership.UNKNOWN, "youtube_tv_receiver_state_unknown", tuple(observations))
+
+    if mode in MODE_ANDROID_LEGACY_VIDEO:
+        observations.append(Observation("android_media_session", Ownership.UNKNOWN, "legacy_android_video_mode_unsupported"))
+        return OwnershipDecision(Ownership.UNKNOWN, "legacy_android_video_mode_unsupported", tuple(observations))
 
     if mode in MODE_ANDROID_AMBIGUOUS:
         android = android_media_observation(android_media_dump, video_mode_confirmed=False)
