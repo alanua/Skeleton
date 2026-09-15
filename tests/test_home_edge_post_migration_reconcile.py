@@ -101,6 +101,18 @@ def assert_no_private_transport_leak(receipt: Mapping[str, object]) -> None:
     assert "HomeEdgeExecError" not in encoded
 
 
+def assert_auth_config_missing_receipt(receipt: Mapping[str, object]) -> None:
+    assert receipt["success_criteria"] == "not_met"
+    assert receipt["stable_reason"] == "executor_auth_config_missing"
+    assert receipt["mutation_executor_receipt_hash"] == "unavailable"
+    assert receipt["audit_receipt_hash"] == reconcile._audit_hash(receipt)
+    assert_no_private_transport_leak(receipt)
+    encoded = json.dumps(receipt, sort_keys=True)
+    assert reconcile.EXEC_HMAC_SECRET_ENV not in encoded
+    assert reconcile.EXEC_HMAC_SECRET_MISSING_REASON not in encoded
+    assert SECRET not in encoded
+
+
 def test_exact_runtime_input_accepted_and_main_sha_checked() -> None:
     parsed = reconcile.parse_runtime_input(issue_body())
 
@@ -164,6 +176,94 @@ def test_request_is_signed_fixed_and_dispatched_only_through_gateway(
     assert request.script == reconcile.RECONCILE_SCRIPT
     assert receipt["mutation_executor_receipt_hash"] == "f" * 64
     assert receipt["audit_receipt_hash"] == reconcile._audit_hash(receipt)
+
+
+def test_missing_hmac_secret_returns_public_safe_blocked_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(reconcile.EXEC_HMAC_SECRET_ENV, raising=False)
+
+    def fake_execute(_request: Mapping[str, Any]):
+        raise AssertionError("transport must not run without request auth")
+
+    monkeypatch.setattr(reconcile, "execute_home_edge_request", fake_execute)
+
+    receipt = reconcile.execute_post_migration_reconcile_task(
+        issue_body(),
+        registered_clean_main_sha=SHA,
+        github_main_sha=SHA,
+    )
+
+    assert_auth_config_missing_receipt(receipt)
+
+
+def test_missing_hmac_secret_from_explicit_environment_returns_blocked_receipt() -> None:
+    receipt = reconcile.execute_post_migration_reconcile_task(
+        issue_body(),
+        registered_clean_main_sha=SHA,
+        github_main_sha=SHA,
+        environment={},
+    )
+
+    assert_auth_config_missing_receipt(receipt)
+
+
+@pytest.mark.parametrize(
+    "body,registered_clean_main_sha,github_main_sha,reason",
+    [
+        (
+            issue_body(**{"Expected Main SHA": "A" * 40}),
+            SHA,
+            SHA,
+            "expected_main_sha_malformed",
+        ),
+        (
+            issue_body(),
+            "b" * 40,
+            SHA,
+            "registered_clean_main_sha_mismatch",
+        ),
+        (
+            issue_body(),
+            SHA,
+            "b" * 40,
+            "github_main_sha_mismatch",
+        ),
+    ],
+)
+def test_pre_request_value_errors_are_not_reclassified_as_auth_config(
+    body: str,
+    registered_clean_main_sha: str,
+    github_main_sha: str,
+    reason: str,
+) -> None:
+    with pytest.raises(ValueError, match=reason):
+        reconcile.execute_post_migration_reconcile_task(
+            body,
+            registered_clean_main_sha=registered_clean_main_sha,
+            github_main_sha=github_main_sha,
+            environment={},
+        )
+
+
+def test_other_request_construction_value_errors_are_not_reclassified(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(reconcile.EXEC_HMAC_SECRET_ENV, SECRET)
+
+    def fake_build_reconcile_request(
+        *, environment: Mapping[str, str] | None = None
+    ) -> HomeEdgeExecRequest:
+        raise ValueError("request_validation_failed /private/id_ed25519 super-secret-token")
+
+    monkeypatch.setattr(reconcile, "build_reconcile_request", fake_build_reconcile_request)
+
+    with pytest.raises(ValueError, match="request_validation_failed"):
+        reconcile.execute_post_migration_reconcile_task(
+            issue_body(),
+            registered_clean_main_sha=SHA,
+            github_main_sha=SHA,
+        )
 
 
 def test_execute_home_edge_exec_error_fails_closed_without_private_leakage(
