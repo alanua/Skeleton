@@ -9,10 +9,12 @@ Schedule Registry
 → due-time resolver
 → Occurrence Ledger
 → typed execution proposal
-→ dispatcher or operator review (later integration)
+→ SharedDispatcher or operator review
 ```
 
-The v1 dispatcher boundary is deliberately inactive. A tick may produce a private typed proposal, but it does not enqueue Runner, start Loop, call a network provider, write canonical memory, or execute shell commands.
+The v1 dispatcher boundary is `core.shared_dispatch.SharedDispatcher`. It is an allowlisted typed dispatch layer for local Scheduler continuation work such as loop-engine packets and control-recovery packets. It is still not a calendar provider, Runner queue, arbitrary shell, network mutation, or canonical memory writer.
+
+Dispatch receipts are keyed by the occurrence attempt idempotency key. Replaying the exact same receipt is a no-op. Reusing the same key with different occurrence, attempt, route result, status, reason or evidence fails closed with `DISPATCH_RECEIPT_IDEMPOTENCY_CONFLICT` instead of hiding the collision.
 
 ## Schedule contract
 
@@ -34,10 +36,12 @@ Occurrence states:
 ```text
 pending → running → done | failed | needs_operator
 pending → skipped | needs_operator | failed
+running → waiting_dependency | pending
+waiting_dependency → pending | needs_operator | failed | skipped
 needs_operator → pending | skipped | failed | done
 ```
 
-A stale `running` occurrence is never silently repeated. Restart recovery moves it to `needs_operator`.
+A stale `running` occurrence is never silently repeated. Restart recovery first checks the latest dispatch receipt for the same occurrence attempt. A completed receipt finalizes the occurrence as `done`; an ambiguous mutating receipt moves it to `needs_operator`; otherwise the occurrence is retried by returning it to `pending` until the bounded attempt limit is exhausted, then it moves to `needs_operator`.
 
 ## CLI
 

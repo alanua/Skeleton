@@ -144,3 +144,122 @@ def test_transition_conflict_fails_closed(tmp_path) -> None:
             reason="DISPATCH_STARTED",
             now=101,
         )
+
+
+def test_dispatch_receipt_exact_duplicate_is_no_op(tmp_path) -> None:
+    store = SchedulerStore(tmp_path / "scheduler.sqlite3")
+    store.initialize()
+    schedule, _ = store.register(_spec(), now=1)
+    occurrence_id = stable_occurrence_id(schedule.spec.schedule_id, schedule.version, 100)
+    proposal = build_execution_proposal(schedule, occurrence_id=occurrence_id, scheduled_for=100)
+    store.create_occurrence(
+        occurrence_id=occurrence_id,
+        schedule=schedule,
+        scheduled_for=100,
+        state="pending",
+        reason="DISPATCH_REQUIRED",
+        proposal=proposal,
+        now=100,
+    )
+    claimed = store.claim_next_pending(now=101)
+    assert claimed is not None
+
+    kwargs = {
+        "occurrence_id": occurrence_id,
+        "attempt": claimed.attempt,
+        "idempotency_key": claimed.idempotency_key or "",
+        "status": "done",
+        "reason": "SYNTHETIC_DONE",
+        "evidence_ref": "dispatch:synthetic-done",
+        "result": {
+            "schema": "skeleton.scheduler_dispatch_receipt.v1",
+            "occurrence_id": occurrence_id,
+            "attempt": claimed.attempt,
+            "idempotency_key": claimed.idempotency_key,
+            "public_safe": True,
+            "external_side_effects_executed": False,
+        },
+        "parent_receipt_id": None,
+    }
+    first = store.record_dispatch_receipt(**kwargs, now=102)
+    replay = store.record_dispatch_receipt(**kwargs, now=103)
+
+    receipts = store.list_dispatch_receipts(occurrence_id)
+    assert replay == first
+    assert len(receipts) == 1
+    assert receipts[0]["created_at"] == 102
+
+
+def test_dispatch_receipt_reused_key_with_different_contract_fails_closed(tmp_path) -> None:
+    store = SchedulerStore(tmp_path / "scheduler.sqlite3")
+    store.initialize()
+    schedule, _ = store.register(_spec(), now=1)
+    occurrence_id = stable_occurrence_id(schedule.spec.schedule_id, schedule.version, 100)
+    proposal = build_execution_proposal(schedule, occurrence_id=occurrence_id, scheduled_for=100)
+    other_occurrence_id = stable_occurrence_id(schedule.spec.schedule_id, schedule.version, 101)
+    other_proposal = build_execution_proposal(
+        schedule, occurrence_id=other_occurrence_id, scheduled_for=101
+    )
+    store.create_occurrence(
+        occurrence_id=occurrence_id,
+        schedule=schedule,
+        scheduled_for=100,
+        state="pending",
+        reason="DISPATCH_REQUIRED",
+        proposal=proposal,
+        now=100,
+    )
+    store.create_occurrence(
+        occurrence_id=other_occurrence_id,
+        schedule=schedule,
+        scheduled_for=101,
+        state="pending",
+        reason="DISPATCH_REQUIRED",
+        proposal=other_proposal,
+        now=100,
+    )
+    claimed = store.claim_next_pending(now=101)
+    assert claimed is not None
+    idempotency_key = claimed.idempotency_key or ""
+    store.record_dispatch_receipt(
+        occurrence_id=occurrence_id,
+        attempt=claimed.attempt,
+        idempotency_key=idempotency_key,
+        status="done",
+        reason="SYNTHETIC_DONE",
+        evidence_ref="dispatch:synthetic-done",
+        result={
+            "schema": "skeleton.scheduler_dispatch_receipt.v1",
+            "occurrence_id": occurrence_id,
+            "attempt": claimed.attempt,
+            "idempotency_key": idempotency_key,
+            "public_safe": True,
+            "external_side_effects_executed": False,
+        },
+        now=102,
+    )
+
+    with pytest.raises(SchedulerStoreError) as exc:
+        store.record_dispatch_receipt(
+            occurrence_id=other_occurrence_id,
+            attempt=claimed.attempt + 1,
+            idempotency_key=idempotency_key,
+            status="failed",
+            reason="SYNTHETIC_FAILED",
+            evidence_ref="dispatch:synthetic-failed",
+            result={
+                "schema": "skeleton.scheduler_dispatch_receipt.v1",
+                "occurrence_id": other_occurrence_id,
+                "attempt": claimed.attempt + 1,
+                "idempotency_key": idempotency_key,
+                "public_safe": True,
+                "external_side_effects_executed": False,
+            },
+            now=103,
+        )
+
+    assert str(exc.value) == "DISPATCH_RECEIPT_IDEMPOTENCY_CONFLICT"
+    receipts = store.list_dispatch_receipts(occurrence_id)
+    assert len(receipts) == 1
+    assert receipts[0]["attempt"] == claimed.attempt
+    assert receipts[0]["status"] == "done"
