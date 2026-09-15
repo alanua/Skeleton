@@ -32,9 +32,23 @@ Installing the worker copies code and units but leaves
 `skeleton-mail-operations.timer` disabled. Activation is a separate registered
 maintenance operation, `mail_gmail_primary_registered_activation_v1`, after
 operator-reviewed exact-main runtime sync. It performs exact-main preflight,
-binds the registered opaque reference, runs exactly one read-only Gmail canary,
-and only on canary pass enables/starts the canonical worker timer and verifies
-bounded systemd health.
+verifies the isolated pinned Bitwarden SDK runtime, runs the identity metadata
+bootstrap, rereads the encrypted reference index, runs exactly one read-only
+Gmail canary, and only on canary pass enables/starts the canonical worker timer
+and verifies bounded systemd health.
+
+The bootstrap helper reads `bitwarden-access-token` only from the private
+systemd credential directory, parses the Bitwarden Secrets Manager machine token
+in memory, and performs one HTTPS form POST to the code-owned Bitwarden identity
+`/connect/token` endpoint with `grant_type=client_credentials` and
+`scope=api.secrets`. It validates the returned Bearer JWT locally, logs no token
+component, then logs the pinned SDK in with the original machine token and calls
+only `client.secrets().list(organization_id)` to discover secret identifier
+metadata. The only accepted key is
+`skeleton/mail-gmail/acct:gmail-primary/oauth-readonly`; exactly one UUID match
+is piped directly to `systemd-creds encrypt` for
+`skeleton-secret-reference-index`. The public helper receipt is limited to
+status, match-count class, persisted, and reason enums.
 
 ## Operator Handoff
 
