@@ -1,0 +1,306 @@
+schema: skeleton.audit.decision_conflict_ledger.v1
+generated_at: "2026-07-28T00:00:00Z"
+issue_ref: "https://github.com/alanua/Skeleton/issues/1752"
+repository_ref: "alanua/Skeleton"
+base_ref: "main"
+current_main_sha: "0f49c719e1106720141d90c2e058c057d54db326"
+privacy_boundary: "GITHUB_PUBLIC_SAFE_INVENTORY_AND_AGGREGATES_ONLY"
+allowed_decision_states:
+  - CURRENT
+  - SUPERSEDED
+  - ABSORBED
+  - CONFLICT
+  - HISTORICAL
+  - REJECTED
+  - NEEDS_OPERATOR
+allowed_implementation_states:
+  - LIVE
+  - PARTIAL
+  - CONTRACT_ONLY
+  - PLANNED
+  - BLOCKED
+  - NOT_PLANNED
+authority_order:
+  - current_user_message
+  - boot_manifest
+  - public_github_canon
+  - private_memory_metadata_only
+  - chatgpt_memory
+  - archive_history_recovery
+sources:
+  - id: source.current_task
+    ref: current_user_message
+    authority: current_user_message
+    freshness: current_turn
+    privacy_class: public_safe_instruction
+  - id: source.main_checkout
+    ref: "git:0f49c719e1106720141d90c2e058c057d54db326"
+    authority: public_github_canon
+    freshness: "2026-07-28T07:53:42Z"
+    privacy_class: public
+  - id: source.source_registry
+    ref: SOURCE_REGISTRY.yaml
+    authority: public_github_canon
+    freshness: current_checkout
+    privacy_class: public
+  - id: source.project_index
+    ref: PROJECT_INDEX.yaml
+    authority: public_github_canon
+    freshness: current_checkout
+    privacy_class: public
+  - id: source.skeleton_state
+    ref: projects/skeleton/STATE.yaml
+    authority: public_github_canon
+    freshness: "last_verified: 2026-06-19"
+    privacy_class: public
+  - id: source.migration_status
+    ref: projects/skeleton/MIGRATION_STATUS.yaml
+    authority: public_github_canon
+    freshness: current_checkout
+    privacy_class: public
+  - id: source.issue_1752_initial_inventory
+    ref: "https://github.com/alanua/Skeleton/issues/1752#issuecomment-4951167981"
+    authority: current_user_message
+    freshness: connector_read_2026-07-28
+    privacy_class: public_safe_aggregate
+  - id: source.issue_1752_execution_control
+    ref: "https://github.com/alanua/Skeleton/issues/1752#issuecomment-4951285542"
+    authority: current_user_message
+    freshness: connector_read_2026-07-28
+    privacy_class: public_safe_aggregate
+  - id: source.issue_1752_blocked_runner
+    ref: "https://github.com/alanua/Skeleton/issues/1752#issuecomment-5101849703"
+    authority: public_github_canon
+    freshness: connector_read_2026-07-28
+    privacy_class: public
+  - id: source.pr_2058
+    ref: "https://github.com/alanua/Skeleton/pull/2058"
+    authority: public_github_canon
+    freshness: "merged_at: 2026-07-28T07:53:43Z"
+    privacy_class: public
+  - id: source.pr_2053
+    ref: "https://github.com/alanua/Skeleton/pull/2053"
+    authority: public_github_canon
+    freshness: "merged_at: 2026-07-28T07:47:50Z"
+    privacy_class: public
+  - id: source.pr_2052
+    ref: "https://github.com/alanua/Skeleton/pull/2052"
+    authority: public_github_canon
+    freshness: "merged_at: 2026-07-28T07:50:27Z"
+    privacy_class: public
+  - id: source.pr_2049
+    ref: "https://github.com/alanua/Skeleton/pull/2049"
+    authority: public_github_canon
+    freshness: "merged_at: 2026-07-28T07:37:07Z"
+    privacy_class: public
+  - id: source.pr_2044
+    ref: "https://github.com/alanua/Skeleton/pull/2044"
+    authority: public_github_canon
+    freshness: "closed_at: 2026-07-28T07:35:09Z"
+    privacy_class: public
+  - id: source.pr_2062
+    ref: "https://github.com/alanua/Skeleton/pull/2062"
+    authority: public_github_canon
+    freshness: "open_at_connector_read_2026-07-28"
+    privacy_class: public
+  - id: source.repo_metadata_required
+    ref: "GitHub repository metadata for alanua/Skeleton, alanua/jeeves, alanua/bauclock, alanua/DIOS, alanua/Lavalamp, alanua/LumenFlow"
+    authority: public_github_canon
+    freshness: connector_read_2026-07-28
+    privacy_class: public
+decisions:
+  - id: decision.source_precedence
+    title: Current task and protected repo canon outrank chat memory and archived history.
+    decision_state: CURRENT
+    implementation_state: LIVE
+    authority: current_user_message
+    freshness: current_turn
+    source_refs:
+      - source.current_task
+      - source.source_registry
+    conflict_refs: []
+    public_safe_summary: Use current operator instructions, boot/control files and verified main before lower-authority memory.
+    next_action: Keep applying source precedence in Phase 2 canon rewrite.
+  - id: decision.skeleton_control_layer
+    title: Skeleton is the current model-neutral control layer.
+    decision_state: CURRENT
+    implementation_state: LIVE
+    authority: public_github_canon
+    freshness: current_checkout
+    source_refs:
+      - source.migration_status
+      - source.project_index
+      - source.main_checkout
+    conflict_refs: []
+    public_safe_summary: Skeleton v2 lives in alanua/Skeleton and contains the control/governance/memory implementation.
+    next_action: Preserve this role while reconciling stale roadmap text.
+  - id: decision.jeeves_inheritance
+    title: Jeeves is independent but inherits approved Skeleton experience through controlled handoff.
+    decision_state: CURRENT
+    implementation_state: PLANNED
+    authority: current_user_message
+    freshness: connector_read_2026-07-28
+    source_refs:
+      - source.issue_1752_initial_inventory
+      - source.issue_1752_execution_control
+      - source.project_index
+    conflict_refs:
+      - decision.jeeves_as_skeleton_adapter_rejected
+    public_safe_summary: Do not describe Skeleton as discarded; treat Skeleton as predecessor, memory source and Jeeves sandbox.
+    next_action: Phase 2 should rewrite public canon language around inheritance and sandbox role.
+  - id: decision.jeeves_as_skeleton_adapter_rejected
+    title: Jeeves is not a Skeleton adapter.
+    decision_state: REJECTED
+    implementation_state: NOT_PLANNED
+    authority: public_github_canon
+    freshness: current_checkout
+    source_refs:
+      - source.migration_status
+      - source.source_registry
+    conflict_refs:
+      - decision.jeeves_inheritance
+    public_safe_summary: Treating Jeeves as an adapter collapses the product/runtime boundary.
+    next_action: Keep adapter phrasing out of canon rewrite.
+  - id: decision.memorygateway_boundary
+    title: MemoryGateway is the required normal private-memory boundary.
+    decision_state: CURRENT
+    implementation_state: PARTIAL
+    authority: public_github_canon
+    freshness: current_checkout
+    source_refs:
+      - source.issue_1752_initial_inventory
+      - source.pr_2052
+      - source.pr_2062
+    conflict_refs:
+      - decision.sole_write_not_proven
+    public_safe_summary: Gateway implementation exists; exact sole-write enforcement and live root repairs remain in progress.
+    next_action: Verify sole normal write path before importing private canon.
+  - id: decision.sole_write_not_proven
+    title: Sole normal live MemoryGateway write migration is not proven complete.
+    decision_state: NEEDS_OPERATOR
+    implementation_state: BLOCKED
+    authority: current_user_message
+    freshness: connector_read_2026-07-28
+    source_refs:
+      - source.issue_1752_initial_inventory
+      - source.issue_1752_execution_control
+    conflict_refs:
+      - decision.memorygateway_boundary
+    public_safe_summary: Current evidence supports implemented gateway pieces but not completed sole-write enforcement.
+    next_action: Complete #1754 and #1544 slices before broad private imports.
+  - id: decision.no_private_import_this_phase
+    title: Private imports are blocked in this audit phase.
+    decision_state: CURRENT
+    implementation_state: BLOCKED
+    authority: current_user_message
+    freshness: current_turn
+    source_refs:
+      - source.current_task
+      - source.issue_1752_execution_control
+    conflict_refs: []
+    public_safe_summary: This phase prepares public-safe artifacts and migration proposals only.
+    next_action: Use Phase 2/Phase 7 gated import after route verification and operator approval.
+  - id: decision.scheduler_core
+    title: Scheduler Core v1 is merged; runtime launch evidence is aggregate-only.
+    decision_state: CURRENT
+    implementation_state: PARTIAL
+    authority: public_github_canon
+    freshness: "2026-07-28"
+    source_refs:
+      - source.pr_2049
+      - source.pr_2053
+      - source.pr_2058
+    conflict_refs:
+      - decision.scheduler_pr_2044_superseded
+    public_safe_summary: Core and launch docs/workflow merged; newer open Scheduler repair PRs mean runtime state should not be overclaimed.
+    next_action: Treat current open Scheduler runtime PRs as planned repairs until merged and receipted.
+  - id: decision.scheduler_pr_2044_superseded
+    title: Earlier Scheduler Core candidate was superseded by PR #2049.
+    decision_state: SUPERSEDED
+    implementation_state: NOT_PLANNED
+    authority: public_github_canon
+    freshness: "2026-07-28"
+    source_refs:
+      - source.pr_2044
+      - source.pr_2049
+    conflict_refs: []
+    public_safe_summary: PR #2044 closed unmerged after main advanced; PR #2049 is the merged implementation.
+    next_action: Keep #2044 only as historical evidence.
+  - id: decision.video_understanding_runtime
+    title: Video Understanding core and launch route are merged but activation repairs remain open.
+    decision_state: CURRENT
+    implementation_state: PARTIAL
+    authority: public_github_canon
+    freshness: "2026-07-28"
+    source_refs:
+      - source.pr_2052
+      - source.pr_2062
+    conflict_refs: []
+    public_safe_summary: Public code route exists; open PR #2062 indicates canonical root resolution still requires merge/receipt.
+    next_action: Do not claim fully stable live activation until #2062 or equivalent is resolved.
+  - id: decision.state_snapshots
+    title: Project STATE.yaml files are handoff snapshots, not complete current canon.
+    decision_state: HISTORICAL
+    implementation_state: PARTIAL
+    authority: public_github_canon
+    freshness: mixed
+    source_refs:
+      - source.skeleton_state
+      - source.issue_1752_initial_inventory
+    conflict_refs: []
+    public_safe_summary: Use state snapshots as evidence and reconcile against current main and issue state before execution.
+    next_action: Phase 2 should rewrite stale state after current source inventory is accepted.
+  - id: decision.archived_jeeves_material
+    title: Older Jeeves/Skeleton material is evidence, not active route truth.
+    decision_state: HISTORICAL
+    implementation_state: PARTIAL
+    authority: public_github_canon
+    freshness: mixed
+    source_refs:
+      - source.issue_1752_initial_inventory
+      - source.source_registry
+    conflict_refs: []
+    public_safe_summary: Valuable older canon and roadmap material must be classified before reuse.
+    next_action: Preserve public-safe references; move private facts only through MemoryGateway.
+  - id: decision.issue_1752_read_only_allowed
+    title: Issue #1752 may continue audit and source reconciliation but not gate bypass.
+    decision_state: CURRENT
+    implementation_state: CONTRACT_ONLY
+    authority: current_user_message
+    freshness: connector_read_2026-07-28
+    source_refs:
+      - source.issue_1752_execution_control
+    conflict_refs: []
+    public_safe_summary: Public canon writes and private imports wait for stage gates.
+    next_action: Next exact Phase 2 action is public canon PatchPlan after approval, starting with architecture and Skeleton to Jeeves inheritance.
+summary_counts:
+  decision_states:
+    CURRENT: 8
+    SUPERSEDED: 1
+    ABSORBED: 0
+    CONFLICT: 0
+    HISTORICAL: 2
+    REJECTED: 1
+    NEEDS_OPERATOR: 1
+  implementation_states:
+    LIVE: 2
+    PARTIAL: 5
+    CONTRACT_ONLY: 1
+    PLANNED: 1
+    BLOCKED: 2
+    NOT_PLANNED: 2
+  stale_conflicting_public_canon_files:
+    - projects/skeleton/STATE.yaml
+    - docs/SKELETON_BUILD_PLAN.md
+    - docs/SKELETON_BUILD_PLAN.yaml
+    - docs/SKELETON_ARCHITECTURE_VNEXT.md
+    - docs/SKELETON_ARCHITECTURE_VNEXT.yaml
+    - docs/RUNNER_QUEUE_STATUS.md
+    - projects/skeleton/REVIEW_QUEUE.yaml
+  private_migration_aggregate:
+    imported: 0
+    skipped: 12
+    conflicts: 2
+    proposals: 12
+    blocked_reason: private_route_and_source_values_not_available_in_this_public_audit_phase
+next_phase_2_action: "Prepare a public canon PatchPlan for architecture and Skeleton-to-Jeeves inheritance, then request operator approval before rewriting stable canon paths."

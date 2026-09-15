@@ -1,0 +1,290 @@
+schema: skeleton.audit.memory_migration_map.v1
+generated_at: "2026-07-28T00:00:00Z"
+issue_ref: "https://github.com/alanua/Skeleton/issues/1752"
+privacy_boundary: "GITHUB_PUBLIC_SAFE_INVENTORY_AND_AGGREGATES_ONLY"
+memory_gateway_contract:
+  compatible_route: memory.private_mutate
+  readback_route: memory.private_read_exact
+  status_route: memory.private_status
+  projection_status_route: memory.private_projection_status
+  direct_sqlite_writes: forbidden
+  value_payloads_in_git: forbidden
+  import_status: not_attempted
+  import_blocker: authorized_local_private_source_values_not_available_to_this_public_audit_turn
+allowed_actions:
+  - IMPORT_PRIVATE
+  - REWRITE_PUBLIC_CANON
+  - KEEP_AS_EVIDENCE
+  - SUPERSEDE
+  - IGNORE_ARCHIVED
+  - NEEDS_OPERATOR
+aggregate_counts:
+  source_categories: 12
+  action_counts:
+    IMPORT_PRIVATE: 2
+    REWRITE_PUBLIC_CANON: 2
+    KEEP_AS_EVIDENCE: 3
+    SUPERSEDE: 1
+    IGNORE_ARCHIVED: 1
+    NEEDS_OPERATOR: 3
+  import_results:
+    imported: 0
+    skipped_no_private_values_or_authorized_route: 12
+    conflicts: 2
+    unsupported: 0
+    idempotency_verified: 0
+    exact_reads_verified: 0
+    revisions_verified: 0
+    derived_index_status_verified: 0
+target_namespaces:
+  - namespace: skeleton
+    privacy_class: PRIVATE
+    target_domain: skeleton.control
+    status: planned
+  - namespace: bauclock
+    privacy_class: PRIVATE
+    target_domain: life_work.gewerbe.bauclock
+    status: planned
+  - namespace: home_automation
+    privacy_class: PRIVATE
+    target_domain: homelab.home_automation
+    status: planned
+  - namespace: aufmass
+    privacy_class: PRIVATE
+    target_domain: dios.aufmass
+    status: partial
+  - namespace: legal_private
+    privacy_class: PRIVATE_HIGH
+    target_domain: legal_financial_documents
+    status: needs_operator
+source_categories:
+  - id: private_chat_exports
+    source_refs:
+      - "https://github.com/alanua/Skeleton/issues/1752#issuecomment-4951167981"
+    source_class: chat_export
+    target_domain: skeleton.inheritance_and_decisions
+    target_namespace: skeleton
+    privacy_class: PRIVATE
+    migration_action: IMPORT_PRIVATE
+    dedupe_strategy: stable_record_id_plus_content_hash
+    conflict_strategy: do_not_import_conflicts_create_operator_review_packet
+    validation_plan:
+      - MemoryGateway dry-run packet validation
+      - exact readback by canonical_ref after import
+      - revision increments exactly once per idempotency key
+      - derived indexes report current or degraded without rolling back canonical write
+    status: proposal_only
+  - id: operator_preferences_identity_bindings
+    source_refs:
+      - docs/PRIVATE_MEMORY_MIGRATION_PACK.md
+      - "https://github.com/alanua/Skeleton/issues/1752#issuecomment-4951167981"
+    source_class: private_operator_memory
+    target_domain: skeleton.operator_preferences
+    target_namespace: skeleton
+    privacy_class: PRIVATE
+    migration_action: IMPORT_PRIVATE
+    dedupe_strategy: subject_ref_plus_fact_type_plus_value_hash
+    conflict_strategy: latest_operator_approved_record_wins_after_explicit_review
+    validation_plan:
+      - schema validation against private memory import bundle contracts
+      - exact readback by canonical_ref
+      - idempotency replay returns unchanged revision
+      - projection status is checked after canonical readback
+    status: proposal_only
+  - id: skeleton_jeeves_relationship_public
+    source_refs:
+      - "https://github.com/alanua/Skeleton/issues/1752#issuecomment-4951136907"
+      - PROJECT_INDEX.yaml
+      - SOURCE_REGISTRY.yaml
+    source_class: public_canon_decision
+    target_domain: public_architecture
+    target_namespace: public_docs
+    privacy_class: PUBLIC
+    migration_action: REWRITE_PUBLIC_CANON
+    dedupe_strategy: replace_stale_relationship_wording_in_stable_paths
+    conflict_strategy: preserve_independent_runtime_plus_controlled_inheritance
+    validation_plan:
+      - public canon patch has source refs
+      - no private values
+      - tests assert required wording and source precedence
+    status: planned_phase_2
+  - id: project_domain_registry_public
+    source_refs:
+      - PROJECT_INDEX.yaml
+      - "https://github.com/alanua/Skeleton/issues/1752#issuecomment-4951167981"
+    source_class: public_project_registry
+    target_domain: public_project_index
+    target_namespace: public_docs
+    privacy_class: PUBLIC
+    migration_action: REWRITE_PUBLIC_CANON
+    dedupe_strategy: reconcile_registered_projects_and_domain_gaps
+    conflict_strategy: mark gaps as needs_operator_not_implicit_new_repos
+    validation_plan:
+      - YAML parses
+      - every project ref has source and freshness classification
+      - stale state snapshots remain evidence only
+    status: planned_phase_2
+  - id: current_control_files
+    source_refs:
+      - BOOT_MANIFEST.yaml
+      - COMMANDS.yaml
+      - MODES.yaml
+      - MEMORY_ROUTING.yaml
+      - SOURCE_REGISTRY.yaml
+      - CAPABILITY_REGISTRY.yaml
+      - OPERATOR_RULES.yaml
+    source_class: public_control_canon
+    target_domain: skeleton.control
+    target_namespace: public_docs
+    privacy_class: PUBLIC
+    migration_action: KEEP_AS_EVIDENCE
+    dedupe_strategy: no_copy_use_repo_relative_refs
+    conflict_strategy: current_checkout_over_stale_docs
+    validation_plan:
+      - protected files unchanged in this phase
+      - audit ledger source refs remain repo-relative
+    status: retained
+  - id: current_implementation_evidence
+    source_refs:
+      - core/memory_gateway.py
+      - core/private_memory_stack.py
+      - core/memory_gateway_storage.py
+      - core/mempalace_projection.py
+      - core/graphify_adapter.py
+      - tests/test_memory_gateway.py
+      - tests/test_private_memory_stack.py
+    source_class: public_code_and_tests
+    target_domain: skeleton.memory
+    target_namespace: public_docs
+    privacy_class: PUBLIC
+    migration_action: KEEP_AS_EVIDENCE
+    dedupe_strategy: cite_files_not_copy_claims
+    conflict_strategy: passing_current_tests_outweigh_old_plans
+    validation_plan:
+      - focused audit artifact tests
+      - full pytest
+      - changed-file review
+    status: retained
+  - id: stale_state_snapshots
+    source_refs:
+      - projects/skeleton/STATE.yaml
+      - projects/*/STATE.yaml
+    source_class: public_state_snapshot
+    target_domain: public_state
+    target_namespace: public_docs
+    privacy_class: PUBLIC
+    migration_action: SUPERSEDE
+    dedupe_strategy: retain_snapshot_refs_do_not_promote_content
+    conflict_strategy: current_main_and_issue_cursor_outweigh_old_last_verified_dates
+    validation_plan:
+      - later canon rewrite identifies superseded files explicitly
+      - no state file edits in this phase
+    status: planned_phase_2
+  - id: old_jeeves_skeleton_evidence
+    source_refs:
+      - docs/MIGRATION_FROM_JEEVES_REPO.md
+      - projects/skeleton/REVIEW_QUEUE.yaml
+      - "https://github.com/alanua/Skeleton/issues/1752#issuecomment-4951167981"
+    source_class: historical_public_evidence
+    target_domain: skeleton.jeeves_history
+    target_namespace: skeleton
+    privacy_class: MIXED_REQUIRES_REVIEW
+    migration_action: KEEP_AS_EVIDENCE
+    dedupe_strategy: classify_entry_by_entry_before_import
+    conflict_strategy: do_not_treat_historical_runtime_claims_as_current
+    validation_plan:
+      - public-safe entries get source/freshness labels
+      - private facts are excluded from GitHub and proposed for MemoryGateway only
+    status: retained_for_review
+  - id: archive_history_recovery
+    source_refs:
+      - SOURCE_REGISTRY.yaml
+    source_class: archived_or_recovered_history
+    target_domain: audit_evidence
+    target_namespace: none
+    privacy_class: MIXED_REQUIRES_REVIEW
+    migration_action: IGNORE_ARCHIVED
+    dedupe_strategy: ignore_until_explicitly_selected
+    conflict_strategy: never_override_current_control_sources
+    validation_plan:
+      - require explicit operator selection before use
+    status: ignored_by_default
+  - id: financial_legal_family_documents
+    source_refs:
+      - "https://github.com/alanua/Skeleton/issues/1752#issuecomment-4951167981"
+    source_class: private_high_sensitivity_records
+    target_domain: legal_financial_documents
+    target_namespace: legal_private
+    privacy_class: PRIVATE_HIGH
+    migration_action: NEEDS_OPERATOR
+    dedupe_strategy: opaque_source_id_and_hash_only
+    conflict_strategy: no_import_without_explicit_review_and_secret_boundary
+    validation_plan:
+      - private-only extraction manifest
+      - no public payload
+      - MemoryGateway exact readback only after approval
+    status: blocked
+  - id: customer_project_measurement_evidence
+    source_refs:
+      - docs/AUFMASS_PRIVATE_WORKSPACE_CONTRACT.md
+      - docs/AUFMASS_PRIVATE_PILOT_PROTOCOL.md
+    source_class: private_customer_project_evidence
+    target_domain: dios.aufmass
+    target_namespace: aufmass
+    privacy_class: PRIVATE_HIGH
+    migration_action: NEEDS_OPERATOR
+    dedupe_strategy: source_pack_id_plus_artifact_hash
+    conflict_strategy: quarantine_conflicting_measurements_for_human_review
+    validation_plan:
+      - use synthetic fixtures publicly
+      - private import requires approved source pack and exact readback
+    status: blocked
+  - id: private_device_topology_credentials
+    source_refs:
+      - docs/HOME_EDGE.md
+      - docs/PRIVATE_MEMORY_STACK.md
+    source_class: private_runtime_and_secret_material
+    target_domain: homelab.home_automation
+    target_namespace: home_automation
+    privacy_class: PRIVATE_HIGH
+    migration_action: NEEDS_OPERATOR
+    dedupe_strategy: secret_ref_only_no_secret_values
+    conflict_strategy: secrets_stay_outside_memory
+    validation_plan:
+      - secret values never enter MemoryGateway
+      - device facts require private approval and readback
+    status: blocked
+private_manifest_shape:
+  schema: skeleton.private_memory_gateway_migration_manifest.v1
+  generated_at: timestamp
+  source_inventory_refs: list_of_public_safe_or_opaque_source_refs
+  records:
+    fields:
+      - stable_record_ref
+      - record_type
+      - target_domain
+      - target_namespace
+      - privacy_class
+      - authority_class
+      - source_refs
+      - dedupe_key
+      - idempotency_key
+      - operation
+      - expected_revision
+      - validation_plan
+    forbidden_fields:
+      - raw_value
+      - secret
+      - credential
+      - local_path
+      - unrestricted_conversation_payload
+      - document_text
+      - customer_payload
+validation_summary:
+  yaml_parses: required
+  public_assertions_have_source_refs: required
+  no_private_values_or_local_paths_in_git_diff: required
+  focused_artifact_tests: required
+  full_pytest: required
+  git_diff_check: required
+next_phase_2_action: "Draft the public canon PatchPlan for architecture and Skeleton-to-Jeeves inheritance, then reconcile project/domain registry gaps before any private import."
